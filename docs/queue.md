@@ -835,6 +835,22 @@ Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry 
    on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
 2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
 
+## ade-git-guard (PR 59): round 9 BLOCK on 7df76ad, paused for a design call (2026-10-25)
+
+Round 9 (Opus, `adv-iso-w1-r9-report.md`) closed N1 and N3 (no false refusals, 723 tests, four mutations red) but BLOCKed on F1: `git --attr-source HEAD <write>` and
+`git --shallow-file /dev/null fetch origin +main:cb` move a claimed branch with rc 0, because `parse_git_argv` skips an unknown global option as one token and its separate
+value becomes the subcommand. Fix as the adversary asks: put both in `GLOBAL_VALUE` and fail closed on any unknown leading option. F2: `docs/git-guard.md` says N6 and N7
+are queued here; the entries above are those. djbclark (2026-10-25) paused PR 59 for a design call after nine rounds of parser bypasses; nothing is dispatched.
+
+## acp-dispatch launchd label with a slash (PR 62, merged e15aeb9, 2026-10-25): lows from adversary round 1
+
+Verdict `APPROVE ac0e0d8`. Left open:
+1. **Docs, low**: `bin/acp-dispatch` usage text (the `launchd's last exit status` line and the `no longer loaded` line) and the `launchd_print` docstring still say `launchctl print gui/$UID/<label>`; a slash label is
+   looked up with `launchctl list` and its last exit is never read (reap goes to rc 0 if delivered, else 255 `lost`). One clause at each place.
+2. **Test gap, low**: the auto-resume resubmit path (`resubmit_auto_resume`) also carries a slash label under `--task`; `STATEFUL_LAUNCHCTL` in `tests/test_acp_dispatch_auto_resume.py` handles only `print`.
+   Add a `list)` case and one reboot-resume test with `--task /abs`.
+3. **Info**: `launchctl list` asks the caller's own bootstrap domain; a `check` run from an ssh login does not see a job submitted from the GUI session, so a slash label still reads as gone there.
+
 ## Verified peer messaging (djbclark, 2026-10-25; part of the big ADE queue)
 
 djbclark, 2026-10-25: always verify the other agent got the message, or we may sit on a one-way receive-only link; "make sure that always happens as part of the big djbclark-ade queue". Case: the
