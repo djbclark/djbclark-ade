@@ -398,11 +398,25 @@ def test_bad_usage(world: World) -> None:
     assert world.run("--repo", "nonsense").returncode == 2
 
 
+_MODULE_CACHE = None
+
+
 def load_module():
-    ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
-    ld.exec_module(mod)
-    return mod
+    """The pr-wait module, loaded ONCE.
+
+    Cached because exec'ing the 1,400-line script on every call is pure overhead: the module is
+    stateless at import (main() is guarded), so one instance is correct. The first version of the
+    adversary tests called this per test, which added ~18s of interpreter work to the suite and made
+    the wall-clock-sensitive Codex tests (`--codex-stuck 1.5`, `--rerequest-after 0.5`) miss their
+    polling windows - a flake that looked like a code regression and was not.
+    """
+    global _MODULE_CACHE
+    if _MODULE_CACHE is None:
+        ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
+        ld.exec_module(mod)
+        _MODULE_CACHE = mod
+    return _MODULE_CACHE
 
 
 def test_second_waiter_for_the_same_head_is_refused(world: World) -> None:
@@ -1385,69 +1399,129 @@ def test_an_adopted_comment_id_is_saved_in_the_state_file(world: World) -> None:
 
 # ---- adversary verdict in the PR body -------------------------------------------------------
 #
-# Added 2026-10-25 with the adversary gate. The house rule (AGENTS.md code review rule 1) is that a
-# teammate's PR body quotes the adversary's verdict AND the head it reviewed; PR 61 was merged with no
-# quote at all and nothing noticed, because merge_ready only looked at CI and Codex.
+# Added 2026-10-25 with the adversary gate, then REWRITTEN after the adversary reviewed the first
+# version and found it broken in both directions: six false APPROVEs (another reviewer's line, an
+# old-head APPROVE naming the new head, a table cell, a negation, a fenced block) and five false
+# MISSES (the house's own canonical `VERDICT: APPROVE <sha>` formats). Every case below is one of
+# those, so a regression in either direction fails a test rather than shipping.
 
 ADV_HEAD = "a" * 40
+OLD_HEAD = "b" * 40
 
 
 def adv(body: str, head: str = ADV_HEAD) -> dict:
     return load_module().adversary_verdict(body, head)
 
 
-def test_an_approve_naming_this_head_matches() -> None:
-    for body in (f"> **APPROVE, no findings** (head {ADV_HEAD})",
-                 f"**APPROVE** (head {ADV_HEAD})",
-                 f"Verdict: APPROVE (head {ADV_HEAD})",
-                 f"APPROVE (head {ADV_HEAD[:7]})"):
-        got = adv(body)
-        assert got["present"] and got["matches_head"], body
-        assert got["verdict"].upper().startswith("APPROVE")
+def passes(body: str, head: str = ADV_HEAD) -> bool:
+    """The same predicate assess() uses: matched AND not a BLOCK."""
+    r = adv(body, head)
+    return bool(r["matches_head"]) and not str(r["verdict"] or "").upper().startswith("BLOCK")
 
 
-def test_an_approve_with_no_head_does_not_count() -> None:
-    # An unqualified APPROVE cannot be tied to a commit, so it must not bless one.
-    got = adv("APPROVE, no findings")
-    assert got["present"] and not got["matches_head"]
-    assert "names no head sha" in got["detail"]
+# --- the shapes that MUST count (false negatives were the F3 findings) ----------------------
+
+def test_house_canonical_formats_all_count() -> None:
+    for body in (f"`VERDICT: APPROVE {ADV_HEAD}`",              # PRs 41, 43, 55, 58, 59
+                 f"VERDICT: APPROVE {ADV_HEAD}",
+                 f"Adversary: APPROVE (head {ADV_HEAD})",        # PR 56
+                 f"Independent adversary verdict: `APPROVE, no findings - HEAD {ADV_HEAD}`",  # 65
+                 f"> adversary APPROVE at head `{ADV_HEAD}`",    # PR 50
+                 f"> **APPROVE, no findings** (head {ADV_HEAD})",  # PR 61, the AGENTS.md shape
+                 f"**APPROVE** (head {ADV_HEAD})"):
+        assert passes(body), body
 
 
-def test_an_approve_for_a_different_head_does_not_count() -> None:
-    got = adv("> **APPROVE** (head " + "b" * 40 + ")")
-    assert got["present"] and not got["matches_head"]
-    assert "NOT this head" in got["detail"]
+def test_a_short_head_prefix_counts() -> None:
+    assert passes(f"> **APPROVE** (head {ADV_HEAD[:7]})")
 
 
-def test_a_block_is_never_read_as_an_approval() -> None:
-    got = adv(f"> **BLOCK: the check is wrong** (head {ADV_HEAD})")
-    assert got["present"] and got["matches_head"]
-    assert got["verdict"].upper().startswith("BLOCK")
+def test_a_block_for_this_head_is_reported_as_a_block() -> None:
+    r = adv(f"> **BLOCK: the check is wrong** (head {ADV_HEAD})")
+    assert r["present"] and r["matches_head"]
+    assert r["verdict"].upper().startswith("BLOCK")
+    assert not passes(f"> **BLOCK: the check is wrong** (head {ADV_HEAD})")
+
+
+def test_a_long_block_reason_is_still_a_block() -> None:
+    assert not passes(f"> **BLOCK: rule 0d.1 makes a false claim about systemd and skips nixpkgs** "
+                      f"(head {ADV_HEAD})")
+
+
+# --- the false APPROVEs the review found (F1, F2, F4) ---------------------------------------
+
+def test_an_approve_naming_another_head_does_not_count() -> None:
+    r = adv(f"> **APPROVE** (head {OLD_HEAD})")
+    assert r["present"] and not r["matches_head"]
+    assert "NOT this head" in r["detail"]
+
+
+def test_an_old_head_approve_that_also_mentions_the_new_head_does_not_count() -> None:
+    # The stale-id case: an APPROVE for an older commit must not bless the newer one merely because
+    # the newer sha appears later in the same sentence.
+    assert not passes(f"> adversary APPROVE (head {OLD_HEAD}); head is now {ADV_HEAD[:7]}, "
+                      f"not re-reviewed")
+
+
+def test_another_reviewers_verdict_does_not_count() -> None:
+    for body in (f"**Codex verdict:** APPROVE at {ADV_HEAD[:7]}",
+                 f"> APPROVE (Cursor Approval Agent, head {ADV_HEAD[:7]})",
+                 f"| Codex | `APPROVE` | `{ADV_HEAD[:7]}` |"):
+        assert not passes(body), body
+
+
+def test_a_negated_approve_does_not_count() -> None:
+    assert not passes(f"> **Do not** APPROVE until {ADV_HEAD[:7]} is fixed")
+
+
+def test_a_verdict_inside_a_fenced_block_does_not_count() -> None:
+    fence = chr(96) * 3
+    assert not passes(fence + "\nadversary VERDICT: APPROVE " + ADV_HEAD + "\n" + fence)
 
 
 def test_a_prose_mention_is_not_a_verdict() -> None:
-    # The real PR 63 case: my own prose said "the review found a BLOCK, and it was right" and the
-    # naive matcher read that as a verdict.
-    got = adv("The adversary returned a BLOCK, and it was right about the thing it found.")
-    assert not got["present"]
+    assert not passes("The adversary returned a BLOCK, and it was right about the thing it found.")
 
 
 def test_a_markdown_heading_is_not_a_verdict() -> None:
-    # The exact PR 63 false positive: a heading that names a verdict is a section label.
     for body in ("## Adversary round 1: **BLOCK**, and it was right",
-                 "## Verdict: APPROVE (head " + ADV_HEAD + ")",
-                 "### APPROVE"):
+                 f"## Verdict: APPROVE (head {ADV_HEAD})"):
         assert not adv(body)["present"], body
 
 
+def test_a_wrapped_prose_line_naming_a_block_does_not_count() -> None:
+    # F4: PR 66's own body had this exact wrapped line and it parsed as a BLOCK.
+    assert not passes("   commit, or a `BLOCK`, all fail the check. An approval from an older head "
+                      "must never bless a new")
+
+
+# --- precedence and reporting (F2, F5) ------------------------------------------------------
+
+def test_a_block_beats_an_approve_on_the_same_head() -> None:
+    body = f"> **APPROVE** (head {ADV_HEAD})\n\n> **BLOCK: race** (head {ADV_HEAD})"
+    r = adv(body)
+    assert r["conflict"] and not passes(body)
+    assert "BOTH" in r["detail"]
+
+
+def test_a_block_in_list_form_is_still_detected() -> None:
+    body = f"- Adversary: BLOCK: missing test (head {ADV_HEAD})"
+    assert not passes(body)
+
+
+def test_an_approve_with_no_head_does_not_count() -> None:
+    r = adv("adversary VERDICT: APPROVE, no findings")
+    assert r["present"] and not r["matches_head"]
+    assert "names no head sha" in r["detail"]
+
+
 def test_an_empty_body_reports_no_verdict() -> None:
-    got = adv("")
-    assert not got["present"] and not got["matches_head"]
-    assert got["detail"] == "no PR body"
+    r = adv("")
+    assert not r["present"] and not r["matches_head"]
+    assert r["detail"] == "no PR body"
 
 
-def test_a_quoted_block_with_a_long_reason_is_still_a_block() -> None:
-    got = adv(f"> **BLOCK: rule 0d.1 makes a false claim about systemd and the check skips nixpkgs** "
-              f"(head {ADV_HEAD})")
-    assert got["present"] and got["matches_head"]
-    assert got["verdict"].upper().startswith("BLOCK")
+def test_a_body_with_no_verdict_says_what_is_needed() -> None:
+    r = adv("This PR does some things and has no verdict in it at all.")
+    assert not r["present"]
+    assert "marker" in r["detail"]
