@@ -39,7 +39,8 @@ try:
         "hookEventName": "PreToolUse", "permissionDecision": "ask",
         "permissionDecisionReason": (
             f"Frontier sub-agent: {agent or 'model ' + model} runs on {what}, which is scarce (operator "
-            "2026-10-18). Approve only if this really needs it; ordinary judgment is Opus at high "
-            "(model: opus), everyday work goes through acp-dispatch.")}}))
+            "2026-10-18). Approve only if this really needs it; ordinary judgment is Opus at high first "
+            "(model: opus; omp Opus next, and codex gpt-6.1-sol at high through acp-dispatch while "
+            "its quota is plentiful, 2026-10-25), everyday work goes through acp-dispatch.")}}))
 except Exception:  # noqa: BLE001 - a gate must never break the tool
     sys.exit(0)

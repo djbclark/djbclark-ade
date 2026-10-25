@@ -24,7 +24,8 @@ review and rework. Concretely:
    (operator 2026-10-18). Claude Fable 5.1 and codex `gpt-6-astra` are reached
    only through the `frontier` kind, one slice per pool per wave. On
    2026-10-18 a wave of four astra slices emptied codex's 5-hour window and
-   every one stopped. Judgment is Opus 5.5 at `high`. `acp-dispatch` runs a
+   every one stopped. Judgment is Opus 5.5 at `high` first (2026-10-25: omp Opus next, Codex
+   `gpt-6.1-sol` at high only while every codex window has `plenty_min` left). `acp-dispatch` runs a
    frontier model only with `--kind frontier`, as a read-only advisor unless
    `ACP_OPERATOR_APPROVED=frontier-exec` (2026-10-18); it reserves each
    in-flight slice's estimated quota on its service before a new one fits (a
@@ -132,7 +133,7 @@ Classify every pool before assigning anything:
 | **reserve** | copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only for kind `github`; a missing or stale reading means do not use. Grok was one until 2026-10-18 (GrokBot moved to its own Cursor pool): now an ordinary subscription pool for `realtime-web`, `research` and `bulk`, behind the burn-first pools |
 | **never** | hermes; the prepaid pools; credits-backed models (not the Max plan's API credits: omp, below) | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes behind an approval gate |
 | **api credits** | omp: the Claude Max plan's monthly API credits (expiring grant, operator 2026-10-19) | kind `api-only` first (SDK paths, verdict classifiers, batch jobs), else `code`/`bulk` via `acp-run omp --model anthropic/claude-sonnet-5-5` so they are spent before each expiry; `route_agent.py` marks it "burn before reset" when far above an even spend; needs a working omp Anthropic login (`omp login`) |
-| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high`, agy 1.4.1 (2026-10-18) dropped the effort-suffixed ids), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to the frontier pools); see *agy Claude/GPT pool* below |
+| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high`, agy 1.4.1 (2026-10-18) dropped the effort-suffixed ids), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to Claude and omp first, codex's Sol at high only while plentiful; 2026-10-25); see *agy Claude/GPT pool* below |
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
@@ -156,8 +157,11 @@ a fan-out needs from it:
    Context stays at the agent's default unless the slice reads a whole corpus
    or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI,
    Cursor and Copilot).
-2. **`judgment` slices** (architecture, adjudication) go to `acp-dispatch claude
-   --model opus --kind judgment --effort high`. **Adversary rounds** (the
+2. **`judgment` slices** (architecture, adjudication; 2026-10-25) go to `acp-dispatch claude
+   --model opus --kind judgment --effort high` first; omp Opus on the credits is next, and Codex
+   `gpt-6.1-sol --effort high` (`--kind judgment`, rank 3) is an eligible, lower-ranked pool only
+   while every codex window has at least `[routing].plenty_min` (50%) left (astra stays
+   frontier-only; `plan` picks it only when it ranks within the quality gap). **Adversary rounds** (the
    adversarial second opinion of Step 6) go first to the omp route, `acp-dispatch
    omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (Claude API
    credits; operator 2026-10-23, after the Claude weekly window ran out 2.6 days
@@ -217,8 +221,8 @@ window, so spending it costs nothing that orchestration needs.
    `remaining_percent`; either one under 15% means skip it this batch.
 2. **Assignment order for a Claude-class code, review or research slice**
    (implementation, reviews, research synthesis): the agy Claude/GPT pool
-   first, then the other everyday pools in `plan`'s order; judgment goes to the
-   frontier pools (*Pool policy* item 2). `--model claude-opus-5-5 --effort high` for the hard
+   first, then the other everyday pools in `plan`'s order; judgment follows
+   *Pool policy* item 2 above (2026-10-25). `--model claude-opus-5-5 --effort high` for the hard
    slices, `--model claude-sonnet-5-5 --effort high` for volume. Mechanical edits and bulk reading still go to the free and Gemini
    pools first; do not spend Opus on them just because it is idle.
 3. **The ACP route reaches it through a client-name workaround (2026-10-10).** agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
@@ -364,7 +368,7 @@ bind every slice to a vendor up front:
    which only logs what Jev and GLiDE think each kind is, never changes the
    plan: `docs/jev.md` "Dual review"). It reads the
    aiuse snapshot (instant, no tokens), ranks by fitness and headroom, applies
-   the burn-first rule, the reserve floors and the frontier-for-judgment rule,
+   the burn-first rule, the reserve floors and the judgment rule (Claude first, omp next, codex Sol/high only while plentiful; 2026-10-25),
    and **spreads the wave** with each service's `max_parallel` (agy Claude/GPT
    3, agy Gemini 2, Cursor Auto 2, copilot 1). Each line ends with the
    dispatch to run, `acp-dispatch <agent> --model M --kind K --effort E`
@@ -436,7 +440,8 @@ vendor, model and effort are chosen at dispatch time by *Dynamic routing* (end
 of Step 1; `plan` prints the `acp-dispatch` line), because the pools will have
 moved by the time a queued slice is reached. Decide the **context window** now,
 per slice: the default unless the slice reads a whole corpus or a long log.
-Tag honestly: a `judgment` slice on an everyday pool fails and is re-run at
+Tag honestly: a `judgment` slice on a pool that is not judgment-tier (or on codex below
+`plenty_min`) is refused or fails and is re-run at
 higher cost; a `code` slice tagged `judgment` or `frontier` wastes a scarce turn.
 
 Keep for **yourself** (the orchestrator), never delegate:
@@ -474,6 +479,18 @@ has already been violated by a real agent on this machine:
 - **Launch no agents.** No herdr panes, `acp-run`/`acp-dispatch` or Agent
   calls of its own: only the orchestrator decides and dispatches what comes
   next. ("Hand off the way this was handed to you" was once read as that.)
+- **A review or probe that exercises `acp-dispatch` pins the runner and checks
+  it before trusting the result.** `dispatch` and `reroute` take
+  `--acp-run <scratch fake>`: pin it and assert `shlex.split(rec["cmd"])[0]`
+  equals the fake (`cmd` is a shell-quoted string). `resume` has no
+  `--acp-run`; its new record inherits the resumed record's runner
+  (`old_cmd[0]`), so assert the ORIGINAL scratch record's
+  `shlex.split(rec["cmd"])[0]` equals the fake before resuming and the resumed
+  record's afterwards, and never resume a record whose runner the reviewer did
+  not create (2026-10-25: a reroute probe omitted the pin, fell through to the
+  live Codex runner, ran 98 s and sent a real `hermes-ping`). An adversary or
+  review brief says "no live agent, no network, no notifications" in exactly
+  those terms: fake runner pinned and checked, no `hermes-ping`, no fetch.
 - **Verify before acting.** Findings handed to an agent were written by another
   AI. Tell it so, and tell it that reporting a finding as wrong is a better
   outcome than a confident wrong edit.
