@@ -9,7 +9,7 @@
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
-    load-watch admit [--max-per-core N] [--max-mem-churn N] [--wait SECONDS] [--json]
+    load-watch admit [--max-per-core N] [--max-mem-churn N] [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
                                             the one session told about every spike (`loadwatch` skill)
@@ -85,7 +85,11 @@ it never kills, throttles or signals anything. Memory gate (operator 2026-10-23,
 `admit` also reads the compressor churn (macOS `vm_stat` Compressions + Decompressions over 0.5 s, pages/s) and
 is hot when it exceeds --max-mem-churn (default 60000, calibrated 2026-10-23 from 215 ten-second samples:
 calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s; one session's data, so
-recalibrate with more; the first guess, 20000, sat below the load<10 median of 34k). Load and swap alone did not separate that spike from a calm hour. The result and the `--json`
+recalibrate with more; the first guess, 20000, sat below the load<10 median of 34k). Load and swap alone did not separate that spike from a calm hour.
+Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default 25000, just above the calm tail)
+the per-core limit is --boost-per-core (default 2.0; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
+passes 1.5; at higher churn, or when churn cannot be read, the base limit holds. The result and `--json` `max_per_core` are the
+limit in force. Swap is not the signal (86-92% in calm hours too). The result and the `--json`
 record carry `mem_churn_pages_s`; where `vm_stat` is unavailable (Linux) the gate never blocks. Test hooks (acp-dispatch scrubs them from the environment it
 gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll with the last value repeating),
 LW_FAKE_CHURN (the same for churn; with only LW_FAKE_LOAD1 set, churn reads 0),
@@ -1304,6 +1308,13 @@ ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machin
 # load<10 p50 34k, 10-25 p50 49k, >=25 p50 80k and p90 108k pages/s; the calm tail read 11-22k. 60000 sits above
 # calm and the mid-load median and below the thrash median. Still ONE session's data: recalibrate with more.
 ADMIT_CHURN_PAGES_S = 60000
+# Calm boost (operator 2026-10-25, "make the change" after a load of 12-14 with no UI lag): while the compressor is
+# calm the per-core limit rises from ADMIT_PER_CORE to ADMIT_BOOST_PER_CORE. The signal is churn, not swap: swap sat
+# at 86-92% in calm hours too (above), so a swap condition would almost never boost. 25000 is just above the calm
+# tail (11-22k) and well below the thrash median (80k); one session's data, recalibrate. A churn that cannot be read
+# (no vm_stat) never boosts.
+ADMIT_BOOST_PER_CORE = 2.0
+ADMIT_BOOST_CHURN_PAGES_S = 25000
 ADMIT_CHURN_WINDOW_S = 0.5
 EX_TEMPFAIL = 75
 
@@ -1350,6 +1361,14 @@ def admit_reading(fake, polls):
     load1 = fake[min(polls, len(fake) - 1)] if fake else os.getloadavg()[0]
     cores = os.cpu_count() or 1
     return load1, cores, load1 / cores
+
+
+def admit_limit(base, churn, boost=ADMIT_BOOST_PER_CORE, boost_churn=ADMIT_BOOST_CHURN_PAGES_S):
+    """The per-core limit in force: `boost` (when above `base`) while the compressor churn is known and at most
+    `boost_churn`, else `base`. boost None or 0 disables it."""
+    if boost and boost > base and churn is not None and churn <= boost_churn:
+        return boost
+    return base
 
 
 def admit_ok(per_core, limit, churn, churn_limit):
@@ -1423,13 +1442,23 @@ def cmd_admit(a):
               "0 <= min <= max <= 60)", file=sys.stderr)
         return 2
     poll = max(1.0, poll)  # never a busy loop on a machine that is already hot
+    boost = getattr(a, "boost_per_core", ADMIT_BOOST_PER_CORE)
+    boost_churn = getattr(a, "boost_max_churn", ADMIT_BOOST_CHURN_PAGES_S)
+    if not (math.isfinite(boost) and math.isfinite(boost_churn)) or boost < 0 or boost_churn <= 0:
+        print("load-watch admit: --boost-per-core and --boost-max-churn must be finite (0 turns the boost off)",
+              file=sys.stderr)
+        return 2
+    if fake and not fake_churn:
+        boost = 0  # a faked load with no faked churn reads churn 0 (not a measurement): never boosts
+    limit = a.max_per_core
     start, polls, next_note = time.monotonic(), 0, 60.0
     while True:
         load1, cores, per_core = admit_reading(fake, polls)
         churn = admit_churn(fake, fake_churn, polls)
+        limit = admit_limit(a.max_per_core, churn, boost, boost_churn)
         polls += 1
         waited = time.monotonic() - start
-        if admit_ok(per_core, a.max_per_core, churn, churn_limit) and polls > 1:
+        if admit_ok(per_core, limit, churn, churn_limit) and polls > 1:
             # the load fell while we waited: stagger so queued dispatchers do not all start in the same second,
             # then look again (someone else may have started in the meantime)
             # (never past the --wait budget: deferred records and rearm timeouts only budget that much)
@@ -1438,17 +1467,18 @@ def cmd_admit(a):
                 time.sleep(min(random.uniform(lo, hi), left))
             load1, cores, per_core = admit_reading(fake, polls)
             churn = admit_churn(fake, fake_churn, polls)
+            limit = admit_limit(a.max_per_core, churn, boost, boost_churn)
             polls += 1
             waited = time.monotonic() - start
-        if admit_ok(per_core, a.max_per_core, churn, churn_limit) or waited >= a.wait:
+        if admit_ok(per_core, limit, churn, churn_limit) or waited >= a.wait:
             break
         if waited >= next_note:
-            print(f"load-watch admit: waiting, load1={load1:g} per_core={per_core:.2f} (limit {a.max_per_core:g})"
+            print(f"load-watch admit: waiting, load1={load1:g} per_core={per_core:.2f} (limit {limit:g})"
                   + (f" mem_churn={churn:.0f} (limit {churn_limit:g})" if churn is not None else "")
                   + f", {int(waited)}s of {a.wait:g}s", file=sys.stderr)
             next_note += 60.0
         time.sleep(max(0.0, min(poll, a.wait - waited)))
-    rec = admit_record(load1, cores, per_core, a.max_per_core, waited, churn, churn_limit)
+    rec = admit_record(load1, cores, per_core, limit, waited, churn, churn_limit)
     print(json.dumps(rec) if a.json else admit_line(rec))
     return 0 if rec["status"] == "ok" else EX_TEMPFAIL
 
@@ -1502,6 +1532,11 @@ def main():
     p.add_argument("--max-mem-churn", type=float, default=ADMIT_CHURN_PAGES_S, metavar="N",
                    help=f"and compressor churn (pages compressed + decompressed per second) is at most N "
                         f"(default {ADMIT_CHURN_PAGES_S:g}, calibrated 2026-10-23)")
+    p.add_argument("--boost-per-core", type=float, default=ADMIT_BOOST_PER_CORE, metavar="N",
+                   help=f"while churn is at most --boost-max-churn, admit up to N per core instead "
+                        f"(default {ADMIT_BOOST_PER_CORE:g}; 0 turns the boost off)")
+    p.add_argument("--boost-max-churn", type=float, default=ADMIT_BOOST_CHURN_PAGES_S, metavar="N",
+                   help=f"the churn (pages/s) up to which the boost applies (default {ADMIT_BOOST_CHURN_PAGES_S:g})")
     p.add_argument("--wait", type=float, default=0, metavar="SECONDS",
                    help="poll every 15 s for up to SECONDS before giving up with exit 75 (0: a pure check)")
     p.add_argument("--json", action="store_true")
