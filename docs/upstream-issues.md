@@ -1224,3 +1224,19 @@ and `~/.claude/skills`. A second daemon with another home (Paseo's own `scripts/
 sync skips a skill dir that is a symlink, or dev homes default to no skill sync. Posted on #7700 2026-10-24: https://github.com/getpaseo/paseo/issues/7700#issuecomment-6386655547.
 Draft PR opened 2026-10-24 (refs #7700, not closes): https://github.com/getpaseo/paseo/pull/7817, branch `fix/dev-home-skill-selection` on the fork, one commit b2836f723 (`scripts/dev-home.sh` seeds the skill selection in dev homes, new `scripts/dev-home.test.mjs`: 3 of 4 tests fail on upstream main, all pass on the fix). macOS arm64 only; the end-to-end dev-daemon run was posted as a PR comment and the PR was marked ready for review on djbclark's instruction (2026-10-24, reported by the workspace-colors session).
 
+
+## 18. zcode-acp — `ZCODE_DISALLOWED_TOOLS` / `--disallowed-tools` never reaches the backend session (draft, not filed, 2026-10-24)
+
+Repo: william0wang/zcode-acp (npm `zcode-acp-server`), wrapping `zcode app-server --stdio` (zcode-app-cli
+`vendor/zcode.cjs`). `backendArgs()` (`dist/backend/resolve.js`) passes the merged `ZCODE_DISALLOWED_TOOLS` and the
+default `Cron*` list to the backend as `--disallowed-tools`, but the backend's protocol-server path (`app-server`)
+does not read that flag: it is parsed for the one-shot prompt/TUI path only, and `session/create` in
+`dist/handlers/session.js` (`createParams`: workspace, mode, mcpServers, workflow flag) carries no `toolDenylist`.
+Both the backend's `session/create` and `session/resume` schemas accept `toolDenylist` and `toolAllowlist`
+(`session/send` accepts only `toolDenylist`). Observed 2026-10-24 with `ZCODE_DISALLOWED_TOOLS="Bash Write Edit ..."`
+and `ZCODE_ACP_MODE=plan`: asked for its tool list the model named Bash, Edit, Write and the default-disallowed
+CronCreate/List/Update/Delete, and ran `ls` through Bash without a permission request (plan mode lets read-only shell
+through). Also `permission.disallowedTools` in the CLI settings file is only a permission rule, not a registry
+removal. Suggest: send `toolDenylist` (and `toolAllowlist`) from the env in `session/create` and `session/resume`.
+Our workaround: `tools/acp-run/zcode-denylist-shim.cjs`, a stdio shim started as `ZCODE_BIN` that adds both fields.
+Not yet duplicate-searched against the upstream issue tracker.
