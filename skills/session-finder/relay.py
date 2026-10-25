@@ -28,7 +28,7 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
   2. dispatch  a headless acp-dispatch slice (no pane): `acp-dispatch tell RECORD` (its inbox plus its live Claude).
   3. launch    a live interactive ACP launch: its inbox (`launch.py reply`'s live path, under its turn lock). An
                ended launch is never replied to here: that would start a new, full-price turn.
-  4. pane      keys into its pane (herdr `pane send-text` + `agent send-keys enter`, Orca `terminal send`, tmux
+  4. pane      submits into its pane (herdr `agent prompt`, Orca `terminal send`, tmux
                `send-keys`). Claude Code queues text typed while it works; other TUIs take it only when idle
                (`--idle S` waits up to S seconds for that). Skipped while the input box holds a draft (Claude
                Code's dim/grey suggested prompt is not one: prompt_line.py). Verified in the transcript: a user
@@ -107,8 +107,10 @@ a retry of text left in a box submits it and types nothing. A socket frame to a 
 
   * Verified where it can be: typed text counts as delivered once a user line in the transcript holds it, as queued
     once a queue-operation enqueue (recorded at once, while the session works) or the pane shows it.
-  * Enter goes in ENTER_DELAY after the text, and again (up to ENTER_RETRIES times) while the text still
-    sits in a Claude input box: sent in one burst it reads as a paste and does not submit (2026-10-18).
+  * Herdr uses `agent prompt` to bracket and submit the whole paste atomically; separate raw text and Enter
+    leave long Codex messages in the composer (2026-10-25). Codex delivery requires the exact new user
+    message in its session rollout, never a visible prompt, wrapped composer text or a generic queue hint.
+    Other channels send Enter after ENTER_DELAY; Claude's own unsent text gets bounded Enter retries.
   * One line: newlines are folded to spaces. For a long brief, write it to a file and relay one line that
     names the file's absolute path.
 
@@ -502,7 +504,11 @@ def type_line(chan, text):
     kind, target = chan
     type_line.typed = False
     if kind == "herdr":
-        step = keys_run(HERDR, "pane", "send-text", target, text)
+        # Herdr wraps the whole prompt in bracketed paste and submits it atomically.
+        # Raw send-text lets Codex's paste detector consume the separate Enter.
+        step = keys_run(HERDR, "agent", "prompt", target, text, timeout=20)
+        type_line.typed = step != "absent"
+        return step == "ok"
     elif kind == "orca":
         step = keys_run("orca", "terminal", "send", "--terminal", target, "--text", text, "--enter", timeout=20)
         type_line.typed = step == "failed"
@@ -752,6 +758,12 @@ def tx_state(tx, mark, text, window=None):
             continue
         if kind == "queue-operation" and op in ("enqueue", "remove"):
             got = [o.get("content")]
+        elif kind == "response_item" and isinstance(o.get("payload"), dict):
+            p = o["payload"]
+            if p.get("type") != "message" or p.get("role") != "user":
+                continue
+            got = [" ".join(b.get("text", "") for b in p.get("content", [])
+                            if isinstance(b, dict) and b.get("type") == "input_text")]
         elif kind == "user":
             c = (o.get("message") or {}).get("content")
             if handed and c and isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c) \
@@ -1212,12 +1224,33 @@ def pulled_and_discarded(s, chan, left):
     return box_text(chan) == "" and entry_state(s, left, windowed=False) == "pulled"
 
 
+def pane_transcript(s):
+    """Resolve a Codex rollout by its exact session id; pane text is never delivery proof for Codex."""
+    if s.get("transcript"):
+        return Path(s["transcript"])
+    if s.get("agent") != "codex":
+        return None
+    sid = s.get("sid")
+    if not sid and (s.get("chan") or (None,))[0] == "herdr":
+        agent = fleet.herdr_json("agent", "get", s["chan"][1]).get("agent") or {}
+        if agent.get("agent") == "codex":
+            sid = (agent.get("agent_session") or {}).get("value")
+    if not isinstance(sid, str) or not UUID.fullmatch(sid):
+        return None
+    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    paths = list((root / "sessions").glob(f"*/*/*/rollout-*-{sid}.jsonl"))
+    if len(paths) == 1:
+        s["transcript"] = str(paths[0])
+        return paths[0]
+    return None
+
+
 def pane_send(c):
     s, a, text = c["s"], c["a"], c["text"]
     chan = tuple(s["chan"])
     d = box_text(chan) if s["agent"] == "claude" else ""
     left = leftover(s["id"])
-    tx = Path(s["transcript"]) if s.get("transcript") else None
+    tx = pane_transcript(s)
     if d is None:    # its ❯ row or bottom border is outside the rows read: nothing may be typed or submitted blind
         if left and " ".join(left["text"].split()) == text:
             return ("unverified", "an earlier copy of this message may sit in its input box, which is out of view. "
@@ -1274,9 +1307,15 @@ def pane_send(c):
                                   "Enter failed; it may sit in the input box. Do not resend; check its pane")
         return ("skip", f"typing into {chan[0]} {chan[1]} failed")
     seen, deadline = None, time.time() + a.wait
+    # A new Codex TUI publishes its session id only after the first prompt. If
+    # resolved now, accept only a user message stamped since this send began.
+    window = None
+    if tx is None and s["agent"] == "codex":
+        tx = pane_transcript(s)
+        window = (typed_at - LEAD, deadline)
     sent_at, retries, stuck, pin, was_ours, gone, pulled = time.time(), 0, False, "*", False, False, False
     while time.time() < deadline:
-        st = tx_state(tx, mark, text)
+        st = tx_state(tx, mark, text, window)
         if st in ("delivered", "queued"):    # queued is not delivered: the operator can still pull it back
             seen = st
             break
@@ -1297,14 +1336,14 @@ def pane_send(c):
         # Claude Code's queue hint (not while our text is still in its input box: the hint may be for an
         # earlier message); for other TUIs the text on a line that is not the input prompt
         # (still on the ❯ line means Enter did not land)
-        if not pulled and ((not stuck and "queued messages" in scr) or (s["agent"] != "claude" and any(
+        if s["agent"] != "codex" and not pulled and ((not stuck and "queued messages" in scr) or (s["agent"] != "claude" and any(
                 text[:30] in ln and not ln.lstrip().startswith(("❯", ">")) for ln in scr.splitlines()))):
             seen = seen or "queued"
             if not tx:
                 break
         time.sleep(1)
     if not seen:
-        st = tx_state(tx, mark, text)    # one last look: the Enter may have landed in the final second
+        st = tx_state(tx, mark, text, window)    # one last look: the Enter may have landed in the final second
         seen = st if st in ("delivered", "queued") else None
         pulled = pulled or st == "pulled"
     if s["agent"] == "claude":
@@ -1620,7 +1659,7 @@ SELF_IDS = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "CLAUDE_CODE_SESSION_ID", "HERD
 DELIVER_DROP = SELF_IDS + ("RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER")
 DELIVER_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "PASEO_CLI", "PASEO_HOME", "PASEO_HOST",
                 "CLAUDE_CONFIG_DIR", "HERDR_BIN_PATH", "SESSION_FINDER_STATE", "HERDR_PLUGIN_STATE_DIR", "HERDR_SLEEPER_STATE",
-                "BIGTEAM_STATE")    # paths and daemon selectors only (where fleet and the paseo CLI look): none names a session
+                "BIGTEAM_STATE", "CODEX_HOME")    # paths and daemon selectors only: none names a session
 DELIVER_KEEP_PREFIXES = ("LC_", "XDG_", "RELAY_")    # RELAY_* are the test and path hooks (DELIVER_DROP removes the identity ones)
 
 

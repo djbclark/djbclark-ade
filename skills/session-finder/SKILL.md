@@ -349,6 +349,16 @@ Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
 bypass a permission denial; grok is excluded (2026-10-06).
 
+## Codex messages in Herdr (2026-10-25)
+
+Relay submits a Herdr message with one `herdr agent prompt` call, so the entire
+message is bracketed paste followed by submission. Do not replace that with raw
+`pane send-text` plus a separate Enter: Codex can leave a long message unsent.
+A visible message in the composer is not delivery. For Codex, relay verifies the
+exact new user message in the rollout belonging to its session id, under
+`CODEX_HOME` (default `~/.codex`). If that proof is missing, it reports unverified;
+never ask the operator to press Enter as the normal delivery path.
+
 ## 7. How it works (nothing for sessions to do)
 
 1. Running sessions (`fleet.py`): herdr `agent list` (any agent kind), herdr
