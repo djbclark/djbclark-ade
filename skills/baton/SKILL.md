@@ -44,7 +44,7 @@ its own archive. First run `bin/watch status` and read `~/.local/state/self-slas
 agent (`$PASEO_AGENT_ID`) holds a watch role, or the newest `then: /baton` line for it follows a handoff
 naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
 directory-resolved pointer whose owner is another live session is not yours: say so and look further.
-A watch holder is never archived (`self-slash --finish` refuses with exit 12).
+On Paseo, `self-slash --finish` refuses a watch holder (exit 12; `--successor` is allowed, and the guard fails open if `watch status` fails or takes over 20 s); herdr and Orca watchers are not guarded.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,

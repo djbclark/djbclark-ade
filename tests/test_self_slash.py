@@ -225,6 +225,25 @@ class SelfSlashPaseoTests(unittest.TestCase):
         r = self.run_ss("--finish", SELF_SLASH_ALLOW_WATCHER="1")
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_a_watch_holder_can_still_hand_over_through_a_successor(self) -> None:
+        self.hold_watch("test-agent")
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        self.assertNotIn("refused", self.log_text())
+
+    def test_holder_prefix_matches_like_bin_watch(self) -> None:
+        self.hold_watch("test-ag")
+        self.assertEqual(self.run_ss("--finish").returncode, 12)
+
+    def test_watch_status_failure_or_timeout_fails_open(self) -> None:
+        for body in ("exit 1", "echo not-json", "sleep 5"):
+            _ = self.watch.write_text(f"#!/bin/bash\n{body}\n")
+            r = self.run_ss("--finish", SELF_SLASH_WATCH_TIMEOUT="1")
+            self.assertEqual(r.returncode, 0, (body, r.stderr))
+            self.wait_log("finish: archived test-agent")
+            self.wait_lock_gone()
+
     # (b)
     def test_quit_on_paseo_maps_to_finish_and_sends_no_text(self) -> None:
         r = self.run_ss("/quit")

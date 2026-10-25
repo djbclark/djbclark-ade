@@ -187,20 +187,31 @@ finish_flag=$finish
        7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
        11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable),
-       12 bare --finish refused: this agent holds a watch role (bin/watch status))" >&2; exit 2; }
+       12 bare --finish refused: this agent holds a watch role (Paseo; bin/watch status; --successor is not refused))" >&2; exit 2; }
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ -n "$successor" ] && [ "$finish" != 1 ]; then echo "self-slash: --successor needs --finish (it replaces the bare archive)" >&2; exit 2; fi
-# A bare --finish never archives the session that holds a watch role (bin/watch status): the role would go
-# unheld (2026-10-25: a /baton-resumed load watcher queued its own archive and caught it only by killing the
-# waiter).  Hand the role over (`watch down DOMAIN`, or `watch up --force` from the successor) first;
-# SELF_SLASH_ALLOW_WATCHER=1 overrides; SELF_SLASH_WATCH_CMD replaces the watch binary (tests).
+# A Paseo agent that holds a watch role (bin/watch status) is not archived by --finish or a mapped /quit: the
+# role would go unheld (2026-10-25: a /baton-resumed load watcher queued its own archive and caught it only by
+# killing the waiter).  Not for --successor (that path hands over), and only on Paseo: herdr/Orca watchers
+# register other ids.  Checked in the parent and again in the waiter child, after its environment is restored.
+# FAILS OPEN when `watch status` fails, times out (20 s, SELF_SLASH_WATCH_TIMEOUT) or returns bad JSON.  A holder
+# matches by the same prefix rule as bin/watch.  SELF_SLASH_ALLOW_WATCHER=1 overrides; SELF_SLASH_WATCH_CMD
+# replaces the watch binary (tests).  Exit 12.
 refuse_if_watcher() {
-  [ "$finish" = 1 ] && [ -z "$successor" ] && [ -n "${PASEO_AGENT_ID-}" ] && [ "${SELF_SLASH_ALLOW_WATCHER-}" != 1 ] || return 0
+  [ "$finish" = 1 ] && [ -z "$successor" ] && [ "$host" = paseo ] && [ -n "$pane" ] && [ "${SELF_SLASH_ALLOW_WATCHER-}" != 1 ] || return 0
   local watch_cmd watch_json
   watch_cmd="${SELF_SLASH_WATCH_CMD:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")/watch}"
-  watch_json="$("$watch_cmd" status --json 2>/dev/null)"
-  if printf '%s' "$watch_json" | jq -e --arg id "$PASEO_AGENT_ID" 'any(.[]; (.holder.target? // "") == $id)' >/dev/null 2>&1; then
-    echo "self-slash: refused: this agent ($PASEO_AGENT_ID) holds a watch role (bin/watch status); archiving it would leave the role unheld. Hand it over first, or set SELF_SLASH_ALLOW_WATCHER=1." >&2
+  watch_json="$(gtimeout "${SELF_SLASH_WATCH_TIMEOUT:-20}" "$watch_cmd" status --json 2>/dev/null)"
+  if printf '%s' "$watch_json" | python3 -c 'import json, sys
+aid = sys.argv[1]
+try:
+    rows = json.load(sys.stdin)
+    held = any(isinstance(r.get("holder"), dict) and (t := str(r["holder"].get("target") or "")) and
+               (t == aid or aid.startswith(t) or t.startswith(aid)) for r in rows)
+except Exception:
+    held = False
+sys.exit(0 if held else 1)' "$pane" 2>/dev/null; then
+    echo "$(gdate '+%F %T') $host $pane: refused: this agent holds a watch role (bin/watch status); archiving it would leave the role unheld. Hand it over first, or set SELF_SLASH_ALLOW_WATCHER=1." >&2
     exit 12
   fi
 }
@@ -323,7 +334,6 @@ if [ "$host" = paseo ]; then
       finish=1;;
   esac
 fi
-refuse_if_watcher
 # ... and a follow-up /quit or /exit would be sent as plain text, or end the fresh session.
 if [ "$host" = paseo ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   case "$then" in /quit|/exit|"/quit "*|"/exit "*) echo "self-slash: --then $then is not a Paseo command; use --finish after the turn instead" >&2; exit 2;; esac
@@ -334,6 +344,7 @@ if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then
   successor="${SELF_SLASH_SUCCESSOR:-}"; s_thinking="${SELF_SLASH_S_THINKING:-}"; s_mode="${SELF_SLASH_S_MODE:-}"; s_title="${SELF_SLASH_S_TITLE:-}"
   s_workspace="${SELF_SLASH_S_WORKSPACE:-}"; s_keepws="${SELF_SLASH_S_KEEPWS:-0}"; s_baton="${SELF_SLASH_S_BATON:-}"
 fi
+refuse_if_watcher
 # --baton goes into the successor's first prompt and the log: an absolute path to an existing
 # regular file of printable characters only (a relative path would resolve in the successor's cwd, a
 # newline could forge a log line; adversary adv-selfslash-1, L1).  The waiter child re-checks the
