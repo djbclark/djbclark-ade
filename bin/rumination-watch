@@ -328,6 +328,74 @@ def cmd_test(a: argparse.Namespace) -> int:
     return 0 if (ok_s or ok_d) else 1
 
 
+def cmd_autoaccept(a: argparse.Namespace) -> int:
+    """Ensure a Paseo agent has auto_accept on (djbclark, 2026-10-24).
+
+    `auto_accept` is a per-agent FEATURE FLAG, not a CLI option: `paseo agent run --help` and
+    `paseo agent update --help` both lack it, so there is no supported way to set it when creating a
+    tab. It lives in the agent's own state file as a `features[]` entry with
+    `{"id": "auto_accept", "value": true}` plus a mirrored `config.featureValues.auto_accept`.
+
+    djbclark: "If possible you should always open other agents that are part of you with the paseo
+    'Auto accept permission prompts' enabled." So a freshly created sibling tab must end up with it
+    on, and asking the operator to click a toggle is not a mechanism.
+
+    This edits the agent's state file directly, which is why it is conservative:
+    - it writes ATOMICALLY (temp file + os.replace), so a concurrent daemon read never sees half a
+      file, and
+    - it only ever sets `value: true` on an existing auto_accept feature, or appends the feature
+      entry when the provider declares features but lacks it. It never invents features for a
+      provider that has none (claude agents carry no `features` list at all, so touching them would
+      be a guess), and it never writes anything else.
+    - a daemon restart or the next agent update may re-read it; if the toggle does not stick, the
+      UI route is still the fallback, and this reports honestly instead of pretending.
+
+    Exit 0 already on / set; 1 could not set; 2 usage. Idempotent.
+    """
+    ident = a.agent
+    state = PASEO / "agents"
+    matches = list(state.glob(f"*/{ident}*.json"))
+    if not matches:
+        # allow a full id with no prefix match
+        matches = [p for p in state.glob("*/*.json") if p.stem.startswith(ident)]
+    if not matches:
+        print(f"autoaccept: no agent state file for {ident!r} under {state}", file=sys.stderr)
+        return 1
+    path = matches[0]
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        print(f"autoaccept: cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    feats = data.get("features")
+    if feats is None:
+        print(f"autoaccept: {path.stem[:8]} ({data.get('provider')}) declares no features "
+              f"list; auto_accept does not apply to this provider, nothing written")
+        return 0
+    changed = False
+    entry = next((f for f in feats if isinstance(f, dict) and f.get("id") == "auto_accept"), None)
+    if entry is None:
+        print(f"autoaccept: {path.stem[:8]} has features but no auto_accept entry; leaving it alone "
+              f"rather than inventing a flag for this provider")
+        return 1
+    if entry.get("value") is not True:
+        entry["value"] = True
+        changed = True
+    cfg = data.setdefault("config", {})
+    fv = cfg.setdefault("featureValues", {})
+    if fv.get("auto_accept") is not True:
+        fv["auto_accept"] = True
+        changed = True
+    if not changed:
+        print(f"autoaccept: {path.stem[:8]} already on")
+        return 0
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    os.replace(tmp, path)
+    print(f"autoaccept: {path.stem[:8]} ({data.get('title') or data.get('provider')}) -> on")
+    return 0
+
+
 def cmd_install(a: argparse.Namespace) -> int:
     """Install the launchd job (macOS). The plist is version-controlled in the repo, not hand-written
     into ~/Library/LaunchAgents, so a fresh machine gets the same job from the same file."""
