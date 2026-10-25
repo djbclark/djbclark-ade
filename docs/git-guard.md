@@ -77,21 +77,34 @@ unexpected exit **fails open** (a warning on stderr, the real git runs).
 **Fail open (2026-10-25, round 10).** A hook that fails aborts git for everyone, the operator included, so the installed stub
 runs the checkout's hook as a CHILD (never `exec`) and passes on only its documented refusal code, **77**; every other
 outcome (the hook exits 1, 3 or 126, dies by a signal, is missing, python is missing or crashes, the 10 s alarm, git not
-answering the origin question) exits 0 and lets git proceed, for agents and humans alike. (Before round 10 the stub `exec`'d
+answering the origin question: see below) exits 0 and lets git proceed, for agents and humans alike. (Before round 10 the stub `exec`'d
 the hook, so a Bash-level crash aborted git; tests now cover that layer.) **Fast path:** a caller with no agent
 marker exits before anything else runs; an agent's call whose stdin names no `HEAD`, `refs/stash` or `refs/heads/` line
 (a fetch of remote-tracking refs and tags) exits after one `grep`, without Python. Measured 2026-10-25, git 2.56: a fetch
 of 500 updated branches opens ~500 reference transactions (one per ref); the test shows Python starts zero times for it.
-A hook never runs a ref-writing git (the transaction's locks are held); the one thing it asks git is `git config --get
-remote.origin.url` (no ref lock), so the URL that matches a claim is git's answer: a trailing `# comment`, quotes and
-`[include]`d config are handled by git. Asked of the common dir (a linked worktree's own git dir has no `remote.*`). If git
-does not answer (timeout, cannot start) the claimed-branch rule is skipped: fail open.
+A hook never runs a ref-writing git (the transaction's locks are held); the one thing it asks git is `git --git-dir <common>
+config --local --includes --get remote.origin.url` (no ref lock), so the URL that matches a claim is git's answer: a trailing
+`# comment`, quotes and `[include]`d config are handled by git. **Which scopes the question reads (round 11, 2026-10-25):** the
+repository's own config file and the files it includes, and nothing else. The caller's command-line config (`-c`,
+`GIT_CONFIG_COUNT/KEY_n/VALUE_n`, `GIT_CONFIG_PARAMETERS`), the global and system files, `HOME`, `XDG_CONFIG_HOME`,
+`GIT_CONFIG_*`, `GIT_DIR` and `GIT_COMMON_DIR` are removed from the question's environment as well as ignored by `--local`, so a
+caller cannot change the URL the claim is matched against (before round 11, `git -c remote.origin.url=/x branch -f cb main` did).
+Asked of the common dir (a linked worktree's own git dir has no `remote.*`). **An unanswered question (timeout, cannot start, a
+repository config or include that fails for this question only, e.g. `includeIf "gitdir:<common dir>"` is true for the hook's
+`--git-dir` and false for the caller's own git dir in a linked worktree) does not switch the claim rule off for an agent:** the
+origin then reads as "" and matches a claim of ANY origin for that branch name, so the rule can refuse a same-named branch of an
+unrelated repository, never miss the claimed one. A human never reaches this (the fast path exits before Python). **Not
+guarded (same uid):** a caller that sets `ADE_REAL_GIT` to a program of its own (the question is then answered by that program)
+or `ADE_PYTHON` to one that exits 0 defeats the hook the same way it defeats the stub's own interpreter lookup.
 
 **`pack-refs`/`gc`.** `git pack-refs --all` reports every ref it packs as `0 <sha> <ref>` and every loose ref it prunes as
 `<sha> 0 <ref>` without changing a value, so beside any claim it would be refused. The stub exports its parent pid
 (`ADE_HOOK_GIT_PID`); when that process is an executable named `git` (its real path: `/proc/PID/exe` on Linux, `sysctl
 KERN_PROCARGS2` on macOS) whose exact argv, parsed word by word, names `pack-refs` (which `gc` and `maintenance` spawn), the
-hook lets it through. A forged `argv[0]` such as `"git pack-refs"` does not count (the parse skips `argv[0]`; tested with
+hook lets it through; its `argv[0]` must also be non-empty and named `git` (round 11: macOS pads the executable path with NULs
+and the parse used to read an EMPTY `argv[0]` as padding, shifting argv by one word; it now counts the NULs beyond the padding
+(`-(len(path)+1) mod 8`, measured arm64 2026-10-25) as empty leading arguments, and an empty `argv[0]` exempts nothing; tested with
+`subprocess.run(["", "-C", "pack-refs", "branch", "-f", "cb", "main"], executable=REAL_GIT)`). A forged `argv[0]` such as `"git pack-refs"` does not count (the parse skips `argv[0]`; tested with
 `subprocess.run(["git pack-refs", "branch", "-f", "cb", "main"], executable=REAL_GIT)`). **Residual (same uid):** a program
 named `git` that sets a `pack-refs` argv and then runs the hook, or one that sets `ADE_HOOK_GIT_PID` to another process's
 `pack-refs`, is believed. If neither /proc nor sysctl answers, nothing is exempted (a maintenance run beside a claim is then
@@ -124,7 +137,12 @@ Evaluated in order; the module docstring has every form.
    1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused: the repository chose it
    (husky, pre-commit), the hooks do not run there, and `install` reports it (78). If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
-   hooks fail open**. **`clone` and `init` copy a template directory (its `config` and `hooks` included) into the new repository
+   hooks fail open**. **acp-run's own config pairs (round 11):** acp-run puts two `GIT_CONFIG_COUNT` pairs in every agent's
+   environment, `hook.acp-run-identity.event=reference-transaction` and `hook.acp-run-identity.command=~/.cache/acp-run/git-identity-guard.sh`
+   (a config hook that checks the git identity; a config hook only adds a hook, it cannot switch the hooks directory's off). The
+   per-key rule exempts exactly those two pairs, from the environment's COUNT pairs only (command value compared after `realpath`);
+   the same key with another value, via `-c`, `--config-env` or `GIT_CONFIG_PARAMETERS`, a second copy, and every other `hook.*`,
+   `include*` and `core.hooksPath` key stay refused. **`clone` and `init` copy a template directory (its `config` and `hooks` included) into the new repository
    (round 11, 2026-10-25; djbclark's ruling): the shim refuses every non-default template source** as `hook-config`: `--template`
    (any abbreviation, `=` or next word), `GIT_TEMPLATE_DIR` in the environment, `init.templateDir` set on the command line, in the
    environment or in any config scope but the repository's own (asked of git like `core.hooksPath`; unanswered is
@@ -187,6 +205,14 @@ analyser (and the Claude PreToolUse hook it was for, W5).
     passes both hooks. Reproduced before round 11 (d9b0583, 3fb69ba): shim `clone -q --config core.hooksPath=/dev/null <up> c2`,
     then `push -f origin main:cb` in c2 moved the upstream branch. The durable rule, left to the operator: "an agent's call
     lands in a repository whose local hooksPath is set and not the ade stubs: refuse `push` and ref-writing subcommands".
+11. **Template sources the shim only reads for `clone`, `init`:** `submodule add|update` and `fetch|pull --recurse-submodules` also
+    clone (and copy `GIT_TEMPLATE_DIR` / `init.templateDir` into) new repositories; not refused (round 11, open question).
+12. **The claim's repository identity is the repository's own `remote.origin.url`:** an agent that runs `git remote set-url origin
+    /x` (allowed; reproduced 2026-10-25 through the shim) and then `git branch -f cb main` is no longer matched to the claim of
+    `cb` in the hook, whatever the origin question reads. Matching the claim by something an agent cannot rewrite (its pasture's
+    git dir or the common dir recorded in the claim) is a design call for the operator.
+13. **Same-uid forgery of the hook's own inputs:** `ADE_REAL_GIT`, `ADE_PYTHON`, `ADE_HOOK_GIT_PID` (see the fail-open and
+    `pack-refs` paragraphs).
 
 ## Refusal, log and override
 
