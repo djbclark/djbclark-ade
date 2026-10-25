@@ -787,12 +787,19 @@ def render(d):
             # directory named `~` below the working directory, inside the checkout it preserves (adversary round 62 on PR 27)
             bd = Home("~/ops/site-private/bundles/") + ck.removeprefix("checkouts/")
             bundle_cmd = shcode("mkdir -p {} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, bd + "/all.bundle")
+            # the bare repo's HEAD names the checkout's branch, so a clone of the restored repo finds `HEAD` instead of
+            # warning `remote HEAD refers to nonexistent ref`: `git init -b` needs git 2.28 (2020-07); an older git rejects
+            # the flag and the recipe then fails loudly at its first step. A detached HEAD (`HEAD`) or a name that is not
+            # UTF-8 (`ODD_NAME`) cannot be typed as a branch, so those keep the plain `git init --bare R`
+            usable = bool(c["branch"]) and c["branch"] != "HEAD" and ODD_NAME not in c["branch"]
+            init_bare = shcode("git init --bare -b {} R", c["branch"]) if usable else "`git init --bare R`"
             if c.get("shallow"):
                 # `bundle create` drops `<common>/shallow`, so the parents of the boundary commits are in no file and
                 # `git clone all.bundle` fails (`Could not read <parent>`): keep the file beside it and say how to restore
                 # (probed 2026-10-24: `git init --bare`, the file copied in as `shallow`, `git fetch all.bundle 'refs/*:refs/*'`)
                 bundle_cmd += (" and " + shcode("\"$GCP\" -- \"$(git -C {} rev-parse --path-format=absolute --git-path shallow)\" {}", raw_p, bd + "/all.bundle.shallow")
-                               + " (shallow checkout: `git clone` of the bundle alone fails; restore with `git init --bare R`, copy `all.bundle.shallow` to `R/shallow`, then `git -C R fetch <bundle> 'refs/*:refs/*'`)")
+                               + " (shallow checkout: `git clone` of the bundle alone fails; restore with " + init_bare
+                               + ", copy `all.bundle.shallow` to `R/shallow`, then `git -C R fetch <bundle> 'refs/*:refs/*'`)")
             cmd.append(bundle_cmd + " or add a remote and `git push -u origin <branch>`")
             need = "**yes**: only copy; hosting or bundle destination"
         elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
