@@ -77,8 +77,9 @@ class TestStandingRules(unittest.TestCase):
 
     def test_judgment_reaches_codex_only_when_claude_is_tight_and_codex_is_plentiful(self):
         # antigravity at 100% must not win judgment work. Since 2026-10-25 codex's judgment
-        # row (rank 3, gpt-6.1-sol at high) is eligible while its quota is plentiful, but it
-        # ranks behind claude, so it only wins once claude is out of room.
+        # row (rank 3, gpt-6.1-sol at high) is an eligible, lower-ranked pool while its quota is
+        # plentiful: the router weighs pressure, burn and pace as well as rank, so it wins
+        # when claude is short of room (it won at claude=15% too), never while claude has plenty.
         q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
         self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
         q = dict(IDLE, claude={"remaining": 5.0})

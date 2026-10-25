@@ -24,10 +24,12 @@ quoting a chain, and update its snapshot if you change one.
 > **Update 2026-10-18 (operator): the frontier models are scarce.** A lead put
 > four plektra "small issues" slices on codex `gpt-6-astra` at high/xhigh
 > together; codex's 5-hour window ran out and all four stopped waiting for the
-> reset. Since then: judgment is Opus 5.5 at `high`; codex astra and Fable 5.1
+> reset. Since then: judgment is Opus 5.5 at `high` first, omp Opus next, and (2026-10-25)
+> codex `gpt-6.1-sol` at `high` as an eligible, lower-ranked pool only while every codex
+> window has >= 50% left; codex astra and Fable 5.1
 > (`high`) are reached only through the `frontier` kind, one slice per pool
 > per wave, for work that really needs them (codex's everyday models, `gpt-6.1-sol` and
-> `gpt-6-luna`, also take `code`/`bulk`/`mechanical` while every codex window has
+> `gpt-6-luna`, also take `judgment`/`code`/`bulk`/`mechanical` while every codex window has
 > >= 50% left, operator 2026-10-25); `acp-dispatch` allows one fresh
 > codex slice in flight machine-wide (replaced the same night by a per-service
 > in-flight quota reservation, see *Routing policy* below) and refuses Fable
@@ -329,8 +331,12 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   can use it for non-frontier")**: `judgment` on `gpt-6.1-sol --effort high`,
   `code` on `gpt-6.1-sol --effort medium`, `bulk` and `mechanical` on `gpt-6-luna --effort low`, only while the
   tightest codex window (5-hour and weekly) has at least
-  `[routing].plenty_min` (50%) left; below it, or with no fresh reading,
-  codex is frontier-only again. It competes on the normal ranking (judgment r3,
+  `[routing].plenty_min` (50%) left, a window with no reading counting as not plentiful
+  (2026-10-25); below it, or with no fresh reading,
+  codex is frontier-only again, and `acp-dispatch` judges the gate again on the reading taken
+  after the load wait (the detached runner too). Estimates match history on kind and effort,
+  and `[dispatch.estimate_floor] "codex:judgment"` (25) holds until three comparable slices
+  exist. It competes on the normal ranking (judgment r3,
   behind claude and omp; code r15, mechanical r12, bulk r20), one slice per wave; astra never takes an
   everyday kind. (2026-10-19: the account is now the $100
   plan, `prolite`; the 5-hour note predates the upgrade, so re-calibrate with
@@ -394,7 +400,9 @@ running agent per reset period toward omp API credits. Exit 0/1/2, 10 stale data
 `mechanical` never go to claude, and `judgment` prefers omp `anthropic/claude-opus-5-5`.
 
 1. **Frontier models only for what really needs them (2026-10-18):** judgment
-   is `acp-dispatch claude --model opus --kind judgment --effort high`; the
+   is `acp-dispatch claude --model opus --kind judgment --effort high` first
+   (2026-10-25: omp Opus next; codex `gpt-6.1-sol --effort high` while every codex window
+   has `plenty_min` left, rank 3; never astra or Fable); the
    `frontier` kind, one slice per pool per wave, reaches codex `gpt-6-astra`
    (`acp-dispatch codex --model gpt-6-astra --kind frontier --effort high`;
    in-flight slices reserve quota, so a second one is refused when the first

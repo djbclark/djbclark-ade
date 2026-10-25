@@ -24,7 +24,8 @@ review and rework. Concretely:
    (operator 2026-10-18). Claude Fable 5.1 and codex `gpt-6-astra` are reached
    only through the `frontier` kind, one slice per pool per wave. On
    2026-10-18 a wave of four astra slices emptied codex's 5-hour window and
-   every one stopped. Judgment is Opus 5.5 at `high`. `acp-dispatch` runs a
+   every one stopped. Judgment is Opus 5.5 at `high` first (2026-10-25: omp Opus next, Codex
+   `gpt-6.1-sol` at high only while every codex window has `plenty_min` left). `acp-dispatch` runs a
    frontier model only with `--kind frontier`, as a read-only advisor unless
    `ACP_OPERATOR_APPROVED=frontier-exec` (2026-10-18); it reserves each
    in-flight slice's estimated quota on its service before a new one fits (a
@@ -156,8 +157,11 @@ a fan-out needs from it:
    Context stays at the agent's default unless the slice reads a whole corpus
    or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI,
    Cursor and Copilot).
-2. **`judgment` slices** (architecture, adjudication) go to `acp-dispatch claude
-   --model opus --kind judgment --effort high`. **Adversary rounds** (the
+2. **`judgment` slices** (architecture, adjudication; 2026-10-25) go to `acp-dispatch claude
+   --model opus --kind judgment --effort high` first; omp Opus on the credits is next, and Codex
+   `gpt-6.1-sol --effort high` (`--kind judgment`, rank 3) is an eligible, lower-ranked pool only
+   while every codex window has at least `[routing].plenty_min` (50%) left (astra stays
+   frontier-only; `plan` picks it only when it ranks within the quality gap). **Adversary rounds** (the
    adversarial second opinion of Step 6) go first to the omp route, `acp-dispatch
    omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (Claude API
    credits; operator 2026-10-23, after the Claude weekly window ran out 2.6 days
@@ -216,8 +220,8 @@ window, so spending it costs nothing that orchestration needs.
    `remaining_percent`; either one under 15% means skip it this batch.
 2. **Assignment order for a Claude-class code, review or research slice**
    (implementation, reviews, research synthesis): the agy Claude/GPT pool
-   first, then the other everyday pools in `plan`'s order; judgment goes to the
-   frontier pools (*Pool policy* item 2). `--model claude-opus-5-5 --effort high` for the hard
+   first, then the other everyday pools in `plan`'s order; judgment follows
+   *Pool policy* item 2 above (2026-10-25). `--model claude-opus-5-5 --effort high` for the hard
    slices, `--model claude-sonnet-5-5 --effort high` for volume. Mechanical edits and bulk reading still go to the free and Gemini
    pools first; do not spend Opus on them just because it is idle.
 3. **The ACP route reaches it through a client-name workaround (2026-10-10).** agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
@@ -435,7 +439,8 @@ vendor, model and effort are chosen at dispatch time by *Dynamic routing* (end
 of Step 1; `plan` prints the `acp-dispatch` line), because the pools will have
 moved by the time a queued slice is reached. Decide the **context window** now,
 per slice: the default unless the slice reads a whole corpus or a long log.
-Tag honestly: a `judgment` slice on an everyday pool fails and is re-run at
+Tag honestly: a `judgment` slice on a pool that is not judgment-tier (or on codex below
+`plenty_min`) is refused or fails and is re-run at
 higher cost; a `code` slice tagged `judgment` or `frontier` wastes a scarce turn.
 
 Keep for **yourself** (the orchestrator), never delegate:
