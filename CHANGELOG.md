@@ -304,7 +304,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Security
 
-- Fixed the RTK OpenCode plugin trusting `ctx.permission.list()` (pending requests, not effective rules) as proof that no deny/ask rules exist, which let a shell rewrite bypass configured rules; rule detection now uses only the scan of the global and project `opencode.json(c)` files (unparsable fails closed); rules from `OPENCODE_CONFIG*`, managed config and agents are still not seen (2026-10-25, #NN).
+- Fixed the RTK OpenCode plugin trusting `ctx.permission.list()` (pending requests, not effective rules) as proof that no deny/ask rules exist, which let a shell rewrite bypass configured rules; rule detection now uses only the scan of the global and project `opencode.json(c)` files (unparsable fails closed); rules from `OPENCODE_CONFIG*`, managed config and agents are still not seen (2026-10-25, #70).
 - `firecrawl-router`: the serve-only form refuses a non-loopback `--listen` like `--open` does,
   and the address actually bound is checked before the first request is served (#14).
 - `cursor-cloud` and `firecrawl-router`: endpoint variables must be https or loopback, bearer
