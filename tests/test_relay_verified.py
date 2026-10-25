@@ -330,6 +330,62 @@ class TestExpectReservation(Base):
         self.assertEqual([r["id"] for r in rows], ["q1"])
 
 
+class TestSweepCostAndRobustness(Base):
+    """Adversary r1 A10 (2026-10-25): a sweep reads each transcript once, prunes idle links, and survives a hand-edited record."""
+
+    REPLY = "[relay from claude cccccccc aka peer-fb (x)] ack bbbbbbbb"
+
+    def link(self) -> dict[str, Any]:
+        return next(iter(json.loads(fleet.LINKS_FILE.read_text())["links"].values()))
+
+    def test_the_scan_mark_advances_so_old_bytes_are_not_read_again_and_new_lines_still_count(self) -> None:
+        self.go("PR 61 is merged")
+        self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "unrelated chatter"}})
+        self.run_cli("--sweep")
+        self.assertEqual(self.link()["mark"], self.me_tx.stat().st_size)
+        reads: list[int] = []
+        real = relay.scan_texts
+        relay.scan_texts = lambda tx, mark: reads.append(mark) or real(tx, mark)
+        self.addCleanup(setattr, relay, "scan_texts", real)
+        self.run_cli("--sweep")
+        self.assertEqual(reads, [self.me_tx.stat().st_size])    # nothing before the stored mark is read again
+        self.reply_to_me("ack bbbbbbbb from cccccccc")
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+
+    def test_a_line_still_being_written_is_not_consumed(self) -> None:
+        self.go("PR 61 is merged")
+        line = json.dumps({"timestamp": fb.stamp(), "type": "user", "message": {"role": "user", "content": self.REPLY}})
+        with self.me_tx.open("a") as fh:
+            fh.write(line)    # no newline yet: the writer is mid-line
+        self.assertIn("0 resolved", self.run_cli("--sweep")[1])
+        with self.me_tx.open("a") as fh:
+            fh.write("\n")
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+
+    def test_a_link_idle_for_the_keep_window_is_pruned_and_a_recent_one_is_not(self) -> None:
+        self.go("PR 61 is merged")
+        data = json.loads(fleet.LINKS_FILE.read_text())
+        key = next(iter(data["links"]))
+        data["links"]["old>peer"] = {**data["links"][key], "last_sent": time.time() - relay.EXPECT_KEEP - 60}
+        fleet.LINKS_FILE.write_text(json.dumps(data))
+        self.run_cli("--sweep")
+        self.assertEqual(list(json.loads(fleet.LINKS_FILE.read_text())["links"]), [key])
+
+    def test_hand_edited_records_never_crash_list_pending_or_sweep(self) -> None:
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
+        path = relay.expect_dir() / "build1.json"
+        rec = json.loads(path.read_text())
+        path.write_text(json.dumps({**rec, "created": "yesterday", "within": [1], "mark": "zz", "target": "alice"}))
+        data = json.loads(fleet.LINKS_FILE.read_text())
+        data["links"]["junk>x"] = "not a dict"
+        data["links"][next(iter(data["links"]))]["sent"] = "many"
+        data["links"]["bbbbbbbb>cccccccc"] = {**next(v for v in data["links"].values() if isinstance(v, dict)), "sent": "many", "mark": "x", "last_sent": "never"}
+        fleet.LINKS_FILE.write_text(json.dumps(data))
+        self.assertEqual(self.run_cli("--pending", "--json")[0], 0)
+        self.assertEqual(self.run_cli("--sweep")[0], 0)
+        self.assertEqual(len(fleet.annotate_links([dict(self.target), dict(self.me)])), 2)
+
+
 class TestFirstContact(Base):
     def test_the_first_message_to_a_peer_asks_for_an_ack_and_the_second_does_not(self) -> None:
         self.assertEqual(self.go("PR 61 is merged")[0], 0)

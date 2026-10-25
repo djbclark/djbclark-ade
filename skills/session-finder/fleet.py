@@ -1298,7 +1298,11 @@ def annotate_links(ss):
     for s in ss:
         ln = links.get(link_key(me["id"], s["id"]))
         if isinstance(ln, dict):
-            s["link"] = {"sent": int(ln.get("sent") or 0), "acked": ln.get("acked") or None}
+            try:
+                sent = int(ln.get("sent") or 0)
+            except (TypeError, ValueError):    # a hand-edited ledger must not stop `fleet.py list`
+                sent = 0
+            s["link"] = {"sent": sent, "acked": ln.get("acked") or None}
     return ss
 
 

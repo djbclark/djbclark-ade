@@ -2522,7 +2522,7 @@ def expect_all():
     if not d.is_dir():
         return []
     rows = [r for p in d.glob("*.json") if EXPECT_ID.fullmatch(p.stem) for r in [expect_read(p.stem)] if r]
-    return sorted(rows, key=lambda r: (float(r.get("created") or 0), r["id"]))
+    return sorted(rows, key=lambda r: (_num(r.get("created")), r["id"]))
 
 
 def expect_write(rec):
@@ -2559,11 +2559,24 @@ def expect_release(eid, sender):
 def user_texts(tx, mark):
     """The texts a session RECEIVED after byte MARK of its transcript TX: user lines (text blocks and plain strings, never a tool
     result or anything the session itself wrote), queue enqueues and absorbed queued_command prompts, Codex user messages."""
+    return scan_texts(tx, mark)[0]
+
+
+def scan_texts(tx, mark):
+    """(texts, end) of the complete lines of transcript TX after byte MARK (`user_texts`), END being the byte after the last newline
+    read: a sweep that stores it never reads those bytes again, and never starts inside a line a writer has not finished
+    (adversary r1 A10, 2026-10-25). A transcript shorter than MARK restarts at 0 (replaced or truncated)."""
     if not (tx and Path(tx).is_file()):
-        return []
+        return [], mark
     with Path(tx).open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() < mark:
+            mark = 0
         fh.seek(mark)
-        lines = fh.read().decode("utf-8", "replace").splitlines()
+        data = fh.read()
+    cut = data.rfind(b"\n") + 1
+    lines = data[:cut].decode("utf-8", "replace").splitlines()
+    end = mark + cut
     out = []
     for ln in lines:
         try:
@@ -2574,15 +2587,17 @@ def user_texts(tx, mark):
             continue    # a compaction summary and a transcript-only notice are the session's own words about the past, never a reply
         kind = o.get("type")
         if kind == "user":
-            c = (o.get("message") or {}).get("content")
+            m = o.get("message")
+            c = m.get("content") if isinstance(m, dict) else None
             out.append(" ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text") if isinstance(c, list) else c)
         elif kind == "queue-operation" and o.get("operation") == "enqueue":
             out.append(o.get("content"))
         elif kind == "response_item" and isinstance(o.get("payload"), dict) and o["payload"].get("role") == "user":
-            out.append(" ".join(b.get("text", "") for b in o["payload"].get("content", []) if isinstance(b, dict)))
+            body = o["payload"].get("content")
+            out.append(" ".join(b.get("text", "") for b in body if isinstance(b, dict)) if isinstance(body, list) else None)
         elif isinstance(o.get("attachment"), dict) and o["attachment"].get("type") == "queued_command":
             out.append(o["attachment"].get("prompt"))
-    return [" ".join(t.split()) for t in out if isinstance(t, str)]
+    return [" ".join(t.split()) for t in out if isinstance(t, str)], end
 
 
 def ack_token(token):
@@ -2630,9 +2645,10 @@ def note_links_and_expect():
     with links_lock():
         data = fleet.links_read()
         key = fleet.link_key(me["id"], s["id"])
-        ln = data["links"].get(key) or {"sender": me["id"], "target": s["id"], "first_sent": now, "sent": 0, "acked": None,
+        ln = data["links"].get(key)
+        ln = ln if isinstance(ln, dict) and ln else {"sender": me["id"], "target": s["id"], "first_sent": now, "sent": 0, "acked": None,
                                        "tx": tx, "mark": CTX.get("mark", 0), "who": who}
-        ln.update(last_sent=now, sent=int(ln.get("sent") or 0) + 1, target_name=s.get("name") or "")
+        ln.update(last_sent=now, sent=int(_num(ln.get("sent"))) + 1, target_name=s.get("name") or "")
         data["links"][key] = ln
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
@@ -2641,36 +2657,54 @@ def note_links_and_expect():
                       "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8]}})
 
 
+def expect_age(r, now):
+    """(age in seconds, seconds allowed) of expectation R: a hand-edited field that is no number counts as just created and the default window."""
+    return now - _num(r.get("created"), now), _num(r.get("within"), EXPECT_WITHIN) or EXPECT_WITHIN
+
+
 def ack_sweep():
-    """Resolve what replies settled: an open expectation whose sender's transcript holds `ack ID`, a first-contact link whose
-    sender's transcript holds `ack <sender id>` naming the peer. Prunes old expectations. Returns (acked, overdue rows)."""
+    """Resolve what replies settled: an open expectation whose sender's transcript holds `ack ID` from its target, a first-contact link whose
+    sender's transcript holds `ack <sender id>` naming the peer. Prunes expectations and links idle for EXPECT_KEEP; each link remembers how far
+    its sender's transcript was read (`mark`), so a sweep reads only what is new (adversary r1 A10, 2026-10-25). A record a hand edit made
+    unreadable is skipped or dropped, never an exception. Returns (acked, overdue rows)."""
     acked, overdue, now = 0, [], time.time()
     for r in expect_all():
-        if now - float(r.get("created") or now) > EXPECT_KEEP:
+        age, within = expect_age(r, now)
+        if age > EXPECT_KEEP:
             with contextlib.suppress(OSError):
                 (expect_dir() / f"{r['id']}.json").unlink()
             continue
-        t = r.get("target") or {}
+        t = r.get("target") if isinstance(r.get("target"), dict) else {}
         who = [w for w in (t.get("id"), t.get("name"), t.get("paseo"), t.get("sid8")) if w]    # only the target's own reply closes it (A2)
-        if r.get("state") == "open" and ack_seen(user_texts(r.get("tx"), int(r.get("mark") or 0)), r["id"], who):
+        if r.get("state") == "open" and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
             expect_write({**r, "state": "acked", "acked": now})
             with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
                 data = fleet.links_read()
-                ln = data["links"].get(fleet.link_key(r.get("sender"), (r.get("target") or {}).get("id")))
-                if ln and not ln.get("acked"):
+                ln = data["links"].get(fleet.link_key(r.get("sender"), t.get("id")))
+                if isinstance(ln, dict) and not ln.get("acked"):
                     ln["acked"] = now
                     atomic_json(fleet.LINKS_FILE, data)
             acked += 1
-        elif r.get("state") == "open" and now - float(r.get("created") or now) > float(r.get("within") or EXPECT_WITHIN):
+        elif r.get("state") == "open" and age > within:
             overdue.append(r)
     if fleet.LINKS_FILE.is_file():
         with links_lock():
             data = fleet.links_read()
             changed = False
-            for ln in data["links"].values():
-                if not ln.get("acked") and ack_seen(user_texts(ln.get("tx"), int(ln.get("mark") or 0)), ln.get("sender") or "", ln.get("who") or ()):
+            for key, ln in list(data["links"].items()):
+                if not isinstance(ln, dict) or now - _num(ln.get("last_sent") or ln.get("first_sent"), now) > EXPECT_KEEP:
+                    del data["links"][key]    # junk, or no message to that peer for EXPECT_KEEP: a later one is a first contact again
+                    changed = True
+                    continue
+                if ln.get("acked"):
+                    continue
+                mark = int(_num(ln.get("mark")))
+                texts, end = scan_texts(ln.get("tx"), mark)
+                if ack_seen(texts, ln.get("sender") or "", ln.get("who") or ()):
                     ln["acked"], changed = now, True
                     acked += 1
+                elif end != mark:
+                    ln["mark"], changed = end, True
             if changed:
                 atomic_json(fleet.LINKS_FILE, data)
     return acked, overdue
@@ -2679,10 +2713,14 @@ def ack_sweep():
 def expect_view(now=None):
     """The expectations as --pending rows: kind "expect", sender, target, age, and `overdue` once past their time."""
     now = now or time.time()
-    return [{"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"), "target": r.get("target"),
-             "age_s": int(now - float(r.get("created") or now)), "within_s": int(float(r.get("within") or EXPECT_WITHIN)),
-             "overdue": r.get("state") == "open" and now - float(r.get("created") or now) > float(r.get("within") or EXPECT_WITHIN)}
-            for r in expect_all() if r.get("state") != "reserved"]
+    rows = []
+    for r in expect_all():
+        if r.get("state") == "reserved":
+            continue
+        age, within = expect_age(r, now)
+        rows.append({"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"),
+                     "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within})
+    return rows
 
 
 def main(argv=None, sweep=True):
@@ -2745,8 +2783,9 @@ def _main(argv=None, sweep=True):
         acked, overdue = ack_sweep()
         print(f"acks: {acked} resolved, {len(overdue)} overdue")
         for r in overdue:    # the escalation hook: a caller that pages the operator greps these lines (or --pending --json: "overdue": true)
-            print(f"OVERDUE ack {r['id']}: {(r.get('target') or {}).get('name') or (r.get('target') or {}).get('id')} has not answered "
-                  f"[{r.get('sender')}] in {int((time.time() - float(r.get('created') or 0)) // 60)}m; tell the operator, never assume it was read")
+            tg = r.get("target") if isinstance(r.get("target"), dict) else {}
+            print(f"OVERDUE ack {r['id']}: {tg.get('name') or tg.get('id')} has not answered "
+                  f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; tell the operator, never assume it was read")
         return 0
     if a.ident is None or a.text is None:
         print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep", file=sys.stderr)
