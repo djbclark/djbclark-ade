@@ -81,6 +81,12 @@ Each doc carries its own summary.
    tracks its latest release. Detail and exceptions:
    `site-private/memory/feedback_upstream_local_changes.md`.
 
+9. **Start every branch in its own worktree, never in the shared checkout.** `~/src/djbclark-ade` is used by many sessions at once and may sit on
+   another session's branch: `git checkout -b` there inherits that branch's commits, and a commit there lands on someone else's work (2026-10-24: three
+   sessions collided; an L-D branch carried two foreign commits until rebased). Use `git worktree add -b NAME ~/src/djbclark-ade-NAME-wt origin/master`, work and
+   push there, and `git worktree remove` it after the merge. In the shared checkout only fast-forward `master` and commit your own hunks to it with
+   `git-commit-own`; if it is on a branch you do not own, say so to that branch's owner through `relay.py`, do not switch it away.
+
 ## Machine context
 
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
