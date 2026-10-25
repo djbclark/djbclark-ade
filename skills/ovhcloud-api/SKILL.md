@@ -248,24 +248,55 @@ flake's* inputs, not the site flake's). The revert restored the previous lock fr
 `flake.lock` had no `sops-nix` node, **every git-ref build failed** including the host's own
 `nixos-upgrade`, and the host quietly stopped upgrading while the local build still worked.
 
-Check it with one command — every input named in `flake.nix` must have a node in `flake.lock`:
+Check it with one command. **Ask Nix rather than parsing** — it needs no regex and cannot miss a
+declaration form:
+
+```bash
+nix flake metadata --json --no-update-lock-file ./nixos >/dev/null
+# exit 0 = the lock matches flake.nix
+# non-zero, "requires lock file changes but they're not allowed due to
+# '--no-update-lock-file'" = the lock is stale or missing an input
+```
+
+If you need the *names* (e.g. to report which input is missing) without Nix, parse carefully — a
+naive `^\s*inputs\.([A-Za-z0-9_-]+)\s*=` **misses the dotted form** `inputs.nixpkgs.url = "…";`
+(which is exactly how `nixpkgs` is declared in `site-djbclark`'s own flake, so that regex silently
+skips it), and it misses the `inputs = { foo.url = …; };` attrset form. Also compare against the
+**root** inputs, not every node in the lock: `set(lock["nodes"])` includes transitive nodes and the
+`root` entry itself, so a transitive node of the same name can mask a missing root input.
 
 ```bash
 python3 - <<'EOF'
 import json, re, pathlib
 d = pathlib.Path("nixos")
 flake = (d / "flake.nix").read_text()
-nodes = json.loads((d / "flake.lock").read_text())["nodes"]
-declared = set(re.findall(r"^\s*inputs\.([A-Za-z0-9_-]+)\s*=", flake, re.M))
-print("MISSING FROM LOCK:", sorted(declared - set(nodes)) or "none")
+lock = json.loads((d / "flake.lock").read_text())
+# Root inputs only - what flake.nix actually declares.
+root_inputs = set(lock["nodes"][lock["root"]].get("inputs", {}))
+declared = set(re.findall(r"^\s*inputs\.([A-Za-z0-9_-]+)(?:\.url)?\s*=", flake, re.M))
+print("declared:", sorted(declared))
+print("root inputs in lock:", sorted(root_inputs))
+print("MISSING FROM LOCK:", sorted(declared - root_inputs) or "none")
 EOF
 ```
 
 **Reverting a lock is not safe on its own** — re-check it against `flake.nix` afterwards, because the
 failure appears only on the git-ref path (local builds still work), which is why it survives local
-testing. And `nixos-upgrade` fails *quietly*: `systemctl is-active` returns `inactive` whether it
-succeeded or failed, so compare `nixos-version --configuration-revision` against the branch head
-rather than trusting the unit state.
+testing.
+
+**And `nixos-upgrade` failing is quiet in the sense that nobody is notified** — not in the sense that
+the state is unreadable. A failed oneshot lands in the `failed` state, and systemd can tell you:
+
+```bash
+systemctl is-failed nixos-upgrade      # 'failed' after a failure, 'inactive' after a success
+systemctl show nixos-upgrade -p Result # Result=exit-code vs Result=success
+```
+
+What *is* easy to miss is that **`is-active` alone is not the check**: it prints `inactive` after a
+*successful* run and `failed` after a failed one, so reading only `is-active` and seeing a non-active
+state tells you nothing on its own. Compare `nixos-version --configuration-revision` against the
+deploy branch head as the authoritative check — it catches a stale host however the state got there.
+
 
 
 Three levels of gate, and they are deliberately separate so one broad yes cannot reach the next:
