@@ -272,7 +272,8 @@ Rules for any agent that dispatches to agy:
 - **Monthly subscription windows**: claude (5h/weekly, with Fable a <=50%
   sublimit of the same weekly, not a separate bucket), codex (ChatGPT Plus
   weekly until 2026-10-18, the $100 plan, aiuse `prolite`, since 2026-10-19;
-  spend it on `gpt-6-astra`), antigravity/agy (Google AI Pro — also
+  `gpt-6-astra` for frontier slices, and `gpt-6.1-sol` / `gpt-6-luna` for everyday kinds while at least
+  half of every window is left, item 1b), antigravity/agy (Google AI Pro — also
   exposes Claude/GPT windows), copilot (premium requests; **reserve, floor
   60%**), cursor Pro (Auto and third-party sublimits; GrokBot has its own
   separate Cursor pool since 2026-10-18, never a target), grok (SuperGrok; an
@@ -448,9 +449,12 @@ sets `ZCODE_BIN` to `vendor/zcode.cjs` (fixed 2026-10-15). The earlier
 "refuses every switch" error (`unsupported config option or switch failed:
 model`) was that missing variable: the server followed `which zcode`, a
 symlink, and never injected `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`. The
-2026-10-11 weekly-limit note was a different failure. `--model` works and
-`acp-dispatch zcode` still does not require it. Pass it when you want
-GLM-5.3-Flash. Effort is option `thought` (`low` / `high` / `max` on GLM-5.3,
+2026-10-11 weekly-limit note was a different failure. `--model` works (a bare `GLM-5.3` or
+`GLM-5.3-Flash` means the coding-plan pool's `builtin:zai-coding-plan\<name>`;
+full ids work too, 2026-10-24) and `acp-dispatch zcode` still does not
+require it. Pass it when you want GLM-5.3-Flash. `--perm read-only` and
+`deny` really remove zcode's tools since 2026-10-24 (acp-run's
+`zcode-denylist-shim.cjs`; before it zcode was offered Bash under read-only). Effort is option `thought` (`low` / `high` / `max` on GLM-5.3,
 default max; `medium` and `xhigh` exit 2, no neighbor map). `--context N` is
 only `ZCODE_ACP_AUTO_COMPACT_THRESHOLD`, a compact cap; GLM-5.3's window is
 fixed at 1,000,000. A 2026-10-15 prompt died `project_token_login_failed` at
@@ -461,6 +465,8 @@ broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback a
 is subject to the burst budget in "agy has a burst limit" above.
 
 **Default permission mode: yolo or its equivalent, for every agent however launched** (standing rule 2026-10-03, `home-agents.md`). Gate only a clearly security-sensitive slice (prompt-injection exposure: `--perm read-only` for a slice that reads, `--perm deny` for text-only; `--role advise` refuses `deny`, 2026-10-19), and say so (operator 2026-10-15; a plain review runs yolo with a read-only brief and a diff check); acp-run has no other gate since 2026-10-14 (bigteam checks file ownership from the diff after the run). `-s read-only` on codex likewise only for those calls; work slices use `--dangerously-bypass-approvals-and-sandbox`.
+
+**Security-sensitive PR that Codex will not or cannot review** (no Daybreak access, a business-only Codex program; djbclark 2026-10-24; `memory/feedback_security_prs_codex_refuses_go_open_weight.md`): review the diff with a frontier open-weight model unlikely to refuse, and once its findings are fixed drop the Codex retry (retry only if another agent investigating the failure wants the PR as a test case). First choice `acp-dispatch zcode --kind code --role advise --model GLM-5.3 --effort high`, second opinion `opencode-go/kimi-k3` or `opencode-go/deepseek-v4-pro`. Pass the diff as a file in the brief, review read-only, and quote the verdict in the PR body like an `adversary` verdict. First used on getpaseo/paseo PR 7817 (GLM-5.3 found two real defects Codex never reached).
 
 **Authority for launch flags:** Orca's roster,
 `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
@@ -573,17 +579,29 @@ method that runs the waves.
        frontier --effort high`) or Fable 5.1 (`--kind frontier --effort high`):
        one slice per pool per wave, for
        work that really needs a frontier model to look it over. Examples: a
-       security-relevant or concurrency fix's final review, debugging that has
-       defeated real attempts, an adjudication no cheaper model settles, a
+       security-relevant or concurrency fix's final review, debugging that
+       has defeated real attempts, an adjudication no cheaper model settles, a
        whole-corpus read that needs Fable's 1M window. "Upstream-bound", "small
-       issues" and "a second opinion would be nice" are not reasons.
+       issues" and "a second opinion would be nice" are not reasons. Codex's
+       **everyday** models are not frontier (operator 2026-10-25: "if we have
+       lots of codex quota and it is the best of available options we can use
+       it for non-frontier"): `code` on `gpt-6.1-sol --effort medium`, `bulk`
+       and `mechanical` on `gpt-6-luna --effort low`, eligible only while the
+       tightest codex window (5-hour and weekly) has at least
+       `[routing].plenty_min` (50%) left; below that, or with no fresh reading,
+       codex is frontier-only again and `acp-dispatch` refuses the kind
+       (exit 2, naming the headroom). Inside the gate it competes on the
+       router's normal ranking (code r15, mechanical r12, bulk r20), one slice
+       per wave; astra never takes an everyday kind.
    1c. **In-flight slices reserve quota, per service** (2026-10-18; it replaced
        the codex-only "one slice in flight" cap). Each running slice reserves
        its estimated quota on its service, and a fresh dispatch must fit what
        is left: `acp-dispatch` refuses one that does not (exit 5, class
        `inflight`); resumes are exempt. `ACP_DISPATCH_INFLIGHT=codex=2`
-       still sets a hard cap for a run. codex is only for astra; never spend
-       its window on `gpt-6-luna` everyday slices.
+       still sets a hard cap for a run. The brief-size estimate floor is per
+       model class (`[dispatch.estimate_floor]`): 60% for an astra slice
+       (`codex:frontier`), 10% for codex's everyday models (`codex`), so an
+       everyday slice does not reserve a hard slice's share of the window.
    1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
        without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
        `fable-deep` agent runs at `high`.
@@ -593,7 +611,8 @@ method that runs the waves.
    (`cswap list`: read the 5h, 7d and Fable lines together; the fullest
    binds). Under 10% of the Fable cap, judgment falls back to Opus 5.5 at the
    same effort (`route_agent.py` does this; `FABLE_MIN_LEFT`).
-3. **Everyday work goes to the other pools**, so the frontier windows stay for
+3. **Everyday work goes to the other pools** (and to codex's everyday models
+   while its quota is plentiful, item 1b), so the frontier windows stay for
    item 1: implementation with a clear shape, tests, refactors, doc writing,
    research summaries, bulk reads, mechanical edits. Order by fitness, then
    headroom, as `plan` computes it: agy's Claude/GPT pool while it has >= 40%
@@ -621,7 +640,7 @@ method that runs the waves.
    shared pool), so the session's own context stays small. Implementation,
    whether its shape is clear or not, goes through `acp-dispatch` to the
    everyday pools (agy `claude-opus-5-5 --effort high`, claude `sonnet --effort high`,
-   zcode `GLM-5.3 --effort high`, cursor `default`); Fable/astra only for `frontier` (item 1b). **Start on the cheap eligible tier and escalate
+   zcode `GLM-5.3 --effort high`, cursor `default`, codex `gpt-6.1-sol --effort medium` while its quota is plentiful, item 1b); Fable/astra only for `frontier` (item 1b). **Start on the cheap eligible tier and escalate
    on a verified failure** (operator, 2026-10-18; it replaced "route up when
    unsure"): when a slice fails its check, `acp-dispatch reroute <record>
    --agent A --model M` continues it on a stronger pool, from the report and
@@ -766,6 +785,10 @@ method that runs the waves.
     whenever `bin/claude-quota-guard` reports `tight` or worse (see *Probes*). Omp
     spends through the same Claude account: while a shared Claude window is exhausted,
     aiuse marks omp rate-gated and `--available` omits it.
+    Since 2026-10-23 `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` (settings `env`, set by running
+    `bin/claude-settings-env`; `--check` shows drift) makes every unpinned Agent-tool sub-agent and teammate
+    Sonnet: pass `model: "opus"` in the call for a judgment sub-agent; pinned
+    definitions keep theirs; the built-in Explore and Plan agents ignore it.
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and
 `config/routing.toml` is the source of truth: the kinds, each service's

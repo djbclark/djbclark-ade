@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- rumination-watch (bin/rumination-watch): every 5 minutes one local survey, no model. It re-touches
+     the entity's open loops (unread sibling mail, its own unfinished slices, chain staleness, its own
+     open PRs) and speaks only when something CHANGED: one line into the session via relay.py, and to
+     the `dann` quiet Telegram topic only when something needs djbclark's decision, at most once per
+     6 h per item. That is the "voice in the head" djbclark asked for (2026-10-24) with the two
+     constraints he set: nearly free (no model, silent unless changed) and not disruptive (never
+     interrupts a turn; relay.py defers to a busy agent).
+
+     5 minutes, not 20 s like load-watch: the things it watches change on human timescales, and a
+     session that is mid-thought does not need to hear about the same open loop every 20 s.
+
+     Installed by `rumination-watch install`; removed by `rumination-watch uninstall`. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.rumination-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/rumination-watch</string>
+    <string>pass</string>
+    <string>--quiet</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- The entity's own instance label: job records it owns are matched by this prefix, so another
+         session's unclosed slice is never adopted (that rule lives in bigteam). -->
+    <key>RW_OWNER</key><string>dann</string>
+    <!-- A launchd job has no session identity, so relay.py could only label its messages
+         "[relay from unknown]" — indistinguishable from load-watch or fleet-watch. This is the
+         declared sender name (2026-10-24). -->
+    <key>RELAY_SENDER_NAME</key><string>rumination</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/rumination-watch/launchd.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/rumination-watch/launchd.err</string>
+</dict>
+</plist>

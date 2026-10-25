@@ -52,7 +52,8 @@ def ask(target, pct, minutes, dry_run):
     if dry_run:
         print(f"DRY-RUN relay to {target}: {msg}", flush=True)
         return 0
-    return subprocess.run([sys.executable, str(RELAY), target, msg]).returncode
+    # --no-defer: a load-shedding ask is time-critical; queued until the busy session is idle, it would arrive after the load is gone
+    return subprocess.run([sys.executable, str(RELAY), target, msg, "--no-defer"]).returncode
 
 
 def main():

@@ -78,6 +78,71 @@ class TestEligibility(RoutingDispatch):
         self.assertEqual(self.record()["kind"], "bulk")
 
 
+class TestCodexEverydayGate(RoutingDispatch):
+    """Operator 2026-10-25: codex takes non-frontier kinds while its quota is plentiful
+    ([routing].plenty_min), never astra; below it, frontier-only again."""
+
+    def code(self, model: str, remaining: float | None, *extra: str, kind: str = "code"):
+        env = self.snap_codex(remaining) if remaining is not None else {}
+        return self.dispatch_agent("codex", model, "--kind", kind, "--no-model-check", "--no-preflight",
+                                   *extra, env=env)
+
+    def test_eligible_with_plenty_of_quota(self):
+        r = self.code("gpt-6.1-sol", 90.0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.record()["kind"], "code")
+
+    def test_refused_below_plenty_min_naming_the_reason_and_the_pools_that_remain(self):
+        r = self.code("gpt-6.1-sol", 40.0)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("codex is not eligible for --kind code", r.stderr)
+        self.assertIn("at least 50% left", r.stderr)
+        self.assertIn("40% left", r.stderr)
+        self.assertIn("route-override", r.stderr)
+        listed = r.stderr.split("eligible:", 1)[1].split(";", 1)[0]
+        self.assertNotIn("codex", listed)
+        self.assertIn("zai", listed)
+
+    def test_the_threshold_is_inclusive_and_the_tightest_window_binds(self):
+        self.assertEqual(self.code("gpt-6.1-sol", 50.0).returncode, 0)
+        snap = self.tmp / "tight.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "5h", "remaining_percent": 95.0},
+                                             {"label": "weekly", "remaining_percent": 30.0}]}]}}))
+        r = self.dispatch_agent("codex", "gpt-6.1-sol", "--kind", "code", "--no-model-check",
+                                "--no-preflight", name="s2", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("30% left", r.stderr)
+
+    def test_no_reading_fails_closed(self):
+        r = self.code("gpt-6.1-sol", None)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("no fresh reading", r.stderr)
+
+    def test_astra_stays_frontier_only_however_plentiful_the_quota(self):
+        r = self.code("gpt-6-astra", 100.0)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("frontier model", r.stderr)
+
+    def test_frontier_needs_no_plenty(self):
+        r = self.code("gpt-6-astra", 30.0, "--min-headroom", "0", "--est-pct", "5", kind="frontier")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_route_override_skips_the_headroom_gate(self):
+        r = self.dispatch_agent("codex", "gpt-6.1-sol", "--kind", "code", "--no-model-check", "--no-preflight",
+                                env={**self.snap_codex(40.0), "ACP_OPERATOR_APPROVED": "route-override"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_everyday_slice_is_not_floored_at_the_astra_estimate(self):
+        """dispatch.estimate_floor: `codex:frontier` (60) is for astra; the everyday models get
+        `codex` (10), else a brief-size default would reserve 60% of the window per slice."""
+        everyday = json.loads(self.code("gpt-6.1-sol", 100.0, "--dry-run", "--json").stdout)
+        frontier = json.loads(self.code("gpt-6-astra", 100.0, "--dry-run", "--json",
+                                        "--min-headroom", "0", kind="frontier").stdout)
+        self.assertEqual(everyday["estimated_usage_pct"], 10.0)
+        self.assertEqual(frontier["estimated_usage_pct"], 60.0)
+
+
 class TestFrontierModelGate(RoutingDispatch):
     def test_astra_with_code_refused_even_with_route_override(self):
         r = self.dispatch_agent(
@@ -203,7 +268,9 @@ class TestReservation(RoutingDispatch):
     def test_inflight_reservation_refuses_second_codex(self):
         jobs = self.tmp / "state" / "other-task" / "jobs"
         jobs.mkdir(parents=True)
-        (jobs / "busy.json").write_text(json.dumps(self.busy_row()))
+        # m1 is not a frontier model, so its estimate floor is codex's plain 10.0 (not the frontier 60.0):
+        # reserve 65 of the 70 left so that 5 is under it
+        (jobs / "busy.json").write_text(json.dumps(self.busy_row(estimated_usage_pct=65.0)))
         r = self.dispatch(env=self.snap_codex(70.0))
         self.assertEqual(r.returncode, 5, (r.stdout, r.stderr))
         self.assertIn("class=inflight", r.stdout)

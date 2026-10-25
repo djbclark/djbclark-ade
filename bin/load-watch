@@ -516,7 +516,9 @@ def notify(inc, g, top, path, load1, ncpu, dry):
     if not dry:
         target = s.get("sid") or s["id"]
         try:
-            r = subprocess.run([sys.executable, str(SF / "relay.py"), target, line], capture_output=True,
+            # --no-defer: the brief is time-critical, so a busy session that cannot take it now is "could not reach it"
+            # (the fixer line below), never "queued": a queued brief arrives after the load spike it is about
+            r = subprocess.run([sys.executable, str(SF / "relay.py"), target, line, "--no-defer"], capture_output=True,
                                text=True, timeout=60)
             relayed = r.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
@@ -587,9 +589,11 @@ def send_transient(r):
     return False
 
 
-def send_to(w, text):
+def send_to(w, text, defer=False):
     """One line into the watcher's session: `paseo send` for a Paseo agent (relay.py cannot reach one: no pane),
-    else relay.py. True only when the channel says it delivered or queued it. The paseo channel retries up to
+    else relay.py with --no-defer (an incident brief is time-critical: a busy watcher that cannot take it now is not
+    reached, and the caller's fixer path runs). DEFER=True (only the `watcher test` registration check) lets relay.py
+    queue it for a busy watcher. True only when the channel says it delivered it (or, DEFER, queued it). The paseo channel retries up to
     SEND_RETRIES times, SEND_RETRY_PAUSE_S apart and inside SEND_RETRY_BUDGET_S, but only when the failure's
     error code is exactly one of SEND_TRANSIENT (the daemon is restarting); relay.py gets one attempt. Once a
     send has given up on such a code, later calls in the same process make one attempt (`_paseo_down`).
@@ -607,7 +611,7 @@ def send_to(w, text):
         argv = [cli, "send", "--no-wait", "--json", "--behavior", "steer", "--", w["target"], text]
         retries = 0 if _paseo_down else SEND_RETRIES
     else:
-        env, argv = None, [sys.executable, str(SF / "relay.py"), w["target"], text]
+        env, argv = None, [sys.executable, str(SF / "relay.py"), w["target"], text, *([] if defer else ["--no-defer"])]
         retries = 0
     started = time.monotonic()
     for attempt in range(retries + 1):
@@ -672,7 +676,7 @@ def cmd_watcher(a):
         if not w:
             print("no load watcher registered", file=sys.stderr)
             return 1
-        ok = send_to(w, a.target or "load-watch test: this session is the registered load watcher.")
+        ok = send_to(w, a.target or "load-watch test: this session is the registered load watcher.", defer=True)
         print(f"{'sent to' if ok else 'could not reach'} {w['channel']} {w['target']}")
         return 0 if ok else 1
     # set: from flags, else this process's own session (a Paseo agent first: relay.py cannot reach one)

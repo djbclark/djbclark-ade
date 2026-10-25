@@ -271,10 +271,30 @@ to this same agent and then exactly one `/baton` into the fresh session; on herd
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
 
+**One contract on every host (2026-10-25, agreed with the Paseo lead):** (a) the default is the same agent with
+a fresh context, the command above: no new process, and its name, model, effort, mode, pane or workspace are
+kept (verified live on herdr, Orca and Paseo); (b) a NEW process only when something cannot change in place (a
+model change, a quota-guard downgrade, a wedged agent), the `--finish --successor` form below, which means the
+same on Paseo and herdr: wait for idle, a new top-level agent in the SAME workspace and cwd on the model asked,
+first prompt `/baton`, verified (status idle, running or initializing) before anything is retired, exit 11 and
+nothing retired on any failure; detached jobs move only through the successor's first action, `/baton`'s re-arm
+(it re-points each record's `owner` and restarts the waiter); (c) the
+old agent is retired only after that check: Paseo archives it, herdr leaves its pane idle for `herdr-tidy` and
+never closes it (djbclark rule: no throwing away work). **The new agent is always a real TUI, never an ACP
+session, when the operator is expected to read and answer it (djbclark, 2026-10-25: an `acp-run` pane shows only
+"⚙ Terminal" lines and failed commands, no transcript to read or steer).** On herdr that is `herdr tab create
+--workspace "$HERDR_WORKSPACE_ID" --cwd DIR --no-focus`, `herdr agent start NAME --kind claude --pane PANE --
+<yolo, --model, --effort>`, then `herdr agent prompt NAME "<brief>"`; `launch.py start --baton` and
+`launch.py successor` do exactly that (claude and codex; yolo is `--dangerously-skip-permissions` /
+`--dangerously-bypass-approvals-and-sandbox`), and `--acp` is the opt-out. Dispatched slices and unattended runs
+keep `acp-dispatch` and `acp-run`; they are never handoff hops. A TUI session can take `/new`, `/compact` and
+another handoff, an `acp-run` one cannot (`self-slash` exits 9 under `ACP_RUN_AGENT=1`). On Paseo the successor
+is already a real agent with a transcript the operator can open.
+
 **A `claude-fleet-governor` steer names its own successor** (`--finish --successor omp/anthropic/claude-sonnet-5-5`):
 run that command instead of this step, once; the rest of this section is for a session no governor has steered.
 
-**Successor on another model (Paseo only; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
+**Successor on another model (Paseo and herdr; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
 Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 medium when pipeline-driving).** Use this
 form **instead of** `self-slash "/new"` when (a) this session's model is Fable (any `claude-fable-*`,
 `[1m]` suffix or not; check the model line in your own context, or `paseo agent inspect <your id>`
@@ -303,8 +323,16 @@ chain lists the repo as a side workspace** (another chain owns `<repo>/<task>/SE
 `--baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md` so its first prompt names the chain. **The
 pre-handoff transcript survives only in the handoff document and the archived agent's log** (Archived
 agents in the Paseo UI); put anything the operator must read there and in the hermes-ping. On
-herdr and Orca there is no successor form (exit 2): write the handoff, then tell the operator to
-relaunch `claude --model <m>` in the pane. The waiter runs detached, so you never see its exit
+Orca there is no successor form (exit 2): write the handoff, then tell the operator to
+relaunch `claude --model <m>` in the pane. **On herdr** the same command takes `claude/MODEL` only
+(`--thinking` becomes `claude --effort`, `--mode` `--permission-mode`, `--baton PATH` as on Paseo;
+`--title`, `--workspace` and `--keep-workspace` exit 2): it runs `skills/session-finder/launch.py successor`, which
+waits for this pane's agent to be idle, opens a tab named `<old tab>-<model>-t` in the same herdr workspace and
+cwd, starts a real claude TUI there (`herdr agent start --kind claude -- --model M`, never `acp-run`),
+prompts `/baton`, and checks that the pane runs claude under another session id; an agent blocked on a question,
+an unsent draft or a pane that never settles exits 11, and the old pane is left exactly as it was. Not
+verified live yet (2026-10-25: nothing may start a session unattended): the first run is the test, so check
+`~/.local/state/self-slash.log` and `herdr agent list`. The waiter runs detached, so you never see its exit
 code: if the successor does not start or is a subagent (exit 11) it archives nothing and logs
 `successor: ...` to `~/.local/state/self-slash.log`; this session just stays idle and usable (a
 successor that was created is left running, not stopped), so when the operator writes again, read the

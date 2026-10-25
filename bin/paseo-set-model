@@ -13,8 +13,15 @@ provider). After the call the agent is fetched again and its model compared.
 `list --json` prints a JSON array, one object per agent the daemon knows, archived included:
 id, name, provider, model, status, archived, and parentAgentId when present.
 
+`autoaccept <agent>` turns the agent's `auto_accept` feature ON through the daemon's own
+`set_agent_feature_request` — the same call the UI's "Auto accept permission prompts" toggle makes.
+djbclark (2026-10-24): "you should always open other agents that are part of you with the paseo 'Auto
+accept permission prompts' enabled", and an agent cannot rely on the operator clicking a toggle, so
+this is the mechanism. Verified by re-fetching the agent afterwards; exit 4 means the daemon accepted
+the request but the feature still reads off. Idempotent (exit 0 "already on").
+
 Exit codes: 0 set and verified (or listed), 1 other error, 2 usage, 3 no such agent,
-4 the re-fetch shows another model.
+4 the re-fetch shows another model (or the feature did not take).
 
 The work runs in Paseo's bundled Electron node through bin/paseo-set-model.mjs (argv list, no
 shell). Env: PASEO_SET_MODEL_HELPER (default: the Paseo Helper binary in /Applications/Paseo.app),
@@ -53,6 +60,12 @@ def main(argv: list[str]) -> int:
         if len(pos) != 2 or any(f != "--dry-run" for f in flags):
             return usage()
         args = ["set", *pos, *flags]
+    elif cmd == "autoaccept":
+        flags = [a for a in rest if a.startswith("--")]
+        pos = [a for a in rest if not a.startswith("--")]
+        if len(pos) != 1 or any(f != "--dry-run" for f in flags):
+            return usage()
+        args = ["autoaccept", *pos, *flags]
     elif cmd == "list":
         if rest != ["--json"]:
             return usage()

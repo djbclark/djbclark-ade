@@ -1,10 +1,15 @@
 // paseo-set-model.mjs: the node half of bin/paseo-set-model. Runs inside Paseo's bundled Electron
 // node (ELECTRON_RUN_AS_NODE=1) and talks to the daemon through the bundled CLI's own client:
 //   set <agent-id-or-prefix> <[provider/]model> [--dry-run]   switch a live agent's model in place
+//   autoaccept <agent-id-or-prefix> [--dry-run]               turn auto_accept ON for that agent
 //   list                                                     print every agent the daemon knows, as JSON
 // The daemon's set_agent_model_request is what the Paseo UI's model picker sends; the CLI has no
-// command for it (docs/upstream-issues.md section 17). Exit codes: 0 ok, 1 error, 2 usage,
-// 3 no such agent, 4 the re-fetch shows another model.
+// command for it (docs/upstream-issues.md section 17). `autoaccept` uses the daemon's
+// set_agent_feature_request (client.setAgentFeature(agentId, featureId, value)), which is the same
+// call the UI's "Auto accept permission prompts" toggle makes — djbclark (2026-10-24): "you should
+// always open other agents that are part of you with the paseo 'Auto accept permission prompts'
+// enabled", and clicking a toggle is not a mechanism an agent can rely on.
+// Exit codes: 0 ok, 1 error, 2 usage, 3 no such agent, 4 the re-fetch shows another model.
 // PASEO_SET_MODEL_CLI_DIST: the bundled CLI's dist directory (set by the launcher).
 import { pathToFileURL } from "node:url";
 import path from "node:path";
@@ -29,14 +34,14 @@ const summary = (a) => ({
 });
 
 const [cmd, ...rest] = process.argv.slice(2);
-if (cmd !== "set" && cmd !== "list") {
-  console.error("usage: paseo-set-model.mjs set <agent> <[provider/]model> [--dry-run] | list");
+if (cmd !== "set" && cmd !== "list" && cmd !== "autoaccept") {
+  console.error("usage: paseo-set-model.mjs set <agent> <[provider/]model> [--dry-run] | autoaccept <agent> [--dry-run] | list");
   process.exit(2);
 }
 const flags = rest.filter((x) => x.startsWith("--"));
 const pos = rest.filter((x) => !x.startsWith("--"));
-if (flags.some((f) => f !== "--dry-run" || cmd !== "set") || (cmd === "set" && pos.length !== 2) || (cmd === "list" && pos.length)) {
-  console.error("usage: paseo-set-model.mjs set <agent> <[provider/]model> [--dry-run] | list");
+if (flags.some((f) => f !== "--dry-run" || cmd === "list") || (cmd === "set" && pos.length !== 2) || (cmd === "autoaccept" && pos.length !== 1) || (cmd === "list" && pos.length)) {
+  console.error("usage: paseo-set-model.mjs set <agent> <[provider/]model> [--dry-run] | autoaccept <agent> [--dry-run] | list");
   process.exit(2);
 }
 
@@ -54,6 +59,58 @@ async function work() {
     const agents = await fetchAllAgents(client, { filter: { includeArchived: true, includeBackground: true } });
     console.log(JSON.stringify(agents.map(summary), null, 1));
     return 0;
+  }
+  if (cmd === "autoaccept") {
+    // Turn auto_accept ON through the daemon's own set_agent_feature_request — the same call the
+    // UI's "Auto accept permission prompts" toggle makes.
+    //
+    // Note on verification: fetchAgent does NOT return `features` (its keys are id, provider, cwd,
+    // workspaceId, model, runtimeInfo, status, modes, title, labels…), and set_agent_feature is a
+    // write-only RPC whose response carries only accepted/error. So the current value and the
+    // re-check are read from the agent's OWN state file (~/.paseo/agents/<cwd-slug>/<id>.json),
+    // which is what the daemon and the UI both persist to. Read-only; this script never writes it.
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const [agentId] = pos;
+    const got = await client.fetchAgent({ agentId });
+    if (!got) { console.error(`no agent ${agentId}`); return 3; }
+    const a = got.agent;
+    const stateFile = () => {
+      const slug = String(a.cwd).replace(/\//g, "-").replace(/^-/, "");
+      return path.join(os.homedir(), ".paseo", "agents", slug, `${a.id}.json`);
+    };
+    const readFeature = () => {
+      try {
+        const d = JSON.parse(fs.readFileSync(stateFile(), "utf8"));
+        const f = (d.features ?? []).find((x) => x?.id === "auto_accept");
+        if (!f) return { declared: false, value: undefined };
+        return { declared: true, value: f.value === true, mirror: d.config?.featureValues?.auto_accept };
+      } catch (e) {
+        return { declared: false, value: undefined, error: String(e?.message ?? e) };
+      }
+    };
+    const before = readFeature();
+    if (before.error) console.error(`note: cannot read the state file (${before.error})`);
+    if (!before.declared) {
+      console.error(`agent ${a.id.slice(0, 7)} (${a.provider}) declares no auto_accept feature; not applicable`);
+      return 1;
+    }
+    console.log(`agent ${a.id.slice(0, 7)} provider=${a.provider} title=${a.title ?? "-"} auto_accept=${before.value}`);
+    if (flags.includes("--dry-run")) return 0;
+    if (before.value === true) { console.log("already on"); return 0; }
+    await client.setAgentFeature(a.id, "auto_accept", true);
+    // The daemon persists the feature ASYNCHRONOUSLY: an immediate re-read can still show the old
+    // value and read as a failure when the write is fine (hit on the first run against a
+    // just-created tab, 2026-10-25). Poll briefly before declaring it did not take.
+    let after = readFeature();
+    for (let i = 0; i < 20 && after.value !== true; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      after = readFeature();
+    }
+    console.log(after.value === true
+      ? "auto_accept: off -> on"
+      : "auto_accept: the daemon accepted the request but the state file still shows off after 5s");
+    return after.value === true ? 0 : 4;
   }
   const [id, requested] = pos;
   const got = await client.fetchAgent({ agentId: id });

@@ -34,7 +34,7 @@
 # aside, never rm) when its pid is dead, was reused by another process (start time differs),
 # or, for a lock without a start time, is not a self-slash process.
 #
-# --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT] (Paseo only;
+# --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT] (Paseo; herdr below;
 # djbclark, 2026-10-23: a lead session on Fable burned ~30% of a week's Claude quota, so the
 # handoff must be able to continue on another model without anyone typing): instead of a bare
 # archive, the waiter (1) waits for this agent to be idle, (2) reads its name, mode and cwd
@@ -50,7 +50,15 @@
 # --workspace, and the daemon then makes the new agent a SUBAGENT (Paseo 0.12.0 CLI source, read
 # 2026-10-23).  Any failure in 2-4 exits 11 and archives nothing: this session stays usable and
 # a successor that was created is left running (logged, never stopped).  The first prompt is
-# /baton, so the Tier 1 pointer must be written first (handoff Step 7).  Not on herdr or Orca (exit 2).
+# /baton, so the Tier 1 pointer must be written first (handoff Step 7).  Not on Orca (exit 2).
+# herdr (2026-10-25; one design with Paseo, see skills/handoff Step 9): `--finish --successor claude/MODEL
+# [--thinking E] [--mode M] [--baton PATH]` runs skills/session-finder/launch.py successor, which waits for this
+# pane's agent to be idle (blocked, a draft in the input box or SELF_SLASH_WAIT running out: exit 11), opens a new tab in
+# the same herdr workspace and cwd, starts a real claude TUI there (`herdr agent start --kind claude -- --model M
+# --effort E`, never acp-run: an acp-run session cannot take /new, /compact or a handoff), prompts /baton, and checks
+# that the pane runs claude with another session id.  The old pane is left idle, never closed or exited
+# (herdr-tidy closes it); any failure exits 11 and leaves it usable.  --title, --workspace and --keep-workspace
+# are Paseo's and exit 2 here.  SELF_SLASH_LAUNCH replaces the launch.py command (tests).
 # Workspaces (djbclark, 2026-10-23): the successor always lands in an EXISTING workspace, `paseo run
 # --workspace <id>` (default this agent's, --workspace ID picks another), never --new-workspace and
 # never a new Paseo window; its --title is kept short (an old name cut to 24 chars plus the model
@@ -157,7 +165,7 @@ finish_flag=$finish
        self-slash [--delay S] [--dry-run] --finish   (end the session; Paseo: archive this agent)
        self-slash [--delay S] [--dry-run] --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT]
                   [--workspace ID] [--keep-workspace] [--baton PATH]
-                  (Paseo only: start /baton on another model in an EXISTING workspace (--workspace <id>, default this
+                  (Paseo, or herdr with claude/MODEL: start /baton on another model in an EXISTING workspace (--workspace <id>, default this
                   agent's; never a new workspace or window), then archive this agent; the old workspace is archived too
                   when it differs from the successor's and holds no other agent (--keep-workspace skips that); keep the
                   --title short, its first words show in the sidebar; a Paseo workspace name ends in -pw;
@@ -193,7 +201,12 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "${ACP_RUN_AGENT:-}" = "1" ]; then
     echo "self-slash: refused ($text): this agent was started by acp-run (ACP_RUN_AGENT=1: a dispatched slice or an acp-run --interactive session); lifecycle actions and /compact run only in the top-level session. Treat a handoff as document-only and say what the operator should type." >&2; exit 9
   fi
 fi
-if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+# herdr is the host when the pane named by $HERDR_PANE_ID exists.  A Cline tool shell inherits the
+# hub daemon's HERDR_* with a pane that no longer exists (2026-10-25), so an id herdr does not know
+# is not a host.  1eda130 gated this branch on PASEO_SELF_TRUST_HERDR, which nothing sets: every
+# plain herdr session then fell through to paseo-self, which named another Cline agent, so a herdr
+# handoff would have sent /clear and /baton to a stranger (fixed 2026-10-25).
+if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] && herdr pane get "$HERDR_PANE_ID" >/dev/null 2>&1; then
   host=herdr; pane="$HERDR_PANE_ID"
   # $HERDR_PANE_ID is fixed at launch; after the tab is moved to another workspace
   # the pane is renumbered (w2G:p1 -> w2H:p1, seen 2026-10-09). `pane get` resolves
@@ -216,10 +229,41 @@ elif [ -n "${PASEO_AGENT_ID:-}" ]; then
   paseo_cli="${PASEO_CLI:-$(command -v paseo || true)}"
   [ -n "$paseo_cli" ] && [ -x "$paseo_cli" ] || { echo "self-slash: PASEO_AGENT_ID is set but no paseo CLI (PASEO_CLI unset, none on PATH); ask the operator to type: $text" >&2; exit 3; }
 else
-  echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset); ask the operator to type: $text" >&2; exit 3
+  # SELF-DISCOVERY (djbclark, 2026-10-25): a Cline agent under Paseo has NO usable environment route
+  # to its own identity. PASEO_AGENT_ID is set on the agent process but NOT in tool shells (they are
+  # children of the shared cline hub daemon), and HERDR_PANE_ID is inherited from that daemon and
+  # stale -- a shell had HERDR_ENV=1 with a pane that no longer exists, so the herdr branch above
+  # would have typed into a stranger's pane. Ask the hub instead: `paseo-self agent` reads the
+  # session id the hub recorded for the tool call in progress and looks it up in Paseo's own agent
+  # state. Refuses (exit 3) rather than guessing, so this is safe to try before giving up.
+  SELF_TOOL="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/paseo-self"
+  # Only a Cline tool shell needs it.  A Claude Code session (CLAUDECODE=1) is never one, and the hub's
+  # newest tool.started row then belongs to some other Cline agent (seen 2026-10-25: it named a
+  # stranger while the caller was a Claude session), so there is no one to discover.
+  if [ "${CLAUDECODE:-}" = "1" ]; then
+    echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID unknown to herdr or unset, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset; a Claude Code session is never discovered through the Cline hub); ask the operator to type: $text" >&2; exit 3
+  elif [ -x "$SELF_TOOL" ]; then
+    if discovered=$("$SELF_TOOL" agent 2>/dev/null) && [ -n "$discovered" ]; then
+      host=paseo; pane="$discovered"; tui=""
+      paseo_cli="${PASEO_CLI:-$(command -v paseo || true)}"
+      if [ -z "$paseo_cli" ] || [ ! -x "$paseo_cli" ]; then
+        echo "self-slash: discovered agent $discovered but no paseo CLI (PASEO_CLI unset, none on PATH); ask the operator to type: $text" >&2; exit 3
+      fi
+      echo "self-slash: no PASEO_AGENT_ID in the environment; discovered agent ${discovered:0:8} from the cline hub" >&2
+    else
+      echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent, and paseo-self could not identify this session (PASEO_AGENT_ID, ORCA_TERMINAL_HANDLE unset); ask the operator to type: $text" >&2; exit 3
+    fi
+  else
+    echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset; no $SELF_TOOL to self-discover); ask the operator to type: $text" >&2; exit 3
+  fi
 fi
-if [ -n "$successor" ] && [ "$host" != paseo ]; then
-  echo "self-slash: successor needs Paseo; hand off and relaunch \`claude --model <m>\` in the pane (host: $host)" >&2; exit 2
+if [ -n "$successor" ] && [ "$host" != paseo ] && [ "$host" != herdr ]; then
+  echo "self-slash: successor needs Paseo or herdr; hand off and relaunch \`claude --model <m>\` in the pane (host: $host)" >&2; exit 2
+fi
+# herdr (2026-10-25, one design with Paseo): a NEW claude TUI in a new tab of this workspace via launch.py successor.
+if [ -n "$successor" ] && [ "$host" = herdr ]; then
+  case "$successor" in claude/?*) ;; *) echo "self-slash: on herdr the successor is claude/MODEL (got: $successor); another provider: hand off and start it in a new pane by hand" >&2; exit 2;; esac
+  if [ -n "$s_title$s_workspace" ] || [ "$s_keepws" = 1 ]; then echo "self-slash: --title, --workspace and --keep-workspace are Paseo options; herdr names the tab from this one and never closes the old pane" >&2; exit 2; fi
 fi
 case "$text" in /*) ;; *) echo "self-slash: only slash commands are sent (got: $text)" >&2; exit 2;; esac
 if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then
@@ -362,6 +406,8 @@ if [ "$dry" = 1 ]; then
       echo "  $paseo_cli ls --background --json                (no other agent in it: by workspaceId, else cwd equal to or below the workspace's)"
       echo "  $paseo_cli workspace archive -- <old id>"
     fi
+  elif [ "$finish" = 1 ] && [ "$host" = herdr ] && [ -n "$successor" ]; then
+    echo "self-slash: dry run, would wait ${delay}s, then: launch.py successor --pane $pane --model ${successor#*/} --effort ${s_thinking} ${s_mode:+--mode $s_mode }${s_baton:+--baton $s_baton }(waits for $pane to be idle, opens a tab in its workspace, starts claude there, prompts /baton, checks it; $pane is left idle, never closed)"
   elif [ "$finish" = 1 ] && [ "$host" = paseo ]; then
     echo "self-slash: dry run, would wait ${delay}s, wait for $pane to be idle, then archive it (paseo agent archive $pane, never --force)"
   else
@@ -877,6 +923,19 @@ if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -n "$successor" ]; then
   echo "$(gdate '+%F %T') $host $pane: successor path aborted; NOT archived, this session stays usable"; exit 11
 fi
 if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -z "$successor" ]; then finish_paseo; fi
+# herdr --finish --successor claude/MODEL: launch.py's `successor` waits for idle, opens a tab in this pane's
+# workspace, starts a real claude TUI there on the model asked, prompts /baton and checks it; exit 11 on any
+# failure.  The old pane is left idle for herdr-tidy, never closed or exited.
+if [ "$finish" = 1 ] && [ "$host" = herdr ] && [ -n "$successor" ]; then
+  launch_cmd=(python3 "$(dirname "$(grealpath "$0")")/../skills/session-finder/launch.py")
+  [ -z "${SELF_SLASH_LAUNCH:-}" ] || launch_cmd=("$SELF_SLASH_LAUNCH")
+  largs=(successor --pane "$pane" --model "${successor#*/}" --effort "$s_thinking" --wait "${SELF_SLASH_WAIT:-900}")
+  [ -z "$s_mode" ] || largs+=(--mode "$s_mode")
+  [ -z "$s_baton" ] || largs+=(--baton "$s_baton")
+  "${launch_cmd[@]}" "${largs[@]}"; rc=$?
+  [ "$rc" = 0 ] || echo "$(gdate '+%F %T') $host $pane: successor path ended with exit $rc; the old pane is untouched"
+  exit "$rc"
+fi
 wait_idle
 noprompt=0; sendfail=0; drafted=0; last_prompt=""; same=0
 while :; do
