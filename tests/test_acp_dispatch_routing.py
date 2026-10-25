@@ -268,7 +268,9 @@ class TestReservation(RoutingDispatch):
     def test_inflight_reservation_refuses_second_codex(self):
         jobs = self.tmp / "state" / "other-task" / "jobs"
         jobs.mkdir(parents=True)
-        (jobs / "busy.json").write_text(json.dumps(self.busy_row()))
+        # m1 is not a frontier model, so its estimate floor is codex's plain 10.0 (not the frontier 60.0):
+        # reserve 65 of the 70 left so that 5 is under it
+        (jobs / "busy.json").write_text(json.dumps(self.busy_row(estimated_usage_pct=65.0)))
         r = self.dispatch(env=self.snap_codex(70.0))
         self.assertEqual(r.returncode, 5, (r.stdout, r.stderr))
         self.assertIn("class=inflight", r.stdout)

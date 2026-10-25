@@ -243,6 +243,14 @@ class TestDispatch(Base):
         brief = Path(rec["brief"]).read_text()
         self.assertIn("This run is read-only (`--perm read-only`)", brief)
 
+    def test_codex_read_only_brief_names_its_shell_not_read_grep_glob(self):
+        r = self.dispatch_agent("codex", "gpt-6-astra", "--kind", "frontier", "--role", "advise", "--perm", "read-only",
+                                "--no-model-check", "--no-preflight", "--min-headroom", "0", mode="stdout")
+        brief = Path(self.record()["brief"]).read_text()
+        self.assertIn("This run is read-only (`--perm read-only`)", brief, r.stdout + r.stderr)
+        self.assertIn("Your only tool is a shell", brief)
+        self.assertNotIn("Read, Grep, Glob", brief)
+
     def test_fake_tool_calls_is_never_recovered_as_a_report(self):
         r = self.dispatch_agent("claude", "fable", "--kind", "frontier", "--perm", "all",
                                 "--no-model-check", "--no-preflight", "--min-headroom", "0",
