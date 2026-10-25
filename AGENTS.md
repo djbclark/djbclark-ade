@@ -171,12 +171,22 @@ Cursor's Security Agent and Approval Agent checks, and the `adversary`
 sub-agent. A
 pull request here is expected to meet these; flag any it misses.
 
-1. **The PR body quotes the adversary's verdict line** (`APPROVE`, `APPROVE,
-   no findings` or `BLOCK ...`) together with the head SHA it reviewed. Flag
-   the PR if the quote is missing, says BLOCK, or names a SHA other than the
-   PR's current head. Whoever merges uses `gh pr merge --squash
-   --match-head-commit <reviewed sha>`, so the head reviewed is the head
-   merged.
+1. **The PR body carries the adversary's verdict as a MACHINE-READABLE MARKER**, naming the head it
+   reviewed:
+
+   ```
+   <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
+   ```
+
+   `pr-wait` reads that marker and reports it as `adversary` / `adversary_warnings`; it does **not**
+   read prose. **Prose verdicts do not count** — the first version parsed English and two adversary
+   rounds found sixteen false approvals and five false misses, including a BLOCK silently deleted by a
+   prose filter, so the parser was deleted rather than patched. Match the `:v1` suffix, exactly as
+   rule 9 does for `codex-review-state:v1`. A marker for another head is not a pass; a malformed one is
+   reported as malformed, not as absent; and **a BLOCK is never downgraded by anything**. The gate is
+   **report-only by default**, blocking only with `--adversary-required` or an `adversary-required`
+   label. Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head
+   reviewed is the head merged.
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper; CI runs `pytest` directly.
