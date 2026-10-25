@@ -60,10 +60,12 @@ Each doc carries its own summary.
    the thing itself: exit codes and structured output over string matching,
    config files over filenames, `gh pr view` over memory. When wrong, say so
    plainly and correct the record in the same breath.
-5. **Number every set of options, hierarchically and uniquely.** Choices,
-   next steps and findings get numbers; with more than one list in a reply,
-   **never restart at 1**: `1.1`, `1.2`, … then `2.1`, `2.2`, …. Keep labels
-   stable within a conversation.
+5. **Label every heading and item uniquely, so it can be referred to by a
+   short typed designation.** Each top-level heading in a reply gets a
+   letter (`A.`, `B.`, …); its items are `A1`, `A2`, …, sub-items `A1a`.
+   A reply with no headings uses `1.`, `2.`; question-card options are
+   numbered too. Each item is labelled once; keep labels stable within a
+   conversation (operator, 2026-10-24).
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.
 7. **Routing discipline**: route per `skills/model-routing/SKILL.md`
@@ -71,6 +73,13 @@ Each doc carries its own summary.
    tier stays retired until an operator top-up; the `agent_stats.py burn`
    alert (every 6h, 48h ahead) governs pool exhaustion: the blanket
    clinepass rule was **retired 2026-08-24**. Watch the alert, not the rule.
+8. **Upstream every local change to someone else's source** (operator,
+   2026-10-24). A fork, vendored copy or local patch: in the same session,
+   search the project's issues and PRs for a duplicate, tidy the change,
+   consult a `frontier` agent if it helps, then open the issue/PR, so an
+   upgrade never needs a merge. Nothing is version-pinned either: software
+   tracks its latest release. Detail and exceptions:
+   `site-private/memory/feedback_upstream_local_changes.md`.
 
 ## Machine context
 
@@ -163,12 +172,24 @@ pull request here is expected to meet these; flag any it misses.
 8. **Docs move with the code**: a flag, exit code or subcommand added or
    changed appears in the tool's usage text and in the doc that lists it
    (`README.md` roster, `docs/*.md`, `skills/*/SKILL.md`).
-9. **Read Codex's result against the request, never against a guessed
+9. **Read Codex's result against the head and the open threads, never against a guessed
    clock**: the summary comment's `codex-review-state` names the `commit_sha`
-   it covers; the findings for that head are the inline comments created
-   after your `@codex review` comment for it (`gh api
-   repos/.../pulls/N/comments`, compare `created_at` with that comment's,
-   and read every one). GitHub re-anchors `commit_id` to the newest head when
+   it covers (for `code_review` and for `security_review`, each read the same way). The findings for that head
+   are the Codex inline comments
+   (`gh api repos/.../pulls/N/comments`, author `chatgpt-codex-connector[bot]`,
+   ending in a finding mark: `codex-code-review-finding:v1` or `codex-security-review-finding:v1`) anchored to it (`original_commit_id`, or the
+   `commit_id` of their review in `pulls/N/reviews`), PLUS every unresolved Codex
+   review thread from an earlier head, security threads included: a finding stays open until its thread is
+   resolved. GraphQL `reviewThreads.isResolved` is the authority, and the marker's
+   `has_unresolved_findings` (per review) must agree with it (a disagreement is chased, never
+   read as a clean "0"). Case (2026-10-23): on PR 32 Codex left a P1 on head
+   3c40470, two pushes followed without the fix, the marker for the new head said
+   `has_unresolved_findings: true`, and a head-only filter read "0" past the open
+   P1. Check with `bin/pr-wait`: `merge_ready` (false with the reasons in `merge_blockers`) and
+   `PREFIX-open-findings.json`.
+   Fixing a finding means fixing the code, then resolving its thread. Never select
+   by time: a "newest `@codex review` comment" window is moved by Codex's own
+   receipts, which quote it (PR 12, 2026-10-20). GitHub re-anchors `commit_id` to the newest head when
    the line is unchanged, so `commit_id` alone cannot tell old from new. A
    waiter that filtered by a hard-coded timestamp missed two findings on
    PR 10 (2026-10-20) and the PR merged past them. The state marker's exact

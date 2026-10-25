@@ -94,6 +94,7 @@ import glob
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import statistics
@@ -1211,6 +1212,51 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
 
 # -- routing --------------------------------------------------------------
 
+# The fleet governor (bin/claude-fleet-governor) writes `level` here every 5 minutes. While it says
+# tight or critical and is fresh, the Claude subscription is treated as an exhausted pool for the
+# kinds below (2026-10-23: `plan --kind code` printed `claude 30% left` with the 5-hour window
+# projected to run out before its reset).
+GOVERNOR_STATE = Path.home() / ".local" / "state" / "ade" / "fleet-governor.json"   # CLAUDE_GOVERNOR_STATE overrides
+GOVERNOR_FRESH = 30 * 60
+GOVERNOR_HOLD_KINDS = frozenset({"code", "bulk", "research", "mechanical"})
+GOVERNOR_JUDGMENT_MODEL = "anthropic/claude-opus-5-5 --effort high"
+
+
+def governor_hold(now: datetime | None = None) -> str | None:
+    """Why the Claude subscription is off limits right now, or None.
+
+    Reads CLAUDE_GOVERNOR_STATE (re-read per call: a tiny file); tight/critical and `checked_at`
+    under 30 minutes old counts. Missing, unreadable, older or `ok`/`stale` state holds nothing."""
+    path = Path(os.environ.get("CLAUDE_GOVERNOR_STATE") or GOVERNOR_STATE)
+    try:
+        state = json.loads(path.read_text())
+        level = state.get("level")
+        checked = datetime.fromisoformat(str(state.get("checked_at")).replace("Z", "+00:00"))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    if level not in ("tight", "critical"):
+        return None
+    if checked.tzinfo is None:
+        checked = checked.replace(tzinfo=UTC)
+    now = now or datetime.now(UTC)
+    if not 0 <= (now - checked).total_seconds() <= GOVERNOR_FRESH:
+        return None
+    windows = state.get("windows")
+    wins = [(k, w) for k, w in (windows.items() if isinstance(windows, dict) else ())
+            if isinstance(w, dict) and w.get("level") == level
+            and isinstance(w.get("projected_at_reset"), (int, float))]   # a corrupt state never stops routing (round 1 LOW 6)
+    top_kind, top = max(wins, key=lambda kw: kw[1]["projected_at_reset"], default=("", None))
+    detail = ""
+    if top:  # fixed names and numbers only: nothing free-form from the state file reaches an agent-facing text
+        name = {"five_hour": "5-hour", "weekly": "weekly", "fable_weekly": "weekly Fable"}.get(top_kind, "window")
+        used, proj = top.get("used"), top.get("projected_at_reset")
+        at = str(top.get("resets_at"))
+        at = at if re.fullmatch(r"[0-9T:.+Z-]{10,40}", at) else "?"
+        detail = (f" ({name} {used:.0f}% used, projected {proj:.0f}% at reset {at})"
+                  if isinstance(used, (int, float)) and isinstance(proj, (int, float)) else "")
+    return f"Claude subscription {level} per claude-fleet-governor{detail}"
+
+
 @dataclass
 class Choice:
     service: Service
@@ -1265,12 +1311,16 @@ def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
     """Why route() found nothing for `kind`, for plan's queued line."""
     gap = QUALITY_MAX_RANK_GAP.get(kind)
+    hold = governor_hold() if kind in GOVERNOR_HOLD_KINDS else None
+    if hold:
+        exclude = frozenset(exclude) | {"claude"}
     best = quality_best(kind, list(discover(quota or {})), exclude)
+    note = f" ({hold})" if hold else ""
     if gap is None or best is None:
-        return "no pool has room: keep queued"
+        return "no pool has room: keep queued" + note
     return (f"no pool within {gap} rank steps of the best for {kind} ({best.name} "
             f"r{best.rank_for(kind)}) has room; weaker pools are not used for {kind} "
-            f"([routing].quality_max_rank_gap): keep queued until a reset")
+            f"([routing].quality_max_rank_gap): keep queued until a reset" + note)
 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
@@ -1288,6 +1338,19 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
     services = list(discover(quota))
+    hold = governor_hold()
+    held = hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment")
+    if hold and kind == "judgment":
+        omp = next((s for s in services if s.name == "omp"), None)
+        info = quota.get("omp") or {}
+        remaining = info.get("remaining")
+        if (omp is not None and "omp" not in exclude and omp.eligible(kind) and service_ready(omp)
+                and (remaining is None or remaining >= max(min_headroom, omp.reserve_floor))):
+            return Choice(omp, remaining, 0.0, f"judgment: {omp.cli}; Claude API credits, off the "
+                          f"subscription: {hold}", [], model=GOVERNOR_JUDGMENT_MODEL, kind=kind)
+        held = False                        # omp cannot take it: Opus judgment may still use claude
+    if held:
+        exclude = frozenset(exclude) | {"claude"}
     best = quality_best(kind, services, exclude)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
 
@@ -1369,6 +1432,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                    "check the window first")
     if best.note:
         why.append(best.note)
+    if held:
+        why.append(f"claude skipped: {hold}")
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
@@ -1466,6 +1531,134 @@ def apply_hermes_chain(chain: list[dict[str, str]]) -> str:
                   + body, text, count=1)
     cfg.write_text(text)
     return str(backup)
+
+
+# The main-loop ("Dann") substrate chain: Flash-primary, provider failover.
+# Primary and fallback serve the SAME model (deepseek-v4.1-flash), so a provider
+# failover does not change the model — which is what makes it safe against
+# Paseo's per-provider constraint: `set_agent_model` refuses a provider other
+# than the agent's, so a cross-provider move is a NEW session, never a live
+# switch (that is what killed the ◈ Dann tab on 2026-10-23). Escalation to
+# deepseek-v4-pro is a within-`opencode` switch and IS live-safe.
+# Source of truth: spec/composite-individual/deepseek-cost-routing.md.
+DANN_SUBSTRATE: tuple[tuple[str, str, str], ...] = (
+    ("opencode-go", "opencode", "opencode-go/deepseek-v4.1-flash"),
+    ("clinepass", "cline", "cline-pass/deepseek-v4.1-flash"),
+)
+DANN_ESCALATION: tuple[str, str, str] = (
+    "opencode-go", "opencode", "opencode-go/deepseek-v4-pro",
+)
+# A measured pool below this much headroom is "tight": still in the chain, but
+# an unmeasured pool is not preferred over it.
+SUBSTRATE_MIN_HEADROOM = 10.0
+
+
+def _substrate_pool_state(pool: str, quota: dict[str, Any] | None,
+                          accounts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Real rolling-window headroom for a substrate pool.
+
+    `load_snapshot`'s quota dict is `--available`-filtered. A pool whose *monthly*
+    budget window is exhausted (opencode-go: 0.6% monthly) reads 0% even while its
+    5-hour/weekly rate windows are wide open and it is usable right now. The picker
+    reads the raw account rows and takes the tightest non-exhausted, non-monthly
+    window as "can I start a session now", reporting the monthly budget separately.
+    """
+    for a in accounts:
+        if a.get("provider") != pool:
+            continue
+        wins = a.get("windows") or []
+
+        def rem(w: dict[str, Any]) -> float | None:
+            return w.get("remaining_percent")
+
+        def is_month(w: dict[str, Any]) -> bool:
+            return "month" in ((w.get("label") or "").lower())
+
+        non_month = [w for w in wins if not is_month(w)]
+        rolling = [rem(w) for w in non_month
+                   if w.get("state") != "exhausted" and rem(w) is not None]
+        monthly = next((rem(w) for w in wins if is_month(w)), None)
+        if rolling:
+            remaining: float | None = min(rolling)
+        elif non_month:
+            remaining = 0.0        # rolling windows exist but none has headroom
+        else:
+            remaining = None       # no rolling windows at all -> unmeasured
+        return {"remaining": remaining, "monthly": monthly}
+    # not in the raw snapshot (clinepass is operator-disabled from collection):
+    # fall back to the filtered quota dict, else unknown.
+    return {"remaining": (quota or {}).get(pool, {}).get("remaining"), "monthly": None}
+
+
+def substrate_chain(quota: dict[str, Any] | None = None,
+                    accounts: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Order the main-loop substrates: healthy-measured first, unmeasured lifeline last.
+
+    Both Flash entries serve deepseek-v4.1-flash, so a provider failover keeps
+    the model constant. `remaining` is None for a pool aiuse does not measure
+    (clinepass is operator-disabled from collection); such a pool sorts last but
+    is never dropped — it is the reserved lifeline, and it is the fallback when
+    the measured pool is tight.
+    """
+    quota = quota or {}
+    accounts = accounts or []
+    states = {p: _substrate_pool_state(p, quota, accounts) for p, _, _ in DANN_SUBSTRATE}
+
+    def key(item: tuple[str, str, str]) -> tuple[int, float]:
+        rem = states[item[0]]["remaining"]
+        if rem is None:
+            return (1, 0.0)                       # unmeasured lifeline: after healthy, before tight
+        if rem >= SUBSTRATE_MIN_HEADROOM:
+            return (0, -rem)                      # healthy -> first, most headroom wins
+        if rem > 0:
+            return (2, -rem)                      # tight -> yield to the lifeline
+        return (3, 0.0)                           # exhausted -> last
+
+    chain: list[dict[str, Any]] = []
+    for i, (pool, provider, model) in enumerate(sorted(DANN_SUBSTRATE, key=key)):
+        chain.append({
+            "role": "primary" if i == 0 else "fallback",
+            "pool": pool, "provider": provider, "model": model,
+            "remaining": states[pool]["remaining"], "monthly": states[pool]["monthly"],
+        })
+    pool, provider, model = DANN_ESCALATION
+    st = _substrate_pool_state(pool, quota, accounts)
+    chain.append({
+        "role": "escalate", "pool": pool, "provider": provider, "model": model,
+        "remaining": st["remaining"], "monthly": st["monthly"],
+    })
+    return chain
+
+
+def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> str:
+    """Apply the chain's primary to `agent` IF it is a within-provider move.
+
+    `paseo-set-model` talks to the daemon's own `set_agent_model` RPC, which
+    only sets a model *within* the agent's provider. So a cross-provider move is
+    refused here with the start-a-new-session instruction rather than attempted
+    (attempting it is what breaks the session).
+    """
+    helper = Path(__file__).resolve().parent / "paseo-set-model"
+    proc = subprocess.run([str(helper), "list", "--json"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return f"cannot list agents (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
+    try:
+        agents = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return "cannot parse paseo-set-model list output"
+    match = [a for a in agents if str(a.get("id", "")).startswith(agent)]
+    if not match:
+        return f"no such agent: {agent}"
+    cur = match[0]
+    primary = chain[0]
+    if cur.get("provider") != primary["provider"]:
+        return (f"cross-provider: {agent} is {cur.get('provider')}/{cur.get('model')}; "
+                f"start a NEW session on {primary['provider']}/{primary['model']} "
+                f"(set_agent_model cannot switch providers)")
+    proc = subprocess.run([str(helper), "set", agent, primary["model"]],
+                          capture_output=True, text=True)
+    return (proc.stdout.strip() or proc.stderr.strip()
+            or f"set rc={proc.returncode} ({primary['model']})")
 
 
 JEV = Path(__file__).resolve().parent / "jev"
@@ -1862,6 +2055,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("services", help="every service discovered right now")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
     hc.add_argument("--apply", action="store_true", help="write it to config.yaml")
+    sb = sub.add_parser(
+        "substrate",
+        help="main-loop substrate chain (Dann: Flash-primary, cline↔opencode-go failover)",
+    )
+    sb.add_argument("--json", action="store_true")
+    sb.add_argument("--apply", metavar="AGENT", default=None,
+                    help="apply the primary to this Paseo agent (within-provider only)")
     pol = sub.add_parser("policy", help="print the effective routing policy")
     pol.add_argument("--md", action="store_true",
                      help="markdown tables (services × kinds, gates, caps)")
@@ -1907,6 +2107,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
                 "quota_source": quota_source_info(),
+                "governor_hold": governor_hold(),
                 "slices": [{"kind": k, "service": c.service.name if c else None,
                             "cli": c.service.cli if c else None,
                             "agent": c.service.acp_agent if c else None,
@@ -1920,6 +2121,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
                       "snapshot file and misses aiuse's credits override and Admin API "
                       "readings", file=sys.stderr)
+            hold = governor_hold()
+            if hold:
+                print(f"NOTE: {hold}: claude is not routed for code, bulk, research or mechanical "
+                      "slices; judgment prefers omp (Claude API credits)", file=sys.stderr)
             if stale:
                 print("WARNING: quota snapshot "
                       + ("empty" if not quota else f"{(age or 0) / 60:.0f} min old")
@@ -1983,6 +2188,26 @@ def main(argv: list[str] | None = None) -> int:
             print("\n  backup:", apply_hermes_chain(chain))
         return 0
 
+    if args.command == "substrate":
+        chain = substrate_chain(quota, _read_snapshot_file()[0])
+        if args.json:
+            print(json.dumps({"snapshot_age_s": age, "chain": chain}, indent=2))
+        else:
+            for e in chain:
+                rem = e["remaining"]
+                remtxt = "unmeasured" if rem is None else f"{rem:.0f}% left"
+                mon = e.get("monthly")
+                montxt = "" if mon is None else f"  (monthly {mon:.0f}%)"
+                print(f"  {e['role']:9} {e['provider']}/{e['model']:34} {remtxt}{montxt}")
+            print("\n  primary→fallback is a PROVIDER failover at session start, not a live")
+            print("  switch: Paseo binds one provider per session (set_agent_model refuses a")
+            print("  cross-provider change), so a new session starts on the other provider")
+            print(f"  with the SAME model. escalate ({DANN_ESCALATION[2]}) is a within-opencode")
+            print("  switch and is safe live.")
+        if args.apply:
+            print("\n  apply:", apply_substrate(args.apply, chain))
+        return 0
+
     if args.command == "policy":
         if args.md:
             sys.stdout.write(policy_markdown())
@@ -2017,6 +2242,7 @@ def main(argv: list[str] | None = None) -> int:
             "dispatch": choice.dispatch,
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
+            "governor_hold": governor_hold(),
             "snapshot_age_seconds": None if age is None else round(age),
             "quota_source": quota_source_info(),
         }, indent=2))

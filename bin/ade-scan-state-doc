@@ -1,0 +1,1111 @@
+#!/usr/bin/env python3
+"""ade-scan-state-doc: render docs/ade-everywhere-phase0-scan-2026-10-20.md from a scan JSON.
+
+  ade-scan-state-doc SCAN.json OUT.md [--force]
+
+SCAN.json is the output of one `bin/ade-scan-state --json` run (the command is in section 5 of the
+doc). The tables and counts come from the JSON; the prose, the section 3 capture commands and the
+findings about named checkouts are the 2026-10-20 snapshot's and are written here, so a scan taken
+on another day needs its own copy of this script. `bin/ade-scan-state --markdown` prints the raw
+tables only. The committed doc was rendered from the 2026-10-20 scan, whose JSON was not kept; later
+scans regenerate their own doc. Every table cell goes through `esc` (control characters as backslash text,
+never a raw CR or newline); a value inside a code span goes through `code`, whose fence is longer than any
+backtick run in the value. Section 0 has one row per checkout verdict present (the rows sum to the checkout
+count); section 3.2 lists every `origin unreachable` checkout, whatever its counts.
+
+OUT must end in `.md`, must not be SCAN.json, and must not exist unless --force is given; it is
+written to a temp file beside it and moved into place, so a failed run leaves OUT as it was.
+"""
+import json
+import os
+import re
+import shlex
+import sys
+import tempfile
+import time
+from urllib.parse import quote
+from pathlib import Path
+
+HOME = str(Path.home())
+ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-scan-state's flag text
+ORIGIN_CREDENTIAL = "origin url holds a credential or names a remote helper: not queried"  # same: never queried, treated as unreachable
+SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a submodule's content
+SKIP_GIT_SYMLINK = "skipped: .git is a symlink"  # same: the whole-directory archive keeps the link, not its target
+SKIP_ALTERNATES = "skipped: submodule config unrecognised (alternates)"  # same: a module's objects live in a store no archive holds
+# One patch per stash entry, untracked files and binary content included (`git stash show --include-untracked`,
+# git 2.32+): `bundle create` takes ref names, not the reflog's commit ids, so a bundle of `stash@{n}` entries
+# cannot be made without writing refs into the checkout (adversary round 26 on PR 27). The entries are listed when
+# the command runs, not counted at scan time (a stash pushed since would be skipped), and the loop sits in a
+# subshell so a failing `exit 1` ends the loop, not a pasted-into interactive shell (round 27). Slots: <ck>, <path>,
+# <path>, <ck>. `${r//[^0-9]/}` (bash and zsh) turns `stash@{3}` into the file name `stash3.patch`. The entries are
+# listed into a variable first, `&&`-guarded: `for r in $(false)` is an empty loop that exits 0, which would read as
+# "every stash saved" (Codex pass 23 on PR 27); an empty list is a failure too, since this row exists only when the
+# scan saw a stash, EXCEPT that an empty reflog beside a live `refs/stash` (`git reflog expire --expire=now --all`) is a
+# stash `stash_count` counts: the loop then runs once over `refs/stash` itself (files `stash.patch` and
+# `stash-index.patch`, no digits to keep), and a missing ref still fails inside it (Codex pass 65 on PR 27, P2).
+# `$(printf '%s\n' "$l")`, not a bare `$l`: zsh does not word-split a parameter expansion, it
+# does split a command substitution.
+# `--no-ext-diff --no-textconv --no-color`: a configured external diff driver, textconv filter or `color.ui=always`
+# would replace the bytes a patch is meant to keep (an attribute-selected textconv turned a changed binary file
+# into an empty patch; Codex pass 30 on PR 27); `--binary` keeps a binary file's content (pass 21)
+DIFF_OPTS = "diff --no-ext-diff --no-textconv --no-color --binary"
+STASH_FMT = ("mkdir -p <DEST>/{} && ( l=$(git -C {} log -g --format=%gd refs/stash) && {{ [ -n \"$l\" ] || l=refs/stash; }} && for r in $(printf '%s\\n' \"$l\"); do "
+             "git -C {} stash show -p --no-ext-diff --no-textconv --no-color --binary --include-untracked \"$r\" > <DEST>/{}/stash${{r//[^0-9]/}}.patch "
+             "&& git -C {} diff --no-ext-diff --no-textconv --no-color --binary \"$r^1\" \"$r^2\" > <DEST>/{}/stash${{r//[^0-9]/}}-index.patch || exit 1; done )")
+# `stash show -p` is base against the stashed worktree; an entry whose index held another version (`git add`, then
+# more edits) keeps that version only in its second parent, which `stash apply --index` would restore and a
+# worktree patch alone loses (Codex pass 31 on PR 27): hence the `<base>..<index>` patch per entry
+# a `.git` FILE's target (a linked worktree's admin directory, an absorbed submodule's git dir) and its common
+# directory, archived only when they are git directories by git's own test (`HEAD` here; `objects` and `refs` in
+# the common directory, which is `$g` itself unless `commondir` names another; a linked worktree made before git
+# 2.44 has no `refs/` of its own), and nothing is archived before the common directory passed (round 36: a
+# directory holding only `HEAD`, a bad `commondir` and private files used to be archived before the failure);
+# every failure is loud. The parse follows git's gitfile reader (round 32); a gitfile with a second line is refused
+# outright, since git takes the whole file after `gitdir: ` and a first-line parse would archive another directory
+# (round 43)
+GITDIR_FMT = ("if [ -f {}/.git ]; then {{ {{ IFS= read -r l || [ -n \"$l\" ]; }} < {}/.git "
+              "&& ! {{ IFS= read -r l1; IFS= read -r l2 || [ -n \"$l2\" ]; }} < {}/.git "
+              "&& case \"$l\" in \"gitdir: \"*) g=${{l#gitdir: }}; g=${{g%$'\\r'}} ;; *) false ;; esac "
+              "&& [ -n \"$g\" ] && case \"$g\" in /*) ;; *) g={}/$g ;; esac "
+              "&& [ -f \"$g/HEAD\" ] && c=$g && if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
+              "&& c=${{c%$'\\r'}} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac; fi "
+              "&& [ -d \"$c/objects\" ] && [ -d \"$c/refs\" ] && TAR_OPTIONS= \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
+              "&& if [ -f \"$g/commondir\" ]; then TAR_OPTIONS= \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi; }} "
+              "|| {{ echo 'gitdir capture FAILED' >&2; false; }}; fi")
+
+
+def gitdir_values(raw_p, ck):
+    return (raw_p, raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
+
+
+# the same command for a checkout the scan recorded with a gitfile that points outside it: there the paste's whole job is
+# this archive, so a `.git` that is no longer a file (replaced, or the paste run in another directory) fails loudly
+# instead of exiting 0 with nothing archived (adversary round 70 on PR 39, INFO 3)
+GITDIR_REQUIRED_FMT = "[ -f {}/.git ] || {{ echo 'gitdir capture FAILED: .git is not a file' >&2; false; }} && " + GITDIR_FMT
+
+
+def gitdir_required_values(raw_p, ck):
+    return (raw_p,) + gitdir_values(raw_p, ck)
+
+
+# a `.git` SYMLINK (`skipped: .git is a symlink`): chdir follows the link, so its target is archived behind the same
+# git-directory test; a link to a gitfile or to anything else fails loudly, archiving nothing (round 43)
+# (a link to a linked worktree's administration directory has `HEAD` and `commondir` but no `objects/` or `refs/` of its
+# own: the common directory is archived too, behind the same test as GITDIR_FMT; Codex pass 45)
+SYMLINK_GITDIR_FMT = ("g={}/.git && [ -f \"$g/HEAD\" ] && c=$g && if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
+                      "&& c=${{c%$'\\r'}} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac; fi "
+                      "&& [ -d \"$c/objects\" ] && [ -d \"$c/refs\" ] && TAR_OPTIONS= \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
+                      "&& if [ -f \"$g/commondir\" ]; then TAR_OPTIONS= \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi "
+                      "|| {{ echo 'gitdir capture FAILED' >&2; false; }}")
+
+
+def modified_fmt():
+    """The modified-files capture for one checkout, or for one submodule (its path and its `<DEST>` directory are
+    the values): a worktree patch and an
+    index patch (DIFF_OPTS), then an archive of every changed worktree file with its manifest, and a copy of the
+    index file. An unmerged entry's bytes are in no patch (`git diff` prints `Binary files differ` or `* Unmerged
+    path` for it), so the files themselves are archived too (Codex pass 30 on PR 27): `ls-files --modified` lists
+    every tracked path whose worktree differs from the index (unmerged ones included), `diff --cached --diff-filter=d`
+    every staged path still present; a path deleted from the worktree has no bytes to keep (`--ignore-failed-read`),
+    and the archive always holds `modified.list` so an all-deletions list never makes gtar refuse an empty archive.
+    Git's and tar's own read errors (`cannot lstat`: an unsearchable directory; `Cannot open: Permission denied`) go
+    to `modified.err` and any line there that is not a plain `warning:` or tar's `Cannot stat: No such file or
+    directory` (a deleted path, `LC_ALL=C` keeps the wording) fails the row, printing the file and a message, since
+    `--ignore-failed-read` would otherwise turn them into rc 0 (adversary rounds 36 and 37: an ambiguous-refname
+    warning is not a loss; Codex pass 34: an unreadable changed file vanished from the archive with rc 0); a listed
+    directory (a submodule gitlink whose HEAD moved, a file replaced by a directory) is not recursed into: the
+    submodule row covers its content, and its ignored files must not be copied (round 36). tar's own failure (an
+    unwritable archive path) prints its stderr and fails the row instead of hiding behind the later grep; a tracked
+    path whose parent is now a file (`Cannot stat: Not a directory`) has nothing to keep, like a missing one; a
+    `TAR_OPTIONS` from the operator's environment must not change the archive (round 40). An unmerged entry's stage
+    blobs (`ls-files -u`) may be reachable from no ref (a conflict against a commit since dropped, a `read-tree` or
+    `update-index` state): the patches print `Binary files differ` / `* Unmerged path` for them and the index copy
+    names objects the deleted checkout no longer has, so every object `ls-files -u` names is packed to
+    `unmerged-<hash>.pack` (`pack-objects` fails loudly on a missing object; no unmerged entry gives an empty
+    pack) (Codex pass 39)."""
+    w, d = "git -C {}", "<DEST>/{}"
+    return (f"mkdir -p {d} && {w} {DIFF_OPTS} > {d}/modified.patch && {w} {DIFF_OPTS} --cached > {d}/staged.patch "
+            f"&& {w} ls-files -z --modified > {d}/modified.list 2> {d}/modified.err "
+            f"&& {w} diff --cached -z --name-only --diff-filter=d >> {d}/modified.list 2>> {d}/modified.err "
+            f"&& {{{{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}} --null --no-recursion --ignore-failed-read -T {d}/modified.list 2>> {d}/modified.err "
+            f"|| {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
+            f"&& {{{{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
+            f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index "
+            f"&& {w} ls-files -u > {d}/unmerged.list "
+            f"&& \"$GSED\" -n 's/^[0-7]* \\([0-9a-f]*\\) [1-3]\\t.*$/\\1/p' {d}/unmerged.list > {d}/unmerged.ids "
+            f"&& GIT_NO_LAZY_FETCH=1 {w} pack-objects {d}/unmerged < {d}/unmerged.ids")
+
+
+def modified_values(raw_p, ck):
+    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, ck, raw_p, ck,
+            raw_p, ck, ck, ck, raw_p, ck, ck)
+
+
+def stash_values(raw_p, ck):
+    return (ck, raw_p, raw_p, ck, raw_p, ck)
+
+
+# a tracked path marked assume-unchanged (lowercase `ls-files -v` tag) or skip-worktree (`S`): `status` reports
+# nothing for it, so its edits are in no count and in no patch; the files themselves are archived with their
+# manifest (Codex pass 32 on PR 27). GNU sed's `-z` keeps the NUL-separated names whole, like the untracked archive;
+# `t` ends the script after the first substitution, or a path `S x` under tag `h` would print a second name `x`
+# (adversary round 38). A hidden path replaced by a directory holds children `status` cannot see (Codex pass 33):
+# they are listed through git's own ignore rules (`ls-files --others --exclude-standard` under each hidden path, a
+# second manifest `hidden-children.list`) and archived without recursion, so an ignored file or a nested
+# repository's content is never copied (adversary round 39). tar's stderr goes to `hidden.err`: `--ignore-failed-read`
+# returns 0 with an unreadable file left out, so any line there but `Cannot stat: No such file or directory` (an
+# assume-unchanged or sparse path with no file: nothing to keep) or `Not a directory` (its parent is a file now) fails
+# the row loudly (Codex pass 34). The children step's stderr goes there too: `ls-files --others` skips an unreadable
+# subdirectory with a warning and rc 0, the same loss class (round 40); tar's own failure prints its stderr
+HIDDEN_FMT = ("mkdir -p <DEST>/{} && git -C {} ls-files -z -v > <DEST>/{}/hidden.raw "
+              "&& \"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/{}/hidden.raw > <DEST>/{}/hidden.list "
+              "&& < <DEST>/{}/hidden.list xargs -0 -r git --literal-pathspecs -C {} ls-files -z --others --exclude-standard -- > <DEST>/{}/hidden-children.list 2> <DEST>/{}/hidden.err "
+              "&& {{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list hidden-children.list -C {} --null --no-recursion --ignore-failed-read "
+              "-T <DEST>/{}/hidden.list -T <DEST>/{}/hidden-children.list 2>> <DEST>/{}/hidden.err || {{ cat <DEST>/{}/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }}; }} "
+              "&& {{ ! grep -qv -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' <DEST>/{}/hidden.err || {{ cat <DEST>/{}/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }}; }}")
+
+
+def hidden_values(raw_p, ck):
+    return (ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, ck, ck)
+
+
+# Every emitted tar runs with `TAR_OPTIONS=` cleared: with `TAR_OPTIONS=--exclude=*` in the operator's environment
+# GNU tar wrote an empty archive and exited 0 (Codex pass 37; the modified and hidden rows had it since round 40)
+UNTRACKED_FMT = ("mkdir -p <DEST>/{} && git -C {} ls-files -z --others --exclude-standard > <DEST>/{} "
+                 "&& TAR_OPTIONS= \"$GTAR\" -C {} --null --no-recursion -T <DEST>/{} -cf <DEST>/{}")
+
+
+def untracked_values(raw_p, ck):
+    return (ck, raw_p, f"{ck}/untracked.list", raw_p, f"{ck}/untracked.list", f"{ck}/untracked.tar")
+
+
+# a de-initialised submodule is an empty directory whose git dir (`<common>/modules/<sub>`) keeps its commits: every
+# by-hand command run there acts on the SUPERPROJECT at rc 0 (adversary round 42), so each one in the submodule row
+# is gated on the gitlink's `.git` (the scanner has verified it is a gitfile naming a vetted git dir), saying so when
+# it stops (round 43: a silent rc 1 reads as "nothing happened"), and the module git dirs themselves are archived,
+# which needs no worktree and runs nothing. Since round 47 the row holds one command set per path the scan vetted
+# (`submodules_vetted`), that path quoted in every command: the human substitutes and pastes nothing
+# `printf '%s\n'`, never `echo`: zsh's builtin and macOS `/bin/sh` interpret backslash escapes in the path (round 47 LOW)
+SUB_GUARD = "{{ [ -e {}/.git ] || {{ printf '%s\\n' {} >&2; false; }}; }} && "  # values: the submodule's path, the message
+MODULES_FMT = ("mkdir -p <DEST>/{} && d=$(git -C {} rev-parse --git-common-dir) "
+               "&& TAR_OPTIONS= \"$GTAR\" -cf <DEST>/{}/modules.tar -C {} -C \"$d\" modules")
+
+
+def modules_values(raw_p, ck):
+    return (ck, raw_p, ck, raw_p)
+
+
+def vettable(sub):
+    """A record path the plan may name: a non-empty string below the checkout, never absolute or holding `..` (the scan
+    refuses those itself; this is defence in depth for a hand-edited record, round 47 LOW 3)."""
+    return isinstance(sub, str) and bool(sub) and not os.path.isabs(sub) and ".." not in sub.split("/")
+
+
+def submodule_commands(raw_p, ck, sub):
+    """The six guarded by-hand commands for one vetted submodule `sub` (a path below the checkout `raw_p`, as the
+    scanner recorded it in `submodules_vetted`), each a code span with every value quoted. The submodule's path
+    is the repository value, so each existing format runs unchanged against it; its artifacts go to
+    `<DEST>/<ck>/submodules/<sub>`, below a `submodules/` directory of their own so a submodule named like one of the
+    checkout's own artifacts (`modified.patch`) cannot collide with it, and two submodules never share one."""
+    sp, sd = os.path.join(raw_p, sub), f"{ck}/submodules/{sub}"
+    g = (sp, f"submodule {sub}: not a checked-out submodule (skipped)")  # never starts with `~/`, which shquote leaves open
+    return [
+        shcode(SUB_GUARD + "git -C {} status --porcelain", *g, sp),
+        shcode(SUB_GUARD + "git -C {} log --oneline --branches --tags --not --remotes", *g, sp),
+        shcode(SUB_GUARD + "mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{}/all.bundle --all",
+               *g, sd, sp, sd),
+        # a bundle holds committed objects only: the modified, staged and untracked files need the same patches and
+        # archive as an ordinary checkout (Codex pass 26 on PR 27)
+        shcode(SUB_GUARD + modified_fmt(), *g, *modified_values(sp, sd)),
+        # and the index-hidden archive: an assume-unchanged or skip-worktree edit in a submodule is in none of the
+        # above (Codex pass 36)
+        shcode(SUB_GUARD + HIDDEN_FMT, *g, *hidden_values(sp, sd)),
+        shcode(SUB_GUARD + UNTRACKED_FMT, *g, *untracked_values(sp, sd)),
+    ]
+
+
+# a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
+# carries it, and `git reflog` recovers it only until expiry (Codex pass 32 on PR 27). Its objects go into one
+# pack: `rev-list --objects` lists everything the reflogs reach that no ref does (a superset of the count: stash
+# entries and origin's live tips included), `pack-objects` packs that list. A partial clone's missing promisor
+# objects are listed as nothing to keep, never fetched: the capture plan's rows never reach the network (round 38)
+ODD_NAME = "\ufffd"  # what the scanner's lossy decoding leaves of a ref name that is not UTF-8
+ODD_NAME_NOTE = " (a branch or tag name is not valid UTF-8, so no push can name it: bundle every ref)"
+REFLOG_FMT = ("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
+              "rev-list --objects --missing=allow-promisor --reflog --not --all > <DEST>/{}/reflog-only.list "
+              "&& GIT_ADVICE=0 GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} pack-objects <DEST>/{}/reflog-only < <DEST>/{}/reflog-only.list")
+
+
+def reflog_values(raw_p, ck):
+    return (ck, raw_p, ck, raw_p, ck, ck)
+
+
+class Home(str):
+    """A path the generator abbreviated with `~` (`tilde`): the only value `shquote` leaves a leading `~` unquoted for.
+    A relative value that merely starts with `~/` (a report or an embedded directory named `~`) is data, quoted
+    literally (Codex pass 56 on PR 27, P2). Joining another piece on keeps the mark."""
+    def __add__(self, other):
+        return Home(str.__add__(self, other))
+
+    def rstrip(self, chars=None):
+        return Home(str.rstrip(self, chars))
+
+
+def tilde(p):
+    """`~` for HOME itself, `~/rest` below it (a `Home`); never a substring match (`/tmp/root/x` with HOME `/root`)."""
+    if p == HOME:
+        return Home("~")
+    if p.startswith(HOME + os.sep):
+        return Home("~" + p[len(HOME):])
+    return p
+
+
+def checkout_dir(p):
+    """The directory below `<DEST>` that holds everything captured from one checkout. Built from the full path,
+    so two checkouts that share a basename (`~/src/foo`, `~/.cow/pastures/x/foo`) never share an artifact name
+    (Codex pass 8 on PR 27); `home/` and `abs/` keep a path below HOME apart from one outside it."""
+    t = tilde(p)
+    if t == "~":
+        return "checkouts/home"
+    if t.startswith("~/"):
+        return "checkouts/home/" + t[2:]
+    return "checkouts/abs/" + t.lstrip("/")
+
+
+def num(v):
+    """A scan count as an int: the null of a skipped or incomplete record (no counts) is 0."""
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+
+def human(n):
+    v = float(n)
+    for u in ("B", "K", "M", "G"):
+        if v < 1024 or u == "G":
+            return f"{v:.0f}{u}" if u == "B" else f"{v:.1f}{u}"
+        v /= 1024
+
+
+# the shell state every plan command assumes: GNU tools by name, and the scanner's own git environment (it drops every
+# `GIT_*` variable and the global and system config, `git_env()`): with `GIT_DIR` set, `git -C <checkout> ls-files` read
+# another repository's index and the tar that followed succeeded without the checkout's files (Codex pass 42)
+PLAN_PREAMBLE = ("GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar); "
+                 "GSED=$(command -v gsed || command -v sed); "
+                 "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR "
+                 "GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT; "
+                 "_E=$(env) || echo 'env failed: GIT_* not cleared' >&2; "
+                 "while IFS= read -r _L; do case ${_L%%=*} in GIT_*[!A-Za-z0-9_]*) ;; GIT_?*) case $_L in *=*) unset \"${_L%%=*}\";; esac;; esac; done <<< \"$_E\"; "
+                 "unset _E _L; "
+                 "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_NO_LAZY_FETCH=1; "
+                 "case $(git version 2>/dev/null) in \"git version \"[3-9].*|\"git version 2.\"4[5-9]*|\"git version 2.\"[5-9][0-9]*|\"git version 2.\"[1-9][0-9][0-9]*|\"git version \"[1-9][0-9]*.*) ;; "
+                 "*) echo 'git older than 2.45 ignores GIT_NO_LAZY_FETCH: in a partial clone a capture may download from origin' >&2;; esac")
+
+
+def esc(value, in_code=False):
+    """One markdown table cell: `|` escaped; outside a code span `<`, `>`, `&` are HTML-escaped and backticks
+    backslash-escaped. Inside a code span (a pasted command) only `|` is escaped: CommonMark and GFM decode no entity in
+    a code span, so `&amp;` there would be shown, copied and run as five characters, and a submodule path `R&D` would
+    reach the guard as `R&amp;D`, a "not a checked-out submodule (skipped)" for a real checkout (adversary round 47,
+    MEDIUM); `code` fences with more backticks instead. Every control character (a bare CR ends a line in CommonMark)
+    is shown as `visible()` text, never the raw byte."""
+    text = "-" if value is None else str(value)
+    if not in_code:
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("|", "\\|")
+    if not in_code:
+        text = text.replace("`", "\\`")
+    return visible(text)
+
+
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def visible(v):
+    """A value that is shown, never pasted, in a code span: control characters as backslash-n, -r, -t or -xNN text."""
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    return _SURROGATE.sub(lambda m: f"\\x{ord(m.group()) - 0xdc00:02x}",   # the byte, as `_quote` writes it (round 48 INFO 7)
+                          _CTRL.sub(lambda m: named.get(m.group()) or f"\\x{ord(m.group()):02x}", str(v)))
+
+
+def shcode(fmt, *values):
+    """A code span holding a shell command: every value is `shlex.quote`d before `code()` escapes it for markdown,
+    so a checkout path or branch name shaped like `side$(touch x)` cannot run anything when the cell is pasted
+    (adversary round 8 on PR 27, 2026-10-20)."""
+    return code(fmt, *[shquote(v) for v in values])
+
+
+def shquote(v):
+    """`shlex.quote`, except that a leading `~/` of a `Home` value (the generator's own home abbreviation,
+    `tilde()`) stays outside the quotes so the shell still expands it: `~/'a b'/c`, never `'~/a b/c'`; a bare
+    `~` (the home directory itself) stays unquoted too (adversary round 9, Codex pass 6). A plain string that
+    starts with `~/` is a literal name and is quoted whole (Codex pass 56 on PR 27, P2). A value with a control character
+    (newline, carriage return, tab, ...) is ANSI-C quoted, `$'a\\nb'`, which bash and zsh accept: `shlex.quote`
+    keeps a raw newline, a markdown table row cannot, and turning it into a space would paste a different path
+    (Codex pass 15 on PR 27)."""
+    if isinstance(v, Home):
+        if v == "~":
+            return "~"
+        if v.startswith("~/"):
+            return "~/" + _quote(str(v)[2:]) if v[2:] else "~/"
+    return _quote(str(v))
+
+
+_SURROGATE = re.compile("[\udc80-\udcff]")  # a byte that is not UTF-8, as `surrogateescape` carries it in the scan JSON
+
+
+def _quote(v):
+    if not _CTRL.search(v) and not _SURROGATE.search(v):
+        return shlex.quote(v)
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\\": "\\\\", "'": "\\'"}
+    # a lone surrogate is the original byte (`\xff`): the command names the path as it is on disk, and the file stays
+    # valid UTF-8 (Codex pass 42 P2: the generator died with UnicodeEncodeError on a checkout named with byte 0xff)
+    return "$'" + "".join(named.get(ch) or (f"\\x{ord(ch) - 0xdc00:02x}" if _SURROGATE.match(ch)
+                                          else f"\\x{ord(ch):02x}" if _CTRL.match(ch) else ch) for ch in v) + "'"
+
+
+def code(fmt, *values):
+    """A code span: `fmt` (literal text, `{}` slots) with each value escaped, fenced with more
+    backticks than the longest run in the result. A control character in a value is refused (ValueError)
+    rather than turned into a space: shell values come through `shquote`, display values through `visible`."""
+    for v in values:
+        if _CTRL.search(str(v)):
+            raise ValueError(f"control character in a code span value: {str(v)!r}")
+    # a GFM table row ends a cell at every unescaped `|`, inside a code span too: the format's own pipes (`||`, `|`
+    # in a `while read` loop) are escaped like a value's, so the rendered cell is one cell (adversary round 48)
+    text = fmt.replace("|", "\\|").format(*[esc(v, in_code=True) for v in values])
+    runs = re.findall(r"`+", text)
+    if not runs:
+        return f"`{text}`"
+    fence = "`" * (max(len(r) for r in runs) + 1)
+    return f"{fence} {text} {fence}"
+
+
+def day(t):
+    return time.strftime("%Y-%m-%d", time.localtime(t))
+
+
+def check_paths(src, out, force):
+    """Refuse an OUT that would destroy the input, a non-markdown file or an existing file."""
+    src, out = Path(src), Path(out)
+    if out.resolve() == src.resolve():
+        sys.exit(f"refusing: OUT is the input {src}")
+    if out.suffix != ".md":
+        sys.exit(f"refusing: OUT {out} does not end in .md")
+    if out.is_dir():
+        sys.exit(f"refusing: OUT {out} is a directory")
+    if out.exists() and not force:
+        sys.exit(f"refusing: {out} exists (--force replaces it)")
+
+
+def write_atomic(out, text):
+    """Temp file beside OUT, then os.replace: OUT is whole before and whole after."""
+    out = Path(out)
+    fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
+    try:
+        # `backslashreplace`: a lone surrogate left in displayed text (a verdict, a cell) is written as `\udcff`, never an error
+        with os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace") as f:
+            f.write(text)
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def render(d):
+    # a scan can hold one category only (`--git` without `--bigteam`, or the reverse): the missing one renders empty
+    # instead of raising KeyError (Codex pass 55 on PR 27, P2)
+    bt = d.get("bigteam") or {"root": None, "tasks": [], "loose_files": []}
+    cos = d.get("checkouts") or []
+    sm = d.get("summary") or {}
+    # the scanned root (`--bigteam`), never a hard-coded default: the capture rows must read the tree that was
+    # scanned (Codex pass 14 on PR 27); `.get` for a scan written before the key existed
+    bt_root = tilde(bt.get("root") or os.path.join(HOME, ".local/state/bigteam"))
+    tasks = sorted(bt["tasks"], key=lambda t: -t["bytes"])
+    uniq = [t for t in tasks if t["verdict"] == "unique"]
+    mixed = [t for t in tasks if t["verdict"] == "mixed"]
+    scr = [t for t in tasks if t["verdict"] == "scratch"]
+    open_jobs = sum(len(t["open_job_records"]) for t in tasks)
+    tasks_open_jobs = sum(1 for t in tasks if t["open_job_records"])
+    bs = {"tasks": 0, "verdicts": {}, "total_bytes": 0, "unique_bytes": 0, "scratch_bytes": 0, "incomplete": 0,
+          **(sm.get("bigteam") or {})}
+    cs = {"count": 0, "verdicts": {}, "with_unpushed_work": 0, "with_local_only_commits": 0, "with_untracked": 0,
+          "with_stash": 0, "skipped": 0, "incomplete": 0, **(sm.get("checkouts") or {})}
+    unpushed = [c for c in cos if "unpushed commits" in c["flags"] or "orphan branch" in c["flags"]]
+    out = []
+    w = out.append
+
+    w("# Phase 0 scan: bigteam task dirs and Orca / cow checkouts (2026-10-20)\n")
+    w("Phase 0, slice 3 of [ade-everywhere-proposal.md](ade-everywhere-proposal.md) §8 item 1 "
+      "(djbclark, 2026-10-20: \"Scan `~/.local/state/bigteam` and the Orca checkouts for unique reports, "
+      "dirty trees, untracked files and unpushed commits and capture them. Nothing is deleted.\"). "
+      "Nothing was moved, committed, stashed, checked out or deleted outside this pasture. The network "
+      "calls were `git ls-remote --heads origin` and, only where an origin tip could not be compared "
+      "with HEAD, `git fetch origin <branch>`: that run used the first version of `--fetch`, which "
+      "downloaded the branch's objects but also rewrote `FETCH_HEAD`, may have updated "
+      "`refs/remotes/origin/<branch>` and may have run auto-maintenance in that checkout (the tool now "
+      "writes no refs, section 5). The first version also ran git inside each checkout with that "
+      "checkout's own config in force, so a `core.fsmonitor` or `remote.*.uploadpack` line there would "
+      "have run (the tool now skips such a checkout, section 5); whether any scanned checkout carried one "
+      "was not checked (section 4). The first version also treated a git call that failed or timed out as "
+      "\"nothing found\" and had no guard against a partial clone downloading objects during a count; the "
+      "tool now reports `scan incomplete: <call> rc=<n>` for the first and sets `GIT_NO_LAZY_FETCH=1` on "
+      "every git call for the second (section 4). Numbers below come from one real run of "
+      "[`bin/ade-scan-state`](../bin/ade-scan-state) at "
+      f"{d['scanned_at']} (commands in section 5); rerun it for a fresh scan. This document is "
+      "rendered from that run's JSON by [`bin/ade-scan-state-doc`](../bin/ade-scan-state-doc). Slice 1 context: "
+      "[ade-everywhere-inventory-2026-10-20-stores.md](ade-everywhere-inventory-2026-10-20-stores.md) "
+      "§2 rows for bigteam and Orca, and the Orca section of "
+      "[ade-everywhere-inventory-2026-10-19.md](ade-everywhere-inventory-2026-10-19.md).\n")
+
+    w("## 0. Summary\n")
+    w("| Measure | Value |\n|---|---|")
+    w(f"| bigteam task dirs scanned | {bs['tasks']} ({human(bs['total_bytes'])} by `du -sk`) |")
+    w(f"| verdict `unique` | {bs['verdicts'].get('unique', 0)} dirs, "
+      f"{sum(t['bytes'] for t in uniq) / 2**20:.1f} MiB whole-dir |")
+    w(f"| verdict `mixed` | {bs['verdicts'].get('mixed', 0)} dirs, "
+      f"{sum(t['bytes'] for t in mixed) / 2**20:.0f} MiB whole-dir |")
+    w(f"| verdict `scratch` | {bs['verdicts'].get('scratch', 0)} dirs, "
+      f"{sum(t['bytes'] for t in scr) / 2**30:.1f} GiB whole-dir |")
+    w(f"| bytes `unique` (report files no other document references) | {bs['unique_bytes']:,} B "
+      f"({bs['unique_bytes'] / 2**20:.2f} MiB) |")
+    w(f"| bytes `scratch` (everything else under bigteam) | {bs['scratch_bytes']:,} B "
+      f"({bs['scratch_bytes'] / 2**30:.1f} GiB) |")
+    w(f"| job records with no `closed` key | {open_jobs} in {tasks_open_jobs} task dirs |")
+    w(f"| git checkouts scanned | {cs['count']} |")
+    shown = ("clean and pushed", "unpushed commits", "orphan branch", "dirty")
+    for k in (*shown, *sorted(k for k in cs["verdicts"] if k not in shown)):
+        # one row per verdict present, so the rows sum to the checkout count (adversary round 21, INFO 5)
+        w(f"| checkouts, verdict {code('{}', visible(k))} | {cs['verdicts'].get(k, 0)} |")
+    w(f"| checkouts with unpushed work (unpushed commits, orphan branch or unpushed tags) | **{cs['with_unpushed_work']}** |")
+    w(f"| checkouts with untracked non-ignored paths | {cs['with_untracked']} |")
+    w(f"| checkouts with a stash | {cs['with_stash']} |")
+    incomplete_tasks = [t for t in tasks if t["verdict"].startswith("scan incomplete")]
+    w(f"| bigteam task dirs with `scan incomplete` (reference search failed) | {len(incomplete_tasks)} |")
+    w(f"| checkouts `skipped` or `scan incomplete` (no counts; listed in 3.2 with a whole-directory archive) | "
+      f"{num(cs.get('skipped')) + num(cs.get('incomplete'))} |")
+    w("")
+    w("The three items that most need a human decision:\n")
+    w("1. **`~/src/one-offs` has no `origin` remote at all** and 37 commits (plus the Orca worktree "
+      "`~/orca/workspaces/one-offs/Hermes`, 2 commits, same repo). Nothing outside this Mac holds them; "
+      "the only copy is this disk. Decide where it is hosted (a new repo needs the where-does-it-go "
+      "question, rule 23) or take a bundle (section 3).")
+    w("2. **Where the 41 `unique`/`mixed` bigteam report sets are preserved** "
+      f"({bs['unique_bytes'] / 2**20:.1f} MiB of report markdown; the rest of those dirs is logs and "
+      "worktrees). One destination answers all of them; two dirs (`emufix`, `wdfollow`) and several "
+      "`unique` ones have an open `CLAIM`, so a session may still be writing there.")
+    w("3. **Five more checkouts hold commits that exist on no origin branch** "
+      "(`you-can-compact-yourself` 2, `aiuse-integration` 2, `crush-merge-v0981` 8, "
+      "`opencode-v2` 1, `clinepass-pr44379` 2 plus a stash). Pushing a branch is outward-facing, so "
+      "djbclark picks push or bundle per repo (section 3).")
+    w("")
+    w("A fourth finding that is not a decision yet: **54.5 GiB of the 60 GiB is one scratch tree**, "
+      "`adhoc-2026-10-18/hm-promo-rehearsal/` (Hermes promotion rehearsal homes and snapshots). "
+      "Deleting it is a later cleanup decision, not part of Phase 0.\n")
+
+    # ---- 1 bigteam
+    w(f"## 1. bigteam ({code('{}/<task>/', visible(bt_root))})\n")
+    w("**Method.** One row per task dir. *Size* is `du -sk`; *newest* is the newest mtime within two "
+      "levels; *CLAIM* is `DONE` when the last non-blank line of `CLAIM` starts with `DONE`, `open` "
+      "when a `CLAIM` exists without it, `no CLAIM` otherwise; *reports* are `*report*.md` files within "
+      "three levels (not inside a git checkout) and whether `<file>.done` exists; *open jobs* counts "
+      "`jobs/*.json` records with no `closed` key (a record written by `acp-dispatch` before it is "
+      "reaped or closed; most are finished slices nobody closed, so this is a loose end, not lost "
+      "data). Verdicts: `unique` = at least one report file and no document under "
+      "`~/src/djbclark-ade/docs`, `~/ops/site-private/memory` or `~/.local/state/handoffs` mentions the "
+      "task name (whole word, `rg -l -F -w`), and the dir is at most 5 MiB; `mixed` = the same but the "
+      "dir is larger (logs, worktrees, caches around the reports); `scratch` = no report file, or every "
+      "report's task name is already referenced elsewhere. **A reference proves a mention, not a copy**, "
+      "and a short common task name can match by accident, so `scratch` for a dir that has reports means "
+      "\"cited somewhere\", not \"safe to delete\"; the 93 scratch dirs have not been read. A fresh scan with the "
+      "current tool marks a task dir whose `rg`/`grep` search failed (exit above 1, or a timeout) "
+      "`scan incomplete`, never `scratch`, `unique` or `mixed`; the run above read such a failure as "
+      "\"no reference\".\n")
+    loose = bt.get("loose_files") or []
+    w(f"{bs['tasks']} dirs; {len(loose)} loose files at the root "
+      f"({', '.join(loose[:6])}{'...' if len(loose) > 6 else ''}).\n")
+
+    w("### 1.1 The ten largest dirs and what fills them\n")
+    w("| # | task | size | verdict | largest children |\n|---|---|---|---|---|")
+    for i, t in enumerate(tasks[:10], 1):
+        fills = ", ".join(f"{code('{}', visible(f['name']))} {human(f['bytes'])}" for f in t.get("fills", []))
+        w(f"| {i} | {esc(t['task'])} | {human(t['bytes'])} | {esc(t['verdict'])} | {fills} |")
+    w("")
+    w("`adhoc-2026-10-18` is 91% of the total: `hm-promo-rehearsal/` holds the rehearsal copies "
+      "`homeB`, `homeC`, `home`, `snap-step1`, `backups-C` and `tmp` (a few GiB each, all derived from a "
+      "Hermes home). The `plektra-*` dirs are Android `*.apk` builds and git worktrees (`wt/`, "
+      "`graft-wt/`); every one of them is reproducible from its repo.\n")
+
+    w("### 1.2 `unique` and `mixed` dirs (the preservation list)\n")
+    w("| task | verdict | size | newest | CLAIM | reports (.done?) | report bytes | open jobs |\n"
+      "|---|---|---|---|---|---|---|---|")
+    for t in uniq + mixed:
+        reps = ", ".join(f"{esc(Path(r['path']).name)}{'' if r['done'] else ' (no .done)'}"
+                         for r in t["reports"][:3])
+        if len(t["reports"]) > 3:
+            reps += f" +{len(t['reports']) - 3}"
+        w(f"| {esc(t['task'])} | {esc(t['verdict'])} | {human(t['bytes'])} | {day(t['newest_mtime'])} | "
+          f"{esc(t['claim'])} | {reps} | {t['unique_bytes']:,} | {len(t['open_job_records'])} |")
+    w("")
+
+    w("### 1.3 Every task dir\n")
+    w("| task | size | newest | CLAIM | report files | open jobs | verdict |\n|---|---|---|---|---|---|---|")
+    for t in tasks:
+        w(f"| {esc(t['task'])} | {human(t['bytes'])} | {day(t['newest_mtime'])} | {esc(t['claim'])} | "
+          f"{len(t['reports'])} | {len(t['open_job_records'])} | {esc(t['verdict'])} |")
+    w("")
+    if incomplete_tasks:
+        w("Task dirs whose reference search failed (`rg`/`grep` exited with an error or timed out, "
+          "`reference_search: incomplete: rc=<n>`) are `scan incomplete`, never `unique`, `mixed` or "
+          "`scratch`: " + ", ".join(esc(t["task"]) for t in incomplete_tasks) + ". They are not in 1.2 "
+          "or 3.1; rescan them before deciding anything.\n")
+
+    # ---- 2 checkouts
+    w("## 2. Orca and cow checkouts\n")
+    w("**Method.** A checkout is a directory holding `.git` (file or directory) found up to two levels "
+      "under `~/orca/workspaces`, `~/orca/projects` and `~/.cow/pastures`; in this run symlinks were "
+      "followed, resolved and deduplicated (`~/orca/projects/djbclark-ade` and `one-offs` are links to "
+      "`~/src/...`, so they appear under `~/src`); the tool no longer follows symlinks under a root, so "
+      "a fresh scan names `--git-root ~/src/djbclark-ade --git-root ~/src/one-offs` itself. `~/orca/workspaces/{aiuse,mobile,wristchess,.orca-preparing}` are empty "
+      "dirs. *Modified* and *untracked* count `git status --porcelain` lines (`??` = untracked, "
+      "non-ignored; an untracked directory counts once). *Unpushed* is `git rev-list --count @{u}..HEAD`, "
+      "or `no upstream`. *Ahead of origin* is commits reachable from HEAD and from no `origin/*` ref "
+      "(with a check that the branch tip on origin does not already contain HEAD, because the local "
+      "remote refs can be stale; `--fetch` downloads that branch's objects when they are missing, writing no refs). *On origin* comes from `git ls-remote --heads origin`. Verdict "
+      "precedence: `unpushed commits` (also any local branch or a detached HEAD holding a commit on no "
+      "origin ref), `orphan branch` (branch not on origin and commits origin lacks), `dirty`, "
+      "`clean and pushed` (no local-only commit on any local branch); the *also* column lists the other "
+      "flags (`detached`, `origin unknown`, `local-only commits: <branch> <n>, tag <tag> <n>`) and the primary "
+      "flag `origin unreachable: local-only count unverified` (`--remote` got no answer from origin, so the "
+      "checkout is never `clean and pushed`) or `origin url holds a credential or names a remote helper: not queried` (the url has a "
+      "password, or a username or query string on a non-ssh scheme, or names a remote helper, so it is never queried: the same, the url is in no record). "
+      "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref`, `rev-list --count` (the one against origin's tip too, unless git says the tip object is missing: that stays `origin tip not fetched`) or `remote get-url origin` call (only git's exit 2 `No such remote` means no origin) "
+      "fails or times out is `scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets "
+      "600 s, other calls 60 s) with null counts, and is never `clean and pushed`; a repository whose "
+      "`.git/HEAD` git cannot read is `skipped: HEAD unreadable`, and one whose HEAD names no ref while "
+      "other refs exist is `scan incomplete`, never a fresh repository.\n")
+    w("| path | branch | mod | untr | unpushed | ahead of origin | stash | on origin | verdict | also |\n"
+      "|---|---|---|---|---|---|---|---|---|---|")
+    for c in cos:
+        also = ", ".join(f for f in c["flags"] if f != c["verdict"])
+        w(f"| {esc(tilde(c['path']))} | {esc(c['branch'])} | {esc(c['modified'])} | {esc(c['untracked'])} | "
+          f"{esc(c['unpushed'])} | {esc(c['ahead_of_origin'])} | {esc(c['stashes'])} | "
+          f"{esc(c['on_origin'])} | **{esc(c['verdict'])}** | {esc(also)} |")
+    w("")
+    dirt = [c for c in cos if "djbclark-ade" in c["path"] and c["verdict"] == "dirty"]
+    w("**What the dirt is.** The seven `djbclark-ade` rows (the primary checkout and six pastures) "
+      "show the same 7 untracked paths and about 4 modified ones (6 in `paseo-lifecycle`, 13 in the "
+      "primary, which other agents kept editing during the scan) because `cow` copies the working tree, "
+      "dirt included: `skills/graft/SKILL.md` and `skills/paseo-*/SKILL.md` (modified), and "
+      "`.agents/skills/fastino-glide/`, `bin/graft/`, `docs/handoffs/HANDOFF_standalone-32c0_...`, "
+      "`skills/paseo*/.paseo-managed-files.json` (untracked). They belong to other agents' in-flight "
+      "work in the primary checkout; this scan does not touch them. The two `forgejo-ci-2026-10` rows "
+      "likewise share `.forgejo/`, `apps/desktop/release-new/` and `scripts/forgejo-test-ref`. "
+      "An untracked `graft/` directory is usually the reproducible graft index (`graft build`), but it is "
+      "archived like any other untracked path: nothing verifies the name. Every checkout gets its own rows, "
+      "the `phase0-scan` pasture included.\n")
+
+    # ---- 3 capture
+    w("## 3. Capture (how each item would be preserved; none of this was run)\n")
+    w("Every command below uses GNU `cp`, `tar` and `sed` through three variables, so the same row runs on this Mac "
+      "(coreutils and gnu-sed installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
+      f"`{PLAN_PREAMBLE}` first, and `<DEST>` to an absolute path. The `unset`s, the loop and the `export` give every `git` the "
+      "scanner's own environment: no `GIT_DIR`, `GIT_INDEX_FILE` or other ambient `GIT_*` variable, no global or "
+      "system config, and `GIT_NO_LAZY_FETCH=1`, so a successful capture is of the checkout the scan read (Codex pass 42). "
+      "In a partial clone a bundle row then fails with `could not fetch ... from promisor remote` instead of downloading "
+      "from origin: archive the whole directory there, or unset the variable once contacting origin is acceptable. Paste it into bash or zsh "
+      "(not sh or dash: the preamble uses `<<<`), in a shell you close afterwards (`bash -l` or a subshell), not your working one; the push rows are the exception, they need your "
+      "own git credentials and config, so run them in a normal shell. Read this document in a rendered markdown view "
+      "(GitHub, a viewer): the commands sit in table cells where a literal `|` is written `\\|`, and a plain-text editor "
+      "shows that backslash.\n")
+    w("### 3.1 `unique` and `mixed` bigteam dirs\n")
+    w("Proposed rule for all of them: copy the report files (not the dir) to one destination, "
+      "`<DEST>/bigteam/<task>/`, keeping each file's path below the task dir. `<DEST>` is the one decision "
+      "(the repo question, rule 23; `~/ops/site-private` is private and fits unreviewed AI reports). The "
+      "command in each row names every report of the task, none is left to a `+N more`; "
+      "`needs decision` is `yes` only where a session may still be writing (open `CLAIM`, an unclosed "
+      "job record with status running) or the dir is `mixed` (the logs next to the report may matter).\n")
+    w("| task | reports | command (copies every report) | needs decision |\n|---|---|---|---|")
+    for t in uniq + mixed:
+        files = [r["path"] for r in t["reports"]]
+        need = []
+        if t["claim"] == "open":
+            need.append("CLAIM open: confirm the session is finished")
+        if t["verdict"] == "mixed":
+            need.append("mixed: say whether the logs/worktrees beside it matter")
+        if t["open_job_records"]:
+            need.append(f"{len(t['open_job_records'])} job record(s) unclosed")
+        # one cp over the whole set, paths relative to the task dir: nothing is dropped from what the plan keeps
+        # (Codex pass 8 on PR 27: a row showing four of 22 paths could not be followed)
+        slots = " ".join("{}" for _ in files)
+        cmd = shcode("mkdir -p <DEST>/bigteam/{} && (cd {} && \"$GCP\" --parents -t <DEST>/bigteam/{} -- " + slots + ")",
+                     t["task"], bt_root + "/" + t["task"], t["task"], *files) if files else "no reports"
+        w(f"| {esc(t['task'])} | {len(files)} | {cmd} | "
+          f"{'yes: ' + '; '.join(need) if need else 'no (only DEST)'} |")  # any unclosed job: yes (Codex pass 13)
+    w("")
+    w("The two open-claim `mixed` dirs and `research-brain-emulation-agent-teams` (22 reports, 88 MiB "
+      "with no CLAIM) are the ones to read first.\n")
+
+    w("### 3.2 Checkouts with unpushed commits or untracked non-ignored files\n")
+    w("Every artifact of one checkout goes to its own directory, `<DEST>/checkouts/home/<path below ~>/` or "
+      "`<DEST>/checkouts/abs/<absolute path>/`, so two checkouts with the same basename never overwrite each "
+      "other; a branch bundle is named `branch-<branch, percent-encoded>.bundle`, a detached HEAD's `HEAD.bundle`.\n")
+    w("| checkout | what is not preserved | command | needs decision |\n|---|---|---|---|")
+    for c in cos:
+        raw_p = tilde(c["path"])
+        p = esc(raw_p)
+        ck = checkout_dir(c["path"])  # one directory per checkout below <DEST>/checkouts/: two with one basename never share a file
+        if c["verdict"].startswith(("skipped", "scan incomplete")):
+            # no counts (null): anything may be in there, so the row demands a re-scan or a whole-directory archive,
+            # never "nothing to capture" (Codex pass 19 on PR 27); no git command runs in a checkout the scan refused
+            # split the absolute path, then abbreviate the parent: the checkout at HOME itself archives as
+            # `-C <dirname HOME> -- <basename HOME>`, not the literal `~` (adversary round 62, LOW 2)
+            parent, base = os.path.split(str(c["path"]).rstrip("/"))
+            parent = tilde(parent) if parent else parent
+            # a `.git` FILE (a linked worktree, an absorbed submodule) points at a git directory elsewhere, which holds
+            # the refs, reflogs and perhaps the only copy of local commits; a linked worktree's objects are one step
+            # further, in its `commondir`. The whole-directory archive alone misses both (Codex pass 26 on PR 27).
+            # the parse matches git's gitfile reader (adversary round 32): the first line must read `gitdir: <path>`
+            # (anything else is `false`), a missing final newline is accepted (`read` returns 1 at EOF, `$l` is
+            # set), a CRLF is stripped; every failure prints a message and leaves a nonzero status. `-C "$g" ... .`
+            # archives the directory's contents without gtar's "Removing leading ../" when commondir is `../..`.
+            # Only a git directory is archived, by git's own `is_git_directory` test: `HEAD` in it, `objects` and
+            # `refs` in the COMMON directory, so a linked worktree's own directory (`HEAD` and `commondir` only,
+            # before git 2.44) passes; a `.git` file naming `/` or a home directory must not make the paste copy
+            # the disk (rounds 33 and 35, Codex pass 30). The command text is GITDIR_FMT, run live by the tests
+            if c["verdict"] == SKIP_GIT_SYMLINK:
+                # the whole-directory archive keeps the link itself, not the git directory it names, where the history
+                # is (round 43): that target is archived when it is a git directory, loudly refused otherwise
+                gitdir = ("the `.git` symlink's target holds the history (the scan read nothing there): archive it too: "
+                          + shcode(SYMLINK_GITDIR_FMT, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar"))
+            else:
+                # the scan saw a gitfile whose git directory is outside the checkout: the command must fail, not skip, when
+                # `.git` is no longer a file at paste time (GITDIR_REQUIRED_FMT)
+                outside = any(isinstance(t, str) and t.startswith("git dir -> ") for t in (c.get("linked_stores") or [])[:4])
+                gitdir = ("when `.git` is a file the directory it points to and that one's common directory hold the "
+                          "history, archive them too: "
+                          + (shcode(GITDIR_REQUIRED_FMT, *gitdir_required_values(raw_p, ck)) if outside
+                             else shcode(GITDIR_FMT, *gitdir_values(raw_p, ck))))
+            # a module, or the checkout itself (the record then carries `alternates`, whatever the reason it was skipped:
+            # adversary round 64), whose `objects/info/alternates` is not empty keeps commits in another object store that
+            # neither archive above holds (Codex thread 10 on PR 27): say so, and refuse the cleanup until they are bundled.
+            # A bundle row needs none of this: `bundle create` reads through alternates. Older records lack the key
+            alt_what, alt_warn, alt_need = "", "", ""
+            if c["verdict"] == SKIP_ALTERNATES or isinstance(c.get("alternates"), list):
+                targets = [t for t in (c.get("alternates") or []) if isinstance(t, str)][:3]
+                names = ("; the first targets, as the alternates file writes them: " + ", ".join(shcode("{}", t) for t in targets)
+                         if targets else "; the store named in `<gitdir>/objects/info/alternates` of " + (
+                             "each module git directory" if c["verdict"] == SKIP_ALTERNATES else "the checkout's git directory"))
+                alt_what = " and the alternate object store"
+                alt_warn = (" **objects/info/alternates points outside this checkout; the store it names is NOT archived: do not "
+                            "delete the checkout or that store until its commits are bundled**" + names + ".")
+                alt_need = "; **do not clean up: the alternate object store is in no archive**"
+            # a git directory whose `objects`, `refs`, `logs`, `packed-refs` or `shallow` is a symlink out, or has a symlink anywhere
+            # inside `objects/`, `refs/` or `logs/` (git-new-workdir), or a git dir that does not point back to the checkout (a
+            # `commondir` in a `.git` directory, a gitfile naming another checkout's or a planted git dir): both archives keep the link, not the store at its target
+            # (adversary round 65, LOW 2). The record key is absent from older scans
+            linked = [t for t in (c.get("linked_stores") or []) if isinstance(t, str)][:4]
+            # a `.git` gitfile that does not point back is recorded as `git dir -> G` (and `commondir -> C`): the git-dir
+            # command of this very row archives both, so only the other entries (a symlinked member, a `commondir` in a `.git`
+            # DIRECTORY, which that command does not read) are stores no archive holds (adversary round 67, INFO 1)
+            by_gitfile = any(t.startswith("git dir -> ") for t in linked)
+            covered = [t for t in linked if by_gitfile and t.startswith(("git dir -> ", "commondir -> "))]
+            linked = [t for t in linked if t not in covered]
+            if covered:
+                alt_what += " and a git directory outside the checkout"
+                alt_warn += (" **the checkout's git directory is outside it (the gitfile does not point back to the checkout): the git-dir command "
+                             "above archives it and its common directory when each is a git directory (and refuses loudly when not, and when `.git` is no longer a file): run it "
+                             "before any cleanup**; the links, as `<member> -> <target>`: "
+                             + ", ".join(shcode("{}", t) for t in covered) + ".")
+                alt_need += "; **do not clean up before the git-dir archive command has run**"
+            if linked:
+                alt_what += " and the linked object store"
+                alt_warn += (" **the git directory keeps its objects or refs in a store outside this checkout (a symlinked `objects`, "
+                             "`refs`, `logs`, `packed-refs` or `shallow`, a symlink inside `objects/`, `refs/` or `logs/`, or a `commondir` in a `.git` directory); the store the link names is NOT archived, only the link: do "
+                             "not delete the checkout or that store until its commits are bundled**; the links, as `<member> -> <target>`: "
+                             + ", ".join(shcode("{}", t) for t in linked) + ".")
+                alt_need += "; **do not clean up: the linked object store is in no archive**"
+            w(f"| {p} | counts unknown{alt_what} ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
+              f"directory: {shcode('mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
+              f" (no git command: the scan did not run one there either); {gitdir}"
+              " Git LFS payloads are in the store (`.git/lfs`, or the directory `lfs.storage` names): when that is a symlink or lives outside"
+              " these archives, archive its `objects` directory too (resolve any symlink first: `realpath`)"
+              f"{alt_warn}"
+              f" | yes: counts unknown; re-scan or archive whole{alt_need} |")
+            continue
+        # every untracked path counts, a `graft/` directory included: nothing verifies that one is the reproducible
+        # graft index rather than work under an ordinary name (Codex pass 28 on PR 27)
+        untr = list(c.get("untracked_sample") or [])
+        real_untr = num(c["untracked"])
+        modified, stashes, local_n = num(c["modified"]), num(c["stashes"]), num(c.get("local_only_commits"))
+        head_ahead = next((v for v in (c["ahead_of_origin"], c["unpushed"])
+                           if isinstance(v, int) and v > 0), 0)
+        # the url is in no record: the flag (`--remote` only) or the field `origin_credential` (every mode, since
+        # adversary round 39; older records lack it) says so
+        credential = ORIGIN_CREDENTIAL in c["flags"] or bool(c.get("origin_credential"))
+        # no push row for such an origin: `git push origin` hands the credential-bearing url to the transport helper's
+        # argv, the exposure the scanner itself avoids; the bundle alternative stands alone (Codex pass 33 on PR 27)
+        cred_note = " (origin url holds a credential or names a remote helper: no push until it is removed from the url; bundle instead)"
+        cred_need = "yes: bundle it; a push would hand the credential-bearing origin url to the transport"
+        # a push to a local path or `file://` origin runs that repository's receive hooks and config programs, which
+        # `-c core.hooksPath` does not reach: bundle only (adversary round 54 on PR 27, MEDIUM); not "unreachable"
+        local_origin = bool(c.get("origin_local_path")) and not credential
+        no_push = credential or local_origin
+        if local_origin:
+            cred_note = " (origin is a local path or file:// url: a push would run that repository's receive hooks and config programs: no push; bundle instead)"
+            cred_need = "yes: bundle it; a push to a local-path origin runs that repository's hooks"
+        unreachable = credential or ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
+        submodules = SUBMODULES_FLAG in c["flags"]  # `status --ignore-submodules=all`: the counts see nothing in there
+        tag_others = c.get("local_only_tags") or []
+        zero_tags = [t for t in tag_others if not num(t["count"])]  # tag objects on pushed commits (Codex pass 31)
+        hidden, reflog = num(c.get("index_hidden")), num(c.get("reflog_only_commits"))  # Codex pass 32; older records lack both
+        if (not unreachable and not submodules and not head_ahead and real_untr <= 0 and not stashes and not modified
+                and not local_n and not zero_tags and not hidden and not reflog and not c.get("embedded_repos")):
+            continue
+        what, cmd, need = [], [], "no"
+        head_row = False
+        covered_by_bundle = False
+        # a shallow checkout's bundle holds no boundary parents, so `git clone` of it alone fails (rc 128): it restores only
+        # by fetching into a clone of origin (adversary round 70 on PR 39, LOW)
+        # `git clone --bare` then a forced fetch into `refs/bundle/*`: a plain clone refuses to fetch into its checked-out
+        # branch, and an origin that moved on rejects a non-forced update (adversary round 1 on PR 47, MEDIUM 2); a
+        # `HEAD.bundle` holds only the ref `HEAD`, which `refs/*` does not match (MEDIUM 1)
+        def _shallow_note(spec):
+            return (" (shallow checkout: the bundle cannot be cloned alone; restore with `git clone --bare <origin> R`, then "
+                    f"`git -C R fetch <bundle> '{spec}'`, so keep origin)") if c.get("shallow") else ""
+        shallow_note = _shallow_note("+refs/*:refs/bundle/*")
+        # no rule keyed on a path name: a checkout called `one-offs/Hermes` used to get "see `~/src/one-offs`" and no
+        # command of its own, whatever repository it was (adversary round 30 on PR 27)
+        if "no origin remote" in c["flags"]:
+            covered_by_bundle = True
+            what.append(f"all {c['ahead_of_origin'] or c.get('local_only_commits') or 0} commits (no remote)")
+            # a `Home`, so the shell expands the `~`: a plain string would be quoted whole and the bundle written into a
+            # directory named `~` below the working directory, inside the checkout it preserves (adversary round 62 on PR 27)
+            bd = Home("~/ops/site-private/bundles/") + ck.removeprefix("checkouts/")
+            bundle_cmd = shcode("mkdir -p {} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, bd + "/all.bundle")
+            if c.get("shallow"):
+                # `bundle create` drops `<common>/shallow`, so the parents of the boundary commits are in no file and
+                # `git clone all.bundle` fails (`Could not read <parent>`): keep the file beside it and say how to restore
+                # (probed 2026-10-24: `git init --bare`, the file copied in as `shallow`, `git fetch all.bundle 'refs/*:refs/*'`)
+                bundle_cmd += (" and " + shcode("\"$GCP\" -- \"$(git -C {} rev-parse --path-format=absolute --git-path shallow)\" {}", raw_p, bd + "/all.bundle.shallow")
+                               + " (shallow checkout: `git clone` of the bundle alone fails; restore with `git init --bare R`, copy `all.bundle.shallow` to `R/shallow`, then `git -C R fetch <bundle> 'refs/*:refs/*'`)")
+            cmd.append(bundle_cmd + " or add a remote and `git push -u origin <branch>`")
+            need = "**yes**: only copy; hosting or bundle destination"
+        elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
+            head_row = True
+            if c["branch"] == "HEAD":
+                # detached: `refs/heads/HEAD` does not exist, a push of it fails (adversary round 13, Codex pass 8)
+                what.append(f"{head_ahead} commit(s) on a detached HEAD")
+                cmd.append(shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} HEAD",
+                                  ck, raw_p, f"{ck}/HEAD.bundle")
+                           + " (detached HEAD: bundle, or create a branch first: "
+                           + shcode("git -C {} switch -c <name>", raw_p) + ")")
+                cmd[-1] += _shallow_note("+HEAD:refs/bundle/HEAD")
+                need = "yes: HEAD names no branch; bundle it, or name a branch first"
+            else:
+                what.append(f"{head_ahead} commit(s) on {code('{}', c['branch'])}")
+                # fully qualified refspecs: a branch named like an option (`--mirror`) must never reach git's option
+                # parser, and shell quoting does not stop that (Codex pass 7 on PR 27); the bundle's file name is the
+                # percent-encoded branch, so `a/b` and `a_b` stay distinct
+                if ODD_NAME in c["branch"]:
+                    # the scanner decoded a name that is not UTF-8 to U+FFFD: `refs/heads/<that>` names no ref, so only
+                    # a bundle of every ref can hold the commits (Codex pass 48 on PR 27, P1)
+                    bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
+                                    ck, raw_p, f"{ck}/all-refs.bundle")
+                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if no_push else "") + shallow_note)
+                    need = cred_need if no_push else "yes: bundle it; the branch name cannot be typed into a push"
+                else:
+                    push = shcode("git -C {} -c core.hooksPath=/dev/null push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
+                    bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
+                                    ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"])
+                    cmd.append((bundle + cred_note if no_push else push + " or " + bundle) + shallow_note)
+                    need = cred_need if no_push else "yes: pushing a branch publishes it; pick push or bundle"
+        if local_n and not covered_by_bundle:
+            # commits on other local branches, tags (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
+            others = [b for b in (c.get("local_only_branches") or [])
+                      if not (head_row and b["branch"] == c["branch"])]
+            more = num(c.get("local_only_branches_uncounted"))
+            names = ", ".join([f"{code('{}', b['branch'])} ({num(b['count'])})" for b in others]
+                              + [f"tag {code('{}', t['tag'])} ({num(t['count']) or 'tag only'})" for t in tag_others])
+            tail = f" and {more} more branches or tags" if more > 0 else ""
+            if others or tag_others:
+                kind = "branches and tags" if tag_others else "branches"
+                what.append((f"local-only commits on other {kind}: {names}" if head_row
+                             else f"{local_n} local-only commits on {names}") + tail)
+            else:
+                what.append(f"{local_n} local-only commits (branches not itemised)" + tail)
+            lo_cmd = [shcode("git -C {} -c core.hooksPath=/dev/null push origin refs/heads/{}:refs/heads/{}", raw_p, b["branch"], b["branch"])
+                      for b in others if b["branch"] != "HEAD" and ODD_NAME not in b["branch"]]
+            odd_names = any(ODD_NAME in b["branch"] for b in others) or any(ODD_NAME in t["tag"] for t in tag_others)
+            # a tag is pushed by its full ref name, like a branch: a tag named like an option never reaches git's parser
+            lo_cmd += [shcode("git -C {} -c core.hooksPath=/dev/null push origin refs/tags/{}:refs/tags/{}", raw_p, t["tag"], t["tag"])
+                       for t in tag_others if ODD_NAME not in t["tag"]]
+            bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
+                            ck, raw_p, f"{ck}/local-only.bundle")
+            if no_push:
+                cmd.append(bundle + cred_note)
+            elif num(c.get("local_only_other_refs")):
+                # a commit only a ref outside refs/heads and refs/tags holds is in no push refspec (Codex pass 53, P1)
+                cmd.append(bundle + " (some local-only commits are on refs outside refs/heads and refs/tags, which a push of branches and tags leaves behind: bundle)")
+            elif more > 0:
+                # branches and tags past the scan's cap are in no itemised push (adversary round 59, MEDIUM)
+                cmd.append(bundle + f" ({more} more branches or tags are not itemised, so no push can name them all: bundle)")
+            elif odd_names:
+                cmd.append(bundle + ODD_NAME_NOTE)  # one bundle holds every ref; no push can name the odd one
+            else:
+                cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
+            if c.get("shallow"):
+                cmd[-1] += shallow_note
+            need = need if need.startswith(("yes", "**yes")) else (
+                cred_need if no_push else "yes: bundle it; a push would leave commits on other refs behind" if (num(c.get("local_only_other_refs")) or more > 0)
+                else "yes: pushing a branch publishes it; pick push or bundle")
+        if zero_tags and not (local_n and not covered_by_bundle):
+            # a local tag origin lacks on a commit origin has: no commit count sees the tag object and no branch
+            # bundle holds it; its name, annotation and signature are lost with the checkout (Codex pass 31 on PR 27)
+            shown = ", ".join(code("{}", t["tag"]) for t in zero_tags[:5])
+            more = max(len(zero_tags) - 5, 0)
+            what.append(f"{len(zero_tags)} local tag(s) origin lacks: {shown}" + (f" and {more} more" if more else ""))
+            # every tag at once, bounded whatever their number (adversary round 37): one origin already has at the
+            # same object is up to date; one it has at another object is rejected, loudly
+            bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
+                            "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
+            cmd.append(bundle + cred_note if no_push else shcode("git -C {} -c core.hooksPath=/dev/null push origin --tags", raw_p) + " or " + bundle
+                       + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
+            if c.get("shallow"):
+                cmd[-1] += shallow_note
+            need = need if need.startswith(("yes", "**yes")) else (
+                cred_need if no_push else "yes: pushing a tag publishes it; pick push or bundle")
+        if c.get("lfs_store"):
+            # a bundle, a stash or reflog pack and a patch hold LFS pointers only and the generated push runs with hooks
+            # off, so LFS's pre-push upload never runs: the payloads are in the store (Codex pass 52 on PR 27, P1; every
+            # capture reason, not only unpushed commits: Codex pass 53 P1, adversary round 58 MEDIUM)
+            # `lfs_store` is the resolved `objects` directory (a symlink on the way is followed by the scan, one inside
+            # the store is kept as a link: no `tar -h`, adversary round 60, LOW 1); restore with `tar -C <objects> -xf`
+            cmd.append("Git LFS payloads (the pointers in any bundle, patch or pack are all those hold) are in the LFS store (its `objects` directory); archive it: "
+                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} .", ck, c["lfs_store"], f"{ck}/lfs.tar"))
+        if hidden:
+            what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
+            cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
+            need = need if need != "no" else "yes: decide whether their edits are work"
+        if reflog:
+            # a routine amend, rebase or squash-merge leaves such entries too, for `gc.reflogExpireUnreachable` (30 days
+            # by default), so the count is a prompt to look, not proof of lost work (adversary round 38)
+            what.append(f"{reflog} reflog-only commit(s) (left by a reset, amend, rebase or squash-merge in the last ~30 days; "
+                        "no ref holds them; an older stash entry's base counts here too)")
+            # the pack holds only what origin lacks, so it restores into a clone that has origin's history and this
+            # checkout's bundles; a ref must then hold each commit or the next `gc` prunes it again (round 38)
+            cmd.append(shcode(REFLOG_FMT, *reflog_values(raw_p, ck))
+                       + " (restore into a clone, after this checkout's bundles, by copying the `.pack` and `.idx` into "
+                       "`.git/objects/pack/`, then `git update-ref refs/recovered/<sha> <sha>` for each commit line of "
+                       "`reflog-only.list`, the lines with no path)")
+            need = need if need != "no" else "yes: decide whether they are work"
+        if modified:
+            what.append(f"{modified} modified tracked file(s)")
+            # `status` counts staged changes too; a plain `diff` is worktree against index and misses them, so
+            # the index gets its own patch (`--cached` works in an unborn repository too; Codex pass 20 on PR 27);
+            # `--binary` keeps a changed binary file's bytes, a plain diff says only "Binary files differ" (pass 21).
+            # Every checkout gets its own patch: that a path names a cow pasture of another checkout proves nothing
+            # about its content (Codex pass 24; the generator used to infer "preserved in the primary" from the name)
+            # (Codex pass 30: `--no-textconv` and friends, and an archive of the changed files: see `modified_fmt`)
+            cmd.append(shcode(modified_fmt(), *modified_values(raw_p, ck)))
+            need = need if need != "no" else "yes: decide whether they are work"
+        if stashes:
+            what.append(f"{stashes} stash" + ("es" if stashes > 1 else ""))
+            # every stash entry, not stash@{0} alone, each with its untracked files (Codex pass 20, adversary round 26)
+            cmd.append(shcode(STASH_FMT, *stash_values(raw_p, ck))
+                       + " (a worktree patch and an index patch per entry, `stash.patch` and `stash-index.patch` for `refs/stash` alone when its reflog expired; restore with "
+                       + code("git apply --allow-empty --cached <index patch> && git apply --allow-empty <patch>") + ")")
+# `--allow-empty` (git 2.35+): a plain `git stash` of unstaged edits has an index equal to the base, so its index patch
+# is empty and a bare `git apply` of it exits 128, skipping the worktree patch behind the `&&` (adversary round 37)
+        if real_untr > 0:
+            what.append(f"{real_untr} untracked ({', '.join(code('{}', visible(u)) for u in untr[:3])}"
+                        f"{', ...' if len(untr) > 3 else ''})")
+            # every untracked path, not the sample shown: an archive from `ls-files`, or `add -A` (which also
+            # stages the modified tracked files) on a branch (Codex pass 7 on PR 27). Two commands joined by
+            # `&&`, the list in a file: `ls-files | gtar` exits 0 when ls-files fails (Codex pass 9). Every checkout,
+            # a cow pasture of another one included: the name proves nothing about the content (Codex pass 24)
+            cmd.append("archive every untracked path: "
+                       + shcode(UNTRACKED_FMT, *untracked_values(raw_p, ck))
+                       + ("" if no_push else " or " + shcode("git -C {} add -A -- .", raw_p)
+                          + " on a branch, commit and push (stages the modified tracked files too)"))
+            need = need if need != "no" else "yes: decide whether they are work"
+        embedded_list = c.get("embedded_repos") or []
+        if embedded_list and real_untr <= 0:
+            # found beneath an index-hidden path, or a tracked file a directory replaced, only: no untracked row above names it (Codex pass 55 on PR 27, P2)
+            what.append(f"{len(embedded_list)} embedded repositor{'y' if len(embedded_list) == 1 else 'ies'} below index-hidden or replaced tracked paths")
+            need = need if need != "no" else "yes: decide whether they are work"
+        # the list names an embedded repository's directory, not its files, and the archive takes no directory's
+        # contents (`--no-recursion`): its ignored files and git metadata stay out of the non-ignored capture. The
+        # repository is its own checkout: scan it, or archive the directory whole (Codex pass 50 on PR 27, P2)
+        pointers = set(c.get("embedded_pointer_repos") or [])
+        for i, e in enumerate(c.get("embedded_repos") or []):
+            name = e.rstrip("/")  # the real name (`ls-files -z`); `--no-unquote` keeps tar from reading it as a quoted one
+            if e in pointers:
+                # its `.git` is a file or symlink: the directory archive holds the pointer, not the commits (round 57, LOW 4)
+                cmd.append(f"embedded repository {code('{}', visible(e))}: its `.git` points elsewhere (a separate gitdir or a linked "
+                           "worktree), so archiving the directory keeps no commits; scan it as a checkout of its own")
+                continue
+            cmd.append(f"embedded repository {code('{}', visible(e))}: archived as an empty entry in the archives above; its own state is not captured. "
+                       "Scan it as a checkout of its own, or archive it whole (its ignored files and `.git` included): "
+                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} --no-unquote -cf <DEST>/{} -- {}",
+                                ck, raw_p, f"{ck}/embedded-{i}.tar", name))
+        if unreachable:
+            # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or
+            # force-pushed branch leaves stale, so even a 0 hides commits (adversary round 21, 1)
+            what.append("local-only count unverified: origin url holds a credential or names a remote helper, not queried" if credential
+                        else "local-only count unverified: origin did not answer")
+            again = ("or remove the password (or the remote helper) from the origin url (ssh or a credential helper) and re-scan with "
+                     "`--remote`" if credential else "or re-scan with `--remote` once origin answers")
+            if local_n and not covered_by_bundle:  # the local-only branch above already printed the bundle command
+                cmd.append(again)
+            else:
+                cmd.append(shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
+                                  ck, raw_p, f"{ck}/local-only.bundle")
+                           + shallow_note + " " + again)
+            need = need if need.startswith(("yes", "**yes")) else (
+                "yes: origin not queried (its url holds a credential or names a remote helper); bundle" if credential
+                else "yes: origin did not answer; bundle, or re-scan")
+        if submodules:
+            # the scan's status and local-only counts ignore submodules and discovery stops at the superproject: a
+            # submodule's modified, untracked or unpushed work is in no count above (Codex pass 18 on PR 27)
+            what.append("submodules not inspected: their modified, untracked or unpushed content is in no count here")
+            # an absorbed submodule carries `core.worktree`, which this scanner refuses (`skipped: worktree redirected`,
+            # adversary round 24), so the inspection is by hand, inside each submodule. The paths are the ones the scan
+            # vetted (`submodules_vetted`), each quoted in its own commands: no template, no `.gitmodules` listing for
+            # the human to read and paste back (adversary rounds 43-46)
+            vetted = c.get("submodules_vetted")
+            modules = shcode(MODULES_FMT, *modules_values(raw_p, ck))
+            if not isinstance(vetted, list):
+                # a scan JSON from a version before `submodules_vetted`: there is no path the plan may name
+                cmd.append("this record lists no vetted submodule path (scanned by an older version): re-scan with this "
+                           "version to get per-submodule commands; until then archive every module git dir, which holds "
+                           "the commits of each submodule, with " + modules + " before any cleanup")
+            elif not [s for s in vetted if vettable(s)]:
+                cmd.append("no submodule is checked out (each is de-initialised or never initialised): its commits live under "
+                           "the git dir's `modules/`, which this archive keeps: " + modules + " before any cleanup")
+            else:
+                sets = [f"{code('{}', shquote(sub))}: " + ", ".join(submodule_commands(raw_p, ck, sub))
+                        for sub in vetted if vettable(sub)]
+                if any(isinstance(sub, str) and sub and not vettable(sub) for sub in vetted):
+                    sets.append("a path in `submodules_vetted` that is absolute or holds `..` was left out (a hand-edited record?)")
+                # the module git dirs hold a de-initialised or removed submodule's commits, which no command above can
+                # reach (adversary round 42)
+                cmd.append("in each checked-out submodule the scan vetted, the path is in the command: " + "; ".join(sets)
+                           + " and " + modules + " before any cleanup (each command fails, saying so, if its submodule is no "
+                           "longer a checkout; a de-initialised one is an empty directory whose commits live under the git "
+                           "dir's `modules/`, which the last archive keeps; the scanner skips absorbed submodules: "
+                           "`core.worktree`)")
+            need = need if need.startswith(("yes", "**yes")) else "yes: inspect each submodule first"
+        w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
+    w("")
+    w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks, HEAD only; "
+      "see limit 9). Every emitted `bundle create` runs with `GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null "
+      "GIT_NO_REPLACE_OBJECTS=1`, like the scan's own counts: a grafts file or replace ref would otherwise leave "
+      "real objects out of the bundle (`GIT_ADVICE=0`, git 2.46+, silences the grafts-deprecation hint that "
+      "`GIT_GRAFT_FILE` provokes on every bundle; older gits ignore it). A `skipped` / `scan incomplete` checkout has "
+      "no counts (its verdict is in the section 2 table) and is listed with a whole-directory archive: anything "
+      "may be in there. A `skipped: submodule config unrecognised (nested submodule)` checkout has a submodule with "
+      "a `.gitmodules`, a gitlink, an untracked repository or a repository at a skip-worktree or assume-unchanged path (or where an ordinary tracked file stood: `status` shows only its deletion) of its own: an edit or commit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
+      "archive holds it. One ending `(alternates)` has a module whose objects live in another store that no archive "
+      "here holds, and any other `skipped` or `scan incomplete` row of a checkout whose own `objects/info/alternates` is not empty, whose `objects`, `refs`, `logs`, `packed-refs` or `shallow` is a symlink out (or holds a symlink inside `objects/`, `refs/` or `logs/`), or whose git dir does not point back to the checkout says the same: the row says so and refuses a cleanup until those commits are bundled. The git dir must point back to the checkout: `skipped: git dir redirected (commondir)` is a `.git` directory holding a `commondir` entry, and `skipped: git dir redirected (does not point back to this checkout)` is a `.git` gitfile whose git dir has no `gitdir` file naming this checkout's `.git` and no `core.worktree` naming this checkout (a linked worktree and an absorbed submodule have one; `--separate-git-dir` writes neither, so a checkout made with it is skipped here although git reads it fine), or whose `commondir` names a common dir that does not hold it as `worktrees/<name>`, or that cannot be read; the scan ran no git there, since every call would act on that directory, and the row lists `git dir -> <target>` (and `commondir -> <target>`), which its git-dir command archives (a symlinked member of the store, or a `commondir` in a `.git` directory, is a store no archive holds, and the row says so). A checkout flagged `origin unreachable` is "
+      "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
+      "unverified, so a 0 there is not `clean and pushed`. A checkout flagged `submodules not inspected` is "
+      "always listed too: no count here covers a submodule's content.\n")
+
+    # ---- 4 caveats
+    w("## 4. Limits of this scan\n")
+    w("1. Bigteam `unique` means \"no document under three roots mentions the task name\"; it does not "
+      "read the reports. A mention in `site-private/memory` is counted as preserved even if the report "
+      "itself is only here.")
+    w("2. Directories are classified by name, not content: the 93 `scratch` dirs were not opened, so a "
+      "decision note in a file not named `*report*.md` (for example `findings.md`, `decision.md`, "
+      "`out.txt`, `final.txt`) is not detected. Count of such files was not measured.")
+    w("3. `du` totals ~64 GB here against ~61 GB in the slice 1 inventory: a different tool and a "
+      "later moment (sessions kept writing during both).")
+    w("4. `ls-remote` needs the remote to answer; a checkout whose origin refused would show "
+      "`on origin: unknown` in the run's tool. None did in this run. The current tool falls back to the "
+      "local `refs/remotes/origin/*` for the count and makes the checkout `origin unreachable: local-only "
+      "count unverified`, never `clean and pushed`; an advertisement of more than 16 MiB is killed and read the same way, "
+      "never as the part of it that arrived.")
+    w("5. A pasture that was clean when created can become dirty or ahead later; this is a snapshot "
+      f"at {d['scanned_at']}.")
+    w("6. The scan ran with the first version of the tool, which did not look at a checkout's own config "
+      "before running git there. The config of the scanned checkouts was not read afterwards for "
+      "command-naming keys (`core.fsmonitor`, `core.sshCommand`, `remote.*.uploadpack`, `filter.*`, "
+      "`credential.*`, `core.hooksPath`, `include.*`), so this document cannot say none of them ran "
+      "something. The current tool scans only a checkout whose config uses allowlisted keys and lists any other as `skipped: unrecognised config <key>`.")
+    w("7. The run's `--fetch` could have moved `refs/remotes/origin/<branch>` and `FETCH_HEAD` in the "
+      "checkouts where it fetched; which ones it touched was not recorded.")
+    w("8. The run's tool read a failed or timed-out git call as \"nothing found\", so a `clean and pushed` "
+      "row above is only as good as every git call in that run having succeeded; failures were not "
+      "recorded. A fresh scan with the current tool reports such a checkout as "
+      "`scan incomplete: <call> rc=<n>`. Likewise whether any scanned checkout was a partial clone "
+      "that downloaded objects during the run was not checked.")
+    w("9. The run's tool counted only the commits of HEAD that lie on no origin ref, so a `clean and pushed` "
+      "row above can still hold commits on another local branch, and a checkout on a detached HEAD or "
+      "with an origin that did not answer was never checked against that. A fresh scan with the current "
+      "tool counts them over HEAD and every local ref (notes and replace refs included) (`local_only_commits`, `local_only_branches`) "
+      "and reports any as `unpushed commits`; none of the rows above was re-checked this way.")
+    w("10. `--remote` believes the refs origin advertises (`ls-remote`): an origin that names a ref for an object "
+      "it does not hold, or a hostile one that names a local-only commit, makes that commit count as pushed. The "
+      "origin is the operator's own server and nothing is deleted by this tool, but a `clean and pushed` verdict "
+      "from a `--remote` scan is evidence, not proof of possession: before removing the only checkout of work, "
+      "bundle it (`git -C <checkout> bundle create <file> --all`; a `clean and pushed` checkout has no row above) or "
+      "fetch the branch from origin into a scratch clone and compare `git rev-parse` (2026-10-23, "
+      "Codex pass 56 security review on PR 27).\n")
+
+    # ---- 5 commands
+    w("## 5. Commands run\n")
+    w("`W` is the slice's scratch dir under "
+      "`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/phase0-scan-work`. Besides writing `W`, the "
+      "run's only effects outside this pasture were the `fetch` calls described above.\n")
+    w("```sh")
+    w("python3 -I bin/ade-scan-state --json \\")
+    w("  --bigteam ~/.local/state/bigteam \\")
+    w("  --ref-root ~/src/djbclark-ade/docs --ref-root ~/ops/site-private/memory \\")
+    w("  --ref-root ~/.local/state/handoffs --exclude 'ade-everywhere-phase0-scan-*.md' \\")
+    w("  --git-root ~/orca/workspaces --git-root ~/orca/projects --git-root ~/.cow/pastures \\")
+    w("  --remote --fetch > $W/scan.json 2> $W/scan.err; echo rc=$? > $W/scan.rc")
+    w("python3 -I bin/ade-scan-state-doc $W/scan.json docs/ade-everywhere-phase0-scan-2026-10-20.md")
+    w("```\n")
+    w("The first command is the run as executed. With the current tool the same scan adds "
+      "`--git-root ~/src/djbclark-ade --git-root ~/src/one-offs` (symlinks under a root are not followed), "
+      "its `--fetch` is `git -c maintenance.auto=false -c gc.auto=0 fetch --no-auto-maintenance "
+      "--no-write-fetch-head --no-tags --refmap= origin refs/heads/<branch>`, every git call runs with "
+      "`GIT_NO_LAZY_FETCH=1` (so the only network calls remain `ls-remote` and that fetch), and a "
+      "checkout whose config names a command is listed as skipped.\n")
+    w("Inside the tool: `du -sk <dir>`; `rg -l -F -w --no-messages -g '!<exclude>' -- <task> <roots>`; "
+      "per checkout `git -C <path>` (in the run as executed, with `GIT_OPTIONAL_LOCKS=0` and the caller's "
+      "other `GIT_*` variables; now `git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null "
+      "-c protocol.ext.allow=never` with every `GIT_*` variable dropped, preceded by `config --list "
+      "--show-scope --includes -z`): `rev-parse --abbrev-ref HEAD`, "
+      "`status --porcelain`, `rev-parse --abbrev-ref --symbolic-full-name @{u}`, "
+      "`rev-list --count @{u}..HEAD`, `rev-list --count HEAD --not --remotes=origin`, `stash list`, "
+      "`remote get-url origin`, `ls-remote --heads origin` (now `ls-remote --heads -- <url>` from an empty "
+      "directory outside any repository), `rev-list --count HEAD --not --remotes=origin <tip>`, "
+      "`fetch --quiet origin <branch>` (only when the tip's objects are missing). "
+      "`bin/ade-scan-state ... --markdown` prints the raw tables; this document's tables and prose come from "
+      "`bin/ade-scan-state-doc`. Before the run: `ls -la ~/orca/projects`, "
+      "`ls -A ~/orca/workspaces/*`, `fd -H .git -d 4 ~/orca/workspaces`, `git -C ~/src/one-offs remote -v` "
+      "(no output: no remote), and `du -sk ~/.local/state/bigteam/adhoc-2026-10-18/hm-promo-rehearsal/*` "
+      "for 1.1.")
+    return "\n".join(out) + "\n"
+
+
+def main(argv):
+    args = [a for a in argv[1:] if a != "--force"]
+    if len(args) != 2:
+        sys.exit(__doc__)
+    check_paths(args[0], args[1], "--force" in argv)
+    with open(args[0]) as f:
+        d = json.load(f)
+    write_atomic(args[1], render(d))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

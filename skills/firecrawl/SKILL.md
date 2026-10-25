@@ -46,7 +46,8 @@ TUI links it through `skill-everywhere`; edit only here.
    unreachable/timeout, (b) 404 (routes not in self-hosted: agent, monitor,
    ...), (c) 5xx, (d) a bot-walled scrape (page status 202/403/405/429/503, or a
    short page whose text is one of the named challenges), or (e) an empty map or
-   search. Never the other way: a commercial 429 or 402 never sends work back.
+   search. Never the other way: a commercial 429 or 402 never sends work back. With no commercial key it answers
+   `/v2/search/developer` itself from GitHub (section "Tools").
    Crawl jobs stay on the backend that started them (job id → backend map;
    absolute `url`/`next` links in responses are rewritten to point back at the
    router). The response header `X-Firecrawl-Backend` names the backend used;
@@ -81,6 +82,21 @@ Self-hosted exposes `firecrawl_scrape`, `firecrawl_search`, `firecrawl_map`,
 batch and deep-research variants. The cloud-only tools (`firecrawl_agent*`,
 `firecrawl_monitor_*`, `firecrawl_research_*`, `firecrawl_interact*`) are
 listed in self-hosted too but route to commercial via the router when called.
+
+`firecrawl_developer_search` (and `firecrawl_search` with `categories: ["developer"]`) is answered by the **Hyades API
+itself** since 2026-10-24: Firecrawl mounts the route only when `RESEARCH_PROXY_URL` is set, and ours points at the
+`devsearch` sidecar in the `djbclark-fc-searxng` microVM, which answers from the **GitHub search API** (issues, merged
+pull requests, READMEs, docs and code files of **public** repositories) in Firecrawl's shape with `source: "github"`, a
+per-kind `coverage` and a `warning`; there is no reranking and no non-GitHub documentation site. The router forwards
+it like any other route (it answered it itself from 2026-10-24 until the cutover, PRs 41, 43, 45). GitHub ANDs every
+word, so write a few distinctive terms (a name, an error string), not a sentence; a search that finds nothing is
+retried once with fewer terms (never when `repos` scopes it). The token (a fine-grained public-repositories-read-only
+one) and the egress through the vps-primary and pastebin proxy legs live on the Hyades side: firecrawl-hyades
+`docs/developer-search.md`. Limits are GitHub's 30 searches/min (10 for code search), shared by everyone using the
+token: results are cached 10 minutes, a rate-limited GitHub is answered from a result up to an hour old (with a
+`warning`), otherwise HTTP 429 with `Retry-After`. Only `query`, `k` and `types`/`repos` (one `owner/name`)/`language`/
+`passages` are honoured; the other developer filters are a 400. The token expires (check
+github.com/settings/personal-access-tokens); after that code search returns 401 and the search degrades with a `warning`.
 
 ## Search order
 

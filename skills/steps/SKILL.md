@@ -13,7 +13,7 @@ description: >-
 
 Canonical copy: `~/src/djbclark-ade/skills/steps/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it via a direct skill-everywhere link `~/src/djbclark-ade/skills/steps`.
 Hermes Telegram `/steps` is native skill slash. It injects this skill; call `clarify` (section 2b) so Telegram shows one button per choice. Do not register a plugin command that returns this file — that dumps the markdown and never starts the walk.
-Claude Code: `site-private/claude/commands/steps.md` → `~/.claude/commands/`.
+Claude Code: `~/src/djbclark-ade/claude/commands/steps.md` → `~/.claude/commands/steps.md` (symlink; `/steps` is also native skill slash).
 Grok Bot: a rendered copy `ade-steps` in `/home/box/agent-data/workflows/` (skill-everywhere `grokbot`
 target, synced nightly by `/home/box/agent-data/shared/skills-sync/sync.sh`; 2026-10-23).
 
