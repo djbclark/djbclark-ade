@@ -478,13 +478,18 @@ has already been violated by a real agent on this machine:
 - **Launch no agents.** No herdr panes, `acp-run`/`acp-dispatch` or Agent
   calls of its own: only the orchestrator decides and dispatches what comes
   next. ("Hand off the way this was handed to you" was once read as that.)
-- **A review or probe that exercises `acp-dispatch` dispatch, resume or reroute
-  pins `--acp-run <scratch fake>` and asserts the new record's `cmd[0]` equals it
-  before trusting the result** (2026-10-25: a reroute probe omitted it, fell
-  through to the live Codex runner, ran 98 s and sent a real `hermes-ping`).
-  An adversary or review brief says "no live agent, no network, no notifications"
-  in exactly those terms: fake runner pinned and checked, no `hermes-ping`, no
-  fetch.
+- **A review or probe that exercises `acp-dispatch` pins the runner and checks
+  it before trusting the result.** `dispatch` and `reroute` take
+  `--acp-run <scratch fake>`: pin it and assert `shlex.split(rec["cmd"])[0]`
+  equals the fake (`cmd` is a shell-quoted string). `resume` has no
+  `--acp-run`; its new record inherits the resumed record's runner
+  (`old_cmd[0]`), so assert the ORIGINAL scratch record's
+  `shlex.split(rec["cmd"])[0]` equals the fake before resuming and the resumed
+  record's afterwards, and never resume a record whose runner the reviewer did
+  not create (2026-10-25: a reroute probe omitted the pin, fell through to the
+  live Codex runner, ran 98 s and sent a real `hermes-ping`). An adversary or
+  review brief says "no live agent, no network, no notifications" in exactly
+  those terms: fake runner pinned and checked, no `hermes-ping`, no fetch.
 - **Verify before acting.** Findings handed to an agent were written by another
   AI. Tell it so, and tell it that reporting a finding as wrong is a better
   outcome than a confident wrong edit.
