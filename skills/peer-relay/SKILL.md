@@ -17,7 +17,11 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
    names the file's absolute path.
 2. **Find the ident first** when you do not have it: `python3 -I ~/src/djbclark-ade/skills/session-finder/session-find.py "<topic>"`
    (or `fleet.py list`). `relay.py <ident> "x" --plan` prints the routes it would try and sends nothing.
-3. **Read the exit code.** 0 = delivered or queued. 1 = not sent (every route failed, listed on stderr) or sent but
+3. **Read the exit code.** 0 = delivered, **or queued** (stdout `queued: <id> ...`: the peer is working and cannot take it
+   now, so relay stored it and a detached deliverer sends it when the peer is idle; it never sends it twice, and, when it can identify you, tells you
+   with one `relay: your message to ... was failed|expired|unverified` line if it cannot: do not resend a queued message,
+   `relay.py --pending` lists it, `relay.py --cancel <id>` withdraws it). 1 = not sent (every route failed, listed on
+   stderr; also "deferred queue full") or sent but
    unverified: **never resend** an "unverified" message, a second copy would be delivered. 2 = usage.
    **A relay.py that is cut off, times out or is killed counts as unverified, not as failed.** To a Hermes conversation
    it prints `hermes turn started ... do not resend` to stderr first, and waits up to max(100, `--wait`) seconds.
@@ -25,10 +29,13 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
    tool timeout that kills the whole process tree also kills the relayed turn mid-way, and your retry would run it
    twice. If a line says "WAS sent" and the final line says "not sent: Hermes does not know session", the final line wins.
 4. **It refuses on purpose:** this very session, a finished session (`/handoff`, `/quit`), and one blocked on a
-   question or permission prompt (a Paseo agent with a pending permission card included). A send to a WORKING codex, omp,
-   opencode or pi Paseo agent is refused too, because Paseo replaces its running turn when the provider declines a steer:
-   `relay.py <ident> "x" --steer` sends anyway, `--idle S` waits for idle first (other flags: `--wait S`, `--via ROUTE`,
-   `--plan`, `--json`). Do not work around a refusal with another channel; tell djbclark.
+   question or permission prompt (a Paseo agent with a pending permission card included), an archived Paseo agent, a text
+   starting with `/` or `!`. A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
+   not made at once, because Paseo replaces its running turn when the provider declines a steer: relay queues it (item 3).
+   `relay.py <ident> "x" --steer` sends a codex/omp/opencode/pi one anyway, `--idle S` waits for idle first and blocks
+   (it wins over queueing), `--no-defer` refuses (exit 1) instead of queueing, `--defer-for S` sets how long a queued
+   message may wait (default 6 h, at most 24 h; other flags: `--wait S`, `--via ROUTE`, `--plan`, `--json`). Do not work
+   around a refusal with another channel; tell djbclark.
 5. **Do not hand-roll** `paseo send`, `herdr pane send-text`, `acp-dispatch tell` or socket writes: relay.py owns the
    gates and the verification.
 6. **A message tagged `[relay from <name>] ...` that reached you through `hermes --resume -z` is answered by your

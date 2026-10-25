@@ -2,7 +2,7 @@
 """relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
     relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
-    relay.py --pending [--json] | --cancel ID | --sweep       (the deferred messages, below)
+    relay.py --pending [--text] [--json] | --cancel ID | --sweep       (the deferred messages, below)
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it)
 
@@ -114,25 +114,40 @@ a retry of text left in a box submits it and types nothing. A socket frame to a 
 
 DEFERRED SEND (2026-10-24). When the only obstacle is that the target is WORKING (a Paseo agent whose provider cannot
 steer, or a codex/omp/opencode/pi one without --steer; a non-Claude pane TUI that is working), relay neither refuses
-nor blocks: it writes a 0600 record ~/.local/state/relay/deferred/<id>.json (id = timestamp + hash; text, target,
-sender label, expiry, state queued|sending|delivered|failed|expired|cancelled), starts a detached `relay.py --deliver
-<id>` and exits 3 with `queued: <id> ...` (`"state":"queued"` with --json). The deliverer looks at the target every 5 s
-and, once it is idle, sends through this same path (every gate, lock and proof) the stored text prefixed `[queued Nm
-ago] ` (omitted under a minute), under the stored sender label. A target that is gone, archived, finished or asking for
-a permission makes the message `failed`; past its expiry (default 6 h, `--defer-for S`, at most 24 h) it is `expired`.
-One deliverer per record (a lock); messages to one target go out in order; a record is never sent twice: `sending` is
-written first, and a deliverer that died then leaves it `failed` ("unverified, do not resend; check its pane"). An
-identical text queued again for the same target is collapsed into the first record. On `failed` or `expired` ONE notice
-`relay: your message to <target> was <state>: <reason>` goes to the sender (PASEO_AGENT_ID, else its fleet row) with
---no-defer, so a notice is never queued and never itself produces one; every event is also appended to
-~/.local/state/relay/deferred.log (no text). `--sweep` (also run cheaply at the start of every relay) re-starts a
-queued record whose deliverer is gone (a reboot), expires old ones and prunes week-old final records. `--pending`
-lists the records, `--cancel ID` withdraws a queued one. Not deferred, still refused (exit 1): archived, pending
-permission, wrong directory, no route, text starting with `/` or `!`; `--idle S` keeps its blocking meaning and wins;
-`--steer` is unchanged; `--no-defer` restores the refusal; `--plan` sends and queues nothing.
+nor blocks: it writes a 0600 record ~/.local/state/relay/deferred/<id>.json (id = timestamp + hash; text, target and its
+identity, sender label, sender ids, expiry, state queued|sending|delivered|failed|expired|cancelled), starts a detached
+`relay.py --deliver <id>` and EXITS 0 with `queued: <id> ...` (`"state":"queued","queued":true` with --json): a queued
+message is accepted, not yet delivered, and a caller that treats exit 0 as "sent" keeps working. The deliverer is
+started with an environment built from scratch (paths, locale, PASEO_CLI and the RELAY_* hooks; never the session ids
+PASEO_AGENT_ID, CLAUDE_CODE_SESSION_ID, HERDR_PANE_ID, ORCA_*, TMUX*, ACP_RUN_AGENT, RELAY_HOPS/HOP_PARENT/SENDER) and
+forks once more, so whichever agent's relay started or re-armed it, it is nobody's child and nobody's `self`: the sender's
+Paseo id, label and hop count come from the record, set at queue time from the sender's own (hosted or fleet-`self`)
+identity. It looks at the target every 5 s (only the head of a target's queue looks) and, once it is idle, sends through
+this same path (every gate, lock and proof) the stored text prefixed `[queued Nm ago] ` (omitted under a minute), under
+the stored label (sanitized again; `--deliver` refuses a record whose label sender_name would not give, and a `hermes xxxx`
+label without stored hops). A target that is gone, archived, finished, asking for a permission, or no longer the same
+session (a pane id reused: its agent, session id, transcript or pid differs from the queue-time values) makes the
+message `failed`; past its expiry (default 6 h, `--defer-for S`, at most 24 h) it is `expired`. One deliverer per
+record (a lock); messages to one target go out in order; at most 20 queued or sending records per target, 20 per sender,
+100 in all (over a bound: exit 1 "deferred queue full (N)", never a silent drop). A record is never sent twice:
+`sending` is written first; a deliverer that died then, or whose send raised, or a record `sending` for 15 minutes, is
+`failed` "unverified, do not resend; check its pane" (it may have been delivered), and it never blocks the records behind
+it. An identical text from the same sender to the same target is collapsed into the first record. On `failed`/`expired`
+ONE notice goes to the sender (its Paseo id, else its fleet id) from a detached deliverer, in the same clean environment
+and with --no-defer, so a notice is never queued and never itself produces one; an unverified one is worded
+"unverified ... do not resend". Every event is also appended to ~/.local/state/relay/deferred.log (no text).
+`--sweep` (also run at the start of every relay, and cheap: it only changes states and starts detached deliverers, never
+sends or waits) re-starts a queued record whose deliverer is gone (a reboot), expires old ones and prunes week-old final
+records. `--pending` lists the records (no text unless `--text`), `--cancel ID` withdraws a queued one. Not deferred,
+still refused (exit 1): archived, pending permission, wrong directory, no route, text starting with `/` or `!`; `--idle S`
+keeps its blocking meaning and wins; `--steer` is unchanged; `--no-defer` restores the refusal; `--plan` queues nothing.
+Residual: PASEO_AGENT_ID, like HERDR_PANE_ID and CLAUDE_CODE_SESSION_ID, is an environment value a same-user process can
+forge, and a record is plain JSON in a 0700 directory of the same user: relay cannot stop such a process from naming
+another agent as the sender or from writing a record itself.
 
 Exit: 0 delivered or queued (verified in the transcript or pane, or for paseo/dispatch/launch, or a socket frame to a working session, the route's
-acknowledgement; an idle session's socket frame is verified in its transcript; for hermes, the turn ran on the stored transcript); 1 not sent (every route failed, listed) or sent but unverified; 2 usage; 3 queued, not delivered yet (deferred send).
+acknowledgement; an idle session's socket frame is verified in its transcript; for hermes, the turn ran on the stored transcript;
+queued: a deferred send, `queued: <id>` on stdout, delivered later or the sender is told); 1 not sent (every route failed, listed) or sent but unverified; 2 usage.
 """
 import argparse
 import contextlib
@@ -810,10 +825,10 @@ def paseo_steer_refusal(s, steer=False):
     if prov in fleet.PASEO_STEER_PROVIDERS:
         return (f"its {prov} Paseo agent is {s.get('status')}: Paseo replaces a running turn when {prov} declines a steer "
                 "(a review turn, a steer error), which this relay cannot see beforehand (--idle S waits for it to go idle; "
-                "--steer sends anyway; unless --no-defer, relay queues it and delivers it when the agent is idle, exit 3)")
+                "--steer sends anyway; unless --no-defer, relay queues it and delivers it when the agent is idle: `queued: <id>`, exit 0)")
     return (f"its {prov or 'unknown'} Paseo agent is {s.get('status')} and that provider cannot steer: a send would "
             "interrupt and replace its running turn (--idle S waits for it to go idle; unless --no-defer, relay queues it "
-            "and delivers it when the agent is idle, exit 3)")
+            "and delivers it when the agent is idle: `queued: <id>`, exit 0)")
 
 
 HEX_PREFIX = re.compile(r"[0-9a-f][0-9a-f-]{5,35}")    # a Paseo agent id prefix: 6 or more characters of a uuid
@@ -905,13 +920,19 @@ def is_slash(text):
 HERMES_SENDER = re.compile(r"hermes [A-Za-z0-9_-]{1,8}")    # what `hermes_env` sets: "hermes " and the last 8 characters of the session id
 
 
+def safe_label(name):
+    return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name or ""), 40) or "unknown"
+
+
 def sender_name(listed):
     """Who is relaying, as one safe label: the label a deliverer sends under (the one stored when the message was
-    queued), this session's fleet row name or id, the fleet row of the PASEO_AGENT_ID this process was handed (a
-    Cline, Codex or omp agent under Paseo has no Claude registry row, so no `self` row), that Paseo agent's short id,
-    this Claude session's id, else "unknown"."""
+    queued, sanitized again here, and a `hermes xxxx` one only inside a relayed Hermes turn, as for RELAY_SENDER), this
+    session's fleet row name or id, the fleet row of the PASEO_AGENT_ID this process was handed (a Cline, Codex or omp
+    agent under Paseo has no Claude registry row, so no `self` row), that Paseo agent's short id, this Claude
+    session's id, else "unknown"."""
     if SENDER_OVERRIDE[0]:
-        return SENDER_OVERRIDE[0]
+        label = safe_label(SENDER_OVERRIDE[0])
+        return "unknown" if HERMES_SENDER.fullmatch(label) and not hermes_hops() else label
     if hermes_hops() and HERMES_SENDER.fullmatch(os.environ.get("RELAY_SENDER", "")):
         return os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller; any other name is a forgery
     me = next((x for x in listed if x.get("self")), None) or {}
@@ -919,7 +940,7 @@ def sender_name(listed):
     if not me and UUID.fullmatch(own):
         me = next((x for x in listed if own in (x.get("paseo"), (x.get("chan") or (None, None))[1])), None) or {"id": own[:8]}
     name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
-    return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name), 40) or "unknown"
+    return safe_label(name)
 
 
 def claude_socket(s):
@@ -1515,11 +1536,22 @@ DEFER_MAX = 24 * 3600
 DEFER_POLL = 5             # seconds between the deliverer's looks at the target
 DEFER_KEEP = 7 * 86400     # a finished record is pruned by a sweep after a week
 DEFER_MISSES = 3           # consecutive looks that cannot find the target before the message fails
+DEFER_SENDING_MAX = 15 * 60    # a record `sending` this long is failed "unverified": it must not block its target's queue
+DEFER_PER_TARGET, DEFER_PER_SENDER, DEFER_TOTAL = 20, 20, 100    # queued or sending records; over a bound a send is refused
 DEFER_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 DEFER_FINAL = ("delivered", "failed", "expired", "cancelled")
 UNVERIFIED_WHY = "unverified, do not resend; check its pane"
+LABEL_OK = re.compile(r"[\u2026A-Za-z0-9._ -]{1,40}")    # what sender_name can produce (the ellipsis is fleet.clip's)
 BUSY = {"hit": False}      # main sets it when it refuses because the target is busy (the deliverer then keeps waiting)
 SENDER_OVERRIDE = [None]   # the label a deliverer sends under (the one stored in the record)
+# What identifies the session a relay runs in. A deliverer is built a new environment: it keeps none of these (a sweep
+# can start one from ANY agent's process, and fleet would mark that agent's own row `self`), and the sender's Paseo id
+# comes from its record alone. RELAY_HOPS and the other two are set from the record's stored hop count instead.
+SELF_IDS = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "CLAUDE_CODE_SESSION_ID", "HERDR_PANE_ID", "HERDR_ENV", "ORCA_PANE_KEY",
+            "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "ACP_RUN_AGENT")
+DELIVER_DROP = SELF_IDS + ("RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER")
+DELIVER_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "PASEO_CLI", "PASEO_HOME")
+DELIVER_KEEP_PREFIXES = ("LC_", "XDG_", "RELAY_")    # RELAY_* are the test and path hooks (DELIVER_DROP removes the identity ones)
 
 
 def defer_dir():
@@ -1534,9 +1566,10 @@ def rec_path(rid):
 
 
 def rec_read(rid):
-    """The record RID as a dict, or None (missing or unreadable). Every field is read with .get by the callers."""
+    """The record RID as a dict, or None (missing, unreadable or a symlink). Every field is read with .get by the callers."""
     try:
-        r = json.loads(rec_path(rid).read_text())
+        with os.fdopen(os.open(rec_path(rid), os.O_RDONLY | os.O_NOFOLLOW)) as fh:
+            r = json.load(fh)
     except (OSError, ValueError):
         return None
     return r if isinstance(r, dict) and r.get("id") == rid else None
@@ -1564,6 +1597,14 @@ def rec_all():
     return sorted(rows, key=lambda r: (float(r.get("created") or 0), r["id"]))
 
 
+def rec_hops(rec):
+    """The stored Hermes hop count; an unreadable one counts as the most there can be (a record is plain JSON)."""
+    try:
+        return max(0, int(rec.get("hops") or 0))
+    except (TypeError, ValueError):
+        return HERMES_HOPS_MAX
+
+
 def state_lock():
     """Every state change of any record holds this short-lived lock (a cancel never races a deliverer's `sending`)."""
     defer_dir()
@@ -1581,11 +1622,11 @@ def deliverer_alive(rid):
         return not got
 
 
-def transition(rid, allowed, **changes):
-    """Apply CHANGES to record RID when its state is one of ALLOWED; the record, or None."""
+def transition(rid, allowed, when=None, **changes):
+    """Apply CHANGES to record RID when its state is one of ALLOWED (and WHEN(record), if given, holds); the record, or None."""
     with state_lock():
         rec = rec_read(rid)
-        if rec is None or rec.get("state") not in allowed:
+        if rec is None or rec.get("state") not in allowed or (when and not when(rec)):
             return None
         rec.update(changes)
         rec_write(rec)
@@ -1602,6 +1643,18 @@ def target_label(rec):
     return f"[{t.get('id') or '?'}] {t.get('name') or '-'}"
 
 
+def sender_key(rec):
+    """Who queued a record: its sender's id (a Paseo agent id or a fleet id), else its label."""
+    return rec.get("sender_ident") or rec.get("sender") or ""
+
+
+def label_ok(label, hops):
+    """True for a stored sender label this process could itself have produced: only the characters sender_name allows, and
+    a `hermes xxxx` label only on a record that carries hops (the Hermes forgery rule; a record is plain JSON)."""
+    return (isinstance(label, str) and LABEL_OK.fullmatch(label) is not None
+            and not (HERMES_SENDER.fullmatch(label) and not hops))
+
+
 def defer_log(rec, state, why=""):
     """One line per event in deferred.log beside the record directory: never the text."""
     stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -1614,9 +1667,9 @@ def defer_log(rec, state, why=""):
 
 @contextlib.contextmanager
 def as_caller(label, scrub=False):
-    """Send under the stored sender LABEL; SCRUB also hides the session's own ids, so a notice to the original
+    """Send under the stored sender LABEL; SCRUB also hides every id of the session, so a notice to the original
     sender is not refused as 'that is this session' and is not labelled as that agent's own message."""
-    saved = {k: os.environ.pop(k) for k in ("PASEO_AGENT_ID", "CLAUDE_CODE_SESSION_ID") if scrub and k in os.environ}
+    saved = {k: os.environ.pop(k) for k in SELF_IDS if scrub and k in os.environ}
     SENDER_OVERRIDE[0] = label
     try:
         yield
@@ -1636,11 +1689,16 @@ def run_captured(argv, sender, scrub=False):
 
 def notify_sender(rec, state, why):
     """ONE best-effort notice to the sender of a record that failed or expired, through the normal relay with
-    deferral off: it is never queued, so it never produces a record or a notice of its own."""
+    deferral off: it is never queued, so it never produces a record or a notice of its own. An unverified send is
+    worded as unverified (it may have been delivered), never as a plain failure."""
     ident = rec.get("sender_ident")
     if not ident:
         return
-    text = f"relay: your message to {target_label(rec)} was {state}: {why}"
+    why = str(why or "")
+    if why.startswith("unverified"):
+        text = f"relay: your message to {target_label(rec)} is unverified (it may have been delivered): do not resend, check its pane"
+    else:
+        text = f"relay: your message to {target_label(rec)} was {state}: {why}"
     try:
         rc, line = run_captured([ident, text, "--no-defer", "--wait", "5"], "relay", scrub=True)
     except Exception as e:    # a notice never breaks the deliverer
@@ -1648,57 +1706,110 @@ def notify_sender(rec, state, why):
     defer_log(rec, "notice", f"rc={rc} {line}")
 
 
-def finish(rid, state, why, allowed=("queued", "sending")):
-    """Final state STATE for record RID (failed and expired also notify the sender); False when it was not in ALLOWED."""
+def send_notice(rid):
+    """Send the notice a final record owes, once: claimed (`notice` done) before it goes out, so a crash never repeats it."""
+    rec = transition(rid, ("failed", "expired"), when=lambda r: r.get("notice") == "owed", notice="done")
+    if rec is not None:
+        notify_sender(rec, rec.get("state"), rec.get("outcome"))
+
+
+def finish(rid, state, why, allowed=("queued", "sending"), notify="now"):
+    """Final state STATE for record RID; False when it was not in ALLOWED. A failed or expired record owes its sender
+    ONE notice: NOTIFY "now" sends it here (only a detached deliverer does), "later" starts a detached deliverer for it
+    (the opportunistic sweep never sends or waits inside an unrelated relay), None sends none."""
     rec = transition(rid, allowed, state=state, outcome=why, finished=time.time())
     if rec is None:
         return False
     defer_log(rec, state, why)
-    if state in ("failed", "expired"):
-        notify_sender(rec, state, why)
+    if state in ("failed", "expired") and notify and rec.get("sender_ident"):
+        transition(rid, (state,), notice="owed")
+        if notify == "now":
+            send_notice(rid)
+        else:
+            spawn_deliverer(rid)
     return True
 
 
+def deliverer_env():
+    """The environment of a deliverer, built from scratch: the paths, locale and hooks it needs, none of the session ids."""
+    env = {k: v for k, v in os.environ.items()
+           if (k in DELIVER_KEEP or k.startswith(DELIVER_KEEP_PREFIXES)) and k not in DELIVER_DROP}
+    env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"] = str(DEFER_DIR), str(UNSENT)
+    return env
+
+
 def spawn_deliverer(rid):
-    """Start `relay.py --deliver RID` detached (own session, no terminal); its pid, or None when it cannot start."""
+    """Start `relay.py --deliver RID --detach` (own session, no terminal, the clean deliverer_env; it forks once more and
+    exits, so the deliverer is a grandchild that init adopts: no ancestor walk reaches this process's agent). The
+    pid of the first process, or None when it cannot start."""
     try:
-        p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--deliver", rid], start_new_session=True,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--deliver", rid, "--detach"], env=deliverer_env(),
+                             start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True)
     except OSError:
         return None
     return p.pid
 
 
+def detach():
+    """The second fork of a deliverer: the parent exits at once and the child lives on as init's. The child does not go
+    on until the parent is gone, so its first look at its own ancestry already shows init."""
+    parent = os.getpid()
+    if os.fork():
+        os._exit(0)
+    for _ in range(300):
+        if os.getppid() != parent:
+            return
+        time.sleep(0.01)
+
+
+def revive(rec, now=None):
+    """The sweep rule for ONE record, which never sends and never waits: it changes states and starts detached deliverers.
+    A final record owing its notice with no deliverer gets one, a week-old one is pruned; a `sending` one whose
+    deliverer is gone, or that has been sending past DEFER_SENDING_MAX, is failed unverified (never resent); a queued one
+    with no deliverer is expired when past its expiry, else gets a new deliverer. The action taken, or None."""
+    now = now or time.time()
+    rid, st = rec["id"], rec.get("state")
+    if st in DEFER_FINAL:
+        if now - float(rec.get("finished") or rec.get("created") or 0) > DEFER_KEEP:
+            try:
+                rec_path(rid).unlink()
+            except OSError:
+                return None
+            with contextlib.suppress(OSError):
+                (DEFER_DIR / f".{rid}.lock").unlink()
+            return "pruned"
+        if (st in ("failed", "expired") and rec.get("notice") == "owed" and rec.get("sender_ident")
+                and not deliverer_alive(rid) and spawn_deliverer(rid)):
+            return "noticed"
+        return None
+    alive = deliverer_alive(rid)
+    if st == "sending":
+        stuck = now - float(rec.get("sending_since") or rec.get("created") or 0) > DEFER_SENDING_MAX
+        return "failed" if (not alive or stuck) and finish(rid, "failed", UNVERIFIED_WHY, allowed=("sending",), notify="later") else None
+    if alive:
+        return None
+    if now > float(rec.get("expires") or 0):
+        return "expired" if finish(rid, "expired", "its deliverer was gone and the message was past its expiry",
+                                   allowed=("queued",), notify="later") else None
+    return "rearmed" if spawn_deliverer(rid) else None
+
+
 def sweep_all():
-    """Re-arm queued records nobody delivers (the deliverer was killed, a reboot), expire old ones, fail a `sending`
-    one whose deliverer is gone (unverified: never resent), prune week-old final records. Counts per action."""
-    n = {"rearmed": 0, "expired": 0, "failed": 0, "pruned": 0}
+    """revive every record, oldest first (an earlier message of a target is re-armed before a later one). Counts per action."""
+    n = {"rearmed": 0, "expired": 0, "failed": 0, "pruned": 0, "noticed": 0}
     now = time.time()
     for rec in rec_all():
-        rid, st = rec["id"], rec.get("state")
-        if st in DEFER_FINAL:
-            if now - float(rec.get("finished") or rec.get("created") or 0) > DEFER_KEEP:
-                with contextlib.suppress(OSError):
-                    rec_path(rid).unlink()
-                    n["pruned"] += 1
-                with contextlib.suppress(OSError):
-                    (DEFER_DIR / f".{rid}.lock").unlink()
-            continue
-        if deliverer_alive(rid):
-            continue
-        if st == "sending":
-            n["failed"] += finish(rid, "failed", UNVERIFIED_WHY, allowed=("sending",))
-        elif st == "queued" and now > float(rec.get("expires") or 0):
-            n["expired"] += finish(rid, "expired", "its deliverer was gone and the message was past its expiry", allowed=("queued",))
-        elif st == "queued" and spawn_deliverer(rid):
-            n["rearmed"] += 1
+        act = revive(rec, now)
+        if act:
+            n[act] += 1
     return n
 
 
 def target_poll(rec):
     """('idle',), ('busy',), ('miss', why) (not seen this time) or ('fail', why) for the record's target."""
     t = rec.get("target") or {}
-    if t.get("paseo"):
+    if t.get("paseo"):    # the Paseo agent id is the identity: inspect must name exactly that agent
         info = paseo_inspect(t["paseo"])
         if info is None:
             return ("miss", f"`paseo agent inspect` does not confirm Paseo agent {t['paseo']}")
@@ -1709,8 +1820,8 @@ def target_poll(rec):
     s = next((x for x in fleet.sessions() if x.get("id") == t.get("id")), None)
     if s is None:
         return ("miss", "its session is gone")
-    if any(t.get(k) and s.get(k) != t[k] for k in ("agent", "sid")):
-        return ("fail", "another session now holds that pane")
+    if any(t.get(k) and s.get(k) != t[k] for k in ("agent", "sid", "transcript", "pid")):    # a recycled pane id
+        return ("fail", "target changed: another session now holds that pane")
     why = hard_stop(s)
     if why:
         return ("fail", why)
@@ -1718,14 +1829,23 @@ def target_poll(rec):
 
 
 def earlier_unfinished(rec):
-    """True when an older record for the same target is still queued or sending: per-target FIFO."""
+    """True when an older record for the same target is still queued or sending: per-target FIFO. Each such record first
+    gets the sweep rule (revive): one whose deliverer is gone, or that has been sending too long, is failed or
+    re-armed here, so it cannot block the later ones for good."""
     me = (float(rec.get("created") or 0), rec["id"])
-    return any(r["id"] != rec["id"] and target_key(r) == target_key(rec) and r.get("state") in ("queued", "sending")
-               and (float(r.get("created") or 0), r["id"]) < me for r in rec_all())
+    for r in rec_all():
+        if (r["id"] != rec["id"] and target_key(r) == target_key(rec) and r.get("state") in ("queued", "sending")
+                and (float(r.get("created") or 0), r["id"]) < me):
+            revive(r)
+            cur = rec_read(r["id"])
+            if cur and cur.get("state") in ("queued", "sending"):
+                return True
+    return False
 
 
 def deliver(rid):
-    """The detached deliverer of record RID (exit 0 whatever the outcome: the record holds it). One per record."""
+    """The detached deliverer of record RID (exit 0 whatever the outcome: the record holds it). One per record. Only the
+    head of a target's queue looks at the target (earlier_unfinished comes first): one inspect per target per poll."""
     if not DEFER_ID.fullmatch(rid or ""):
         print(f"relay: not a record id: {rid!r}", file=sys.stderr)
         return 2
@@ -1736,12 +1856,25 @@ def deliver(rid):
         if rec is None:
             print(f"relay: no record {rid}", file=sys.stderr)
             return 1
+        if rec.get("state") in ("failed", "expired"):
+            send_notice(rid)    # a final record that still owes its notice (a sweep started this deliverer)
+            return 0
         if rec.get("state") == "sending":
             finish(rid, "failed", UNVERIFIED_WHY, allowed=("sending",))    # a deliverer died mid-send: never resend
             return 0
-        if transition(rid, ("queued",), pid=os.getpid()) is None:
+        if rec.get("state") != "queued":
             return 0
-        hops = int(rec.get("hops") or 0)
+        if not label_ok(rec.get("sender"), rec_hops(rec)):    # a record is plain JSON: never send under a label sender_name would not give
+            finish(rid, "failed", "refused: the stored sender label is not one relay produces", allowed=("queued",), notify=None)
+            return 0
+        if transition(rid, ("queued",), pid=os.getpid(), ppid=os.getppid()) is None:
+            return 0
+        sender_paseo = rec.get("sender_paseo") or ""
+        if UUID.fullmatch(sender_paseo):    # the sender's own Paseo id, from its record only: Paseo labels the send as that agent's
+            os.environ["PASEO_AGENT_ID"] = sender_paseo
+        else:
+            os.environ.pop("PASEO_AGENT_ID", None)
+        hops = rec_hops(rec)
         if hops:    # the stored Hermes hop count, counted here without the ancestor walk that a detached process cannot pass
             os.environ["RELAY_HOPS"] = str(hops)
             os.environ.pop("RELAY_HOP_PARENT", None)
@@ -1766,13 +1899,18 @@ def deliver(rid):
                 last = poll[1] if poll[0] == "miss" else "the target stayed busy"
                 time.sleep(DEFER_POLL)
                 continue
-            if transition(rid, ("queued",), state="sending") is None:
+            if transition(rid, ("queued",), state="sending", sending_since=time.time()) is None:
                 return 0    # cancelled while we looked
             mins = int((time.time() - float(rec.get("created") or time.time())) // 60)
             t = rec.get("target") or {}
             BUSY["hit"] = False
-            rc, line = run_captured([t.get("paseo") or t.get("id") or "", (f"[queued {mins}m ago] " if mins >= 1 else "") + rec.get("text", ""),
-                                     "--no-defer"], rec.get("sender") or "unknown")
+            try:
+                rc, line = run_captured([t.get("paseo") or t.get("id") or "", (f"[queued {mins}m ago] " if mins >= 1 else "") + rec.get("text", ""),
+                                         "--no-defer"], rec.get("sender") or "unknown")
+            except (Exception, SystemExit) as e:    # the send may have happened: never `sending` with nothing running, never resent
+                defer_log(rec, "error", f"{type(e).__name__} during the send")
+                finish(rid, "failed", UNVERIFIED_WHY, allowed=("sending",))
+                return 0
             if rc == 1 and BUSY["hit"]:    # it went busy again between our look and the send: nothing was sent
                 transition(rid, ("sending",), state="queued")
                 last = "the target stayed busy"
@@ -1800,27 +1938,46 @@ def pane_busy(s, routes):
 
 
 def defer_send(s, a, text, listed, why):
-    """Queue TEXT for session S (exit 3), or collapse into an identical queued one; 1 when no deliverer can start."""
+    """Queue TEXT for session S (exit 0, `queued: ID ...`), or collapse into an identical queued one of the same sender;
+    1 when the queue is full or no deliverer can start. The sender's identity is read once, here, from this process: its
+    label, its Paseo id (only a verified one: hosted by Paseo, or fleet's own `self` row) and its fleet id."""
     own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
     me = next((x for x in listed if x.get("self")), None) or {}
+    verified = own if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own) else ""
+    sender_paseo = verified or (me.get("paseo") if UUID.fullmatch(me.get("paseo") or "") else "") or ""
+    ident = sender_paseo or me.get("id") or ""
+    hops = hermes_hops()
+    label = sender_name(listed)
+    if HERMES_SENDER.fullmatch(label) and not hops:
+        label = "unknown"    # a session merely NAMED like a Hermes relay is not one: the deliverer would refuse the label
+    skey = ident or label
     agent = s["chan"][1] if (s.get("chan") or (None,))[0] == "paseo" else s.get("paseo") or ""
     now = time.time()
     life = min(a.defer_for if a.defer_for is not None else DEFER_FOR, DEFER_MAX)
     key = agent or s["id"]
+    full = 0
     with state_lock():
-        dup = next((r for r in rec_all() if target_key(r) == key and r.get("text") == text
-                    and r.get("state") in ("queued", "sending") and float(r.get("expires") or 0) > now), None)
+        live = [r for r in rec_all() if r.get("state") in ("queued", "sending")]
+        dup = next((r for r in live if target_key(r) == key and r.get("text") == text and sender_key(r) == skey
+                    and float(r.get("expires") or 0) > now), None)
         if dup is None:
+            for n, cap in ((sum(target_key(r) == key for r in live), DEFER_PER_TARGET),
+                           (sum(sender_key(r) == skey for r in live), DEFER_PER_SENDER), (len(live), DEFER_TOTAL)):
+                full = full or (n if n >= cap else 0)
+        if dup is None and not full:
             rid = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + hashlib.sha256(
                 (uuid.uuid4().hex + text).encode()).hexdigest()[:6]
             dup = {"id": rid, "target": {"id": s["id"], "paseo": agent, "name": s.get("name") or "", "agent": s.get("agent") or "",
-                                         "sid": s.get("sid") or ""},
-                   "text": text, "sender": sender_name(listed), "sender_ident": own if UUID.fullmatch(own) else me.get("id") or "",
-                   "hops": hermes_hops(), "created": now, "expires": now + life, "state": "queued", "outcome": "", "pid": 0}
+                                         "sid": s.get("sid") or "", "transcript": s.get("transcript") or "", "pid": s.get("pid") or 0},
+                   "text": text, "sender": label, "sender_ident": ident, "sender_paseo": sender_paseo,
+                   "hops": hops, "created": now, "expires": now + life, "state": "queued", "outcome": "", "pid": 0, "notice": ""}
             rec_write(dup)
             fresh = True
         else:
             fresh = False
+    if full:
+        print(f"relay: [{s['id']}] not sent: deferred queue full ({full}); {why}", file=sys.stderr)
+        return 1
     rid = dup["id"]
     if fresh:
         defer_log(dup, "queued", why)
@@ -1831,27 +1988,30 @@ def defer_send(s, a, text, listed, why):
             return 1
     left = max(0, int(float(dup.get("expires") or now) - now))
     if a.json:
-        print(json.dumps({"id": s["id"], "name": s["name"], "state": "queued", "record": rid, "expires_in": left,
+        print(json.dumps({"id": s["id"], "name": s["name"], "state": "queued", "queued": True, "record": rid, "expires_in": left,
                           "duplicate_of": None if fresh else rid, "reason": why}, ensure_ascii=False))
     else:
         print(f"queued: {rid} for [{s['id']}] {s['name']}{'' if fresh else ' (an identical message was already queued)'}: {why}. "
               f"Delivered when it is idle, within {left // 60} min; `relay.py --pending` lists, `relay.py --cancel {rid}` withdraws it")
-    return 3
+    return 0
 
 
-def pending_cmd(as_json):
+def pending_cmd(as_json, show_text=False):
+    """The records. The text stays in the 0600 record unless --text asks for a clipped preview: another agent's queued
+    message is not printed to whoever runs --pending."""
     rows = rec_all()
     now = time.time()
     view = [{"id": r["id"], "state": r.get("state"), "target": r.get("target"), "sender": r.get("sender"),
              "age_s": int(now - float(r.get("created") or now)), "expires_in": int(float(r.get("expires") or now) - now),
-             "outcome": r.get("outcome") or "", "text_preview": fleet.clip(r.get("text") or "", 60)} for r in rows]
+             "outcome": r.get("outcome") or "", **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
+            for r in rows]
     if as_json:
         print(json.dumps(view, ensure_ascii=False))
     elif not view:
         print("no deferred messages")
     for v in ([] if as_json else view):
         print(f"{v['id']}  {v['state']:<9} {target_label({'target': v['target']})}  from {v['sender'] or '?'}  {v['age_s'] // 60}m old"
-              + (f"  {v['outcome']}" if v["outcome"] else "") + f"  | {v['text_preview']}")
+              + (f"  {v['outcome']}" if v["outcome"] else "") + (f"  | {v['text_preview']}" if show_text else ""))
     return 0
 
 
@@ -1885,12 +2045,16 @@ def main(argv=None, sweep=True):
     ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
     ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
+    ap.add_argument("--text", action="store_true", dest="show_text", help="with --pending: show a 60-character preview of each text (it stays in the record otherwise)")
+    ap.add_argument("--detach", action="store_true", help=argparse.SUPPRESS)    # internal: --deliver forks once more, so init adopts the deliverer
     a = ap.parse_args(argv)
     t0 = time.time()
     if a.deliver:
+        if a.detach:
+            detach()
         return deliver(a.deliver)
     if a.pending:
-        return pending_cmd(a.json)
+        return pending_cmd(a.json, a.show_text)
     if a.cancel:
         return cancel_cmd(a.cancel)
     if a.sweep:

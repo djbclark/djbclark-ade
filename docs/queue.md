@@ -5,11 +5,15 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 ## relay.py deferred send and Paseo sender label (2026-10-24, branch `feat/relay-deferred-send`, PR pending)
 
-Built, not merged: a busy target no longer loses the text (`relay.py` exit 3, 0600 record under `~/.local/state/relay/deferred/`,
-detached `--deliver`, `--pending`, `--cancel`, `--sweep`) and `sender_name` reads `PASEO_AGENT_ID`. Open: (1) no launchd job re-arms
-queued records after a reboot yet; they wait for the next `relay.py` run (its opportunistic sweep) or `relay.py --sweep`, by the
-brief; (2) each deliverer polls every 5 s, so a long queue costs one `paseo agent inspect` per record per 5 s; (3) a
-Claude-pane target is never deferred (it queues natively).
+Built, repair round 1 (2026-10-24) after an adversary BLOCK, not merged: a busy target no longer loses the text (`relay.py` prints
+`queued: <id>` and exits 0, so fleet-watch and load-watch, which read only the exit code, keep working; 0600 record under
+`~/.local/state/relay/deferred/`, detached `--deliver` with its own clean environment, `--pending`, `--cancel`, `--sweep`) and
+`sender_name` reads `PASEO_AGENT_ID`. Open: (1) no launchd job re-arms queued records after a reboot yet; they wait for the next
+`relay.py` run (its opportunistic sweep) or `relay.py --sweep`, by the brief; (2) a Claude-pane target is never deferred (it
+queues natively); (3) one deliverer process per queued record (at most 100), only the head of a target's queue polls it; (4)
+`--cancel` has no sender check (same-uid operator surface); (5) `PASEO_AGENT_ID` can be forged by a same-user process, as
+`HERDR_PANE_ID` can; (6) two records left by an earlier test run sit in `~/.local/state/relay/deferred/` (`20261024-194844-fe1631`,
+`20261024-194854-57fcc1`) and are pruned by a sweep a week after they went final.
 
 ## tuios support: do it LAST (djbclark, direct, 2026-10-24)
 

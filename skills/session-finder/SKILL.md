@@ -97,13 +97,20 @@ adds the archived agents as `ended` rows (`relay.py` never sends to one). No `pa
 (`paseo ls`'s 7-character short id works); exactly one agent must match, else it refuses and lists the candidates.
 A working agent whose provider cannot steer (cline and every other ACP provider, which Paseo would interrupt and replace
 the running turn of) is **queued, not refused** (2026-10-24): `relay.py` writes a 0600 record under
-`~/.local/state/relay/deferred/`, starts a detached deliverer and exits **3** (`queued: <id> ...`; `"state":"queued"` with
-`--json`); the deliverer sends the text, prefixed `[queued Nm ago] `, through the same gates when the agent goes idle, and
-tells the sender (one `relay: your message to <target> was failed|expired: <reason>` notice) if it cannot. `--idle S` still
-blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at most
-24 h); `relay.py --pending [--json]` lists, `--cancel ID` withdraws, `--sweep` re-arms records whose deliverer died (it also
-runs at the start of every relay). A non-Claude pane TUI that is working is deferred the same way. Archived, permission-blocked,
-wrong-directory and no-route refusals are never deferred. claude, codex, omp, opencode and pi
+`~/.local/state/relay/deferred/`, starts a detached deliverer and **exits 0** with `queued: <id> ...` on stdout
+(`"state":"queued","queued":true` with `--json`; a caller that reads 0 as "sent" keeps working; checked 2026-10-24: fleet-watch,
+load-watch and session-load-watch read only the exit code and log the last output lines). The deliverer has its own clean environment (no session id of any agent; the sender's Paseo id, label and hop
+count come from the record, taken at queue time from the sender's own hosted or fleet-`self` identity), sends the text,
+prefixed `[queued Nm ago] `, through the same gates when the agent goes idle, and tells the sender (one
+`relay: your message to <target> was failed|expired: <reason>` notice, or `is unverified ... do not resend, check its pane`)
+if it cannot. Per target, messages go out in order; at most 20 queued per target, 20 per sender and 100 in all (over:
+exit 1 "deferred queue full (N)"); a pane id reused by another session fails the message ("target changed"). `--idle S`
+still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at
+most 24 h); `relay.py --pending [--text] [--json]` lists (the text only with `--text`), `--cancel ID` withdraws a queued
+one, `--sweep` re-arms records whose deliverer died (it also runs, cheaply, at the start of every relay: it only changes
+states and starts detached deliverers). A non-Claude pane TUI that is working is deferred the same way. Archived,
+permission-blocked, wrong-directory and no-route refusals are never deferred. Residual: `PASEO_AGENT_ID` is an
+environment value a same-user process can forge, as `HERDR_PANE_ID` is. claude, codex, omp, opencode and pi
 can steer (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23), but Paseo replaces the running
 turn of even these when the provider declines the steer at that moment (while Claude or Codex compacts, a Codex review
 turn, an omp steer error), which relay cannot see beforehand: only **claude** is steered into a working agent by default;

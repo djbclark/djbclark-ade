@@ -70,14 +70,19 @@ class RelayPaseo(unittest.TestCase):
         os.environ.update(PASEO_CLI=str(fake), FAKE_LOG=str(self.log), FAKE_ENVLOG=str(self.envlog), FAKE_KNOWN=AGENT,
                           PASEO_AGENT_ID=CALLER)
         for k in ("FAKE_PROVIDER", "FAKE_STATUS", "FAKE_WAIT_RC", "FAKE_ARCHIVED", "FAKE_PENDING", "FAKE_ID", "FAKE_CWD",
-                  "CLAUDE_CODE_SESSION_ID"):
+                  "CLAUDE_CODE_SESSION_ID", "ACP_RUN_AGENT"):    # an acp-run slice running the suite sets ACP_RUN_AGENT: it changes who is tagged as the sender
             os.environ.pop(k, None)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved_env)))
         saved_attrs = [(relay.fleet, "sessions", relay.fleet.sessions), (relay.fleet, "ancestors", relay.fleet.ancestors),
-                       (relay.where, "real_cwd", relay.where.real_cwd), (relay, "hosted_by", relay.hosted_by)]
+                       (relay.where, "real_cwd", relay.where.real_cwd), (relay, "hosted_by", relay.hosted_by),
+                       (relay, "DEFER_DIR", relay.DEFER_DIR), (relay, "spawn_deliverer", relay.spawn_deliverer)]
         self.addCleanup(lambda: [setattr(o, n, v) for o, n, v in saved_attrs])
         relay.fleet.ancestors = lambda: set()    # hermetic: the test runner's real ancestry is not under test
         relay.hosted_by = lambda agent_id: agent_id == CALLER    # the test runner "is" the CALLER agent
+        relay.DEFER_DIR = Path(self.tmp.name) / "relay" / "deferred"    # never the real queue, and a deferral never starts a real deliverer
+        os.environ["RELAY_DEFER_DIR"] = str(relay.DEFER_DIR)
+        self.spawned: list[str] = []
+        relay.spawn_deliverer = lambda rid: self.spawned.append(rid) or 4242
 
     def calls(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -375,6 +380,12 @@ class RelayPaseo(unittest.TestCase):
         os.environ["FAKE_CWD"] = "/tmp/agent-dir"
         rc, _out, err = self.main([s], SID, "ping", "--wait", "1")
         self.assertEqual(rc, 0, err)
+
+    def test_working_non_steering_agent_is_queued_with_exit_0_and_nothing_is_sent(self) -> None:
+        os.environ.update(FAKE_PROVIDER="cline", FAKE_STATUS="running")
+        rc, out, err = self.main([], AGENT, "ping")
+        self.assertEqual((rc, out.startswith("queued: "), self.sends(), len(self.spawned)), (0, True, [], 1), err)
+        self.assertEqual([p.name for p in relay.DEFER_DIR.glob("*.json")], [f"{self.spawned[0]}.json"])    # in the test's own queue
 
     def test_working_non_steering_agent_needs_idle_and_then_waits_first(self) -> None:
         os.environ.update(FAKE_PROVIDER="cline", FAKE_STATUS="running")
