@@ -612,3 +612,25 @@ def test_r10_f1_a_config_git_cannot_read_is_refused_with_the_reason(world, tmp_p
 
 
 @pytest.mark.parametrize("how", ["home", "xdg", "empty-value"])
+def test_r10_f2_f5_a_global_config_git_finds_through_home_or_xdg_that_sets_hooks_path_is_refused(world, tmp_path, how):
+    home = tmp_path / "home"
+    (home / ".config" / "git").mkdir(parents=True)
+    body = "[core]\n\thooksPath = /dev/null\n" if how != "empty-value" else "[core]\n\thooksPath =\n"
+    extra = {"GIT_CONFIG_GLOBAL": None, "HOME": str(home)}
+    if how == "xdg":
+        (tmp_path / "xdg" / "git").mkdir(parents=True)
+        (tmp_path / "xdg" / "git" / "config").write_text(body)
+        extra["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    else:
+        (home / ".gitconfig").write_text(body)
+    _held(world, shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", **extra))
+
+
+def test_r10_f2_an_included_file_that_sets_hooks_path_is_refused_because_git_follows_it(world, tmp_path):
+    inc = tmp_path / "inc.cfg"
+    inc.write_text("[core]\n\thooksPath = /dev/null\n")
+    cfg = tmp_path / "g.cfg"
+    cfg.write_text(f"[include]\n\tpath = {inc}\n")
+    _held(world, shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", GIT_CONFIG_GLOBAL=str(cfg)))
+
+
