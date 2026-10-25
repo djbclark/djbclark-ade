@@ -865,7 +865,12 @@ states the rule. Build items, each one Sonnet `code` slice with a test:
 Scoping (Dann 5, lead of techno-euphora, relayed 2026-10-25, after djbclark asked whether relay should ALWAYS require a reply): mandate PROOF, not conversation. Delivery proof (the text reached the
 target's transcript) is mechanical and needs no reply; a reply (the target read it and acted) costs the target a turn, and a send to a working cline or ACP agent cannot steer, so forcing one on every message
 doubles traffic, interrupts work and is wrong for one-way messages (a status, a handoff pointer, "PR 61 is merged"). Evidence: this chain's own handoff a621 item 6 carried a 30-minute waiter and a "peer may
-be unreachable" note for a peer (`29a5535c`) that was reachable and responsive; only `queued` looking like success hid it. The items keep their shape and gain:
+be unreachable" note for a peer (`29a5535c`) that was in fact reachable and responsive - its ack was
+verified both ways 31 s AFTER that handoff line was written (b457 log, 04:08:31 vs a621 created_at
+04:08:00), so the line was stale rather than the link broken. A later relay by Dann 5 reached the same
+peer immediately. The real cost stands either way: a 30-minute waiter and a false "may be unreachable"
+note, spent because `queued` looked like success and nothing distinguished "not yet delivered" from
+"cannot deliver". The items keep their shape and gain:
 A. `queued` never exits 0 as if delivered (item 1, first and unchanged).
 B. `--expect-ack ID` is REQUIRED for a message that asks a question or requests action, and is record state, not a blocking wait: set at send time, shown by `relay.py --pending` (sender, target, age), resolved by
    a later `--sweep` when the reply arrives, so no turn is held open on a peer's schedule.
