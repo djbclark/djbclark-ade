@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
-    relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--via ROUTE] [--plan] [--json]
+    relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--steer] [--via ROUTE] [--plan] [--json]
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it)
 
@@ -13,7 +13,12 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                --behavior steer -- <id> <text>`. The caller's own PASEO_AGENT_ID stays in the child's
                environment, so Paseo labels the message `kind="agent-message"` with the sender; a caller that is
                not a Paseo agent prefixes the text with `[relay from <name>] `. Steer queues the text for the next
-               tool round on Claude; a provider that cannot steer has its running turn replaced. Before any send
+               tool round on Claude, Codex, omp, opencode and pi (fleet.PASEO_STEER_PROVIDERS) unless the provider
+               declines the steer (compaction, a Codex review turn, an omp steer error): Paseo then replaces the running
+               turn. A send to a WORKING agent is therefore refused for any provider but claude unless `--steer` (a
+               cline, grok or other ACP agent cannot steer at all, so `--steer` does not apply: `--idle S` waits for
+               idle). A Paseo agent with no Claude registry row is found by its id, its Paseo id or a hex prefix of 6+
+               characters, never by its workspace title. Before any send
                `paseo agent inspect` must show the agent unarchived, with no pending permission or question, idle
                or running, in the directory its process runs in; any refusal ends the run, whatever `--via` says.
                Delivery is what the daemon acknowledges ("accepted"), upgraded to "delivered" once a Claude
@@ -26,22 +31,26 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                (`--idle S` waits up to S seconds for that). Skipped while the input box holds a draft (Claude
                Code's dim/grey suggested prompt is not one: prompt_line.py). Verified in the transcript: a user
                line that IS the text is "delivered"; a queue `enqueue` of it is only "queued" (exit 0, but the
-               operator can still pull it back; a `dequeue` after it, or a `remove` for absorbed_mid_turn or
-               delivered_to_agent, ends the queue as delivered, and a `remove` with no reason leaves it queued), and an
+               operator can still pull it back; a `dequeue` whose next prompt (a user line or a `queued_command`
+               attachment) IS the text, or a `remove` for absorbed_mid_turn or
+               delivered_to_agent, ends the queue as delivered; a `dequeue` that handed the agent someone else's prompt
+               leaves ours queued; a `remove` with no reason leaves it queued), and an
                enqueue followed by a `remove` with another stated reason, or by a `popAll`, is "pulled back": not
                delivered, reported unverified, never submitted for the operator, a retry types nothing. One unproven
                text per session: while an earlier text of ours is not yet proven (younger than an hour), a DIFFERENT
                text is skipped, not typed, so the earlier one's retry cannot type it twice (an entry pulled back whose
                box then reads empty twice, a second apart, with no copy submitted, was discarded by the operator and is
                dropped). Two relays never type into one pane together: a per-session flock is held from the box read
-               until the text is recorded, and a second relay is refused ("stop"); the unsent-entries file is
+               until the text is recorded, and a second relay skips the pane route (the socket may still deliver); the unsent-entries file is
                updated under its own flock, through a unique temp file. A retry's proof for a SHORT text (30
                characters or fewer: `continue`, `yes`, `1`) whose copy we never saw in the box must be stamped from 2 s
                before our typing to 10 s after the end of the --wait loop that followed it (so up to about
                --wait + 12 s after the typing; the default --wait is 20 s): the operator's own equal text later does
                not count. A stamp only CLAIMS success: whether a leftover copy in the box is submitted is decided on
                the transcript without any window, so a recalled copy of a text delivered at any time is never
-               submitted again. Longer texts and entries without a recorded `typed` time have no window.
+               submitted again. Longer texts and entries without a recorded `typed` time have no window. An entry
+               records its transcript file: if the pane's transcript is another file (/clear, a resume), nothing is
+               provable, pressed or typed for it ("unverified").
   5. socket    a Claude Code TUI with a live messaging socket (registry ~/.claude/sessions/<pid>.json, the pid
                the fleet knows, a socket we own in a directory only we can write): one `cross-session-message`
                frame, XML-escaped, queued for its next tool round. No keys, so it cannot collide with a draft or
@@ -55,7 +64,10 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                text prefixed `[relay from <name>] `, stdin closed, in its own process group. The child gets the
                caller's environment without its session, Paseo, ACP-approval and Hermes routing variables, plus
                RELAY_HOPS and RELAY_SENDER (a relay made inside that turn is tagged as Hermes, not as the original
-               caller; only nested `hermes -z` turns are counted, a fourth is refused). Hermes's reply goes to a
+               caller; only nested `hermes -z` turns are counted, a fourth is refused; both variables are ignored when
+               another agent sits between the relay and RELAY_HOP_PARENT, the pid of the relay that started the turn, such as a
+               Claude session started in the turn; covers relays Hermes starts through its terminal tool or a background process, not from its
+               execute_code sandbox, which strips RELAY_*). Hermes's reply goes to a
                0600 file under RELAY_HERMES_DIR (default ~/.local/state/session-finder/relay-hermes, pruned after 7
                days) and is printed here as untrusted data: control, format and escape characters stripped, at most
                4000 characters (a cut reply's cleaned text is kept in the file, whose path is printed).
@@ -64,15 +76,17 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                own conversation (HERMES_SESSION_ID, or the same session key, or platform, chat and thread, for a delegated
                subagent).
                Only rc 1, an empty stdout and the single stderr line `hermes -z: agent failed: session not found:
-               <sid>` (or `cannot resume session <sid>: ...`) mean nothing was written ("not sent"); every other
+               <sid>` (or `cannot resume session <sid>: ...`, or `This session is too long to reload safely (N
+               messages; limit L).`, reported as a thread too large to reload) mean nothing was written ("not sent"); every other
                failure is "unverified" (the turn may have started: do not resend). A "hermes turn started" line goes
                to stderr first, with the reply file, because the caller's own tool timeout (Claude Code 120 s,
                Hermes 180 s) can end this process before its verdict: if you are cut off, the message WAS sent. Give the
                command a timeout of at least max(100, --wait) + 50 seconds, or run it in the background: a tool timeout
                that kills the whole process tree (Claude Code's and Hermes's both do) also kills the turn, mid-way.
                relay.py itself never kills it: a turn still running after max(100, --wait) seconds from relay.py's start
-               is left running (the exit is "unverified" and names the reply file); until it ends a second relay to that
-               conversation is refused (a per-session flock the child holds). A profile Hermes (HERMES_HOME) sees only its own sessions: "not sent" for another
+               is left running (the exit is "unverified" and names the reply file, also as `reply_file` in --json); until
+               it ends a second relay to that conversation is refused, naming the turn's pid (a per-session flock the
+               child holds; lock files idle for 7 days are pruned). A profile Hermes (HERMES_HOME) sees only its own sessions: "not sent" for another
                profile's. RELAY_HERMES overrides the `hermes` binary. ACP cannot load a gateway session and
                messages_send only posts outward, so neither is a route. Checked 2026-10-23 on a throwaway `oneshot`
                session and end to end on a real Telegram topic (delivered; tagged user row and reply in its stored
@@ -103,6 +117,7 @@ import argparse
 import contextlib
 import datetime
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -115,7 +130,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import unicodedata
 import uuid
 from pathlib import Path
 
@@ -138,8 +152,6 @@ HERMES_DIR = Path(os.environ.get("RELAY_HERMES_DIR", Path.home() / ".local/state
 HERMES_SCRUB = ("CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "ACP_OPERATOR_APPROVED",
                "HERMES_UI_SESSION_ID")
 HERMES_SCRUB_PREFIXES = ("HERMES_SESSION_", "HERMES_CRON_")
-HIDDEN = "\u115f\u1160\u3164\uffa0\u2800"    # fillers and blanks that render as nothing
-ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
 # Pause between the text and its Enter (2026-10-18): sent back to back, Claude Code reads the burst as a
 # paste and the Enter inside it does not submit, so the message sat in the input box until the operator
 # pressed Enter by hand. ENTER_RETRIES more Enters go in when the text is still in the box after RETRY_AFTER s.
@@ -283,7 +295,7 @@ def sender_tag(listed):
 def send_paseo(s, text, wait):
     """Send TEXT to Paseo agent S: 'delivered' (seen in its Claude transcript), 'accepted' (the daemon took
     it; not a verified delivery) or None (send failed; the reason is printed). --behavior steer queues the text
-    for the next tool round on Claude; a provider that cannot steer has its running turn replaced by
+    for the next tool round on a steer-capable provider; one that cannot steer has its running turn replaced by
     Paseo, so the caller already refused anything that starts a built-in. --no-wait so this returns at once
     (the transcript poll below is the verification); `--` keeps TEXT, whatever it starts with, out of the options."""
     agent = s["chan"][1]
@@ -482,19 +494,33 @@ def _unsent():
 
 
 @contextlib.contextmanager
-def _flock(path, wait=True):
+def _flock(path, wait=True, tag=None):
     """Hold an exclusive flock on the 0600 file PATH for the block, yielding True. With WAIT false it never blocks:
-    it yields False, and holds nothing, when another process holds the lock. Closing the descriptor releases it."""
+    it yields False, and holds nothing, when another process holds the lock. Closing the descriptor releases it.
+    TAG (a string) is written into the file while the lock is held and emptied before it is released."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    held = False
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except OSError:
             yield False
             return
+        held = True
+        if tag:
+            try:
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, tag.encode(), 0)
+            except OSError:
+                pass
         yield True
     finally:
+        if held and tag:
+            try:
+                os.ftruncate(fd, 0)
+            except OSError:
+                pass
         os.close(fd)
 
 
@@ -504,20 +530,47 @@ def _unsent_lock():
     return _flock(UNSENT.with_name(UNSENT.name + ".lock"))
 
 
-def pane_lock(sid):
+def pane_lock_path(sid):
+    return UNSENT.with_name("relay-pane-" + re.sub(r"[^A-Za-z0-9_-]", "_", sid) + ".lock")
+
+
+def text_tag(text):
+    return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()[:32]
+
+
+def pane_lock(sid, text=""):
     """Non-blocking per-session lock a relay holds from reading a pane's box until its text is recorded: yields
-    False when another relay is typing into that pane."""
-    return _flock(UNSENT.with_name("relay-pane-" + re.sub(r"[^A-Za-z0-9_-]", "_", sid) + ".lock"), wait=False)
+    False when another relay is typing into that pane. While held, the lock file carries a hash of TEXT (`pane_sending`)."""
+    return _flock(pane_lock_path(sid), wait=False, tag=text_tag(text) if text else None)
 
 
-def _note(sid, text, draft, mark, typed):
+def pane_sending(sid, text):
+    """True when the relay that holds SID's pane lock is sending TEXT: the hash it wrote in the lock file. The holder
+    writes it right after taking the lock, so an empty file is read a few times before it counts as "another text"."""
+    want = text_tag(text)
+    for _ in range(5):
+        try:
+            fd = os.open(pane_lock_path(sid), os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                got = os.read(fd, 64).decode("ascii", "replace")
+            finally:
+                os.close(fd)
+        except OSError:
+            return False
+        if got:
+            return got == want
+        time.sleep(0.02)
+    return False
+
+
+def _note(sid, text, draft, mark, typed, tx=None):
     rows = {k: v for k, v in _unsent().items()
             if isinstance(v, dict) and time.time() - float(v.get("at") or 0) <= UNSENT_KEEP}
     if text is None:
         if rows.pop(sid, None) is None:
             return
     else:
-        rows[sid] = {"text": text, "draft": " ".join(draft.split()), "mark": mark, "at": time.time(), "typed": typed}
+        rows[sid] = {"text": text, "draft": " ".join(draft.split()), "mark": mark, "at": time.time(), "typed": typed, "tx": tx}
     UNSENT.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=UNSENT.parent, prefix=UNSENT.name + ".", suffix=".tmp")
     try:
@@ -529,13 +582,13 @@ def _note(sid, text, draft, mark, typed):
         raise
 
 
-def note_unsent(sid, text, draft="", mark=0, typed=None):
+def note_unsent(sid, text, draft="", mark=0, typed=None, tx=None):
     """Remember TEXT as left unsent in session SID's box, with the draft the box showed then, the transcript size
-    before it was typed and when (TYPED; None forgets the entry). Entries older than UNSENT_TTL are dropped by
-    `leftover`. One entry per session: `route_pane` types no other text while it is unproven. The whole
-    read-modify-write holds the file lock, so two relays never lose each other's entry."""
+    before it was typed (MARK, of the transcript file TX) and when (TYPED; None forgets the entry). Entries older
+    than UNSENT_TTL are dropped by `leftover`. One entry per session: `route_pane` types no other text while it is
+    unproven. The whole read-modify-write holds the file lock, so two relays never lose each other's entry."""
     with _unsent_lock():
-        _note(sid, text, draft, mark, typed)
+        _note(sid, text, draft, mark, typed, tx)
 
 
 def leftover(sid):
@@ -576,7 +629,7 @@ def arm(s, chan, text, mark, pin="*", typed=None):
     it is our text or our collapsed paste, never whatever else the box shows."""
     if s["agent"] == "claude":
         d = box_text(chan) or ""
-        note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text, pin) else "", mark, typed)
+        note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text, pin) else "", mark, typed, s.get("transcript"))
 
 
 PASTED_RE = re.compile(r'<pasted_content id="([^"]+)">\s*(.*?)\s*</pasted_content id="\1">', re.S)
@@ -600,7 +653,8 @@ def _ts(o):
 def tx_state(tx, mark, text, window=None):
     """What the transcript file TX holds, after byte MARK, about TEXT (whole, whitespace-folded; never a substring:
     "continue" appears in any assistant line, adversary round 8): "delivered" (a user message that IS the text, or a
-    queued copy a turn absorbed), "queued" (an enqueue nothing has pulled back: it sits in Claude Code's queue, which
+    queued copy a turn absorbed, or one a `dequeue` handed the agent: the next prompt after it IS the text), "queued"
+    (an enqueue nothing has pulled back: it sits in Claude Code's queue, which
     is not delivery), "pulled" (queued, then pulled back into the input box: a `remove` for another reason, or a
     popAll; unproven, and the box now holds our text) or None. Claude Code records a collapsed paste (a text over 800
     characters) wrapped in `<pasted_content id="N">...</pasted_content id="N">`, in the user line and in the enqueue
@@ -613,7 +667,7 @@ def tx_state(tx, mark, text, window=None):
     with Path(tx).open("rb") as fh:
         fh.seek(mark)
         lines = fh.read().decode("utf-8", "replace").splitlines()
-    state = None
+    state, handed = None, False
     for ln in lines:
         try:
             o = json.loads(ln)
@@ -624,21 +678,33 @@ def tx_state(tx, mark, text, window=None):
         kind, op = o.get("type"), o.get("operation")
         if kind == "queue-operation" and op == "popAll":    # its content (if any) is not trusted: every queued item left
             state = "pulled" if state == "queued" else state
+            handed = False
             continue
-        if kind == "queue-operation" and op == "dequeue":    # the queue handed its front item to the agent (no content is recorded): ours, if queued, can no longer be pulled back
-            if state == "queued":
-                return "delivered"
+        if kind == "queue-operation" and op == "dequeue":    # the queue handed its front item to the agent (no content is recorded): whose it was is read off the next prompt
+            handed = handed or state == "queued"
             continue
         if kind == "queue-operation" and op in ("enqueue", "remove"):
             got = [o.get("content")]
         elif kind == "user":
             c = (o.get("message") or {}).get("content")
+            if handed and c and isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c) \
+                    and not any(isinstance(b, dict) and b.get("type") == "text" for b in c):
+                continue    # a tool result is not a prompt: real transcripts put one between a dequeue and the prompt it handed over, also one with a pasted image beside it (an AskUserQuestion answer); an image-only or document-only prompt is someone's prompt
             got = [" ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
                    if isinstance(c, list) else c]
+        elif isinstance(o.get("attachment"), dict):    # a prompt absorbed mid-turn is an attachment, counted only right after a dequeue
+            if not (handed and o["attachment"].get("type") == "queued_command"):
+                continue
+            got = [o["attachment"].get("prompt")]
         else:
             continue
-        if not any(isinstance(g, str) and " ".join((m.group(2) if (m := PASTED_RE.fullmatch(g.strip())) else g).split()) == want
-                   for g in got):
+        hit = any(isinstance(g, str) and " ".join((m.group(2) if (m := PASTED_RE.fullmatch(g.strip())) else g).split()) == want
+                  for g in got)
+        if handed and kind != "queue-operation":    # the first prompt the agent got after a dequeue
+            if hit:
+                return "delivered"
+            handed = False    # someone else's prompt was handed over: ours is still queued
+        if not hit:
             continue
         if op == "remove":
             if state == "queued":
@@ -682,9 +748,19 @@ def proof_window(e, since=None):
     return (float(e["typed"]) - LEAD, float(e.get("at") or 0) + GRACE)
 
 
+def entry_moved(s, entry):
+    """True when session S's transcript is not the file the leftover ENTRY's mark is a byte offset into (/clear or a
+    resume gives a pane a new one; the pane id stays). An entry from before the file was recorded has none to compare."""
+    was = entry.get("tx")
+    return bool(was) and str(was) != str(s.get("transcript") or "")
+
+
 def entry_state(s, entry, since=None, windowed=True):
-    """`tx_state` of the leftover ENTRY's whole text in session S's transcript after the entry's mark. WINDOWED
-    false: any copy counts wherever it is stamped (what may stand between us and an Enter)."""
+    """`tx_state` of the leftover ENTRY's whole text in session S's transcript after the entry's mark; None when that
+    transcript is another file (`entry_moved`: the mark means nothing there). WINDOWED false: any copy counts wherever
+    it is stamped (what may stand between us and an Enter)."""
+    if entry_moved(s, entry):
+        return None
     return tx_state(s.get("transcript"), entry.get("mark"), entry.get("text"), proof_window(entry, since) if windowed else None)
 
 
@@ -696,10 +772,42 @@ def forget(sid, text):
             _note(sid, None, "", 0, None)
 
 
+def paseo_steer_refusal(s, steer=False):
+    """Why a send to Paseo agent S must wait for it to go idle, or None. `paseo send --behavior steer` queues the text
+    only for a provider that can steer (fleet.PASEO_STEER_PROVIDERS); for any other (a cline agent, any ACP one)
+    Paseo interrupts the running turn and starts the text as a new one (steerOrReplaceActiveTurn "replaced",
+    read from the daemon bundle 2026-10-23), which would destroy the work in flight. A steer provider can decline
+    too (a Codex review turn, a server without turn/steer, an omp steer error) where this relay cannot see it, and
+    Paseo then replaces the turn the same way: only claude (fleet.PASEO_STEER_DEFAULT) is steered into a working agent
+    without STEER (`--steer`)."""
+    prov = (s.get("agent") or "").lower()
+    if s.get("status") == "idle" or prov in fleet.PASEO_STEER_DEFAULT or (steer and prov in fleet.PASEO_STEER_PROVIDERS):
+        return None
+    if prov in fleet.PASEO_STEER_PROVIDERS:
+        return (f"its {prov} Paseo agent is {s.get('status')}: Paseo replaces a running turn when {prov} declines a steer "
+                "(a review turn, a steer error), which this relay cannot see beforehand (--idle S waits for it to go idle; "
+                "--steer sends anyway)")
+    return (f"its {prov or 'unknown'} Paseo agent is {s.get('status')} and that provider cannot steer: a send would "
+            "interrupt and replace its running turn (--idle S waits for it to go idle)")
+
+
+HEX_PREFIX = re.compile(r"[0-9a-f][0-9a-f-]{5,35}")    # a Paseo agent id prefix: 6 or more characters of a uuid
+
+
 def find(ident, ss):
-    hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"), s.get("pane"), s.get("paseo"))]
-    if not hits and len(ident) >= 8:
+    """Sessions IDENT names: exactly (id, name, session id, pane, Paseo agent id), else by prefix: a session id
+    of 8 or more characters, or a hex prefix of 6 or more characters of a Paseo agent id. The prefix kinds are
+    pooled and a row counts once, so two agents sharing a prefix are an ambiguity (the caller refuses it). The
+    name of a Paseo agent with no Claude registry row is its workspace title, generated from its first prompt
+    ("/baton", "say hi"): it never matches by name, only by id or Paseo id (adversary, 2026-10-23)."""
+    hits = [s for s in ss if ident in (s["id"], None if s.get("host") == "paseo" and not s.get("sid") else s["name"],
+                                       s.get("sid"), s.get("pane"), s.get("paseo"))]
+    if hits:
+        return hits
+    if len(ident) >= 8:
         hits = [s for s in ss if (s.get("sid") or "").startswith(ident)]
+    if HEX_PREFIX.fullmatch(ident):
+        hits += [s for s in ss if all(s is not h for h in hits) and isinstance(s.get("paseo"), str) and s["paseo"].startswith(ident)]
     return hits
 
 
@@ -728,7 +836,9 @@ def hard_stop(s):
     if s.get("host") == "paseo" and s.get("paseo_state") not in (None, "idle", "running"):
         return f"its Paseo agent is {s['paseo_state']}, not idle or running"
     if s.get("status") == "blocked":
-        return "blocked on a question or permission prompt: a message would land in or behind that dialog (helm.py answer)"
+        return ("blocked on a permission or question card: a message would answer or replace it (the Paseo UI, or "
+                "`paseo permit allow|deny <agent> -- <request id>`, one card at a time, answers it)" if s.get("host") == "paseo" else
+                "blocked on a question or permission prompt: a message would land in or behind that dialog (helm.py answer)")
     return None
 
 
@@ -767,11 +877,13 @@ def is_slash(text):
     return text.lstrip(SLASH_STRIP).startswith(("/", "\uff0f"))
 
 
+HERMES_SENDER = re.compile(r"hermes [A-Za-z0-9_-]{1,8}")    # what `hermes_env` sets: "hermes " and the last 8 characters of the session id
+
+
 def sender_name(listed):
     """Who is relaying: this session's name, else its id, as one safe label."""
-    if hermes_hops() and os.environ.get("RELAY_SENDER"):
-        name = os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller
-        return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name), 40) or "unknown"
+    if hermes_hops() and HERMES_SENDER.fullmatch(os.environ.get("RELAY_SENDER", "")):
+        return os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller; any other name is a forgery
     me = next((x for x in listed if x.get("self")), None) or {}
     name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
     return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name), 40) or "unknown"
@@ -893,6 +1005,8 @@ PULLED_WHY = ("your earlier copy of this message was queued, then pulled back ou
               "and is not delivered. Do not resend and do not submit it for the operator; check its pane")
 RECALLED_WHY = ("the transcript already holds a copy of this message that is not shown to be the one we typed, so the copy "
                 "in its input box may be a recalled one: not submitted, nothing typed. Do not resend; check its pane")
+MOVED_WHY = ("its transcript is not the one our earlier copy of this message was typed into (/clear, a resumed or replaced "
+             "session): its delivery cannot be proven and the copy in its box is not ours to submit. Do not resend; check its pane")
 
 
 def retry_leftover(c, chan, d, left):
@@ -903,6 +1017,8 @@ def retry_leftover(c, chan, d, left):
     if d and not mine(d, left):
         return ("unverified", f"its input box holds someone else's draft ({fleet.clip(d, 60)!r}); an earlier copy of this "
                               "message may or may not have landed. Do not resend; check its pane")
+    if entry_moved(s, left):
+        return ("unverified", MOVED_WHY)
     st = entry_state(s, left)
     if st == "pulled":    # queued, then taken back into the box (or out of it) by the operator: not delivered, not ours to submit
         return ("unverified", PULLED_WHY)
@@ -952,18 +1068,22 @@ def route_pane(c):
     if is_slash(text) or text.lstrip(SLASH_STRIP).startswith("!"):
         return ("skip", "text starting with '/' or '!' typed into a pane would run a built-in or a shell command "
                         "there; peers do not run another session's built-ins")
-    with pane_lock(s["id"]) as got:    # from the box read until the text is recorded: two relays never type into one box
+    with pane_lock(s["id"], text) as got:    # from the box read until the text is recorded: two relays never type into one box
         if not got:
-            return ("stop", "another relay is typing into that pane right now (it holds the pane lock beside "
-                            f"{UNSENT.name}): not typing beside it; check its pane, then retry", 1)
+            if pane_sending(s["id"], text):    # the holder is sending this very text: the socket would put it in a second time
+                return ("stop", "another relay is sending this very text into that pane right now (it holds the pane lock "
+                                f"beside {UNSENT.name}): not sending it a second time; check its pane, do not resend", 1)
+            return ("skip", "another relay is typing into that pane right now (it holds the pane lock beside "    # skip, not stop: the socket sends no keys, so the next route may still deliver
+                            f"{UNSENT.name}): not typing beside it; check its pane, then retry")
         return pane_send(c)
 
 
 def pulled_and_discarded(s, chan, left):
     """True when the pulled-back entry LEFT was discarded by the operator: its box reads empty a second after it did
-    already, and no copy of the text has been submitted since."""
+    already, and no copy of the text has been submitted since, wherever it is stamped (the window only claims success:
+    a copy he submitted by hand after it must keep the entry)."""
     time.sleep(1)
-    return box_text(chan) == "" and entry_state(s, left) == "pulled"
+    return box_text(chan) == "" and entry_state(s, left, windowed=False) == "pulled"
 
 
 def pane_send(c):
@@ -979,12 +1099,13 @@ def pane_send(c):
         return ("skip", "cannot see its input box (its ❯ row or bottom border is outside the screen read)")
     if left and " ".join(left["text"].split()) == text:    # a retry of the message an earlier relay left unsent
         return retry_leftover(c, chan, d, left)
+    moved = bool(left) and entry_moved(s, left)    # its transcript is another file than the entry's mark points into: nothing is provable, nothing pressed
     raw = entry_state(s, left, windowed=False) if d and left else None    # any copy of that text in the transcript: never press on one
     if raw in ("delivered", "queued") and entry_state(s, left) in ("delivered", "queued"):    # that message reached the session: the box holds a recalled copy
         note_unsent(s["id"], None)
         left, raw = None, None
     pressed_at = None
-    if d and mine(d, left) and raw is None:    # a copy the operator pulled back out of the queue, or a recalled one, is not ours to submit
+    if d and mine(d, left) and raw is None and not moved:    # a copy the operator pulled back out of the queue, or a recalled one, is not ours to submit
         pressed_at = time.time()
         press_enter(chan)
         for _ in range(10):
@@ -1011,6 +1132,10 @@ def pane_send(c):
             note_unsent(s["id"], None)
         elif stt == "pulled" and pulled_and_discarded(s, chan, left):
             note_unsent(s["id"], None)    # he pulled it back and emptied the box: not ours any more
+        elif moved:    # its transcript is gone from this pane: nothing will ever prove it, only its expiry frees the pane for other text
+            return ("skip", f"an earlier message of ours to this session ({fleet.clip(left['text'], 50)!r}) was typed into a "
+                            "transcript that is not its current one (/clear, a resumed or replaced session): its delivery cannot "
+                            "be proven, so it holds other text back until it expires (up to an hour). Check its pane")
         else:    # typing now could make its retry type the first text again (a duplicate): the retry must ask first
             return ("skip", f"an earlier message of ours to this session is not yet proven delivered "
                             f"({fleet.clip(left['text'], 50)!r}); wait up to an hour, or check its pane")
@@ -1109,25 +1234,45 @@ def route_dispatch(c):
     return ("ok", f"acp-dispatch {Path(rec).name}", "queued")
 
 
+def turn_is_above(table, pid, boundary):
+    """True when walking up from PID in TABLE (pid -> (ppid, command), as `fleet.proc_table` reads it) reaches BOUNDARY (the
+    relay that started the Hermes turn) or the top of the tree before it passes an agent other than Hermes. The Hermes
+    process itself is not told from its command line (`python3 -I -c import os, ...`), so the boundary is explicit."""
+    for _ in range(40):
+        if pid == boundary or pid <= 1:
+            return True
+        ppid, cmd = table.get(pid, (0, ""))
+        agent = next((fleet.PROC_AGENTS[n] for n in (os.path.basename(p) for p in cmd.split()[:2]) if n in fleet.PROC_AGENTS), None)
+        if agent:
+            return agent == "hermes"
+        pid = ppid
+    return True
+
+
 def hermes_hops():
+    """Hermes turns nested above this process (RELAY_HOPS, set for a relayed `hermes -z` turn together with RELAY_HOP_PARENT,
+    the pid of the relay that started it). Anything a turn starts inherits both, so a Claude, Codex or other agent session
+    started inside the turn would count it too: it counts only when the walk up from this process reaches that relay, or the
+    top of the tree (the relay already exited), before another agent (R3-L3). Without a valid RELAY_HOP_PARENT it counts."""
     try:
-        return max(0, int(os.environ.get("RELAY_HOPS", "0")))
+        n = max(0, int(os.environ.get("RELAY_HOPS", "0")))
     except ValueError:
         return HERMES_HOPS_MAX
+    if not n:
+        return 0
+    try:
+        boundary = int(os.environ["RELAY_HOP_PARENT"])
+    except (KeyError, ValueError):
+        return n
+    return n if turn_is_above(fleet.proc_table(), os.getppid(), boundary) else 0
 
 
 def hermes_env(sid):
     env = {k: v for k, v in os.environ.items() if k not in HERMES_SCRUB and not k.startswith(HERMES_SCRUB_PREFIXES)}
     env["RELAY_HOPS"] = str(hermes_hops() + 1)
+    env["RELAY_HOP_PARENT"] = str(os.getpid())
     env["RELAY_SENDER"] = f"hermes {sid[-8:]}"
     return env
-
-
-def clean_reply(text):
-    """Hermes's reply as plain data: escape sequences and control characters (C0 bar newline and tab, DEL, C1) removed."""
-    return "".join(ch for ch in ANSI.sub("", text)
-                   if ch in "\n\t" or not (ch < " " or "\x7f" <= ch <= "\x9f" or unicodedata.category(ch) in ("Cf", "Zl", "Zp")
-                                                                       or ch in HIDDEN or "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef")).strip()
 
 
 def read_capped(path):
@@ -1145,10 +1290,60 @@ def hermes_prune():
     for f in HERMES_DIR.glob("[0-9]*-*.out"):
         try:
             if f.stat().st_mtime < cutoff:
-                f.unlink()
+                f.unlink(missing_ok=True)    # a concurrent prune may have taken it first: its .err still goes
                 f.with_suffix(".err").unlink(missing_ok=True)
         except OSError:
             pass
+    for f in HERMES_DIR.glob("*.lock"):    # a lock untouched for the keep time that nobody holds (a held one fails the flock)
+        try:
+            if f.stat().st_mtime < cutoff:
+                fd = os.open(f, os.O_WRONLY | os.O_NOFOLLOW)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    f.unlink(missing_ok=True)    # still locked: `hermes_lock` re-checks the inode of what it locked
+                finally:
+                    os.close(fd)
+        except OSError:
+            pass
+
+
+def hermes_lock_path(sid):
+    return HERMES_DIR / f"{re.sub(r'[^A-Za-z0-9_-]', '_', sid)}.lock"
+
+
+def hermes_lock(sid):
+    """The open, exclusively locked 0600 lock file of conversation SID (the turn's child inherits it), or None when a
+    relayed turn holds it. A prune can unlink the file between the open and the lock, and it holds that file's lock
+    while it does: so whether the lock was taken or refused, a file that is no longer the path was not the conversation's
+    lock, and the open is repeated."""
+    path = hermes_lock_path(sid)
+    for _ in range(5):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            taken = True
+        except OSError:
+            taken = False
+        try:
+            current = os.stat(path).st_ino == os.fstat(fd).st_ino
+        except OSError:
+            current = False
+        if current:
+            if taken:
+                return fd
+            os.close(fd)
+            return None
+        os.close(fd)
+    return None
+
+
+def hermes_holder(sid):
+    """"pid N, " for the turn that holds the lock of conversation SID (it writes its pid there), else ""."""
+    try:
+        pid = hermes_lock_path(sid).read_text().strip()
+    except OSError:
+        return ""
+    return f"pid {pid}, " if pid.isdigit() else ""
 
 
 def route_hermes(c):
@@ -1167,12 +1362,14 @@ def route_hermes(c):
     os.chmod(HERMES_DIR, 0o700)
     hermes_prune()
     sid8 = s["sid"][-8:]
-    lock = os.open(HERMES_DIR / f"{re.sub(r'[^A-Za-z0-9_-]', '_', s['sid'])}.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return ("stop", f"a relayed turn is still running in that conversation (lock {HERMES_DIR}): not writing beside it", 1)
+        lock = hermes_lock(s["sid"])
+    except OSError as e:    # a sid too long for a file name, a symlinked lock path
+        return ("stop", f"cannot open the lock of that conversation ({e}): nothing was sent", 1)
+    if lock is None:
+        return ("stop", f"a relayed turn is still running in that conversation ({hermes_holder(s['sid'])}lock {HERMES_DIR}): "
+                        "not writing beside it", 1)
+    try:
         base = HERMES_DIR / f"{time.time_ns()}-{sid8}"
         out_p, err_p = base.with_suffix(".out"), base.with_suffix(".err")
         try:
@@ -1183,6 +1380,11 @@ def route_hermes(c):
             out_p.unlink(missing_ok=True)
             err_p.unlink(missing_ok=True)
             return ("skip", f"hermes CLI not usable: {e}")
+        try:
+            os.ftruncate(lock, 0)
+            os.pwrite(lock, f"{proc.pid}\n".encode(), 0)    # who holds the lock, for the next relay's refusal
+        except OSError:
+            pass
     finally:
         os.close(lock)    # the child holds its own copy of the locked file: the lock lasts as long as its turn
     note = (f"relay: [{s['id']}] hermes turn started (pid {proc.pid}). If this command is cut off or times out, the message "
@@ -1197,6 +1399,7 @@ def route_hermes(c):
     try:
         rc = proc.wait(timeout=max(1.0, c["t0"] + max(HERMES_MIN_WAIT, c["a"].wait) - time.time()))
     except subprocess.TimeoutExpired:
+        c["reply_file"] = str(out_p)
         return ("unverified", f"`hermes --resume -z` is still running (pid {proc.pid}, left running, not killed); its raw "
                               f"reply will land in {out_p} (escape sequences are not stripped there). The text may already "
                               "be in the conversation. Do not resend")
@@ -1207,15 +1410,23 @@ def route_hermes(c):
     out = read_capped(out_p)
     sid = re.escape(s["sid"])
     if (rc == 1 and not out.strip() and re.fullmatch(
-            rf"hermes -z: agent failed: (?:session not found: {sid}|cannot resume session {sid}: [^\n]*)", clean_reply(err))):
+            rf"hermes -z: agent failed: (?:session not found: {sid}|cannot resume session {sid}: [^\n]*)", fleet.clean_text(err))):
         out_p.unlink(missing_ok=True)
         err_p.unlink(missing_ok=True)
-        return ("skip", f"Hermes does not know session {s['sid']}: {fleet.clip(clean_reply(err), 160)}")
+        return ("skip", f"Hermes does not know session {s['sid']}: {fleet.clip(fleet.clean_text(err), 160)}")
+    big = re.fullmatch(r"hermes -z: agent failed: This session is too long to reload safely \((\d+) messages; limit (\d+)\)\.[^\n]*",
+                       fleet.clean_text(err)) if rc == 1 and not out.strip() else None
+    if big:    # assert_resume_safe runs before the turn writes anything (hermes_cli/oneshot.py _load_resume_target)
+        out_p.unlink(missing_ok=True)
+        err_p.unlink(missing_ok=True)
+        return ("skip", f"that Hermes thread is too large to reload ({big[1]} messages; limit {big[2]}): Hermes refused it before "
+                        "writing anything; start a fresh chat, or `hermes config set sessions.max_resume_messages 0`")
     if rc != 0:
-        return ("unverified", f"`hermes --resume -z` failed (rc={rc}: {fleet.clip(clean_reply(err).splitlines()[-1] if err.strip() else '', 160)}); "
+        c["reply_file"] = str(out_p)
+        return ("unverified", f"`hermes --resume -z` failed (rc={rc}: {fleet.clip(fleet.clean_text(err).splitlines()[-1] if err.strip() else '', 160)}); "
                               f"the turn may have started, so no other route was tried. Output kept in {out_p} and {err_p} "
                               "(raw). Do not resend")
-    reply = clean_reply(out)
+    reply = fleet.clean_text(out)
     if len(reply) > HERMES_REPLY_CAP:
         out_p.write_text(reply)    # the kept file holds the cleaned text, never the raw
         c["reply"] = reply[:HERMES_REPLY_CAP] + f"\n[cut at {HERMES_REPLY_CAP} characters; the cleaned first {HERMES_READ_CAP // 1024} KB of the reply: {out_p}]"
@@ -1259,6 +1470,8 @@ def main():
     ap.add_argument("text")
     ap.add_argument("--wait", type=float, default=20, help="seconds to verify delivery (default 20; a hermes turn gets max(100, S))")
     ap.add_argument("--idle", type=float, metavar="S", help="a working Paseo agent or non-Claude pane TUI: wait up to S seconds for it to go idle first")
+    ap.add_argument("--steer", action="store_true", help="send to a WORKING codex, omp, opencode or pi Paseo agent as a steer anyway: "
+                    "Paseo replaces its running turn when the provider declines the steer (a review turn, an error); claude needs no flag")
     ap.add_argument("--via", choices=sorted(ROUTES), help="use only this route (default: the best, then fall back)")
     ap.add_argument("--plan", action="store_true", help="print the routes in order and send nothing")
     ap.add_argument("--json", action="store_true")
@@ -1279,8 +1492,13 @@ def main():
     if not hits and UUID.fullmatch(a.ident):
         hits = [s for s in [paseo_session(a.ident)] if s]    # a PASEO_AGENT_ID fleet does not list
     if len(hits) != 1:
-        print(f"relay: {'no' if not hits else len(hits)} session(s) match {a.ident!r} (fleet.py list shows ids and names)",
-              file=sys.stderr)
+        if len(hits) > 1:
+            print(f"relay: {len(hits)} sessions match {a.ident!r}; give a longer id or the name. Candidates:", file=sys.stderr)
+            for h in hits[:12]:
+                print(f"  [{h['id']}] {h['agent']} {h['name'] or '-'} {h['status']} {fleet.short(h['cwd'])}"
+                      + (f"  paseo {h['paseo']}" if h.get("paseo") else ""), file=sys.stderr)
+        else:
+            print(f"relay: no session(s) match {a.ident!r} (fleet.py list shows ids and names)", file=sys.stderr)
         return 1
     s = hits[0]
     is_paseo = s.get("host") == "paseo" or (s.get("chan") or (None,))[0] == "paseo"
@@ -1309,9 +1527,9 @@ def main():
     if why:
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
-    if is_paseo and s["agent"] != "claude" and s.get("status") != "idle":
-        print(f"relay: [{s['id']}] not sent: a {s['agent']} TUI that is {s.get('status')}: only idle ones take typed "
-              "text reliably (--idle S waits for it)", file=sys.stderr)
+    why = is_paseo and paseo_steer_refusal(s, a.steer)
+    if why:
+        print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
     routes = [n for n in plan(s) if not a.via or n == a.via]
     if a.plan:
@@ -1338,6 +1556,8 @@ def main():
             out["via"] = res[1]
         else:
             out["reason"] = res[1]
+        if res[0] == "unverified" and "reply_file" in c:    # a timed-out or failed turn: where its reply lands or was kept
+            out["reply_file"] = c["reply_file"]
         if tried:
             print(f"relay: [{s['id']}] fell back past " + "; ".join(f"{n} ({w})" for n, w in tried), file=sys.stderr)
         if res[0] == "unverified":

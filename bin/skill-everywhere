@@ -30,7 +30,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 # GNU tools carry a g prefix on the Mac (Homebrew). On GNU/Linux, e.g. the
 # Grok Bot box (2026-10-23), the plain names are already GNU: alias them.
-for t in sed readlink realpath grep head; do
+for t in sed readlink realpath grep head awk; do
   command -v "g$t" >/dev/null || eval "g$t() { $t \"\$@\"; }"
 done
 ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
@@ -93,7 +93,7 @@ render_copy() {  # render_copy <src> <out>
 > needs the operator's explicit approval.${SKILL_EVERYWHERE_GROKBOT_NOTE:+
 >
 > ${SKILL_EVERYWHERE_GROKBOT_NOTE}}" \
-  awk 'n < 2 && /^---[[:space:]]*$/ { n++; print; if (n == 2) print "\n" ENVIRON["BANNER"]; next } { print }' \
+  gawk 'n < 2 && /^---[[:space:]]*$/ { n++; print; if (n == 2) print "\n" ENVIRON["BANNER"]; next } { print }' \
     "$2/SKILL.md" >"$2/SKILL.md.new" && mv "$2/SKILL.md.new" "$2/SKILL.md"
 }
 copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry

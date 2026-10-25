@@ -76,7 +76,7 @@ class TestInnerClaudeBySid(unittest.TestCase):
 class TestMarkedHidden(unittest.TestCase):
     def test_include_marked_false_drops_marked_launches(self) -> None:
         saved = {k: getattr(fleet, k) for k in ("herdr_json", "_launched", "_claude_sessions", "_other_herdr", "_pane_only",
-                                                 "_proc_scan", "_hermes_gateway", "proc_table", "mark_busy", "ancestors")}
+                                                 "_proc_scan", "_hermes_gateway", "_paseo_rows", "proc_table", "mark_busy", "ancestors")}
         try:
             fleet.herdr_json = lambda *a: {}
             fleet._launched = lambda used: [fleet._rec(id="L", host="acp", mark="test"), fleet._rec(id="M", host="acp")]
@@ -85,6 +85,7 @@ class TestMarkedHidden(unittest.TestCase):
             fleet._pane_only = lambda *a: ([], [])
             fleet._proc_scan = lambda *a: []
             fleet._hermes_gateway = lambda: []
+            fleet._paseo_rows = lambda *a: []
             fleet.proc_table = lambda: {}
             fleet.mark_busy = lambda *a: None
             fleet.ancestors = lambda: set()
