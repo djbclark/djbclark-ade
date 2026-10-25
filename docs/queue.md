@@ -1631,7 +1631,7 @@ The fork carries the fix as branch `djbclark/short-postcompact-hook` (upstream
 `main` + the PR commit, rebased 2026-10-10, **not built**). Build it only if
 djbclark asks; once a release ships #25211, delete that branch.
 
-## Review the Jev-vs-GLiDE dual review (ends by 2026-10-23)
+## Review the Jev-vs-GLiDE dual review — DONE 2026-10-25 (findings; djbclark chose Jev-only shadow)
 
 **Started 2026-10-11 (operator).** The Jev-only prompt-effort review was closed the
 same day; see `docs/jev.md` "Dual review". Jev and GLiDE answer the same prompt-effort
@@ -1641,6 +1641,12 @@ days; the window closes itself (mode goes off). On 2026-10-23 run
 agent-choice --between`, label disagreements, then ask djbclark per backend: act, keep
 shadow, or off. A self-removing launchd job (`com.djbclark.jev-remind-2026-10-23`)
 pings Hermes that morning.
+
+**Outcome (2026-10-25).** Report `jev-dual1-review-report.md` (bigteam task `ade-queue-build-2026-10-24`): nothing met the promotion bar. The agent-choice rows are 97.5% pytest fixtures; every timeout
+hit both backends at once (shared deadline); 44% of prompt-effort rows are Herald voice-announcer prompts; no operator labels exist. On 36 decided disagreement rows (one agent's reading) GLiDE was
+right 21, Jev 11, neither 4. djbclark chose to restore Jev-only shadow: `bin/jev review stop` and `~/.config/jev/backends` removed (copy was `jev,glide`), mode `shadow`. Findings a later window would need:
+fixtures run with `JEV_MODE=off`, the hook skips non-human prompts, the report's default `--since` follows the review window, separate deadlines per backend, a per-site backends setting.
+
 
 ## Why the `sed` edit failed twice (queued 2026-10-14, operator) — DONE 2026-10-14
 
