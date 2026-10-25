@@ -862,6 +862,17 @@ states the rule. Build items, each one Sonnet `code` slice with a test:
 3. **Inbound relays**: a relayed message that asks a question is answered by a relay to its sender (the footer names the route); a reply written only in the receiver's prose is flagged by the `session-finder` skill text and by a Stop-hook nudge when a turn began with `[relay from ...]` and ended with no `relay.py` call.
 4. **Home instruction file (Opus only)**: item 24 (3) of `~/.claude/CLAUDE.md` gains one clause pointing at standing order 10; dispatched `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment` on 2026-10-25.
 
+Scoping (Dann 5, lead of techno-euphora, relayed 2026-10-25, after djbclark asked whether relay should ALWAYS require a reply): mandate PROOF, not conversation. Delivery proof (the text reached the
+target's transcript) is mechanical and needs no reply; a reply (the target read it and acted) costs the target a turn, and a send to a working cline or ACP agent cannot steer, so forcing one on every message
+doubles traffic, interrupts work and is wrong for one-way messages (a status, a handoff pointer, "PR 61 is merged"). Evidence: this chain's own handoff a621 item 6 carried a 30-minute waiter and a "peer may
+be unreachable" note for a peer (`29a5535c`) that was reachable and responsive; only `queued` looking like success hid it. The items keep their shape and gain:
+A. `queued` never exits 0 as if delivered (item 1, first and unchanged).
+B. `--expect-ack ID` is REQUIRED for a message that asks a question or requests action, and is record state, not a blocking wait: set at send time, shown by `relay.py --pending` (sender, target, age), resolved by
+   a later `--sweep` when the reply arrives, so no turn is held open on a peer's schedule.
+C. First contact with a peer always asks for an ack (item 2, standing order 10).
+D. No ack within a bounded time escalates to the operator, never assumed read.
+E. Everything else: verified delivery is enough; an FYI that provably landed needs no reply.
+
 ## Software factory, Phase F (decided 2026-10-19)
 
 Proposal §8 item 9 and §9.3. Starts after Phase 1's first PR. First slices: `bin/factory` F1
