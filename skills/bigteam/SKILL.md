@@ -996,8 +996,10 @@ Whenever a prompt contains separable, discrete work, or the context-size hook
 has fired, slice it and send it out at the minimum spec that does it well; a
 single lookup goes to a minimum-spec Agent sub-agent instead (`effort-routing`).
 The orchestrator's own context is also a cost: Claude Code compacts it by itself
-at 400k tokens (`autoCompactWindow`), and in a herdr pane, Orca terminal or Paseo agent the
+at 300k tokens (`autoCompactWindow`, verified 2026-10-25), and in a herdr pane, Orca terminal or Paseo agent the
 orchestrator compacts earlier at a wave boundary with `self-slash "/compact
 <focus>"`, or runs the `handoff` skill then `self-slash "/new"` on a topic change
 (the fresh session gets `/baton` from self-slash itself, 2026-10-19), without
 asking.
+
+**Provider-specific context controls (2026-10-25).** Read [context hygiene](../../docs/context-hygiene.md) before a long Go slice. Cached input still debits the shared monthly allowance; neither the model context capacity nor a small uncached input count is a cost budget. OpenCode V2 uses native safe-point compaction and current input plus cache tokens. At a completed task, write the owned handoff and Tier 1 checkpoint before a supported fresh-session/baton cycle; a dispatched slice never clears its parent.

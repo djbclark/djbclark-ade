@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Queue native Go compaction for the tool-scoped OpenCode session.
+
+Called by self-slash when the context plugin supplies ADE_OPENCODE_SESSION_ID.
+Usage: opencode-self-compact [--dry-run]
+No terminal input, parent lifecycle operation, retry, or inference probe.
+Exit: 2 invalid scope/options, 7 cooldown/lock/state refusal, 11 API failure.
+An accepted request is not proof that compaction has completed.
+"""
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def save(path, data):
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def api(*args):
+    return subprocess.run(
+        ["opencode", "api", *args], capture_output=True, text=True,
+        timeout=15, check=False,
+    )
+
+
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else argv
+    sid = os.environ.get("ADE_OPENCODE_SESSION_ID", "")
+    if args not in ([], ["--dry-run"]) or not re.fullmatch(r"ses_[A-Za-z0-9]+", sid):
+        print("self-slash: native compact needs a valid tool-scoped ADE_OPENCODE_SESSION_ID", file=sys.stderr)
+        return 2
+    if args == ["--dry-run"]:
+        print(f"self-slash: would verify Go session {sid} and queue native compaction; no API call made")
+        return 0
+    root = Path.home() / ".local/state/self-slash"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state = root / f"opencode_{sid}.compact.json"
+    try:
+        with (root / f"opencode_{sid}.compact.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 7
+            if state.exists():
+                previous = json.loads(state.read_text())
+                when = previous.get("attempted_at") if isinstance(previous, dict) else None
+                if not isinstance(when, (int, float)) or isinstance(when, bool):
+                    print("self-slash: native compaction state unreadable; refusing a duplicate", file=sys.stderr)
+                    return 7
+                if time.time() - when < 300:
+                    print("self-slash: native compaction already attempted within 300s", file=sys.stderr)
+                    return 7
+            result = api("get", f"/api/session/{sid}")
+            if result.returncode:
+                print("self-slash: native session lookup failed; nothing requested", file=sys.stderr)
+                return 11
+            data = json.loads(result.stdout)
+            info = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(info, dict) or info.get("id") != sid:
+                print("self-slash: native session identity unverified; nothing requested", file=sys.stderr)
+                return 11
+            model = info.get("model")
+            if not isinstance(model, dict) or model.get("providerID") != "opencode-go":
+                print("self-slash: native compact is scoped to an OpenCode Go session", file=sys.stderr)
+                return 2
+            record = {"session_id": sid, "attempted_at": time.time(), "outcome": "uncertain"}
+            # Record before the write: a timeout may still have queued it upstream.
+            save(state, record)
+            result = api("post", f"/api/session/{sid}/compact", "--data", "{}")
+            if result.returncode:
+                print("self-slash: native compact request failed or is uncertain; do not retry immediately", file=sys.stderr)
+                return 11
+            record["outcome"] = "accepted"
+            save(state, record)
+            print(f"self-slash: native compaction accepted for {sid}; completion is not yet verified")
+            return 0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        print("self-slash: native compact failed or state is unreadable; no automatic retry", file=sys.stderr)
+        return 11
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

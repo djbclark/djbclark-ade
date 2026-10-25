@@ -10,6 +10,8 @@ description: >-
 
 # Baton — resume a task workspace from its Tier 1 pointer
 
+**Provider scope (2026-10-25).** A native OpenCode compaction continues its existing session; it does not start a new baton. Only resume a fresh session after the owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
+
 Since 2026-10-19 `bin/self-slash "/new"` (also `/clear`, `/reset`) queues
 `/baton` into the fresh session itself (`--then`, default `/baton`; `--no-then`
 turns it off), so after a handoff nobody types this; a `/baton` that arrives

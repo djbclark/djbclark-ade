@@ -242,6 +242,8 @@ session; in that case skip it silently. Add its one-line result to the report.
 
 ## Step 9 — Clear and continue
 
+**Context and provider check (2026-10-25).** Follow [context hygiene](../../docs/context-hygiene.md): start a handoff at a completed task boundary rather than carrying unrelated work into a large context. Cached reads still consume the provider allowance. If `ADE_OPENCODE_SESSION_ID` is set, this is the native OpenCode path: persist the owned checkpoint and use `self-slash "/compact"` when continuing. Do not send `/new`, `/clear` or `/reset` into a presumed parent; native reset needs a supported, acknowledged successor/baton path. Until that path is verified, this step is document-only for a native reset, and compaction is the automatic continuation mechanism.
+
 Last action, after Step 8 (djbclark, 2026-10-20: "handoffs [should] immediately clear context and
 then start a baton and continue running without human intervention"). Run
 
