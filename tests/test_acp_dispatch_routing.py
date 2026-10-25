@@ -564,5 +564,129 @@ class TestFloorWithShortHistory(RoutingDispatch):
         self.assertIn("history", rec["estimate_source"])
 
 
+class TestWindowFloor(RoutingDispatch):
+    """Adversary d13f2ed, A2: one comparable 2% window measurement stood in for the three the floor
+    needs, so the window path admitted a judgment slice the scalar estimate (25) would refuse."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.jobs = self.tmp / "state" / "other-task" / "jobs"
+        self.jobs.mkdir(parents=True)
+
+    def comparable(self, n: int = 1) -> None:
+        for i in range(n):
+            (self.jobs / f"h{i}.json").write_text(json.dumps({
+                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
+                "effort": "high", "measured_usage_pct": 2.0, "measured_usage_windows": {"5h": 2.0}}))
+
+    def reserve_40(self) -> None:
+        (self.jobs / "busy.json").write_text(json.dumps(self.busy_row(
+            model="gpt-6.1-sol", estimated_usage_pct=40.0, estimated_usage_windows={"5h": 40.0})))
+
+    def judgment(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        return self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", *extra,
+            env={**self.snap_codex(50.0), "ACP_DISPATCH_INFLIGHT": "codex=2"})
+
+    def test_one_comparable_window_row_is_estimated_at_the_floor(self):
+        self.comparable(1)
+        self.reserve_40()
+        r = self.judgment("--dry-run", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (25.0, {"5h": 25.0}))
+        self.assertEqual(rec["reserved_usage_windows"], {"5h": 40.0})
+        self.assertEqual(rec["would_refuse_class"], "inflight")
+
+    def test_admission_refuses_with_nothing_spawned(self):
+        self.comparable(1)
+        self.reserve_40()
+        r = self.judgment()
+        self.assertEqual(r.returncode, 5, (r.stdout, r.stderr))
+        rec = self.record()
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["pid"]), ("unavailable", "inflight", None))
+        self.assertIn("25.0% > 10.0% left on 5h", rec["detail"])
+        # the fake runner writes the log and the report when it is started: it never was
+        self.assertFalse((self.out / "s1.jsonl").exists() or (self.out / "s1-report.md").exists())
+
+    def test_a_stored_estimate_reserves_the_floor_for_the_next_dispatch(self):
+        self.comparable(1)
+        r = self.judgment()
+        self.assertEqual(r.returncode, 0, (r.stdout, r.stderr))
+        rec = self.record()
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (25.0, {"5h": 25.0}))
+        import importlib.machinery
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"
+        loader = importlib.machinery.SourceFileLoader("acp_dispatch_window_floor", str(script))
+        spec = importlib.util.spec_from_loader("acp_dispatch_window_floor", loader)
+        assert spec is not None
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        self.assertEqual(mod.reserved_usage([self.out / "jobs" / "s1.json"], ["5h"]), (25.0, {"5h": 25.0}))
+
+    def test_three_comparable_window_rows_still_release_the_floor(self):
+        self.comparable(3)
+        self.reserve_40()
+        r = self.judgment("--dry-run", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (2.0, {"5h": 2.0}))
+        self.assertNotIn("would_refuse_class", rec)
+
+    def test_a_window_no_comparable_row_measured_is_checked_at_the_floor_too(self):
+        """One row measured only the 5-hour window: the weekly window is not left unchecked beside it."""
+        self.comparable(1)
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({
+            "collected_at": "2099-01-01T00:00:00+00:00",
+            "snapshot": {"accounts": [{"provider": "codex", "windows": [
+                {"label": "5h", "remaining_percent": 100.0}, {"label": "7d", "remaining_percent": 60.0}]}]}}))
+        r = self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", "--dry-run", "--json", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual(rec["estimated_usage_windows"], {"5h": 25.0, "7d": 25.0})
+
+    def test_a_window_estimate_is_never_below_the_scalar_estimate(self):
+        for i in range(2):
+            (self.jobs / f"h{i}.json").write_text(json.dumps({
+                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
+                "effort": "high", "measured_usage_pct": 40.0, "measured_usage_windows": {"5h": 2.0}}))
+        r = self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", "--dry-run", "--json", env=self.snap_codex(100.0))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (40.0, {"5h": 40.0}))
+
+    def test_a_window_with_fewer_than_three_measurements_is_floored_beside_one_with_three(self):
+        """Per label: three rows measure 5h, only two of them also the weekly window."""
+        for i in range(3):
+            (self.jobs / f"h{i}.json").write_text(json.dumps({
+                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
+                "effort": "high", "measured_usage_pct": 2.0,
+                "measured_usage_windows": {"5h": 2.0, **({"7d": 1.0} if i < 2 else {})}}))
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({
+            "collected_at": "2099-01-01T00:00:00+00:00",
+            "snapshot": {"accounts": [{"provider": "codex", "windows": [
+                {"label": "5h", "remaining_percent": 100.0}, {"label": "7d", "remaining_percent": 100.0}]}]}}))
+        r = self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", "--dry-run", "--json", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual(rec["estimated_usage_windows"], {"5h": 2.0, "7d": 25.0})
+
+
 if __name__ == "__main__":
     unittest.main()

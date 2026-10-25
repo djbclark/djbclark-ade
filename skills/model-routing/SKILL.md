@@ -612,7 +612,10 @@ method that runs the waves.
        until three history rows that record that kind and effort exist (a row
        with either unrecorded does not count toward them, and a request with
        no `--effort`, a manual reroute included, counts none: it reserves the
-       floor, 2026-10-25).
+       floor, 2026-10-25). The per-window estimates obey the same floor: a
+       window with fewer than three comparable measurements is estimated at
+       the floor, never at one row's small measurement, and every window of
+       the reading is then checked at it.
    1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
        without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
        `fable-deep` agent runs at `high`.
