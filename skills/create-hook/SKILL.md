@@ -52,8 +52,11 @@ then write the files, then give the operator the trust steps (section 4).
 
 ## 2. Events
 
-Event names are exact, case-sensitive PascalCase. `matcher` is a **regex, unanchored**
-(`Bash` also matches `MyBashTool`; use `^Bash$`); `""`, `"*"` or omitted matches all.
+Event names are exact, case-sensitive PascalCase. `matcher`: `""`, `"*"` or omitted matches
+all; a pattern made only of letters, digits, `_` and `|` is an **exact** name or `|`-list
+(`Bash` does not match `BashOutput`; `mcp__memory` does not match
+`mcp__memory__create_entities`); anything else is an **unanchored** regex (`^Bash` matches
+`BashOutput`; use `^mcp__memory__` for a whole server).
 
 | Event | `matcher` filters | Can steer? |
 |---|---|---|
@@ -102,9 +105,11 @@ the directory a command will run in.
    context. `Stop`, `SubagentStop`, `Interrupt`: stdout must be JSON or empty (plain text is
    invalid). `PreToolUse`, `PermissionRequest`, `PostToolUse`: plain text is ignored.
 5. Common JSON fields (`continue`, `stopReason`, `systemMessage`, `suppressOutput`) only work
-   where listed in the docs. `suppressOutput` is parsed and does nothing. `PreToolUse` and
-   `PermissionRequest` reject `continue`, `stopReason`: the run is marked failed and the
-   tool call proceeds.
+   where listed in the docs. `PreToolUse` and `PermissionRequest` reject `continue:false`,
+   `stopReason` and `suppressOutput:true`, and `PostToolUse` rejects `suppressOutput:true`:
+   the run is marked failed and **its decision is discarded** (`PreToolUse`/`PostToolUse`:
+   the tool proceeds; `PermissionRequest`: the normal approval prompt). Never add these
+   fields to a deny or block.
 6. Context returned as `additionalContext` is capped near 2,500 tokens per hook (the rest
    is spilled to a temp file with a preview); `additionalContextLimit` on the handler tunes
    it. Keep it small, and never put secrets in output.
@@ -124,13 +129,20 @@ tool run.
 
 **PermissionRequest** decides an approval Codex is about to ask for:
 
+Allow, **or** deny: print exactly one of these objects, never both:
+
 ```json
 {"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}
+```
+
+```json
 {"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"why"}}}
 ```
 
-Print nothing to leave the decision to the normal prompt. `updatedInput`,
-`updatedPermissions` and `interrupt` fail closed today; never send them.
+Print nothing to leave the decision to the normal prompt. A reserved `updatedInput`,
+`updatedPermissions` or `interrupt: true` invalidates the **whole** output (a deny sent with
+it is dropped and the normal prompt follows); never send them. Invalid output never
+becomes an allow.
 
 **Stop** continues the turn: `{"decision":"block","reason":"Run the failing tests again."}`
 (the reason becomes a new user-style prompt). Check `stop_hook_active` or the hook loops.
@@ -198,8 +210,10 @@ The key is `<source file>:<event in snake_case>:<matcher-group index>:<handler i
    hook in a **fresh, controlled session** (a new `codex` in a scratch directory), or wait
    for the operator's natural restart. Any change to a hook's definition makes it `Modified`
    (new hash) and skipped again until re-trusted; do not assume a running session sees it.
-3. **Editing the script body does not change the hash**, so trust covers the command line,
-   not the script's contents. Keep hook scripts in a place only the operator can write.
+3. **For user and project hooks, editing the script body does not change the hash**, so
+   trust covers the command line, not the script's contents (plugin hooks are different:
+   Codex also fingerprints the plugin's content). Keep hook scripts where only the operator
+   can write.
 4. **Never** use `--dangerously-bypass-hook-trust`, and never hand-edit `[hooks.state]` or
    any Codex database or state file to mark a hook trusted. The `/hooks` browser is the only
    path. Plugin hooks are not trusted by installing the plugin.
@@ -239,7 +253,7 @@ except Exception as exc:  # hooks fail open; a policy hook must fail closed itse
 Handler (append as its own group in `~/.codex/hooks.json`):
 
 ```json
-{"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [
+{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
   {"type": "command", "command": "python3 ~/.codex/hooks/deny_force_push.py",
    "timeout": 10, "statusMessage": "Checking Bash command"}]}]}}
 ```
@@ -259,7 +273,7 @@ if e.get("tool_name") == "Bash" and e.get("tool_input", {}).get("command") == "g
                "decision": {"behavior": "allow"}}}, sys.stdout)
 ```
 
-Matcher `^Bash$`, `timeout` 10. To deny, use `{"behavior":"deny","message":"..."}`.
+Matcher `Bash`, `timeout` 10. To deny, use `{"behavior":"deny","message":"..."}` instead.
 
 ## 6. Coexist with existing hooks, and uninstall
 
@@ -271,6 +285,15 @@ gates, plugin hooks). Preserve all of them.
 2. Merge with **one helper**, `hookedit.py` (below): it appends your group last, or removes by
    exact `command`, keeping every other key (including `description`). Run it as
    `python3 hookedit.py PATH add EVENT 'GROUP_JSON'` or `python3 hookedit.py PATH remove EVENT 'COMMAND'`.
+   It reports `updated` or `unchanged`. It needs an existing file: on a missing one it fails
+   with `FileNotFoundError` and writes nothing. To start from nothing, create the file once
+   with exclusive creation, which refuses an existing file (user scope `0o600`; a project
+   `.codex/hooks.json` is shared through git, so `0o644`, and it only loads once the
+   project's `.codex/` layer is trusted):
+
+```sh
+python3 -c 'import os,sys; p=sys.argv[1]; os.makedirs(os.path.dirname(p), exist_ok=True); fd=os.open(p, os.O_WRONLY|os.O_CREAT|os.O_EXCL, int(sys.argv[2],8)); os.write(fd, b"{\"hooks\": {}}\n")' ~/.codex/hooks.json 600
+```
 
 ```python
 #!/usr/bin/env python3
@@ -316,11 +339,18 @@ def add(event, group):
 def remove(event, command):
     def mutate(doc):
         groups = doc.get("hooks", {}).get(event, [])
-        kept = [dict(g, hooks=[h for h in g.get("hooks", []) if h.get("command") != command])
-                for g in groups]
-        kept = [g for g in kept if g["hooks"]]      # drop only groups this emptied
-        if kept == groups:
-            return False
+        kept, changed = [], False
+        for g in groups:
+            hooks = g.get("hooks", [])
+            rest = [h for h in hooks if h.get("command") != command]
+            if len(rest) == len(hooks):
+                kept.append(g)                      # untouched, empty or hooks-less included
+                continue
+            changed = True
+            if rest:
+                kept.append(dict(g, hooks=rest))    # a group this call emptied is dropped
+        if not changed:
+            return False                            # no match: nothing rewritten
         if kept:
             doc["hooks"][event] = kept
         else:
@@ -341,10 +371,13 @@ if __name__ == "__main__":
    describe this helper as race-free. If it aborts, re-read the file and run it again.
 
 3. **Uninstall removes only your own entry** (`remove`, exact `command` you wrote), never a
-   whole event or file. Appended last means nothing after it shifts; if anything sits after
-   it, those later groups lose trust until re-reviewed in `/hooks`, so say so. Leave the
-   `[hooks.state]` lines alone. Delete the hook script file only if you created it, and
-   `~/.codex/hooks/` only if you created it and it is now empty.
+   whole event or file. `remove` leaves every group it did not change byte-for-byte as it was
+   (empty or `hooks`-less groups included) and drops only a group this call emptied. Dropping
+   that group shifts the trust index of every group after it in the event, so if anything
+   sits after yours those later hooks lose trust until re-reviewed in `/hooks`: say so (a
+   group appended last shifts nothing). Leave the `[hooks.state]` lines alone. Delete the
+   hook script file only if you created it, and `~/.codex/hooks/` only if you created it and
+   it is now empty.
 4. Do not touch `notify`, `[features]`, `[hooks.state]`, plugin directories or other tools'
    scripts. If the target layer has inline `[hooks]` in `config.toml`, add to that form rather
    than creating a second `hooks.json` that triggers the merge warning.
@@ -354,7 +387,8 @@ if __name__ == "__main__":
 ## 7. Review checklist before finishing
 
 1. Events are PascalCase, paths are `.codex/`, no `.cursor/` anywhere.
-2. `matcher` anchored where exactness matters; ignored events have none.
+2. `matcher` follows the exact-name/regex rule (section 2): `Bash` is exact, `^mcp__memory__`
+   covers a whole server; ignored events have none.
 3. Policy script fails closed; `timeout` set short for `PermissionRequest`.
 4. JSON parses; existing entries unchanged; new group last.
 5. Trust handled per section 4: definition shown and authorized, `/hooks` hash path only,
