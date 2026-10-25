@@ -40,7 +40,7 @@ Files: only regular files that `lstat` confirms and whose realpath is under the 
 realpath are read; symlinked notes, FIFOs, devices and the like are listed under `skipped`
 and never opened, so a link cannot pull outside text into a report and a FIFO cannot hang
 the run. A symlinked directory (`sub -> /elsewhere`, or `y.md -> /dir`) is listed the same way
-(`symlink: <rel>`) and never followed. A note that exists but cannot be read ("not readable")
+(`symlink: <rel>`) and never followed; so is a dangling or looping symlink with any name. A note that exists but cannot be read ("not readable")
 and a directory that cannot be listed are named under `skipped` (path only, never errno text
 or content); a note that vanishes mid-lint is ignored. A store root that cannot be listed, or
 a run that read no note at all while some were skipped, is exit 2, never "ok, no findings".
@@ -61,9 +61,9 @@ Checks (finding `check` ids):
                       with the occurrence count in the detail (1.2: 67)
   ruling-undated      `[ruling]` observation without a YYYY-MM-DD date on its line (Q8: a
                       ruling is something the operator said, quoted and dated)
-  decision-unlinked   `[decision]` observation in a note with no relation at all (Q8: an
-                      agent's design choice needs a relation to the handoff or PR that
-                      made it)
+  decision-unlinked   `[decision]` observation in a note with no relation and no PR/issue/
+                      commit link (Q8: an agent's design choice needs a relation to the
+                      handoff or PR that made it)
   status-unverified   `status: active` note whose `verified:` date is missing or older than
                       --verify-days (R6)
   oversize-note       note larger than --max-bytes (R6: 50 KB; largest today 404,846 bytes)
@@ -80,6 +80,10 @@ targets and rulings use a 12-hex SHA-1 of the text; `detail` may name other note
 config project paths. The `--json` output is still LOCAL-ONLY (it holds note paths and the
 store location); a notice sent off the machine should print `key`s built from paths only.
 
+One note that cannot be parsed is skipped alone (`notes: not parsed: <rel>` under `skipped`),
+never a failed run. An internal error exits 2 and prints the exception class name only: its
+message can carry note text.
+
 Exit status: 0 no findings, 1 findings, 2 error (unreadable store, bad arguments or
 BM_LINT_* values, any internal error).
 """
@@ -93,7 +97,7 @@ import re
 import stat
 import sys
 import time
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 
 DEFAULT_STORE = "~/ops/site-private/memory"
 DEFAULT_CONFIG = "~/.basic-memory/config.json"
@@ -118,6 +122,7 @@ EXTLINK_RE = re.compile(r"\[[^\]\n[]*\]\(<?(https?://[^)\s\[\]()<>]+)>?(?:[ \t]+
 # Provenance = a PR, issue, merge request or commit page: GitHub/Forgejo `pull`/`pulls`/
 # `issues`/`commit`, GitLab `merge_requests`, with something after the segment.
 PROVENANCE_PATH_RE = re.compile(r"/(?:pulls?|issues|merge_requests|commits?)/[^/]+", re.IGNORECASE)
+URL_AUTHORITY_RE = re.compile(r"^https?://[^/?#]*", re.IGNORECASE)
 OBSERVATION_RE = re.compile(r"^[ \t]*[-*][ \t]*\[(ruling|decision)\][ \t]*(.*)$", re.MULTILINE)
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
@@ -137,6 +142,17 @@ DEAD_PATH_RE = re.compile(
 def short_hash(text):
     """12 hex of SHA-1: a stable, content-free handle for text that must not be printed."""
     return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def url_path(url):
+    """The path of an http(s) URL, taken by hand: no query, no fragment, no host. Never
+    `urlsplit`, which raises ValueError on a netloc such as `example.com\uff1a8080` (NFKC
+    turns the full-width colon into `:`), and one such link must not abort the whole run.
+    Anything that is not an http(s) URL has no path ("")."""
+    m = URL_AUTHORITY_RE.match(url)
+    if not m:
+        return ""
+    return url[m.end():].split("?", 1)[0].split("#", 1)[0]
 
 
 def slug(s):
@@ -241,9 +257,15 @@ class Store:
                                            "symlink"))
                     dirnames.remove(d)
             for name in sorted(filenames):
-                if not name.endswith(".md"):
-                    continue
                 path = os.path.join(dirpath, name)
+                if not name.endswith(".md"):
+                    # A dangling or looping symlink (an unmounted volume, `loop -> loop`)
+                    # is in `filenames`, not `dirnames`: say so, or a store holding only
+                    # `gone -> /Volumes/x` would read as clean. A working link to a
+                    # non-note file is not a note and stays silent.
+                    if os.path.islink(path) and not os.path.exists(path):
+                        self._not_read.append((os.path.relpath(path, root), "symlink"))
+                    continue
                 rel = os.path.relpath(path, root)
                 try:
                     st = os.lstat(path)
@@ -267,37 +289,53 @@ class Store:
                         data = f.read(cap)
                 except FileNotFoundError:
                     continue  # a note that vanishes mid-lint is not a finding
-                except OSError:
+                except (OSError, ValueError):
                     # EACCES/EPERM/ELOOP/EISDIR...: the note exists but was not read, so say
                     # so (path only, never errno text); it must never look like a clean note.
                     self._not_read.append((rel, "not readable"))
                     continue
                 text = data.decode("utf-8", errors="replace").lstrip("\ufeff")
                 parsed = st.st_size <= max_bytes
-                links, mdlinks, cites = [], [], False
-                clean = strip_code(text)  # observations are scanned here even when not parsed
-                if parsed:
-                    links = [(m.group(1).strip(), ln)
-                             for ln, m in finditer_lines(WIKILINK_RE, clean)]
-                    mdlinks = [(unquote(m.group(1)), ln)
-                               for ln, m in finditer_lines(MDLINK_RE, clean)]
-                    cites = any(PROVENANCE_PATH_RE.search(urlsplit(m.group(1)).path)
-                                for m in EXTLINK_RE.finditer(clean))
-                else:
+                try:
+                    note = self._parse(rel, path, text, st, parsed)
+                except Exception:
+                    # One note's parse failure is that note's, never the run's: list it
+                    # (path only, never the exception text, which can carry note text).
+                    self._not_read.append((rel, "not parsed"))
+                    continue
+                if not parsed:
                     self._not_read.append((rel, "relations not parsed, over --max-bytes"))
-                self.notes.append({
-                    "rel": rel,
-                    "path": path,
-                    "text": text,
-                    "clean": clean,
-                    "fm": parse_frontmatter(text),
-                    "mtime": st.st_mtime,
-                    "size": st.st_size,
-                    "parsed": parsed,
-                    "links": links,
-                    "mdlinks": mdlinks,
-                    "cites": cites,
-                })
+                self.notes.append(note)
+        self._finish(root, walk_errors)
+
+    @staticmethod
+    def _parse(rel, path, text, st, parsed):
+        """Everything derived from one note's text. Pure; may raise, and the caller
+        then skips this note alone."""
+        links, mdlinks, cites = [], [], False
+        clean = strip_code(text)  # observations are scanned here even when not parsed
+        if parsed:
+            links = [(m.group(1).strip(), ln)
+                     for ln, m in finditer_lines(WIKILINK_RE, clean)]
+            mdlinks = [(unquote(m.group(1)), ln)
+                       for ln, m in finditer_lines(MDLINK_RE, clean)]
+            cites = any(PROVENANCE_PATH_RE.search(url_path(m.group(1)))
+                        for m in EXTLINK_RE.finditer(clean))
+        return {
+            "rel": rel,
+            "path": path,
+            "text": text,
+            "clean": clean,
+            "fm": parse_frontmatter(text),
+            "mtime": st.st_mtime,
+            "size": st.st_size,
+            "parsed": parsed,
+            "links": links,
+            "mdlinks": mdlinks,
+            "cites": cites,
+        }
+
+    def _finish(self, root, walk_errors):
         for err in walk_errors:
             where = os.path.relpath(err.filename, root) if err.filename else "."
             if where == ".":
@@ -362,7 +400,7 @@ class Linter:
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # RecursionError: a deeply nested file
             self.skipped.append(
                 "empty-project: no readable config at %s (pass --config)" % self.args.config)
             return
@@ -378,6 +416,9 @@ class Linter:
             if not isinstance(ppath, str) or not ppath:
                 continue
             ppath = os.path.expanduser(ppath)
+            if "\0" in ppath:  # os.walk raises ValueError on it; not a path to look at
+                self.skipped.append("empty-project: project %s not fully readable" % name)
+                continue
             count = 0
             unreadable = []
             linked = False
@@ -680,10 +721,18 @@ def run_lint(argv):
 
 
 def main(argv=None):
+    # A note path that is not valid UTF-8 (Linux) reaches print() as lone surrogates; escape
+    # them instead of letting the encoder abort the whole report.
+    try:
+        sys.stdout.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
     try:
         return run_lint(argv)
     except Exception as e:  # exit 1 means "findings"; a broken run must never look like it
-        print("bm-lint: internal error: %s: %s" % (type(e).__name__, e), file=sys.stderr)
+        # The class name only: the message can carry note text, and this tool prints paths,
+        # line numbers and counts, never what a note says.
+        print("bm-lint: internal error: %s" % type(e).__name__, file=sys.stderr)
         return 2
 
 

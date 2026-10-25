@@ -717,3 +717,124 @@ def test_project_with_only_a_symlinked_directory_is_not_called_empty(tmp_path):
     proc, out = jrun(tmp_path / "store", "--config", str(cfg))
     assert not of(out, "empty-project")
     assert any("project p not fully readable" in s for s in out["skipped"])
+
+
+# --- round 6: urlsplit regression, one bad note never aborts the run (2026-10-24) --------
+
+NFKC_URLS = (
+    "https://example.com\uff1a8080/pull/1",   # full-width colon
+    "https://example.com\uff0f..",            # full-width slash
+    "https://user\ufe6bexample.com/pull/1",   # small commercial at
+    "https://exa\u2100mple.com/pull/1",       # ℀ -> a/c
+)
+
+
+def test_nfkc_netloc_in_a_link_does_not_abort_the_run(tmp_path):
+    for i, url in enumerate(NFKC_URLS):
+        write_note(tmp_path, "n%d.md" % i, "---\ntitle: n%d\ntype: note\n---\n[x](%s)\n" % (i, url))
+    proc = run(tmp_path, "--json")
+    assert proc.returncode == 1, proc.stdout + proc.stderr  # the orphan finding, not an error
+    assert "internal error" not in proc.stderr and proc.stderr == ""
+    out = json.loads(proc.stdout)
+    assert out["notes"] == len(NFKC_URLS) and len(of(out, "orphan-notes")) == 1
+    assert not any(s.startswith("notes: not parsed") for s in out["skipped"])
+
+
+def test_decision_with_an_nfkc_link_is_judged_not_crashed(tmp_path):
+    write_note(tmp_path, "a.md", "# A\n- [decision] x [PR](https://example.com\uff1a8080/pull/1)\n")
+    write_note(tmp_path, "b.md", "# B\n- [decision] y [PR](https://github.com/o/r/pull/9)\n")
+    _proc, out = jrun(tmp_path)
+    # a.md: the malformed host is still a URL whose path names a PR, so it cites; no crash
+    assert [f["path"] for f in of(out, "decision-unlinked")] == []
+    write_note(tmp_path, "c.md", "# C\n- [decision] z [s](https://example.com\uff0f/about)\n")
+    _proc, out = jrun(tmp_path)
+    assert [f["path"] for f in of(out, "decision-unlinked")] == ["c.md"]
+
+
+def test_url_path_is_taken_by_hand():
+    url_path = load_tool().url_path
+    assert url_path("https://github.com/o/r/pull/55?x=/pull/5#/issues/1") == "/o/r/pull/55"
+    assert url_path("HTTPS://Host:80/a/commit/abc") == "/a/commit/abc"
+    assert url_path("https://example.com\uff1a8080/pull/1") == "/pull/1"
+    assert url_path("https://host") == "" and url_path("ftp://h/pull/5") == ""
+    assert url_path("https://host/p?q/pull/5") == "/p" and url_path("https://host#/pull/5") == ""
+
+
+def test_internal_error_prints_the_class_never_the_message(tmp_path, monkeypatch, capsys):
+    mod = load_tool()
+    write_note(tmp_path, "a.md", "see [[b]]\n")
+
+    def boom(self, store):
+        raise RuntimeError("NOTECANARY text from a note")
+
+    monkeypatch.setattr(mod.Linter, "check_oversize", boom)
+    for flags in ([], ["--json"]):
+        rc = mod.main([str(tmp_path), "--config", NO_CONFIG] + flags)
+        cap = capsys.readouterr()
+        assert rc == 2
+        assert "RuntimeError" in cap.err
+        assert "NOTECANARY" not in cap.err + cap.out
+
+
+def test_a_note_whose_parse_raises_is_skipped_and_the_rest_still_reports(tmp_path, monkeypatch, capsys):
+    mod = load_tool()
+    write_note(tmp_path, "bad.md", "# bad\nBADCANARY [[x]]\n")
+    write_note(tmp_path, "feedback_ok.md", "# ok\nno type here\n")
+    real = mod.Store._parse
+
+    def picky(rel, path, text, st, parsed):
+        if rel == "bad.md":
+            raise ValueError("BADCANARY in the message")
+        return real(rel, path, text, st, parsed)
+
+    monkeypatch.setattr(mod.Store, "_parse", staticmethod(picky))
+    rc = mod.main([str(tmp_path), "--json", "--config", NO_CONFIG])
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    assert rc == 1 and out["notes"] == 1
+    assert "notes: not parsed: bad.md" in out["skipped"]
+    assert [f["path"] for f in of(out, "missing-type")] == ["feedback_ok.md"]
+    assert "BADCANARY" not in cap.out + cap.err
+
+
+def test_a_store_where_every_note_fails_to_parse_is_exit_2(tmp_path, monkeypatch, capsys):
+    mod = load_tool()
+    write_note(tmp_path, "a.md", "x\n")
+
+    def always(*a, **kw):
+        raise ValueError("nope")
+
+    monkeypatch.setattr(mod.Store, "_parse", staticmethod(always))
+    assert mod.main([str(tmp_path), "--config", NO_CONFIG]) == 2
+    assert "no readable notes" in capsys.readouterr().err
+
+
+def test_dangling_and_looping_symlinks_are_listed_not_silent(tmp_path):
+    store = tmp_path / "store"
+    write_note(store, "a.md", "see [[b]]\n")
+    write_note(store, "b.md", "see [[a]]\n")
+    write_note(tmp_path, "real.txt", "x\n")
+    os.symlink(tmp_path / "unmounted", store / "gone")
+    os.symlink("loop", store / "loop")
+    os.symlink(tmp_path / "real.txt", store / "fine.txt")  # a working link to a non-note
+    proc, out = jrun(store)
+    assert proc.returncode == 0
+    assert "notes: symlink: gone" in out["skipped"] and "notes: symlink: loop" in out["skipped"]
+    assert not any("fine.txt" in s for s in out["skipped"])
+    only = tmp_path / "only"
+    only.mkdir()
+    os.symlink(tmp_path / "unmounted", only / "gone")
+    assert run(only, "--json").returncode == 2  # nothing read, something skipped: never "ok"
+
+
+def test_config_with_a_nul_path_or_deep_nesting_does_not_crash(tmp_path):
+    write_note(tmp_path / "store", "a.md", "see [[a2]]\n")
+    write_note(tmp_path / "store", "a2.md", "see [[a]]\n")
+    cfg = tmp_path / "nul.json"
+    cfg.write_text('{"projects": {"p": {"path": "/tmp/x\\u0000y"}}}', encoding="utf-8")
+    proc, out = jrun(tmp_path / "store", "--config", str(cfg))
+    assert any("project p not fully readable" in s for s in out["skipped"])
+    deep = tmp_path / "deep.json"
+    deep.write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
+    proc, out = jrun(tmp_path / "store", "--config", str(deep))
+    assert any("no readable config" in s for s in out["skipped"])
