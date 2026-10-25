@@ -95,6 +95,30 @@ def acp_session_id_flag():
     return _ACP_I["s"]
 
 
+# acp-run claude takes its own model ids (`acp-run claude --info` lists them): family aliases and
+# claude-<family>-<major>, not the API-style claude-<family>-5-5 the routing tables use for other agents.
+# 2026-10-25: `--model claude-sonnet-5-5` opened a herdr tab and only then died in acp-run.
+_CLAUDE_DOTTED = re.compile(r"^claude-(opus|sonnet|haiku|fable)-(\d+)[-.](\d+)$")
+
+
+def resolve_model(agent, model, probe=True):
+    """Map MODEL to one the agent's acp-run takes, and refuse an unknown one before any tab opens."""
+    if not model or agent != "claude":
+        return model
+    m = _CLAUDE_DOTTED.match(model)
+    if m:    # claude-sonnet-5-5 -> claude-sonnet-5 (haiku has no versioned id, only the `haiku` alias)
+        model = "haiku" if m[1] == "haiku" else f"claude-{m[1]}-{m[2]}"
+    if probe:     # read-only handshake, no model turn (~3 s): acp-run exits non-zero naming the valid ids
+        try:
+            r = subprocess.run([ACP_RUN, "claude", "--info", "--model", model], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:    # cannot probe: let the real launch report it
+            print(f"launch: could not check --model {model} ({e}); continuing", file=sys.stderr)
+            return model
+        if r.returncode != 0:
+            die(f"acp-run claude refuses --model {model}: {(r.stderr.strip().splitlines() or ['no output'])[-1]}", 2)
+    return model
+
+
 def inbox_send(d, text):
     """Hand TEXT to a live interactive session as its next prompt (no keys, no new process)."""
     inbox = Path(d.get("inbox") or "")
@@ -408,6 +432,7 @@ def start(a, brief_text, parent=None):
     cwd = str(Path(a.cwd).expanduser().resolve())
     if not Path(cwd).is_dir():
         die(f"no such directory {cwd}")
+    a.model = resolve_model(agent, a.model)    # before any claim, pane or tab exists
     lid = new_id(agent)
     # conflicts (operator 2026-10-08: never collide with another session's work)
     c = fleet.conflicts(cwd)
