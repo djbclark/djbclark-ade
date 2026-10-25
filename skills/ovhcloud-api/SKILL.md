@@ -256,27 +256,42 @@ declaration form:
 # BEFORE committing - and NOT proof that the pushed ref is sound.
 nix flake metadata --json --no-update-lock-file ./nixos >/dev/null
 
-# After pushing, check the ref the host actually builds. This is the authoritative one.
-nix flake metadata --json --no-update-lock-file \
-  'github:OWNER/REPO/<deploy-branch>?dir=nixos' >/dev/null
+# After pushing, check the ref the host actually builds. This is the authoritative form - but it
+# needs --refresh, because Nix caches which commit a github: branch points to for `tarball-ttl`
+# (3600 s by default). Without it, a re-check within the hour can silently test the PREVIOUS commit
+# and pass - the same false-pass hazard as the local form, inside the check meant to catch it.
+nix flake metadata --json --refresh --no-update-lock-file \
+  'github:OWNER/REPO/<deploy-branch>?dir=nixos' > meta.json
+jq -r .revision meta.json   # must equal: git rev-parse origin/<deploy-branch>
 
 # exit 0 = the lock matches flake.nix
 # non-zero, "requires lock file changes but they're not allowed due to
 # '--no-update-lock-file'" = the lock is stale or missing an input
 ```
 
+**Two traps in that command, both verified on vps-primary (2026-10-25):**
+
+1. **`tarball-ttl` is 3600** (`nix config show tarball-ttl`), so without `--refresh` a check run within
+   the hour of a push may test the *old* commit — and it can pass or fail either way. **Always compare
+   the reported `.revision` against `git rev-parse origin/<branch>`**; that comparison is the actual
+   check, not the exit code.
+2. **Push order matters when a promotion branch is involved** (house rule 36: `master` is promoted to
+   the deploy branch). Checking `<deploy-branch>` *before* promoting tests the previous deploy head,
+   which may well pass. Promote first, then check.
+
 **The local form is a false-pass hazard** (verified on vps-primary, 2026-10-25): `./nixos` inside a git
 checkout resolves to `git+file:` over the **tracked working tree**, uncommitted edits included. So you
 can regenerate the lock, see exit 0, then push only `flake.nix` — and the host still fails. The
-`github:` form is what catches that, and it is the one that matters for a host that builds from git.
+`github:` form above is what catches that.
 
 If you need the *names* (e.g. to report which input is missing) without Nix, parse carefully — the
-fallback below handles **only top-level `inputs.<name>…` lines**, so it misses the
-`inputs = { foo.url = …; };` attrset form and can be confused by a nested `inputs.bar.url = …` at the
-start of a line inside another input's block. **The Nix command above is authoritative; the fallback is
-for naming what is missing.** It also compares against the **root** inputs, not every node in the lock:
-`set(lock["nodes"])` includes transitive nodes and the `root` entry itself, so a transitive node of the
-same name can mask a missing root input.
+fallback below **reads the working tree too** (same weakness as the local form) and handles **only
+top-level `inputs.<name>…` lines**, so it misses the `inputs = { foo.url = …; };` attrset form and can
+be confused by a nested `inputs.bar.url = …` at the start of a line inside another input's block.
+**The Nix command above is authoritative; the fallback is for naming what is missing.** It also
+compares against the **root** inputs, not every node in the lock: `set(lock["nodes"])` includes
+transitive nodes and the `root` entry itself, so a transitive node of the same name can mask a missing
+root input.
 
 ```bash
 python3 - <<'EOF'
@@ -312,8 +327,6 @@ them apart — the *printed word* differs (`inactive` vs `failed`) but the *stat
 only reflects the **latest** run: it clears on the next timer run or a `reset-failed`. That is why the
 authoritative check is comparing `nixos-version --configuration-revision` against the deploy branch
 head — it catches a stale host however the state got there.
-
-
 
 Three levels of gate, and they are deliberately separate so one broad yes cannot reach the next:
 
@@ -382,6 +395,4 @@ Kept because this work repeats: these cost real time and each one looks like som
 10. **A password change on a remote box is a two-step operation.** The change closes the session, so
    installing a key must be a *second* login with the new password. Do the change first, verify the
    new password works, then install the key — and keep both values in 600 files, never argv.
-
-
 
