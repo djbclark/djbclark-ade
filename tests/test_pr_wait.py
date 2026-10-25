@@ -1381,3 +1381,73 @@ def test_an_adopted_comment_id_is_saved_in_the_state_file(world: World) -> None:
     assert world.posts() == 1
     state = request_state(world)
     assert state["own"] == 1 and state["adopted_ids"] == [42]
+
+
+# ---- adversary verdict in the PR body -------------------------------------------------------
+#
+# Added 2026-10-25 with the adversary gate. The house rule (AGENTS.md code review rule 1) is that a
+# teammate's PR body quotes the adversary's verdict AND the head it reviewed; PR 61 was merged with no
+# quote at all and nothing noticed, because merge_ready only looked at CI and Codex.
+
+ADV_HEAD = "a" * 40
+
+
+def adv(body: str, head: str = ADV_HEAD) -> dict:
+    return load_module().adversary_verdict(body, head)
+
+
+def test_an_approve_naming_this_head_matches() -> None:
+    for body in (f"> **APPROVE, no findings** (head {ADV_HEAD})",
+                 f"**APPROVE** (head {ADV_HEAD})",
+                 f"Verdict: APPROVE (head {ADV_HEAD})",
+                 f"APPROVE (head {ADV_HEAD[:7]})"):
+        got = adv(body)
+        assert got["present"] and got["matches_head"], body
+        assert got["verdict"].upper().startswith("APPROVE")
+
+
+def test_an_approve_with_no_head_does_not_count() -> None:
+    # An unqualified APPROVE cannot be tied to a commit, so it must not bless one.
+    got = adv("APPROVE, no findings")
+    assert got["present"] and not got["matches_head"]
+    assert "names no head sha" in got["detail"]
+
+
+def test_an_approve_for_a_different_head_does_not_count() -> None:
+    got = adv("> **APPROVE** (head " + "b" * 40 + ")")
+    assert got["present"] and not got["matches_head"]
+    assert "NOT this head" in got["detail"]
+
+
+def test_a_block_is_never_read_as_an_approval() -> None:
+    got = adv(f"> **BLOCK: the check is wrong** (head {ADV_HEAD})")
+    assert got["present"] and got["matches_head"]
+    assert got["verdict"].upper().startswith("BLOCK")
+
+
+def test_a_prose_mention_is_not_a_verdict() -> None:
+    # The real PR 63 case: my own prose said "the review found a BLOCK, and it was right" and the
+    # naive matcher read that as a verdict.
+    got = adv("The adversary returned a BLOCK, and it was right about the thing it found.")
+    assert not got["present"]
+
+
+def test_a_markdown_heading_is_not_a_verdict() -> None:
+    # The exact PR 63 false positive: a heading that names a verdict is a section label.
+    for body in ("## Adversary round 1: **BLOCK**, and it was right",
+                 "## Verdict: APPROVE (head " + ADV_HEAD + ")",
+                 "### APPROVE"):
+        assert not adv(body)["present"], body
+
+
+def test_an_empty_body_reports_no_verdict() -> None:
+    got = adv("")
+    assert not got["present"] and not got["matches_head"]
+    assert got["detail"] == "no PR body"
+
+
+def test_a_quoted_block_with_a_long_reason_is_still_a_block() -> None:
+    got = adv(f"> **BLOCK: rule 0d.1 makes a false claim about systemd and the check skips nixpkgs** "
+              f"(head {ADV_HEAD})")
+    assert got["present"] and got["matches_head"]
+    assert got["verdict"].upper().startswith("BLOCK")

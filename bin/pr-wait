@@ -239,6 +239,128 @@ def pr_head(repo: str, pr: int) -> str:
 # ---- CI -------------------------------------------------------------------------------------------
 
 
+# ---- adversary verdict ----------------------------------------------------------------------------
+
+# A PR body may quote the adversary reviewer's verdict line. The house rule (AGENTS.md, code review
+# rule 1) is that a teammate's PR carries one, naming the head it reviewed; the merge is then done with
+# `--match-head-commit <reviewed sha>` so the head reviewed is the head merged.
+#
+# WHY THIS EXISTS (2026-10-25): PR 61 was merged with NO adversary quote in its body and nothing
+# noticed, because `merge_ready` checks only CI and Codex, `master` is unprotected and `reviewDecision`
+# is empty. The rule was a convention with no enforcement. This makes the missing quote a visible FACT
+# in pr-wait's output.
+#
+# THREE PROPERTIES, each deliberate (Dann 5's ruling, 2026-10-25):
+#   1. A quoted verdict counts ONLY if it names a head SHA. An unqualified "APPROVE" from an older head
+#      must not bless a new commit - that is the stale-id bug class this repo has spent a day fixing.
+#   2. It REPORTS by default and BLOCKS only when opted in (an `adversary-required` label, or
+#      `--adversary-required`). A global default would block the operator's own small PRs, which is not
+#      what the rule is for.
+#   3. It never merges. pr-wait has no merge authority and must not gain any.
+# A verdict is a QUOTED or labelled line, not the word appearing in prose. Anchoring on a quote or a
+# `verdict:` label prevents a false positive from a sentence like "the review found a BLOCK, and it
+# was right" - which is what happened on PR 63 (2026-10-25): the prose mention parsed as a verdict.
+ADVERSARY_RE = re.compile(
+    r"(?:^|>|\*\*|`)\s*(?:adversary\s+)?(?:verdict:?\s*)?"
+    r"(APPROVE(?:,\s*no findings)?|BLOCK\b[^\n`]*)",
+    re.IGNORECASE)
+SHA_RE = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
+
+
+def _looks_like_verdict(line: str) -> bool:
+    """True when a line plausibly CARRIES a verdict rather than merely mentioning the word.
+
+    A real verdict line is short, is quoted/bolded/labelled, and does not read as a sentence. Rejected:
+    a long prose mention, and a Markdown HEADING that happens to contain the word - which is what bit
+    PR 63 on 2026-10-25 (`## Adversary round 1: **BLOCK**, and it was right` parsed as a verdict).
+    """
+    stripped = line.strip()
+    if len(stripped) > 300:
+        return False
+    # A heading is a label for a section, never a verdict. This is the PR 63 false positive.
+    if stripped.startswith("#"):
+        return False
+    # The verdict must appear at or very near the start of the line. `>` is a quote marker, so allow
+    # the match to begin after it; anything else must start within the first few characters.
+    probe = stripped.lstrip("> ").lstrip()
+    m = ADVERSARY_RE.search(stripped)
+    if not m:
+        return False
+    if m.start() > 24:
+        return False
+    # A line that continues into prose after the verdict word is a mention, not a verdict. A real one
+    # ends the line, or is followed by emphasis/quote/punctuation.
+    tail = stripped[m.end():].strip()
+    if tail and not tail.startswith(("*", "`", ")", ".", ",", "—", "-", ":", "(")) and len(tail) > 40:
+        return False
+    # Quoted, bolded, code, or labelled at the start - the shapes a real verdict line takes.
+    return bool(probe[:24] and (stripped.startswith(">") or "**" in stripped[:60] or "`" in stripped[:60]
+                                or re.match(r"^\s*(adversary\s+)?verdict\b", stripped, re.IGNORECASE)
+                                or re.match(r"^\s*(APPROVE|BLOCK)\b", stripped, re.IGNORECASE)))
+
+
+def adversary_verdict(body: str, head: str) -> dict:
+    """Find an adversary verdict line in a PR body and decide whether it names this head.
+
+    Returns {"present": bool, "verdict": str|None, "quoted_sha": str|None, "matches_head": bool,
+             "detail": str}.
+
+    `matches_head` requires the SHA to be a prefix of the head (or the head a prefix of it), so a
+    short-form quote like `APPROVE (head 062e3c1)` counts against `062e3c1e748d...` but an APPROVE
+    naming a DIFFERENT commit does not.
+    """
+    if not body:
+        return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
+                "detail": "no PR body"}
+
+    verdict = None
+    quoted = None
+    for line in body.splitlines():
+        if not _looks_like_verdict(line):
+            continue
+        m = ADVERSARY_RE.search(line)
+        if not m:
+            continue
+        verdict = m.group(1).strip().rstrip("*`.").strip()
+        # A SHA on the same line is what makes the verdict specific to a commit. Accept either order
+        # ("APPROVE (head abc1234)" / "head abc1234: APPROVE").
+        for cand in SHA_RE.findall(line):
+            if len(cand) >= 7 and (head.startswith(cand.lower()) or cand.lower().startswith(head)):
+                quoted = cand.lower()
+                break
+        if quoted is None:
+            for cand in SHA_RE.findall(line):
+                if len(cand) >= 7:
+                    quoted = cand.lower()
+                    break
+        break
+
+    if verdict is None:
+        return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
+                "detail": "no adversary verdict line in the PR body"}
+    if quoted is None:
+        return {"present": True, "verdict": verdict, "quoted_sha": None, "matches_head": False,
+                "detail": f"verdict {verdict!r} names no head sha, so it cannot be tied to this head"}
+    matches = head.startswith(quoted) or quoted.startswith(head)
+    return {"present": True, "verdict": verdict, "quoted_sha": quoted, "matches_head": matches,
+            "detail": (f"verdict {verdict!r} names {quoted}, which matches this head"
+                       if matches else
+                       f"verdict {verdict!r} names {quoted}, which is NOT this head ({head[:12]})")}
+
+
+def fetch_adversary(repo: str, pr: int, head: str) -> dict:
+    """Read the PR body and extract the adversary verdict. Read-only; no extra API call (pr_head
+    already fetched the same document, but this keeps the two concerns independent and testable)."""
+    try:
+        doc = json.loads(gh("api", f"repos/{repo}/pulls/{pr}"))
+    except (ValueError, KeyError, TypeError) as e:
+        raise GhError(f"pulls/{pr} (adversary): unexpected shape: {e}") from e
+    labels = {l.get("name") for l in (doc.get("labels") or []) if isinstance(l, dict)}
+    out = adversary_verdict(doc.get("body") or "", head)
+    out["required_by_label"] = "adversary-required" in labels
+    return out
+
+
 def fetch_checks(repo: str, sha: str) -> list[dict]:
     runs = api_items(f"repos/{repo}/commits/{sha}/check-runs?per_page=100", "check_runs")
     statuses = api_items(f"repos/{repo}/commits/{sha}/status?per_page=100", "statuses")
@@ -431,7 +553,8 @@ def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict
 
 
 def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, sr: dict | None,
-           head: str, review: dict | None) -> dict:
+           head: str, review: dict | None, adversary: dict | None = None,
+           adversary_required: bool = False) -> dict:
     """The findings and merge_ready fields of the summary.
 
     Both Codex reviews are judged the same way: the code review (`code_review`, mark
@@ -448,7 +571,16 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     merge_blockers names why not: `codex-<status>` (code review not completed on the head), `security-<status>`
     (`security-failed`, `security-running`, `security-other-head`), `findings-not-collected`,
     `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
-    `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`."""
+    `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`, plus - ONLY when the
+    adversary gate is switched on (`--adversary-required` or an `adversary-required` label) -
+    `adversary-missing` or `adversary-stale-or-blocked`.
+
+    The adversary verdict (added 2026-10-25) is read from the PR BODY: a quoted or labelled line
+    naming APPROVE or BLOCK. It is always REPORTED in `adversary` / `adversary_warnings`, and it blocks
+    only when opted in, because `merge_ready = not blockers` and a global default would block every PR
+    in the house. A quoted verdict counts ONLY if it names this head: an unqualified APPROVE, one
+    naming another commit, or a BLOCK, all fail the check. A prose mention or a Markdown heading that
+    happens to contain the word is NOT a verdict (both were real false positives on PR 63)."""
     mismatch: list[str] = []
     blockers: list[str] = []
     for_head = open_n = outdated_n = None
@@ -501,13 +633,28 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
         blockers.append("open-findings")
     if mismatch:
         blockers.append("findings-mismatch")
+    # The adversary verdict: REPORTED always, BLOCKING only when opted in. It must not go into
+    # `blockers` by default, because `merge_ready = not blockers` and a global default would block
+    # every PR in the house - including the operator's own small ones.
+    adversary_warnings: list[str] = []
+    if adversary is not None:
+        ok = bool(adversary.get("matches_head")) and not str(adversary.get("verdict", "")).upper().startswith("BLOCK")
+        if not ok:
+            adversary_warnings.append("adversary-missing" if not adversary.get("present")
+                                      else "adversary-stale-or-blocked")
+            if adversary_required:
+                blockers.append(adversary_warnings[-1])
     return {"has_any_findings": cr.get("has_any_findings"), "has_unresolved_findings": cr.get("has_unresolved_findings"),
             "security_status": "absent" if sr is None else (sr.get("status") or "unknown"),
             "security_has_any_findings": None if sr is None else sr.get("has_any_findings"),
             "security_has_unresolved_findings": None if sr is None else sr.get("has_unresolved_findings"),
             "findings_for_head": for_head, "findings_for_head_by_kind": by_kind_head,
             "open_findings": open_n, "open_findings_by_kind": by_kind_open, "open_findings_outdated": outdated_n,
-            "findings_mismatch": mismatch, "merge_ready": not blockers, "merge_blockers": blockers}
+            "findings_mismatch": mismatch, "merge_ready": not blockers, "merge_blockers": blockers,
+            # Reported whether or not it blocks, so a PR that should carry a verdict shows up even
+            # where blocking is not switched on. `adversary` is the raw finding for the PR body.
+            "adversary": adversary, "adversary_warnings": adversary_warnings,
+            "adversary_required": adversary_required}
 
 
 # ---- files ----------------------------------------------------------------------------------------
@@ -813,6 +960,10 @@ def build_parser() -> Parser:
                    "pending (default 120)")
     p.add_argument("--no-codex", action="store_true", help="wait for CI only (never requests a review)")
     p.add_argument("--no-request", action="store_true", help="never post `@codex review`; only wait")
+    p.add_argument("--adversary-required", action="store_true",
+                   help="make a missing/stale adversary verdict in the PR body a merge BLOCKER "
+                        "(default: report it in `adversary_warnings` and do not block; also implied by "
+                        "an `adversary-required` label on the PR)")
     p.add_argument("--rerequest-after", type=number, default=600, help="seconds a Codex review may stay "
                    "`running` after pr-wait's own request before it is requested once more (default 600; "
                    "at most two requests per head)")
@@ -883,7 +1034,8 @@ def main(argv: list[str]) -> int:
 
     s = {"checks": None, "codex_match": None, "codex_newest": None, "review": None,
          "ci_done": False, "codex_done": a.no_codex, "since": None, "since_source": None,
-         "codex_clock": start, "running_seen": False, "posted": [], "state_note": "", "warnings": []}
+         "codex_clock": start, "running_seen": False, "posted": [], "state_note": "", "warnings": [],
+         "adversary": None}
     rq_path = sd / f"request-{slug}-{a.pr}-{head}.json"
     rq = load_request_state(rq_path)  # pr-wait's own requests for this head, across runs
     rq_ctx: dict = {"exists": False, "allowed": None}
@@ -915,7 +1067,9 @@ def main(argv: list[str]) -> int:
         if s["ci_done"] and not checks:
             ci_state = "no-checks"
         judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, security_review(s["codex_match"]),
-                        head, s["review"])
+                        head, s["review"], s["adversary"],
+                        adversary_required=(a.adversary_required
+                                            or bool((s["adversary"] or {}).get("required_by_label"))))
         summary = {"result": result, "exit": code, "repo": a.repo, "pr": a.pr, "head": head,
                    "new_head": new_head, "ci": {"state": ci_state, **counts}, "codex": codex,
                    **judged, "codex_requested": rq["own"], "codex_request_note": request_note(s["codex_match"], result),
@@ -946,6 +1100,17 @@ def main(argv: list[str]) -> int:
                              f"{judged['open_findings_outdated']} outdated)")
             if judged["findings_mismatch"]:
                 parts.append("FINDINGS-MISMATCH: " + " / ".join(judged["findings_mismatch"]))
+            # The adversary verdict, reported whether or not it gates. A missing quote is the fact
+            # that went unnoticed on PR 61 (2026-10-25), so it is printed even when it does not block.
+            adv = judged.get("adversary")
+            if adv is not None:
+                if adv.get("matches_head"):
+                    v = str(adv.get("verdict") or "").upper()
+                    parts.append(f"adversary: {'BLOCK' if v.startswith('BLOCK') else adv.get('verdict')}"
+                                 f" at this head")
+                else:
+                    parts.append(f"adversary: {'FETCH FAILED' if adv.get('fetch_failed') else 'missing'}"
+                                 f" - {adv.get('detail')}")
             parts.append("merge_ready: " + ("yes" if judged["merge_ready"]
                                             else "no (" + ", ".join(judged["merge_blockers"]) + ")"))
             if new_head:
@@ -976,6 +1141,25 @@ def main(argv: list[str]) -> int:
         s["review"] = review
         if a.since:
             s["since"], s["since_source"] = a.since, "--since"
+        return True
+
+    def collect_adversary() -> bool:
+        """Read the PR body for an adversary verdict. Read-only, one extra API call per poll.
+
+        Deliberately separate from collect_findings: it must still run under --no-codex, because the
+        adversary is not Codex and a PR can legitimately want the adversary gate without the Codex one.
+
+        A gh failure here is recorded as `fetch_failed`, NOT as "no verdict" - reporting an unknown as
+        absent is how a missing gate gets read as a passing one. It never blocks finishing, because by
+        default the adversary is reported rather than gating.
+        """
+        adv = attempt(fetch_adversary, a.repo, a.pr, head)
+        if adv is None:
+            s["adversary"] = {"present": False, "verdict": None, "quoted_sha": None,
+                              "matches_head": False, "fetch_failed": True,
+                              "detail": "could not read the PR body (gh failed)"}
+            return True
+        s["adversary"] = adv
         return True
 
     def allowed_authors() -> set:
@@ -1137,6 +1321,7 @@ def main(argv: list[str]) -> int:
                     request_step(match)
             # finish only when both hold on this same poll
             if s["ci_done"] and s["codex_done"] and collect_findings():
+                collect_adversary()  # a warning, never a gate: its failure must not block finishing
                 return finish("done", EXIT_DONE)
 
         now = time.monotonic()
