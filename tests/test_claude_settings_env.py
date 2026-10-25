@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for bin/claude-settings-env (2026-10-16): sets GRAFT_NO_GITIGNORE in a settings
-file's env block idempotently, keeps other keys, key order, mode and a symlinked target."""
+"""Tests for bin/claude-settings-env (2026-10-16): enforces GRAFT_NO_GITIGNORE and (2026-10-23) adds the
+CLAUDE_CODE_SUBAGENT_MODEL default only when absent, idempotently, keeping other keys, key order, mode and a
+symlinked target."""
 from __future__ import annotations
 
 import json
@@ -33,7 +34,7 @@ class ClaudeSettingsEnvTest(unittest.TestCase):
         self.assertEqual(run(self.settings, "--check").returncode, 1)
         self.assertEqual(run(self.settings).returncode, 0)
         data = json.loads(self.settings.read_text())
-        self.assertEqual(data["env"], {"A": "1", "GRAFT_NO_GITIGNORE": "1"})
+        self.assertEqual(data["env"], {"A": "1", "GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"})
         self.assertEqual(list(data), ["env", "model"])
         before = self.settings.read_text()
         self.assertEqual(run(self.settings, "--check").returncode, 0)
@@ -47,7 +48,17 @@ class ClaudeSettingsEnvTest(unittest.TestCase):
         self.assertEqual(json.loads(self.settings.read_text())["env"]["GRAFT_NO_GITIGNORE"], "1")
         self.settings.write_text("{}\n")
         self.assertEqual(run(self.settings).returncode, 0)
-        self.assertEqual(json.loads(self.settings.read_text()), {"env": {"GRAFT_NO_GITIGNORE": "1"}})
+        self.assertEqual(json.loads(self.settings.read_text()),
+                         {"env": {"GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"}})
+
+    def test_a_deliberate_default_value_is_left_alone(self) -> None:
+        self.settings.write_text(json.dumps({"env": {"GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "opus"}}) + "\n")
+        before = self.settings.read_text()
+        p = run(self.settings, "--check")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("left alone", p.stdout)
+        self.assertEqual(run(self.settings).returncode, 0)
+        self.assertEqual(self.settings.read_text(), before)
 
     def test_symlink_is_kept(self) -> None:
         link = self.tmp / "link.json"
