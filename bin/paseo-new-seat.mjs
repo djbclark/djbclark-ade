@@ -41,11 +41,24 @@ const model = opt("--model");
 const cwd = opt("--cwd");
 const prompt = opt("--prompt");
 const workspaceId = opt("--workspace");
+const allowNewWorkspace = has("--allow-new-workspace");
 const autoAccept = has("--auto-accept");
 const dryRun = has("--dry-run");
 
 if (!title || !provider || !cwd) {
   console.error("create needs --title, --provider and --cwd");
+  process.exit(2);
+}
+
+// REFUSE to create a workspace implicitly. `paseo agent run` (and this call) creates a NEW workspace
+// named from the prompt when no workspaceId is given — which silently littered four empty `main`
+// workspaces on 2026-10-25, and a workspace name is derived the same fragile way a tab name is. A
+// seat almost always belongs in an existing workspace, so making the implicit path a hard error is
+// the fix; --allow-new-workspace is the deliberate opt-in for the rare case it is wanted.
+if (!workspaceId && !allowNewWorkspace) {
+  console.error("refusing to create a workspace implicitly (that is how four empty `main` "
+    + "workspaces appeared on 2026-10-25). Pass --workspace <id> to join an existing one, or "
+    + "--allow-new-workspace if a new one is really wanted.");
   process.exit(2);
 }
 

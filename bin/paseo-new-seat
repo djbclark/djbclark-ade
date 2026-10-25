@@ -69,6 +69,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--model", default="cline-pass/deepseek-v4.1-flash")
     p.add_argument("--cwd", default=os.path.expanduser("~/src/techno-euphora"))
     p.add_argument("--workspace", default="")
+    p.add_argument("--allow-new-workspace", action="store_true",
+                   help="permit creating a NEW workspace (refused by default: the implicit path "
+                        "littered four empty `main` workspaces on 2026-10-25)")
     p.add_argument("--no-auto-accept", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
@@ -86,6 +89,8 @@ def main(argv: list[str]) -> int:
         args += ["--prompt", a.prompt]
     if a.workspace:
         args += ["--workspace", a.workspace]
+    if a.allow_new_workspace:
+        args += ["--allow-new-workspace"]
     if not a.no_auto_accept:
         args += ["--auto-accept"]
     if a.dry_run:

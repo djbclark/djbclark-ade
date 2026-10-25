@@ -37,16 +37,31 @@ NAMING SCHEME — base 36, digits then letters
 Deliberately **not** `v1`/`v2`: a version implies a revision of the same thing, which is the confusion
 djbclark is trying to remove. A bare base-36 counter reads as an identity, not a revision.
 
+WORKSPACES DRAW FROM THE SAME SEQUENCE
+--------------------------------------
+A Paseo workspace is a *container* (several agents can share one) while a tab is an *identity*, but
+both are named from the first prompt when auto-created, so both collide the same way — and four empty
+`main` workspaces were made by accident on 2026-10-25 alone.
+
+So `--kind workspace` emits `<slug>-<n>-pw`, drawing `n` from **the same counter** as seats. One
+sequence, so a number never means two things: if `Dann 3` is a tab, no workspace is also `-3-pw`. The
+`-pw` suffix is the house convention (`-t` herdr tab, `-p` herdr pane, `-pw` Paseo workspace), kept
+because it says *what kind of thing* this is — which the counter alone cannot.
+
+    seat-name.py next --kind workspace --slug dann-home     -> "dann-home-4-pw"
+    seat-name.py next --kind workspace --slug cfengine      -> "cfengine-5-pw"
+
 STATE
 -----
 `~/.local/state/ade/seat-sequence.json`: `{"next": N, "issued": {"<name>": {"at": ts, "n": N, "id": agent}}}`.
 The `issued` map is the audit trail: which name went to which agent, and when.
 
 USAGE
-  seat-name.py next [--role dann] [--count N] [--agent ID]   allocate and print the next name(s)
-  seat-name.py peek [--role dann] [--count N]                the next name(s), without consuming
-  seat-name.py issued [--limit N] [--json]                   what has been handed out, newest first
-  seat-name.py check                                         self-test: atomic and monotonic
+  seat-name.py next [--role dann] [--count N] [--agent ID]            allocate seat name(s)
+  seat-name.py next --kind workspace --slug <slug> [--count N]        allocate workspace name(s)
+  seat-name.py peek [--role dann] [--count N]                         the next name(s), no consume
+  seat-name.py issued [--limit N] [--json]                            what has been handed out
+  seat-name.py check                                                  self-test: base-36, atomic, monotonic
 
 Exit: 0 ok; 1 error; 2 usage.
 """
@@ -57,6 +72,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -102,10 +118,15 @@ def _save(d: dict) -> None:
     os.replace(tmp, STATE)
 
 
-def allocate(role: str, count: int, agent: str | None = None) -> list[str]:
+def allocate(kind: str, count: int, role: str | None = None, slug: str | None = None,
+             agent: str | None = None) -> list[str]:
     """Take `count` names from the sequence. Atomic: the whole read-modify-write holds an flock, so
     two agents allocating at once cannot receive the same number (the failure this exists to
-    prevent)."""
+    prevent).
+
+    `kind` is `seat` (a tab, an identity: `<role> <n>`) or `workspace` (a container:
+    `<slug>-<n>-pw`). Both draw from the SAME counter, so a number never means two things.
+    """
     STATE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
@@ -114,9 +135,14 @@ def allocate(role: str, count: int, agent: str | None = None) -> list[str]:
             out = []
             for _ in range(count):
                 n = int(d["next"])
-                name = f"{role} {to_base36(n)}"
+                if kind == "workspace":
+                    if not slug:
+                        raise ValueError("workspace names need --slug")
+                    name = f"{slug_slug(slug)}-{to_base36(n)}-pw"
+                else:
+                    name = f"{role or DEFAULT_ROLE} {to_base36(n)}"
                 d["issued"][name] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                                     "n": n, "id": agent or ""}
+                                     "n": n, "kind": kind, "id": agent or ""}
                 d["next"] = n + 1
                 out.append(name)
             _save(d)
@@ -125,24 +151,45 @@ def allocate(role: str, count: int, agent: str | None = None) -> list[str]:
             fcntl.flock(lk, fcntl.LOCK_UN)
 
 
-def peek(count: int, role: str) -> list[str]:
+def slug_slug(title: str, max_len: int = 34) -> str:
+    """A workspace slug from free text: lower case, hyphens, whole words, number-only words dropped.
+
+    Deliberately the same transformation `skills/autorename/autorename.py` uses for a Paseo workspace
+    name (`title_slug`), so a workspace this tool names is indistinguishable in style from one
+    `autorename` names — two conventions for the same thing would be worse than either.
+    """
+    words = [w for w in re.sub(r"[^a-z0-9]+", " ", title.lower()).split()
+             if not re.fullmatch(r"[0-9.-]+", w)]
+    out = ""
+    for w in words:
+        cand = f"{out}-{w}" if out else w
+        if len(cand) > max_len:
+            break
+        out = cand
+    return out or "session"
+
+
+def peek(count: int, role: str | None, kind: str = "seat", slug: str | None = None) -> list[str]:
     with open(LOCK, "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_SH)
         try:
             d = _load()
-            return [f"{role} {to_base36(int(d['next']) + i)}" for i in range(count)]
+            n0 = int(d["next"])
+            if kind == "workspace":
+                return [f"{slug_slug(slug or '')}-{to_base36(n0 + i)}-pw" for i in range(count)]
+            return [f"{role or DEFAULT_ROLE} {to_base36(n0 + i)}" for i in range(count)]
         finally:
             fcntl.flock(lk, fcntl.LOCK_UN)
 
 
 def cmd_next(a) -> int:
-    for name in allocate(a.role, a.count, a.agent):
+    for name in allocate(a.kind, a.count, role=a.role, slug=a.slug, agent=a.agent):
         print(name)
     return 0
 
 
 def cmd_peek(a) -> int:
-    for name in peek(a.count, a.role):
+    for name in peek(a.count, a.role, kind=a.kind, slug=a.slug):
         print(name)
     return 0
 
@@ -183,12 +230,28 @@ def cmd_check(a) -> int:
                 problems.append(f"base36({n})={to_base36(n)} want {want}")
 
         # monotonic: no name ever repeats
-        first = allocate("Test", 3)
-        second = allocate("Test", 3)
+        first = allocate("seat", 3, role="Test")
+        second = allocate("seat", 3, role="Test")
         if len(set(first + second)) != 6:
             problems.append(f"names repeated: {first + second}")
         if first != ["Test 1", "Test 2", "Test 3"]:
             problems.append(f"unexpected first three: {first}")
+
+        # a workspace draws from the SAME counter, so a number never means two things
+        ws = allocate("workspace", 2, slug="Dann Home")
+        if ws != ["dann-home-7-pw", "dann-home-8-pw"]:
+            problems.append(f"unexpected workspace names: {ws}")
+
+        # every number in this run must be distinct across BOTH kinds: a seat and a workspace must
+        # never share one (that is the property the single counter buys).
+        seen_numbers: list[str] = []
+        for name in first + second + ws:
+            m = re.search(r"(?:^| )([0-9a-z]+)(?:-pw)?$", name)
+            if m:
+                seen_numbers.append(m.group(1))
+        if len(set(seen_numbers)) != len(seen_numbers):
+            dupes = sorted({n for n in seen_numbers if seen_numbers.count(n) > 1})
+            problems.append(f"a number was reused across seats and workspaces: {dupes}")
 
         # atomic: 6 processes x 10 names, every one distinct
         outs = [str(Path(tmp) / f"w{i}.json") for i in range(6)]
@@ -218,12 +281,16 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="seat-name", description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="command", required=True)
     n = sub.add_parser("next", help="allocate the next name(s)")
-    n.add_argument("--role", default=DEFAULT_ROLE)
+    n.add_argument("--role", default=DEFAULT_ROLE, help="for a seat: the role name")
+    n.add_argument("--kind", choices=("seat", "workspace"), default="seat")
+    n.add_argument("--slug", default=None, help="for a workspace: the slug before -<n>-pw")
     n.add_argument("--count", type=int, default=1)
     n.add_argument("--agent", default=None, help="the agent id this name is for (recorded)")
     n.set_defaults(func=cmd_next)
     k = sub.add_parser("peek", help="the next name(s), without consuming")
     k.add_argument("--role", default=DEFAULT_ROLE)
+    k.add_argument("--kind", choices=("seat", "workspace"), default="seat")
+    k.add_argument("--slug", default=None)
     k.add_argument("--count", type=int, default=1)
     k.set_defaults(func=cmd_peek)
     i = sub.add_parser("issued", help="what has been handed out")
