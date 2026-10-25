@@ -370,11 +370,11 @@ only where the message asks a question or requests action. An FYI that provably 
    (or an `--expect-ack` from it resolved); `fleet.py list` then shows `link: acked` or `link: ONE-WAY` (sent, never answered) under that peer.
 4. **Inbound**: a message tagged `[relay from KIND ID (DIR)]` (`KIND ID aka NAME (DIR)` for a named session; or `[queued Nm ago] [relay from ...]`, or a Paseo
    agent message) that **asks a question or requests action is answered by `relay.py <ID> "<answer>"`** (ID is the second word: a herdr pane id such as w2F:p45, a session
-   id prefix, a Paseo agent id), never only in your own prose: your prose does not reach it. The sender is read from the sending process (2026-10-25): fleet's `self`
+   id prefix, a Paseo agent id; a job's declared label, `[relay from load-watch]`, has no ID and cannot be replied to: tell the operator instead), never only in your own prose: your prose does not reach it. The sender is read from the sending process (2026-10-25): fleet's `self`
    row, `HERDR_PANE_ID` or the pane an ancestor runs in, `PASEO_AGENT_ID` or the Paseo agent above it, `CLAUDE_CODE_SESSION_ID`, `HERMES_SESSION_ID` (a relay Hermes starts itself is `hermes SID8`), `RELAY_SENDER_NAME`. A Codex tool shell
    has none of these variables (`shell_environment_policy inherit = "core"`), so relay reads the `codex` process above it. **A relay whose sender resolves to none of these
    is refused, never sent (2026-10-25)**: exit 4, nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`), the message names every
-   variable and ancestor source checked; **re-run it with `RELAY_SENDER_NAME=<label> relay.py ...`** (a launchd job, script or Hermes turn with no session) or from inside a
+   variable and ancestor source checked; **re-run it with `RELAY_SENDER_NAME=<label> relay.py ...`** (a launchd job or script with no session; a relay Hermes starts itself is named `hermes SID8` and sends) or from inside a
    session. `[relay from unknown]` is never sent, so a header you read always names a sender you can answer. A footer
    `[reply through relay.py to ID: ack X]` means start the answer with `ack X`. A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
    An FYI needs no reply. After a relay that is not `delivered`, read its status word; `queued`, `accepted`, `unverified` are not proof.
