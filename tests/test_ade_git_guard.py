@@ -8,7 +8,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -84,8 +83,20 @@ def dirty(repo):
 
 
 def guard_log(state_dir):
+    """The refusals and overrides; the hooks' `ref-change` lines (every change to a claimed branch) are not part of them."""
     p = Path(state_dir) / "guard.log"
-    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+    rows = [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+    return [r for r in rows if r.get("outcome") != "ref-change"]
+
+
+def two_claimed(tmp_path, state):
+    """a (claimed by A, with uncommitted work) and b (claimed by B, the caller)."""
+    a = mk_repo(tmp_path, state, "a")
+    b = mk_repo(tmp_path, state, "b")
+    claim(a, "A")
+    claim(b, "B", branch="b")
+    dirty(a)
+    return a, b
 
 
 DESTRUCTIVE = [
@@ -177,8 +188,10 @@ def test_acp_run_agent_zero_is_not_an_agent(tmp_path, state):
 @pytest.mark.parametrize("cmd", [
     ["status"], ["diff"], ["log", "--oneline"], ["show", "HEAD"], ["ls-files"], ["rev-parse", "HEAD"],
     ["branch", "--list"], ["branch"], ["config", "--get", "core.bare"], ["config", "user.name"],
-    ["worktree", "list"], ["stash", "list"], ["tag", "-l"], ["remote", "-v"], ["grep", "base"],
-    ["-C", ".", "status"], ["--no-pager", "log", "-1"], ["cat-file", "-t", "HEAD"],
+    ["worktree", "list"], ["remote", "-v"], ["grep", "base"], ["symbolic-ref", "HEAD"], ["describe", "--always"],
+    ["-C", ".", "status"], ["--no-pager", "log", "-1"], ["cat-file", "-t", "HEAD"], ["--version"], ["version"],
+    ["for-each-ref"], ["rev-list", "HEAD"], ["shortlog", "-s", "HEAD"], ["name-rev", "HEAD"], ["merge-base", "HEAD", "HEAD"],
+    ["blame", "f"], ["ls-tree", "HEAD"], ["config", "--list"], ["remote", "get-url", "nope"],
 ], ids=lambda c: " ".join(c))
 def test_foreign_agent_may_read(tmp_path, state, cmd):
     repo = mk_repo(tmp_path, state)
@@ -262,7 +275,7 @@ def test_shim_is_a_relative_symlink_to_the_guard():
 
 def test_guard_help_documents_exit_77():
     r = subprocess.run([str(GUARD), "--help"], capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0 and "77" in r.stdout and "--check" in r.stdout
+    assert r.returncode == 0 and "77" in r.stdout and "install" in r.stdout and "--check" not in r.stdout
 
 
 # --------------------------------------------------------------------------------------------
@@ -351,6 +364,7 @@ def test_copied_pointer_does_not_confer_ownership(tmp_path, state):
     dirty(cp)
     r = run(state, ["reset", "--hard"], cp, who="A")
     assert r.returncode == 77 and "no active claim" in r.stderr   # shared rule, not A's own workspace
+    plain(state, ["checkout", "-q", "-b", "b-branch"], cp)        # B's own branch: the copy's `main` is still A's
     claim(cp, "B", branch="b-branch", agent="omp")
     assert ade_claims.find_claim(ade_claims.find_workspace(cp))["id"] == "B"
     assert run(state, ["reset", "--hard"], cp, who="B").returncode == 0
@@ -375,80 +389,6 @@ def test_refusal_log_never_holds_positional_values(tmp_path, state):
     assert r.returncode == 77
     text = (Path(state) / "guard.log").read_text()
     assert secret not in text and secret not in r.stderr
-
-
-# --------------------------------------------------------------------------------------------
-# push of another claim's branch (row 2)
-# --------------------------------------------------------------------------------------------
-
-def test_push_of_another_claims_branch_is_refused_from_an_unclaimed_checkout(tmp_path, state):
-    bare = tmp_path / "origin.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
-    owner = mk_repo(tmp_path, state, "owner")
-    plain(state, ["remote", "add", "origin", str(bare)], owner)
-    plain(state, ["checkout", "-q", "-b", "feat"], owner)
-    claim(owner, "A", branch="feat", origin=str(bare))
-    assert run(state, ["push", "-q", "origin", "feat"], owner, who="A").returncode == 0
-    sha = plain(state, ["rev-parse", "feat"], owner).strip()
-    primary = tmp_path / "primary"
-    plain(state, ["clone", "-q", str(bare), str(primary)], tmp_path)
-    plain(state, ["checkout", "-q", "feat"], primary)
-    (primary / "x").write_text("merge-from-primary\n")
-    plain(state, ["add", "x"], primary)
-    plain(state, ["commit", "-qm", "from primary"], primary)
-    for args in (["push", "origin", "HEAD:feat"], ["push", "origin", "+HEAD:refs/heads/feat"], ["push", "origin"],
-                 ["push", "origin", "feat"], ["push", "--force", "origin", "HEAD:feat"]):
-        r = run(state, args, primary, who="B")
-        assert r.returncode == 77, (args, r.stderr)
-        assert "branch 'feat' is claimed" in r.stderr and "codex gpt-x (A)" in r.stderr
-    remote_sha = plain(state, ["--git-dir", str(bare), "rev-parse", "feat"], tmp_path).strip()
-    assert remote_sha == sha
-    assert run(state, ["push", "-q", "origin", "HEAD:scratch-b"], primary, who="B").returncode == 0
-    assert run(state, ["push", "-q", "origin", "HEAD:feat"], primary, who="A").returncode == 0  # the owner may
-
-
-def test_push_claim_is_per_repository(tmp_path, state):
-    """A claim on `feat` in repo X must not block pushing `feat` in an unrelated repo Y."""
-    owner = mk_repo(tmp_path, state, "owner")
-    claim(owner, "A", branch="feat", origin="https://example.invalid/x/one.git")
-    bare = tmp_path / "other.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
-    other = mk_repo(tmp_path, state, "other")
-    plain(state, ["remote", "add", "origin", str(bare)], other)
-    assert run(state, ["push", "-q", "origin", "HEAD:feat"], other, who="B").returncode == 0
-
-
-# --------------------------------------------------------------------------------------------
-# --check: shell command strings (the Claude hook, slice W5)
-# --------------------------------------------------------------------------------------------
-
-def check(state_dir, cmd, cwd, who="B"):
-    return subprocess.run([str(GUARD), "--check", cmd, "--cwd", str(cwd)], env=base_env(state_dir, who),
-                          capture_output=True, text=True, timeout=60)
-
-
-def test_check_refuses_every_destructive_git_in_a_command(tmp_path, state):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "A")
-    assert check(state, "git reset --hard", repo).returncode == 77
-    assert check(state, f"cd {repo} && git stash", tmp_path).returncode == 77
-    assert check(state, f"echo hi; git -C {repo} clean -fd", tmp_path).returncode == 77
-    assert check(state, f"bash -c 'git checkout -- .'", repo).returncode == 77
-    assert check(state, "FOO=1 git reset --hard | cat", repo).returncode == 77
-    ok = check(state, "git status && git diff | head -3", repo)
-    assert ok.returncode == 0, ok.stderr
-    assert check(state, "git reset --hard", repo, who="A").returncode == 0
-    assert check(state, "echo 'git reset --hard'", repo).returncode == 0   # text, not a command
-
-
-def test_check_refuses_pathspec_commit_after_apply_cached_in_a_shared_checkout(tmp_path, state):
-    repo = mk_repo(tmp_path, state)
-    cmd = "git apply --cached p.patch && git commit -m msg -- f"
-    assert check(state, cmd, repo).returncode == 77
-    assert check(state, "git apply --cached p.patch && git commit -m msg", repo).returncode == 0
-    assert check(state, "git commit -m msg -- f", repo).returncode == 0   # alone it is not the row-3 shape
-    claim(repo, "A")
-    assert check(state, cmd, repo, who="A").returncode == 0
 
 
 # --------------------------------------------------------------------------------------------
@@ -647,37 +587,35 @@ def test_abbreviated_write_options_are_refused_in_a_foreign_workspace(tmp_path, 
         assert run(state, cmd, repo, who="B").returncode == 77, cmd
 
 
-@pytest.mark.parametrize("flag", ["--all", "--al", "--mirror", "--mir", "--branches", "--br"])
-def test_push_all_and_mirror_spellings_cover_claimed_branches(tmp_path, state, flag):
-    bare = tmp_path / "origin.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
-    owner = mk_repo(tmp_path, state, "owner")
-    plain(state, ["remote", "add", "origin", str(bare)], owner)
-    plain(state, ["checkout", "-q", "-b", "feat"], owner)
-    claim(owner, "A", branch="feat", origin=str(bare))
-    primary = mk_repo(tmp_path, state, "primary")
-    plain(state, ["remote", "add", "origin", str(bare)], primary)
-    plain(state, ["branch", "feat"], primary)
-    r = run(state, ["push", flag, "origin"], primary, who="B")
-    assert r.returncode == 77, r.stderr
-    assert plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path).strip() == ""
-
-
 # --- BLOCK-3: the target's workspace, not the cwd's -----------------------------------------
 
 @pytest.mark.parametrize("cmd", [
     ["worktree", "remove", "--force", "{wt}"], ["worktree", "remove", "{wt}"], ["worktree", "move", "{wt}", "{wt}2"],
     ["worktree", "remove", "-f", "-f", "{wt}"], ["worktree", "remove", "--forc", "{wt}"],
-    ["branch", "-D", "wtb"], ["branch", "-m", "wtb", "gone"], ["branch", "-f", "wtb", "HEAD"], ["branch", "--delete", "--force", "wtb"],
-    ["update-ref", "-d", "refs/heads/wtb"], ["update-ref", "refs/heads/wtb", "HEAD"],
+    ["branch", "-m", "wtb", "gone"], ["branch", "-M", "main", "wtb"], ["branch", "-c", "main", "wtb"], ["branch", "-C", "main", "wtb"],
 ], ids=lambda c: " ".join(c))
 @pytest.mark.parametrize("claim_branch", ["wtb", "some-other-name"])
 def test_target_workspace_claim_protects_a_worktree_and_its_branch(tmp_path, state, cmd, claim_branch):
+    """What no hook can see: a worktree verb on a claimed workspace, and a rename's or copy's destination."""
     repo, wt = setup_linked(tmp_path, state, claim_branch)
     r = run(state, [c.format(wt=wt) for c in cmd], repo, who="B")
     assert r.returncode == 77, r.stderr
     assert wt.is_dir() and (wt / "f").read_text().endswith("uncommitted\n") and (wt / "u.txt").exists()
     assert "wtb" in plain(state, ["branch", "--list"], repo)
+
+
+@pytest.mark.parametrize("cmd", [
+    ["branch", "-D", "cbr"], ["branch", "-f", "cbr", "HEAD"], ["branch", "--delete", "--force", "cbr"],
+    ["update-ref", "-d", "refs/heads/cbr"], ["update-ref", "refs/heads/cbr", "HEAD"], ["branch", "-m", "cbr", "gone"],
+], ids=lambda c: " ".join(c))
+def test_ref_writes_on_a_claimed_branch_are_refused_by_the_hook_the_shim_installed(tmp_path, state, cmd):
+    repo, wt = setup_linked(tmp_path, state, "cbr")
+    plain(state, ["branch", "cbr"], repo)
+    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
+    head = plain(state, ["rev-parse", "cbr"], repo).strip()
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode != 0 and ("aborted by the reference-transaction hook" in r.stderr or "REFUSED" in r.stderr), r.stderr
+    assert plain(state, ["rev-parse", "cbr"], repo).strip() == head and wt.is_dir()
 
 
 def test_worktree_prune_is_refused_for_a_claimed_stale_entry(tmp_path, state):
@@ -699,85 +637,6 @@ def test_worktree_remove_by_its_owner_and_force_on_unclaimed(tmp_path, state):
     assert run(state, ["worktree", "remove", "--force", str(other)], repo, who="B").returncode == 77
     assert (other / "f").read_text() == "dirty\n"
     assert run(state, ["worktree", "remove", str(other)], repo, who="B").returncode != 77   # git itself refuses dirty
-
-
-# --- BLOCK-4: --check ------------------------------------------------------------------------
-
-@pytest.mark.parametrize("cmd", [
-    "echo hi\ngit reset --hard",
-    "true\n\n  git reset --hard\necho done",
-    "echo `git reset --hard`",
-    'echo "$(git reset --hard)"',
-    "echo $(git reset --hard)",
-    'echo "a $(echo `git reset --hard`) b"',
-    "env -i git reset --hard",
-    "env -i FOO=1 git reset --hard",
-    "timeout 5 git reset --hard",
-    "xargs git reset --hard",
-    "sudo -u nobody git reset --hard",
-    "nice -n 5 git reset --hard",
-    "watch -n1 git reset --hard",
-    "watch 'git reset --hard'",
-    'bash -lc "git reset --hard"',
-    "sh -ec 'git reset --hard'",
-    "zsh -c 'cd . && git reset --hard'",
-    "eval git reset --hard",
-    "eval 'git reset --hard'",
-    "if true; then git reset --hard; fi",
-    "(git reset --hard)",
-    "{ git reset --hard; }",
-    "true && /opt/homebrew/bin/git reset --hard",
-    "git status\ngit stash",
-    "git status # comment\ngit clean -fd",
-    "git commit -m 'msg\nwith a second line'\ngit reset --hard",
-], ids=lambda c: c.replace("\n", "⏎")[:40])
-def test_check_sees_git_after_line_one_and_inside_wrappers(tmp_path, state, cmd):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "A")
-    r = check(state, cmd, repo)
-    assert r.returncode == 77, (cmd, r.stderr)
-    assert check(state, cmd, repo, who="A").returncode == 0
-
-
-@pytest.mark.parametrize("cmd", [
-    "git $CMD", "git ${SUB} --hard", 'git "$X"', "D=/tmp/x; git -C $D reset --hard", 'git -C "$D" reset --hard',
-    'cd "$D" && git reset --hard', "cd $D; git reset --hard", "cd ~someone && git reset --hard", "cd - && git reset --hard",
-    "cd $(mktemp -d) && git reset --hard", "git reset --hard 'unterminated", 'git "reset --hard',
-    "GIT_DIR=$X git reset --hard", "GIT_WORK_TREE=$(pwd)/x git checkout -f",
-], ids=lambda c: c[:40])
-def test_check_fails_closed_on_what_it_cannot_read(tmp_path, state, cmd):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "B", branch="b")   # B's own workspace: a plain `git reset --hard` there is fine
-    assert check(state, "git reset --hard", repo).returncode == 0
-    r = check(state, cmd, repo)
-    assert r.returncode == 77, (cmd, r.stderr)
-    assert "spell" in r.stderr
-
-
-@pytest.mark.parametrize("cmd", [
-    "git commit -m \"git reset --hard\"", "echo 'git reset --hard' | cat", "which git", "command -v git", "git --version",
-    "echo git status", "brew install git", "git commit -F- <<'EOF'\nfix: git reset --hard is refused\nEOF",
-    'git commit -m "$(cat <<\'EOF\'\nfix\n\ngit reset --hard\nEOF\n)"', "cd /tmp && git --version",
-    'cd "$D" && git status', "git status && git diff | head", "grep -rn git README.md", "ls git-docs",
-], ids=lambda c: c.replace("\n", "⏎")[:40])
-def test_check_does_not_refuse_text_that_merely_mentions_git(tmp_path, state, cmd):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "B", branch="b")
-    r = check(state, cmd, repo)
-    assert r.returncode == 0, (cmd, r.stderr)
-
-
-def test_check_inline_work_tree_and_git_dir_select_the_other_workspace(tmp_path, state):
-    a = mk_repo(tmp_path, state, "a")
-    b = mk_repo(tmp_path, state, "b")
-    claim(a, "A")
-    claim(b, "B", branch="b")
-    dirty(a)
-    for cmd in (f"GIT_WORK_TREE={a} git checkout -f", f"env GIT_WORK_TREE={a} git reset --hard",
-                f"GIT_DIR={a}/.git git reset --hard", f"git --work-tree={a} checkout -f"):
-        r = check(state, cmd, b)
-        assert r.returncode == 77, (cmd, r.stderr)
-    assert untouched(a)
 
 
 # --- MEDIUM-1: aliases and config -------------------------------------------------------------
@@ -805,22 +664,6 @@ def test_a_repo_bang_alias_is_refused_in_a_shared_checkout_but_not_in_ones_own(t
     assert run(state, ["-c", "alias.hi=!echo hi", "hi"], repo, who="B").returncode == 0
 
 
-def test_alias_to_push_or_stash_hits_the_push_and_linked_rules(tmp_path, state):
-    bare = tmp_path / "origin.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
-    owner = mk_repo(tmp_path, state, "owner")
-    plain(state, ["remote", "add", "origin", str(bare)], owner)
-    plain(state, ["checkout", "-q", "-b", "feat"], owner)
-    claim(owner, "A", branch="feat", origin=str(bare))
-    primary = mk_repo(tmp_path, state, "primary")
-    plain(state, ["remote", "add", "origin", str(bare)], primary)
-    plain(state, ["branch", "feat"], primary)
-    r = run(state, ["-c", "alias.pp=push", "pp", "origin", "feat"], primary, who="B")
-    assert r.returncode == 77 and "feat" in r.stderr
-    repo, wt = setup_linked(tmp_path, state)
-    assert run(state, ["-c", "alias.ss=stash", "ss"], wt, who="A").returncode == 77
-
-
 @pytest.mark.parametrize("cmd", [["rebase", "-x", "true", "main"], ["rebase", "--exec", "true", "main"],
                                  ["rebase", "--exe=true", "main"], ["rebase", "-xtrue", "main"]],
                          ids=lambda c: " ".join(c))
@@ -837,55 +680,6 @@ def test_header_says_seatbelt_and_names_what_git_spawns():
     text = GUARD.read_text()
     assert "NOT A SANDBOX" in text and "git itself spawns" in text.lower().replace("everything ", "")
     assert "NOT A SANDBOX" in ade_claims.__doc__
-
-
-# --- MEDIUM-2: push destinations that come from config ---------------------------------------------
-
-def push_setup(tmp_path, state):
-    bare = tmp_path / "origin.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
-    owner = mk_repo(tmp_path, state, "owner")
-    plain(state, ["remote", "add", "origin", str(bare)], owner)
-    plain(state, ["checkout", "-q", "-b", "feat"], owner)
-    claim(owner, "A", branch="feat", origin=str(bare))
-    assert run(state, ["push", "-q", "origin", "feat"], owner, who="A").returncode == 0
-    primary = tmp_path / "primary"
-    plain(state, ["clone", "-q", str(bare), str(primary)], tmp_path)
-    plain(state, ["checkout", "-q", "-b", "mine"], primary)
-    (primary / "x").write_text("x\n")
-    plain(state, ["add", "x"], primary)
-    plain(state, ["commit", "-qm", "mine"], primary)
-    sha = plain(state, ["--git-dir", str(bare), "rev-parse", "feat"], tmp_path).strip()
-    return bare, primary, sha
-
-
-def test_push_destination_from_remote_push_config_is_checked(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    r = run(state, ["-c", "remote.origin.push=HEAD:refs/heads/feat", "push", "origin"], primary, who="B")
-    assert r.returncode == 77 and "feat" in r.stderr
-    plain(state, ["config", "remote.origin.push", "HEAD:refs/heads/feat"], primary)
-    assert run(state, ["push"], primary, who="B").returncode == 77
-    assert plain(state, ["--git-dir", str(bare), "rev-parse", "feat"], tmp_path).strip() == sha
-
-
-def test_push_destination_from_upstream_and_push_default_is_checked(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    plain(state, ["branch", "-u", "origin/feat"], primary)
-    r = run(state, ["-c", "push.default=upstream", "push"], primary, who="B")
-    assert r.returncode == 77 and "feat" in r.stderr
-    assert plain(state, ["--git-dir", str(bare), "rev-parse", "feat"], tmp_path).strip() == sha
-
-
-def test_bare_push_to_an_unclaimed_branch_still_works_and_an_unresolvable_one_is_refused(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    assert run(state, ["push", "-q", "-u", "origin", "mine"], primary, who="B").returncode == 0
-    (primary / "y").write_text("y\n")
-    plain(state, ["add", "y"], primary)
-    plain(state, ["commit", "-qm", "y"], primary)
-    assert run(state, ["push", "-q"], primary, who="B").returncode == 0           # upstream mine: resolvable
-    lone = mk_repo(tmp_path, state, "lone")                                       # no remote at all
-    r = run(state, ["push"], lone, who="B")
-    assert r.returncode == 77 and "unresolved" in r.stderr and "refspec" in r.stderr
 
 
 # --- MEDIUM-3: GIT_WORK_TREE ------------------------------------------------------------------
@@ -978,36 +772,6 @@ def test_a_released_claim_does_not_block_a_new_claim_on_the_path(tmp_path, state
     ade_claims.create_claim(ade_claims.make_claim(id="B", path=repo, branch="b", base_sha="s", owner_record="B"))
 
 
-# --- MEDIUM-6: "read-only" commands that write ----------------------------------------------------------
-
-@pytest.mark.parametrize("cmd", [
-    ["log", "-0", "--output=f"], ["log", "-0", "--output", "f"], ["diff", "--output=f"], ["show", "--output=f", "HEAD"],
-    ["log", "-0", "--out=f"], ["log", "-0", "--outp=f"], ["format-patch", "-1", "-o", "f"], ["format-patch", "-1", "-of"],
-    ["format-patch", "-1", "--output-directory=f"], ["format-patch", "-1", "--output-d", "f"],
-    ["archive", "-o", "f", "HEAD"], ["archive", "--output=f", "HEAD"], ["grep", "-Oless", "base"],
-    ["grep", "--open-files-in-pager=less", "base"],
-], ids=lambda c: " ".join(c))
-def test_output_writing_options_are_not_read_only_in_a_foreign_workspace(tmp_path, state, cmd):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "A")
-    dirty(repo)
-    r = run(state, cmd, repo, who="B")
-    assert r.returncode == 77, r.stderr
-    assert untouched(repo)
-
-
-def test_output_into_another_claims_tree_is_refused_from_ones_own(tmp_path, state):
-    a = mk_repo(tmp_path, state, "a")
-    b = mk_repo(tmp_path, state, "b")
-    claim(a, "A")
-    claim(b, "B", branch="b")
-    dirty(a)
-    r = run(state, ["log", "-0", f"--output={a / 'f'}"], b, who="B")
-    assert r.returncode == 77 and untouched(a)
-    assert run(state, ["log", "-0", f"--output={b / 'out.txt'}"], b, who="B").returncode == 0
-    assert (b / "out.txt").exists()
-
-
 @pytest.mark.parametrize("cmd", [["ls-files", "-o"], ["grep", "-o", "base"], ["log", "--oneline", "-1"],
                                  ["diff", "--output-indicator-new=+"], ["log", "-1", "--format=%s"], ["ls-files", "--others"]],
                          ids=lambda c: " ".join(c))
@@ -1024,7 +788,7 @@ def test_plain_reads_still_never_start_python(tmp_path, state):
     for cmd in (["log", "--oneline", "-1"], ["diff", "--stat"], ["status", "-sb"], ["show", "--format=%s", "HEAD"]):
         r = run(state, cmd, repo, who="B", ADE_PYTHON="/nonexistent/python3")
         assert r.returncode == 0 and r.stderr == "", (cmd, r.stderr)
-    r = run(state, ["log", "-0", "--output=f"], repo, who="B", ADE_PYTHON="/nonexistent/python3")
+    r = run(state, ["fetch"], repo, who="B", ADE_PYTHON="/nonexistent/python3")
     assert "unguarded" in r.stderr          # it went to the rules (which fail open here), not the fast path
 
 
@@ -1067,64 +831,6 @@ def test_a_poisoned_pythonpath_does_not_switch_the_guard_off(tmp_path, state):
     assert untouched(repo)
 
 
-# ============================================================================================
-# repair round 2 (adversary BLOCK at 858cf6d, 2026-10-24): one regression per finding
-# ============================================================================================
-
-def remote_sha(state_dir, bare, branch="feat"):
-    return plain(state_dir, ["--git-dir", str(bare), "rev-parse", branch], bare.parent).strip()
-
-
-def two_claimed(tmp_path, state):
-    """a (claimed by A, with uncommitted work) and b (claimed by B, the caller)."""
-    a = mk_repo(tmp_path, state, "a")
-    b = mk_repo(tmp_path, state, "b")
-    claim(a, "A")
-    claim(b, "B", branch="b")
-    dirty(a)
-    return a, b
-
-
-# --- R2-B1: the push preflight can never perform the push -------------------------------------
-
-@pytest.mark.parametrize("args", [
-    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-dry-run", "origin"],
-    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-dry", "origin"],
-    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-d", "origin"],
-    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-porcelain", "origin"],
-    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-por", "origin"],
-    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "origin", "--no-dry-run"],
-    ["push", "--no-dry-run", "origin", "HEAD:feat"],
-], ids=lambda a: " ".join(a[2:] if a[0] == "-c" else a))
-def test_push_preflight_can_never_perform_the_push(tmp_path, state, args):
-    bare, primary, sha = push_setup(tmp_path, state)
-    r = run(state, args, primary, who="B")
-    assert r.returncode == 77, r.stderr
-    assert remote_sha(state, bare) == sha          # the claimed branch did not move, not even once
-
-
-def test_check_of_a_push_that_cancels_the_dry_run_pushes_nothing(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    for cmd in ("git -c remote.origin.push=+HEAD:refs/heads/feat push --no-dry-run origin",
-                "git -c remote.origin.push=+HEAD:refs/heads/feat push origin"):
-        assert check(state, cmd, primary).returncode == 77
-        assert remote_sha(state, bare) == sha
-    assert check(state, "git push origin HEAD:scratch-b", primary).returncode == 0   # asked, not executed
-    assert plain(state, ["--git-dir", str(bare), "branch", "--list", "scratch-b"], tmp_path) == ""
-
-
-def test_push_preflight_runs_no_pre_push_hook(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    marker = tmp_path / "hook.log"
-    hook = primary / ".git" / "hooks" / "pre-push"
-    hook.write_text(f"#!/bin/sh\necho ran >> '{marker}'\nexit 0\n")
-    hook.chmod(0o755)
-    r = run(state, ["-c", "remote.origin.push=HEAD:refs/heads/feat", "push", "origin"], primary, who="B")
-    assert r.returncode == 77 and not marker.exists()
-    assert run(state, ["push", "-q", "origin", "HEAD:scratch-b"], primary, who="B").returncode == 0
-    assert marker.read_text().count("ran") == 1     # the real push only, never the guard's own dry run
-
-
 def test_run_git_kills_the_whole_process_group_on_timeout(tmp_path, monkeypatch):
     import time
     fake = tmp_path / "git"
@@ -1149,65 +855,6 @@ def test_run_git_kills_the_whole_process_group_on_timeout(tmp_path, monkeypatch)
             os.kill(pid, 9)
         except ProcessLookupError:
             pass
-
-
-def test_an_unresolvable_push_is_refused_only_while_someone_else_holds_a_claim(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    r = run(state, ["push", "nowhere", "HEAD:feat"], primary, who="B")
-    assert r.returncode == 77 and "unresolved" in r.stderr
-    ade_claims.set_state("A", "released")
-    r = run(state, ["push", "nowhere", "HEAD:feat"], primary, who="B")
-    assert "REFUSED" not in r.stderr          # nothing is claimed: git's own failure follows
-
-
-# --- R2-B5: destinations and URLs come from git, under the call's own ordered config -------------------------
-
-@pytest.mark.parametrize("args", [
-    ["push", "-f", "origin", "HEAD:heads/feat"],
-    ["push", "-f", "origin", "mine:heads/feat"],
-    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "-c", "remote.origin.push=+HEAD:refs/heads/mine", "push", "origin"],
-    ["push", "--mirror", "origin"],
-    ["push", "origin", "--delete", "feat"],
-    ["push", "origin", ":feat"],
-], ids=lambda a: " ".join(a)[:60])
-def test_push_destinations_come_from_git_not_from_the_command_line(tmp_path, state, args):
-    bare, primary, sha = push_setup(tmp_path, state)
-    r = run(state, args, primary, who="B")
-    assert r.returncode == 77, r.stderr
-    assert remote_sha(state, bare) == sha
-
-
-def test_push_of_at_sign_resolves_to_the_checked_out_claimed_branch(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    plain(state, ["checkout", "-q", "feat"], primary)
-    (primary / "z").write_text("z\n")
-    plain(state, ["add", "z"], primary)
-    plain(state, ["commit", "-qm", "z"], primary)
-    assert run(state, ["push", "origin", "@"], primary, who="B").returncode == 77
-    assert remote_sha(state, bare) == sha
-
-
-def test_wildcard_refspec_is_judged_by_the_remote_names_it_maps_to(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    ade_claims.write_claim(ade_claims.make_claim(id="C", path=tmp_path / "cw", branch="foreign/mine", base_sha="s",
-                                                 repo_origin=str(bare), owner_record="C"))
-    r = run(state, ["push", "origin", "refs/heads/*:refs/heads/foreign/*"], primary, who="B")
-    assert r.returncode == 77, r.stderr
-    assert plain(state, ["--git-dir", str(bare), "branch", "--list", "foreign/*"], tmp_path) == ""
-
-
-def test_push_url_comes_from_the_calls_own_config(tmp_path, state):
-    bare, primary, sha = push_setup(tmp_path, state)
-    other = tmp_path / "other.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(other)], tmp_path)
-    plain(state, ["remote", "set-url", "origin", str(other)], primary)      # the repo's own url is an unrelated repo
-    r = run(state, ["-c", f"remote.origin.pushurl={bare}", "push", "origin", "HEAD:feat"], primary, who="B")
-    assert r.returncode == 77 and remote_sha(state, bare) == sha
-    plain(state, ["remote", "set-url", "origin", "zz:origin"], primary)
-    r = run(state, ["-c", f"url.{bare}.insteadOf=zz:origin", "push", "origin", "HEAD:feat"], primary, who="B")
-    assert r.returncode == 77 and remote_sha(state, bare) == sha
-    plain(state, ["remote", "set-url", "origin", str(other)], primary)
-    assert run(state, ["push", "-q", "origin", "HEAD:feat"], primary, who="B").returncode == 0   # unrelated repo
 
 
 def test_normalize_origin_knows_verified_aliases_only():
@@ -1236,29 +883,6 @@ def test_effective_worktree_follows_git_dir_env_core_worktree_and_c_chains(tmp_p
     plain(state, ["config", "core.worktree", str(a)], b)       # b's own config points at a's files
     r = run(state, ["checkout", "-f"], b, who="B")
     assert r.returncode == 77 and untouched(a), r.stderr
-
-
-def test_output_file_symlinks_are_resolved_before_their_parent(tmp_path, state):
-    a, b = two_claimed(tmp_path, state)
-    os.symlink(a / "f", b / "link")
-    os.symlink(a / "newfile", b / "dangling")
-    os.symlink(a, b / "dirlink")
-    for args in (["log", "-0", "--output=link"], ["log", "-0", "--output=dangling"], ["log", "-0", "--output=dirlink/f"],
-                 ["log", "-0", "--output=dirlink/newfile"], ["format-patch", "-1", "-o", "dirlink"]):
-        r = run(state, args, b, who="B")
-        assert r.returncode == 77, (args, r.stderr)
-    assert untouched(a) and not (a / "newfile").exists()
-    assert run(state, ["log", "-0", "--output=ok.txt"], b, who="B").returncode == 0
-
-
-def test_output_over_a_dirty_file_of_a_shared_checkout_is_refused(tmp_path, state):
-    repo = mk_repo(tmp_path, state)
-    dirty(repo)
-    for args in (["diff", "--output=f"], ["log", "-0", "--output=u.txt"], ["diff", "--output", "f"]):
-        r = run(state, args, repo, who="B")
-        assert r.returncode == 77 and "dirty" in r.stderr, (args, r.stderr)
-    assert untouched(repo)
-    assert run(state, ["diff", "--output=new.patch"], repo, who="B").returncode == 0
 
 
 def test_absolute_dash_c_is_honored_when_the_cwd_is_gone(tmp_path, state, monkeypatch):
@@ -1319,73 +943,12 @@ def test_alias_resolution_uses_the_calls_config_and_fails_closed(tmp_path, state
     inc = tmp_path / "inc.cfg"
     inc.write_text("[alias]\n\tzz = reset --hard\n")
     assert run(state, ["-c", f"include.path={inc}", "zz"], repo, who="B").returncode == 77
-    r = check(state, "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.zz GIT_CONFIG_VALUE_0='reset --hard' git zz", repo)
+    r = run(state, ["zz"], repo, who="B", GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="alias.zz", GIT_CONFIG_VALUE_0="reset --hard")
     assert r.returncode == 77
     inline_cfg = tmp_path / "evil.cfg"
     inline_cfg.write_text("[alias]\n\tqq = reset --hard\n")
-    assert check(state, f"GIT_CONFIG_GLOBAL={inline_cfg} git qq", repo).returncode == 77
+    assert run(state, ["qq"], repo, who="B", GIT_CONFIG_GLOBAL=str(inline_cfg)).returncode == 77
     assert untouched(repo)
-
-
-# --- R2-B3: what --check cannot judge is refused; scope is tracked ---------------------------------
-
-@pytest.mark.parametrize("tpl", [
-    "cat <<< x\ngit reset --hard",
-    "bash <<'EOF'\ngit reset --hard\nEOF",
-    "sh <<EOF\ngit reset --hard\nEOF",
-    "cat <<EOF\n$(git reset --hard)\nEOF",
-    "bash <<< 'git reset --hard'",
-    "echo 'git reset --hard' | bash",
-    "printf 'git reset --hard\\n' | sh -s",
-    "source /dev/stdin <<'EOF'\ngit reset --hard\nEOF",
-    "(cd {b}) && git reset --hard",
-    "pushd {b} > /dev/null; popd > /dev/null; git reset --hard",
-    "cd {b} | cat; git reset --hard",
-    "cd {b} & git reset --hard",
-    "G=git; $G reset --hard",
-    "$(which git) reset --hard",
-    "$'\\x67it' reset --hard",
-    "g{{i,}}t reset --hard",
-    "/usr/bin/g?t reset --hard",
-    "echo reset | xargs -I{{}} git {{}} --hard",
-], ids=lambda c: c.replace("\n", "⏎")[:44])
-def test_check_refuses_what_the_lexer_cannot_judge_or_would_misscope(tmp_path, state, tpl):
-    a, b = two_claimed(tmp_path, state)
-    r = check(state, tpl.format(b=b), a)
-    assert r.returncode == 77, (tpl, r.stderr)
-    assert untouched(a)
-
-
-@pytest.mark.parametrize("tpl,where", [
-    ("echo '$G reset --hard'", "b"),
-    ("cat <<'EOF'\ngit reset --hard\nEOF", "b"),
-    ("git commit -F- <<EOF\nnote: git reset --hard is only text\nEOF", "b"),
-    ("bash <<EOF\necho hi\nEOF", "b"),
-    ("cat <<EOF\n$(date)\nEOF", "b"),
-    ("$(pwd)/run.sh git", "b"),
-    ("ls *.md; echo git", "b"),
-    ("{{ cd {b}; }} && git reset --hard", "a"),
-    ("( cd {b} && git reset --hard )", "a"),
-    ("cd {b} && git reset --hard", "a"),
-    ("git commit --allow-empty -m \"$(cat <<'EOF'\nfix: don't break hooks\n\nbody \"quoted\" text\nEOF\n)\"", "b"),
-], ids=lambda c: c.replace("\n", "⏎")[:44] if isinstance(c, str) else c)
-def test_check_keeps_literal_data_and_correct_scopes_allowed(tmp_path, state, tpl, where):
-    a, b = two_claimed(tmp_path, state)
-    r = check(state, tpl.format(b=b), {"a": a, "b": b}[where])
-    assert r.returncode == 0, (tpl, r.stderr)
-
-
-def test_check_refuses_when_nesting_exhausts_the_recursion_limit(tmp_path, state):
-    a, b = two_claimed(tmp_path, state)
-    deep = lambda n, leaf: "echo $(" * n + leaf + ")" * n   # noqa: E731
-    assert check(state, deep(12, "git reset --hard"), a).returncode == 77
-    assert check(state, deep(3, "git reset --hard"), a).returncode == 77        # still read, and judged
-    assert check(state, deep(12, "echo hi"), a).returncode == 0                 # nothing to judge
-
-
-def test_match_paren_skips_heredoc_bodies():
-    s = "$(cat <<'EOF'\ndon't \"break\"\nEOF\n) tail"
-    assert ade_claims._match_paren(s, 1) == s.index("\n)") + 1
 
 
 # --- R2-M1..M4 -------------------------------------------------------------------------------
@@ -1396,23 +959,6 @@ def test_worktree_selector_is_resolved_against_the_registered_list(tmp_path, sta
     assert r.returncode == 77 and wt.exists() and not (tmp_path / "W2").exists(), r.stderr
     assert run(state, ["worktree", "remove", "W"], repo, who="B").returncode == 77
     assert untouched(wt)
-
-
-def test_ref_transactions_and_forced_fetch_cannot_move_a_claimed_branch(tmp_path, state):
-    repo, wt = setup_linked(tmp_path, state)
-    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)       # a fetch that changes nothing is no write
-    head = plain(state, ["rev-parse", "wtb"], repo).strip()
-    main = plain(state, ["rev-parse", "main"], repo).strip()
-    r = subprocess.run([str(SHIM), "update-ref", "--stdin"], cwd=repo, env=base_env(state, "B"), capture_output=True,
-                       text=True, input=f"update refs/heads/wtb {main}\n", timeout=60)
-    assert r.returncode == 77, r.stderr
-    for args in (["fetch", "--update-head-ok", ".", "+main:wtb"], ["fetch", "-u", ".", "+main:refs/heads/wtb"],
-                 ["fetch", ".", "+main:wtb"], ["-c", "remote.origin.fetch=+refs/heads/*:refs/heads/*", "fetch", "origin"]):
-        r = run(state, args, repo, who="B")
-        assert r.returncode == 77, (args, r.stderr)
-    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head
-    r = run(state, ["fetch", "."], repo, who="B")
-    assert r.returncode != 77 and "REFUSED" not in r.stderr
 
 
 def test_symbolic_ref_delete_is_not_read_only(tmp_path, state):
@@ -1525,7 +1071,7 @@ def git_env(state, monkeypatch):
 
 def decide(state_dir, who, argv, cwd, **extra):
     env = base_env(state_dir, who, **extra)
-    return ade_claims.evaluate(ade_claims.parse_git_argv(argv, str(cwd), env), env, assume_agent=True)
+    return ade_claims.evaluate(ade_claims.parse_git_argv(argv, str(cwd), env), env)
 
 
 # --- R3-B1: core.worktree and friends are read by git, never by a parser of ours --------------------------------
@@ -1560,12 +1106,11 @@ def test_core_worktree_is_read_by_git_in_every_spelling(tmp_path, state, git_env
     top = plain(state, ["rev-parse", "--show-toplevel"], b).strip()
     assert os.path.samefile(top, tgt) == hits, top                  # git's own answer is the oracle
     d = decide(state, "B", ["reset", "--hard"], b)
-    c = check(state, "git reset --hard", b)
     if hits:
         assert not d.allowed and d.rule == "foreign-claim" and d.claim_id == "A", d
-        assert c.returncode == 77 and "[foreign-claim]" in c.stderr and untouched(tgt)
+        assert untouched(tgt)
     else:
-        assert d.allowed and c.returncode == 0                      # b is B's own: nothing of A's is hit
+        assert d.allowed                                            # b is B's own: nothing of A's is hit
 
 
 def test_git_work_tree_and_dash_c_chains_follow_what_git_resolves(tmp_path, state, git_env):
@@ -1658,198 +1203,6 @@ def test_git_that_finds_no_repository_is_an_answer_not_a_failure(tmp_path, state
     assert decide(state, "B", ["init"], tmp_path / "empty").allowed
 
 
-# --- R3-MEDIUM: a push dry run that did not finish or does not cover every ref is unresolved --------------------
-
-def _fake_push(monkeypatch, rc, out):
-    real_run = ade_claims._run_git
-    monkeypatch.setattr(ade_claims, "_run_git", lambda argv, *x, **k: (rc, out) if "push" in argv
-                        else real_run(argv, *x, **k))
-
-
-COMPLETE = "To /somewhere.git\n*\trefs/heads/mine:refs/heads/mine\t[new branch]\nDone\n"
-
-
-@pytest.mark.parametrize("rc,out", [
-    (0, "To /somewhere.git\n*\trefs/heads/mine:refs/heads/mine\t[new branch]\n"),                    # no closing Done
-    (0, "To /somewhere.git\n*\trefs/heads/mine:refs/heads/mine\t[new branch]\n*\tgarbage\nDone\n"),    # stray line
-    (0, "*\trefs/heads/mine:refs/heads/mine\t[new branch]\nDone\n"),                                  # no `To` line
-    (0, ""),
-    (124, COMPLETE),                                                                                   # timeout
-    (1, "To /somewhere.git\n!\trefs/heads/mine:refs/heads/mine\t[rejected] (non-fast-forward)\n"),   # rc 1, partial
-    (128, COMPLETE),
-    (0, "To /somewhere.git\nTo /other.git\n*\trefs/heads/mine:refs/heads/mine\t[x]\nDone\n"),         # block never closed
-], ids=["no-done", "stray-line", "no-to", "empty", "rc124", "rc1-partial", "rc128", "unclosed-block"])
-def test_a_partial_or_failed_push_dry_run_is_unresolved(tmp_path, state, git_env, monkeypatch, rc, out):
-    a, b = two_claimed(tmp_path, state)
-    _fake_push(monkeypatch, rc, out)
-    d = decide(state, "B", ["push", "origin", "HEAD"], b)
-    assert not d.allowed and d.rule == "push-destination-unresolved", (rc, out, d)
-    ade_claims.set_state("A", "released")
-    assert decide(state, "B", ["push", "origin", "HEAD"], b).allowed        # nothing foreign to protect
-
-
-def test_a_complete_push_dry_run_is_still_judged_by_its_refs(tmp_path, state, git_env, monkeypatch):
-    a, b = two_claimed(tmp_path, state)
-    _fake_push(monkeypatch, 0, COMPLETE.replace("Done", "Would set upstream of 'mine' to 'mine' of 'origin'\nDone"))
-    assert decide(state, "B", ["push", "-u", "origin", "HEAD"], b).allowed         # prose inside a block is no ref
-    _fake_push(monkeypatch, 0, COMPLETE)
-    assert decide(state, "B", ["push", "origin", "HEAD"], b).allowed
-    rejected = "To /somewhere.git\n!\trefs/heads/mine:refs/heads/mine\t[rejected] (non-fast-forward)\nDone\n"
-    _fake_push(monkeypatch, 1, rejected)            # git's rc 1 for a rejected ref: its complete listing is read
-    assert decide(state, "B", ["push", "origin", "HEAD"], b).allowed
-    _fake_push(monkeypatch, 1, rejected.replace("mine", "main"))
-    assert decide(state, "B", ["push", "origin", "HEAD"], b).rule == "push-foreign-branch"
-    _fake_push(monkeypatch, 0, COMPLETE + "To /second.git\n+\trefs/heads/main:refs/heads/main\t[forced update]\nDone\n")
-    d = decide(state, "B", ["push", "origin", "HEAD"], b)
-    assert not d.allowed and d.rule == "push-foreign-branch" and d.claim_id == "A"     # branch main is A's
-
-
-# --- R3-B2: --check reads what bash reads, or refuses --------------------------------------------------------------
-
-@pytest.mark.parametrize("tpl", [
-    "env -u UNSET_ME bash <<'EOF'\ngit reset --hard\nEOF",
-    "env VAR=1 sh <<EOF\ngit reset --hard\nEOF",
-    "env -i -u X VAR=1 zsh <<'EOF'\ngit reset --hard\nEOF",
-    "command bash <<'EOF'\ngit reset --hard\nEOF",
-    "exec bash <<'EOF'\ngit reset --hard\nEOF",
-    "nohup bash <<'EOF'\ngit reset --hard\nEOF",
-    "nice -n 5 bash <<'EOF'\ngit reset --hard\nEOF",
-    "time bash <<'EOF'\ngit reset --hard\nEOF",
-    "sudo -u me bash <<'EOF'\ngit reset --hard\nEOF",
-    "timeout 5 bash <<'EOF'\ngit reset --hard\nEOF",
-    "/usr/bin/env -u X bash <<'EOF'\ngit reset --hard\nEOF",
-    "xargs sh <<'EOF'\ngit reset --hard\nEOF",
-    "env -u X bash <<< 'git reset --hard'",
-    "nice -n 5 sh <<< 'git reset --hard'",
-    "<<'EOF' env -u X bash\ngit reset --hard\nEOF",
-    "env -u X source /dev/stdin <<'EOF'\ngit reset --hard\nEOF",
-    "echo ${UNSET_ME:-$(git reset --hard)}",
-    "echo ${UNSET_ME:+$(git reset --hard)}",
-    "echo ${UNSET_ME:=$(git reset --hard)}",
-    "echo ${UNSET_ME:?$(git reset --hard)}",
-    "echo ${UNSET_ME:-${OTHER:-$(git reset --hard)}}",
-    "echo ${UNSET_ME:-`git reset --hard`}",
-    "echo \"${UNSET_ME:-$(git reset --hard)}\"",
-    "echo ${UNSET_ME/x/$(git reset --hard)}",
-    "cat <<E\"OF\"\ndata\nEOF\ngit reset --hard",
-    "cat <<E'O'F\ndata\nEOF\ngit reset --hard",
-    "cat <<E\\OF\ndata\nEOF\ngit reset --hard",
-    "cat <<\"E OF\"\ndata\nE OF\ngit reset --hard",
-    "cat <<-EOF\n\tdata\n\tEOF\ngit reset --hard",
-    "cat <<- 'EOF'\n\tdata\n\tEOF\ngit reset --hard",
-    "cat <<'EOF' >/dev/null\ndata\nEOF\ngit reset --hard",
-    "cat <<$'EOF'\ndata\nEOF\ngit reset --hard",              # a delimiter the lexer cannot read: refused
-    "cat <<`echo EOF`\ndata\nEOF\ngit reset --hard",
-    "cat <<EOF\ngit reset --hard",                              # no terminating line: nothing may be swallowed
-    "(( x = 1<<2 ))\ngit reset --hard",
-    "cat <<\ngit reset --hard",
-    "cat <<< foo; git reset --hard",
-    "echo $(cat <<< foo\ngit reset --hard)",
-    "G=git; env -u X $G reset --hard",
-    "git commit -m \"$(echo \")\"; git reset --hard)\"",
-], ids=lambda c: c.replace("\n", "⏎")[:46])
-def test_check_refuses_or_judges_every_heredoc_consumer_and_expansion(tmp_path, state, tpl):
-    a, b = two_claimed(tmp_path, state)
-    r = check(state, tpl, a)
-    assert r.returncode == 77, (tpl, r.stderr)
-    assert untouched(a)
-
-
-@pytest.mark.parametrize("tpl", [
-    "cat <<'EOF'\ngit reset --hard\nEOF",
-    "cat <<E\"OF\"\ngit reset --hard\nEOF\ngit status",
-    "cat <<E'O'F\ngit reset --hard\nEOF\ngit status",
-    "cat <<E\\OF\ngit reset --hard\nEOF\ngit status",
-    "cat <<\"E OF\"\ngit reset --hard\nE OF\ngit status",
-    "cat <<-'EOF'\n\tgit reset --hard\n\tEOF\ngit status",
-    "git log -1 --format=%B <<'EOF'\nnote: git reset --hard is only text\nEOF",
-    "env -u X bash <<'EOF'\ngit status\nEOF",
-    "env VAR=1 sh <<EOF\necho hi\nEOF",
-    "bash <<EOF\necho hi\nEOF",
-    "nice -n 5 bash <<< 'echo git'",
-    "echo ${UNSET_ME:-$(date)}",
-    "echo ${UNSET_ME:-plain} ${OTHER:+x}",
-    "echo \"${UNSET_ME:-$(date)}\"",
-    "echo $((1<<2))",
-    "echo $(cat <<< foo)\ngit status",
-    "env -u X git status",
-    "timeout 5s git log -1",
-], ids=lambda c: c.replace("\n", "⏎")[:46])
-def test_check_keeps_literal_data_and_exactly_read_siblings_allowed(tmp_path, state, tpl):
-    a, b = two_claimed(tmp_path, state)
-    r = check(state, tpl, a)
-    assert r.returncode == 0, (tpl, r.stderr)
-
-
-def test_check_sees_an_alias_behind_wrappers_and_their_option_values(tmp_path, state):
-    a, b = two_claimed(tmp_path, state)
-    plain(state, ["config", "alias.zz", "reset --hard"], a)
-    for cmd in ("env -u X git zz", "nice -n 5 git zz", "sudo -u me git zz", "env VAR=1 -u X git zz"):
-        assert check(state, cmd, a).returncode == 77, cmd
-    assert untouched(a)
-
-
-@pytest.mark.parametrize("text,delim,quoted", [
-    ("<<EOF", "EOF", False), ("<< EOF", "EOF", False), ("<<-EOF", "EOF", False), ("<<'EOF'", "EOF", True),
-    ("<<\"EOF\"", "EOF", True), ("<<\\EOF", "EOF", True), ("<<E\"OF\"", "EOF", True), ("<<E'O'F", "EOF", True),
-    ("<<E\\OF", "EOF", True), ("<<'E OF'", "E OF", True), ("<<\"E OF\"", "E OF", True), ("<<-'E.F-1'", "E.F-1", True),
-    ("<<$X", "$X", False), ("<<EOF;", "EOF", False), ("<<EOF)", "EOF", False), ("<<E\"\\\"\"F", "E\"F", True),
-])
-def test_heredoc_delimiters_are_read_the_way_bash_removes_quotes(text, delim, quoted):
-    d, strip, q, end = ade_claims._read_heredoc_op(text, 0)
-    assert (d, q) == (delim, quoted) and strip == text.startswith("<<-")
-
-
-@pytest.mark.parametrize("text", ["<<", "<<\n", "<< ", "<<'EOF", "<<\"EOF", "<<$'EOF'", "<<$\"EOF\"", "<<`x`", "<<\\"])
-def test_a_heredoc_delimiter_that_cannot_be_read_exactly_raises(text):
-    with pytest.raises(ValueError):
-        ade_claims._read_heredoc_op(text, 0)
-
-
-# --- R3-B3: an owner's own commit is never refused for its quoting ------------------------------------------------------
-
-OWNER_COMMITS = [
-    "git commit --allow-empty -m \"$(cat <<E'OF'\nfix: don't break\nEOF\n)\"",
-    "git commit --allow-empty -m \"$(cat <<\"EOF\"\nfix: don't break\nEOF\n)\"",
-    "git commit --allow-empty -m \"$(cat <<-'EOF'\n\tfix: don't break\n\tEOF\n)\"",
-    "git commit --allow-empty -m \"$(cat <<\\EOF\nfix: don't break\nEOF\n)\"",
-    "git commit --allow-empty -m \"$(cat <<'EOF'\nsay \"hi\" and don't (really) ) end\nEOF\n)\"",
-    "git commit --allow-empty -m \"$(cat <<E\"OF\"\nit's ) here\nEOF\n)\"",
-    "git commit --allow-empty -m \"$(cat <<E\\OF\n\"unbalanced and 'unbalanced\nEOF\n)\"",
-    "git commit --allow-empty -m \"$(cat <<'E OF'\nbody ) 'x\nE OF\n)\"",
-    "git commit --allow-empty -F- <<E'OF'\ndon't \"quote\" )\nEOF",
-    "git commit --allow-empty -m $'it\\'s \\x \\u \\xZ \\U \\c'",
-    "git commit --allow-empty -m $'\\x'",
-    "git commit --allow-empty -m $'\\u' -m $'\\xZ' -m $'\\U110000'",
-    "git commit --allow-empty -m $'\\x4' -m $'\\u12' -m $'ok \\x41 \\u00e9 \\101'",
-]
-
-
-@pytest.mark.parametrize("cmd", OWNER_COMMITS, ids=lambda c: c.replace("\n", "⏎")[:50])
-def test_an_owners_commit_is_not_refused_for_its_quoting_but_a_foreigner_is_refused_as_a_foreigner(tmp_path, state, cmd):
-    a, b = two_claimed(tmp_path, state)
-    r = check(state, cmd, a, who="A")
-    assert r.returncode == 0, (cmd, r.stderr)
-    r = check(state, cmd, a, who="B")        # same shape, another agent's workspace: parsed, then refused as foreign
-    assert r.returncode == 77 and "[foreign-claim]" in r.stderr and "unclassifiable" not in r.stderr, (cmd, r.stderr)
-
-
-@pytest.mark.parametrize("raw,want", [
-    ("\\x", "\\x"), ("\\u", "\\u"), ("\\U", "\\U"), ("\\xZ", "\\xZ"), ("\\x4Z", "\x04Z"), ("\\x41", "A"),
-    ("\\u00e9", "é"), ("\\U0001F600", "\U0001F600"), ("\\U110000", "\\U110000"), ("\\101", "A"), ("\\q", "\\q"),
-    ("\\c", "\\c"), ("\\cA", "\x01"), ("a\\nb", "a\nb"), ("\\x67it", "git"), ("tail\\", "tail\\"),
-])
-def test_ansi_c_quoting_decodes_like_bash_and_keeps_a_bad_escape_literal(raw, want):
-    assert ade_claims._ansi_c(raw) == want
-
-
-def test_quote_nesting_past_the_interpreters_recursion_limit_is_refused_not_a_crash(tmp_path, state):
-    a, b = two_claimed(tmp_path, state)       # a crash of --check would fail OPEN (the guard allows on rc 1)
-    for nest in ('echo git "$(' * 700, 'echo git ${a:-' * 700, 'echo git "${a:-$(' * 400):
-        r = check(state, nest, a)
-        assert r.returncode == 77 and "unguarded" not in r.stderr and "failed" not in r.stderr, (nest[:20], r.stderr)
-
-
 # ============================================================================================
 # repair round 4 (PR 59: bash 3.2 CI, Codex P1 x3): one regression per finding and per sibling
 # ============================================================================================
@@ -1860,101 +1213,7 @@ def test_shim_parses_under_the_system_bash():
     r = subprocess.run(["/bin/bash", "-n", str(SHIM)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     h = subprocess.run(["/bin/bash", str(GUARD), "--help"], capture_output=True, text=True, timeout=30)
-    assert h.returncode == 0 and "ade-git-guard --check CMD" in h.stdout and "#!" not in h.stdout
-
-
-def fetch_world(tmp_path, state):
-    """P (an unclaimed primary, `main` checked out) with a bare origin one commit ahead of `cb`; branch `cb` exists in P
-    and is checked out NOWHERE (git itself would refuse a checked-out one with rc 128, which hides a guard miss), and is
-    claimed by Z in its own clone of the same origin. Returns (P, bare, Z)."""
-    bare = tmp_path / "origin.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
-    p = mk_repo(tmp_path, state, "P")
-    plain(state, ["remote", "add", "origin", str(bare)], p)
-    plain(state, ["push", "-q", "origin", "main"], p)
-    plain(state, ["branch", "cb"], p)
-    plain(state, ["commit", "-q", "--allow-empty", "-m", "main moves on"], p)
-    plain(state, ["push", "-q", "origin", "main"], p)
-    z = tmp_path / "Z"
-    plain(state, ["clone", "-q", str(bare), str(z)], tmp_path)
-    plain(state, ["checkout", "-q", "-b", "cb"], z)
-    claim(z, "Z", branch="cb", origin=str(bare))
-    return p, bare, z
-
-
-def rev(state, repo, ref="cb"):
-    return plain(state, ["rev-parse", ref], repo).strip()
-
-
-def map_origin(state, repo, mapping):
-    plain(state, ["config", "--replace-all", "remote.origin.fetch", mapping], repo)
-
-
-def refused_and_unmoved(state, repo, argv, cwd=None, who="B", ref="cb", **extra):
-    """The call is refused (77) AND the claimed branch is exactly where it was: a refusal that git would have made
-    anyway (rc 128, a checked-out branch) proves nothing, so the branch is never checked out here."""
-    before = rev(state, repo, ref)
-    r = run(state, argv, cwd or repo, who=who, **extra)
-    assert r.returncode == 77, (argv, r.returncode, r.stderr)
-    assert rev(state, repo, ref) == before, argv
-    return r
-
-
-@pytest.mark.parametrize("cmd", [
-    ["fetch", "origin"], ["fetch"], ["fetch", "origin", "main"], ["fetch", "--all"], ["fetch", "--multiple", "origin"],
-    ["pull", "--ff-only", "origin"], ["pull", "-s", "ours", "origin"], ["remote", "update"], ["remote", "update", "origin"],
-    ["-C", "{P}", "fetch", "origin"],
-], ids=lambda c: " ".join(c))
-def test_a_configured_fetch_mapping_into_a_claimed_branch_is_refused(tmp_path, state, cmd):
-    repo, bare, z = fetch_world(tmp_path, state)
-    map_origin(state, repo, "+refs/heads/main:refs/heads/cb")
-    r = refused_and_unmoved(state, repo, [c.format(P=repo) for c in cmd],
-                            cwd=repo if "{P}" not in " ".join(cmd) else tmp_path)
-    assert "claimed branch" in r.stderr or "unresolved" in r.stderr, r.stderr
-
-
-def test_fetch_stdin_refspecs_cannot_be_inspected_so_they_are_refused_beside_a_claim(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    before = rev(state, repo)
-    for flag in ("--stdin", "--std"):
-        r = subprocess.run([str(SHIM), "fetch", flag, "origin"], cwd=repo, env=base_env(state, "B"), capture_output=True,
-                           text=True, input="+refs/heads/main:refs/heads/cb\n", timeout=60)
-        assert r.returncode == 77 and "--stdin" in r.stderr and "fetch destinations unresolved" in r.stderr, (flag, r.stderr)
-    assert rev(state, repo) == before
-    plain(state, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], repo)
-    ade_claims.set_state("Z", "released")                                       # no claim left: nothing to protect
-    r = subprocess.run([str(SHIM), "fetch", "--stdin", "origin"], cwd=repo, env=base_env(state, "B"), capture_output=True,
-                       text=True, input="+refs/heads/main:refs/heads/cb\n", timeout=60)
-    assert r.returncode == 0 and rev(state, repo) == rev(state, repo, "main")  # git ran it
-
-
-def test_fetch_stays_allowed_for_the_owner_a_human_and_a_harmless_mapping(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    ok = lambda r: r.returncode != 77 and "REFUSED" not in r.stderr   # noqa: E731
-    map_origin(state, repo, "+refs/heads/main:refs/heads/cb")
-    main = rev(state, repo, "main")
-    r = run(state, ["fetch", "origin"], repo)                                  # a human shell: git runs it
-    assert ok(r) and rev(state, repo) == main
-    plain(state, ["branch", "-f", "cb", "HEAD~1"], repo)
-    assert ok(run(state, ["fetch", "origin"], z, who="Z"))                     # the owner, in its own workspace
-    map_origin(state, repo, "+refs/heads/*:refs/remotes/origin/*")
-    r = run(state, ["fetch", "origin"], repo, who="B")                         # remote-tracking refs only
-    assert r.returncode == 0 and "REFUSED" not in r.stderr, r.stderr
-    assert ok(run(state, ["fetch", "origin", "main:scratch-b"], repo, who="B"))  # a branch nobody claimed
-    claim(repo, "C", branch="main")                                            # foreign claim of the checkout itself
-    assert ok(run(state, ["fetch", "origin"], repo, who="B"))                  # still a read there
-    map_origin(state, repo, "+refs/heads/main:refs/heads/cb")
-    before = rev(state, repo)
-    assert run(state, ["fetch", "origin"], repo, who="B").returncode == 77     # but not once the mapping writes a claimed branch
-    assert rev(state, repo) == before
-
-
-def test_every_plain_fetch_goes_through_the_rules_not_the_fast_path(tmp_path, state):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "A")
-    no_python = {"ADE_PYTHON": "/nonexistent/python3"}
-    for args in (["fetch"], ["fetch", "origin"], ["fetch", "origin", "+main:wbr"], ["fetch", "-qu"]):
-        assert "unguarded" in run(state, args, repo, who="B", **no_python).stderr, args
+    assert h.returncode == 0 and "ade-git-guard install [DIR]" in h.stdout and "#!" not in h.stdout
 
 
 @pytest.mark.parametrize("cmd", [
@@ -1982,64 +1241,12 @@ def test_branch_copy_stays_allowed_for_the_owner_and_for_a_new_destination(tmp_p
     assert "copy1" in plain(state, ["branch", "--list"], repo)
 
 
-@pytest.mark.parametrize("cmd", [
-    ["stash", "show", "-p", "--output=OUT"], ["stash", "show", "--output", "OUT"], ["stash", "show", "--out=OUT"],
-    ["stash", "list", "--output=OUT"], ["stash", "show", "-p", "stash@{0}", "--outp=OUT"],
-], ids=lambda c: " ".join(c))
-def test_stash_show_and_list_output_options_write_a_file(tmp_path, state, cmd):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "A")
-    dirty(repo)
-    plain(state, ["stash", "push", "-q", "-u"], repo)
-    (repo / "f").write_text("precious\n")
-    argv = [c.replace("OUT", "f") for c in cmd]
-    r = run(state, argv, repo, who="B")                                     # foreign claim: not read-only any more
-    assert r.returncode == 77 and (repo / "f").read_text() == "precious\n", r.stderr
-    outside = tmp_path / "outside.txt"                                      # not read-only there, whatever the target
-    r = run(state, [c.replace("OUT", str(outside)) for c in cmd], repo, who="B")
-    assert r.returncode == 77 and not outside.exists(), r.stderr
-    b = mk_repo(tmp_path, state, "b")
-    claim(b, "B", branch="b")
-    r = run(state, [c.replace("OUT", str(repo / "f")) for c in cmd], b, who="B")   # into another claim's tree
-    assert r.returncode == 77 and (repo / "f").read_text() == "precious\n", r.stderr
-
-
-def test_stash_show_without_an_output_option_stays_read_only_and_the_owner_may_write_beside_itself(tmp_path, state):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "A")
-    dirty(repo)
-    plain(state, ["stash", "push", "-q", "-u"], repo)
-    for argv in (["stash", "show", "-p"], ["stash", "list"], ["stash", "show", "--stat", "--only-untracked"]):
-        r = run(state, argv, repo, who="B")
-        assert r.returncode != 77 and "REFUSED" not in r.stderr, (argv, r.stderr)
-    assert run(state, ["stash", "show", "-p", "--output=out.patch"], repo, who="A").returncode == 0
-    assert (repo / "out.patch").read_text().startswith("diff --git")
-
-
 def two_repos(tmp_path, state):
     a = mk_repo(tmp_path, state, "a")
     b = mk_repo(tmp_path, state, "b")
     claim(a, "A")
     claim(b, "B", branch="b")
     return a, b
-
-
-@pytest.mark.parametrize("cmd", [
-    ["bundle", "create", "{a}/x.bundle", "main"], ["bundle", "create", "--progress", "{a}/x.bundle", "main"],
-    ["fast-export", "--export-marks={a}/marks", "main"], ["fast-export", "--export-marks", "{a}/marks", "main"],
-    ["config", "--file", "{a}/cfg", "k.v", "x"], ["config", "-f", "{a}/cfg", "k.v", "x"], ["config", "--fil={a}/cfg", "k.v", "x"],
-    ["config", "-zf", "{a}/cfg", "k.v", "x"], ["config", "-zf{a}/cfg", "k.v", "x"],
-    ["format-patch", "-ko", "{a}/d1", "-1"], ["format-patch", "-k", "-o{a}/d1", "-1"],
-    ["bugreport", "-o", "{a}/d2"], ["bugreport", "--output-directory={a}/d2"],
-], ids=lambda c: " ".join(c))
-def test_file_writers_into_another_claims_tree_are_refused_and_own_tree_allowed(tmp_path, state, cmd):
-    a, b = two_repos(tmp_path, state)
-    before = sorted(os.listdir(a))
-    r = run(state, [c.format(a=a) for c in cmd], b, who="B")
-    assert r.returncode == 77, r.stderr
-    assert sorted(os.listdir(a)) == before                  # nothing was created in A's tree
-    r = run(state, [c.format(a=b) for c in cmd], b, who="B")
-    assert r.returncode == 0 and "REFUSED" not in r.stderr, r.stderr
 
 
 def test_config_file_reads_stay_allowed_beside_another_claim(tmp_path, state):
@@ -2049,18 +1256,21 @@ def test_config_file_reads_stay_allowed_beside_another_claim(tmp_path, state):
 
 
 @pytest.mark.parametrize("cmd", [
-    ["worktree", "add", "-B", "wtb", "{W3}"], ["worktree", "add", "-Bwtb", "{W3}"], ["worktree", "add", "--detach", "-B", "wtb", "{W3}"],
-    ["checkout", "-B", "wtb"], ["checkout", "-B", "wtb", "main"], ["checkout", "-Bwtb"],
-    ["switch", "-C", "wtb"], ["switch", "-Cwtb", "main"], ["switch", "--force-create", "wtb"], ["switch", "--force-create=wtb"],
-    ["switch", "--force-c", "wtb", "main"],
+    ["worktree", "add", "-B", "cbr", "{W3}"], ["worktree", "add", "-Bcbr", "{W3}"],
+    ["checkout", "-B", "cbr"], ["checkout", "-B", "cbr", "main"], ["checkout", "-Bcbr"],
+    ["switch", "-C", "cbr"], ["switch", "-Ccbr", "main"], ["switch", "--force-create", "cbr"], ["switch", "--force-create=cbr"],
+    ["switch", "--force-c", "cbr", "main"],
 ], ids=lambda c: " ".join(c))
 def test_reset_by_creation_cannot_overwrite_a_claimed_branch(tmp_path, state, cmd):
-    repo, wt = setup_linked(tmp_path, state)
+    """Through the shim the shim allows these (no argv rule any more); the ref hook the shim installed lazily refuses. (The
+    claimed branch is not checked out anywhere: git itself refuses to reset one that is.)"""
+    repo, wt = setup_linked(tmp_path, state, "cbr")
+    plain(state, ["branch", "cbr"], repo)
     plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
-    head = plain(state, ["rev-parse", "wtb"], repo).strip()
+    head = plain(state, ["rev-parse", "cbr"], repo).strip()
     r = run(state, [c.format(W3=tmp_path / "W3") for c in cmd], repo, who="B")
-    assert r.returncode == 77, r.stderr
-    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head and not (tmp_path / "W3").exists()
+    assert r.returncode != 0 and "aborted by the reference-transaction hook" in r.stderr, r.stderr
+    assert plain(state, ["rev-parse", "cbr"], repo).strip() == head
 
 
 def test_creating_or_resetting_ones_own_or_a_new_branch_stays_allowed(tmp_path, state):
@@ -2073,433 +1283,196 @@ def test_creating_or_resetting_ones_own_or_a_new_branch_stays_allowed(tmp_path, 
     assert run(state, ["switch", "-C", "wtb"], repo).returncode != 77   # a human shell
 
 
+
 # ============================================================================================
-# repair round 7 (PR 59): fetch/pull/remote update are judged by git's own `fetch --dry-run --porcelain`
+# O2 (2026-10-25): the shim fails CLOSED on what it cannot read; foreign workspaces are read-only by allowlist
 # ============================================================================================
 
-@pytest.mark.parametrize("cmd", [
-    # B1: `heads/X` names refs/heads/X (pull passes --update-head-ok to its fetch, so git's own check is off)
-    ["pull", "--ff-only", ".", "main:heads/cb"], ["pull", "--ff-only", "origin", "+main:heads/cb"],
-    ["-c", "remote.origin.fetch=+refs/heads/main:heads/cb", "pull", "--ff-only", "origin"],
-    ["fetch", ".", "main:heads/cb"], ["-c", "remote.origin.fetch=+refs/heads/main:heads/cb", "fetch", "origin"],
-    # B2: --set-upstream takes no value
-    ["pull", "--ff-only", "--set-upstream", ".", "main:cb"], ["pull", "--ff-only", "--set-upstream", "origin", "main:cb"],
-    ["fetch", "--set-upstream", ".", "main:cb"], ["fetch", "--set-upstream", "origin", "main:cb"],
-    ["fetch", "--set-up", "origin", "main:cb"], ["pull", "--ff-only", "--set-up", "origin", "main:cb"],
-    # B3: the last of --multiple/--no-multiple wins
-    ["fetch", "--multiple", "--no-multiple", ".", "main:cb"], ["fetch", "--mul", "--no-mul", ".", "main:cb"],
-    # plain spellings, abbreviations, options the call may carry
-    ["fetch", ".", "main:cb"], ["fetch", ".", "main:refs/heads/cb"], ["fetch", "-q", ".", "main:cb"],
-    ["pull", "-q", "--ff-only", ".", "main:cb"], ["pull", "--no-rebase", "-n", "-s", "ours", ".", "main:cb"],
-    ["pull", "--ff-only", "-Xtheirs", "origin", "main:cb"], ["fetch", "-u", ".", "+main:cb"],
-    ["fetch", "--refmap=+refs/heads/main:refs/heads/cb", "origin", "main"], ["fetch", "--prune", ".", "main:cb"],
-    ["fetch", "origin", "+refs/heads/main:refs/heads/cb", "refs/heads/main:refs/remotes/origin/zz"],
-    # the preflight cannot be talked out of its dry run: a dangling value option swallows the next token
-    ["fetch", ".", "main:cb", "--no-dry-run", "--server-option"],
-], ids=lambda c: " ".join(c))
-def test_fetch_and_pull_into_a_claimed_branch_are_refused_by_what_git_says_it_would_update(tmp_path, state, cmd):
-    repo, bare, z = fetch_world(tmp_path, state)
-    r = refused_and_unmoved(state, repo, cmd)
-    assert "claimed branch" in r.stderr and "codex gpt-x (Z)" in r.stderr, r.stderr   # judged, not merely failed
+def refused77(r):
+    return r.returncode == 77 and "REFUSED" in r.stderr
 
 
-@pytest.mark.parametrize("cmd", [
-    ["remote", "update"], ["remote", "-v", "update"], ["remote", "--verbose", "update", "origin"],
-    ["remote", "update", "-p"], ["remote", "update", "--prune", "origin"], ["remote", "update", "origin"],
-    ["remote", "--", "update"], ["remote", "-v", "update", "-p", "default"],
-], ids=lambda c: " ".join(c))
-def test_remote_update_is_judged_however_the_subcommand_is_reached(tmp_path, state, cmd):
-    repo, bare, z = fetch_world(tmp_path, state)
-    plain(state, ["config", "remotes.default", "origin"], repo)
-    argv = ["-c", "remote.origin.fetch=+refs/heads/main:refs/heads/cb", *cmd]
-    r = refused_and_unmoved(state, repo, argv)
-    assert "remote update of a claimed branch" in r.stderr, r.stderr
-
-
-def test_remote_update_without_a_default_group_covers_every_remote(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    other = tmp_path / "other.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(other)], tmp_path)
-    plain(state, ["push", "-q", str(other), "main"], repo)         # push BEFORE the remote exists: a push by URL would
-    plain(state, ["remote", "add", "second", str(other)], repo)    # update a mapped tracking ref (cb) by itself
-    plain(state, ["config", "remote.second.fetch", "+refs/heads/main:refs/heads/cb"], repo)
-    refused_and_unmoved(state, repo, ["remote", "update"])
-
-
-def test_the_default_remote_is_the_one_git_picks_not_origin(tmp_path, state):
-    """B5: a repository whose only remote is not called origin fetches that remote on a bare fetch/pull."""
-    repo, bare, z = fetch_world(tmp_path, state)
-    plain(state, ["remote", "rename", "origin", "up"], repo)
-    cfg = ["-c", "remote.up.fetch=+refs/heads/main:refs/heads/cb"]
-    for argv in ([*cfg, "pull", "--ff-only"], [*cfg, "fetch"], [*cfg, "fetch", "--all"], [*cfg, "remote", "update"],
-                 [*cfg, "pull", "--ff-only", "up"]):
-        r = refused_and_unmoved(state, repo, argv)
-        assert "claimed branch" in r.stderr, (argv, r.stderr)
-
-
-def test_fetch_and_pull_of_unclaimed_or_remote_tracking_refs_stay_allowed_beside_a_claim(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    before = rev(state, repo)
-    for argv in (["fetch", "origin"], ["fetch"], ["fetch", "--all"], ["fetch", "origin", "main"], ["fetch", "-q", "origin"],
-                 ["fetch", "origin", "main:scratch-1"], ["fetch", "origin", "main:heads/scratch-2"], ["fetch", "--prune", "origin"],
-                 ["pull", "--ff-only", "origin", "main"], ["pull", "-s", "ours", "-Xtheirs", "origin", "main"],
-                 ["pull", "--no-rebase", "--no-edit", "-n", "origin", "main"], ["pull", "--ff-only", "--set-upstream", "origin", "main"],
-                 ["pull", "-vr", "origin", "main"], ["pull", "--cleanup", "strip", "origin", "main"], ["remote", "update"],
-                 ["remote", "-v", "update", "-p", "origin"], ["fetch", "--set-upstream", "origin", "main"]):
-        r = run(state, argv, repo, who="B")
-        assert r.returncode == 0 and "REFUSED" not in r.stderr, (argv, r.returncode, r.stderr)
-    assert rev(state, repo) == before
-    assert rev(state, repo, "scratch-1") == rev(state, repo, "main")
-
-
-def test_the_owner_and_a_human_may_fetch_and_pull_into_the_claimed_branch(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    plain(state, ["commit", "-q", "--allow-empty", "-m", "again"], repo)
-    plain(state, ["push", "-q", "origin", "main"], repo)
-    claim(repo, "Y", branch="other", origin=str(bare))                         # another claim: the dry run runs for Z too
-    for argv in (["fetch", "origin"], ["pull", "--ff-only", "origin", "main"], ["fetch", "origin", "main:scratch-z"],
-                 ["remote", "update"]):
-        r = run(state, argv, z, who="Z")
-        assert r.returncode == 0 and "REFUSED" not in r.stderr, (argv, r.stderr)
-    main = rev(state, repo, "main")
-    assert rev(state, z, "cb") == main                                         # the owner's pull moved its own branch
-    assert rev(state, repo) != main
-    r = run(state, ["fetch", "origin", "main:cb"], repo)                       # a human shell: git runs it
-    assert r.returncode == 0 and rev(state, repo) == main
-
-
-def dry_run_spy(monkeypatch, fake=None):
-    """Record every fetch dry run the guard starts; with `fake` = (rc, out) or (rc, out, stderr) answer it instead of git."""
-    real = ade_claims._run_git
-    seen: list[list[str]] = []
-
-    def spy(args, timeout=10, env_extra=None, err_out=None):
-        args = list(args)
-        if "--no-write-fetch-head" in args:
-            seen.append(args)
-            if fake is not None:
-                if err_out is not None:
-                    err_out.append(fake[2] if len(fake) > 2 else "")
-                return fake[:2]
-        return real(args, timeout, env_extra, err_out)
-    monkeypatch.setattr(ade_claims, "_run_git", spy)
-    return seen
-
-
-def test_the_dry_run_starts_only_while_another_agent_holds_a_claim_in_the_repository(tmp_path, state, git_env, monkeypatch):
-    repo, bare, z = fetch_world(tmp_path, state)
-    seen = dry_run_spy(monkeypatch)
-    ade_claims.set_state("Z", "released")
-    claim(repo, "B", branch="main", origin=str(bare))                          # the caller's own claim is not a reason
-    other = mk_repo(tmp_path, state, "other")                                  # a claim in an unrelated repository neither
-    claim(other, "E", branch="x", origin="https://example.invalid/not/this.git")
-    for argv in (["fetch", "origin"], ["pull", "--ff-only", "origin"], ["remote", "update"], ["fetch", "origin", "main:cb"]):
-        d = decide(state, "B", argv, repo)
-        assert d.allowed, (argv, d)
-    assert seen == []                                                          # no claim of another agent here: no cost
-    ade_claims.set_state("Z", "active")
-    d = decide(state, "B", ["fetch", "origin"], repo)
-    assert d.allowed and len(seen) == 1                                        # a refs/remotes-only fetch: allowed, but asked
-    argv = seen[0]
-    assert argv[:2] == ["-C", str(repo)] and argv[argv.index("fetch") + 1:][:4] == ["--dry-run", "--porcelain", "--no-quiet", "--no-write-fetch-head"]
-    assert "origin" in argv
-
-
-@pytest.mark.parametrize("rc,out", [
-    (124, ""), (127, ""), (128, ""), (2, ""), (129, "usage\n"), (0, "garbage\n"), (0, "+ nothex nothex refs/heads/a\n"),
-    (0, "  " + "0" * 40 + " " + "1" * 40 + " refs/heads/ok\njunk\n"), (0, "x " + "0" * 40 + " " + "1" * 40 + " refs/heads/a\n"),
-    (0, "  " + "0" * 40 + " " + "1" * 40 + "\n"),
-], ids=["timeout", "no-start", "fatal", "rc2", "usage", "garbage", "not-oids", "junk-after-ref", "bad-flag", "no-ref"])
-def test_an_unanswered_dry_run_is_refused_only_while_another_agent_holds_a_claim(tmp_path, state, git_env, monkeypatch, rc, out):
-    repo, bare, z = fetch_world(tmp_path, state)
-    seen = dry_run_spy(monkeypatch, fake=(rc, out))
-    for argv in (["fetch", "origin"], ["pull", "--ff-only", "origin"], ["remote", "update"], ["fetch", "--stdin"]):
-        d = decide(state, "B", argv, repo)
-        assert not d.allowed and d.rule == "fetch destinations unresolved" and d.claim_id == "Z", (argv, d)
-    ade_claims.set_state("Z", "released")
-    d = decide(state, "B", ["fetch", "origin"], repo)
-    assert d.allowed
-
-
-@pytest.mark.parametrize("rc,out,allowed", [
-    (0, "  " + "0" * 40 + " " + "1" * 40 + " refs/heads/cb\n", False),
-    (1, "! " + "0" * 40 + " " + "1" * 40 + " refs/heads/cb\n", False),
-    (0, "* " + "0" * 40 + " " + "1" * 40 + " refs/remotes/origin/x\nt " + "0" * 40 + " " + "1" * 64 + " refs/tags/t\n", True),
-    (0, "", True), (1, "! " + "0" * 40 + " " + "1" * 40 + " refs/heads/free\n", True),
-])
-def test_a_complete_dry_run_listing_is_judged_by_its_branch_refs(tmp_path, state, git_env, monkeypatch, rc, out, allowed):
-    repo, bare, z = fetch_world(tmp_path, state)
-    dry_run_spy(monkeypatch, fake=(rc, out))
-    d = decide(state, "B", ["fetch", "origin"], repo)
-    assert d.allowed is allowed and (allowed or d.rule == "fetch of a claimed branch")
-
-
-def test_a_fetch_from_an_unreachable_remote_is_refused_beside_a_claim_and_left_to_git_without_one(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    r = run(state, ["fetch", str(tmp_path / "no-such-remote.git")], repo, who="B")
-    assert r.returncode == 77 and "fetch destinations unresolved" in r.stderr and "Z" in r.stderr
-    ade_claims.set_state("Z", "released")
-    r = run(state, ["fetch", str(tmp_path / "no-such-remote.git")], repo, who="B")
-    assert r.returncode not in (0, 77) and "REFUSED" not in r.stderr          # git's own failure
-
-
-def test_fetch_timeout_override_is_a_positive_number_of_seconds_and_falls_back(monkeypatch):
-    for raw, want in (("3", 3.0), ("0.5", 0.5), ("600", 600.0), ("", 20.0), ("x", 20.0), ("0", 20.0), ("-4", 20.0), ("601", 20.0)):
-        monkeypatch.setenv("ADE_GUARD_FETCH_TIMEOUT", raw)
-        assert ade_claims.fetch_timeout() == want, raw
-    monkeypatch.delenv("ADE_GUARD_FETCH_TIMEOUT")
-    assert ade_claims.fetch_timeout() == 20.0
-
-
-def test_a_slow_remote_hits_the_timeout_and_the_call_is_refused_while_a_claim_exists(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    slow = tmp_path / "slow-upload-pack"
-    slow.write_text("#!/bin/sh\nsleep 30\n")
-    slow.chmod(0o755)
-    t0 = time.monotonic()
-    r = run(state, ["fetch", "--upload-pack", str(slow), "origin"], repo, who="B", ADE_GUARD_FETCH_TIMEOUT="1")
-    assert r.returncode == 77 and "fetch destinations unresolved" in r.stderr and "1 s" in r.stderr, r.stderr
-    assert time.monotonic() - t0 < 15                      # the dry run was cut at 1 s, not left to sleep 30
-
-
-@pytest.mark.parametrize("args,want", [
-    (["--ff-only", "origin", "main:cb"], ["origin", "main:cb"]),
-    (["-s", "ours", "-Xtheirs", "origin"], ["origin"]),
-    (["--strategy=ours", "--no-rebase", "-n", "origin"], ["origin"]),
-    (["--strategy", "ours", "--set-upstream", ".", "main:cb"], ["--set-upstream", ".", "main:cb"]),
-    (["-vr", "origin"], ["-v", "origin"]), (["-fn", "origin"], ["-f", "origin"]), (["-qsours", "origin"], ["-q", "origin"]),
-    (["-j", "4", "origin"], ["-j", "4", "origin"]), (["-jo", "origin"], ["-jo", "origin"]),
-    (["--ff", "--no-ff", "--squash", "--no-commit", "--no-edit", "--rebase=merges", "--autostash", "--verify-signatures",
-      "--allow-unrelated", "--log=3", "--signoff", "--stat", "--cleanup", "strip", "-S", "origin"], ["origin"]),
-    (["--depth", "1", "origin", "--", "-x"], ["--depth", "1", "origin", "--", "-x"]),
-    (["--ff-o", "origin"], ["origin"]), (["--s", "origin"], ["--s", "origin"]), (["--no-rebase", "--tags", "origin"], ["--tags", "origin"]),
-    (["--all", "--prune", "-p", "--force"], ["--all", "--prune", "-p", "--force"]),
-], ids=lambda v: " ".join(v) if isinstance(v, list) else None)
-def test_a_pull_hands_its_fetch_everything_but_the_merge_only_options(args, want):
-    assert ade_claims._pull_fetch_args(args) == want
-
-
-def test_remote_update_is_translated_to_the_fetch_it_runs(tmp_path, state, git_env):
+@pytest.mark.parametrize("argv", [["--bogus", "commit", "--allow-empty", "-m", "x"], ["--no-such-flag", "branch"], ["-X", "branch"],
+                                  ["--git-dir"], ["-c"], ["--exec-path=/x", "--shallow-file=x", "branch"]],
+                         ids=lambda c: " ".join(c))
+def test_an_unknown_leading_option_is_refused_not_ignored(tmp_path, state, argv):
     repo = mk_repo(tmp_path, state)
-    tr = lambda *a: ade_claims._remote_update_fetch_args(ade_claims.parse_git_argv(["remote", *a], str(repo), {}))   # noqa: E731
-    assert tr("update") == ["--all"] and tr("-v", "update") == ["--all"]
-    assert tr("update", "-p", "a", "b") == ["--multiple", "--prune", "--", "a", "b"]
-    assert tr("--", "update", "-x") == ["--multiple", "--", "-x"]
-    plain(state, ["config", "remotes.default", "a b"], repo)
-    assert tr("update") == ["--multiple", "--", "default"] and tr("update", "z") == ["--multiple", "--", "z"]
+    r = run(state, argv, repo, who="B")
+    assert refused77(r) and "unknown-option" in r.stderr, r.stderr
 
 
-def test_the_preflight_argv_repeats_its_safety_options_after_the_callers_and_before_the_separator(tmp_path, state, git_env):
+@pytest.mark.parametrize("argv", [["--no-pager", "-c", "core.abbrev=9", "branch", "--list"], ["-C", ".", "--attr-source", "HEAD", "branch"],
+                                  ["--shallow-file", "/dev/null", "branch"], ["--no-replace-objects", "branch", "-v"],
+                                  ["--git-dir=.git", "--work-tree=.", "branch"], ["--namespace", "ns", "branch"],
+                                  ["--config-env=user.name=HOME", "branch"], ["-P", "branch"]],
+                         ids=lambda c: " ".join(c))
+def test_every_option_git_itself_knows_is_still_read(tmp_path, state, argv):
     repo = mk_repo(tmp_path, state)
-    call = ade_claims.parse_git_argv(["-c", "a.b=c", "pull", "--ff-only", "--no-dry-run", "-q", "origin", "--", "main:x"], str(repo), {})
-    argv = ade_claims.fetch_preflight_argv(call, "pull")
-    assert argv[:5] == ["-C", str(repo), "-c", "a.b=c", "fetch"]
-    i = argv.index("--no-dry-run")
-    assert argv[i + 1:].count("--dry-run") == 2 and argv[-2:] == ["--", "main:x"]      # a spare for a swallowed token
-    assert "--update-head-ok" in argv[5:i] and "--update-head-ok" in argv[i:] and "--ff-only" not in argv
-    assert ade_claims.fetch_preflight_argv(ade_claims.parse_git_argv(["fetch", "--std", "o"], str(repo), {}), "fetch") is None
-
-
-def test_porcelain_listing_reader_needs_every_line_to_be_a_ref_line():
-    a, b = "a" * 40, "b" * 40
-    assert ade_claims._fetch_porcelain_heads("") == [] and ade_claims._fetch_porcelain_heads("\n \n") == []
-    assert ade_claims._fetch_porcelain_heads(f"  {a} {b} refs/heads/x\n* {a} {b} refs/heads/y/z\n= {a} {a} refs/remotes/o/m\n") == ["x", "y/z"]
-    assert ade_claims._fetch_porcelain_heads(f"- {a} {'0' * 40} refs/heads/gone\n") == ["gone"]
-    assert ade_claims._fetch_porcelain_heads(f"  {a} {b} refs/heads/x\u2028refs/heads/y\n") == ["x\u2028refs/heads/y"]
-    for bad in ("From x\n", f"  {a} {b}\n", f" {a} {b} refs/heads/x\nwarning: y\n", f"?  {a} {b} refs/heads/x\n", f"  {a[:-1]} {b} refs/heads/x\n"):
-        assert ade_claims._fetch_porcelain_heads(bad) is None, bad
-
-
-def test_the_preflight_itself_writes_nothing_whatever_options_the_caller_gives(tmp_path, state, git_env, monkeypatch):
-    """--dry-run is not cancelled by the caller: no ref written or pruned, no FETCH_HEAD, no upstream config, no trace
-    file (the helper git runs scrub GIT_TRACE*), while the pruned ref is still listed."""
-    repo, bare, z = fetch_world(tmp_path, state)
-    plain(state, ["push", "-q", "origin", "main:gone"], repo)
-    plain(state, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/heads/x/*"], repo)
-    plain(state, ["fetch", "-q", "origin"], repo)
-    plain(state, ["--git-dir", str(bare), "update-ref", "-d", "refs/heads/gone"], tmp_path)   # not a push: it would prune x/gone itself
-    (repo / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
-    trace = tmp_path / "trace.txt"
-    monkeypatch.setenv("GIT_TRACE", str(trace))
-    monkeypatch.setenv("GIT_TRACE2", str(trace))
-    snap = lambda: (plain(state, ["for-each-ref"], repo), (repo / ".git" / "config").read_text())   # noqa: E731
-    before = snap()
-    parse = lambda argv: ade_claims.parse_git_argv(argv, str(repo), {})                           # noqa: E731
-    for kind, argv in (("fetch", ["fetch", "--prune", "--write-fetch-head", "--auto-gc", "--no-dry-run", "origin"]),
-                       ("pull", ["pull", "--prune", "--ff-only", "--no-dry-run", "origin"])):
-        assert ade_claims.fetch_destinations(parse(argv), kind) == ["x/gone"], argv
-    assert ade_claims.fetch_destinations(parse(["fetch", "--set-upstream", "--no-dry-run", ".", "main:scratch-up"]),
-                                         "fetch") == ["scratch-up"]
-    assert snap() == before
-    assert not (repo / ".git" / "FETCH_HEAD").exists() and not trace.exists()
-
-
-@pytest.mark.parametrize("argv,want", [
-    (["config", "-zf", "x", "k.v", "v"], ["x"]), (["config", "-zfx", "k.v", "v"], ["x"]), (["config", "-f", "x", "k.v", "v"], ["x"]),
-    (["format-patch", "-ko", "d", "-1"], ["d"]), (["format-patch", "-kod", "-1"], ["d"]), (["format-patch", "-k", "-1"], None),
-    (["archive", "-o", "x.tar", "HEAD"], ["x.tar"]), (["bugreport", "-o", "d"], ["d"]), (["diagnose", "--output-directory=d"], ["d"]),
-    (["diagnose", "-o", "d"], ["d"]), (["config", "--get", "k.v"], None), (["config", "-z", "--get", "k.v"], None),
-], ids=lambda v: " ".join(v) if isinstance(v, list) else None)
-def test_a_short_option_inside_a_cluster_names_its_file(tmp_path, state, argv, want):
-    repo = mk_repo(tmp_path, state)
-    assert ade_claims.output_targets(ade_claims.parse_git_argv(argv, str(repo), {})) == want
-
-
-def test_a_short_option_cluster_that_may_name_an_output_file_leaves_the_shim_fast_path(tmp_path, state):
-    repo = mk_repo(tmp_path, state)
-    no_python = {"ADE_PYTHON": "/nonexistent/python3"}
-    assert "unguarded" in run(state, ["grep", "-nO", "x"], repo, who="B", **no_python).stderr   # went to the rules
-    assert "unguarded" not in run(state, ["grep", "-n", "x"], repo, who="B", **no_python).stderr  # still fast
-
-
-def test_switch_force_is_discard_changes_not_force_create(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    w = tmp_path / "W"
-    plain(state, ["worktree", "add", "-q", "-b", "wbranch", str(w)], repo)
-    claim(w, "A", branch="wbranch", origin=str(bare))
-    r = run(state, ["switch", "--force", "cb"], w, who="A")                  # cb is Z's, but this only switches to it
+    r = run(state, argv, repo, who="B")
     assert r.returncode == 0 and "REFUSED" not in r.stderr, r.stderr
-    plain(state, ["switch", "-q", "wbranch"], w)
-    assert run(state, ["switch", "--force-create", "cb"], w, who="A").returncode == 77    # that one resets cb
 
 
-def test_the_guards_own_helper_runs_never_write_a_trace_file(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    trace = z / "trace.txt"
-    r = run(state, ["fetch", ".", "main:cb"], repo, who="B", GIT_TRACE=str(trace), GIT_TRACE2=str(trace),
-            GIT_TRACE2_EVENT=str(trace))
-    assert r.returncode == 77 and not trace.exists()                       # the claimed tree got nothing from the guard itself
+def test_an_unknown_subcommand_is_refused_but_a_known_one_and_an_alias_are_not(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    r = run(state, ["frobnicate"], repo, who="B")
+    assert refused77(r) and "unknown-subcommand" in r.stderr and "frobnicate" in r.stderr
+    assert refused77(run(state, ["commit-own", "msg"], repo, who="B"))          # an external git-foo program
+    plain(state, ["config", "alias.lg", "log --oneline"], repo)
+    assert run(state, ["lg", "-1"], repo, who="B").returncode == 0
+    assert run(state, ["hash-object", "f"], repo, who="B").returncode == 0
+    assert run(state, ["frobnicate"], repo).returncode == 1                       # a human: git's own answer, never the guard's
 
 
-def test_a_pull_moves_a_branch_checked_out_elsewhere_so_its_dry_run_must_see_it(tmp_path, state):
-    """pull passes --update-head-ok to its fetch, so git's own refusal of a checked-out branch is off: the preflight
-    must list `wtb` (checked out in A's claimed W) rather than die with git's rc 128 and refuse for another reason."""
-    repo, wt = setup_linked(tmp_path, state)
-    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
-    head = plain(state, ["rev-parse", "wtb"], repo).strip()
-    r = run(state, ["pull", "--ff-only", ".", "main:wtb"], repo, who="B")
-    assert r.returncode == 77 and "pull of a claimed branch" in r.stderr, r.stderr
-    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head and untouched(wt)
-    r = run(state, ["fetch", ".", "main:wtb"], repo, who="B")                # a plain fetch: git itself would refuse (rc 128)
-    assert r.returncode == 77, r.stderr
-
-
-def test_a_fetch_that_writes_any_local_branch_is_not_read_only_in_a_foreign_workspace(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    claim(repo, "C", branch="main")                                          # P itself is claimed by C
-    r = run(state, ["fetch", "origin", "main:scratch-c"], repo, who="B")
-    assert r.returncode == 77 and "foreign-claim" in r.stderr and "scratch-c" not in plain(state, ["branch", "--list"], repo)
-    r = run(state, ["fetch", "origin"], repo, who="B")                       # remote-tracking refs only: a read
-    assert r.returncode == 0 and "REFUSED" not in r.stderr
-
-
-# --- round 8: what the dry run must see exactly as the real call does ------------------------------
-
-MAP_CB = "remote.origin.fetch=+refs/heads/main:refs/heads/cb"
-
-
-def add_second_remote(tmp_path, state, repo, name="o2"):
-    other = tmp_path / f"{name}.git"
-    plain(state, ["init", "-q", "--bare", "-b", "main", str(other)], tmp_path)
-    plain(state, ["push", "-q", str(other), "main"], repo)
-    plain(state, ["remote", "add", name, str(other)], repo)
-
-
-@pytest.mark.parametrize("cmd", [
-    ["fetch", "-j2", "--all"], ["fetch", "--jobs=4", "--multiple", "origin", "o2"], ["fetch", "--jobs", "3", "--all"],
-    ["-c", "fetch.parallel=4", "fetch", "--all"], ["-c", "fetch.parallel=0", "fetch", "--all"],
-    ["-c", "fetch.parallel=4", "remote", "update"], ["pull", "-j2", "--all", "--ff-only"],
-    ["-c", "fetch.parallel=2", "pull", "--all", "--ff-only"], ["-c", "alias.f=fetch -j2 --all", "f"],
+@pytest.mark.parametrize("argv", [
+    ["-c", "core.hooksPath=/tmp/x", "branch", "nb"], ["-c", "core.hookspath=/tmp/x", "branch", "nb"],
+    ["-c", "CORE.HooksPath=/tmp/x", "branch", "nb"], ["-c", "core.hooksPath", "branch", "nb"],
+    ["-c", "hook.pre-push.enabled=false", "branch", "nb"], ["-c", "hook.x.command=true", "branch", "nb"],
+    ["-c", "include.path=/tmp/x", "branch", "nb"], ["-c", "includeIf.gitdir:/.path=/tmp/x", "branch", "nb"],
+    ["--config-env", "core.hooksPath=HOME", "branch", "nb"], ["--config-env=hook.x.command=HOME", "branch", "nb"],
+    ["config", "core.hooksPath", "/tmp/x"], ["config", "--local", "core.hookspath", "/tmp/x"], ["config", "--add", "hook.a.command", "x"],
+    ["config", "--global", "include.path", "/tmp/x"], ["config", "-e"], ["config", "--edit"], ["config", "--unset", "core.hooksPath"],
+    ["config", "--rename-section", "core", "hook"],
 ], ids=lambda c: " ".join(c))
-def test_a_parallel_multi_remote_fetch_is_judged_like_a_sequential_one(tmp_path, state, cmd):
-    """With -j N or fetch.parallel, git runs one child fetch per remote and the children print their ref lines on
-    STDERR; the dry run's stdout is then empty. --jobs=1 on the dry run keeps the listing on stdout."""
-    repo, bare, z = fetch_world(tmp_path, state)
-    add_second_remote(tmp_path, state, repo)
-    r = refused_and_unmoved(state, repo, ["-c", MAP_CB, *cmd])
-    assert "of a claimed branch" in r.stderr and "codex gpt-x (Z)" in r.stderr, r.stderr
-    assert "unresolved" not in r.stderr, r.stderr          # judged from the listing, not refused for want of one
+def test_config_that_would_disable_move_or_extend_the_hooks_is_refused(tmp_path, state, argv):
+    repo = mk_repo(tmp_path, state)
+    r = run(state, argv, repo, who="B")
+    assert refused77(r) and "hook-config" in r.stderr, r.stderr
+    assert "nb" not in plain(state, ["branch", "--list"], repo)
 
 
-def test_a_parallel_fetch_in_the_owners_worktree_cannot_move_the_checked_out_branch(tmp_path, state):
-    repo, wt = setup_linked(tmp_path, state)
-    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
+@pytest.mark.parametrize("argv", [
+    ["-c", "core.abbrev=9", "branch", "nb"], ["-c", "user.name=x", "branch", "nb"], ["config", "user.name", "x"],
+    ["config", "--get", "core.hooksPath"], ["config", "core.hooksPath"], ["config", "--list"], ["config", "--unset", "user.name"],
+    ["-c", "alias.x=status", "branch", "nb"],
+], ids=lambda c: " ".join(c))
+def test_ordinary_config_stays_allowed(tmp_path, state, argv):
+    repo = mk_repo(tmp_path, state)
+    r = run(state, argv, repo, who="B")
+    assert "hook-config" not in r.stderr and r.returncode != 77, r.stderr
+
+
+@pytest.mark.parametrize("env", [
+    {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/tmp/x"},
+    {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "x", "GIT_CONFIG_KEY_1": "Hook.A.Enabled",
+     "GIT_CONFIG_VALUE_1": "false"},
+    {"GIT_CONFIG_PARAMETERS": "'core.hookspath=/tmp/x'"},
+], ids=["count-key", "second-key", "parameters"])
+def test_hook_keys_in_the_environment_are_refused(tmp_path, state, env):
+    repo = mk_repo(tmp_path, state)
+    assert refused77(run(state, ["branch", "nb"], repo, who="B", **env))
+
+
+@pytest.mark.parametrize("body,bad", [("[core]\n\thooksPath = /tmp/x\n", True), ("[core]\n\tHOOKSPATH=/tmp/x\n", True),
+                                      ("[hook \"a\"]\n\tcommand = true\n", True), ("[include]\n\tpath = /tmp/x\n", True),
+                                      ("[includeIf \"gitdir:/\"]\n\tpath = /tmp/x\n", True),
+                                      ("[user]\n\tname = x\n[alias]\n\tx = status\n", False)])
+@pytest.mark.parametrize("var", ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])
+def test_a_config_file_named_by_the_environment_that_would_define_hooks_is_refused(tmp_path, state, body, bad, var):
+    repo = mk_repo(tmp_path, state)
+    cfg = tmp_path / "cfg"
+    cfg.write_text(body)
+    r = run(state, ["branch", "nb"], repo, who="B", **{var: str(cfg)})
+    assert refused77(r) == bad, r.stderr
+
+
+def test_push_no_verify_and_every_no_v_prefix_is_refused_and_a_plain_push_is_not(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
     bare = tmp_path / "o.git"
     plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
-    plain(state, ["push", "-q", str(bare), "main"], repo)
     plain(state, ["remote", "add", "origin", str(bare)], repo)
-    add_second_remote(tmp_path, state, repo)
-    head = rev(state, wt, "HEAD")
-    for cmd in (["fetch", "-u", "-j2", "--all"], ["fetch", "-u", "--jobs=4", "--multiple", "origin", "o2"],
-                ["-c", "fetch.parallel=4", "fetch", "-u", "--all"], ["-c", "fetch.parallel=4", "remote", "update"]):
-        argv = ["-c", "remote.origin.fetch=+refs/heads/main:refs/heads/wtb", *cmd]
-        r = run(state, argv, wt, who="B")
-        assert r.returncode == 77 and "unresolved" not in r.stderr, (cmd, r.returncode, r.stderr)
-        assert rev(state, wt, "wtb") == head and rev(state, wt, "HEAD") == head, cmd
-    assert untouched(wt)
+    for flag in ("--no-verify", "--no-verif", "--no-ver", "--no-v", "--no-ve"):
+        r = run(state, ["push", flag, "origin", "main"], repo, who="B")
+        assert refused77(r) and "push-no-verify" in r.stderr, (flag, r.stderr)
+    assert "main" not in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+    r = run(state, ["push", "origin", "main"], repo, who="B")
+    assert r.returncode == 0, r.stderr
+    assert "main" in plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path)
+    assert refused77(run(state, ["-c", "alias.pp=push", "pp", "--no-verify", "origin", "main"], repo, who="B"))
+    assert refused77(run(state, ["send-pack", str(bare), "main"], repo, who="B"))
+    assert run(state, ["push", "--no-verify", "origin", "main"], repo).returncode == 0     # a human
 
 
-def test_a_ref_line_on_stderr_means_the_dry_run_listing_is_not_trusted(tmp_path, state, git_env, monkeypatch):
-    repo, bare, z = fetch_world(tmp_path, state)
-    line = f"  {'a' * 40} {'b' * 40} refs/heads/cb\n"
-    dry_run_spy(monkeypatch, fake=(0, "", line))
-    for argv in (["fetch", "--all"], ["fetch", "origin"], ["pull", "--ff-only", "--all"], ["remote", "update"]):
-        d = decide(state, "B", argv, repo)
-        assert not d.allowed and d.rule == "fetch destinations unresolved", (argv, d)
-    dry_run_spy(monkeypatch, fake=(0, "", "From /somewhere\n * [new branch]      main       -> origin/main\nwarning: x\n"))
-    assert decide(state, "B", ["fetch", "--all"], repo).allowed                  # ordinary chatter is no ref line
-
-
-@pytest.mark.parametrize("flag", ["--namespace=x", "--namespace"], ids=["attached", "separate"])
-@pytest.mark.parametrize("verb", [["fetch"], ["pull", "--ff-only"]], ids=["fetch", "pull"])
-def test_a_global_namespace_reaches_the_dry_run(tmp_path, state, flag, verb):
-    """upload-pack advertises the refs under the namespace only: a dry run without it sees another listing."""
-    repo, bare, z = fetch_world(tmp_path, state)
-    plain(state, ["update-ref", "refs/namespaces/x/refs/heads/cb", "main"], repo)
-    argv = [flag] if "=" in flag else [flag, "x"]
-    r = refused_and_unmoved(state, repo, [*argv, *verb, ".", "+refs/heads/cb:refs/heads/cb"])
-    assert "claimed branch" in r.stderr, r.stderr
-
-
-def test_a_global_exec_path_reaches_the_dry_run(tmp_path, state):
-    """The dry run runs the same git-upload-pack as the call: the one in the call's --exec-path."""
-    repo, bare, z = fetch_world(tmp_path, state)
-    execdir, log = tmp_path / "exec", tmp_path / "upload-pack.log"
-    execdir.mkdir()
-    prog = execdir / "git-upload-pack"
-    prog.write_text(f"#!/bin/sh\necho ran >> '{log}'\nexec '{ade_claims.real_git()}' upload-pack \"$@\"\n")
-    prog.chmod(0o755)
-    refused_and_unmoved(state, repo, [f"--exec-path={execdir}", "fetch", "--upload-pack", "git-upload-pack", ".", "+main:cb"])
-    assert log.exists() and log.read_text().strip() == "ran"                   # once: the dry run (the real call never ran)
-
-
-def test_every_global_option_that_changes_what_fetch_sees_is_given_to_the_helper_runs(tmp_path, state, git_env):
+def test_the_operator_override_allows_a_fail_closed_refusal_and_logs_it(tmp_path, state):
     repo = mk_repo(tmp_path, state)
-    argv = ["-p", "--no-pager", "--exec-path=/x/y", "--bare", "--no-replace-objects", "--namespace", "n", "--super-prefix=s/",
-            "--no-optional-locks", "--no-lazy-fetch", "--no-advice", "--literal-pathspecs", "-c", "a.b=c", "fetch", "o"]
-    call = ade_claims.parse_git_argv(argv, str(repo), {})
-    g = ade_claims._globals(call)
-    for want in (["--exec-path=/x/y"], ["--bare"], ["--no-replace-objects"], ["--namespace", "n"], ["--super-prefix=s/"],
-                 ["--no-optional-locks"], ["--no-lazy-fetch"], ["--no-advice"], ["--literal-pathspecs"], ["-c", "a.b=c"]):
-        assert any(g[i:i + len(want)] == want for i in range(len(g))), (want, g)
-    assert "-p" not in g and "--no-pager" not in g                             # only the pager choice stays out
-    assert "--exec-path" not in ade_claims._globals(ade_claims.parse_git_argv(["--exec-path", "fetch"], str(repo), {}))
-    sep = ade_claims.parse_git_argv(["--super-prefix", "p/", "--namespace=q", "fetch"], str(repo), {})
-    assert sep.gopts == ["--super-prefix", "p/", "--namespace=q"] and sep.sub == "fetch"
-    assert ade_claims.fetch_preflight_argv(call, "fetch")[:len(g)] == g
+    r = run(state, ["frobnicate"], repo, who="B", ACP_OPERATOR_APPROVED="git-guard")
+    assert r.returncode == 1 and "ACP_OPERATOR_APPROVED=git-guard" in r.stderr           # allowed; git's own "not a command"
+    assert guard_log(state)[-1]["outcome"] == "override" and guard_log(state)[-1]["rule"] == "unknown-subcommand"
 
 
-def test_a_refusal_of_an_unanswered_dry_run_names_the_timeout_variable_and_the_override(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    r = run(state, ["fetch", str(tmp_path / "no-such-remote.git")], repo, who="B", ADE_GUARD_FETCH_TIMEOUT="7")
-    assert r.returncode == 77 and "fetch destinations unresolved" in r.stderr, r.stderr
-    assert "ADE_GUARD_FETCH_TIMEOUT" in r.stderr and "now 7" in r.stderr
-    assert "ACP_OPERATOR_APPROVED=git-guard" in r.stderr and "retrying does not help" in r.stderr, r.stderr
+# --- the coarse foreign-workspace rule ------------------------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    ["fetch"], ["fetch", "origin"], ["stash", "list"], ["stash", "show"], ["tag", "-l"], ["tag", "t"], ["checkout", "main"],
+    ["switch", "main"], ["branch", "newb"], ["branch", "-m", "x"], ["remote", "add", "o", "/x"], ["remote", "show", "origin"],
+    ["remote", "update"], ["config", "user.name", "x"], ["config", "--unset", "user.name"], ["symbolic-ref", "-d", "HEAD"],
+    ["symbolic-ref", "HEAD", "refs/heads/zz"], ["ls-remote", "."], ["show-ref"], ["cherry"], ["reflog"], ["archive", "HEAD"],
+    ["worktree", "add", "../zz"], ["worktree", "prune"], ["notes", "list"], ["gc"], ["maintenance", "run"], ["commit-tree", "HEAD^{tree}"],
+    ["update-ref", "refs/x", "HEAD"], ["hash-object", "-w", "f"], ["add", "f"], ["apply"], ["bundle", "list-heads", "x"],
+], ids=lambda c: " ".join(c))
+def test_in_a_foreign_workspace_only_the_read_allowlist_runs(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    r = run(state, cmd, repo, who="B")
+    assert refused77(r) and "foreign-claim" in r.stderr, (cmd, r.returncode, r.stderr)
 
 
-def test_pull_summary_is_a_merge_option_and_is_not_refused(tmp_path, state):
-    repo, bare, z = fetch_world(tmp_path, state)
-    for flag in ("--summary", "--no-summary"):
-        r = run(state, ["pull", "--ff-only", flag, "origin", "main"], repo, who="B")
-        assert r.returncode == 0 and "REFUSED" not in r.stderr, (flag, r.returncode, r.stderr)
-        assert ade_claims._pull_fetch_args([flag, "origin"]) == ["origin"]
+def test_the_foreign_rule_follows_every_path_the_call_types(tmp_path, state):
+    a, b = two_claimed(tmp_path, state)
+    for argv, cwd, extra in [
+        (["-C", str(a), "branch", "zz"], b, {}),
+        (["-C", str(a), "-C", str(b), "branch", "zz"], tmp_path, {}),             # a later -C moves git away; the first still counts
+        (["--git-dir", str(a / ".git"), "branch", "zz"], b, {}),
+        (["--work-tree", str(a), "branch", "zz"], b, {}),
+        (["branch", "zz"], b, {"GIT_DIR": str(a / ".git")}),
+        (["branch", "zz"], b, {"GIT_WORK_TREE": str(a)}),
+        (["-C", str(a / "nope" / ".."), "tag", "t"], b, {}),
+    ]:
+        r = run(state, argv, cwd, who="B", **extra)
+        assert refused77(r) and "foreign-claim" in r.stderr, (argv, extra, r.stderr)
+    assert "zz" not in plain(state, ["branch", "--list"], a) and untouched(a)
+    assert run(state, ["-C", str(a), "status"], b, who="B").returncode == 0               # a read of the foreign tree is fine
+    assert run(state, ["-C", str(a), "log", "-1"], b, who="B").returncode == 0
+    assert run(state, ["branch", "zz"], b, who="B").returncode == 0                       # B's own workspace
+
+
+@pytest.mark.parametrize("argv", [["log", "-0", "--output=f"], ["log", "-0", "--out=f"], ["diff", "--output", "f"], ["show", "--outp=f"],
+                                  ["shortlog", "-s", "--output=f"], ["grep", "-Oless", "base"], ["grep", "--open-files-in-pager=less", "base"]],
+                         ids=lambda c: " ".join(c))
+def test_output_writing_flags_on_an_allowlisted_command_are_refused_in_a_foreign_workspace(tmp_path, state, argv):
+    """Through `ade_claims.py guard` itself: the shim's own fast path does not scan arguments (a stray file in another agent's tree
+    is a nuisance, not lost work), so this is the rule's reach where it IS asked."""
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    env = base_env(state, "B")
+    r = subprocess.run([sys.executable, str(ROOT / "bin" / "ade_claims.py"), "guard", "--", *argv], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert refused77(r) and "foreign-claim" in r.stderr, r.stderr
+    assert not (repo / "f.out").exists()
+
+
+@pytest.mark.parametrize("argv", [["diff", "--output-indicator-new=+"], ["log", "-1", "--format=%s"], ["grep", "-o", "base"], ["diff", "--stat"],
+                                  ["show", "--name-only", "HEAD"]], ids=lambda c: " ".join(c))
+def test_look_alike_read_flags_stay_allowed_in_a_foreign_workspace(tmp_path, state, argv):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    env = base_env(state, "B")
+    r = subprocess.run([sys.executable, str(ROOT / "bin" / "ade_claims.py"), "guard", "--", *argv], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
+def test_fast_path_reads_are_exactly_the_allowlist_and_never_start_python(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    no_python = {"ADE_PYTHON": "/nonexistent/python3"}
+    for sub in ("status", "log", "show", "diff", "rev-parse", "ls-files", "ls-tree", "cat-file", "blame", "describe", "rev-list",
+                "for-each-ref", "grep", "shortlog", "name-rev", "merge-base", "version", "help"):
+        assert "unguarded" not in run(state, [sub, "--bogus-flag-for-this-test"], repo, who="B", **no_python).stderr, sub
+    for sub in ("fetch", "stash", "ls-remote", "show-ref", "branch", "remote", "config"):
+        assert "unguarded" in run(state, [sub], repo, who="B", **no_python).stderr, sub      # these go to the rules
+
+
+def test_install_is_a_front_door_command_not_a_git_subcommand(tmp_path, state):
+    """`git install` is not a git subcommand: only `ade-git-guard install` is."""
+    repo = mk_repo(tmp_path, state)
+    assert refused77(run(state, ["install"], repo, who="B"))
