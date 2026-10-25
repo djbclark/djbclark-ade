@@ -222,8 +222,66 @@ def deny(reason: str) -> None:
     sys.exit(0)
 
 
+def unterminated_heredoc_reason(cmd: str) -> str | None:
+    """An unterminated heredoc: bash writes the PARTIAL body and still exits 0.
+
+    Probed on this Mac 2026-10-24: `cat > f <<'EOF'` with no `EOF` line creates `f` holding
+    everything up to the end of input, prints only a *warning* on stderr
+    (`here-document at line N delimited by end-of-file`), and exits **0**. So a message, brief or
+    file written this way is silently truncated and the caller sees success — which is exactly what
+    happened to a sibling handoff message on 2026-10-24 (a long peer_mail body arrived cut off
+    mid-sentence, 632 bytes of a 3178-byte message, and nothing reported an error).
+
+    Deliberately NOT a `strip_literals` check: that function skips the body to avoid false
+    positives from words inside it, so it cannot see the missing terminator. This scans the RAW
+    command for each heredoc introducer and requires a matching delimiter line after it.
+
+    Quoted and unquoted introducers both count (`<<'EOF'`, `<<"EOF"`, `<<EOF`, `<<-EOF`); an
+    escaped `<<` is a literal and does not introduce one. Fails open: any oddity that makes the
+    scan uncertain returns None rather than denying a legitimate command.
+    """
+    lines = cmd.split("\n")
+    i = 0
+    while i < len(lines):
+        # An introducer INSIDE a quoted string is not a heredoc (`rg -n '<<EOF' file` must pass).
+        # Do not blank quoted runs: the delimiter of `<<'EOF'` is itself quoted, so blanking would
+        # hide the very introducer being sought. Instead compute the quoted spans and skip a match
+        # whose start falls inside one.
+        quoted: list[tuple[int, int]] = []
+        for q in re.finditer(r"'[^']*'|\"[^\"]*\"", lines[i]):
+            quoted.append((q.start(), q.end()))
+        for m in re.finditer(r"(?<!\\)<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2", lines[i]):
+            if any(a <= m.start() < b for a, b in quoted):
+                continue  # this `<<` is inside a string, not an introducer
+            delim = m.group(3)
+            strip_tabs = m.group(1) == "-"
+            j = i + 1
+            found = False
+            while j < len(lines):
+                line = lines[j].lstrip("\t") if strip_tabs else lines[j]
+                if line.strip() == delim:
+                    found = True
+                    break
+                j += 1
+            if not found:
+                return (f"Unterminated heredoc: `<<{m.group(1)}{m.group(2)}{delim}{m.group(2)}` "
+                        f"on line {i + 1} has no `{delim}` line after it. bash does NOT fail on "
+                        f"this — it writes the PARTIAL body, warns on stderr and exits 0, so the "
+                        f"file is silently truncated (2026-10-24: a peer message arrived cut off "
+                        f"mid-sentence). Close the heredoc, or write the text to a file and pass "
+                        f"the path (`--file`/`-f`) instead of inlining a long body.")
+            i = j  # continue after the delimiter
+        i += 1
+    return None
+
+
 def check(cmd: str) -> tuple[str | None, str | None]:
     """(deny reason, warning) for a Bash command line."""
+    # Raw-command check first: strip_literals skips heredoc bodies, so this cannot live in the
+    # per-stage loop below (it must see the body to notice a missing terminator).
+    hd = unterminated_heredoc_reason(cmd)
+    if hd:
+        return hd, None
     plain = strip_literals(cmd)
     # control operators split pipelines; keep each operator to know what reads the status
     parts = re.split(r"(&&|\|\||;|\n|&)", plain)
