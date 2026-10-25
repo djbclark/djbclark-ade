@@ -288,9 +288,55 @@ class TestExpectationClosedOnlyByItsTarget(Base):
         self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude w7:p7 (other)] ack build1"}})
         self.assertIn("0 resolved", self.swept())
 
+    def test_only_a_hermes_session_is_known_by_the_last_eight_characters_of_its_session_id(self) -> None:
+        self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": f"[relay from claude {fb.SID[-8:]} (x)] ack build1"}})
+        self.assertIn("0 resolved", self.swept())
+
     def test_the_targets_own_reply_closes_it(self) -> None:
         self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude cccccccc aka peer-fb (x)] ack build1"}})
         self.assertIn("1 resolved", self.swept())
+
+
+class TestHermesTargetClosesItsAck(Base):
+    """Adversary r2 A1 (2026-10-25): Hermes replies as `hermes SID[-8:]` (the LAST 8 characters of its session id), not by its row id's first 8."""
+
+    HSID = "20261025_abcdef12"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.target = sess(id=f"hermes:{self.HSID[-8:]}", agent="hermes", host="hermes-gw", sid=self.HSID, chan=None, name="tg-chat", status="idle")
+        saved = relay.ROUTES["hermes"]
+        relay.ROUTES["hermes"] = lambda c: ("ok", "hermes turn", "delivered")
+        self.addCleanup(relay.ROUTES.__setitem__, "hermes", saved)
+
+    def hermes_says(self, text: str, who: str = "hermes abcdef12") -> None:
+        self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": f"[relay from {who}] {text}"}})
+
+    def link_acked(self) -> Any:
+        return json.loads(fleet.LINKS_FILE.read_text())["links"]["bbbbbbbb>hermes:abcdef12"].get("acked")
+
+    def send(self, text: str, *argv: str) -> None:
+        self.assertEqual(self.go(text, "--via", "hermes", *argv, to=self.target["id"])[0], 0)
+
+    def test_the_hermes_reply_closes_an_expectation_and_proves_the_link(self) -> None:
+        self.send("can you check?", "--expect-ack", "hq1")
+        self.assertIsNone(self.link_acked())
+        self.hermes_says("ack hq1")
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+        self.assertEqual(relay.expect_read("hq1")["state"], "acked")
+        self.assertTrue(self.link_acked())
+
+    def test_the_hermes_reply_to_a_first_contact_acks_the_link(self) -> None:
+        self.send("PR 61 is merged")
+        self.hermes_says("ack bbbbbbbb")
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+        self.assertTrue(self.link_acked())
+
+    def test_another_hermes_session_does_not_close_it(self) -> None:
+        self.send("can you check?", "--expect-ack", "hq1")
+        self.hermes_says("ack hq1", "hermes 99999999")
+        self.assertIn("0 resolved", self.run_cli("--sweep")[1])
+        self.assertEqual(relay.expect_read("hq1")["state"], "open")
 
 
 class TestExpectReservation(Base):
@@ -407,6 +453,7 @@ class TestLinkBelongsToTheSession(Base):
         self.me["sid"] = self.OTHER_SID
         self.assertEqual(self.go("PR 62 is merged")[0], 0)
         self.assertIn("first contact from bbbbbbbb", self.sent_texts[1])
+
 
 
 class TestFirstContact(Base):

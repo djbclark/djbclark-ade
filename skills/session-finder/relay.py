@@ -2652,6 +2652,18 @@ def links_lock():
     return _flock(fleet.LINKS_FILE.with_name(fleet.LINKS_FILE.name + ".lock"))
 
 
+def peer_words(s):
+    """The words a reply from session S may carry as the ID or `aka` of its relay header: its id, name, Paseo id and first 8 characters of its
+    session id; for a Hermes gateway session also the LAST 8 characters of its session id, the word Hermes itself replies under
+    (`hermes SID[-8:]`, adversary r2 A1, 2026-10-25). Any other kind of peer gets no tail: only the target's own reply may close an ack."""
+    text = lambda v: v if isinstance(v, str) else ""
+    sid = text(s.get("sid"))
+    words = [text(s.get("id")), text(s.get("name")), sid[:8], text(s.get("paseo"))]
+    if text(s.get("host")) == "hermes-gw":
+        words.append(sid[-8:])
+    return [w for w in words if w]
+
+
 def note_links_and_expect():
     """After a send that may have reached the target (main's CTX): record the link sender -> target (first contact, count) and
     the --expect-ack expectation. Both are state, written atomically."""
@@ -2659,7 +2671,7 @@ def note_links_and_expect():
     if me is None:
         return
     tx = me.get("transcript") or ""
-    who = [w for w in (s.get("id"), s.get("name"), (s.get("sid") or "")[:8], s.get("paseo")) if w]
+    who = peer_words(s)
     with links_lock():
         data = fleet.links_read()
         key = fleet.link_key(me["id"], s["id"])
@@ -2673,7 +2685,8 @@ def note_links_and_expect():
     if CTX.get("expect"):
         expect_write({"id": CTX["expect"], "state": "open", "sender": me["id"], "sender_label": me.get("name") or "", "tx": tx,
                       "mark": CTX.get("mark", 0), "created": now, "within": CTX.get("within") or EXPECT_WITHIN, "acked": None,
-                      "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8]}})
+                      "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
+                             "sid": s.get("sid") or "", "host": s.get("host") or ""}})
 
 
 def expect_age(r, now):
@@ -2694,7 +2707,7 @@ def ack_sweep():
                 (expect_dir() / f"{r['id']}.json").unlink()
             continue
         t = r.get("target") if isinstance(r.get("target"), dict) else {}
-        who = [w for w in (t.get("id"), t.get("name"), t.get("paseo"), t.get("sid8")) if w]    # only the target's own reply closes it (A2)
+        who = peer_words({**t, "sid": t.get("sid") or t.get("sid8")})    # only the target's own reply closes it (A2)
         if r.get("state") == "open" and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
             expect_write({**r, "state": "acked", "acked": now})
             with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
