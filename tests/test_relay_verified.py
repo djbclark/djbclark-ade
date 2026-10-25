@@ -386,6 +386,29 @@ class TestSweepCostAndRobustness(Base):
         self.assertEqual(len(fleet.annotate_links([dict(self.target), dict(self.me)])), 2)
 
 
+class TestLinkBelongsToTheSession(Base):
+    """Adversary r1 A11 (2026-10-25): a herdr pane id is reused, so a link is the pane's only while the same session sits in it."""
+
+    OTHER_SID = "eeeeeeee-0000-4000-8000-000000000009"
+
+    def test_a_new_session_in_the_peers_pane_is_a_first_contact_not_an_acked_link(self) -> None:
+        self.assertEqual(self.go("PR 61 is merged")[0], 0)
+        self.reply_to_me("ack bbbbbbbb from cccccccc")
+        self.run_cli("--sweep")
+        self.assertEqual(self.go("PR 62 is merged")[0], 0)
+        self.assertNotIn("first contact", self.sent_texts[1])    # the same session: an acked link
+        self.target = sess(transcript=str(self.tx), status="idle", sid=self.OTHER_SID)    # the pane now holds another session
+        self.assertEqual(self.go("PR 63 is merged")[0], 0)
+        self.assertIn("first contact from bbbbbbbb", self.sent_texts[2])
+        self.assertIsNone(fleet.annotate_links([dict(self.target), dict(self.me)])[0].get("link", {}).get("acked"))
+
+    def test_a_new_session_in_the_senders_pane_starts_over_too(self) -> None:
+        self.assertEqual(self.go("PR 61 is merged")[0], 0)
+        self.me["sid"] = self.OTHER_SID
+        self.assertEqual(self.go("PR 62 is merged")[0], 0)
+        self.assertIn("first contact from bbbbbbbb", self.sent_texts[1])
+
+
 class TestFirstContact(Base):
     def test_the_first_message_to_a_peer_asks_for_an_ack_and_the_second_does_not(self) -> None:
         self.assertEqual(self.go("PR 61 is merged")[0], 0)

@@ -2645,10 +2645,11 @@ def note_links_and_expect():
     with links_lock():
         data = fleet.links_read()
         key = fleet.link_key(me["id"], s["id"])
-        ln = data["links"].get(key)
-        ln = ln if isinstance(ln, dict) and ln else {"sender": me["id"], "target": s["id"], "first_sent": now, "sent": 0, "acked": None,
+        ln = fleet.link_get(data["links"], me, s)
+        ln = ln if ln else {"sender": me["id"], "target": s["id"], "first_sent": now, "sent": 0, "acked": None,
                                        "tx": tx, "mark": CTX.get("mark", 0), "who": who}
-        ln.update(last_sent=now, sent=int(_num(ln.get("sent"))) + 1, target_name=s.get("name") or "")
+        ln.update(last_sent=now, sent=int(_num(ln.get("sent"))) + 1, target_name=s.get("name") or "", sender_sid=me.get("sid") or ln.get("sender_sid") or "",
+                  target_sid=s.get("sid") or ln.get("target_sid") or "")
         data["links"][key] = ln
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
@@ -2886,7 +2887,7 @@ def _main(argv=None, sweep=True):
     if me is not None and not a.plan and not NOTICE[0]:
         if a.expect_ack:
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
-        elif not fleet.links_read()["links"].get(fleet.link_key(me["id"], s["id"])):
+        elif fleet.link_get(fleet.links_read()["links"], me, s) is None:
             text += f" [first contact from {me['id']}: reply `ack {me['id']}` through relay.py to prove this link both ways]"
     why = is_paseo and paseo_steer_refusal(s, a.steer)
     if why:

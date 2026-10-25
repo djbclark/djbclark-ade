@@ -1276,6 +1276,19 @@ def link_key(sender, target):
     return f"{sender}>{target}"
 
 
+def link_get(links, me, s):
+    """The link record sender ME -> target S in LINKS, or None. A herdr pane id is reused by the next session in the pane, so a record that
+    stored a session id (`sender_sid`, `target_sid`) for either end counts only while that end still has it (adversary r1 A11, 2026-10-25):
+    the new occupant starts as a first contact. A record or an end without a session id is matched by the pane id alone, as before."""
+    ln = links.get(link_key(me["id"], s["id"]))
+    if not isinstance(ln, dict):
+        return None
+    for stored, now in ((ln.get("sender_sid"), me.get("sid")), (ln.get("target_sid"), s.get("sid"))):
+        if stored and now and stored != now:
+            return None
+    return ln
+
+
 def links_read():
     """The link ledger as {"links": {"<sender>><target>": {sent, first_sent, last_sent, acked, ...}}}; empty when missing or unreadable.
     Every field is read with .get: an older record may lack a newer one."""
@@ -1296,8 +1309,8 @@ def annotate_links(ss):
         return ss
     links = links_read()["links"]
     for s in ss:
-        ln = links.get(link_key(me["id"], s["id"]))
-        if isinstance(ln, dict):
+        ln = link_get(links, me, s)
+        if ln is not None:
             try:
                 sent = int(ln.get("sent") or 0)
             except (TypeError, ValueError):    # a hand-edited ledger must not stop `fleet.py list`
