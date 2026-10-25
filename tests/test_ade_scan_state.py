@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -4270,6 +4271,28 @@ def test_the_git_dir_command_for_a_gitfile_outside_the_checkout_fails_when_dot_g
     assert subprocess.run(["bash", "-c", plain], capture_output=True, text=True).returncode == 0
 
 
+def test_a_skipped_row_for_a_git_directory_keeps_the_plain_git_dir_command(tmp_path):
+    """PR 54 adversary round, LOW a: pins the selector in `bin/ade-scan-state-doc` (`outside = any(...)`). Only a scan that
+    saw a gitfile naming a git directory outside the checkout (`git dir -> `) pastes `GITDIR_REQUIRED_FMT`; a skipped
+    checkout whose `.git` is a DIRECTORY (here a `commondir` redirect, `commondir -> ` in `linked_stores`) keeps the plain
+    `GITDIR_FMT`, so the paste never fails with `.git is not a file` where nothing was ever a file."""
+    mod, doc = load(), load_doc()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    victim = (work / ".git").resolve()
+    decoy = roots / "dirdecoy"
+    decoy.mkdir()
+    git(decoy, "init", "-b", "main")
+    (decoy / ".git" / "commondir").write_text(str(victim) + "\n")
+    rec = mod.scan_checkout(decoy.resolve(), remote=False)
+    assert rec["verdict"] == mod.SKIP_COMMONDIR and (decoy / ".git").is_dir()
+    assert rec["linked_stores"] == [f"commondir -> {victim}"]
+    ck = doc.checkout_dir(str(decoy))
+    row = skipped_row(doc, rec)
+    plain = doc.shcode(doc.GITDIR_FMT, *doc.gitdir_values(str(decoy), ck)).replace("\\|", "|")
+    assert plain in row
+    assert ".git is not a file" not in row  # the plain command has its own `gitdir capture FAILED` (a bad gitfile), not this prefix
+
+
 def test_a_git_dir_that_points_back_to_the_checkout_stays_scanned_and_a_stale_back_pointer_does_not(tmp_path):
     """Adversary round 66 on PR 27: the layouts git itself builds must not be skipped for the redirect check: a main
     checkout, `git worktree add`, an absorbed submodule (`core.worktree` in the module's config) and any git dir whose
@@ -5489,10 +5512,23 @@ def test_a_shallow_checkout_with_no_origin_keeps_its_shallow_file_beside_the_bun
     assert (bundles / "all.bundle").is_file() and (bundles / "all.bundle.shallow").is_file(), list(home.rglob("*.bundle*"))
     assert subprocess.run(["git", "clone", "-q", str(bundles / "all.bundle"), str(tmp_path / "plain")], env=GIT_ENV,
                           capture_output=True).returncode != 0  # the premise: the bundle alone cannot be cloned
-    git(tmp_path, "init", "-q", "--bare", "restored")
+    # the recipe names the checkout's branch, so the restored bare repo's HEAD is not left at `init.defaultBranch`
+    # (a clone of it warned `remote HEAD refers to nonexistent ref`); run the pasted `git init` itself
+    recipe = re.search(r"restore with `(git init --bare[^`]*)`", unescape_span(row))
+    assert recipe and recipe.group(1) == "git init --bare -b main R", row
+    argv = [("restored" if a == "R" else a) for a in shlex.split(recipe.group(1))]
+    trunk = {**GIT_ENV, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "init.defaultBranch", "GIT_CONFIG_VALUE_0": "trunk"}
+    assert subprocess.run(argv, cwd=tmp_path, env=trunk, capture_output=True).returncode == 0
     shutil.copy(bundles / "all.bundle.shallow", tmp_path / "restored" / "shallow")
     git(tmp_path / "restored", "fetch", "-q", str(bundles / "all.bundle"), "refs/*:refs/*")
     assert git(tmp_path / "restored", "log", "--format=%s", "main").split() == ["c.txt"]
+    assert git(tmp_path / "restored", "symbolic-ref", "HEAD").strip() == "refs/heads/main"
+    # a branch name that needs quoting is quoted; a detached HEAD or a non-UTF-8 name has no branch to give `-b`
+    def recipe_for(branch):
+        r = next(r for r in section_3_2(doc.render(doc_scan([dict(c, branch=branch)]))).splitlines() if r.startswith("| ~/src/sh "))
+        return re.search(r"restore with `(git init --bare[^`]*)`", unescape_span(r)).group(1)
+    assert recipe_for("feat/a b") == "git init --bare -b 'feat/a b' R"
+    assert recipe_for("HEAD") == "git init --bare R" and recipe_for("bad\ufffdname") == "git init --bare R"
     full = make_repo(tmp_path / "full")  # a checkout that is not shallow gets no extra command
     assert scan_one(mod, full)["shallow"] is False
 
