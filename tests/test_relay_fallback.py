@@ -80,6 +80,7 @@ class Harness(unittest.TestCase):
                   "ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER"):
             os.environ.pop(k, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
+        os.environ["CODEX_HOME"] = str(self.tmp / "codex")
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
         names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
                  "paseo_run", "paseo_inspect", "paseo_probe", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY", "DEFER_DIR", "DEFER_POLL",
@@ -235,12 +236,84 @@ class TestFallback(Harness):
         self.assertEqual((rc, self.calls), (0, ["socket"]))
         self.assertIn("claude socket", out)
 
-    def test_real_type_line_herdr_send_text_timeout_does_not_fall_back(self) -> None:
+    def test_real_type_line_herdr_prompt_timeout_does_not_fall_back(self) -> None:
         relay.type_line = saved_type_line
         relay.claude_socket = lambda s: "/tmp/x.sock"
         relay.keys_run = lambda *cmd, timeout=10: "failed"
         rc, _, _ = self.run_main(sess())
         self.assertEqual((rc, self.calls), (1, []))
+
+    def test_codex_composer_text_is_not_delivery(self) -> None:
+        relay.screen = lambda chan, lines=20: "  › hello there friend\n    wrapped composer text"
+        rc, out, err = self.run_main(sess(agent="codex", status="idle"), "--wait", "0.01")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertNotIn("; it takes the message now", out)
+
+    def test_codex_delivery_requires_a_new_user_message(self) -> None:
+        tx = self.tmp / "codex.jsonl"
+        tx.write_text("")
+
+        def typed(chan, text):
+            self.calls.append("type")
+            with tx.open("a") as f:
+                f.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}}) + "\n")
+            return True
+
+        relay.type_line = typed
+        rc, out, err = self.run_main(sess(agent="codex", status="idle", transcript=str(tx)))
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": delivered;", out)
+
+    def test_codex_history_echo_and_partial_text_do_not_prove_delivery(self) -> None:
+        tx = self.tmp / "codex.jsonl"
+        tx.write_text(json.dumps({"type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "hello there friend"}]}}) + "\n")
+        mark = tx.stat().st_size
+        with tx.open("a") as f:
+            for role, text in (("assistant", "hello there friend"),
+                               ("user", "hello there friend with operator additions")):
+                f.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": role,
+                    "content": [{"type": "input_text", "text": text}]}}) + "\n")
+        self.assertIsNone(relay.tx_state(tx, mark, "hello there friend"))
+
+    def test_codex_first_prompt_resolves_the_new_session_and_rejects_stale_text(self) -> None:
+        root = Path(os.environ["CODEX_HOME"]) / "sessions/2026/10/25"
+        root.mkdir(parents=True)
+        tx = root / f"rollout-2026-10-25T00-00-00-{SID}.jsonl"
+        current = {}
+
+        def typed(chan, text):
+            current.update(agent="codex", agent_session={"value": SID})
+            tx.write_text(json.dumps({"timestamp": stamp(), "type": "response_item", "payload": {
+                "type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": text}]}}) + "\n")
+            return True
+
+        relay.type_line = typed
+        with mock.patch.object(relay.fleet, "herdr_json", lambda *args: {"agent": dict(current)}):
+            rc, out, err = self.run_main(sess(agent="codex", status="idle", sid=None))
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": delivered;", out)
+        # A session id alone is insufficient when a first-send lookup resolves an
+        # existing rollout: an older equal prompt must not count as this send.
+        current.clear()
+        tx.unlink()
+
+        def stale_typed(chan, text):
+            typed(chan, text)
+            record = json.loads(tx.read_text())
+            record["timestamp"] = "2000-01-01T00:00:00Z"
+            tx.write_text(json.dumps(record) + "\n")
+            return True
+
+        relay.type_line = stale_typed
+        with mock.patch.object(relay.fleet, "herdr_json", lambda *args: {"agent": dict(current)}):
+            rc, out, err = self.run_main(sess(agent="codex", status="idle", sid=None), "--wait", "0.01")
+        self.assertEqual(rc, 1, (out, err))
 
     def armed(self, mark: int = 0, draft: str = "") -> None:
         relay.note_unsent("cccccccc", "hello there friend", draft, mark)
@@ -2715,14 +2788,26 @@ class TestDeferredSend(Harness):
         self.assertEqual((self.calls, relay.rec_all()), (["type"], []))
 
     def test_a_working_non_claude_pane_is_queued_and_delivered_when_idle(self) -> None:
-        pane = {"v": sess(agent="codex")}
+        tx = self.tmp / "codex.jsonl"
+        tx.write_text("")
+        pane = {"v": sess(agent="codex", transcript=str(tx))}
         relay.fleet.sessions = lambda: [dict(pane["v"]), dict(self.sender, self=True)]
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = relay.main(["peer-fb", "hello there friend", "--wait", "2"])
         self.assertEqual((rc, self.calls, out.getvalue().startswith("queued: ")), (0, [], True), err.getvalue())
         rid = relay.rec_all()[0]["id"]
-        pane["v"] = sess(agent="codex", status="idle")
+        pane["v"] = sess(agent="codex", status="idle", transcript=str(tx))
+
+        def typed(chan, text):
+            self.calls.append("type")
+            with tx.open("a") as f:
+                f.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}}) + "\n")
+            return True
+
+        relay.type_line = typed
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(relay.deliver(rid), 0)
         self.assertEqual((self.calls, relay.rec_read(rid)["state"]), (["type"], "delivered"))    # type_line is the pane send
