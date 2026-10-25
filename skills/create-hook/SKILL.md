@@ -181,14 +181,29 @@ trusted_hash = "sha256:..."
 The key is `<source file>:<event in snake_case>:<matcher-group index>:<handler index>`.
 
 1. A new or changed hook is `Untrusted` / `Modified` and is **skipped** (a startup warning
-   says to open `/hooks`). After writing hooks, tell the operator: restart Codex, run
-   `/hooks`, review and trust the new entry. You cannot trust it for them.
-2. **Editing the script body does not change the hash**, so trust covers the command line,
+   points at `/hooks`). Trust is two separate things, keep them apart:
+   - **Approval of the definition** is the operator's decision. Show the exact definition
+     (event, matcher, command, timeout, async) and proceed only on authorization that covers
+     that specific hook: the operator asking for it, or a standing instruction naming it.
+     Ask only when that authorization is missing; do not ask when it exists.
+   - **The `/hooks` step** is the mechanical recording of that approval. With authorization
+     for this hook, an assistant that can drive the TUI may open `/hooks`, check that the
+     listed definition matches what was authorized, and trust it; otherwise hand the
+     operator the one step. Never say an assistant categorically cannot, and never tell the
+     operator to type or restart something they have already authorized you to do.
+   Afterwards confirm `/hooks` lists it as trusted. Hash trust via `/hooks` is the only path.
+2. **Do not restart live TUIs.** Sessions load hooks at start and on a config refresh
+   (`Session::refresh_hooks`, 0.164.0 source); whether a new or edited `hooks.json` is
+   picked up by an already-running session was not verified, so assume it is not. Prove a
+   hook in a **fresh, controlled session** (a new `codex` in a scratch directory), or wait
+   for the operator's natural restart. Any change to a hook's definition makes it `Modified`
+   (new hash) and skipped again until re-trusted; do not assume a running session sees it.
+3. **Editing the script body does not change the hash**, so trust covers the command line,
    not the script's contents. Keep hook scripts in a place only the operator can write.
-3. **Never** use `--dangerously-bypass-hook-trust`, and never hand-edit `[hooks.state]` or
+4. **Never** use `--dangerously-bypass-hook-trust`, and never hand-edit `[hooks.state]` or
    any Codex database or state file to mark a hook trusted. The `/hooks` browser is the only
    path. Plugin hooks are not trusted by installing the plugin.
-4. Because the trust key contains **indexes**, inserting, reordering or deleting a group
+5. Because the trust key contains **indexes**, inserting, reordering or deleting a group
    shifts the keys of every later group in that event: their trust no longer matches, so they
    stop running until re-reviewed. **Always append new matcher groups at the end of an event's
    array**, as their own group (not as an extra handler inside someone else's group).
@@ -230,7 +245,7 @@ Handler (append as its own group in `~/.codex/hooks.json`):
 ```
 
 Smoke test without Codex: `echo '{"tool_input":{"command":"git push --force"}}' | python3 ~/.codex/hooks/deny_force_push.py`
-prints the deny JSON; a harmless command prints nothing. Then restart Codex, `/hooks`, trust.
+prints the deny JSON; a harmless command prints nothing. Then trust it as in section 4.
 
 ### Minimal example: PermissionRequest
 
@@ -251,45 +266,85 @@ Matcher `^Bash$`, `timeout` 10. To deny, use `{"behavior":"deny","message":"..."
 Machines already carry hooks from other tools (approval relays, command rewriters, habit
 gates, plugin hooks). Preserve all of them.
 
-1. **Read the whole existing file first** and keep a dated copy (`hooks.json.bak-YYYY-MM-DD`)
-   before the first change. Never overwrite the file with a fresh template.
-2. Merge by loading JSON, **appending** your group to the end of the event's list, and writing
-   atomically (temp file beside it, `os.replace`), then re-parse it. Keep every other key,
-   including `description`. Example append, and removal by exact `command`:
+1. **Read the whole existing file first** and keep a dated copy (`hooks.json.bak-YYYY-MM-DD`,
+   not overwritten if it exists) before the first change. Never replace the file with a fresh template.
+2. Merge with **one helper**, `hookedit.py` (below): it appends your group last, or removes by
+   exact `command`, keeping every other key (including `description`). Run it as
+   `python3 hookedit.py PATH add EVENT 'GROUP_JSON'` or `python3 hookedit.py PATH remove EVENT 'COMMAND'`.
 
 ```python
-import json, os, sys
-path, event, group = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-doc = json.load(open(path))                       # fails loudly on a corrupt file
-doc.setdefault("hooks", {}).setdefault(event, [])
-if group not in doc["hooks"][event]:              # idempotent
-    doc["hooks"][event].append(group)             # append only: never reorder
-tmp = path + ".tmp"
-json.dump(doc, open(tmp, "w"), indent=2); open(tmp, "a").write("\n")
-json.load(open(tmp)); os.replace(tmp, path)
+#!/usr/bin/env python3
+import contextlib, json, os, stat, sys, tempfile
+
+def update_json(path, mutate):
+    """Apply mutate(doc) -> changed?; replace atomically; abort if the file moved meanwhile."""
+    real = os.path.realpath(path)                   # edit the target, never replace a symlink
+    with open(real, "rb") as f:
+        snapshot = f.read()
+    doc = json.loads(snapshot)                      # corrupt file: fail loudly
+    if not mutate(doc):
+        return False
+    mode = stat.S_IMODE(os.stat(real).st_mode)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real), prefix=".hooks-", suffix=".tmp")  # private, unique
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)                         # keep the original permissions
+        with open(tmp) as f:
+            json.load(f)                            # re-parse what will be installed
+        with open(real, "rb") as f:
+            if f.read() != snapshot:                # last check before the swap
+                sys.exit(f"{real} changed while editing; aborted, nothing written")
+        os.replace(tmp, real)
+        return True
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)                          # no-op after a successful replace
+
+def add(event, group):
+    def mutate(doc):
+        groups = doc.setdefault("hooks", {}).setdefault(event, [])
+        if group in groups:                         # idempotent
+            return False
+        groups.append(group)                        # append only: never reorder
+        return True
+    return mutate
+
+def remove(event, command):
+    def mutate(doc):
+        groups = doc.get("hooks", {}).get(event, [])
+        kept = [dict(g, hooks=[h for h in g.get("hooks", []) if h.get("command") != command])
+                for g in groups]
+        kept = [g for g in kept if g["hooks"]]      # drop only groups this emptied
+        if kept == groups:
+            return False
+        if kept:
+            doc["hooks"][event] = kept
+        else:
+            del doc["hooks"][event]
+        return True
+    return mutate
+
+if __name__ == "__main__":
+    path, verb, event, arg = sys.argv[1:5]
+    changed = update_json(path, add(event, json.loads(arg)) if verb == "add" else remove(event, arg))
+    print("updated" if changed else "unchanged")
 ```
 
-```python
-import json, os, sys
-path, event, command = sys.argv[1:4]
-doc = json.load(open(path))
-groups = doc.get("hooks", {}).get(event, [])
-for g in groups:
-    g["hooks"] = [h for h in g.get("hooks", []) if h.get("command") != command]
-doc["hooks"][event] = [g for g in groups if g.get("hooks")]   # drop only groups left empty
-if not doc["hooks"][event]:
-    del doc["hooks"][event]
-tmp = path + ".tmp"
-json.dump(doc, open(tmp, "w"), indent=2); open(tmp, "a").write("\n")
-json.load(open(tmp)); os.replace(tmp, path)
-```
+   The unchanged-bytes check is optimistic: it narrows the window but **cannot serialize a
+   writer that does not cooperate** (another agent can still write between the check and the
+   replace, and its edit is then lost). Not race-free. A production installer needs a shared
+   advisory lock that every writer takes, or a retry loop around a fresh snapshot; never
+   describe this helper as race-free. If it aborts, re-read the file and run it again.
 
-3. **Uninstall removes only your own entry**, matched on the exact `command` string you
-   wrote, never a whole event or file. Because it was appended last, nothing after it shifts.
-   If anything sits after it, the later groups lose trust until the operator re-reviews them
-   in `/hooks`; say so. Leave the other `[hooks.state]` lines alone. Delete the hook script
-   file only if you created it, and the `~/.codex/hooks/` directory only if you created it
-   and it is now empty.
+3. **Uninstall removes only your own entry** (`remove`, exact `command` you wrote), never a
+   whole event or file. Appended last means nothing after it shifts; if anything sits after
+   it, those later groups lose trust until re-reviewed in `/hooks`, so say so. Leave the
+   `[hooks.state]` lines alone. Delete the hook script file only if you created it, and
+   `~/.codex/hooks/` only if you created it and it is now empty.
 4. Do not touch `notify`, `[features]`, `[hooks.state]`, plugin directories or other tools'
    scripts. If the target layer has inline `[hooks]` in `config.toml`, add to that form rather
    than creating a second `hooks.json` that triggers the merge warning.
@@ -302,5 +357,6 @@ json.load(open(tmp)); os.replace(tmp, path)
 2. `matcher` anchored where exactness matters; ignored events have none.
 3. Policy script fails closed; `timeout` set short for `PermissionRequest`.
 4. JSON parses; existing entries unchanged; new group last.
-5. Operator told: restart, `/hooks`, trust. No bypass flag, no state edits.
+5. Trust handled per section 4: definition shown and authorized, `/hooks` hash path only,
+   no bypass flag, no state edits, no restart of live TUIs.
 6. Docs consulted for the installed version: `codex --version`, then the official page.
