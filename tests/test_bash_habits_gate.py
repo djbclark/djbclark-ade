@@ -212,6 +212,44 @@ def raw(payload, *args):
                           capture_output=True, text=True, timeout=30)
 
 
+@pytest.mark.parametrize("command", [
+    # the real 2026-10-24 slip: a long peer message written via heredoc arrived cut off
+    # mid-sentence (632 bytes of 3178) because the delimiter was never reached — bash wrote the
+    # partial body, warned on stderr and exited 0, so nothing reported an error.
+    "cat > /tmp/msg.md <<'EOF'\nline one\nline two, no delimiter ever\n",
+    "cat <<EOF\ntext\n",
+    "cat <<'A'\none\nA\ncat <<'B'\ntwo\n",                      # the SECOND one is unclosed
+    "peer_mail.py send --text \"$(cat <<'EOF'\nbody\n)\"",      # unclosed inside a substitution
+])
+def test_unterminated_heredoc_is_denied(command):
+    assert denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    "cat > f <<'EOF'\nhello\nEOF\n",
+    "cat > f <<EOF\nhello\nEOF\n",
+    "cat > f <<'EOF'\nDanny's rule (really)\nEOF\n",            # apostrophes are fine when closed
+    "cat <<'A'\none\nA\ncat <<'B'\ntwo\nB\n",                   # two, both closed
+    "cat <<-'EOF'\n\tbody\n\tEOF\n",                            # tab-indented terminator
+    "cat <<'EOF' | wc -l\nhello\nEOF\n",                        # in a pipeline
+    "cat <<'EOF'\nsay EOF now\nEOF\n",                          # delimiter word inside the body
+    "echo a \\<\\< b\n",                                        # an escaped << is a literal
+    "rg -n '<<EOF' docs/\n",                                    # inside a quoted string
+    "rg -n \"<<'EOF'\" docs/\n",
+    "rg -n pattern /tmp/file\n",                                # no heredoc at all
+])
+def test_closed_or_non_heredocs_pass(command):
+    assert not denied(command)
+
+
+def test_unterminated_heredoc_reason_names_the_consequence():
+    """The reason must say bash does not fail, because that is the surprising part."""
+    out = run("cat > /tmp/msg.md <<'EOF'\nno terminator\n")
+    reason = out.get("permissionDecisionReason", "")
+    assert "Unterminated heredoc" in reason
+    assert "exits 0" in reason or "partial" in reason.lower()
+
+
 def test_codex_mode_denies_with_exit_2_and_the_reason_on_stderr():
     r = raw({"tool_name": "Bash", "tool_input": {"command": "sed -n 1p f"}}, "--codex")
     assert r.returncode == 2 and "gsed" in r.stderr and r.stdout == ""

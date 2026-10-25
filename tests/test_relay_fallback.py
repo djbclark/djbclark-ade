@@ -36,6 +36,12 @@ assert _spec and _spec.loader
 relay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(relay)
 relay.UNSENT = Path(tempfile.mkdtemp(prefix="relay-fallback-test-")) / "relay-unsent.json"
+relay.DEFER_DIR = Path(tempfile.mkdtemp(prefix="relay-defer-test-")) / "relay" / "deferred"
+REAL_SPAWN = relay.spawn_deliverer
+REAL_PROBE = relay.paseo_probe
+# where the paseo CLI, fleet and the herdr plugin look: a deliverer keeps these (none names a session)
+WHERE_THINGS_LIVE = ("PASEO_HOME", "PASEO_HOST", "CLAUDE_CONFIG_DIR", "HERDR_BIN_PATH", "SESSION_FINDER_STATE", "HERDR_PLUGIN_STATE_DIR",
+                     "HERDR_SLEEPER_STATE", "BIGTEAM_STATE")
 
 SID = "cccccccc-0000-4000-8000-000000000003"
 REAL_POPEN = relay.subprocess.Popen
@@ -67,13 +73,22 @@ class Harness(unittest.TestCase):
     def setUp(self) -> None:
         self.calls: list[str] = []
         relay.UNSENT.unlink(missing_ok=True)
+        patcher = mock.patch.dict(os.environ)    # whatever session runs the tests (Paseo, acp-run, Claude, herdr) is not under test
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "CLAUDE_CODE_SESSION_ID", "HERDR_PANE_ID", "HERDR_ENV",
+                  "ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER"):
+            os.environ.pop(k, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
+        os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
         names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
-                 "paseo_run", "paseo_inspect", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY"]
+                 "paseo_run", "paseo_inspect", "paseo_probe", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY", "DEFER_DIR", "DEFER_POLL",
+                 "spawn_deliverer"]
         saved = {n: getattr(relay, n) for n in names}
-        saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record")}
+        saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record", "pane_procs")}
         self.addCleanup(lambda: [setattr(relay, n, v) for n, v in saved.items()])
         self.addCleanup(lambda: [setattr(relay.fleet, n, v) for n, v in saved_fleet.items()])
+        relay.fleet.pane_procs = lambda pane: (None, None)    # never the live herdr: a test that needs a pane's processes sets them
         relay.claude_socket = lambda s: None
         relay.socket_send = lambda sock, sender, text: self.calls.append("socket") or True
         relay.type_line = lambda chan, text: self.calls.append("type") or True
@@ -90,10 +105,13 @@ class Harness(unittest.TestCase):
         relay.press_enter = lambda chan: True
         relay.screen = lambda chan, lines=20: "Press up to edit queued messages"
         relay.RETRY_AFTER = relay.ENTER_DELAY = 0
+        relay.DEFER_DIR, relay.DEFER_POLL = self.tmp / "relay" / "deferred", 0    # never the real queue, never a real wait
+        self.spawned: list[str] = []
+        relay.spawn_deliverer = lambda rid: self.spawned.append(rid) or 4242
 
         def live(*a: Any, **k: Any) -> Any:
             self.fail("unexpected call to the live paseo CLI")
-        relay.paseo_run = relay.paseo_inspect = relay.send_paseo = live
+        relay.paseo_run = relay.paseo_inspect = relay.paseo_probe = relay.send_paseo = live
         relay.fleet.dispatch_record = lambda sid: None
 
     def run_main(self, s: dict[str, Any], *argv: str) -> tuple[int, str, str]:
@@ -663,7 +681,7 @@ class TestFallback(Harness):
         self.assertFalse(relay.pane_idle(s, 4))
 
     def test_working_non_claude_pane_is_refused_without_idle(self) -> None:
-        rc, _, err = self.run_main(sess(agent="codex"))
+        rc, _, err = self.run_main(sess(agent="codex"), "--no-defer")
         self.assertEqual((rc, self.calls), (1, []))
         self.assertIn("only idle ones", err)
 
@@ -734,7 +752,7 @@ class TestHardStops(Harness):
         # Paseo interrupts and replaces the running turn of a provider without steer (cline, any ACP one): never do that
         relay.paseo_gate = lambda s: None
         for agent in ("cline", "grok", "antigravity", "paseo", ""):
-            rc, _, err = self.run_main(pasess(agent=agent, status="working"))
+            rc, _, err = self.run_main(pasess(agent=agent, status="working"), "--no-defer")
             self.assertEqual((rc, self.calls), (1, []), agent)
             self.assertIn("cannot steer", err, agent)
             self.assertIn("interrupt and replace its running turn", err, agent)
@@ -753,7 +771,7 @@ class TestHardStops(Harness):
         sent: list[str] = []
         relay.send_paseo = lambda s, text, wait: sent.append(s["agent"]) or "accepted"
         for agent in ("codex", "omp", "opencode", "pi"):
-            rc, _, err = self.run_main(pasess(agent=agent, status="working"))
+            rc, _, err = self.run_main(pasess(agent=agent, status="working"), "--no-defer")
             self.assertEqual(rc, 1, agent)
             self.assertIn("replaces a running turn", err, agent)
             self.assertIn("--steer", err, agent)
@@ -766,7 +784,7 @@ class TestHardStops(Harness):
     def test_steer_does_not_make_a_provider_without_steer_safe(self) -> None:
         relay.paseo_gate = lambda s: None
         relay.send_paseo = lambda s, text, wait: self.calls.append("send") or "accepted"
-        rc, _, err = self.run_main(pasess(agent="cline", status="working"), "--steer")
+        rc, _, err = self.run_main(pasess(agent="cline", status="working"), "--steer", "--no-defer")
         self.assertEqual((rc, self.calls), (1, []))
         self.assertIn("cannot steer", err)
 
@@ -2485,6 +2503,1147 @@ class TestRound7(Harness):
     def test_arming_records_the_transcript_the_mark_belongs_to(self) -> None:
         relay.arm(sess(transcript="/some/where/t.jsonl"), ("herdr", "w9:p9"), "hello there friend", 5)
         self.assertEqual(relay.leftover("cccccccc")["tx"], "/some/where/t.jsonl")
+
+
+SENDER = "bbbbbbbb-0000-4000-8000-000000000002"
+OTHER = "eeeeeeee-0000-4000-8000-000000000005"
+CAROL = "ffffffff-0000-4000-8000-000000000006"
+HERD_SID = "dddddddd-0000-4000-8000-000000000004"
+
+
+def real_omp_row(status: str = "working") -> dict[str, Any]:
+    """The row fleet itself builds (fleet._other_herdr) from a real `herdr agent list` entry of an omp pane (read 2026-10-24,
+    `fleet.py list --json`): sid, pid and transcript are all null, as they are for every herdr-detected non-Claude pane."""
+    herdr_agent = {"agent": "omp", "agent_status": status, "cwd": "/Users/djbclark/ops", "focused": False,
+                   "foreground_cwd": "/Users/djbclark/ops", "pane_id": "w2N:pZ", "revision": 32786, "state_change_seq": 503,
+                   "tab_id": "w2N:tY", "terminal_id": "term_65e980fec51e149", "terminal_title": "\u03c0 ! T2E: Investigate why t2e is slow",
+                   "terminal_title_stripped": "\u03c0 ! T2E: Investigate why t2e is slow", "workspace_id": "w2N"}
+    with mock.patch.object(fleet, "herdr_label", lambda kind, ident: ident):
+        (row,) = fleet._other_herdr([herdr_agent], set())
+    return row
+
+
+def real_omp_procs(pid: int) -> list[dict[str, Any]]:
+    """`fleet.pane_procs("w2N:pZ")[0]` as herdr `pane process-info` really answers it (2026-10-24)."""
+    return [{"pid": pid, "name": "omp", "argv": ["omp", "--auto-approve"], "argv0": "omp", "cwd": "/Users/djbclark/ops"}]
+
+
+class Stalled(Exception):
+    """Raised by the patched sleep: the deliverer would have waited another poll."""
+
+
+class TestDeferredSend(Harness):
+    """Deferred send (2026-10-24): a busy target gets the text queued (`queued: ID`, exit 0) and a deliverer sends it once, when idle."""
+
+    def messages(self) -> list[tuple[str, str]]:
+        """What was sent to a target that is not the original sender: the queued messages themselves, not the failure notices."""
+        return [(a, t) for a, t in self.sent if "your message to" not in t]
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = relay.hosted_by
+        relay.hosted_by = lambda a: False
+        self.addCleanup(setattr, relay, "hosted_by", saved)
+        os.environ["PASEO_AGENT_ID"] = SENDER    # a sender relay can identify (and tell if the send fails): an anonymous caller is not deferred for
+        self.cur, self.statuses, self.archived = "running", [], False
+        self.sent: list[tuple[str, str]] = []
+        self.sent_as: list[str | None] = []    # the PASEO_AGENT_ID each send ran with
+        self.inspects: list[str] = []
+        self.target = pasess(agent="cline", status="working")
+        self.other = sess(id="eeeeeeee", name="other-peer", agent="cline", host="paseo", paseo=OTHER, chan=("paseo", OTHER), status="working")
+        self.sender = sess(id="bbbbbbbb", name="alice", agent="claude", host="paseo", paseo=SENDER, chan=("paseo", SENDER), status="idle")
+        self.carol = sess(id="ffffffff", name="carol", agent="cline", host="paseo", paseo=CAROL, chan=("paseo", CAROL), status="idle")
+        self.rows = [self.target, self.other, self.sender, self.carol]
+        relay.fleet.sessions = lambda: [dict(r, self=self.is_self(r)) for r in self.rows]
+
+        def inspect(agent: str) -> dict[str, Any]:
+            self.inspects.append(agent)
+            if agent == AGENT and self.statuses:
+                self.cur = self.statuses.pop(0)
+            return {"Id": agent, "Status": self.cur if agent == AGENT else "idle", "Cwd": "/x",
+                    "Archived": self.archived and agent == AGENT, "PendingPermissions": []}
+        relay.paseo_inspect = inspect
+        self.probe_kind = ""    # "" = ask relay.paseo_inspect; "error" / "notfound" = what `paseo agent inspect` answers instead
+
+        def probe(agent: str) -> tuple[dict[str, Any] | None, str]:
+            if self.probe_kind:
+                self.inspects.append(agent)
+                return None, self.probe_kind
+            info = relay.paseo_inspect(agent)
+            return info, "ok" if info else "notfound"
+        relay.paseo_probe = probe
+        relay.paseo_gate = lambda s: s.update(status="working" if (s.get("paseo") == AGENT and self.cur != "idle") or s.get("paseo") == OTHER else "idle")
+
+        def send(s: dict[str, Any], text: str, wait: float) -> str:
+            self.sent.append((s["paseo"], text))
+            self.sent_as.append(os.environ.get("PASEO_AGENT_ID"))
+            return "accepted"
+        relay.send_paseo = send
+
+    @staticmethod
+    def is_self(row: dict[str, Any]) -> bool:
+        """fleet's own rule: a Paseo row is `self` by PASEO_AGENT_ID, a herdr row by HERDR_PANE_ID."""
+        agent, pane = os.environ.get("PASEO_AGENT_ID"), os.environ.get("HERDR_PANE_ID")
+        chan = row.get("chan") or (None, None)
+        return bool(agent and row.get("paseo") == agent) or bool(pane and chan[0] == "herdr" and chan[1] == pane)
+
+    def go(self, *argv: str, text: str = "hello there friend", to: str = AGENT) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = relay.main([to, text, "--wait", "2", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def queue(self, text: str = "hello there friend", *argv: str, to: str = AGENT) -> str:
+        rc, out, err = self.go(*argv, text=text, to=to)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertTrue(out.startswith("queued: "), out)
+        return out.split()[1]
+
+    def age(self, rid: str, secs: float) -> None:
+        rec = relay.rec_read(rid)
+        assert rec
+        rec["created"] -= secs
+        relay.rec_write(rec)
+
+    def patch_rec(self, rid: str, **kw: Any) -> None:
+        rec = relay.rec_read(rid)
+        assert rec
+        rec.update(kw)
+        relay.rec_write(rec)
+
+    def sleeps(self, n: int = 0) -> Any:
+        """time.sleep that raises Stalled on call n+1: a deliverer that would wait again fails the test instead of hanging it."""
+        count = [0]
+
+        def sleeper(_s: float) -> None:
+            count[0] += 1
+            if count[0] > n:
+                raise Stalled
+        return mock.patch.object(relay.time, "sleep", side_effect=sleeper)
+
+    def deliver_in(self, env: dict[str, str], rid: str) -> int:
+        """relay.deliver(rid) in a process that has exactly ENV."""
+        with mock.patch.dict(os.environ, env, clear=True):
+            return relay.deliver(rid)
+
+    def deliverer_env_of(self, sweeper_env: dict[str, str]) -> dict[str, str]:
+        """The environment spawn_deliverer gives a deliverer started by a process that has SWEEPER_ENV."""
+        with mock.patch.dict(os.environ, sweeper_env), mock.patch.object(relay.subprocess, "Popen") as popen:
+            REAL_SPAWN("20261024-000000-abcdef")
+        return popen.call_args.kwargs["env"]
+
+    def as_agent(self, agent_id: str) -> None:
+        os.environ["PASEO_AGENT_ID"] = agent_id
+
+    def log(self) -> str:
+        return (relay.DEFER_DIR.parent / "deferred.log").read_text()
+
+    # ---- queueing ------------------------------------------------------------------------------------------
+
+    def test_a_busy_target_that_cannot_steer_is_queued_not_refused_and_nothing_is_sent(self) -> None:
+        self.as_agent(SENDER)
+        rc, out, err = self.go()
+        self.assertEqual(rc, 0, err)    # queued is accepted: a caller that reads exit 0 as "sent" keeps working
+        rec = relay.rec_all()[0]
+        self.assertTrue(out.startswith(f"queued: {rec['id']} "), out)
+        self.assertEqual((rec["state"], rec["text"], rec["target"]["paseo"], self.sent, self.spawned), ("queued", "hello there friend", AGENT, [], [rec["id"]]))
+        self.assertEqual((rec["sender"], rec["sender_paseo"], rec["sender_ident"]), ("alice", SENDER, SENDER))
+        self.assertEqual(oct(relay.rec_path(rec["id"]).stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(relay.DEFER_DIR.stat().st_mode & 0o777), "0o700")
+        for k in ("id", "target", "text", "sender", "created", "expires", "state", "outcome", "pid"):
+            self.assertIn(k, rec)
+        self.assertAlmostEqual(rec["expires"] - rec["created"], 6 * 3600, delta=2)
+
+    def test_json_reports_the_queued_state(self) -> None:
+        rc, out, _ = self.go("--json")
+        res = json.loads(out)
+        self.assertEqual((rc, res["state"], res["queued"]), (0, "queued", True))
+
+    def test_no_defer_keeps_the_old_refusal(self) -> None:
+        rc, _, err = self.go("--no-defer")
+        self.assertEqual((rc, self.sent, self.spawned, relay.rec_all()), (1, [], [], []))
+        self.assertIn("cannot steer", err)
+
+    def test_every_non_steerable_provider_and_a_codex_without_steer_is_queued_but_steer_still_sends(self) -> None:
+        for agent in ("cline", "grok", "codex", "omp", "opencode", "pi"):
+            self.target["agent"] = agent
+            rc, out, _ = self.go(text=f"for {agent}")
+            self.assertEqual((rc, out.startswith("queued: ")), (0, True), agent)
+        self.assertEqual((len(relay.rec_all()), self.sent), (6, []))
+        self.target["agent"] = "codex"
+        rc, out, _ = self.go("--steer", text="steered")
+        self.assertEqual((rc, out.startswith("relayed to"), len(relay.rec_all())), (0, True, 6))
+        self.assertEqual(self.sent[-1][0], AGENT)
+
+    def test_refusals_that_are_not_busyness_are_never_deferred(self) -> None:
+        relay.paseo_gate = lambda s: "its Paseo agent is archived (a send would unarchive it and start a turn)"
+        rc, _, err = self.go()
+        self.assertEqual((rc, relay.rec_all()), (1, []))
+        self.assertIn("archived", err)
+        relay.paseo_gate = lambda s: s.update(status="working")
+        pane = sess(agent="codex")
+        relay.fleet.sessions = lambda: [pane]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main(["peer-fb", "!rm -rf x", "--wait", "2"]), 1)    # a shell line is refused for a pane, never queued
+        self.assertEqual(relay.rec_all(), [])
+        self.assertEqual(self.go(text="/exit")[0], 2)
+
+    def test_idle_and_plan_win_over_deferral(self) -> None:
+        with mock.patch.object(relay, "paseo_idle", lambda s, seconds: False):
+            rc, _, err = self.go("--idle", "1")
+        self.assertEqual((rc, relay.rec_all()), (1, []))
+        self.assertIn("still running", err)
+        rc, _, _ = self.go("--plan")
+        self.assertEqual((rc, relay.rec_all()), (1, []))
+        pane = sess(agent="codex")    # a working non-Claude pane: --idle waits (and here times out) instead of queueing
+        relay.fleet.sessions = lambda: [dict(pane)]
+        with mock.patch.object(relay, "pane_idle", lambda s, seconds: False), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main(["peer-fb", "hello there friend", "--wait", "2", "--idle", "1"]), 1)
+        self.assertEqual((relay.rec_all(), self.calls), ([], []))
+
+    def test_via_names_the_route_and_a_different_route_is_not_deferred(self) -> None:
+        rc, _, err = self.go("--via", "pane")
+        self.assertEqual((rc, relay.rec_all()), (1, []))
+        self.assertIn("cannot steer", err)
+        self.assertEqual(self.go("--via", "paseo")[0], 0)
+        self.assertEqual(len(relay.rec_all()), 1)
+
+    def test_a_working_claude_pane_is_still_sent_at_once_and_never_queued(self) -> None:
+        relay.fleet.sessions = lambda: [sess(agent="claude", status="working")]    # Claude Code queues typed text itself
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main(["peer-fb", "hello there friend", "--wait", "2"]), 0)
+        self.assertEqual((self.calls, relay.rec_all()), (["type"], []))
+
+    def test_a_working_non_claude_pane_is_queued_and_delivered_when_idle(self) -> None:
+        pane = {"v": sess(agent="codex")}
+        relay.fleet.sessions = lambda: [dict(pane["v"]), dict(self.sender, self=True)]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = relay.main(["peer-fb", "hello there friend", "--wait", "2"])
+        self.assertEqual((rc, self.calls, out.getvalue().startswith("queued: ")), (0, [], True), err.getvalue())
+        rid = relay.rec_all()[0]["id"]
+        pane["v"] = sess(agent="codex", status="idle")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.deliver(rid), 0)
+        self.assertEqual((self.calls, relay.rec_read(rid)["state"]), (["type"], "delivered"))    # type_line is the pane send
+
+    # ---- delivery ------------------------------------------------------------------------------------------
+
+    def test_the_deliverer_waits_while_busy_then_sends_once_with_the_queued_prefix(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.assertEqual(relay.rec_read(rid)["sender"], "alice")
+        self.age(rid, 130)
+        self.statuses = ["running", "running", "idle"]
+        self.assertEqual(relay.deliver(rid), 0)
+        self.assertEqual(self.sent, [(AGENT, "[relay from alice] [queued 2m ago] hello there friend")])
+        rec = relay.rec_read(rid)
+        self.assertEqual(rec["state"], "delivered")
+        self.assertIn("relayed to", rec["outcome"])
+        self.assertEqual(relay.deliver(rid), 0)    # a finished record is never sent again
+        self.assertEqual(len(self.sent), 1)
+
+    def test_no_prefix_under_a_minute(self) -> None:
+        rid = self.queue()
+        self.statuses = ["idle"]
+        relay.deliver(rid)
+        self.assertEqual(self.sent, [(AGENT, "[relay from alice] hello there friend")])
+
+    def test_it_going_busy_again_before_the_send_is_waited_out_not_failed(self) -> None:
+        rid = self.queue()
+        polls = iter(["idle", "running", "idle", "idle"])    # target_poll sees idle, main's own gate sees it working again, then both see idle
+
+        def inspect(agent: str) -> dict[str, Any]:
+            self.cur = next(polls)
+            return {"Id": agent, "Status": self.cur, "Archived": False, "PendingPermissions": []}
+        relay.paseo_inspect = inspect
+        relay.paseo_gate = lambda s: s.update(status="idle" if relay.paseo_inspect(AGENT)["Status"] == "idle" else "working")
+        relay.deliver(rid)
+        self.assertEqual(relay.rec_read(rid)["state"], "delivered")
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_send_that_failed_for_another_reason_is_never_retried(self) -> None:
+        rid = self.queue()
+        self.cur = "idle"
+        relay.send_paseo = lambda s, text, wait: self.sent.append((s["paseo"], text)) or None    # paseo send failed: not a busy refusal
+        with self.sleeps(0), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.deliver(rid), 0)    # a requeue would sleep: Stalled
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], len(self.messages())), ("failed", 1))
+        self.assertEqual(relay.deliver(rid), 0)
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_an_exception_in_the_send_fails_the_record_unverified_and_the_sender_is_told_to_check(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.cur = "idle"
+        sent = relay.send_paseo
+
+        def boom(s: dict[str, Any], text: str, wait: float) -> str:
+            if "your message" not in text:
+                raise RuntimeError("fleet fell over")
+            return sent(s, text, wait)
+        relay.send_paseo = boom
+        self.assertEqual(relay.deliver(rid), 0)
+        rec = relay.rec_read(rid)
+        self.assertEqual(rec["state"], "failed")
+        self.assertIn("do not resend", rec["outcome"])
+        self.assertIn("RuntimeError", self.log())
+        self.assertEqual(len(self.sent), 1)    # only the notice
+        self.assertEqual(self.sent[0][0], SENDER)
+        self.assertIn("unverified", self.sent[0][1])
+        self.assertIn("do not resend", self.sent[0][1])
+        self.assertNotIn("was failed", self.sent[0][1])
+
+    def test_a_send_that_died_midway_is_never_resent(self) -> None:
+        rid = self.queue()
+        relay.transition(rid, ("queued",), state="sending")
+        self.cur = "idle"
+        self.assertEqual(relay.deliver(rid), 0)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], self.messages()), ("failed", []))
+        self.assertIn("do not resend", rec["outcome"])
+
+    def test_a_sweep_fails_a_sending_record_whose_deliverer_is_gone_and_never_resends(self) -> None:
+        rid = self.queue()
+        self.patch_rec(rid, sender_ident="")    # no notice owed: only the sweep is under test
+        relay.transition(rid, ("queued",), state="sending")
+        self.cur = "idle"
+        relay.sweep_all()
+        self.assertEqual(relay.rec_read(rid)["state"], "failed")
+        self.assertNotIn((AGENT, "hello there friend"), self.sent)
+        self.assertEqual(self.spawned, [rid])    # only the original start: the sweep did not restart it
+
+    def test_past_its_expiry_it_is_expired_and_not_sent(self) -> None:
+        rid = self.queue("late", "--defer-for", "30")
+        self.patch_rec(rid, expires=time.time() - 1)
+        self.cur = "idle"
+        relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], self.messages()), ("expired", []))
+
+    def test_defer_for_is_capped_at_24_hours(self) -> None:
+        rid = self.queue("long", "--defer-for", "9999999")
+        rec = relay.rec_read(rid)
+        self.assertAlmostEqual(rec["expires"] - rec["created"], 24 * 3600, delta=2)
+
+    def test_an_expired_message_tells_its_sender_once(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.patch_rec(rid, expires=time.time() - 1)
+        relay.deliver(rid)
+        self.assertEqual([(a, "was expired" in t) for a, t in self.sent], [(SENDER, True)])
+
+    # ---- order, duplicates, bounds ----------------------------------------------------------------------------
+
+    def test_a_later_message_waits_for_the_earlier_one_to_the_same_target(self) -> None:
+        first, second = self.queue("first one"), self.queue("second one")
+        self.age(first, 10)
+        self.statuses = []
+        self.cur = "idle"
+        seen: list[int] = []
+
+        def sleeper(_s: float) -> None:
+            seen.append(len(self.sent))
+            relay.deliver(first)    # the earlier record's own deliverer gets its turn
+        with mock.patch.object(relay.time, "sleep", side_effect=sleeper):
+            relay.deliver(second)
+        self.assertEqual(seen, [0])
+        self.assertEqual([t.split("] ")[-1] for _, t in self.sent], ["first one", "second one"])
+
+    def test_a_message_waits_behind_an_earlier_one_that_is_being_sent(self) -> None:
+        first, second = self.queue("first one"), self.queue("second one")
+        self.age(first, 10)
+        relay.transition(first, ("queued",), state="sending", sending_since=time.time())
+        self.cur = "idle"
+        with relay.deliverer_lock(first) as got, self.sleeps(0):    # its deliverer is alive and mid-send
+            self.assertTrue(got)
+            with self.assertRaises(Stalled):
+                relay.deliver(second)
+        self.assertEqual((self.sent, relay.rec_read(second)["state"], self.inspects), ([], "queued", []))
+
+    def test_only_the_head_of_a_targets_queue_looks_at_the_target(self) -> None:
+        first, _, third = self.queue("one"), self.queue("two"), self.queue("three")
+        self.age(first, 20)
+        self.inspects.clear()
+        with relay.deliverer_lock(first), self.sleeps(0), self.assertRaises(Stalled):
+            relay.deliver(third)
+        self.assertEqual(self.inspects, [])    # one inspect per target per poll: the head's
+
+    def test_an_earlier_message_whose_deliverer_died_while_sending_does_not_block_the_next_one(self) -> None:
+        first, second = self.queue("first one"), self.queue("second one")
+        self.age(first, 10)
+        relay.transition(first, ("queued",), state="sending", sending_since=time.time())    # no lock held: its deliverer is gone
+        self.cur = "idle"
+        with self.sleeps(0):    # waiting on the dead first record would raise Stalled instead of hanging
+            relay.deliver(second)
+        self.assertEqual((relay.rec_read(first)["state"], relay.rec_read(second)["state"]), ("failed", "delivered"))
+        self.assertIn("do not resend", relay.rec_read(first)["outcome"])
+        self.assertEqual([t.split("] ")[-1] for _, t in self.sent], ["second one"])    # the first is never resent
+
+    def test_an_earlier_queued_message_without_a_deliverer_is_re_armed_first(self) -> None:
+        first, second = self.queue("first one"), self.queue("second one")
+        self.age(first, 10)
+        self.spawned.clear()
+        with self.sleeps(0), self.assertRaises(Stalled):
+            relay.deliver(second)
+        self.assertEqual((self.spawned, self.sent, relay.rec_read(second)["state"]), ([first], [], "queued"))
+
+    def test_a_message_sending_for_over_15_minutes_is_failed_unverified_even_with_a_live_deliverer(self) -> None:
+        first, second = self.queue("first one"), self.queue("second one")
+        self.age(first, 2000)
+        relay.transition(first, ("queued",), state="sending", sending_since=time.time() - 16 * 60)
+        self.cur = "idle"
+        with relay.deliverer_lock(first) as got, self.sleeps(0):    # a requeue-and-wait would raise Stalled instead of hanging
+            self.assertTrue(got)
+            relay.deliver(second)
+        self.assertEqual((relay.rec_read(first)["state"], relay.rec_read(second)["state"]), ("failed", "delivered"))
+
+    def test_identical_text_from_the_same_sender_to_the_same_target_collapses_into_the_first_record(self) -> None:
+        self.as_agent(SENDER)
+        a = self.queue("same words")
+        rc, out, _ = self.go(text="same words")
+        self.assertEqual(rc, 0)
+        self.assertIn("an identical message was already queued", out)
+        self.assertIn(a, out)
+        self.assertEqual(([r["id"] for r in relay.rec_all()], set(self.spawned)), ([a], {a}))    # the later run's sweep may re-arm the one record; never a second record
+        self.queue("other words")
+        self.assertEqual(len(relay.rec_all()), 2)
+
+    def test_the_same_text_from_another_sender_is_its_own_record_with_its_own_label_and_notice(self) -> None:
+        self.as_agent(SENDER)
+        a = self.queue("ready for review")
+        self.as_agent(CAROL)
+        b = self.queue("ready for review")
+        self.assertNotEqual(a, b)
+        self.assertEqual([(r["sender"], r["sender_ident"]) for r in relay.rec_all()], [("alice", SENDER), ("carol", CAROL)])
+
+    def test_a_final_record_never_swallows_a_later_identical_message(self) -> None:
+        self.as_agent(SENDER)
+        last = self.queue("again")
+        seen = {last}
+        for state in ("delivered", "failed", "cancelled", "expired"):
+            relay.transition(last, ("queued",), state=state)
+            last = self.queue("again")
+            self.assertNotIn(last, seen, state)
+            seen.add(last)
+
+    def test_a_queued_message_past_its_expiry_is_not_a_duplicate(self) -> None:
+        self.as_agent(SENDER)
+        a = self.queue("again")
+        self.patch_rec(a, expires=time.time() - 5)
+        with relay.deliverer_lock(a):    # a live deliverer: the opportunistic sweep leaves the record queued, so only the dedup rule decides
+            rc, out, _ = self.go(text="again")
+        self.assertEqual((rc, "an identical" in out, len(relay.rec_all()), relay.rec_read(a)["state"]), (0, False, 2, "queued"))
+
+    def test_the_queue_is_bounded_per_target(self) -> None:
+        with mock.patch.object(relay, "DEFER_PER_TARGET", 2):
+            self.as_agent(SENDER)
+            self.queue("one")
+            self.queue("two")
+            n = len(self.spawned)
+            rc, _, err = self.go(text="three")
+            self.assertEqual((rc, len(relay.rec_all()), set(self.spawned[n:]) <= {r["id"] for r in relay.rec_all()}), (1, 2, True))    # refused, not silently dropped, and no deliverer for a third record
+            self.assertIn("not sent: deferred queue full (2)", err)
+            self.assertEqual(self.go(text="one")[0], 0)    # a duplicate collapses even when the queue is full
+            self.queue("to other", to=OTHER)    # another target has room
+            self.as_agent(CAROL)
+            rc, _, err = self.go(text="carol")    # and so is every other sender's
+            self.assertEqual((rc, len(relay.rec_all())), (1, 3))
+
+    def test_the_queue_is_bounded_per_sender(self) -> None:
+        with mock.patch.object(relay, "DEFER_PER_SENDER", 2):
+            self.as_agent(SENDER)
+            self.queue("one")
+            self.queue("two", to=OTHER)
+            rc, _, err = self.go(text="three")
+            self.assertEqual((rc, len(relay.rec_all())), (1, 2))
+            self.assertIn("deferred queue full (2)", err)
+            self.as_agent(CAROL)
+            self.queue("carol's")    # another sender is not held back by alice's bound
+
+    def test_the_queue_is_bounded_in_total_and_a_finished_record_frees_a_place(self) -> None:
+        with mock.patch.object(relay, "DEFER_TOTAL", 2):
+            self.as_agent(SENDER)
+            first = self.queue("one")
+            self.as_agent(CAROL)
+            self.queue("two", to=OTHER)
+            rc, _, err = self.go(text="three")
+            self.assertEqual((rc, len(relay.rec_all())), (1, 2))
+            self.assertIn("deferred queue full (2)", err)
+            relay.transition(first, ("queued",), state="cancelled")
+            self.queue("three")
+
+    # ---- the deliverer's own environment ------------------------------------------------------------------------
+
+    def test_the_deliverer_is_started_with_a_new_environment_that_has_no_session_id(self) -> None:
+        mine = {"PATH": "/usr/bin:/bin", "HOME": "/home/x", "USER": "x", "LANG": "C", "LC_ALL": "C", "TMPDIR": "/tmp/x", "XDG_STATE_HOME": "/x/s",
+                "PASEO_CLI": "/bin/paseo", "RELAY_HERMES": "/bin/hermes", "SECRET_TOKEN": "hunter2", "HERMES_SESSION_ID": "h1",
+                **{k: f"/where/{k}" for k in WHERE_THINGS_LIVE},    # the paseo daemon selector, and where fleet finds Claude, herdr and its own state
+                **{k: "v" for k in relay.DELIVER_DROP}}
+        with mock.patch.dict(os.environ, mine), mock.patch.object(relay.subprocess, "Popen") as popen:
+            REAL_SPAWN("20261024-000000-abcdef")
+        argv, kw = popen.call_args.args[0], popen.call_args.kwargs
+        self.assertEqual((argv[-3:], argv[0]), (["--deliver", "20261024-000000-abcdef", "--detach"], sys.executable))
+        self.assertEqual((kw["start_new_session"], kw["close_fds"], kw.get("shell")), (True, True, None))
+        env = kw["env"]
+        for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "CLAUDE_CODE_SESSION_ID", "HERDR_PANE_ID", "HERDR_ENV", "ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE",
+                  "TMUX", "TMUX_PANE", "ACP_RUN_AGENT", "RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER", "SECRET_TOKEN", "HERMES_SESSION_ID"):
+            self.assertNotIn(k, env, k)
+        for k in ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "XDG_STATE_HOME", "PASEO_CLI", "RELAY_HERMES", *WHERE_THINGS_LIVE):
+            self.assertEqual(env[k], mine[k], k)
+        self.assertEqual((env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"]), (str(relay.DEFER_DIR.resolve()), str(relay.UNSENT.resolve())))
+
+    def test_a_relative_operator_path_reaches_the_deliverer_as_an_absolute_one(self) -> None:
+        """The deliverer chdir("/")s: RELAY_DEFER_DIR, RELAY_UNSENT and RELAY_HERMES_DIR given relative must name the same directory there."""
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(relay, "DEFER_DIR", Path("rel/deferred")), \
+                mock.patch.object(relay, "UNSENT", Path("rel/unsent.json")), mock.patch.object(relay, "HERMES_DIR", Path("rel/hermes")):
+            here = os.getcwd()
+            os.chdir(d)    # where the operator started the sender
+            try:
+                env = self.deliverer_env_of({"PATH": "/usr/bin", "RELAY_HERMES_DIR": "rel/hermes"})
+            finally:
+                os.chdir(here)
+            base = Path(d).resolve()
+            self.assertEqual((env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"], env["RELAY_HERMES_DIR"]),
+                             (str(base / "rel/deferred"), str(base / "rel/unsent.json"), str(base / "rel/hermes")))
+
+    def test_a_sweep_started_by_the_target_itself_still_delivers_to_it(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.cur = "idle"
+        env = self.deliverer_env_of({"PASEO_AGENT_ID": AGENT, "CLAUDE_CODE_SESSION_ID": "x", "PATH": "/usr/bin"})    # the target ran a relay: its sweep re-armed alice's record
+        self.assertEqual(self.deliver_in(env, rid), 0)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], self.sent, self.sent_as), ("delivered", [(AGENT, "[relay from alice] hello there friend")], [SENDER]))
+
+    def test_a_third_agents_sweep_keeps_the_real_senders_label_and_paseo_id(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.cur = "idle"
+        env = self.deliverer_env_of({"PASEO_AGENT_ID": CAROL, "HERDR_PANE_ID": "w1:p1", "PATH": "/usr/bin"})
+        self.deliver_in(env, rid)
+        self.assertEqual((self.sent, self.sent_as), ([(AGENT, "[relay from alice] hello there friend")], [SENDER]))    # not carol's
+
+    def test_the_stored_label_is_what_the_message_is_sent_under(self) -> None:
+        rid = self.queue()
+        self.patch_rec(rid, sender="custom-label")
+        self.statuses = ["idle"]
+        relay.deliver(rid)
+        self.assertEqual(self.sent, [(AGENT, "[relay from custom-label] hello there friend")])
+
+    def test_the_sender_paseo_id_is_stored_only_when_verified(self) -> None:
+        self.rows = [r for r in self.rows if r is not self.sender]    # no fleet row for the caller
+        self.as_agent(SENDER)
+        rc, _, err = self.go()    # PASEO_AGENT_ID in the env but no Paseo-hosted ancestor: not verified, so no identity at all
+        self.assertEqual((rc, relay.rec_all()), (1, []))
+        self.assertIn("deferring needs an identifiable sender", err)
+        relay.hosted_by = lambda a: a == SENDER
+        rec = relay.rec_read(self.queue("hosted"))
+        self.assertEqual((rec["sender_paseo"], rec["sender_ident"]), (SENDER, SENDER))
+
+    # ---- the failure notice -------------------------------------------------------------------------------------
+
+    def test_a_vanished_or_archived_target_fails_the_message_and_tells_the_sender_once(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.archived = True
+        relay.deliver(rid)
+        rec = relay.rec_read(rid)
+        self.assertEqual(rec["state"], "failed")
+        self.assertIn("archived", rec["outcome"])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][0], SENDER)
+        self.assertIn("relay: your message to [cccccccc] peer-fb was failed: ", self.sent[0][1])
+        self.assertTrue(self.log().count(" failed ") >= 1)
+        relay.deliver(rid)
+        self.assertEqual(len(self.sent), 1)    # one notice, whatever runs again
+
+    def test_a_notice_to_a_sender_in_a_herdr_pane_is_not_refused_as_this_session(self) -> None:
+        herd = sess(id="dddddddd", name="herd", agent="claude", sid=HERD_SID, status="idle", chan=("herdr", "w3:p3"), pid=777)
+        self.rows.append(herd)
+        os.environ.pop("PASEO_AGENT_ID", None)
+        os.environ.update(HERDR_PANE_ID="w3:p3", CLAUDE_CODE_SESSION_ID=HERD_SID)    # the sender runs in that pane
+        rid = self.queue()
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["sender"], rec["sender_ident"], rec["sender_paseo"]), ("herd", "dddddddd", ""))
+        self.archived = True
+        self.assertEqual(self.deliver_in(self.deliverer_env_of(dict(os.environ)), rid), 0)
+        self.assertEqual(relay.rec_read(rid)["state"], "failed")
+        self.assertEqual(self.calls, ["type"])    # the notice was typed into the sender's pane
+        self.assertRegex(self.log(), r"notice target=\S+ rc=0 relayed to \[dddddddd\] herd")
+
+    def test_a_notice_to_a_busy_sender_is_deferred_once_as_a_notice_and_no_notice_follows_it(self) -> None:
+        rid = self.queue()
+        self.sender["agent"], self.sender["status"] = "cline", "working"    # a sender that cannot steer and is working
+        relay.paseo_gate = lambda s: s.update(status="working")
+        self.archived = True
+        self.spawned.clear()
+        relay.deliver(rid)
+        recs = {r["id"]: r for r in relay.rec_all()}
+        self.assertEqual((recs[rid]["state"], recs[rid]["notice"], self.sent), ("failed", "done", []))
+        (nid,) = [i for i in recs if i != rid]
+        note = recs[nid]
+        self.assertEqual((note["kind"], note["state"], note["sender"], note["sender_ident"], self.spawned), ("notice", "queued", "relay", "", [nid]))
+        self.assertEqual(note["target"]["paseo"], SENDER)
+        self.assertAlmostEqual(note["expires"] - note["created"], 3600, delta=2)
+        self.assertIn("was failed", note["text"])
+        # the sender goes idle: the notice record is delivered like any record; and when it fails, it owes nothing
+        self.sender["agent"], self.sender["status"] = "claude", "idle"
+        relay.paseo_gate = lambda s: s.update(status="idle")
+        self.assertEqual(relay.deliver(nid), 0)
+        self.assertEqual((relay.rec_read(nid)["state"], [a for a, _ in self.sent]), ("delivered", [SENDER]))
+        self.assertIn("[relay from relay] ", self.sent[0][1])
+
+    def test_a_sender_that_cannot_be_identified_gets_no_notice(self) -> None:
+        rid = self.queue()
+        self.patch_rec(rid, sender_ident="")    # a record from before the sender had to be identifiable
+        self.archived = True
+        relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], relay.rec_read(rid)["notice"], self.sent), ("failed", "", []))
+
+    # ---- the sweep ---------------------------------------------------------------------------------------------
+
+    def test_sweep_restarts_a_queued_record_without_a_deliverer_and_expires_old_ones(self) -> None:
+        rid, old = self.queue("rearm me"), self.queue("too old")
+        self.spawned.clear()
+        self.patch_rec(old, expires=time.time() - 5, sender_ident="")    # no notice owed: only the re-arm is under test
+        with relay.deliverer_lock(rid) as got:    # a live deliverer holds its lock: not restarted
+            self.assertTrue(got)
+            relay.sweep_all()
+            self.assertEqual(self.spawned, [])
+        n = relay.sweep_all()
+        self.assertEqual((self.spawned, relay.rec_read(old)["state"], n["rearmed"]), ([rid], "expired", 1))
+
+    def test_every_relay_run_sweeps_opportunistically(self) -> None:
+        rid = self.queue("rearm me")
+        self.spawned.clear()
+        self.cur = "idle"
+        self.go(text="another message")
+        self.assertIn(rid, self.spawned)
+
+    def test_the_opportunistic_sweep_never_sends_or_waits_inside_an_unrelated_relay(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue("orphan")
+        relay.transition(rid, ("queued",), state="sending")    # its deliverer is gone
+        self.spawned.clear()
+        self.inspects.clear()
+        with mock.patch.object(relay, "run_captured", side_effect=AssertionError("a notice sent inline")):
+            self.go(text="unrelated")
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], rec["notice"], self.sent, rid in self.spawned), ("failed", "owed", [], True))
+        self.assertEqual(self.inspects, [])    # nothing looked at the target for the orphan
+        self.assertEqual(self.deliver_in(self.deliverer_env_of({}), rid), 0)    # a detached deliverer sends the owed notice, once
+        self.assertEqual([(a, "unverified" in t) for a, t in self.sent], [(SENDER, True)])
+        relay.deliver(rid)
+        self.assertEqual((len(self.sent), relay.rec_read(rid)["notice"]), (1, "done"))
+
+    def test_a_sweep_gives_an_owed_notice_to_a_final_record_a_new_deliverer(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.patch_rec(rid, state="failed", outcome="x", finished=time.time(), notice="owed")
+        self.spawned.clear()
+        self.assertEqual(relay.sweep_all()["noticed"], 1)
+        self.assertEqual(self.spawned, [rid])
+        self.patch_rec(rid, notice="done")
+        self.assertEqual(relay.sweep_all()["noticed"], 0)
+
+    def test_a_week_old_final_record_is_pruned(self) -> None:
+        rid = self.queue()
+        self.patch_rec(rid, state="delivered", finished=time.time() - 8 * 86400)
+        self.assertEqual((relay.sweep_all()["pruned"], relay.rec_read(rid)), (1, None))
+
+    def test_a_deliverer_really_started_is_a_grandchild_with_its_own_environment(self) -> None:
+        rid = "20261024-000001-abcdef"
+        now = time.time()
+        relay.rec_write({"id": rid, "target": {"id": "cccccccc", "paseo": AGENT}, "text": "hi there", "sender": "alice", "sender_ident": "",
+                         "created": now, "expires": now - 1, "state": "queued", "outcome": "", "pid": 0})    # already expired: it ends at once, touching nothing
+        pid = REAL_SPAWN(rid)
+        self.assertTrue(pid)
+        for _ in range(300):
+            rec = relay.rec_read(rid)
+            if rec and rec.get("state") == "expired":
+                break
+            time.sleep(0.05)
+        rec = relay.rec_read(rid)
+        self.assertEqual(rec["state"], "expired", rec)
+        self.assertNotIn(rec["ppid"], (os.getpid(), pid))    # not our child, not the first process's: init's
+        self.assertNotIn(rec["pid"], (os.getpid(), pid))
+
+    # ---- cancel and pending ------------------------------------------------------------------------------------
+
+    def test_cancel_withdraws_a_queued_message_and_the_deliverer_sends_nothing(self) -> None:
+        rid = self.queue()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(relay.main(["--cancel", rid]), 0)
+        self.assertEqual(relay.rec_read(rid)["state"], "cancelled")
+        self.cur = "idle"
+        relay.deliver(rid)
+        self.assertEqual(self.sent, [])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main(["--cancel", rid]), 1)    # no longer queued
+            self.assertEqual(relay.main(["--cancel", "../../etc/passwd"]), 1)
+
+    def test_a_message_being_sent_cannot_be_cancelled(self) -> None:
+        rid = self.queue()
+        relay.transition(rid, ("queued",), state="sending")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(relay.main(["--cancel", rid]), 1)
+        self.assertEqual(relay.rec_read(rid)["state"], "sending")
+        self.assertIn("only a queued message", err.getvalue())
+
+    def test_pending_lists_the_records_without_their_text_unless_asked(self) -> None:
+        rid = self.queue("a private brief")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(relay.main(["--pending", "--json"]), 0)
+        rows = json.loads(out.getvalue())
+        self.assertEqual([(r["id"], r["state"]) for r in rows], [(rid, "queued")])
+        self.assertNotIn("private", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            relay.main(["--pending"])
+        self.assertIn(rid, out.getvalue())
+        self.assertNotIn("private", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            relay.main(["--pending", "--text", "--json"])
+        self.assertEqual(json.loads(out.getvalue())[0]["text_preview"], "a private brief")
+
+    def test_a_record_that_is_a_symlink_is_not_read(self) -> None:
+        rid = self.queue()
+        real = relay.rec_path(rid)
+        moved = real.with_name("elsewhere.dat")
+        real.rename(moved)
+        real.symlink_to(moved)
+        self.assertIsNone(relay.rec_read(rid))
+
+    # ---- identity of the target and of the label ---------------------------------------------------------------
+
+    def test_a_recycled_pane_gets_nothing(self) -> None:
+        """A herdr row of a TUI herdr itself detected, as fleet really emits it (copied from `fleet.py list --json`, 2026-10-24): sid,
+        pid and transcript are all null. The identity is the pid of the pane's foreground process (herdr `pane process-info`)."""
+        for key, first, change in (("agent", {}, {"agent": "opencode"}), ("sid", {"sid": "s1"}, {"sid": "another-session"}),
+                                   ("transcript", {"transcript": "/t.jsonl"}, {"transcript": "/other/t.jsonl"}), ("pid", {}, {})):
+            pane = {"v": {**real_omp_row(status="working"), **first}, "procs": real_omp_procs(51921)}
+            relay.fleet.sessions = lambda: [dict(pane["v"]), dict(self.sender, self=True)]
+            relay.fleet.pane_procs = lambda p: (pane["procs"], 50626)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(relay.main(["w2N:pZ", f"for {key}", "--wait", "2"]), 0, key)
+            rec = relay.rec_all()[-1]
+            self.assertEqual((rec["target"]["agent"], rec["target"]["sid"], rec["target"]["pid"]), ("omp", first.get("sid", ""), 51921))
+            pane["v"] = {**real_omp_row(status="idle"), **first, **change}
+            if key == "pid":
+                pane["procs"] = real_omp_procs(60001)    # a new omp in the same pane id: the row is identical, the process is not
+            relay.deliver(rec["id"])
+            rec = relay.rec_read(rec["id"])
+            self.assertEqual(rec["state"], "failed", key)
+            self.assertIn("target changed", rec["outcome"])
+        self.assertEqual([c for c in self.calls if c == "type"], [])
+        pane = {"v": real_omp_row(status="working")}
+        relay.fleet.sessions = lambda: [dict(pane["v"]), dict(self.sender, self=True)]
+        relay.fleet.pane_procs = lambda p: (real_omp_procs(51921), 50626)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            relay.main(["w2N:pZ", "unchanged", "--wait", "2"])
+            pane["v"] = real_omp_row(status="idle")
+            relay.deliver(relay.rec_all()[-1]["id"])
+        self.assertEqual(self.calls, ["type"])    # the same process, now idle, takes it
+
+    def test_a_pane_row_with_no_way_to_tell_its_tui_apart_is_not_deferred(self) -> None:
+        relay.fleet.sessions = lambda: [real_omp_row(status="working"), dict(self.sender, self=True)]
+        relay.fleet.pane_procs = lambda p: (None, None)    # herdr could not read the pane's processes, and the row has no sid, pid or transcript
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = relay.main(["w2N:pZ", "hello there friend", "--wait", "2"])
+        self.assertEqual((rc, relay.rec_all(), self.spawned), (1, [], []))
+        self.assertIn("deferring needs a way to tell this pane's TUI from a later one", err.getvalue())
+
+    def test_an_unreadable_pane_at_poll_time_counts_as_an_error_not_a_match(self) -> None:
+        pane = {"procs": real_omp_procs(51921)}
+        relay.fleet.sessions = lambda: [real_omp_row(status="idle"), dict(self.sender, self=True)]
+        relay.fleet.pane_procs = lambda p: (pane["procs"], 50626)
+        rec = {"target": {"id": "w2N:pZ", "paseo": "", "agent": "omp", "sid": "", "transcript": "", "pid": 51921}}
+        self.assertEqual(relay.target_poll(rec), ("idle",))
+        pane["procs"] = None
+        self.assertEqual(relay.target_poll(rec)[0], "error")
+
+    # ---- round 3: a TUI's tool children are foreground processes too ---------------------------------------------
+
+    @staticmethod
+    def proc(pid: int, name: str, *argv: str) -> dict[str, Any]:
+        return {"pid": pid, "name": name, "argv": list(argv) or [name], "argv0": name, "cwd": "/Users/djbclark/ops"}
+
+    def pane(self, row: dict[str, Any], procs: Any) -> dict[str, Any]:
+        """Serve ROW and PROCS (a list, None for a herdr that cannot answer, or a callable) as the pane w2N:pZ."""
+        state = {"row": row, "procs": procs}
+        relay.fleet.sessions = lambda: [dict(state["row"]), dict(self.sender, self=True)]
+        relay.fleet.pane_procs = lambda p: ((state["procs"]() if callable(state["procs"]) else state["procs"]), 50626)
+        return state
+
+    def queue_pane(self) -> str:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 0)
+        return relay.rec_all()[-1]["id"]
+
+    def test_a_pane_with_tool_children_keeps_its_tui_and_stays_the_same_target(self) -> None:
+        tui = self.proc(51921, "omp", "omp", "--auto-approve")
+        state = self.pane(real_omp_row(status="working"), [self.proc(51990, "graft", "graft", "mcp"), tui, self.proc(51991, "cow", "cow", "mcp")])
+        rid = self.queue_pane()
+        self.assertEqual(relay.rec_read(rid)["target"]["pid"], 51921)    # the process named like the agent, not the first one
+        state["row"] = real_omp_row(status="idle")
+        state["procs"] = [self.proc(52100, "bash", "bash", "-c", "make"), tui, self.proc(52101, "make", "make")]    # other children now
+        self.assertEqual(relay.target_poll(relay.rec_read(rid)), ("idle",))
+        relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], self.calls), ("delivered", ["type"]))
+
+    def test_a_tui_is_found_by_the_binary_name_fleet_maps_to_its_label(self) -> None:
+        row = {**real_omp_row(status="working"), "agent": "cursor"}
+        self.pane(row, [self.proc(60001, "node", "node", "/x/mcp-server.js"),
+                        self.proc(60002, "cursor-agent", "/Users/djbclark/.local/bin/cursor-agent", "--yolo")])
+        self.assertEqual(relay.agent_pid(row), 60002)
+        self.pane(row, [self.proc(60001, "node", "node", "/x/mcp-server.js"), self.proc(60003, "node", "node", "/x/cursor-agent")])
+        self.assertEqual(relay.agent_pid(row), 60003)    # node-launched: the script is argv[1]
+
+    def test_a_pane_whose_process_cannot_be_picked_unambiguously_is_not_deferred(self) -> None:
+        for procs in ([self.proc(1, "omp", "omp"), self.proc(2, "omp", "omp", "--sub")],    # two processes named like the agent
+                      [self.proc(1, "graft", "graft"), self.proc(2, "cow", "cow")]):          # several, none named like it
+            self.pane(real_omp_row(status="working"), procs)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 1)
+            self.assertEqual((relay.rec_all(), self.spawned), ([], []))
+            self.assertIn("deferring needs a way to tell this pane's TUI", err.getvalue())
+
+    def test_the_stored_pid_missing_from_a_multi_process_pane_is_a_changed_target(self) -> None:
+        state = self.pane(real_omp_row(status="working"), [self.proc(51921, "omp", "omp"), self.proc(51990, "graft", "graft")])
+        rid = self.queue_pane()
+        state["row"] = real_omp_row(status="idle")
+        state["procs"] = [self.proc(60001, "omp", "omp"), self.proc(51990, "graft", "graft")]    # a new omp; an old child's pid is still there
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "fail")
+        relay.deliver(rid)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], self.calls), ("failed", []))
+        self.assertIn("target changed", rec["outcome"])
+
+    def test_a_tui_restarted_onto_the_same_session_is_still_the_target_but_a_new_session_is_not(self) -> None:
+        """C1: Claude's row carries sid AND pid. A restart onto the same sid (`--resume`, a sleeper wake) has a new pid and must still get
+        the message; /clear gives a new sid and fails it."""
+        row = {**real_omp_row(status="working"), "sid": "s1", "pid": 51921}
+        state = self.pane(row, [self.proc(51921, "omp", "omp")])
+        rid = self.queue_pane()
+        self.assertEqual(relay.rec_read(rid)["target"]["pid"], 51921)
+        state["row"] = {**real_omp_row(status="idle"), "sid": "s1", "pid": 60001}
+        state["procs"] = [self.proc(60001, "omp", "omp")]
+        self.assertEqual(relay.target_poll(relay.rec_read(rid)), ("idle",))
+        state["row"] = {**real_omp_row(status="idle"), "sid": "s2", "pid": 60001}    # /clear
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "fail")
+        self.assertIn("target changed", relay.target_poll(relay.rec_read(rid))[1])
+
+    def test_the_pid_of_a_row_with_a_session_id_is_not_asked_for_at_poll_time(self) -> None:
+        """C1: the pane's processes are not even read for a target that has a sid."""
+        row = {**real_omp_row(status="idle"), "sid": "s1", "pid": 60001}
+        self.pane(row, None)    # herdr cannot answer: a pid check would be an "error"
+        rec = {"target": {"id": "w2N:pZ", "paseo": "", "agent": "omp", "sid": "s1", "transcript": "", "pid": 51921}}
+        self.assertEqual(relay.target_poll(rec), ("idle",))
+
+    def undetected_row(self, pid: int, status: str = "working") -> dict[str, Any]:
+        """What fleet._pane_only emits for a TUI herdr does not detect (zcode, muse): fleet's own pid, no sid or transcript."""
+        return {**real_omp_row(status=status), "pid": pid, "undetected": True}
+
+    def test_an_undetected_pane_with_several_same_named_processes_is_refused_at_queue_time(self) -> None:
+        """C2: fleet._tui_of took the first of several same-named processes (often a child): no record with a guessed pid."""
+        self.pane(self.undetected_row(51990), [self.proc(51990, "omp", "omp", "--sub"), self.proc(51921, "omp", "omp")])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 1)
+        self.assertEqual((relay.rec_all(), self.spawned), ([], []))
+        self.assertIn("deferring needs a way to tell this pane's TUI", err.getvalue())
+        self.pane(self.undetected_row(51921), [self.proc(51921, "omp", "omp"), self.proc(51990, "graft", "graft")])    # one match: queued with fleet's pid
+        self.assertEqual(relay.rec_read(self.queue_pane())["target"]["pid"], 51921)
+
+    def test_an_undetected_pane_is_judged_by_membership_not_by_the_pid_fleet_picks_each_poll(self) -> None:
+        """C2: a same-named helper appears (fleet now picks it, being the higher pid) and goes away: the TUI is the same throughout."""
+        state = self.pane(self.undetected_row(51921), [self.proc(51921, "omp", "omp")])
+        rid = self.queue_pane()
+        state["row"] = self.undetected_row(52000, "idle")
+        state["procs"] = [self.proc(52000, "omp", "omp", "--helper"), self.proc(51921, "omp", "omp")]
+        self.assertEqual(relay.target_poll(relay.rec_read(rid)), ("idle",))
+        state["procs"] = [self.proc(60001, "omp", "omp")]    # the TUI itself was replaced
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "fail")
+        state["procs"] = None    # herdr restarting: counted, not failed
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "error")
+
+    def test_a_herdr_restart_shorter_than_the_error_limit_does_not_fail_a_pane_message(self) -> None:
+        tui = self.proc(51921, "omp", "omp")
+        state = self.pane(real_omp_row(status="working"), [tui, self.proc(51990, "graft", "graft")])
+        rid = self.queue_pane()
+        state["row"] = real_omp_row(status="idle")
+        n = [0]
+
+        def restart(_s: float) -> None:
+            n[0] += 1
+            state["procs"] = [tui] if n[0] >= 2 else None    # herdr answers nothing for two looks (about 10 s), then comes back
+        state["procs"] = None
+        with mock.patch.object(relay.time, "sleep", side_effect=restart):
+            relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], self.calls, n[0]), ("delivered", ["type"], 2))
+
+    # ---- round 2: sender identity, notices that are deferred, daemon errors, late sends -------------------------
+
+    def test_a_caller_with_no_identifiable_sender_is_refused_not_queued(self) -> None:
+        os.environ.pop("PASEO_AGENT_ID")    # a launchd script: no verified Paseo id and no fleet `self` row
+        rc, out, err = self.go()
+        self.assertEqual((rc, out, relay.rec_all(), self.spawned), (1, "", [], []))
+        self.assertIn("not sent: that session is busy and cannot take it now; deferring needs an identifiable sender "
+                      "(it gets a notice if the send fails). Retry with --idle S, or --no-defer for the plain refusal", err)
+        relay.fleet.sessions = lambda: [real_omp_row(status="working")]    # the same for a pane target
+        relay.fleet.pane_procs = lambda p: (real_omp_procs(51921), 50626)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err2:
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 1)
+        self.assertEqual((relay.rec_all(), self.spawned), ([], []))
+        self.assertIn("identifiable sender", err2.getvalue())
+
+    def notice_rec(self, i: int, text: str | None = None, **kw: Any) -> dict[str, Any]:
+        """A queued `kind: notice` record to the sender (what notify_sender queues for a busy sender)."""
+        return {"id": f"20261024-1200{i:02d}-aaaaaa", "target": {"id": "bbbbbbbb", "paseo": SENDER, "name": "alice", "agent": "claude",
+                                                                 "sid": "", "transcript": "", "pid": 0},
+                "text": text or f"note {i}", "sender": "relay", "sender_ident": "", "sender_paseo": "", "kind": "notice", "hops": 0,
+                "created": time.time(), "expires": time.time() + 3600, "state": "queued", "outcome": "", "pid": 0, "notice": "", **kw}
+
+    def test_a_failed_notice_record_owes_no_notice(self) -> None:
+        relay.rec_write(self.notice_rec(1, sender_ident=SENDER))    # even a notice record that names a sender (a hand-written one) owes no notice
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": True, "PendingPermissions": []}
+        nid = relay.rec_all()[0]["id"]
+        self.assertEqual(relay.deliver(nid), 0)
+        rec = relay.rec_read(nid)
+        self.assertEqual((rec["state"], rec["notice"], self.sent, self.spawned), ("failed", "", [], []))    # nobody is told about a notice: no loop
+
+    def test_a_notice_is_never_collapsed_with_a_normal_record(self) -> None:
+        self.sender["agent"], self.sender["status"] = "cline", "working"
+        relay.paseo_gate = lambda s: s.update(status="working")
+        text = "relay: your message to [cccccccc] peer-fb was failed: x"
+        normal = self.notice_rec(1, text, kind="")    # a normal record that would absorb the notice: same target, same text, same sender key
+        relay.rec_write(normal)
+        with relay.as_caller("relay", scrub=True, notice=True), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main([SENDER, text, "--wait", "2"], sweep=False), 0)
+        self.assertEqual(sorted(r.get("kind") or "" for r in relay.rec_all() if r.get("text") == text), ["", "notice"])
+
+    def test_notices_have_their_own_cap_of_20_and_do_not_use_the_normal_ones(self) -> None:
+        notice = self.notice_rec
+        for i in range(20):
+            relay.rec_write(notice(i))
+        self.assertEqual(self.go()[0], 0)    # 20 queued notices take no room from normal messages
+        self.sender["agent"], self.sender["status"] = "cline", "working"
+        relay.paseo_gate = lambda s: s.update(status="working")
+        with relay.as_caller("relay", scrub=True, notice=True), contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = relay.main([SENDER, "one too many", "--wait", "2"], sweep=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("deferred notice queue full (20)", err.getvalue())
+
+    def test_the_final_state_and_the_owed_notice_are_written_together(self) -> None:
+        rid = self.queue()
+        writes: list[tuple[str, str]] = []
+        real_write = relay.rec_write
+        relay.rec_write = lambda rec: writes.append((rec.get("state"), rec.get("notice"))) or real_write(rec)
+        self.addCleanup(setattr, relay, "rec_write", real_write)
+        self.archived = True
+        relay.deliver(rid)
+        finals = [w for w in writes if w[0] == "failed"]
+        self.assertEqual(finals[0], ("failed", "owed"))    # a kill between two writes would leave a final record that owes nothing
+
+    def test_a_daemon_that_cannot_answer_fails_the_message_only_after_three_errors_in_a_row(self) -> None:
+        rid = self.queue()
+        self.probe_kind = "error"
+        with self.sleeps(2):
+            self.assertEqual(relay.deliver(rid), 0)    # error, sleep, error, sleep, error: failed (a 3rd sleep would be Stalled)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], len(self.inspects)), ("failed", 3))
+        self.assertIn("could not answer", rec["outcome"])
+        rid2 = self.queue("second")
+        self.cur = "idle"
+        n = [0]
+
+        def recover(_s: float) -> None:
+            n[0] += 1
+            self.probe_kind = "" if n[0] >= 2 else "error"    # two errors, then Paseo answers
+        with mock.patch.object(relay.time, "sleep", side_effect=recover):
+            relay.deliver(rid2)
+        self.assertEqual((relay.rec_read(rid2)["state"], len(self.messages())), ("delivered", 1))
+
+    def test_not_found_and_could_not_ask_are_counted_apart(self) -> None:
+        rid = self.queue()
+        self.cur = "idle"
+        seq = iter(["notfound", "notfound", "error", "error", ""])    # never three of one kind in a row
+
+        def next_kind(_s: float) -> None:
+            self.probe_kind = next(seq)
+        self.probe_kind = next(seq)
+        with mock.patch.object(relay.time, "sleep", side_effect=next_kind):
+            relay.deliver(rid)
+        self.assertEqual(relay.rec_read(rid)["state"], "delivered")
+        self.cur = "running"
+        rid3 = self.queue("third")
+        self.probe_kind = "notfound"
+        with self.sleeps(2):
+            relay.deliver(rid3)
+        rec = relay.rec_read(rid3)
+        self.assertEqual(rec["state"], "failed")
+        self.assertIn("does not confirm", rec["outcome"])
+
+    def test_a_pending_permission_is_waited_for_and_an_archived_agent_still_fails(self) -> None:
+        rid = self.queue()
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": False, "PendingPermissions": [{"id": "p1"}]}
+        with self.sleeps(0), self.assertRaises(Stalled):
+            relay.deliver(rid)    # busy: it waits for the card to be answered
+        self.assertEqual((relay.rec_read(rid)["state"], self.sent), ("queued", []))
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": True, "PendingPermissions": [{"id": "p1"}]}
+        relay.deliver(rid)
+        self.assertEqual(relay.rec_read(rid)["state"], "failed")
+
+    def test_a_paseo_probe_tells_not_found_from_a_daemon_that_cannot_answer(self) -> None:
+        def probe(rc: int, out: str) -> str:
+            with mock.patch.object(relay, "paseo_run", return_value=(rc, out, "")):
+                return REAL_PROBE(AGENT)[1]
+        found = json.dumps({"Id": AGENT, "Status": "idle"})
+        self.assertEqual(probe(0, found), "ok")
+        self.assertEqual(probe(0, json.dumps({"Id": OTHER})), "notfound")
+        self.assertEqual(probe(1, json.dumps({"error": {"code": "AGENT_NOT_FOUND", "message": "Agent not found"}})), "notfound")
+        self.assertEqual(probe(1, json.dumps({"error": {"code": "DAEMON_UNREACHABLE", "message": "Cannot connect"}})), "error")
+        self.assertEqual(probe(124, ""), "error")    # a timed-out CLI
+        self.assertEqual(probe(127, ""), "error")    # no CLI
+        self.assertEqual(probe(0, "not json"), "error")
+
+    def test_a_send_that_outlives_the_15_minute_rule_is_logged_unverified_and_the_notice_goes_out(self) -> None:
+        rid = self.queue()
+        self.cur = "idle"
+        real = relay.send_paseo
+
+        def slow(s: dict[str, Any], text: str, wait: float) -> str:
+            if "your message to" in text:
+                return real(s, text, wait)
+            self.patch_rec(rid, sending_since=time.time() - 16 * 60)
+            relay.revive(relay.rec_read(rid))    # a sweep: 15 minutes in `sending`, with this deliverer still alive
+            return real(s, text, wait)    # the send itself went through
+        relay.send_paseo = slow
+        self.assertEqual(relay.deliver(rid), 0)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], rec["notice"]), ("failed", "done"))
+        self.assertNotRegex(self.log(), rf"{rid} delivered")    # the log says what the record says
+        self.assertRegex(self.log(), rf"{rid} unverified ")
+        notes = [t for a, t in self.sent if a == SENDER]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("unverified (it may have been delivered): do not resend", notes[0])
+
+    def test_a_deliverer_whose_record_was_failed_under_it_stops_without_sending(self) -> None:
+        rid = self.queue()
+        self.cur = "running"
+
+        def stop(_s: float) -> None:
+            relay.finish(rid, "failed", relay.UNVERIFIED_WHY, allowed=("queued",), notify="later")
+            self.cur = "idle"    # it would be sendable now: the deliverer must still not send
+        with mock.patch.object(relay.time, "sleep", side_effect=stop):
+            self.assertEqual(relay.deliver(rid), 0)
+        self.assertEqual((self.messages(), relay.rec_read(rid)["notice"]), ([], "done"))
+        self.assertEqual(len([a for a, _ in self.sent if a == SENDER]), 1)    # and the notice it owed went out, once
+
+    def test_detach_leaves_the_spawners_directory_and_sets_no_umask_its_children_would_inherit(self) -> None:
+        with (mock.patch.object(relay.os, "fork", return_value=0), mock.patch.object(relay.os, "getppid", return_value=1),
+              mock.patch.object(relay.os, "chdir") as chdir, mock.patch.object(relay.os, "umask") as umask):
+            relay.detach()
+        chdir.assert_called_once_with("/")
+        umask.assert_not_called()
+
+    def test_the_files_a_deliverer_makes_itself_are_private_whatever_the_umask(self) -> None:
+        old = os.umask(0o022)    # the spawner's usual umask: nothing in the deliverer may depend on it being 077
+        try:
+            rid = self.queue()
+            self.cur = "idle"
+            relay.deliver(rid)
+        finally:
+            os.umask(old)
+        modes = {p.name: p.stat().st_mode & 0o777 for p in relay.DEFER_DIR.parent.rglob("*") if p.is_file()}    # the records, the lock, deferred.log
+        self.assertIn("deferred.log", modes)
+        self.assertEqual(set(modes.values()), {0o600}, modes)
+
+    def test_a_cancel_that_races_a_prune_is_a_clean_refusal(self) -> None:
+        rid = self.queue()
+        real_read = relay.rec_read
+        reads = []
+
+        def vanishing(r: str) -> Any:
+            reads.append(r)
+            return real_read(r) if len(reads) == 1 else None    # the sweep pruned it after the first read
+        with mock.patch.object(relay, "rec_read", vanishing), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = relay.cancel_cmd(rid)
+        self.assertIn(rc, (0, 1))    # never an AttributeError
+        self.assertEqual(relay.cancel_cmd("20261024-000000-ffffff"), 1)
+
+    def test_the_stored_label_goes_through_the_sanitizer_and_the_hermes_forgery_rule(self) -> None:
+        for label, hops in (("x] [relay from hermes abcd\n", 0), ("hermes abcd", 0), ("a" * 41, 0), ("", 0)):
+            self.cur = "running"
+            rid = self.queue(f"for {label!r}")
+            self.patch_rec(rid, sender=label, hops=hops)
+            self.cur = "idle"
+            self.assertEqual(relay.deliver(rid), 0)
+            rec = relay.rec_read(rid)
+            self.assertEqual(rec["state"], "failed", label)
+            self.assertIn("sender label", rec["outcome"])
+        self.assertEqual(self.sent, [])
+        self.cur = "running"
+        rid = self.queue("from hermes")
+        self.patch_rec(rid, sender="hermes abcd1234", hops=1)    # a label hermes_env really sets, with the hops that go with it
+        self.cur = "idle"
+        relay.deliver(rid)
+        self.assertEqual(self.sent, [(AGENT, "[relay from hermes abcd1234] from hermes")])
+
+    def test_a_refused_label_gets_no_notice(self) -> None:
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.patch_rec(rid, sender="x] [y")
+        self.cur = "idle"
+        relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], self.sent), ("failed", []))
+
+    def test_a_session_merely_named_like_a_hermes_relay_is_queued_as_unknown(self) -> None:
+        self.sender["name"] = "hermes abcd"
+        self.as_agent(SENDER)
+        self.assertEqual(relay.rec_read(self.queue())["sender"], "unknown")
+
+    def test_the_hop_count_is_stored_and_set_for_the_deliverer(self) -> None:
+        os.environ["RELAY_HOPS"] = "2"
+        rid = self.queue()
+        self.assertEqual(relay.rec_read(rid)["hops"], 2)    # no valid RELAY_HOP_PARENT: counted, as hermes_hops does
+        os.environ.pop("RELAY_HOPS")
+        self.statuses = ["idle"]
+        relay.deliver(rid)
+        self.assertEqual(os.environ.get("RELAY_HOPS"), "2")
+
+
+class TestSenderName(Harness):
+    def test_a_non_claude_paseo_caller_is_named_from_its_fleet_row(self) -> None:
+        os.environ["PASEO_AGENT_ID"] = SENDER
+        row = sess(id="bbbbbbbb", name="cline-worker", agent="cline", host="paseo", paseo=SENDER, chan=("paseo", SENDER))
+        self.assertEqual(relay.sender_name([sess(self=False), row]), "cline-worker")
+
+    def test_a_paseo_caller_with_no_row_is_named_by_its_short_id(self) -> None:
+        os.environ["PASEO_AGENT_ID"] = SENDER
+        self.assertEqual(relay.sender_name([]), "bbbbbbbb")
+
+    def test_unknown_only_when_nothing_identifies_the_caller(self) -> None:
+        self.assertEqual(relay.sender_name([]), "unknown")
+        os.environ["PASEO_AGENT_ID"] = "not-a-uuid"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "12345678-aaaa"
+        self.assertEqual(relay.sender_name([]), "12345678")
+
+    def test_a_self_row_still_wins_and_the_hermes_forgery_rule_is_unchanged(self) -> None:
+        os.environ["PASEO_AGENT_ID"] = SENDER
+        self.assertEqual(relay.sender_name([sess(name="me", **{"self": True})]), "me")
+        os.environ["RELAY_SENDER"] = "hermes abcd1234"    # no RELAY_HOPS: a forgery
+        self.assertEqual(relay.sender_name([]), "bbbbbbbb")
+
+    def test_a_stored_label_is_sanitized_like_any_other_and_a_hermes_one_needs_hops(self) -> None:
+        with relay.as_caller("x] [relay from y\nz"):
+            self.assertEqual(relay.sender_name([]), "x relay from yz")
+        with relay.as_caller("hermes abcd"):
+            self.assertEqual(relay.sender_name([]), "unknown")
+            os.environ["RELAY_HOPS"] = "1"
+            self.assertEqual(relay.sender_name([]), "hermes abcd")
 
 
 if __name__ == "__main__":

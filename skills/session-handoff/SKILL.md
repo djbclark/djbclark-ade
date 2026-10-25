@@ -79,7 +79,10 @@ read.
          --state-root ~/.local/state/handoffs \
          --dir ~/.local/state/handoffs/<repo>/<task>
 
-   It prints `stale: true` per workspace alongside `actual_head`, so the
+   A chain found through the discovery fallback (all its workspaces are side)
+   has no pointer directory: give
+   `--dir ~/.local/state/handoffs/chains/<chain-key>` instead. It prints
+   `stale: true` per workspace alongside `actual_head`, so the
    verdict is a field to read, not a sentence to interpret.
 4. **Check the memory layers the log cannot see** (added 2026-08-23). A
    `SESSION_LOG.md` only knows what *its own* session wrote. Decisions
@@ -157,7 +160,7 @@ anchor in your log but gets no pointer, keeps the owner's sidecars, and its
 head moving does not make your log stale. A chain whose repos are all owned by
 other chains lists them all as side; its log is then found through
 `ls ~/.local/state/handoffs/chains/` (the discovery fallback) and read with
-`read --dir ~/.local/state/handoffs/chains/<chain-key>`.
+`read --state-root ~/.local/state/handoffs --dir ~/.local/state/handoffs/chains/<chain-key>`.
 
 `read`/`fold` take `--state-root` and `--dir <pointer-directory>`; `read`
 returns the staleness verdict pre-computed per workspace. Only edit files

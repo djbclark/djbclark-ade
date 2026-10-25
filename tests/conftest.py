@@ -1,5 +1,7 @@
 """Shared pytest setup for the djbclark-ade tests."""
+import atexit
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -46,3 +48,12 @@ if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1")
 os.environ["CLAUDE_GOVERNOR_STATE"] = "/nonexistent/claude-governor-state.json"
 # the governor also reads the quota guard's state (bin/claude-quota-guard): a test never sees the real one
 os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.json"
+# relay.py reads RELAY_DEFER_DIR once, at import: every test module that loads it (test_relay_*.py, test_session_relay.py)
+# gets a throwaway queue directory, so no test reads, sweeps, expires or prunes the operator's real deferred-send queue
+# ~/.local/state/relay/deferred (2026-10-24: test_session_relay.py ran relay.main(), whose opportunistic sweep expired and
+# pruned real records and started real deliverers). Unconditional: an outer value must not point the suite at a real queue.
+# tests/test_zz_relay_real_state_untouched.py proves a freshly loaded relay.py points at this directory, never the real one.
+REAL_RELAY_DIR = Path.home() / ".local/state/relay"
+_DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-defer-"))
+atexit.register(shutil.rmtree, _DEFER_ROOT, ignore_errors=True)
+os.environ["RELAY_DEFER_DIR"] = str(_DEFER_ROOT / "relay" / "deferred")

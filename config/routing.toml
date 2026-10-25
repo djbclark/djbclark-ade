@@ -4,7 +4,9 @@
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
 # only through the `frontier` kind, one slice per pool per wave; judgment is
-# Opus 5.5 at high; everyday work goes to the OTHER pools; copilot is the one
+# Opus 5.5 at high; everyday work goes to the OTHER pools, plus codex's everyday
+# models (never astra) while its quota is plentiful (`plenty_min`, operator 2026-10-25);
+# copilot is the one
 # reserve, with a hard floor (GitHub-side Copilot review runs on it; grok is an
 # ordinary pool since 2026-10-18, when GrokBot moved to its own Cursor pool);
 # hermes is never a target; omp (the Claude API credits) is an ordinary tier since
@@ -48,6 +50,12 @@ pace_penalty_judgment_factor = 0.5
 quality_max_rank_gap = { code = 10, judgment = 10 }
 # Most `frontier` slices one wave puts on a single pool (operator 2026-10-18).
 frontier_per_wave = 1
+# Pools with `plenty_kinds` (codex's everyday kinds, operator 2026-10-25: "if we have lots of codex
+# quota and it is the best of available options we can use it for non-frontier") are eligible for
+# those kinds only while the binding headroom (the tightest window of the pool, 5-hour and weekly
+# alike) is at least this many percent; below it, or with no fresh reading, codex is frontier-only
+# again, so a wave cannot empty the 5-hour window the way four astra slices did on 2026-10-18.
+plenty_min = 50.0
 # Below this much of the Fable sublimit, frontier on claude falls back to Opus.
 fable_min_left = 10.0
 # Curated profiles overlay discovery; anything discovered without one gets
@@ -120,8 +128,12 @@ extra = { crush = " --acp-arg=--strip-user-config" }
 # gpt-6-astra median 65% of codex's 5-hour window across 4 measured slices).
 # 2026-10-19: the codex plan changed (Plus to the $100 plan, aiuse "prolite"); this
 # floor awaits re-calibration from `route_agent.py calibrate`. Value unchanged.
+# A key `SERVICE:frontier` floors only a slice on a [dispatch].frontier_models model;
+# plain `SERVICE` floors every other slice (2026-10-25: codex's everyday models, luna and
+# 6.1-sol, are not astra; 10.0 is a guess until `calibrate` has measured slices).
 [dispatch.estimate_floor]
-codex = 60.0
+"codex:frontier" = 60.0
+codex = 10.0
 claude = 8.0
 antigravity-claude = 15.0
 
@@ -203,10 +215,10 @@ models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "a
 
 [[service]]
 name = "codex"
-cli = "codex (gpt-6-astra, frontier only)"
-good_at = { frontier = 1 }
+cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds while quota is plentiful)"
+good_at = { frontier = 1, mechanical = 12, code = 15, bulk = 20 }
 billing = "subscription"
-note = "top frontier coding model: only a slice that really needs astra to look it over; one at a time"
+note = "frontier: only a slice that really needs astra to look it over; code/bulk/mechanical on gpt-6.1-sol / gpt-6-luna only while every codex window has >= [routing].plenty_min left (operator 2026-10-25); one at a time"
 judgment_tier = true
 max_parallel = 1
 # Tolerated rather than committed: OpenAI neither permits nor
@@ -217,13 +229,23 @@ max_parallel = 1
 # worth reserving for coding judgment rather than spending on
 # background agent turns.
 access = "cli-only"
-# No judgment/code/research rows (operator 2026-10-18): the 2026-10-15
-# fall-through let plan, and leads copying it, put whole waves on
-# astra; its 5-hour window holds about one hard slice. acp-dispatch
-# also refuses a second codex slice while one is in flight.
+# Everyday kinds (operator 2026-10-25: "if we have lots of codex quota and it is the best of
+# available options we can use it for non-frontier"): `plenty_kinds` makes those kinds eligible
+# only while the pool's tightest window holds at least [routing].plenty_min percent; below it
+# (or with no fresh reading) codex is frontier-only again. They rank like any other pool
+# (code 15: behind agy's Claude pool, claude, omp and Cursor Auto, ahead of zai and
+# opencode-go; mechanical 12, bulk 20: behind the free pools). astra stays frontier-only
+# (`[dispatch].frontier_models`), and no research/judgment/github row: conservative.
+# Models: code on gpt-6.1-sol, the "latest workhorse model for coding and everyday work"
+# (acp-run codex --info, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
+# affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
+# easier tasks) and nothing here measures the older gpt-6-sol as cheaper.
+# 2026-10-18's astra-wave incident: its 5-hour window holds about one hard slice. acp-dispatch
+# also reserves in-flight estimates per service. max_parallel = 1 keeps one codex slice per wave.
 # 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
 # and the in-flight rule await re-calibration from `route_agent.py calibrate`.
-models ={ frontier = "gpt-6-astra --effort high" }
+plenty_kinds = ["code", "bulk", "mechanical"]
+models = { frontier = "gpt-6-astra --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
 
 # agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
 # Pro subscription, a separate 5h/weekly window from Gemini. Operator
