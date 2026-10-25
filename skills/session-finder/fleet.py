@@ -424,6 +424,47 @@ def dispatch_record(sid):
     return _DISPATCH.get(sid)
 
 
+def _same_process(rec):
+    """True when the record's pid is alive and, if the record stored `pid_start` (`ps -o lstart=`), still the process that
+    started it: a pid reused after a reboot is not the slice. A `ps` that fails proves nothing, so the pid alone stands."""
+    pid = rec.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1 or not alive(pid):    # pid 0 and -1 would signal a group
+        return False
+    want = rec.get("pid_start")
+    if not want:
+        return True
+    rc, out = run("ps", "-o", "lstart=", "-p", str(pid))
+    return rc != 0 or not out.strip() or out.strip() == want
+
+
+def dispatch_target(path):
+    """(row, None) for the acp-dispatch job record at the exact PATH, or (None, why) when relay must not send to it. For a
+    record that `dispatch_record` cannot find: a slice started with `--out` somewhere else (a /tmp work tree) or a headless
+    omp/codex slice that has no fleet row (2026-10-25: relay.py could not reach a running Collie worker whose record was
+    /private/tmp/.../jobs/collie-native.json). Nothing is searched: the caller names the file. Only an unfinished, unclosed
+    record whose process is still the one that launched it is a target; a finished one is refused, never resumed."""
+    p = Path(path).expanduser().resolve()
+    try:
+        rec = json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        return None, f"unreadable acp-dispatch record {p}: {e}"
+    if not isinstance(rec, dict) or not all(isinstance(rec.get(k), str) and rec[k] for k in ("agent", "dir")):
+        return None, f"{p} is not an acp-dispatch job record (it needs string `agent` and `dir` fields)"
+    name = rec.get("name") if isinstance(rec.get("name"), str) and rec["name"] else p.stem
+    done = rec.get("done")
+    if rec.get("closed") or rec.get("finished") or rec.get("status") != "running" or (isinstance(done, str) and done and Path(done).exists()):
+        state = "closed" if rec.get("closed") else f"finished ({rec.get('status') or 'no status'})"
+        return None, (f"slice {name} is {state}: a message would never be read, and relay never resumes a finished slice; "
+                      f"give it to the next run with `acp-dispatch resume {p} -p '<message>'`")
+    if rec.get("pid") is not None and not _same_process(rec):
+        return None, f"slice {name}: its process (pid {rec.get('pid')}) is gone or is another process now; it is not running"
+    sid = rec["session_id"] if isinstance(rec.get("session_id"), str) else None
+    pid = rec["pid"] if isinstance(rec.get("pid"), int) else None
+    return _rec(id=name, agent=rec["agent"], host="dispatch", sid=sid, name=name, cwd=rec["dir"], status="working", pid=pid,
+                self=pid in ancestors(), dispatch_rec=str(p),
+                reach=f'acp-dispatch tell {p} "<text>" (a headless acp-dispatch slice: no pane to relay into)'), None
+
+
 def claude_reach(d, sid):
     """How to message a running Claude TUI. SendMessage needs the session's messaging socket (the
     registry's messagingSocketPath) and a caller whose ListAgents lists it: a workflow sub-agent's often

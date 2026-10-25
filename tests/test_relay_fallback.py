@@ -1042,6 +1042,125 @@ class TestOtherRoutes(Harness):
         self.assertIn("acp-dispatch", out)
 
 
+class TestExplicitDispatchRecord(Harness):
+    """An acp-dispatch job record named by exact path is a relay target on its own (2026-10-25: a running Collie omp worker whose
+    `--out` record was /private/tmp/.../jobs/collie-native.json was in no bigteam glob and no fleet row, so relay found no session)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.jobs = self.tmp / "elsewhere" / "jobs"    # outside BIGTEAM and STATE_DIR: nothing may find it by searching
+        self.jobs.mkdir(parents=True)
+        self.tell: list[list[str]] = []
+        self.tell_result = (0, "delivered: inbox", "")
+        real_run = relay.subprocess.run
+
+        def run(cmd: Any, **kw: Any) -> Any:
+            if len(cmd) > 1 and Path(cmd[0]).name == "acp-dispatch":
+                self.tell.append(list(cmd))
+                return mock.Mock(returncode=self.tell_result[0], stdout=self.tell_result[1], stderr=self.tell_result[2])
+            return real_run(cmd, **kw)    # `ps` for the record's pid_start
+        patcher = mock.patch.object(relay.subprocess, "run", run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def record(self, name: str = "collie-native", **kw: Any) -> Path:
+        rec = {"name": name, "agent": "omp", "dir": str(self.tmp), "status": "running", "session_id": "01a17369-ff4b-731a-88ea-1731546b7284",
+               "pid": os.getpid(), "finished": None, "closed": None, "exit": None, "report": str(self.jobs / f"{name}-report.md"),
+               "done": str(self.jobs / f"{name}-report.md.done"), **kw}
+        path = self.jobs / f"{name}.json"
+        path.write_text(json.dumps(rec))
+        return path
+
+    def relay_to(self, ident: Any, *argv: str) -> tuple[int, str, str]:
+        relay.fleet.sessions = lambda: []    # a headless omp slice has no fleet row
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = relay.main(["--wait", "2", str(ident), "please ack ack-1", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_running_headless_record_outside_every_glob_is_told_and_only_queued(self) -> None:
+        path = self.record()
+        rc, out, err = self.relay_to(path, "--via", "dispatch", "--json")
+        self.assertEqual(rc, 0, err)
+        res = json.loads(out)
+        self.assertEqual((res["route"], res["result"]), ("dispatch", "queued"))    # the inbox write is not a read
+        want = path.resolve()    # the tmp dir sits behind a symlink on macOS (/var -> /private/var); relay resolves it as acp-dispatch does
+        self.assertEqual((res["inbox"], res["replies"]), (str(want.with_suffix(".inbox.md")), str(want.with_suffix(".replies.md"))))
+        argv = self.tell[0]
+        self.assertEqual(argv[1], "tell")
+        self.assertEqual(argv[argv.index("--") + 1:], [str(path.resolve()), "please ack ack-1"])
+
+    def test_active_record_with_a_stored_pid_start_is_accepted_and_a_reused_pid_is_not(self) -> None:
+        start = relay.subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True, check=False).stdout.strip()
+        self.assertTrue(start)
+        rc, _, err = self.relay_to(self.record("same", pid_start=start))
+        self.assertEqual(rc, 0, err)
+        self.tell.clear()
+        rc, _, err = self.relay_to(self.record("reused", pid_start="Mon Jan  1 00:00:00 1990"))
+        self.assertEqual(rc, 1)
+        self.assertIn("another process now", err)
+        self.assertEqual(self.tell, [])
+
+    def test_a_dead_pid_is_not_a_running_slice(self) -> None:
+        child = relay.subprocess.Popen(["true"])
+        child.wait()
+        rc, _, err = self.relay_to(self.record(pid=child.pid))
+        self.assertEqual(rc, 1)
+        self.assertIn("is gone", err)
+        self.assertEqual(self.tell, [])
+
+    def test_missing_unreadable_and_malformed_records_are_refused_before_any_tell(self) -> None:
+        bad = {"missing": self.jobs / "nope.json", "not json": self.jobs / "junk.json", "a list": self.jobs / "list.json",
+               "no dir": self.jobs / "nodir.json", "agent not a string": self.jobs / "agent.json"}
+        bad["not json"].write_text("{not json")
+        bad["a list"].write_text("[1]")
+        bad["no dir"].write_text(json.dumps({"agent": "omp", "status": "running"}))
+        bad["agent not a string"].write_text(json.dumps({"agent": 7, "dir": "/x", "status": "running"}))
+        for label, path in bad.items():
+            with self.subTest(label):
+                rc, out, err = self.relay_to(path)
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn("relay: not sent:", err)
+        self.assertEqual(self.tell, [])
+
+    def test_finished_or_closed_records_are_refused_and_never_resumed(self) -> None:
+        done_file = self.jobs / "late.done"
+        done_file.write_text("")
+        cases = {"status done": {"status": "done", "finished": 1.0, "exit": 0}, "finished only": {"finished": 1.0},
+                 "closed": {"closed": True}, "no-report": {"status": "no-report"}, "done file present": {"done": str(done_file)}}
+        for label, fields in cases.items():
+            with self.subTest(label):
+                rc, out, err = self.relay_to(self.record(label.replace(" ", "-"), **fields))
+                self.assertEqual((rc, out), (1, ""))
+                self.assertRegex(err, r"is (closed|finished)")
+                self.assertIn("never resumes", err)
+        self.assertEqual(self.tell, [])    # no tell, so nothing could have started an auto-resume
+
+    def test_a_tell_refusal_is_not_sent_and_not_queued(self) -> None:
+        self.tell_result = (1, "", "slice collie-native is finished; the message would never be read.")
+        rc, out, err = self.relay_to(self.record())
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("refused", err)
+        self.assertIn("finished", err)
+
+    def test_the_slice_that_runs_relay_cannot_message_its_own_record(self) -> None:
+        with mock.patch.object(relay.fleet, "ancestors", lambda: {os.getpid()}):
+            rc, _, err = self.relay_to(self.record())
+        self.assertEqual(rc, 1)
+        self.assertIn("this session", err)
+        self.assertEqual(self.tell, [])
+
+    def test_plan_names_the_dispatch_route_and_sends_nothing(self) -> None:
+        rc, out, _ = self.relay_to(self.record(), "--plan")
+        self.assertEqual((rc, out.strip(), self.tell), (0, "dispatch", []))
+
+    def test_a_session_name_that_is_not_a_path_still_goes_through_find(self) -> None:
+        with mock.patch.object(relay, "find_herdr_agent", lambda ident, ss: []):    # never the live herdr
+            rc, _, err = self.relay_to("collie-native")    # no `/`: a name, not a record
+        self.assertEqual(rc, 1)
+        self.assertIn("no session(s) match", err)
+
+
 class TestHermesRoute(Harness):
     """A Hermes gateway conversation is resumed with `hermes --resume SID -z TEXT` and nothing else (2026-10-23)."""
 

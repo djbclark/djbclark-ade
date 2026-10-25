@@ -482,7 +482,7 @@ HANDSHAKE_TIMEOUT_DEFAULT = 40
 # Removed from the agent's environment on every run (see run()): the caller's herdr pane,
 # Paseo agent and Orca terminal (2026-10-20: a dispatched slice that inherited
 # PASEO_AGENT_ID could /clear or archive the CALLER's agent through self-slash).
-SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE")
+SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY")
 # Set to "1" in every launched agent's environment; bin/self-slash refuses lifecycle actions
 # (/new, /clear, /reset, /compact, /quit, --finish) when it sees it.  Not "ACP_RUN": that
 # name already holds the acp-run path for skills/session-finder/launch.py.
@@ -993,7 +993,7 @@ def _private_write(path, text):
         f.write(text)
 
 
-def opencode_deny_config(env, tag="deny"):
+def opencode_deny_config(env, tag="deny", guard=None):
     """A per-run OPENCODE_CONFIG_DIR for --perm deny: one opencode.json holding only
     OPENCODE_KEEP_KEYS from the user's global config (and OPENCODE_CONFIG, if set),
     deep-merged in that order as opencode does. opencode v2 (checked 2.0.27, from the
@@ -1004,7 +1004,10 @@ def opencode_deny_config(env, tag="deny"):
     env as {env:...} references instead of the file; relative {file:x} references are
     made absolute (the copy no longer sits next to them). Raises ValueError, before
     creating anything, when a source file cannot be read or parsed: a partial copy
-    would silently lose the provider or model. Returns (temp dir, log info, extra env);
+    would silently lose the provider or model. guard, a resolved go_guard_dir(), is the one plugin
+    kept: it is linked as plugins/ade-go-context in the temp dir (OpenCode's global plugin discovery,
+    README of opencode-plugins/go-context) and nothing else is copied there, so every other user plugin
+    stays excluded. Returns (temp dir, log info, extra env);
     the caller removes the dir. env is the child's env."""
     src = Path(env.get("OPENCODE_CONFIG_DIR") or Path(
         env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode").expanduser()
@@ -1057,12 +1060,16 @@ def opencode_deny_config(env, tag="deny"):
     d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}opencode-{tag}-{os.getpid()}-"))
     try:
         _private_write(d / "opencode.json", json.dumps(kept, indent=1))
+        if guard is not None:
+            (d / "plugins").mkdir(mode=0o700)
+            (d / "plugins" / GO_GUARD_NAME).symlink_to(guard, target_is_directory=True)
     except BaseException:
         shutil.rmtree(d, ignore_errors=True)
         raise
     info = {"agent": "opencode", "action": "stripped", "source": str(src),
             "kept_keys": sorted(kept), "dropped_keys": sorted(dropped),
             "mcp_servers": sorted(mcp), "plugins": plugins, "project_config": "off",
+            "trusted_plugins": [GO_GUARD_NAME] if guard is not None else [],
             "secrets_via_env": len(extra_env), "secrets_in_file": on_disk,
             "env": ["OPENCODE_CONFIG_DIR", "OPENCODE_DISABLE_PROJECT_CONFIG",
                     "OPENCODE_CONFIG_PROJECT_DISABLE", "-OPENCODE_CONFIG"]
@@ -1498,7 +1505,7 @@ def strip_user_config(a, env, deny_dir):
                        "skills": "off", "hooks": "off", "permission": "user's",
                        "env": ["ZCODE_CLI_SETTINGS_FILE"]}
         if a.agent == "opencode":
-            d, info, extra = opencode_deny_config(env, tag)
+            d, info, extra = opencode_deny_config(env, tag, go_guard_dir() if is_go_model(getattr(a, "model", None)) else None)
             env.update(extra)  # literal provider secrets, referenced as {env:...} in d
             env["OPENCODE_CONFIG_DIR"] = str(d)
             # opencode reads OPENCODE_CONFIG_PROJECT_DISABLE ?? OPENCODE_DISABLE_PROJECT_CONFIG
@@ -1518,6 +1525,9 @@ def strip_user_config(a, env, deny_dir):
         else:
             d, info = agy_deny_home(tag)
     except (OSError, ValueError) as e:
+        if a.agent == "opencode" and is_go_model(getattr(a, "model", None)):
+            # a Go run must not fall back to the user's unsanitized config: its trusted guard could not be placed
+            raise ConfigError(f"could not build opencode's sanitized config with the trusted Go context guard: {e}") from None
         print(f"acp-run: could not strip {a.agent}'s plugins and MCP servers; keeping them: {e}",
               file=sys.stderr)
         kept = {"agent": a.agent, "action": "kept", "why": f"error: {e}"[:300]}
@@ -2264,6 +2274,91 @@ class ConfigError(Exception):
     """A requested model, effort or context was not applied (failure class config, exit 1)."""
 
 
+GO_PROVIDER_PREFIX = "opencode-go/"
+GO_POLICY_BUNDLE = Path.home() / ".local/share/acp-run/go-policy"
+_GO_POLICY = None
+_GO_ROOT = None
+GO_GUARD_NAME = "ade-go-context"  # the plugin's directory name under <config dir>/plugins/
+
+
+def is_go_model(model):
+    """True for an OpenCode Go model ID. Same boundary as go_model_policy.classification(), so a
+    standalone copy of this script can tell a non-Go run apart without loading the policy."""
+    return isinstance(model, str) and model.lower().startswith(GO_PROVIDER_PREFIX)
+
+
+def load_go_policy():
+    """Load the Go cost policy (bin/go_model_policy.py + config/go-model-policy.json), only when a Go
+    model is requested or applied; non-Go runs never need it. Looked up in exactly two places, never
+    on sys.path, in the cwd or beside the script: (1) the djbclark-ade checkout this script lives in
+    (tools/acp-run/acp-run -> ../../bin, ../../config), (2) the installed bundle
+    ~/.local/share/acp-run/go-policy/{bin,config}/ (README "Install"). Missing or unreadable policy
+    raises ConfigError, so a Go prompt never runs unchecked."""
+    global _GO_POLICY, _GO_ROOT
+    if _GO_POLICY is not None:
+        return _GO_POLICY
+    import importlib.util
+    here = Path(__file__).resolve()
+    roots = []
+    if here.parent.name == "acp-run" and here.parent.parent.name == "tools":
+        roots.append(here.parents[2])
+    roots.append(GO_POLICY_BUNDLE)
+    problems = []
+    for root in roots:
+        helper = root / "bin" / "go_model_policy.py"
+        if not helper.is_file():
+            problems.append(f"{helper}: not found")
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("acp_run_go_model_policy", helper)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.policy()
+            if not (callable(getattr(mod, "classification", None)) and callable(getattr(mod, "refusal", None))):
+                raise ValueError("no classification()/refusal()")
+        except Exception as e:
+            problems.append(f"{helper}: {type(e).__name__}: {e}")
+            # A present checkout policy is authoritative. Never mask its failure
+            # with an older, potentially more permissive installed snapshot.
+            break
+        _GO_POLICY, _GO_ROOT = mod, root
+        return mod
+    raise ConfigError(
+        "the Go cost policy is not installed, so OpenCode Go models are refused (non-Go models are unaffected). "
+        f"Install the bundle (bin/go_model_policy.py, config/go-model-policy.json and opencode-plugins/go-context/ "
+        f"from djbclark-ade) under {GO_POLICY_BUNDLE}, or run acp-run from the checkout "
+        f"(tools/acp-run/README.md, Install). Tried: " + "; ".join(problems))
+
+
+def go_guard_dir():
+    """The trusted ade.go-context plugin directory for a sanitized OpenCode Go launch.
+
+    The guard is taken only from the root the Go policy was loaded from (the checkout or the installed
+    bundle: opencode-plugins/go-context/ beside bin/ and config/), never from the user's OpenCode config,
+    its plugins dir, the project or the cwd. The plugin resolves its policy as
+    <its real dir>/../../config/go-model-policy.json, which must be the very file the helper enforces, so
+    the guard and acp-run can never read different policies. Raises ConfigError when the guard is absent,
+    incomplete or paired with another policy file: a Go launch then fails closed instead of running
+    without its context guard."""
+    mod = load_go_policy()
+    src = _GO_ROOT / "opencode-plugins" / "go-context"
+    try:
+        real = src.resolve(strict=True)
+        missing = [n for n in ("index.js", "package.json") if not (real / n).is_file()]
+        paired = (real.parents[1] / "config" / "go-model-policy.json").resolve() == Path(mod.POLICY_PATH).resolve()
+    except (OSError, RuntimeError, IndexError) as e:
+        raise ConfigError(f"the trusted Go context guard is unavailable ({src}: {e}); Go models are refused "
+                          f"without it. Install opencode-plugins/go-context/ into {GO_POLICY_BUNDLE} "
+                          "(tools/acp-run/README.md, Install)") from None
+    if missing or not paired:
+        raise ConfigError(
+            "the trusted Go context guard is unusable, so Go models are refused: "
+            + (f"{real} lacks {', '.join(missing)}" if missing else
+               f"{real}/../../config/go-model-policy.json is not the policy acp-run enforces")
+            + f"; reinstall the bundle under {GO_POLICY_BUNDLE} (tools/acp-run/README.md, Install)")
+    return real
+
+
 def usage_exit(msg):
     """A request the agent or model cannot satisfy: say why on stderr and exit 2, before any prompt."""
     print(f"acp-run: {msg}", file=sys.stderr)
@@ -2889,8 +2984,9 @@ def fallback_cli(a, client=None) -> int:
                           text=True, check=False, env=env).returncode
 
 
-def extend_deadline(client, deadline):
-    """Consume a whole-second extension beside the log (2026-10-11)."""
+def extend_deadline(client, deadline, bounded=False):
+    """Consume a whole-second extension beside the log (2026-10-11). bounded (a costly Go advisory
+    turn, a.go_bounded) never moves the deadline: the file is deleted and the refusal logged."""
     name = getattr(getattr(client, "log", None), "name", None)
     if not isinstance(name, str):
         return deadline
@@ -2900,13 +2996,13 @@ def extend_deadline(client, deadline):
     try:
         with path.with_name(path.name + ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            return read_deadline_extension(client, deadline, path)
+            return read_deadline_extension(client, deadline, path, bounded)
     except OSError as e:
         client.rec("deadline_extension_invalid", {"error": str(e)})
         return deadline
 
 
-def read_deadline_extension(client, deadline, path):
+def read_deadline_extension(client, deadline, path, bounded=False):
     try:
         value = path.read_text().strip()
     except FileNotFoundError:
@@ -2914,7 +3010,15 @@ def read_deadline_extension(client, deadline, path):
     except (OSError, UnicodeError) as e:
         client.rec("deadline_extension_invalid", {"error": str(e)})
     else:
-        if re.fullmatch(r"[0-9]+", value):
+        if bounded:
+            # An admitted costly Go advisory run is one bounded turn (go_model_policy
+            # advisory_timeout_seconds): any extension, 0 (unlimited) included, is refused here too,
+            # so editing the control file directly cannot lift the deadline admitted at launch.
+            client.rec("deadline_extension_refused", {"value": value[:200], "deadline": deadline,
+                                                      "why": "costly Go advisory runs have a fixed deadline"})
+            print("acp-run: deadline extension refused: a costly Go advisory run keeps its fixed deadline",
+                  file=sys.stderr)
+        elif re.fullmatch(r"[0-9]+", value):
             try:
                 seconds = int(value)
                 new = None if seconds == 0 or deadline is None else deadline + seconds
@@ -3025,7 +3129,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             why = None
             try:
                 while True:
-                    deadline = extend_deadline(client, deadline)
+                    deadline = extend_deadline(client, deadline, getattr(a, "go_bounded", False))
                     left = deadline - time.monotonic() if deadline is not None else 30
                     if left <= 0:
                         raise TimeoutError
@@ -4240,6 +4344,17 @@ async def run(a, log, err, log_path):
                     usage_exit("--effort/--context: the resumed session offers no config options")
             await apply_config(a, conn, sess, init, client, sets, applied,
                                per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
+            if a.agent == "opencode":
+                # Validate identity after ACP's fuzzy resolver and on resume, before
+                # the first prompt. An alias is not an exact provider/model ID.
+                resolved = applied.get("model")
+                if not resolved or resolved != a.model or "model" in applied.get("unverified", []):
+                    raise ConfigError("OpenCode requires an exact applied provider/model ID; aliases or unverified resumed models are refused")
+                if is_go_model(resolved):
+                    why = load_go_policy().refusal(resolved, advisory=getattr(a, "go_advisory", False),
+                                                   timeout=a.timeout, perm=a.perm, context=a.context)
+                    if why:
+                        raise ConfigError(why)
             if applied:
                 client.rec("applied", applied)
             if a.interactive:
@@ -4663,6 +4778,8 @@ def main():
         help="reopen this ACP session (session/load or session/resume) instead"
         " of starting a new one",
     )
+    ap.add_argument("--go-advisory", action="store_true",
+                    help="explicit bounded read-only OpenCode Go advice; requires --perm read-only and --timeout <=600")
     a = ap.parse_args()
     bad = [k for k in a.tripwire_exempt_kinds.split(',') if k and k not in TRIPWIRE_EXEMPTABLE]
     if bad:
@@ -4707,6 +4824,35 @@ def main():
         ap.error("--inbox and --show-thinking need --interactive")
     if a.all_models and not a.info:
         ap.error("--all-models needs --info")
+    if a.agent == "opencode" and not a.info:
+        if not a.model or "/" not in a.model:
+            ap.error("opencode prompt runs require --model provider/model so the Go cost policy can be checked")
+        if a.model != a.model.strip():
+            ap.error("opencode --model must not have leading or trailing whitespace")
+        if is_go_model(a.model):
+            try:
+                go_policy = load_go_policy()
+            except ConfigError as e:
+                ap.error(str(e))
+            why = go_policy.refusal(a.model, advisory=a.go_advisory, timeout=a.timeout,
+                                    perm=a.perm, context=a.context)
+            if why:
+                ap.error(why)
+            if (a.perm in RESTRICTED_PERMS or strip_requested(a)) and not a.interactive and not keep_user_config(a):
+                try:  # this launch gets a sanitized config: its only plugin is the trusted guard, which must exist
+                    go_guard_dir()
+                except ConfigError as e:
+                    ap.error(str(e))
+            if any(str(value).split("=", 1)[0].lower() in ("model", "modelid", "model_id", "provider", "providerid") for value in a.set):
+                ap.error("Go model selection must use --model, not --set")
+            if a.go_advisory and a.interactive:
+                ap.error("Go advisory runs are single-turn; --interactive is refused")
+            if go_policy.classification(a.model) == "advisory":
+                if a.verify is not None or a.prompt_retries:
+                    ap.error("Go advisory use cannot run --verify or prompt retries")
+                a.wrapup_grace = 0
+                a.wrapup = None
+                a.go_bounded = True  # prompt_turn refuses every deadline extension (extend_deadline)
     check_static(a)
     if a.prompt_retries < 0:
         ap.error("--prompt-retries must be 0 or more")

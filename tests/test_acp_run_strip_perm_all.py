@@ -162,6 +162,8 @@ FAKE = textwrap.dedent("""\
             "ZCODE_ACP_MODE", "ZCODE_DISALLOWED_TOOLS", "ZCODE_CLI_SETTINGS_FILE",
             "CRUSH_GLOBAL_DATA", "CRUSH_GLOBAL_CONFIG", "CRUSH_SKILLS_DIR", "CRUSH_DISABLE_METRICS")
 
+    MODEL = {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sipb/test", "options": [{"value": "sipb/test", "name": "Test"}, {"value": "opencode-go/kimi-k3", "name": "Kimi"}]}
+
     def rd(*parts):
         try:
             return Path(*parts).read_text()
@@ -197,11 +199,13 @@ FAKE = textwrap.dedent("""\
         elif m == "authenticate":
             send({"id": i, "result": {}})
         elif m == "session/new":
-            send({"id": i, "result": {"sessionId": "s1", "configOptions": [MODE]}})
+            send({"id": i, "result": {"sessionId": "s1", "configOptions": [MODE, MODEL]}})
         elif m == "session/set_config_option":
+            if msg["params"].get("configId") == "model":
+                MODEL["currentValue"] = msg["params"]["value"]
             out["sets"].append(msg.get("params"))
             fake_out.write_text(json.dumps(out))
-            send({"id": i, "result": {"configOptions": [MODE]}})
+            send({"id": i, "result": {"configOptions": [MODE, MODEL]}})
         elif m == "session/prompt":
             send({"method": "session/update", "params": {"sessionId": "s1", "update": {
                 "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}})
@@ -452,7 +456,8 @@ class TestStripOutsideDenyEndToEnd(unittest.TestCase):
         e.update(env or {})
         argv = [UV, "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
                 "-p", "Reply with the word ok", "--handshake-tries", "1", "--handshake-timeout", "20",
-                "--no-fallback", "--timeout", "60", "--log", str(log), *args]
+                "--no-fallback", "--timeout", "60", "--log", str(log),
+                *(["--model", "sipb/test"] if agent == "opencode" else []), *args]
         p = subprocess.run(argv, env=e, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            timeout=180, check=False)
         recs = [json.loads(x) for x in log.read_text().splitlines() if x.strip()] if log.exists() else []
@@ -473,6 +478,12 @@ class TestStripOutsideDenyEndToEnd(unittest.TestCase):
         self.assertEqual(r["rc"], 0, r["stderr"])
         self.assertEqual(r["stdout"].strip(), "ok")
         self.assertEqual(r["leftovers"], [], "the per-run dir is removed after the run")
+
+    def test_fuzzy_go_alias_is_refused_after_resolution_before_prompt(self):
+        r = self.run_acp("opencode", "--model", "go/kimi-k3", "--perm", "all", "--strip-user-config")
+        self.assertEqual(r["rc"], 1, r["stderr"])
+        self.assertIn("exact applied provider/model", r["stderr"])
+        self.assertEqual(r["stdout"].strip(), "")
 
     def test_opencode_perm_all_strip(self):
         r = self.run_acp("opencode", "--perm", "all", "--strip-user-config")
