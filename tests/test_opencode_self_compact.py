@@ -90,6 +90,37 @@ def test_uncertain_write_is_not_retried(setup, monkeypatch):
     assert compact.main([]) == 7
 
 
+@pytest.mark.parametrize("previous", [{}, [], {"attempted_at": True}, {"attempted_at": float("nan")}])
+def test_corrupt_state_does_not_allow_a_duplicate(setup, previous):
+    calls, home = setup
+    state = home / ".local/state/self-slash/opencode_ses_abc123.compact.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps(previous))
+    assert compact.main([]) == 7
+    assert calls == []
+
+
+def test_failed_write_keeps_uncertain_state_and_cooldown(setup, monkeypatch):
+    original = compact.api
+
+    def api(*args):
+        if args[0] == "post":
+            return subprocess.CompletedProcess(args, 1, "", "rejected")
+        return original(*args)
+
+    monkeypatch.setattr(compact, "api", api)
+    assert compact.main([]) == 11
+    assert compact.main([]) == 7
+
+
+def test_elapsed_cooldown_allows_another_request(setup, monkeypatch):
+    monkeypatch.setattr(compact.time, "time", lambda: 1000)
+    assert compact.main([]) == 0
+    monkeypatch.setattr(compact.time, "time", lambda: 1300)
+    assert compact.main([]) == 0
+    assert len(setup[0]) == 4
+
+
 def test_self_slash_routes_before_parent_host_or_acp_guard(setup):
     result = subprocess.run([str(ROOT / "bin/self-slash"), "--dry-run", "/compact"],
                             capture_output=True, text=True, check=False)

@@ -10,6 +10,7 @@ An accepted request is not proof that compaction has completed.
 
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -60,7 +61,8 @@ def main(argv=None):
             if state.exists():
                 previous = json.loads(state.read_text())
                 when = previous.get("attempted_at") if isinstance(previous, dict) else None
-                if not isinstance(when, (int, float)) or isinstance(when, bool):
+                if (not isinstance(when, (int, float)) or isinstance(when, bool)
+                        or not math.isfinite(when)):
                     print("self-slash: native compaction state unreadable; refusing a duplicate", file=sys.stderr)
                     return 7
                 if time.time() - when < 300:
