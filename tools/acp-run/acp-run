@@ -91,7 +91,7 @@ value the agent reports differently is failure class "config", exit 1. --meta JS
 into session/new _meta. --agent-arg ARG / --agent-env K=V append to the agent's launch
 command / environment (per host: ACP_RUN_ARGS_<AGENT> split like a shell line,
 ACP_RUN_ENV_<AGENT>="K=V,K=V").
-The agent never sees HERDR_PANE_ID, HERDR_ENV, PASEO_AGENT_ID, PASEO_AGENT_CWD or
+The agent never sees HERDR_PANE_ID, HERDR_ENV, HERDR_WORKSPACE_ID, HERDR_TAB_ID, PASEO_AGENT_ID, PASEO_AGENT_CWD or
 ORCA_TERMINAL_HANDLE (acp-run drops them on every run, not only --interactive: an agent
 hook once renamed the caller's herdr tab; a slice that kept PASEO_AGENT_ID could clear or
 archive the caller's Paseo agent, 2026-10-20) and always sees ACP_RUN_AGENT=1.
@@ -481,8 +481,10 @@ HANDSHAKE_TIMEOUT = {"claude": 90}
 HANDSHAKE_TIMEOUT_DEFAULT = 40
 # Removed from the agent's environment on every run (see run()): the caller's herdr pane,
 # Paseo agent and Orca terminal (2026-10-20: a dispatched slice that inherited
-# PASEO_AGENT_ID could /clear or archive the CALLER's agent through self-slash).
-SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY")
+# PASEO_AGENT_ID could /clear or archive the CALLER's agent through self-slash). The herdr
+# workspace and tab ids go too (2026-10-25): the Codex tool environment now passes all four
+# herdr ids (agents/codex/config.toml.tmpl), so a detached Codex would otherwise act on the caller's tab.
+SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY")
 # Set to "1" in every launched agent's environment; bin/self-slash refuses lifecycle actions
 # (/new, /clear, /reset, /compact, /quit, --finish) when it sees it.  Not "ACP_RUN": that
 # name already holds the acp-run path for skills/session-finder/launch.py.

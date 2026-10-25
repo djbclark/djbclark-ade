@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Merge the template's [shell_environment_policy] tables into a Codex config.toml atomically.
+
+    codex-env-apply.py TEMPLATE TARGET [--write]
+
+Dry run by default (prints the unified diff). Touches nothing but the two policy tables: Codex's own
+[projects.*], [hooks.state.*], [marketplaces.*] and every other line stay byte-identical. With --write: refuses if TARGET
+changed since it was read (Codex rewrites it), keeps TARGET.bak-DATE, writes a sibling temp file (0600) and os.replace()s it
+onto the realpath. The result must parse and keep every non-policy table equal."""
+import difflib, os, re, sys, tempfile, tomllib, datetime
+tmpl, target = sys.argv[1], os.path.realpath(sys.argv[2]); write = "--write" in sys.argv
+home = os.path.expanduser("~")
+t = open(tmpl).read()
+old = open(target).read(); st = os.stat(target)
+live = tomllib.loads(old)
+TABLE = re.compile(r"^\[(.+?)\]\s*$", re.M)
+def policy_span(text, start_at_comment):
+    heads = [m for m in TABLE.finditer(text)]
+    idx = [i for i, m in enumerate(heads) if m.group(1) == "shell_environment_policy"]; assert len(idx) == 1
+    first = heads[idx[0]].start()
+    last = idx[0]
+    while last + 1 < len(heads) and heads[last + 1].group(1).startswith("shell_environment_policy"): last += 1
+    end = heads[last + 1].start() if last + 1 < len(heads) else len(text)
+    if start_at_comment:  # take the comment block just above the table header
+        lines = text[:first].split("\n"); n = len(lines) - 1
+        while n > 0 and lines[n - 1].startswith("#"): n -= 1
+        first = len("\n".join(lines[:n])) + (1 if n else 0)
+    return first, end
+a, b = policy_span(t, True); block = t[a:b].replace("{{ .home }}", home)
+# the machine-specific browser digests stay what the live file has
+block = block.replace("{{ .codex_browser_client_sha256s }}", live["shell_environment_policy"]["set"]["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"])
+assert "{{" not in block, "unfilled placeholder"
+c, d = policy_span(old, True)
+new = old[:c] + block + old[d:]
+nl, ol = tomllib.loads(new), live
+assert {k: v for k, v in nl.items() if k != "shell_environment_policy"} == {k: v for k, v in ol.items() if k != "shell_environment_policy"}, "non-policy content changed"
+oset, nset = ol["shell_environment_policy"]["set"], nl["shell_environment_policy"]["set"]
+assert oset == nset, f"explicit set changed: {oset} vs {nset}"
+sys.stdout.writelines(difflib.unified_diff(old.splitlines(1), new.splitlines(1), "live", "new"))
+if not write: sys.exit(0)
+if open(target).read() != old or os.stat(target).st_mtime_ns != st.st_mtime_ns: sys.exit("target changed while reading; rerun")
+bak = f"{target}.bak-{datetime.date.today()}-env-policy"
+if not os.path.exists(bak): open(bak, "w").write(old); os.chmod(bak, 0o600)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".config.toml.")
+with os.fdopen(fd, "w") as f: f.write(new); f.flush(); os.fsync(f.fileno())
+os.chmod(tmp, st.st_mode & 0o777)
+if os.stat(target).st_mtime_ns != st.st_mtime_ns: os.unlink(tmp); sys.exit("target changed; rerun")
+os.replace(tmp, target); print("written", target)

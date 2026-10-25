@@ -14,6 +14,25 @@ these with the companion's data, as a `modify_` merge and never a symlink, becau
 | [opencode/opencode.json.tmpl](opencode/opencode.json.tmpl) | `~/.config/opencode/opencode.json` | opencode reads `opencode.jsonc` too; that file is a 50-byte `$schema` stub, so it is not templated. `tui.json` and `cli.json` beside them hold no secrets and are not templated yet |
 | [hermes/config.yaml.tmpl](hermes/config.yaml.tmpl) | `~/.hermes/config.yaml` | Hermes writes it too; `~/.hermes` is its own git repo |
 
+## Codex tool environment (2026-10-25)
+
+`[shell_environment_policy]` in `codex/config.toml.tmpl` decides which variables a Codex tool command gets. It is
+`inherit = "all"` plus an exact legacy `include_only` allowlist: the variables `inherit = "core"` gave (`HOME LANG
+LC_ALL LC_CTYPE LOGNAME PATH SHELL TEMP TMP TMPDIR USER`, read back from Codex 0.164.0 on macOS), the four Herdr pane
+variables (`HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`) and the `set` keys. Outside Herdr none of the
+four exists, so none appears; no id is written into the file. `tests/test_codex_shell_env_policy.py` pins it,
+including a read-back through the installed `codex app-server` (no model call).
+
+1. `include_only` runs after `set` (probed 2026-10-25, Codex 0.160.1, 0.163.0, 0.164.0): add a `set` key and its
+   name to the allowlist together.
+2. The newer `filters` table is not used: Codex 0.163.0 ignores it, and `inherit = "all"` would then pass every
+   variable.
+3. The live file is a regular file Codex also writes; there is no renderer yet. To change only the policy tables:
+   `bin/codex-env-policy-apply TEMPLATE TARGET` (dry run; `--write` applies) replaces the two `shell_environment_policy` tables (and the comment above
+   them) byte-for-byte, checks that every other table and the `set` values are unchanged, keeps a `.bak-DATE-env-policy`
+   copy, writes a temp file beside the target and `os.replace`s it on the realpath, refusing if the file changed
+   while it ran. A running Codex keeps the policy it started with; only sessions started after the change see it.
+
 ## Placeholder syntax
 
 1. `{{ .field }}` is a value the companion provides (table below).
