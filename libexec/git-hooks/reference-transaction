@@ -9,7 +9,7 @@
 #
 # Fast path, cheapest first: not an agent (no ACP_RUN_AGENT/ADE_CLAIM_ID, no CLAUDECODE/OMPCODE/CODEX_*) -> exit 0 before
 # anything else runs; no line about HEAD, refs/stash or refs/heads/ (a fetch of remote-tracking refs, tags) -> exit 0 without
-# Python. FAIL OPEN: the stub maps "python exited 77" to exit 1 and everything else (no python, a traceback, the 10 s alarm)
+# Python. FAIL OPEN: this hook maps "python exited 77" to exit 77 (the one refusal code) and everything else (no python, a traceback, the 10 s alarm)
 # to exit 0, because a git hook that fails aborts the transaction for everyone, the operator included.
 # NEVER runs a ref-writing git (the transaction's locks are held). bash 3.2: no associative arrays, no `case` inside $( ).
 set -u
@@ -48,5 +48,5 @@ command -v "$py" > /dev/null 2>&1 && [ -f "$lib" ] || exit 0
 
 printf '%s\n' "$input" | ADE_HOOK_GIT_PID="${ADE_HOOK_GIT_PID:-$PPID}" "$py" -I -S "$lib" hook-ref "$1"
 rc=$?
-[ "$rc" -eq 77 ] && exit 1
+[ "$rc" -eq 77 ] && exit 77
 exit 0

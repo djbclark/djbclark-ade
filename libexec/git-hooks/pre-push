@@ -6,7 +6,7 @@
 #   bin/ade_claims.py hook-push REMOTE URL
 # `git push --no-verify` skips this hook: the shim refuses `push --no-verify` (any `--no-v` prefix) and `send-pack`.
 # Fast path and FAIL OPEN exactly as libexec/git-hooks/reference-transaction: not an agent -> exit 0; no line naming
-# refs/heads/ -> exit 0 without Python; python exited 77 -> exit 1; any other outcome -> exit 0. bash 3.2.
+# refs/heads/ -> exit 0 without Python; python exited 77 -> exit 77; any other outcome -> exit 0 (the installed stub passes only 77 on: a crash of this file itself also lets git proceed). bash 3.2.
 set -u
 
 agent=0
@@ -39,5 +39,5 @@ command -v "$py" > /dev/null 2>&1 && [ -f "$lib" ] || exit 0
 
 printf '%s\n' "$input" | "$py" -I -S "$lib" hook-push "${1:-}" "${2:-}"
 rc=$?
-[ "$rc" -eq 77 ] && exit 1
+[ "$rc" -eq 77 ] && exit 77
 exit 0

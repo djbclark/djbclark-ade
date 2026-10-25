@@ -1831,17 +1831,16 @@ def _stub_text(name: str) -> str:
         'case "$0" in */*) d="${0%/*}" ;; *) d=. ;; esac',
         f'pre="$d/{name}.pre-ade"',
         'if [ ! -x "$pre" ]; then',
-        '  [ -x "$hook" ] && exec "$hook" "$@"',
+        '  [ -x "$hook" ] || exit 0',
+        '  "$hook" "$@"',
+        '  [ $? -eq 77 ] && exit 77',
         "  exit 0",
         "fi",
-        "export ADE_HOOK_GIT_PID=$PPID",
         "input=$(cat)",
-        "rc=0",
         'if [ -x "$hook" ]; then',
         "  printf '%s\\n' \"$input\" | \"$hook\" \"$@\"",
-        "  rc=$?",
+        '  [ $? -eq 77 ] && exit 77',
         "fi",
-        '[ "$rc" -eq 0 ] || exit "$rc"',
         "printf '%s\\n' \"$input\" | \"$pre\" \"$@\"",
         "exit $?",
     ]
@@ -1860,6 +1859,9 @@ def _stubs_present(common: Path) -> bool:
 
 
 def _install_common(common: Path) -> tuple[int, list[str]]:
+        "export ADE_HOOK_GIT_PID=$PPID",
+        "# The checkout's hook runs as a child, never exec'd: only its documented refusal code (77) refuses; any other",
+        "# outcome (exit 1, 3, 126, a signal, no such file) lets git proceed, for agents and humans alike.",
     """Write the chain-preserving stubs into `<common>/hooks` (atomic; idempotent; an existing hook of the same name that
     is not ours becomes NAME.pre-ade). Returns (exit code, one line per action)."""
     hooks = common / "hooks"

@@ -634,3 +634,45 @@ def test_r10_f2_an_included_file_that_sets_hooks_path_is_refused_because_git_fol
     _held(world, shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", GIT_CONFIG_GLOBAL=str(cfg)))
 
 
+def _stub_with_hook(w, name, body):
+    """Point the INSTALLED stub of `name` at a scratch hook with `body` (the stub still does everything else)."""
+    fake = w.tmp / f"fake-{name}"
+    fake.write_text("#!/bin/bash\n" + body + "\n")
+    fake.chmod(0o755)
+    stub = w.repo / ".git" / "hooks" / name
+    text = stub.read_text()
+    stub.write_text(re.sub(r"(?m)^hook=.*$", lambda m: "hook=" + shlex.quote(str(fake)), text))
+    assert f"hook={shlex.quote(str(fake))}" in stub.read_text()
+
+
+CRASHES = ["cat >/dev/null; exit 1", "cat >/dev/null; exit 3", "cat >/dev/null; exit 126", "cat >/dev/null; kill -9 $$",
+           "exit 1", "echo boom >&2; exit 2"]
+
+
+@pytest.mark.parametrize("who", ["B", None], ids=["agent", "human"])
+@pytest.mark.parametrize("body", CRASHES)
+def test_r10_f4_a_crashing_checkout_hook_lets_a_ref_write_through_the_installed_stub(world, body, who):
+    _stub_with_hook(world, "reference-transaction", body)
+    r = git(world.state, ["branch", "-f", "cb", "main"], world.repo, who=who)
+    assert r.returncode == 0, r.stderr
+    assert world.cb() == world.main()
+
+
+@pytest.mark.parametrize("body", CRASHES)
+def test_r10_f4_a_crashing_pre_push_hook_lets_a_push_through_the_installed_stub(world, body):
+    _stub_with_hook(world, "pre-push", body)
+    ok(world.state, ["push", "origin", "main:fresh"], world.repo, who="B")
+
+
+def test_r10_f4_only_exit_77_refuses_and_the_pre_ade_chain_survives_a_crash(world):
+    _stub_with_hook(world, "reference-transaction", "cat >/dev/null; exit 77")
+    assert refused(git(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B"))
+    assert world.cb() != world.main()
+    hooks = world.repo / ".git" / "hooks"
+    (hooks / "reference-transaction.pre-ade").write_text("#!/bin/sh\ncat >/dev/null\nexit 1\n")
+    (hooks / "reference-transaction.pre-ade").chmod(0o755)
+    _stub_with_hook(world, "reference-transaction", "kill -9 $$")
+    r = git(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B")
+    assert refused(r) and world.cb() != world.main()     # our hook crashed (fail open); the kept old hook still said no
+
+
