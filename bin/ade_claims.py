@@ -1682,18 +1682,19 @@ def _common_dir(gitdir: Path) -> Path:
 _ORIGIN_QUESTION_DROP = ("HOME", "XDG_CONFIG_HOME", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_CONFIG")
 
 
-def _config_origin(common: Path) -> Optional[str]:
+def _config_origin(common: Path) -> str:
     """`remote.origin.url` as git answers for the REPOSITORY'S OWN config file and the files it includes (`git config
     --local --includes --get`: comments, quotes and escapes are git's to read; the caller's command-line, environment,
     global, system, HOME and XDG scopes are not read at all, so no caller can change the answer): the URL, or "" when it
-    is unset (exit 1), None when git did not answer (timeout, cannot start, broken repository config). `git config` takes
-    no ref lock, so a hook may run it. Asked of the COMMON dir: a linked worktree's own git dir has no `remote.*`
-    (measured 2026-10-25)."""
+    is unset (exit 1) or git did not answer (timeout, cannot start, a repository config or include that fails only for this
+    question, e.g. an `includeIf "gitdir:<common dir>"` that is false for the caller's own git dir in a linked worktree).
+    "" matches a claim of any origin (`claims_for_branch`): an unanswered question never switches the claim rule off, it
+    widens it to every claim of the branch's name (round 11, 2026-10-25: a failure that was read as "no claim rule can be
+    judged" let a hostile include turn the rule off). `git config` takes no ref lock, so a hook may run it. Asked of the
+    COMMON dir: a linked worktree's own git dir has no `remote.*` (measured 2026-10-25)."""
     drop = {k: None for k in os.environ if k in _ORIGIN_QUESTION_DROP or k.startswith("GIT_CONFIG")}
     rc, out = _run_git(["--git-dir", str(common), "config", "--local", "--includes", "--get", "remote.origin.url"], 3, drop)
-    if rc == 0:
-        return out.rstrip("\n")
-    return "" if rc == 1 else None
+    return out.rstrip("\n") if rc == 0 else ""
 
 
 def _hook_workspace(env: dict[str, str], cwd: str) -> Optional[Workspace]:
@@ -1792,11 +1793,11 @@ def hook_ref(state: str, text: str, env: Optional[dict[str, str]] = None, cwd: O
         return 0
     ident = caller_ident(env)
     ws = _hook_workspace(env, cwd)
-    origin = _config_origin(_common_dir(ws.gitdir)) if ws else ""      # None: git did not answer, no claim rule can be judged
+    origin = _config_origin(_common_dir(ws.gitdir)) if ws else ""
     if state == "committed":
         for old, new, ref in updates:
             if ref.startswith("refs/heads/"):
-                cs = claims_for_branch(ref[len("refs/heads/"):], origin) if origin is not None else []
+                cs = claims_for_branch(ref[len("refs/heads/"):], origin)
                 if cs:
                     append_guard_log({"ts": utc_now(), "outcome": "ref-change", "via": "reference-transaction",
                                       "ref": ref, "old": old, "new": new, "ident": ident or "", "pid": os.getpid(),
@@ -1809,7 +1810,7 @@ def hook_ref(state: str, text: str, env: Optional[dict[str, str]] = None, cwd: O
         rule = ""
         if ref.startswith("refs/heads/"):
             b = ref[len("refs/heads/"):]
-            for c in (claims_for_branch(b, origin) if origin is not None else []):
+            for c in claims_for_branch(b, origin):
                 if not is_mine(c, ident):
                     rule = "ref-claimed-branch"
                     d = _foreign(c, rule, "message the owner; never move, delete or write another agent's branch "

@@ -750,3 +750,25 @@ def test_r11_f1_a_callers_config_never_rewrites_the_origin_the_claim_is_matched_
         g = tmp_path / "g.cfg"
         g.write_text('[remote "origin"]\n\turl = /x\n')
         _move_refused(world, ["branch", "-f", "cb", "main"], GIT_CONFIG_GLOBAL=str(g))
+
+
+def _wt_cb(w, wt):
+    return ok(w.state, ["rev-parse", "cb"], wt)
+
+
+def test_r11_f2_an_origin_question_that_fails_only_for_the_hook_does_not_switch_the_claim_rule_off(world, tmp_path):
+    """The repository's own config includes a broken file only when the git dir is the COMMON dir: the main git, running in
+    the linked worktree (git dir .git/worktrees/wt), never reads it; the hook's question (`--git-dir <common>`) does and
+    fails. An unanswered question must not read as `no claim`."""
+    common = (world.repo / ".git").resolve()
+    wt = tmp_path / "wt"
+    ok(world.state, ["worktree", "add", "-q", "--detach", str(wt)], world.repo)
+    (tmp_path / "bad.cfg").write_text("[broken\n")
+    with open(common / "config", "a") as f:
+        f.write(f'[includeIf "gitdir:{common}"]\n\tpath = {tmp_path / "bad.cfg"}\n')
+    assert git(world.state, ["config", "--get", "remote.origin.url"], wt).returncode == 0     # git itself is fine in wt
+    r = shim(world.state, ["branch", "-f", "cb", "main"], wt, who="B")
+    assert refused(r), (r.returncode, r.stderr)
+    assert _wt_cb(world, wt) != ok(world.state, ["rev-parse", "main"], wt)
+    r = shim(world.state, ["branch", "-f", "cb", "main"], wt, who="Z")              # the owner may still write its own branch
+    assert r.returncode == 0, r.stderr
