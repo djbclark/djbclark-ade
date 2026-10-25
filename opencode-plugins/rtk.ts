@@ -23,8 +23,10 @@ import { dirname, join, resolve } from "node:path"
 // rewrite can move a command out from under a `deny`/`ask` rule. `rtk rewrite`
 // does not judge OpenCode's rules; `rtk hook opencode` (added upstream in
 // rtk-ai/rtk#4187, not in any release yet) does. Until that ships, this plugin
-// FAILS CLOSED: if the effective OpenCode configuration declares any shell
-// permission rules, it registers no rewrite at all and says so on stderr.
+// FAILS CLOSED: if the scanned OpenCode config files (global plus project
+// opencode.json(c)) declare any permission rules, or one is unparsable, it
+// registers no rewrite at all and says so on stderr. Rules from other sources
+// (OPENCODE_CONFIG*, managed config, agents) are not seen.
 // Reproduced and documented in djbclark-ade/docs/opencode-plugin-v2.md.
 //
 // Managed by `rtk init -g --opencode`, which writes the upstream v1 template —

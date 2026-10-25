@@ -107,8 +107,15 @@ answer proved nothing (corrected 2026-10-25; the earlier version read it as the
 effective rules and could rewrite past a deny/ask rule). It scans the global
 config plus every `opencode.json(c)`/`.opencode/opencode.json(c)` from the
 session directory up to the filesystem root, treating an unparsable file as
-"rules present". Managed rules outside those files are not seen; the real fix is
-rtk's `hook opencode` (rtk-ai/rtk#4187, #4521). The
+"rules present". Rules from any other source are NOT seen and the plugin
+rewrites past them: `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
+`OPENCODE_CONFIG_CONTENT`, managed config, and agent-level rules (`agent`,
+`agents`, `mode`, agent markdown). Those gaps predate this change (adversary
+round 1, 2026-10-25) and none applies on this machine today; the real fix is
+rtk's `hook opencode` (rtk-ai/rtk#4187, #4521). A merged edit reaches the running
+plugin only after `opencode-plugins/rtk.ts` is copied to
+`~/.config/opencode/plugins/rtk.ts`: `bin/opencode-plugin-guard` leaves a
+v2-shaped file that differs alone. The
 canonical copy lives at `djbclark-ade/opencode-plugins/rtk.ts` and is restored by
 `djbclark-ade/bin/opencode-plugin-guard` (Jobber 03:45) if a tool upgrade
 reverts it.
