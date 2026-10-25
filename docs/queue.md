@@ -817,6 +817,16 @@ today: its registry version requires Paseo `>=0.11.2 <0.12.0` and the daemon is 
 for a compatible release, then one Phase F item re-points `hermes-ping`, the approval buttons
 and home rule 12, with Hermes's relay as the rollback.
 
+## Telegram for 2fado, Herald and agent web searches: talk first (djbclark, 2026-10-25)
+
+djbclark asked (2026-10-25) to set Telegram up for the Paseo `2fado` plugin (`@xpufx/paseo-twofado` 0.1.3, daemon `2fadod`, "Telegram Fallback: unconfigured")
+and "in general", at an appropriate point in the queue, after a talk with him about what it does and whether it helps us, web searches included. **Do not configure
+anything before that talk.** Findings 2026-10-25 (read of the plugin README and github.com/xpufx/2fado): 2fado gates only commands an agent chooses to run as
+`2fado run -- <argv>` (policy allow / deny / ask a human on Telegram; fail closed; runs as the daemon user, no escalation in the default build), plus `ask`/`notify`
+petitions; it does not intercept Claude Code's own tool calls, MCP calls (`WebSearch`, `firecrawl_*`) or `sudo-ask`. A web-search gate would need a PreToolUse hook that calls
+`2fado ask`. Overlaps: the SF-Q16 item below (Paseo Telegram plugin replacing Hermes's relay, blocked on a Paseo version range), `hermes-ping`, Hermes's
+`permissions_respond`, `/helm`, and Herald (spoken waiting alert). Ties to the "ask before costly steps" rule in `feedback_heavy_web_search`.
+
 ## Software factory, Phase F (decided 2026-10-19)
 
 Proposal §8 item 9 and §9.3. Starts after Phase 1's first PR. First slices: `bin/factory` F1
