@@ -252,7 +252,11 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    seconds there to add to the current deadline, or `0` to remove it. Positive
    extensions leave an unlimited turn unlimited. The file is consumed and
    deleted; malformed input is logged and ignored. `deadline_extended` records
-   carry the old and new monotonic deadlines (`null` means unlimited).
+   carry the old and new monotonic deadlines (`null` means unlimited). A costly
+Go advisory turn (`--go-advisory`, see the OpenCode Go section) never extends:
+acp-run deletes the file, logs `deadline_extension_refused` and keeps the deadline
+fixed at start + `--timeout` (at most 600 s), so a hand-edited control file cannot
+bypass it either.
 7. **Safe permission answers**: only an offered `allow_once` or `reject_once`
    option is ever selected. Never an `*_always` option, which an agent may save
    beyond this run (Hermes writes `allow_always` to a permanent allowlist), and
@@ -526,7 +530,9 @@ still optional.
 `acp-dispatch extend <out>/jobs/<name>.json 3600` adds an hour to a running
 slice. Use `0` to remove its deadline. The command atomically writes the control
 file and records the requested total limit; acp-run's log confirms application.
-Pending positive extensions accumulate. Finished slices are refused.
+Pending positive extensions accumulate. Finished slices are refused, and so is
+every extension (`0` included) of a costly Go advisory slice, whose record carries
+`--go-advisory` (exit 2, nothing written).
 
 `acp-dispatch resume <out>/jobs/<name>.json --timeout 14400` continues a
 finished slice in its original ACP session. Optional `-p TEXT` or `-f FILE`

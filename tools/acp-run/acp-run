@@ -2984,8 +2984,9 @@ def fallback_cli(a, client=None) -> int:
                           text=True, check=False, env=env).returncode
 
 
-def extend_deadline(client, deadline):
-    """Consume a whole-second extension beside the log (2026-10-11)."""
+def extend_deadline(client, deadline, bounded=False):
+    """Consume a whole-second extension beside the log (2026-10-11). bounded (a costly Go advisory
+    turn, a.go_bounded) never moves the deadline: the file is deleted and the refusal logged."""
     name = getattr(getattr(client, "log", None), "name", None)
     if not isinstance(name, str):
         return deadline
@@ -2995,13 +2996,13 @@ def extend_deadline(client, deadline):
     try:
         with path.with_name(path.name + ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            return read_deadline_extension(client, deadline, path)
+            return read_deadline_extension(client, deadline, path, bounded)
     except OSError as e:
         client.rec("deadline_extension_invalid", {"error": str(e)})
         return deadline
 
 
-def read_deadline_extension(client, deadline, path):
+def read_deadline_extension(client, deadline, path, bounded=False):
     try:
         value = path.read_text().strip()
     except FileNotFoundError:
@@ -3009,7 +3010,15 @@ def read_deadline_extension(client, deadline, path):
     except (OSError, UnicodeError) as e:
         client.rec("deadline_extension_invalid", {"error": str(e)})
     else:
-        if re.fullmatch(r"[0-9]+", value):
+        if bounded:
+            # An admitted costly Go advisory run is one bounded turn (go_model_policy
+            # advisory_timeout_seconds): any extension, 0 (unlimited) included, is refused here too,
+            # so editing the control file directly cannot lift the deadline admitted at launch.
+            client.rec("deadline_extension_refused", {"value": value[:200], "deadline": deadline,
+                                                      "why": "costly Go advisory runs have a fixed deadline"})
+            print("acp-run: deadline extension refused: a costly Go advisory run keeps its fixed deadline",
+                  file=sys.stderr)
+        elif re.fullmatch(r"[0-9]+", value):
             try:
                 seconds = int(value)
                 new = None if seconds == 0 or deadline is None else deadline + seconds
@@ -3120,7 +3129,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             why = None
             try:
                 while True:
-                    deadline = extend_deadline(client, deadline)
+                    deadline = extend_deadline(client, deadline, getattr(a, "go_bounded", False))
                     left = deadline - time.monotonic() if deadline is not None else 30
                     if left <= 0:
                         raise TimeoutError
@@ -4843,6 +4852,7 @@ def main():
                     ap.error("Go advisory use cannot run --verify or prompt retries")
                 a.wrapup_grace = 0
                 a.wrapup = None
+                a.go_bounded = True  # prompt_turn refuses every deadline extension (extend_deadline)
     check_static(a)
     if a.prompt_retries < 0:
         ap.error("--prompt-retries must be 0 or more")

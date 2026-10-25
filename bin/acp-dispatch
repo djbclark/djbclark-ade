@@ -16,7 +16,7 @@
     acp-dispatch check (PATH)...                         classify reports: PATH is a report file,
                                                          a jobs/<name>.json record, or an out dir
     acp-dispatch finalize RECORD --exit RC               (internal) what the detached runner calls
-    acp-dispatch extend RECORD SECONDS                  add seconds, or 0 for no deadline
+    acp-dispatch extend RECORD SECONDS                  add seconds, or 0 for no deadline (not for a Go advisory slice)
     acp-dispatch tell RECORD MESSAGE [--from NAME]      send a message into a running slice
                                                          (MESSAGE - reads stdin; RECORD may be a
                                                          bare report path when no .json exists)
@@ -1816,6 +1816,10 @@ def extend_locked(record: Path, seconds: int) -> int:
         die("cannot extend a finished slice; use resume")
     if seconds < 0:
         die("seconds must be a whole number, 0 or more")
+    if "--go-advisory" in shlex.split(rec.get("cmd", "")):
+        # a costly Go advisory slice is one bounded turn (go_model_policy advisory_timeout_seconds):
+        # no extension, 0 (unlimited) included; acp-run refuses a hand-edited .extend file too
+        die("cannot extend a costly Go advisory slice: its deadline is fixed (after it finishes, resume with a new bounded --timeout)")
     control = Path(rec["log"] + ".extend")
     with record_lock(control):
         value = seconds
