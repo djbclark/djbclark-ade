@@ -2584,8 +2584,9 @@ def scan_texts(tx, mark):
     """(texts, end) of the complete lines of transcript TX after byte MARK (`user_texts`), END being the byte after the last newline
     read: a sweep that stores it never reads those bytes again, and never starts inside a line a writer has not finished
     (adversary r1 A10, 2026-10-25). A transcript shorter than MARK restarts at 0 (replaced or truncated)."""
-    if not (tx and Path(tx).is_file()):
+    if not (isinstance(tx, str) and tx and Path(tx).is_file()):
         return [], mark
+    mark = max(0, mark)    # a hand-edited negative mark is a seek error
     with Path(tx).open("rb") as fh:
         fh.seek(0, os.SEEK_END)
         if fh.tell() < mark:
@@ -2643,6 +2644,11 @@ def from_peer(text, who):
 def ack_seen(texts, token, who=()):
     """True when one of TEXTS holds `ack TOKEN` and, when WHO is given (names, ids of the peer), is from one of them (`from_peer`): a
     first-contact token is the sender's own id, the same for every peer, so the line must say whose reply it is."""
+    if not (isinstance(token, str) and token):
+        return False    # a record is plain JSON: a hand-edited sender or id is no token (adversary r2 A2)
+    given, who = who, [w for w in who if isinstance(w, str)] if isinstance(who, (list, tuple)) else []
+    if given and not who:
+        return False    # a peer list with nothing readable is never "anyone may close it"
     pat = ack_token(token)
     return any(pat.search(t) and (not who or from_peer(t, who)) for t in texts)
 

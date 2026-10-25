@@ -432,6 +432,45 @@ class TestSweepCostAndRobustness(Base):
         self.assertEqual(len(fleet.annotate_links([dict(self.target), dict(self.me)])), 2)
 
 
+class TestSweepSurvivesEveryHandEditedField(Base):
+    """Adversary r2 A2 (2026-10-25): one bad field of one record must not abort the sweep of the others."""
+
+    def test_no_edited_field_of_a_link_or_an_expectation_aborts_the_sweep_and_a_good_expectation_still_closes(self) -> None:
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
+        base_link = json.loads(fleet.LINKS_FILE.read_text())
+        base_exp = json.loads((relay.expect_dir() / "build1.json").read_text())
+        key = next(iter(base_link["links"]))
+        link_edits = {"mark": -5, "tx": 123, "sender": 5, "who": 5, "sender_sid": 7}
+        exp_edits = {"tx": 123, "mark": -9, "id": 5, "sender": 5}
+        cases = [("link", f, v) for f, v in link_edits.items()] + [("expect", f, v) for f, v in exp_edits.items()]
+        for kind, field, value in cases:
+            with self.subTest(kind=kind, field=field):
+                links, exp = json.loads(json.dumps(base_link)), json.loads(json.dumps(base_exp))
+                (links["links"][key] if kind == "link" else exp)[field] = value
+                fleet.LINKS_FILE.write_text(json.dumps(links))
+                (relay.expect_dir() / "build1.json").write_text(json.dumps(exp))
+                # a second, intact expectation must still be swept when the first is broken
+                good = {**base_exp, "id": "good1", "tx": str(self.me_tx), "mark": 0, "target": {**base_exp["target"], "id": "zzzzzzzz", "name": "other"}}
+                (relay.expect_dir() / "good1.json").write_text(json.dumps(good))
+                self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude zzzzzzzz (x)] ack good1"}})
+                try:
+                    rc, out = self.run_cli("--sweep")
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(relay.expect_read("good1")["state"], "acked")
+                finally:
+                    (relay.expect_dir() / "good1.json").unlink(missing_ok=True)
+
+
+    def test_an_unreadable_peer_list_closes_nothing(self) -> None:
+        """A link whose `who` a hand edit broke is not a link anyone may answer."""
+        self.assertEqual(self.go("PR 61 is merged")[0], 0)
+        data = json.loads(fleet.LINKS_FILE.read_text())
+        next(iter(data["links"].values()))["who"] = 5
+        fleet.LINKS_FILE.write_text(json.dumps(data))
+        self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude w7:p7 (other)] ack bbbbbbbb"}})
+        self.assertIn("0 resolved", self.run_cli("--sweep")[1])
+
+
 class TestLinkBelongsToTheSession(Base):
     """Adversary r1 A11 (2026-10-25): a herdr pane id is reused, so a link is the pane's only while the same session sits in it."""
 
