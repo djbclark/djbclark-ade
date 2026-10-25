@@ -1,40 +1,44 @@
 #!/usr/bin/env bash
-# ade-git-guard — a `git` front door that refuses destructive git in a workspace another agent owns.
+# ade-git-guard — a `git` front door for what git's own hooks cannot see in a workspace another agent owns.
+#
+# TWO ENFORCEMENT POINTS (O2, 2026-10-25; docs/git-guard.md): git's hooks guard REFS (libexec/git-hooks/reference-transaction
+# and pre-push: `refs/heads/<claimed>` is refused however the argv spelled the write); this shim guards what hooks cannot
+# see: a foreign workspace (read-only allowlist), the shared checkout's destructive forms, `worktree remove|move|prune`,
+# `branch -m|-c` destinations, and it FAILS CLOSED on what it cannot read (an unknown option or subcommand, config that
+# redirects the hooks, `push --no-verify`). It installs the hooks lazily.
 #
 # SEATBELT, NOT A SANDBOX (design 5.7): it stops accidental or careless git, not a determined agent. Out of reach by
 # design: an absolute path to the real git, unsetting ACP_RUN_AGENT/ADE_CLAIM_ID, another agent's ADE_CLAIM_ID,
-# editing the claim registry, and EVERYTHING GIT ITSELF SPAWNS (hooks, `bisect run`, `submodule foreach`, pagers,
+# editing the claim registry, and EVERYTHING GIT ITSELF SPAWNS (`bisect run`, `submodule foreach`, pagers,
 # core.fsmonitor, diff.external, core.sshCommand, `fetch --upload-pack`, any `git` a `!` alias runs): git puts its own
-# exec-path first on its children's PATH, so they reach the real git, not this shim.
+# exec-path first on its children's PATH, so they reach the real git, not this shim. (The hooks still run for those.)
 #
 # Installed as libexec/agent-bin/git (a relative symlink to ../../bin/ade-git-guard). Integration stage as of
-# 2026-10-24: only this guard and bin/ade_claims.py exist (slice W1). Slices W3 (acp-dispatch exports ADE_CLAIM_ID),
-# W4 (acp-run puts libexec/agent-bin first on the PATH of every agent it launches: codex, opencode, omp, agy, crush,
-# zcode, claude slices) and W5 (the Claude hook calling `--check`) are NOT installed yet, so nothing reaches git
-# through here until they land; the operator's shell, Orca and IDEs never will.
-# Design: design-isolation-report.md 3.4-3.5 (2026-10-24); rules and claim schema: bin/ade_claims.py.
+# 2026-10-25: only this guard, the hooks and bin/ade_claims.py exist (slice W1). Slices W3 (acp-dispatch exports
+# ADE_CLAIM_ID), W4 (acp-run puts libexec/agent-bin first on the PATH of every agent it launches) and W2 (cow-pasture
+# installs the hooks into a new pasture) are NOT wired yet, so nothing reaches git through here until they land; the
+# operator's shell, Orca and IDEs never will.
+# Design: design-isolation-report.md 3.4-3.5 (2026-10-24); O2 design: frontier-pr59-design-report.md (2026-10-25).
 #
 #   git ARGS...                           (the shim) run the real git, or refuse with exit 77
 #   ade-git-guard git-ARGS...             the same, called by name
-#   ade-git-guard --check CMD [--cwd DIR] decide every `git` call in a shell command string (Claude hook);
-#                                         exit 0 allow, 77 refuse (also when a call cannot be classified)
+#   ade-git-guard install [DIR]           install the hook stubs into DIR's repository (exit 2 not a repository,
+#                                         78 core.hooksPath is set, 73 NAME.pre-ade is in the way)
 #   ade-git-guard --real-git              print the git this guard would run
 #   ade-git-guard --help
 #
 # Order of work, cheapest first (one bash exec and no Python for the common call):
 #   1. Not an agent process (neither ACP_RUN_AGENT=1 nor ADE_CLAIM_ID set): exec the real git untouched.
 #   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
-#   3. A subcommand that does not change the repository (status diff log show ls-files ...), after -C/-c/--git-dir=...,
-#      and none of whose arguments can name an output file (--output*, -o, -O, --open-files-in-pager): exec.
-#      `fetch` is never fast-pathed: where it lands (`fetch --dry-run --porcelain`, asked of git itself while another
-#      agent holds a claim in the repository) is decided by the rules. A single-dash cluster holding o or O (`-ko`) goes to them too.
+#   3. A plain read (status log show diff rev-parse ls-files ls-tree cat-file blame describe rev-list for-each-ref grep
+#      shortlog name-rev merge-base version help), after -C/-c/--git-dir=...: exec. No argument is scanned.
 #   4. Everything else: `python3 -I -S ade_claims.py guard -- ARGS`, which looks up the workspace claim
-#      (`.git/ade-claim` -> ~/.local/state/ade/claims/<id>.json). Exit 0 -> exec the real git;
-#      exit 77 -> the refusal text (owner, claim id, safe alternative) is on stderr, one line is in
-#      ~/.local/state/ade/guard.log, and git never runs.
+#      (`.git/ade-claim` -> ~/.local/state/ade/claims/<id>.json). Exit 0 -> exec the real git (after installing the hooks
+#      into the repository when they are missing); exit 77 -> the refusal text (owner, claim id, safe alternative) is on
+#      stderr, one line is in ~/.local/state/ade/guard.log, and git never runs.
 # A broken guard (no python3, a crash) fails OPEN with a warning on stderr: a guard bug must not stop all git.
 #
-# Exit codes: 77 refused (EX_NOPERM); every other code is the real git's. --check: 0 / 77 / 2 usage.
+# Exit codes: 77 refused (EX_NOPERM); every other code is the real git's.
 # Environment: ADE_CLAIM_ID (the caller's claim id, exported by acp-dispatch), ACP_RUN_AGENT, ADE_STATE_DIR
 # (default ~/.local/state/ade; claims/ and guard.log live there), ADE_REAL_GIT (skip the PATH search),
 # ADE_PYTHON (default python3), ACP_OPERATOR_APPROVED=git-guard (allow and log one call).
@@ -104,11 +108,10 @@ if [ "${self##*/}" = "ade-git-guard" ]; then
       printf '%s\n' "$real"
       exit 0
       ;;
-    --check)
-      [ $# -ge 2 ] || { echo "usage: ade-git-guard --check CMD [--cwd DIR]" >&2; exit 2; }
-      run_python check "${@:2}"
+    install)
+      run_python install "${@:2}"
       rc=$?
-      case "$rc" in 0 | 77 | 2) exit "$rc" ;; *) echo "ade-git-guard: --check failed (rc=$rc); allowing" >&2; exit 0 ;; esac
+      case "$rc" in 126) echo "ade-git-guard: install needs python3 and bin/ade_claims.py" >&2; exit 1 ;; *) exit "$rc" ;; esac
       ;;
   esac
 fi
@@ -119,7 +122,8 @@ if { [ -z "${ADE_CLAIM_ID:-}" ] && { [ -z "${ACP_RUN_AGENT:-}" ] || [ "${ACP_RUN
   exec "$real" "$@"
 fi
 
-# 3: first non-option word (skipping -C DIR, -c K=V and the value-less global flags) is a non-changing subcommand
+# 3: first non-option word (skipping -C DIR, -c K=V and the value-less global flags) is one of the plain reads that cannot
+# move a ref or touch another agent's tree (O2: a stray --output file is a nuisance, not lost work, so no argument is scanned)
 args=("$@")
 n=${#args[@]}
 i=0
@@ -128,24 +132,16 @@ while [ "$i" -lt "$n" ]; do
   a="${args[$i]}"
   case "$a" in
     -C | -c) i=$((i + 2)) ;;
-    --no-pager | -p | --paginate | --no-optional-locks | --no-replace-objects | --literal-pathspecs) i=$((i + 1)) ;;
+    --no-pager | -P | -p | --paginate | --no-optional-locks | --no-replace-objects | --literal-pathspecs) i=$((i + 1)) ;;
     --git-dir=* | --work-tree=*) i=$((i + 1)) ;;
     -*) break ;;
     *) sub="$a"; break ;;
   esac
 done
-# an argument that can name an output file (git log --output=f truncates f) goes to the rules
-slow=0
-for a in "$@"; do
-  case "$a" in
-    --ou* | --op* | -o | -o?* | -O | -O?* | -[!-]*[oO]*) slow=1; break ;;
-  esac
-done
 case "$sub" in
-  status | diff | log | show | ls-files | ls-tree | rev-parse | cat-file | blame | grep | ls-remote | describe \
-    | merge-base | version | help | rev-list | show-ref | for-each-ref | shortlog | diff-tree | diff-index | diff-files \
-    | name-rev | check-ignore | check-attr | var | whatchanged | cherry | count-objects | show-branch)
-    if [ "$slow" = 0 ]; then exec "$real" "$@"; fi
+  status | log | show | diff | rev-parse | ls-files | ls-tree | cat-file | blame | describe | rev-list | for-each-ref \
+    | grep | shortlog | name-rev | merge-base | version | help)
+    exec "$real" "$@"
     ;;
 esac
 

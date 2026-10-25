@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""ade_claims: the workspace claim library and the git-guard rules (isolation slice W1, 2026-10-24).
+"""ade_claims: the workspace claim library, the git-guard rules and the ref hooks (isolation slice W1, 2026-10-24; O2 redesign
+2026-10-25).
 
 One claim per workspace (a cow pasture or a linked worktree): who owns it, which branch, which base.
-Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard), 4.2.1 (gate). `bin/ade-git-guard` is
-the bash front door; it runs `ade_claims.py guard -- GIT_ARGS...` only for a git call that is not
-plainly read-only. Integration stage as of 2026-10-24: W1 (this file and the guard) exists; W2 (cow-pasture),
-W3 (acp-dispatch), W4 (acp-run puts the shim on agents' PATH) and W5 (Claude hook) consume this module and are NOT
-installed yet, so the names below are the contract but nothing calls the guard in a live session.
+Design: design-isolation-report.md 3.4 (schema), 3.5.4 (guard); frontier-pr59-design-report.md (O2). TWO ENFORCEMENT POINTS:
+  1. git's own hooks guard REFS: `libexec/git-hooks/reference-transaction` and `pre-push` (installed per repository by
+     `install`, run through `hook-ref` / `hook-push` below). git resolves every option, refspec, mapping and alias to the
+     final ref name before it calls the hook, so no argv spelling gets round it.
+  2. `bin/ade-git-guard`, the PATH shim, runs `ade_claims.py guard -- GIT_ARGS...` for what hooks cannot see (a foreign
+     workspace, the shared checkout's destructive forms, worktree verbs, rename/copy destinations) and FAILS CLOSED on what it
+     cannot read.
+Integration stage as of 2026-10-25: W1 (this file, the shim and the hooks) exists; W2 (cow-pasture installs the hooks into a new
+pasture), W3 (acp-dispatch exports ADE_CLAIM_ID) and W4 (acp-run puts the shim on agents' PATH) are NOT wired yet, so nothing
+calls the guard in a live session. Repositories get the hooks from `ade-git-guard install` or lazily from the shim.
 
 THIS IS A SEATBELT, NOT A SANDBOX (design 5.7). It stops an agent's accidental or careless git; it does not
-stop one that works at it. Out of reach by design: an absolute path to the real git, unsetting
-ACP_RUN_AGENT/ADE_CLAIM_ID, another agent's ADE_CLAIM_ID, editing the claim registry (same uid), and
-EVERYTHING GIT ITSELF SPAWNS (hooks, `bisect run`, `submodule foreach`, pagers, core.fsmonitor, diff.external,
-core.sshCommand, `fetch --upload-pack`, and any `git` a `!` alias runs), because git puts its own exec-path first
-on the PATH of its children, so those children reach the real git, not the shim.
+stop one that works at it. Out of reach by design: an absolute path to the real git (the hooks still run), unsetting
+ACP_RUN_AGENT/ADE_CLAIM_ID (`env -i`), another agent's ADE_CLAIM_ID, editing the claim registry (same uid), repositories
+without the hooks, writers that never run git's hooks (libgit2, gitoxide), a harness that turns repository hooks off, and
+EVERYTHING GIT ITSELF SPAWNS for the shim's rules (`bisect run`, `submodule foreach`, pagers, core.fsmonitor, diff.external,
+core.sshCommand, `fetch --upload-pack`, any `git` a `!` alias runs), because git puts its own exec-path first on its
+children's PATH, so those children reach the real git, not the shim.
 
 Claim file, `<state>/claims/<id>.json` (state = $ADE_STATE_DIR, default ~/.local/state/ade), JSON,
 written atomically (temp file beside, then os.replace), every field read with .get:
@@ -44,96 +51,70 @@ Who is "mine" (`is_mine`): the caller identity (ADE_CLAIM_ID, else a harness ses
 claim id, owner.record, owner.session, or is in `allow`. `lead` is NOT implied: a lead that should
 write in a worker's workspace or push its branch goes into `allow`.
 
-Guard rules (agents only: ACP_RUN_AGENT=1 or ADE_CLAIM_ID set; a human shell is never touched; the design's
-other markers CLAUDECODE/OMPCODE/CODEX_* are NOT used: interactive Claude is covered by `check`, W5).
-Git is read the way git reads it: option state is evaluated IN ORDER (`restore --staged --no-staged` is not
-staged), long options match by any unique prefix, config is the call's own ordered multi-valued -c /
---config-env / GIT_CONFIG_* plus the repository's, and relative --git-dir/--work-tree/GIT_DIR/GIT_WORK_TREE are
-relative to the cwd after every -C:
-  1. A workspace with an ACTIVE claim that is not mine: git is read-only (READONLY set plus the read forms of
-     branch/config/worktree/remote/tag/stash/reflog/submodule/symbolic-ref/fetch). A "read-only" command that
-     writes a file (`--output` also of `stash show|list`, format-patch -o, archive -o, grep -O) or a local branch
-     (a fetch whose dry run lists a local branch, `symbolic-ref -d|--delete`) is not read-only there.
+Who is guarded. The shim and its rules: agents only (ACP_RUN_AGENT=1 or ADE_CLAIM_ID set; a human shell is never touched).
+The hooks: those two, plus a caller with CLAUDECODE, OMPCODE or CODEX_* set and no claim identity (an agent that may write
+nothing claimed). git's own hooks (GIT_INDEX_FILE set) and pre-commit (PRE_COMMIT set) are never refused.
+
+HOOKS (the ref enforcement). `hook-ref STATE` (stdin: `<old> <new> <ref>` lines) refuses in `prepared` only, which aborts git's
+transaction ("aborted by the reference-transaction hook"): (a) an update (deletion and a `0 0` line included) of
+`refs/heads/<b>` while another owner's active claim, of a repository whose origin matches, names `<b>` or has `<b>` checked
+out; (b) a `HEAD` or `refs/heads/*` update while the hook runs in a workspace another agent claims (`checkout`, `switch`,
+`commit` there, however it was reached: -C, --git-dir, GIT_DIR); (c) a `refs/stash` update in a linked worktree (refs/stash is
+shared). `pack-refs` (and so `gc`, `maintenance`), whose transactions report packing and pruning as `0 new` and `old 0`
+without changing a value, is exempt (the stub exports the git pid; the parent's argv decides). In `committed` it appends
+one line to guard.log per change to a claimed branch (actor, ref, old, new) and never fails. `hook-push REMOTE URL` (stdin:
+`<local ref> <local oid> <remote ref> <remote oid>`) refuses a push to `refs/heads/<b>` claimed by another owner of the
+repository the URL names. FAIL OPEN: the bash stubs map "python exited 77" to exit 1 and every other outcome (no python, a
+traceback, the 10 s alarm) to exit 0, because a failing hook aborts git for everyone. A hook never runs a ref-writing git.
+`install [DIR]` writes chain-preserving stubs into `$(git rev-parse --git-common-dir)/hooks` (an existing hook of the same
+name is kept as NAME.pre-ade and runs after ours; exit 78 while core.hooksPath is set; 73 when NAME.pre-ade is in the way;
+2 outside a repository); the stub execs the ade checkout's hook by absolute path. The shim installs them lazily.
+
+SHIM RULES (`guard`), evaluated in order. Git is read the way git reads it: option state in order (`restore --staged
+--no-staged` is not staged), long options match by any unique prefix, config is the call's own ordered -c / --config-env /
+GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_WORK_TREE are relative to the cwd after every -C.
+  0. FAIL CLOSED: a leading option git does not define (or one missing its value) -> `unknown-option`; a subcommand that is not
+     a git builtin, not an alias and not in KNOWN_SUBS -> `unknown-subcommand`; command-line or environment config whose key,
+     after normalisation, is `core.hookspath` or starts with `hook.`, `include.` or `includeif.`, a `git config` that writes
+     such a key (or `--edit`), a GIT_CONFIG_GLOBAL/SYSTEM file that sets hooksPath or has a [hook]/[include]/[includeIf]
+     section -> `hook-config`; `push --no-verify` (any `--no-v` prefix) and `send-pack`/`http-push`, which skip the pre-push
+     hook -> `push-no-verify`/`push-plumbing`.
+  1. A workspace with an ACTIVE claim that is not mine (the cwd, or ANY -C, --git-dir, --work-tree, GIT_DIR or GIT_WORK_TREE
+     value the call types, even one a later option moves git away from): only the read allowlist runs (FOREIGN_READ: status,
+     log, show, diff, rev-parse, ls-files, ls-tree, cat-file, blame, describe, rev-list, for-each-ref, grep, shortlog,
+     name-rev, merge-base, version, help; plus `branch` listings, `remote -v|get-url`, `config --get*|--list`, `worktree
+     list`, `symbolic-ref` reads). `--output` of diff/log/show/shortlog and `grep -O` are refused there; everything else is.
   2. A workspace with no active claim (shared or primary checkout): refuse stash (except list/show),
      reset --hard|--merge|--keep, checkout -f|-p|--pathspec-from-file|--|<path>|<2+ args>, restore unless
      --staged is in force and --worktree is not, switch -f|--discard-changes, clean unless -n (also -i), rm -f
      unless --cached or -n is in force, commit -a, add -A/-u/--all/--update with no pathspec or add ., pull|
      rebase|merge with autostash in force (--autostash/--no-autostash, else rebase.autoStash for a rebase or a
      pull that rebases, merge.autoStash for a merge or a pull that merges), rebase -x, `!` aliases and an
-     alias chain deeper than MAX_ALIAS_DEPTH. An output file over a dirty (modified or untracked) file of a
-     shared checkout is refused. Not covered (plumbing, object-store maintenance and wildcard staging stay the operator's call):
-     checkout-index, update-index, read-tree, fast-import itself (only its --export-marks file is judged), gc/prune/repack,
-     tag -f|-d, notes, replace, mv -f, `add '*'`.
+     alias chain deeper than MAX_ALIAS_DEPTH. Abbreviated options are read as the dangerous option they may stand for.
+     Not covered (plumbing and object-store maintenance stay the operator's call): checkout-index, update-index, read-tree,
+     fast-import, gc/prune/repack, tag -f|-d, notes, replace, mv -f, `add '*'`.
   3. A linked worktree, even its own claimed owner's: stash, rebase -x and `!` aliases are refused (refs/stash
      is shared with the other worktrees); everything else the owner does there is allowed.
-  4. push: refused when a destination branch has an active claim that is not mine (any workspace). Destinations
-     and push URLs come only from git's own `push --dry-run --porcelain --no-verify` under the call's config
-     (so `@`, `heads/x`, wildcard, --mirror, deletion, pushurl, insteadOf all resolve as git resolves them); the
-     safety options are forced after every caller option, `--no-dry-run`/`--no-porcelain` or any abbreviation is
-     refused, and the group is killed on timeout. The dry run still contacts the remote (transport, credential
-     helper and ssh command run; pre-push hooks do not). A destination that cannot be resolved is refused while
-     another agent holds an active claim: the dry run timed out or exited other than 0/1, printed no `To` line, or
-     its output is incomplete (no closing `Done`, a malformed ref line). A claim matches a URL by normalised origin (scheme default ports and
-     ssh.github.com:443 are verified aliases; any other host/port spelling is a different repository).
-  5. The TARGET counts, not only the cwd: `worktree remove|move|prune` (selectors resolved against git's
-     registered worktree list, unique-suffix form included), `branch -d|-D|-m|-M|-f` (every name) and `-c|-C|--copy`
-     (the destination), `checkout -B`, `switch -C|--force-create`, `worktree add -B` (the branch they reset),
-     `update-ref` (named ref; with --stdin refused while another agent holds a claim in the repository), `fetch`/
-     `pull`/`remote update` (also `remote -v update`; judged only while another agent holds a claim in the
-     repository, else git is not asked) by the `refs/heads/*` lines of a `fetch --dry-run --porcelain --jobs=1`
-     run under the call's -C, -c, --git-dir, --work-tree, environment, the global options that change what fetch
-     sees (--namespace, --super-prefix, --exec-path=, --bare, --no-replace-objects, ...; GLOBAL_CARRIED_*) and its
-     own remote, refspec and fetch options (a pull without its merge-only options, with --update-head-ok;
-     `remote update` as the `fetch --multiple` it runs; safety options before and after the caller's, the second
-     copy opening with a spare --dry-run, --jobs=1 last so that -j or fetch.parallel cannot make a multi-remote
-     fetch print its listing on stderr), so no refspec, mapping, `heads/x` or default-remote spelling is parsed
-     here; a dry run that cannot answer (timeout ADE_GUARD_FETCH_TIMEOUT, default 20 s; a status other than 0/1; a
-     line that is not a ref line; a ref line on stderr) or `--stdin` is refused as `fetch destinations unresolved`;
-     the dry run is git's own and may write `.git/shallow` (with --depth and the like) and the objects it
-     downloads, even when the call is refused) and an
-     output file (`--output`, `stash show|list --output`, `bundle create FILE`, `fast-export|fast-import
-     --export-marks`, `bugreport|diagnose -o`, `config --file` when it writes; a short option counts anywhere in
-     a cluster, `-zf`; its own symlink resolved first) are checked against the claim
-     of the workspace they hit; the git dir and work tree the call
-     lands on are asked of git itself (`rev-parse --absolute-git-dir --show-toplevel` under the call's own -C, -c,
-     --git-dir, --work-tree and environment: GIT_WORK_TREE, core.worktree and their quoting are git's to read; only
-     what git reads is honored, so core.worktree from `-c` or an include is ignored exactly as git ignores it);
-     when git cannot answer at all (timeout), the typed values are used and a call that changes anything is refused
-     while another agent holds a claim (rule workspace-unresolved); `worktree remove --force` needs ownership of
-     the target.
-  6. In my own claimed workspace everything else is allowed.
+  4. The TARGET counts for what no hook sees: `worktree remove|move|prune` (selectors resolved against git's registered
+     worktree list, unique-suffix form included; `remove --force` needs ownership of the target) and `branch -m|-M` (every
+     name) and `-c|-C|--copy` (the destination): the files backend reports a rename's source deletion to the hook but not its
+     destination, and a copy not at all (measured on git 2.56, 2026-10-25). The git dir and work tree the call lands on are
+     asked of git itself (`rev-parse --absolute-git-dir --show-toplevel` under the call's own -C, -c, --git-dir, --work-tree and
+     environment); when git cannot answer at all (timeout), the typed values are used and a call that is not read-only is
+     refused while another agent holds a claim (rule workspace-unresolved).
+  5. In my own claimed workspace everything else is allowed.
+Removed in O2 (the hooks replace them): the fetch/pull/remote-update and push dry-run preflights, the `update-ref`, `branch -d|-D|-f`,
+`checkout -B`, `switch -C` and `worktree add -B` target rules, the output-file rules (`--output`, `bundle create`, `format-patch -o`,
+`config --file`, `bugreport -o`), and the shell-string `check` analyser with its Claude hook.
 Refusal = exit 77 (EX_NOPERM), a message naming the owner and the safe alternative (control characters escaped),
-one JSON line in `<state>/guard.log` (flag NAMES from an allowlist only; an option's value is never logged).
+one JSON line in `<state>/guard.log` (flag NAMES from an allowlist only; an option's value is never logged). A refused
+hook shows git's `fatal: ... aborted by the reference-transaction hook` (exit 128) after the same message.
 Operator override: ACP_OPERATOR_APPROVED containing `git-guard` allows the call and logs it (design 5.6's
-ADE_GIT_GUARD_BYPASS was not built; this is the convention bin/acp-dispatch already uses).
-git's own hooks (GIT_INDEX_FILE set) and pre-commit (PRE_COMMIT set) are never refused: their `git
-checkout -- .` stash dance is git's, not the agent's. A guard crash fails OPEN (design 5.7, bin/ade-git-guard).
-
-`check CMD` reads a shell command string. Supported syntax: newlines, `;` `&&` `||` `|` `|&` `&`, `( )` subshell
-scope (a `cd`/`pushd` inside `( )` does not leak; one in a pipeline or a background job does not take effect;
-`popd` pops the `pushd` stack; `{ }` groups share the shell, so a cd inside leaks as in bash), `$(...)` and backticks
-(analysed at the directory in force; so is one inside `${X:-$(...)}`), double/single quotes, `$'...'` (decoded
-like bash; a bad escape such as `\\x`, `\\u`, `\\xZ` stays literal), `$"..."`, heredocs (`<<`, `<<-`) and here-strings
-(`<<<`). The heredoc delimiter is the word after `<<` with shell quote removal applied exactly (`E"OF"`, `E\\OF`,
-`'E OF'`); one that cannot be read exactly (`$'..'`, a backtick, no word) or a heredoc with no terminating line is
-refused when the command mentions git, never swallowed as data. The consumer is judged: a body or here-string in a
-segment with `bash`/`sh`/`zsh`... anywhere (`env -u X bash`, `sudo -u me sh`, `nice -n 5 zsh`) or `source`/`.` as
-the command is analysed as shell code, an unquoted body's `$(...)`/backticks are analysed, a quoted body for
-anything else is data;
-`bash -lc '...'`, `eval`, `watch`, env/sudo/nice/timeout/xargs wrappers (`{}` of xargs counts as unexpanded),
-inline GIT_DIR=/GIT_WORK_TREE=/GIT_CONFIG_*=, `cd X &&` (a cd to a directory that does not exist, without a
-`mkdir` in the command, is an unknown directory). It FAILS CLOSED (exit 77, "spell it out") for: a git call whose
-global options or subcommand are unexpanded variables; a `cd`/`-C` into an unknown directory before a
-non-read-only call; an unterminated quote; shell code nested deeper than MAX_SHELL_DEPTH; text that mentions git
-piped into a shell; `source`/a shell reading a process substitution or /dev/stdin; `eval` of a computed string;
-and a COMPUTED command name (`$G`, `$(which git)`, a glob or brace pattern that can match `git`) in a command
-that mentions git (a literal path tail other than `git`, as in `$(pwd)/run.sh`, rules it out). Not followed:
-shell functions and aliases, `source file`, `bash script.sh`, `xargs` stdin, variables set outside the command, `case`/
-`for` control flow (a cd in a failing branch is judged as if it ran). Unquoted `echo git reset --hard` is judged
-as a git call (a false refusal is cheaper than a miss); quoted text such as `echo 'git reset --hard'` is data.
+ADE_GIT_GUARD_BYPASS was not built; this is the convention bin/acp-dispatch already uses), in the shim and in the hooks.
+A shim crash fails OPEN (design 5.7, bin/ade-git-guard).
 
 CLI (also the bash-facing API; every subcommand exits 0 ok, 1 not found, 2 usage, 3 id exists, 4 path
-owned by another owner's active claim, 77 refused):
+owned by another owner's active claim, 77 refused; `install` also 73 and 78, above):
     ade_claims.py new --id ID --path DIR --branch B --base-sha S [--repo-origin U]
         [--owner-record R] [--owner-session S] [--owner-agent A] [--owner-model M] [--lead L]
         [--allow ID]... [--role lead|worker|builder] [--purpose T] [--created-by X]
@@ -143,7 +124,8 @@ owned by another owner's active claim, 77 refused):
     ade_claims.py list [--state S] [--json] one line per claim (or a JSON array)
     ade_claims.py set-state ID active|released|merged
     ade_claims.py guard -- GIT_ARGS...      decide one git call (what ade-git-guard runs)
-    ade_claims.py check CMD [--cwd DIR]     decide every git call inside a shell command (Claude hook)
+    ade_claims.py install [DIR]             install the ref hooks into DIR's repository
+    ade_claims.py hook-ref STATE | hook-push REMOTE URL    what libexec/git-hooks/* run (stdin is git's)
 """
 from __future__ import annotations
 
@@ -664,23 +646,42 @@ def _head_branch(gitdir: Path) -> str:
 # guard: argv parsing
 # --------------------------------------------------------------------------------------------
 
-READONLY = frozenset("""status diff log show ls-files ls-tree rev-parse cat-file blame grep ls-remote describe
-merge-base version help rev-list show-ref for-each-ref shortlog whatchanged diff-tree diff-index diff-files name-rev
-check-ignore check-attr check-ref-format var cherry range-diff count-objects show-branch merge-tree archive
-format-patch verify-commit verify-tag""".split())
-# The write commands the rules know by name; anything else is looked up as an alias first.
-KNOWN_WRITE = frozenset("""commit add rm mv merge rebase pull push cherry-pick revert am apply checkout switch restore reset
-clean stash tag branch config remote worktree init clone submodule gc prune update-ref symbolic-ref notes bisect fetch
-reflog sparse-checkout maintenance bundle replace filter-branch""".split())
-GLOBAL_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
-GLOBAL_FLAG = {"--no-pager", "-p", "--paginate", "--no-optional-locks", "--no-replace-objects",
+# Every subcommand git 2.56 lists (`git --list-cmds=builtins,main,nohelpers,list-complete`, 2026-10-25). One that is not
+# here is an alias (looked up), else an external `git-foo` program, which the guard cannot read: refused.
+KNOWN_SUBS = frozenset("""add am annotate apply archimport archive backfill bisect blame branch bugreport bundle cat-file
+check-attr check-ignore check-mailmap check-ref-format checkout checkout-index cherry cherry-pick clean clone column commit
+commit-graph commit-tree config count-objects credential credential-cache credential-netrc credential-osxkeychain
+credential-store cvsexportcommit cvsimport cvsserver daemon describe diagnose diff diff-files diff-index diff-pairs
+diff-tree difftool fast-export fast-import fetch fetch-pack filter-branch fmt-merge-msg for-each-ref for-each-repo
+format-patch format-rev fsck fsck-objects gc get-tar-commit-id grep hash-object help history hook http-backend http-fetch
+http-push imap-send index-pack init init-db instaweb interpret-trailers jump last-modified log ls-files ls-remote ls-tree
+mailinfo mailsplit maintenance merge merge-base merge-file merge-index merge-octopus merge-one-file merge-ours
+merge-recursive merge-recursive-ours merge-recursive-theirs merge-resolve merge-subtree merge-tree mergetool mktag mktree
+multi-pack-index mv name-rev notes p4 pack-objects pack-redundant pack-refs patch-id pickaxe prune prune-packed pull push
+quiltimport range-diff read-tree rebase receive-pack reflog refs remote remote-ext remote-fd remote-ftp remote-ftps
+remote-http remote-https repack replace replay repo request-pull rerere reset restore rev-list rev-parse revert rm
+send-email send-pack shell shortlog show show-branch show-index show-ref sparse-checkout stage stash status stripspace
+submodule subtree switch symbolic-ref tag unpack-file unpack-objects update-index update-ref update-server-info
+upload-archive upload-pack url-parse var verify-commit verify-pack verify-tag version whatchanged worktree
+write-tree""".split())
+# The subcommands that are read-only in a workspace another agent's active claim covers (the rest of the call decides
+# for `branch`, `remote`, `config`, `worktree` and `symbolic-ref`: only their read forms).
+FOREIGN_READ = frozenset("""status log show diff rev-parse ls-files ls-tree cat-file blame describe rev-list for-each-ref
+grep shortlog name-rev merge-base version help""".split())
+FOREIGN_READ_FORMS = frozenset("branch remote config worktree symbolic-ref".split())
+# git's global options (git.c, 2.56). A leading option that is not here is refused: `-c`-style tricks the guard cannot
+# read must not be mistaken for the subcommand.
+GLOBAL_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source",
+                "--shallow-file"}
+GLOBAL_FLAG = {"--no-pager", "-P", "-p", "--paginate", "--no-optional-locks", "--no-replace-objects",
                "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--bare",
                "--no-lazy-fetch", "--no-advice"}
+GLOBAL_INFO = {"--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path", "--exec-path"}
 # The global options a helper git run (dry run, rev-parse, config) must carry because they change what git sees:
 # the namespace and super-prefix, the exec path (which upload-pack, remote helpers and hooks run), --bare, object
 # replacement and the like. Everything in GLOBAL_FLAG but the pager choice (git runs with its output piped).
 GLOBAL_CARRIED_VALUE = frozenset({"--namespace", "--super-prefix"})
-GLOBAL_CARRIED_FLAG = frozenset(GLOBAL_FLAG - {"--no-pager", "-p", "--paginate"})
+GLOBAL_CARRIED_FLAG = frozenset(GLOBAL_FLAG - {"--no-pager", "-P", "-p", "--paginate"})
 
 
 def _ckey(key: str) -> str:
@@ -706,6 +707,9 @@ class GitCall:
     nglobal: int = 0                    # index of the subcommand in the original argv
     env: dict[str, str] = dataclasses.field(default_factory=dict)   # GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM/GIT_CONFIG in force
     gopts: list[str] = dataclasses.field(default_factory=list)      # the other global options git sees (GLOBAL_CARRIED_*)
+    problem: str = ""                   # a leading option git does not know, or one with no value: the call is refused
+    touched: list[str] = dataclasses.field(default_factory=list)   # the cwd after each -C, in order (every -C counts)
+    ws: Optional["Workspace"] = None    # the workspace the guard decided on (set by evaluate; the lazy hook install uses it)
 
     def display(self) -> str:
         return f"git {self.sub}".rstrip()
@@ -756,68 +760,73 @@ def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
 def parse_git_argv(argv: Sequence[str], cwd: str, env: Optional[dict[str, str]] = None) -> GitCall:
     """Split git's global options from `<subcommand> <args>`, in order: `-C` is cumulative, `-c` and --config-env
     append to an ordered multi-valued list (after GIT_CONFIG_* from `env`), --git-dir/--work-tree override
-    GIT_DIR/GIT_WORK_TREE from `env` (last wins)."""
+    GIT_DIR/GIT_WORK_TREE from `env` (last wins). A leading option git does not know (or one missing its value) sets
+    `problem`: the call is refused, never read as something else (2026-10-25, O2: a parser miss is a false refusal)."""
     env = os.environ if env is None else env
     cur = cwd
     gitdir: Optional[str] = env.get("GIT_DIR") or None
     worktree: Optional[str] = env.get("GIT_WORK_TREE") or None
     config = _env_config(env)
     gopts: list[str] = []
+    touched: list[str] = []
+    problem = ""
     i, n = 0, len(argv)
     while i < n:
         a = argv[i]
-        if a == "-C" and i + 1 < n:
+        name, eq, val = a.partition("=") if a.startswith("--") else (a, "", "")
+        if a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source",
+                 "--shallow-file") and i + 1 >= n:
+            problem = f"global option `{a}` has no value"
+            i += 1
+            break
+        if a == "-C":
             cur = os.path.join(cur, argv[i + 1])
+            touched.append(cur)
             i += 2
-        elif a == "-c" and i + 1 < n:
-            k, eq, v = argv[i + 1].partition("=")
-            config.append((_ckey(k), v if eq else "true"))
+        elif a == "-c":
+            k, e, v = argv[i + 1].partition("=")
+            config.append((_ckey(k), v if e else "true"))
             i += 2
-        elif a.startswith("-c") and len(a) > 2 and a[2] != "-":
-            k, eq, v = a[2:].partition("=")
-            config.append((_ckey(k), v if eq else "true"))
-            i += 1
-        elif a.startswith("-C") and len(a) > 2 and a[2] != "-":
-            cur = os.path.join(cur, a[2:])
-            i += 1
-        elif a in ("--git-dir", "--work-tree") and i + 1 < n:
-            if a == "--git-dir":
-                gitdir = argv[i + 1]
+        elif a in ("--git-dir", "--work-tree") or name in ("--git-dir", "--work-tree") and eq:
+            v = val if eq else argv[i + 1]
+            if name == "--git-dir":
+                gitdir = v
             else:
-                worktree = argv[i + 1]
-            i += 2
-        elif a.startswith("--git-dir="):
-            gitdir = a.split("=", 1)[1]
-            i += 1
-        elif a.startswith("--work-tree="):
-            worktree = a.split("=", 1)[1]
-            i += 1
-        elif a == "--config-env" and i + 1 < n or a.startswith("--config-env="):
-            spec = argv[i + 1] if a == "--config-env" else a.split("=", 1)[1]
+                worktree = v
+            i += 1 if eq else 2
+        elif a == "--config-env" or name == "--config-env" and eq:
+            spec = val if eq else argv[i + 1]
             k, _, var = spec.partition("=")
             config.append((_ckey(k), env.get(var, "")))
-            i += 2 if a == "--config-env" else 1
+            i += 1 if eq else 2
         elif a in GLOBAL_CARRIED_VALUE and i + 1 < n:
             gopts += [a, argv[i + 1]]
             i += 2
-        elif a.partition("=")[0] in GLOBAL_CARRIED_VALUE and "=" in a:
+        elif name in GLOBAL_CARRIED_VALUE and eq:
             gopts.append(a)
             i += 1
-        elif a in GLOBAL_VALUE and i + 1 < n:
-            i += 2
+        elif a in GLOBAL_VALUE:
+            i += 2                                      # --attr-source X, --shallow-file X
+        elif name == "--attr-source" and eq:
+            i += 1
         elif a in GLOBAL_CARRIED_FLAG or a.startswith("--exec-path="):
             gopts.append(a)
             i += 1
-        elif a in GLOBAL_FLAG or a.startswith("--exec-path") or \
-                a in ("--version", "--help", "-h", "--html-path", "--man-path", "--info-path"):
+        elif a in GLOBAL_FLAG or a in GLOBAL_INFO or a.startswith("--list-cmds="):
             i += 1
         elif a.startswith("-"):
-            i += 1  # unknown global flag: ignore it, never mistake it for the subcommand
+            problem = f"unknown global option `{a}`"
+            i += 1
+            break
         else:
             break
-    sub = argv[i] if i < n else ""
-    return GitCall(cur, gitdir, sub, list(argv[i + 1:]), config, worktree, i,
+    sub = argv[i] if i < n and not problem else ""
+    rest = list(argv[i + 1:]) if sub else []
+    call = GitCall(cur, gitdir, sub, rest, config, worktree, i,
                    {k: v for k, v in env.items() if k in _CONFIG_FILE_ENV}, gopts)
+    call.problem = problem
+    call.touched = touched
+    return call
 
 
 @dataclasses.dataclass
@@ -935,70 +944,34 @@ D_WRITE_BRANCH = {"delete", "move", "copy", "set-upstream-to", "unset-upstream",
 # guard: classification
 # --------------------------------------------------------------------------------------------
 
-def output_targets(call: GitCall) -> Optional[list[str]]:
-    """None when the call writes no file of its own choosing; else the file/dir paths it writes (may be
-    empty when the path cannot be read from the arguments). `git log --output=f` truncates f. Besides the
-    diff/log family: `stash show|list` (they forward diff/log options), `bundle create FILE`,
-    `fast-export|fast-import --export-marks=F`, `bugreport|diagnose -o DIR` and a `config` that writes with
-    `--file F` (a short option counts anywhere in a cluster: `-ko`, `-zf`)."""
+def _writes_a_file(call: GitCall) -> bool:
+    """An allowlisted read that can still write a file of the caller's choosing: `--output` of the diff/log family
+    (any prefix of the name, as git parses it: inclusive), `grep -O|--open-files-in-pager` (runs a program on the
+    files). A stray file in another agent's tree is a nuisance, not lost work, so this is the whole of the rule."""
     sub, args = call.sub, call.args
-    short = ""
-    if sub in ("diff", "log", "show", "whatchanged", "diff-tree", "diff-index", "diff-files", "range-diff", "shortlog"):
-        long_name = "output"
-    elif sub == "stash" and args and args[0] in ("show", "list"):
-        long_name, args = "output", args[1:]
-    elif sub == "format-patch":
-        long_name, short = "output-directory", "o"
-    elif sub == "archive":
-        long_name, short = "output", "o"
-    elif sub == "grep":
-        long_name, short = "open-files-in-pager", "O"
-    elif sub in ("fast-export", "fast-import"):
-        long_name = "export-marks"
-    elif sub in ("bugreport", "diagnose"):
-        long_name, short = "output-directory", "o"
-    elif sub == "config" and not is_readonly(call):
-        long_name, short = "file", "f"
-    elif sub == "bundle" and args and args[0] == "create":
-        s = scan(args[1:], value_long={"version"})
-        first = (s.pos + s.after)[:1]
-        return [first[0]] if first and first[0] != "-" else []
-    else:
-        return None
-    found: Optional[list[str]] = None
-    i, n = 0, len(args)
-    while i < n:
-        a = args[i]
+    for a in args:
         if a == "--":
             break
-        val: Optional[str] = None
-        hit = False
         if a.startswith("--"):
-            name, eq, v = a[2:].partition("=")
-            if name and long_name.startswith(name):   # any prefix, as git parses it (inclusive: fail closed)
-                hit = True
-                val = v if eq else None
-        elif short and len(a) > 1 and a[0] == "-" and short in a[1:]:
-            # a short option anywhere in a cluster (`-ko`, `-zf`): inclusive, the value is the rest of the cluster
-            # after it or the next token
-            hit = True
-            val = a[a.index(short, 1) + 1:] or None
-        if hit:
-            if val is None and sub != "grep" and i + 1 < n:
-                val = args[i + 1]
-                i += 1
-            found = (found or []) + ([val] if val else [])
-        i += 1
-    return found
+            name = a[2:].partition("=")[0]
+            if name and (("output".startswith(name) and sub in ("diff", "log", "show", "shortlog")) or
+                         ("open-files-in-pager".startswith(name) and sub == "grep")):
+                return True
+        elif sub == "grep" and a.startswith("-") and "O" in a[1:]:
+            return True
+    return False
 
 
 def is_readonly(call: GitCall) -> bool:
-    """True when this git call cannot change the repository or its working tree."""
+    """True when this call may run in a workspace another agent's active claim covers (O2, 2026-10-25): the small
+    allowlist FOREIGN_READ, plus the read forms of `branch` (a listing), `remote` (`-v`, `get-url`), `config`
+    (`--get*`, `--list`), `worktree list` and `symbolic-ref` (no value, no -d). Everything else, a subcommand the
+    allowlist does not name included, is not read-only there. `--output`-style flags make an allowlisted call a write."""
     sub, args = call.sub, call.args
     if sub == "":
         return True
-    if sub in READONLY:
-        return output_targets(call) is None
+    if sub in FOREIGN_READ:
+        return not _writes_a_file(call)
     if sub == "branch":
         s = scan(args, value_long={"contains", "no-contains", "merged", "no-merged", "points-at", "format", "sort",
                                    "abbrev"}, danger=D_WRITE_BRANCH)
@@ -1022,26 +995,10 @@ def is_readonly(call: GitCall) -> bool:
         return bool(args) and args[0] == "list"
     if sub == "remote":
         s = scan(args)
-        return not s.pos or s.pos[0] in ("show", "get-url")
-    if sub == "tag":
-        wr = {"delete", "annotate", "sign", "force", "message", "file", "local-user"}
-        ls = {"list", "contains", "no-contains", "merged", "no-merged", "points-at"}
-        s = scan(args, value_short="umF", value_long={"contains", "no-contains", "merged", "no-merged", "points-at",
-                                                       "format", "sort", "message", "file", "local-user"}, danger=wr)
-        if s.shorts & set("dasf") or s.longs & wr:
-            return False
-        return not s.pos or bool(s.shorts & set("ln") or s.longs & ls)
-    if sub == "stash":
-        return bool(args) and args[0] in ("list", "show") and output_targets(call) is None
-    if sub == "reflog":
-        return not args or args[0] not in ("expire", "delete")
-    if sub == "submodule":
-        return bool(args) and args[0] in ("status", "summary")
+        return not s.pos or s.pos[0] == "get-url"
     if sub == "symbolic-ref":
         s = scan(args, value_short="m", danger={"delete"})
-        return len(s.pos) < 2 and "d" not in s.shorts and "delete" not in s.longs
-    if sub == "fetch":
-        return call.__dict__.get("_fetch_heads") == []      # judged by evaluate (fetch_head_updates): nothing but non-branch refs
+        return len(s.pos) < 2 and "d" not in s.shorts and "delete" not in s.longs and "m" not in s.shorts
     return False
 
 
@@ -1185,8 +1142,8 @@ def shared_destructive(call: GitCall) -> Optional[Rule]:
     return None
 
 
-FOREIGN_ALT = ("use read-only git here (status, diff, log, show, fetch); to edit, make your own workspace "
-               "(`bin/cow-pasture create`, or `acp-dispatch --workspace auto`)")
+FOREIGN_ALT = ("only read-only git runs here (status, log, show, diff, rev-parse, ls-files, grep, `branch --list`, ...); to edit, "
+               "make your own workspace (`bin/cow-pasture create`, or `acp-dispatch --workspace auto`)")
 
 
 @dataclasses.dataclass
@@ -1273,305 +1230,6 @@ def _globals(call: GitCall) -> list[str]:
 
 
 # --------------------------------------------------------------------------------------------
-# guard: push destinations
-# --------------------------------------------------------------------------------------------
-
-PUSH_SAFETY = ["--dry-run", "--porcelain", "--no-verify", "--no-quiet"]   # --no-quiet: `push -q` prints no ref lines
-
-
-def push_cancels_preflight(args: Sequence[str]) -> Optional[str]:
-    """The first option that is `--no-dry-run`/`--no-porcelain` or any abbreviation of one (git takes any unique
-    prefix, `--no-d`; an ambiguous one is an error there but refused here all the same). The preflight must never
-    be able to push, so a call carrying one is refused before git runs at all."""
-    for a in args:
-        if a == "--":
-            break
-        if a.startswith("--"):
-            name = a[2:].partition("=")[0]
-            if name and any(t.startswith(name) for t in ("no-dry-run", "no-porcelain")):
-                return a
-    return None
-
-
-def push_preflight_argv(call: GitCall) -> list[str]:
-    """git's own dry run of this push. The safety options come BEFORE and AFTER every option the caller gave (so no
-    caller option can cancel them, and an option of the caller's that lacks its value and swallows the next token
-    cannot swallow the first copy) and before the `--` separator. --no-verify keeps pre-push hooks from running."""
-    args = list(call.args)
-    cut = args.index("--") if "--" in args else len(args)
-    return [*_globals(call), "push", *PUSH_SAFETY, *args[:cut], *PUSH_SAFETY, *args[cut:]]
-
-
-def _porcelain_destinations(out: str) -> Optional[tuple[list[str], list[str]]]:
-    """(destination branch names, URLs) of a COMPLETE `push --porcelain` output, or None. Complete = every remote
-    block is `To <url>`, ref lines (`<flag>\t<src>:<dst>\t<summary>`, one per mapped ref, rejected ones included)
-    and git's closing `Done`; a line outside a block, a tab-separated line that is not a ref line, a block that never
-    closed or no block at all means some ref may be missing from what was read (prose inside a block, such as
-    `Would set upstream of ...` for -u, names no ref and is skipped)."""
-    urls: list[str] = []
-    dests: list[str] = []
-    open_block, closed = False, 0
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        if line.startswith("To "):
-            if open_block:
-                return None
-            urls.append(line[3:].strip())
-            open_block = True
-            continue
-        if line == "Done":
-            if not open_block:
-                return None
-            open_block = False
-            closed += 1
-            continue
-        if open_block and "\t" not in line:
-            continue                      # prose git prints inside a block (`Would set upstream of ...`): no ref
-        parts = line.split("\t")
-        if not open_block or len(parts) < 3 or parts[0] not in (" ", "+", "-", "*", "=", "!") or ":" not in parts[1]:
-            return None
-        dst = parts[1].split(":", 1)[1]
-        if dst.startswith("refs/heads/"):
-            dests.append(dst[len("refs/heads/"):])
-    if open_block or not closed:
-        return None
-    return dests, urls
-
-
-def push_destinations(call: GitCall) -> tuple[Optional[list[str]], list[str]]:
-    """(destination branch names, effective push URLs) of a `git push` call, both from git's own
-    `push --dry-run --porcelain` under the call's own config (every -c, repeats and order kept; url.<base>.insteadOf,
-    pushurl, pushDefault, branch.<n>.pushRemote, push.default, `@`, `heads/x`, wildcard and --mirror/--all/deletion
-    refspecs all resolved by git). (None, []) = UNRESOLVED: the dry run did not finish (a timeout, rc 124, or any
-    status other than 0 and 1: no remote, no such repository, usage error), printed no `To` line, or its output is
-    not complete (no closing `Done`, a malformed ref line), so a mapped ref may be missing from what was read.
-    Status 1 is git's answer for "some ref would be rejected" (non-fast-forward): its porcelain lists EVERY mapped
-    ref, the rejected ones with `!`, so a complete listing is read; a partial one is not. The caller decides what
-    unresolved means; nothing is guessed from the command line. Contacts the remote like any push (its transport,
-    credential helper and ssh command run; pre-push hooks do not)."""
-    rc, out = _run_git(push_preflight_argv(call), timeout=20, env_extra=call.env)
-    parsed = _porcelain_destinations(out) if rc in (0, 1) else None
-    if parsed is None:
-        return None, []
-    return parsed[0], parsed[1]
-
-
-# --------------------------------------------------------------------------------------------
-# guard: fetch / pull / remote update destinations
-# --------------------------------------------------------------------------------------------
-
-# --jobs=1 last: `-j N`, `--jobs` or `fetch.parallel` with --all/--multiple/a group runs one child fetch per remote and
-# every child's ref lines go to STDERR, so the listing on stdout would read as empty
-FETCH_SAFETY = ["--dry-run", "--porcelain", "--no-quiet", "--no-write-fetch-head", "--no-auto-gc",
-                "--no-write-commit-graph", "--no-recurse-submodules", "--no-set-upstream", "--jobs=1"]
-FETCH_TIMEOUT = 20.0                       # seconds; ADE_GUARD_FETCH_TIMEOUT overrides (a number in (0, 600])
-_OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-_PORCELAIN_FLAGS = " +-*=!t"
-# `git pull` options that only its merge half reads (git pull -h, 2.56); every other option and operand goes to the
-# fetch half unchanged, so a name missing here makes the preflight fail (unresolved), never narrower
-_PULL_MERGE = frozenset(_with_negations({"rebase", "stat", "summary", "compact-summary", "log", "signoff", "squash", "commit",
-                                         "edit", "cleanup", "ff", "ff-only", "verify", "verify-signatures", "autostash",
-                                         "strategy", "strategy-option", "gpg-sign", "allow-unrelated-histories"}))
-_PULL_MERGE_VALUE = frozenset({"cleanup", "strategy", "strategy-option"})      # a separate value token follows
-_PULL_FETCH = frozenset(_with_negations({"verbose", "quiet", "progress", "recurse-submodules", "all", "append",
-                                         "upload-pack", "force", "tags", "prune", "jobs", "dry-run", "keep", "depth",
-                                         "shallow-since", "shallow-exclude", "deepen", "unshallow", "update-shallow",
-                                         "refmap", "server-option", "ipv4", "ipv6", "negotiation-restrict",
-                                         "negotiation-tip", "negotiation-include", "show-forced-updates",
-                                         "set-upstream", "update-head-ok"}))
-
-
-def fetch_kind(call: GitCall) -> str:
-    """"fetch", "pull", "remote update" (also `remote -v update`, `remote -- update`) or "" for any other call."""
-    if call.sub in ("fetch", "pull"):
-        return call.sub
-    if call.sub == "remote":
-        s = scan(call.args)
-        if (s.pos + s.after)[:1] == ["update"]:
-            return "remote update"
-    return ""
-
-
-def fetch_timeout() -> float:
-    try:
-        v = float(os.environ.get("ADE_GUARD_FETCH_TIMEOUT", ""))
-    except ValueError:
-        return FETCH_TIMEOUT
-    return v if 0 < v <= 600 else FETCH_TIMEOUT
-
-
-def _names_stdin(args: Sequence[str]) -> bool:
-    """Whether `--stdin` or any abbreviation that may stand for it is among the options (refspecs read from stdin
-    cannot be given to the preflight)."""
-    for a in args:
-        if a == "--":
-            break
-        name = a[2:].partition("=")[0] if a.startswith("--") else ""
-        if name and "stdin".startswith(name):
-            return True
-    return False
-
-
-def _pull_long_is_merge_only(name: str) -> bool:
-    if name in _PULL_MERGE:
-        return True
-    if not name or name in _PULL_FETCH:
-        return False
-    return any(m.startswith(name) for m in _PULL_MERGE) and not any(f.startswith(name) for f in _PULL_FETCH)
-
-
-def _pull_long_takes_value(name: str) -> bool:
-    cands = [name] if name in _PULL_MERGE else [m for m in _PULL_MERGE if m.startswith(name)]
-    return bool(cands) and all(c in _PULL_MERGE_VALUE for c in cands)
-
-
-def _pull_fetch_args(args: Sequence[str]) -> list[str]:
-    """The options and operands of a `git pull` that its inner `git fetch` takes: the merge-only options (and the
-    separate value of -s/-X/--strategy/--strategy-option/--cleanup) are removed, everything else stays as typed."""
-    out: list[str] = []
-    i, n = 0, len(args)
-    while i < n:
-        a = args[i]
-        if a == "--":
-            out += args[i:]
-            break
-        if a.startswith("--"):
-            name, eq, _ = a[2:].partition("=")
-            if _pull_long_is_merge_only(name):
-                if not eq and _pull_long_takes_value(name):
-                    i += 1
-            else:
-                out.append(a)
-        elif a.startswith("-") and len(a) > 1:
-            kept, j = "", 1
-            while j < len(a):
-                ch = a[j]
-                if ch == "n":                         # --no-stat
-                    j += 1
-                elif ch in "rS":                      # --rebase, --gpg-sign: an optional value, attached
-                    break
-                elif ch in "sX":                      # --strategy, --strategy-option: attached, or the next token
-                    if not a[j + 1:]:
-                        i += 1
-                    break
-                else:
-                    kept += ch
-                    if ch in "jo":                    # --jobs, --server-option: the rest (or the next token) is its value
-                        kept += a[j + 1:]
-                        break
-                    j += 1
-            if kept:
-                out.append("-" + kept)
-        else:
-            out.append(a)
-        i += 1
-    return out
-
-
-def _remote_update_fetch_args(call: GitCall) -> Optional[list[str]]:
-    """`remote update [-p] [group|remote...]` is `fetch --multiple` over the named groups and remotes, over the
-    `default` group when one is configured, else over every remote (`fetch --multiple --all`). Any option
-    after `update` counts as -p (a dry-run prune lists what it would delete, so it is the stricter reading)."""
-    names: list[str] = []
-    prune = past_update = ended = False
-    for a in call.args:
-        if not ended and a == "--":
-            ended = True
-        elif not past_update and (ended or not a.startswith("-")):
-            past_update = True                       # the subcommand itself
-        elif past_update and not ended and a.startswith("-"):
-            prune = True
-        elif past_update:
-            names.append(a)
-    if not names:
-        rc, out = _call_git(call, "config", "--get-all", "remotes.default")
-        if rc not in (0, 1):
-            return None
-        names = ["default"] if out.strip() else []
-    return ["--multiple" if names else "--all", *(["--prune"] if prune else []), *(["--", *names] if names else [])]
-
-
-def fetch_preflight_argv(call: GitCall, kind: str) -> Optional[list[str]]:
-    """git's own dry run of what this call fetches: `fetch --dry-run --porcelain` under the call's own -C/-c/--git-dir/
-    --work-tree and config environment, with the call's remote, refspec and fetch options (a `pull` without its merge
-    options, plus --update-head-ok, as pull's own fetch passes it; `remote update` as the `fetch --multiple` it runs).
-    The safety options come before and after the caller's options (the second copy opens with a spare --dry-run, so
-    an option of the caller's that lacks its value and swallows the next token cannot leave the dry run cancelled by
-    a `--no-dry-run` of the caller's), and before a bare `--`. None when the refspecs cannot be given to it (`--stdin`)
-    or the call cannot be translated."""
-    if kind == "remote update":
-        args = _remote_update_fetch_args(call)
-    elif _names_stdin(call.args):
-        args = None
-    else:
-        args = _pull_fetch_args(call.args) if kind == "pull" else list(call.args)
-    if args is None:
-        return None
-    safe = [*FETCH_SAFETY, *(["--update-head-ok"] if kind == "pull" else [])]
-    cut = args.index("--") if "--" in args else len(args)
-    return [*_globals(call), "fetch", *safe, *args[:cut], "--dry-run", *safe, *args[cut:]]
-
-
-def _porcelain_ref(line: str) -> Optional[str]:
-    """The ref name of one `fetch --porcelain` line `<flag> <old> <new> <ref>` (flag one of space + - * = ! t, two
-    object ids), or None when the line is not one."""
-    parts = line[2:].split(" ") if len(line) > 2 and line[0] in _PORCELAIN_FLAGS and line[1] == " " else []
-    if len(parts) < 3 or not _OID.fullmatch(parts[0]) or not _OID.fullmatch(parts[1]):
-        return None
-    return parts[2]
-
-
-def _fetch_porcelain_heads(out: str) -> Optional[list[str]]:
-    """The branch names (`refs/heads/X` -> `X`) of a COMPLETE `fetch --porcelain` listing, or None: every non-blank
-    line must be a ref line (_porcelain_ref), so a line this reader does not understand means a ref may be missing
-    from what was read. An empty listing is complete (nothing to update)."""
-    heads: list[str] = []
-    for line in out.split("\n"):
-        if not line.strip():
-            continue
-        ref = _porcelain_ref(line)
-        if ref is None:
-            return None
-        if ref.startswith("refs/heads/"):
-            heads.append(ref[len("refs/heads/"):])
-    return heads
-
-
-def fetch_destinations(call: GitCall, kind: str) -> Optional[list[str]]:
-    """The local branches (`refs/heads/*`) this fetch, pull or remote update would update, from git's own
-    `fetch --dry-run --porcelain` (fetch_preflight_argv): every refspec spelling, configured `remote.<name>.fetch`,
-    legacy remotes/branches files, default-remote choice, `--refmap`, `--prune`, `heads/x`, `tags/x` and wildcard is
-    resolved by git, none by this guard. None = UNRESOLVED: the dry run timed out (ADE_GUARD_FETCH_TIMEOUT, default
-    20 s), exited other than 0/1 (1 is git's answer for "some ref would be rejected"), printed a line that is not a ref
-    line, printed ref lines on STDERR (what a parallel multi-remote fetch does with its listing: the listing on stdout
-    cannot then be trusted, whatever made git parallel), or the call has `--stdin`. Contacts the remote like the fetch
-    itself (transport, credential helper, ssh, --upload-pack and --exec-path run; hooks, FETCH_HEAD, gc, commit-graph,
-    submodules and --set-upstream do not). It may write `.git/shallow` (with --depth and the like) and the objects it
-    downloads: git's own `--dry-run` does, and nothing here redirects them."""
-    argv = fetch_preflight_argv(call, kind)
-    if argv is None:
-        return None
-    err: list[str] = []
-    rc, out = _run_git(argv, timeout=fetch_timeout(), env_extra=call.env, err_out=err)
-    if rc not in (0, 1) or any(_porcelain_ref(x) is not None for x in "".join(err).split("\n")):
-        return None
-    return _fetch_porcelain_heads(out)
-
-
-def fetch_head_updates(call: GitCall, ws0: Optional[Workspace], ident: Optional[str]) -> Optional[list[str]]:
-    """The local branches a fetch-like call updates, cached on the call: [] for any other call and, with no other
-    agent holding a claim in the repository, without starting git (nothing there to protect); None = unresolved."""
-    if "_fetch_heads" not in call.__dict__:
-        kind = fetch_kind(call)
-        heads: Optional[list[str]] = []
-        if kind and _foreign_claim_in_repo(ws0, ident) is not None:
-            heads = fetch_destinations(call, kind)
-        call.__dict__["_fetch_heads"] = heads
-    return call.__dict__["_fetch_heads"]
-
-
-# --------------------------------------------------------------------------------------------
 # guard: decisions
 # --------------------------------------------------------------------------------------------
 
@@ -1618,6 +1276,13 @@ def call_workspaces(call: GitCall) -> tuple[list[Optional[Workspace]], bool]:
             elif gd_path:
                 wt_path = call.cwd
         cands = [find_workspace(wt_path) if wt_path else None, gd_ws]
+    # every path the call TYPES counts as well (O2 coarse rule): each cumulative -C, --git-dir and --work-tree, even when
+    # a later option moves git elsewhere (`-C /their/tree -C /mine` still named their tree)
+    for p in call.touched:
+        cands.append(find_workspace(p))
+    for p, is_gitdir in ((call.gitdir_path(), True), (call.worktree_path(), False)):
+        if p:
+            cands.append(workspace_for_gitdir(p, call.cwd) if is_gitdir else find_workspace(p))
     out: list[Workspace] = []
     for w in cands:
         if w is not None and not any(_same_path(w.root, x.root) and _same_path(w.gitdir, x.gitdir) for x in out):
@@ -1668,72 +1333,6 @@ def _worktree_targets(call: GitCall, ws0: Optional[Workspace], token: str) -> li
     return hits or [Path(p)]
 
 
-def _foreign_claim_in_repo(ws0: Optional[Workspace], ident: Optional[str]) -> Optional[dict[str, Any]]:
-    """An active claim of someone else in the repository of `ws0` (a claim on one of its worktrees, or one whose
-    origin is this repository's or unknown), or None."""
-    if ws0 is None:
-        return None
-    origin = _git_out(ws0.root, "config", "--get", "remote.origin.url")
-    roots = [r for r, _ in repo_worktrees(ws0)]
-    for c in list_claims("active"):
-        if is_mine(c, ident):
-            continue
-        if _origin_matches(str(c.get("repo_origin") or ""), [origin]) or any(_same_path(c.get("path"), r) for r in roots):
-            return c
-    return None
-
-
-def _output_decision(call: GitCall, out: str, ident: Optional[str]) -> Optional[Decision]:
-    """An output file (`--output=`, `-o`) is judged by the workspace of the file it REALLY writes: its own symlink
-    (even dangling) is resolved before its parent is taken. Into a claimed workspace of someone else: refused;
-    over an existing dirty (modified or untracked) file of a shared checkout: refused."""
-    tp = Path(os.path.realpath(os.path.join(call.cwd, out)))
-    tws = find_workspace(tp if tp.is_dir() else tp.parent)
-    if tws is None:
-        return None
-    c = find_claim(tws)
-    if c is not None:
-        if not is_mine(c, ident):
-            return _foreign(c, "output into a claimed workspace", "write the file outside the other agent's workspace")
-        return None
-    if tp.is_file() and _git_out(tws.root, "status", "--porcelain", "--", str(tp)):
-        return Decision(False, "output over a dirty file", "write the file outside the shared checkout, or to a new "
-                        "name; this one holds uncommitted work", "", "nobody; a shared checkout (no active claim)")
-    return None
-
-
-def _opt_values(args: Sequence[str], shorts: str = "", longs: Iterable[str] = (), exact: Iterable[str] = ()) -> list[str]:
-    """The values given to the short options in `shorts` (`-B x`, `-Bx`, inside a cluster) and to the long options
-    in `longs` (`--name=x`, `--name x`, any unique-or-not prefix: fail closed), up to a bare `--`. A name in `exact`
-    is another option of the command that git matches whole before it tries prefixes (`switch --force` is
-    --discard-changes, not --force-create)."""
-    out: list[str] = []
-    i, n = 0, len(args)
-    while i < n:
-        a = args[i]
-        if a == "--":
-            break
-        if a.startswith("--"):
-            name, eq, v = a[2:].partition("=")
-            if name and name not in exact and any(x.startswith(name) for x in longs):
-                if eq:
-                    out.append(v)
-                elif i + 1 < n:
-                    out.append(args[i + 1])
-                    i += 1
-        elif a.startswith("-") and len(a) > 1:
-            for j, ch in enumerate(a[1:], 1):
-                if ch in shorts:
-                    if a[j + 1:]:
-                        out.append(a[j + 1:])
-                    elif i + 1 < n:
-                        out.append(args[i + 1])
-                        i += 1
-                    break
-        i += 1
-    return out
-
-
 def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str]) -> Optional[Decision]:
     """Rule 5: the claim of what the call HITS, not of where it runs."""
     sub, args = call.sub, call.args
@@ -1757,137 +1356,145 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
                                 "`git worktree remove <path>` without --force (git then refuses a dirty tree), or claim it first",
                                 "", "nobody; the target has no active claim of yours")
     names: list[str] = []
-    label = sub
     if sub == "branch":
+        # Only a rename's or copy's DESTINATION: the files backend never tells the reference-transaction hook about it (a
+        # rename reports its source's deletion, a copy nothing: measured on git 2.56, 2026-10-25). Deleting, forcing and
+        # every other ref write reach the hook, which does not care how the call was spelled.
         s = scan(args, value_long={"contains", "no-contains", "merged", "no-merged", "points-at", "format", "sort",
                                    "abbrev"}, danger=D_WRITE_BRANCH)
-        if s.shorts & set("dDmM") or s.longs & {"delete", "move"}:
+        if s.shorts & set("mM") or s.longs & {"move"}:
             names = [p for p in s.pos]                    # the old name goes away and the new one is overwritten
         elif s.shorts & set("cC") or s.longs & {"copy"}:
             names = s.pos[-1:]                            # a copy only writes its destination (`-c SRC DST`, `-c DST`)
-        elif s.shorts & {"f"} or s.longs & {"force"}:
-            names = [p for p in s.pos]
-    elif sub == "update-ref":
-        s = scan(args, value_short="m", value_long={"stdin"}, danger={"stdin"})
-        if "stdin" in s.longs:
-            c = _foreign_claim_in_repo(ws0, ident)
-            if c is not None:
-                return _foreign(c, "update-ref --stdin with claims in this repository",
-                                "name the ref on the command line (`git update-ref refs/heads/<your-branch> <sha>`); "
-                                "a ref transaction on stdin cannot be inspected, and another agent's branch is claimed")
-        elif s.pos and s.pos[0].startswith("refs/heads/"):
-            names = [s.pos[0][len("refs/heads/"):]]
-    elif sub in ("checkout", "switch"):
-        names = _opt_values(args, "B" if sub == "checkout" else "C", ("force-create",) if sub == "switch" else (), ("force",))
-    elif sub == "worktree" and args and args[0] == "add":
-        names = _opt_values(args[1:], "B")
-    elif fetch_kind(call):
-        label = fetch_kind(call)
-        heads = fetch_head_updates(call, ws0, ident)
-        if heads is None:
-            c = _foreign_claim_in_repo(ws0, ident)
-            if c is not None:
-                why = ("`--stdin` refspecs cannot be given to git's dry run" if _names_stdin(args) else
-                       "git's own `fetch --dry-run --porcelain` did not answer (remote unreachable, it timed out after "
-                       f"{fetch_timeout():g} s, exited non-zero or printed something unexpected)")
-                return _foreign(c, "fetch destinations unresolved",
-                                f"{why} while another agent holds a claim in this repository, so a claimed branch cannot "
-                                "be ruled out. If the remote is merely slow, retrying does not help (the dry run is "
-                                "cut at the same point every time): raise ADE_GUARD_FETCH_TIMEOUT (seconds, up to 600, "
-                                "now " f"{fetch_timeout():g}); otherwise fix the remote or name a plain `git fetch "
-                                f"<remote>`. The operator can allow it with ACP_OPERATOR_APPROVED={OVERRIDE}")
-        else:
-            names = heads
     if names and ws0 is not None:
         origin = _git_out(ws0.root, "config", "--get", "remote.origin.url")
         for nm in names:
             for c in claims_for_branch(nm, origin):
                 if not is_mine(c, ident):
-                    return _foreign(c, f"{label} of a claimed branch", "message the owner; never move or delete another agent's branch")
+                    return _foreign(c, f"{sub} of a claimed branch", "message the owner; never move or delete another agent's branch")
             for root, gd in repo_worktrees(ws0):
                 if _head_branch(gd) == nm:
                     c = claim_at(root)
                     if c is not None and not is_mine(c, ident):
-                        return _foreign(c, f"{label} of a branch checked out in a claimed workspace",
+                        return _foreign(c, f"{sub} of a branch checked out in a claimed workspace",
                                         "message the owner; the branch is checked out in their workspace")
-    for o in output_targets(call) or []:
-        d = _output_decision(call, o, ident)
-        if d is not None:
-            return d
-    return None
-
-
-def _push_decision(call: GitCall, ident: Optional[str]) -> Optional[Decision]:
-    """push is refused when a destination branch has an active claim that is not the caller's. The destinations
-    and URLs are git's own (push_destinations). Unresolvable: refused while anyone else holds an active claim
-    (the claimed branch cannot be ruled out), allowed otherwise (nothing exists to protect; a real push that
-    cannot resolve fails by itself)."""
-    bad = push_cancels_preflight(call.args)
-    if bad:
-        return Decision(False, "push-preflight-option", f"drop `{bad}`; the guard's own dry run needs --dry-run and "
-                        "--porcelain in force, so a push that cancels them is refused", "", "nobody; not decidable")
-    dests, urls = push_destinations(call)
-    if dests is None:
-        other = next((c for c in list_claims("active") if not is_mine(c, ident)), None)
-        if other is None:
-            return None
-        return Decision(False, "push-destination-unresolved",
-                        "git's own `push --dry-run` could not resolve where this push goes (remote unreachable or "
-                        "unconfigured, it timed out, exited non-zero, or its output did not cover every ref) and "
-                        "another agent holds an active claim, so a claimed branch cannot be ruled out; fix the "
-                        "remote or name a refspec that resolves", "",
-                        "nobody; destination unknown")
-    for nm in dict.fromkeys(dests):
-        for c in claims_for_branch(nm, urls):
-            if not is_mine(c, ident):
-                return _foreign(c, "push-foreign-branch",
-                                f"push only your own branch; ask the owner to push (or to add you to the "
-                                f"claim's allow list); branch {nm!r} is claimed")
     return None
 
 
 MAX_ALIAS_DEPTH = 10
 
+# Config that turns the hooks off, moves them or pulls in more config (O2, 2026-10-25): `core.hooksPath`, anything under
+# `hook.` (git 2.54+ config hooks, `hook.<event>.enabled=false`), `include.*` and `includeIf.*`. No agent has a reason to
+# set one, so a match is refused whatever the call is.
+def _hook_key(key: str) -> bool:
+    k = _ckey(key.strip())
+    return k == "core.hookspath" or k.startswith(("hook.", "include.", "includeif."))
 
-def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, assume_agent: bool = False,
-             _depth: int = 0) -> Decision:
-    """Decide one git call. Reads claims; asks real git (with the call's own config) for an alias, a push
-    destination or a branch's origin."""
+
+_HOOK_LINE = re.compile(r"^\s*(hookspath\s*=|\[\s*(hook|include|includeif)[\s.\"\]])", re.I | re.M)
+
+
+def _config_file_defines_hooks(path: str) -> bool:
+    """A config file named by GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM that sets hooksPath or has a [hook]/[include]/
+    [includeIf] section. Any such file, whatever its other content, is refused; an unreadable one is not."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return bool(_HOOK_LINE.search(f.read(1 << 20)))
+    except OSError:
+        return False
+
+
+def _closed(rule: str, alt: str) -> Decision:
+    return Decision(False, rule, alt, "", "nobody; the call cannot be classified safely")
+
+
+def _redirect_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
+    """Rule (ii): the call, its environment or a `git config` write would disable, move or extend the hooks."""
+    alt = "the ref guard lives in git hooks; nothing may redirect or switch them off. Ask the operator"
+    for k, _ in call.config:
+        if _hook_key(k):
+            return _closed("hook-config", f"`{_esc(k)}` set on the command line or in the environment: {alt}")
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"):
+        v = env.get(name, "")
+        if v and _config_file_defines_hooks(v):
+            return _closed("hook-config", f"{name} names a config file that sets hooksPath, a [hook] or an [include]: {alt}")
+    if call.sub == "config":
+        s = scan(call.args, value_short="f", value_long={"file", "blob", "type", "default"}, danger={"edit"})
+        if s.shorts & {"e"} or "edit" in s.longs:
+            return _closed("hook-config", f"`git config --edit` can write any key: {alt}")
+        if not is_readonly(call):
+            for t in s.pos + s.after:
+                low = t.lower()
+                if _hook_key(t) or low.partition(".")[0] in ("hook", "include", "includeif"):
+                    return _closed("hook-config", f"`git config` writes `{_esc(t)}`: {alt}")
+    return None
+
+
+def _push_decision(call: GitCall) -> Optional[Decision]:
+    """`push --no-verify` (or any `--no-v` prefix) skips the pre-push hook; so does `send-pack`/`http-push`."""
+    if call.sub in ("send-pack", "http-push"):
+        return _closed("push-plumbing", f"`git {call.sub}` pushes without running the pre-push hook; use `git push`")
+    if call.sub == "push":
+        for a in call.args:
+            if a == "--":
+                break
+            if a.startswith("--no-v"):
+                return _closed("push-no-verify", "`git push --no-verify` skips the pre-push hook that protects other "
+                                                 "agents' branches; push without it")
+    return None
+
+
+def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int = 0) -> Decision:
+    """Decide one git call. Reads claims; asks real git (with the call's own config) for an alias or a branch's origin.
+    Order: the fail-closed rules first (an option or subcommand the guard cannot read, hook-redirecting config, a push that
+    skips its hook), then the workspace rules, then the targets the hooks cannot see."""
     env = os.environ if env is None else env
-    if not assume_agent and not is_agent_env(env):
+    if not is_agent_env(env):
         return ALLOW
     ident = caller_ident(env)
     approved = {x.strip() for x in env.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
-    wss, unresolved = call_workspaces(call)
     sub = call.sub
+    wss: list[Optional[Workspace]] = [None]
+    deny: Optional[Decision] = None
     bang = ""
-    if sub and sub not in READONLY and sub not in KNOWN_WRITE:
+    unresolved = False
+    if call.problem:
+        deny = _closed("unknown-option", f"{call.problem}: the guard reads only options git itself defines; spell the "
+                                          "call with the plain global options (-C, -c, --git-dir, --work-tree ...)")
+    if deny is None:
+        deny = _redirect_decision(call, env) or _push_decision(call)
+    if deny is None and sub and sub not in KNOWN_SUBS:
+        rc, alias = _call_git(call, "config", "--get", f"alias.{sub}") if _depth < MAX_ALIAS_DEPTH else (1, "")
+        alias = alias.strip() if rc == 0 else ""
         if _depth >= MAX_ALIAS_DEPTH:
             bang = "alias chain"          # fail closed: an unresolved name is treated as the worst alias
+        elif alias.startswith("!"):
+            bang = "shell alias"
+        elif alias:
+            try:
+                words = shlex.split(alias)
+            except ValueError:
+                words = []
+            if not words:
+                bang = "alias chain"
+            else:
+                x = parse_git_argv([*words, *call.args], call.cwd, {})
+                nc = GitCall(x.cwd, x.gitdir or call.gitdir, x.sub, x.args, [*call.config, *x.config],
+                             x.worktree or call.worktree, call.nglobal, call.env, [*call.gopts, *x.gopts])
+                nc.problem = x.problem
+                nc.touched = [*call.touched, *x.touched]
+                d = evaluate(nc, env, _depth=_depth + 1)
+                call.ws = nc.ws
+                return d
         else:
-            rc, alias = _call_git(call, "config", "--get", f"alias.{sub}")
-            alias = alias.strip() if rc == 0 else ""
-            if alias.startswith("!"):
-                bang = "shell alias"
-            elif alias:
-                try:
-                    words = shlex.split(alias)
-                except ValueError:
-                    words = []
-                if not words:
-                    bang = "alias chain"
-                else:
-                    x = parse_git_argv([*words, *call.args], call.cwd, {})
-                    return evaluate(GitCall(x.cwd, x.gitdir or call.gitdir, x.sub, x.args, [*call.config, *x.config],
-                                            x.worktree or call.worktree, call.nglobal, call.env, [*call.gopts, *x.gopts]),
-                                    env, assume_agent=assume_agent, _depth=_depth + 1)
-    if not unresolved and fetch_kind(call):       # asks git (dry run) only while another agent holds a claim here
-        fetch_head_updates(call, next((w for w in wss if w is not None), None), ident)
-    deny: Optional[Decision] = None
-    for ws in wss:
-        deny = _ws_decision(call, ws, ident, bang)
-        if deny is not None:
-            break
+            deny = _closed("unknown-subcommand", f"`git {_esc(sub)}` is not a git subcommand the guard knows (an external "
+                           "`git-foo` program, or a typo); run the program directly, or ask the operator")
+    if deny is None:
+        wss, unresolved = call_workspaces(call)
+        for ws in wss:
+            deny = _ws_decision(call, ws, ident, bang)
+            if deny is not None:
+                break
     if deny is None and unresolved and not is_readonly(call):
         other = next((c for c in list_claims("active") if not is_mine(c, ident)), None)
         if other is not None:      # git could not say where this lands: the target cannot be ruled out
@@ -1896,11 +1503,10 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, assume_agen
                             "gave no answer) while another agent holds a claim; retry, or run it read-only")
     if deny is None:
         deny = _target_decision(call, wss, ident)
-    if deny is None and sub == "push":
-        deny = _push_decision(call, ident)
+    ws_any = next((w for w in wss if w is not None), None)
+    call.ws = ws_any
     if deny is None:
         return ALLOW
-    ws_any = next((w for w in wss if w is not None), None)
     deny.detail = {"sub": sub, "cwd": str(ws_any.root if ws_any else call.cwd), "ident": ident or ""}
     if OVERRIDE in approved:
         deny.override = True
@@ -1951,15 +1557,8 @@ def _esc(value: Any) -> str:
                    for c in str(value))
 
 
-def log_event(decision: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) -> None:
-    """One JSON line per refusal or override in guard.log: the subcommand and option NAMES only, never an
-    option's value or a positional (URLs, messages, paths): a credential in argv must not reach a log."""
-    rec = {"ts": utc_now(), "outcome": "override" if decision.override else "refused", "rule": decision.rule,
-           "cmd": call.display(), "flags": _log_flags(call.args), "claim": decision.claim_id,
-           "owner": decision.owner, "ident": decision.detail.get("ident", ""),
-           "cwd": decision.detail.get("cwd", ""), "pid": os.getpid()}
-    if extra:
-        rec.update(extra)
+def append_guard_log(rec: dict[str, Any]) -> None:
+    """One JSON line appended to guard.log (O_APPEND: concurrent writers do not interleave a line)."""
     try:
         path = guard_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1970,6 +1569,18 @@ def log_event(decision: Decision, call: GitCall, extra: Optional[dict[str, Any]]
             os.close(fd)
     except OSError:
         pass  # a full disk never turns a refusal into a crash; the refusal still exits 77
+
+
+def log_event(decision: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) -> None:
+    """One JSON line per refusal or override in guard.log: the subcommand and option NAMES only, never an
+    option's value or a positional (URLs, messages, paths): a credential in argv must not reach a log."""
+    rec = {"ts": utc_now(), "outcome": "override" if decision.override else "refused", "rule": decision.rule,
+           "cmd": call.display(), "flags": _log_flags(call.args), "claim": decision.claim_id,
+           "owner": decision.owner, "ident": decision.detail.get("ident", ""),
+           "cwd": decision.detail.get("cwd", ""), "pid": os.getpid()}
+    if extra:
+        rec.update(extra)
+    append_guard_log(rec)
 
 
 def refusal_text(decision: Decision, call: GitCall) -> str:
@@ -1996,7 +1607,8 @@ def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) 
 
 
 def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> int:
-    """What ade-git-guard runs for a git call that was not plainly read-only. 0 = run real git, 77 = refused."""
+    """What ade-git-guard runs for a git call that was not plainly read-only. 0 = run real git, 77 = refused. An allowed
+    call also installs the ref hooks into its repository when they are missing (lazy install; never fails the call)."""
     env = os.environ if env is None else env
     if env.get("GIT_INDEX_FILE") or env.get("PRE_COMMIT"):
         return 0
@@ -2007,722 +1619,312 @@ def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: O
     call = parse_git_argv(argv, base, env)
     d = evaluate(call, env)
     if d.allowed and not d.override:
+        _lazy_install(call, env)
         return 0
-    return _report(d, call)
+    rc = _report(d, call)
+    if rc == 0:
+        _lazy_install(call, env)
+    return rc
 
 
 # --------------------------------------------------------------------------------------------
-# guard: shell command strings (the Claude PreToolUse hook, W5)
+# hooks: reference-transaction and pre-push (O2, 2026-10-25), and their install
 # --------------------------------------------------------------------------------------------
 
-# commands that run their arguments: a `git` after one of them is a real invocation
-_WRAPPERS = {"command", "builtin", "exec", "time", "nohup", "sudo", "doas", "env", "noglob", "nice", "ionice", "timeout",
-             "xargs", "watch", "stdbuf", "caffeinate", "setsid", "then", "do", "else", "elif", "if", "while", "until",
-             "!", "{", "}", "exec", "unbuffer", "chronic", "parallel"}
-_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "ash"}
-_ENV_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
-_DYN = re.compile(r"\$[A-Za-z_{(@*#?!0-9]|`")
-_HD_END = " \t\r\n;&|()<>"                      # ends a heredoc delimiter word
-_WRAP_VALUE = re.compile(r"^[0-9][0-9.]*[smhd]?$")   # `timeout 5s`, `nice -n 5`: a wrapper's number
-_MENTIONS_GIT = re.compile(r"(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_])")
-_INLINE_GIT_ENV = re.compile(r"^(GIT_DIR|GIT_WORK_TREE|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_KEY_\d+|"
-                             r"GIT_CONFIG_VALUE_\d+|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|GIT_CONFIG)$")
-MAX_SHELL_DEPTH = 8
+HOOK_NAMES = ("reference-transaction", "pre-push")
+STUB_MARK = "# ade-git-guard hook stub"
+HOOKS_SRC = Path(__file__).resolve().parent.parent / "libexec" / "git-hooks"
+EXIT_HOOKSPATH = 78     # install: core.hooksPath is set, git would never run the stubs (EX_CONFIG)
+EXIT_PRE_ADE = 73       # install: NAME.pre-ade already exists, so the existing hook cannot be kept (EX_CANTCREAT)
 
 
-@dataclasses.dataclass
-class Word:
-    text: str
-    dyn: bool = False    # holds an unexpanded variable, $(...) or backtick: its value is unknown
-    glob: bool = False   # an unquoted * ? [ or {a,b} / {a..b}: the shell may expand it to another name
-
-
-@dataclasses.dataclass
-class Heredoc:
-    delim: str
-    strip: bool          # <<-
-    quoted: bool         # a quoted or backslashed delimiter: the body is literal text, no substitutions
-    body: str = ""
-
-
-@dataclasses.dataclass
-class Seg:
-    """One simple command: its words, the control operator before and after it, the substitutions in its words,
-    and the heredocs / here-strings attached to it."""
-    words: list[Word]
-    sep_before: str = ""
-    sep_after: str = ""
-    subs: list[str] = dataclasses.field(default_factory=list)
-    heredocs: list[Heredoc] = dataclasses.field(default_factory=list)
-    herestrings: list[str] = dataclasses.field(default_factory=list)
-
-
-def _read_heredoc_op(s: str, j: int) -> tuple[str, bool, bool, int]:
-    """The heredoc operator at s[j:] (`<<`, never `<<<`): (delimiter, strip, quoted, index after the word). The
-    delimiter is the WORD after the operator with shell quote removal applied exactly as written (`E"OF"`, `E\\OF`,
-    `'E OF'`, `"E"'O'F` all read as EOF / E OF), so the body ends where the shell ends it. `quoted` is true when
-    any part is quoted or escaped (the body is then literal). ValueError when the word cannot be read exactly: none
-    follows, an unterminated quote, `$'..'`, `$".."` or a backtick in it."""
-    n = len(s)
-    k = j + 2
-    strip = k < n and s[k] == "-"
-    k += strip
-    while k < n and s[k] in " \t":
-        k += 1
-    start, out, quoted = k, [], False
-    while k < n and s[k] not in _HD_END:
-        c = s[k]
-        if c == "\\":
-            if k + 1 >= n or s[k + 1] == "\n":
-                raise ValueError("heredoc delimiter ends in a backslash")
-            out.append(s[k + 1])
-            quoted = True
-            k += 2
-        elif c == "'":
-            e = s.find("'", k + 1)
-            if e < 0:
-                raise ValueError("unterminated quote in a heredoc delimiter")
-            out.append(s[k + 1:e])
-            quoted = True
-            k = e + 1
-        elif c == '"':
-            e = k + 1
-            while e < n and s[e] != '"':
-                if s[e] == "\\" and e + 1 < n and s[e + 1] in '$`"\\':
-                    e += 1
-                out.append(s[e])
-                e += 1
-            if e >= n:
-                raise ValueError("unterminated quote in a heredoc delimiter")
-            quoted = True
-            k = e + 1
-        elif c == "`" or (c == "$" and s[k + 1:k + 2] in ("'", '"')):
-            raise ValueError("heredoc delimiter the guard cannot read exactly ($'..', $\"..\" or a backtick)")
-        else:
-            out.append(c)
-            k += 1
-    if k == start:
-        raise ValueError("heredoc operator without a delimiter word")
-    return "".join(out), strip, quoted, k
-
-
-def _skip_heredoc_body(s: str, i: int, delim: str, strip: bool) -> tuple[str, int, bool]:
-    """(body, index after the delimiter line, delimiter found) of the heredoc whose body starts at s[i]."""
-    n = len(s)
-    lines: list[str] = []
-    while i < n:
-        j = s.find("\n", i)
-        line = s[i:n if j < 0 else j]
-        i = n if j < 0 else j + 1
-        if (line.lstrip("\t") if strip else line) == delim:
-            return "\n".join(lines), i, True
-        lines.append(line)
-    return "\n".join(lines), i, False
-
-
-def _skip_dquote(s: str, j: int) -> int:
-    """Index after the double-quoted string that opens at s[j] (len(s) when unterminated); `$(...)` and backticks
-    inside it nest, so a quote inside a substitution inside a string does not end the string."""
-    n = len(s)
-    j += 1
-    while j < n:
-        c = s[j]
-        if c == "\\":
-            j += 2
-        elif c == '"':
-            return j + 1
-        elif c == "$" and s.startswith("$(", j):
-            j = _match_paren(s, j + 1) + 1
-        elif c == "`":
-            k = s.find("`", j + 1)
-            j = n if k < 0 else k + 1
-        else:
-            j += 1
-    return n
-
-
-def _match_paren(s: str, i: int) -> int:
-    """Index of the `)` closing the `(` at s[i], skipping quoted text, comments and heredoc bodies (an apostrophe
-    in a `$(cat <<'EOF' ... EOF)` commit message is not a quote); len(s) when unclosed. A heredoc operator the
-    guard cannot read exactly raises ValueError."""
-    depth, j, n = 0, i, len(s)
-    pending: list[tuple[str, bool]] = []
-    while j < n:
-        c = s[j]
-        if c == "\\":
-            j += 2
-            continue
-        if c == "'":
-            k = s.find("'", j + 1)
-            j = n if k < 0 else k + 1
-            continue
-        if c == '"':
-            j = _skip_dquote(s, j)
-            continue
-        if c == "`":
-            k = s.find("`", j + 1)
-            j = n if k < 0 else k + 1
-            continue
-        if c == "#" and (j == 0 or s[j - 1] in " \t\n;&|("):
-            k = s.find("\n", j)
-            j = n if k < 0 else k
-            continue
-        if c == "<" and s.startswith("<<<", j):
-            j += 3
-            continue
-        if c == "<" and s.startswith("<<", j):
-            delim, strip, _, j = _read_heredoc_op(s, j)
-            pending.append((delim, strip))
-            continue
-        if c == "\n" and pending:
-            j += 1
-            for delim, strip in pending:
-                _, j, _ = _skip_heredoc_body(s, j, delim, strip)
-            pending.clear()
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-        j += 1
-    return n
-
-
-def _match_brace(s: str, i: int) -> int:
-    """Index of the `}` closing the `{` of a `${` at s[i] (quotes, `$(...)` and nested `${` skipped). ValueError
-    when unclosed."""
-    depth, j, n = 0, i, len(s)
-    while j < n:
-        c = s[j]
-        if c == "\\":
-            j += 2
-            continue
-        if c == "'":
-            k = s.find("'", j + 1)
-            j = n if k < 0 else k + 1
-            continue
-        if c == '"':
-            j = _skip_dquote(s, j)
-            continue
-        if c == "`":
-            k = s.find("`", j + 1)
-            j = n if k < 0 else k + 1
-            continue
-        if c == "$" and s.startswith("$(", j):
-            j = _match_paren(s, j + 1) + 1
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return j
-        j += 1
-    raise ValueError("unterminated ${...}")
-
-
-def _body_subs(body: str) -> list[str]:
-    """Bodies of the `$(...)` and backtick substitutions in UNQUOTED heredoc text (the outer shell runs them)."""
-    subs: list[str] = []
-    i, n = 0, len(body)
-    while i < n:
-        c = body[i]
-        if c == "\\":
-            i += 2
-        elif c == "$" and body.startswith("$(", i):
-            j = _match_paren(body, i + 1)
-            subs.append(body[i + 2:j])
-            i = j + 1
-        elif c == "`":
-            j = body.find("`", i + 1)
-            j = n if j < 0 else j
-            subs.append(body[i + 1:j])
-            i = j + 1
-        else:
-            i += 1
-    return subs
-
-
-_ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
-                "\\": "\\", "'": "'", '"': '"', "?": "?"}
-
-
-def _ansi_c(s: str) -> str:
-    """Decode the inside of a bash `$'...'` word (`\\x67it`, `\\147it`, `\\n`, `\\u00e9`, `\\cA`) to the text the shell
-    builds. A bad escape stays literal, as in bash: `\\x` or `\\u` with no hex digit, `\\xZ`, an unknown `\\q`."""
-    def one(m: "re.Match[str]") -> str:
-        g = m.group(1)
-        try:
-            if g[0] in "xuU" and len(g) > 1:
-                return chr(int(g[1:], 16))
-            if g[0] in "01234567":
-                return chr(int(g, 8) & 0xFF)
-            if g[0] == "c" and len(g) == 2:
-                return chr(ord(g[1]) & 0x1F)
-        except (ValueError, OverflowError):
-            pass
-        return _ANSI_SIMPLE.get(g, "\\" + g)
-    return re.sub(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)", one, s, flags=re.S)
-
-
-def lex_shell(cmd: str) -> list["Seg | str"]:
-    """The command as an ordered list of Seg (one simple command) and the markers "(" / ")" (subshell scope). A
-    segment ends at an unquoted newline, ; & && | || |& ( ). Heredoc bodies are kept on the segment that owns the
-    heredoc (judged by the analyzer, never skipped); `<<<` is read as a here-string; `$'...'` is decoded. Raises
-    ValueError on an unterminated quote."""
-    items: list["Seg | str"] = []
-    buf: list[str] = []
-    state = {"in": False, "dyn": False, "glob": False}
-    holder: dict[str, Any] = {"seg": None, "sep": "", "here": False}
-    pending: list[Heredoc] = []
-    i, n = 0, len(cmd)
-
-    def seg() -> Seg:
-        if holder["seg"] is None:
-            holder["seg"] = Seg([], sep_before=holder["sep"])
-            items.append(holder["seg"])
-        return holder["seg"]
-
-    def end_word() -> None:
-        if state["in"]:
-            w = Word("".join(buf), state["dyn"], state["glob"])
-            s = seg()
-            s.words.append(w)
-            if holder["here"]:
-                s.herestrings.append(w.text)
-                holder["here"] = False
-        buf.clear()
-        state["in"] = state["dyn"] = state["glob"] = False
-
-    def end_seg(sep: str) -> None:
-        end_word()
-        if holder["seg"] is not None:
-            holder["seg"].sep_after = sep
-            holder["seg"] = None
-        holder["sep"] = sep
-
-    def add_sub(body: str) -> None:
-        seg().subs.append(body)
-
-    while i < n:
-        c = cmd[i]
-        if c == "\\":
-            if i + 1 < n:
-                if cmd[i + 1] != "\n":
-                    buf.append(cmd[i + 1])
-                    state["in"] = True
-            i += 2
-        elif c == "'":
-            j = cmd.find("'", i + 1)
-            if j < 0:
-                raise ValueError("unterminated single quote")
-            buf.append(cmd[i + 1:j])
-            state["in"] = True
-            i = j + 1
-        elif c == "$" and cmd[i + 1:i + 2] == "'":
-            j = i + 2
-            while j < n and cmd[j] != "'":
-                j += 2 if cmd[j] == "\\" else 1
-            if j >= n:
-                raise ValueError("unterminated $'...' quote")
-            buf.append(_ansi_c(cmd[i + 2:j]))
-            state["in"] = True
-            i = j + 1
-        elif c == "$" and cmd[i + 1:i + 2] == '"':
-            i += 1                                  # $"..." is a double-quoted string
-        elif c == '"':
-            state["in"] = True
-            i += 1
-            closed = False
-            while i < n:
-                d = cmd[i]
-                if d == '"':
-                    closed = True
-                    i += 1
-                    break
-                if d == "\\" and i + 1 < n:
-                    buf.append(cmd[i + 1] if cmd[i + 1] in '$`"\\' else "\\" + cmd[i + 1])
-                    i += 2
-                elif d == "$" and cmd[i + 1:i + 2] == "(":
-                    j = _match_paren(cmd, i + 1)
-                    add_sub(cmd[i + 2:j])
-                    buf.append("$()")
-                    state["dyn"] = True
-                    i = j + 1
-                elif d == "`":
-                    j = cmd.find("`", i + 1)
-                    j = n if j < 0 else j
-                    add_sub(cmd[i + 1:j])
-                    buf.append("``")
-                    state["dyn"] = True
-                    i = j + 1
-                else:
-                    if d == "$" and _DYN.match(cmd[i:i + 2]):
-                        state["dyn"] = True
-                    buf.append(d)
-                    i += 1
-            if not closed:
-                raise ValueError("unterminated double quote")
-        elif c == "$" and cmd[i + 1:i + 2] == "(":
-            j = _match_paren(cmd, i + 1)
-            add_sub(cmd[i + 2:j])
-            buf.append("$()")
-            state["in"] = state["dyn"] = True
-            i = j + 1
-        elif c == "$" and cmd[i + 1:i + 2] == "{":
-            j = _match_brace(cmd, i + 1)                # a substitution inside ${X:-$(...)} runs too
-            for body in _body_subs(cmd[i + 2:j]):
-                add_sub(body)
-            buf.append(cmd[i:j + 1])
-            state["in"] = state["dyn"] = True
-            i = j + 1
-        elif c == "`":
-            j = cmd.find("`", i + 1)
-            j = n if j < 0 else j
-            add_sub(cmd[i + 1:j])
-            buf.append("``")
-            state["in"] = state["dyn"] = True
-            i = j + 1
-        elif c in " \t\r":
-            end_word()
-            i += 1
-        elif c == "\n":
-            end_seg("\n")
-            i += 1
-            while pending:                       # the bodies of the heredocs opened on this line
-                hd = pending.pop(0)
-                hd.body, i, done = _skip_heredoc_body(cmd, i, hd.delim, hd.strip)
-                if not done:
-                    raise ValueError(f"heredoc <<{hd.delim} has no terminating line")
-        elif c == "#" and not state["in"]:
-            j = cmd.find("\n", i)
-            i = n if j < 0 else j
-        elif c == ";":
-            end_seg(";")
-            i += 1
-        elif c == "&" and cmd.startswith("&&", i):
-            end_seg("&&")
-            i += 2
-        elif c == "&" and ((i > 0 and cmd[i - 1] in "<>") or cmd[i + 1:i + 2] == ">"):
-            buf.append(c)                        # 2>&1 and &> are redirections, not a control operator
-            state["in"] = True
-            i += 1
-        elif c == "&":
-            end_seg("&")
-            i += 1
-        elif c == "|":
-            op = "||" if cmd.startswith("||", i) else "|&" if cmd.startswith("|&", i) else "|"
-            end_seg(op)
-            i += len(op)
-        elif c in "()":
-            end_seg("")
-            items.append(c)
-            holder["sep"] = c
-            i += 1
-        elif c == "<" and cmd.startswith("<<<", i):
-            end_word()
-            holder["here"] = True
-            i += 3
-        elif c == "<" and cmd.startswith("<<", i):
-            delim, strip, quoted, end = _read_heredoc_op(cmd, i)
-            end_word()
-            hd = Heredoc(delim, strip, quoted)
-            seg().heredocs.append(hd)
-            pending.append(hd)
-            i = end
-        else:
-            if c == "$" and _DYN.match(cmd[i:i + 2]):
-                state["dyn"] = True
-            if c in "*?[" or (c == "{" and re.match(r"\{[^{}\s]*(,|\.\.)", cmd[i:])):
-                state["glob"] = True
-            buf.append(c)
-            state["in"] = True
-            i += 1
-    end_word()
-    if holder["seg"] is not None:
-        holder["seg"].sep_after = ""
-    return [it for it in items if isinstance(it, str) or it.words or it.heredocs or it.subs]
-
-
-@dataclasses.dataclass
-class ShellCall:
-    argv: list[str]
-    cwd: Optional[str]          # None: unknown (a `cd` into an unexpanded or `-` path)
-    env: dict[str, str]         # inline GIT_DIR= / GIT_WORK_TREE= / GIT_CONFIG_* assignments in force
-    headlike: bool              # `git` is the command word (after wrappers), not an argument of another command
-    nglobal: int = 0            # index of the subcommand in argv
-
-
-def _basename(t: str) -> str:
-    return os.path.basename(t) if "/" in t else t
-
-
-def _could_be_git(w: Word) -> bool:
-    """A command word the shell computes (an unexpanded variable or substitution, a glob or brace pattern) that
-    can still turn out to be `git`. A literal path suffix other than `git` rules it out (`$(pwd)/run.sh`)."""
-    text = w.text
-    if "/" in text:
-        tail = text.rsplit("/", 1)[1]
-        if tail and not any(ch in tail for ch in "$`*?[{") and tail != "git":
-            return False
-    if w.glob and not w.dyn:
-        import fnmatch
-        alts = [text.rsplit("/", 1)[-1]]
-        for _ in range(4):                       # expand {a,b} one level at a time, bounded
-            nxt: list[str] = []
-            for a in alts:
-                m = re.search(r"\{([^{}]*,[^{}]*)\}", a)
-                if m:
-                    nxt += [a[:m.start()] + part + a[m.end():] for part in m.group(1).split(",")]
-                else:
-                    nxt.append(a)
-            alts = nxt[:64]
-        return any(fnmatch.fnmatchcase("git", a) for a in alts) or any("{" in a and ".." in a for a in alts)
-    return True
-
-
-def _stdin_shell(seg: Seg, head: int) -> bool:
-    """The segment's command is a shell that reads its script from stdin (no -c, no script file, or -s / -)."""
-    for w in seg.words[head + 1:]:
-        t = w.text
-        if t == "-s" or t == "-":
-            return True
-        if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", t):
-            return False
-        if t.startswith("-"):
-            continue
-        return False                              # the first non-option word is a script file
-    return True
-
-
-def _wrapped_head(texts: list[str], k: int) -> bool:
-    """texts[k] can be the command a run of wrappers ends in: `env -u X bash`, `nice -n 5 sh`, `sudo -u me git`,
-    `timeout 5s git`, `env A=1 git`, `/usr/bin/env git`. A wrapper's option may take a value, so the word after one
-    counts as that value AND as a candidate command (fail closed: `env -u X $G` is a computed name)."""
-    j = 0
-    while j < k and _ENV_ASSIGN.match(texts[j]):
-        j += 1
-    if j == k:
-        return True
-    if _basename(texts[j]) not in _WRAPPERS:
+def hook_is_agent(env: dict[str, str]) -> bool:
+    """The caller of a hook is an agent: the shim's markers (ACP_RUN_AGENT, ADE_CLAIM_ID), or a harness marker
+    (CLAUDECODE, OMPCODE, CODEX_*) that names no claim: such an agent may write nothing that is claimed. A human, git's
+    own hooks (GIT_INDEX_FILE) and pre-commit (PRE_COMMIT) are never refused."""
+    if env.get("GIT_INDEX_FILE") or env.get("PRE_COMMIT"):
         return False
-    after_opt = False
-    for t in texts[j + 1:k]:
-        if _basename(t) in _WRAPPERS or _ENV_ASSIGN.match(t) or _WRAP_VALUE.match(t):
-            after_opt = False
-        elif t.startswith("-"):
-            after_opt = True
-        elif after_opt:
-            after_opt = False
-        else:
+    return is_agent_env(env) or bool(env.get("CLAUDECODE") or env.get("OMPCODE")) or any(k.startswith("CODEX_") for k in env)
+
+
+def _common_dir(gitdir: Path) -> Path:
+    try:
+        return (gitdir / _slurp(gitdir / "commondir").strip()).resolve()
+    except OSError:
+        return gitdir
+
+
+def _config_origin(common: Path) -> str:
+    """`remote.origin.url` read straight from the repository's config file (a hook must not run git: locks are held)."""
+    try:
+        text = _slurp(common / "config")
+    except OSError:
+        return ""
+    in_origin = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            in_origin = s.lower().replace(" ", "").startswith('[remote"origin"]')
+        elif in_origin:
+            key, eq, v = s.partition("=")
+            if eq and key.strip().lower() == "url":
+                return v.strip().strip('"')
+    return ""
+
+
+def _hook_workspace(env: dict[str, str], cwd: str) -> Optional[Workspace]:
+    """The workspace the hook runs in: git runs a hook with GIT_DIR exported in a linked worktree and with the cwd at the
+    work tree's root (the git dir in a bare repository)."""
+    gd = env.get("GIT_DIR")
+    if gd:
+        return workspace_for_gitdir(os.path.join(cwd, gd), cwd)
+    ws = find_workspace(cwd)
+    if ws is None and os.path.isfile(os.path.join(cwd, "HEAD")) and os.path.isdir(os.path.join(cwd, "objects")):
+        ws = workspace_for_gitdir(cwd, cwd)
+    return ws
+
+
+def _parent_is_pack_refs(env: dict[str, str]) -> bool:
+    """Whether the git process that runs this hook is `git pack-refs` (which `gc` and `maintenance` spawn). pack-refs
+    reports every ref it packs as `0 new` and every loose ref it prunes as `old 0`, but changes no value: measured
+    2026-10-25, git 2.56. The stub exports the git process's pid in ADE_HOOK_GIT_PID."""
+    pid = env.get("ADE_HOOK_GIT_PID", "")
+    if not pid.isdigit():
+        return False
+    argv: list[str] = []
+    try:
+        argv = [x.decode("utf-8", "replace") for x in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if x]
+    except OSError:
+        import subprocess
+        try:
+            r = subprocess.run(["ps", "-ww", "-o", "command=", "-p", pid], capture_output=True, text=True, timeout=5)
+            argv = r.stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return len(argv) > 1 and parse_git_argv(argv[1:], os.sep, {}).sub == "pack-refs"
+
+
+def _hook_refusal(rule: str, d: Decision, via: str, what: str, env: dict[str, str], cwd: str, extra: dict[str, Any]) -> int:
+    """Log and print a hook refusal (or, under ACP_OPERATOR_APPROVED=git-guard, the override); the exit code is the guard's
+    (77 refused, 0 override). The text names the owner, the claim id and the safe alternative, like the shim's."""
+    ident = caller_ident(env) or ""
+    approved = {x.strip() for x in env.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
+    override = OVERRIDE in approved
+    append_guard_log({"ts": utc_now(), "outcome": "override" if override else "refused", "rule": rule, "via": via,
+                      "claim": d.claim_id, "owner": d.owner, "ident": ident, "cwd": cwd, "pid": os.getpid(), **extra})
+    if override:
+        sys.stderr.write(f"ade-git-guard: ACP_OPERATOR_APPROVED={OVERRIDE}: allowed {_esc(what)} [{_esc(rule)}] (logged)\n")
+        return 0
+    me = _esc(ident or "no claim id")
+    sys.stderr.write(f"ade-git-guard: REFUSED {_esc(what)} [{_esc(rule)}] by the {via} hook in {_esc(cwd)}\n"
+                     + (f"  claim {_esc(d.claim_id)}: {_esc(d.owner)}; you are {me}.\n" if d.claim_id else
+                        f"  {_esc(d.owner)}; you are {me}.\n")
+                     + f"  Safe alternative: {_esc(d.message)}.\n"
+                     "  Ask the owner through session-finder/relay.py; exit 77 is an answer, not an obstacle to route "
+                     f"around. Logged in {_esc(guard_log_path())}.\n")
+    return EXIT_REFUSED
+
+
+def hook_ref(state: str, text: str, env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> int:
+    """`reference-transaction` (STATE, then lines `<old> <new> <ref>` on stdin). Refuses (77) only in `prepared`, which
+    aborts git's transaction for every caller: a ref update that reaches `refs/heads/<b>` while another owner's active claim
+    names `<b>` (or has it checked out), a `HEAD` or branch update while the hook runs in a workspace another agent
+    claims, a `refs/stash` update in a linked worktree. Whatever argv wrote it (the grammar is git's, already resolved).
+    In `committed` it logs every change to a claimed branch and never fails."""
+    env = os.environ if env is None else env
+    if state not in ("prepared", "committed") or not hook_is_agent(env):
+        return 0
+    cwd = cwd or os.getcwd()
+    updates = [p for p in (ln.split(" ", 2) for ln in text.splitlines()) if len(p) == 3]
+    if not updates:
+        return 0
+    ident = caller_ident(env)
+    ws = _hook_workspace(env, cwd)
+    origin = _config_origin(_common_dir(ws.gitdir)) if ws else ""
+    if state == "committed":
+        for old, new, ref in updates:
+            if ref.startswith("refs/heads/"):
+                cs = claims_for_branch(ref[len("refs/heads/"):], origin)
+                if cs:
+                    append_guard_log({"ts": utc_now(), "outcome": "ref-change", "via": "reference-transaction",
+                                      "ref": ref, "old": old, "new": new, "ident": ident or "", "pid": os.getpid(),
+                                      "claim": ",".join(str(c.get("id")) for c in cs), "cwd": str(ws.root if ws else cwd)})
+        return 0
+    wclaim = find_claim(ws) if ws else None
+    foreign_ws = wclaim is not None and not is_mine(wclaim, ident)
+    for old, new, ref in updates:
+        d: Optional[Decision] = None
+        rule = ""
+        if ref.startswith("refs/heads/"):
+            b = ref[len("refs/heads/"):]
+            for c in claims_for_branch(b, origin):
+                if not is_mine(c, ident):
+                    rule = "ref-claimed-branch"
+                    d = _foreign(c, rule, "message the owner; never move, delete or write another agent's branch "
+                                          "(write your own branch instead)")
+                    break
+            if d is None and ws is not None:
+                for root, gd in repo_worktrees(ws):
+                    if _head_branch(gd) == b:
+                        c = claim_at(root)
+                        if c is not None and not is_mine(c, ident):
+                            rule = "ref-checked-out-branch"
+                            d = _foreign(c, rule, "message the owner; the branch is checked out in their workspace")
+                            break
+        if d is None and foreign_ws and wclaim is not None and (ref == "HEAD" or ref.startswith("refs/heads/")):
+            rule = "ref-in-foreign-workspace"
+            d = _foreign(wclaim, rule, FOREIGN_ALT)
+        if d is None and ref == "refs/stash" and ws is not None and ws.linked:
+            rule = "ref-stash-in-linked-worktree"
+            d = Decision(False, rule, "commit to a WIP branch in your own workspace, or save `git diff > file`; refs/stash is "
+                         "shared by every workspace of this repository", str((wclaim or {}).get("id") or ""),
+                         owner_label(wclaim) if wclaim else "nobody; a linked worktree (shared refs/stash)")
+        if d is not None:
+            if _parent_is_pack_refs(env):
+                return 0
+            return _hook_refusal(rule, d, "reference-transaction", f"the update of `{ref}`", env, str(ws.root if ws else cwd),
+                                 {"ref": ref, "old": old, "new": new})
+    return 0
+
+
+def hook_push(remote: str, url: str, text: str, env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> int:
+    """`pre-push` (REMOTE URL, then lines `<local ref> <local oid> <remote ref> <remote oid>` on stdin): refuses (77) a
+    push whose remote ref is `refs/heads/<b>` while another owner's active claim, of the repository the URL names, claims
+    `<b>` (deletion included). `push --no-verify` skips it; the shim refuses that."""
+    env = os.environ if env is None else env
+    if not hook_is_agent(env):
+        return 0
+    ident = caller_ident(env)
+    cwd = cwd or os.getcwd()
+    for ln in text.splitlines():
+        parts = ln.split(" ")
+        if len(parts) >= 3 and parts[2].startswith("refs/heads/"):
+            b = parts[2][len("refs/heads/"):]
+            for c in claims_for_branch(b, url):
+                if not is_mine(c, ident):
+                    d = _foreign(c, "push-foreign-branch", "push only your own branch; ask the owner to push (or to add you "
+                                 f"to the claim's allow list); branch {b!r} is claimed")
+                    ws = _hook_workspace(env, cwd)
+                    return _hook_refusal("push-foreign-branch", d, "pre-push", f"the push of `{parts[2]}`", env,
+                                         str(ws.root if ws else cwd), {"ref": parts[2]})
+    return 0
+
+
+def _stub_text(name: str) -> str:
+    lines = [
+        "#!/bin/bash",
+        f"{STUB_MARK} (installed by `ade-git-guard install`, 2026-10-25). The logic is the ade checkout's own hook, run by",
+        f"# absolute path: one copy. An older hook of this name was kept as {name}.pre-ade and runs after ours.",
+        "# A missing checkout fails open (exit 0).",
+        f"hook={shlex.quote(str(HOOKS_SRC / name))}",
+        'case "$0" in */*) d="${0%/*}" ;; *) d=. ;; esac',
+        f'pre="$d/{name}.pre-ade"',
+        'if [ ! -x "$pre" ]; then',
+        '  [ -x "$hook" ] && exec "$hook" "$@"',
+        "  exit 0",
+        "fi",
+        "export ADE_HOOK_GIT_PID=$PPID",
+        "input=$(cat)",
+        "rc=0",
+        'if [ -x "$hook" ]; then',
+        "  printf '%s\\n' \"$input\" | \"$hook\" \"$@\"",
+        "  rc=$?",
+        "fi",
+        '[ "$rc" -eq 0 ] || exit "$rc"',
+        "printf '%s\\n' \"$input\" | \"$pre\" \"$@\"",
+        "exit $?",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _stubs_present(common: Path) -> bool:
+    for name in HOOK_NAMES:
+        try:
+            with open(common / "hooks" / name, "r", encoding="utf-8", errors="replace") as f:
+                if STUB_MARK not in f.read(400):
+                    return False
+        except OSError:
             return False
     return True
 
 
-def shell_git_calls(cmd: str, cwd: Optional[str], _depth: int = 0) -> tuple[list[ShellCall], list[str]]:
-    """(git calls found in a shell command, problems that call for a fail-closed answer). See the module
-    docstring for what is followed. `cwd` None means the directory is not known."""
-    problems: list[str] = []
-    mentions = bool(_MENTIONS_GIT.search(cmd))
-    if _depth > MAX_SHELL_DEPTH:
-        return [], ([f"shell code nested deeper than {MAX_SHELL_DEPTH} levels; spell the git command out"] if mentions else [])
+def _install_common(common: Path) -> tuple[int, list[str]]:
+    """Write the chain-preserving stubs into `<common>/hooks` (atomic; idempotent; an existing hook of the same name that
+    is not ours becomes NAME.pre-ade). Returns (exit code, one line per action)."""
+    hooks = common / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    notes: list[str] = []
+    for name in HOOK_NAMES:
+        dest = hooks / name
+        pre = hooks / f"{name}.pre-ade"
+        want = _stub_text(name)
+        have: Optional[str] = None
+        if dest.is_file() and not dest.is_symlink():
+            have = _slurp(dest)
+        if have == want:
+            notes.append(f"{name}: already installed")
+            continue
+        if (dest.exists() or dest.is_symlink()) and not (have is not None and STUB_MARK in have[:400]):
+            if pre.exists() or pre.is_symlink():
+                return EXIT_PRE_ADE, notes + [f"{name}: {dest} exists and is not ours, and {pre} exists too; not installed"]
+            os.rename(dest, pre)
+            notes.append(f"{name}: existing hook kept as {pre.name}")
+        tmp = _write_temp(dest, want)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, dest)
+        notes.append(f"{name}: installed")
+    return 0, notes
+
+
+def install_hooks(start: str = ".") -> tuple[int, list[str]]:
+    """`ade-git-guard install [DIR]`: stubs into `$(git rev-parse --git-common-dir)/hooks` (one install covers every linked
+    worktree). Refused (78) while core.hooksPath is set, because git would never run them; 2 when DIR is no repository."""
+    rc, out = _run_git(["-C", start, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if rc != 0 or not out.strip():
+        return 2, [f"{start} is not inside a git repository"]
+    rc, hp = _run_git(["-C", start, "config", "--get", "core.hooksPath"])
+    if hp.strip():
+        return EXIT_HOOKSPATH, [f"core.hooksPath is set ({hp.strip()}): git would never run the stubs in {out.strip()}/hooks; "
+                                "not installed. Unset it, or call the stubs from the hooks directory it names"]
+    return _install_common(Path(out.strip()))
+
+
+def _lazy_install(call: GitCall, env: dict[str, str]) -> None:
+    """The shim's slow path installs the hooks the first time it meets a repository without them. Never raises, never in
+    a directory that is not a git repository, never while core.hooksPath is set (git would not run them)."""
     try:
-        items = lex_shell(cmd)
-    except (ValueError, RecursionError) as e:          # RecursionError: `"$("` nested past the interpreter's limit
-        return [], ([f"cannot parse the command ({e}); spell it out"] if mentions else [])
-    out: list[ShellCall] = []
-    cur: Optional[str] = cwd
-    scope: list[tuple[Optional[str], list[Optional[str]]]] = []   # (cwd, dir stack) saved at each `(`
-    dirs: list[Optional[str]] = []                                 # pushd/popd stack
-    pipeline: list[str] = []                                       # text of the pipeline so far
-
-    def rec(text: str, at: Optional[str]) -> None:
-        c2, p2 = shell_git_calls(text, at, _depth + 1)
-        out.extend(c2)
-        problems.extend(p2)
-
-    for item in items:
-        if item == "(":
-            scope.append((cur, list(dirs)))
-            pipeline = []
-            continue
-        if item == ")":
-            if scope:
-                cur, dirs = scope.pop()
-            pipeline = []
-            continue
-        assert isinstance(item, Seg)
-        seg = item
-        words = seg.words
-        texts = [w.text for w in words]
-        if seg.sep_before not in ("|", "|&"):
-            pipeline = []
-        pipeline.append(" ".join(texts) + "\n" + "\n".join(h.body for h in seg.heredocs) + "\n" + "\n".join(seg.herestrings))
-        for body in seg.subs:
-            rec(body, cur)
-        for hd in seg.heredocs:
-            if not hd.quoted:
-                try:
-                    bodies = _body_subs(hd.body)
-                except (ValueError, RecursionError) as e:   # a heredoc inside the body that cannot be read exactly
-                    bodies = []
-                    if mentions:
-                        problems.append(f"cannot parse a heredoc body ({e}); spell it out")
-                for body in bodies:
-                    rec(body, cur)
-        head = 0
-        while head < len(words) and (_ENV_ASSIGN.match(texts[head]) or texts[head] in _WRAPPERS):
-            head += 1
-        while head < len(words) and head > 0 and (texts[head].startswith("-") or texts[head].isdigit()):
-            head += 1                                   # options and numbers of a wrapper: `timeout 5`, `nice -n 5`
-        hbase = _basename(texts[head]) if head < len(words) else ""
-        shell_like = hbase in _SHELLS or hbase in ("source", ".")
-        if hbase in ("cd", "pushd", "popd"):
-            piped = seg.sep_before in ("|", "|&") or seg.sep_after in ("|", "|&", "&")
-            if not piped:                               # a pipeline member or a background job runs in a subshell
-                if hbase == "popd":
-                    cur = dirs.pop() if dirs else None
-                else:
-                    args = [w for w in words[head + 1:] if not w.text.startswith("-") or w.text == "-"]
-                    if hbase == "pushd":
-                        dirs.append(cur)
-                    if not args or args[0].dyn or args[0].text == "-" or re.match(r"^~[^/]", args[0].text) or cur is None:
-                        cur = None
-                    else:
-                        cur = os.path.normpath(os.path.join(cur, os.path.expanduser(args[0].text)))
-                        if not os.path.isdir(cur) and "mkdir" not in cmd:
-                            cur = None                  # a cd that fails leaves the shell where it was: unknown
-            continue
-        wrapped = [k for k in range(len(words)) if _wrapped_head(texts, k)]   # words that can BE the command
-        shell_k = [k for k in wrapped if _basename(texts[k]) in _SHELLS or _basename(texts[k]) in ("source", ".")]
-        if shell_k or any(_basename(t) in _SHELLS for t in texts):
-            # a shell anywhere in the segment (`env -u X bash`, `sudo -u me sh`, `nice -n 5 zsh`, `xargs sh`) may read
-            # the heredoc / here-string as its script; judged as code (a body of plain text finds no git call)
-            body_code = [hd.body for hd in seg.heredocs] + list(seg.herestrings)
-            for code in body_code:
-                rec(code, cur)
-            k0 = next((k for k in shell_k if _basename(texts[k]) in _SHELLS), None)
-            if k0 is not None and not body_code and _stdin_shell(seg, k0) and seg.sep_before in ("|", "|&"):
-                if _MENTIONS_GIT.search("\n".join(pipeline[:-1])):
-                    problems.append("text that mentions git is piped into a shell; spell the git command out")
-            if shell_k and any(w.text in ("<", "/dev/stdin") or w.text.startswith("/dev/fd/") for w in words) \
-                    and mentions and not body_code:
-                problems.append("a shell or `source` reads a process substitution or stdin; spell the git command out")
-        for k in wrapped:
-            hw = words[k]
-            if _ENV_ASSIGN.match(hw.text) or hw.text in _WRAPPERS:
-                continue
-            if ((hw.dyn and mentions) or (hw.glob and not hw.dyn)) and _could_be_git(hw):
-                problems.append("the command name is computed (a variable or substitution in a command that mentions "
-                                "git, or a glob / brace pattern that can match `git`); spell the git command out")
-                break
-        placeholder = any(t in ("xargs", "parallel") for t in texts)
-        for idx, w in enumerate(words):
-            base = _basename(w.text)
-            if base in _SHELLS:
-                for k in range(idx + 1, min(idx + 6, len(words))):
-                    if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", words[k].text) and k + 1 < len(words):
-                        payload = words[k + 1]
-                        if (payload.dyn or (placeholder and "{}" in payload.text)) and mentions:
-                            problems.append("a shell -c script is computed (variable, substitution or xargs "
-                                            "placeholder) and the command mentions git; spell it out")
-                        rec(payload.text, cur)
-                        break
-            elif base in ("eval", "watch"):
-                if base == "eval" and mentions and any(x.dyn for x in words[idx + 1:]):
-                    problems.append("eval runs a computed string and the command mentions git; spell it out")
-                rec(" ".join(x.text for x in words[idx + 1:]), cur)
-            if base != "git":
-                continue
-            inline: dict[str, str] = {}
-            for t in texts[:idx]:
-                m = _ENV_ASSIGN.match(t)
-                if m and _INLINE_GIT_ENV.match(m.group(1)):
-                    inline[m.group(1)] = m.group(2)
-            headlike = _wrapped_head(texts, idx) or all(
-                _ENV_ASSIGN.match(t) or t in _WRAPPERS or t.startswith("-") or t.isdigit() or t == "{}"
-                or _basename(t) in ("env",) for t in texts[:idx])
-            rest = words[idx + 1:]
-            if placeholder:
-                rest = [Word(x.text, x.dyn or "{}" in x.text, x.glob) for x in rest]
-            call = parse_git_argv([x.text for x in rest], cur if cur is not None else (cwd or os.sep), {})
-            if headlike:
-                if any(x.dyn for x in rest[:call.nglobal + 1]):
-                    problems.append("a git global option or subcommand is an unexpanded variable or substitution")
-                elif any(_DYN.search(v) or (v.startswith("~") and not v.startswith("~/") and v != "~") for v in inline.values()):
-                    problems.append("GIT_DIR/GIT_WORK_TREE is an unexpanded variable")
-            out.append(ShellCall([x.text for x in rest], cur, inline, headlike, call.nglobal))
-    return out, problems
-
-
-def _pathspec_commit_after_apply(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
-    """Row 3 of the collision table: a `commit -- <paths>` after `apply --cached` in a shared checkout."""
-    if call.sub != "commit" or "--" not in call.args or not call.args[call.args.index("--") + 1:]:
-        return None
-    ws = find_workspace(call.cwd)
-    if ws is not None and find_claim(ws) is not None:
-        return None
-    d = Decision(False, "commit-pathspec-after-apply-cached",
-                 "commit the index only (`git commit -m MSG`, no `-- <paths>`) or use `git-commit-own --staged`; a "
-                 "pathspec commit takes the working tree's version of each path, peer hunks included",
-                 "", "nobody; a shared checkout (no active claim)")
-    d.detail = {"cwd": str(ws.root if ws else call.cwd), "ident": caller_ident(env) or ""}
-    if OVERRIDE in {x.strip() for x in env.get("ACP_OPERATOR_APPROVED", "").split(",")}:
-        d.override = d.allowed = True
-    return d
-
-
-def _closed(reason: str, env: dict[str, str], cwd: str) -> tuple[Decision, GitCall]:
-    d = Decision(False, "unclassifiable", f"{reason}; spell the path and the git command out so the guard can read them",
-                 "", "nobody; the call cannot be classified")
-    d.detail = {"cwd": cwd, "ident": caller_ident(env) or ""}
-    if OVERRIDE in {x.strip() for x in env.get("ACP_OPERATOR_APPROVED", "").split(",")}:
-        d.override = d.allowed = True
-    return d, GitCall(cwd, None, "", [], [])
-
-
-def check_command(cmd: str, cwd: str, env: Optional[dict[str, str]] = None) -> int:
-    """Decide every git call inside a shell command as an agent (the hook decides when to call this).
-    Adds the row-3 rule: `git apply --cached` then `git commit ... -- <paths>` in one command. Fails closed
-    (77) on a call it cannot classify."""
-    env = os.environ if env is None else env
-    calls, problems = shell_git_calls(cmd, cwd)
-    for reason in problems:
-        d, c = _closed(reason, env, cwd)
-        if not (d.allowed and not d.override):
-            rc = _report(d, c, {"via": "check"})
-            if rc:
-                return rc
-    applied_cached = False
-    for sc in calls:
-        ecwd = sc.cwd if sc.cwd is not None else cwd
-        cenv = {**env, **sc.env}
-        call = parse_git_argv(sc.argv, ecwd, cenv)
-        if not sc.headlike and call.sub not in READONLY and call.sub not in KNOWN_WRITE:
-            continue  # `echo git foo`, `which git`: an argument, not a command
-        if sc.cwd is None and not is_readonly(call):
-            d, c = _closed("an earlier `cd`/`pushd` went to an unknown directory", cenv, ecwd)
-        else:
-            c = call
-            d = evaluate(call, cenv, assume_agent=True)
-            if d.allowed and not d.override:
-                if call.sub == "apply" and "--cached" in call.args:
-                    applied_cached = True
-                elif applied_cached:
-                    d = _pathspec_commit_after_apply(call, cenv) or d
-        if d.allowed and not d.override:
-            continue
-        rc = _report(d, c, {"via": "check"})
-        if rc:
-            return rc
-    return 0
+        ws = call.ws
+        if ws is None or not (ws.gitdir / "HEAD").exists():
+            return
+        common = _common_dir(ws.gitdir)
+        if _stubs_present(common):
+            return
+        rc, hp = _call_git(call, "config", "--get", "core.hooksPath")
+        if hp.strip():
+            return
+        _install_common(common)
+    except Exception:   # noqa: BLE001 - a failed install must never fail the user's git command
+        pass
 
 
 # --------------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------------
+
+def _hook_cli(argv: Sequence[str]) -> int:
+    """`hook-ref STATE` and `hook-push REMOTE URL` (run by libexec/git-hooks/*; stdin is git's). The stub maps exit 77 to a
+    refusal and everything else to success, so a crash or the 10 s alarm lets git proceed."""
+    import signal
+    signal.signal(signal.SIGALRM, lambda *_: os._exit(3))
+    signal.alarm(10)
+    text = sys.stdin.read()
+    if argv[0] == "hook-ref" and len(argv) == 2:
+        return hook_ref(argv[1], text)
+    if argv[0] == "hook-push" and len(argv) == 3:
+        return hook_push(argv[1], argv[2], text)
+    print("usage: ade_claims.py hook-ref STATE | hook-push REMOTE URL", file=sys.stderr)
+    return 2
+
 
 def _cli(argv: Sequence[str]) -> int:
     if argv and argv[0] == "guard":
@@ -2730,6 +1932,8 @@ def _cli(argv: Sequence[str]) -> int:
         if rest and rest[0] == "--":
             rest = rest[1:]
         return guard_argv(rest)
+    if argv and argv[0] in ("hook-ref", "hook-push"):
+        return _hook_cli(argv)
     import argparse
     p = argparse.ArgumentParser(prog="ade_claims.py", description=__doc__.split("\n\n")[0])
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -2761,9 +1965,9 @@ def _cli(argv: Sequence[str]) -> int:
     ss = sp.add_parser("set-state")
     ss.add_argument("id")
     ss.add_argument("state", choices=STATES)
-    ck = sp.add_parser("check")
-    ck.add_argument("command")
-    ck.add_argument("--cwd", default=None)
+    ins = sp.add_parser("install", help="install the ref hooks into the repository of DIR (exit 2 not a repository, "
+                                         "78 core.hooksPath is set, 73 a .pre-ade file is in the way)")
+    ins.add_argument("dir", nargs="?", default=".")
     a = p.parse_args(list(argv))
     try:
         if a.cmd == "new":
@@ -2802,8 +2006,11 @@ def _cli(argv: Sequence[str]) -> int:
             if set_state(a.id, a.state) is None:
                 print(f"ade_claims: no claim {a.id!r}", file=sys.stderr)
                 return 1
-        elif a.cmd == "check":
-            return check_command(a.command, a.cwd or os.getcwd())
+        elif a.cmd == "install":
+            rc, notes = install_hooks(a.dir)
+            for line in notes:
+                print(f"ade_claims: {line}", file=sys.stderr if rc else sys.stdout)
+            return rc
     except ClaimExists as e:
         print(f"ade_claims: {e}", file=sys.stderr)
         return EXIT_EXISTS

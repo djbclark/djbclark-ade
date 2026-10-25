@@ -1,0 +1,43 @@
+#!/bin/bash
+# ade-git-guard: the pre-push hook (O2, 2026-10-25; PR 59). Installed as a chain-preserving stub by `ade-git-guard install`
+# (or lazily by the shim); the stub execs THIS file by absolute path. git runs it with `REMOTE URL` and one stdin line per ref:
+# `<local ref> <local oid> <remote ref> <remote oid>`; exit 1 aborts the push. It refuses a push to `refs/heads/<b>` while
+# another owner's active claim, of the repository the URL names, claims `<b>` (deletion included).
+#   bin/ade_claims.py hook-push REMOTE URL
+# `git push --no-verify` skips this hook: the shim refuses `push --no-verify` (any `--no-v` prefix) and `send-pack`.
+# Fast path and FAIL OPEN exactly as libexec/git-hooks/reference-transaction: not an agent -> exit 0; no line naming
+# refs/heads/ -> exit 0 without Python; python exited 77 -> exit 1; any other outcome -> exit 0. bash 3.2.
+set -u
+
+agent=0
+if [ -n "${ADE_CLAIM_ID:-}" ] || { [ -n "${ACP_RUN_AGENT:-}" ] && [ "${ACP_RUN_AGENT}" != 0 ]; } \
+  || [ -n "${CLAUDECODE:-}" ] || [ -n "${OMPCODE:-}" ]; then
+  agent=1
+else
+  for v in $(compgen -A export); do
+    case "$v" in CODEX_*) agent=1; break ;; esac
+  done
+fi
+[ "$agent" = 1 ] || exit 0
+[ -z "${GIT_INDEX_FILE:-}" ] && [ -z "${PRE_COMMIT:-}" ] || exit 0
+
+IFS= read -r -d '' input || true
+nl='
+'
+re="(^|$nl)[^ ]+ [^ ]+ refs/heads/"
+[[ "$input" =~ $re ]] || exit 0
+
+self="$0"
+case "$self" in */*) ;; *) self="./$self" ;; esac
+while [ -L "$self" ]; do
+  t=$(readlink "$self")
+  case "$t" in /*) self="$t" ;; *) self="${self%/*}/$t" ;; esac
+done
+lib="${self%/*}/../../bin/ade_claims.py"
+py="${ADE_PYTHON:-python3}"
+command -v "$py" > /dev/null 2>&1 && [ -f "$lib" ] || exit 0
+
+printf '%s\n' "$input" | "$py" -I -S "$lib" hook-push "${1:-}" "${2:-}"
+rc=$?
+[ "$rc" -eq 77 ] && exit 1
+exit 0
