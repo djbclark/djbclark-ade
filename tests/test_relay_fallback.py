@@ -242,6 +242,29 @@ class TestFallback(Harness):
         rc, _, _ = self.run_main(sess())
         self.assertEqual((rc, self.calls), (1, []))
 
+    def test_codex_composer_text_is_not_delivery(self) -> None:
+        relay.screen = lambda chan, lines=20: "  › hello there friend\n    wrapped composer text"
+        rc, out, err = self.run_main(sess(agent="codex", status="idle"), "--wait", "0.01")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertNotIn("; it takes the message now", out)
+
+    def test_codex_delivery_requires_a_new_user_message(self) -> None:
+        tx = self.tmp / "codex.jsonl"
+        tx.write_text("")
+
+        def typed(chan, text):
+            self.calls.append("type")
+            with tx.open("a") as f:
+                f.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}}) + "\n")
+            return True
+
+        relay.type_line = typed
+        rc, out, err = self.run_main(sess(agent="codex", status="idle", transcript=str(tx)))
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": delivered;", out)
+
     def armed(self, mark: int = 0, draft: str = "") -> None:
         relay.note_unsent("cccccccc", "hello there friend", draft, mark)
 
