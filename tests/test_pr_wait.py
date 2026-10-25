@@ -50,6 +50,8 @@ with open(cf + ".tmp.%d" % os.getpid(), "w") as f:
     f.write(str(n + 1))
 os.replace(cf + ".tmp.%d" % os.getpid(), cf)
 r = routes[key][min(n, len(routes[key]) - 1)]
+import time
+time.sleep(r.get("sleep", 0))
 sys.stdout.write(r.get("out", ""))
 sys.stderr.write(r.get("err", ""))
 sys.exit(r.get("rc", 0))
@@ -1132,7 +1134,7 @@ def test_push_time_and_request_counting_use_server_stamps_as_datetimes() -> None
 def test_request_state_fields_are_read_with_get_clamped_and_finite(tmp_path: Path) -> None:
     pw = load_module()
     p = tmp_path / "request-x.json"
-    blank = {"own": 0, "last_at": None, "attempt_at": None, "ids": []}
+    blank = {"own": 0, "attempts": 0, "last_at": None, "attempt_at": None, "ids": []}
     assert pw.load_request_state(p) == blank  # missing file
     for text in ["not json", "[]", "{}", '{"own": "1"}', '{"own": true}', '{"own": -4}', '{"own": NaN}']:
         p.write_text(text)
@@ -1140,13 +1142,21 @@ def test_request_state_fields_are_read_with_get_clamped_and_finite(tmp_path: Pat
     p.write_text('{"own": 7}')
     assert pw.load_request_state(p)["own"] == 2  # clamped to MAX_REQUESTS, never reset below it
     p.write_text('{"own": 1}')  # an older record without the later fields
-    assert pw.load_request_state(p) == {**blank, "own": 1}
+    assert pw.load_request_state(p) == {**blank, "own": 1, "attempts": 1}
     p.write_text('{"own": 2, "last_at": 5, "attempt_at": 6.5, "ids": [1, 2]}')
-    assert pw.load_request_state(p) == {"own": 2, "last_at": 5.0, "attempt_at": 6.5, "ids": [1, 2]}
+    assert pw.load_request_state(p) == {"own": 2, "attempts": 2, "last_at": 5.0, "attempt_at": 6.5, "ids": [1, 2]}
     for bad in ["NaN", "Infinity", "-Infinity", "1e999", "true", '"7"']:  # a hostile time must not fire a re-request
         p.write_text('{"own": 1, "last_at": %s, "attempt_at": %s}' % (bad, bad))
         st = pw.load_request_state(p)
         assert st["last_at"] is None and st["attempt_at"] is None and st["own"] == 1, bad
+    # the POST-attempt count: garbage is none, a huge one is the cap, and it never reads below `own`
+    for text in ['{"attempts": "1"}', '{"attempts": true}', '{"attempts": -4}', '{"attempts": NaN}', '{"attempts": 1.5}']:
+        p.write_text(text)
+        assert pw.load_request_state(p)["attempts"] == 0, text
+    for text, want in [('{"attempts": 1}', 1), ('{"attempts": 99}', 2), ('{"attempts": 1e999}', 0),
+                       ('{"own": 2}', 2), ('{"own": 1, "attempts": 0}', 1), ('{"own": 1, "attempts": 2}', 2)]:
+        p.write_text(text)
+        assert pw.load_request_state(p)["attempts"] == want, text
 
 
 def test_repo_slug_case_does_not_split_the_request_state(world: World) -> None:
@@ -1189,3 +1199,103 @@ def test_a_state_write_failure_after_the_post_is_a_warning_not_a_crash(world: Wo
     note = world.file("summary")["codex_request_note"]
     assert "posted @codex review" in note and "could not write request-" in note
     assert not list(world.state.glob("*.tmp.*")), "a failed replace leaves no temp file"
+
+
+# ---- POST attempts, errored POSTs and clock skew (PR 58 round 2, Codex P2) ----------------------------
+
+
+def iso(offset: float = 0.0) -> str:
+    """A server-style timestamp `offset` seconds from the real clock (attempt times are real wall-clock times)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset))
+
+
+def no_push_stamp(world: World) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-suites", ok({"total_count": 0, "check_suites": []}))
+
+
+def request_state(world: World) -> dict:
+    return json.loads(next(world.state.glob(f"request-*-{HEAD}.json")).read_text())
+
+
+def test_no_stamp_repo_an_errored_post_that_landed_is_adopted_and_not_posted_twice(world: World) -> None:
+    # a repo with no check suites: requests_since_push() is always 0, so only the attempt time can recognise it
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(0))]))
+    world.route(f"POST {COMMENTS}", fail("gh: timeout after the server accepted it"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.posts() == 1, "the errored POST landed: the next poll adopts it instead of posting again"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "errored but landed" in summary["codex_request_note"]
+    state = request_state(world)
+    assert state["own"] == 1 and state["attempts"] == 1 and state["attempt_at"] is None
+
+
+def test_a_clock_running_ahead_of_the_server_still_adopts_the_landed_post(world: World) -> None:
+    # the local clock is 100 s ahead: the server stamped the comment 100 s BEFORE the attempt time, inside the 120 s
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(-100))]))
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 1 and world.file("summary")["codex_requested"] == 1
+
+
+def test_a_request_older_than_the_attempt_less_the_skew_is_not_adopted(world: World) -> None:
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(-300))]))  # an old human one
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 2, "the old comment is not the errored POST's: the retry is sent"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "errored but landed" not in summary["codex_request_note"]
+
+
+def test_an_errored_post_that_never_lands_is_tried_at_most_twice_across_runs(world: World) -> None:
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]))  # the POSTs never show up
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"))
+    world.route(COMMENTS, NOMARK)
+    assert world.run("--codex-stuck", "1.5", "--timeout", "20").returncode == 3
+    assert world.posts() == 2, "two attempts in one run, however many polls followed"
+    assert request_state(world)["attempts"] == 2
+    assert world.run("--codex-stuck", "1", "--timeout", "20").returncode == 3  # a restart reads the saved count
+    assert world.posts() == 2
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0 and "POST attempts already" in summary["codex_request_note"]
+
+
+def test_the_attempt_is_on_record_before_the_post_is_sent(world: World) -> None:
+    # a POST that hangs and is killed (a gh timeout, a crash) leaves the attempt counted in the state file
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(f"POST {COMMENTS}", {"out": json.dumps({"id": 1}), "sleep": 8})
+    world.route(COMMENTS, NOMARK)
+    proc = subprocess.Popen(world.argv(), env=world.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 15
+        while not list(world.state.glob("request-*.json")) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+    state = request_state(world)
+    assert state["attempts"] == 1 and state["own"] == 0 and isinstance(state["attempt_at"], float)
+
+
+def test_a_pending_attempt_alone_triggers_adoption_and_keeps_the_attempt_time_as_last_at(world: World) -> None:
+    # own is 0 and a marker already exists (so `first()` is false and no re-request is due): only `pending` looks
+    no_push_stamp(world)
+    t = time.time() - 10
+    world.state.mkdir(parents=True)
+    (world.state / f"request-{REPO.replace('/', '__')}-{PR}-{HEAD}.json").write_text(
+        json.dumps({"own": 0, "attempts": 1, "last_at": None, "attempt_at": t, "ids": []}))
+    world.route(TIMELINE, ok([committed(HEAD), commented(at=iso(-5))]))
+    world.route(COMMENTS, ok([codex_comment(HEAD, "running")]))  # a terminal marker would end the step early
+    assert world.run("--codex-stuck", "1", "--timeout", "20").returncode == 3
+    assert world.posts() == 0
+    state = request_state(world)
+    assert state["own"] == 1 and state["last_at"] == t and state["attempt_at"] is None and state["attempts"] == 1
+    assert world.file("summary")["codex_requested"] == 1
