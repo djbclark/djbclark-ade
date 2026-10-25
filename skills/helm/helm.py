@@ -10,7 +10,8 @@
                                         block until an item appears or changes; print only those
     helm.py check <id> [--fp F]        is the question still pending? 0 yes, 10 answered elsewhere, 11 changed
     helm.py show <id>                   one session in full: question, last reply, screen. For a TUI herdr does not detect (status
-                                        unknown) it also prints `screen-fp`, the fingerprint of that fresh screen
+                                        unknown) it also prints `screen-fp`, the fingerprint of the very capture it shows (none, and no
+                                        send command, when herdr could not read the screen)
     helm.py answer <id> <n>...          pick option n (1-based), one number per question
     helm.py answer <id> --text "..."    answer a single question in free text
     helm.py send <id> "<prompt>"        submit a prompt to an idle session
@@ -18,8 +19,10 @@
                                         the same for a TUI herdr does not detect (zcode, muse, native Hermes: status unknown, never idle by
                                         itself): FP is from `show`. You attest that you read that screen and it shows an idle, empty input
                                         (a dimmed suggestion is not a draft) and no pending question, approval or plan; it is sent only if
-                                        the pane still shows exactly that screen (elapsed-time counters ignored), checked again just
-                                        before the submit. Refused for any other kind of session, the audit, a changed screen
+                                        the pane still shows exactly that screen (elapsed-time counters are ignored, so a turn that shows
+                                        only as a ticking timer is not seen), read again just before the submit; an unreadable screen
+                                        never matches. Refused for any other kind of session, the audit, an unreadable or changed screen,
+                                        and another pane or process. It reports a submit, not a read: confirm with `show` or a named ack.
     helm.py audit <id>                  send /loose and remember that this session was audited
     helm.py skip <id>                   hide this item until the session changes
     helm.py keys <id> <key>...          raw keys, for a prompt helm cannot parse (read `show` first)
@@ -66,18 +69,31 @@ run, herdr_json, short, clip, transcript, parse = fleet.run, fleet.herdr_json, f
 # ---- channels: how to reach a session's terminal ------------------------------------------
 
 
-def screen(s, lines=30, width=160):
+def _capture(s, lines):
+    """(exit status, raw output) of reading session S's pane through its channel; (None, "") when it has none."""
     kind, target = s.get("chan") or (None, None)
     if kind == "herdr":
-        out = run(HERDR, "agent", "read", target, "--source", "visible", "--lines", str(lines))[1]
-    elif kind == "orca":
-        out = run("orca", "terminal", "read", "--terminal", target)[1]
-    elif kind == "tmux":
-        out = run("tmux", "capture-pane", "-p", "-t", target)[1]
-    else:
-        return ""
-    rows = [ln.rstrip()[:width] for ln in out.splitlines() if ln.strip()]
-    return "\n".join(rows[-lines:])
+        return run(HERDR, "agent", "read", target, "--source", "visible", "--lines", str(lines))
+    if kind == "orca":
+        return run("orca", "terminal", "read", "--terminal", target)
+    if kind == "tmux":
+        return run("tmux", "capture-pane", "-p", "-t", target)
+    return None, ""
+
+
+def _rows(out, lines, width):
+    return "\n".join([ln.rstrip()[:width] for ln in out.splitlines() if ln.strip()][-lines:])
+
+
+def screen(s, lines=30, width=160):
+    return _rows(_capture(s, lines)[1], lines, width)
+
+
+def screen_read(s, lines=30, width=160):
+    """The same rows as `screen`, or None when the read failed: a non-zero exit (a timeout or a missing binary is 127), even with output,
+    or no channel. A blank screen is "" and never a usable reading."""
+    rc, out = _capture(s, lines)
+    return None if rc != 0 else _rows(out, lines, width)
 
 
 def send_keys(s, *keys):
@@ -116,12 +132,20 @@ FP_LINES, FP_WIDTH = 200, 400    # what `screen_fp` reads: every visible row, an
 DURATION = re.compile(r"\b\d+(?:\.\d+)?(?:ms|[smhd])\b")    # the status bar's elapsed-time counters tick, nothing else is masked
 
 
-def screen_fp(s):
-    """Fingerprint of the fresh visible screen of session S's pane: sha256 over its id, agent and pid (a different pane or a restarted
-    TUI never matches) and every non-blank visible row, trailing space dropped, with duration counters (`8m`, `0s`) masked so a status bar
-    clock does not change it. Any other change (a question, an approval, a typed draft, a turn starting) does."""
-    rows = "\n".join(DURATION.sub("<t>", ln) for ln in screen(s, FP_LINES, FP_WIDTH).splitlines())
+def fp_of(s, text):
+    """Fingerprint of the captured screen TEXT of session S's pane, or None when there is nothing to attest (no rows): sha256 over its id,
+    agent and pid (a different pane or a restarted TUI never matches) and every non-blank row, with duration counters (`8m`, `0s`) masked so
+    a status bar clock does not change it. Any other change (a question, an approval, a typed draft, a turn starting) does. A turn that
+    shows only as a ticking timer is therefore not seen (documented limit)."""
+    if not text or not text.strip():
+        return None
+    rows = "\n".join(DURATION.sub("<t>", ln) for ln in text.splitlines())
     return hashlib.sha256(f"{s['id']}\0{s.get('agent')}\0{s.get('pid')}\0{rows}".encode()).hexdigest()[:16]
+
+
+def screen_fp(s):
+    """`fp_of` a fresh `screen_read` of S, or None when herdr failed (any non-zero exit, even with output) or the screen is blank."""
+    return fp_of(s, screen_read(s, FP_LINES, FP_WIDTH))
 
 
 def draft(s):
@@ -396,13 +420,16 @@ def render(it, full=False):
             out += ["  screen:"] + ["    | " + ln for ln in it["screen"].splitlines()[-8:]]
         if not it["audited"]:
             out.append(f"  next: helm.py audit {it['id']}  |  helm.py skip {it['id']}")
-    elif k == "unknown" and it.get("screen_fp"):
+    elif k == "unknown" and (it.get("screen_fp") or it.get("screen_unreadable")):
         out.append("  UNKNOWN: a TUI herdr does not detect; its state is not known, so it is not sent to by default")
-        out += ["  screen:"] + ["    | " + ln for ln in it.get("screen", "").splitlines()[-22:]]
-        out.append(f"  screen-fp: {it['screen_fp']}")
-        out.append(f"  send, only if YOU read the screen above and it shows an idle, empty input (a dimmed suggestion is not a draft) and "
-                   f"no pending question, approval or plan: helm.py send {it['id']} --screen-fp {it['screen_fp']} \"<text>\"")
-        out.append("  it is refused if the screen changed since (the elapsed-time counters are ignored), is another pane or process, or you skipped this step")
+        if it.get("screen_unreadable"):
+            out.append("  screen unreadable (herdr failed or the pane is blank): no screen-fp, nothing can be sent")
+        else:
+            out += ["  screen:"] + ["    | " + ln for ln in it.get("screen", "").splitlines()[-22:]]
+            out.append(f"  screen-fp: {it['screen_fp']}")
+            out.append(f"  send, only if YOU read the screen above and it shows an idle, empty input (a dimmed suggestion is not a draft) and "
+                       f"no pending question, approval or plan: helm.py send {it['id']} --screen-fp {it['screen_fp']} \"<text>\"")
+            out.append("  it is refused if the screen changed since (the elapsed-time counters are ignored), is another pane or process, or you skipped this step")
     else:
         out.append(f"  {k.upper()}")
     if it["focus"]:
@@ -502,9 +529,15 @@ def cmd_brief(a, state):
 
 def cmd_show(a, state):
     s, it = find(a.id, state)
-    it.setdefault("screen", screen(s, 22))
     if it["kind"] == "unknown" and s.get("undetected") and s.get("status") == "unknown" and (s.get("chan") or ("",))[0] == "herdr":
-        it["screen_fp"] = screen_fp(s)    # taken from a fresh read after the one `find` made; `send --screen-fp` compares against it
+        text = screen_read(s, FP_LINES, FP_WIDTH)    # ONE read: the rows shown below and the fingerprint come from the same capture
+        if text:
+            it["screen"] = "\n".join(ln[:160] for ln in text.splitlines()[-22:])
+            it["screen_fp"] = fp_of(s, text)
+        else:
+            it["screen"], it["screen_unreadable"] = "", True
+    else:
+        it.setdefault("screen", screen(s, 22))
     emit([it], a.json, full=True)
 
 
@@ -611,6 +644,8 @@ def attested_unknown(s, it, a):
         return False, (f"--screen-fp is only for a TUI herdr does not detect (status unknown, a herdr pane); {it['id']} is "
                        f"{it['kind']}; drop --screen-fp")
     now = screen_fp(s)
+    if now is None:
+        return False, f"the screen of {it['id']} could not be read (herdr failed or it is blank), so nothing can be attested"
     if now != a.screen_fp:
         return False, (f"the screen of {it['id']} is not the one you fingerprinted (now {now}, you gave {a.screen_fp}); it changed, "
                        f"or it is another pane or process: read `helm.py show {it['id']}` again")
@@ -629,7 +664,7 @@ def cmd_send(a, state):
     if not s.get("chan"):
         sys.exit(f"helm: no channel to {it['id']} ({it['where'] or 'unknown terminal'}); use SendMessage for a Claude session")
     fp = getattr(a, "screen_fp", None)
-    if fp or it["kind"] != "idle":
+    if fp is not None or it["kind"] != "idle":
         if fp is None:
             hint = (f"; it is a TUI herdr does not detect: read `helm.py show {it['id']}` and, only if its screen shows an idle, "
                     f"empty input and nothing pending, send with `--screen-fp` from it" if s.get("undetected") and it["kind"] == "unknown" else "")
@@ -641,8 +676,8 @@ def cmd_send(a, state):
     if d:
         sys.exit(f"helm: {it['id']} has an unsent draft in its input box ({clip(d, 60)!r}); nothing sent")
     text = audit_text(s) if a.prompt is None else a.prompt
-    if fp and screen_fp(s) != fp:    # the last look before the keys: the screen can change between the check above and the submit
-        sys.exit(f"helm: the screen of {it['id']} changed just before the submit; nothing sent")
+    if fp is not None and screen_fp(s) != fp:    # the last look before the keys; an unreadable screen (None) never equals a fingerprint
+        sys.exit(f"helm: the screen of {it['id']} changed or could not be read just before the submit; nothing sent")
     if not submit(s, text):
         sys.exit(f"helm: could not submit to {it['id']}")
     if a.prompt is None:
@@ -653,6 +688,8 @@ def cmd_send(a, state):
             st["audited_fp"] = it["fp"].split(":", 1)[1]
     save(state)
     print(f"sent to [{it['id']}] {it['project']}: {clip(text, 80)}")
+    if fp is not None:
+        print(f"  submitted, not proven read: confirm with `helm.py show {it['id']}` or a named acknowledgement in your text (standing order 10)")
 
 
 def cmd_skip(a, state):

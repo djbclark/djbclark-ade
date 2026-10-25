@@ -34,19 +34,21 @@ class Rig:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, s: dict[str, Any], kind: str = "unknown") -> None:
         self.s, self.sent, self.reads = s, [], 0
-        self.screens: list[list[str]] = [READY]
+        self.screens: list[list[str] | None] = [READY]
         monkeypatch.setattr(helm, "STATE_DIR", tmp_path / "state")
         monkeypatch.setattr(helm, "STATE", tmp_path / "state" / "state.json")
         monkeypatch.setattr(helm, "find", lambda ident, state: (self.s, item(self.s, kind)))
-        monkeypatch.setattr(helm, "screen", self.read)
+        monkeypatch.setattr(helm, "screen", lambda s, lines=30, width=160: self.read(s, lines, width) or "")
+        monkeypatch.setattr(helm, "screen_read", self.read)
         monkeypatch.setattr(helm, "submit", lambda s, text: self.sent.append(text) or True)
 
-    def read(self, s: dict[str, Any], lines: int = 30, width: int = 160) -> str:
+    def read(self, s: dict[str, Any], lines: int = 30, width: int = 160) -> str | None:
+        """What successive reads return: rows, or None for a failed read (the last entry repeats)."""
         rows = self.screens[min(self.reads, len(self.screens) - 1)]
         self.reads += 1
-        return "\n".join(ln.rstrip()[:width] for ln in rows if ln.strip())
+        return None if rows is None else "\n".join(ln.rstrip()[:width] for ln in rows if ln.strip())
 
-    def fp(self) -> str:
+    def fp(self) -> str | None:
         self.reads = 0
         return helm.screen_fp(self.s)
 
@@ -88,7 +90,7 @@ def test_the_screen_changing_between_the_check_and_the_submit_is_refused(monkeyp
     rig = Rig(monkeypatch, tmp_path, row())
     fp = rig.fp()
     rig.screens = [READY, [*READY, "Approve this command? [y/N]"]]    # the first read (the check) matches, the last look does not
-    refused(rig, fp, "changed just before the submit")
+    refused(rig, fp, "changed or could not be read just before the submit")
 
 
 def test_only_elapsed_time_counters_are_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -153,3 +155,59 @@ def test_show_prints_the_fingerprint_only_for_an_eligible_row(monkeypatch: pytes
         Rig(monkeypatch, tmp_path, s, kind)
         helm.cmd_show(argparse.Namespace(id=s["id"], json=False), {})
         assert "screen-fp" not in capsys.readouterr().out
+
+
+def test_an_unreadable_or_blank_screen_gives_no_fingerprint_and_no_send_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                                                capsys: pytest.CaptureFixture[str]) -> None:
+    """F1: every read failing (a herdr outage, a timeout) or returning no rows must never produce a usable fingerprint."""
+    for label, shown in {"failed": None, "blank": ""}.items():
+        rig = Rig(monkeypatch, tmp_path, row())
+        rig.screens = [shown]
+        assert rig.fp() is None, label
+        helm.cmd_show(argparse.Namespace(id="w1:p1", json=False), {})
+        out = capsys.readouterr().out
+        assert "screen unreadable" in out
+        assert "screen-fp" not in out.replace("no screen-fp", "") and "helm.py send" not in out
+        refused(rig, "0" * 16, "could not be read")    # the fingerprint a caller would have held for an empty screen
+        helm.cmd_show(argparse.Namespace(id="w1:p1", json=True), {})
+        assert "screen_fp" not in capsys.readouterr().out
+
+
+def test_the_final_read_failing_refuses_the_send(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Rig(monkeypatch, tmp_path, row())
+    fp = rig.fp()
+    rig.screens = [READY, None]    # the check reads the screen, the last look before the submit cannot
+    refused(rig, fp, "could not be read just before the submit")
+
+
+@pytest.mark.parametrize(("rc", "out", "usable"), [(127, "", False), (1, "a row\n", False), (2, "a row\n", False), (0, "", False),
+                                                    (0, "   \n\n", False), (0, "a row\n\n  b row  \n", True)])
+def test_screen_read_and_the_fingerprint_need_a_successful_non_blank_read(monkeypatch: pytest.MonkeyPatch, rc: int, out: str, usable: bool) -> None:
+    monkeypatch.setattr(helm, "run", lambda *cmd, timeout=10: (rc, out))
+    s = row()
+    assert (helm.screen_fp(s) is not None) is usable
+    assert (helm.screen_read(s) is not None and bool(helm.screen_read(s))) is usable
+    if rc != 0:
+        assert helm.screen_read(s) is None
+        assert helm.screen(s) == "".join(ln.rstrip() + "\n" for ln in out.splitlines() if ln.strip()).rstrip("\n")    # the other callers still get what was printed
+
+
+def test_a_channel_less_row_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert helm.screen_read(row(chan=None)) is None
+    assert helm.screen_fp(row(chan=None)) is None
+
+
+def test_show_hashes_and_displays_one_capture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """D1: a second read between the display and the hash would let the caller attest screen A while holding the fingerprint of B."""
+    rig = Rig(monkeypatch, tmp_path, row())
+    a_rows = [f"row {i}" for i in range(30)]
+    b_rows = [*a_rows, "Approve this command? [y/N]"]
+    rig.screens = [a_rows, b_rows]    # a second read would see the approval prompt
+    helm.cmd_show(argparse.Namespace(id="w1:p1", json=False), {})
+    out = capsys.readouterr().out
+    assert rig.reads == 1
+    assert "Approve this command" not in out
+    assert "| row 29" in out
+    assert "| row 7" not in out and "| row 8" in out    # the last 22 rows of that one capture
+    assert f"screen-fp: {helm.fp_of(rig.s, chr(10).join(a_rows))}" in out
+    assert f"screen-fp: {helm.fp_of(rig.s, chr(10).join(b_rows))}" not in out
