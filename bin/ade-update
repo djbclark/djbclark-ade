@@ -37,7 +37,10 @@ Steps, in order:
    the canonical checkout it warns on stderr (its sibling skill-everywhere is the one that runs). Links are
    only changed when --repo is the canonical skills home (~/src/djbclark-ade, or the parent of
    $SKILL_EVERYWHERE_ADE when that is set): any other checkout (a pasture, a second clone) gets a
-   report-only skill step, since linking would repoint every TUI's live skills into it. A skills/
+   report-only skill step, since linking would repoint every TUI's live skills into it; that step also sets
+   SKILL_EVERYWHERE_NO_COPY=1, so the helper checks link targets only and never renders the checkout's skill for
+   the Grok Bot copy target. In the canonical checkout the helper's copy target refuses a skill holding a symlink
+   that is not a link to a regular file inside that skill (row `unsafe source symlink`, stuck, exit 10). A skills/
    directory whose name is not [A-Za-z0-9][A-Za-z0-9._-]* is skipped and reported (skill-everywhere
    reads a leading `-` as a mode flag).
 3. `CLAUDE.md` is a symlink to `AGENTS.md` in the repo, and every entry of `claude/{commands,agents,
@@ -288,7 +291,8 @@ def classify(state):
 
     The `grokbot` copy target (skill-everywhere, 2026-10-23) prints `<state> (<path>)`: the trailing path is
     stripped first. `not installed` and `copied` are ok, `missing` and `stale copy` are fixable (link mode
-    re-renders them), `real dir/file (not ours)` and `copy of a removed skill` stay stuck (round 15)."""
+    re-renders them), `real dir/file (not ours)`, `copy of a removed skill` and `unsafe source symlink` (the skill
+    holds a link that leaves it; the helper refuses to copy it, 2026-10-23) stay stuck (round 15)."""
     state = re.sub(r" \(.*\)$", "", state)
     if state in OK_LINK_STATES or state == "copied" or state.startswith(("via ", "not installed")):
         return "ok"
@@ -297,16 +301,23 @@ def classify(state):
     return "stuck"
 
 
-def helper_env(repo):
+def helper_env(repo, copies=True):
     """The helper's environment: an inherited SKILL_EVERYWHERE_ONLY would narrow the check to some targets and
-    still print a complete-looking report, which is read as "every link in place" (round 15, LOW)."""
+    still print a complete-looking report, which is read as "every link in place" (round 15, LOW).
+    copies=False (a report-only run on a non-canonical checkout) sets SKILL_EVERYWHERE_NO_COPY=1: the grokbot
+    copy target renders the checkout's skill into a temp dir to compare it, and a checkout that may be an
+    untrusted PR branch must never be read that way (Codex review of PR 20, 2026-10-23). An inherited value
+    is dropped first so the canonical run always checks every target."""
     env = dict(os.environ, SKILL_EVERYWHERE_ADE=str(Path(repo) / "skills"))
     env.pop("SKILL_EVERYWHERE_ONLY", None)
+    env.pop("SKILL_EVERYWHERE_NO_COPY", None)
+    if not copies:
+        env["SKILL_EVERYWHERE_NO_COPY"] = "1"
     return env
 
 
-def check_skills(script, repo, names):
-    env = helper_env(repo)
+def check_skills(script, repo, names, copies=True):
+    env = helper_env(repo, copies)
     rc, out, err = run([script, "--check", *names], env=env, timeout=LINK_TIMEOUT)
     # exit 1 is the script's own "warning: ..." status (e.g. a dangling Codex AGENTS.md); anything else is a crash
     # (127 for a missing greadlink on Linux) and its partial output must not be taken for a complete result.
@@ -575,7 +586,7 @@ def update(rep, args, repo):
     elif script is None:  # the canonical checkout's own dependency is gone: exit 4, like every other helper failure
         raise Stop(EXIT_ERROR, "skill-everywhere not found (not beside ade-update, <repo>/bin or PATH); cannot check links")
     else:
-        rows, _ = check_skills(script, repo, names) if names else ([], "")
+        rows, _ = check_skills(script, repo, names, copies=can_link) if names else ([], "")
         bad = [(s, tui, st) for s, tui, st in rows if classify(st) != "ok"]
         fixable = sorted({s for s, _, st in bad if classify(st) == "fixable"})
         if not bad:

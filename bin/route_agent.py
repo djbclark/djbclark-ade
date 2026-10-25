@@ -59,7 +59,15 @@ preferences, because they encode consequences a score cannot see:
   `frontier` kind, at most one slice per pool per wave, for work that really
   needs them (operator 2026-10-18: a wave of four astra slices emptied
   codex's 5-hour window and every one stopped; Fable at xhigh should almost
-  never run). Everyday work goes to the other pools;
+  never run). Everyday work goes to the other pools, and ALSO to codex's
+  everyday models (gpt-6.1-sol for code, gpt-6-luna for bulk and mechanical;
+  never astra) while its quota is plentiful (operator 2026-10-25: "if we have
+  lots of codex quota and it is the best of available options we can use it for
+  non-frontier"): a service's `plenty_kinds` are eligible only while its binding
+  headroom (the tightest window, 5-hour and weekly alike) is at least
+  `PLENTY_MIN` ([routing].plenty_min, 50), and with no fresh reading they are
+  not, so below it codex is frontier-only again; inside that gate it competes
+  on the normal ranking, it is not forced first;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
   separate allowance: a Fable run bills the shared window too;
 - copilot is the one reserve, with a hard floor (`reserve_floor`): GitHub-side
@@ -202,19 +210,32 @@ class Service:
     # price against the Cursor pool, 2026-10-20): load_snapshot copies that row's reading
     # to this name unless aiuse reports one of its own.
     shares_pool: str = ""
+    # Kinds that need a plentiful quota: eligible only while the pool's tightest window holds at
+    # least PLENTY_MIN percent ([routing].plenty_min). Codex's everyday kinds (operator 2026-10-25).
+    plenty_kinds: tuple[str, ...] = ()
 
     @property
     def acp_agent(self) -> str:
         return self.agent or self.name
 
-    def eligible(self, kind: str) -> bool:
+    def eligible(self, kind: str, quota: dict[str, Any] | None = None, *,
+                 any_headroom: bool = False) -> bool:
+        """Can this service take `kind`?  `plenty_kinds` also need a fresh reading of at least
+        PLENTY_MIN in `quota[name]["remaining"]` (the tightest window), else they are not
+        eligible; no `quota` means no reading, so those kinds fail closed.  `any_headroom`
+        skips that gate, for questions about the profile alone (calibrate's history)."""
         if self.retired or self.hermes_only:
             return False
         if kind in ("bulk", "mechanical") and self.never_bulk:
             return False
         if kind in ("judgment", "frontier") and not self.judgment_tier:
             return False
-        return kind in self.good_at
+        if kind not in self.good_at:
+            return False
+        if kind in self.plenty_kinds and not any_headroom:
+            remaining = ((quota or {}).get(self.name) or {}).get("remaining")
+            return remaining is not None and remaining >= PLENTY_MIN
+        return True
 
     def rank_for(self, kind: str) -> int:
         return self.good_at[kind]
@@ -254,6 +275,7 @@ PACE_PENALTY_ABOVE: float
 PACE_PENALTY: float
 PACE_PENALTY_JUDGMENT_FACTOR: float
 FRONTIER_PER_WAVE: int
+PLENTY_MIN: float
 QUALITY_MAX_RANK_GAP: dict[str, int]
 DEFAULT_PROFILE: dict[str, int]
 NEVER_ROUTE: frozenset[str]
@@ -339,6 +361,7 @@ def _service_from_entry(entry: dict[str, Any]) -> Service:
         a, b = kwargs["pool"]
         kwargs["pool"] = (a, b)
     kwargs["good_at"] = {str(k): int(v) for k, v in kwargs["good_at"].items()}
+    kwargs["plenty_kinds"] = tuple(str(k) for k in kwargs.get("plenty_kinds") or ())
     if "models" in kwargs and kwargs["models"] is not None:
         kwargs["models"] = {str(k): str(v) for k, v in kwargs["models"].items()}
     return Service(**kwargs)
@@ -349,7 +372,7 @@ def apply_policy(data: dict[str, Any]) -> None:
     global POLICY, SERVICES, BY_NAME, KINDS, BURN_FIRST_MIN, BURN_FIRST_BONUS
     global BURN_FIRST_WASTE_MIN, PACE_PENALTY_ABOVE, PACE_PENALTY
     global PACE_PENALTY_JUDGMENT_FACTOR, QUALITY_MAX_RANK_GAP
-    global FRONTIER_PER_WAVE, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
+    global FRONTIER_PER_WAVE, PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
     global FABLE_MIN_LEFT, ALIASES, DISPATCH_EXTRA, HERMES_MODELS
     global HERMES_PROVIDER_NAME
     global CALIBRATE_MIN_OUTCOMES, CALIBRATE_MIN_PEERS
@@ -373,6 +396,7 @@ def apply_policy(data: dict[str, Any]) -> None:
         PACE_PENALTY = float(routing["pace_penalty"])
         PACE_PENALTY_JUDGMENT_FACTOR = float(routing["pace_penalty_judgment_factor"])
         FRONTIER_PER_WAVE = int(routing["frontier_per_wave"])
+        PLENTY_MIN = float(routing["plenty_min"])
         QUALITY_MAX_RANK_GAP = {str(k): int(v) for k, v in
                                 (routing.get("quality_max_rank_gap") or {}).items()}
         FABLE_MIN_LEFT = float(routing["fable_min_left"])
@@ -425,7 +449,7 @@ def policy_public() -> dict[str, Any]:
             "max_parallel": s.max_parallel, "agent": s.agent,
             "models": dict(s.models), "reserve_floor": s.reserve_floor,
             "grant_days": s.grant_days, "ready_probe": s.ready_probe,
-            "shares_pool": s.shares_pool,
+            "shares_pool": s.shares_pool, "plenty_kinds": list(s.plenty_kinds),
         }
     return {
         "path": str(POLICY_PATH),
@@ -438,6 +462,7 @@ def policy_public() -> dict[str, Any]:
             "pace_penalty": PACE_PENALTY,
             "pace_penalty_judgment_factor": PACE_PENALTY_JUDGMENT_FACTOR,
             "frontier_per_wave": FRONTIER_PER_WAVE,
+            "plenty_min": PLENTY_MIN,
             "fable_min_left": FABLE_MIN_LEFT,
             "default_profile": dict(DEFAULT_PROFILE),
         },
@@ -507,6 +532,7 @@ def policy_markdown() -> str:
     frontiers = ", ".join(d.get("frontier_models") or []) or "(none)"
     lines.append(f"| dispatch.frontier_models | {frontiers} |")
     lines.append(f"| routing.frontier_per_wave | {FRONTIER_PER_WAVE} |")
+    lines.append(f"| routing.plenty_min | {PLENTY_MIN:g} |")
     lines.append(f"| routing.fable_min_left | {FABLE_MIN_LEFT} |")
     lines.append(f"| routing.burn_first_min | {BURN_FIRST_MIN} |")
     lines.append(f"| routing.burn_first_waste_min | {BURN_FIRST_WASTE_MIN} |")
@@ -1299,11 +1325,13 @@ def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
 
 
 def quality_best(kind: str, services: list[Service],
-                 exclude: frozenset[str] | set[str] = frozenset()) -> Service | None:
-    """The best-ranked pool eligible for `kind`, quota aside, that anchors the quality band
-    ([routing].quality_max_rank_gap). Reserves and excluded pools never anchor it."""
+                 exclude: frozenset[str] | set[str] = frozenset(),
+                 quota: dict[str, Any] | None = None) -> Service | None:
+    """The best-ranked pool eligible for `kind` (headroom aside, bar the `plenty_kinds` gate,
+    which reads `quota`) that anchors the quality band ([routing].quality_max_rank_gap).
+    Reserves and excluded pools never anchor it."""
     pool = [s for s in services
-            if s.eligible(kind) and s.name not in exclude and not s.reserve_floor]
+            if s.eligible(kind, quota) and s.name not in exclude and not s.reserve_floor]
     return min(pool, key=lambda s: (s.rank_for(kind), s.name), default=None)
 
 
@@ -1314,7 +1342,7 @@ def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
     hold = governor_hold() if kind in GOVERNOR_HOLD_KINDS else None
     if hold:
         exclude = frozenset(exclude) | {"claude"}
-    best = quality_best(kind, list(discover(quota or {})), exclude)
+    best = quality_best(kind, list(discover(quota or {})), exclude, quota)
     note = f" ({hold})" if hold else ""
     if gap is None or best is None:
         return "no pool has room: keep queued" + note
@@ -1351,12 +1379,12 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         held = False                        # omp cannot take it: Opus judgment may still use claude
     if held:
         exclude = frozenset(exclude) | {"claude"}
-    best = quality_best(kind, services, exclude)
+    best = quality_best(kind, services, exclude, quota)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
     for svc in services:
-        if not svc.eligible(kind) or svc.name in exclude:
+        if not svc.eligible(kind, quota) or svc.name in exclude:
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
@@ -1930,7 +1958,7 @@ def calibrate_report(*, since_days: float | None = None, min_n: int | None = Non
         if agg["n"] < min_n:
             continue
         svc = BY_NAME.get(service)
-        if svc is None or not svc.eligible(kind):
+        if svc is None or not svc.eligible(kind, any_headroom=True):
             continue
         rate = 100.0 * agg["done"] / agg["n"]
         by_kind.setdefault(kind, []).append((service, rate, agg["n"]))

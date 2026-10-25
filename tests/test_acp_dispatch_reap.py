@@ -280,6 +280,33 @@ class TestReap(ReapBase):
         with patch.dict(os.environ, {"ACP_DISPATCH_LAUNCHCTL": str(lc)}):
             self.assertIsNone(mod["dead_reason"](rec))
 
+    def test_a_loaded_job_whose_label_holds_a_path_is_not_reaped_as_gone(self):
+        # 2026-10-25: `launchctl print gui/UID/<label>` splits the label on "/", so every --task dispatch
+        # (the label carries the absolute task dir) read "not loaded" after 120 s in the load gate and was
+        # reaped as lost while its launchd job was alive and waiting.
+        self.dispatch()
+        mod = self.mod()
+        label = f"acp-dispatch.{self.out}.s1"
+        self.assertIn("/", label)
+        rec = self.unfinished(pid=None, label=label, started=time.time() - 600)
+        calls = self.tmp / "launchctl-calls"
+        lc = self.tmp / "launchctl-path-label"
+        lc.write_text(
+            "#!/bin/bash\necho \"$@\" >> " + str(calls) + "\n"
+            "[ \"$1\" = print ] && exit 113            # print cannot address a label with a slash\n"
+            "[ \"$1\" = list ] && [ -f " + str(self.tmp / "loaded") + " ] && { echo '{ \"Label\" = \"x\"; };'; exit 0; }\n"
+            "exit 113\n")
+        lc.chmod(0o755)
+        (self.tmp / "loaded").write_text("")
+        with patch.dict(os.environ, {"ACP_DISPATCH_LAUNCHCTL": str(lc)}):
+            self.assertIsNone(mod["dead_reason"](rec))         # loaded: still running
+            self.assertIsNone(mod["launchd_last_exit"](label))  # unknown, not guessed
+        self.assertIn("list " + label, calls.read_text())
+        self.assertNotIn("print", calls.read_text())
+        (self.tmp / "loaded").unlink()
+        with patch.dict(os.environ, {"ACP_DISPATCH_LAUNCHCTL": str(lc)}):
+            self.assertIn("never started", mod["dead_reason"](rec))  # really gone: still reaped
+
 
 class TestWaitResumeRace(ReapBase):
     def test_wait_returns_only_once_finalized(self):

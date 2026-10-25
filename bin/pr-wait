@@ -1,0 +1,1156 @@
+#!/usr/bin/env -S python3 -I
+"""pr-wait: ONE waiter per PR head for CI and Codex's review.
+
+  pr-wait PR [--repo OWNER/NAME] [--head SHA] [--since ISO] [--out PREFIX] [--timeout S]
+             [--interval S] [--codex-stuck S] [--ci-grace S] [--no-codex] [--no-request]
+             [--rerequest-after S] [--json]
+
+Why (2026-10-23): three waiters per head (CI, Codex, adversary) were two thirds of the
+notification turns of a 579-turn lead transcript, and the load watcher found eight duplicate
+waiters on 2026-10-20. This is the one aggregating waiter: it wakes the lead once, when
+  1. every CI check on the exact head SHA is finished (`check-runs` plus commit statuses of
+     that SHA through `gh api`, not the PR's current checks), and
+  2. Codex's review of that exact head is terminal (AGENTS.md code review rule 9): the comment
+     carrying `<!-- codex-pull-request-review-summary -->` holds `<!-- codex-review-state:v1
+     {...} -->`, edited in place; `code_review.commit_sha` must equal the head and
+     `code_review.status` be `completed` or `failed` (both terminal; a marker for another sha
+     never matches).
+Then it prints ONE line and writes, each atomically (temp file beside it, then os.replace):
+  PREFIX-checks.json   the normalized checks (name, kind, state, conclusion) of the head
+  PREFIX-codex.json    the state marker of the head (the newest marker seen when none matches; {} none)
+  PREFIX-findings.json Codex's inline findings for the head
+                       (`null` when not collected: --no-codex, or the wait ended before Codex did)
+  PREFIX-open-findings.json  every unresolved Codex review thread of any head (see Open findings)
+  PREFIX-summary.json  the one-line result as JSON
+PREFIX defaults to ~/.local/state/pr-wait/<owner>__<name>-pr<N>-<head12>. Output files are written on
+every end except exit 2 and 4 (nothing was waited for).
+Both conditions are re-judged on every poll (a check suite registered late, a re-run, a re-requested
+review); it finishes only when both hold on the same poll.
+
+Only the Codex app is believed: a state marker counts only from a comment whose author is
+`chatgpt-codex-connector[bot]` (type Bot) and whose `performed_via_github_app.slug` is
+`chatgpt-codex-connector`; the repo is public, so anyone can post a comment holding the markers.
+
+Findings for the head are the PR's inline comments (`pulls/N/comments`) that carry
+a finding mark (`<!-- codex-code-review-finding:v1 -->` or `<!-- codex-security-review-finding:v1 -->`), are authored by that bot, and belong to the head: their
+`original_commit_id` is the head, or their `pull_request_review_id` is a `pulls/N/reviews` entry whose
+`commit_id` is the head. No time window (2026-10-23, adversary round 1: Codex's own receipt comments
+quote `@codex review`, so a "newest request" moved past real findings; PR 12 on 2026-10-20). GitHub
+re-anchors `commit_id` of a finding on an unchanged line, but not these two. `--since ISO` is an optional
+extra lower bound on created_at.
+
+Open findings: a finding of an EARLIER head stays open until its review thread is resolved (PR 32,
+2026-10-23: Codex left a P1 on head 3c40470, two pushes followed, the marker for the new head said
+`has_unresolved_findings: true` and the head-only filter said 0). So the waiter also reads the PR's review
+threads (`gh api graphql`, `reviewThreads.isResolved`, the authority) and lists every unresolved Codex
+thread of any head, outdated or not, in PREFIX-open-findings.json (`null` when not collected); a thread
+counts when ANY of its comments (up to 100) is a Codex finding. Fixing a finding means fixing the code,
+then resolving its thread.
+Two Codex reviews, treated alike: code findings carry `<!-- codex-code-review-finding:v1 -->` and the
+marker's `code_review`; security findings carry `<!-- codex-security-review-finding:v1 -->` and the
+marker's `security_review` (PR 20 thread 4361214081 is an open one). Every finding and open thread has a
+`kind` (`code` or `security`). The wait ends only when `security_review` is terminal too, if the marker
+carries one. A marker WITHOUT `security_review` is not blocked on it (nothing to verify; the open threads
+of both kinds still gate) and the summary says `security_status: absent`.
+Summary fields: has_any_findings and has_unresolved_findings (marker `code_review`) with security_ twins,
+security_status, findings_for_head (and _by_kind), open_findings (unresolved Codex threads, outdated or
+not; open_findings_by_kind) and open_findings_outdated (the outdated subset), findings_mismatch (list of
+reasons; per kind the marker and the threads disagree: has_unresolved_findings true with no open thread of
+that kind, false with some, or has_any_findings true with no Codex finding comment of that kind; never
+print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when: at least one CI
+check succeeded and none failed or is pending (skipped and neutral count as passed beside a success,
+never alone), Codex's code review completed on this head, the security review too when the marker carries
+it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings as
+a boolean for each review it carries. merge_blockers lists why not: codex-<status>, security-<status>
+(security-failed, security-running, security-other-head), findings-not-collected, marker-unverified,
+security-marker-unverified, no-checks, ci-pending, ci-failed, ci-none-succeeded, open-findings,
+findings-mismatch, codex-skipped. The exit code does not carry it: the caller reads merge_ready.
+
+Requesting the review (2026-10-24; operator: "Make pr-wait request the review itself"). The Codex bot
+reviews on PR open and draft-to-ready, NOT on a push: a pushed head needs a comment `@codex review`
+(PR 55: 45 min of "codex-stuck" because nobody had asked). So when the poll finds NO Codex marker for the
+head and NO request since the head was pushed, pr-wait posts ONE comment `@codex review` (`gh api -X POST
+repos/R/issues/N/comments -f body=...`, an argv list). It never posts when a marker for the head exists
+(any status), with `--no-codex`, or with `--no-request`.
+"A request since the push" is decided by SERVER-STAMPED times, never by a commit's own date and never by
+timeline position (adversary round 1, 2026-10-24: GitHub places a `committed` timeline item by the commit's
+own, author-controlled date, so a commit made before a request but pushed after it sits BEFORE that request
+and the request, made for the previous head, would count for the new one). The push time of the head is the
+EARLIEST `created_at` of its check suites (`gh api --paginate repos/R/commits/H/check-suites`; GitHub makes
+the suite when the push arrives); for a force-push also the `created_at` of the LATEST `head_ref_force_pushed`
+item of the PR timeline (`gh api --paginate repos/R/issues/N/timeline`) whose `commit_id` is the head; the
+LATEST of the stamps that exist. `pushedDate` (GraphQL) is null in practice (checked on PR 55, 2026-10-24).
+A request is a `commented` timeline item whose body, stripped, is exactly `@codex review`, whose author is
+the PR author, the repo owner (the OWNER of --repo) or the authenticated `gh` user (`gh api user`), and
+whose server `created_at` is LATER than the push time (parsed UTC datetimes, never strings). Codex's own
+receipts and anyone else's quotes of the phrase never count (AGENTS.md rule 9: PR 12 and PR 10). With NO
+server push stamp (no CI app on the repo) no request can be dated: it leans toward posting (zero counted);
+the cap of two POST ATTEMPTS per head (an errored POST counts, and is saved BEFORE it is sent) and the
+own-request state file bound the duplicates. If a gh call fails (check
+suites, timeline, user) the case is undecidable: nothing is posted, `codex_request_note` says so, and the
+next poll retries (re-reading both before any post). At most TWO requests per head: if the marker for the
+head is still non-terminal (`running`) `--rerequest-after` seconds (default 600) after pr-wait's own request,
+it re-requests ONCE more (only when the timeline shows fewer than two requests and pr-wait has made fewer than
+two POST attempts: a POST that errored spends one, and then `codex_request_note` says the re-request was
+skipped); then `codex_request_note`
+points to openai/codex#55890 (a manual request sometimes stays "Running") and the usual `--codex-stuck`
+bound ends the wait. The delay is pr-wait's own wall clock (a wait, not an ordering decision). The count of
+pr-wait's own requests, of its POST attempts, the time of the last request, a pending attempt and the ids of the
+timeline comments already counted as its own persist in
+`request-<repo>-<pr>-<head>.json` in $PR_WAIT_STATE_DIR (repo lower-cased; written atomically, read with `.get`,
+`own` and `attempts` clamped to 0..2, `adopted_ids` at most 8 ints, a non-finite time dropped): a second pr-wait
+on the same head, started after the first exited, never posts again past that count. A POST that errored may
+still have landed: a request by an allowed author, body exactly `@codex review`, not an id already counted,
+whose server `created_at` is between the attempt time less 120 s of clock skew and the attempt time plus 240 s
+(a later one is a person's) AND, when a push stamp exists, later than it (floor = max(push, attempt - skew): a
+request for the previous head never counts), is recorded ONCE as pr-wait's own, so its re-request is not lost
+and no second post follows it. With a push stamp, below the cap, a request since the push that the own count does
+not explain adopts as well. With NO push stamp a request for the previous head made within 120 s before the
+attempt is indistinguishable from the landed POST: it is adopted, and the post for the new head is missed (a
+stall bounded by `--codex-stuck`; never an extra post). A state write that fails is a
+warning in `codex_request_note`, never a crash. The summary gains `codex_requested` (0, 1 or 2: the requests
+pr-wait posted for the head, all runs) and `codex_request_note`.
+
+A `gh` failure (or empty `gh` output) is "unknown", never "done": it is retried on the next poll and
+reported in the summary (`errors`) when the wait ends. A PR that does not exist (HTTP 404) is a usage error.
+
+Codex stuck: no terminal marker for the head `--codex-stuck` seconds (default 2700) after the wait
+started (marker absent) or after the marker was first seen non-terminal (running) ends the wait with
+result `codex-stuck`, never a silent timeout. CI with no checks at all counts as pending for
+`--ci-grace` seconds (default 120) after the wait started, because a fresh push registers its check runs
+a little later; after that, zero checks is "no checks" and finished.
+
+Exit: 0 done (CI finished and Codex terminal, whatever each said: read the files and `merge_ready`),
+      1 timed out, 2 bad usage, no such PR, or the lock takeover guard held by a live pid for 30 s,
+      3 Codex stuck, 4 another pr-wait for the same
+      repo + PR + head is alive (its pid and output prefix on stderr: never re-arm it),
+      5 the PR head moved (a new push; the new head is in the line and the summary),
+      6 timed out while `gh` was failing (the last poll did not get through).
+Duplicate guard: a lock file `lock-<repo>-<pr>-<head>` in $PR_WAIT_STATE_DIR (default
+~/.local/state/pr-wait), created atomically with its content (temp file, then os.link), holding the pid
+and a process start identity (Linux: /proc/<pid>/stat starttime, immune to wall-clock steps; macOS:
+`ps -o lstart=`); a dead pid, or a live pid whose identity differs (pid reuse), is stale and taken over
+under a takeover guard that holds its taker's pid and start and is broken by liveness.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import json
+import math
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+DEFAULT_REPO = "djbclark/djbclark-ade"
+SUMMARY_MARK = "<!-- codex-pull-request-review-summary -->"
+STATE_RE = re.compile(r"codex-review-state:v1\s+")
+FINDING_MARKS = (("codex-code-review-finding:v1", "code"), ("codex-security-review-finding:v1", "security"))
+KINDS = ("code", "security")
+CODEX_LOGIN = "chatgpt-codex-connector[bot]"
+CODEX_APP = "chatgpt-codex-connector"
+CODEX_GQL_LOGIN = "chatgpt-codex-connector"  # GraphQL author login: no [bot] suffix
+TERMINAL = ("completed", "failed")
+PASS_CONCLUSIONS = ("success", "neutral", "skipped")
+GH_TIMEOUT = 120
+REQUEST_BODY = "@codex review"
+STUCK_ISSUE = "openai/codex#55890"
+MAX_REQUESTS = 2  # `@codex review` POST attempts per head, an errored one counted
+CLOCK_SKEW = 120  # seconds the local clock may differ from GitHub's when matching an attempt to a comment
+MAX_IDS = 8  # timeline comment ids kept in the request state file (two requests per head; a few spare)
+
+EXIT_DONE, EXIT_TIMEOUT, EXIT_USAGE, EXIT_STUCK, EXIT_DUP, EXIT_MOVED, EXIT_GH = 0, 1, 2, 3, 4, 5, 6
+
+
+class GhError(Exception):
+    def __init__(self, msg: str, not_found: bool = False) -> None:
+        super().__init__(msg)
+        self.not_found = not_found
+
+
+# ---- gh -------------------------------------------------------------------------------------------
+
+
+def gh(*args: str) -> str:
+    """Run `gh` with an argv list; any failure is a GhError, never an empty success."""
+    try:
+        p = subprocess.run(
+            ["gh", *args], check=False, capture_output=True, text=True, timeout=GH_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise GhError(f"gh {args[0]} {args[1] if len(args) > 1 else ''}: {e}") from e
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout).strip().replace("\n", " ")[:300]
+        raise GhError(f"gh {' '.join(args[:2])}: rc={p.returncode} {err}", "HTTP 404" in err)
+    return p.stdout
+
+
+def parse_pages(text: str) -> list:
+    """`gh api --paginate` prints one JSON document PER PAGE, concatenated: decode them all."""
+    dec = json.JSONDecoder()
+    docs, i, n = [], 0, len(text)
+    while True:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            return docs
+        try:
+            doc, i = dec.raw_decode(text, i)
+        except ValueError as e:
+            raise GhError(f"unparsable gh output at byte {i}: {e}") from e
+        docs.append(doc)
+
+
+def api_items(endpoint: str, key: str | None = None) -> list:
+    """All items of a paginated list endpoint; `key` names the array inside an object page."""
+    items: list = []
+    docs = parse_pages(gh("api", "--paginate", endpoint))
+    if not docs:
+        raise GhError(f"{endpoint}: empty gh output")
+    for doc in docs:
+        if key is not None:
+            part = doc.get(key) if isinstance(doc, dict) else None
+        else:
+            part = doc
+        if isinstance(part, list):
+            items.extend(part)
+        else:
+            raise GhError(f"{endpoint}: unexpected page shape {type(doc).__name__}")
+    return items
+
+
+def pr_head(repo: str, pr: int) -> str:
+    try:
+        doc = json.loads(gh("api", f"repos/{repo}/pulls/{pr}"))
+        sha = doc["head"]["sha"]
+    except (ValueError, KeyError, TypeError) as e:
+        raise GhError(f"pulls/{pr}: unexpected shape: {e}") from e
+    if not isinstance(sha, str) or not sha:
+        raise GhError(f"pulls/{pr}: no head sha")
+    return sha
+
+
+# ---- CI -------------------------------------------------------------------------------------------
+
+
+def fetch_checks(repo: str, sha: str) -> list[dict]:
+    runs = api_items(f"repos/{repo}/commits/{sha}/check-runs?per_page=100", "check_runs")
+    statuses = api_items(f"repos/{repo}/commits/{sha}/status?per_page=100", "statuses")
+    out = []
+    for r in runs:
+        done = r.get("status") == "completed"
+        out.append({"name": r.get("name"), "kind": "check-run", "state": "finished" if done else "pending",
+                    "conclusion": r.get("conclusion") if done else None})
+    for s in statuses:
+        st = s.get("state")
+        out.append({"name": s.get("context"), "kind": "status",
+                    "state": "pending" if st == "pending" else "finished",
+                    "conclusion": None if st == "pending" else st})
+    return out
+
+
+def ci_counts(checks: list[dict]) -> dict:
+    pending = sum(1 for c in checks if c["state"] == "pending")
+    passed = sum(1 for c in checks if c["state"] == "finished" and c["conclusion"] in PASS_CONCLUSIONS)
+    succeeded = sum(1 for c in checks if c["state"] == "finished" and c["conclusion"] == "success")
+    return {"total": len(checks), "pass": passed, "success": succeeded,
+            "fail": len(checks) - pending - passed, "pending": pending}
+
+
+# ---- Codex ----------------------------------------------------------------------------------------
+
+
+def parse_state(body: str) -> dict | None:
+    m = STATE_RE.search(body)
+    if not m:
+        return None
+    try:
+        doc, _ = json.JSONDecoder().raw_decode(body, m.end())
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def is_codex_user(c: dict) -> bool:
+    """Authored by the Codex app's bot account; anyone can post a comment with Codex's markers."""
+    u = c.get("user")
+    return isinstance(u, dict) and u.get("login") == CODEX_LOGIN and u.get("type") == "Bot"
+
+
+def is_codex_app_comment(c: dict) -> bool:
+    app = c.get("performed_via_github_app")
+    return is_codex_user(c) and isinstance(app, dict) and app.get("slug") == CODEX_APP
+
+
+def codex_state_for(comments: list[dict], head: str) -> tuple[dict | None, dict | None]:
+    """(marker whose code_review.commit_sha is head, newest marker of any head), Codex app comments only."""
+    marked = []
+    for c in comments:
+        body = c.get("body") or ""
+        if SUMMARY_MARK in body and is_codex_app_comment(c):
+            st = parse_state(body)
+            if st is not None:
+                marked.append((c.get("updated_at") or c.get("created_at") or "", st))
+    marked.sort(key=lambda t: t[0])
+    newest = marked[-1][1] if marked else None
+    match = None
+    for _, st in marked:
+        cr = st.get("code_review")
+        if isinstance(cr, dict) and cr.get("commit_sha") == head:
+            match = st
+    return match, newest
+
+
+def code_review(state: dict | None) -> dict:
+    cr = (state or {}).get("code_review")
+    return cr if isinstance(cr, dict) else {}
+
+
+def security_review(state: dict | None) -> dict | None:
+    """The marker's `security_review` object, or None when the marker carries none."""
+    sr = (state or {}).get("security_review")
+    return sr if isinstance(sr, dict) else None
+
+
+def review_terminal(state: dict | None, head: str) -> bool:
+    """Codex is done with the head: the code review is terminal, and so is the security review when the
+    marker carries one (a security finding is posted by that review, after or beside the code one)."""
+    if code_review(state).get("status") not in TERMINAL:
+        return False
+    sr = security_review(state)
+    return sr is None or (sr.get("status") in TERMINAL and sr.get("commit_sha") in (None, head))
+
+
+def parse_ts(s: str) -> datetime:
+    d = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+THREADS_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){"
+    "pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor} "
+    "nodes{isResolved isOutdated comments(first:100){nodes{databaseId author{login} path originalCommit{oid}}}}}}}}"
+)
+
+
+def finding_kind(body: str) -> str | None:
+    for mark, kind in FINDING_MARKS:
+        if mark in body:
+            return kind
+    return None
+
+
+def fetch_threads(repo: str, pr: int) -> list[dict]:
+    """Every review thread of the PR: all its comments (databaseId, author, path, original commit; up to
+    100 per thread) and whether the thread is resolved / outdated. GraphQL `reviewThreads.isResolved` is the
+    authority on whether a finding is still open (PR 32, 2026-10-23: an earlier head's P1 stayed open past
+    two pushes). Owner and name go through `-f` (strings: `-F` would turn a digits-only name into an integer)."""
+    owner, name = repo.split("/", 1)
+    threads: list[dict] = []
+    cursor: str | None = None
+    seen: set[str] = set()
+    while True:
+        args = ["api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={pr}",
+                "-f", f"query={THREADS_QUERY}"]
+        if cursor is not None:
+            args += ["-f", f"cursor={cursor}"]
+        try:
+            doc = json.loads(gh(*args))
+            rt = doc["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes, info = rt["nodes"], rt["pageInfo"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise GhError(f"graphql reviewThreads: unusable answer: {e}") from e
+        if doc.get("errors"):
+            raise GhError(f"graphql reviewThreads: errors: {str(doc['errors'])[:200]}")
+        for n in nodes:
+            comments = [{"databaseId": c.get("databaseId"), "author": (c.get("author") or {}).get("login"),
+                         "path": c.get("path"), "original_commit_id": (c.get("originalCommit") or {}).get("oid")}
+                        for c in ((n.get("comments") or {}).get("nodes") or []) if isinstance(c, dict)]
+            threads.append({"comments": comments, "isResolved": bool(n.get("isResolved")),
+                            "isOutdated": bool(n.get("isOutdated"))})
+        if not info.get("hasNextPage"):
+            return threads
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            raise GhError("graphql reviewThreads: hasNextPage without a new endCursor")
+        seen.add(cursor)
+
+
+def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict:
+    """Codex's findings, code and security alike: `for_head` (selected by head and author, never by a time
+    window) and `open`, each entry tagged `kind` (`code` or `security`, by its mark).
+
+    A comment belongs to the head when its `original_commit_id` is the head or its review
+    (`pull_request_review_id`) is a `pulls/N/reviews` entry whose `commit_id` is the head: GitHub
+    re-anchors `commit_id` of a finding on an unchanged line, but not these two (PR 12, 2026-10-20).
+    A later Codex receipt or a quoted `@codex review` therefore cannot hide a finding.
+
+    `open` is every unresolved Codex review thread of ANY head (outdated or not) in which ANY comment is a
+    Codex finding (REST: Codex bot, a finding mark; GraphQL: author the Codex app, same databaseId).
+    `finding_comments` counts all Codex finding comments per kind, for the marker cross-check."""
+    t0 = parse_ts(since) if since else None
+    reviews = api_items(f"repos/{repo}/pulls/{pr}/reviews?per_page=100")
+    head_reviews = {r.get("id") for r in reviews if r.get("commit_id") == head}
+    findings = {}
+    for c in api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100"):
+        kind = finding_kind(c.get("body") or "")
+        if kind and is_codex_user(c):
+            findings[c.get("id")] = (kind, c)
+    for_head = []
+    for kind, c in findings.values():
+        if c.get("original_commit_id") != head and c.get("pull_request_review_id") not in head_reviews:
+            continue
+        if t0 is not None and not (c.get("created_at") and parse_ts(c["created_at"]) >= t0):
+            continue
+        for_head.append({"id": c.get("id"), "kind": kind, "path": c.get("path"),
+                         "line": c.get("line") or c.get("original_line"),
+                         "created_at": c.get("created_at"), "original_commit_id": c.get("original_commit_id"),
+                         "body": (c.get("body") or "")[:600]})
+    open_threads = []
+    for t in fetch_threads(repo, pr):
+        if t["isResolved"]:
+            continue
+        hit = next((x for x in t["comments"] if x["author"] == CODEX_GQL_LOGIN and x["databaseId"] in findings), None)
+        if hit is None:
+            continue
+        kind, c = findings[hit["databaseId"]]
+        body = (c.get("body") or "").strip()
+        open_threads.append({"id": hit["databaseId"], "kind": kind, "path": hit["path"] or c.get("path"),
+                             "line": c.get("line") or c.get("original_line"),
+                             "original_commit_id": hit["original_commit_id"] or c.get("original_commit_id"),
+                             "isOutdated": t["isOutdated"],
+                             "title": (body.splitlines() or [""])[0][:200]})
+    return {"for_head": for_head, "open": open_threads,
+            "finding_comments": {k: sum(1 for kind, _ in findings.values() if kind == k) for k in KINDS}}
+
+
+def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, sr: dict | None,
+           head: str, review: dict | None) -> dict:
+    """The findings and merge_ready fields of the summary.
+
+    Both Codex reviews are judged the same way: the code review (`code_review`, mark
+    `codex-code-review-finding:v1`) and the security review (`security_review`, mark
+    `codex-security-review-finding:v1`). Mismatch (the marker and the threads disagree, so never a clean "0"),
+    per kind: the marker says `has_unresolved_findings: true` and no open Codex thread of that kind was
+    found, or `false` and some was; or `has_any_findings: true` and no Codex finding comment of that kind
+    exists at all. merge_ready needs: at least one CI check that really succeeded, none failing or pending
+    (skipped and neutral checks count as passed beside it, never alone); Codex's code review completed on
+    this head; its security review completed on this head too WHEN the marker carries `security_review`
+    (a marker without one is not blocked on it: the open threads of both kinds still gate, and the summary
+    says `security_status: absent`); zero open Codex threads of either kind (outdated or not); no mismatch;
+    and a marker that states has_unresolved_findings as a boolean for each review it carries.
+    merge_blockers names why not: `codex-<status>` (code review not completed on the head), `security-<status>`
+    (`security-failed`, `security-running`, `security-other-head`), `findings-not-collected`,
+    `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
+    `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`."""
+    mismatch: list[str] = []
+    blockers: list[str] = []
+    for_head = open_n = outdated_n = None
+    by_kind_open: dict | None = None
+    by_kind_head: dict | None = None
+    reviews = [("code", cr)]
+    if sr is not None:
+        reviews.append(("security", sr))
+    if review is not None:
+        for_head, open_n = len(review["for_head"]), len(review["open"])
+        outdated_n = sum(1 for t in review["open"] if t["isOutdated"])
+        by_kind_open = {k: sum(1 for t in review["open"] if t["kind"] == k) for k in KINDS}
+        by_kind_head = {k: sum(1 for t in review["for_head"] if t["kind"] == k) for k in KINDS}
+        for kind, r in reviews:
+            has_any, has_unres = r.get("has_any_findings"), r.get("has_unresolved_findings")
+            if has_unres is True and by_kind_open[kind] == 0:
+                mismatch.append(f"{kind}: marker has_unresolved_findings=true but no open Codex thread found")
+            if has_unres is False and by_kind_open[kind] > 0:
+                mismatch.append(f"{kind}: marker has_unresolved_findings=false but "
+                                f"{by_kind_open[kind]} open Codex thread(s) found")
+            if has_any is True and review["finding_comments"][kind] == 0:
+                mismatch.append(f"{kind}: marker has_any_findings=true but no Codex finding comment found")
+    if no_codex:
+        blockers.append("codex-skipped")
+    else:
+        if codex_status != "completed":
+            blockers.append(f"codex-{codex_status}")
+        if sr is not None:
+            sstatus = sr.get("status") or "unknown"
+            if sr.get("commit_sha") not in (None, head):
+                blockers.append("security-other-head")
+            elif sstatus != "completed":
+                blockers.append(f"security-{sstatus}")
+        if review is None:
+            blockers.append("findings-not-collected")
+        else:
+            if not isinstance(cr.get("has_unresolved_findings"), bool):
+                blockers.append("marker-unverified")
+            if sr is not None and not isinstance(sr.get("has_unresolved_findings"), bool):
+                blockers.append("security-marker-unverified")
+    if ci_state == "no-checks":
+        blockers.append("no-checks")
+    elif ci_state != "done":
+        blockers.append("ci-pending")
+    if counts["fail"]:
+        blockers.append("ci-failed")
+    elif ci_state == "done" and counts["total"] and not counts["success"]:
+        blockers.append("ci-none-succeeded")
+    if open_n:
+        blockers.append("open-findings")
+    if mismatch:
+        blockers.append("findings-mismatch")
+    return {"has_any_findings": cr.get("has_any_findings"), "has_unresolved_findings": cr.get("has_unresolved_findings"),
+            "security_status": "absent" if sr is None else (sr.get("status") or "unknown"),
+            "security_has_any_findings": None if sr is None else sr.get("has_any_findings"),
+            "security_has_unresolved_findings": None if sr is None else sr.get("has_unresolved_findings"),
+            "findings_for_head": for_head, "findings_for_head_by_kind": by_kind_head,
+            "open_findings": open_n, "open_findings_by_kind": by_kind_open, "open_findings_outdated": outdated_n,
+            "findings_mismatch": mismatch, "merge_ready": not blockers, "merge_blockers": blockers}
+
+
+# ---- files ----------------------------------------------------------------------------------------
+
+
+def write_atomic(path: str, doc: object) -> None:
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=1)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+# ---- requesting the Codex review ------------------------------------------------------------------
+
+
+def stamp(s: object) -> datetime | None:
+    """A server timestamp as an aware UTC datetime; None when absent or unparsable."""
+    if not isinstance(s, str):
+        return None
+    try:
+        return parse_ts(s)
+    except ValueError:
+        return None
+
+
+def push_stamp(suites: list, timeline: list, head: str) -> datetime | None:
+    """When the head was pushed, from SERVER stamps only: the earliest `created_at` of its check suites, and for a
+    force-push the `created_at` of the latest `head_ref_force_pushed` item naming the head; the LATEST of the
+    stamps that exist. None = no server stamp at all. A commit's own date and its timeline position are never
+    used: GitHub places a `committed` item by the commit's author-controlled date."""
+    suite_at = [t for t in (stamp(x.get("created_at")) for x in suites if isinstance(x, dict)) if t]
+    forced_at = [t for t in (stamp(e.get("created_at")) for e in timeline
+                             if isinstance(e, dict) and e.get("event") == "head_ref_force_pushed"
+                             and isinstance(e.get("commit_id"), str) and e["commit_id"].lower() == head) if t]
+    stamps = ([min(suite_at)] if suite_at else []) + ([max(forced_at)] if forced_at else [])
+    return max(stamps) if stamps else None
+
+
+def request_items(timeline: list[dict], allowed: set[str]) -> list[tuple[datetime, int | None]]:
+    """(server `created_at`, comment id or None) of every request in the timeline: a `commented` item whose stripped
+    body is exactly REQUEST_BODY, whose author is in `allowed` (lower-case logins) and whose `created_at` parses.
+    Codex's receipts and other people's quotes of the phrase are never in `allowed`."""
+    out = []
+    for e in timeline:
+        if not isinstance(e, dict) or e.get("event") != "commented":
+            continue
+        who = e.get("user") or e.get("actor")
+        login = who.get("login") if isinstance(who, dict) else None
+        at = stamp(e.get("created_at"))
+        if (isinstance(login, str) and login.lower() in allowed and at is not None
+                and isinstance(e.get("body"), str) and e["body"].strip() == REQUEST_BODY):
+            cid = e.get("id")
+            out.append((at, cid if isinstance(cid, int) and not isinstance(cid, bool) else None))
+    return out
+
+
+def request_times(timeline: list[dict], allowed: set[str]) -> list[datetime]:
+    """Server `created_at` of every request (see request_items)."""
+    return [at for at, _ in request_items(timeline, allowed)]
+
+
+def requests_since_push(timeline: list[dict], allowed: set[str], pushed: datetime | None) -> int:
+    """Number of `@codex review` requests posted after the head was pushed (`pushed` from push_stamp).
+
+    Requests are those of request_times, strictly later than `pushed` (datetimes, not strings). `pushed` None (no
+    server stamp) counts none: the caller leans toward posting, and the cap of two POST attempts per head bounds
+    the duplicates. A comment without a parsable `created_at` cannot be shown to follow the push: not counted."""
+    if pushed is None:
+        return 0
+    return sum(1 for at in request_times(timeline, allowed) if at > pushed)
+
+
+def landed_requests(timeline: list[dict], allowed: set[str], attempt_at: float, pushed: datetime | None,
+                    known: set[int]) -> list[int | None]:
+    """Ids (None for an item without one) of the requests that a POST attempt made at local epoch `attempt_at` may
+    have produced: server `created_at` within [attempt - CLOCK_SKEW, attempt + GH_TIMEOUT + CLOCK_SKEW] (the local
+    clock may differ from the server's; a landed POST is created while its gh call runs, so a LATER request is a
+    person's, never the attempt's), STRICTLY later than the push stamp when one exists (a request for the previous
+    head is never this head's, whatever the skew: floor = max(push, attempt - skew)), and not an id already
+    adopted or posted. Needs no push stamp: it is how an errored POST that landed is recognised on a repo
+    without check suites; with none, a request for the previous head made within CLOCK_SKEW before the attempt is
+    indistinguishable from it (a missed post, bounded by --codex-stuck)."""
+    lo, hi = attempt_at - CLOCK_SKEW, attempt_at + GH_TIMEOUT + CLOCK_SKEW
+    return [cid for at, cid in request_items(timeline, allowed)
+            if lo <= at.timestamp() <= hi and (pushed is None or at > pushed) and (cid is None or cid not in known)]
+
+
+def finite(x: object) -> float | None:
+    """`x` as a finite float, else None (JSON accepts NaN and Infinity; bool is not a number here)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    try:
+        v = float(x)
+    except OverflowError:
+        return None
+    return v if math.isfinite(v) else None
+
+
+def clamp_count(x: object) -> int:
+    """A stored count as an int in 0..MAX_REQUESTS; anything that is not a plain int (bool included) is 0."""
+    return max(0, min(x, MAX_REQUESTS)) if isinstance(x, int) and not isinstance(x, bool) else 0
+
+
+def clamp_ids(x: object) -> list[int]:
+    """A stored id list as at most MAX_IDS plain ints (the newest kept); anything else is dropped."""
+    return [i for i in x if isinstance(i, int) and not isinstance(i, bool)][-MAX_IDS:] if isinstance(x, list) else []
+
+
+def load_request_state(path: Path) -> dict:
+    """pr-wait's own requests for one head: {"own": 0..MAX_REQUESTS, "attempts": own..MAX_REQUESTS (POSTs tried,
+    an errored one included), "last_at": epoch seconds or None, "attempt_at": epoch seconds of a POST that may not
+    have been recorded, or None, "ids": [...], "adopted_ids": [int, ...]: ids of the timeline comments already
+    counted as pr-wait's own, adopted or posted, at most MAX_IDS}. Every field is read with `.get`; the counts are
+    clamped to 0..MAX_REQUESTS (`attempts` never below `own`, so a record from before the field keeps its cap) and a
+    non-finite time is dropped; an unreadable file counts as none (the timeline still guards a first post)."""
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        doc = None
+    doc = doc if isinstance(doc, dict) else {}
+    own, ids = clamp_count(doc.get("own")), doc.get("ids")
+    return {"own": own, "attempts": max(own, clamp_count(doc.get("attempts"))),
+            "last_at": finite(doc.get("last_at")), "attempt_at": finite(doc.get("attempt_at")),
+            "ids": ids if isinstance(ids, list) else [], "adopted_ids": clamp_ids(doc.get("adopted_ids"))}
+
+
+def fetch_login(endpoint: str, *path: str) -> str | None:
+    """A login from a JSON document: `path` keys down from the root; None when absent."""
+    try:
+        node = json.loads(gh("api", endpoint))
+    except ValueError as e:
+        raise GhError(f"{endpoint}: unparsable answer: {e}") from e
+    for k in path:
+        node = node.get(k) if isinstance(node, dict) else None
+    return node if isinstance(node, str) and node else None
+
+
+def post_request(repo: str, pr: int) -> dict:
+    """Post the one `@codex review` comment (argv list; the body goes through -f, a raw string)."""
+    try:
+        doc = json.loads(gh("api", "-X", "POST", f"repos/{repo}/issues/{pr}/comments", "-f", f"body={REQUEST_BODY}"))
+    except ValueError as e:
+        raise GhError(f"posting the request: unparsable answer: {e}") from e
+    return doc if isinstance(doc, dict) else {}
+
+
+# ---- duplicate guard ------------------------------------------------------------------------------
+
+
+def parse_proc_stat(raw: str) -> str | None:
+    """starttime (field 22, jiffies since boot) of a /proc/<pid>/stat line; the comm field may hold ')'."""
+    try:
+        return "proc:" + raw.rsplit(")", 1)[1].split()[19]
+    except IndexError:
+        return None
+
+
+def proc_start(pid: int) -> str | None:
+    """An identity for the process that survives pid reuse; None when the pid is gone.
+
+    Linux: /proc/<pid>/stat starttime (jiffies since boot, so a wall-clock step cannot change it).
+    Elsewhere (macOS has no /proc): `ps -o lstart=`, which is stored absolutely there."""
+    try:
+        return parse_proc_stat(Path(f"/proc/{pid}/stat").read_text())
+    except FileNotFoundError:
+        if Path("/proc/self/stat").exists():
+            return None  # Linux and the pid is gone
+    except OSError:
+        pass
+    try:
+        p = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], check=False, capture_output=True,
+                           text=True, timeout=10, env={"LC_ALL": "C", "PATH": os.environ.get("PATH", "")})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = " ".join(p.stdout.split())
+    return out if p.returncode == 0 and out else None
+
+
+def lock_live(doc: object) -> bool:
+    if not isinstance(doc, dict) or not isinstance(doc.get("pid"), int) or not doc.get("start"):
+        return False
+    return proc_start(doc["pid"]) == doc["start"]
+
+
+def read_lock(path: Path) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+class LockBusy(Exception):
+    pass
+
+
+def create_exclusive(path: Path, doc: dict) -> bool:
+    """Create `path` already holding `doc`: write a temp file beside it, then os.link (EEXIST = held).
+
+    O_EXCL then write would leave an empty file a second starter could read as stale."""
+    tmp = Path(f"{path}.tmp.{os.getpid()}.{time.monotonic_ns()}")
+    tmp.write_text(json.dumps(doc))
+    try:
+        os.link(tmp, path)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def acquire_lock(path: Path, info: dict) -> dict | None:
+    """Take the lock. Returns None when taken, else the LIVE holder's lock doc.
+
+    A stale lock is taken over under a guard file (`<lock>.takeover`, holding the taker's pid and start,
+    broken by liveness, not age) so two takers cannot unlink each other's fresh lock. Residual window:
+    two breakers of one orphaned guard can race; the lock itself is still created atomically."""
+    guard = Path(f"{path}.takeover")
+    ginfo = {"pid": info["pid"], "start": info["start"]}
+    deadline = time.monotonic() + 30
+    while True:
+        if create_exclusive(path, info):
+            return None
+        doc = read_lock(path)
+        if lock_live(doc):
+            return doc  # type: ignore[return-value]
+        if not create_exclusive(guard, ginfo):
+            if not lock_live(read_lock(guard)):
+                guard.unlink(missing_ok=True)  # its taker died inside the guard
+                continue
+            if time.monotonic() >= deadline:
+                raise LockBusy(f"the lock takeover guard {guard} is held by a live pid for 30 s")
+            time.sleep(0.05)
+            continue
+        try:
+            drop_if_stale(path)
+        finally:
+            gdoc = read_lock(guard)
+            if isinstance(gdoc, dict) and gdoc.get("pid") == info["pid"]:
+                guard.unlink(missing_ok=True)
+
+
+def drop_if_stale(path: Path) -> None:
+    """Unlink the lock only if a file is there and is not a live waiter's.
+
+    Called inside the takeover guard. A lock that is MISSING must stay missing: another taker may have
+    just created a fresh one in the window between our stale read and this reread (adversary round 2, L1);
+    an existing but unparseable lock is stale (the writer never leaves one)."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    if not lock_live(doc):
+        path.unlink(missing_ok=True)
+
+
+def release_lock(path: Path, pid: int) -> None:
+    doc = read_lock(path)
+    if isinstance(doc, dict) and doc.get("pid") == pid:
+        path.unlink(missing_ok=True)
+
+
+# ---- the wait -------------------------------------------------------------------------------------
+
+
+def number(s: str) -> float:
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"needs a number of seconds, got '{s}'") from None
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"must not be negative, got '{s}'")
+    return v
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # argparse exits 2 already; keep the usage text short
+        self.exit(EXIT_USAGE, f"pr-wait: {message}\n")
+
+
+def build_parser() -> Parser:
+    p = Parser(prog="pr-wait", description="ONE waiter per PR head: CI checks and Codex's review. "
+               "Exit: 0 done, 1 timeout, 2 usage/no such PR, 3 Codex stuck, 4 duplicate waiter alive, "
+               "5 head moved, 6 timeout while gh was failing.")
+    p.add_argument("pr", type=int, help="pull request number")
+    p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
+    p.add_argument("--head", help="head SHA to wait on (default: the PR's current head)")
+    p.add_argument("--since", help="optional extra lower bound (ISO time) on a finding's created_at; findings "
+                   "are selected by head, not by time")
+    p.add_argument("--out", help="output prefix (default ~/.local/state/pr-wait/<repo>-pr<N>-<head12>)")
+    p.add_argument("--timeout", type=number, default=3600, help="seconds before giving up (default 3600)")
+    p.add_argument("--interval", type=number, default=30, help="seconds between polls (default 30)")
+    p.add_argument("--codex-stuck", type=number, default=2700, help="seconds before a non-terminal Codex "
+                   "review is reported stuck (default 2700)")
+    p.add_argument("--ci-grace", type=number, default=120, help="seconds a head with no checks yet counts as "
+                   "pending (default 120)")
+    p.add_argument("--no-codex", action="store_true", help="wait for CI only (never requests a review)")
+    p.add_argument("--no-request", action="store_true", help="never post `@codex review`; only wait")
+    p.add_argument("--rerequest-after", type=number, default=600, help="seconds a Codex review may stay "
+                   "`running` after pr-wait's own request before it is requested once more (default 600; "
+                   "at most two requests per head)")
+    p.add_argument("--json", action="store_true", help="print the summary as one JSON line")
+    return p
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("PR_WAIT_STATE_DIR") or Path.home() / ".local/state/pr-wait")
+
+
+def main(argv: list[str]) -> int:
+    a = build_parser().parse_args(argv)
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo):
+        return usage(f"--repo must be OWNER/NAME, got '{a.repo}'")
+    if a.head is not None and not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", a.head):
+        return usage(f"--head must be a full commit SHA (40 hex), got '{a.head}'")
+    if a.since is not None:
+        try:
+            parse_ts(a.since)
+        except ValueError:
+            return usage(f"--since must be an ISO time, got '{a.since}'")
+    if a.pr < 1:
+        return usage("PR must be a positive number")
+
+    start = time.monotonic()
+    deadline = start + a.timeout
+    errors: list[str] = []
+
+    # resolve the head; a gh failure is retried, a missing PR is a usage error
+    head = a.head
+    if head is None:
+        while True:
+            try:
+                head = pr_head(a.repo, a.pr)
+                break
+            except GhError as e:
+                if e.not_found:
+                    return usage(f"no such PR: {a.repo}#{a.pr} ({e})")
+                errors = [str(e)]
+                if time.monotonic() >= deadline:
+                    print(f"PR {a.pr}: timeout, gh failed all along: {e}")
+                    return EXIT_GH
+                time.sleep(min(a.interval, max(0.0, deadline - time.monotonic())))
+    head = head.lower()
+
+    sd = state_dir()
+    sd.mkdir(parents=True, exist_ok=True)
+    slug = a.repo.replace("/", "__").lower()  # GitHub slugs are case-insensitive: one lock and state per repo
+    out = a.out or str(sd / f"{slug}-pr{a.pr}-{head[:12]}")
+    lock = sd / f"lock-{slug}-{a.pr}-{head}"
+    me = os.getpid()
+    my_start = proc_start(me)
+    if my_start is None:
+        return usage("cannot read this process's start time (/proc/<pid>/stat on Linux, `ps -o lstart=` elsewhere)")
+    try:
+        held = acquire_lock(lock, {"pid": me, "start": my_start, "repo": a.repo, "pr": a.pr,
+                                   "head": head, "out": out})
+    except LockBusy as e:
+        return usage(str(e))
+    if held is not None:
+        print(f"pr-wait: already waiting on {a.repo}#{a.pr} at {head[:12]}: pid {held.get('pid')}, "
+              f"output prefix {held.get('out')} (read its files; never re-arm a live waiter)", file=sys.stderr)
+        return EXIT_DUP
+    atexit.register(release_lock, lock, me)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+
+    s = {"checks": None, "codex_match": None, "codex_newest": None, "review": None,
+         "ci_done": False, "codex_done": a.no_codex, "since": None, "since_source": None,
+         "codex_clock": start, "running_seen": False, "posted": [], "state_note": "", "warnings": []}
+    rq_path = sd / f"request-{slug}-{a.pr}-{head}.json"
+    rq = load_request_state(rq_path)  # pr-wait's own requests for this head, across runs
+    rq_ctx: dict = {"exists": False, "allowed": None}
+
+    def request_note(match: dict | None, result: str) -> str:
+        parts = list(s["posted"])
+        if rq["own"] and not s["posted"]:
+            parts.append(f"{rq['own']} request(s) were posted by an earlier run")
+        if s["state_note"]:
+            parts.append(s["state_note"])
+        parts.extend(s["warnings"])
+        if (not a.no_codex and rq["own"] and match is not None and not review_terminal(match, head)
+                and result != "done"):
+            parts.append(f"Codex stayed {code_review(match).get('status') or 'non-terminal'} after {rq['own']} "
+                         f"request(s): a manual request is sometimes stuck 'Running' ({STUCK_ISSUE})")
+        return "; ".join(parts) or "none needed or not evaluated"
+
+    def finish(result: str, code: int, new_head: str | None = None) -> int:
+        checks = s["checks"] or []
+        counts = ci_counts(checks)
+        cr = code_review(s["codex_match"])
+        newest_cr = code_review(s["codex_newest"])
+        if a.no_codex:
+            codex = {"status": "skipped"}
+        else:
+            codex = {"status": cr.get("status") or ("absent" if not newest_cr else "other-head"),
+                     "commit_sha": cr.get("commit_sha"), "newest_seen_commit_sha": newest_cr.get("commit_sha")}
+        ci_state = "done" if s["ci_done"] else "pending"
+        if s["ci_done"] and not checks:
+            ci_state = "no-checks"
+        judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, security_review(s["codex_match"]),
+                        head, s["review"])
+        summary = {"result": result, "exit": code, "repo": a.repo, "pr": a.pr, "head": head,
+                   "new_head": new_head, "ci": {"state": ci_state, **counts}, "codex": codex,
+                   **judged, "codex_requested": rq["own"], "codex_request_note": request_note(s["codex_match"], result),
+                   "since": s["since"], "since_source": s["since_source"], "errors": errors[-3:],
+                   "elapsed_s": round(time.monotonic() - start, 1), "out": out}
+        write_atomic(f"{out}-checks.json", checks)
+        write_atomic(f"{out}-codex.json", None if a.no_codex else (s["codex_match"] or s["codex_newest"] or {}))
+        write_atomic(f"{out}-findings.json", None if s["review"] is None else s["review"]["for_head"])
+        write_atomic(f"{out}-open-findings.json", None if s["review"] is None else s["review"]["open"])
+        write_atomic(f"{out}-summary.json", summary)
+        if a.json:
+            print(json.dumps(summary, separators=(",", ":")))
+        else:
+            parts = [f"PR {a.pr} at {head[:12]}: {result}",
+                     f"CI {ci_state} ({counts['pass']} pass, {counts['fail']} fail, {counts['pending']} pending)"]
+            if not a.no_codex:
+                parts.append(f"codex {codex['status']} (security {judged['security_status']})")
+                if rq["own"]:
+                    parts.append(f"@codex review requested {rq['own']}x")
+            if s["review"] is None:
+                parts.append("findings not collected")
+            else:
+                parts.append(f"findings for the head: {len(s['review']['for_head'])}"
+                             + (f" (since {s['since']})" if s["since"] else "")
+                             + f"; open Codex findings: {judged['open_findings']}"
+                             f" ({judged['open_findings_by_kind']['code']} code, "
+                             f"{judged['open_findings_by_kind']['security']} security; "
+                             f"{judged['open_findings_outdated']} outdated)")
+            if judged["findings_mismatch"]:
+                parts.append("FINDINGS-MISMATCH: " + " / ".join(judged["findings_mismatch"]))
+            parts.append("merge_ready: " + ("yes" if judged["merge_ready"]
+                                            else "no (" + ", ".join(judged["merge_blockers"]) + ")"))
+            if new_head:
+                parts.append(f"new head {new_head[:12]}")
+            if errors and code in (EXIT_TIMEOUT, EXIT_GH):
+                parts.append(f"last gh error: {errors[-1]}")
+            print("; ".join(parts))
+        return code
+
+    fails: list[str] = []  # gh failures of the current poll
+
+    def attempt(fn, *fargs):  # one gh-backed step: a failure is "unknown", retried on the next poll
+        try:
+            return fn(*fargs)
+        except GhError as e:
+            fails.append(str(e))
+            errors.append(str(e))
+            return None
+
+    issue_comments = f"repos/{a.repo}/issues/{a.pr}/comments?per_page=100"
+
+    def collect_findings() -> bool:
+        if a.no_codex:
+            return True
+        review = attempt(fetch_review_state, a.repo, a.pr, head, a.since)
+        if review is None:
+            return False
+        s["review"] = review
+        if a.since:
+            s["since"], s["since_source"] = a.since, "--since"
+        return True
+
+    def allowed_authors() -> set:
+        """Logins whose `@codex review` counts: the PR author, the repo owner, the authenticated gh user."""
+        if rq_ctx["allowed"] is None:
+            user = fetch_login("user", "login")
+            if not user:
+                raise GhError("gh api user: no login")
+            names = {a.repo.split("/", 1)[0].lower(), user.lower()}
+            author = fetch_login(f"repos/{a.repo}/pulls/{a.pr}", "user", "login")
+            if author:
+                names.add(author.lower())
+            rq_ctx["allowed"] = names
+        return rq_ctx["allowed"]
+
+    def save_rq() -> None:
+        try:
+            write_atomic(str(rq_path), rq)
+        except OSError as e:  # a warning, never a crash: the process would exit 1, the timeout code
+            msg = f"could not write {rq_path.name} ({e}): a later run may not know of these requests"
+            if msg not in s["warnings"]:
+                s["warnings"].append(msg)
+
+    def post_one(what: str) -> None:
+        # the attempt is counted and on record BEFORE the POST: one that errors (a gh timeout) may still have landed,
+        # and neither a later poll nor a restarted run may count it as never made
+        rq["attempts"] = min(rq["attempts"] + 1, MAX_REQUESTS)
+        rq["attempt_at"] = time.time()
+        save_rq()
+        doc = post_request(a.repo, a.pr)
+        rq["own"] += 1
+        rq["last_at"] = time.time()
+        rq["attempt_at"] = None
+        rq["ids"].append(doc.get("id"))
+        remember(doc.get("id"))
+        save_rq()
+        s["posted"].append(f"{what} (comment {doc.get('id')})")
+        s["state_note"] = ""
+
+    def known_ids() -> set[int]:
+        return set(rq["adopted_ids"]) | {i for i in rq["ids"] if isinstance(i, int) and not isinstance(i, bool)}
+
+    def remember(cid: int | None) -> None:
+        """A timeline comment counted as ours (adopted or posted) is never adopted again."""
+        if isinstance(cid, int) and not isinstance(cid, bool) and cid not in rq["adopted_ids"]:
+            rq["adopted_ids"] = clamp_ids(rq["adopted_ids"] + [cid])
+
+    def count_requests(attempt_at: float | None) -> tuple[int | None, list, list, str]:
+        """(requests since the push, ids of the requests the pending POST attempt may have produced (landed_requests),
+        ids of the requests since the push, ""), or (None, [], [], why) when a gh call failed: undecidable,
+        retried on the next poll."""
+        try:
+            suites = api_items(f"repos/{a.repo}/commits/{head}/check-suites?per_page=100", "check_suites")
+            timeline = api_items(f"repos/{a.repo}/issues/{a.pr}/timeline?per_page=100")
+            allowed = allowed_authors()
+            pushed = push_stamp(suites, timeline, head)
+            landed = [] if attempt_at is None else landed_requests(timeline, allowed, attempt_at, pushed, known_ids())
+            since = [] if pushed is None else [cid for at, cid in request_items(timeline, allowed) if at > pushed]
+            return len(since), landed, since, ""
+        except GhError as e:
+            return None, [], [], str(e)
+
+    def request_step(match: dict | None) -> None:
+        """Post `@codex review` when the head has no marker and no request since its push, and once more when
+        the marker stays non-terminal past --rerequest-after after pr-wait's own request (module docstring)."""
+        if a.no_request:
+            s["state_note"] = "requesting disabled (--no-request)"
+            return
+        if rq["own"] >= MAX_REQUESTS:
+            return
+        pending = rq["attempt_at"] is not None  # an earlier POST errored: it may have landed
+        if rq["attempts"] >= MAX_REQUESTS and not pending:
+            if (match is not None and rq["own"] == 1 and rq["last_at"] is not None  # due() would hold: say why not
+                    and not review_terminal(match, head) and time.time() - rq["last_at"] >= a.rerequest_after):
+                s["state_note"] = f"re-request skipped: {rq['attempts']} POST attempts already (one errored)"
+            return  # every POST of the head's cap was tried (an errored one counts): never another
+        if match is not None and review_terminal(match, head):
+            s["state_note"] = "no request needed: the marker for the head is terminal" if not rq["own"] else ""
+            return
+
+        def first() -> bool:
+            return match is None and not rq["own"] and not rq_ctx["exists"]
+
+        def due() -> bool:
+            return (match is not None and rq["own"] == 1 and rq["last_at"] is not None
+                    and time.time() - rq["last_at"] >= a.rerequest_after)
+
+        if not (first() or due() or pending):
+            if match is not None and not rq["own"]:
+                s["state_note"] = "no request needed: a marker for the head exists"
+            return
+        n, landed, since, why = count_requests(rq["attempt_at"])
+        if n is None:
+            s["state_note"] = f"undecidable, nothing posted (retried on the next poll): {why}"
+            return
+        # the errored POST landed: it is ours, so its re-request is not lost and no second post follows it. Found
+        # by `landed` (within the skew window of the attempt, later than the push stamp when there is one, not an id
+        # already counted) or, below the cap and only with a push stamp, by `n > own` (a request since the push that
+        # pr-wait's own count does not explain: it counts only requests AFTER the push, so an old head's request never
+        # matches; it has no upper time bound, so it is not used at the cap, where a later person's request would be
+        # taken for ours). Which comment was adopted is saved (adopted_ids): never adopted twice.
+        known = known_ids()
+        fresh = [i for i in since if i is None or i not in known]
+        if pending and (landed or (rq["attempts"] < MAX_REQUESTS and n > rq["own"])):
+            remember(landed[0] if landed else (fresh[0] if fresh else None))
+            rq["own"] += 1
+            rq["last_at"], rq["attempt_at"] = rq["attempt_at"], None
+            save_rq()
+            s["posted"].append("recorded the request whose POST errored but landed (found in the timeline)")
+            s["state_note"] = ""
+        if rq["attempts"] >= MAX_REQUESTS:
+            s["state_note"] = s["state_note"] or f"{rq['attempts']} POST attempts already (an errored one counts): no more"
+            return
+        if match is None:
+            if rq["own"] or rq_ctx["exists"]:
+                return
+            if n >= 1:
+                rq_ctx["exists"] = True
+                s["state_note"] = f"a request since the push already exists ({n}): none posted"
+                return
+            again = False
+        else:
+            if not due():
+                return
+            if max(n, rq["own"]) >= MAX_REQUESTS:
+                s["state_note"] = f"{n} requests since the push already: no third one"
+                return
+            again = True
+        try:
+            post_one("re-requested after the review stayed running" if again else "posted @codex review")
+        except GhError as e:
+            s["state_note"] = f"posting the request failed, nothing recorded (re-checked on the next poll): {e}"
+
+    while True:
+        fails.clear()
+        codex_polled = False
+        s["ci_done"], s["codex_done"] = False, a.no_codex  # both re-judged on every poll, never latched
+        cur = attempt(pr_head, a.repo, a.pr)
+        if cur is not None and cur.lower() != head:
+            return finish("head-moved", EXIT_MOVED, cur)
+        if cur is not None:
+            checks = attempt(fetch_checks, a.repo, head)
+            if checks is not None:
+                s["checks"] = checks
+                s["ci_done"] = not any(c["state"] == "pending" for c in checks) and bool(
+                    checks or time.monotonic() - start >= a.ci_grace
+                )
+            if not a.no_codex:
+                comments = attempt(api_items, issue_comments)
+                if comments is not None:
+                    codex_polled = True
+                    match, newest = codex_state_for(comments, head)
+                    s["codex_match"], s["codex_newest"] = match, newest
+                    if review_terminal(match, head):
+                        s["codex_done"], s["running_seen"] = True, False
+                    elif match is not None and not s["running_seen"]:
+                        s["running_seen"] = True
+                        s["codex_clock"] = time.monotonic()
+                    request_step(match)
+            # finish only when both hold on this same poll
+            if s["ci_done"] and s["codex_done"] and collect_findings():
+                return finish("done", EXIT_DONE)
+
+        now = time.monotonic()
+        if codex_polled and not s["codex_done"] and now - s["codex_clock"] >= a.codex_stuck:
+            return finish("codex-stuck", EXIT_STUCK)
+        if now >= deadline:
+            return finish("timeout", EXIT_GH if fails else EXIT_TIMEOUT)
+        time.sleep(min(a.interval, max(0.0, deadline - now)))
+
+
+def usage(msg: str) -> int:
+    print(f"pr-wait: {msg}", file=sys.stderr)
+    return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

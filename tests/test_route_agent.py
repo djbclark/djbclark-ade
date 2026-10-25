@@ -616,12 +616,14 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
     """Operator 2026-10-18: a wave of four astra slices emptied codex's 5-hour
     window; codex only for work that really needs astra, Fable xhigh almost never."""
 
-    def test_codex_takes_only_the_frontier_kind(self):
-        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude", "cursor-auto")}
+    def test_codex_takes_only_frontier_and_the_plentiful_everyday_kinds(self):
+        """2026-10-25 widened this: code, bulk and mechanical only while plentiful (see
+        TestCodexEverydayKinds); every other kind stays off codex at any headroom."""
+        q = {s.name: {"remaining": 0.0} for s in r.SERVICES}
         q["codex"] = {"remaining": 100.0}
         for kind in r.KINDS:
             c = r.route(kind, quota=q)
-            if kind != "frontier":
+            if kind not in ("frontier", "code", "bulk", "mechanical"):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
     def test_a_wave_puts_at_most_one_frontier_slice_on_each_pool(self):
@@ -709,11 +711,13 @@ class TestRoutingPolicyToml(unittest.TestCase):
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {
-            "cli": "codex (gpt-6-astra, frontier only)",
-            "good_at": {"frontier": 1},
+            "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds "
+                    "while quota is plentiful)"),
+            "good_at": {"frontier": 1, "mechanical": 12, "code": 15, "bulk": 20},
             "billing": "subscription",
             "judgment_tier": True,
-            "models": {"frontier": "gpt-6-astra --effort high"},
+            "models": {"frontier": "gpt-6-astra --effort high", "code": "gpt-6.1-sol --effort medium",
+                       "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low"},
             "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
         },
         "antigravity-claude": {
@@ -1131,6 +1135,86 @@ class TestQualityBand(unittest.TestCase):
         nxt = r.quality_best("code", services, {best.name})
         self.assertIsNotNone(nxt)
         self.assertNotEqual(nxt.name, best.name)
+
+
+class TestCodexEverydayKinds(unittest.TestCase):
+    """Operator 2026-10-25: "if we have lots of codex quota and it is the best of available
+    options we can use it for non-frontier". Everyday kinds are gated on [routing].plenty_min of
+    the binding headroom; astra stays frontier-only; ranking is the normal one."""
+
+    EVERYDAY = ("code", "bulk", "mechanical")
+
+    def codex(self):
+        return r.BY_NAME["codex"]
+
+    def drained(self, **over):
+        return {**{s.name: {"remaining": 0.0} for s in r.SERVICES}, **over}
+
+    def test_eligible_at_high_headroom_only_for_the_everyday_kinds_profiled(self):
+        q = {"codex": {"remaining": 100.0}}
+        for kind in self.EVERYDAY:
+            self.assertTrue(self.codex().eligible(kind, q), kind)
+        for kind in ("research", "judgment", "github", "api-only", "realtime-web"):
+            self.assertFalse(self.codex().eligible(kind, q), kind)
+        self.assertTrue(self.codex().eligible("frontier", q))
+
+    def test_ineligible_below_the_constant_and_without_a_reading_but_frontier_stays(self):
+        edge = r.PLENTY_MIN
+        for kind in self.EVERYDAY:
+            self.assertTrue(self.codex().eligible(kind, {"codex": {"remaining": edge}}), kind)
+            self.assertFalse(self.codex().eligible(kind, {"codex": {"remaining": edge - 0.1}}), kind)
+            self.assertFalse(self.codex().eligible(kind, {"codex": {"remaining": None}}), kind)
+            self.assertFalse(self.codex().eligible(kind), kind)
+        self.assertTrue(self.codex().eligible("frontier", {"codex": {"remaining": 1.0}}))
+        self.assertTrue(self.codex().eligible("frontier"))
+
+    def test_the_default_constant_is_half_the_window(self):
+        self.assertEqual(r.PLENTY_MIN, 50.0)
+
+    def test_route_never_hands_codex_an_everyday_slice_below_the_constant(self):
+        low = self.drained(codex={"remaining": r.PLENTY_MIN - 1})
+        for kind in self.EVERYDAY:
+            c = r.route(kind, quota=low)          # an installed unprofiled agent may still take bulk
+            self.assertNotEqual(c.service.name if c else None, "codex", kind)
+        self.assertTrue(self.codex().eligible("code", self.drained(codex={"remaining": r.PLENTY_MIN})))
+        self.assertEqual(r.route("frontier", quota=low).service.name, "codex")
+
+    def test_astra_is_frontier_only_in_the_profile(self):
+        models = self.codex().models
+        frontier = [str(m).lower() for m in r.POLICY["dispatch"]["frontier_models"]]
+        self.assertIn("gpt-6-astra", models["frontier"])
+        for kind in self.EVERYDAY:
+            self.assertFalse(any(tok in models[kind].lower() for tok in frontier), (kind, models[kind]))
+        c = r.route("code", quota=self.drained(codex={"remaining": 100.0}))
+        self.assertEqual((c.service.name, c.model), ("codex", "gpt-6.1-sol --effort medium"))
+        c = r.route("mechanical", quota=self.drained(codex={"remaining": 100.0}))
+        self.assertEqual((c.service.name, c.model), ("codex", "gpt-6-luna --effort low"))
+
+    def test_codex_competes_on_rank_it_is_not_forced_first(self):
+        q = {**IDLE, "codex": {"remaining": 100.0}}
+        for kind in ("bulk", "mechanical"):          # free and idle pools stay first
+            c = r.route(kind, quota=q)
+            self.assertNotEqual(c.service.name, "codex", kind)
+        better = self.drained(codex={"remaining": 100.0}, **{"antigravity-claude": {"remaining": 90.0}})
+        self.assertEqual(r.route("code", quota=better).service.name, "antigravity-claude")
+        only = self.drained(codex={"remaining": 100.0}, zai={"remaining": 90.0})
+        self.assertEqual(r.route("code", quota=only).service.name, "codex")   # r15 beats zai r16
+
+    def test_a_wave_puts_one_slice_on_codex(self):
+        q = self.drained(codex={"remaining": 100.0})
+        rows = r.plan(["code", "code", "code"], quota=q)
+        self.assertEqual([c.service.name if c else None for _, c in rows].count("codex"), 1)
+
+    def test_policy_json_and_md_carry_the_constant_and_the_gated_kinds(self):
+        pub = r.policy_public()
+        self.assertEqual(pub["routing"]["plenty_min"], 50.0)
+        row = next(s for s in pub["services"] if s["name"] == "codex")
+        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "mechanical"])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(r.main(["policy", "--md"]), 0)
+        self.assertIn("| routing.plenty_min | 50 |", buf.getvalue())
+
 
 
 class TestOmpReadyRoster(unittest.TestCase):
@@ -1948,7 +2032,8 @@ class TestGovernorHold(unittest.TestCase):
         because the governor holds Claude."""
         self.state("tight")
         original = r.Service.eligible
-        with mock.patch.object(r.Service, "eligible", lambda self, kind: self.name != "omp" and original(self, kind)):
+        with mock.patch.object(r.Service, "eligible",
+                               lambda self, kind, quota=None: self.name != "omp" and original(self, kind, quota)):
             choice = r.route("judgment", quota=self.QUOTA)
         self.assertNotEqual(choice.service.name, "omp")
 

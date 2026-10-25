@@ -26,7 +26,9 @@ quoting a chain, and update its snapshot if you change one.
 > together; codex's 5-hour window ran out and all four stopped waiting for the
 > reset. Since then: judgment is Opus 5.5 at `high`; codex astra and Fable 5.1
 > (`high`) are reached only through the `frontier` kind, one slice per pool
-> per wave, for work that really needs them; `acp-dispatch` allows one fresh
+> per wave, for work that really needs them (codex's everyday models, `gpt-6.1-sol` and
+> `gpt-6-luna`, also take `code`/`bulk`/`mechanical` while every codex window has
+> >= 50% left, operator 2026-10-25); `acp-dispatch` allows one fresh
 > codex slice in flight machine-wide (replaced the same night by a per-service
 > in-flight quota reservation, see *Routing policy* below) and refuses Fable
 > `xhigh`/`max` without `ACP_OPERATOR_APPROVED=fable-xhigh`. Where the 2026-10-15 text below says
@@ -317,12 +319,20 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   integration (workflows, skills, Orca, this repo).
 - **Claude Haiku 4.5 @ low** — mechanical fan-out nodes: extract,
   classify, reformat.
-- **Codex (gpt-6-astra @ high; 2026-10-18)** — the second frontier pool,
-  only for a slice that really needs astra to look it over (a
+- **Codex (gpt-6-astra @ high for frontier; 2026-10-18)** — the second frontier pool,
+  `--kind frontier` only for a slice that really needs astra to look it over (a
   security-relevant or concurrency fix's final review, debugging that
   defeated real attempts). Its in-flight slices reserve quota against a new
-  one (2026-10-18): its 5-hour window holds about one hard slice. Everyday slices go to the everyday pools, not
-  to `gpt-6-luna` on this window. (2026-10-19: the account is now the $100
+  one (2026-10-18): its 5-hour window holds about one hard slice.
+  **Everyday kinds too, while its quota is plentiful (operator 2026-10-25:
+  "if we have lots of codex quota and it is the best of available options we
+  can use it for non-frontier")**: `code` on `gpt-6.1-sol --effort medium`,
+  `bulk` and `mechanical` on `gpt-6-luna --effort low`, only while the
+  tightest codex window (5-hour and weekly) has at least
+  `[routing].plenty_min` (50%) left; below it, or with no fresh reading,
+  codex is frontier-only again. It competes on the normal ranking (code r15,
+  mechanical r12, bulk r20), one slice per wave; astra never takes an
+  everyday kind. (2026-10-19: the account is now the $100
   plan, `prolite`; the 5-hour note predates the upgrade, so re-calibrate with
   `route_agent.py calibrate` before relying on "one hard slice".)
 - **Gemini via agy** — big-context reading, summarization, multimodal,
@@ -394,7 +404,9 @@ running agent per reset period toward omp API credits. Exit 0/1/2, 10 stale data
    sublimit of the one shared Claude weekly (and bills the 5h window); under
    10% of its cap the router suggests `opus --effort high`.
 2. **Everyday work on the other pools**, cheapest adequate first: agy
-   Claude/GPT (>= 40% left), Cursor Auto, zai GLM-5.3, opencode-go, agy Gemini
+   Claude/GPT (>= 40% left), Cursor Auto, codex `gpt-6.1-sol` / `gpt-6-luna`
+   (only while every codex window has >= 50% left, operator 2026-10-25; never
+   astra), zai GLM-5.3, opencode-go, agy Gemini
    for bulk and big-context reads, crush/SIPB for light bulk. Minimum spec
    (model × effort × context) that does it well. Start on the cheap eligible
    tier and escalate through `acp-dispatch reroute` on a verified failure
@@ -463,7 +475,9 @@ alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%:
 lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
 and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
 at medium when it only drives a pipeline, high only for a judgment turn; djbclark 2026-10-23), never Fable; adversary rounds go to `acp-dispatch
-omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first. The guard that
+omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first; an unpinned
+Agent-tool sub-agent or teammate runs Sonnet (`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`, set in the
+live settings by running `bin/claude-settings-env`, whose `--check` shows drift, 2026-10-23), so pass `model: "opus"` for judgment. The guard that
 makes the numbers act: `bin/claude-quota-guard` (`check` every 15 minutes under launchd after
 `--install`, `status [--json]`) derives `ok` / `watch` / `tight` / `critical` from the Claude
 windows (weekly, 5-hour, Fable cap) and the snapshot's Claude `conserve` alerts, writes

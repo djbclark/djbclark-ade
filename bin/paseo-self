@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""paseo-self — which Paseo agent am I? Ask the Cline hub, not the environment.
+
+WHY THIS EXISTS (djbclark, 2026-10-25)
+-------------------------------------
+A Cline agent under Paseo could not compact, hand off or `/new` itself, because `self-slash` needs to
+know *which* agent it is and every environment route was missing or wrong:
+
+1. **`PASEO_AGENT_ID` is not in a tool shell.** Paseo sets it on the agent process (`cline --acp`
+   carries it), but **tool shells are children of the shared `cline --cline-hub-daemon`**, which does
+   not have it — the hub multiplexes every Cline agent on the machine, so no per-agent variable can
+   reach a tool shell that way. Verified 2026-10-25.
+2. **`HERDR_PANE_ID` is inherited from the hub and is stale, which is worse than absent.** A shell had
+   `HERDR_ENV=1` and `HERDR_PANE_ID=w2F:p34` while `herdr pane list` showed no such pane. `self-slash`
+   takes the herdr route whenever both are set, so it would have typed into a pane that is not this
+   session's — silent cross-session contamination. **Any tool that trusts these must not.**
+3. **cwd is not an identity.** Four live agents shared `/Users/djbclark/src/techno-euphora`, and
+   djbclark: *"We can't always trust CWD, esp. in herdr I often start things in ~ or ~/src and then
+   work on multiple projects."* So cwd is at best a tiebreak, never a key.
+
+THE SIGNAL THAT WORKS: the hub's own event log
+----------------------------------------------
+`~/.cline/data/db/hub-events-hub-production.db` has `hub_events(sequence, event, session_id, ...)`,
+and **`tool.started` events carry the session id of the agent that made the call**. A tool shell asking
+"which session just started a tool?" and reading the newest `tool.started` row gets **its own** session,
+because that row is its own invocation — the hub's record of the very call in progress, per-session
+rather than per-machine.
+
+USAGE
+  paseo-self.py agent [--json]     the Paseo agent id for THIS session (exit 3 if it cannot be told)
+  paseo-self.py session [--json]   this Cline session id
+  paseo-self.py explain            how the answer was reached (for debugging a miss)
+  paseo-self.py check              self-test: refuses rather than guessing
+
+Exit: 0 found; 3 cannot be determined (never a guess); 2 usage.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path(os.environ.get("HOME", "/Users/djbclark"))
+CLINE = HOME / ".cline" / "data"
+EVENTS_DB = Path(os.environ.get("PASEO_SELF_EVENTS",
+                                CLINE / "db" / "hub-events-hub-production.db"))
+SESSIONS_DB = CLINE / "db" / "sessions.db"
+
+# How stale a `tool.started` row may be and still be "the call I am running". Generous, because a
+# slow tool (a long test run) starts once and the shell may ask at its end.
+FRESH_S = float(os.environ.get("PASEO_SELF_FRESH_S", 900))
+
+
+def ro(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+
+
+def my_session() -> tuple[str | None, str]:
+    """The Cline session id whose `tool.started` is the newest — i.e. this very tool call.
+
+    Returns (session_id, how). The `how` is for `explain`; it never lies about a fallback.
+    """
+    if not EVENTS_DB.is_file():
+        return None, f"no hub event db at {EVENTS_DB}"
+    try:
+        with ro(EVENTS_DB) as c:
+            rows = c.execute(
+                "SELECT session_id, created_at FROM hub_events "
+                "WHERE event='tool.started' ORDER BY sequence DESC LIMIT 5").fetchall()
+    except sqlite3.Error as exc:
+        return None, f"hub event db unreadable: {exc}"
+    now_ms = time.time() * 1000
+    for sid, created in rows:
+        if not sid:
+            continue
+        age = (now_ms - float(created or 0)) / 1000
+        if age <= FRESH_S:
+            return sid, (f"newest hub_events tool.started is session {sid} ({age:.0f}s old)")
+    return None, "no recent tool.started row in the hub event db"
+
+
+def live_agents() -> list[dict]:
+    """Live Paseo agents, from the CLI. [] when paseo is unavailable (never raises)."""
+    try:
+        p = subprocess.run(["paseo", "agent", "ls", "--json"], capture_output=True,
+                           text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if p.returncode != 0:
+        return []
+    try:
+        d = json.loads(p.stdout)
+    except ValueError:
+        return []
+    return [a for a in d if isinstance(a, dict)] if isinstance(d, list) else []
+
+
+def norm_cwd(p: str) -> str:
+    """A cwd in comparable form: expand `~`, resolve symlinks, drop a trailing slash.
+
+    Paseo reports cwd with a literal `~` (`~/src/techno-euphora`) while Cline stores the absolute
+    path — comparing them raw silently matches nothing, which is what made the first version of this
+    tool report "no live agent" for a session that plainly had one.
+    """
+    s = os.path.expanduser(str(p or "").strip())
+    if not s:
+        return ""
+    try:
+        s = str(Path(s).resolve())
+    except OSError:
+        pass
+    return s.rstrip("/")
+
+
+def agent_for_session(sid: str) -> tuple[str | None, str]:
+    """The Paseo agent id whose own record names this Cline session. A DIRECT link, no guessing.
+
+    Paseo stores each agent's `runtimeInfo.sessionId` in its state file
+    (`~/.paseo/agents/<cwd-slug>/<agent-id>.json`), and for a cline agent that is exactly the Cline
+    session id this tool discovered from the hub's event log. So the resolution is a lookup, not an
+    inference.
+
+    An earlier version of this matched on cwd instead, and it was **wrong for a reason djbclark named
+    himself** ("we can't always trust CWD… I often start things in ~ or ~/src and then work on multiple
+    projects"): four live agents shared `/Users/djbclark/src/techno-euphora`, so cwd identified
+    nothing and the tool correctly refused. The session id needs no such guess.
+    """
+    if not sid:
+        return None, "no session id"
+    state = HOME / ".paseo" / "agents"
+    if not state.is_dir():
+        return None, f"no paseo agent state at {state}"
+    hits = []
+    for path in state.glob("*/*.json"):
+        try:
+            d = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        if str((d.get("runtimeInfo") or {}).get("sessionId") or "") == sid:
+            hits.append((str(d.get("id") or path.stem), d.get("title"), d.get("provider")))
+    if len(hits) == 1:
+        aid, title, provider = hits[0]
+        return aid, f"session {sid} is recorded by paseo agent {aid[:8]} ({title}, {provider})"
+    if not hits:
+        return None, f"no paseo agent records session {sid}"
+    names = ", ".join(f"{h[0][:8]} ({h[1]})" for h in hits)
+    return None, (f"AMBIGUOUS: {len(hits)} paseo agents record session {sid}: {names}. "
+                  f"Refusing rather than guessing")
+
+
+def cmd_agent(a) -> int:
+    sid, how = my_session()
+    if not sid:
+        print(f"paseo-self: cannot tell which session this is: {how}", file=sys.stderr)
+        return 3
+    aid, why = agent_for_session(sid)
+    if not aid:
+        print(f"paseo-self: {why}", file=sys.stderr)
+        return 3
+    if a.json:
+        print(json.dumps({"session_id": sid, "agent_id": aid, "how": [how, why]}, indent=1))
+    else:
+        print(aid)
+    return 0
+
+
+def cmd_session(a) -> int:
+    sid, how = my_session()
+    if not sid:
+        print(f"paseo-self: {how}", file=sys.stderr)
+        return 3
+    print(json.dumps({"session_id": sid, "how": how}, indent=1) if a.json else sid)
+    return 0
+
+
+def cmd_explain(a) -> int:
+    sid, how = my_session()
+    print(f"session: {sid or 'UNKNOWN'}")
+    print(f"  how: {how}")
+    if sid:
+        aid, why = agent_for_session(sid)
+        print(f"agent:   {aid or 'UNKNOWN'}")
+        print(f"  how: {why}")
+    print("\nenvironment (for the record — none of this is trusted as an identity):")
+    for k in ("PASEO_AGENT_ID", "HERDR_ENV", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID",
+              "ORCA_TERMINAL_HANDLE"):
+        print(f"  {k}={os.environ.get(k, '<unset>')}")
+    return 0 if sid else 3
+
+
+def cmd_check(a) -> int:
+    """Self-test: the mechanism works, and it refuses rather than guessing."""
+    problems: list[str] = []
+    sid, how = my_session()
+    print("paseo-self self-test")
+    print(f"1. own session discovered: {'ok' if sid else 'PROBLEM'}  ({how})")
+    if not sid:
+        problems.append("could not discover this session")
+    else:
+        aid, why = agent_for_session(sid)
+        print(f"2. resolved to a paseo agent: {'ok' if aid else 'PROBLEM'}  ({why})")
+        if not aid:
+            problems.append("could not resolve the session to an agent")
+    # the anti-guess property: an unknown session must be refused, never matched to something
+    _aid, why_unknown = agent_for_session("__definitely_not_a_session__")
+    refused = "no paseo agent records session" in why_unknown or "AMBIGUOUS" in why_unknown
+    print(f"3. an unknown session is refused, not guessed: {'ok' if refused else 'PROBLEM'}")
+    if not refused:
+        problems.append("an unknown session was not refused")
+    print("self-test: " + ("FAILED: " + "; ".join(problems) if problems else "PASS"))
+    return 1 if problems else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="paseo-self", description=__doc__.split("\n")[0])
+    sub = p.add_subparsers(dest="command", required=True)
+    for name, fn, help_ in (("agent", cmd_agent, "this session's Paseo agent id"),
+                            ("session", cmd_session, "this session's Cline session id")):
+        s = sub.add_parser(name, help=help_)
+        s.add_argument("--json", action="store_true")
+        s.set_defaults(func=fn)
+    e = sub.add_parser("explain", help="how the answer was reached")
+    e.set_defaults(func=cmd_explain)
+    c = sub.add_parser("check", help="self-test: works, and refuses rather than guessing")
+    c.set_defaults(func=cmd_check)
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

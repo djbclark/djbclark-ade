@@ -39,7 +39,7 @@ Chain: `load-spike-monitor-t` (`/baton load-spike-monitor-t`). It is a side-work
    into for one. Anything else is registered by `$CLAUDE_CODE_SESSION_ID` and reached by
    `skills/session-finder/relay.py`. For another TUI, pass `--relay <id|name|herdr pane>`.
 2. If `set` printed `replaced ...`, the old watcher has been told. Say in your reply which session it was.
-3. `test` exits 0 only when the channel reports the line was delivered or queued. If it exits 1, or the
+3. `test` exits 0 only when the channel reports the line was delivered or queued (relay.py's `queued: <id>` for a watcher that is busy and cannot steer counts here, and only here: the registration check is not time-critical, and the line arrives when the watcher is idle). An incident brief, a job-guard line and the "you are no longer the watcher" line are time-critical, so load-watch sends them with `--no-defer`: a busy watcher that cannot take one now is "could not reach it" and the existing fixer path runs, never "queued". If `test` exits 1, or the
    line never shows up, the watcher cannot be reached. Fix the channel (relay.py's refusal reasons, or
    `paseo ls`) before claiming the role. Never leave a watcher registered that cannot be reached.
 4. **Record the role in the chain's Tier 1 log in the same turn, unasked** (djbclark, 2026-10-23: "update the

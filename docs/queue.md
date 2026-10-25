@@ -3,6 +3,32 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## relay.py deferred send and Paseo sender label (2026-10-24, branch `feat/relay-deferred-send`, PR #57)
+
+Built, repair round 2 (2026-10-24) after a second adversary BLOCK, not merged: a busy target no longer loses the text (`relay.py`
+prints `queued: <id>` and exits 0 for a caller it can identify; 0600 record under `~/.local/state/relay/deferred/`, detached
+`--deliver` with its own clean environment, `--pending`, `--cancel`, `--sweep`) and `sender_name` reads `PASEO_AGENT_ID`.
+`load-watch` passes `--no-defer` for incident briefs (a queued brief arrives after the spike; only `watcher test` may queue).
+A caller with no identifiable sender (fleet-watch's `upr_relay`, load-watch, cron scripts) gets exit 1 "deferring needs an
+identifiable sender" on a busy target, which is the behaviour before this branch: fleet-watch's `upr_dispatch` reads rc 1 as a
+refused relay and falls back to a worker (checked 2026-10-24). **site-private follow-up** (not edited here): `upr_relay` could pass `--idle S`. Open:
+(1) no launchd job re-arms queued records after a reboot yet; they wait for the next `relay.py` run (its opportunistic sweep)
+or `relay.py --sweep`, by the brief; (2) a Claude-pane target is never deferred (it queues natively); (3) one deliverer
+process per queued record (at most 100), only the head of a target's queue polls it; (4) `--cancel` has no sender check
+(same-uid operator surface); (5) `PASEO_AGENT_ID` can be forged by a same-user process, as `HERDR_PANE_ID` can; (6) the
+bounds can be starved by a same-user process that mints sender keys (100 in all; never silent: exit 1 "deferred queue
+full"), one sender can fill one target's 20, and a deliverer stuck in a send holds its own record's owed notice until a later
+sweep; (7) a Paseo daemon error is tolerated for only 3 looks, 5 s apart (about 10-15 s): raise `DEFER_ERRORS` or space
+the looks if a longer restart must be survived; (8) at QUEUE time a herdr pane row with no session id, transcript or pid is not deferred (exit 1 with the `--idle S` hint)
+when `pane process-info` fails, or when no foreground process, or more than one, is named like the agent (the herdr label
+or a binary `fleet.PROC_AGENTS` maps to it; with one foreground process in all, that one is taken); at POLL time the stored
+pid only has to be among the pane's foreground pids (tool and MCP children come and go), and a pane herdr cannot read
+counts as an error that fails the message only after 3 in a row (about 10-15 s, as in (7)); (9) two records left by an earlier test run sit in
+`~/.local/state/relay/deferred/` (`20261024-194844-fe1631`, `20261024-194854-57fcc1`) and are pruned by a sweep a week after
+they went final; the test suite now points `RELAY_DEFER_DIR` at a temp directory (`tests/conftest.py`) and
+`tests/test_zz_relay_real_state_untouched.py` fails if a freshly loaded relay would point at the real directory.
+Round 4 residuals (APPROVE f3873a2, 2026-10-24; all LOW/NIT, each ends in a notice and loses nothing): (C1, C2 and C4 fixed in #60, 2026-10-25: a row with a session id or transcript no longer checks the stored pid at poll time; a herdr row is judged by membership even with fleet's own pid, and an undetected pane with several same-named processes is refused at queue time (defensive, 2026-10-25: fleet reports undetected rows as `unknown`, so none is deferred today; if that changes, keep the pid check for them); `deliverer_env` passes the three directories resolved); (B3, NIT) `deliverer_env` resolves symlinks where `.absolute()` would do, so a symlinked `RELAY_UNSENT` puts the deliverer's pane locks beside the link target until the first rewrite (no symlinks in real state); (C3) a sid-less pane whose TUI has a same-named foreground child (npm/npx wrapper plus native binary, `codex exec` in the TUI's pgrp) has two name hits, so the queue is refused with exit 1 "Retry with --idle S" (not observed live; herdr's process-info carries no ppid for a tie-break); (C5) a deferred Hermes turn starts with cwd `/`, informational.
+
 ## tuios support: do it LAST (djbclark, direct, 2026-10-24)
 
 djbclark, 2026-10-24: "Queue for very end, although we can consider it a little now to make room for it any work between
@@ -34,9 +60,26 @@ web searches about it and make heavy use of web searches during all of your work
 5. **Standing order from the same message: use web searches heavily in all work**, not only here (memory
    `feedback_heavy_web_search`).
 
+## bm-lint (PR 55) and pr-wait (PR 58) follow-ups (merged 2026-10-25 as 3d0c2e2 and 7c3b73c)
+
+Both merged at adversary APPROVE and clean Codex reviews; these were disclosed in the PR bodies and left unfixed on purpose. Reports: `~/.local/state/bigteam/ade-queue-build-2026-10-24/adv-bm-w3-r6-report.md`, `adv-prwait-r5-report.md`. Also open: the weekly `bm-lint` hook-up in site-djbclark `fleet-watch` (`bm-w3-fleet-watch.patch` in that directory, parked until PR 55 merged: offer it to djbclark).
+1. **bm-lint LOW**: a config project path holding a lone surrogate (`"/tmp/x\ud800y"`) still aborts the run with `internal error: UnicodeEncodeError` (`os.walk` in `check_empty_projects`, `bin/bm-lint:418-425`); class name only, nothing leaks. Fix: wrap the walk in `try/except ValueError` and list the project as `not fully readable` (the `"\0"` test then becomes redundant).
+2. **bm-lint LOW**: a partial read (some notes skipped, the rest clean) prints `ok, no findings` with rc 0 by contract; the headline could show the skipped count. On a filesystem without `d_type`, a subdirectory under a 0444 directory might be filed as a file [INFERENCE]. Earlier LOWs: CommonMark fence edge cases, a newline in a filename in text mode, the `skipped` cap loses names.
+3. **pr-wait MEDIUM (missed post)**: `push_stamp` takes the earliest check-suite `created_at` of the head sha and ignores `head_branch`, so a sha pushed earlier to another ref (a backup or stacked branch with push-triggered CI) dates the push too early; a request for the previous head between the two pushes then counts and the wait ends `codex-stuck`. Fix: keep only suites whose `head_branch` is the PR's `head.ref`, fall back to no stamp (which posts).
+4. **pr-wait LOW**: (a) no push stamp (no CI app): a previous head's request within 120 s plus any clock skew before an errored POST is indistinguishable from ours (docstring says "120 s", add "plus any clock skew"); (b) a lost or deleted request-state file, or another `$PR_WAIT_STATE_DIR`, on a no-stamp repo with no marker lets a new run post a third time, and the `load_request_state` docstring (~:629) still says the timeline guards a first post; (c) a request in the same second as the push stamp is not counted (strict `>`): `skills/bigteam/SKILL.md` should say "after a push, start pr-wait and do not post by hand"; (d) `@Codex review` / `... please` is not counted as a request (one extra capped post); on a fork PR the PR author's own request stops pr-wait from posting.
+5. **Both**: Codex's PR review stuck "Running" on PR 55 head 7a59802 (openai/codex#55890); `pr-wait` now re-requests once, but the cause is upstream.
+
+## ade-scan-state follow-up 3 after PR 47 (adversary round 3, 2026-10-24)
+
+PR 47 merged (6234a18) at adversary APPROVE; djbclark chose to queue these LOWs rather than fix them (report: `~/.local/state/bigteam/adhoc-2026-10-24/adv-shallow-47-r3-report.md`). 1. **LOW**: `tests/test_ade_scan_state.py` asserts `git clone --bare` once per row, not inside each note (a row with two notes passes if one says a plain clone); assert it in each note's span. 2. **LOW**: the shallow note on the odd-name `all-refs.bundle` row (`bin/ade-scan-state-doc`, the `ODD_NAME_NOTE` branch) has no test; set `c["branch"] = "b\ufffd"` on the real record in the branch case and expect `all-refs.bundle` with `+refs/*:refs/bundle/*`. 3. **LOW**: the comment above `_shallow_note` and the test's "a non-forced update would be rejected" overstate: into `refs/bundle/*` a non-forced fetch also succeeds on a fresh bare clone; reword to "a fetch into `refs/heads/*` would be rejected". 4. INFO: the CHANGELOG line says "now say" for "every bundle row" (should be "says") and omits the odd-name row.
+
 ## ade-scan-state follow-up 2 after PR 39 (adversary round 70, 2026-10-24)
 
-PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **LOW**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 2. INFO: the no-origin restore recipe leaves the bare repo's HEAD at `init.defaultBranch` (a clone warns `remote HEAD refers to nonexistent ref`); `git init --bare -b <branch>`. 3. INFO: `GITDIR_FMT` exits 0 having archived nothing when `.git` is no longer a file at paste time, so the new "refuses loudly" sentence overstates; make the command fail or reword. 4. INFO: the PR's CHANGELOG line bundles about eight changes in one line where rule 10 says one per change; split if a reviewer asks. 5. INFO: `merge_repositories` keeps the first spelling (unreachable for a symlink today).
+PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **DONE in PR 47 (2026-10-24)**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 3. **DONE in the follow-up 2b PR (2026-10-24)**: a row whose scan saw a gitfile naming a git directory outside the checkout pastes `GITDIR_REQUIRED_FMT`, which fails (nonzero, `gitdir capture FAILED: .git is not a file` on stderr) when `.git` is no longer a file; the plain `GITDIR_FMT` stays a silent no-op for an ordinary `.git` directory. 4. **DONE in the same PR**: the PR 39 CHANGELOG line is split into eight, one per change. 5. **LEFT, by design (2026-10-24)**: `merge_repositories` keeps the first spelling, which its docstring says and `test_one_directory_under_two_spellings_is_one_embedded_repository_not_two` pins; a symlink spelling is unreachable today (adversary round 70), so no test can show a `realpath` preference without inventing an input; the only reachable case is the case-insensitive pair, where either spelling is the same directory.
+
+Open LOWs from the PR 54 adversary round (APPROVE at 8b0ecfd, merged 9d8f896, 2026-10-24): b. **LOW**: the split CHANGELOG line for `--separate-git-dir` names only `bin/ade-scan-state-doc`, but PR 39 made that change mainly in `bin/ade-scan-state` (docstrings) and `docs/threat-model.md:322`; widen the file list. c. **INFO**: a skipped linked worktree whose gitfile points back (skipped for alternates, a time-out) still gets the plain `GITDIR_FMT`, so a missing `.git` at paste time exits 0 having archived nothing (the gap item 3 closed only for the foreign case); by design in the PR body, revisit if it bites.
+
+Open LOWs and INFO from the 2026-10-24 landing rounds (PRs 37, 38, 32, merged a40e21a, a637686, 8cb18f7): g. PR 37 **LOW**, recorded as accepted: in-tree link amplification in canonical mode (`cp -rL` copies each link to one in-tree file); and a check-versus-copy TOCTOU via a swapped path component (`unsafe_links` in `bin/skill-everywhere`, needs a local writer). h. PR 38 **LOW**: the rearm hint prints "up to 2.0 h" for waits just over 2 h; a `wait_timeout` within about 60 s of 7200 can have its waiter killed just before its 124; the usage header says 7200000 is named only for short waits. Landing note (2026-10-24): six PRs landed in one evening and every merge moved master, which re-conflicted `CHANGELOG.md` for the next (each PR adds a line at the top of `### Fixed`); a small `CHANGELOG` union helper at `~/.local/state/bigteam/pr-landing-2026-10-24/union-merge.py` did the resolution, and a merge queue or a rule that PRs add their line at a random position would end the treadmill.
 
 ## Consider: drop the brew Paseo and run our fork instead (djbclark, direct, 2026-10-24): ASK FIRST, it is disruptive
 
@@ -48,6 +91,10 @@ djbclark, 2026-10-24: "At appropriate point, consider if we want to remove the p
 4. **Order:** after the connected-hosts upgrade is verified on stock 0.13.0 (so a regression can be told apart from the fork), before tuios. Not started; blocked on djbclark's go.
 
 ## Paseo connected hosts: make full use of them, after we quiesce and upgrade Paseo (djbclark, direct, 2026-10-24)
+
+Status 2026-10-24 (afternoon, after the research slice; report `~/.local/state/bigteam/pr-landing-2026-10-24/connected-hosts-research2-report.md`): the Mac daemon is already 0.13.0 (`daemonVersion` 0.13.0, 127.0.0.1:7263), so no restart is needed; `paseo host ls` is empty (nothing connected). Correction: the report's recommendation of `get` is withdrawn (`get.sipb.cloud` is down, hyades microVM slots are used up). Host choice (djbclark): the eventual host is vps-primary as user `bb`, which is already logged into the agent services. Read-only look at vps-primary, 2026-10-24: `bb` exists (uid 994, home `/var/lib/bb`, logins present for Claude, Codex, Cursor, omp, grok, Hermes, copilot, gh, zcode); a Paseo daemon already runs there as `bb` (listening on 127.0.0.1, the tailnet IP and the tailnet IPv6, port 7263) but it is **0.11.4**, and connected hosts need **0.13.0+ on both daemons**, so the vps-primary package (nix, `paseo-bin`) must be bumped first through the `nixos/` flake and the pushed `deploy-vps-primary` branch, never by hand; disk is 87% used (3.9 G free), RAM 3.8 GB (about 2.6 GB available) against BB's 3G cap; `bb` has no `~/.ssh`, so the `ssh://` transport needs a key added through the flake, or use `host:port` over the tailnet if the daemon accepts it. A scrappable podman-microVM trial first is optional; nothing is installed, connected or deployed without djbclark's yes.
+
+Status 2026-10-25 (djbclark: scrap the bigger-server work, keep the current vps-primary): Hetzner CX33/CX43 rescale, the Netcup/OVH trials and the restock watcher are dropped (watcher PR https://github.com/djbclark/site-djbclark/pull/231 closed unmerged, branch `ops/hetzner-restock-watch` kept on origin at edf21b3, adversary-approved). Landed instead: https://github.com/djbclark/site-djbclark/pull/232 (paseo-nix 6b79032 = Paseo 0.13.0, journald `SystemMaxUse=200M`; weekly nix-gc 14 d, optimise and grub limit 10 were already there), promoted to `deploy-vps-primary` at 22ea786 and applied with `systemctl start nixos-upgrade`. Verified on the host 2026-10-25 (04:18 AM UTC): `nixos-version --configuration-revision` 22ea786, `paseo` 0.13.0, service active, journal 157 MB; root is still 85% (4.4 G free) because the old and new Paseo closures coexist until the weekly 14-day GC, the 7.5 GB swap partition cannot be reclaimed without a repartition, and a Hetzner Volume (EUR 0.0767/GB/month per the pricing API, 10 GB minimum; the 0.057 figure here earlier was wrong) was the cheap way to add space and was created the same day. Update 2026-10-25 (05:2x UTC): bb's home moved to a 15 GB Hetzner Volume 107263872 `vps-primary-bb-home` (ext4, UUID cef32561-f50a-4332-ae46-b5ee5a1570eb, nbg1, about EUR 1.15/month, grow in place then `resize2fs`) via site-djbclark#233; root disk now 49% (15 G free), volume 75%. The BB service (bb.service, tailnet 443/38443) was removed from vps-primary, the `bb` user stays for Paseo (djbclark: BB is deprecated); the Mac's BB host daemon (port 38888 LaunchAgent) has no server and can be uninstalled. Connected hosts: `paseo host add 'wss://vps-primary.greyhound-sidemirror.ts.net:7263' --label vps-primary` from the Mac, status online (registration hst_c77a1bb4-4b9e-4eec-aa48-592c6dc0363d); ssh:// stays the documented fallback (needs a key for `bb` through the flake). Test agent (2026-10-25): `paseo --host wss://vps-primary.greyhound-sidemirror.ts.net:7263 run --workspace <id> --provider codex ...` ran on vps-primary as `bb` from the Mac (workspace made with `workspace create --isolation local --path /var/lib/bb/...`, then archived; scratch dir removed). Swap partition kept (djbclark: may be needed). Mac BB host daemon LaunchAgent unloaded and its plist moved to `~/.local/state/retired-launchagents/`, ports 38886/38887/38888 released in `registry/ports.yml` (2026-10-25). The later hardening PR (djbclark, 2026-10-25) also carries the ssh:// fallback (authorized key for `bb`, then register a second host). Hardening done (2026-10-25, site-djbclark#234, rev a7c2aa7): bb uid 994 / gid 991 pinned, mount `rw,nosuid,nodev`, Hetzner delete-protection on volume 107263872. The ssh:// fallback needs no key (djbclark already has ssh access): Paseo allows ONE registration per daemon (a second gives `duplicate_host`), so fail over by swapping the connection: `paseo host update <registrationId> --connection 'ssh://djbclark@100.125.249.107?daemonPort=7263'` and back to `wss://vps-primary.greyhound-sidemirror.ts.net:7263` (tested online both ways). The swap partition stays (djbclark: may be needed). Nothing open on vps-primary.
 
 djbclark, 2026-10-24: "Add to appropriate point in our queue, we should make full use of this new feature (before doing
 this we'll need to run out the queue / quiesse here so we can install the latest paseo version that supports this and
@@ -281,7 +328,7 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    Sonnet 5.5 at **medium**, high only for judgment turns; effort changes on 5.5/Fable 5.1 keep the prompt cache.
    One Sonnet `code` slice: `skills/model-routing/SKILL.md` item 12, `config/routing.toml` `[lead]`
    `pipeline_effort`, `route_agent.py policy --md`, a test.
-2. **`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`** in `~/.claude/settings.json` `env` (via `agents/claude/settings.json.tmpl`):
+2. **DONE 2026-10-23 (djbclark approved; `bin/claude-settings-env` DEFAULTS (add-only) plus the template line, applied live by running it):** **`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`** in `~/.claude/settings.json` `env` (via `agents/claude/settings.json.tmpl`):
    an Agent-tool sub-agent with no `model:` inherits the lead's model, so a Fable or Opus lead silently spawns
    Fable or Opus sub-agents; `claude/agents/adversary.md` keeps its explicit `model: opus`. One small PR.
 3. **One aggregating waiter per PR**: promote `~/.local/state/bigteam/adhoc-2026-10-23/pr-wait.sh` (waits for CI
@@ -295,6 +342,23 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    silently); `gh api --jq` takes no `--arg` (the findings query failed with "accepts 1 arg(s), received 4"), so fetch
    with `gh api ... --paginate > f.json`, then `jq -s --arg t ... f.json`; the adversary appends its own `## Round NN`
    section to its report file, so the lead must not append a second copy (rounds 43 and 44 were deduplicated).
+   **Done 2026-10-23** (`bin/pr-wait`, `tests/test_pr_wait.py`, `skills/bigteam/SKILL.md`): one waiter per repo + PR + head
+   (CI checks of the exact head plus the Codex marker; `completed` and `failed` terminal; stuck bound `--codex-stuck`,
+   default 45 min, exit 3; `gh` failures retried, exit 6 if still failing at the deadline; paginated output parsed as
+   concatenated pages; findings by `original_commit_id` / review `commit_id` of the head and the Codex bot author, no time window; markers believed only from the Codex app), a lock refusing a duplicate (exit 4). Not done:
+   the adversary-report round dedup lesson is a lead habit, not a waiter feature.
+   **Open LOW from PR 34's adversary (2026-10-24, head a15ecb7; D1 and D2 fixed in the PR, D3 and D4 left):**
+   D3 stale summary: `finish()` is the only writer, and the summary carries no run id or start time. Scenario: run A on head H
+   ends `merge_ready: true`; a re-requested Codex review or an unresolved thread makes run B start on H; a third agent gets exit 4
+   ("read its files"), reads `PREFIX-summary.json` at once and sees run A's `merge_ready: true`. A crash gives exit 1 plus the
+   previous summary. Fix: once the lock is held, write `PREFIX-summary.json` atomically as `{"result":"running","pid":...,
+   "started_at":...}` (or delete the old `PREFIX-*` files), put `pid` and `started_at` in the final summary too, and make the
+   exit-4 message say "wait for pid N to exit, then read". D4 macOS identity ([INFERENCE], not reproduced): the lock identity is
+   the text of `ps -o lstart=`, a local-time rendering, so the docstring's "stored absolutely" holds only for the kernel value.
+   Scenario: the Mac's automatic timezone changes while a waiter runs; a second `pr-wait` on the same head computes a different
+   lstart string for the live holder, `lock_live` returns False, it takes over, and two waiters run on one head. Fix: read
+   `pbi_start_tvsec`/`pbi_start_tvusec` through libproc `proc_pidinfo(PROC_PIDTBSDINFO)` (ctypes) or `sysctl kern.proc.pid.<pid>`;
+   or keep lstart, also store the epoch, and compare within +-1 s after parsing both in the same zone.
 4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
    row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) **DONE 2026-10-23** (Codex 4361062506;
    `decide` now builds a summary window for every windowless row beside the detailed ones, then the Fable supplement; tests `test_s2_*`) a detailed
@@ -752,6 +816,67 @@ Decided: the Paseo Telegram plugin (`daaaaave/telegram`) becomes the phone surfa
 today: its registry version requires Paseo `>=0.11.2 <0.12.0` and the daemon is 0.12.0; wait
 for a compatible release, then one Phase F item re-points `hermes-ping`, the approval buttons
 and home rule 12, with Hermes's relay as the rollback.
+
+## Telegram for 2fado, Herald and agent web searches: talk first (djbclark, 2026-10-25)
+
+djbclark asked (2026-10-25) to set Telegram up for the Paseo `2fado` plugin (`@xpufx/paseo-twofado` 0.1.3, daemon `2fadod`, "Telegram Fallback: unconfigured")
+and "in general", at an appropriate point in the queue, after a talk with him about what it does and whether it helps us, web searches included. **Ruling 2026-10-25 (djbclark, after the talk): parked until SF-Q16 (the section below) is settled; then decide on one bot. Configure nothing before that.** (Original note: do not configure
+anything before the talk.) Findings 2026-10-25 (read of the plugin README and github.com/xpufx/2fado): 2fado gates only commands an agent chooses to run as
+`2fado run -- <argv>` (policy allow / deny / ask a human on Telegram; fail closed; runs as the daemon user, no escalation in the default build), plus `ask`/`notify`
+petitions; it does not intercept Claude Code's own tool calls, MCP calls (`WebSearch`, `firecrawl_*`) or `sudo-ask`. A web-search gate would need a PreToolUse hook that calls
+`2fado ask`. Overlaps: the SF-Q16 item below (Paseo Telegram plugin replacing Hermes's relay, blocked on a Paseo version range), `hermes-ping`, Hermes's
+`permissions_respond`, `/helm`, and Herald (spoken waiting alert). Ties to the "ask before costly steps" rule in `feedback_heavy_web_search`.
+
+## ade-git-guard (PR 59) residuals from adversary round 8 (2026-10-25)
+
+Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry run's ref lines) and N3 (`--namespace` not passed to the dry run); the repair slice
+`iso-w1-r8fix` also takes N2, N4 (text only) and N5. Left open on purpose (djbclark ruling 2026-10-25, report `adv-iso-w1-r8-report.md` B6 and B7):
+1. **N6, low**: without `-v` the porcelain listing omits up-to-date refs, so a claimed `refs/heads/X` behind a glob or mirror mapping that is unchanged at dry-run time but moves
+   on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
+2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
+
+## ade-git-guard (PR 59): round 9 BLOCK on 7df76ad, paused for a design call (2026-10-25)
+
+Round 9 (Opus, `adv-iso-w1-r9-report.md`) closed N1 and N3 (no false refusals, 723 tests, four mutations red) but BLOCKed on F1: `git --attr-source HEAD <write>` and
+`git --shallow-file /dev/null fetch origin +main:cb` move a claimed branch with rc 0, because `parse_git_argv` skips an unknown global option as one token and its separate
+value becomes the subcommand. Fix as the adversary asks: put both in `GLOBAL_VALUE` and fail closed on any unknown leading option. F2: `docs/git-guard.md` says N6 and N7
+are queued here; the entries above are those. djbclark (2026-10-25) paused PR 59 for a design call after nine rounds of parser bypasses; nothing is dispatched.
+
+## acp-dispatch launchd label with a slash (PR 62, merged e15aeb9, 2026-10-25): lows from adversary round 1
+
+Verdict `APPROVE ac0e0d8`. Left open:
+1. **Docs, low**: `bin/acp-dispatch` usage text (the `launchd's last exit status` line and the `no longer loaded` line) and the `launchd_print` docstring still say `launchctl print gui/$UID/<label>`; a slash label is
+   looked up with `launchctl list` and its last exit is never read (reap goes to rc 0 if delivered, else 255 `lost`). One clause at each place.
+2. **Test gap, low**: the auto-resume resubmit path (`resubmit_auto_resume`) also carries a slash label under `--task`; `STATEFUL_LAUNCHCTL` in `tests/test_acp_dispatch_auto_resume.py` handles only `print`.
+   Add a `list)` case and one reboot-resume test with `--task /abs`.
+3. **Info**: `launchctl list` asks the caller's own bootstrap domain; a `check` run from an ssh login does not see a job submitted from the GUI session, so a slash label still reads as gone there.
+
+## Verified peer messaging (djbclark, 2026-10-25; part of the big ADE queue)
+
+djbclark, 2026-10-25: always verify the other agent got the message, or we may sit on a one-way receive-only link; "make sure that always happens as part of the big djbclark-ade queue". Case: the
+herdr successor `29a5535c` sent a contract proposal; the reply was written only in prose, then relayed (`relay.py` status: `queued`, the target was inside a long command): not yet proven. Standing order 10 in AGENTS.md
+states the rule. Build items, each one Sonnet `code` slice with a test:
+1. **`relay.py --ack`**: after a send that is not `delivered`, keep watching (transcript or inbox of the target, bounded by `--wait`) and print `delivered`, `unverified` or `not delivered` as the exit status
+   (today `queued` exits 0 like a delivery); add `--expect-ack ID` that waits for a reply message naming the sender.
+2. **First-contact ack**: the first relay to a session this sender has never messaged appends "reply `ack <sender id>` through relay.py"; `fleet.py` records which peers have ever acked, so a one-way link shows as such.
+3. **Inbound relays**: a relayed message that asks a question is answered by a relay to its sender (the footer names the route); a reply written only in the receiver's prose is flagged by the `session-finder` skill text and by a Stop-hook nudge when a turn began with `[relay from ...]` and ended with no `relay.py` call.
+4. **Home instruction file (Opus only)**: item 24 (3) of `~/.claude/CLAUDE.md` gains one clause pointing at standing order 10; dispatched `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment` on 2026-10-25.
+
+Scoping (Dann 5, lead of techno-euphora, relayed 2026-10-25, after djbclark asked whether relay should ALWAYS require a reply): mandate PROOF, not conversation. Delivery proof (the text reached the
+target's transcript) is mechanical and needs no reply; a reply (the target read it and acted) costs the target a turn, and a send to a working cline or ACP agent cannot steer, so forcing one on every message
+doubles traffic, interrupts work and is wrong for one-way messages (a status, a handoff pointer, "PR 61 is merged"). Evidence: this chain's own handoff a621 item 6 carried a 30-minute waiter and a "peer may
+be unreachable" note for a peer (`29a5535c`) that was in fact reachable and responsive - its ack was
+verified both ways 31 s AFTER that handoff line was written (b457 log, 04:08:31 vs a621 created_at
+04:08:00), so the line was stale rather than the link broken. A later relay by Dann 5 reached the same
+peer immediately. The real cost stands either way: a 30-minute waiter and a false "may be unreachable"
+note, spent because `queued` looked like success and nothing distinguished "not yet delivered" from
+"cannot deliver". The items keep their shape and gain:
+A. `queued` never exits 0 as if delivered (item 1, first and unchanged).
+B. `--expect-ack ID` is REQUIRED for a message that asks a question or requests action, and is record state, not a blocking wait: set at send time, shown by `relay.py --pending` (sender, target, age), resolved by
+   a later `--sweep` when the reply arrives, so no turn is held open on a peer's schedule.
+C. First contact with a peer always asks for an ack (item 2, standing order 10).
+D. No ack within a bounded time escalates to the operator, never assumed read.
+E. Everything else: verified delivery is enough; an FYI that provably landed needs no reply.
 
 ## Software factory, Phase F (decided 2026-10-19)
 
@@ -1735,6 +1860,6 @@ OPEN (adversary fix text kept; not implemented, 2026-10-24):
    (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
 3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): fixed 2026-10-24, the lines end with PR 40.
 4. Accepted residual (L-D, adversary B2, 2026-10-24): a holder that proved delivery (`forget`) or a non-claude pane leaves no entry, so a relay of the same text that wins the
-   lock inside the release window types it a second time (before L-D a non-claude pane ended "not sent" there). It is what a relay arriving just after the holder does anyway.
+   lock inside the release window types it a second time (before L-D a non-claude pane, or a claude pane with no socket, ended "not sent" there). It is what a relay arriving just after the holder does anyway.
 5. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
    prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.

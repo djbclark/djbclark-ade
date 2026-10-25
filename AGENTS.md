@@ -81,6 +81,20 @@ Each doc carries its own summary.
    tracks its latest release. Detail and exceptions:
    `site-private/memory/feedback_upstream_local_changes.md`.
 
+9. **Start every branch in its own worktree, never in the shared checkout.** `~/src/djbclark-ade` is used by many sessions at once and may sit on
+   another session's branch: `git checkout -b` there inherits that branch's commits, and a commit there lands on someone else's work (2026-10-24: three
+   sessions collided; an L-D branch carried two foreign commits until rebased). Use `git worktree add -b NAME ~/src/djbclark-ade-NAME-wt origin/master`, work and
+   push there, and `git worktree remove` it after the merge. In the shared checkout only fast-forward `master` and commit your own hunks to it with
+   `git-commit-own`; if it is on a branch you do not own, say so to that branch's owner through `relay.py`, do not switch it away.
+
+10. **A message to another agent is not sent until it is sent through `session-finder/relay.py`, and not delivered until you have verified it** (operator, 2026-10-25:
+   "we always need to verify that the other agent got our message otherwise we may be on a broken one-way receive-only link"; the same day an agreement was written
+   only in a reply to the sender and never relayed back). Writing an answer in your own turn does not reach a peer; a relayed message from a peer is answered by `relay.py`
+   to that peer, not in prose. Read relay's status word: `delivered` is proof, `queued`, `accepted` or `unverified` is not. After a non-`delivered` status
+   check the target's transcript or inbox for the text (`--wait S` blocks for it), ask for a named ack (`ack <your agent id>`), and re-send or switch route
+   (`--via`) when none arrives. The first message to a new peer always asks for an ack, to prove the return path. A peer you cannot reach is reported to the operator,
+   never assumed read. Checklist for the queue: `docs/queue.md`, "Verified peer messaging".
+
 ## Machine context
 
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
@@ -172,12 +186,24 @@ pull request here is expected to meet these; flag any it misses.
 8. **Docs move with the code**: a flag, exit code or subcommand added or
    changed appears in the tool's usage text and in the doc that lists it
    (`README.md` roster, `docs/*.md`, `skills/*/SKILL.md`).
-9. **Read Codex's result against the request, never against a guessed
+9. **Read Codex's result against the head and the open threads, never against a guessed
    clock**: the summary comment's `codex-review-state` names the `commit_sha`
-   it covers; the findings for that head are the inline comments created
-   after your `@codex review` comment for it (`gh api
-   repos/.../pulls/N/comments`, compare `created_at` with that comment's,
-   and read every one). GitHub re-anchors `commit_id` to the newest head when
+   it covers (for `code_review` and for `security_review`, each read the same way). The findings for that head
+   are the Codex inline comments
+   (`gh api repos/.../pulls/N/comments`, author `chatgpt-codex-connector[bot]`,
+   ending in a finding mark: `codex-code-review-finding:v1` or `codex-security-review-finding:v1`) anchored to it (`original_commit_id`, or the
+   `commit_id` of their review in `pulls/N/reviews`), PLUS every unresolved Codex
+   review thread from an earlier head, security threads included: a finding stays open until its thread is
+   resolved. GraphQL `reviewThreads.isResolved` is the authority, and the marker's
+   `has_unresolved_findings` (per review) must agree with it (a disagreement is chased, never
+   read as a clean "0"). Case (2026-10-23): on PR 32 Codex left a P1 on head
+   3c40470, two pushes followed without the fix, the marker for the new head said
+   `has_unresolved_findings: true`, and a head-only filter read "0" past the open
+   P1. Check with `bin/pr-wait`: `merge_ready` (false with the reasons in `merge_blockers`) and
+   `PREFIX-open-findings.json`.
+   Fixing a finding means fixing the code, then resolving its thread. Never select
+   by time: a "newest `@codex review` comment" window is moved by Codex's own
+   receipts, which quote it (PR 12, 2026-10-20). GitHub re-anchors `commit_id` to the newest head when
    the line is unchanged, so `commit_id` alone cannot tell old from new. A
    waiter that filtered by a hard-coded timestamp missed two findings on
    PR 10 (2026-10-20) and the PR merged past them. The state marker's exact
