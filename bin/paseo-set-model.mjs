@@ -99,10 +99,17 @@ async function work() {
     if (flags.includes("--dry-run")) return 0;
     if (before.value === true) { console.log("already on"); return 0; }
     await client.setAgentFeature(a.id, "auto_accept", true);
-    const after = readFeature();
+    // The daemon persists the feature ASYNCHRONOUSLY: an immediate re-read can still show the old
+    // value and read as a failure when the write is fine (hit on the first run against a
+    // just-created tab, 2026-10-25). Poll briefly before declaring it did not take.
+    let after = readFeature();
+    for (let i = 0; i < 20 && after.value !== true; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      after = readFeature();
+    }
     console.log(after.value === true
       ? "auto_accept: off -> on"
-      : "auto_accept: the daemon accepted the request but the state file still shows off");
+      : "auto_accept: the daemon accepted the request but the state file still shows off after 5s");
     return after.value === true ? 0 : 4;
   }
   const [id, requested] = pos;
