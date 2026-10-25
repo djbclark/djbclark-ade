@@ -317,7 +317,10 @@ class TestMachineHistory(RoutingDispatch):
             "--no-model-check", "--no-preflight", "--min-headroom", "0", "--dry-run", "--json",
             env=self.snap_codex(100.0))
         self.assertEqual(r.returncode, 0, r.stderr)
-        return json.loads(r.stdout)
+        rec = json.loads(r.stdout)
+        # a dry run never launches, but the record must show the scratch fake it would run
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        return rec
 
     def test_another_kinds_and_efforts_history_is_not_borrowed(self):
         """Adversary 7802361, A3: three 2% medium `code` slices made a high `judgment` slice reserve
@@ -362,6 +365,28 @@ class TestMachineHistory(RoutingDispatch):
         self.assertEqual((rec["estimated_usage_pct"], rec["estimate_source"]),
                          (34.0, "history (3 slices, machine)"))
         self.assertEqual(rec["estimated_usage_windows"], {"5h": 34.0})
+
+    def test_a_request_without_effort_never_meets_a_history_estimate(self):
+        """Adversary d13f2ed, A1: None == None let a request with no --effort (or a manual reroute, which
+        sets effort None) match three rows that never recorded an effort, so it reserved 2%. Unknown
+        effort on either side proves nothing: the floor holds."""
+        row = {"measured_usage_pct": 2.0, "measured_usage_windows": {"5h": 2.0}}
+        for label, extra in (("kind recorded, effort absent", {"kind": "judgment"}),
+                             ("kind recorded, effort null", {"kind": "judgment", "effort": None}),
+                             ("effort recorded, request without one", {"kind": "judgment", "effort": "high"})):
+            with self.subTest(label):
+                rec = self.judgment_estimate([{**row, **extra} for _ in range(3)], effort=None)
+                self.assertEqual(rec["estimated_usage_pct"], 25.0)
+                self.assertEqual(rec["estimate_source"], "brief-size default")
+                self.assertEqual(rec["estimated_usage_windows"], {})
+
+    def test_a_request_with_the_effort_of_three_recorded_rows_still_releases_the_floor(self):
+        rec = self.judgment_estimate([
+            {"kind": "judgment", "effort": "high", "measured_usage_pct": 2.0,
+             "measured_usage_windows": {"5h": 2.0}} for _ in range(3)])
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimate_source"]),
+                         (2.0, "history (3 slices, machine)"))
+        self.assertEqual(rec["estimated_usage_windows"], {"5h": 2.0})
 
 
 class TestReservation(RoutingDispatch):
@@ -463,6 +488,18 @@ class TestRerouteEstimate(RoutingDispatch):
     def test_the_same_workload_keeps_its_reservation(self):
         new = self.reroute(self.finished_code_slice(), "--kind", "code")
         self.assertEqual(new["estimated_usage_pct"], 2.0)
+
+    def test_a_manual_reroute_has_no_effort_so_unrecorded_history_does_not_release_the_floor(self):
+        """Adversary d13f2ed, A1: a manual reroute sets effort None and matched rows that never recorded one."""
+        other = self.tmp / "state" / "other-task" / "jobs"
+        other.mkdir(parents=True)
+        for i, extra in enumerate(({}, {"effort": None}, {})):
+            (other / f"h{i}.json").write_text(json.dumps({
+                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
+                "measured_usage_pct": 2.0, "measured_usage_windows": {"5h": 2.0}, **extra}))
+        new = self.reroute(self.finished_code_slice("--effort", "medium"), "--kind", "judgment")
+        self.assertEqual((new["estimated_usage_pct"], new["estimate_source"]), (25.0, "brief-size default"))
+        self.assertEqual(new["estimated_usage_windows"], {})
 
 
 class TestWindowReservation(RoutingDispatch):

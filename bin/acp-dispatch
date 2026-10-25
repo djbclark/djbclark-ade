@@ -711,12 +711,14 @@ def _same_workload(row: dict, kind: str | None, effort: str | None, strict: bool
     row does not carry (a pre-change record, read with .get) cannot contradict the request and
     stays comparable; a recorded kind or effort that differs is a different workload: a medium-effort
     `code` slice says nothing about a high-effort `judgment` one (adversary 7802361, A3).  `strict`
-    (a request whose kind has its own estimate floor, `codex:judgment`) also drops a row whose kind
-    or effort is unknown: three legacy rows must not release a floor that exists because no
-    comparable slice was ever measured (adversary bcdd223, A1)."""
+    (a request whose kind has its own estimate floor, `codex:judgment`) requires the row to RECORD a
+    non-null kind and effort equal to the request's, and a request without one of them (no --effort,
+    a manual reroute) matches nothing: an unknown field is never equal to another unknown field, so
+    three legacy rows cannot release a floor that exists because no comparable slice was ever measured
+    (adversary bcdd223 A1, d13f2ed A1)."""
     pairs = ((row.get("kind"), kind), (row.get("effort"), effort))
     if strict:
-        return all(have == want for have, want in pairs)
+        return all(want is not None and have == want for have, want in pairs)
     return all(have is None or have == want for have, want in pairs)
 
 

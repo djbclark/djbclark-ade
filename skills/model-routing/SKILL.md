@@ -610,7 +610,9 @@ method that runs the waves.
        everyday slice does not reserve a hard slice's share of the window;
        25% for a codex `--kind judgment` slice (`codex:judgment`, 2026-10-25),
        until three history rows that record that kind and effort exist (a row
-       with either unrecorded does not count toward them).
+       with either unrecorded does not count toward them, and a request with
+       no `--effort`, a manual reroute included, counts none: it reserves the
+       floor, 2026-10-25).
    1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
        without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
        `fable-deep` agent runs at `high`.

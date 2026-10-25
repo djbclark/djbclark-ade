@@ -336,7 +336,8 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   codex is frontier-only again, and `acp-dispatch` judges the gate again on the reading taken
   after the load wait (the detached runner too). Estimates match history on kind and effort,
   and `[dispatch.estimate_floor] "codex:judgment"` (25) holds until three comparable slices
-  exist. It competes on the normal ranking (judgment r3,
+  (recorded kind and effort equal the request's; a request without `--effort` has none) exist.
+  It competes on the normal ranking (judgment r3,
   behind claude and omp; code r15, mechanical r12, bulk r20), one slice per wave; astra never takes an
   everyday kind. (2026-10-19: the account is now the $100
   plan, `prolite`; the 5-hour note predates the upgrade, so re-calibrate with
