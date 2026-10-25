@@ -16,6 +16,8 @@ agent what changed and what is new. Entries end with the pull request number.
 - First contact (2026-10-25): the first relay from a session to a peer appends a request to reply `ack <sender id>`; `relay.py` keeps `~/.local/state/relay/links.json` and `fleet.py list` shows `link: acked` or `link: ONE-WAY` per peer (#NN).
 - `relay.py` header names the sender (2026-10-25): a relayed text starts `[relay from KIND ID (DIR)]` (`KIND ID aka NAME (DIR)` when the session has a name), e.g. `[relay from codex w2F:p45 (djbclark-ade-baseline-ci-fixtures-wt)]`, so the receiver can run `relay.py ID "..."` verbatim; `[relay from unknown]` is never sent: when nothing resolves relay refuses (exit 4) and lists what it checked (`PASEO_AGENT_ID`, `HERDR_PANE_ID`, `CLAUDE_CODE_SESSION_ID`, `HERMES_SESSION_ID`, `RELAY_SENDER_NAME`, ancestors, fleet `self` rows). A job's declared label (`[relay from load-watch]`) has no ID and cannot be replied to. The sender is read from the sending process, including the herdr pane and Paseo agent an ancestor runs in, because Codex's `shell_environment_policy inherit = "core"` strips both variables from the shell it runs `relay.py` in (#NN).
 
+- Added Go guard installation and zero-inference verification to standard setup instructions (#68).
+
 - Added the native Codex `create-hook` guide, verified against Codex 0.164.0, with exact hook trust review, conservative installation, approval semantics and coexistence with legacy notify (2026-10-25; direct integration).
 - Added exact acp-dispatch record paths to `relay.py`, including headless workers outside the default state tree; preserved queued versus delivered status and named the acknowledgement files (2026-10-25; direct integration).
 - Added a load-watch notice when one Google Chrome process uses 0.9+ cores for 5 minutes (`LW_CHROME_CORES`, `LW_CHROME_SUSTAIN_S`): warns the watcher hourly per process and never kills (2026-10-25).
@@ -171,6 +173,8 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Changed
 
 - `relay.py` refuses to send when it cannot resolve the sender (2026-10-25): a relay from a process with no session identity (a launchd job, a script, a Hermes turn) and no `RELAY_SENDER_NAME` exits 4 with nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`) and names every variable and ancestor source it checked; `[relay from unknown]` is never sent. `bin/load-watch` and `bin/session-load-watch` now declare `RELAY_SENDER_NAME` for their relay calls (#NN).
+- Autorename docs (2026-10-24): Paseo tabs are named `<name>-pt` (17 characters including the suffix) and Paseo workspaces `-pw`, the `-p` suffix is retired for Paseo (`skills/autorename/SKILL.md`, `workspace-layout.md` principle 10, an `AGENTS.md` row); `docs/upstream-issues.md` gains draft 19 (terminal-tab rename, UI rename event stream, inspect workspace id) (#51).
+- `autorename` names a Paseo agent's tab `<topic>-pt` (2026-10-24, at most 17 characters including the suffix, `paseo_tab_name` in `skills/autorename/autorename.py`; the sentence title stays the provider session's) and `--auto` no longer overwrites an agent name that already ends in `-pt` (the 0.4.4 overwrite bug); the names store that tells a user rename from a tool rename is a later slice; the reply line ends `(names store unavailable)` on both `--auto` paths (#53).
 - Clarified bounded executor waits and required a registry claim before a worker binds any Mac test port, after a compatibility probe used an unclaimed port (2026-10-25; direct integration).
 - AGENTS.md standing order 9 is now an absolute rule (djbclark, 2026-10-25): all development happens in an exclusively claimed task workspace (linked worktree or cow pasture), one writer at a time, with named exceptions; the shared-master commit allowance is gone, `skills/cow-workspaces/SKILL.md` accepts both worktrees and pastures, and `~/ops` keeps plain master until the ops-promotion pilot passes (direct commit).
 - `relay.py` repairs after the adversary's round 1 (2026-10-25): the pane and launch routes type the sender header too (a Paseo-hosted sender included); a relay Hermes starts itself is sent as `hermes SID8` (from `HERMES_SESSION_ID`) instead of exiting 4, and `RELAY_SENDER_NAME` cannot be a `hermes xxxx` label; an `--expect-ack` closes only on its target's reply (a compaction summary or another peer's `ack` no longer does) and a first-contact `ack` is attributed by the header's exact ID word; `--expect-ack ID` is claimed before the send and released when nothing is sent; `where.env_of` reads every key from the env part of `ps eww` only (#NN).
@@ -225,6 +229,8 @@ agent what changed and what is new. Entries end with the pull request number.
   the canonical checkout (#20).
 
 ### Fixed
+
+- Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#68).
 
 - Fixed Herdr peer relays leaving long messages unsent in Codex: used atomic prompt submission and verified the exact new user message in its session rollout before reporting delivery (2026-10-25).
 
