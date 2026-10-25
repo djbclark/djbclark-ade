@@ -237,6 +237,33 @@ class TestExpectAck(Base):
         self.assertTrue([r for r in json.loads(self.run_cli("--pending", "--json")[1]) if r.get("kind") == "expect"][0]["overdue"])
 
 
+class TestPeerAttribution(unittest.TestCase):
+    """Adversary r1 A4 (2026-10-25): a first-contact `ack` names its peer by the header's ID word, not by a substring."""
+
+    def test_an_id_that_only_starts_with_the_peers_id_is_another_peer(self) -> None:
+        self.assertFalse(relay.ack_seen(["[relay from claude w34:p45 (x)] ack w1:p1"], "w1:p1", ["w34:p4"]))
+        self.assertTrue(relay.ack_seen(["[relay from claude w34:p4 (x)] ack w1:p1"], "w1:p1", ["w34:p4"]))
+
+    def test_a_short_name_matches_the_aka_name_only_and_never_a_line_that_says_main(self) -> None:
+        self.assertFalse(relay.ack_seen(["[relay from claude w9:p9 aka main2 (x)] ack w1:p1 on the main line"], "w1:p1", ["main"]))
+        self.assertTrue(relay.ack_seen(["[relay from claude w9:p9 aka main (x)] ack w1:p1"], "w1:p1", ["main"]))
+        self.assertFalse(relay.ack_seen(["ack w1:p1 from main"], "w1:p1", ["main"]))    # no header: a short word is no evidence
+
+    def test_a_header_quoted_in_the_body_is_not_the_sender(self) -> None:
+        text = "[relay from claude w7:p7 (other)] ack w1:p1 [relay from claude w34:p4 (x)] says so"
+        self.assertFalse(relay.ack_seen([text], "w1:p1", ["w34:p4"]))
+
+    def test_the_socket_envelope_names_its_sender_the_same_way(self) -> None:
+        env = '<cross-session-message from="relay.py" from-name="relay.py (claude w34:p4 aka lead (x))" from-mode="bypass"> ack w1:p1'
+        self.assertTrue(relay.ack_seen([env], "w1:p1", ["w34:p4"]))
+        self.assertFalse(relay.ack_seen([env], "w1:p1", ["w34:p"]))
+
+    def test_a_paseo_label_with_no_relay_header_counts_by_the_whole_agent_id(self) -> None:
+        agent = "aaaaaaaa-0000-4000-8000-000000000001"
+        self.assertTrue(relay.ack_seen([f'<paseo-system from="{agent}"> ack w1:p1'], "w1:p1", [agent]))
+        self.assertFalse(relay.ack_seen([f'<paseo-system from="{agent}9"> ack w1:p1'], "w1:p1", [agent]))
+
+
 class TestFirstContact(Base):
     def test_the_first_message_to_a_peer_asks_for_an_ack_and_the_second_does_not(self) -> None:
         self.assertEqual(self.go("PR 61 is merged")[0], 0)

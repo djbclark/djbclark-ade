@@ -2542,11 +2542,28 @@ def ack_token(token):
     return re.compile(rf"(?<![\w-])ack[ :=]+{re.escape(token)}(?![\w.-])", re.I)
 
 
+HEADER_RE = re.compile(r'\[relay from (?P<kind>[^\s\]]+) (?P<id>[^\s\]]+)(?: aka (?P<aka>[^()\]]+?))?(?= \(|\])'
+                       r'|from-name="relay\.py \((?P<kind2>[^\s")]+) (?P<id2>[^\s")]+)(?: aka (?P<aka2>[^()"]+?))?(?= \(|\))')
+WHO_MIN = 6    # a peer name or id this short (`main`, `lead`) is no evidence in a line that carries no relay header
+
+
+def from_peer(text, who):
+    """True when TEXT, a line the sender's session received, is from one of WHO (the peer's id, name, session id prefix, Paseo id). A
+    relay header names its sender: its ID word or its `aka NAME` must EQUAL one of WHO (adversary r1 A4, 2026-10-25: `w34:p45` is not
+    `w34:p4`, and `main` is not any line that says "main"). A line with no relay header (a Paseo label) counts when one of WHO, at
+    least WHO_MIN characters, stands in it as a whole token. Only the first header counts."""
+    names = {w.lower() for w in who if w}
+    m = HEADER_RE.search(text)    # the FIRST header is the relay's own; a header quoted in the body is the sender's words
+    if m:
+        return (m["id"] or m["id2"]).lower() in names or (m["aka"] or m["aka2"] or "").strip().lower() in names
+    return any(len(w) >= WHO_MIN and re.search(rf"(?<![\w:.-]){re.escape(w)}(?![\w:.-])", text, re.I) for w in names)
+
+
 def ack_seen(texts, token, who=()):
-    """True when one of TEXTS holds `ack TOKEN` and, when WHO is given (names, ids of the peer), names one of them: a first-contact
-    token is the sender's own id, the same for every peer, so the line must say whose reply it is."""
+    """True when one of TEXTS holds `ack TOKEN` and, when WHO is given (names, ids of the peer), is from one of them (`from_peer`): a
+    first-contact token is the sender's own id, the same for every peer, so the line must say whose reply it is."""
     pat = ack_token(token)
-    return any(pat.search(t) and (not who or any(w.lower() in t.lower() for w in who if w)) for t in texts)
+    return any(pat.search(t) and (not who or from_peer(t, who)) for t in texts)
 
 
 def links_lock():
