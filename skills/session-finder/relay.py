@@ -955,7 +955,12 @@ def sender_name(listed):
     queued, sanitized again here, and a `hermes xxxx` one only inside a relayed Hermes turn, as for RELAY_SENDER), this
     session's fleet row name or id, the fleet row of the PASEO_AGENT_ID this process was handed (a Cline, Codex or omp
     agent under Paseo has no Claude registry row, so no `self` row), that Paseo agent's short id, this Claude
-    session's id, else "unknown"."""
+    session's id, a label declared in RELAY_SENDER_NAME (a launchd job has no session identity at all, so without it
+    every watcher arrived as `[relay from unknown]`), else "unknown".
+
+    The declared label is consulted LAST, so a real session identity always wins and a job cannot
+    impersonate a live session; it is sanitized through safe_label like every other path.
+    """
     if SENDER_OVERRIDE[0]:
         label = safe_label(SENDER_OVERRIDE[0])
         return "unknown" if HERMES_SENDER.fullmatch(label) and not hermes_hops() else label
@@ -965,8 +970,21 @@ def sender_name(listed):
     own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
     if not me and UUID.fullmatch(own):
         me = next((x for x in listed if own in (x.get("paseo"), (x.get("chan") or (None, None))[1])), None) or {"id": own[:8]}
-    name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
+    name = (me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8]
+            or env_sender_label() or "unknown")
     return safe_label(name)
+
+
+def env_sender_label() -> str:
+    """A declared sender label from RELAY_SENDER_NAME, or "".
+
+    Exists because a launchd job has NO session identity: it runs with a bare environment, so
+    `sender_name` could only ever return "unknown" and its messages arrived as
+    `[relay from unknown]` — an anonymous line into a session that cannot tell which of the
+    watchers spoke (load-watch, fleet-watch and rumination-watch all looked identical).
+    Set by the job's own plist, which is the same trust position as the job itself.
+    """
+    return safe_label((os.environ.get("RELAY_SENDER_NAME") or "").strip())
 
 
 def claude_socket(s):

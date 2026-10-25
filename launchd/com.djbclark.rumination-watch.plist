@@ -27,6 +27,10 @@
     <!-- The entity's own instance label: job records it owns are matched by this prefix, so another
          session's unclosed slice is never adopted (that rule lives in bigteam). -->
     <key>RW_OWNER</key><string>dann</string>
+    <!-- A launchd job has no session identity, so relay.py could only label its messages
+         "[relay from unknown]" — indistinguishable from load-watch or fleet-watch. This is the
+         declared sender name (2026-10-24). -->
+    <key>RELAY_SENDER_NAME</key><string>rumination</string>
   </dict>
   <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
   <key>RunAtLoad</key><true/>
