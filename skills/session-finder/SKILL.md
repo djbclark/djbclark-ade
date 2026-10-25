@@ -394,6 +394,19 @@ submission failure ends the waiter without a resend. A queued lifecycle is
 not proof it ran: check `self-slash.log` and the new thread before reporting
 automatic continuation.
 
+**Skill versus built-in in a Codex pane (2026-10-25).** Codex invokes a skill as `$name` and keeps `/name` for its
+built-ins (`/new`, `/compact`, `/quit`). `self-slash` keeps `/new` and the other built-ins as they are and sends the
+follow-up skill as `$baton` (default `--then`), rewriting a legacy `--then "/baton PATH"` once into `$baton PATH`
+(exact command name `/baton` at the start only; the rest of the text is untouched). It chooses by the provider herdr
+reports for the pane, confirmed again with `herdr agent get` (provider, this pane, idle or done) right before the
+submit; a missing or different identity submits nothing (exit 8), a pane herdr reports no agent for gets no baton
+follow-up at all (exit 3), and `$baton` is refused (exit 2) for any other client. In a shell, single-quote it:
+`--then '$baton PATH'`. A Codex skill prompt goes in with one `herdr agent prompt`, no Enter and no retry, and is
+reported sent only when herdr still names the same pane as codex and that session's rollout holds a user message that
+is exactly the text, byte for byte (paths with runs of spaces are not folded), stamped after the submit
+(`SELF_SLASH_RECEIPT_WAIT`, default 30 s); otherwise exit 8 `NOT confirmed delivered`. Text still in the composer or a
+zero exit from herdr is not proof.
+
 Relay submits a Herdr message with one `herdr agent prompt` call, so the entire
 message is bracketed paste followed by submission. Do not replace that with raw
 `pane send-text` plus a separate Enter: Codex can leave a long message unsent.

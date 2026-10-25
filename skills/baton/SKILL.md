@@ -16,6 +16,13 @@ turns it off), so after a handoff nobody types this; a `/baton` that arrives
 right after a `/clear` is that follow-up (`~/.local/state/self-slash.log`
 shows `then: /baton` and `sent /baton`), not a request for anything else.
 
+**Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
+`$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed
+into a Codex composer is just text and starts nothing (seen live 2026-10-25, three Enters later it still sat in the
+composer). `self-slash` picks the spelling from the provider herdr reports for the pane, so in a Codex pane the
+follow-up above is `$baton`, and a `--then "/baton PATH"` is rewritten once to `$baton PATH`. The same skill answers
+to either spelling; treat `$baton PATH` exactly like `/baton PATH`. Never write `$baton` for a Claude pane.
+
 `/baton` never clears, compacts or starts a new session itself: `/new` queues
 `/baton`, so a `/baton` that started a `/new` would recurse. If the pointer
 has nothing to resume (no open work, `latest_handoff` already finished), say

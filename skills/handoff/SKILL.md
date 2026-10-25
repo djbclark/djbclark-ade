@@ -254,6 +254,14 @@ to this same agent and then exactly one `/baton` into the fresh session; on herd
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
 
+On a **Codex** pane (herdr reports the pane's agent as `codex`) the same command sends the built-in `/new` and then
+`$baton`: Codex invokes a skill with `$`, and `/baton` there is plain text that starts nothing (2026-10-25). Nothing
+changes in how you call it; `self-slash` chooses the spelling and `--dry-run` prints the text it will send. If you give
+`--then` yourself on Codex, single-quote the `$` so the shell keeps it: `--then '$baton /path/SESSION_LOG.md'` (the
+legacy `--then "/baton /path"` is rewritten once, keeping every byte of the path). A Codex skill prompt is submitted
+once, never with extra Enters, and counts as sent only when that Codex session's rollout holds the exact message;
+otherwise the waiter exits 8 and logs `NOT confirmed delivered`: report that, never type it again.
+
 **One contract on every host (2026-10-25, agreed with the Paseo lead):** (a) the default is the same agent with
 a fresh context, the command above: no new process, and its name, model, effort, mode, pane or workspace are
 kept (verified live on herdr, Orca and Paseo); (b) a NEW process only when something cannot change in place (a
