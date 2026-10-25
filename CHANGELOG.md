@@ -219,9 +219,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- Fixed Codex `self-slash` lifecycle submission in Herdr, preserved shaded multiline composer drafts and blocked/working states, and detached waiters from the launching tool's process session (2026-10-25).
+- Fixed Codex `self-slash` lifecycle submission in Herdr, preserved shaded multiline composer drafts and blocked/working states, and detached waiters from the launching tool's process session (2026-10-25) (#69).
 
-- Fixed `self-slash` sending Codex panes `/baton` instead of the `$baton` skill, and reporting it sent without an exact rollout receipt (2026-10-25).
+- Fixed `self-slash` sending Codex panes `/baton` instead of the `$baton` skill, and reporting it sent without an exact rollout receipt (2026-10-25) (#69).
 
 - Fixed Herdr peer relays leaving long messages unsent in Codex: used atomic prompt submission and verified the exact new user message in its session rollout before reporting delivery (2026-10-25).
 

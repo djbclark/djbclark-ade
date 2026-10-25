@@ -195,8 +195,8 @@ finish_flag=$finish
                   empty mode passes none), bypassPermissions for a claude successor from another provider, else the
                   provider's own default; without --mode, an inspect of this agent that lacks a Provider or a Mode
                   value exits 11 and starts nothing)
-       exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
-       7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
+       exit codes: 2 usage, 3 no host or unknown baton syntax, 4 draft in the input box, 5 no prompt, 6 session still working,
+       7 refused (gap check or lifecycle already queued), 8 archive refused or Codex submission unconfirmed (identity, target change or no rollout receipt), 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
        11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable)" >&2; exit 2; }
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
