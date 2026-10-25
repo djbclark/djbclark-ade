@@ -133,7 +133,7 @@ Classify every pool before assigning anything:
 | **reserve** | copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only for kind `github`; a missing or stale reading means do not use. Grok was one until 2026-10-18 (GrokBot moved to its own Cursor pool): now an ordinary subscription pool for `realtime-web`, `research` and `bulk`, behind the burn-first pools |
 | **never** | hermes; the prepaid pools; credits-backed models (not the Max plan's API credits: omp, below) | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes behind an approval gate |
 | **api credits** | omp: the Claude Max plan's monthly API credits (expiring grant, operator 2026-10-19) | kind `api-only` first (SDK paths, verdict classifiers, batch jobs), else `code`/`bulk` via `acp-run omp --model anthropic/claude-sonnet-5-5` so they are spent before each expiry; `route_agent.py` marks it "burn before reset" when far above an even spend; needs a working omp Anthropic login (`omp login`) |
-| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high`, agy 1.4.1 (2026-10-18) dropped the effort-suffixed ids), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to the frontier pools); see *agy Claude/GPT pool* below |
+| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high`, agy 1.4.1 (2026-10-18) dropped the effort-suffixed ids), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to Claude and omp first, codex's Sol at high only while plentiful; 2026-10-25); see *agy Claude/GPT pool* below |
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
@@ -367,7 +367,7 @@ bind every slice to a vendor up front:
    which only logs what Jev and GLiDE think each kind is, never changes the
    plan: `docs/jev.md` "Dual review"). It reads the
    aiuse snapshot (instant, no tokens), ranks by fitness and headroom, applies
-   the burn-first rule, the reserve floors and the frontier-for-judgment rule,
+   the burn-first rule, the reserve floors and the judgment rule (Claude first, omp next, codex Sol/high only while plentiful; 2026-10-25),
    and **spreads the wave** with each service's `max_parallel` (agy Claude/GPT
    3, agy Gemini 2, Cursor Auto 2, copilot 1). Each line ends with the
    dispatch to run, `acp-dispatch <agent> --model M --kind K --effort E`
