@@ -169,3 +169,19 @@ def test_dangling_symlink_is_preserved_without_creating_destination(guard, tmp_p
     assert "dangling or cyclic" in p.stdout
     assert live.is_symlink()
     assert not target.parent.exists()
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_directory_entry_is_preserved_without_dropping_temp_file(guard, tmp_path, symlink):
+    plugins, run = guard
+    live = plugins / "rtk.ts"
+    destination = tmp_path / "directory" if symlink else live
+    destination.mkdir()
+    if symlink:
+        live.symlink_to(destination, target_is_directory=True)
+    p = run()
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "non-regular plugin entry" in p.stdout
+    assert live.is_dir()
+    assert live.is_symlink() == symlink
+    assert list(destination.iterdir()) == []

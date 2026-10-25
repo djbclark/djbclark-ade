@@ -11,7 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- Added Go guard installation and zero-inference verification to standard setup instructions (#pending).
+- Added Go guard installation and zero-inference verification to standard setup instructions (#68).
 
 - Added the native Codex `create-hook` guide, verified against Codex 0.164.0, with exact hook trust review, conservative installation, approval semantics and coexistence with legacy notify (2026-10-25; direct integration).
 - Added exact acp-dispatch record paths to `relay.py`, including headless workers outside the default state tree; preserved queued versus delivered status and named the acknowledgement files (2026-10-25; direct integration).
@@ -221,7 +221,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#pending).
+- Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#68).
 
 - Fixed Herdr peer relays leaving long messages unsent in Codex: used atomic prompt submission and verified the exact new user message in its session rollout before reporting delivery (2026-10-25).
 

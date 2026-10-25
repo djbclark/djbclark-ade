@@ -92,6 +92,11 @@ handle() {
     rc=1
     return
   fi
+  if [ -e "$file" ] && [ ! -f "$file" ]; then
+    log "  $name: non-regular plugin entry preserved; review it; no write"
+    rc=1
+    return
+  fi
   local unsafe_rtk=0
   if [ "$name" = rtk ] && [ -f "$file" ] && is_known_unsafe_rtk "$file"; then
     # Only our exact former managed copy is automatically migrated. Preserve

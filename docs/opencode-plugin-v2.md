@@ -114,7 +114,8 @@ migration without changing plugin bytes. Existing servers may retain loaded
 code: verify native loading at a fresh location and do not restart busy agents.
 An unsafe canonical source is refused without writing, even if a newer guard
 is run from a worktree before the canonical checkout is updated. Dangling or
-cyclic plugin symlinks are preserved for review without creating a destination.
+cyclic plugin symlinks and non-regular entries are preserved for review without
+creating a destination.
 To clear an unknown-copy warning, review and preserve that copy, then replace it
 with the reviewed disabled module; adopting an upstream adapter also requires
 updating this guard's documented safety policy.
