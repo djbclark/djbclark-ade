@@ -241,6 +241,33 @@ heredoc.
 `error: cannot write modified lock file of flake 'github:…'` — because from a git ref Nix cannot write
 the lock it would need to create. The lock must be committed alongside the input.
 
+**0d.1 The way this bites twice: reverting a lock that predated the input.** Real case, 2026-10-25,
+and self-inflicted. A wrong `flake.lock` was committed by accident (it held a *standalone install
+flake's* inputs, not the site flake's). The revert restored the previous lock from `HEAD~1` — which
+**predated the `sops-nix` input added in between**. Result: `flake.nix` required `sops-nix`,
+`flake.lock` had no `sops-nix` node, **every git-ref build failed** including the host's own
+`nixos-upgrade`, and the host quietly stopped upgrading while the local build still worked.
+
+Check it with one command — every input named in `flake.nix` must have a node in `flake.lock`:
+
+```bash
+python3 - <<'EOF'
+import json, re, pathlib
+d = pathlib.Path("nixos")
+flake = (d / "flake.nix").read_text()
+nodes = json.loads((d / "flake.lock").read_text())["nodes"]
+declared = set(re.findall(r"^\s*inputs\.([A-Za-z0-9_-]+)\s*=", flake, re.M))
+print("MISSING FROM LOCK:", sorted(declared - set(nodes)) or "none")
+EOF
+```
+
+**Reverting a lock is not safe on its own** — re-check it against `flake.nix` afterwards, because the
+failure appears only on the git-ref path (local builds still work), which is why it survives local
+testing. And `nixos-upgrade` fails *quietly*: `systemctl is-active` returns `inactive` whether it
+succeeded or failed, so compare `nixos-version --configuration-revision` against the branch head
+rather than trusting the unit state.
+
+
 Three levels of gate, and they are deliberately separate so one broad yes cannot reach the next:
 
 | level | examples | why |
