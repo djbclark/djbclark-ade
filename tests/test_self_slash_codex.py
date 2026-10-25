@@ -332,6 +332,20 @@ class CodexWaiterTests(unittest.TestCase):
                     self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
         self.assertEqual(self.submitted(), [])
 
+    def test_a_draft_with_marker_looking_continuation_rows_is_refused_without_enter(self):
+        drafts = {'shaded marker': screen('keep this operator draft', '›'),
+                  'shaded marker and space': screen('keep this operator draft', '› '),
+                  'typed continuation then marker': screen('', 'typed continuation\x1b[0m\n' + BG + '›'),
+                  'several marker rows': screen('first', '› second\x1b[0m\n' + BG + '›')}
+        for text in ('/new', '$baton /x'):
+            for name, draft in drafts.items():
+                with self.subTest(text=text, draft=name):
+                    self.calls.write_text('')
+                    p = self.run_waiter('--no-then', text, FAKE_SCREEN=draft, SELF_SLASH_WAIT='0')
+                    self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+                    self.assertEqual(self.submitted(), [])
+                    self.assertFalse([a for a in self.calls_made() if 'enter' in a or 'Enter' in a], self.calls_made())
+
     def test_ambiguous_failure_never_retries(self):
         for text in ('/new', '$baton /x'):
             with self.subTest(text=text):

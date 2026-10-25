@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """prompt_line — the operator's own text on a TUI's input line, read from ANSI screen output. No model.
 
-    prompt_line.py MARK < screen.ansi      prints the operator text after the last MARK line, EMPTY, or NOPROMPT
+    prompt_line.py MARK < screen.ansi      prints the operator's draft from the input region, EMPTY, or NOPROMPT
 
 Claude Code paints its hint text and its suggested next prompt (ghost text, accepted with Tab, replaced by
 anything typed) in grey (38;2;153;153;153, the ❯'s own colour) or dim (ESC[2m); the operator's typed text is
@@ -72,29 +72,36 @@ def omp_after(after: str) -> str:
 
 
 def classify(screen: str, mark: str = "❯") -> str | None:
-    """None when no line holds `mark`, else the operator text after the last one ("" = empty)."""
+    """Operator text from the input region; None if its boundary is unproven, "" if empty."""
     if mark == "›":
-        # Codex's shaded composer can contain a leading empty line followed
-        # by a real multiline draft. Only inspect rows in that same background;
-        # transcript quotes and the model/status footer are not composer text.
+        # Codex's shaded composer can hold a leading empty line, a real multiline draft, and continuation rows that
+        # themselves start with `›` (typed text). The composer is the contiguous run of rows sharing the marker row's
+        # background, so the boundary is the run's first marker row, never a later marker-looking row inside it.
+        # Transcript quotes carry no background and prior transcript blocks are separated by unshaded rows.
         rows = screen.splitlines()
         sgr = re.compile(r"\x1b\[[0-9;]*m")
         backgrounds = re.compile(r"(?:\[|;)48;(?:2;\d+;\d+;\d+|5;\d+)")
-        candidates = [i for i, line in enumerate(rows)
-                      if re.match(r"^\s*›(?:\s|$)", sgr.sub("", line))]
-        if not candidates:
+        marker = re.compile(r"^\s*›(?:\s|$)")
+
+        def shades(row: str) -> list[str]:
+            return [c.lstrip("[;") for c in backgrounds.findall(row)]
+
+        markers = [i for i, line in enumerate(rows) if marker.match(sgr.sub("", line))]
+        if not markers:
             return None
-        i = candidates[-1]
-        prefix, after = rows[i].split(mark, 1)
-        colors = backgrounds.findall(prefix)
+        last = markers[-1]
+        colors = shades(rows[last].split(mark, 1)[0])
         if not colors:
             return None  # no styled composer boundary: fail closed
-        color = colors[-1].lstrip("[;")
-        text = [operator_text(after)]
-        for row in rows[i + 1:]:
-            if not any(c.lstrip("[;") == color for c in backgrounds.findall(row)):
-                break
-            text.append(operator_text(row))
+        color = colors[-1]
+        start = end = last
+        while start > 0 and color in shades(rows[start - 1]):
+            start -= 1
+        while end + 1 < len(rows) and color in shades(rows[end + 1]):
+            end += 1
+        first = next(i for i in range(start, last + 1) if marker.match(sgr.sub("", rows[i])))
+        text = [operator_text(rows[i].split(mark, 1)[1] if i == first else rows[i])
+                for i in range(start, end + 1)]
         return "\n".join(part for part in text if part).strip()
     lines = [ln for ln in screen.splitlines() if mark in ln]
     if not lines:
