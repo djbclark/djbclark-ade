@@ -3973,10 +3973,14 @@ def reroute_record(a: argparse.Namespace) -> int:
     old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
     if a.est_pct is not None:
         est = a.est_pct
-    elif new_svc is not None and new_svc == old_svc:
+    elif (new_svc is not None and new_svc == old_svc and kind == old.get("kind")
+          and a.model == old.get("model") and effort == old.get("effort")):
         est = old.get("estimated_usage_pct")
     else:
-        est = None  # estimate afresh for a different service
+        # a different service, kind, model or effort is a different workload: estimate afresh, so the old
+        # (possibly automatic) number is never promoted to an explicit one that skips the kind's floor
+        # (adversary bcdd223, A6)
+        est = None
     ns = argparse.Namespace(
         agent=a.agent, model=a.model, name=f"{base}-{n}", dir=old["dir"], task=old.get("task"),
         out=old["out"], perm=old.get("perm") or "all", timeout=a.timeout or old.get("timeout", DEFAULT_TIMEOUT),

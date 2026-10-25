@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import unittest
 from pathlib import Path
@@ -418,6 +419,50 @@ class TestLegacyRecord(RoutingDispatch):
                  "--acp-run", str(self.fake), "--no-preflight"], env=self.base_env())
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("frontier model", r.stderr)
+
+
+class TestRerouteEstimate(RoutingDispatch):
+    """Adversary bcdd223, A6: reroute promoted the old slice's estimate to an explicit one whenever the
+    service matched, so a kind change skipped the new kind's floor."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        # the fake runner's `--info` must offer the model a reroute checks (reroute has no --no-model-check)
+        self.fake.write_text(self.fake.read_text().replace('"value": "m1"', '"value": "gpt-6.1-sol"'))
+
+    def finished_code_slice(self, *effort: str) -> Path:
+        r = self.dispatch_agent("codex", "gpt-6.1-sol", "--kind", "code", *effort,
+                                "--est-pct", "2", "--no-model-check", "--no-preflight",
+                                "--min-headroom", "0", env=self.snap_codex(90.0))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = self.out / "jobs" / "s1.json"
+        self.assertEqual(json.loads(path.read_text())["estimate_source"], "explicit")
+        return path
+
+    def reroute(self, path: Path, *extra: str) -> dict:
+        r = run(["reroute", str(path), "--agent", "codex", "--model", "gpt-6.1-sol", *extra,
+                 "--no-preflight", "--min-headroom", "0", "--acp-run", str(self.fake)],
+                env={**self.base_env(), **self.snap_codex(90.0)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        new = json.loads((self.out / "jobs" / "s1-reroute-1.json").read_text())
+        # never trust a probe that fell through to the live runner (adversary bcdd223, C2)
+        self.assertEqual(shlex.split(new["cmd"])[0], str(self.fake))
+        return new
+
+    def test_a_kind_change_estimates_afresh_and_meets_the_new_floor(self):
+        new = self.reroute(self.finished_code_slice("--effort", "medium"), "--kind", "judgment")
+        self.assertEqual(new["kind"], "judgment")
+        self.assertEqual(new["estimated_usage_pct"], 25.0)
+        self.assertNotEqual(new["estimate_source"], "explicit")
+
+    def test_an_operator_estimate_still_wins(self):
+        new = self.reroute(self.finished_code_slice("--effort", "medium"), "--kind", "judgment", "--est-pct", "7")
+        self.assertEqual((new["estimated_usage_pct"], new["estimate_source"]), (7.0, "explicit"))
+
+    def test_the_same_workload_keeps_its_reservation(self):
+        new = self.reroute(self.finished_code_slice(), "--kind", "code")
+        self.assertEqual(new["estimated_usage_pct"], 2.0)
 
 
 class TestWindowReservation(RoutingDispatch):
