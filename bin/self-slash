@@ -186,9 +186,24 @@ finish_flag=$finish
        exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
        7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
-       11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable)" >&2; exit 2; }
+       11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable),
+       12 bare --finish refused: this agent holds a watch role (bin/watch status))" >&2; exit 2; }
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ -n "$successor" ] && [ "$finish" != 1 ]; then echo "self-slash: --successor needs --finish (it replaces the bare archive)" >&2; exit 2; fi
+# A bare --finish never archives the session that holds a watch role (bin/watch status): the role would go
+# unheld (2026-10-25: a /baton-resumed load watcher queued its own archive and caught it only by killing the
+# waiter).  Hand the role over (`watch down DOMAIN`, or `watch up --force` from the successor) first;
+# SELF_SLASH_ALLOW_WATCHER=1 overrides; SELF_SLASH_WATCH_CMD replaces the watch binary (tests).
+refuse_if_watcher() {
+  [ "$finish" = 1 ] && [ -z "$successor" ] && [ -n "${PASEO_AGENT_ID-}" ] && [ "${SELF_SLASH_ALLOW_WATCHER-}" != 1 ] || return 0
+  local watch_cmd watch_json
+  watch_cmd="${SELF_SLASH_WATCH_CMD:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")/watch}"
+  watch_json="$("$watch_cmd" status --json 2>/dev/null)"
+  if printf '%s' "$watch_json" | jq -e --arg id "$PASEO_AGENT_ID" 'any(.[]; (.holder.target? // "") == $id)' >/dev/null 2>&1; then
+    echo "self-slash: refused: this agent ($PASEO_AGENT_ID) holds a watch role (bin/watch status); archiving it would leave the role unheld. Hand it over first, or set SELF_SLASH_ALLOW_WATCHER=1." >&2
+    exit 12
+  fi
+}
 if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s_title" ] || [ -n "$s_workspace" ] || [ "$s_keepws" = 1 ] || [ -n "$s_baton" ]; }; then echo "self-slash: --thinking, --mode, --title, --workspace, --keep-workspace and --baton only go with --successor" >&2; exit 2; fi
 # Plain-id character sets spelled out: bash 3.2 matches a bracket range ([a-z]) by locale
 # collation, so under en_US.UTF-8 it also takes upper-case and accented letters (adversary
@@ -308,6 +323,7 @@ if [ "$host" = paseo ]; then
       finish=1;;
   esac
 fi
+refuse_if_watcher
 # ... and a follow-up /quit or /exit would be sent as plain text, or end the fresh session.
 if [ "$host" = paseo ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   case "$then" in /quit|/exit|"/quit "*|"/exit "*) echo "self-slash: --then $then is not a Paseo command; use --finish after the turn instead" >&2; exit 2;; esac

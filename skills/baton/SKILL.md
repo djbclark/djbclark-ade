@@ -37,6 +37,15 @@ the staleness check against real `HEAD`, state a resume plan before
 touching anything, bootstrap a minimal log if none exists — never ask
 the operator for information the file already answers).
 
+**Which chain, before resolving by directory (2026-10-25).** A `/baton` queued by `self-slash "/new"`
+belongs to the chain that session just handed off, and the directory can name a different one: a fresh
+load watcher resumed the repo's `main` chain while its own was `load-spike-monitor-t`, and then queued
+its own archive. First run `bin/watch status` and read `~/.local/state/self-slash.log`: if this
+agent (`$PASEO_AGENT_ID`) holds a watch role, or the newest `then: /baton` line for it follows a handoff
+naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
+directory-resolved pointer whose owner is another live session is not yours: say so and look further.
+A watch holder is never archived (`self-slash --finish` refuses with exit 12).
+
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,
 if you were handed an explicit path in the prompt, use that instead of

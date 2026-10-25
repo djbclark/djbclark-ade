@@ -223,6 +223,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `self-slash --finish` (and a mapped `/quit`) on Paseo now refuses with exit 12 when the agent holds a watch role in `bin/watch status`, so a session that is the load, CFEngine or Paseo watcher is not archived by accident; `SELF_SLASH_ALLOW_WATCHER=1` overrides. The baton and loose skills say how to pick the chain and not to offer finish for a watcher (2026-10-25, #NN).
 - Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#68).
 
 - Fixed Herdr peer relays leaving long messages unsent in Codex: used atomic prompt submission and verified the exact new user message in its session rollout before reporting delivery (2026-10-25).
