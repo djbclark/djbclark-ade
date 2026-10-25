@@ -803,3 +803,57 @@ def test_r11_f3_an_empty_argv0_does_not_shift_the_parse_into_a_pack_refs_exempti
     r = _forged_pack_refs(world, ["", "-C", "pack-refs", "branch", "-f", "cb", "main"])
     assert refused(r), (r.returncode, r.stderr)
     assert world.cb() != world.main()
+
+
+def _tpl(tmp_path):
+    tpl = tmp_path / "tpl"
+    tpl.mkdir()
+    (tpl / "config").write_text("[core]\n\thooksPath = /dev/null\n")
+    return tpl
+
+
+def _template_cases(up, tpl, tmp_path):
+    g = tmp_path / "tg.cfg"
+    return {
+        "clone -c hooksPath": (["clone", "-q", "-c", "core.hooksPath=/dev/null", str(up), "d"], {}),
+        "clone -c attached": (["clone", "-q", "-ccore.hooksPath=/dev/null", str(up), "d"], {}),
+        "clone -q cluster": (["clone", "-qc", "core.hooksPath=/dev/null", str(up), "d"], {}),
+        "clone --config": (["clone", "-q", "--config", "core.hooksPath=/dev/null", str(up), "d"], {}),
+        "clone --config=": (["clone", "-q", "--config=core.hooksPath=/dev/null", str(up), "d"], {}),
+        "clone --conf prefix": (["clone", "-q", "--conf=hook.x.event=reference-transaction", str(up), "d"], {}),
+        "clone --template=": (["clone", "-q", f"--template={tpl}", str(up), "d"], {}),
+        "clone --template next word": (["clone", "-q", "--template", str(tpl), str(up), "d"], {}),
+        "clone --tem prefix": (["clone", "-q", f"--tem={tpl}", str(up), "d"], {}),
+        "init --template=": (["init", "-q", f"--template={tpl}", "d"], {}),
+        "init --template next word": (["init", "-q", "--template", str(tpl), "d"], {}),
+        "clone GIT_TEMPLATE_DIR": (["clone", "-q", str(up), "d"], {"GIT_TEMPLATE_DIR": str(tpl)}),
+        "init GIT_TEMPLATE_DIR": (["init", "-q", "d"], {"GIT_TEMPLATE_DIR": str(tpl)}),
+        "init -c init.templateDir": (["-c", f"init.templateDir={tpl}", "init", "-q", "d"], {}),
+        "clone -c init.templateDir": (["-c", f"init.templateDir={tpl}", "clone", "-q", str(up), "d"], {}),
+        "init GIT_CONFIG_COUNT": (["init", "-q", "d"], _count_env([("init.templateDir", str(tpl))])),
+        "clone GIT_CONFIG_PARAMETERS": (["clone", "-q", str(up), "d"], {"GIT_CONFIG_PARAMETERS": f"'init.templatedir={tpl}'"}),
+        "init global config": (["init", "-q", "d"], {"GIT_CONFIG_GLOBAL": str(g)}),
+        "clone global config": (["clone", "-q", str(up), "d"], {"GIT_CONFIG_GLOBAL": str(g)}),
+    }
+
+
+_TEMPLATE_NAMES = list(_template_cases("u", "t", Path("/x")))
+
+
+@pytest.mark.parametrize("name", _TEMPLATE_NAMES)
+def test_r11_f4_clone_and_init_refuse_every_hooks_path_and_template_spelling(world, tmp_path, name):
+    tpl = _tpl(tmp_path)
+    (tmp_path / "tg.cfg").write_text(f"[init]\n\ttemplateDir = {tpl}\n")
+    args, extra = _template_cases(world.up, tpl, tmp_path)[name]
+    r = shim(world.state, args, tmp_path, who="B", **extra)
+    assert r.returncode == 77 and "hook-config" in r.stderr, (r.returncode, r.stderr)
+    assert not (tmp_path / "d").exists()
+
+
+@pytest.mark.parametrize("args", [["clone", "-q", "-c", "user.name=x", "UP", "d"], ["clone", "-q", "--depth", "1", "UP", "d"],
+                                  ["clone", "-q", "-b", "main", "UP", "d"], ["init", "-q", "d"], ["init", "-q", "-b", "main", "d"]])
+def test_r11_f4_a_plain_clone_and_init_still_work(world, tmp_path, args):
+    args = [str(world.up) if a == "UP" else a for a in args]
+    r = shim(world.state, args, tmp_path, who="B")
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "d").is_dir()

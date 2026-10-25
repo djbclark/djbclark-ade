@@ -124,7 +124,13 @@ Evaluated in order; the module docstring has every form.
    1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused: the repository chose it
    (husky, pre-commit), the hooks do not run there, and `install` reports it (78). If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
-   hooks fail open**. `[hook]` sections and `[include]` of files that set no `hooksPath` are no longer refused: measured
+   hooks fail open**. **`clone` and `init` copy a template directory (its `config` and `hooks` included) into the new repository
+   (round 11, 2026-10-25; djbclark's ruling): the shim refuses every non-default template source** as `hook-config`: `--template`
+   (any abbreviation, `=` or next word), `GIT_TEMPLATE_DIR` in the environment, `init.templateDir` set on the command line, in the
+   environment or in any config scope but the repository's own (asked of git like `core.hooksPath`; unanswered is
+   `hook-config-unknown`), and, for `clone`, a `-c`/`--config` whose key is a hook key (`core.hooksPath`, `hook.*`, `include*`)
+   or `init.templateDir` (tested for `-c KEY=V`, `-cKEY=V`, a cluster `-qc KEY=V`, `--config KEY=V`, `--config=KEY=V`, `--conf=`).
+   `[hook]` sections and `[include]` of files that set no `hooksPath` are no longer refused: measured
    2026-10-25, git 2.56, `hook.<name>.enabled=false` does not stop a hook in the hooks directory. `push --no-verify` (any `--no-v`
    prefix; `push-no-verify`) and `send-pack`/`http-push`, which never run `pre-push` (`push-plumbing`).
 2. **Foreign workspace, coarse and read-only.** When the cwd, or any `-C`, `--git-dir`, `--work-tree`, `GIT_DIR` or
@@ -173,6 +179,14 @@ analyser (and the Claude PreToolUse hook it was for, W5).
    set on the command line or in the environment regardless; in a config FILE they are not judged (measured inert for the
    hooks directory, 2026-10-25).
 9. **A same-uid program impersonating the `pack-refs` parent** (see above).
+10. **A template directory or `core.hooksPath` that arrives by a route the shim does not see (round 11, 2026-10-25):** a human
+    sets `init.templateDir` in the repository's own config (or points a template at a repository the agent did not create);
+    an agent edits `.git/config` of its own repository by hand, or runs the real git by absolute path. The shim refuses the
+    agent's own `clone`/`init` template sources and `clone -c core.hooksPath=...` (above), but a repository whose LOCAL
+    `core.hooksPath` is set and not the ade stubs is still deliberately allowed, so `git push -f origin main:cb` there
+    passes both hooks. Reproduced before round 11 (d9b0583, 3fb69ba): shim `clone -q --config core.hooksPath=/dev/null <up> c2`,
+    then `push -f origin main:cb` in c2 moved the upstream branch. The durable rule, left to the operator: "an agent's call
+    lands in a repository whose local hooksPath is set and not the ade stubs: refuse `push` and ref-writing subcommands".
 
 ## Refusal, log and override
 

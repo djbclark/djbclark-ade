@@ -1400,14 +1400,14 @@ def _hook_key(key: str) -> bool:
     return k == "core.hookspath" or k.startswith(("hook.", "include.", "includeif."))
 
 
-def _hooks_path_scopes(call: GitCall, env: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
-    """Ask git whether `core.hooksPath` is set, under the call's own -c / --git-dir / -C and the CALLER's environment
+def _config_scopes(call: GitCall, env: dict[str, str], key: str = "core.hooksPath") -> tuple[str, list[tuple[str, str]]]:
+    """Ask git whether `key` (`core.hooksPath`, or `init.templateDir`) is set, under the call's own -c / --git-dir / -C and the CALLER's environment
     (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL/SYSTEM/COUNT/KEY_n/PARAMETERS, includes: git reads them, never us):
-    `git config --null --show-scope --get-all core.hooksPath` exits 0 when it is set, even to an empty value, 1 when it is
+    `git config --null --show-scope --get-all KEY` exits 0 when it is set, even to an empty value, 1 when it is
     not (measured 2026-10-25, git 2.56). ("set", [(scope, value)...]), ("unset", []), or ("unknown", []) when git did not
     answer 0/1 (timeout, cannot start, a broken config file)."""
     extra = {k: v for k, v in env.items() if k in ("HOME", "XDG_CONFIG_HOME") or k.startswith("GIT_CONFIG")}
-    rc, out = _run_git([*_globals(call), "config", "--null", "--show-scope", "--get-all", "core.hooksPath"], 5,
+    rc, out = _run_git([*_globals(call), "config", "--null", "--show-scope", "--get-all", key], 5,
                        {**call.env, **extra})
     if rc == 1:
         return "unset", []
@@ -1421,6 +1421,71 @@ def _closed(rule: str, alt: str) -> Decision:
     return Decision(False, rule, alt, "", "nobody; the call cannot be classified safely")
 
 
+def _clone_config_keys(args: Sequence[str]) -> list[str]:
+    """The keys of every `clone -c KEY[=VALUE]` / `--config KEY[=VALUE]` (git takes any unique prefix of `--config`, a
+    value attached or in the next word, a short `-c` at the end of a cluster like `-qcKEY=V`)."""
+    keys: list[str] = []
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, val = a[2:].partition("=")
+            if "config" in expand_long(name, danger={"config"}):
+                if not eq:
+                    i += 1
+                    val = args[i] if i < n else ""
+                keys.append(val.partition("=")[0])
+            elif not eq and name in ("branch", "origin", "upload-pack", "reference", "reference-if-able", "depth", "jobs",
+                                    "separate-git-dir", "shallow-since", "shallow-exclude", "filter", "server-option",
+                                    "bundle-uri", "ref-format", "revision", "template"):
+                i += 1                                 # a value in the next word: it is not a key
+        elif a.startswith("-") and len(a) > 1:
+            cl = a[1:]
+            for j, ch in enumerate(cl):
+                if ch == "c":
+                    val = cl[j + 1:]
+                    if not val:
+                        i += 1
+                        val = args[i] if i < n else ""
+                    keys.append(val.partition("=")[0])
+                    break
+                if ch in "bouj":                       # these take the rest of the cluster or the next word
+                    if j == len(cl) - 1:
+                        i += 1
+                    break
+        i += 1
+    return keys
+
+
+def _template_decision(call: GitCall, env: dict[str, str], alt: str) -> Optional[Decision]:
+    """`clone` and `init` copy a template directory into the new repository, hooks and `config` included: a template
+    that holds `core.hooksPath = /dev/null` makes the NEW repository's hooks vanish (round 11, 2026-10-25). Refuse every
+    non-default template source (djbclark, 2026-10-25): `--template` (any abbreviation), `GIT_TEMPLATE_DIR`,
+    `init.templateDir` (asked of git: command line, environment, or any config scope but the repository's own), and, for
+    `clone`, a `-c`/`--config` that writes a hook key or `init.templateDir` into the clone."""
+    if scan(call.args, value_short="b" if call.sub == "clone" else "", danger={"template"}).longs & {"template"}:
+        return _closed("hook-config", f"`{call.sub} --template` copies a template (hooks, config) into the new repository: {alt}")
+    if env.get("GIT_TEMPLATE_DIR") is not None:
+        return _closed("hook-config", f"`GIT_TEMPLATE_DIR` is set, so `{call.sub}` would copy that template into the new "
+                                      f"repository: {alt}")
+    if call.sub == "clone":
+        for k in _clone_config_keys(call.args):
+            if _hook_key(k) or _ckey(k.strip()) == "init.templatedir":
+                return _closed("hook-config", f"`clone --config {_esc(k)}` writes a key that moves, disables or extends the "
+                                              f"new repository's hooks: {alt}")
+    state, scoped = _config_scopes(call, env, "init.templateDir")
+    if state == "unknown":
+        return _closed("hook-config-unknown", f"git did not say whether init.templateDir is set; `{call.sub}` is refused "
+                                              f"rather than guessed: {alt}")
+    for scope, value in scoped:
+        if scope not in ("local", "worktree"):
+            return _closed("hook-config", f"init.templateDir is set ({scope} config, value `{_esc(value)}`), so `{call.sub}` "
+                                          f"would copy that template into the new repository: {alt}")
+    return None
+
+
 def _redirect_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
     """Rule (ii): the call, its environment or a `git config` write would disable, move or extend the hooks. git answers
     for `core.hooksPath` (any value, empty included) in the scopes a call or its environment controls: command (-c,
@@ -1431,13 +1496,17 @@ def _redirect_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]
     for k, _ in call.config:
         if _hook_key(k):
             return _closed("hook-config", f"`{_esc(k)}` set on the command line or in the environment: {alt}")
-    state, scoped = _hooks_path_scopes(call, env)
+    state, scoped = _config_scopes(call, env)
     if state == "unknown":
         return _closed("hook-config-unknown", "git did not say whether core.hooksPath is set (it timed out, could not run, or "
                                               f"a config file is broken); the call is refused rather than guessed: {alt}")
     for scope, value in scoped:
         if scope not in ("local", "worktree"):
             return _closed("hook-config", f"core.hooksPath is set ({scope} config, value `{_esc(value)}`): {alt}")
+    if call.sub in ("clone", "init"):
+        d = _template_decision(call, env, alt)
+        if d is not None:
+            return d
     if call.sub == "config":
         s = scan(call.args, value_short="f", value_long={"file", "blob", "type", "default"}, danger={"edit"})
         if s.shorts & {"e"} or "edit" in s.longs:
