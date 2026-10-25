@@ -1067,14 +1067,17 @@ def paseo_set_name(title: str, auto: bool = False) -> str:
     if wks and auto:
         try:
             ls = subprocess.run([cli, "workspace", "ls", "--json"], capture_output=True, text=True, timeout=20)
-            now = next((w.get("name", "") for w in json.loads(ls.stdout) if w.get("workspaceId") == wks), "")
-            kept = now if now.endswith("-pw") else ""
-        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            rows = json.loads(ls.stdout) if ls.returncode == 0 else None
+            if not isinstance(rows, list):
+                raise ValueError(f"workspace ls rc {ls.returncode}" if ls.returncode else "workspace ls: not a list")
+            now = next((w.get("name") for w in rows if isinstance(w, dict) and w.get("workspaceId") == wks), "")
+            kept = now if isinstance(now, str) and now.endswith("-pw") else ""
+        except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError, TypeError) as exc:
             ws_err = exc
     if auto and cur.endswith(TAB_SUFFIX):
         out = f" (paseo tab kept: {cur}) (names store unavailable)"
     else:
-        tab = paseo_tab_name(title, paseo_tab_context(wks, None if kept else name) if wks else [],
+        tab = paseo_tab_name(title, paseo_tab_context(wks, kept or name) if wks else [],
                              paseo_tab_taken(agent, wks, cli) if wks else [])
         try:
             r = subprocess.run([cli, "agent", "update", agent, "--name", tab, "--json"],
