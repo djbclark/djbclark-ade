@@ -1933,7 +1933,7 @@ def defer_wanted(a, text, route):
 
 def pane_busy(s, routes):
     """True when the only thing keeping text out of pane TUI S is that it is working: it would take it when idle."""
-    return (bool(routes) and routes[0] == "pane" and s.get("agent") != "claude" and s.get("status") == "working"
+    return (bool(routes) and routes[0] == "pane" and s.get("status") == "working"    # refusal() never refuses a working Claude pane: Claude queues text itself
             and refusal(s) is not None and refusal({**s, "status": "idle"}) is None)
 
 

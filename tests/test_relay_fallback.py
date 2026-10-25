@@ -2837,7 +2837,8 @@ class TestDeferredSend(Harness):
         self.age(first, 10)
         relay.transition(first, ("queued",), state="sending", sending_since=time.time())    # no lock held: its deliverer is gone
         self.cur = "idle"
-        relay.deliver(second)
+        with self.sleeps(0):    # waiting on the dead first record would raise Stalled instead of hanging
+            relay.deliver(second)
         self.assertEqual((relay.rec_read(first)["state"], relay.rec_read(second)["state"]), ("failed", "delivered"))
         self.assertIn("do not resend", relay.rec_read(first)["outcome"])
         self.assertEqual([t.split("] ")[-1] for _, t in self.sent], ["second one"])    # the first is never resent
@@ -2855,7 +2856,7 @@ class TestDeferredSend(Harness):
         self.age(first, 2000)
         relay.transition(first, ("queued",), state="sending", sending_since=time.time() - 16 * 60)
         self.cur = "idle"
-        with relay.deliverer_lock(first) as got:
+        with relay.deliverer_lock(first) as got, self.sleeps(0):    # a requeue-and-wait would raise Stalled instead of hanging
             self.assertTrue(got)
             relay.deliver(second)
         self.assertEqual((relay.rec_read(first)["state"], relay.rec_read(second)["state"]), ("failed", "delivered"))
@@ -2893,8 +2894,9 @@ class TestDeferredSend(Harness):
         self.as_agent(SENDER)
         a = self.queue("again")
         self.patch_rec(a, expires=time.time() - 5)
-        rc, out, _ = self.go(text="again")
-        self.assertEqual((rc, "an identical" in out, len(relay.rec_all())), (0, False, 2))
+        with relay.deliverer_lock(a):    # a live deliverer: the opportunistic sweep leaves the record queued, so only the dedup rule decides
+            rc, out, _ = self.go(text="again")
+        self.assertEqual((rc, "an identical" in out, len(relay.rec_all()), relay.rec_read(a)["state"]), (0, False, 2, "queued"))
 
     def test_the_queue_is_bounded_per_target(self) -> None:
         with mock.patch.object(relay, "DEFER_PER_TARGET", 2):
