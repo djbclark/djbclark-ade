@@ -78,7 +78,7 @@ gtail -n 10 ~/.local/state/load-watch/guard.jsonl
 
 Investigate (section 3) when any of these holds. Otherwise report the numbers in one line and stop.
 
-1. The 1-minute load per core is above **1.5** (`admit` says `hot`; that is 12 on 8 cores, the same limit
+1. The 1-minute load per core is above **1.5** (`admit` says `hot`; that is 12 on 8 cores; since 2026-10-25 the limit is **2.0** (16) while the compressor churn is at most 25k pages/s, `max_per_core` in `admit --json` is the one in force; the same limit
    `bg` and `acp-dispatch` use) **and** the 5- or 15-minute average agrees. A 1-minute spike over a
    falling 15-minute average is agents starting up, not a problem: report it and move on.
 2. `status` shows a hot streak (`hot for N/300 s`), or `sample.log` has a `sustained load` line from the
