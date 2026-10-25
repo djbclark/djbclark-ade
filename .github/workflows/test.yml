@@ -5,12 +5,18 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      context_only:
+        description: Run only the focused context and Go cost checks
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   pytest:
+    if: ${{ github.event.inputs.context_only != 'true' }}
     runs-on: macos-latest
     timeout-minutes: 30
 
@@ -30,6 +36,7 @@ jobs:
         run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
 
   pytest-linux:
+    if: ${{ github.event.inputs.context_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -69,3 +76,16 @@ jobs:
 
       - name: Run the test suite
         run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
+
+  context-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Go policy, native compaction and Claude nudges
+        run: >-
+          uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0'
+          python -m pytest tests/test_go_model_policy.py tests/test_go_context_plugin.py
+          tests/test_opencode_self_compact.py
+          claude/hooks/handoff-tools/tests/test_context_size_nudge.py -q

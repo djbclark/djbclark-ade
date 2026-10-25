@@ -10,6 +10,8 @@ description: >-
 
 # Baton — resume a task workspace from its Tier 1 pointer
 
+**Provider scope (2026-10-25).** A native OpenCode compaction continues its existing session; it does not start a new baton. Only resume a fresh session after the owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
+
 Since 2026-10-19 `bin/self-slash "/new"` (also `/clear`, `/reset`) queues
 `/baton` into the fresh session itself (`--then`, default `/baton`; `--no-then`
 turns it off), so after a handoff nobody types this; a `/baton` that arrives
@@ -99,3 +101,11 @@ that loads this skill, next to its own built-in `/resume` session picker).
 
 Do not duplicate the reader protocol's steps here — if they ever change,
 they change in exactly one place (`session-handoff`'s SKILL.md), not two.
+
+OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction.
+The plugin never rewrites shell commands. A supported host controller may pass
+an explicit validated session and directory to `self-slash "/compact"`.
+These paths compact only the verified current session; they do not implement a
+new-session/baton successor.
+See `docs/context-hygiene.md`. Write the checkpoint first and require the normal
+host identity/acknowledgment checks for a lifecycle cycle.

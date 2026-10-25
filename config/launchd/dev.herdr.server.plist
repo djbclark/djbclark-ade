@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.herdr.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/herdr-server-run</string>
+  </array>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.config/herdr/herdr-service.log</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.config/herdr/herdr-service.log</string>
+</dict>
+</plist>

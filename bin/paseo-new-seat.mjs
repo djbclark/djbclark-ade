@@ -112,19 +112,25 @@ async function work() {
   const readFeature = () => {
     try {
       const d = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-      const f = (d.features ?? []).find((x) => x?.id === "auto_accept");
-      return f ? f.value === true : undefined;
+      const feats = d.features ?? [];
+      const f = feats.find((x) => x?.id === "auto_accept");
+      if (f) return f.value === true;
+      // The provider published other features but not this one (omp: only fast_mode; its default
+      // mode is already Full Access): nothing to switch on, so not a failure. An empty list may just
+      // be a provider that has not loaded its features yet, so that stays unverified.
+      return feats.length > 0 ? "n/a" : undefined;
     } catch { return undefined; }
   };
   let on = readFeature();
-  for (let i = 0; i < 20 && on !== true; i++) {
+  for (let i = 0; i < 20 && on !== true && on !== "n/a"; i++) {
     await new Promise((r) => setTimeout(r, 250));
     on = readFeature();
   }
-  if (wantJson) console.log(JSON.stringify({ id, shortId: id.slice(0, 8), autoAccept: on === true }));
+  if (wantJson) console.log(JSON.stringify({ id, shortId: id.slice(0, 8), autoAccept: on === "n/a" ? null : on === true }));
   else console.log(on === true ? "auto_accept: on (verified)"
+    : on === "n/a" ? "auto_accept: not offered by this provider (nothing to switch on)"
     : "auto_accept: NOT verified - the shield may be grey; run paseo-set-model autoaccept " + id.slice(0, 8));
-  return on === true ? 0 : 4;
+  return on === true || on === "n/a" ? 0 : 4;
 }
 
 try {

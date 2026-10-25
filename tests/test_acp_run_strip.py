@@ -281,7 +281,7 @@ FAKE_AGENT = textwrap.dedent("""\
         if m == "initialize":
             send({"id": i, "result": {"protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}})
         elif m == "session/new":
-            send({"id": i, "result": {"sessionId": "s1"}})
+            send({"id": i, "result": {"sessionId": "s1", "configOptions": [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sipb/test", "options": [{"value": "sipb/test", "name": "Test"}]}]}})
         elif m == "session/prompt":
             cfg = os.environ.get("OPENCODE_CONFIG_DIR") or os.environ.get("GEMINI_HOME")
             Path(str(fake_out) + ".turn").write_text(json.dumps({"cfg": cfg, "exists": bool(cfg) and Path(cfg).exists()}))
@@ -295,6 +295,8 @@ FAKE_AGENT = textwrap.dedent("""\
             if pending is not None:
                 send({"id": pending, "result": {"stopReason": "cancelled"}})
                 pending = None
+        elif m == "session/set_config_option":
+            send({"id": i, "result": {"configOptions": [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "sipb/test", "options": [{"value": "sipb/test", "name": "Test"}]}]}})
         elif m == "session/set_mode":
             send({"id": i, "result": {}})
         elif i is not None:
@@ -628,7 +630,8 @@ class TestStripEndToEnd(unittest.TestCase):
         e.update(env or {})
         argv = [UV, "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
                 "-p", "Reply with the word ok", "--handshake-tries", "1", "--handshake-timeout", "10",
-                "--no-fallback", "--timeout", "60", "--log", str(log), *args]
+                "--no-fallback", "--timeout", "60", "--log", str(log),
+                *(["--model", "sipb/test"] if agent == "opencode" else []), *args]
         proc = subprocess.Popen(argv, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True)
         live: list[str] = []

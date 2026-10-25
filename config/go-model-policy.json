@@ -1,0 +1,12 @@
+{
+  "snapshot_date": "2026-10-25",
+  "routine_models": ["deepseek-v4.1-flash", "deepseek-v4-flash", "minimax-m3", "minimax-m3.1-flash", "glm-5.3-flash", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5", "mimo-v2.6-flash", "mimo-v2.5", "qwen3.7-plus", "longcat-2.0", "hy3", "beam-free"],
+  "advisory_models": ["grok-4.7", "kimi-k3", "kimi-k3.1-pro", "kimi-k2.7-code", "deepseek-v4-pro", "qwen3.8-max", "glm-5.3", "glm-5.2", "gemini-4-argon"],
+  "advisory_kinds": ["judgment", "research", "frontier"],
+  "advisory_timeout_seconds": 600,
+  "advisory_context_tokens": 64000,
+  "routine_context": {"warn": 64000, "compact": 96000, "hard": 128000},
+  "advisory_context": {"warn": 32000, "compact": 64000, "hard": 96000},
+  "minimum_growth_tokens": 32000,
+  "compact_cooldown_seconds": 300
+}

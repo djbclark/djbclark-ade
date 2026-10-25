@@ -491,6 +491,14 @@ after each whether to keep it. Record the final set in `AGENTS.md` (§8 item
 
 ## 1. Tool inventory
 
+Native Codex hooks use the shared [`create-hook`](../skills/create-hook/SKILL.md)
+guide (verified against Codex 0.164.0 on 2026-10-25). Link it through
+`~/src/djbclark-ade/bin/skill-everywhere create-hook` when distributing the catalog.
+Use `.codex/hooks.json`, PascalCase events and the native `/hooks` trust review;
+preserve legacy `notify` and unrelated hooks. This guide is Codex-specific: do
+not substitute Cursor hook paths or camelCase events. Re-check the official
+Codex documentation for the installed version before applying its snapshot.
+
 Install **everything in this section, even for languages and formats the repo
 does not use yet**, so the tools are ready when they are needed. Check first
 (`<tool> --version`) and skip anything already installed at a suitable version.
