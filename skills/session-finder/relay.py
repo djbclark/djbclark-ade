@@ -131,11 +131,13 @@ target every 5 s (only the head of a target's queue looks) and, once it is idle,
 this same path (every gate, lock and proof) the stored text prefixed `[queued Nm ago] ` (omitted under a minute), under
 the stored label (sanitized again; `--deliver` refuses a record whose label sender_name would not give, and a `hermes xxxx`
 label without stored hops). A target that is gone (3 looks in a row), archived, finished, or no longer the same
-session (a pane id reused: its agent, session id, transcript differs, or the queue-time pid of its TUI is no longer among the
-pane's foreground pids: tool children come and go, so it is membership, never a re-pick) makes the message `failed`. At QUEUE
+session (a pane id reused: its agent, session id, transcript differs, or, for a target with neither session id nor transcript, the
+queue-time pid of its TUI is no longer among the pane's foreground pids: tool children come and go, so it is membership, never a
+re-pick; a TUI restarted onto the same session id is still the target) makes the message `failed`. At QUEUE
 time a pane row with no session id, transcript or pid takes the pid of the ONE foreground process named like the agent
 (its herdr label or the binary fleet.PROC_AGENTS maps to it); none or several matching, with several processes, means no
-token: not deferred, exit 1. At POLL time a pane whose processes herdr cannot read counts as an error (3 in a row fail it); a Paseo daemon that
+token: not deferred, exit 1 (so too a row with fleet's own pid, a TUI herdr does not detect, that has several such processes).
+At POLL time a pane whose processes herdr cannot read counts as an error (3 in a row fail it); a Paseo daemon that
 cannot answer (a restart) fails it only after 3 consecutive errors, 5 s apart, counted apart from "not found"; an agent
 blocked on a permission card is waited for, never sent to. Past its expiry (default 6 h, `--defer-for S`, at most 24 h) it is
 `expired`. One deliverer per record (a lock); messages to one target go out in order; at most 20 queued or sending records
@@ -1795,7 +1797,9 @@ def deliverer_env():
     """The environment of a deliverer, built from scratch: the paths, locale and hooks it needs, none of the session ids."""
     env = {k: v for k, v in os.environ.items()
            if (k in DELIVER_KEEP or k.startswith(DELIVER_KEEP_PREFIXES)) and k not in DELIVER_DROP}
-    env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"] = str(DEFER_DIR), str(UNSENT)
+    # absolute and symlink-free: the deliverer chdir("/")s, so a relative operator value would name another directory there
+    env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"] = str(DEFER_DIR.resolve()), str(UNSENT.resolve())
+    env["RELAY_HERMES_DIR"] = str(HERMES_DIR.resolve())
     return env
 
 
@@ -1891,7 +1895,10 @@ def target_poll(rec):
         return ("miss", "its session is gone")
     if any(t.get(k) and s.get(k) != t[k] for k in ("agent", "sid", "transcript")):    # a recycled pane id
         return ("fail", "target changed: another session now holds that pane")
-    if t.get("pid"):    # a herdr pane row of a detected TUI has no pid: the pane's foreground process names it (agent_pid at queue time, pid_check at poll time)
+    # A row with a session id or transcript is told apart by those (checked above): a TUI restarted onto the SAME session has a
+    # new pid and is still the target. Only a row with neither (a herdr pane of a detected TUI, a zcode/muse pane) is told by
+    # its process: agent_pid at queue time, pid_check at poll time.
+    if t.get("pid") and not (t.get("sid") or t.get("transcript")):
         seen = pid_check(s, t["pid"])
         if seen == "error":
             return ("error", "cannot read the process in its pane")
@@ -2034,20 +2041,29 @@ def herdr_pane_procs(s):
     return fleet.pane_procs(chan[1])[0]
 
 
+def named_hits(s, procs):
+    """The processes of PROCS (a herdr pane's foreground processes) named like session S's agent: its herdr label, or a binary
+    fleet.PROC_AGENTS maps to that label (`cursor-agent` for `cursor`; node-launched: the script is argv[1])."""
+    label = s.get("agent") or ""
+    names = ({label, *(n for n, a in fleet.PROC_AGENTS.items() if a == label)}) - {""}
+    return [pr for pr in procs
+            if names & {os.path.basename(pr.get("argv0") or ""), os.path.basename(pr.get("name") or ""),
+                        *(os.path.basename(x) for x in (pr.get("argv") or [])[:2])}]
+
+
 def agent_pid(s):
     """The process id of the TUI of session S, picked at QUEUE time: fleet's own `pid`, else (a herdr pane row of a TUI herdr
     itself detected carries sid null and pid null: fleet._other_herdr sets neither) the ONE foreground process of its pane
     named like the agent (the herdr label, or a binary fleet.PROC_AGENTS maps to that label: `cursor-agent` for `cursor`;
     a TUI's MCP and tool children are foreground processes too), else its only foreground process. 0 when it cannot be read
-    or when several processes match: a pid that might be a child's is never stored."""
+    or when several processes match: a pid that might be a child's is never stored. That holds for fleet's own pid of an
+    undetected herdr pane too (zcode, muse: fleet._tui_of took the first match, in descending pid order, so often a child)."""
     if s.get("pid"):
+        if s.get("undetected") and len(named_hits(s, herdr_pane_procs(s) or [])) > 1:
+            return 0
         return s["pid"]
     procs = herdr_pane_procs(s) or []
-    label = s.get("agent") or ""
-    names = ({label, *(n for n, a in fleet.PROC_AGENTS.items() if a == label)}) - {""}
-    hits = [pr for pr in procs
-            if names & {os.path.basename(pr.get("argv0") or ""), os.path.basename(pr.get("name") or ""),
-                        *(os.path.basename(x) for x in (pr.get("argv") or [])[:2])}]
+    hits = named_hits(s, procs)
     if len(hits) == 1:
         return hits[0].get("pid") or 0
     return (procs[0].get("pid") or 0) if len(procs) == 1 and not hits else 0
@@ -2055,9 +2071,10 @@ def agent_pid(s):
 
 def pid_check(s, pid):
     """POLL time: is the stored TUI process PID still the one in session S? "same" when it is among the pane's foreground
-    pids (or equals fleet's own `pid`), "error" when the pane's processes cannot be read (a herdr restart: counted, not
-    failed at once), else "changed" (another TUI holds the pane id now). Membership, not a re-pick: tool children come and go."""
-    if s.get("pid"):
+    pids, "error" when the pane's processes cannot be read (a herdr restart: counted, not failed at once), else "changed"
+    (another TUI holds the pane id now). Membership, not a re-pick: tool children come and go. Every herdr row is judged so,
+    fleet's own pid included; a row outside herdr (no pane to read) is judged by equality with fleet's pid."""
+    if s.get("pid") and not (s.get("chan") or (None,))[0] == "herdr":
         return "same" if s["pid"] == pid else "changed"
     procs = herdr_pane_procs(s)
     if procs is None:

@@ -2991,7 +2991,21 @@ class TestDeferredSend(Harness):
             self.assertNotIn(k, env, k)
         for k in ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "XDG_STATE_HOME", "PASEO_CLI", "RELAY_HERMES", *WHERE_THINGS_LIVE):
             self.assertEqual(env[k], mine[k], k)
-        self.assertEqual((env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"]), (str(relay.DEFER_DIR), str(relay.UNSENT)))
+        self.assertEqual((env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"]), (str(relay.DEFER_DIR.resolve()), str(relay.UNSENT.resolve())))
+
+    def test_a_relative_operator_path_reaches_the_deliverer_as_an_absolute_one(self) -> None:
+        """The deliverer chdir("/")s: RELAY_DEFER_DIR, RELAY_UNSENT and RELAY_HERMES_DIR given relative must name the same directory there."""
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(relay, "DEFER_DIR", Path("rel/deferred")), \
+                mock.patch.object(relay, "UNSENT", Path("rel/unsent.json")), mock.patch.object(relay, "HERMES_DIR", Path("rel/hermes")):
+            here = os.getcwd()
+            os.chdir(d)    # where the operator started the sender
+            try:
+                env = self.deliverer_env_of({"PATH": "/usr/bin", "RELAY_HERMES_DIR": "rel/hermes"})
+            finally:
+                os.chdir(here)
+            base = Path(d).resolve()
+            self.assertEqual((env["RELAY_DEFER_DIR"], env["RELAY_UNSENT"], env["RELAY_HERMES_DIR"]),
+                             (str(base / "rel/deferred"), str(base / "rel/unsent.json"), str(base / "rel/hermes")))
 
     def test_a_sweep_started_by_the_target_itself_still_delivers_to_it(self) -> None:
         self.as_agent(SENDER)
@@ -3307,6 +3321,53 @@ class TestDeferredSend(Harness):
         rec = relay.rec_read(rid)
         self.assertEqual((rec["state"], self.calls), ("failed", []))
         self.assertIn("target changed", rec["outcome"])
+
+    def test_a_tui_restarted_onto_the_same_session_is_still_the_target_but_a_new_session_is_not(self) -> None:
+        """C1: Claude's row carries sid AND pid. A restart onto the same sid (`--resume`, a sleeper wake) has a new pid and must still get
+        the message; /clear gives a new sid and fails it."""
+        row = {**real_omp_row(status="working"), "sid": "s1", "pid": 51921}
+        state = self.pane(row, [self.proc(51921, "omp", "omp")])
+        rid = self.queue_pane()
+        self.assertEqual(relay.rec_read(rid)["target"]["pid"], 51921)
+        state["row"] = {**real_omp_row(status="idle"), "sid": "s1", "pid": 60001}
+        state["procs"] = [self.proc(60001, "omp", "omp")]
+        self.assertEqual(relay.target_poll(relay.rec_read(rid)), ("idle",))
+        state["row"] = {**real_omp_row(status="idle"), "sid": "s2", "pid": 60001}    # /clear
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "fail")
+        self.assertIn("target changed", relay.target_poll(relay.rec_read(rid))[1])
+
+    def test_the_pid_of_a_row_with_a_session_id_is_not_asked_for_at_poll_time(self) -> None:
+        """C1: the pane's processes are not even read for a target that has a sid."""
+        row = {**real_omp_row(status="idle"), "sid": "s1", "pid": 60001}
+        self.pane(row, None)    # herdr cannot answer: a pid check would be an "error"
+        rec = {"target": {"id": "w2N:pZ", "paseo": "", "agent": "omp", "sid": "s1", "transcript": "", "pid": 51921}}
+        self.assertEqual(relay.target_poll(rec), ("idle",))
+
+    def undetected_row(self, pid: int, status: str = "working") -> dict[str, Any]:
+        """What fleet._pane_only emits for a TUI herdr does not detect (zcode, muse): fleet's own pid, no sid or transcript."""
+        return {**real_omp_row(status=status), "pid": pid, "undetected": True}
+
+    def test_an_undetected_pane_with_several_same_named_processes_is_refused_at_queue_time(self) -> None:
+        """C2: fleet._tui_of took the first of several same-named processes (often a child): no record with a guessed pid."""
+        self.pane(self.undetected_row(51990), [self.proc(51990, "omp", "omp", "--sub"), self.proc(51921, "omp", "omp")])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 1)
+        self.assertEqual((relay.rec_all(), self.spawned), ([], []))
+        self.assertIn("deferring needs a way to tell this pane's TUI", err.getvalue())
+        self.pane(self.undetected_row(51921), [self.proc(51921, "omp", "omp"), self.proc(51990, "graft", "graft")])    # one match: queued with fleet's pid
+        self.assertEqual(relay.rec_read(self.queue_pane())["target"]["pid"], 51921)
+
+    def test_an_undetected_pane_is_judged_by_membership_not_by_the_pid_fleet_picks_each_poll(self) -> None:
+        """C2: a same-named helper appears (fleet now picks it, being the higher pid) and goes away: the TUI is the same throughout."""
+        state = self.pane(self.undetected_row(51921), [self.proc(51921, "omp", "omp")])
+        rid = self.queue_pane()
+        state["row"] = self.undetected_row(52000, "idle")
+        state["procs"] = [self.proc(52000, "omp", "omp", "--helper"), self.proc(51921, "omp", "omp")]
+        self.assertEqual(relay.target_poll(relay.rec_read(rid)), ("idle",))
+        state["procs"] = [self.proc(60001, "omp", "omp")]    # the TUI itself was replaced
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "fail")
+        state["procs"] = None    # herdr restarting: counted, not failed
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "error")
 
     def test_a_herdr_restart_shorter_than_the_error_limit_does_not_fail_a_pane_message(self) -> None:
         tui = self.proc(51921, "omp", "omp")

@@ -110,8 +110,9 @@ sent: that session is busy and cannot take it now; deferring needs an identifiab
 fails). Retry with --idle S, or --no-defer for the plain refusal"; `load-watch` and `session-load-watch` pass `--no-defer` for every incident
 brief or load-shedding ask, since a brief that arrives after the load spike is useless. Per target, messages go out in order; at most 20 queued
 per target, 20 per sender and 100 in all (over: exit 1 "deferred queue full (N)"); a pane id reused by another session
-fails the message ("target changed": the agent, session id or transcript differs, or the TUI's pid, taken at queue time as
-the one foreground process named like the agent, is no longer among the pane's foreground pids). At queue time a herdr pane
+fails the message ("target changed": the agent, session id or transcript differs, or, for a target with neither session id
+nor transcript, the TUI's pid, taken at queue time as the one foreground process named like the agent, is no longer among the
+pane's foreground pids; a TUI restarted onto the same session id is still the target). At queue time a herdr pane
 with none of session id, transcript or an unambiguous TUI process is not deferred (exit 1); at poll time a pane whose
 processes herdr cannot read is an error, and 3 in a row (about 10-15 s) fail the message. A Paseo daemon that cannot answer fails a queued message only
 after 3 consecutive errors 5 s apart, counted apart from "not found"; a pending permission card is waited for. A record
