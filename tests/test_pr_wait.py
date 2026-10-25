@@ -1397,16 +1397,22 @@ def test_an_adopted_comment_id_is_saved_in_the_state_file(world: World) -> None:
     assert state["own"] == 1 and state["adopted_ids"] == [42]
 
 
-# ---- adversary verdict in the PR body -------------------------------------------------------
+# ---- adversary verdict MARKER in the PR body ------------------------------------------------
 #
-# Added 2026-10-25 with the adversary gate, then REWRITTEN after the adversary reviewed the first
-# version and found it broken in both directions: six false APPROVEs (another reviewer's line, an
-# old-head APPROVE naming the new head, a table cell, a negation, a fenced block) and five false
-# MISSES (the house's own canonical `VERDICT: APPROVE <sha>` formats). Every case below is one of
-# those, so a regression in either direction fails a test rather than shipping.
+# Rewritten 2026-10-25 for the MARKER design (Dann 5's ruling after two adversary rounds). The first
+# version parsed English; round 1 found six false APPROVEs and five false MISSES, round 2 found
+# fourteen NEW false APPROVEs including a BLOCK silently deleted by a prose filter. The prose parser
+# and its heuristics are DELETED, not patched: correctness there would mean "no sentence anyone could
+# write defeats it", which is unbounded.
+#
+# Every test below is one of Dann 5's six required properties, plus the regressions the review found.
 
 ADV_HEAD = "a" * 40
-OLD_HEAD = "b" * 40
+OTHER_HEAD = "b" * 40
+
+
+def marker(verdict: str, head: str = ADV_HEAD) -> str:
+    return f'<!-- adversary-verdict:v1 {{"verdict":"{verdict}","head":"{head}"}} -->'
 
 
 def adv(body: str, head: str = ADV_HEAD) -> dict:
@@ -1419,109 +1425,101 @@ def passes(body: str, head: str = ADV_HEAD) -> bool:
     return bool(r["matches_head"]) and not str(r["verdict"] or "").upper().startswith("BLOCK")
 
 
-# --- the shapes that MUST count (false negatives were the F3 findings) ----------------------
+# --- property 1: the :v1 suffix is part of the match -----------------------------------------
 
-def test_house_canonical_formats_all_count() -> None:
-    for body in (f"`VERDICT: APPROVE {ADV_HEAD}`",              # PRs 41, 43, 55, 58, 59
-                 f"VERDICT: APPROVE {ADV_HEAD}",
-                 f"Adversary: APPROVE (head {ADV_HEAD})",        # PR 56
-                 f"Independent adversary verdict: `APPROVE, no findings - HEAD {ADV_HEAD}`",  # 65
-                 f"> adversary APPROVE at head `{ADV_HEAD}`",    # PR 50
-                 f"> **APPROVE, no findings** (head {ADV_HEAD})",  # PR 61, the AGENTS.md shape
-                 f"**APPROVE** (head {ADV_HEAD})"):
-        assert passes(body), body
+def test_a_marker_without_the_v1_suffix_is_not_this_marker() -> None:
+    # Rule 9 records a waiter whose regex lacked :v1 seeing no state on PR 12 and running 30 minutes.
+    body = '<!-- adversary-verdict {"verdict":"APPROVE","head":"' + ADV_HEAD + '"} -->'
+    assert not adv(body)["present"]
 
 
-def test_a_short_head_prefix_counts() -> None:
-    assert passes(f"> **APPROVE** (head {ADV_HEAD[:7]})")
+def test_the_canonical_marker_approves_this_head() -> None:
+    assert passes(marker("APPROVE"))
 
 
-def test_a_block_for_this_head_is_reported_as_a_block() -> None:
-    r = adv(f"> **BLOCK: the check is wrong** (head {ADV_HEAD})")
-    assert r["present"] and r["matches_head"]
-    assert r["verdict"].upper().startswith("BLOCK")
-    assert not passes(f"> **BLOCK: the check is wrong** (head {ADV_HEAD})")
+def test_the_canonical_marker_blocks_this_head() -> None:
+    r = adv(marker("BLOCK"))
+    assert r["present"] and r["matches_head"] and r["verdict"] == "BLOCK"
+    assert not passes(marker("BLOCK"))
 
 
-def test_a_long_block_reason_is_still_a_block() -> None:
-    assert not passes(f"> **BLOCK: rule 0d.1 makes a false claim about systemd and skips nixpkgs** "
-                      f"(head {ADV_HEAD})")
+# --- property 2: a missing or unknown verdict value fails closed ------------------------------
+
+def test_an_unknown_verdict_value_is_malformed_not_a_default() -> None:
+    body = '<!-- adversary-verdict:v1 {"verdict":"LGTM","head":"' + ADV_HEAD + '"} -->'
+    r = adv(body)
+    assert not r["present"] and r["malformed"]
+    assert "APPROVE or BLOCK" in r["detail"]
 
 
-# --- the false APPROVEs the review found (F1, F2, F4) ---------------------------------------
+def test_a_missing_verdict_field_is_malformed() -> None:
+    body = '<!-- adversary-verdict:v1 {"head":"' + ADV_HEAD + '"} -->'
+    r = adv(body)
+    assert not r["present"] and r["malformed"]
 
-def test_an_approve_naming_another_head_does_not_count() -> None:
-    r = adv(f"> **APPROVE** (head {OLD_HEAD})")
+
+# --- property 3: head must be 40 hex and must equal the PR head -------------------------------
+
+def test_a_marker_for_another_head_is_not_a_pass() -> None:
+    r = adv(marker("APPROVE", OTHER_HEAD))
     assert r["present"] and not r["matches_head"]
     assert "NOT this head" in r["detail"]
 
 
-def test_an_old_head_approve_that_also_mentions_the_new_head_does_not_count() -> None:
-    # The stale-id case: an APPROVE for an older commit must not bless the newer one merely because
-    # the newer sha appears later in the same sentence.
-    assert not passes(f"> adversary APPROVE (head {OLD_HEAD}); head is now {ADV_HEAD[:7]}, "
-                      f"not re-reviewed")
+def test_a_short_head_is_malformed() -> None:
+    r = adv(marker("APPROVE", ADV_HEAD[:7]))
+    assert not r["present"] and r["malformed"]
+    assert "40-hex" in r["detail"]
 
 
-def test_another_reviewers_verdict_does_not_count() -> None:
-    for body in (f"**Codex verdict:** APPROVE at {ADV_HEAD[:7]}",
-                 f"> APPROVE (Cursor Approval Agent, head {ADV_HEAD[:7]})",
-                 f"| Codex | `APPROVE` | `{ADV_HEAD[:7]}` |"):
-        assert not passes(body), body
+# --- property 4: a malformed marker is its own outcome ---------------------------------------
+
+def test_a_marker_that_is_not_json_is_malformed() -> None:
+    r = adv('<!-- adversary-verdict:v1 {"verdict":"APPROVE","head": -->')
+    assert not r["present"] and r["malformed"]
+    assert "malformed" in r["detail"]
 
 
-def test_a_negated_approve_does_not_count() -> None:
-    assert not passes(f"> **Do not** APPROVE until {ADV_HEAD[:7]} is fixed")
+# --- property 5: never fall back to prose ----------------------------------------------------
 
-
-def test_a_verdict_inside_a_fenced_block_does_not_count() -> None:
-    fence = chr(96) * 3
-    assert not passes(fence + "\nadversary VERDICT: APPROVE " + ADV_HEAD + "\n" + fence)
-
-
-def test_a_prose_mention_is_not_a_verdict() -> None:
-    assert not passes("The adversary returned a BLOCK, and it was right about the thing it found.")
-
-
-def test_a_markdown_heading_is_not_a_verdict() -> None:
-    for body in ("## Adversary round 1: **BLOCK**, and it was right",
-                 f"## Verdict: APPROVE (head {ADV_HEAD})"):
-        assert not adv(body)["present"], body
-
-
-def test_a_wrapped_prose_line_naming_a_block_does_not_count() -> None:
-    # F4: PR 66's own body had this exact wrapped line and it parsed as a BLOCK.
-    assert not passes("   commit, or a `BLOCK`, all fail the check. An approval from an older head "
-                      "must never bless a new")
-
-
-# --- precedence and reporting (F2, F5) ------------------------------------------------------
-
-def test_a_block_beats_an_approve_on_the_same_head() -> None:
-    body = f"> **APPROVE** (head {ADV_HEAD})\n\n> **BLOCK: race** (head {ADV_HEAD})"
-    r = adv(body)
-    assert r["conflict"] and not passes(body)
-    assert "BOTH" in r["detail"]
-
-
-def test_a_block_in_list_form_is_still_detected() -> None:
-    body = f"- Adversary: BLOCK: missing test (head {ADV_HEAD})"
-    assert not passes(body)
-
-
-def test_an_approve_with_no_head_does_not_count() -> None:
-    r = adv("adversary VERDICT: APPROVE, no findings")
-    assert r["present"] and not r["matches_head"]
-    assert "names no head sha" in r["detail"]
+def test_prose_verdicts_with_no_marker_are_simply_missing() -> None:
+    for body in (f"> **APPROVE, no findings** (head {ADV_HEAD})",
+                 f"VERDICT: APPROVE {ADV_HEAD}",
+                 f"Adversary: APPROVE (head {ADV_HEAD})",
+                 f"**Codex verdict:** APPROVE at {ADV_HEAD}"):
+        r = adv(body)
+        assert not r["present"], body
+        assert "marker" in r["detail"], body
 
 
 def test_an_empty_body_reports_no_verdict() -> None:
     r = adv("")
-    assert not r["present"] and not r["matches_head"]
-    assert r["detail"] == "no PR body"
+    assert not r["present"] and r["detail"] == "no PR body"
 
 
-def test_a_body_with_no_verdict_says_what_is_needed() -> None:
-    r = adv("This PR does some things and has no verdict in it at all.")
-    assert not r["present"]
-    assert "marker" in r["detail"]
+# --- property 6: a BLOCK can never be downgraded ---------------------------------------------
+
+def test_a_block_is_never_downgraded_by_its_reason() -> None:
+    # The round-2 finding: a prose filter deleted a BLOCK whose reason said "never"/"must not".
+    # With a marker there is no reason text to filter, but the invariant is asserted directly.
+    for reason_style in (marker("BLOCK"), marker("BLOCK")):
+        assert not passes(reason_style)
+
+
+def test_a_block_beats_an_approve_for_the_same_head() -> None:
+    body = marker("APPROVE") + "\n\n" + marker("BLOCK")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["conflict"] and r["matches_head"]
+    assert not passes(body)
+    assert "BOTH" in r["detail"]
+
+
+def test_an_approve_for_another_head_does_not_block_the_block_for_this_head() -> None:
+    body = marker("APPROVE", OTHER_HEAD) + "\n\n" + marker("BLOCK")
+    assert not passes(body)
+
+
+def test_a_malformed_marker_beside_a_good_one_still_reports_the_verdict() -> None:
+    body = '<!-- adversary-verdict:v1 {broken -->' + "\n\n" + marker("APPROVE")
+    r = adv(body)
+    assert r["present"] and r["matches_head"] and r["malformed"]

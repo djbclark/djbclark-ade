@@ -254,238 +254,118 @@ def pr_head(repo: str, pr: int) -> str:
 
 # ---- adversary verdict ----------------------------------------------------------------------------
 
-# A PR body may quote the adversary reviewer's verdict line. The house rule (AGENTS.md, code review
-# rule 1) is that a teammate's PR carries one, naming the head it reviewed; the merge is then done with
-# `--match-head-commit <reviewed sha>` so the head reviewed is the head merged.
+# The adversary's verdict is read from a MACHINE-READABLE MARKER in the PR body, never from prose:
 #
-# WHY THIS EXISTS (2026-10-25): PR 61 was merged with NO adversary quote in its body and nothing
-# noticed, because `merge_ready` checks only CI and Codex, `master` is unprotected and `reviewDecision`
-# is empty. The rule was a convention with no enforcement. This makes the missing quote a visible FACT
-# in pr-wait's output.
+#     <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
 #
-# THREE PROPERTIES, each deliberate (Dann 5's ruling, 2026-10-25):
-#   1. A quoted verdict counts ONLY if it names a head SHA. An unqualified "APPROVE" from an older head
-#      must not bless a new commit - that is the stale-id bug class this repo has spent a day fixing.
-#   2. It REPORTS by default and BLOCKS only when opted in (an `adversary-required` label, or
-#      `--adversary-required`). A global default would block the operator's own small PRs, which is not
-#      what the rule is for.
-#   3. It never merges. pr-wait has no merge authority and must not gain any.
-# A verdict is a QUOTED or labelled line, not the word appearing in prose. Anchoring on a quote or a
-# `verdict:` label prevents a false positive from a sentence like "the review found a BLOCK, and it
-# was right" - which is what happened on PR 63 (2026-10-25): the prose mention parsed as a verdict.
-# ---- adversary verdict ----------------------------------------------------------------------------
-
-# A PR body may quote the adversary reviewer's verdict line. The house rule (AGENTS.md, code review
-# rule 1) is that a teammate's PR carries one, naming the head it reviewed; the merge is then done with
-# `--match-head-commit <reviewed sha>` so the head reviewed is the head merged.
+# WHY A MARKER AND NOT PROSE (2026-10-25, after two adversary rounds):
+# The first version parsed English. Round 1 found six false APPROVEs and five false MISSES. It was
+# patched and 14 tests added; round 2 found fourteen NEW false APPROVEs, including a BLOCK silently
+# deleted whenever its reason contained "never", "must not", or named another reviewer. The lesson is
+# structural, not a missing case: **the artefact under test was a claim about English**, and no set of
+# heuristics makes that correct, because correctness would mean "no sentence anyone could write defeats
+# it" - an unbounded set. A filter must only ever DOWNGRADE; the prose version could delete a BLOCK.
 #
-# WHY THIS EXISTS (2026-10-25): PR 61 was merged with NO adversary quote in its body and nothing
-# noticed, because `merge_ready` checks only CI and Codex, `master` is unprotected and `reviewDecision`
-# is empty. The rule was a convention with no enforcement.
+# THE PRECEDENT IS THE HOUSE'S OWN: AGENTS.md rule 9 reads Codex's review state from
+# `<!-- codex-review-state:v1 {...} -->` and matches the `:v1` SUFFIX deliberately (a waiter whose regex
+# lacked it saw no state on PR 12 and ran its full 30 minutes). Same shape here, on purpose.
 #
-# DESIGN, after an adversary review of the first attempt found it broken in BOTH directions
-# (false APPROVEs from other reviewers' lines, and false MISSES on the house's own canonical format):
-#
-#   1. A verdict must carry an EXPLICIT MARKER - `VERDICT:`, or the word `adversary` on the same line.
-#      Without this, `**Codex verdict:** APPROVE`, `| Codex | APPROVE |`, a Cursor Approval Agent line
-#      and even `Do not APPROVE until X` all parsed as approvals. The marker is what makes a line
-#      *about the adversary* rather than merely containing the word APPROVE.
-#   2. The SHA must be the one ATTACHED to the verdict (the first one after it, or the one in its
-#      `head`/`at` parenthetical) - never "any SHA on the line that happens to match". A line like
-#      `APPROVE (head <old>); head is now <new>` must not bless <new>.
-#   3. ALL verdict lines are collected. A BLOCK naming the head wins over any APPROVE; a body saying
-#      both is reported as self-contradictory. Taking the first match let review ROUND ORDER decide.
-#   4. Fenced code blocks are skipped, and a wrapped prose line is not a verdict.
-#
-# The matcher is deliberately conservative: a false MISS is visible (the line says "missing") and can
-# be fixed by editing the PR body, while a false APPROVE silently blesses unreviewed code.
-# A verdict must be attributable to the ADVERSARY. `VERDICT:` alone is not enough: the review found
-# that `**Codex verdict:** APPROVE at <head>` passed as an adversary approval, because `verdict:` was
-# treated as the marker. So the marker is either
-#   * the word `adversary` anywhere on the line, or
-#   * a `VERDICT:` label when NO OTHER reviewer is named on the same line.
-# The second branch keeps the house's bare `VERDICT: APPROVE <sha>` format working while refusing
-# another reviewer's verdict.
-ADVERSARY_WORD = re.compile(r"\badversary\b", re.IGNORECASE)
-VERDICT_LABEL = re.compile(r"\bVERDICT\s*:", re.IGNORECASE)
-# Reviewers that are NOT the adversary. A `VERDICT:` line naming one of these is theirs, not ours.
-OTHER_REVIEWERS = re.compile(
-    r"\b(?:codex|cursor|approval agent|security agent|bugbot|coderabbit|"
-    r"copilot|snyk|sonar|greptile)\b", re.IGNORECASE)
-VERDICT_WORD = re.compile(r"\b(APPROVE(?:,\s*no findings)?|BLOCK)\b", re.IGNORECASE)
-# A SHA the verdict could be attached to: 7-40 hex, optionally backticked.
-SHA_NEAR = re.compile(r"`?\b([0-9a-f]{7,40})\b`?", re.IGNORECASE)
-# Words that introduce the SHA, so `head abc123` is preferred over a stray number.
-HEAD_WORDS = re.compile(r"(?:head|at|commit|sha)\s*[:=]?\s*", re.IGNORECASE)
-# A line that merely mentions the word while talking ABOUT verdicts.
-PROSE_TELLS = re.compile(
-    r"\b(?:do not|don't|must not|never|all fail|fail the check|is not a verdict|"
-    r"false positive|would parse|parsed as|for example|e\.g\.)\b", re.IGNORECASE)
+# THE PROPERTIES, each of which a test covers:
+#   1. `:v1` is part of the match. A marker without it is not this marker.
+#   2. A missing or unknown `verdict` value is `adversary-missing` - never a default. Fail closed.
+#   3. `head` must be 40 hex AND equal the PR head. Another head is `adversary-other-head`, not a pass.
+#   4. A malformed marker is `adversary-malformed`, its own outcome, so a typo reads as a typo rather
+#      than as an absence.
+#   5. NEVER fall back to prose. No marker means "no machine-readable verdict", full stop; a fallback
+#      would reintroduce the parser through the back door and the failure would be invisible again.
+#   6. A BLOCK can never be downgraded by anything - no ordering, no other field, no warning.
+# The marker is matched LOOSELY (anything up to the closing `-->`) and then validated, so a marker
+# with broken JSON is reported as `malformed` rather than as an absence. A strict `{...}` regex cannot
+# see a malformed marker at all, which would make a typo indistinguishable from "no verdict".
+MARKER_RE = re.compile(r"<!--\s*adversary-verdict:v1\s*(.*?)\s*-->", re.DOTALL)
+HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
-
-def _has_adversary_marker(line: str) -> bool:
-    """True when the line's verdict can be attributed to the adversary.
-
-    Four accepted shapes, in the order the house actually writes them:
-
-    1. the word `adversary` anywhere on the line;
-    2. a bare `VERDICT:` label with NO other reviewer named on the same line (so
-       `**Codex verdict:** APPROVE` is refused, while `VERDICT: APPROVE <sha>` works);
-    3. **a line that IS a quoted verdict** - it starts with `>` and is short, e.g.
-       `> **APPROVE, no findings** (head <sha>)`. This is the shape AGENTS.md code-review rule 1
-       describes and the shape PR 61 actually used, so it must count.
-    4. a bolded verdict at the start of the line, `**APPROVE ...**`.
-
-    What is deliberately NOT accepted: a bare `APPROVE` in the middle of a sentence, a table cell, or
-    a `**Codex verdict:**` line - each of those was a real false positive.
-    """
-    if ADVERSARY_WORD.search(line):
-        return True
-    if VERDICT_LABEL.search(line) and not OTHER_REVIEWERS.search(line):
-        return True
-    if OTHER_REVIEWERS.search(line):
-        return False
-    stripped = line.strip()
-    m = VERDICT_WORD.search(stripped)
-    if not m:
-        return False
-    # (3) a quoted line whose verdict comes right after the quote marker, possibly after `**`.
-    if stripped.startswith(">") and m.start() <= 8:
-        return True
-    # (4) a bolded verdict opening the line.
-    return stripped.startswith("**") and m.start() <= 4
-
-
-
-def _strip_fenced_blocks(body: str) -> str:
-    """Drop fenced code blocks: a verdict quoted inside ``` is an example, not a claim."""
-    out, inside = [], False
-    for line in body.splitlines():
-        if line.lstrip().startswith("```"):
-            inside = not inside
-            continue
-        if not inside:
-            out.append(line)
-    return "\n".join(out)
-
-
-def _verdict_lines(body: str) -> list[tuple[str, str | None]]:
-    """Every (verdict, sha-or-None) a line plausibly claims, in order.
-
-    A line qualifies only when it carries an adversary marker and does not read as prose about
-    verdicts. The SHA is the one ATTACHED to the verdict word: the first SHA after it, or the one
-    inside its `head ...` parenthetical. A SHA appearing only BEFORE the verdict belongs to an
-    earlier statement - that is how an old-head APPROVE got counted for a new head.
-    """
-    found: list[tuple[str, str | None]] = []
-    for raw in _strip_fenced_blocks(body).splitlines():
-        line = raw.strip()
-        if not line or len(line) > 400:
-            continue
-        if line.startswith("#"):            # a heading labels a section, never a verdict
-            continue
-        if not _has_adversary_marker(line):
-            continue
-        if PROSE_TELLS.search(line):
-            continue
-        m = VERDICT_WORD.search(line)
-        if not m:
-            continue
-        verdict = m.group(1).strip()
-        rest = line[m.end():]
-        sha = None
-        hm = HEAD_WORDS.search(rest)
-        if hm:
-            sm = SHA_NEAR.search(rest, hm.end())
-            if sm:
-                sha = sm.group(1).lower()
-        if sha is None and m.start() <= 40:
-            # Only if the verdict is near the start, so a long prose sentence cannot reach forward
-            # and grab an unrelated sha.
-            sm = SHA_NEAR.search(rest)
-            if sm:
-                sha = sm.group(1).lower()
-        found.append((verdict, sha))
-    return found
-
-
-def _sha_matches(quoted: str | None, head: str) -> bool:
-    if not quoted:
-        return False
-    return head.lower().startswith(quoted) or quoted.startswith(head.lower())
 
 
 def adversary_verdict(body: str, head: str) -> dict:
-    """Find adversary verdict lines in a PR body and decide whether they name this head.
+    """Read the adversary verdict marker from a PR body and decide whether it names this head.
 
-    Returns {"present", "verdict", "quoted_sha", "matches_head", "conflict", "detail"}.
-
-    Precedence, and it is deliberate: **any BLOCK naming this head wins** over every APPROVE, and a
-    body carrying both is flagged `conflict`. An APPROVE counts only if it names this head; an
-    APPROVE naming another head, or none, does not.
+    Returns {"present", "verdict", "quoted_sha", "matches_head", "conflict", "malformed", "detail"}.
+    Never inspects prose: a body full of verdict-shaped sentences and no marker is simply
+    `present: False`, which is the point.
     """
     if not body:
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
-                "conflict": False, "detail": "no PR body"}
+                "conflict": False, "malformed": False, "detail": "no PR body"}
 
-    lines = _verdict_lines(body)
-    if not lines:
+    matches = MARKER_RE.findall(body)
+    if not matches:
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
-                "conflict": False,
-                "detail": "no adversary verdict line (needs a `VERDICT:` or `adversary` marker "
-                          "naming APPROVE or BLOCK)"}
+                "conflict": False, "malformed": False,
+                "detail": "no adversary-verdict marker in the PR body (prose verdicts are not read)"}
 
-    blocks = [(v, s) for v, s in lines if v.upper().startswith("BLOCK") and _sha_matches(s, head)]
-    approves = [(v, s) for v, s in lines
-                if v.upper().startswith("APPROVE") and _sha_matches(s, head)]
+    # Validate EVERY marker, so a malformed one beside a good one is still reported.
+    parsed: list[dict] = []
+    problems: list[str] = []
+    for raw in matches:
+        try:
+            doc = json.loads(raw)
+        except ValueError as e:
+            problems.append(f"marker is not valid JSON: {e}")
+            continue
+        if not isinstance(doc, dict):
+            problems.append("marker is not a JSON object")
+            continue
+        verdict = doc.get("verdict")
+        sha = doc.get("head")
+        if not isinstance(verdict, str) or verdict.upper() not in ("APPROVE", "BLOCK"):
+            problems.append(f"verdict must be APPROVE or BLOCK, got {verdict!r}")
+            continue
+        if not isinstance(sha, str) or not HEX40.match(sha):
+            problems.append(f"head must be a 40-hex sha, got {sha!r}")
+            continue
+        parsed.append({"verdict": verdict.upper(), "head": sha.lower()})
 
-    if blocks and approves:
-        return {"present": True, "verdict": blocks[0][0], "quoted_sha": blocks[0][1],
-                "matches_head": True, "conflict": True,
-                "detail": f"the body says BOTH BLOCK and APPROVE for this head "
-                          f"({len(blocks)} block, {len(approves)} approve) - resolve it, the PR "
-                          f"cannot be read as approved"}
+    if not parsed:
+        # A marker was present but unusable: its OWN outcome, so a typo is visibly a typo.
+        return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
+                "conflict": False, "malformed": True,
+                "detail": "adversary-verdict marker is malformed: " + "; ".join(problems)}
+
+    for_marker = [p for p in parsed if p["head"] == head.lower()]
+    blocks = [p for p in for_marker if p["verdict"] == "BLOCK"]
+    approves = [p for p in for_marker if p["verdict"] == "APPROVE"]
+
+    # INVARIANT: a BLOCK is never downgraded. If a body carries both for this head it is a conflict,
+    # and the verdict reported is the BLOCK.
     if blocks:
-        return {"present": True, "verdict": blocks[0][0], "quoted_sha": blocks[0][1],
-                "matches_head": True, "conflict": False,
-                "detail": f"BLOCK for this head: {blocks[0][0]}"}
+        return {"present": True, "verdict": "BLOCK", "quoted_sha": blocks[0]["head"],
+                "matches_head": True, "conflict": bool(approves), "malformed": bool(problems),
+                "detail": ("the body says BOTH BLOCK and APPROVE for this head - resolve it, the PR "
+                           "cannot be read as approved" if approves else "BLOCK for this head")}
     if approves:
-        return {"present": True, "verdict": approves[0][0], "quoted_sha": approves[0][1],
-                "matches_head": True, "conflict": False,
-                "detail": f"verdict {approves[0][0]!r} names {approves[0][1]}, matching this head"}
+        return {"present": True, "verdict": "APPROVE", "quoted_sha": approves[0]["head"],
+                "matches_head": True, "conflict": False, "malformed": bool(problems),
+                "detail": f"APPROVE for this head ({approves[0]['head'][:12]})"}
 
-    # Nothing matched this head. Say which of the three reasons applies.
-    v, s = lines[0]
-    if s is None:
-        return {"present": True, "verdict": v, "quoted_sha": None, "matches_head": False,
-                "conflict": False,
-                "detail": f"verdict {v!r} names no head sha, so it cannot be tied to this head"}
-    return {"present": True, "verdict": v, "quoted_sha": s, "matches_head": False,
-            "conflict": False,
-            "detail": f"verdict {v!r} names {s}, which is NOT this head ({head[:12]})"}
+    # A valid marker, but for a different head. That is not a pass.
+    other = parsed[0]
+    return {"present": True, "verdict": other["verdict"], "quoted_sha": other["head"],
+            "matches_head": False, "conflict": False, "malformed": bool(problems),
+            "detail": f"marker names {other['head'][:12]}, which is NOT this head ({head[:12]})"}
 
 
 def adversary_from_doc(doc: dict, head: str) -> dict:
     """Extract the adversary verdict from an ALREADY-FETCHED `pulls/{pr}` document.
 
-    No API call: `pr_doc()` is the only reader of that endpoint. The verdict lives in the same
-    document (`body` + `labels`), so reading it twice would double the calls and shift the
-    call-count-keyed routes in the test harness.
+    No API call: the poll keeps the document it fetches, so the verdict is always judged from the
+    CURRENT body rather than a startup snapshot (a body edited from APPROVE to BLOCK during the wait
+    must be seen).
     """
     labels = {l.get("name") for l in (doc.get("labels") or []) if isinstance(l, dict)}
     out = adversary_verdict(doc.get("body") or "", head)
     out["required_by_label"] = "adversary-required" in labels
     return out
-
-    return head.lower().startswith(quoted) or quoted.startswith(head.lower())
-
-    for line in body.splitlines():
-        if line.lstrip().startswith("```"):
-            inside = not inside
-            continue
-        if not inside:
-            out.append(line)
-    return "\n".join(out)
 
 
 def fetch_checks(repo: str, sha: str) -> list[dict]:
@@ -1153,6 +1033,16 @@ def main(argv: list[str]) -> int:
                     print(f"PR {a.pr}: timeout, gh failed all along: {e}")
                     return EXIT_GH
                 time.sleep(min(a.interval, max(0.0, deadline - time.monotonic())))
+    else:
+        # `--head` was given, so no head resolution happened - but the PR document is still needed for
+        # the adversary verdict. Fetching it here (not only on the resolve path) is the fix for a real
+        # regression: with `--head`, `s["pr_doc"]` stayed None, `collect_adversary` recorded
+        # `fetch_failed`, and `assess` then reported `merge_ready: false` with a FALSE "gh failed"
+        # message on a run where gh had not failed.
+        try:
+            pr_document = pr_doc(a.repo, a.pr)
+        except GhError:
+            pr_document = None  # a real failure: `fetch_failed` is then the honest answer
     head = head.lower()
 
     sd = state_dir()
@@ -1445,7 +1335,17 @@ def main(argv: list[str]) -> int:
         fails.clear()
         codex_polled = False
         s["ci_done"], s["codex_done"] = False, a.no_codex  # both re-judged on every poll, never latched
-        cur = attempt(pr_head, a.repo, a.pr)
+        # Keep the document this poll fetched: the adversary verdict is judged from the CURRENT body
+        # and labels, not a startup snapshot. A body edited from APPROVE to BLOCK during the wait must
+        # be seen, and an `adversary-required` label added mid-wait must be honoured.
+        doc = attempt(pr_doc, a.repo, a.pr)
+        cur = None
+        if doc is not None:
+            try:
+                cur = doc["head"]["sha"]
+            except (KeyError, TypeError):
+                cur = None
+            s["pr_doc"] = doc
         if cur is not None and cur.lower() != head:
             return finish("head-moved", EXIT_MOVED, cur)
         if cur is not None:
