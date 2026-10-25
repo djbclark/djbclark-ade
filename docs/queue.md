@@ -827,6 +827,14 @@ petitions; it does not intercept Claude Code's own tool calls, MCP calls (`WebSe
 `2fado ask`. Overlaps: the SF-Q16 item below (Paseo Telegram plugin replacing Hermes's relay, blocked on a Paseo version range), `hermes-ping`, Hermes's
 `permissions_respond`, `/helm`, and Herald (spoken waiting alert). Ties to the "ask before costly steps" rule in `feedback_heavy_web_search`.
 
+## ade-git-guard (PR 59) residuals from adversary round 8 (2026-10-25)
+
+Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry run's ref lines) and N3 (`--namespace` not passed to the dry run); the repair slice
+`iso-w1-r8fix` also takes N2, N4 (text only) and N5. Left open on purpose (djbclark ruling 2026-10-25, report `adv-iso-w1-r8-report.md` B6 and B7):
+1. **N6, low**: without `-v` the porcelain listing omits up-to-date refs, so a claimed `refs/heads/X` behind a glob or mirror mapping that is unchanged at dry-run time but moves
+   on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
+2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
+
 ## Software factory, Phase F (decided 2026-10-19)
 
 Proposal §8 item 9 and §9.3. Starts after Phase 1's first PR. First slices: `bin/factory` F1
