@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import plugin, { createGuard, loadPolicy } from "./index.js";
 
 async function fixture() {
@@ -147,6 +148,10 @@ test("native V2 adapter registers real hooks and a session-scoped compact tool",
   assert.match((await tools[0].execute({}, { sessionID: "ses_one" })).content, /accepted/);
   assert.deepEqual(await rpc.handlers.compact({ sessionID: "ses_one" }), { accepted: false }, "RPC and tool share pending admission");
   assert.equal(f.calls.length, 1);
+  const status = await rpc.handlers.status({ sessionID: "ses_one" });
+  assert.equal(status.known, true);
+  assert.equal(status.pending, true);
+  assert.equal(f.calls.length, 1, "status must never request compaction");
   await cleanup();
 });
 
@@ -172,6 +177,7 @@ test("a failed lookup never becomes an uncertain write or permanent pending stat
   const original = f.ctx.session.get;
   f.ctx.session.get = async () => { throw new Error("temporary read failure"); };
   await f.step(150000);
+  assert.equal(await f.guard.manual("ses_one"), false);
   assert.equal(f.calls.length, 0);
   f.ctx.session.get = original;
   f.advance(300000); await f.step(160000);
@@ -184,4 +190,15 @@ test("manual calls share automatic cooldown and ineffective-baseline protection"
   await f.step(145000); f.advance(300000);
   assert.equal(await f.guard.manual("ses_one"), false);
   assert.equal(f.calls.length, 1);
+});
+
+
+test("native directory scope is literal shell data, including quotes and substitutions", async () => {
+  const f = await fixture(); await f.context();
+  f.ctx.location.directory = "/repo's dir $(false)\nline";
+  const event = { tool: "shell", sessionID: "ses_one", input: { command: "printf '%s' \"$ADE_OPENCODE_DIRECTORY\"" } };
+  f.guard.onTool(event);
+  const result = spawnSync("/bin/sh", ["-c", event.input.command], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, f.ctx.location.directory);
 });

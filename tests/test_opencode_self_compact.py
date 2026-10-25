@@ -3,6 +3,8 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
+import sys
 from pathlib import Path
 import subprocess
 
@@ -89,3 +91,23 @@ def test_self_slash_refuses_unverified_native_lifecycle(setup, command):
                             capture_output=True, text=True, check=False)
     assert result.returncode == 2
     assert "native" in result.stderr
+
+
+def test_native_self_slash_preserves_the_callers_cli_path(setup, tmp_path):
+    binary = tmp_path / "bin" / "opencode"
+    binary.parent.mkdir()
+    marker = tmp_path / "native-call.json"
+    binary.write_text("#!" + sys.executable + "\nimport json,sys\nfrom pathlib import Path\n" +
+                      "Path(" + repr(str(marker)) + ").write_text(json.dumps(sys.argv[1:]))\n" +
+                      "print(json.dumps({'output': {'accepted': False}}))\n")
+    binary.chmod(0o755)
+    env = {**os.environ, "PATH": str(binary.parent) + os.pathsep + os.environ["PATH"],
+           "BASH_ENV": "/dev/null"}
+    env.pop("ENV", None)
+    result = subprocess.run([str(ROOT / "bin/self-slash"), "/compact"], env=env,
+                            capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 7, result.stderr
+    args = json.loads(marker.read_text())
+    assert args[:2] == ["api", "post"]
+    assert args[2].startswith("/api/rpc/ade.go-context/compact?")
+    assert json.loads(args[4]) == {"input": {"sessionID": "ses_abc123"}}

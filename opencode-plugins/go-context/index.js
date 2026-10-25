@@ -173,14 +173,19 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
 
   async function manual(sid) {
     if (!SID.test(sid ?? "")) return false;
-    const response = await ctx.session.get({ sessionID: sid });
+    let response;
+    try { response = await ctx.session.get({ sessionID: sid }, { signal: AbortSignal.timeout(10000) }); }
+    catch { return false; }
     const info = response?.data ?? response;
     if (info?.id !== sid || info.model?.providerID !== "opencode-go") return false;
     const state = remember(sid, info.model);
     if (!state) return false;
     return request(sid, state);
   }
-  return { onContext, onEvent, onTool, manual, streamStopped: () => { streamAvailable = false; } };
+  const status = (sid) => ({ ready: storageReadable && streamAvailable,
+    known: states.has(sid), pending: states.get(sid)?.pending ?? false,
+    blocked: states.get(sid)?.blocked ?? false, attemptAt: states.get(sid)?.attemptAt ?? 0 });
+  return { onContext, onEvent, onTool, manual, status, streamStopped: () => { streamAvailable = false; } };
 }
 
 export default {
@@ -190,10 +195,14 @@ export default {
     const registrations = [
       await ctx.rpc.register({
         id: "ade.go-context", events: {}, methods: { compact: {
-          input: { type: "object", properties: { sessionID: { type: "string", pattern: "^ses_[A-Za-z0-9]+$" } }, required: ["sessionID"], additionalProperties: false },
+          input: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
           output: { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"], additionalProperties: false },
+        }, status: {
+          input: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
+          output: { type: "object", properties: { ready: { type: "boolean" }, known: { type: "boolean" }, pending: { type: "boolean" }, blocked: { type: "boolean" }, attemptAt: { type: "number" } }, required: ["ready", "known", "pending", "blocked", "attemptAt"], additionalProperties: false },
         } },
-      }, { compact: async ({ sessionID }) => ({ accepted: await guard.manual(sessionID) }) }),
+      }, { compact: async ({ sessionID }) => ({ accepted: await guard.manual(sessionID) }),
+           status: async ({ sessionID }) => guard.status(sessionID) }),
       await ctx.session.hook("context", guard.onContext),
       await ctx.tool.hook("execute.before", guard.onTool),
       await ctx.tool.transform((editor) => editor.add({

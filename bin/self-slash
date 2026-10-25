@@ -136,6 +136,9 @@
 # slash command only accepts the autocomplete, so up to two more Enters are sent
 # while the text (or its menu row) is still on screen (verified 2026-10-10 with
 # /rename; /quit left its menu row open, cursor-agent 2026.10.01).
+# Preserve the tool caller's OpenCode selection. GNU tools for host controllers
+# may live in Homebrew, but its opencode can be a different install.
+self_slash_caller_path="$PATH"
 export PATH="/opt/homebrew/bin:$PATH"
 set -u
 # An inherited BASHOPTS=nocasematch (bash >= 4.1 applies it at startup) would make every `case`
@@ -210,8 +213,8 @@ if [ -n "${ADE_OPENCODE_SESSION_ID:-}" ]; then
         echo "self-slash: native compact takes no lifecycle or --then options" >&2; exit 2
       fi
       native_helper="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/opencode-self-compact"
-      if [ "$dry" = 1 ]; then exec python3 "$native_helper" --dry-run; fi
-      exec python3 "$native_helper";;
+      if [ "$dry" = 1 ]; then PATH="$self_slash_caller_path" exec python3 "$native_helper" --dry-run; fi
+      PATH="$self_slash_caller_path" exec python3 "$native_helper";;
     "/compact "*|/new|/clear|/reset|/quit|/exit|"/new "*|"/clear "*|"/reset "*|"/quit "*|"/exit "*)
       echo "self-slash: native OpenCode accepts /compact without focus; resets need an owned handoff and a verified successor, never a parent terminal clear" >&2; exit 2;;
   esac

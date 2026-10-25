@@ -39,8 +39,17 @@ else:
 ```
 
 New OpenCode locations load it through V2 plugin discovery. Existing servers
-may retain already-loaded plugins; confirm `ade.go-context` through the native
-plugin listing for the actual location before relying on it. Do not restart a
+may retain already-loaded plugins. Confirm setup with the read-only status RPC:
+
+```bash
+opencode api post '/api/rpc/ade.go-context/status?location[directory]=/absolute/project' --data '{"input":{"sessionID":"ses_probe"}}'
+```
+
+`output.ready: true` proves that this location loaded the guard; `known: false`
+is expected for a nonexistent probe session. Status never looks up or compacts
+the probe session. A cold `/api/plugin` listing may be empty before plugin
+initialization; it is not sufficient negative evidence. Use status on the actual
+server/location before relying on the guard. Do not restart a
 server or interrupt another session to activate a cost guard. Installation and
 native loading are separate evidence from offline guard tests.
 
@@ -68,3 +77,8 @@ Primary contracts: [compaction](https://opencode.ai/v2/docs/compaction),
 [native plugin hooks](https://opencode.ai/v2/docs/build/plugins), and
 [discovery](https://opencode.ai/v2/docs/plugins); checked against installed
 OpenCode V2.1.4 and the current native SDK declarations on 2026-10-25.
+
+The native RPC validator rejects JSON Schema regex patterns by default. Session
+IDs are validated by the guard before any lookup/write; keep RPC transport
+schemas simple. Verify the real RPC adapter, not only an SDK mock or cold
+plugin listing, when changing this surface.

@@ -32,7 +32,7 @@ def main(argv=None):
     route = "/api/rpc/ade.go-context/compact?" + urlencode({"location[directory]": directory})
     try:
         result = invoke(["opencode", "api", "post", route, "--data", json.dumps({"input": {"sessionID": sid}})],
-                                capture_output=True, text=True, timeout=20, check=False)
+                                capture_output=True, text=True, timeout=45, check=False)
         if result.returncode:
             print("self-slash: native Go guard unavailable or request uncertain; do not retry blindly", file=sys.stderr)
             return 11
@@ -44,8 +44,8 @@ def main(argv=None):
             return 7
         print(f"self-slash: native compaction accepted for {sid}; completion is not yet verified")
         return 0
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        print("self-slash: native Go guard call failed or is uncertain; no automatic retry", file=sys.stderr)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f"self-slash: native Go guard call failed or is uncertain ({type(error).__name__}); no automatic retry", file=sys.stderr)
         return 11
 
 

@@ -70,6 +70,20 @@ a cost optimization: an unused speculative summary still costs tokens.
 
 ## 4. Verification
 
+On 2026-10-25 the actual guard loaded on an isolated OpenCode 2.1.4 server and
+answered its read-only status RPC (`ready: true`, no probe session known).
+The native `self-slash` path also reached the guard and refused a nonexistent
+session through the real RPC transport. Both probes used a temporary HOME and
+private server, with zero inference or compaction calls. This verifies setup
+and transport, not a paid production compaction or real event sequence.
+A cold plugin listing did not initialize plugins; checking that proxy alone
+would have produced a false negative. Native RPC schemas also reject regex
+patterns by default, so the guard validates session IDs in code. Isolate shell
+startup too (`BASH_ENV=/dev/null`, no `ENV`) in native test wrappers; a user
+startup file can replace the test PATH. The native `self-slash` branch preserves
+the caller's CLI selection rather than forcing a Homebrew copy.
+
+
 Test offline with fake native APIs and separate temporary session state. Cover
 provider/session identity, concurrent and duplicate requests, uncertain writes,
 compaction completion, out-of-order usage, fixed-baseline loops and parent
