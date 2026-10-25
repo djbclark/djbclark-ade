@@ -85,7 +85,7 @@ class Harness(unittest.TestCase):
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
         names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
                  "paseo_run", "paseo_inspect", "paseo_probe", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY", "DEFER_DIR", "DEFER_POLL",
-                 "spawn_deliverer", "own_cwd"]
+                 "spawn_deliverer", "own_cwd", "forced_tag"]
         saved = {n: getattr(relay, n) for n in names}
         saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record", "pane_procs", "ancestors")}
         self.addCleanup(lambda: [setattr(relay, n, v) for n, v in saved.items()])
@@ -93,6 +93,7 @@ class Harness(unittest.TestCase):
         relay.fleet.pane_procs = lambda pane: (None, None)    # never the live herdr: a test that needs a pane's processes sets them
         relay.fleet.ancestors = lambda: set()    # hermetic: the test runner's real ancestry (a herdr pane, a Paseo agent) is not under test
         relay.claude_socket = lambda s: None
+        relay.forced_tag = lambda listed: ""    # the pane and launch routes type a sender header (2026-10-25, A1): off here, so the retry and leftover tests keep plain texts; test_relay_sender_header.TestEveryRouteTypesAHeader runs the real one
         relay.own_cwd = lambda: "/work/here"    # a row with no cwd is named by the directory of the process: pinned
         relay.socket_send = lambda sock, sender, text: self.calls.append("socket") or True
         relay.type_line = lambda chan, text: self.calls.append("type") or True
@@ -2348,7 +2349,7 @@ class TestRound7(Harness):
 
     def test_two_relays_to_one_pane_do_not_both_type(self) -> None:
         s = sess()
-        c = {"s": s, "a": argparse.Namespace(wait=0, idle=None), "text": "hello there friend"}
+        c = {"s": s, "a": argparse.Namespace(wait=0, idle=None), "text": "hello there friend", "listed": []}
         inside, release = threading.Event(), threading.Event()
 
         def slow_type(chan: Any, text: str) -> bool:

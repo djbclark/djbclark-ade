@@ -388,6 +388,12 @@ def sender_tag(listed):
     return f"[relay from {sender_header_name(listed)}] "
 
 
+def forced_tag(listed):
+    """'[relay from NAME] ' for a route nobody else labels (a pane, an ACP launch inbox; route_hermes builds the same): `sender_tag`, but a
+    Paseo-hosted sender gets its header too, since Paseo labels only what `paseo send` carries (2026-10-25, adversary round 1 A1)."""
+    return sender_tag(listed) or f"[relay from {sender_header_name(listed)}] "
+
+
 def probe_proof(tx, mark, probe):
     """A zero-argument proof for the --ack watch: 'delivered' once the JSON-escaped PROBE is in transcript TX after byte
     MARK, else None (also while the transcript is absent)."""
@@ -1305,16 +1311,28 @@ def retry_leftover(c, chan, d, left):
 
 
 def route_pane(c):
-    s, a, text = c["s"], c["a"], c["text"]
+    s, a, raw = c["s"], c["a"], c["text"]
     why = refusal(s)
     if why and a.idle and s.get("agent") != "claude" and s.get("status") == "working" and not s.get("host") == "acp":
         if pane_idle(s, a.idle):
             why = refusal(s)
     if why:
         return ("skip", why)
-    if is_slash(text) or text.lstrip(SLASH_STRIP).startswith("!"):
+    if is_slash(raw) or raw.lstrip(SLASH_STRIP).startswith("!"):    # on the raw text: the header below starts with `[`
         return ("skip", "text starting with '/' or '!' typed into a pane would run a built-in or a shell command "
                         "there; peers do not run another session's built-ins")
+    text = forced_tag(c["listed"]) + raw    # every typed text starts `[relay from ...]`, the reverse contact (2026-10-25)
+    c["text"] = c["text_sent"] = text    # pane_send, the lock hash and the delivery proofs all look for exactly this text
+    try:
+        res = pane_locked(c, s, text)
+    finally:
+        c["text"] = raw    # a later route (socket, after a skip) tags the raw text itself
+    if res[0] == "skip":
+        c.pop("text_sent", None)
+    return res
+
+
+def pane_locked(c, s, text):
     sending = None
     for _ in range(PANE_LOCK_ASKS):
         with pane_lock(s["id"], text) as got:    # from the box read until the text is recorded: two relays never type into one box
@@ -1490,12 +1508,14 @@ def route_launch(c):
         import launch  # noqa: PLC0415
     except ImportError as e:
         return ("skip", f"launch.py not importable: {e}")
+    tagged = forced_tag(c["listed"]) + c["text"]    # an inbox line is read as the next prompt: it carries the reverse contact too
     with launch.turn_lock():    # the check and the write are one step, as in `launch.py reply`
         why = launch.reply_refusal(d["id"])
         if why:
             return ("skip", why)
-        if not launch.inbox_send(d, c["text"]):
+        if not launch.inbox_send(d, tagged):
             return ("skip", f"inbox {d.get('inbox')} is gone")
+    c["text_sent"] = tagged
     return ("ok", f"launch inbox {d['id']}", "queued")
 
 
