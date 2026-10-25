@@ -835,12 +835,19 @@ Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry 
    on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
 2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
 
-## ade-git-guard (PR 59): round 9 BLOCK on 7df76ad, paused for a design call (2026-10-25)
+## ade-git-guard (PR 59): redesign O2 adopted after round 9 BLOCK on 7df76ad (djbclark, 2026-10-25)
 
-Round 9 (Opus, `adv-iso-w1-r9-report.md`) closed N1 and N3 (no false refusals, 723 tests, four mutations red) but BLOCKed on F1: `git --attr-source HEAD <write>` and
-`git --shallow-file /dev/null fetch origin +main:cb` move a claimed branch with rc 0, because `parse_git_argv` skips an unknown global option as one token and its separate
-value becomes the subcommand. Fix as the adversary asks: put both in `GLOBAL_VALUE` and fail closed on any unknown leading option. F2: `docs/git-guard.md` says N6 and N7
-are queued here; the entries above are those. djbclark (2026-10-25) paused PR 59 for a design call after nine rounds of parser bypasses; nothing is dispatched.
+Round 9 (Opus, `adv-iso-w1-r9-report.md`) BLOCKed on F1: `git --attr-source HEAD <write>` and `git --shallow-file /dev/null fetch origin +main:cb` move a claimed branch with rc 0, because
+`parse_git_argv` skips an unknown global option as one token. After nine rounds of argv-spelling bypasses djbclark asked for a design consult: web research (`dcg`, `cc-safety-net` are argv-pattern
+guards, both "not a sandbox"; GitLab Gitaly uses `reference-transaction` in production) and a Fable 5.1 frontier consult (`frontier-pr59-design-report.md`). Measured 2026-10-25 on git 2.56.0: a
+`reference-transaction` hook refused both round-9 spellings, `branch -f` and `update-ref`, allowed unrelated ops, and was disabled only by `-c core.hooksPath=...`.
+**Decision: O2.** `reference-transaction` (prepared) and `pre-push` hooks in the repo's common git dir are the ref enforcement, fail-open on a hook crash, humans exempt; the shim shrinks on the same
+branch to fail-closed rules the hooks cannot see (config keys that disable hooks, `push --no-verify`, foreign-workspace read-only allowlist, `worktree` verbs, `branch -m/-c` destinations, unknown
+option or subcommand = refused); the fetch/push preflights, output-file rules and shell-string `check` analyser go. Proof test: every r7-r9 argv form through the real git must fail with the claimed ref
+unmoved. Build slice `o2-build-pr59` (Sonnet 5.5 via omp) dispatched 2026-10-25; then ONE adversary round with a new brief (argv spelling out of scope; ask for ref writes without a transaction, hook
+disabling through config, no-ref harms in a foreign tree, false refusals of the owner). Open follow-ups: upstream report that `branch -m/-c` destinations are not reported to the hook (files backend);
+config-based hooks (git 2.54+) as an install route, verify composition first; wire `ade-git-guard install` into `cow-pasture`, `acp-dispatch` and `acp-run` (W2/W3/W4). F2 (docs pointer to the N6/N7
+entries) is moot once `docs/git-guard.md` is rewritten.
 
 ## acp-dispatch launchd label with a slash (PR 62, merged e15aeb9, 2026-10-25): lows from adversary round 1
 
@@ -1624,7 +1631,7 @@ The fork carries the fix as branch `djbclark/short-postcompact-hook` (upstream
 `main` + the PR commit, rebased 2026-10-10, **not built**). Build it only if
 djbclark asks; once a release ships #25211, delete that branch.
 
-## Review the Jev-vs-GLiDE dual review (ends by 2026-10-23)
+## Review the Jev-vs-GLiDE dual review — DONE 2026-10-25 (findings; djbclark chose Jev-only shadow)
 
 **Started 2026-10-11 (operator).** The Jev-only prompt-effort review was closed the
 same day; see `docs/jev.md` "Dual review". Jev and GLiDE answer the same prompt-effort
@@ -1634,6 +1641,12 @@ days; the window closes itself (mode goes off). On 2026-10-23 run
 agent-choice --between`, label disagreements, then ask djbclark per backend: act, keep
 shadow, or off. A self-removing launchd job (`com.djbclark.jev-remind-2026-10-23`)
 pings Hermes that morning.
+
+**Outcome (2026-10-25).** Report `jev-dual1-review-report.md` (bigteam task `ade-queue-build-2026-10-24`): nothing met the promotion bar. The agent-choice rows are 97.5% pytest fixtures; every timeout
+hit both backends at once (shared deadline); 44% of prompt-effort rows are Herald voice-announcer prompts; no operator labels exist. On 36 decided disagreement rows (one agent's reading) GLiDE was
+right 21, Jev 11, neither 4. djbclark chose to restore Jev-only shadow: `bin/jev review stop` and `~/.config/jev/backends` removed (copy was `jev,glide`), mode `shadow`. Findings a later window would need:
+fixtures run with `JEV_MODE=off`, the hook skips non-human prompts, the report's default `--since` follows the review window, separate deadlines per backend, a per-site backends setting.
+
 
 ## Why the `sed` edit failed twice (queued 2026-10-14, operator) — DONE 2026-10-14
 
