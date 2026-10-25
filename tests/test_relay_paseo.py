@@ -337,12 +337,19 @@ class RelayPaseo(unittest.TestCase):
             self.assertIn("built-ins", err)
         self.assertFalse(self.sends())
 
-    def test_an_empty_or_junk_paseo_agent_id_still_gets_the_sender_tag(self) -> None:
+    def test_an_empty_or_junk_paseo_agent_id_does_not_identify_the_sender(self) -> None:
+        # a junk id names nobody: the send is refused (exit 4, nothing sent) unless the caller declares a label
         for value in (" ", "", "not-a-uuid"):
             os.environ["PASEO_AGENT_ID"] = value
+            os.environ.pop("RELAY_SENDER_NAME", None)
+            sent = len(self.sends())
             rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
-            self.assertEqual(rc, 0, err)
-            self.assertTrue(all("[relay from " in s_ for s_ in self.sends()), (value, self.sends()))
+            self.assertEqual(rc, 4, (value, err))
+            self.assertEqual(len(self.sends()), sent, value)
+            os.environ["RELAY_SENDER_NAME"] = "junk-id-test"
+            rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
+            self.assertEqual(rc, 0, (value, err))
+            self.assertTrue(all("[relay from " in s_ and "junk-id-test" in s_ for s_ in self.sends()), (value, self.sends()))
 
     def test_slash_text_is_not_refused_in_the_middle_of_a_message(self) -> None:
         rc, _out, err = self.main([sess()], SID, "see /tmp/x and /clear", "--wait", "1")
