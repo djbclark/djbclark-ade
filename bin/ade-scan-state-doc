@@ -78,6 +78,16 @@ def gitdir_values(raw_p, ck):
     return (raw_p, raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
 
 
+# the same command for a checkout the scan recorded with a gitfile that points outside it: there the paste's whole job is
+# this archive, so a `.git` that is no longer a file (replaced, or the paste run in another directory) fails loudly
+# instead of exiting 0 with nothing archived (adversary round 70 on PR 39, INFO 3)
+GITDIR_REQUIRED_FMT = "[ -f {}/.git ] || {{ echo 'gitdir capture FAILED: .git is not a file' >&2; false; }} && " + GITDIR_FMT
+
+
+def gitdir_required_values(raw_p, ck):
+    return (raw_p,) + gitdir_values(raw_p, ck)
+
+
 # a `.git` SYMLINK (`skipped: .git is a symlink`): chdir follows the link, so its target is archived behind the same
 # git-directory test; a link to a gitfile or to anything else fails loudly, archiving nothing (round 43)
 # (a link to a linked worktree's administration directory has `HEAD` and `commondir` but no `objects/` or `refs/` of its
@@ -673,8 +683,13 @@ def render(d):
                 gitdir = ("the `.git` symlink's target holds the history (the scan read nothing there): archive it too: "
                           + shcode(SYMLINK_GITDIR_FMT, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar"))
             else:
+                # the scan saw a gitfile whose git directory is outside the checkout: the command must fail, not skip, when
+                # `.git` is no longer a file at paste time (GITDIR_REQUIRED_FMT)
+                outside = any(isinstance(t, str) and t.startswith("git dir -> ") for t in (c.get("linked_stores") or [])[:4])
                 gitdir = ("when `.git` is a file the directory it points to and that one's common directory hold the "
-                          "history, archive them too: " + shcode(GITDIR_FMT, *gitdir_values(raw_p, ck)))
+                          "history, archive them too: "
+                          + (shcode(GITDIR_REQUIRED_FMT, *gitdir_required_values(raw_p, ck)) if outside
+                             else shcode(GITDIR_FMT, *gitdir_values(raw_p, ck))))
             # a module, or the checkout itself (the record then carries `alternates`, whatever the reason it was skipped:
             # adversary round 64), whose `objects/info/alternates` is not empty keeps commits in another object store that
             # neither archive above holds (Codex thread 10 on PR 27): say so, and refuse the cleanup until they are bundled.
@@ -703,7 +718,7 @@ def render(d):
             if covered:
                 alt_what += " and a git directory outside the checkout"
                 alt_warn += (" **the checkout's git directory is outside it (the gitfile does not point back to the checkout): the git-dir command "
-                             "above archives it and its common directory when each is a git directory (and refuses loudly when not): run it "
+                             "above archives it and its common directory when each is a git directory (and refuses loudly when not, and when `.git` is no longer a file): run it "
                              "before any cleanup**; the links, as `<member> -> <target>`: "
                              + ", ".join(shcode("{}", t) for t in covered) + ".")
                 alt_need += "; **do not clean up before the git-dir archive command has run**"
@@ -754,6 +769,15 @@ def render(d):
         what, cmd, need = [], [], "no"
         head_row = False
         covered_by_bundle = False
+        # a shallow checkout's bundle holds no boundary parents, so `git clone` of it alone fails (rc 128): it restores only
+        # by fetching into a clone of origin (adversary round 70 on PR 39, LOW)
+        # `git clone --bare` then a forced fetch into `refs/bundle/*`: a plain clone refuses to fetch into its checked-out
+        # branch, and an origin that moved on rejects a non-forced update (adversary round 1 on PR 47, MEDIUM 2); a
+        # `HEAD.bundle` holds only the ref `HEAD`, which `refs/*` does not match (MEDIUM 1)
+        def _shallow_note(spec):
+            return (" (shallow checkout: the bundle cannot be cloned alone; restore with `git clone --bare <origin> R`, then "
+                    f"`git -C R fetch <bundle> '{spec}'`, so keep origin)") if c.get("shallow") else ""
+        shallow_note = _shallow_note("+refs/*:refs/bundle/*")
         # no rule keyed on a path name: a checkout called `one-offs/Hermes` used to get "see `~/src/one-offs`" and no
         # command of its own, whatever repository it was (adversary round 30 on PR 27)
         if "no origin remote" in c["flags"]:
@@ -780,6 +804,7 @@ def render(d):
                                   ck, raw_p, f"{ck}/HEAD.bundle")
                            + " (detached HEAD: bundle, or create a branch first: "
                            + shcode("git -C {} switch -c <name>", raw_p) + ")")
+                cmd[-1] += _shallow_note("+HEAD:refs/bundle/HEAD")
                 need = "yes: HEAD names no branch; bundle it, or name a branch first"
             else:
                 what.append(f"{head_ahead} commit(s) on {code('{}', c['branch'])}")
@@ -791,13 +816,13 @@ def render(d):
                     # a bundle of every ref can hold the commits (Codex pass 48 on PR 27, P1)
                     bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                     ck, raw_p, f"{ck}/all-refs.bundle")
-                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if no_push else ""))
+                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if no_push else "") + shallow_note)
                     need = cred_need if no_push else "yes: bundle it; the branch name cannot be typed into a push"
                 else:
                     push = shcode("git -C {} -c core.hooksPath=/dev/null push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
                     bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
                                     ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"])
-                    cmd.append(bundle + cred_note if no_push else push + " or " + bundle)
+                    cmd.append((bundle + cred_note if no_push else push + " or " + bundle) + shallow_note)
                     need = cred_need if no_push else "yes: pushing a branch publishes it; pick push or bundle"
         if local_n and not covered_by_bundle:
             # commits on other local branches, tags (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
@@ -833,6 +858,8 @@ def render(d):
                 cmd.append(bundle + ODD_NAME_NOTE)  # one bundle holds every ref; no push can name the odd one
             else:
                 cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
+            if c.get("shallow"):
+                cmd[-1] += shallow_note
             need = need if need.startswith(("yes", "**yes")) else (
                 cred_need if no_push else "yes: bundle it; a push would leave commits on other refs behind" if (num(c.get("local_only_other_refs")) or more > 0)
                 else "yes: pushing a branch publishes it; pick push or bundle")
@@ -848,6 +875,8 @@ def render(d):
                             "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
             cmd.append(bundle + cred_note if no_push else shcode("git -C {} -c core.hooksPath=/dev/null push origin --tags", raw_p) + " or " + bundle
                        + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
+            if c.get("shallow"):
+                cmd[-1] += shallow_note
             need = need if need.startswith(("yes", "**yes")) else (
                 cred_need if no_push else "yes: pushing a tag publishes it; pick push or bundle")
         if c.get("lfs_store"):
@@ -936,7 +965,7 @@ def render(d):
             else:
                 cmd.append(shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                   ck, raw_p, f"{ck}/local-only.bundle")
-                           + " " + again)
+                           + shallow_note + " " + again)
             need = need if need.startswith(("yes", "**yes")) else (
                 "yes: origin not queried (its url holds a credential or names a remote helper); bundle" if credential
                 else "yes: origin did not answer; bundle, or re-scan")
