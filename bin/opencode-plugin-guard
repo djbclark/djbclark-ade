@@ -7,14 +7,14 @@
 # rejects at load. `openusage integrations upgrade opencode` and
 # `rtk init -g --opencode` therefore silently revert a working plugin. The
 # canonical copies here are the patched files; this guard restores them only
-# when the v2 shape is missing.
+# when the v2 shape is missing, or migrates the exact known unsafe RTK shim.
 #
 #   opencode-plugin-guard --check   report only, change nothing
 #   opencode-plugin-guard           restore what is missing (default)
 #
 # Idempotent and non-destructive: a live file that already has the v2 shape and
-# differs from the canonical copy is treated as an upstream fix (or a deliberate
-# local edit) and left alone. See djbclark-ade/docs/opencode-plugin-v2.md.
+# differs from the canonical copy is left alone. Unknown RTK copies are flagged
+# for review; a v2 export alone does not prove permission safety. See djbclark-ade/docs/opencode-plugin-v2.md.
 #
 # Exit codes: 0 ok / nothing to do; 1 something was restored or needs attention.
 
@@ -25,7 +25,6 @@ CANONICAL_DIR="${OPENCODE_PLUGIN_GUARD_CANONICAL:-$HOME/src/djbclark-ade/opencod
 CONFIG_DIR="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 LIVE_DIR="$CONFIG_DIR/plugins"
 STATE_DIR="$HOME/.local/state/opencode-plugin-guard"
-SENTINEL="$STATE_DIR/obsolete"
 CHECK=0
 [ "${1:-}" = "--check" ] && CHECK=1
 
@@ -43,7 +42,7 @@ has_v2() {
   ggrep -qE '(^|[^[:alnum:]_])(setup|effect)([^[:alnum:]_]|$)' "$f" 2>/dev/null
 }
 
-sha() { shasum -a 256 "$1" 2>/dev/null | gawk '{print $1}'; }
+sha() { python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()[:12])' "$1"; }
 
 # upstream_or_drift <name> <live> <canonical> — v2 present but not our bytes.
 upstream_or_drift() {
@@ -74,21 +73,42 @@ handle() {
     log "  $name: no canonical copy at $canonical — skipping"
     return
   fi
-  if has_v2 "$file"; then
-    upstream_or_drift "$name" "$file" "$canonical"
-    return
+  local unsafe_rtk=0
+  if [ "$name" = rtk ] && [ -f "$file" ]; then
+    # Only our exact former managed copy is automatically migrated. Preserve
+    # custom/upstream code for review; pending requests never prove it safe.
+    if python3 - "$file" <<'PYHASH'
+import hashlib, pathlib, sys
+known = "8e46510ecdc95d4268838e435d33752d179675a6005b8de2483c7355b5d7da44"
+sys.exit(0 if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == known else 1)
+PYHASH
+    then unsafe_rtk=1; fi
   fi
-  log "  $name: v2 shape MISSING in $file"
+  if [ "$unsafe_rtk" = 1 ]; then
+    log "  rtk: known unsafe automatic rewrite shim; migrate to disabled entrypoints"
+  elif has_v2 "$file"; then
+    if [ "$name" = rtk ] && ! cmp -s "$file" "$canonical"; then
+      log "  rtk: unknown v2 copy preserved; permission safety needs review"
+      rc=1
+    else
+      upstream_or_drift "$name" "$file" "$canonical"
+    fi
+    return
+  else
+    log "  $name: v2 shape MISSING in $file"
+  fi
   if [ "$CHECK" = 1 ]; then
     log "    would restore from $canonical"
     rc=1
     return
   fi
+  file="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$file")"
+  mkdir -p "$(dirname "$file")"
   local tmp="$file.new.$$"
   cp "$canonical" "$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$file" # atomic replace; OpenCode's watcher reloads it
-  log "    restored $(basename "$file") from canonical (sha $(sha "$file" | gcut -c1-12))"
+  log "    restored $(basename "$file") from canonical (sha $(sha "$file"))"
   rc=1
 }
 
@@ -128,32 +148,12 @@ PY
 
 log "opencode-plugin-guard $( [ "$CHECK" = 1 ] && echo '(check)' || echo '(enforce)') — $(gdate -u +%Y-%m-%dT%H:%M:%SZ)"
 
-if [ -f "$SENTINEL" ]; then
-  log "  sentinel $SENTINEL present: both plugins are upstream-v2. Nothing to do."
-  log "  Ask the operator to delete the Jobber job + this script."
-  exit 0
-fi
-
+# An old obsolescence sentinel is not evidence of permission safety. Always
+# inspect the managed files; never execute `rtk hook opencode` as a probe.
 handle rtk "$LIVE_DIR/rtk.ts" "$CANONICAL_DIR/rtk.ts"
 handle openusage "$LIVE_DIR/openusage-telemetry.ts" "$CANONICAL_DIR/openusage-telemetry.ts"
 strip_plugin_entry
 
-# Obsolescence: rtk's own v2 ships `rtk hook opencode`; openusage's ships a v2
-# export. When both are upstream-owned, retire.
-rtk_done=0
-if command -v rtk >/dev/null 2>&1 && rtk hook opencode >/dev/null 2>&1; then rtk_done=1
-elif [ -f "$STATE_DIR/upstream-v2-rtk" ]; then rtk_done=1; fi
-ou_done=0
-[ -f "$STATE_DIR/upstream-v2-openusage" ] && ou_done=1
-
-if [ "$rtk_done" = 1 ] && [ "$ou_done" = 1 ]; then
-  if [ "$CHECK" = 1 ]; then
-    log "  both plugins look upstream-v2 (would retire)"
-  else
-    gtouch "$SENTINEL"
-    log "  both plugins look upstream-v2 — wrote $SENTINEL"
-    "$HOME/.local/bin/hermes-ping" "djbclark-ade: opencode-plugin-guard is obsolete (both plugins upstream-v2); delete the Jobber job + bin/opencode-plugin-guard" || true
-  fi
-fi
-
+# Retirement requires an explicit review of the upstream permission contract,
+# not a default export, a stale drift marker or a successful subcommand.
 exit "$rc"
