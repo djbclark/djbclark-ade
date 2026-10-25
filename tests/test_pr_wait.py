@@ -1499,11 +1499,6 @@ def test_an_empty_body_reports_no_verdict() -> None:
 
 # --- property 6: a BLOCK can never be downgraded ---------------------------------------------
 
-def test_a_block_is_never_downgraded_by_its_reason() -> None:
-    # The round-2 finding: a prose filter deleted a BLOCK whose reason said "never"/"must not".
-    # With a marker there is no reason text to filter, but the invariant is asserted directly.
-    for reason_style in (marker("BLOCK"), marker("BLOCK")):
-        assert not passes(reason_style)
 
 
 def test_a_block_beats_an_approve_for_the_same_head() -> None:
@@ -1523,3 +1518,53 @@ def test_a_malformed_marker_beside_a_good_one_still_reports_the_verdict() -> Non
     body = '<!-- adversary-verdict:v1 {broken -->' + "\n\n" + marker("APPROVE")
     r = adv(body)
     assert r["present"] and r["matches_head"] and r["malformed"]
+
+
+def gate(body: str, required: bool = True, head: str = ADV_HEAD) -> tuple[bool, list[str]]:
+    """Run the REAL gate (`assess`), not a copy of its predicate.
+
+    The first version of these tests only called `adversary_verdict` / a copied predicate, so the
+    gate itself (the blocker names, the report-only default, `malformed` handling) was untested —
+    which is how a malformed BLOCK beside a valid APPROVE reached `merge_ready: true`.
+    """
+    mod = load_module()
+    adv = mod.adversary_verdict(body, head)
+    adv["required_by_label"] = False
+    cr = {"has_any_findings": False, "has_unresolved_findings": False}
+    counts = {"total": 1, "success": 1, "fail": 0, "pending": 0, "skipped": 0, "neutral": 0}
+    review = {"for_head": [], "open": [], "finding_comments": {"code": 0, "security": 0}}
+    r = mod.assess(False, "done", counts, "completed", cr, None, head, review, adv, required)
+    return r["merge_ready"], r["adversary_warnings"]
+
+
+def test_the_gate_blocks_a_malformed_marker_beside_a_valid_approve() -> None:
+    # The A1 finding: `assess()` ignored `malformed`, so a typo in a BLOCK let the PR through.
+    for broken in ('{"verdict":"BLOCKED","head":"' + ADV_HEAD + '"}',
+                   '{"verdict":"BLOCK","head":"' + ADV_HEAD[:7] + '"}',
+                   '{"verdict":"BLOCK","head":"' + ADV_HEAD + '"}'):  # the third is unclosed below
+        body = marker("APPROVE") + "\n<!-- adversary-verdict:v1 " + broken
+        ready, warnings = gate(body)
+        assert not ready, body
+        assert warnings == ["adversary-malformed"], warnings
+
+
+def test_the_gate_reports_malformed_as_its_own_warning_not_as_missing() -> None:
+    ready, warnings = gate('<!-- adversary-verdict:v1 {broken -->')
+    assert not ready
+    assert warnings == ["adversary-malformed"]
+
+
+def test_the_gate_passes_a_good_approve() -> None:
+    ready, warnings = gate(marker("APPROVE"))
+    assert ready and warnings == []
+
+
+def test_the_gate_blocks_a_block() -> None:
+    ready, warnings = gate(marker("BLOCK"))
+    assert not ready and warnings == ["adversary-stale-or-blocked"]
+
+
+def test_the_gate_is_report_only_by_default() -> None:
+    ready, warnings = gate(marker("BLOCK"), required=False)
+    assert ready, "a missing/stale verdict must not block without opt-in"
+    assert warnings == ["adversary-stale-or-blocked"], "but it must still be REPORTED"

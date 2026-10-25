@@ -238,17 +238,6 @@ def pr_doc(repo: str, pr: int) -> dict:
         raise GhError(f"pulls/{pr}: unexpected shape: {e}") from e
 
 
-def pr_head(repo: str, pr: int) -> str:
-    doc = pr_doc(repo, pr)
-    try:
-        sha = doc["head"]["sha"]
-    except (KeyError, TypeError) as e:
-        raise GhError(f"pulls/{pr}: no head sha: {e}") from e
-    if not isinstance(sha, str) or not sha:
-        raise GhError(f"pulls/{pr}: no head sha")
-    return sha
-
-
 # ---- CI -------------------------------------------------------------------------------------------
 
 
@@ -283,7 +272,26 @@ def pr_head(repo: str, pr: int) -> str:
 # with broken JSON is reported as `malformed` rather than as an absence. A strict `{...}` regex cannot
 # see a malformed marker at all, which would make a typo indistinguishable from "no verdict".
 MARKER_RE = re.compile(r"<!--\s*adversary-verdict:v1\s*(.*?)\s*-->", re.DOTALL)
+# A marker START with no closing `-->` is invisible to MARKER_RE, and GitHub renders an unclosed
+# `<!--` as a comment to the end of the body, so a human does not see it either. Count the starts and
+# compare with the matches: any excess is malformed (adversary review, A2).
+MARKER_START_RE = re.compile(r"<!--\s*adversary-verdict:", re.IGNORECASE)
 HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+
+
+def _strict_object(pairs):
+    """`object_pairs_hook` that rejects a DUPLICATE key.
+
+    Without it, `{"verdict":"BLOCK","head":H,"verdict":"APPROVE"}` is read last-wins, so a BLOCK is
+    silently downgraded by a second key (adversary review, A3).
+    """
+    seen = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise ValueError(f"duplicate key {k!r}")
+        seen.add(k)
+    return dict(pairs)
+
 
 
 
@@ -299,7 +307,14 @@ def adversary_verdict(body: str, head: str) -> dict:
                 "conflict": False, "malformed": False, "detail": "no PR body"}
 
     matches = MARKER_RE.findall(body)
+    starts = len(MARKER_START_RE.findall(body))
     if not matches:
+        if starts:
+            # A marker START with no `-->`: malformed, NOT absent.
+            return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
+                    "conflict": False, "malformed": True,
+                    "detail": f"{starts} adversary-verdict marker(s) with no closing `-->` "
+                              f"(an unclosed `<!--` runs to the end of the body)"}
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                 "conflict": False, "malformed": False,
                 "detail": "no adversary-verdict marker in the PR body (prose verdicts are not read)"}
@@ -307,9 +322,11 @@ def adversary_verdict(body: str, head: str) -> dict:
     # Validate EVERY marker, so a malformed one beside a good one is still reported.
     parsed: list[dict] = []
     problems: list[str] = []
+    if starts > len(matches):
+        problems.append(f"{starts - len(matches)} marker(s) with no closing `-->`")
     for raw in matches:
         try:
-            doc = json.loads(raw)
+            doc = json.loads(raw, object_pairs_hook=_strict_object)
         except ValueError as e:
             problems.append(f"marker is not valid JSON: {e}")
             continue
@@ -318,13 +335,15 @@ def adversary_verdict(body: str, head: str) -> dict:
             continue
         verdict = doc.get("verdict")
         sha = doc.get("head")
-        if not isinstance(verdict, str) or verdict.upper() not in ("APPROVE", "BLOCK"):
-            problems.append(f"verdict must be APPROVE or BLOCK, got {verdict!r}")
+        # EXACT match: the spec says "APPROVE"|"BLOCK". A lowercase or odd-cased value is outside it
+        # and fails closed (adversary review, A5).
+        if verdict not in ("APPROVE", "BLOCK"):
+            problems.append(f"verdict must be exactly APPROVE or BLOCK, got {verdict!r}")
             continue
         if not isinstance(sha, str) or not HEX40.match(sha):
             problems.append(f"head must be a 40-hex sha, got {sha!r}")
             continue
-        parsed.append({"verdict": verdict.upper(), "head": sha.lower()})
+        parsed.append({"verdict": verdict, "head": sha.lower()})
 
     if not parsed:
         # A marker was present but unusable: its OWN outcome, so a typo is visibly a typo.
@@ -579,16 +598,17 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     (`security-failed`, `security-running`, `security-other-head`), `findings-not-collected`,
     `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
     `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`, plus - ONLY when the
-    adversary gate is switched on (`--adversary-required` or an `adversary-required` label) or a fetch
-    failed - `adversary-missing`, `adversary-stale-or-blocked` or `adversary-fetch-failed`.
+    adversary gate is switched on (`--adversary-required` or an `adversary-required` label), or when a
+    fetch failed or the marker is malformed - `adversary-missing`, `adversary-stale-or-blocked`,
+    `adversary-fetch-failed` or `adversary-malformed`.
 
-    The adversary verdict (added 2026-10-25) is read from the PR BODY. It is always REPORTED in
-    `adversary` / `adversary_warnings`, and it blocks only when opted in, because
-    `merge_ready = not blockers` and a global default would block every PR in the house. A verdict
-    counts ONLY if it is attributable to the adversary and names this head: another reviewer's line, an
-    unqualified APPROVE, one naming a different commit, and a BLOCK all fail the check. A prose mention,
-    a Markdown heading, a fenced code block and a negated APPROVE are not verdicts - every one of those
-    was a real false positive found by reviewing the first version against live PR bodies.
+    The adversary verdict (added 2026-10-25) is read from a MACHINE-READABLE MARKER in the PR body,
+    never from prose: `<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->`.
+    A verdict counts only if the marker is well formed, names exactly APPROVE or BLOCK, and names this
+    head. `malformed` is its own outcome and is NEVER ok, even when a valid APPROVE sits beside it; a
+    BLOCK is never downgraded by anything. Prose verdicts are not read at all - the first version parsed
+    English and three adversary rounds found false approvals and false misses, so that parser was
+    deleted rather than patched.
     """
     mismatch: list[str] = []
     blockers: list[str] = []
@@ -654,16 +674,22 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     adversary_warnings: list[str] = []
     if adversary is not None:
         fetch_failed = bool(adversary.get("fetch_failed"))
-        ok = (not fetch_failed and bool(adversary.get("matches_head"))
+        malformed = bool(adversary.get("malformed"))
+        # A MALFORMED result is never ok, even when a valid APPROVE sits beside it: a typo in a BLOCK
+        # must not let the PR through (adversary review, A1). And `malformed` is its OWN warning, so a
+        # typo does not read as an absence (A4).
+        ok = (not fetch_failed and not malformed and bool(adversary.get("matches_head"))
               and not str(adversary.get("verdict") or "").upper().startswith("BLOCK"))
         if not ok:
             if fetch_failed:
                 adversary_warnings.append("adversary-fetch-failed")
+            elif malformed:
+                adversary_warnings.append("adversary-malformed")
             elif not adversary.get("present"):
                 adversary_warnings.append("adversary-missing")
             else:
                 adversary_warnings.append("adversary-stale-or-blocked")
-            if adversary_required or fetch_failed:
+            if adversary_required or fetch_failed or malformed:
                 blockers.append(adversary_warnings[-1])
     return {"has_any_findings": cr.get("has_any_findings"), "has_unresolved_findings": cr.get("has_unresolved_findings"),
             "security_status": "absent" if sr is None else (sr.get("status") or "unknown"),
@@ -1181,7 +1207,7 @@ def main(argv: list[str]) -> int:
     def collect_adversary() -> bool:
         """Read the adversary verdict from the `pulls/{pr}` document already in hand. NO extra call.
 
-        The verdict lives in the same document `pr_head()` reads (`body` + `labels`), so this reuses
+        The verdict lives in the same document `pr_doc()` reads (`body` + `labels`), so this reuses
         `s["pr_doc"]` rather than hitting the endpoint again. That keeps the call count at one per run
         - which the test harness depends on, because it serves routes by CALL COUNT.
 
