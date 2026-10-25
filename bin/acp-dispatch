@@ -1993,12 +1993,19 @@ def model_values(info: dict) -> list[dict] | None:
     return None
 
 
+# zcode lists each GLM model under builtin:zai\ (API key) and builtin:zai-coding-plan\ (the everyday
+# Coding Plan pool); a bare name means the second. Mirror of acp-run's ZCODE_DEFAULT_PROVIDER.
+ZCODE_DEFAULT_PROVIDER = "builtin:zai-coding-plan\\"
+
+
 def match_model(values: list[dict], want: str) -> tuple[bool, str]:
     """Mirror of acp-run match_value: an exact value or name, else a unique run of dash-separated
     tokens (a trailing "[...]" or "(...)" ignored on both sides), else the same across `:` and `/`
     (hermes: nous:anthropic/claude-x). (ok, why-not)."""
     if any(want in (v.get("value"), v.get("name")) for v in values):
         return True, ""
+    if any(str(v.get("value")).lower() == ZCODE_DEFAULT_PROVIDER + want.lower() for v in values):
+        return True, ""   # zcode: a bare "GLM-5.3" is the coding-plan pool's model
 
     def toks(x: object, split: str) -> list[str]:
         return re.split(split, re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower())

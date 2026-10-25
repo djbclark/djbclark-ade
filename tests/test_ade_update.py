@@ -1039,7 +1039,7 @@ def run_real_se(tmp_path, home, *args, **extra):
                                    CODEX_HOME=str(home / ".codex"), SKILL_EVERYWHERE_ONLY="grokbot", **extra))
 
 
-@pytest.mark.parametrize("kind", ["file-outside", "dir-outside", "dangling", "dir-inside", "fifo-inside"])
+@pytest.mark.parametrize("kind", ["file-outside", "dir-outside", "dangling", "dir-inside", "subdir-inside", "fifo-inside"])
 @pytest.mark.parametrize("with_copy", [True, False])
 def test_the_grokbot_copy_never_dereferences_a_symlink_that_leaves_the_skill(tmp_path, kind, with_copy):
     src = tmp_path / "skills" / "alpha"
@@ -1058,6 +1058,8 @@ def test_the_grokbot_copy_never_dereferences_a_symlink_that_leaves_the_skill(tmp
         os.symlink(tmp_path / "gone", src / "leak")
     elif kind == "dir-inside":  # a directory link can loop (`leak -> .`) or multiply content: refused even in-tree
         os.symlink(".", src / "leak")
+    elif kind == "subdir-inside":  # a link to a real in-tree directory: inside the skill, but `-f` is false (not `.`)
+        os.symlink("sub", src / "leak")
     else:
         os.mkfifo(src / "pipe")
         os.symlink("pipe", src / "leak")
@@ -1100,6 +1102,22 @@ def test_a_report_only_ade_update_asks_the_helper_for_link_targets_only(tmp_path
     monkeypatch.delenv("SKILL_EVERYWHERE_NO_COPY", raising=False)
     assert "SKILL_EVERYWHERE_NO_COPY" not in mod.helper_env(tmp_path)  # canonical checkout: the copy target stays
     assert mod.helper_env(tmp_path, copies=False)["SKILL_EVERYWHERE_NO_COPY"] == "1"
+
+
+def test_an_inherited_no_copy_never_hides_the_grokbot_target_from_a_canonical_run(env, monkeypatch):
+    """PR 37 landing round, LOW g: `helper_env` pops an inherited SKILL_EVERYWHERE_NO_COPY, so a canonical run (which
+    must judge every target) never inherits the report-only setting; the report-only run still sets it itself."""
+    mod = load_module()
+    monkeypatch.setenv("SKILL_EVERYWHERE_NO_COPY", "1")  # inherited, not deleted first
+    assert "SKILL_EVERYWHERE_NO_COPY" not in mod.helper_env(env.machine)
+    assert mod.helper_env(env.machine, copies=False)["SKILL_EVERYWHERE_NO_COPY"] == "1"
+    fake = env.bin / "skill-everywhere"
+    fake.write_text(FAKE_SKILL_EVERYWHERE.format(python=sys.executable).replace(
+        "json.dumps(sys.argv[1:])", 'json.dumps(sys.argv[1:] + [os.environ.get("SKILL_EVERYWHERE_NO_COPY", "")])'))
+    env.se_log.write_text("")
+    r = env.run("--check", repo=env.machine)
+    assert r.returncode in (0, 10), r.stdout + r.stderr
+    assert env.calls() == [["--check", "alpha", ""]]  # the helper under the canonical run never saw the inherited value
 
 
 def test_the_helper_never_renders_a_copy_for_a_non_canonical_checkout(env):

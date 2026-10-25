@@ -605,14 +605,18 @@ DENY_ENV = {
     # opencode's PermissionConfig accepts one action for every tool (config schema,
     # https://opencode.ai/config.json, checked 2026-10-12 against v2.0.27).
     "opencode": {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": "deny"})},
-    # zcode-acp-server reads the start mode from ZCODE_ACP_MODE (no user config
-    # file overrides it here) and passes ZCODE_DISALLOWED_TOOLS to the backend's
-    # --disallowed-tools.
+    # zcode-acp-server reads the start mode from ZCODE_ACP_MODE (no user config file overrides
+    # it here). ZCODE_DISALLOWED_TOOLS and ZCODE_ACP_RUN_ALLOWLIST do NOT reach the backend
+    # through zcode-acp-server (it ignores --disallowed-tools); zcode-denylist-shim.cjs reads
+    # them and sends them as the session's toolDenylist / toolAllowlist (zcode_denylist_shim).
+    # The allowlist is a name no tool has: under deny the session is offered no tool at all,
+    # MCP tools and tools of a later zcode release included.
     "zcode": {
         "ZCODE_ACP_MODE": "plan",
         "ZCODE_DISALLOWED_TOOLS": "Bash Read Write Edit MultiEdit Glob Grep LS WebFetch"
         " WebSearch Task Agent Skill SendMessage TaskOutput TaskStop NotebookEdit TodoWrite"
-        " mcp__*",
+        " CronCreate CronList CronUpdate CronDelete mcp__*",
+        "ZCODE_ACP_RUN_ALLOWLIST": "acp-run-deny-no-tool",
     },
 }
 # --perm read-only per agent (2026-10-19): a session that can read and cannot change anything.
@@ -622,7 +626,8 @@ DENY_ENV = {
 #   codex    the "read-only" session mode (codex-acp 2.2.2 `--info`: sandbox read-only).
 #   opencode OPENCODE_CONFIG_CONTENT permission block: read/glob/grep/list/webfetch/websearch
 #            allow, everything else deny (schema https://opencode.ai/config.json).
-#   zcode    plan mode and ZCODE_DISALLOWED_TOOLS naming only the mutating tools.
+#   zcode    plan mode, plus the backend session's toolDenylist (the mutating tools) and
+#            toolAllowlist (the reading tools only), installed by zcode-denylist-shim.cjs.
 READONLY_SET = {
     "claude": {"mode": "default"},
     "codex": {"mode": "read-only"},
@@ -637,7 +642,10 @@ READONLY_ENV = {
     "zcode": {
         "ZCODE_ACP_MODE": "plan",
         "ZCODE_DISALLOWED_TOOLS": "Bash Write Edit MultiEdit Task Agent Skill SendMessage"
-        " TaskOutput TaskStop NotebookEdit TodoWrite mcp__*",
+        " TaskOutput TaskStop NotebookEdit TodoWrite CronCreate CronList CronUpdate CronDelete"
+        " mcp__*",
+        # only the reading tools: a mutating tool zcode adds later, or an MCP tool, is not offered
+        "ZCODE_ACP_RUN_ALLOWLIST": "Read Glob Grep LS WebFetch WebSearch",
     },
 }
 READONLY_AGENTS = ("claude", "codex", "opencode", "zcode")
@@ -810,6 +818,37 @@ def _zcode_settings(deny, readonly=False):
     (d / "cli" / "setting.json").write_text(json.dumps(base, indent=1))
     (d / "cli" / "config.json").write_text(json.dumps({"hooks": {"enabled": False, "events": {}}}))
     return d
+
+
+ZCODE_SHIM = Path(__file__).resolve().with_name("zcode-denylist-shim.cjs")
+
+
+def zcode_denylist_shim(deny_dir, env, perm):
+    """Make --perm read-only and --perm deny really remove the disallowed tools from zcode
+    (2026-10-24). `zcode app-server --stdio` ignores --disallowed-tools and zcode-acp-server's
+    session/create carries no toolDenylist, so ZCODE_DISALLOWED_TOOLS and the setting.json
+    permission.disallowedTools never took effect: a live read-only run was offered Bash, Edit and
+    Write and ran `ls` unasked (plan mode lets read-only shell through). zcode-denylist-shim.cjs,
+    started as ZCODE_BIN, adds the list as toolDenylist to the backend's session/create, resume
+    and send requests. It lives in <deny_dir>/shim next to a link to the real provider tables, so
+    zcode-acp-server's builtin-provider injection (and with it model switches) keeps working.
+    Raises ConfigError, never runs unguarded, if the real zcode entry or the shim is missing."""
+    real = env.get("ZCODE_BIN") or zcode_bin()
+    if not real or not Path(real).is_file():
+        raise ConfigError(f"--perm {perm} for zcode needs zcode's vendor/zcode.cjs to install its tool "
+                          "denylist, and none was found: set ZCODE_BIN to it")
+    if not ZCODE_SHIM.is_file():
+        raise ConfigError(f"--perm {perm} for zcode needs {ZCODE_SHIM}, which is missing")
+    real_dir = Path(real).resolve().parent
+    provider = next((p for p in (real_dir / "provider", real_dir.parent / "config" / "provider")
+                     if (p / "zcode-builtin.json").is_file()), None)
+    shim_dir = deny_dir / "shim"
+    shim_dir.mkdir()
+    (shim_dir / "zcode.cjs").symlink_to(ZCODE_SHIM)
+    if provider is not None:
+        (shim_dir / "provider").symlink_to(provider)
+    env["ZCODE_ACP_RUN_REAL_BIN"] = str(Path(real).resolve())
+    env["ZCODE_BIN"] = str(shim_dir / "zcode.cjs")
 
 
 # --perm deny (not --interactive) also starts opencode and agy WITHOUT the user's
@@ -2109,14 +2148,22 @@ def _toks(x, split="-"):
     return re.split(split, re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower())
 
 
+# zcode lists every GLM model twice, builtin:zai\<m> (API-key pool) and builtin:zai-coding-plan\<m>
+# (the everyday Coding Plan pool); a bare model name means the second (2026-10-24).
+ZCODE_DEFAULT_PROVIDER = "builtin:zai-coding-plan\\"
+
+
 def match_value(values, want):
     """(the value dict matching want, []) or (None, ambiguous candidates). An exact value or
     name wins. The claude ACP server's model list varies between launches ("fable" one
     time, "claude-fable-5-1[1m]" the next; 2026-10-10), so fall back to a unique token
     match: a value whose dash-separated tokens contain the wanted name's tokens as a
-    contiguous run."""
+    contiguous run. A bare zcode model name ("GLM-5.3") is the coding-plan id."""
     for v in values:
         if want in (v.get("value"), v.get("name")):
+            return v, []
+    for v in values:  # zcode: a bare "GLM-5.3" is the coding-plan pool's model, not builtin:zai\GLM-5.3
+        if str(v.get("value")).lower() == ZCODE_DEFAULT_PROVIDER + str(want).lower():
             return v, []
     for split in (r"-", r"[-:/]"):  # then also across provider prefixes: nous:anthropic/claude-x
         wt = _toks(want, split)
@@ -3941,11 +3988,13 @@ async def run(a, log, err, log_path):
             if a.agent == "zcode":
                 deny_dir = zcode_readonly_settings()
                 env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+                zcode_denylist_shim(deny_dir, env, "read-only")
         elif a.perm == "deny":
             env.update(DENY_ENV.get(a.agent, {}))
             if a.agent == "zcode":
                 deny_dir = zcode_deny_settings()
                 env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+                zcode_denylist_shim(deny_dir, env, "deny")
             elif a.agent == "crush":
                 # every built-in tool off; no fallback: a crush deny run without it
                 # would run its read-only tools unasked, so it fails instead

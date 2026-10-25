@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""rumination-watch — the entity's "voice in the head": re-touch open threads, speak only on change.
+
+WHY THIS EXISTS (djbclark, 2026-10-24)
+--------------------------------------
+An agent session is silent between prompts: nothing re-touches what it left open, so a stall, an
+unread message or a forgotten job is only noticed when a human asks "why did you stop?". A human
+mind does the opposite — it *ruminates*: it periodically re-touches open loops without being asked.
+This is that loop, with the two constraints djbclark set on it:
+
+1. **Continuous but nearly free.** It is a launchd script with NO model in it. It reads local files
+   and compares them to the last run's state; it costs nothing until there is something to say.
+2. **Not disruptive to thought in progress.** It stays silent unless something *changed* or is
+   *due*, and it speaks in one line. A session mid-task is not interrupted by a status echo.
+
+It is deliberately the same shape as `load-watch` and `fleet-watch` (launchd, no model, relays a
+brief), because that pattern is already proven here and already understood by the operator.
+
+WHAT IT WATCHES (each an "open loop")
+-------------------------------------
+- **Mail**: unread messages in the sibling mailbox (`agents/comm/mailboxes/<role>/new/`).
+- **Jobs**: unfinished bigteam job records (`~/.local/state/bigteam/*/jobs/*.json` with no `closed`).
+- **Stuck jobs**: a job whose `done` path exists but whose record is still open.
+- **Open PRs** authored by the operator's account (via `gh`; best-effort, offline is not an incident).
+- **Chain staleness**: the Tier 1 log's `head_sha` vs the repo's real HEAD.
+
+TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
+-------------------------------------------------
+- **To the session** (a one-line relay): "here is work you left open" — actionable by the agent.
+- **To djbclark, via the `dann` quiet topic** (`inbox-target dann`), **only** when something needs
+  HIS decision. Rate-limited by a per-item cooldown, because the point of a quiet channel is quiet.
+
+Exit codes: 0 nothing to say (the normal case); 10 something to say (it was said); 2 usage/error.
+The exit code is the interface for launchd and for a session that runs it by hand.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path(os.environ.get("HOME", "/Users/djbclark"))
+STATE_DIR = Path(os.environ.get("RW_STATE_DIR", HOME / ".local/state/rumination-watch"))
+STATE = STATE_DIR / "state.json"
+LOG = STATE_DIR / "rumination.log"
+
+REPO = Path(os.environ.get("RW_REPO", HOME / "src/techno-euphora"))
+ROLE = os.environ.get("RW_ROLE", "dann")
+MAILBOX = REPO / "agents" / "comm" / "mailboxes" / ROLE / "new"
+BIGTEAM = HOME / ".local/state/bigteam"
+
+# Job records are owned by the session that opened them; only OUR OWN are actionable here. Matched
+# as a prefix so both a live session id and the role label work ("cline-techno-euphora-…",
+# "dann-8d891459"). Empty means "no ownership filter" (report everything recent) — useful when
+# debugging the watcher itself, wrong for the launchd job.
+OWNER = os.environ.get("RW_OWNER", ROLE)
+
+# How often the same item may be re-announced to djbclark (seconds). A quiet channel that repeats
+# itself is not quiet; this is the anti-noise budget djbclark asked for.
+DJB_COOLDOWN_S = int(os.environ.get("RW_COOLDOWN_S", 6 * 3600))
+
+
+def log(msg: str) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as fh:
+        fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {msg}\n")
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(data: dict) -> None:
+    """Atomic replace: a half-written state file would make the next run re-announce everything."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
+    os.replace(tmp, STATE)
+
+
+def run(cmd: list[str], timeout: int = 20) -> tuple[int, str]:
+    """argv list, never a shell string: this script must not become a quoting problem itself."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except (OSError, subprocess.SubprocessError):
+        return 127, ""
+
+
+# --- the open loops ----------------------------------------------------------------------------
+
+
+def open_mail() -> list[str]:
+    if not MAILBOX.is_dir():
+        return []
+    return [p.name for p in sorted(MAILBOX.glob("*.md"))]
+
+
+def open_jobs(max_age_h: float = 24.0) -> list[dict]:
+    """ACTIONABLE job records owned by THIS entity: recent, unfinished, and not someone else's.
+
+    Two filters, each earned from a real false-positive run on 2026-10-24:
+
+    1. **Recency.** An unclosed record from days ago is litter, not a signal: 622 records and 761
+       `.done` files exist here, nearly all historical (bigteam records are closed by whoever reads
+       them, so "unclosed" is the norm). Without a cutoff the first run reported 145 items and was
+       useless noise — the opposite of a quiet watcher.
+    2. **Ownership.** Other sessions own their own slices, and their unclosed records are not this
+       entity's to act on. With recency alone it still reported 69; filtering to records this entity
+       opened (`RW_OWNER` prefix, matching the mailbox instance label) leaves only its own work.
+       Never adopt another live session's record: that is the bigteam ownership rule.
+
+    Two actionable shapes, both recency- and ownership-bounded:
+    - **no `done` file** — the slice may still be running, or died without finalizing.
+    - **`done` exists** — work finished but the record was never closed (bookkeeping debt).
+    """
+    found = []
+    if not BIGTEAM.is_dir():
+        return found
+    cutoff = time.time() - max_age_h * 3600
+    for path in BIGTEAM.glob("*/jobs/*.json"):
+        try:
+            rec = json.loads(path.read_text())
+            mtime = path.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or "closed" in rec or mtime < cutoff:
+            continue  # closed, or historical: not a signal either way
+        owner = str(rec.get("owner") or "")
+        if OWNER and not owner.startswith(OWNER):
+            continue  # another session's slice: not ours to act on
+        done = rec.get("done")
+        found.append({
+            "record": str(path),
+            "name": rec.get("name") or path.stem,
+            "task": path.parent.parent.name,
+            "owner": owner or "(none)",
+            "done_exists": bool(done and Path(done).exists()),
+            "age_h": round((time.time() - mtime) / 3600, 1),
+        })
+    return found
+
+
+def open_prs() -> list[str]:
+    """Open PRs authored by the operator's own account. Best-effort: offline is not an incident."""
+    rc, out = run(["gh", "search", "prs", "--author", "@me", "--state", "open",
+                   "--json", "number,title", "--limit", "20"], timeout=25)
+    if rc != 0:
+        return []
+    try:
+        return [f"#{p['number']} {p['title']}" for p in json.loads(out)]
+    except (ValueError, KeyError, TypeError):
+        return []
+
+
+def chain_staleness() -> str | None:
+    """The Tier 1 log's recorded head vs the repo's real HEAD. A string when they disagree.
+
+    Reads the pointer, follows `redirect:` to the canonical log, and compares. This is the same
+    check the `session-handoff` skill documents, done mechanically so nobody has to remember it.
+    """
+    pointer = HOME / ".local/state/handoffs" / REPO.name / "main" / "SESSION_LOG.md"
+    try:
+        text = pointer.read_text()
+    except OSError:
+        return None
+    if m := re.search(r"^redirect:\s*(\S+)", text, re.M):
+        try:
+            text = (HOME / ".local/state/handoffs" / m.group(1)).read_text()
+        except OSError:
+            return None
+    m = re.search(r"head_sha:\s*([0-9a-f]{7,40})", text)
+    if not m:
+        return None
+    rc, head = run(["git", "-C", str(REPO), "rev-parse", "HEAD"])
+    if rc != 0 or not head:
+        return None
+    if not (head.startswith(m.group(1)[:12]) or m.group(1)[:12] == head[:12]):
+        return f"Tier 1 log records {m.group(1)[:12]}, repo is at {head[:12]}"
+    return None
+
+
+def survey() -> dict:
+    """One pass over every open loop. Pure reads; no model, and it writes nothing it watches."""
+    return {
+        "mail": open_mail(),
+        "jobs": open_jobs(),
+        "prs": open_prs(),
+        "stale": chain_staleness(),
+    }
+
+
+# --- speaking -----------------------------------------------------------------------------------
+
+
+def to_session(text: str) -> bool:
+    """One line into the current session, via the session-finder relay (best route, self-falling).
+
+    `--idle` so a busy cline agent is not interrupted mid-turn: the whole point is to be
+    non-disruptive. relay.py also defers by default since PR 57, so this is belt and braces.
+    """
+    ident = os.environ.get("RW_SESSION") or os.environ.get("PASEO_AGENT_ID") or ""
+    if not ident:
+        return False
+    relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
+    if not relay.is_file():
+        return False
+    rc, _ = run(["python3", "-I", str(relay), ident, text, "--idle", "300"], timeout=320)
+    return rc == 0
+
+
+def to_djbclark(text: str) -> bool:
+    """The quiet topic. Resolved through the registry, never a hard-coded thread id."""
+    target = ""
+    reg = HOME / "ops/site-djbclark/bin/inbox-target"
+    if reg.is_file():
+        rc, out = run([str(reg), "dann"], timeout=15)
+        target = out if rc == 0 else ""
+    target = target or os.environ.get("RW_DJB_TARGET", "")
+    if not target:
+        return False
+    rc, _ = run(["hermes", "send", "-t", target, text], timeout=30)
+    return rc == 0
+
+
+def should_tell_djbclark(item: str, state: dict, now: float) -> bool:
+    """Anti-noise: the same item reaches him at most once per DJB_COOLDOWN_S."""
+    seen = state.setdefault("told", {})
+    last = seen.get(item)
+    if last and now - float(last) < DJB_COOLDOWN_S:
+        return False
+    seen[item] = now
+    return True
+
+
+# --- commands -----------------------------------------------------------------------------------
+
+
+def cmd_pass(a: argparse.Namespace) -> int:
+    """One rumination pass: survey, compare to the last state, speak only on change."""
+    now = time.time()
+    state = load_state()
+    before = state.get("last", {})
+    cur = survey()
+
+    changed = [k for k, v in cur.items() if v != before.get(k)]
+
+    # What is genuinely NEW drives the session line; a re-observation must stay silent.
+    before_mail = before.get("mail") or []
+    before_job_names = [j.get("name") for j in (before.get("jobs") or [])]
+    new_mail = [m for m in cur["mail"] if m not in before_mail]
+    new_jobs = [j["name"] for j in cur["jobs"] if j["name"] not in before_job_names]
+
+    lines: list[str] = []
+    if new_mail:
+        lines.append(f"{len(new_mail)} unread peer message(s): {', '.join(new_mail[:3])}")
+    if new_jobs:
+        lines.append(f"{len(new_jobs)} open job(s): {', '.join(new_jobs[:3])}")
+    if cur["stale"]:
+        lines.append(f"stale chain log: {cur['stale']}")
+    if cur["prs"] and not before.get("prs"):
+        lines.append(f"{len(cur['prs'])} open PR(s) of yours")
+
+    # A job whose `done` file exists but whose record is still open is a real, actionable defect.
+    stuck = [j["name"] for j in cur["jobs"] if j["done_exists"]]
+    if stuck:
+        lines.append(f"job(s) finished but not closed: {', '.join(stuck[:3])}")
+
+    if a.dry_run:
+        print(json.dumps({"changed": changed, "lines": lines, "survey": cur}, indent=1))
+        return 10 if lines else 0
+
+    state["last"] = cur
+    state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    spoke_session = spoke_djb = False
+    if lines:
+        summary = "rumination: " + "; ".join(lines)
+        spoke_session = to_session(summary)
+        # Only items needing HIS decision go to the quiet topic, and at most once per cooldown.
+        needs_him = []
+        if cur["stale"]:
+            needs_him.append("stale chain log")
+        if stuck:
+            needs_him.append(f"{len(stuck)} job(s) finished but not closed")
+        for item in needs_him:
+            if should_tell_djbclark(item, state, now):
+                spoke_djb = to_djbclark(f"Dann: {item}") or spoke_djb
+        log(f"spoke session={spoke_session} djbclark={spoke_djb}: {summary}")
+    else:
+        log("quiet (nothing new)")
+
+    save_state(state)
+    if lines:
+        print("rumination: " + "; ".join(lines))
+        return 10
+    if not a.quiet:
+        print("quiet: nothing new")
+    return 0
+
+
+def cmd_status(a: argparse.Namespace) -> int:
+    state = load_state()
+    cur = survey()
+    stuck = sum(1 for j in cur["jobs"] if j["done_exists"])
+    print(f"mail:  {len(cur['mail'])} unread")
+    print(f"jobs:  {len(cur['jobs'])} open" + (f" ({stuck} finished-but-open)" if stuck else ""))
+    print(f"prs:   {len(cur['prs'])} open")
+    print(f"stale: {cur['stale'] or 'no'}")
+    print(f"last pass: {state.get('last_run') or 'never'}")
+    return 0
+
+
+def cmd_test(a: argparse.Namespace) -> int:
+    """Prove BOTH channels work: a watcher that cannot be heard is worse than no watcher."""
+    ok_s = to_session("rumination: channel test from the watcher (no action needed).")
+    ok_d = to_djbclark("Dann: quiet-channel test from the rumination watcher (no action needed).")
+    print(f"session relay:  {'ok' if ok_s else 'FAILED (set RW_SESSION or PASEO_AGENT_ID)'}")
+    print(f"djbclark topic: {'ok' if ok_d else 'FAILED (is inbox-target dann resolvable?)'}")
+    return 0 if (ok_s or ok_d) else 1
+
+
+def cmd_install(a: argparse.Namespace) -> int:
+    """Install the launchd job (macOS). The plist is version-controlled in the repo, not hand-written
+    into ~/Library/LaunchAgents, so a fresh machine gets the same job from the same file."""
+    if sys.platform != "darwin":
+        print("rumination-watch install: launchd is macOS only (exit 69)", file=sys.stderr)
+        return 69
+    plist = Path(__file__).resolve().parent.parent / "launchd" / "com.djbclark.rumination-watch.plist"
+    if not plist.is_file():
+        print(f"rumination-watch: no plist at {plist}", file=sys.stderr)
+        return 2
+    dest = HOME / "Library/LaunchAgents" / plist.name
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(plist.read_text())
+    run(["launchctl", "bootout", f"gui/{os.getuid()}/{plist.stem}"])  # ignore: may not be loaded
+    rc, out = run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(dest)], timeout=30)
+    if rc != 0:
+        print(f"rumination-watch: bootstrap failed: {out}", file=sys.stderr)
+        return 1
+    print(f"installed {plist.stem} (every 300 s, background, no model)")
+    print(f"state: {STATE_DIR}")
+    return 0
+
+
+def cmd_uninstall(a: argparse.Namespace) -> int:
+    label = "com.djbclark.rumination-watch"
+    run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], timeout=30)
+    dest = HOME / "Library/LaunchAgents" / f"{label}.plist"
+    dest.unlink(missing_ok=True)
+    print(f"removed {label} (state kept at {STATE_DIR})")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="rumination-watch", description=__doc__.split("\n")[0])
+    sub = p.add_subparsers(dest="command", required=True)
+    pa = sub.add_parser("pass", help="one rumination pass (the launchd entry point)")
+    pa.add_argument("--dry-run", action="store_true", help="survey and report; send nothing")
+    pa.add_argument("--quiet", action="store_true", help="print nothing when there is nothing new")
+    pa.set_defaults(func=cmd_pass)
+    st = sub.add_parser("status", help="what is open right now")
+    st.set_defaults(func=cmd_status)
+    te = sub.add_parser("test", help="prove both output channels work")
+    te.set_defaults(func=cmd_test)
+    ins = sub.add_parser("install", help="install the launchd job (macOS)")
+    ins.set_defaults(func=cmd_install)
+    un = sub.add_parser("uninstall", help="remove the launchd job (state is kept)")
+    un.set_defaults(func=cmd_uninstall)
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
