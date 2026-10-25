@@ -654,19 +654,6 @@ class TestWindowFloor(RoutingDispatch):
         self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
         self.assertEqual(rec["estimated_usage_windows"], {"5h": 25.0, "7d": 25.0})
 
-    def test_a_window_estimate_is_never_below_the_scalar_estimate(self):
-        for i in range(2):
-            (self.jobs / f"h{i}.json").write_text(json.dumps({
-                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
-                "effort": "high", "measured_usage_pct": 40.0, "measured_usage_windows": {"5h": 2.0}}))
-        r = self.dispatch_agent(
-            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
-            "--no-preflight", "--min-headroom", "0", "--dry-run", "--json", env=self.snap_codex(100.0))
-        self.assertEqual(r.returncode, 0, r.stderr)
-        rec = json.loads(r.stdout)
-        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
-        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (40.0, {"5h": 40.0}))
-
     def test_a_window_with_fewer_than_three_measurements_is_floored_beside_one_with_three(self):
         """Per label: three rows measure 5h, only two of them also the weekly window."""
         for i in range(3):

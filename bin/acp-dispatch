@@ -813,8 +813,7 @@ def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
 
 def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None = None,
                      effort: str | None = None, service: str | None = None,
-                     scalar: float | None = None, labels: tuple[str, ...] | list[str] = ()
-                     ) -> dict[str, float]:
+                     labels: tuple[str, ...] | list[str] = ()) -> dict[str, float]:
     """Median measured drop per quota window (label -> percent).
 
     Prefers this task's history (≥3 slices); else the most recent 20 machine-wide
@@ -824,9 +823,10 @@ def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None 
     against 69% weekly left although it needed ~15% of the week).
 
     The estimate floor binds the windows as it binds the scalar (adversary d13f2ed, A2): a window
-    with fewer than three comparable measurements is estimated at the floor (never below `scalar`,
-    the slice's own scalar estimate), and once any window is measured, so is every label in `labels`
-    (the reading's windows), so the window path never checks less than the scalar path would.
+    with fewer than three comparable measurements is estimated at least at the floor, and once any
+    window is measured, every label in `labels` (the reading's windows) is too, so the window path
+    never checks less than the floor the scalar path applies.  The scalar estimate itself is NOT a
+    lower bound: one row's scalar can mix windows (the 70% above), which is what this path avoids.
     """
     rows, _ = measured_history(out, agent, model, kind, effort, kind_floor_applies(service, kind))
     seen: dict[str, list[float]] = {}
@@ -837,12 +837,11 @@ def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None 
         except (TypeError, ValueError, AttributeError):
             pass
     floor = estimate_floor(model, service, kind)
-    least = max(floor, scalar or 0.0)
-    est = {label: (max(sorted(v)[len(v) // 2], least) if floor and len(v) < 3 else sorted(v)[len(v) // 2])
+    est = {label: (max(sorted(v)[len(v) // 2], floor) if floor and len(v) < 3 else sorted(v)[len(v) // 2])
            for label, v in seen.items() if v}
     if est and floor:
         for label in labels:
-            est.setdefault(label, least)
+            est.setdefault(label, floor)
     return est
 
 
@@ -4184,7 +4183,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     else:
         per_window = {
             k: v for k, v in estimate_windows(out, a.agent, a.model, kind, est_effort, service,
-                                              estimate, list(windows)).items()
+                                              list(windows)).items()
             if windows.get(k) is not None}
     # In-flight reservation by service (2026-10-18). A resume is never refused by it (reserved
     # is zeroed when previous is set); its own estimate still counts as in flight for others.
