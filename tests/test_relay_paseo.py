@@ -75,9 +75,11 @@ class RelayPaseo(unittest.TestCase):
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved_env)))
         saved_attrs = [(relay.fleet, "sessions", relay.fleet.sessions), (relay.fleet, "ancestors", relay.fleet.ancestors),
                        (relay.where, "real_cwd", relay.where.real_cwd), (relay, "hosted_by", relay.hosted_by),
-                       (relay, "DEFER_DIR", relay.DEFER_DIR), (relay, "spawn_deliverer", relay.spawn_deliverer)]
+                       (relay, "DEFER_DIR", relay.DEFER_DIR), (relay, "spawn_deliverer", relay.spawn_deliverer),
+                       (relay, "own_cwd", relay.own_cwd)]
         self.addCleanup(lambda: [setattr(o, n, v) for o, n, v in saved_attrs])
         relay.fleet.ancestors = lambda: set()    # hermetic: the test runner's real ancestry is not under test
+        relay.own_cwd = lambda: "/work/here"    # a sender row with no cwd is named by the directory of the process
         relay.hosted_by = lambda agent_id: agent_id == CALLER    # the test runner "is" the CALLER agent
         relay.DEFER_DIR = Path(self.tmp.name) / "relay" / "deferred"    # never the real queue, and a deferral never starts a real deliverer
         os.environ["RELAY_DEFER_DIR"] = str(relay.DEFER_DIR)
@@ -142,7 +144,7 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         sends = self.sends()
         self.assertEqual(len(sends), 1)
-        self.assertTrue(sends[0].startswith(f"send --no-wait --behavior steer --json -- {AGENT} [relay from the caller] ping"), sends)
+        self.assertTrue(sends[0].startswith(f"send --no-wait --behavior steer --json -- {AGENT} [relay from claude cccccccc aka the caller (here)] ping"), sends)
         self.assertIn("reply `ack cccccccc` through relay.py", sends[0])    # first contact asks for the ack
         self.assertEqual([e for e in self.envs() if e.startswith("send ")], ["send NOID"])
 
@@ -151,7 +153,7 @@ class RelayPaseo(unittest.TestCase):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "dddddddd-0000-4000-8000-000000000004"
         rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.sends(), [f"send --no-wait --behavior steer --json -- {AGENT} [relay from dddddddd] ping"])
+        self.assertEqual(self.sends(), [f"send --no-wait --behavior steer --json -- {AGENT} [relay from claude dddddddd (here)] ping"])
 
     def test_option_looking_text_stays_after_double_dash(self) -> None:
         # without `--` this reads as `--prompt-file=...` and makes paseo send a local file (adversary 2)

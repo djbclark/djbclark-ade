@@ -195,6 +195,21 @@ def ancestors():
     return pids
 
 
+ANCESTOR_SELF = [True]   # relay.as_caller(scrub=True) sets False: a notice sender hides every id of the session, ancestry included
+_ANC_PANE = [None]       # set by sessions(): the herdr pane an ancestor of this process runs in, when HERDR_PANE_ID is unset
+
+
+def ancestor_pane(anc):
+    """The herdr pane this process runs in, read from an ancestor's environment, or None. Codex's `shell_environment_policy
+    inherit = "core"` (this machine's ~/.codex/config.toml) strips HERDR_PANE_ID from the shell Codex runs a command in, but
+    the `codex` TUI process above that shell keeps it. Used only when this process's own HERDR_PANE_ID is unset; ancestors
+    naming two different panes name none (nothing is guessed)."""
+    if os.environ.get("HERDR_PANE_ID") or not ANCESTOR_SELF[0] or not _where:
+        return None
+    panes = {_where.env_of(pid).get("HERDR_PANE_ID") for pid in anc} - {None, ""}
+    return panes.pop() if len(panes) == 1 else None
+
+
 def short(path):
     return "~" + path[len(HOME):] if path and path.startswith(HOME) else path or ""
 
@@ -359,7 +374,7 @@ def _from_herdr(s, a):
              where=f"herdr · ws {herdr_label('workspace', a['workspace_id'])} · tab {herdr_label('tab', a['tab_id'])}")
     s.update(pane=a["pane_id"], tab=a["tab_id"], workspace=a["workspace_id"], label=a.get("label") or "",
              herdr_status=a.get("agent_status") or "unknown")
-    if a["pane_id"] == os.environ.get("HERDR_PANE_ID"):
+    if a["pane_id"] == (os.environ.get("HERDR_PANE_ID") or _ANC_PANE[0]):
         s["self"] = True
     if a.get("agent_status") in ("idle", "working", "blocked", "done"):
         s["status"] = "idle" if a["agent_status"] == "done" else a["agent_status"]
@@ -898,6 +913,7 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
     (test/trial launches their starter drives; helm should ignore them, hcom trial 6g). include_archived adds
     the archived Paseo agents as `ended` rows (fleet.py --all)."""
     anc = ancestors()
+    _ANC_PANE[0] = ancestor_pane(anc)
     agents = herdr_json("agent", "list").get("agents") or []
     panes = herdr_json("pane", "list").get("panes") or []
     by_sid = {(a.get("agent_session") or {}).get("value"): a for a in agents if a.get("agent_session")}

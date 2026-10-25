@@ -185,6 +185,14 @@ from a session to a peer appends "[first contact from <id>: reply `ack <id>` thr
 (RELAY_LINKS_FILE) records each link, `--sweep` marks it acked when the sender's transcript holds `ack <id>` naming the peer (or an
 --expect-ack from it resolved), and `fleet.py list` prints `link: acked` or `link: ONE-WAY` under each peer this session messaged.
 
+THE SENDER HEADER (2026-10-25): a relayed text (not a Paseo agent's own message, which Paseo labels) starts `[relay from KIND ID (DIR)]`, or
+`[relay from KIND ID aka NAME (DIR)]` for a named session: KIND the agent (codex, claude, ...), ID what `relay.py ID "..."` takes (a herdr pane
+id such as w2F:p45, a session id prefix, a Paseo agent id), DIR the directory it runs in (its worktree's name). The sender comes from the
+sending PROCESS: fleet's `self` row (HERDR_PANE_ID, else the pane an ancestor process runs in), PASEO_AGENT_ID (else the agent the Paseo
+daemon hosts above it), CLAUDE_CODE_SESSION_ID, a label declared in RELAY_SENDER_NAME. A Codex tool shell keeps none of these variables
+(this machine's `shell_environment_policy inherit = "core"`), which is why the `codex` process above it is read. Only when nothing resolves
+the header says `unknown (no sender id: checked ...)` and names what was checked.
+
 Exit: 0 delivered or queued (verified in the transcript or pane, or for paseo/dispatch/launch, or a socket frame to a working session, the route's
 acknowledgement; an idle session's socket frame is verified in its transcript; for hermes, the turn ran on the stored transcript;
 queued: a deferred send, `queued: <id>` on stdout, delivered later or the sender is told); 1 not sent (every route failed, listed, or a busy target and a sender that cannot be told) or sent but unverified; 2 usage or a
@@ -370,13 +378,13 @@ def paseo_idle(s, seconds):
 
 
 def sender_tag(listed):
-    """'[relay from NAME] ' for a caller that is not a Paseo agent (Paseo labels only an agent sender): the
-    caller's session name, else the first 8 characters of its session id."""
+    """'[relay from KIND ID (DIR)] ' for a caller that is not a Paseo agent (Paseo labels only an agent sender): who
+    `sender_header_name` resolves, so the receiver can run `relay.py ID "..."` verbatim."""
     own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
     if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own):
         return ""    # genuinely this agent: Paseo labels the message itself. An empty or junk value, an acp-run
                      # slice, or an inherited id with no Paseo-hosted ancestor (Codex, PR 25) gets the tag
-    return f"[relay from {sender_name(listed)}] "
+    return f"[relay from {sender_header_name(listed)}] "
 
 
 def probe_proof(tx, mark, probe):
@@ -1011,33 +1019,93 @@ def is_slash(text):
 HERMES_SENDER = re.compile(r"hermes [A-Za-z0-9_-]{1,8}")    # what `hermes_env` sets: "hermes " and the last 8 characters of the session id
 
 
-def safe_label(name):
-    return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name or ""), 40) or "unknown"
+LABEL_MAX = 160   # a composed sender label: KIND (16) ID (40) aka NAME (40) (DIR (48)), each part clipped first
+
+
+def safe_label(name, limit=40, composed=False):
+    """NAME reduced to letters, digits and `._ -` (a composed label, which sender_label builds, also keeps `:()`), at most
+    LIMIT characters; "unknown" when nothing is left."""
+    return fleet.clip(re.sub(r"[^A-Za-z0-9._:() -]" if composed else r"[^A-Za-z0-9._ -]", "", name or ""), limit) or "unknown"
+
+
+def own_paseo_id():
+    """The Paseo agent id this process runs in, or "": the PASEO_AGENT_ID it was handed when that is a UUID, else the one agent
+    the Paseo daemon hosts above it. Codex's shell_environment_policy `core` strips PASEO_AGENT_ID from the shell Codex runs
+    a command in, while the `codex` process above keeps it. Two different agents above name none; a notice sender
+    (fleet.ANCESTOR_SELF False) reads the environment only."""
+    own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+    if UUID.fullmatch(own) or not fleet.ANCESTOR_SELF[0]:
+        return own if UUID.fullmatch(own) else ""
+    found = {where.paseo_agent(pid, where.env_of(pid)) for pid in fleet.ancestors()} - {None}
+    return found.pop() if len(found) == 1 else ""
+
+
+def own_cwd():
+    """The directory this process runs in, "" when it is gone (a seam: tests pin it)."""
+    try:
+        return os.getcwd()
+    except OSError:
+        return ""
+
+
+def sender_label(me):
+    """`KIND ID aka NAME (DIR)` for fleet row ME, the session this process runs in: the agent kind, the id `relay.py` takes (a
+    herdr pane id such as w2F:p45, a session id prefix, a Paseo agent id), its name when it has one, and the directory THIS process
+    runs in (its worktree's name; the row's directory, a pane's, is the fallback), so a receiver can run `relay.py ID "..."`
+    verbatim. Every part is sanitized and clipped; a row with no id or name is "unknown"."""
+    def clean(text, limit, chars=r"A-Za-z0-9._ -"):
+        return fleet.clip(re.sub(rf"[^{chars}]", "", str(text or "")), limit).strip()
+    ident = clean(me.get("id"), 40, r"A-Za-z0-9._:-")
+    name = clean(me.get("name"), 40)
+    if not (ident or name):
+        return "unknown"
+    parts = [clean(me.get("agent"), 16), ident or name]
+    if ident and name and name != ident:
+        parts += ["aka", name]
+    where_ = clean(os.path.basename((own_cwd() or me.get("cwd") or "").rstrip("/")), 48, r"A-Za-z0-9._-")
+    return " ".join(p for p in parts if p) + (f" ({where_})" if where_ else "")
+
+
+SENDER_CHECKED = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME")
+
+
+def sender_header_name(listed):
+    """sender_name for a header the receiver reads: when nothing resolves, "unknown" plus what was checked (these environment
+    variables, then the environment of this process's ancestors, then fleet's `self` rows), so the receiver and the operator
+    can see why and fix the sender's environment instead of reading a bare `unknown`. Never stored in a record."""
+    name = sender_name(listed)
+    if name != "unknown":
+        return name
+    return f"unknown (no sender id: checked {', '.join(SENDER_CHECKED)}, ancestors, fleet self rows)"
 
 
 def sender_name(listed):
-    """Who is relaying, as one safe label: the label a deliverer sends under (the one stored when the message was
-    queued, sanitized again here, and a `hermes xxxx` one only inside a relayed Hermes turn, as for RELAY_SENDER), this
-    session's fleet row name or id, the fleet row of the PASEO_AGENT_ID this process was handed (a Cline, Codex or omp
-    agent under Paseo has no Claude registry row, so no `self` row), that Paseo agent's short id, this Claude
-    session's id, a label declared in RELAY_SENDER_NAME (a launchd job has no session identity at all, so without it
-    every watcher arrived as `[relay from unknown]`), else "unknown".
+    """Who is relaying, as one safe label `KIND ID aka NAME (DIR)` (see sender_label): the label a deliverer sends under (the
+    one stored when the message was queued, sanitized again here, and a `hermes xxxx` one only inside a relayed Hermes turn,
+    as for RELAY_SENDER), this session's fleet `self` row (a herdr pane found in this process's environment or an
+    ancestor's), the fleet row of the Paseo agent this process runs in (`own_paseo_id`: PASEO_AGENT_ID or the agent hosting an
+    ancestor; a Cline, Codex or omp agent under Paseo has no Claude registry row, so no `self` row), that agent's full id,
+    this Claude session's id prefix, a label declared in RELAY_SENDER_NAME (a launchd job has no session identity at all, so
+    without it every watcher arrived as `[relay from unknown]`), else "unknown".
 
     The declared label is consulted LAST, so a real session identity always wins and a job cannot
     impersonate a live session; it is sanitized through safe_label like every other path.
     """
     if SENDER_OVERRIDE[0]:
-        label = safe_label(SENDER_OVERRIDE[0])
+        label = safe_label(SENDER_OVERRIDE[0], LABEL_MAX, composed=True)
         return "unknown" if HERMES_SENDER.fullmatch(label) and not hermes_hops() else label
     if hermes_hops() and HERMES_SENDER.fullmatch(os.environ.get("RELAY_SENDER", "")):
         return os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller; any other name is a forgery
     me = next((x for x in listed if x.get("self")), None) or {}
-    own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
-    if not me and UUID.fullmatch(own):
-        me = next((x for x in listed if own in (x.get("paseo"), (x.get("chan") or (None, None))[1])), None) or {"id": own[:8]}
-    name = (me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8]
-            or env_sender_label() or "unknown")
-    return safe_label(name)
+    own = own_paseo_id()
+    if not me and own:
+        me = next((x for x in listed if own in (x.get("paseo"), (x.get("chan") or (None, None))[1])), None) or {"id": own, "agent": "paseo"}
+    if not (me.get("name") or me.get("id")):
+        sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8]
+        me = {"id": sid, "agent": "claude"} if sid else {}
+    if me:
+        return sender_label(me)
+    return env_sender_label()
 
 
 def env_sender_label() -> str:
@@ -1131,7 +1199,7 @@ def route_socket(c):
         return ("skip", "no live Claude messaging socket for it")
     tx = Path(s["transcript"]) if s.get("transcript") else None
     mark = tx.stat().st_size if tx and tx.is_file() else 0
-    if not socket_send(sock, sender_name(c["listed"]), c["text"]):
+    if not socket_send(sock, sender_header_name(c["listed"]), c["text"]):
         return ("skip", f"could not write to its messaging socket {sock}")
     probe = json.dumps('from-mode="bypass">\n' + xml_body(c["text"]) + "\n</cross-session-message>", ensure_ascii=False)[1:-1]
     if s.get("status") == "working":
@@ -1425,7 +1493,7 @@ def route_dispatch(c):
     if not rec or not cli.is_file():
         return ("skip", "no open acp-dispatch record for it")
     try:
-        p = subprocess.run([str(cli), "tell", "--from", f"relay {sender_name(c['listed'])}", "--", rec, c["text"]],
+        p = subprocess.run([str(cli), "tell", "--from", f"relay {sender_header_name(c['listed'])}", "--", rec, c["text"]],
                            capture_output=True, text=True, timeout=30, check=False, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return ("unverified", "acp-dispatch tell timed out; it may already have written the slice's inbox. Do not resend")
@@ -1559,7 +1627,7 @@ def route_hermes(c):
     s = c["s"]
     if hermes_hops() >= HERMES_HOPS_MAX:
         return ("stop", f"{hermes_hops()} nested hermes relays already (RELAY_HOPS): not relaying into Hermes again", 1)
-    text = c["text_sent"] = (sender_tag(c["listed"]) or f"[relay from {sender_name(c['listed'])}] ") + c["text"]
+    text = c["text_sent"] = (sender_tag(c["listed"]) or f"[relay from {sender_header_name(c['listed'])}] ") + c["text"]
     HERMES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(HERMES_DIR, 0o700)
     hermes_prune()
@@ -1684,7 +1752,7 @@ DEFER_PER_TARGET, DEFER_PER_SENDER, DEFER_TOTAL = 20, 20, 100    # queued or sen
 DEFER_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 DEFER_FINAL = ("delivered", "failed", "expired", "cancelled")
 UNVERIFIED_WHY = "unverified, do not resend; check its pane"
-LABEL_OK = re.compile(r"[\u2026A-Za-z0-9._ -]{1,40}")    # what sender_name can produce (the ellipsis is fleet.clip's)
+LABEL_OK = re.compile(rf"[\u2026A-Za-z0-9._:() -]{{1,{LABEL_MAX}}}")    # what sender_name can produce (the ellipsis is fleet.clip's)
 BUSY = {"hit": False}      # main sets it when it refuses because the target is busy (the deliverer then keeps waiting)
 SENDER_OVERRIDE = [None]   # the label a deliverer sends under (the one stored in the record)
 NOTICE = [False]           # set while a failure notice is sent: a busy target may take it as a `kind: notice` record (defer_send)
@@ -1821,10 +1889,12 @@ def as_caller(label, scrub=False, notice=False):
     busy target take the text as a `kind: notice` record (defer_send)."""
     saved = {k: os.environ.pop(k) for k in SELF_IDS if scrub and k in os.environ}
     SENDER_OVERRIDE[0], NOTICE[0] = label, notice
+    fleet.ANCESTOR_SELF[0] = not scrub    # a scrubbed sender is nobody's child either: no ancestor's pane or Paseo agent is its own
     try:
         yield
     finally:
         SENDER_OVERRIDE[0], NOTICE[0] = None, False
+        fleet.ANCESTOR_SELF[0] = True
         os.environ.update(saved)
 
 
