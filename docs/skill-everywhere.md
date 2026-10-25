@@ -30,10 +30,20 @@ and can advertise the trash skill under the live name. Hide it with
 ## 1. Link it
 
 ```sh
+~/src/djbclark-ade/bin/skill-everywhere --all                # sync all shared skills
+~/src/djbclark-ade/bin/skill-everywhere --check --all        # exit 1 for installed-target gaps
+~/src/djbclark-ade/bin/skill-everywhere --dry-run --all      # preview all repairs
 ~/src/djbclark-ade/bin/skill-everywhere <name>...          # link, idempotent
 ~/src/djbclark-ade/bin/skill-everywhere --check <name>...  # status only
 ~/src/djbclark-ade/bin/skill-everywhere --remove <name>... # undo
 ```
+
+`--all` (2026-10-25) discovers readable `*/SKILL.md` files directly under both
+shared roots, including linked directories. It deduplicates names with public
+precedence and excludes hidden/helper directories. It cannot be combined with
+names or `--remove`. The all-mode check returns 1 for missing, chained, stale or
+conflicting installed targets; explicit-name check output/semantics remain
+compatible with `ade-update`. Preserve foreign files/links and report conflicts.
 
 If the skill has no directory yet, create it first: public skills in
 `~/src/djbclark-ade/skills/<name>/`, private ones (operator ruling required)

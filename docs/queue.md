@@ -835,6 +835,29 @@ Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry 
    on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
 2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
 
+## ade-git-guard (PR 59): redesign O2 adopted after round 9 BLOCK on 7df76ad (djbclark, 2026-10-25)
+
+Round 9 (Opus, `adv-iso-w1-r9-report.md`) BLOCKed on F1: `git --attr-source HEAD <write>` and `git --shallow-file /dev/null fetch origin +main:cb` move a claimed branch with rc 0, because
+`parse_git_argv` skips an unknown global option as one token. After nine rounds of argv-spelling bypasses djbclark asked for a design consult: web research (`dcg`, `cc-safety-net` are argv-pattern
+guards, both "not a sandbox"; GitLab Gitaly uses `reference-transaction` in production) and a Fable 5.1 frontier consult (`frontier-pr59-design-report.md`). Measured 2026-10-25 on git 2.56.0: a
+`reference-transaction` hook refused both round-9 spellings, `branch -f` and `update-ref`, allowed unrelated ops, and was disabled only by `-c core.hooksPath=...`.
+**Decision: O2.** `reference-transaction` (prepared) and `pre-push` hooks in the repo's common git dir are the ref enforcement, fail-open on a hook crash, humans exempt; the shim shrinks on the same
+branch to fail-closed rules the hooks cannot see (config keys that disable hooks, `push --no-verify`, foreign-workspace read-only allowlist, `worktree` verbs, `branch -m/-c` destinations, unknown
+option or subcommand = refused); the fetch/push preflights, output-file rules and shell-string `check` analyser go. Proof test: every r7-r9 argv form through the real git must fail with the claimed ref
+unmoved. Build slice `o2-build-pr59` (Sonnet 5.5 via omp) dispatched 2026-10-25; then ONE adversary round with a new brief (argv spelling out of scope; ask for ref writes without a transaction, hook
+disabling through config, no-ref harms in a foreign tree, false refusals of the owner). Open follow-ups: upstream report that `branch -m/-c` destinations are not reported to the hook (files backend);
+config-based hooks (git 2.54+) as an install route, verify composition first; wire `ade-git-guard install` into `cow-pasture`, `acp-dispatch` and `acp-run` (W2/W3/W4). F2 (docs pointer to the N6/N7
+entries) is moot once `docs/git-guard.md` is rewritten.
+
+## acp-dispatch launchd label with a slash (PR 62, merged e15aeb9, 2026-10-25): lows from adversary round 1
+
+Verdict `APPROVE ac0e0d8`. Left open:
+1. **Docs, low**: `bin/acp-dispatch` usage text (the `launchd's last exit status` line and the `no longer loaded` line) and the `launchd_print` docstring still say `launchctl print gui/$UID/<label>`; a slash label is
+   looked up with `launchctl list` and its last exit is never read (reap goes to rc 0 if delivered, else 255 `lost`). One clause at each place.
+2. **Test gap, low**: the auto-resume resubmit path (`resubmit_auto_resume`) also carries a slash label under `--task`; `STATEFUL_LAUNCHCTL` in `tests/test_acp_dispatch_auto_resume.py` handles only `print`.
+   Add a `list)` case and one reboot-resume test with `--task /abs`.
+3. **Info**: `launchctl list` asks the caller's own bootstrap domain; a `check` run from an ssh login does not see a job submitted from the GUI session, so a slash label still reads as gone there.
+
 ## Verified peer messaging (djbclark, 2026-10-25; part of the big ADE queue)
 
 djbclark, 2026-10-25: always verify the other agent got the message, or we may sit on a one-way receive-only link; "make sure that always happens as part of the big djbclark-ade queue". Case: the
@@ -845,6 +868,22 @@ states the rule. Build items, each one Sonnet `code` slice with a test:
 2. **First-contact ack**: the first relay to a session this sender has never messaged appends "reply `ack <sender id>` through relay.py"; `fleet.py` records which peers have ever acked, so a one-way link shows as such.
 3. **Inbound relays**: a relayed message that asks a question is answered by a relay to its sender (the footer names the route); a reply written only in the receiver's prose is flagged by the `session-finder` skill text and by a Stop-hook nudge when a turn began with `[relay from ...]` and ended with no `relay.py` call.
 4. **Home instruction file (Opus only)**: item 24 (3) of `~/.claude/CLAUDE.md` gains one clause pointing at standing order 10; dispatched `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment` on 2026-10-25.
+
+Scoping (Dann 5, lead of techno-euphora, relayed 2026-10-25, after djbclark asked whether relay should ALWAYS require a reply): mandate PROOF, not conversation. Delivery proof (the text reached the
+target's transcript) is mechanical and needs no reply; a reply (the target read it and acted) costs the target a turn, and a send to a working cline or ACP agent cannot steer, so forcing one on every message
+doubles traffic, interrupts work and is wrong for one-way messages (a status, a handoff pointer, "PR 61 is merged"). Evidence: this chain's own handoff a621 item 6 carried a 30-minute waiter and a "peer may
+be unreachable" note for a peer (`29a5535c`) that was in fact reachable and responsive - its ack was
+verified both ways 31 s AFTER that handoff line was written (b457 log, 04:08:31 vs a621 created_at
+04:08:00), so the line was stale rather than the link broken. A later relay by Dann 5 reached the same
+peer immediately. The real cost stands either way: a 30-minute waiter and a false "may be unreachable"
+note, spent because `queued` looked like success and nothing distinguished "not yet delivered" from
+"cannot deliver". The items keep their shape and gain:
+A. `queued` never exits 0 as if delivered (item 1, first and unchanged).
+B. `--expect-ack ID` is REQUIRED for a message that asks a question or requests action, and is record state, not a blocking wait: set at send time, shown by `relay.py --pending` (sender, target, age), resolved by
+   a later `--sweep` when the reply arrives, so no turn is held open on a peer's schedule.
+C. First contact with a peer always asks for an ack (item 2, standing order 10).
+D. No ack within a bounded time escalates to the operator, never assumed read.
+E. Everything else: verified delivery is enough; an FYI that provably landed needs no reply.
 
 ## Software factory, Phase F (decided 2026-10-19)
 
@@ -1592,7 +1631,7 @@ The fork carries the fix as branch `djbclark/short-postcompact-hook` (upstream
 `main` + the PR commit, rebased 2026-10-10, **not built**). Build it only if
 djbclark asks; once a release ships #25211, delete that branch.
 
-## Review the Jev-vs-GLiDE dual review (ends by 2026-10-23)
+## Review the Jev-vs-GLiDE dual review — DONE 2026-10-25 (findings; djbclark chose Jev-only shadow)
 
 **Started 2026-10-11 (operator).** The Jev-only prompt-effort review was closed the
 same day; see `docs/jev.md` "Dual review". Jev and GLiDE answer the same prompt-effort
@@ -1602,6 +1641,12 @@ days; the window closes itself (mode goes off). On 2026-10-23 run
 agent-choice --between`, label disagreements, then ask djbclark per backend: act, keep
 shadow, or off. A self-removing launchd job (`com.djbclark.jev-remind-2026-10-23`)
 pings Hermes that morning.
+
+**Outcome (2026-10-25).** Report `jev-dual1-review-report.md` (bigteam task `ade-queue-build-2026-10-24`): nothing met the promotion bar. The agent-choice rows are 97.5% pytest fixtures; every timeout
+hit both backends at once (shared deadline); 44% of prompt-effort rows are Herald voice-announcer prompts; no operator labels exist. On 36 decided disagreement rows (one agent's reading) GLiDE was
+right 21, Jev 11, neither 4. djbclark chose to restore Jev-only shadow: `bin/jev review stop` and `~/.config/jev/backends` removed (copy was `jev,glide`), mode `shadow`. Findings a later window would need:
+fixtures run with `JEV_MODE=off`, the hook skips non-human prompts, the report's default `--since` follows the review window, separate deadlines per backend, a per-site backends setting.
+
 
 ## Why the `sed` edit failed twice (queued 2026-10-14, operator) — DONE 2026-10-14
 

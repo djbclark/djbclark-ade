@@ -82,3 +82,10 @@ The native RPC validator rejects JSON Schema regex patterns by default. Session
 IDs are validated by the guard before any lookup/write; keep RPC transport
 schemas simple. Verify the real RPC adapter, not only an SDK mock or cold
 plugin listing, when changing this surface.
+
+On 2026-10-25, OpenCode 2.1.4 also loaded the directory symlink through global
+plugin auto-discovery in a fresh isolated HOME and returned `ready: true`,
+`known: false` through the status RPC, without an explicit plugin config entry.
+That probe made zero inference or compaction calls. Run local native probes as
+targeted pytest tests through `bg`; a CI-first repository does not admit an
+arbitrary Python script as a targeted test.

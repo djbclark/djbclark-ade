@@ -144,13 +144,11 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
 Since 2026-10-20, run `~/src/djbclark-ade/bin/ade-update` (`--check` first to see what it would do, `--json` for a
 machine-readable report; `--repo` and `--state` override the checkout, which must be the top of its work
 tree, and the record). It is
-idempotent and safe to run daily. It does, in order, what this section used to list by hand:
+idempotent and safe to run daily. It does, in order, every step below; nothing here is done by hand:
 
 ```sh
-git -C ~/src/djbclark-ade status --short        # another agent's edits? leave them; never stash
-git -C ~/src/djbclark-ade pull --ff-only         # a diverged branch stops here: resolve by hand
-for s in ~/src/djbclark-ade/skills/*/; do ~/src/djbclark-ade/bin/skill-everywhere --check "$(basename "$s")"; done
-ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | ggrep -c djbclark-ade  # symlinks still point here
+~/src/djbclark-ade/bin/ade-update --check        # report only; exit 10 when behind
+~/src/djbclark-ade/bin/ade-update                # pull, skills, symlinks, changelog delta
 ```
 
 1. **Pull.** It fetches once, checks that commit, and fast-forwards to exactly that commit
