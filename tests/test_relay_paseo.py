@@ -248,6 +248,55 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["result"], "delivered")
 
+    HDR = "[relay from claude cccccccc aka the caller (djbclark-ade-relay-verified-wt)] "    # longer than any fixed-length probe prefix
+
+    def send_and_probe(self, tx: Path, text: str, arrives: str | None) -> tuple[str | None, Any]:
+        """send_paseo(TEXT) to a fake agent whose transcript TX gets the line ARRIVES while the send runs (None: nothing arrives)."""
+        real_run = relay.paseo_run
+
+        def run_and_record(*args: str, **kw: Any) -> tuple[int, str, str]:
+            res = real_run(*args, **kw)
+            if args[0] == "send" and arrives is not None:
+                with tx.open("a") as fh:
+                    _ = fh.write(json.dumps({"text": arrives}) + "\n")
+            return res
+
+        relay.paseo_run = run_and_record
+        try:
+            s = sess(transcript=str(tx))
+            seen = relay.send_paseo(s, text, 1)
+        finally:
+            relay.paseo_run = real_run
+        return seen, s.get("proof")
+
+    def test_two_relays_sharing_one_sender_header_are_not_certified_by_one_transcript_line(self) -> None:
+        # Codex P1, PR 74: the probe was the first 40 characters, which the expanded header alone fills, so a line of
+        # message A certified message B (and an --ack watch) of the same sender to the same target
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        first, second = self.HDR + "first body", self.HDR + "second body"
+        self.assertEqual(self.send_and_probe(tx, first, first)[0], "delivered")
+        seen, proof = self.send_and_probe(tx, second, first)    # concurrent relays: only A's line reached the transcript during B's send
+        self.assertEqual(seen, "accepted")
+        self.assertIsNone(proof())    # the --ack watch is not fooled either
+        with tx.open("a") as fh:
+            _ = fh.write(json.dumps({"text": second}) + "\n")
+        self.assertEqual(proof(), "delivered")    # and it still sees the message once it does arrive
+
+    def test_a_paseo_agent_message_is_verified_whole_with_its_escapes_past_the_old_probe_length(self) -> None:
+        # a Paseo-hosted sender's text carries no relay header: Paseo wraps the XML-escaped text in its own label
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        text = "x" * 50 + " use <b> & \"q\" 's' tail"
+        body = '<agent-message from="' + CALLER + '">\n' + "".join(relay.XML_ESCAPES.get(c, c) for c in text) + "\n</agent-message>"
+        self.assertEqual(self.send_and_probe(tx, text, body)[0], "delivered")
+        self.assertEqual(self.send_and_probe(tx, text, body.replace("tail", "other"))[0], "accepted")    # same first 50 characters, another end
+
+    def test_the_relay_prefix_route_is_verified_whole(self) -> None:
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        self.assertEqual(self.send_and_probe(tx, self.HDR + "ping & more", self.HDR + "ping &amp; more")[0], "delivered")
+
     def test_unknown_terminal_for_a_pid_nobody_hosts_still_errors_and_names_paseo(self) -> None:
         s = sess(host="terminal", chan=None, paseo=None, where="unknown terminal")
         rc, _out, err = self.main([s], SID, "ping", "--wait", "1")

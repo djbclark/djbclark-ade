@@ -428,8 +428,10 @@ def send_paseo(s, text, wait):
         print(f"relay: [{s['id']}] paseo send to {agent} failed (rc={rc}): {fleet.clip((err or out).strip(), 200)}",
               file=sys.stderr)
         return None
-    # the daemon XML-escapes the text inside its label and the transcript stores that JSON-escaped
-    escaped = "".join(XML_ESCAPES.get(c, c) for c in text[:40])
+    # the daemon XML-escapes the text inside its label and the transcript stores that JSON-escaped. The probe is the WHOLE
+    # text: any prefix can be shared by two relays of one sender (the header alone is ~60 characters), so a line of one
+    # message would certify the other (Codex P1, PR 74)
+    escaped = "".join(XML_ESCAPES.get(c, c) for c in text)
     probe = json.dumps(escaped, ensure_ascii=False)[1:-1]
     deadline = time.time() + wait
     while tx and tx.is_file() and time.time() < deadline:
