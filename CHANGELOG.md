@@ -224,6 +224,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- Clarified dispatch waits: finish downloads before reading dependent artifacts, and use the documented load-watch precheck instead of starting the governor daemon (2026-10-25; direct integration).
+
 - Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#68).
 
 - Fixed Herdr peer relays leaving long messages unsent in Codex: used atomic prompt submission and verified the exact new user message in its session rollout before reporting delivery (2026-10-25).
