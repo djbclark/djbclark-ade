@@ -213,6 +213,15 @@ analyser (and the Claude PreToolUse hook it was for, W5).
     git dir or the common dir recorded in the claim) is a design call for the operator.
 13. **Same-uid forgery of the hook's own inputs:** `ADE_REAL_GIT`, `ADE_PYTHON`, `ADE_HOOK_GIT_PID` (see the fail-open and
     `pack-refs` paragraphs).
+14. **Output files written into an unclaimed checkout (replayed 2026-10-25 at ac2fc56 for Codex threads on f6fd689 and
+    fdaad51):** the output-file rules went with O2 because no hook sees a worktree file write. So an agent's `git stash show
+    -p --output=f` (also `--output=f` without `-p`, with `stash@{0}`), `git format-patch -1 -o .` (also `--output-directory=.`,
+    `-o ./`, and a plain `format-patch -1`, which writes into the current directory) succeed through the shim and replace a
+    file of that name in an unclaimed checkout that holds a peer's uncommitted work (observed: rc 0, the file now holds the
+    stash diff or the patch). In a CLAIMED foreign workspace the same calls are refused (`[foreign-claim]`, rc 77). Accepted
+    residual: the guard protects branches, history and tracked work, not arbitrary files an agent redirects git's output to.
+    The durable rule, left to the operator (`docs/queue.md`): refuse `--output*`, `-o` and `--output-directory` on
+    `stash show` and `format-patch` when the target lies inside a tree that is not the caller's claimed workspace.
 
 ## Refusal, log and override
 

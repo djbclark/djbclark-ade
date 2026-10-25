@@ -860,6 +860,10 @@ the r9 F1 (`--attr-source`, `--shallow-file`) are gone with the dry-run prefligh
    hooks off in its trees) before relying on the hooks there.
 5. **`git replay`, `git history`, `git refs migrate` (new in 2.54-2.56)** write refs and should reach the hook (NOT measured); the shim's `KNOWN_SUBS` lists them as ordinary subcommands.
    Re-measure the hook on each when a claimed branch is in play.
+6. **Output files into an unclaimed checkout (accepted residual, 2026-10-25; Codex threads on PR 59 for `stash show --output` and `format-patch -o`)**: replayed at ac2fc56, `git stash show -p
+   --output=f` and `git format-patch -1 -o .` replace a peer's uncommitted file in an unclaimed checkout (rc 0); in a claimed foreign workspace they are refused. `docs/git-guard.md`
+   NOT covered item 14 says so. If djbclark wants it closed: a slim shim rule refusing `--output*`, `-o` and `--output-directory` on `stash show` and `format-patch` when the target lies
+   outside the caller's claimed workspace (the O2 removal of the output-file rules is the reason it is open), plus tests that fail before and an adversary round.
 
 ## acp-dispatch launchd label with a slash (PR 62, merged e15aeb9, 2026-10-25): lows from adversary round 1
 
