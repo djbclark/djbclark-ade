@@ -171,12 +171,12 @@ relation parser):
 - `- [decision] <choice>; rejected: <alternative>; because <reason>`
 - `- [ruling] <what djbclark said, quoted> (djbclark, YYYY-MM-DD)`
 - `- continues [[<previous handoff's file stem, HANDOFF_..._<id>>]]` (a handoff resolves by its file stem,
-  never by its `# Handoff — <title>` head`- decided_in [[<file stem of the handoff that made the decision>]]` (the first handoff of a chain has no earlier
+  never by its `# Handoff — <title>` heading)
+- `- decided_in [[<file stem of the handoff that made the decision>]]` (the first handoff of a chain has no earlier
   one: use its own stem); a PR is no note, so give it as a Markdown link inside the observation, and end the
   line with the link plus a full stop, never with a closing parenthesis after the link (Basic Memory's parser
   drops a `[category] ...` line that contains `](` and ends in `)`): `- [decision] <choice>; rejected:
   <alternative>; because <reason>; in [PR N](https://github.com/OWNER/REPO/pull/N).`
-l/N))`
 - no `part_of [[<repo>]]`: no repo notes exist in the store, so it would never resolve (create the repo note first
   if you want that relation)
 
