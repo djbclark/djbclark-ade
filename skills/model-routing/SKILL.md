@@ -264,7 +264,7 @@ Rules for any agent that dispatches to agy:
    *critical* burn alert (5h 100% left, weekly 49% left, weekly resets in ~5 h).
    Gate on `aiuse --available`, not on a standing rule: **at >= 40% left on both
    Claude/GPT windows, prefer it** over claude's own window and codex for code,
-   review and research (judgment goes to the frontier pools; agy only as an
+   review and research (judgment follows *Routing policy* item 1a, 2026-10-25; agy only as an
    independent reviewer of a frontier decision), via `acp-run agy --model
    claude-opus-5-5 --effort high` (hard calls) or `--model claude-sonnet-5-5 --effort high` (volume; agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids);
    `gpt-oss-120b-medium` is offered too. Over ACP these ids exist only because
@@ -598,9 +598,13 @@ method that runs the waves.
    resetting 2026-10-26; the 5-hour scarcity above, the in-flight limits and
    the estimate floor predate the upgrade and await re-calibration from
    `route_agent.py calibrate`. The routing policy itself is unchanged.) So:
-   1a. **Judgment** (review, design, adjudication) is `acp-dispatch claude
-       --model opus --kind judgment --effort high`. It is not Fable and not
-       codex. (Adversary rounds take the omp route first: item 13.)
+   1a. **Judgment** (review, design, adjudication; 2026-10-25): Claude Opus at
+       high first, `acp-dispatch claude --model opus --kind judgment --effort
+       high`; omp Opus on the API credits next (adversary rounds name it first:
+       item 13); Codex `gpt-6.1-sol --effort high` as an eligible, lower-ranked
+       pool (rank 3) only while every codex window has at least
+       `[routing].plenty_min` left (item 1b). It is never Fable, and never
+       astra (frontier-only).
    1b. **`frontier`** is the only route to codex `gpt-6-astra` (`--kind
        frontier --effort high`) or Fable 5.1 (`--kind frontier --effort high`):
        one slice per pool per wave, for
@@ -611,13 +615,15 @@ method that runs the waves.
        issues" and "a second opinion would be nice" are not reasons. Codex's
        **everyday** models are not frontier (operator 2026-10-25: "if we have
        lots of codex quota and it is the best of available options we can use
-       it for non-frontier"): `code` on `gpt-6.1-sol --effort medium`, `bulk`
+       it for non-frontier"): `judgment` on `gpt-6.1-sol --effort high`, `code` on
+       `gpt-6.1-sol --effort medium`, `bulk`
        and `mechanical` on `gpt-6-luna --effort low`, eligible only while the
        tightest codex window (5-hour and weekly) has at least
-       `[routing].plenty_min` (50%) left; below that, or with no fresh reading,
-       codex is frontier-only again and `acp-dispatch` refuses the kind
-       (exit 2, naming the headroom). Inside the gate it competes on the
-       router's normal ranking (code r15, mechanical r12, bulk r20), one slice
+       `[routing].plenty_min` (50%) left, an unknown window counting as not
+       plentiful; below that, or with no fresh reading, codex is frontier-only
+       again and `acp-dispatch` refuses the kind (exit 2, naming the headroom;
+       it re-checks after the load wait, and the detached runner does too). Inside the gate it competes on the
+       router's normal ranking (judgment r3, behind claude and omp; code r15, mechanical r12, bulk r20), one slice
        per wave; astra never takes an everyday kind.
    1c. **In-flight slices reserve quota, per service** (2026-10-18; it replaced
        the codex-only "one slice in flight" cap). Each running slice reserves
@@ -627,7 +633,15 @@ method that runs the waves.
        still sets a hard cap for a run. The brief-size estimate floor is per
        model class (`[dispatch.estimate_floor]`): 60% for an astra slice
        (`codex:frontier`), 10% for codex's everyday models (`codex`), so an
-       everyday slice does not reserve a hard slice's share of the window.
+       everyday slice does not reserve a hard slice's share of the window;
+       25% for a codex `--kind judgment` slice (`codex:judgment`, 2026-10-25),
+       until three history rows that record that kind and effort exist (a row
+       with either unrecorded does not count toward them, and a request with
+       no `--effort`, a manual reroute included, counts none: it reserves the
+       floor, 2026-10-25). The per-window estimates obey the same floor: a
+       window with fewer than three comparable measurements is estimated at
+       the floor, never at one row's small measurement, and every window of
+       the reading is then checked at it.
    1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
        without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
        `fable-deep` agent runs at `high`.

@@ -39,4 +39,17 @@ For each request:
    the real HOME and touched 274 Cursor `-shm` files. A dry-run or check mode
    the brief explicitly allows is the one exception, and the brief names it.
 
+6. A probe that exercises `acp-dispatch` pins the runner and checks it before it
+   trusts the result. `dispatch` and `reroute` take `--acp-run <scratch fake>`:
+   pin it, then assert `shlex.split(rec["cmd"])[0]` equals the fake (`cmd` is a
+   shell-quoted string, never index it directly). `resume` has no `--acp-run`:
+   its new record inherits the runner of the record it resumes (`old_cmd[0]`),
+   so before resuming, assert the ORIGINAL scratch record's
+   `shlex.split(rec["cmd"])[0]` equals the fake, and assert the resumed record
+   the same way afterwards; never resume a record whose runner you did not
+   create. 2026-10-25, round 2: a reroute probe omitted the flag, fell through
+   to the live Codex runner, which ran 98 s and sent a real `hermes-ping`.
+   "No live agent, no network, no notifications" in a brief means exactly this:
+   a fake runner pinned and checked, no `hermes-ping`, no fetch.
+
 Working rule: Start any command likely to take more than ~10-15 s (builds, test suites, long probes, waits) with run_in_background: true from the first call; wait on the completion notification, never poll, and kill any stray process you started.
