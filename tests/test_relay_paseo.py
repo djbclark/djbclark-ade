@@ -283,19 +283,61 @@ class RelayPaseo(unittest.TestCase):
             _ = fh.write(json.dumps({"text": second}) + "\n")
         self.assertEqual(proof(), "delivered")    # and it still sees the message once it does arrive
 
+    SPECIAL = "use <b> & \"q\" 's' tail"
+
+    def esc(self, text: str) -> str:
+        return "".join(relay.XML_ESCAPES.get(c, c) for c in text)
+
+    def envelope(self, body: str) -> str:
+        """The Paseo 0.13.0 text of a send that carries a source agent: its label around the XML-escaped body."""
+        return '<paseo-system version="1" kind="agent-message" source-agent-id="a1" message-id="m2">\n' + body + "\n</paseo-system>"
+
     def test_a_paseo_agent_message_is_verified_whole_with_its_escapes_past_the_old_probe_length(self) -> None:
-        # a Paseo-hosted sender's text carries no relay header: Paseo wraps the XML-escaped text in its own label
+        # a source-bearing send (a Paseo-hosted sender) carries no relay header: Paseo wraps the XML-escaped text in its own label
         tx = Path(self.tmp.name) / "tx.jsonl"
         _ = tx.write_text("{}\n")
-        text = "x" * 50 + " use <b> & \"q\" 's' tail"
-        body = '<agent-message from="' + CALLER + '">\n' + "".join(relay.XML_ESCAPES.get(c, c) for c in text) + "\n</agent-message>"
-        self.assertEqual(self.send_and_probe(tx, text, body)[0], "delivered")
-        self.assertEqual(self.send_and_probe(tx, text, body.replace("tail", "other"))[0], "accepted")    # same first 50 characters, another end
+        text = "x" * 50 + " " + self.SPECIAL
+        line = self.envelope(self.esc(text))
+        self.assertEqual(self.send_and_probe(tx, text, line)[0], "delivered")
+        self.assertEqual(self.send_and_probe(tx, text, line.replace("tail", "other"))[0], "accepted")    # same first 50 characters, another end
 
     def test_the_relay_prefix_route_is_verified_whole(self) -> None:
+        # no source agent on this route: Paseo stores the text raw
         tx = Path(self.tmp.name) / "tx.jsonl"
         _ = tx.write_text("{}\n")
-        self.assertEqual(self.send_and_probe(tx, self.HDR + "ping & more", self.HDR + "ping &amp; more")[0], "delivered")
+        self.assertEqual(self.send_and_probe(tx, self.HDR + "ping & more", self.HDR + "ping & more")[0], "delivered")
+
+    def test_a_sourceless_send_is_stored_raw_and_delivered_with_every_special_character(self) -> None:
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        seen, proof = self.send_and_probe(tx, self.SPECIAL, self.SPECIAL)
+        self.assertEqual(seen, "delivered")
+        self.assertIsNone(proof)    # nothing left to wait for
+
+    def test_a_source_bearing_send_is_stored_escaped_and_delivered(self) -> None:
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        self.assertEqual(self.send_and_probe(tx, self.SPECIAL, self.envelope(self.esc(self.SPECIAL)))[0], "delivered")
+
+    def test_the_ack_proof_accepts_the_raw_and_the_escaped_whole_text(self) -> None:
+        for stored in (self.SPECIAL, self.envelope(self.esc(self.SPECIAL))):
+            tx = Path(self.tmp.name) / "tx.jsonl"
+            _ = tx.write_text("{}\n")
+            seen, proof = self.send_and_probe(tx, self.SPECIAL, None)    # nothing arrives during the send window
+            self.assertEqual(seen, "accepted", stored)
+            self.assertIsNone(proof(), stored)
+            with tx.open("a") as fh:
+                _ = fh.write(json.dumps({"text": stored}) + "\n")
+            self.assertEqual(proof(), "delivered", stored)
+
+    def test_a_text_present_in_neither_form_stays_accepted(self) -> None:
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        # the other message's escaped line, a half-escaped mix, and an unrelated line: none is the whole text in either form
+        for line in (self.esc(self.SPECIAL.replace("tail", "other")), self.SPECIAL.replace("&", "&amp;"), "unrelated"):
+            seen, proof = self.send_and_probe(tx, self.SPECIAL, line)
+            self.assertEqual(seen, "accepted", line)
+            self.assertIsNone(proof(), line)
 
     def test_unknown_terminal_for_a_pid_nobody_hosts_still_errors_and_names_paseo(self) -> None:
         s = sess(host="terminal", chan=None, paseo=None, where="unknown terminal")

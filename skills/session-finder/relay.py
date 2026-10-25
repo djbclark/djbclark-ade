@@ -401,15 +401,16 @@ def forced_tag(listed):
     return sender_tag(listed) or f"[relay from {sender_header_name(listed)}] "
 
 
-def probe_proof(tx, mark, probe):
-    """A zero-argument proof for the --ack watch: 'delivered' once the JSON-escaped PROBE is in transcript TX after byte
+def probe_proof(tx, mark, *probes):
+    """A zero-argument proof for the --ack watch: 'delivered' once any of the JSON-escaped PROBES is in transcript TX after byte
     MARK, else None (also while the transcript is absent)."""
     def proof():
         if not (tx and Path(tx).is_file()):
             return None
         with Path(tx).open("rb") as fh:
             fh.seek(mark)
-            return "delivered" if probe in fh.read().decode("utf-8", "replace") else None
+            data = fh.read().decode("utf-8", "replace")
+        return "delivered" if any(p in data for p in probes) else None
     return proof
 
 
@@ -428,19 +429,21 @@ def send_paseo(s, text, wait):
         print(f"relay: [{s['id']}] paseo send to {agent} failed (rc={rc}): {fleet.clip((err or out).strip(), 200)}",
               file=sys.stderr)
         return None
-    # the daemon XML-escapes the text inside its label and the transcript stores that JSON-escaped. The probe is the WHOLE
-    # text: any prefix can be shared by two relays of one sender (the header alone is ~60 characters), so a line of one
-    # message would certify the other (Codex P1, PR 74)
-    escaped = "".join(XML_ESCAPES.get(c, c) for c in text)
-    probe = json.dumps(escaped, ensure_ascii=False)[1:-1]
+    # Paseo 0.13.0 XML-escapes the text only when the send carries a source agent (a Paseo-hosted sender); a sourceless send (every
+    # other sender, and the `[relay from ...]` route) is stored raw. The transcript holds either JSON-escaped. The probes are the
+    # WHOLE text, raw or escaped: any prefix can be shared by two relays of one sender (the header alone is ~60 characters), so a
+    # line of one message would certify the other (Codex P1, PR 74; adversary round 4 R4-1)
+    probe_raw = json.dumps(text, ensure_ascii=False)[1:-1]
+    probe_esc = json.dumps("".join(XML_ESCAPES.get(c, c) for c in text), ensure_ascii=False)[1:-1]
     deadline = time.time() + wait
     while tx and tx.is_file() and time.time() < deadline:
         with tx.open("rb") as fh:
             fh.seek(mark)
-            if probe in fh.read().decode("utf-8", "replace"):
-                return "delivered"
+            data = fh.read().decode("utf-8", "replace")
+        if probe_raw in data or probe_esc in data:
+            return "delivered"
         time.sleep(1)
-    s["proof"] = probe_proof(tx, mark, probe) if tx else None    # route_paseo hands it to the --ack watch: an "accepted" send may still show up
+    s["proof"] = probe_proof(tx, mark, probe_raw, probe_esc) if tx else None    # route_paseo hands it to the --ack watch: an "accepted" send may still show up
     return "accepted"
 
 
