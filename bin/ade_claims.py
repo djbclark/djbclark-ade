@@ -1665,22 +1665,15 @@ def _common_dir(gitdir: Path) -> Path:
         return gitdir
 
 
-def _config_origin(common: Path) -> str:
-    """`remote.origin.url` read straight from the repository's config file (a hook must not run git: locks are held)."""
-    try:
-        text = _slurp(common / "config")
-    except OSError:
-        return ""
-    in_origin = False
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("["):
-            in_origin = s.lower().replace(" ", "").startswith('[remote"origin"]')
-        elif in_origin:
-            key, eq, v = s.partition("=")
-            if eq and key.strip().lower() == "url":
-                return v.strip().strip('"')
-    return ""
+def _config_origin(common: Path) -> Optional[str]:
+    """`remote.origin.url` as git itself answers (`git config --get`: comments, quotes, escapes and includes are git's to
+    read): the URL, "" when git says it is unset (exit 1), None when git did not answer (timeout, cannot start, broken
+    config): the hook then lets the update through. `git config` takes no ref lock, so a hook may run it. Asked of the
+    COMMON dir: a linked worktree's own git dir has no `remote.*` (measured 2026-10-25)."""
+    rc, out = _run_git(["--git-dir", str(common), "config", "--get", "remote.origin.url"], 3)
+    if rc == 0:
+        return out.rstrip("\n")
+    return "" if rc == 1 else None
 
 
 def _hook_workspace(env: dict[str, str], cwd: str) -> Optional[Workspace]:
@@ -1779,11 +1772,11 @@ def hook_ref(state: str, text: str, env: Optional[dict[str, str]] = None, cwd: O
         return 0
     ident = caller_ident(env)
     ws = _hook_workspace(env, cwd)
-    origin = _config_origin(_common_dir(ws.gitdir)) if ws else ""
+    origin = _config_origin(_common_dir(ws.gitdir)) if ws else ""      # None: git did not answer, no claim rule can be judged
     if state == "committed":
         for old, new, ref in updates:
             if ref.startswith("refs/heads/"):
-                cs = claims_for_branch(ref[len("refs/heads/"):], origin)
+                cs = claims_for_branch(ref[len("refs/heads/"):], origin) if origin is not None else []
                 if cs:
                     append_guard_log({"ts": utc_now(), "outcome": "ref-change", "via": "reference-transaction",
                                       "ref": ref, "old": old, "new": new, "ident": ident or "", "pid": os.getpid(),
@@ -1796,7 +1789,7 @@ def hook_ref(state: str, text: str, env: Optional[dict[str, str]] = None, cwd: O
         rule = ""
         if ref.startswith("refs/heads/"):
             b = ref[len("refs/heads/"):]
-            for c in claims_for_branch(b, origin):
+            for c in (claims_for_branch(b, origin) if origin is not None else []):
                 if not is_mine(c, ident):
                     rule = "ref-claimed-branch"
                     d = _foreign(c, rule, "message the owner; never move, delete or write another agent's branch "

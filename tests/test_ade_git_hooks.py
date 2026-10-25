@@ -695,3 +695,26 @@ def test_r10_f5_an_empty_core_hooks_path_counts_as_set_for_install_and_lazy_inst
     assert not (repo / ".git" / "hooks" / "pre-push").exists()
 
 
+def _origin_text(w, new_lines):
+    cfg = w.repo / ".git" / "config"
+    text = cfg.read_text()
+    text, n = re.subn(r'(\[remote "origin"\]\n)\turl = [^\n]*\n', lambda m: m.group(1) + new_lines, text)
+    assert n == 1
+    cfg.write_text(text)
+
+
+@pytest.mark.parametrize("form", ["comment", "quoted", "quoted-comment", "included"])
+def test_r10_f6_origin_is_what_git_says_whatever_its_spelling_in_the_config(world, form):
+    up = str(world.up)
+    if form == "included":
+        (world.repo / ".git" / "origin.cfg").write_text(f'[remote "origin"]\n\turl = {up}\n')
+        _origin_text(world, "")
+        with open(world.repo / ".git" / "config", "a") as f:
+            f.write("[include]\n\tpath = origin.cfg\n")
+    else:
+        url = {"comment": f"{up} # normal comment", "quoted": f'"{up}"', "quoted-comment": f'"{up}" ; note'}[form]
+        _origin_text(world, f"\turl = {url}\n")
+    assert ok(world.state, ["config", "--get", "remote.origin.url"], world.repo) == up
+    r = git(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B")
+    assert refused(r), r.stderr
+    assert world.cb() != world.main()
