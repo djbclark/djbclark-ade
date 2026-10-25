@@ -9,9 +9,9 @@
     helm.py wait [--auto-audit] [--settle S] [--timeout S] [--json]
                                         block until an item appears or changes; print only those
     helm.py check <id> [--fp F]        is the question still pending? 0 yes, 10 answered elsewhere, 11 changed
-    helm.py show <id>                   one session in full: question, last reply, screen. For a TUI herdr does not detect (status
-                                        unknown) it also prints `screen-fp`, the fingerprint of the very capture it shows (none, and no
-                                        send command, when herdr could not read the screen)
+    helm.py show <id>                   one session in full: question, last reply, screen. For a herdr pane that is idle or a TUI herdr does
+                                        not detect (status unknown) it also prints `screen-fp`, the fingerprint of the very capture it shows
+                                        (none, and no send command, when herdr could not read the screen)
     helm.py answer <id> <n>...          pick option n (1-based), one number per question
     helm.py answer <id> --text "..."    answer a single question in free text
     helm.py send <id> "<prompt>"        submit a prompt to an idle session
@@ -23,6 +23,14 @@
                                         only as a ticking timer is not seen), read again just before the submit; an unreadable screen
                                         never matches. Refused for any other kind of session, the audit, an unreadable or changed screen,
                                         and another pane or process. It reports a submit, not a read: confirm with `show` or a named ack.
+                                        Herdr has no agent entry for an undetected TUI (`agent read` and `agent prompt` fail agent_not_found), so
+                                        helm reads with `herdr pane read` and types with `pane send-text` then `pane send-keys enter`, only
+                                        after the second fingerprint check; a failed typing never presses Enter, is never retried and reads
+                                        "unverified, do not resend". Newlines and tabs in the text fold to spaces; other control characters refuse.
+                                        The flag is also accepted for a herdr pane herdr reports idle (`show` offers it there too): a detected agent
+                                        can be "not an active named agent" (`agent send-keys` rc 1 agent_not_ready) while its pane takes input. It
+                                        then only adds the same fresh-screen, pane and pid checks to what the plain send accepts, and sends through
+                                        the pane verbs; without the flag an idle row still goes through `agent prompt` (Codex paste handling).
     helm.py audit <id>                  send /loose and remember that this session was audited
     helm.py skip <id>                   hide this item until the session changes
     helm.py keys <id> <key>...          raw keys, for a prompt helm cannot parse (read `show` first)
@@ -69,11 +77,13 @@ run, herdr_json, short, clip, transcript, parse = fleet.run, fleet.herdr_json, f
 # ---- channels: how to reach a session's terminal ------------------------------------------
 
 
-def _capture(s, lines):
-    """(exit status, raw output) of reading session S's pane through its channel; (None, "") when it has none."""
+def _capture(s, lines, pane=False):
+    """(exit status, raw output) of reading session S's pane through its channel; (None, "") when it has none. PANE: the herdr `pane` verb
+    whatever the row (it addresses the pane, so it works for a detected agent that is not an active named agent too); otherwise a detected
+    agent keeps `agent read`."""
     kind, target = s.get("chan") or (None, None)
     if kind == "herdr":
-        return run(HERDR, "agent", "read", target, "--source", "visible", "--lines", str(lines))
+        return run(HERDR, "pane" if (pane or pane_api(s)) else "agent", "read", target, "--source", "visible", "--lines", str(lines))
     if kind == "orca":
         return run("orca", "terminal", "read", "--terminal", target)
     if kind == "tmux":
@@ -91,8 +101,9 @@ def screen(s, lines=30, width=160):
 
 def screen_read(s, lines=30, width=160):
     """The same rows as `screen`, or None when the read failed: a non-zero exit (a timeout or a missing binary is 127), even with output,
-    or no channel. A blank screen is "" and never a usable reading."""
-    rc, out = _capture(s, lines)
+    or no channel. A blank screen is "" and never a usable reading. Only the fingerprint paths read this way, and always with the herdr
+    `pane` verb: it addresses the pane itself, so it works for every row `fp_eligible` accepts."""
+    rc, out = _capture(s, lines, pane=True)
     return None if rc != 0 else _rows(out, lines, width)
 
 
@@ -126,6 +137,35 @@ def submit(s, text):
     if kind == "orca":
         return run("orca", "terminal", "send", "--terminal", target, "--text", text, "--enter", timeout=20)[0] == 0
     return send_text(s, text) and send_keys(s, "enter")
+
+
+ENTER_DELAY = 0.5    # between the text and its Enter, as relay.py: a burst can be read as one paste
+
+
+def pane_api(s):
+    """True for a herdr pane whose TUI herdr does not detect (fleet's `undetected` row). Herdr has no AGENT entry for it, so every
+    `herdr agent ...` call fails with agent_not_found (2026-10-25, a native Hermes TUI: `agent read` rc 1, `pane read` fine); only the
+    `herdr pane ...` verbs reach it. A detected agent keeps the agent verbs."""
+    return bool(s.get("undetected")) and (s.get("chan") or ("",))[0] == "herdr"
+
+
+def submit_attested(s, text):
+    """(True, None) once TEXT was typed into the undetected pane S and Enter pressed, else (False, why). Only for a row `attested_unknown`
+    accepted, after its last fingerprint check; `herdr pane send-text` then `herdr pane send-keys ... enter`, never an agent verb. A failed or
+    timed-out typing is uncertain (part of the text may be in the input box): Enter is NOT pressed, nothing is retried and no other route is
+    tried. Newlines and tabs fold to spaces (a newline would submit early); any other control character refuses before anything is typed."""
+    text = " ".join(text.split())
+    if not text or any(ord(c) < 32 or ord(c) == 127 for c in text):
+        return False, "nothing sent: the text is empty or holds control characters"
+    target = s["chan"][1]
+    if run(HERDR, "pane", "send-text", target, text, timeout=20)[0] != 0:
+        return False, (f"unverified: typing into {s['id']} failed or timed out, so part of the text may sit in its input box; Enter was "
+                       f"NOT pressed. Do not resend; check `helm.py show {s['id']}`")
+    time.sleep(ENTER_DELAY)
+    if run(HERDR, "pane", "send-keys", target, "enter", timeout=20)[0] != 0:
+        return False, (f"unverified: the text was typed into {s['id']} but Enter failed or timed out; it may sit in its input box. "
+                       f"Do not resend; check `helm.py show {s['id']}`")
+    return True, None
 
 
 FP_LINES, FP_WIDTH = 200, 400    # what `screen_fp` reads: every visible row, and past the 160 columns the other reads clip to
@@ -417,7 +457,14 @@ def render(it, full=False):
         if it.get("context"):
             out.append(f"  last reply: {it['context']}")
         if it.get("screen") and (full or not it.get("context")):
-            out += ["  screen:"] + ["    | " + ln for ln in it["screen"].splitlines()[-8:]]
+            out += ["  screen:"] + ["    | " + ln for ln in it["screen"].splitlines()[-(22 if it.get("screen_fp") else 8):]]
+        if it.get("screen_unreadable"):
+            out.append("  screen unreadable (herdr failed or the pane is blank): no screen-fp, nothing can be sent with --screen-fp")
+        elif it.get("screen_fp"):
+            out.append(f"  screen-fp: {it['screen_fp']}")
+            out.append(f"  when the plain send is refused by herdr's agent API (e.g. `not an active named agent`) and YOU read the screen above and it shows an "
+                       f"empty input and no pending question, approval or plan: helm.py send {it['id']} --screen-fp {it['screen_fp']} \"<text>\"  "
+                       f"(pane verbs; refused if the screen changed, is another pane or process, or unreadable)")
         if not it["audited"]:
             out.append(f"  next: helm.py audit {it['id']}  |  helm.py skip {it['id']}")
     elif k == "unknown" and (it.get("screen_fp") or it.get("screen_unreadable")):
@@ -529,7 +576,7 @@ def cmd_brief(a, state):
 
 def cmd_show(a, state):
     s, it = find(a.id, state)
-    if it["kind"] == "unknown" and s.get("undetected") and s.get("status") == "unknown" and (s.get("chan") or ("",))[0] == "herdr":
+    if fp_eligible(s, it):
         text = screen_read(s, FP_LINES, FP_WIDTH)    # ONE read: the rows shown below and the fingerprint come from the same capture
         if text:
             it["screen"] = "\n".join(ln[:160] for ln in text.splitlines()[-22:])
@@ -633,15 +680,28 @@ def cmd_answer(a, state):
     save(state)
 
 
-def attested_unknown(s, it, a):
-    """(True, None) when `send --screen-fp` may stand in for the idle status herdr cannot give, else (False, why). Only a TUI herdr
-    does not detect (fleet marks the row `undetected`, status unknown) with a real herdr channel, never the audit, and only while the
-    screen is the very one the caller fingerprinted. The caller's part is the attestation `show` asks for: it read that screen and it
-    showed an idle, empty input and no pending question, approval or plan. Nothing here infers idle from the screen."""
+def fp_eligible(s, it):
+    """True when `--screen-fp` is accepted for this row, and `show` offers a fingerprint: a herdr pane that is a status-unknown TUI herdr does
+    not detect (fleet's `undetected` row), or one herdr reports idle (the plain send, which needs no flag, already accepts it). Never a
+    working, blocked, question, permission, plan, busy, finished, remote or ACP row, a row outside herdr, or one with no channel."""
+    if (s.get("chan") or ("",))[0] != "herdr":
+        return False
+    if it["kind"] == "unknown":
+        return bool(s.get("undetected")) and s.get("status") == "unknown"
+    return it["kind"] == "idle" and s.get("status") == "idle"
+
+
+def attested_pane(s, it, a):
+    """(True, None) when `send --screen-fp` may go ahead, else (False, why): the row qualifies (`fp_eligible`), it is not the audit, and the
+    screen is the very one the caller fingerprinted. For a status-unknown TUI the flag stands in for the idle herdr cannot give. For an idle
+    row it only ADDS constraints to what the plain send accepts, and reaches panes whose agent API refuses input (a detected agent that is
+    "not an active named agent": `agent send-keys` rc 1 agent_not_ready); it never turns a busy row into a sendable one. The caller's part
+    is the attestation `show` asks for: it read that screen and it showed an idle, empty input and no pending question, approval or plan.
+    Nothing here infers idle from the screen."""
     if a.prompt is None:
-        return False, "an audit is never sent to a session whose status is unknown"
-    if not (it["kind"] == "unknown" and s.get("undetected") and s.get("status") == "unknown" and (s.get("chan") or ("",))[0] == "herdr"):
-        return False, (f"--screen-fp is only for a TUI herdr does not detect (status unknown, a herdr pane); {it['id']} is "
+        return False, "an audit never takes --screen-fp"
+    if not fp_eligible(s, it):
+        return False, (f"--screen-fp is only for a herdr pane that is idle or a status-unknown TUI herdr does not detect; {it['id']} is "
                        f"{it['kind']}; drop --screen-fp")
     now = screen_fp(s)
     if now is None:
@@ -669,7 +729,7 @@ def cmd_send(a, state):
             hint = (f"; it is a TUI herdr does not detect: read `helm.py show {it['id']}` and, only if its screen shows an idle, "
                     f"empty input and nothing pending, send with `--screen-fp` from it" if s.get("undetected") and it["kind"] == "unknown" else "")
             sys.exit(f"helm: {it['id']} is {it['kind']}, not idle; nothing sent{hint}")
-        ok, why = attested_unknown(s, it, a)
+        ok, why = attested_pane(s, it, a)
         if not ok:
             sys.exit(f"helm: {why}; nothing sent")
     d = draft(s) if s["agent"] == "claude" else ""
@@ -678,7 +738,12 @@ def cmd_send(a, state):
     text = audit_text(s) if a.prompt is None else a.prompt
     if fp is not None and screen_fp(s) != fp:    # the last look before the keys; an unreadable screen (None) never equals a fingerprint
         sys.exit(f"helm: the screen of {it['id']} changed or could not be read just before the submit; nothing sent")
-    if not submit(s, text):
+    if fp is not None:    # attested, undetected: herdr has no agent entry for it, so the pane verbs; no fallback, no resend
+        ok, why = submit_attested(s, text)
+        if not ok:
+            sys.exit(f"helm: {why}")
+        text = " ".join(text.split())
+    elif not submit(s, text):
         sys.exit(f"helm: could not submit to {it['id']}")
     if a.prompt is None:
         st = state[s["id"]]
