@@ -31,16 +31,25 @@ with open(os.path.join(d, "calls.log"), "a") as f:
     f.write(json.dumps(args) + "\n")
 if args[:1] != ["api"]:
     sys.stderr.write("fake gh: only `api` is served\n"); sys.exit(1)
-ep = next(a for a in args[1:] if not a.startswith("-")).split("?")[0]
+skip = False
+method, ep = "GET", None
+for a in args[1:]:
+    if skip:
+        method, skip = a, False
+    elif a == "-X":
+        skip = True
+    elif not a.startswith("-") and ep is None:
+        ep = a.split("?")[0]
 routes = json.load(open(os.path.join(d, "scenario.json")))["routes"]
-if ep not in routes:
-    sys.stderr.write("fake gh: no route " + ep + "\n"); sys.exit(1)
-cf = os.path.join(d, "count-" + ep.replace("/", "_"))
+key = ep if method == "GET" else method + " " + ep
+if key not in routes:
+    sys.stderr.write("fake gh: no route " + key + "\n"); sys.exit(1)
+cf = os.path.join(d, "count-" + key.replace("/", "_").replace(" ", "_"))
 n = int(open(cf).read()) if os.path.exists(cf) else 0
 with open(cf + ".tmp.%d" % os.getpid(), "w") as f:
     f.write(str(n + 1))
 os.replace(cf + ".tmp.%d" % os.getpid(), cf)
-r = routes[ep][min(n, len(routes[ep]) - 1)]
+r = routes[key][min(n, len(routes[key]) - 1)]
 sys.stdout.write(r.get("out", ""))
 sys.stderr.write(r.get("err", ""))
 sys.exit(r.get("rc", 0))
@@ -104,6 +113,21 @@ def request(at: str) -> dict:
     return {"body": "@codex review", "created_at": at, "updated_at": at, "user": {"login": "djbclark", "type": "User"}}
 
 
+# Issue-timeline items (REST `issues/N/timeline`): `committed` and `commented` carry no usable push time,
+# so none is given: position in the list is the only order pr-wait may use.
+def committed(sha: str) -> dict:
+    return {"event": "committed", "sha": sha}
+
+
+def forced(sha: str) -> dict:
+    return {"event": "head_ref_force_pushed", "commit_id": sha, "created_at": "2026-10-24T10:00:00Z"}
+
+
+def commented(body: str = "@codex review", login: str = "djbclark") -> dict:
+    return {"event": "commented", "body": body, "user": {"login": login, "type": "User"}}
+
+
+
 def finding(n: int, at: str, original: str = HEAD, review: int | None = None, login: str = CODEX_LOGIN,
             type_: str = "Bot") -> dict:
     return {"id": n, "path": f"f{n}.py", "line": n, "created_at": at, "original_commit_id": original,
@@ -141,6 +165,10 @@ class World:
         self.route(f"repos/{REPO}/pulls/{PR}/reviews", ok([]))
         self.route(f"repos/{REPO}/pulls/{PR}/comments", ok([]))
         self.route("graphql", gql())
+        # the head was pushed, then a request: so a missing marker alone never makes pr-wait post
+        self.route(f"repos/{REPO}/issues/{PR}/timeline", ok([committed(HEAD), commented()]))
+        self.route("user", ok({"login": "djbclark"}))
+        self.route(f"POST repos/{REPO}/issues/{PR}/comments", ok({"id": 999, "body": "@codex review"}))
 
     def argv(self, *extra: str) -> list[str]:
         return [sys.executable, "-I", str(PR_WAIT), str(PR), "--interval", "0.1", "--timeout", "15",
@@ -156,6 +184,14 @@ class World:
     def calls(self, ep: str) -> int:
         cf = self.dir / ("count-" + f"repos/{REPO}/{ep}".replace("/", "_"))
         return int(cf.read_text()) if cf.exists() else 0
+
+    def posts(self) -> int:
+        cf = self.dir / f"count-POST_repos_{REPO}/issues/{PR}/comments".replace("/", "_")
+        return int(cf.read_text()) if cf.exists() else 0
+
+    def post_argvs(self) -> list[list[str]]:
+        lines = (self.dir / "calls.log").read_text().splitlines()
+        return [a for a in map(json.loads, lines) if "POST" in a]
 
 
 @pytest.fixture
@@ -841,3 +877,200 @@ def test_script_defers_annotations_so_stock_macos_python_3_9_can_load_it() -> No
     if version.isdigit() and int(version) < 10:
         run = subprocess.run([str(stock), "-I", str(PR_WAIT), "--help"], capture_output=True, text=True)
         assert run.returncode == 0, run.stderr
+
+
+# ---- requesting the Codex review (2026-10-24) --------------------------------------------------------
+
+COMMENTS = f"repos/{REPO}/issues/{PR}/comments"
+TIMELINE = f"repos/{REPO}/issues/{PR}/timeline"
+POST_ARGV = ["api", "-X", "POST", COMMENTS, "-f", "body=@codex review"]
+NOMARK = ok([])
+
+
+def test_posts_one_request_when_the_head_has_no_marker_and_none_was_requested(world: World) -> None:
+    world.route(TIMELINE, ok([committed(OLD), committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.posts() == 1, "one post, however many polls found no marker afterwards"
+    assert world.post_argvs() == [POST_ARGV]  # an argv list; the body goes through -f
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "posted @codex review (comment 999)" in summary["codex_request_note"]
+    assert "@codex review requested 1x" in r.stdout
+    state = json.loads(next(world.state.glob("request-*.json")).read_text())
+    assert state["own"] == 1 and state["ids"] == [999] and isinstance(state["last_at"], float)
+
+
+@pytest.mark.parametrize("status", ["running", "completed", "failed"])
+def test_no_post_when_a_marker_for_the_head_exists_whatever_its_status(world: World, status: str) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))  # nobody has asked: only the marker keeps pr-wait quiet
+    world.route(COMMENTS, ok([codex_comment(HEAD, status)]))
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == (3 if status == "running" else 0), r.stdout + r.stderr
+    assert world.posts() == 0 and world.calls("issues/7/timeline") == 0
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0 and "no request needed" in summary["codex_request_note"]
+
+
+@pytest.mark.parametrize("flag", ["--no-codex", "--no-request"])
+def test_no_post_with_no_codex_or_no_request(world: World, flag: str) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK)
+    r = world.run(flag, "--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == (0 if flag == "--no-codex" else 3), r.stdout + r.stderr
+    assert world.posts() == 0 and world.calls("issues/7/timeline") == 0
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0
+    if flag == "--no-request":
+        assert "disabled" in summary["codex_request_note"]
+
+
+@pytest.mark.parametrize("author,pr_author,me", [
+    ("djbclark", None, "djbclark"),  # the authenticated gh user
+    ("alice", "alice", "ci-bot"),  # the PR author
+    ("djbclark", None, "ci-bot"),  # the repo owner (the OWNER of --repo)
+])
+def test_no_post_when_a_request_exists_since_the_push(world: World, author: str, pr_author: str | None,
+                                                      me: str) -> None:
+    world.route(f"repos/{REPO}/pulls/{PR}", ok({"head": {"sha": HEAD}, "user": {"login": pr_author}}))
+    world.route("user", ok({"login": me}))
+    world.route(TIMELINE, ok([committed(HEAD), commented("@codex review\n", author)]))  # a stripped body counts
+    world.route(COMMENTS, NOMARK)
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 0
+    assert "already exists (1)" in world.file("summary")["codex_request_note"]
+
+
+@pytest.mark.parametrize("timeline", [
+    [commented(), committed(HEAD)],  # asked, THEN pushed: the request was for the previous head
+    [committed(OLD), commented(), committed(HEAD)],
+    [committed(HEAD), commented(), forced(HEAD)],  # force-pushed to the head again after the request
+])
+def test_a_request_before_the_push_does_not_count(world: World, timeline: list[dict]) -> None:
+    world.route(TIMELINE, ok(timeline))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 1
+
+
+def test_codex_receipts_and_quotes_of_the_phrase_are_not_requests(world: World) -> None:
+    # AGENTS.md rule 9 (PR 12, PR 10): Codex's own comments quote `@codex review`
+    world.route(TIMELINE, ok([committed(HEAD),
+                              commented("@codex review", CODEX_LOGIN),
+                              commented('About Codex: Comment "@codex review".', CODEX_LOGIN),
+                              commented("> @codex review\nlgtm"),  # a quote by the right author
+                              commented("@codex review please"),
+                              commented("@codex review", "mallory")]))  # exact body, wrong author
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 1
+
+
+@pytest.mark.parametrize("what", ["head-not-in-timeline", "timeline-fails", "user-fails"])
+def test_undecidable_means_no_post_and_says_so(world: World, what: str) -> None:
+    if what == "head-not-in-timeline":
+        world.route(TIMELINE, ok([committed(OLD)]))
+    elif what == "timeline-fails":
+        world.route(TIMELINE, fail("gh: HTTP 502 Bad Gateway"))
+    else:
+        world.route("user", fail("gh: HTTP 401"))
+    world.route(COMMENTS, NOMARK)
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == 3, r.stdout + r.stderr  # a failed decision never turns into exit 6
+    assert world.posts() == 0
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0 and "undecidable, nothing posted" in summary["codex_request_note"]
+
+
+def test_a_failed_post_is_not_recorded_and_is_rechecked_before_the_next(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(f"POST {COMMENTS}", fail("gh: HTTP 500"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 2 and world.file("summary")["codex_requested"] == 1
+    assert world.calls("issues/7/timeline") == 2  # the timeline was read again before the second attempt
+
+
+def test_a_review_stuck_running_is_requested_once_more_never_a_third_time(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))  # a lagging timeline never shows pr-wait's own comments
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "1", "--codex-stuck", "3", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 2, "the first request, one re-request after the Running window, never a third"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 2
+    note = summary["codex_request_note"]
+    assert "posted @codex review" in note and "re-requested" in note and "openai/codex#55890" in note
+
+
+def test_no_re_request_before_the_running_window_ends(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "600", "--codex-stuck", "1.5", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 1
+    assert "openai/codex#55890" in world.file("summary")["codex_request_note"]
+
+
+def test_a_human_request_beside_pr_waits_own_blocks_the_re_request(world: World) -> None:
+    # two requests since the push already (one is pr-wait's): never a third
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(), commented()]))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "0.5", "--codex-stuck", "2", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 1
+
+
+def test_a_second_run_on_the_same_head_does_not_post_again(world: World) -> None:
+    # the timeline lags (never shows pr-wait's own comment): only the persisted state can stop a second post
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK)
+    assert world.run("--codex-stuck", "0.5", "--timeout", "5").returncode == 3
+    assert world.posts() == 1
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 1
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "earlier run" in summary["codex_request_note"]
+
+
+def test_requests_per_head_are_capped_at_two_across_runs(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK)
+    assert world.run("--codex-stuck", "0.5", "--timeout", "5").returncode == 3  # request 1
+    world.route(COMMENTS, ok([codex_comment(HEAD, "running")]))
+    for _ in range(2):  # request 2, then none
+        assert world.run("--rerequest-after", "0", "--codex-stuck", "0.5", "--timeout", "5").returncode == 3
+    assert world.posts() == 2
+    assert world.file("summary")["codex_requested"] == 2
+    # another head starts afresh
+    assert json.loads(next(world.state.glob(f"request-*-{HEAD}.json")).read_text())["own"] == 2
+
+
+def test_requests_since_push_is_decided_by_position_not_by_dates() -> None:
+    pw = load_module()
+    allowed = {"djbclark"}
+    f = pw.requests_since_push
+    assert f([committed(HEAD.upper()), commented()], HEAD, allowed) == (1, "")  # sha case is not significant
+    assert f([committed(HEAD), commented(), commented("@codex review", "DJBCLARK")], HEAD, allowed) == (2, "")
+    assert f([committed(HEAD), commented(), forced(HEAD)], HEAD, allowed) == (0, "")
+    assert f([forced(HEAD), commented(), committed(HEAD)], HEAD, allowed) == (0, "")  # the LAST item naming it
+    assert f([committed(HEAD), {"event": "reviewed", "body": "@codex review", "user": {"login": "djbclark"}}],
+             HEAD, allowed) == (0, "")  # only `commented` items are requests
+    n, why = f([committed(OLD), commented()], HEAD, allowed)
+    assert n is None and "not in the PR timeline" in why
+    assert f([committed(HEAD), "junk", {"event": "commented", "body": None}], HEAD, allowed) == (0, "")
+
+
+def test_request_state_fields_are_read_with_get(tmp_path: Path) -> None:
+    pw = load_module()
+    p = tmp_path / "request-x.json"
+    assert pw.load_request_state(p) == {"own": 0, "last_at": None, "ids": []}  # missing file
+    for text in ["not json", "[]", "{}", '{"own": "1"}', '{"own": 7}', '{"own": true}']:
+        p.write_text(text)
+        assert pw.load_request_state(p)["own"] == 0, text
+    p.write_text('{"own": 1}')  # an older record without the later fields
+    assert pw.load_request_state(p) == {"own": 1, "last_at": None, "ids": []}
+    p.write_text('{"own": 2, "last_at": 5, "ids": [1, 2]}')
+    assert pw.load_request_state(p) == {"own": 2, "last_at": 5.0, "ids": [1, 2]}

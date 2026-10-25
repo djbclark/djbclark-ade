@@ -777,6 +777,15 @@ timeout, 2 bad usage, no such PR or the lock guard busy, 3 Codex stuck, 4 a wait
 not start another), 5 the head moved (wait on the new head), 6 timed out while `gh` failed. After a push, start one for
 the new head; a second for the same head is refused by itself.
 
+**`pr-wait` requests the Codex review itself (2026-10-24):** the Codex bot reviews on PR open and draft-to-ready, not on a
+push, so when a head has no Codex marker and no `@codex review` since its push (decided by position in the PR timeline, never
+by a clock; Codex's own receipts that quote the phrase never count), it posts ONE comment `@codex review`; a review still
+`running` after `--rerequest-after S` (default 600) is requested once more, never a third time, then the summary's
+`codex_request_note` points to openai/codex#55890 (a manual request is sometimes stuck "Running"). `--no-request` only waits
+(`--no-codex` never requests). The summary carries `codex_requested` (0-2) and `codex_request_note`; an undecidable case (the
+head is absent from the timeline, a `gh` call failed) posts nothing and says so. Do not post `@codex review` by hand while a
+`pr-wait` is alive.
+
 ### Jobs and records — work that must outlive the session
 
 What survives a session is a file, not a process. Every slice and every
