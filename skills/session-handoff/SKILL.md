@@ -97,9 +97,11 @@ read.
      — the `basic-memory` MCP
      `search_notes`, or `bm tool search-notes "<query>"`, for decisions
      and corrections from other sessions and for anything machine-wide.
-     Hermes reads the same store, so this is also how you find what *it*
-     decided. Notes under `hindsight/<repo>/` were exported from a retired
-     LLM extractor: verify before relying on one.
+     Hermes has `basic-memory` as an MCP server (`~/.hermes/config.yaml`,
+     checked 2026-10-24), but its own memory provider is off
+     (`memory.provider: ''`), so it does not recall from this store
+     automatically. No `hindsight/` folder exists in `main` (checked
+     2026-10-24). Verify any hit against the repo before relying on it.
    - **Verbatim recovery**, when the log references something it does not
      explain: `~/ops/site-djbclark/bin/s1_search.py search
      '<phrase>' --mode trigram`, then `neighbours <event_id>` for context.

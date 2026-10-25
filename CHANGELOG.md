@@ -173,6 +173,9 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Changed
 
 - `relay.py` refuses to send when it cannot resolve the sender (2026-10-25): a relay from a process with no session identity (a launchd job, a script, a Hermes turn) and no `RELAY_SENDER_NAME` exits 4 with nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`) and names every variable and ancestor source it checked; `[relay from unknown]` is never sent. `bin/load-watch` and `bin/session-load-watch` now declare `RELAY_SENDER_NAME` for their relay calls (#NN).
+- Codex shell commands inherit their launching terminal environment, restoring multiplexer and runtime context while preserving the configured exports and keeping the shared app-server disabled (2026-10-25; direct integration).
+
+- Handoff template (2026-10-25): `skills/handoff/SKILL.md` Step 4 gained `## Decisions` and `## Relations` in Basic Memory's observation and relation syntax (a `[ruling]` only for something djbclark said, quoted and dated; an agent's own choice is a `[decision]` with `decided_in`, whose targets resolve: file stems or PR links); stale Basic Memory paths and the false "Hermes reads the same store" line were fixed in the memory docs, `session-handoff` and `todo` skills (design slices W2 and W5; the pre-compact hook writes no Basic Memory note, so it is unchanged) (#52).
 - Autorename docs (2026-10-24): Paseo tabs are named `<name>-pt` (17 characters including the suffix) and Paseo workspaces `-pw`, the `-p` suffix is retired for Paseo (`skills/autorename/SKILL.md`, `workspace-layout.md` principle 10, an `AGENTS.md` row); `docs/upstream-issues.md` gains draft 19 (terminal-tab rename, UI rename event stream, inspect workspace id) (#51).
 - `autorename` names a Paseo agent's tab `<topic>-pt` (2026-10-24, at most 17 characters including the suffix, `paseo_tab_name` in `skills/autorename/autorename.py`; the sentence title stays the provider session's) and `--auto` no longer overwrites an agent name that already ends in `-pt` (the 0.4.4 overwrite bug); the names store that tells a user rename from a tool rename is a later slice; the reply line ends `(names store unavailable)` on both `--auto` paths (#53).
 - Clarified bounded executor waits and required a registry claim before a worker binds any Mac test port, after a compatibility probe used an unclaimed port (2026-10-25; direct integration).
@@ -230,6 +233,8 @@ agent what changed and what is new. Entries end with the pull request number.
   the canonical checkout (#20).
 
 ### Fixed
+
+- Clarified dispatch waits: finish downloads before reading dependent artifacts, and use the documented load-watch precheck instead of starting the governor daemon (2026-10-25; direct integration).
 
 - Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#68).
 
