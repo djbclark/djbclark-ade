@@ -52,30 +52,44 @@ inherit the claim.
 
 1. In a workspace another agent's active claim covers: everything that is not read-only. A command that looks read-only
    but writes is not: `--output[=]` of `diff`/`log`/`show`/`stash show|list`/`whatchanged`/`range-diff`/`shortlog`,
-   `format-patch -o`, `archive -o`, `grep -O`, `fetch` that can update a local branch, `symbolic-ref -d`.
+   `format-patch -o`, `archive -o`, `grep -O`, a `fetch` whose dry run lists a local branch, `symbolic-ref -d`.
 2. In a checkout with no claim: `stash`, `reset --hard|--merge|--keep`, `checkout -f|-p|<path>`, `restore` of the
    working tree, `switch -f`, `clean`, `rm -f`, `commit -a`, `add -A|-u|.`, autostash, `rebase -x`, `!` aliases.
 3. In a linked worktree, even its owner's: `stash`, `rebase -x`, `!` aliases (refs/stash is shared).
 4. Anywhere: `push` to another claim's branch (destinations from git's own `push --dry-run --porcelain`).
 5. Anywhere, by target: `worktree remove|move|prune` of a claimed worktree; `branch -d|-D|-m|-M|-f|-c|-C` (a copy is
    judged by its destination), `checkout -B`, `switch -C|--force-create`, `worktree add -B`, `update-ref` of another
-   claim's branch; `fetch`, `pull` and `remote update` whose refspecs write a local branch (command line,
-   `remote.<name>.fetch` as git reads it under the call's own `-C`/`-c`/environment, or `--stdin`, which cannot be
-   inspected: refused while another agent holds a claim in the repository); a file written (`--output`, `bundle create
-   FILE`, `fast-export --export-marks`, `config --file`) into another claim's tree or over a dirty file of a shared
-   checkout.
+   claim's branch; `fetch`, `pull` and `remote update` (also `remote -v update`) that git itself says would update
+   another claim's branch; a file written (`--output`, `bundle create FILE`, `fast-export|fast-import --export-marks`,
+   `config --file`, `bugreport|diagnose -o`; a short option counts anywhere in a cluster, `-zf`, `-ko`) into another
+   claim's tree or over a dirty file of a shared checkout. The fetch family is judged only while another agent holds a
+   claim in the repository (no such claim: git is not asked, nothing is run for it): the guard runs
+   `git <the call's -C/-c/--git-dir/--work-tree/environment> fetch --dry-run --porcelain --no-quiet --no-write-fetch-head
+   --no-auto-gc --no-write-commit-graph --no-recurse-submodules --no-set-upstream <the call's own remote, refspecs and
+   options>` (a `pull` without its merge-only options and with `--update-head-ok`, as pull's own fetch is called;
+   `remote update` as the `fetch --multiple` over its groups and remotes, or `--all`, that it is; the safety options
+   come before and after the caller's and the second copy opens with a spare `--dry-run`, so nothing the caller types
+   can cancel the dry run) and checks every `refs/heads/*` line of the listing against the claims. Refspec spellings,
+   `heads/x`, wildcards, `--refmap`, `--prune`, configured and legacy mappings and the default remote are git's to
+   resolve, not the guard's. A fetch that updates only `refs/remotes/*` and tags is allowed (and read-only in a foreign
+   workspace). When the dry run cannot answer (it timed out, exited other than 0 or 1, printed a line that is not a ref
+   line) or the call has `--stdin` (refspecs on stdin cannot be given to it), the call is refused as `fetch destinations
+   unresolved`. The dry run contacts the remote like the fetch (transport, credential helper, ssh, `--upload-pack` run;
+   hooks, FETCH_HEAD, gc, commit graph, submodules and upstream config do not), so a claim in the repository doubles the
+   network cost of a fetch or pull; a branch that is already up to date prints no line and is not a write.
 
 Not covered (plumbing and object-store maintenance stay the operator's call): `checkout-index`, `update-index`,
-`read-tree`, `fast-import`, `gc`/`prune`/`repack`, `tag -f|-d` (claims name branches, not tags), `notes`, `replace`,
-`mv -f`, `add '*'`, and everything git itself spawns (hooks, `bisect run`, `submodule foreach`, pagers, `!` aliases'
-children, `fetch --upload-pack`).
+`read-tree`, `fast-import` itself (it writes refs and objects; only its `--export-marks` file is judged), `gc`/`prune`/
+`repack`, `tag -f|-d` (claims name branches, not tags), `notes`, `replace`, `mv -f`, `add '*'`, and everything git
+itself spawns (hooks, `bisect run`, `submodule foreach`, pagers, `!` aliases' children, `fetch --upload-pack`).
 
 ## Refusal, log and override
 
 A refusal prints the owner, the claim id and a safe alternative, appends one JSON line to `<state>/guard.log` (option
 names from an allowlist only; values never), and exits 77. The operator allows and logs one call with
 `ACP_OPERATOR_APPROVED=git-guard` (the convention `bin/acp-dispatch` already uses). Other environment: `ADE_REAL_GIT`
-(skip the PATH search), `ADE_PYTHON` (default `python3`).
+(skip the PATH search), `ADE_PYTHON` (default `python3`), `ADE_GUARD_FETCH_TIMEOUT` (seconds the fetch dry run may take,
+a number in (0, 600], default 20; anything else means 20).
 
 The shim is plain bash 3.2 (macOS `/bin/bash`): no `case` inside `$( )`, no associative arrays; a test runs
 `/bin/bash -n` on it.

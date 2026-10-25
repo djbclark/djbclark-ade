@@ -26,8 +26,8 @@
 #   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
 #   3. A subcommand that does not change the repository (status diff log show ls-files ...), after -C/-c/--git-dir=...,
 #      and none of whose arguments can name an output file (--output*, -o, -O, --open-files-in-pager): exec.
-#      `fetch` is never fast-pathed: the refspecs it applies come from the repository's remote.<name>.fetch (and from
-#      --stdin), so the rules resolve them through git itself; it is read-only there only when none can update a local branch.
+#      `fetch` is never fast-pathed: where it lands (`fetch --dry-run --porcelain`, asked of git itself while another
+#      agent holds a claim in the repository) is decided by the rules. A single-dash cluster holding o or O (`-ko`) goes to them too.
 #   4. Everything else: `python3 -I -S ade_claims.py guard -- ARGS`, which looks up the workspace claim
 #      (`.git/ade-claim` -> ~/.local/state/ade/claims/<id>.json). Exit 0 -> exec the real git;
 #      exit 77 -> the refusal text (owner, claim id, safe alternative) is on stderr, one line is in
@@ -138,7 +138,7 @@ done
 slow=0
 for a in "$@"; do
   case "$a" in
-    --ou* | --op* | -o | -o?* | -O | -O?*) slow=1; break ;;
+    --ou* | --op* | -o | -o?* | -O | -O?* | -[!-]*[oO]*) slow=1; break ;;
   esac
 done
 case "$sub" in
