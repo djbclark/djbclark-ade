@@ -26,13 +26,20 @@ For a new isolated workspace on a **primary checkout**, run:
 ~/orca/projects/djbclark-ade/bin/cow-pasture create <name> --source <repo> [--branch <b>] [--orca]
 ```
 
-It prints the pasture path. Do not use `git worktree add` or a plain clone
-for agent workspaces unless cow refuses (see limits). Default pasture root
-is `~/.cow/pastures/<source-name>/<name>`.
+It prints the pasture path. A pasture and a linked `git worktree add`
+checkout are both valid task workspaces (AGENTS.md standing order 9,
+2026-10-25): prefer a pasture when the task needs the source's untracked
+dependencies (`node_modules`, build caches) and a linked worktree when
+reusing them adds nothing; a plain clone is for submodule-heavy repos or when
+cow refuses (see limits). Default pasture root is
+`~/.cow/pastures/<source-name>/<name>`.
 
 Never create pastures from `~/ops/*` — those are deployment checkouts that
-running services read directly; the wrapper refuses (exit 3). Work there in
-place with plain git (operator decision 2026-08-23).
+running services read directly; the wrapper refuses (exit 3). For now work
+there in place with plain git (operator decision 2026-08-23); AGENTS.md
+standing order 9 (2026-10-25) makes that transitional: once the queue's
+ops-promotion pilot passes, ops development moves to a linked worktree
+outside `~/ops` and `~/ops` master only fast-forwards.
 
 ## Why the wrapper, not bare `cow create`
 
