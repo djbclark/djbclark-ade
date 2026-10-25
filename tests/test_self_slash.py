@@ -592,15 +592,83 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 8, r.stdout + r.stderr)
         self.assertIn("successor new-agent-1 left running", r.stdout)
 
+    def fake_herdr(self, known: str = "p1") -> None:
+        """A herdr that knows exactly one pane (`pane get` is what self-slash asks), else pane_not_found."""
+        fake = Path(self.env["PATH"].split(":")[0]) / "herdr"
+        _ = fake.write_text('#!/bin/bash\nif [ "$1 $2" = "pane get" ] && [ "$3" = "%s" ]; then\n'
+                            '  echo \'{"result":{"pane":{"pane_id":"%s","agent":"claude"}}}\'; exit 0; fi\n'
+                            'echo \'{"error":{"code":"pane_not_found"}}\'; exit 1\n' % (known, known))
+        fake.chmod(0o755)
+
+    def test_herdr_is_the_host_when_herdr_knows_the_pane(self) -> None:
+        # 1eda130 gated this on PASEO_SELF_TRUST_HERDR, which nothing sets: herdr sessions fell through
+        self.fake_herdr()
+        r = self.run_ss("--dry-run", "/new", HERDR_ENV="1", HERDR_PANE_ID="p1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would send to herdr p1", r.stdout + r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+
+    def test_a_pane_herdr_does_not_know_is_not_a_host(self) -> None:
+        # a Cline tool shell inherits the hub daemon's stale HERDR_PANE_ID: never type into it
+        self.fake_herdr()
+        r = self.run_ss("--dry-run", "/new", HERDR_ENV="1", HERDR_PANE_ID="w2F:p34")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would send to paseo test-agent", r.stdout + r.stderr)
+
+    def test_a_claude_session_is_never_discovered_through_the_cline_hub(self) -> None:
+        # paseo-self names the newest tool.started in the hub, another Cline agent's when the caller is Claude
+        self.fake_herdr()
+        env = {k: v for k, v in self.env.items() if k != "PASEO_AGENT_ID"}
+        r = subprocess.run([str(SCRIPT), "--delay", "0", "--dry-run", "/new"], text=True, capture_output=True,
+                           timeout=60, check=False, env={**env, "HERDR_ENV": "1", "HERDR_PANE_ID": "w2F:p34", "CLAUDECODE": "1"})
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("never discovered through the Cline hub", r.stderr)
+
     def test_successor_outside_paseo_exits_2(self) -> None:
         fake_orca = Path(self.env["PATH"].split(":")[0]) / "orca"
         _ = fake_orca.write_text("#!/bin/bash\nexit 0\n")
         fake_orca.chmod(0o755)
-        for host_env in (dict(ORCA_TERMINAL_HANDLE="t1"), dict(HERDR_ENV="1", HERDR_PANE_ID="p1")):
+        self.fake_herdr()
+        for host_env in (dict(ORCA_TERMINAL_HANDLE="t1"),):
             r = self.run_ss(*self.SUCCESSOR, **host_env)
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-            self.assertIn("successor needs Paseo", r.stderr)
+            self.assertIn("successor needs Paseo or herdr", r.stderr)
             self.assertIn("claude --model", r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+
+    def test_herdr_successor_dry_run_names_launch_py(self) -> None:
+        self.fake_herdr()
+        r = self.run_ss("--dry-run", "--finish", "--successor", "claude/claude-sonnet-5-5", "--thinking", "medium",
+                        HERDR_ENV="1", HERDR_PANE_ID="p1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("launch.py successor --pane p1 --model claude-sonnet-5-5 --effort medium", r.stdout)
+        self.assertIn("never closed", r.stdout)
+
+    def test_herdr_successor_takes_claude_only_and_no_paseo_options(self) -> None:
+        self.fake_herdr()
+        for args, needle in ((["--successor", "omp/anthropic/claude-opus-5-5"], "claude/MODEL"),
+                             (["--successor", "claude"], "claude/MODEL"),
+                             (["--successor", "claude/claude-opus-5-5", "--title", "x"], "Paseo options"),
+                             (["--successor", "claude/claude-opus-5-5", "--keep-workspace"], "Paseo options")):
+            r = self.run_ss("--dry-run", "--finish", *args, HERDR_ENV="1", HERDR_PANE_ID="p1")
+            self.assertEqual(r.returncode, 2, f"{args}: {r.stdout}{r.stderr}")
+            self.assertIn(needle, r.stderr)
+
+    def test_herdr_successor_hands_the_work_to_launch_py_and_keeps_its_exit(self) -> None:
+        self.fake_herdr()
+        stub = Path(self.env["PATH"].split(":")[0]) / "launch-stub.sh"
+        argv = Path(f"{self.calls}.launch")
+        _ = stub.write_text(f'#!/bin/bash\nprintf \'%s\\n\' "$@" > {argv}\nexit ${{STUB_RC:-0}}\n')
+        stub.chmod(0o755)
+        chain = Path(self.env["PATH"].split(":")[0]) / "SESSION_LOG.md"
+        _ = chain.write_text("x")
+        env = dict(HERDR_ENV="1", HERDR_PANE_ID="p1", SELF_SLASH_LAUNCH=str(stub), STUB_RC="11")
+        r = self.run_ss("--finish", "--successor", "claude/claude-sonnet-5-5", "--thinking", "medium",
+                        "--baton", str(chain), **env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.wait_log("successor path ended with exit 11")
+        self.assertEqual(argv.read_text().split(), ["successor", "--pane", "p1", "--model", "claude-sonnet-5-5",
+                                                    "--effort", "medium", "--wait", "30", "--baton", str(chain)])
         self.assertEqual(self.paseo_calls(), [])
 
     def test_successor_usage_errors(self) -> None:

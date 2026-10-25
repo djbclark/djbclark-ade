@@ -45,7 +45,7 @@ $FW upstream --relay-test              # one line must arrive in this session
    For another session pass its id or herdr pane as the target.
 2. If the output says `replaced ...`, the old watcher was told (`told the old watcher`) or not
    (`could not reach the old watcher`: it had already ended, which is fine). Say which session it was.
-3. `--relay-test` exits 0 only when the channel accepted the line; it then shows up here as a message
+3. `--relay-test` exits 0 only when the channel accepted the line; fleet-watch has no sender relay.py can identify, so relay.py never queues its line (a working watcher that cannot take it now is "not sent: ... deferring needs an identifiable sender", exit 1: try again when the watcher is idle; checked 2026-10-24); it then shows up here as a message
    starting `fleet-watch test:` which asks for nothing. If it exits 1, or the line never arrives, the
    watcher cannot be reached: fix the channel (`paseo ls`, relay.py's refusal reasons) before claiming
    the role. Never leave a watcher registered that cannot be reached. (The first real event would only

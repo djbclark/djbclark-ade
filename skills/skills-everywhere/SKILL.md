@@ -19,9 +19,33 @@ plus Grok Bot (`grokbot`, a rendered copy `ade-<name>` in
 `~/agent-data/workflows/` on its Linux box, 2026-10-23):
 
 ```sh
+~/src/djbclark-ade/bin/skill-everywhere --all
+~/src/djbclark-ade/bin/skill-everywhere --check --all
 ~/src/djbclark-ade/bin/skill-everywhere <skill-name>...
 ~/src/djbclark-ade/bin/skill-everywhere --check <skill-name>...
 ```
+
+## Default: reconcile the whole shared catalog
+
+With no skill names, or when asked to make all skills available, use `--all`
+(2026-10-25). It discovers every readable `*/SKILL.md` directly below the public
+and private roots, including linked skill directories, once per name; public
+wins a duplicate. Hidden/helper directories are excluded. It never discovers
+skills from a TUI's destination tree or copies private skills into the public repo.
+
+Run `--check --all`, then `--dry-run --all`, apply `--all`, and finish with
+`--check --all`. Save the complete reports outside the repo and summarize any
+missing/blocked target rows. The all-mode check exits 1 for any installed target
+that is not directly linked/currently copied; non-installed targets are skipped.
+Existing unrelated files and links remain untouched. `--all --remove` is refused.
+For explicit names, keep the existing named check/apply/check flow.
+
+For Codex, verify every discovered skill is readable through `~/.agents/skills/`
+and resolves to its expected source, not just the named example. Compare the
+current session's skill catalog when available; filesystem coverage does not
+prove a running client's catalog refreshed. Never claim a missing skill when
+it is already listed: read the listed `SKILL.md` and use it. A `/steps` chooser
+limitation is separate from skill discovery and must be reported as such.
 
 Add `--dry-run` (`-n`) to print what link or `--remove` would change, and
 `SKILL_EVERYWHERE_ONLY=<bin>,...` to touch only those targets.

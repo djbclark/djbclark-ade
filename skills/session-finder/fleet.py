@@ -562,8 +562,9 @@ def paseo_reach(sid, provider, archived=False):
     if provider in PASEO_STEER_PROVIDERS:
         return base + ("queued at its next tool round if it is working and the provider takes the steer; if it declines "
                        "(a Codex review turn, a steer error) Paseo replaces the turn, so a send while it works needs "
-                       "--steer; --idle S waits for idle instead)")
-    return base + f"a {provider} agent cannot steer, so a send while it works would replace its turn: refused, --idle S waits for idle)"
+                       "--steer; otherwise relay queues it for delivery when the agent is idle (`queued: <id>`, exit 0) and --idle S waits for idle instead)")
+    return base + (f"a {provider} agent cannot steer, so a send while it works would replace its turn: relay queues it "
+                   "for delivery when the agent is idle (`queued: <id>`, exit 0; --idle S waits for idle instead, --no-defer refuses)")
 
 
 def _paseo_hosting(anc):

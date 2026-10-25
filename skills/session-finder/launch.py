@@ -31,6 +31,13 @@ Route (djbclark 2026-10-08: "use ACP if possible … other methods have proven t
      when none fits), else detached with no terminal. The pane is reported to herdr as an agent
      (`pane report-agent`, source session-finder) so helm and fleet list it like any other.
   2. Agents with no ACP route (zcode, muse) get `herdr agent start --kind` + `agent prompt`.
+  3. A real TUI, not acp-run, when a human is expected to read and answer the new agent (djbclark 2026-10-25: an
+     ACP pane shows only "⚙ Terminal" lines, no transcript): `--baton` on herdr with claude or codex starts one by
+     default (`herdr tab create`, `herdr agent start NAME --kind K --pane P -- <yolo, --model, effort>`, then
+     `herdr agent prompt` with the brief); `--tui` forces it for any `--interactive` start on herdr, `--acp` keeps
+     acp-run, and `--no-interactive` (a dispatched slice) is never a TUI. A TUI session can take /new, /compact and
+     a handoff; an acp-run one cannot (self-slash exits 9 under ACP_RUN_AGENT=1). Not verified live before
+     2026-10-25: see skills/handoff Step 9.
   --pane: host in that herdr pane. If a finished Claude session still sits there idle, it is sent /exit
   first (what herdr-sleeper does); a pane with a draft in its input box is refused.
   --baton: the brief tells the session to follow the baton skill from the named Tier 1 chain
@@ -93,6 +100,63 @@ def acp_session_id_flag():
         except OSError:
             _ACP_I["s"] = False
     return _ACP_I["s"]
+
+
+# A real TUI, not an acp-run session, when a human is expected to read and answer the new agent (djbclark,
+# 2026-10-25, memory/feedback_handoff_new_tab_uses_tui_not_acp.md: an ACP pane shows only "⚙ Terminal" lines).
+# The narrow case is a --baton start on herdr; --tui forces it anywhere on herdr, --acp or --no-interactive
+# (a dispatched slice) keeps acp-run.
+TUI_AGENTS = {"claude", "codex"}
+
+
+def wants_tui(a, agent, host):
+    if getattr(a, "acp", False):
+        return False
+    if getattr(a, "tui", False):
+        return True
+    return bool(getattr(a, "baton", False) and getattr(a, "interactive", True) and host == "herdr" and agent in TUI_AGENTS)
+
+
+_FAMILY_ID = re.compile(r"^claude-(opus|sonnet|haiku|fable)-\d+(?:[-.]\d+)?$")
+
+
+def tui_native_args(agent, model, effort=None, mode=None):
+    """The agent's own CLI flags after `herdr agent start ... --`: yolo, model, effort (rule: every agent runs yolo)."""
+    if agent == "claude":
+        args = ["--permission-mode", mode] if mode else ["--dangerously-skip-permissions"]
+        if model:    # the CLI takes the family alias for the current model of that family
+            m = _FAMILY_ID.match(model)
+            args += ["--model", m[1] if m else model]
+        return args + (["--effort", effort] if effort else [])
+    if agent == "codex":
+        args = ["--dangerously-bypass-approvals-and-sandbox"]
+        args += ["-m", model] if model else []
+        return args + (["-c", f'model_reasoning_effort="{effort}"'] if effort else [])
+    return []
+
+
+# acp-run claude takes its own model ids (`acp-run claude --info` lists them): family aliases and
+# claude-<family>-<major>, not the API-style claude-<family>-5-5 the routing tables use for other agents.
+# 2026-10-25: `--model claude-sonnet-5-5` opened a herdr tab and only then died in acp-run.
+_CLAUDE_DOTTED = re.compile(r"^claude-(opus|sonnet|haiku|fable)-(\d+)[-.](\d+)$")
+
+
+def resolve_model(agent, model, probe=True):
+    """Map MODEL to one the agent's acp-run takes, and refuse an unknown one before any tab opens."""
+    if not model or agent != "claude":
+        return model
+    m = _CLAUDE_DOTTED.match(model)
+    if m:    # claude-sonnet-5-5 -> claude-sonnet-5 (haiku has no versioned id, only the `haiku` alias)
+        model = "haiku" if m[1] == "haiku" else f"claude-{m[1]}-{m[2]}"
+    if probe:     # read-only handshake, no model turn (~3 s): acp-run exits non-zero naming the valid ids
+        try:
+            r = subprocess.run([ACP_RUN, "claude", "--info", "--model", model], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:    # cannot probe: let the real launch report it
+            print(f"launch: could not check --model {model} ({e}); continuing", file=sys.stderr)
+            return model
+        if r.returncode != 0:
+            die(f"acp-run claude refuses --model {model}: {(r.stderr.strip().splitlines() or ['no output'])[-1]}", 2)
+    return model
 
 
 def inbox_send(d, text):
@@ -408,6 +472,14 @@ def start(a, brief_text, parent=None):
     cwd = str(Path(a.cwd).expanduser().resolve())
     if not Path(cwd).is_dir():
         die(f"no such directory {cwd}")
+    host = a.host or "auto"
+    if host == "auto":
+        host = "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") or os.environ.get("TERM_PROGRAM") == "Orca" else (
+            "herdr" if herdr_up() else "none")
+    use_tui = wants_tui(a, agent, host)
+    a.tui = use_tui
+    if not use_tui:    # the TUI takes the claude CLI's own ids; acp-run's list does not apply
+        a.model = resolve_model(agent, a.model)    # before any claim, pane or tab exists
     lid = new_id(agent)
     # conflicts (operator 2026-10-08: never collide with another session's work)
     c = fleet.conflicts(cwd)
@@ -455,11 +527,7 @@ def start(a, brief_text, parent=None):
     if not a.dry_run:
         Path(d["brief"]).write_text(brief_text)
 
-    host = a.host or "auto"
-    if host == "auto":
-        host = "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") or os.environ.get("TERM_PROGRAM") == "Orca" else (
-            "herdr" if herdr_up() else "none")
-    if agent not in ACP_AGENTS:
+    if agent not in ACP_AGENTS or use_tui:
         return start_tui(a, d, brief_text, host)
 
     interactive = bool(getattr(a, "interactive", True) and acp_interactive())
@@ -586,6 +654,9 @@ def start_tui(a, d, brief_text, host):
     d["host"] = {"kind": "herdr-tui", "pane": pane, "tab": tab, "workspace": wid}
     record(d)
     args = [HERDR, "agent", "start", f"sf-{d['id'][-8:]}", "--kind", a.agent, "--pane", pane, "--timeout", "60000"]
+    native = tui_native_args(a.agent, a.model, getattr(a, "effort", None))
+    if native:
+        args += ["--", *native]
     rc, out = fleet.run(*args, timeout=70)
     if rc != 0 or '"error"' in out:
         die(f"herdr agent start failed: {out[:300]}")
@@ -831,6 +902,88 @@ def close_orca_terminal(handle):
     return f"closed its Orca terminal {handle}"
 
 
+# ---- successor: the herdr half of `self-slash --finish --successor` ---------------------------
+# Agreed with the Paseo side (2026-10-25): same workspace, a NEW top-level agent running the model asked,
+# first prompt /baton, verified before anything is retired; the old pane is never closed (herdr-tidy does that).
+
+SELF_SLASH_LOG = Path.home() / ".local/state/self-slash.log"
+
+
+def successor_log(old, msg):
+    line = f"{time.strftime('%F %T')} herdr {old}: successor: {''.join(c for c in msg if c.isprintable())}"
+    SELF_SLASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with SELF_SLASH_LOG.open("a") as f:
+        f.write(line + "\n")
+    print(line)
+
+
+def successor_fail(old, msg):
+    successor_log(old, f"{msg}; the old pane is untouched and stays usable")
+    sys.exit(11)
+
+
+def successor_label(old_label, cwd, model):
+    """Tab label for the successor: the old name plus the model, herdr's -t suffix kept, 24 characters at most."""
+    base = (old_label[:-2] if old_label.endswith("-t") else old_label) or os.path.basename(cwd)
+    return f"{base}-{re.sub('^claude-', '', model)}"[:22].rstrip("-") + "-t"
+
+
+def cmd_successor(a):
+    """Start /baton on MODEL in a new tab of this pane's workspace, once this agent is idle, then check it."""
+    old = a.pane or os.environ.get("HERDR_PANE_ID")
+    if not old:
+        die("no pane: run inside a herdr pane or pass --pane", 2)
+    p = fleet.herdr_json("pane", "get", old).get("pane") or {}
+    if not p:
+        die(f"herdr does not know pane {old}", 2)
+    old = p["pane_id"]          # a moved pane is renumbered; `pane get` resolves the old id
+    cwd, wid = p.get("cwd") or p.get("foreground_cwd") or os.getcwd(), p["workspace_id"]
+    if a.baton and not Path(a.baton).is_file():
+        die(f"--baton is not an existing file: {a.baton}", 2)
+    label = successor_label(next((t.get("label") or "" for t in fleet.herdr_json("tab", "list", "--workspace", wid).get("tabs") or []
+                                  if t.get("tab_id") == p.get("tab_id")), ""), cwd, a.model)
+    prompt = f"/baton {a.baton}" if a.baton else "/baton"
+    claude_args = tui_native_args("claude", a.model, a.effort, a.mode)
+    if a.dry_run:
+        print(json.dumps({"old_pane": old, "workspace": wid, "cwd": cwd, "tab_label": label, "claude_args": claude_args, "prompt": prompt}, indent=1))
+        return 0
+    deadline = time.time() + a.wait
+    while True:
+        status = (fleet.herdr_json("agent", "get", old).get("agent") or {}).get("agent_status")
+        if status in ("idle", "done", None):
+            break
+        if status == "blocked":
+            successor_fail(old, "this agent is blocked on a question")
+        if time.time() > deadline:
+            successor_fail(old, f"this agent still {status} after {a.wait}s")
+        time.sleep(a.poll)
+    if pane_draft(old):
+        successor_fail(old, "the input box holds an unsent draft")
+    old_session = (p.get("agent_session") or {}).get("value")
+    try:
+        pane, tab = new_herdr_pane(cwd, label, wid)
+    except SystemExit:
+        successor_fail(old, "could not open a new tab")
+    successor_log(old, f"starting claude {a.model} in tab {tab} pane {pane} (workspace {wid}, cwd {cwd}, label {label})")
+    rc, out = fleet.run(HERDR, "agent", "start", f"sf-succ-{int(time.time())}", "--kind", "claude", "--pane", pane,
+                        "--timeout", "60000", "--", *claude_args, timeout=90)
+    if rc != 0 or '"error"' in out:
+        fleet.run(HERDR, "tab", "close", tab)       # an empty shell tab we just made: nothing to lose
+        successor_fail(old, f"herdr agent start failed: {out[:200]}")
+    rc, out = fleet.run(HERDR, "agent", "prompt", pane, prompt, timeout=30)
+    if rc != 0 or '"error"' in out:
+        successor_fail(old, f"the successor in {pane} did not take {prompt} ({out[:200]}; left running)")
+    for _ in range(a.settle):
+        n = fleet.herdr_json("agent", "get", pane).get("agent") or {}
+        if n.get("agent") == "claude" and n.get("agent_status") in ("working", "idle", "initializing"):
+            if n.get("pane_id") == old or (old_session and (n.get("agent_session") or {}).get("value") == old_session):
+                successor_fail(old, f"{pane} is this agent, not a new one (left running)")
+            successor_log(old, f"claude is up in {pane} ({n['agent_status']}); {old} left idle for herdr-tidy")
+            return 0
+        time.sleep(a.poll)
+    successor_fail(old, f"nothing verified in {pane} after {a.settle} checks (left running)")
+
+
 def cmd_close(a):
     """Mark closed and, by default, close the herdr tab or Orca terminal that hosted it so tabs do not pile up.
     A live interactive session is asked to /exit first; a working one is refused unless --force."""
@@ -898,6 +1051,9 @@ def main():
     p.add_argument("--pane")
     p.add_argument("--files", nargs="*", help="paths this session will own (written to its bigteam claim)")
     p.add_argument("--force", action="store_true", help="start even though another session works in that repo")
+    p.add_argument("--tui", action="store_true", help="herdr: start a real TUI in a pane (the default for --baton with claude or codex)")
+    p.add_argument("--acp", action="store_true", help="keep an acp-run session even where a TUI is the default (--baton on herdr)")
+    p.add_argument("--effort", help="TUI start: claude --effort / codex model_reasoning_effort")
     p.add_argument("--no-interactive", dest="interactive", action="store_false",
                    help="one turn and exit (default: keep the ACP session open; the pane shows it and takes input)")
     common(p)
@@ -919,6 +1075,17 @@ def main():
     p.add_argument("id")
     p.add_argument("--force", action="store_true", help="audit a --mark'ed launch anyway")
     p.set_defaults(fn=cmd_audit)
+    p = sub.add_parser("successor", help="herdr half of self-slash --finish --successor: /baton on MODEL in a new tab")
+    p.add_argument("--model", required=True)
+    p.add_argument("--effort")
+    p.add_argument("--mode", help="claude --permission-mode; omitted: --dangerously-skip-permissions (yolo)")
+    p.add_argument("--baton", help="absolute path of the chain log, for /baton when this repo is a side workspace")
+    p.add_argument("--pane", help="the old agent's pane (default $HERDR_PANE_ID)")
+    p.add_argument("--wait", type=int, default=900, help="seconds to wait for this agent to go idle")
+    p.add_argument("--poll", type=float, default=3.0)
+    p.add_argument("--settle", type=int, default=7, help="polls to see the successor up")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_successor)
     p = sub.add_parser("close")
     p.add_argument("id")
     p.add_argument("--keep-pane", action="store_true", help="mark closed but leave the herdr tab/pane or Orca terminal")
