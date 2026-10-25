@@ -827,20 +827,25 @@ petitions; it does not intercept Claude Code's own tool calls, MCP calls (`WebSe
 `2fado ask`. Overlaps: the SF-Q16 item below (Paseo Telegram plugin replacing Hermes's relay, blocked on a Paseo version range), `hermes-ping`, Hermes's
 `permissions_respond`, `/helm`, and Herald (spoken waiting alert). Ties to the "ask before costly steps" rule in `feedback_heavy_web_search`.
 
-## ade-git-guard (PR 59) residuals from adversary round 8 (2026-10-25)
+## ade-git-guard (PR 59): O2 redesign built on the PR branch (2026-10-25); what is left
 
-Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry run's ref lines) and N3 (`--namespace` not passed to the dry run); the repair slice
-`iso-w1-r8fix` also takes N2, N4 (text only) and N5. Left open on purpose (djbclark ruling 2026-10-25, report `adv-iso-w1-r8-report.md` B6 and B7):
-1. **N6, low**: without `-v` the porcelain listing omits up-to-date refs, so a claimed `refs/heads/X` behind a glob or mirror mapping that is unchanged at dry-run time but moves
-   on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
-2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
-
-## ade-git-guard (PR 59): round 9 BLOCK on 7df76ad, paused for a design call (2026-10-25)
-
-Round 9 (Opus, `adv-iso-w1-r9-report.md`) closed N1 and N3 (no false refusals, 723 tests, four mutations red) but BLOCKed on F1: `git --attr-source HEAD <write>` and
-`git --shallow-file /dev/null fetch origin +main:cb` move a claimed branch with rc 0, because `parse_git_argv` skips an unknown global option as one token and its separate
-value becomes the subcommand. Fix as the adversary asks: put both in `GLOBAL_VALUE` and fail closed on any unknown leading option. F2: `docs/git-guard.md` says N6 and N7
-are queued here; the entries above are those. djbclark (2026-10-25) paused PR 59 for a design call after nine rounds of parser bypasses; nothing is dispatched.
+djbclark adopted the frontier advisor's O2 design (`frontier-pr59-design-report.md`, 2026-10-25) after nine adversary rounds of argv-parser bypasses: refs are enforced by
+git's `reference-transaction` and `pre-push` hooks, the shim shrank to what hooks cannot see and fails closed (`docs/git-guard.md`). The rounds-8 and -9 residuals N6 and N7 and
+the r9 F1 (`--attr-source`, `--shallow-file`) are gone with the dry-run preflight they were about (an unknown leading option is now refused). Open:
+1. **Next adversary round, with a NEW brief** (O2 plan step 5): argv spelling is out of scope by construction. Ask for (a) ref writes that reach disk without a reference transaction
+   (a `packed-refs` edit, `git replace`, `git notes`, a `symbolic-ref` of a per-worktree ref), (b) hook disabling through config the shim does not see (`HOME`/`XDG_CONFIG_HOME`
+   pointing at a file, `GIT_CONFIG_SYSTEM`, a repo-level `core.hooksPath` written by hand), (c) no-ref harms in a foreign tree, (d) false refusals of the owner's ordinary work.
+2. **Upstream report, `branch -m|-M|-c|-C` destinations (git, files backend)**: a rename reports its SOURCE deletion to `reference-transaction` but not the destination creation, and
+   a copy reports nothing (measured on git 2.56 in /tmp, 2026-10-25; git-hooks-ext documents the same for 2.27-2.55; Jiang Xin's 2022 series did not land). Dupe-search git's list,
+   draft a minimal reproduction (a hook that logs stdin; `git branch -c a b`), file it (AGENTS.md item 38). Until it lands the shim keeps the destination rule.
+3. **Config-based hooks (git 2.54+, `hook.<event>.command`)**: they may let `acp-run` inject the guard through `GIT_CONFIG_COUNT` into repositories nobody installed. Verify FIRST whether
+   a config hook for `reference-transaction` runs alongside `.git/hooks/reference-transaction` or replaces it, and whether `-c hook.*.enabled=false` from an agent beats an env-injected one
+   (the shim refuses `hook.*` keys regardless). Do not build on it before that is measured.
+4. **Wire the call sites** (not in PR 59): W2 `cow-pasture create` runs `ade-git-guard install <pasture>`; W3 `acp-dispatch` exports `ADE_CLAIM_ID` and installs in the repository at claim
+   time; W4 `acp-run` puts `libexec/agent-bin` first on agents' PATH; the operator runs `ade-git-guard install` once over `~/src/*` and `~/orca/projects/*`. Check Hermes (it turns repository
+   hooks off in its trees) before relying on the hooks there.
+5. **`git replay`, `git history`, `git refs migrate` (new in 2.54-2.56)** write refs and should reach the hook (NOT measured); the shim's `KNOWN_SUBS` lists them as ordinary subcommands.
+   Re-measure the hook on each when a claimed branch is in play.
 
 ## acp-dispatch launchd label with a slash (PR 62, merged e15aeb9, 2026-10-25): lows from adversary round 1
 
