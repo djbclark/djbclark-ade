@@ -1550,8 +1550,13 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
     if call.problem:
         deny = _closed("unknown-option", f"{call.problem}: the guard reads only options git itself defines; spell the "
                                           "call with the plain global options (-C, -c, --git-dir, --work-tree ...)")
+    unknown: Optional[Decision] = None
     if deny is None:
         deny = _redirect_decision(call, env) or _push_decision(call)
+        if deny is not None and deny.rule == "hook-config-unknown":
+            # git could not answer a config question (a `-C` into a place that does not exist, a broken file): the call is
+            # still refused, but a foreign claim its path names comes first, so the refusal names the owner (round 11)
+            unknown, deny = deny, None
     if deny is None and sub and sub not in KNOWN_SUBS:
         rc, alias = _call_git(call, "config", "--get", f"alias.{sub}") if _depth < MAX_ALIAS_DEPTH else (1, "")
         alias = alias.strip() if rc == 0 else ""
@@ -1593,6 +1598,8 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
                             "gave no answer) while another agent holds a claim; retry, or run it read-only")
     if deny is None:
         deny = _target_decision(call, wss, ident)
+    if deny is None and unknown is not None:
+        deny = unknown
     ws_any = next((w for w in wss if w is not None), None)
     call.ws = ws_any
     if deny is None:
