@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import unittest
 from typing import Any
 
@@ -98,6 +99,20 @@ class TestRefusal(fb.Harness):
                 rc, _, _ = self.run_main(sess(status="idle"))
                 self.assertEqual(rc, relay.NO_SENDER_EXIT)
                 self.assert_nothing_happened()
+
+    def test_a_refused_send_touches_no_queued_record_the_sweep_would_have_acted_on(self) -> None:
+        """Adversary r1 A8 (2026-10-25): the refusal comes BEFORE the opportunistic sweep, so a relay that is not sent changes nothing."""
+        rid = "20261024-120001-aaaaaa"
+        relay.rec_write({"id": rid, "target": {"id": "bbbbbbbb", "paseo": "", "name": "alice", "agent": "claude", "sid": "", "transcript": "", "pid": 0},
+                         "text": "queued earlier", "sender": "claude w1:p1 (x)", "sender_ident": "w1:p1", "sender_paseo": "", "kind": "", "hops": 0,
+                         "created": time.time() - 7200, "expires": time.time() - 3600, "state": "queued", "outcome": "", "pid": 0, "notice": ""})
+        before = relay.rec_read(rid)
+        rc, _, _ = self.run_main(sess(status="idle"))
+        self.assertEqual(rc, relay.NO_SENDER_EXIT)
+        self.assertEqual((relay.rec_read(rid), self.spawned), (before, []))
+        os.environ["RELAY_SENDER_NAME"] = "load-watch"    # control: the same record IS due, a relay that is sent sweeps it
+        self.assertEqual(self.run_main(sess(status="idle"))[0], 0)
+        self.assertEqual((relay.rec_read(rid) or {}).get("state"), "expired")
 
     def test_a_declared_label_of_unknown_is_refused(self) -> None:
         os.environ["RELAY_SENDER_NAME"] = "unknown"
