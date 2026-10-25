@@ -3461,10 +3461,12 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
 
 def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None = None) -> tuple[str, str, dict]:
     rec = json.loads(record_path.read_text())
-    if rec.get("status") == "unavailable" and rec.get("unavailable_class") in ("load", "inflight"):
-        # the runner refused before starting an agent: nothing to classify, nothing to resume
+    if rec.get("status") == "unavailable" and rec.get("unavailable_class") in ("load", "inflight", "headroom"):
+        # the runner refused before starting an agent: nothing to classify, nothing to resume, nothing
+        # measured (a headroom refusal's "after" reading is the wait's, not a slice's; adversary bcdd223, A2)
         return "unavailable", (f"{LOAD_RETRY_TEXT} ({rec.get('detail', '')})" if rec["unavailable_class"] == "load"
-                               else rec.get("detail", "in-flight cap full")), rec
+                               else rec.get("detail", "in-flight cap full" if rec["unavailable_class"] == "inflight"
+                                            else "pool no longer plentiful")), rec
     report, final, done = Path(rec["report"]), Path(rec["final"]), Path(rec["done"])
     inner = Path(rec.get("agent_report", rec["report"]))
     if inner != report:

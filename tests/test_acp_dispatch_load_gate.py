@@ -221,6 +221,24 @@ class TestLoadGateBeforeQuotaChecks(LoadGate):
         self.assertFalse(rec["load_gate_pending"])
         self.assertFalse((self.out / "s1-report.md").exists())          # no agent started
 
+    def test_the_runner_finalize_keeps_the_headroom_refusal(self):
+        """Adversary bcdd223, A2: the generated runner always runs `finalize` after `execute`, and
+        finalize turned the headroom refusal into a no-report with a usage sample made from the wait."""
+        d = self.judgment("--detach", "--no-wait", env=self.gate_env(0, OK, **self.snap_codex(90.0)))
+        self.assertEqual(d.returncode, 0, d.stderr + d.stdout)
+        path = str(self.out / "jobs" / "s1.json")
+        env = {**self.base_env(), **self.gate_env(0, OK, **self.drains_to_40())}
+        self.assertEqual(run(["execute", path], env=env).returncode, 5)
+        for argv in (["finalize", path, "--exit", "5"], ["check", path]):
+            r = run(argv, env=env)
+            self.assertEqual(r.returncode, 5, (argv, r.stdout, r.stderr))
+            self.assertNotIn("no-report", r.stdout.lower())
+            self.assertNotIn("--escalate", r.stdout)
+        rec = self.record()
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "headroom", 5))
+        self.assertIn("now: 40% left", rec["detail"])
+        self.assertFalse([k for k in rec if k.startswith("measured_usage")], rec)
+
     def test_a_route_override_runner_does_not_recheck(self):
         d = self.judgment("--detach", "--no-wait", env={
             **self.gate_env(0, OK, **self.snap_codex(90.0)), "ACP_OPERATOR_APPROVED": "route-override"})
