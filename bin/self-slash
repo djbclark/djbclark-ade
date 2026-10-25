@@ -193,7 +193,7 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "${ACP_RUN_AGENT:-}" = "1" ]; then
     echo "self-slash: refused ($text): this agent was started by acp-run (ACP_RUN_AGENT=1: a dispatched slice or an acp-run --interactive session); lifecycle actions and /compact run only in the top-level session. Treat a handoff as document-only and say what the operator should type." >&2; exit 9
   fi
 fi
-if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] && [ "${PASEO_SELF_TRUST_HERDR:-}" = "1" ]; then
   host=herdr; pane="$HERDR_PANE_ID"
   # $HERDR_PANE_ID is fixed at launch; after the tab is moved to another workspace
   # the pane is renumbered (w2G:p1 -> w2H:p1, seen 2026-10-09). `pane get` resolves
@@ -216,7 +216,28 @@ elif [ -n "${PASEO_AGENT_ID:-}" ]; then
   paseo_cli="${PASEO_CLI:-$(command -v paseo || true)}"
   [ -n "$paseo_cli" ] && [ -x "$paseo_cli" ] || { echo "self-slash: PASEO_AGENT_ID is set but no paseo CLI (PASEO_CLI unset, none on PATH); ask the operator to type: $text" >&2; exit 3; }
 else
-  echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset); ask the operator to type: $text" >&2; exit 3
+  # SELF-DISCOVERY (djbclark, 2026-10-25): a Cline agent under Paseo has NO usable environment route
+  # to its own identity. PASEO_AGENT_ID is set on the agent process but NOT in tool shells (they are
+  # children of the shared cline hub daemon), and HERDR_PANE_ID is inherited from that daemon and
+  # stale -- a shell had HERDR_ENV=1 with a pane that no longer exists, so the herdr branch above
+  # would have typed into a stranger's pane. Ask the hub instead: `paseo-self agent` reads the
+  # session id the hub recorded for the tool call in progress and looks it up in Paseo's own agent
+  # state. Refuses (exit 3) rather than guessing, so this is safe to try before giving up.
+  SELF_TOOL="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/paseo-self"
+  if [ -x "$SELF_TOOL" ]; then
+    if discovered=$("$SELF_TOOL" agent 2>/dev/null) && [ -n "$discovered" ]; then
+      host=paseo; pane="$discovered"; tui=""
+      paseo_cli="${PASEO_CLI:-$(command -v paseo || true)}"
+      if [ -z "$paseo_cli" ] || [ ! -x "$paseo_cli" ]; then
+        echo "self-slash: discovered agent $discovered but no paseo CLI (PASEO_CLI unset, none on PATH); ask the operator to type: $text" >&2; exit 3
+      fi
+      echo "self-slash: no PASEO_AGENT_ID in the environment; discovered agent ${discovered:0:8} from the cline hub" >&2
+    else
+      echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent, and paseo-self could not identify this session (PASEO_AGENT_ID, ORCA_TERMINAL_HANDLE unset); ask the operator to type: $text" >&2; exit 3
+    fi
+  else
+    echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset; no $SELF_TOOL to self-discover); ask the operator to type: $text" >&2; exit 3
+  fi
 fi
 if [ -n "$successor" ] && [ "$host" != paseo ]; then
   echo "self-slash: successor needs Paseo; hand off and relaunch \`claude --model <m>\` in the pane (host: $host)" >&2; exit 2
