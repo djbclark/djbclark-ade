@@ -1316,7 +1316,8 @@ def test_an_unknown_subcommand_is_refused_but_a_known_one_and_an_alias_are_not(t
     repo = mk_repo(tmp_path, state)
     r = run(state, ["frobnicate"], repo, who="B")
     assert refused77(r) and "unknown-subcommand" in r.stderr and "frobnicate" in r.stderr
-    assert refused77(run(state, ["commit-own", "msg"], repo, who="B"))          # an external git-foo program
+    r = run(state, ["commit-own", "msg"], repo, who="B")                          # an external git-foo program
+    assert refused77(r) and "not `git commit-own`" in r.stderr                          # the refusal names the program to run instead
     plain(state, ["config", "alias.lg", "log --oneline"], repo)
     assert run(state, ["lg", "-1"], repo, who="B").returncode == 0
     assert run(state, ["hash-object", "f"], repo, who="B").returncode == 0

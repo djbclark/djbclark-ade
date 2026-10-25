@@ -1499,7 +1499,8 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, _depth: int
                 return d
         else:
             deny = _closed("unknown-subcommand", f"`git {_esc(sub)}` is not a git subcommand the guard knows (an external "
-                           "`git-foo` program, or a typo); run the program directly, or ask the operator")
+                           "`git-foo` program, or a typo); run the program directly "
+                           "(`git-commit-own MSG <paths>`, not `git commit-own`; `git-lfs`, not `git lfs`); or ask the operator")
     if deny is None:
         wss, unresolved = call_workspaces(call)
         for ws in wss:
