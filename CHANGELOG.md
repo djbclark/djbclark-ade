@@ -167,6 +167,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- Autorename docs (2026-10-24): Paseo tabs are named `<name>-pt` (17 characters including the suffix) and Paseo workspaces `-pw`, the `-p` suffix is retired for Paseo (`skills/autorename/SKILL.md`, `workspace-layout.md` principle 10, an `AGENTS.md` row); `docs/upstream-issues.md` gains draft 19 (terminal-tab rename, UI rename event stream, inspect workspace id) (#51).
 - `autorename` names a Paseo agent's tab `<topic>-pt` (2026-10-24, at most 17 characters including the suffix, `paseo_tab_name` in `skills/autorename/autorename.py`; the sentence title stays the provider session's) and `--auto` no longer overwrites an agent name that already ends in `-pt` (the 0.4.4 overwrite bug); the names store that tells a user rename from a tool rename is a later slice; the reply line ends `(names store unavailable)` on both `--auto` paths (#53).
 - Clarified bounded executor waits and required a registry claim before a worker binds any Mac test port, after a compatibility probe used an unclaimed port (2026-10-25; direct integration).
 - AGENTS.md standing order 9 is now an absolute rule (djbclark, 2026-10-25): all development happens in an exclusively claimed task workspace (linked worktree or cow pasture), one writer at a time, with named exceptions; the shared-master commit allowance is gone, `skills/cow-workspaces/SKILL.md` accepts both worktrees and pastures, and `~/ops` keeps plain master until the ops-promotion pilot passes (direct commit).
