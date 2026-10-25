@@ -11,6 +11,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- Added the native Codex `create-hook` guide, verified against Codex 0.164.0, with exact hook trust review, conservative installation, approval semantics and coexistence with legacy notify (2026-10-25; direct integration).
+- Added exact acp-dispatch record paths to `relay.py`, including headless workers outside the default state tree; preserved queued versus delivered status and named the acknowledgement files (2026-10-25; direct integration).
 - Added a load-watch notice when one Google Chrome process uses 0.9+ cores for 5 minutes (`LW_CHROME_CORES`, `LW_CHROME_SUSTAIN_S`): warns the watcher hourly per process and never kills (2026-10-25).
 - Added `bin/herdr-server-run` and `config/launchd/dev.herdr.server.plist`: the herdr LaunchAgent wrapper that turns "server is already running" after a handoff into a clean exit, so launchd no longer loops (2026-10-25; not yet applied to the live plist).
 - `watch` skill and `bin/watch` (`status`, `up [--dry-run] [--force] [--probe]`, `down`; table `config/watch.toml`): starts one watcher agent per domain (CFEngine PRs, Paseo contributions, load) in its own Paseo workspace, only when nobody live holds the role, with model, effort and context from `route_agent.py plan` and recent event load, per-domain lock and state record, registration verified (exit 1 `not registered`, 3 no eligible route); `paseo-new-seat` gained `--thinking`, `--label` and `--json` (2026-10-25).
@@ -163,6 +165,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- Clarified bounded executor waits and required a registry claim before a worker binds any Mac test port, after a compatibility probe used an unclaimed port (2026-10-25; direct integration).
 - AGENTS.md standing order 9 is now an absolute rule (djbclark, 2026-10-25): all development happens in an exclusively claimed task workspace (linked worktree or cow pasture), one writer at a time, with named exceptions; the shared-master commit allowance is gone, `skills/cow-workspaces/SKILL.md` accepts both worktrees and pastures, and `~/ops` keeps plain master until the ops-promotion pilot passes (direct commit).
 - Changed `load-watch admit` to raise the per-core limit from 1.5 to 2.0 while compressor churn is at most 25k pages/s (new `--boost-per-core`, `--boost-max-churn`; swap is not the signal); `bg` now defers to that decision (2026-10-25).
 - codex takes `--kind code`, `bulk` and `mechanical` (djbclark, 2026-10-25: "if we have lots of codex quota and it is the best of available options we can use it for non-frontier") on `gpt-6.1-sol --effort medium` (code) and `gpt-6-luna --effort low` (bulk, mechanical), only while the tightest codex window (5-hour and weekly) has at least `[routing].plenty_min` (50%) left; below it, or with no fresh reading, codex is frontier-only again and `acp-dispatch` exits 2 naming the headroom. New `plenty_kinds` service key and `Service.eligible(kind, quota)`; `route`, `plan` and `acp-dispatch` read the same gate. `gpt-6-astra` still needs `--kind frontier`, and `[dispatch.estimate_floor]` keys may be `SERVICE:frontier` (codex 60 for astra; the everyday models get `codex` = 10).
