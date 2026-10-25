@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import unittest
 from pathlib import Path
@@ -118,6 +119,46 @@ class TestCodexEverydayGate(RoutingDispatch):
         r = self.code("gpt-6.1-sol", None)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("no fresh reading", r.stderr)
+
+    def test_judgment_is_eligible_with_plenty_and_refused_below_it(self):
+        """Operator 2026-10-25: a Codex adversary round was refused as not eligible for judgment."""
+        ok = self.code("gpt-6.1-sol", 90.0, kind="judgment")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(self.record()["kind"], "judgment")
+        low = self.code("gpt-6.1-sol", 40.0, kind="judgment")
+        self.assertEqual(low.returncode, 2, low.stderr)
+        self.assertIn("codex is not eligible for --kind judgment", low.stderr)
+        self.assertIn("40% left", low.stderr)
+
+    def test_a_window_with_no_reading_fails_closed(self):
+        """A known 95% window next to a null one is not "every window has 50%" (adversary 7802361, A2)."""
+        snap = self.tmp / "partial.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "5h", "remaining_percent": 95.0},
+                                             {"label": "weekly", "remaining_percent": None}]}]}}))
+        r = self.dispatch_agent("codex", "gpt-6.1-sol", "--kind", "judgment", "--no-model-check",
+                                "--no-preflight", "--dry-run", "--json", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("codex is not eligible for --kind judgment", r.stderr)
+        self.assertIn("a window has no reading", r.stderr)
+
+    def test_the_refusal_prints_the_reading_with_its_decimal(self):
+        """49.9% is refused; "now: 50% left" would read as the threshold itself (adversary B2)."""
+        low = self.code("gpt-6.1-sol", 49.9, kind="judgment")
+        self.assertEqual(low.returncode, 2, low.stderr)
+        self.assertIn("now: 49.9% left", low.stderr)
+
+    def test_judgment_runs_the_everyday_model_never_astra(self):
+        """Both halves: astra is refused for judgment however plentiful the quota, and the everyday
+        model at high is accepted and recorded (the parent config refused the second half)."""
+        r = self.code("gpt-6-astra", 100.0, kind="judgment")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("frontier model", r.stderr)
+        ok = self.code("gpt-6.1-sol", 100.0, "--effort", "high", kind="judgment")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        rec = self.record()
+        self.assertEqual((rec["kind"], rec["model"], rec["effort"], rec["service"]),
+                         ("judgment", "gpt-6.1-sol", "high", "codex"))
 
     def test_astra_stays_frontier_only_however_plentiful_the_quota(self):
         r = self.code("gpt-6-astra", 100.0)
@@ -263,6 +304,90 @@ class TestMachineHistory(RoutingDispatch):
         self.assertEqual(rec["estimated_usage_pct"], 55.0)
         self.assertIn("machine", rec["estimate_source"])
 
+    def judgment_estimate(self, rows: list[dict], kind: str = "judgment", effort: str | None = "high") -> dict:
+        other = self.tmp / "state" / "other-task" / "jobs"
+        other.mkdir(parents=True, exist_ok=True)
+        for old in other.glob("*.json"):
+            old.unlink()
+        for i, row in enumerate(rows):
+            (other / f"h{i}.json").write_text(json.dumps(
+                {"agent": "codex", "model": "gpt-6.1-sol", "status": "done", **row}))
+        r = self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", kind, *(["--effort", effort] if effort else []),
+            "--no-model-check", "--no-preflight", "--min-headroom", "0", "--dry-run", "--json",
+            env=self.snap_codex(100.0))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        # a dry run never launches, but the record must show the scratch fake it would run
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        return rec
+
+    def test_another_kinds_and_efforts_history_is_not_borrowed(self):
+        """Adversary 7802361, A3: three 2% medium `code` slices made a high `judgment` slice reserve
+        2%, below even the uncalibrated default. Different workloads: the floor holds."""
+        rec = self.judgment_estimate([
+            {"kind": "code", "effort": "medium", "measured_usage_pct": 2.0,
+             "measured_usage_windows": {"5h": 2.0}} for _ in range(3)])
+        self.assertEqual(rec["estimated_usage_pct"], 25.0)
+        self.assertEqual(rec["estimate_source"], "brief-size default")
+        self.assertEqual(rec["estimated_usage_windows"], {})
+        # the same kind at another effort is a different workload too
+        rec = self.judgment_estimate([
+            {"kind": "judgment", "effort": "medium", "measured_usage_pct": 2.0} for _ in range(3)])
+        self.assertEqual(rec["estimated_usage_pct"], 25.0)
+
+    def test_comparable_history_replaces_the_floor_and_legacy_rows_still_load(self):
+        rec = self.judgment_estimate([
+            {"kind": "judgment", "effort": "high", "measured_usage_pct": p} for p in (30.0, 34.0, 38.0)])
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimate_source"]),
+                         (34.0, "history (3 slices, machine)"))
+
+    def test_legacy_rows_do_not_release_the_judgment_floor(self):
+        """Adversary bcdd223, A1: three 2% rows with kind and/or effort unknown made a high-effort
+        judgment slice reserve 2%. An unknown workload proves nothing about this one."""
+        row = {"measured_usage_pct": 2.0, "measured_usage_windows": {"5h": 2.0}}
+        for label, extra in (("kind and effort absent", {}),
+                             ("effort absent", {"kind": "judgment"}),
+                             ("effort null", {"kind": "judgment", "effort": None}),
+                             ("kind absent", {"effort": "high"})):
+            with self.subTest(label):
+                rec = self.judgment_estimate([{**row, **extra} for _ in range(3)])
+                self.assertEqual(rec["estimated_usage_pct"], 25.0)
+                self.assertEqual(rec["estimate_source"], "brief-size default")
+                self.assertEqual(rec["estimated_usage_windows"], {})
+
+    def test_legacy_rows_still_load_where_no_kind_floor_applies(self):
+        """Rows from before kind/effort were recorded stay comparable for a request whose kind has
+        no floor of its own (read with .get, never a KeyError)."""
+        rec = self.judgment_estimate(
+            [{"measured_usage_pct": p, "measured_usage_windows": {"5h": p}} for p in (30.0, 34.0, 38.0)],
+            kind="code", effort="medium")
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimate_source"]),
+                         (34.0, "history (3 slices, machine)"))
+        self.assertEqual(rec["estimated_usage_windows"], {"5h": 34.0})
+
+    def test_a_request_without_effort_never_meets_a_history_estimate(self):
+        """Adversary d13f2ed, A1: None == None let a request with no --effort (or a manual reroute, which
+        sets effort None) match three rows that never recorded an effort, so it reserved 2%. Unknown
+        effort on either side proves nothing: the floor holds."""
+        row = {"measured_usage_pct": 2.0, "measured_usage_windows": {"5h": 2.0}}
+        for label, extra in (("kind recorded, effort absent", {"kind": "judgment"}),
+                             ("kind recorded, effort null", {"kind": "judgment", "effort": None}),
+                             ("effort recorded, request without one", {"kind": "judgment", "effort": "high"})):
+            with self.subTest(label):
+                rec = self.judgment_estimate([{**row, **extra} for _ in range(3)], effort=None)
+                self.assertEqual(rec["estimated_usage_pct"], 25.0)
+                self.assertEqual(rec["estimate_source"], "brief-size default")
+                self.assertEqual(rec["estimated_usage_windows"], {})
+
+    def test_a_request_with_the_effort_of_three_recorded_rows_still_releases_the_floor(self):
+        rec = self.judgment_estimate([
+            {"kind": "judgment", "effort": "high", "measured_usage_pct": 2.0,
+             "measured_usage_windows": {"5h": 2.0}} for _ in range(3)])
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimate_source"]),
+                         (2.0, "history (3 slices, machine)"))
+        self.assertEqual(rec["estimated_usage_windows"], {"5h": 2.0})
+
 
 class TestReservation(RoutingDispatch):
     def test_inflight_reservation_refuses_second_codex(self):
@@ -319,6 +444,62 @@ class TestLegacyRecord(RoutingDispatch):
                  "--acp-run", str(self.fake), "--no-preflight"], env=self.base_env())
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("frontier model", r.stderr)
+
+
+class TestRerouteEstimate(RoutingDispatch):
+    """Adversary bcdd223, A6: reroute promoted the old slice's estimate to an explicit one whenever the
+    service matched, so a kind change skipped the new kind's floor."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        # the fake runner's `--info` must offer the model a reroute checks (reroute has no --no-model-check)
+        self.fake.write_text(self.fake.read_text().replace('"value": "m1"', '"value": "gpt-6.1-sol"'))
+
+    def finished_code_slice(self, *effort: str) -> Path:
+        r = self.dispatch_agent("codex", "gpt-6.1-sol", "--kind", "code", *effort,
+                                "--est-pct", "2", "--no-model-check", "--no-preflight",
+                                "--min-headroom", "0", env=self.snap_codex(90.0))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = self.out / "jobs" / "s1.json"
+        self.assertEqual(json.loads(path.read_text())["estimate_source"], "explicit")
+        return path
+
+    def reroute(self, path: Path, *extra: str) -> dict:
+        r = run(["reroute", str(path), "--agent", "codex", "--model", "gpt-6.1-sol", *extra,
+                 "--no-preflight", "--min-headroom", "0", "--acp-run", str(self.fake)],
+                env={**self.base_env(), **self.snap_codex(90.0)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        new = json.loads((self.out / "jobs" / "s1-reroute-1.json").read_text())
+        # never trust a probe that fell through to the live runner (adversary bcdd223, C2)
+        self.assertEqual(shlex.split(new["cmd"])[0], str(self.fake))
+        return new
+
+    def test_a_kind_change_estimates_afresh_and_meets_the_new_floor(self):
+        new = self.reroute(self.finished_code_slice("--effort", "medium"), "--kind", "judgment")
+        self.assertEqual(new["kind"], "judgment")
+        self.assertEqual(new["estimated_usage_pct"], 25.0)
+        self.assertNotEqual(new["estimate_source"], "explicit")
+
+    def test_an_operator_estimate_still_wins(self):
+        new = self.reroute(self.finished_code_slice("--effort", "medium"), "--kind", "judgment", "--est-pct", "7")
+        self.assertEqual((new["estimated_usage_pct"], new["estimate_source"]), (7.0, "explicit"))
+
+    def test_the_same_workload_keeps_its_reservation(self):
+        new = self.reroute(self.finished_code_slice(), "--kind", "code")
+        self.assertEqual(new["estimated_usage_pct"], 2.0)
+
+    def test_a_manual_reroute_has_no_effort_so_unrecorded_history_does_not_release_the_floor(self):
+        """Adversary d13f2ed, A1: a manual reroute sets effort None and matched rows that never recorded one."""
+        other = self.tmp / "state" / "other-task" / "jobs"
+        other.mkdir(parents=True)
+        for i, extra in enumerate(({}, {"effort": None}, {})):
+            (other / f"h{i}.json").write_text(json.dumps({
+                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
+                "measured_usage_pct": 2.0, "measured_usage_windows": {"5h": 2.0}, **extra}))
+        new = self.reroute(self.finished_code_slice("--effort", "medium"), "--kind", "judgment")
+        self.assertEqual((new["estimated_usage_pct"], new["estimate_source"]), (25.0, "brief-size default"))
+        self.assertEqual(new["estimated_usage_windows"], {})
 
 
 class TestWindowReservation(RoutingDispatch):
@@ -381,6 +562,117 @@ class TestFloorWithShortHistory(RoutingDispatch):
         rec = json.loads(r.stdout)
         self.assertGreaterEqual(rec["estimated_usage_pct"], 8.0)
         self.assertIn("history", rec["estimate_source"])
+
+
+class TestWindowFloor(RoutingDispatch):
+    """Adversary d13f2ed, A2: one comparable 2% window measurement stood in for the three the floor
+    needs, so the window path admitted a judgment slice the scalar estimate (25) would refuse."""
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.jobs = self.tmp / "state" / "other-task" / "jobs"
+        self.jobs.mkdir(parents=True)
+
+    def comparable(self, n: int = 1) -> None:
+        for i in range(n):
+            (self.jobs / f"h{i}.json").write_text(json.dumps({
+                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
+                "effort": "high", "measured_usage_pct": 2.0, "measured_usage_windows": {"5h": 2.0}}))
+
+    def reserve_40(self) -> None:
+        (self.jobs / "busy.json").write_text(json.dumps(self.busy_row(
+            model="gpt-6.1-sol", estimated_usage_pct=40.0, estimated_usage_windows={"5h": 40.0})))
+
+    def judgment(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        return self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", *extra,
+            env={**self.snap_codex(50.0), "ACP_DISPATCH_INFLIGHT": "codex=2"})
+
+    def test_one_comparable_window_row_is_estimated_at_the_floor(self):
+        self.comparable(1)
+        self.reserve_40()
+        r = self.judgment("--dry-run", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (25.0, {"5h": 25.0}))
+        self.assertEqual(rec["reserved_usage_windows"], {"5h": 40.0})
+        self.assertEqual(rec["would_refuse_class"], "inflight")
+
+    def test_admission_refuses_with_nothing_spawned(self):
+        self.comparable(1)
+        self.reserve_40()
+        r = self.judgment()
+        self.assertEqual(r.returncode, 5, (r.stdout, r.stderr))
+        rec = self.record()
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["pid"]), ("unavailable", "inflight", None))
+        self.assertIn("25.0% > 10.0% left on 5h", rec["detail"])
+        # the fake runner writes the log and the report when it is started: it never was
+        self.assertFalse((self.out / "s1.jsonl").exists() or (self.out / "s1-report.md").exists())
+
+    def test_a_stored_estimate_reserves_the_floor_for_the_next_dispatch(self):
+        self.comparable(1)
+        r = self.judgment()
+        self.assertEqual(r.returncode, 0, (r.stdout, r.stderr))
+        rec = self.record()
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (25.0, {"5h": 25.0}))
+        import importlib.machinery
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"
+        loader = importlib.machinery.SourceFileLoader("acp_dispatch_window_floor", str(script))
+        spec = importlib.util.spec_from_loader("acp_dispatch_window_floor", loader)
+        assert spec is not None
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        self.assertEqual(mod.reserved_usage([self.out / "jobs" / "s1.json"], ["5h"]), (25.0, {"5h": 25.0}))
+
+    def test_three_comparable_window_rows_still_release_the_floor(self):
+        self.comparable(3)
+        self.reserve_40()
+        r = self.judgment("--dry-run", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimated_usage_windows"]), (2.0, {"5h": 2.0}))
+        self.assertNotIn("would_refuse_class", rec)
+
+    def test_a_window_no_comparable_row_measured_is_checked_at_the_floor_too(self):
+        """One row measured only the 5-hour window: the weekly window is not left unchecked beside it."""
+        self.comparable(1)
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({
+            "collected_at": "2099-01-01T00:00:00+00:00",
+            "snapshot": {"accounts": [{"provider": "codex", "windows": [
+                {"label": "5h", "remaining_percent": 100.0}, {"label": "7d", "remaining_percent": 60.0}]}]}}))
+        r = self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", "--dry-run", "--json", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual(rec["estimated_usage_windows"], {"5h": 25.0, "7d": 25.0})
+
+    def test_a_window_with_fewer_than_three_measurements_is_floored_beside_one_with_three(self):
+        """Per label: three rows measure 5h, only two of them also the weekly window."""
+        for i in range(3):
+            (self.jobs / f"h{i}.json").write_text(json.dumps({
+                "agent": "codex", "model": "gpt-6.1-sol", "status": "done", "kind": "judgment",
+                "effort": "high", "measured_usage_pct": 2.0,
+                "measured_usage_windows": {"5h": 2.0, **({"7d": 1.0} if i < 2 else {})}}))
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({
+            "collected_at": "2099-01-01T00:00:00+00:00",
+            "snapshot": {"accounts": [{"provider": "codex", "windows": [
+                {"label": "5h", "remaining_percent": 100.0}, {"label": "7d", "remaining_percent": 100.0}]}]}}))
+        r = self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", "--dry-run", "--json", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads(r.stdout)
+        self.assertEqual(shlex.split(rec["cmd"])[0], str(self.fake))
+        self.assertEqual(rec["estimated_usage_windows"], {"5h": 2.0, "7d": 25.0})
 
 
 if __name__ == "__main__":
