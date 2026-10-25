@@ -11,6 +11,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- Added Go guard installation and zero-inference verification to standard setup instructions (#68).
+
 - Added the native Codex `create-hook` guide, verified against Codex 0.164.0, with exact hook trust review, conservative installation, approval semantics and coexistence with legacy notify (2026-10-25; direct integration).
 - Added exact acp-dispatch record paths to `relay.py`, including headless workers outside the default state tree; preserved queued versus delivered status and named the acknowledgement files (2026-10-25; direct integration).
 - Added a load-watch notice when one Google Chrome process uses 0.9+ cores for 5 minutes (`LW_CHROME_CORES`, `LW_CHROME_SUSTAIN_S`): warns the watcher hourly per process and never kills (2026-10-25).
@@ -165,6 +167,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `autorename` names a Paseo agent's tab `<topic>-pt` (2026-10-24, at most 17 characters including the suffix, `paseo_tab_name` in `skills/autorename/autorename.py`; the sentence title stays the provider session's) and `--auto` no longer overwrites an agent name that already ends in `-pt` (the 0.4.4 overwrite bug); the names store that tells a user rename from a tool rename is a later slice; the reply line ends `(names store unavailable)` on both `--auto` paths (#53).
 - Clarified bounded executor waits and required a registry claim before a worker binds any Mac test port, after a compatibility probe used an unclaimed port (2026-10-25; direct integration).
 - AGENTS.md standing order 9 is now an absolute rule (djbclark, 2026-10-25): all development happens in an exclusively claimed task workspace (linked worktree or cow pasture), one writer at a time, with named exceptions; the shared-master commit allowance is gone, `skills/cow-workspaces/SKILL.md` accepts both worktrees and pastures, and `~/ops` keeps plain master until the ops-promotion pilot passes (direct commit).
 - Changed `load-watch admit` to raise the per-core limit from 1.5 to 2.0 while compressor churn is at most 25k pages/s (new `--boost-per-core`, `--boost-max-churn`; swap is not the signal); `bg` now defers to that decision (2026-10-25).
@@ -218,6 +221,8 @@ agent what changed and what is new. Entries end with the pull request number.
   the canonical checkout (#20).
 
 ### Fixed
+
+- Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#68).
 
 - Fixed Codex `self-slash` lifecycle submission in Herdr, preserved shaded multiline composer drafts and blocked/working states, and detached waiters from the launching tool's process session (2026-10-25) (#69).
 
