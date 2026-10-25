@@ -1697,22 +1697,50 @@ def _hook_workspace(env: dict[str, str], cwd: str) -> Optional[Workspace]:
 
 def _parent_is_pack_refs(env: dict[str, str]) -> bool:
     """Whether the git process that runs this hook is `git pack-refs` (which `gc` and `maintenance` spawn). pack-refs
+def _proc_args(pid: int) -> Optional[tuple[str, list[str]]]:
+    """(executable path, argv) of process `pid`, exact: /proc/PID/{exe,cmdline} on Linux, sysctl KERN_PROCARGS2 on macOS
+    (NUL-separated, so an argv[0] holding spaces stays one word; `ps` joins argv with spaces and cannot tell)."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        exe = os.readlink(f"/proc/{pid}/exe")
+        parts = raw[:-1].split(b"\0") if raw.endswith(b"\0") else raw.split(b"\0")
+        return exe, [x.decode("utf-8", "replace") for x in parts]
+    except OSError:
+        pass
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        mib = (ctypes.c_int * 3)(1, 49, pid)            # CTL_KERN, KERN_PROCARGS2, pid
+        size = ctypes.c_size_t(0)
+        if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+            return None
+        data = buf.raw[:size.value]
+        argc = int.from_bytes(data[:4], sys.byteorder)
+        exe_b, _, rest = data[4:].partition(b"\0")
+        parts = rest.lstrip(b"\0").split(b"\0")[:argc]
+        return exe_b.decode("utf-8", "replace"), [x.decode("utf-8", "replace") for x in parts]
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
     reports every ref it packs as `0 new` and every loose ref it prunes as `old 0`, but changes no value: measured
-    2026-10-25, git 2.56. The stub exports the git process's pid in ADE_HOOK_GIT_PID."""
+    2026-10-25, git 2.56. The stub exports the git process's pid in ADE_HOOK_GIT_PID. The process must be an executable
+    named `git` (its real path, not its argv[0]) whose argv, parsed word by word, names `pack-refs`; a forged argv[0]
+    ("git pack-refs") is skipped by the parse and exempts nothing. Same-uid residual: a program named `git` that sets a
+    pack-refs argv, then runs the hook, or one that sets ADE_HOOK_GIT_PID itself, is believed (docs/git-guard.md)."""
     pid = env.get("ADE_HOOK_GIT_PID", "")
     if not pid.isdigit():
         return False
-    argv: list[str] = []
-    try:
-        argv = [x.decode("utf-8", "replace") for x in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if x]
-    except OSError:
-        import subprocess
-        try:
-            r = subprocess.run(["ps", "-ww", "-o", "command=", "-p", pid], capture_output=True, text=True, timeout=5)
-            argv = r.stdout.split()
-        except (OSError, subprocess.SubprocessError):
-            return False
-    return len(argv) > 1 and parse_git_argv(argv[1:], os.sep, {}).sub == "pack-refs"
+    got = _proc_args(int(pid))
+    if got is None:
+        return False
+    exe, argv = got
+    return os.path.basename(exe) == "git" and len(argv) > 1 and parse_git_argv(argv[1:], os.sep, {}).sub == "pack-refs"
 
 
 def _hook_refusal(rule: str, d: Decision, via: str, what: str, env: dict[str, str], cwd: str, extra: dict[str, Any]) -> int:

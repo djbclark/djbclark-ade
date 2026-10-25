@@ -676,3 +676,10 @@ def test_r10_f4_only_exit_77_refuses_and_the_pre_ade_chain_survives_a_crash(worl
     assert refused(r) and world.cb() != world.main()     # our hook crashed (fail open); the kept old hook still said no
 
 
+def test_r10_f3_a_forged_argv0_does_not_pass_for_pack_refs(world):
+    r = subprocess.run(["git pack-refs", "branch", "-f", "cb", "main"], executable=REAL_GIT, cwd=world.repo,
+                       env=env_for(world.state, "B"), capture_output=True, text=True, timeout=120)
+    assert refused(r), r.stderr
+    assert world.cb() != world.main()
+
+
