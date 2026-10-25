@@ -5,15 +5,26 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 ## relay.py deferred send and Paseo sender label (2026-10-24, branch `feat/relay-deferred-send`, PR pending)
 
-Built, repair round 1 (2026-10-24) after an adversary BLOCK, not merged: a busy target no longer loses the text (`relay.py` prints
-`queued: <id>` and exits 0, so fleet-watch and load-watch, which read only the exit code, keep working; 0600 record under
-`~/.local/state/relay/deferred/`, detached `--deliver` with its own clean environment, `--pending`, `--cancel`, `--sweep`) and
-`sender_name` reads `PASEO_AGENT_ID`. Open: (1) no launchd job re-arms queued records after a reboot yet; they wait for the next
-`relay.py` run (its opportunistic sweep) or `relay.py --sweep`, by the brief; (2) a Claude-pane target is never deferred (it
-queues natively); (3) one deliverer process per queued record (at most 100), only the head of a target's queue polls it; (4)
-`--cancel` has no sender check (same-uid operator surface); (5) `PASEO_AGENT_ID` can be forged by a same-user process, as
-`HERDR_PANE_ID` can; (6) two records left by an earlier test run sit in `~/.local/state/relay/deferred/` (`20261024-194844-fe1631`,
-`20261024-194854-57fcc1`) and are pruned by a sweep a week after they went final.
+Built, repair round 2 (2026-10-24) after a second adversary BLOCK, not merged: a busy target no longer loses the text (`relay.py`
+prints `queued: <id>` and exits 0 for a caller it can identify; 0600 record under `~/.local/state/relay/deferred/`, detached
+`--deliver` with its own clean environment, `--pending`, `--cancel`, `--sweep`) and `sender_name` reads `PASEO_AGENT_ID`.
+`load-watch` passes `--no-defer` for incident briefs (a queued brief arrives after the spike; only `watcher test` may queue).
+A caller with no identifiable sender (fleet-watch's `upr_relay`, load-watch, cron scripts) gets exit 1 "deferring needs an
+identifiable sender" on a busy target, which is the behaviour before this branch: fleet-watch's `upr_dispatch` reads rc 1 as a
+refused relay and falls back to a worker (checked 2026-10-24). **site-private follow-up** (not edited here): `upr_relay` could pass `--idle S`. Open:
+(1) no launchd job re-arms queued records after a reboot yet; they wait for the next `relay.py` run (its opportunistic sweep)
+or `relay.py --sweep`, by the brief; (2) a Claude-pane target is never deferred (it queues natively); (3) one deliverer
+process per queued record (at most 100), only the head of a target's queue polls it; (4) `--cancel` has no sender check
+(same-uid operator surface); (5) `PASEO_AGENT_ID` can be forged by a same-user process, as `HERDR_PANE_ID` can; (6) the
+bounds can be starved by a same-user process that mints sender keys (100 in all; never silent: exit 1 "deferred queue
+full"), one sender can fill one target's 20, and a deliverer stuck in a send holds its own record's owed notice until a later
+sweep; (7) a Paseo daemon error is tolerated for only 3 looks, 5 s apart (about 10-15 s): raise `DEFER_ERRORS` or space
+the looks if a longer restart must be survived; (8) a herdr pane whose foreground process cannot be read (herdr
+`pane process-info` fails) is not deferred, and one whose process is read wrongly (several foreground processes, none
+named like the agent) is not identified: exit 1 with the `--idle S` hint; (9) two records left by an earlier test run sit in
+`~/.local/state/relay/deferred/` (`20261024-194844-fe1631`, `20261024-194854-57fcc1`) and are pruned by a sweep a week after
+they went final; the test suite now points `RELAY_DEFER_DIR` at a temp directory (`tests/conftest.py`) and
+`tests/test_zz_relay_real_state_untouched.py` fails if the real directory changes.
 
 ## tuios support: do it LAST (djbclark, direct, 2026-10-24)
 

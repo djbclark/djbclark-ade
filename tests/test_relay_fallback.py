@@ -3274,7 +3274,7 @@ class TestDeferredSend(Harness):
                 "created": time.time(), "expires": time.time() + 3600, "state": "queued", "outcome": "", "pid": 0, "notice": "", **kw}
 
     def test_a_failed_notice_record_owes_no_notice(self) -> None:
-        relay.rec_write(self.notice_rec(1))
+        relay.rec_write(self.notice_rec(1, sender_ident=SENDER))    # even a notice record that names a sender (a hand-written one) owes no notice
         relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": True, "PendingPermissions": []}
         nid = relay.rec_all()[0]["id"]
         self.assertEqual(relay.deliver(nid), 0)

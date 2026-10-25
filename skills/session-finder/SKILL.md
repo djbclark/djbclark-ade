@@ -103,14 +103,26 @@ load-watch and session-load-watch read only the exit code and log the last outpu
 count come from the record, taken at queue time from the sender's own hosted or fleet-`self` identity), sends the text,
 prefixed `[queued Nm ago] `, through the same gates when the agent goes idle, and tells the sender (one
 `relay: your message to <target> was failed|expired: <reason>` notice, or `is unverified ... do not resend, check its pane`)
-if it cannot. Per target, messages go out in order; at most 20 queued per target, 20 per sender and 100 in all (over:
-exit 1 "deferred queue full (N)"); a pane id reused by another session fails the message ("target changed"). `--idle S`
+if it cannot; that notice is itself deferred once when the sender is busy (a `kind: notice` record: its own cap of 20, an
+hour, owes no notice, never collapsed with a normal record, so no notice loop). **A caller with no identifiable sender**
+(no verified Paseo id and no fleet `self` row: fleet-watch, load-watch, a cron script) **is not deferred for**: exit 1 "not
+sent: that session is busy and cannot take it now; deferring needs an identifiable sender (it gets a notice if the send
+fails). Retry with --idle S, or --no-defer for the plain refusal"; `load-watch` passes `--no-defer` for every incident
+brief, since a brief that arrives after the load spike is useless. Per target, messages go out in order; at most 20 queued
+per target, 20 per sender and 100 in all (over: exit 1 "deferred queue full (N)"); a pane id reused by another session
+fails the message ("target changed": the agent, session id, transcript or the pid of the TUI in the pane differs; a herdr
+pane whose TUI shows none of the three is not deferred). A Paseo daemon that cannot answer fails a queued message only
+after 3 consecutive errors 5 s apart, counted apart from "not found"; a pending permission card is waited for. A record
+`sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
+the notice say "unverified", never "delivered". `--idle S`
 still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at
 most 24 h); `relay.py --pending [--text] [--json]` lists (the text only with `--text`), `--cancel ID` withdraws a queued
 one, `--sweep` re-arms records whose deliverer died (it also runs, cheaply, at the start of every relay: it only changes
 states and starts detached deliverers). A non-Claude pane TUI that is working is deferred the same way. Archived,
-permission-blocked, wrong-directory and no-route refusals are never deferred. Residual: `PASEO_AGENT_ID` is an
-environment value a same-user process can forge, as `HERDR_PANE_ID` is. claude, codex, omp, opencode and pi
+permission-blocked (at queue time), wrong-directory and no-route refusals are never deferred. Residual: `PASEO_AGENT_ID` is an
+environment value a same-user process can forge, as `HERDR_PANE_ID` is, and the bounds can be starved (100 records in all:
+a same-user process that mints sender keys fills the queue, never silently; one sender can fill one target's 20; a stuck
+deliverer holds its own record's notice until a later sweep). claude, codex, omp, opencode and pi
 can steer (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23), but Paseo replaces the running
 turn of even these when the provider declines the steer at that moment (while Claude or Codex compacts, a Codex review
 turn, an omp steer error), which relay cannot see beforehand: only **claude** is steered into a working agent by default;

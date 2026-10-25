@@ -18,9 +18,11 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
 2. **Find the ident first** when you do not have it: `python3 -I ~/src/djbclark-ade/skills/session-finder/session-find.py "<topic>"`
    (or `fleet.py list`). `relay.py <ident> "x" --plan` prints the routes it would try and sends nothing.
 3. **Read the exit code.** 0 = delivered, **or queued** (stdout `queued: <id> ...`: the peer is working and cannot take it
-   now, so relay stored it and a detached deliverer sends it when the peer is idle; it never sends it twice, and, when it can identify you, tells you
+   now, so relay stored it and a detached deliverer sends it when the peer is idle; it never sends it twice, and tells the sender
    with one `relay: your message to ... was failed|expired|unverified` line if it cannot: do not resend a queued message,
-   `relay.py --pending` lists it, `relay.py --cancel <id>` withdraws it). 1 = not sent (every route failed, listed on
+   `relay.py --pending` lists it, `relay.py --cancel <id>` withdraws it). A caller relay cannot identify (no Paseo id, no fleet
+   session row: Hermes itself, a script) is never queued for: it gets exit 1 "deferring needs an identifiable sender", so
+   retry later or use `--idle S`. 1 = not sent (every route failed, listed on
    stderr; also "deferred queue full") or sent but
    unverified: **never resend** an "unverified" message, a second copy would be delivered. 2 = usage.
    **A relay.py that is cut off, times out or is killed counts as unverified, not as failed.** To a Hermes conversation
