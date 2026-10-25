@@ -296,6 +296,45 @@ class TestMachineHistory(RoutingDispatch):
         self.assertEqual(rec["estimated_usage_pct"], 55.0)
         self.assertIn("machine", rec["estimate_source"])
 
+    def judgment_estimate(self, rows: list[dict]) -> dict:
+        other = self.tmp / "state" / "other-task" / "jobs"
+        other.mkdir(parents=True, exist_ok=True)
+        for old in other.glob("*.json"):
+            old.unlink()
+        for i, row in enumerate(rows):
+            (other / f"h{i}.json").write_text(json.dumps(
+                {"agent": "codex", "model": "gpt-6.1-sol", "status": "done", **row}))
+        r = self.dispatch_agent(
+            "codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high", "--no-model-check",
+            "--no-preflight", "--min-headroom", "0", "--dry-run", "--json", env=self.snap_codex(100.0))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_another_kinds_and_efforts_history_is_not_borrowed(self):
+        """Adversary 7802361, A3: three 2% medium `code` slices made a high `judgment` slice reserve
+        2%, below even the uncalibrated default. Different workloads: the floor holds."""
+        rec = self.judgment_estimate([
+            {"kind": "code", "effort": "medium", "measured_usage_pct": 2.0,
+             "measured_usage_windows": {"5h": 2.0}} for _ in range(3)])
+        self.assertEqual(rec["estimated_usage_pct"], 25.0)
+        self.assertEqual(rec["estimate_source"], "brief-size default")
+        self.assertEqual(rec["estimated_usage_windows"], {})
+        # the same kind at another effort is a different workload too
+        rec = self.judgment_estimate([
+            {"kind": "judgment", "effort": "medium", "measured_usage_pct": 2.0} for _ in range(3)])
+        self.assertEqual(rec["estimated_usage_pct"], 25.0)
+
+    def test_comparable_history_replaces_the_floor_and_legacy_rows_still_load(self):
+        rec = self.judgment_estimate([
+            {"kind": "judgment", "effort": "high", "measured_usage_pct": p} for p in (30.0, 34.0, 38.0)])
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimate_source"]),
+                         (34.0, "history (3 slices, machine)"))
+        # a row from before kind/effort were recorded cannot contradict the request: it counts,
+        # and a lone small one is still held up by the floor
+        rec = self.judgment_estimate([{"measured_usage_pct": 2.0}])
+        self.assertEqual((rec["estimated_usage_pct"], rec["estimate_source"]),
+                         (25.0, "history (1 slices, machine)"))
+
 
 class TestReservation(RoutingDispatch):
     def test_inflight_reservation_refuses_second_codex(self):

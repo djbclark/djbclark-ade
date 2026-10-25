@@ -129,10 +129,16 @@ extra = { crush = " --acp-arg=--strip-user-config" }
 # 2026-10-19: the codex plan changed (Plus to the $100 plan, aiuse "prolite"); this
 # floor awaits re-calibration from `route_agent.py calibrate`. Value unchanged.
 # A key `SERVICE:frontier` floors only a slice on a [dispatch].frontier_models model;
-# plain `SERVICE` floors every other slice (2026-10-25: codex's everyday models, luna and
-# 6.1-sol, are not astra; 10.0 is a guess until `calibrate` has measured slices).
+# `SERVICE:KIND` floors that kind and wins over plain `SERVICE`, which floors every other
+# slice (2026-10-25: codex's everyday models, luna and 6.1-sol, are not astra; 10.0 is a guess
+# until `calibrate` has measured slices). History is matched on kind and effort too, so a
+# floor holds until three comparable slices are measured, never on another kind's or effort's.
+# `codex:judgment` = 25.0 (2026-10-25): the first judgment slices on gpt-6.1-sol at high have no
+# measurement, and codex's plain 10.0 is a guess for medium `code` that would reserve too little
+# for a review at high. 25.0 is a guess as well, chosen on the high side; `calibrate` replaces it.
 [dispatch.estimate_floor]
 "codex:frontier" = 60.0
+"codex:judgment" = 25.0
 codex = 10.0
 claude = 8.0
 antigravity-claude = 15.0

@@ -706,9 +706,19 @@ def approved_tokens() -> set[str]:
     return {x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
 
 
+def _same_workload(row: dict, kind: str | None, effort: str | None) -> bool:
+    """Does a history row measure the same workload (kind and effort) as the request?  A field the
+    row does not carry (a pre-change record, read with .get) cannot contradict the request and
+    stays comparable; a recorded kind or effort that differs is a different workload: a medium-effort
+    `code` slice says nothing about a high-effort `judgment` one (adversary 7802361, A3)."""
+    return all(have is None or have == want
+               for have, want in ((row.get("kind"), kind), (row.get("effort"), effort)))
+
+
 def _history_rows(paths: list[Path], agent: str, model: str | None, *,
-                  skip_placeholders: bool) -> list[tuple[float, dict]]:
-    """(mtime, row) for measured records matching agent×model, newest first."""
+                  skip_placeholders: bool, kind: str | None = None, effort: str | None = None
+                  ) -> list[tuple[float, dict]]:
+    """(mtime, row) for measured records matching agent×model×kind×effort, newest first."""
     rows: list[tuple[float, dict]] = []
     for path in paths:
         try:
@@ -716,7 +726,8 @@ def _history_rows(paths: list[Path], agent: str, model: str | None, *,
             mtime = path.stat().st_mtime
         except (OSError, ValueError, TypeError):
             continue
-        if row.get("agent") != agent or row.get("model") != model:
+        if (row.get("agent") != agent or row.get("model") != model
+                or not _same_workload(row, kind, effort)):
             continue
         if skip_placeholders and str(row.get("model") or "") in PLACEHOLDER_MODELS:
             continue
@@ -733,16 +744,16 @@ def session_finder_state() -> Path:
                                str(Path.home() / ".local/state/session-finder")))
 
 
-def measured_history(out: Path, agent: str, model: str | None
-                     ) -> tuple[list[dict], str]:
+def measured_history(out: Path, agent: str, model: str | None, kind: str | None = None,
+                     effort: str | None = None) -> tuple[list[dict], str]:
     """Measured job rows for estimates: task (≥3) else machine-wide (20) else task remainder."""
     task_paths = list((out / "jobs").glob("*.json")) if (out / "jobs").is_dir() else []
-    task = _history_rows(task_paths, agent, model, skip_placeholders=False)
+    task = _history_rows(task_paths, agent, model, skip_placeholders=False, kind=kind, effort=effort)
     if len(task) >= 3:
         return [r for _, r in task], f"history ({len(task)} slices, task)"
     machine = _history_rows(
         record_paths([str(STATE_ROOT), str(session_finder_state())]), agent, model,
-        skip_placeholders=True)[:20]
+        skip_placeholders=True, kind=kind, effort=effort)[:20]
     if machine:
         return [r for _, r in machine], f"history ({len(machine)} slices, machine)"
     if task:
@@ -751,16 +762,20 @@ def measured_history(out: Path, agent: str, model: str | None
 
 
 def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
-                 explicit: float | None, service: str | None = None) -> tuple[float, str]:
+                 explicit: float | None, service: str | None = None, kind: str | None = None,
+                 effort: str | None = None) -> tuple[float, str]:
     if explicit is not None:
         return explicit, "explicit"
-    rows, source = measured_history(out, agent, model)
+    rows, source = measured_history(out, agent, model, kind, effort)
     values = [float(r["measured_usage_pct"]) for r in rows
               if r.get("measured_usage_pct") is not None]
-    # `SERVICE:frontier` floors a [dispatch].frontier_models slice and wins over `SERVICE`, which
-    # floors every other slice (codex's everyday models are not astra, 2026-10-25).
+    # `SERVICE:frontier` floors a [dispatch].frontier_models slice and wins over `SERVICE:KIND`,
+    # which floors that kind (codex's judgment, 2026-10-25: no measurement yet) and wins over
+    # `SERVICE`, which floors every other slice (codex's everyday models are not astra).
     name = service or ""
     floor = ESTIMATE_FLOOR.get(name, 0.0)
+    if kind and kind != "frontier":
+        floor = ESTIMATE_FLOOR.get(f"{name}:{kind}", floor)
     if is_frontier_model(model):
         floor = ESTIMATE_FLOOR.get(f"{name}:frontier", floor)
     if values:
@@ -777,7 +792,8 @@ def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
     return est, "brief-size default"
 
 
-def estimate_windows(out: Path, agent: str, model: str | None) -> dict[str, float]:
+def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None = None,
+                     effort: str | None = None) -> dict[str, float]:
     """Median measured drop per quota window (label -> percent).
 
     Prefers this task's history (≥3 slices); else the most recent 20 machine-wide
@@ -786,7 +802,7 @@ def estimate_windows(out: Path, agent: str, model: str | None) -> dict[str, floa
     5h-after (2026-10-13: certpin4 recorded 70%, so the next codex slice was refused
     against 69% weekly left although it needed ~15% of the week).
     """
-    rows, _ = measured_history(out, agent, model)
+    rows, _ = measured_history(out, agent, model, kind, effort)
     seen: dict[str, list[float]] = {}
     for row in rows:
         try:
@@ -4081,7 +4097,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         except (OSError, ValueError):
             pass
     prompt = read_brief(a.prompt_file) if a.prompt_file else a.prompt
-    estimate, estimate_source = estimate_pct(out, a.agent, a.model, prompt, a.est_pct, service)
+    est_effort = effort or (previous or {}).get("effort")
+    estimate, estimate_source = estimate_pct(out, a.agent, a.model, prompt, a.est_pct, service, kind, est_effort)
     if estimate < 0:
         die("--est-pct must be 0 or more")
     # Load gate (2026-10-19) BEFORE any quota or capacity reading: it may wait up to --load-wait, and the
@@ -4116,7 +4133,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         per_window = {}
     else:
         per_window = {
-            k: v for k, v in estimate_windows(out, a.agent, a.model).items()
+            k: v for k, v in estimate_windows(out, a.agent, a.model, kind, est_effort).items()
             if windows.get(k) is not None}
     # In-flight reservation by service (2026-10-18). A resume is never refused by it (reserved
     # is zeroed when previous is set); its own estimate still counts as in flight for others.
