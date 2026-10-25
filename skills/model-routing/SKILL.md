@@ -129,6 +129,31 @@ skill's snapshot in the same turn.
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
   starts no new Claude work until the reset.
 
+## OpenCode Go cost guard (2026-10-25)
+
+Go Plus is a $40 subscription with shared allowance, not a free model bundle.
+Use `config/go-model-policy.json` as the cost classification. Routine routing
+uses MiniMax M3 for bulk, GPT-6 Luna for mechanical work, and DeepSeek V4.1 Flash
+for code. Luna stays routine: a smaller model allowance alone does not establish
+high per-token cost. Unknown Go model IDs are refused until classified.
+
+Costly Go models (including Grok 4.7, Kimi K3/K2.7 Code, GLM 5.3 and DeepSeek
+V4 Pro) are advisors only. Use `acp-dispatch opencode --model opencode-go/kimi-k3
+--kind judgment --role advise --perm read-only --timeout 600 ...` with a short,
+self-contained brief. `research` and `frontier` are also eligible kinds; ordinary
+code, bulk and mechanical runs are refused. Direct ACP requires `--go-advisory`.
+Both entry points enforce a positive deadline no longer than ten minutes and
+read-only permissions; no interactive loop, prompt retries or verify loop.
+OpenCode has no adjustable ACP context size; keep the brief small rather than
+passing an unsupported `--context`. Never use raw `opencode run` to bypass this
+guard, or switch a live main loop to a costly model. Native UI choices are not
+a server-side spending limit. `route-override` does not bypass the cost gate.
+
+Use the native V2 Go context plugin and `docs/context-hygiene.md` for early
+nudges, safe-point compaction, cooldowns and durable boundary handoffs. Automatic
+compaction is not permission to clear a parent or abandon running work. Do not
+enable Go "Use balance" to evade an exhausted subscription allowance.
+
 ## Reading quota numbers (a misreading here already cost a dispatch round)
 
 `aiuse --available` / `--json` now bake these rules into their output; use them for
@@ -284,8 +309,9 @@ Rules for any agent that dispatches to agy:
   devin (disabled in Orca on purpose).
 - **Never a delegation target**: hermes (the operator's assistant; gated in
   acp-run/acp-dispatch since 2026-10-15).
-- **Free**: opencode-go bundled models; sipb (MIT-hosted, `opencode`
-  provider `sipb`).
+- **OpenCode Go Plus subscription**: one shared monthly allowance, not free fan-out.
+  `config/go-model-policy.json` classifies routine models versus bounded advisors.
+- **Free**: sipb (MIT-hosted, `opencode` provider `sipb`).
 - **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
   only via the `opencode-ralph-tui-*` gate scripts, never by default.
 - **The Claude API credits, omp (operator 2026-10-19; gate lifted)**: the pool
@@ -489,13 +515,13 @@ TUI with `&` inherits the harness's stdin and codex blocks on it forever.
 | codex (GPT-6 Astra default) | `codex exec -s read-only -C <dir> "<prompt>" < /dev/null > out 2>&1` | without `< /dev/null`: prints `Reading additional input from stdin...` and hangs with no timeout. |
 | agy (Antigravity) | `agy --dangerously-skip-permissions --print-timeout 120s -p='<prompt>' < /dev/null > out 2>&1` — **attach the prompt with `-p=`**, which is order-independent and cannot be confused with a flag. `-p`/`--print`/`--prompt` is a *required-value string flag*, not a boolean. | `agy -p` with no value: exits 2, `flag needs an argument: -p`. `agy -p --effort high` (value-less `-p` before another flag): **since 1.1.18 this is a clean exit 2** naming the mistake — *"-p took \"--effort\" as its prompt…"* — and before 1.1.18 it silently ran with `--effort` as the prompt. Verified on 1.2.16, 2026-10-03. Headless still needs `--dangerously-skip-permissions` or tool permissions auto-deny (by design, hardened in 1.2.15). **`RESOURCE_EXHAUSTED (code 429)` with `aiuse` showing headroom** (2026-10-03: every CLI model, 15:42 to 23:50+, while ACP worked): a CLI burst lockout, not an empty pool; the CLI retries 8 times (~2m20s) so it looks like a hang, and `--print-timeout` cuts it with exit 0 and partial output. Check `grep 'attempt [0-9]* failed' ~/.gemini/antigravity-cli/log/cli-*.log` and switch to `acp-run agy`. |
 | copilot | `copilot -p "<prompt>" --model auto --allow-all-tools --allow-all-paths --silent < /dev/null > out 2>&1` | fine as-is. **Do not add `--reasoning-effort` with `--model auto`**: exits 1, `Model "auto" does not support reasoning effort configuration` (2026-09-26). Name a concrete model if you want an effort level. |
-| opencode (free Go bundle) | `opencode run -m opencode-go/<model> "<prompt>" < /dev/null > out 2>&1` — e.g. `opencode-go/deepseek-v4-pro`, `opencode-go/gpt-6-luna`, `opencode-go/kimi-k3` (all answered 2026-09-26; `opencode models \| ggrep ^opencode-go/` lists 33). | **`opencode/<model>` is the prepaid Zen catalogue, not Go**: every `opencode/*` model except `big-pickle` fails with `Upstream request failed: Insufficient account funds`. `big-pickle` answers but on a review prompt spent its run trying to install pytest and returned nothing — steer it with "do not run tests or install anything". **Side effect:** every `opencode run` rewrites `./opencode.json` in the cwd (adds a `$schema` key) — `git checkout -- opencode.json` afterwards in repos that track it. |
+| opencode (Go subscription) | Use `acp-dispatch opencode` with an explicitly qualified routine model such as `opencode-go/deepseek-v4.1-flash`, `opencode-go/minimax-m3` or `opencode-go/gpt-6-luna`. Expensive models require the bounded advisory form below; direct `opencode run` bypasses the ACP cost gate. | **`opencode/<model>` is the prepaid Zen catalogue, not Go**: every `opencode/*` model except `big-pickle` fails with `Upstream request failed: Insufficient account funds`. `big-pickle` answers but on a review prompt spent its run trying to install pytest and returned nothing — steer it with "do not run tests or install anything". **Side effect:** every `opencode run` rewrites `./opencode.json` in the cwd (adds a `$schema` key) — `git checkout -- opencode.json` afterwards in repos that track it. |
 | cursor-agent | `cursor-agent -p --yolo --output-format text "<prompt>" < /dev/null > out 2>&1` | without `--trust` (or `--yolo`/`-f`) in a directory Cursor hasn't trusted: exits 1 with a "Workspace Trust Required" prompt and no review. |
 | zai (zcode) | `zcode -p "<prompt>" < /dev/null > out 2>&1` — `-p` already defaults to `--mode yolo`; `--attach <file>` works (verified 2026-09-30). Inlining the file into the prompt is equally fine. | **Never pass `--mode build` (or `--mode edit`) headless**: it gates every tool behind an approval no one can give, so the run hangs indefinitely — process alive, ~0 CPU, no `zcode-cli` worker doing work, zero output — until it's killed (seen 2026-09-30, `--mode build --attach`). The default yolo mode auto-approves. The `ZCode Built-in skipped (not-due)` lines on stderr are a benign memory-heartbeat, not an error. |
 
-Where DeepSeek lives on this machine (probed 2026-09-26): free —
-`opencode-go/deepseek-v4-pro` / `-v4-flash` / `-v4.1-flash` (Go bundle)
-and `sipb/deepseek-r1:{8b,14b,32b}` (MIT-hosted); paid —
+Where DeepSeek lives on this machine (updated 2026-10-25): Go subscription —
+`opencode-go/deepseek-v4-pro` (advisory only) / `-v4-flash` / `-v4.1-flash`; free —
+`sipb/deepseek-r1:{8b,14b,32b}` (MIT-hosted); prepaid —
 `opencode/deepseek-*` (Zen prepaid), `clinepass-deepseek`
 via LiteLLM :4000 (ClinePass, a reserve pool), and the `deepseek`
 prepaid account. Check `aiuse` for what is left in each. z.ai serves GLM, not DeepSeek.
@@ -744,6 +770,10 @@ method that runs the waves.
    workflows `agent(..., {model, effort})`; Orca `worker-start --agent <TUI>
    --model --effort`; the per-CLI headless forms only where no ACP route exists
    (muse) or as a fallback.
+   For dispatch report paths use `--out DIR --name NAME` (writes
+   `DIR/NAME-report.md`); `--report PATH` belongs only to `acp-dispatch footer`,
+   not to the dispatch command.
+
 10. Model names get renamed and retired: a name from an old plan or roster is a
     hint. Check `acp-run <agent> --info` before committing to an id.
 11. **Context hygiene is part of cost.** Claude Code compacts a session by

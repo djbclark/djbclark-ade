@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Ask the native Go plugin's single admission guard to compact this session.
+
+Usage: opencode-self-compact [--dry-run]
+Exit: 2 invalid scope/options, 7 guard refusal, 11 RPC failure.
+No direct compact POST, separate cooldown store, parent target or retry.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from urllib.parse import urlencode
+
+
+def invoke(*args, **kwargs):
+    return subprocess.run(*args, **kwargs)
+
+
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else argv
+    sid = os.environ.get("ADE_OPENCODE_SESSION_ID", "")
+    directory = os.environ.get("ADE_OPENCODE_DIRECTORY", "")
+    if (args not in ([], ["--dry-run"]) or not re.fullmatch(r"ses_[A-Za-z0-9]+", sid)
+            or not directory or not Path(directory).is_absolute()):
+        print("self-slash: native compact needs tool-scoped session and directory", file=sys.stderr)
+        return 2
+    if args == ["--dry-run"]:
+        print(f"self-slash: would ask native Go guard to compact {sid}; no API call made")
+        return 0
+    route = "/api/rpc/ade.go-context/compact?" + urlencode({"location[directory]": directory})
+    try:
+        result = invoke(["opencode", "api", "post", route, "--data", json.dumps({"input": {"sessionID": sid}})],
+                                capture_output=True, text=True, timeout=45, check=False)
+        if result.returncode:
+            print("self-slash: native Go guard unavailable or request uncertain; do not retry blindly", file=sys.stderr)
+            return 11
+        value = json.loads(result.stdout)
+        # Native RPC returns {output: ...}; the guard's boolean is not HTTP acceptance.
+        data = value.get("output") if isinstance(value, dict) else None
+        if not isinstance(data, dict) or data.get("accepted") is not True:
+            print("self-slash: native guard refused compaction; inspect pending state, cooldown or baseline", file=sys.stderr)
+            return 7
+        print(f"self-slash: native compaction accepted for {sid}; completion is not yet verified")
+        return 0
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f"self-slash: native Go guard call failed or is uncertain ({type(error).__name__}); no automatic retry", file=sys.stderr)
+        return 11
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

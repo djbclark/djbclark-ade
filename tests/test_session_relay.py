@@ -145,7 +145,7 @@ class TestRelayRules(unittest.TestCase):
             relay.fleet.herdr_json = real
         self.assertEqual(calls[0], ("agent", "get", "sf-succ-1"))
 
-    def test_type_line_through_herdr_is_send_text_then_enter(self) -> None:
+    def test_type_line_through_herdr_submits_one_atomic_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as t:
             calls = Path(t) / "calls"
             fake = Path(t) / "herdr"
@@ -158,7 +158,7 @@ class TestRelayRules(unittest.TestCase):
             finally:
                 relay.HERDR = old
             self.assertEqual(calls.read_text().splitlines(),
-                             ["pane send-text w1:p1 hello there", "agent send-keys w1:p1 enter"])
+                             ["agent prompt w1:p1 hello there"])
 
     def run_main(self, drafts: list[str], scr: str, transcript: Path | None = None) -> tuple[int, list[str]]:
         """main() against one fake working Claude session; DRAFTS are successive input-box reads."""
