@@ -718,3 +718,35 @@ def test_r10_f6_origin_is_what_git_says_whatever_its_spelling_in_the_config(worl
     r = git(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B")
     assert refused(r), r.stderr
     assert world.cb() != world.main()
+
+
+# --------------------------------------------------------------------------------------------
+# round 11 (2026-10-25): the origin question reads the repository's own config and nothing the caller controls
+# --------------------------------------------------------------------------------------------
+
+def _count_env(pairs):
+    env = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for i, (k, v) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    return env
+
+
+def _move_refused(w, args, **extra):
+    r = shim(w.state, args, w.repo, who="B", **extra)
+    assert refused(r), (r.returncode, r.stderr)
+    assert r.returncode == 128
+    assert w.cb() != w.main()
+
+
+@pytest.mark.parametrize("how", ["dash-c", "count-env", "parameters-env", "global-file"])
+def test_r11_f1_a_callers_config_never_rewrites_the_origin_the_claim_is_matched_against(world, tmp_path, how):
+    if how == "dash-c":
+        _move_refused(world, ["-c", "remote.origin.url=/x", "branch", "-f", "cb", "main"])
+    elif how == "count-env":
+        _move_refused(world, ["branch", "-f", "cb", "main"], **_count_env([("remote.origin.url", "/x")]))
+    elif how == "parameters-env":
+        _move_refused(world, ["branch", "-f", "cb", "main"], GIT_CONFIG_PARAMETERS="'remote.origin.url=/x'")
+    else:
+        g = tmp_path / "g.cfg"
+        g.write_text('[remote "origin"]\n\turl = /x\n')
+        _move_refused(world, ["branch", "-f", "cb", "main"], GIT_CONFIG_GLOBAL=str(g))

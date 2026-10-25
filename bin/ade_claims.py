@@ -1183,16 +1183,17 @@ def real_git(env: Optional[dict[str, str]] = None) -> str:
     return "/usr/bin/git"
 
 
-def _run_git(args: Sequence[str], timeout: float = 10, env_extra: Optional[dict[str, str]] = None,
+def _run_git(args: Sequence[str], timeout: float = 10, env_extra: Optional[dict[str, Optional[str]]] = None,
              err_out: Optional[list[str]] = None) -> tuple[int, str]:
     """Run the real git with stdout captured (decoded with replacement, so a hostile byte never raises), its own
     stdin closed and its own process group: on timeout the WHOLE group (hooks, credential helpers, ssh) is killed.
-    stderr is discarded, or with `err_out` appended to it (decoded the same way).
+    stderr is discarded, or with `err_out` appended to it (decoded the same way). An `env_extra` value of None removes
+    the variable.
     (127, "") when it cannot start, (124, partial output) on timeout."""
     import signal
     import subprocess
     env = {**os.environ, **(env_extra or {}), "GIT_TERMINAL_PROMPT": "0"}
-    env = {k: v for k, v in env.items() if not k.startswith("GIT_TRACE")}      # a helper run never writes a trace file
+    env = {k: v for k, v in env.items() if v is not None and not k.startswith("GIT_TRACE")}   # a helper run never writes a trace file
     try:
         p = subprocess.Popen([real_git(), *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL if err_out is None else subprocess.PIPE, env=env,
@@ -1674,12 +1675,22 @@ def _common_dir(gitdir: Path) -> Path:
         return gitdir
 
 
+# What the origin question must not inherit: every config scope but the repository's own file (round 11, 2026-10-25: the
+# caller's -c / GIT_CONFIG_COUNT / GIT_CONFIG_PARAMETERS rewrote `remote.origin.url` for the question while the claim kept
+# the real one), plus the variables that point git at another git dir or common dir. `--local` already ignores the
+# global, system and command scopes; this is the belt to those braces.
+_ORIGIN_QUESTION_DROP = ("HOME", "XDG_CONFIG_HOME", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_CONFIG")
+
+
 def _config_origin(common: Path) -> Optional[str]:
-    """`remote.origin.url` as git itself answers (`git config --get`: comments, quotes, escapes and includes are git's to
-    read): the URL, "" when git says it is unset (exit 1), None when git did not answer (timeout, cannot start, broken
-    config): the hook then lets the update through. `git config` takes no ref lock, so a hook may run it. Asked of the
-    COMMON dir: a linked worktree's own git dir has no `remote.*` (measured 2026-10-25)."""
-    rc, out = _run_git(["--git-dir", str(common), "config", "--get", "remote.origin.url"], 3)
+    """`remote.origin.url` as git answers for the REPOSITORY'S OWN config file and the files it includes (`git config
+    --local --includes --get`: comments, quotes and escapes are git's to read; the caller's command-line, environment,
+    global, system, HOME and XDG scopes are not read at all, so no caller can change the answer): the URL, or "" when it
+    is unset (exit 1), None when git did not answer (timeout, cannot start, broken repository config). `git config` takes
+    no ref lock, so a hook may run it. Asked of the COMMON dir: a linked worktree's own git dir has no `remote.*`
+    (measured 2026-10-25)."""
+    drop = {k: None for k in os.environ if k in _ORIGIN_QUESTION_DROP or k.startswith("GIT_CONFIG")}
+    rc, out = _run_git(["--git-dir", str(common), "config", "--local", "--includes", "--get", "remote.origin.url"], 3, drop)
     if rc == 0:
         return out.rstrip("\n")
     return "" if rc == 1 else None
