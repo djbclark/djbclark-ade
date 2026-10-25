@@ -342,10 +342,14 @@ mine: I tested with `basic-memory status`, which only reports, on a project
 that had not begun syncing, and concluded "no file mutation". A report is not
 the artifact. (Standing order 4, learned again the hard way.)
 
-**Correct adoption shape:** Basic Memory owns `~/basic-memory` and nothing
-else. If existing material should live in it, *copy* it in and let the
-originals stay canonical in git — do not hand it a repo. Current state: one
-project, `main` → `~/basic-memory`, no repo registered.
+**Correct adoption shape (2026-08-23 decision):** Basic Memory owns its store
+folder and nothing else. If existing material should live in it, *copy* it in
+and let the originals stay canonical in git — do not hand it a repo. Current
+state (checked 2026-10-25 against `~/.basic-memory/config.json`): 11 projects;
+the shared one, `main`, is `~/ops/site-private/memory`, inside the `site-private`
+git repo (registered deliberately after this rule; see the store's
+`basic-memory/README.md`). The 8 `~/agent-memory/*` projects are empty.
+`~/basic-memory` no longer exists.
 
 Open question before it earns real use: with the curated corpus staying in
 git, what does Basic Memory actually hold? The honest candidate is
