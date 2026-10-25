@@ -668,14 +668,16 @@ def route_module():
     return route_agent
 
 
-def pool_reading(agent: str, model: str | None) -> tuple[float | None, dict]:
+def pool_reading(agent: str, model: str | None, fresh: bool = False) -> tuple[float | None, dict]:
+    """(remaining, row) of agent×model's pool. `fresh=True` is for the admission boundaries that judge the
+    pool after a wait: it skips the router's 30 s aiuse memo (2026-10-25); every other look keeps the memo."""
     mapping = map_agent_to_provider(agent, model)
     if mapping is None:
         return None, {}
     provider, family = mapping
     router = route_module()
     service = router.pool_service(provider, family)
-    quota, _ = router.load_snapshot()
+    quota, _ = router.load_snapshot(bypass_memo=fresh)
     info = quota.get(service) or {}
     return info.get("remaining"), info
 
@@ -1051,7 +1053,7 @@ def plenty_gate_refusal(rec: dict, after: str = "the load wait") -> str | None:
     svc = plenty_gated(rec.get("agent") or "", rec.get("service"), kind)
     if svc is None:
         return None
-    _, reading = pool_reading(rec.get("agent") or "", rec.get("model"))
+    _, reading = pool_reading(rec.get("agent") or "", rec.get("model"), fresh=True)
     if svc.eligible(kind, {svc.name: reading}):
         return None
     return (f"{svc.name} is not eligible for --kind {kind} after {after}"
@@ -4180,7 +4182,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             if not admitted:
                 return unavailable_record(out, a, why, "load", None, estimate, previous,
                                           exit_code=LOAD_GATE_EXIT, extra={"load_gate": gate_info})
-    remaining, reading = pool_reading(a.agent, a.model)
+    # `fresh`: the load gate ran inline and may have waited, so this look must not reuse the 30 s aiuse memo
+    # the first look filled (Codex review of PR 73); a deferred or skipped gate waited nothing.
+    remaining, reading = pool_reading(a.agent, a.model, fresh=gate_info is not None and not gate_deferred)
     # The plenty gate was judged above on a reading taken BEFORE the load wait, which may have lasted
     # up to --load-wait; judge it again on this one (adversary 7802361, A1). A detached --no-wait
     # runner repeats it after its own wait (plenty_gate_refusal). route-override and a resume skip it,

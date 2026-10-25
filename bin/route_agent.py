@@ -29,7 +29,8 @@ rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (t
 as source `canned`, logged on stderr each use, and it takes precedence over
 `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
 pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
-`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s.
+`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s;
+`load_snapshot(bypass_memo=True)` skips the memo (acp-dispatch's post-wait plenty-gate looks).
 
 **Services are discovered, not hardcoded.** The roster changes — agents gain
 an ACP mode, providers appear in aiuse, plans lapse. So the service list is
@@ -921,7 +922,7 @@ def _parse_available(raw: bytes, label: str) -> tuple[dict[str, Any] | None, str
     return payload, label
 
 
-def aiuse_available() -> tuple[dict[str, Any] | None, str]:
+def aiuse_available(bypass_memo: bool = False) -> tuple[dict[str, Any] | None, str]:
     """`aiuse --available --json` as (payload, source label); (None, reason) on any failure.
 
     Applies aiuse's own read-time overlays (operator credits override, Admin API readings,
@@ -931,7 +932,9 @@ def aiuse_available() -> tuple[dict[str, Any] | None, str]:
     ROUTE_AGENT_AIUSE_TIMEOUT is in seconds, (0, 60], default 20 (the cache read is well
     under one second). Exit 3 means nothing is usable and still prints the JSON. The
     subprocess result (success or failure) is memoised for AIUSE_MEMO_TTL = 30 s, with elapsed
-    seconds added to its ages on reuse (`_reset_aiuse_cache` clears it)."""
+    seconds added to its ages on reuse (`_reset_aiuse_cache` clears it). `bypass_memo=True` skips the
+    memo read and spawns anyway (still storing the result): the admission boundaries that judge a
+    reading after a wait pass it (2026-10-25, Codex review of PR 73); every other caller keeps the memo."""
     canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
     if canned:
         try:
@@ -944,7 +947,7 @@ def aiuse_available() -> tuple[dict[str, Any] | None, str]:
         return None, "aiuse not on PATH"
     timeout = _aiuse_timeout()
     key = (exe, timeout)
-    hit = _AIUSE_MEMO.get(key)
+    hit = None if bypass_memo else _AIUSE_MEMO.get(key)
     if hit is not None:
         elapsed = time.monotonic() - hit[0]
         if 0 <= elapsed < AIUSE_MEMO_TTL:
@@ -1008,20 +1011,21 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
         providers[key] = entry
 
 
-def load_snapshot() -> tuple[dict[str, Any], float | None]:
+def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | None]:
     """Pool state per service: `aiuse --available --json`, else the snapshot file.
 
     Never probes live (the `--available` form reads aiuse's cache, well under a second).
     `--available` lists only usable pools, so a pool the snapshot file knows that is
     missing from a fresh payload is exhausted, excluded or hidden: it reads 0% left rather
     than unknown. Fields 3.8 adds (`expires_at`, `burn_before_reset`, `reading_expired`,
-    `source`) are tolerated when absent; the row's own `resets_at` and windows carry them."""
+    `source`) are tolerated when absent; the row's own `resets_at` and windows carry them.
+    `bypass_memo=True` makes the aiuse read skip its 30 s memo (see aiuse_available)."""
     QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason = "snapshot", "", ""
     accounts, age = _read_snapshot_file()
     providers = _providers_from_accounts(accounts, age)
     canned = bool(os.environ.get("ROUTE_AGENT_AIUSE_JSON"))
     if canned or _aiuse_wanted():
-        payload, label = aiuse_available()
+        payload, label = aiuse_available(bypass_memo)
         fresh: dict[str, Any] | None = None
         p_age: float | None = None
         marked_stale = False

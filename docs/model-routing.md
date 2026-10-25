@@ -115,7 +115,7 @@ feeds canned output (tests; reported as source `canned`, logged on stderr every 
 takes precedence over `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`); `ROUTE_AGENT_AIUSE=off` or
 `AIUSE_SNAPSHOT` pins the file-only read (tests/conftest.py sets `off`); `ROUTE_AGENT_AIUSE_BIN`
 and `ROUTE_AGENT_AIUSE_TIMEOUT` (seconds, 0 to 60, default 20) override the binary and timeout.
-The spawn result is memoised for 30 s (elapsed seconds are added to its ages on reuse, so a blocking dispatch's finalize never reads a start-time quota as current). Unparseable rows, non-finite percentages and unknown ages
+The spawn result is memoised for 30 s (elapsed seconds are added to its ages on reuse, so a blocking dispatch's finalize never reads a start-time quota as current). The admission looks that judge the pool after a wait (the post-load-wait reading in `dispatch`, and the stamped plenty-gate recheck after the load and capacity waits) bypass the memo (`load_snapshot(bypass_memo=True)`, 2026-10-25, PR 73), so a wait shorter than 30 s cannot hide a drained pool. Unparseable rows, non-finite percentages and unknown ages
 never read as headroom: the first falls back to the file, the others read unknown or stale.
 
 The aiuse path reads the `--available` row contract: each row's top-level `provider`,

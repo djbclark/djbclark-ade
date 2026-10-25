@@ -3,6 +3,7 @@
 A fake load-watch stands in (ACP_DISPATCH_LOAD_WATCH); conftest turns the gate off for every other suite."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import override
+from unittest.mock import patch
 
 from test_acp_dispatch import SCRIPT, run
 from test_acp_dispatch_routing import RoutingDispatch
@@ -584,6 +586,138 @@ class TestRecordWaitingOnTheGateIsNotOverwritten(LoadGate):
         self.assertEqual(self.dispatch("--no-model-check", env=self.gate_env(75, HOT)).returncode, 75)
         again = self.dispatch("--no-model-check", env=self.gate_env(0, OK))
         self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
+
+
+class TestPlentyGateReadsPastTheAiuseMemo(LoadGate):
+    """Codex review of PR 73 (P2): the aiuse-backed reader memoises its spawn for 30 s, so a plenty-gate look
+    taken after a load or capacity wait shorter than that reused the pre-wait percentages. The admission
+    boundaries read fresh; every other look keeps the memo. A fake `aiuse` prints DATA, which a test rewrites
+    to stand for the pool draining during the wait."""
+
+    MODEL = "gpt-6.1-sol"
+
+    def payload(self, pct: float) -> str:
+        return json.dumps({"age_seconds": 5, "fresh": True, "available": [{
+            "provider": "codex", "age_seconds": 5,
+            "windows": [{"label": "5h", "remaining_percent": pct, "headroom_percent": pct}]}]})
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.data = self.tmp / "aiuse.data"
+        self.spawns = self.tmp / "aiuse.spawns"
+        self.data.write_text(self.payload(90.0))
+        self.bin = self.tmp / "aiuse"
+        self.bin.write_text(f"#!/bin/sh\necho x >> {shlex.quote(str(self.spawns))}\n"
+                            f"cat {shlex.quote(str(self.data))}\n")
+        self.bin.chmod(0o755)
+        (self.tmp / "home").mkdir()
+
+    def drain(self, pct: float = 40.0) -> None:
+        self.data.write_text(self.payload(pct))
+
+    def spawn_count(self) -> int:
+        return len(self.spawns.read_text().splitlines()) if self.spawns.exists() else 0
+
+    def aiuse_env(self, **extra: str) -> dict[str, str]:
+        """Env that makes the router ask the fake aiuse (not a snapshot file, not the host's home)."""
+        return {"AIUSE_SNAPSHOT": "", "ROUTE_AGENT_AIUSE": "", "ROUTE_AGENT_AIUSE_BIN": str(self.bin),
+                "HOME": str(self.tmp / "home"), **extra}
+
+    def judgment(self, *extra: str, env: dict[str, str]):
+        return self.dispatch_agent("codex", self.MODEL, "--kind", "judgment", "--effort", "high",
+                                   "--no-model-check", "--no-preflight", "--min-headroom", "0", *extra, env=env)
+
+    @contextlib.contextmanager
+    def aiuse_world(self, **extra: str):
+        """In-process: acp-dispatch and the router read the fake aiuse, a pristine memo, no host snapshot."""
+        env = {**self.gate_env(0, OK), **self.aiuse_env(), "ACP_DISPATCH_STATE": str(self.tmp / "state"), **extra}
+        mod = self.load_module()
+        route = mod.route_module()
+        with patch.dict("os.environ", env), patch.object(route, "SNAPSHOT", route.DEFAULT_SNAPSHOT), \
+                patch.object(route, "_read_snapshot_file", return_value=([], None)):
+            route._reset_aiuse_cache()
+            try:
+                yield mod, route
+            finally:
+                route._reset_aiuse_cache()
+
+    def stamped_record(self) -> Path:
+        """A detached judgment/high record dispatched at 90% (plenty_gate stamped), nothing launched."""
+        d = self.judgment("--detach", "--no-wait", env=self.gate_env(0, OK, **self.aiuse_env()))
+        self.assertEqual(d.returncode, 0, d.stderr + d.stdout)
+        path = self.out / "jobs" / "s1.json"
+        self.assertTrue(json.loads(path.read_text())["plenty_gate"])
+        return path
+
+    def test_dispatch_judges_the_plenty_gate_on_a_reading_taken_after_the_load_wait(self):
+        """The first look memoises 90%; the fake load-watch drains the pool to 40% while it admits, well inside
+        the 30 s memo: the post-load look must see 40% and refuse."""
+        env = self.gate_env(0, OK, FAKE_LW_WRITE=str(self.data), FAKE_LW_BODY=self.payload(40.0), **self.aiuse_env())
+        r = self.judgment(env=env)
+        self.assertEqual(r.returncode, 2, r.stderr + r.stdout)
+        self.assertIn("codex is not eligible for --kind judgment", r.stderr)
+        self.assertIn("now: 40% left", r.stderr)
+        self.assertFalse((self.out / "jobs" / "s1.json").exists())        # nothing launched, no record
+        self.assertFalse((self.out / "s1-report.md").exists())
+
+    def test_the_runner_rechecks_the_plenty_gate_on_a_fresh_reading_after_its_own_load_wait(self):
+        path = self.stamped_record()
+        with self.aiuse_world(FAKE_LW_WRITE=str(self.data), FAKE_LW_BODY=self.payload(40.0)) as (mod, route):
+            self.assertEqual(route.load_snapshot()[0]["codex"]["remaining"], 90.0)    # a sibling's look: memoised
+            rc = mod.runner_load_gate(path)             # load-watch admits and drains the pool to 40%
+        self.assertEqual(rc, 5)
+        rec = json.loads(path.read_text())
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "headroom", 5))
+        self.assertIn("after the load wait", rec["detail"])
+        self.assertIn("now: 40% left", rec["detail"])
+
+    def test_the_plenty_gate_is_rechecked_on_a_fresh_reading_after_a_short_capacity_wait(self):
+        """execute_record: the load gate's own look memoises 90%; the (replaced) capacity wait drains the pool
+        to 40%, well inside the 30 s memo; the look right before the spawn must see it. Popen is a trap."""
+        path = self.stamped_record()
+        launched: list = []
+        real_popen = subprocess.Popen
+        agent_cmd = shlex.split(json.loads(path.read_text())["cmd"])
+
+        def trap(argv, *args, **kwargs):
+            if list(argv) != agent_cmd:                  # load-watch and the fake aiuse run for real
+                return real_popen(argv, *args, **kwargs)
+            launched.append(argv)
+            raise AssertionError("an agent was spawned")
+
+        with self.aiuse_world() as (mod, _route), patch("subprocess.Popen", trap):
+            mod.wait_for_capacity = lambda record: self.drain()
+            rc = mod.execute_record(path)
+        self.assertEqual((rc, launched), (5, []))
+        rec = json.loads(path.read_text())
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "headroom", 5))
+        self.assertIn("after the capacity wait", rec["detail"])
+        self.assertIn("now: 40% left", rec["detail"])
+
+    def test_an_aiuse_failure_at_the_recheck_still_refuses(self):
+        """Fail closed: a fresh read that fails reads no window (no host snapshot here), so the stamped gate
+        refuses instead of falling back on the memoised 90%."""
+        rec = {"plenty_gate": True, "kind": "judgment", "agent": "codex", "model": self.MODEL, "service": "codex"}
+        with self.aiuse_world() as (mod, _route):
+            self.assertIsNone(mod.plenty_gate_refusal(rec))             # 90%: admitted, memo now holds it
+            self.bin.write_text("#!/bin/sh\nexit 1\n")
+            refusal = mod.plenty_gate_refusal(rec, "the capacity wait")
+        self.assertIsNotNone(refusal)
+        self.assertIn("after the capacity wait", refusal)
+        self.assertIn("no fresh reading", refusal)
+
+    def test_the_first_look_and_every_other_reader_keep_the_memo(self):
+        with self.aiuse_world() as (mod, route):
+            self.assertEqual(mod.pool_reading("codex", self.MODEL)[0], 90.0)
+            self.drain()
+            self.assertEqual(mod.pool_reading("codex", self.MODEL)[0], 90.0)   # memoised: still the old reading
+            self.assertEqual(route.load_snapshot()[0]["codex"]["remaining"], 90.0)
+            self.assertEqual(self.spawn_count(), 1)
+            self.assertEqual(mod.pool_reading("codex", self.MODEL, fresh=True)[0], 40.0)   # the admission read
+            self.assertEqual(self.spawn_count(), 2)
+            self.assertEqual(mod.pool_reading("codex", self.MODEL)[0], 40.0)   # ... which refreshes the memo
+            self.assertEqual(self.spawn_count(), 2)
 
 
 if __name__ == "__main__":
