@@ -1007,14 +1007,16 @@ def _paseo_json(path: Path) -> list:
     return data if isinstance(data, list) else []
 
 
-def paseo_tab_context(wks: str) -> list[str]:
-    """The workspace's title and its project's displayName: words a tab name never repeats."""
+def paseo_tab_context(wks: str, applied: str | None = None) -> list[str]:
+    """The workspace's title and its project's displayName: words a tab name never repeats. `applied` = the
+    workspace name the same call is about to set: it replaces the recorded title, so a rename of an already-named
+    session is not shortened against the old title."""
     home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo") / "projects"
     wk = next((w for w in _paseo_json(home / "workspaces.json")
                if isinstance(w, dict) and w.get("workspaceId") == wks), {})
     prj = next((p for p in _paseo_json(home / "projects.json")
                 if isinstance(p, dict) and p.get("projectId") == wk.get("projectId")), {})
-    title = str(wk.get("title") or "")
+    title = str(wk.get("title") or "") if applied is None else applied
     if title.endswith("-pw"):
         title = title[:-len("-pw")]
     return [title, str(prj.get("displayName") or "")]
@@ -1059,10 +1061,20 @@ def paseo_set_name(title: str, auto: bool = False) -> str:
         return " (paseo: no CLI, name not set)"
     wks = paseo_workspace_id(agent)
     cur = str(paseo_agent_record(agent).get("title") or "")
+    name = paseo_workspace_name(title)
+    kept = ""                    # --auto keeps a workspace that already ends in -pw; else `name` replaces its title
+    ws_err: BaseException | None = None
+    if wks and auto:
+        try:
+            ls = subprocess.run([cli, "workspace", "ls", "--json"], capture_output=True, text=True, timeout=20)
+            now = next((w.get("name", "") for w in json.loads(ls.stdout) if w.get("workspaceId") == wks), "")
+            kept = now if now.endswith("-pw") else ""
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            ws_err = exc
     if auto and cur.endswith(TAB_SUFFIX):
         out = f" (paseo tab kept: {cur}) (names store unavailable)"
     else:
-        tab = paseo_tab_name(title, paseo_tab_context(wks) if wks else [],
+        tab = paseo_tab_name(title, paseo_tab_context(wks, None if kept else name) if wks else [],
                              paseo_tab_taken(agent, wks, cli) if wks else [])
         try:
             r = subprocess.run([cli, "agent", "update", agent, "--name", tab, "--json"],
@@ -1074,15 +1086,13 @@ def paseo_set_name(title: str, auto: bool = False) -> str:
             out += " (names store unavailable)"
     if not wks:
         return out + " (paseo workspace: not found)"
-    name = paseo_workspace_name(title)
+    if ws_err is not None:
+        return out + f" (paseo workspace: {ws_err})"
+    if kept:
+        return out + f" (paseo workspace kept: {kept})"
     try:
-        if auto:
-            ls = subprocess.run([cli, "workspace", "ls", "--json"], capture_output=True, text=True, timeout=20)
-            cur = next((w.get("name", "") for w in json.loads(ls.stdout) if w.get("workspaceId") == wks), "")
-            if cur.endswith("-pw"):
-                return out + f" (paseo workspace kept: {cur})"
         r = subprocess.run([cli, "workspace", "rename", wks, name], capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return out + f" (paseo workspace: {exc})"
     return out + (f" (paseo workspace {name})" if r.returncode == 0 else f" (paseo workspace: rc {r.returncode})")
 

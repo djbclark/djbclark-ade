@@ -210,3 +210,13 @@ def test_tab_name_without_a_workspace_record_still_names(tmp_path: Path, monkeyp
     out = ar.paseo_set_name("Load watcher", auto=True)
     assert agent_updates(log) == ["agent update abc --name loadwatch-pt --json"]
     assert "paseo workspace: not found" in out
+
+
+def test_rename_of_a_named_session_is_shortened_against_the_applied_workspace_name_not_the_old_title(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 'Adversary review' -> 'Adversary review fix': the call replaces the workspace title, so the old title's
+    # words ('adversary', 'review') must not be dropped from the tab (the old behaviour gave "fix-pt").
+    log = setup_paseo(tmp_path, monkeypatch, "adversary-review-pt", ws_title="adversary-review-pw")
+    ar.paseo_set_name("Adversary review fix", auto=False)
+    assert agent_updates(log) == ["agent update abc --name adv-rev-fix-pt --json"]
+    assert "workspace rename wks_1 adversary-review-fix-pw" in log.read_text()
