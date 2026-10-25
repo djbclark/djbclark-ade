@@ -2169,17 +2169,19 @@ def test_the_owner_and_a_human_may_fetch_and_pull_into_the_claimed_branch(tmp_pa
 
 
 def dry_run_spy(monkeypatch, fake=None):
-    """Record every fetch dry run the guard starts; with `fake` = (rc, out) answer it instead of git."""
+    """Record every fetch dry run the guard starts; with `fake` = (rc, out) or (rc, out, stderr) answer it instead of git."""
     real = ade_claims._run_git
     seen: list[list[str]] = []
 
-    def spy(args, timeout=10, env_extra=None):
+    def spy(args, timeout=10, env_extra=None, err_out=None):
         args = list(args)
         if "--no-write-fetch-head" in args:
             seen.append(args)
             if fake is not None:
-                return fake
-        return real(args, timeout, env_extra)
+                if err_out is not None:
+                    err_out.append(fake[2] if len(fake) > 2 else "")
+                return fake[:2]
+        return real(args, timeout, env_extra, err_out)
     monkeypatch.setattr(ade_claims, "_run_git", spy)
     return seen
 
@@ -2389,3 +2391,115 @@ def test_a_fetch_that_writes_any_local_branch_is_not_read_only_in_a_foreign_work
     assert r.returncode == 77 and "foreign-claim" in r.stderr and "scratch-c" not in plain(state, ["branch", "--list"], repo)
     r = run(state, ["fetch", "origin"], repo, who="B")                       # remote-tracking refs only: a read
     assert r.returncode == 0 and "REFUSED" not in r.stderr
+
+
+# --- round 8: what the dry run must see exactly as the real call does ------------------------------
+
+MAP_CB = "remote.origin.fetch=+refs/heads/main:refs/heads/cb"
+
+
+def add_second_remote(tmp_path, state, repo, name="o2"):
+    other = tmp_path / f"{name}.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(other)], tmp_path)
+    plain(state, ["push", "-q", str(other), "main"], repo)
+    plain(state, ["remote", "add", name, str(other)], repo)
+
+
+@pytest.mark.parametrize("cmd", [
+    ["fetch", "-j2", "--all"], ["fetch", "--jobs=4", "--multiple", "origin", "o2"], ["fetch", "--jobs", "3", "--all"],
+    ["-c", "fetch.parallel=4", "fetch", "--all"], ["-c", "fetch.parallel=0", "fetch", "--all"],
+    ["-c", "fetch.parallel=4", "remote", "update"], ["pull", "-j2", "--all", "--ff-only"],
+    ["-c", "fetch.parallel=2", "pull", "--all", "--ff-only"], ["-c", "alias.f=fetch -j2 --all", "f"],
+], ids=lambda c: " ".join(c))
+def test_a_parallel_multi_remote_fetch_is_judged_like_a_sequential_one(tmp_path, state, cmd):
+    """With -j N or fetch.parallel, git runs one child fetch per remote and the children print their ref lines on
+    STDERR; the dry run's stdout is then empty. --jobs=1 on the dry run keeps the listing on stdout."""
+    repo, bare, z = fetch_world(tmp_path, state)
+    add_second_remote(tmp_path, state, repo)
+    r = refused_and_unmoved(state, repo, ["-c", MAP_CB, *cmd])
+    assert "of a claimed branch" in r.stderr and "codex gpt-x (Z)" in r.stderr, r.stderr
+    assert "unresolved" not in r.stderr, r.stderr          # judged from the listing, not refused for want of one
+
+
+def test_a_parallel_fetch_in_the_owners_worktree_cannot_move_the_checked_out_branch(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
+    bare = tmp_path / "o.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    plain(state, ["push", "-q", str(bare), "main"], repo)
+    plain(state, ["remote", "add", "origin", str(bare)], repo)
+    add_second_remote(tmp_path, state, repo)
+    head = rev(state, wt, "HEAD")
+    for cmd in (["fetch", "-u", "-j2", "--all"], ["fetch", "-u", "--jobs=4", "--multiple", "origin", "o2"],
+                ["-c", "fetch.parallel=4", "fetch", "-u", "--all"], ["-c", "fetch.parallel=4", "remote", "update"]):
+        argv = ["-c", "remote.origin.fetch=+refs/heads/main:refs/heads/wtb", *cmd]
+        r = run(state, argv, wt, who="B")
+        assert r.returncode == 77 and "unresolved" not in r.stderr, (cmd, r.returncode, r.stderr)
+        assert rev(state, wt, "wtb") == head and rev(state, wt, "HEAD") == head, cmd
+    assert untouched(wt)
+
+
+def test_a_ref_line_on_stderr_means_the_dry_run_listing_is_not_trusted(tmp_path, state, git_env, monkeypatch):
+    repo, bare, z = fetch_world(tmp_path, state)
+    line = f"  {'a' * 40} {'b' * 40} refs/heads/cb\n"
+    dry_run_spy(monkeypatch, fake=(0, "", line))
+    for argv in (["fetch", "--all"], ["fetch", "origin"], ["pull", "--ff-only", "--all"], ["remote", "update"]):
+        d = decide(state, "B", argv, repo)
+        assert not d.allowed and d.rule == "fetch destinations unresolved", (argv, d)
+    dry_run_spy(monkeypatch, fake=(0, "", "From /somewhere\n * [new branch]      main       -> origin/main\nwarning: x\n"))
+    assert decide(state, "B", ["fetch", "--all"], repo).allowed                  # ordinary chatter is no ref line
+
+
+@pytest.mark.parametrize("flag", ["--namespace=x", "--namespace"], ids=["attached", "separate"])
+@pytest.mark.parametrize("verb", [["fetch"], ["pull", "--ff-only"]], ids=["fetch", "pull"])
+def test_a_global_namespace_reaches_the_dry_run(tmp_path, state, flag, verb):
+    """upload-pack advertises the refs under the namespace only: a dry run without it sees another listing."""
+    repo, bare, z = fetch_world(tmp_path, state)
+    plain(state, ["update-ref", "refs/namespaces/x/refs/heads/cb", "main"], repo)
+    argv = [flag] if "=" in flag else [flag, "x"]
+    r = refused_and_unmoved(state, repo, [*argv, *verb, ".", "+refs/heads/cb:refs/heads/cb"])
+    assert "claimed branch" in r.stderr, r.stderr
+
+
+def test_a_global_exec_path_reaches_the_dry_run(tmp_path, state):
+    """The dry run runs the same git-upload-pack as the call: the one in the call's --exec-path."""
+    repo, bare, z = fetch_world(tmp_path, state)
+    execdir, log = tmp_path / "exec", tmp_path / "upload-pack.log"
+    execdir.mkdir()
+    prog = execdir / "git-upload-pack"
+    prog.write_text(f"#!/bin/sh\necho ran >> '{log}'\nexec '{ade_claims.real_git()}' upload-pack \"$@\"\n")
+    prog.chmod(0o755)
+    refused_and_unmoved(state, repo, [f"--exec-path={execdir}", "fetch", "--upload-pack", "git-upload-pack", ".", "+main:cb"])
+    assert log.exists() and log.read_text().strip() == "ran"                   # once: the dry run (the real call never ran)
+
+
+def test_every_global_option_that_changes_what_fetch_sees_is_given_to_the_helper_runs(tmp_path, state, git_env):
+    repo = mk_repo(tmp_path, state)
+    argv = ["-p", "--no-pager", "--exec-path=/x/y", "--bare", "--no-replace-objects", "--namespace", "n", "--super-prefix=s/",
+            "--no-optional-locks", "--no-lazy-fetch", "--no-advice", "--literal-pathspecs", "-c", "a.b=c", "fetch", "o"]
+    call = ade_claims.parse_git_argv(argv, str(repo), {})
+    g = ade_claims._globals(call)
+    for want in (["--exec-path=/x/y"], ["--bare"], ["--no-replace-objects"], ["--namespace", "n"], ["--super-prefix=s/"],
+                 ["--no-optional-locks"], ["--no-lazy-fetch"], ["--no-advice"], ["--literal-pathspecs"], ["-c", "a.b=c"]):
+        assert any(g[i:i + len(want)] == want for i in range(len(g))), (want, g)
+    assert "-p" not in g and "--no-pager" not in g                             # only the pager choice stays out
+    assert "--exec-path" not in ade_claims._globals(ade_claims.parse_git_argv(["--exec-path", "fetch"], str(repo), {}))
+    sep = ade_claims.parse_git_argv(["--super-prefix", "p/", "--namespace=q", "fetch"], str(repo), {})
+    assert sep.gopts == ["--super-prefix", "p/", "--namespace=q"] and sep.sub == "fetch"
+    assert ade_claims.fetch_preflight_argv(call, "fetch")[:len(g)] == g
+
+
+def test_a_refusal_of_an_unanswered_dry_run_names_the_timeout_variable_and_the_override(tmp_path, state):
+    repo, bare, z = fetch_world(tmp_path, state)
+    r = run(state, ["fetch", str(tmp_path / "no-such-remote.git")], repo, who="B", ADE_GUARD_FETCH_TIMEOUT="7")
+    assert r.returncode == 77 and "fetch destinations unresolved" in r.stderr, r.stderr
+    assert "ADE_GUARD_FETCH_TIMEOUT" in r.stderr and "now 7" in r.stderr
+    assert "ACP_OPERATOR_APPROVED=git-guard" in r.stderr and "retrying does not help" in r.stderr, r.stderr
+
+
+def test_pull_summary_is_a_merge_option_and_is_not_refused(tmp_path, state):
+    repo, bare, z = fetch_world(tmp_path, state)
+    for flag in ("--summary", "--no-summary"):
+        r = run(state, ["pull", "--ff-only", flag, "origin", "main"], repo, who="B")
+        assert r.returncode == 0 and "REFUSED" not in r.stderr, (flag, r.returncode, r.stderr)
+        assert ade_claims._pull_fetch_args([flag, "origin"]) == ["origin"]

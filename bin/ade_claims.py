@@ -80,13 +80,17 @@ relative to the cwd after every -C:
      (the destination), `checkout -B`, `switch -C|--force-create`, `worktree add -B` (the branch they reset),
      `update-ref` (named ref; with --stdin refused while another agent holds a claim in the repository), `fetch`/
      `pull`/`remote update` (also `remote -v update`; judged only while another agent holds a claim in the
-     repository, else git is not asked) by the `refs/heads/*` lines of git's own `fetch --dry-run --porcelain`
-     run under the call's -C, -c, --git-dir, --work-tree, environment and its own remote, refspec and fetch options
-     (a pull without its merge-only options, with --update-head-ok; `remote update` as the `fetch --multiple` it
-     runs; safety options before and after the caller's, the second copy opening with a spare --dry-run), so no
-     refspec, mapping, `heads/x` or default-remote spelling is parsed here; a dry run that cannot answer (timeout
-     ADE_GUARD_FETCH_TIMEOUT, default 20 s; a status other than 0/1; a line that is not a ref line) or `--stdin`
-     is refused as `fetch destinations unresolved`) and an
+     repository, else git is not asked) by the `refs/heads/*` lines of a `fetch --dry-run --porcelain --jobs=1`
+     run under the call's -C, -c, --git-dir, --work-tree, environment, the global options that change what fetch
+     sees (--namespace, --super-prefix, --exec-path=, --bare, --no-replace-objects, ...; GLOBAL_CARRIED_*) and its
+     own remote, refspec and fetch options (a pull without its merge-only options, with --update-head-ok;
+     `remote update` as the `fetch --multiple` it runs; safety options before and after the caller's, the second
+     copy opening with a spare --dry-run, --jobs=1 last so that -j or fetch.parallel cannot make a multi-remote
+     fetch print its listing on stderr), so no refspec, mapping, `heads/x` or default-remote spelling is parsed
+     here; a dry run that cannot answer (timeout ADE_GUARD_FETCH_TIMEOUT, default 20 s; a status other than 0/1; a
+     line that is not a ref line; a ref line on stderr) or `--stdin` is refused as `fetch destinations unresolved`;
+     the dry run is git's own and may write `.git/shallow` (with --depth and the like) and the objects it
+     downloads, even when the call is refused) and an
      output file (`--output`, `stash show|list --output`, `bundle create FILE`, `fast-export|fast-import
      --export-marks`, `bugreport|diagnose -o`, `config --file` when it writes; a short option counts anywhere in
      a cluster, `-zf`; its own symlink resolved first) are checked against the claim
@@ -672,6 +676,11 @@ GLOBAL_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-
 GLOBAL_FLAG = {"--no-pager", "-p", "--paginate", "--no-optional-locks", "--no-replace-objects",
                "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--bare",
                "--no-lazy-fetch", "--no-advice"}
+# The global options a helper git run (dry run, rev-parse, config) must carry because they change what git sees:
+# the namespace and super-prefix, the exec path (which upload-pack, remote helpers and hooks run), --bare, object
+# replacement and the like. Everything in GLOBAL_FLAG but the pager choice (git runs with its output piped).
+GLOBAL_CARRIED_VALUE = frozenset({"--namespace", "--super-prefix"})
+GLOBAL_CARRIED_FLAG = frozenset(GLOBAL_FLAG - {"--no-pager", "-p", "--paginate"})
 
 
 def _ckey(key: str) -> str:
@@ -696,6 +705,7 @@ class GitCall:
     worktree: Optional[str] = None
     nglobal: int = 0                    # index of the subcommand in the original argv
     env: dict[str, str] = dataclasses.field(default_factory=dict)   # GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM/GIT_CONFIG in force
+    gopts: list[str] = dataclasses.field(default_factory=list)      # the other global options git sees (GLOBAL_CARRIED_*)
 
     def display(self) -> str:
         return f"git {self.sub}".rstrip()
@@ -752,6 +762,7 @@ def parse_git_argv(argv: Sequence[str], cwd: str, env: Optional[dict[str, str]] 
     gitdir: Optional[str] = env.get("GIT_DIR") or None
     worktree: Optional[str] = env.get("GIT_WORK_TREE") or None
     config = _env_config(env)
+    gopts: list[str] = []
     i, n = 0, len(argv)
     while i < n:
         a = argv[i]
@@ -786,8 +797,17 @@ def parse_git_argv(argv: Sequence[str], cwd: str, env: Optional[dict[str, str]] 
             k, _, var = spec.partition("=")
             config.append((_ckey(k), env.get(var, "")))
             i += 2 if a == "--config-env" else 1
+        elif a in GLOBAL_CARRIED_VALUE and i + 1 < n:
+            gopts += [a, argv[i + 1]]
+            i += 2
+        elif a.partition("=")[0] in GLOBAL_CARRIED_VALUE and "=" in a:
+            gopts.append(a)
+            i += 1
         elif a in GLOBAL_VALUE and i + 1 < n:
             i += 2
+        elif a in GLOBAL_CARRIED_FLAG or a.startswith("--exec-path="):
+            gopts.append(a)
+            i += 1
         elif a in GLOBAL_FLAG or a.startswith("--exec-path") or \
                 a in ("--version", "--help", "-h", "--html-path", "--man-path", "--info-path"):
             i += 1
@@ -797,7 +817,7 @@ def parse_git_argv(argv: Sequence[str], cwd: str, env: Optional[dict[str, str]] 
             break
     sub = argv[i] if i < n else ""
     return GitCall(cur, gitdir, sub, list(argv[i + 1:]), config, worktree, i,
-                   {k: v for k, v in env.items() if k in _CONFIG_FILE_ENV})
+                   {k: v for k, v in env.items() if k in _CONFIG_FILE_ENV}, gopts)
 
 
 @dataclasses.dataclass
@@ -1198,9 +1218,11 @@ def real_git(env: Optional[dict[str, str]] = None) -> str:
     return "/usr/bin/git"
 
 
-def _run_git(args: Sequence[str], timeout: float = 10, env_extra: Optional[dict[str, str]] = None) -> tuple[int, str]:
+def _run_git(args: Sequence[str], timeout: float = 10, env_extra: Optional[dict[str, str]] = None,
+             err_out: Optional[list[str]] = None) -> tuple[int, str]:
     """Run the real git with stdout captured (decoded with replacement, so a hostile byte never raises), its own
     stdin closed and its own process group: on timeout the WHOLE group (hooks, credential helpers, ssh) is killed.
+    stderr is discarded, or with `err_out` appended to it (decoded the same way).
     (127, "") when it cannot start, (124, partial output) on timeout."""
     import signal
     import subprocess
@@ -1208,20 +1230,23 @@ def _run_git(args: Sequence[str], timeout: float = 10, env_extra: Optional[dict[
     env = {k: v for k, v in env.items() if not k.startswith("GIT_TRACE")}      # a helper run never writes a trace file
     try:
         p = subprocess.Popen([real_git(), *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+                             stderr=subprocess.DEVNULL if err_out is None else subprocess.PIPE, env=env,
+                             start_new_session=True)
     except (OSError, ValueError):
         return 127, ""
     rc = 124
     try:
-        out, _ = p.communicate(timeout=timeout)
+        out, err = p.communicate(timeout=timeout)
         rc = p.returncode
     except subprocess.TimeoutExpired:
         with contextlib.suppress(OSError):
             os.killpg(p.pid, signal.SIGKILL)
         try:
-            out, _ = p.communicate(timeout=5)
+            out, err = p.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            out = b""
+            out = err = b""
+    if err_out is not None:
+        err_out.append((err or b"").decode("utf-8", "replace"))
     return rc, (out or b"").decode("utf-8", "replace")
 
 
@@ -1237,8 +1262,9 @@ def _call_git(call: GitCall, *args: str, timeout: int = 10) -> tuple[int, str]:
 
 def _globals(call: GitCall) -> list[str]:
     """The call's own global options in git's order, for a helper git run: `-C` the final cwd, every -c in order
-    (repeats kept), --git-dir and --work-tree as typed (relative to that cwd, as git reads them)."""
-    g = ["-C", call.cwd, *call.cfg_argv()]
+    (repeats kept), the other global options that change what git sees (`call.gopts`: --namespace, --exec-path=,
+    --bare, --no-replace-objects, ...), --git-dir and --work-tree as typed (relative to that cwd, as git reads them)."""
+    g = ["-C", call.cwd, *call.cfg_argv(), *call.gopts]
     if call.gitdir:
         g += ["--git-dir", call.gitdir]
     if call.worktree:
@@ -1335,15 +1361,17 @@ def push_destinations(call: GitCall) -> tuple[Optional[list[str]], list[str]]:
 # guard: fetch / pull / remote update destinations
 # --------------------------------------------------------------------------------------------
 
+# --jobs=1 last: `-j N`, `--jobs` or `fetch.parallel` with --all/--multiple/a group runs one child fetch per remote and
+# every child's ref lines go to STDERR, so the listing on stdout would read as empty
 FETCH_SAFETY = ["--dry-run", "--porcelain", "--no-quiet", "--no-write-fetch-head", "--no-auto-gc",
-                "--no-write-commit-graph", "--no-recurse-submodules", "--no-set-upstream"]
+                "--no-write-commit-graph", "--no-recurse-submodules", "--no-set-upstream", "--jobs=1"]
 FETCH_TIMEOUT = 20.0                       # seconds; ADE_GUARD_FETCH_TIMEOUT overrides (a number in (0, 600])
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _PORCELAIN_FLAGS = " +-*=!t"
 # `git pull` options that only its merge half reads (git pull -h, 2.56); every other option and operand goes to the
 # fetch half unchanged, so a name missing here makes the preflight fail (unresolved), never narrower
-_PULL_MERGE = frozenset(_with_negations({"rebase", "stat", "compact-summary", "log", "signoff", "squash", "commit", "edit",
-                                         "cleanup", "ff", "ff-only", "verify", "verify-signatures", "autostash",
+_PULL_MERGE = frozenset(_with_negations({"rebase", "stat", "summary", "compact-summary", "log", "signoff", "squash", "commit",
+                                         "edit", "cleanup", "ff", "ff-only", "verify", "verify-signatures", "autostash",
                                          "strategy", "strategy-option", "gpg-sign", "allow-unrelated-histories"}))
 _PULL_MERGE_VALUE = frozenset({"cleanup", "strategy", "strategy-option"})      # a separate value token follows
 _PULL_FETCH = frozenset(_with_negations({"verbose", "quiet", "progress", "recurse-submodules", "all", "append",
@@ -1485,19 +1513,28 @@ def fetch_preflight_argv(call: GitCall, kind: str) -> Optional[list[str]]:
     return [*_globals(call), "fetch", *safe, *args[:cut], "--dry-run", *safe, *args[cut:]]
 
 
+def _porcelain_ref(line: str) -> Optional[str]:
+    """The ref name of one `fetch --porcelain` line `<flag> <old> <new> <ref>` (flag one of space + - * = ! t, two
+    object ids), or None when the line is not one."""
+    parts = line[2:].split(" ") if len(line) > 2 and line[0] in _PORCELAIN_FLAGS and line[1] == " " else []
+    if len(parts) < 3 or not _OID.fullmatch(parts[0]) or not _OID.fullmatch(parts[1]):
+        return None
+    return parts[2]
+
+
 def _fetch_porcelain_heads(out: str) -> Optional[list[str]]:
     """The branch names (`refs/heads/X` -> `X`) of a COMPLETE `fetch --porcelain` listing, or None: every non-blank
-    line must be `<flag> <old> <new> <ref>` (flag one of space + - * = ! t, two object ids), so a line this reader does
-    not understand means a ref may be missing from what was read. An empty listing is complete (nothing to update)."""
+    line must be a ref line (_porcelain_ref), so a line this reader does not understand means a ref may be missing
+    from what was read. An empty listing is complete (nothing to update)."""
     heads: list[str] = []
     for line in out.split("\n"):
         if not line.strip():
             continue
-        parts = line[2:].split(" ") if len(line) > 2 and line[0] in _PORCELAIN_FLAGS and line[1] == " " else []
-        if len(parts) < 3 or not _OID.fullmatch(parts[0]) or not _OID.fullmatch(parts[1]):
+        ref = _porcelain_ref(line)
+        if ref is None:
             return None
-        if parts[2].startswith("refs/heads/"):
-            heads.append(parts[2][len("refs/heads/"):])
+        if ref.startswith("refs/heads/"):
+            heads.append(ref[len("refs/heads/"):])
     return heads
 
 
@@ -1507,13 +1544,19 @@ def fetch_destinations(call: GitCall, kind: str) -> Optional[list[str]]:
     legacy remotes/branches files, default-remote choice, `--refmap`, `--prune`, `heads/x`, `tags/x` and wildcard is
     resolved by git, none by this guard. None = UNRESOLVED: the dry run timed out (ADE_GUARD_FETCH_TIMEOUT, default
     20 s), exited other than 0/1 (1 is git's answer for "some ref would be rejected"), printed a line that is not a ref
-    line, or the call has `--stdin`. Contacts the remote like the fetch itself (transport, credential helper, ssh and
-    --upload-pack run; hooks and FETCH_HEAD, gc, commit-graph, submodules and --set-upstream do not)."""
+    line, printed ref lines on STDERR (what a parallel multi-remote fetch does with its listing: the listing on stdout
+    cannot then be trusted, whatever made git parallel), or the call has `--stdin`. Contacts the remote like the fetch
+    itself (transport, credential helper, ssh, --upload-pack and --exec-path run; hooks, FETCH_HEAD, gc, commit-graph,
+    submodules and --set-upstream do not). It may write `.git/shallow` (with --depth and the like) and the objects it
+    downloads: git's own `--dry-run` does, and nothing here redirects them."""
     argv = fetch_preflight_argv(call, kind)
     if argv is None:
         return None
-    rc, out = _run_git(argv, timeout=fetch_timeout(), env_extra=call.env)
-    return _fetch_porcelain_heads(out) if rc in (0, 1) else None
+    err: list[str] = []
+    rc, out = _run_git(argv, timeout=fetch_timeout(), env_extra=call.env, err_out=err)
+    if rc not in (0, 1) or any(_porcelain_ref(x) is not None for x in "".join(err).split("\n")):
+        return None
+    return _fetch_porcelain_heads(out)
 
 
 def fetch_head_updates(call: GitCall, ws0: Optional[Workspace], ident: Optional[str]) -> Optional[list[str]]:
@@ -1749,7 +1792,10 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
                        f"{fetch_timeout():g} s, exited non-zero or printed something unexpected)")
                 return _foreign(c, "fetch destinations unresolved",
                                 f"{why} while another agent holds a claim in this repository, so a claimed branch cannot "
-                                "be ruled out; fix the remote, name a plain `git fetch <remote>`, or retry")
+                                "be ruled out. If the remote is merely slow, retrying does not help (the dry run is "
+                                "cut at the same point every time): raise ADE_GUARD_FETCH_TIMEOUT (seconds, up to 600, "
+                                "now " f"{fetch_timeout():g}); otherwise fix the remote or name a plain `git fetch "
+                                f"<remote>`. The operator can allow it with ACP_OPERATOR_APPROVED={OVERRIDE}")
         else:
             names = heads
     if names and ws0 is not None:
@@ -1833,7 +1879,7 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, assume_agen
                 else:
                     x = parse_git_argv([*words, *call.args], call.cwd, {})
                     return evaluate(GitCall(x.cwd, x.gitdir or call.gitdir, x.sub, x.args, [*call.config, *x.config],
-                                            x.worktree or call.worktree, call.nglobal, call.env),
+                                            x.worktree or call.worktree, call.nglobal, call.env, [*call.gopts, *x.gopts]),
                                     env, assume_agent=assume_agent, _depth=_depth + 1)
     if not unresolved and fetch_kind(call):       # asks git (dry run) only while another agent holds a claim here
         fetch_head_updates(call, next((w for w in wss if w is not None), None), ident)

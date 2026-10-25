@@ -59,24 +59,36 @@ inherit the claim.
 4. Anywhere: `push` to another claim's branch (destinations from git's own `push --dry-run --porcelain`).
 5. Anywhere, by target: `worktree remove|move|prune` of a claimed worktree; `branch -d|-D|-m|-M|-f|-c|-C` (a copy is
    judged by its destination), `checkout -B`, `switch -C|--force-create`, `worktree add -B`, `update-ref` of another
-   claim's branch; `fetch`, `pull` and `remote update` (also `remote -v update`) that git itself says would update
-   another claim's branch; a file written (`--output`, `bundle create FILE`, `fast-export|fast-import --export-marks`,
+   claim's branch; `fetch`, `pull` and `remote update` (also `remote -v update`) for which a `fetch --dry-run --porcelain`
+   run as the call is run lists another claim's branch; a file written (`--output`, `bundle create FILE`, `fast-export|fast-import --export-marks`,
    `config --file`, `bugreport|diagnose -o`; a short option counts anywhere in a cluster, `-zf`, `-ko`) into another
    claim's tree or over a dirty file of a shared checkout. The fetch family is judged only while another agent holds a
    claim in the repository (no such claim: git is not asked, nothing is run for it): the guard runs
-   `git <the call's -C/-c/--git-dir/--work-tree/environment> fetch --dry-run --porcelain --no-quiet --no-write-fetch-head
-   --no-auto-gc --no-write-commit-graph --no-recurse-submodules --no-set-upstream <the call's own remote, refspecs and
+   `git <the call's -C/-c/--git-dir/--work-tree/environment and the global options that change what fetch sees:
+   --namespace, --super-prefix, --exec-path=, --bare, --no-replace-objects, --no-lazy-fetch, --no-optional-locks,
+   --no-advice, the pathspec switches> fetch --dry-run --porcelain --no-quiet --no-write-fetch-head --no-auto-gc
+   --no-write-commit-graph --no-recurse-submodules --no-set-upstream --jobs=1 <the call's own remote, refspecs and
    options>` (a `pull` without its merge-only options and with `--update-head-ok`, as pull's own fetch is called;
    `remote update` as the `fetch --multiple` over its groups and remotes, or `--all`, that it is; the safety options
    come before and after the caller's and the second copy opens with a spare `--dry-run`, so nothing the caller types
-   can cancel the dry run) and checks every `refs/heads/*` line of the listing against the claims. Refspec spellings,
-   `heads/x`, wildcards, `--refmap`, `--prune`, configured and legacy mappings and the default remote are git's to
-   resolve, not the guard's. A fetch that updates only `refs/remotes/*` and tags is allowed (and read-only in a foreign
-   workspace). When the dry run cannot answer (it timed out, exited other than 0 or 1, printed a line that is not a ref
-   line) or the call has `--stdin` (refspecs on stdin cannot be given to it), the call is refused as `fetch destinations
-   unresolved`. The dry run contacts the remote like the fetch (transport, credential helper, ssh, `--upload-pack` run;
-   hooks, FETCH_HEAD, gc, commit graph, submodules and upstream config do not), so a claim in the repository doubles the
-   network cost of a fetch or pull; a branch that is already up to date prints no line and is not a write.
+   can cancel the dry run; `--jobs=1` comes last so that `-j N` and `fetch.parallel` cannot make a multi-remote fetch
+   parallel, where git prints every child's ref lines on stderr, not stdout) and checks every `refs/heads/*` line of
+   the listing against the claims. Refspec spellings, `heads/x`, wildcards, `--refmap`, `--prune`, configured and
+   legacy mappings and the default remote are git's to resolve, not the guard's. A fetch that updates only
+   `refs/remotes/*` and tags is allowed (and read-only in a foreign workspace). When the dry run cannot answer (it timed
+   out, exited other than 0 or 1, printed a line that is not a ref line, or printed a ref line on stderr) or the call
+   has `--stdin` (refspecs on stdin cannot be given to it), the call is refused as `fetch destinations unresolved`; the
+   refusal text names `ADE_GUARD_FETCH_TIMEOUT` and the override, because a slow remote hits the same limit on every
+   retry. The dry run contacts the remote like the fetch (transport, credential helper, ssh, `--upload-pack` and
+   `--exec-path` programs run; hooks, FETCH_HEAD, gc, commit graph, submodules and upstream config do not), so a claim
+   in the repository doubles the network cost of a fetch or pull; a branch that is already up to date prints no line
+   and is not a write. **The dry run is git's own `--dry-run`, and that writes**: the objects it downloads into the
+   shared object store and, with `--depth`, `--deepen`, `--unshallow` or `--shallow-*`, `.git/shallow` (git commits
+   the shallow file even for a dry run, and has no option or environment variable that redirects it; the objects could
+   be redirected, the shallow file could not, so nothing is redirected). A refused call can therefore leave those
+   behind; an allowed `fetch --depth` writes them anyway. Residual: the remote may move between the dry run and the
+   real fetch (a branch the dry run found up to date is then updated unjudged), and `--recurse-submodules` is never
+   judged inside a submodule's own repository (queued in `docs/queue.md`).
 
 Not covered (plumbing and object-store maintenance stay the operator's call): `checkout-index`, `update-index`,
 `read-tree`, `fast-import` itself (it writes refs and objects; only its `--export-marks` file is judged), `gc`/`prune`/
@@ -89,7 +101,7 @@ A refusal prints the owner, the claim id and a safe alternative, appends one JSO
 names from an allowlist only; values never), and exits 77. The operator allows and logs one call with
 `ACP_OPERATOR_APPROVED=git-guard` (the convention `bin/acp-dispatch` already uses). Other environment: `ADE_REAL_GIT`
 (skip the PATH search), `ADE_PYTHON` (default `python3`), `ADE_GUARD_FETCH_TIMEOUT` (seconds the fetch dry run may take,
-a number in (0, 600], default 20; anything else means 20).
+a number in (0, 600], default 20; anything else means 20; a larger fetch than that is refused while a claim exists).
 
 The shim is plain bash 3.2 (macOS `/bin/bash`): no `case` inside `$( )`, no associative arrays; a test runs
 `/bin/bash -n` on it.
