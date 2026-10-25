@@ -1,0 +1,28 @@
+#!/bin/bash
+# herdr-server-run: what the dev.herdr.server LaunchAgent runs instead of `herdr server` (2026-10-25).
+#
+# After a live server handoff (`herdr server --handoff-import ...`) the new server is a child of launchd's init,
+# not of this job. launchd sees its own process exit and relaunches `herdr server`, which prints
+# "error: herdr server is already running" and exits 1: 24 restarts in 4 minutes, and load-watch's job guard
+# booted the job out (2026-10-25). Here that exact case ("already running", exit 1) is a clean exit 0; any other
+# result is passed through unchanged. The wrapper never signals, stops or probes the running server: it only runs
+# `herdr server` as before, so the TUIs inside herdr are untouched.
+#
+# The plist pairs this with KeepAlive {SuccessfulExit: false}: a clean exit (handoff, already running) is not
+# restarted; a crash (non-zero) is. HERDR_BIN overrides the binary (tests).
+HERDR="${HERDR_BIN:-$HOME/.local/bin/herdr}"
+out="$(mktemp "${TMPDIR:-/tmp}/herdr-server-run.XXXXXX")" || exit 1
+child=""
+trap 'rm -f "$out"' EXIT
+trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null' TERM INT HUP
+"$HERDR" server "$@" > >(tee "$out") 2>&1 &
+child=$!
+wait "$child"
+rc=$?
+if [ "$rc" = 143 ] || [ "$rc" = 130 ] || [ "$rc" = 129 ]; then wait "$child" 2>/dev/null; rc=$?; fi
+sleep 0.2  # let the tee process finish writing $out
+if [ "$rc" = 1 ] && grep -q "herdr server is already running" "$out"; then
+  echo "herdr-server-run: a herdr server is already running (handed off); exiting 0 so launchd does not loop" >&2
+  exit 0
+fi
+exit "$rc"
