@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import textwrap
 import time
@@ -48,6 +49,17 @@ class LoadGate(RoutingDispatch):
 
     def calls(self) -> list[str]:
         return self.lw_args.read_text().splitlines() if self.lw_args.exists() else []
+
+    def load_module(self):
+        import importlib.machinery
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"
+        loader = importlib.machinery.SourceFileLoader("acp_dispatch_under_test", str(script))
+        spec = importlib.util.spec_from_loader("acp_dispatch_under_test", loader)
+        assert spec is not None
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
 
 
 HOT = '{"status": "hot", "load1": 31.2, "per_core": 3.9, "cores": 8, "max_per_core": 1.5, "waited_s": 5}'
@@ -238,6 +250,52 @@ class TestLoadGateBeforeQuotaChecks(LoadGate):
         self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "headroom", 5))
         self.assertIn("now: 40% left", rec["detail"])
         self.assertFalse([k for k in rec if k.startswith("measured_usage")], rec)
+
+    def runner_with_capacity_wait(self, extra_env: dict[str, str], *flags: str) -> tuple[int, dict, list]:
+        """execute_record in-process on a detached judgment/high record dispatched at 90%; the capacity
+        wait (replaced here) is where fresh 40% headroom lands. Popen is a trap: a launch is recorded."""
+        from unittest.mock import patch
+        d = self.judgment("--detach", "--no-wait", *flags,
+                          env={**self.gate_env(0, OK, **self.snap_codex(90.0)), **extra_env})
+        self.assertEqual(d.returncode, 0, d.stderr + d.stdout)
+        path = self.out / "jobs" / "s1.json"
+        low = {"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [
+            {"provider": "codex", "windows": [{"label": "5h", "remaining_percent": 40.0}]}]}}
+        snap = Path(self.snap_codex(90.0)["AIUSE_SNAPSHOT"])
+        launched: list = []
+        env = {**self.gate_env(0, OK), "AIUSE_SNAPSHOT": str(snap), "ACP_DISPATCH_STATE": str(self.tmp / "state"),
+               **extra_env}
+        real_popen = subprocess.Popen
+        agent_cmd = shlex.split(json.loads(path.read_text())["cmd"])
+
+        def trap(argv, *args, **kwargs):
+            if list(argv) != agent_cmd:                  # load-watch, aiuse and friends run for real
+                return real_popen(argv, *args, **kwargs)
+            launched.append(argv)
+            raise AssertionError("an agent was spawned")
+
+        with patch.dict("os.environ", env), patch("subprocess.Popen", trap):
+            mod = self.load_module()
+            mod.wait_for_capacity = lambda record: snap.write_text(json.dumps(low))
+            rc = mod.execute_record(path)
+        return rc, json.loads(path.read_text()), launched
+
+    def test_the_plenty_gate_is_rechecked_after_the_capacity_wait(self):
+        """Adversary bcdd223, A5: wait_for_capacity (up to 900 s) ran after the post-admission check and
+        right before Popen; quota drained there launched a judgment slice below the 50% gate."""
+        rc, rec, launched = self.runner_with_capacity_wait({})
+        self.assertEqual(rc, 5)
+        self.assertEqual(launched, [])
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "headroom", 5))
+        self.assertIn("after the capacity wait", rec["detail"])
+        self.assertIn("now: 40% left", rec["detail"])
+        self.assertFalse(rec["load_gate_pending"])
+        self.assertFalse((self.out / "s1-report.md").exists())
+
+    def test_a_route_override_launches_after_the_capacity_wait(self):
+        with self.assertRaises(AssertionError) as ctx:        # reaches Popen (the trap), as authorized
+            self.runner_with_capacity_wait({"ACP_OPERATOR_APPROVED": "route-override"})
+        self.assertIn("an agent was spawned", str(ctx.exception))
 
     def test_a_route_override_runner_does_not_recheck(self):
         d = self.judgment("--detach", "--no-wait", env={
@@ -479,17 +537,6 @@ class TestPendingRunnersHoldTheCap(LoadGate):
 class TestPendingStaysUntilThePidIsWritten(LoadGate):
     """Re-review 3, L2: between admission and the pid write (wait_for_capacity can hold 900 s) the row must
     still count as in flight; a pid-less row that is not pending drops out after the 600 s spawn grace."""
-
-    def load_module(self):
-        import importlib.machinery
-        import importlib.util
-        script = Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"
-        loader = importlib.machinery.SourceFileLoader("acp_dispatch_under_test", str(script))
-        spec = importlib.util.spec_from_loader("acp_dispatch_under_test", loader)
-        assert spec is not None
-        mod = importlib.util.module_from_spec(spec)
-        loader.exec_module(mod)
-        return mod
 
     def test_admitted_runner_is_still_pending_and_counted_before_its_pid(self):
         from unittest.mock import patch

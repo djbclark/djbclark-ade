@@ -1019,10 +1019,11 @@ def plenty_gated(agent: str, service: str | None, kind: str | None) -> Any:
     return svc if svc is not None and kind in svc.plenty_kinds else None
 
 
-def plenty_gate_refusal(rec: dict) -> str | None:
+def plenty_gate_refusal(rec: dict, after: str = "the load wait") -> str | None:
     """Why the plenty gate no longer admits this record's slice, judged by the pool reading NOW
-    (after load admission, 2026-10-25), else None. Only a record dispatch marked `plenty_gate`
-    is checked, so a route-override dispatch and an older record launch as before."""
+    (after load admission, 2026-10-25; and again after the capacity wait, right before the spawn),
+    else None. Only a record dispatch marked `plenty_gate` is checked, so a route-override dispatch
+    and an older record launch as before."""
     if not rec.get("plenty_gate"):
         return None
     kind = rec.get("kind")
@@ -1032,7 +1033,7 @@ def plenty_gate_refusal(rec: dict) -> str | None:
     _, reading = pool_reading(rec.get("agent") or "", rec.get("model"))
     if svc.eligible(kind, {svc.name: reading}):
         return None
-    return (f"{svc.name} is not eligible for --kind {kind} after the load wait"
+    return (f"{svc.name} is not eligible for --kind {kind} after {after}"
             f"{plenty_why(route_module(), svc, kind, reading)}")
 
 
@@ -3700,6 +3701,15 @@ def runner_inflight_recheck(record: Path, rec: dict) -> str | None:
             f"{', '.join(p.stem for p in ahead[:3])}; not launched, re-dispatch later")
 
 
+def refuse_headroom(record: Path, rec: dict, stale: str, **extra) -> int:
+    """Finalize a detached record as unavailable/headroom (exit 5, nothing started): the plenty gate
+    stamped at dispatch no longer holds. `finalize` leaves such a record alone."""
+    print(f"acp-dispatch: {rec.get('name')}: {stale}", file=sys.stderr)
+    update_record(record, load_gate_pending=False, status="unavailable", unavailable_class="headroom",
+                  detail=stale, exit=UNAVAILABLE_EXIT, finished=time.time(), pid=None, **extra)
+    return UNAVAILABLE_EXIT
+
+
 def runner_load_gate(record: Path) -> int | None:
     """The detached runner's load gate (--detach --no-wait wrote the record with load_gate_pending: the caller
     had to return at once). None when the agent may start; LOAD_GATE_EXIT after finalizing the record as
@@ -3725,11 +3735,7 @@ def runner_load_gate(record: Path) -> int | None:
             return UNAVAILABLE_EXIT
         stale = plenty_gate_refusal(rec)
         if stale:
-            print(f"acp-dispatch: {rec.get('name')}: {stale}", file=sys.stderr)
-            update_record(record, load_gate=info, load_gate_pending=False, status="unavailable",
-                          unavailable_class="headroom", detail=stale, exit=UNAVAILABLE_EXIT,
-                          finished=time.time(), pid=None)
-            return UNAVAILABLE_EXIT
+            return refuse_headroom(record, rec, stale, load_gate=info)
         # load_gate_pending stays true until execute_record writes the pid: wait_for_capacity can hold up to 900 s
         # in between, and a pid-less row that is not pending drops out of the in-flight count after 600 s
         update_record(record, load_gate=info, gate=f"load ok after {info and info.get('waited_s')}s")
@@ -3746,6 +3752,11 @@ def execute_record(record: Path, tee: bool = False) -> int:
         return refused
     wait_for_capacity(record)
     rec = json.loads(record.read_text())
+    # wait_for_capacity may have held the slice up to 900 s: judge the stamped plenty gate once more on the
+    # pool as it is right before the spawn (adversary bcdd223, A5); a resume or route-override has no stamp
+    stale = plenty_gate_refusal(rec, "the capacity wait")
+    if stale:
+        return refuse_headroom(record, rec, stale)
     got: dict = {}
     with open(rec["final"] + ".tmp", "w") as fo, open(rec["stderr"], "w") as fe:
         proc = subprocess.Popen(shlex.split(rec["cmd"]), stdout=subprocess.PIPE if tee else fo,
