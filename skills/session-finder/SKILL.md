@@ -373,7 +373,9 @@ case, recover only this TUI's inherited context from its own live process and
 owning shell, verify that both descend from Herdr and agree on the caller
 IDs, and pass those verified values explicitly to the helper. Confirm that
 `agent get` for that pane names this TUI's exact session ID before controlling
-it. Never substitute the UI-focused pane or another process's context.
+it. A verified live server handoff can reparent the owning shell; retain the
+previous caller-context receipt and confirm the same TUI/session mapping with
+the new server. Never substitute the UI-focused pane or another process's context.
 
 This is a boundary for an agent's direct control of its current session.
 Detached `relay.py` delivery workers intentionally scrub caller identity and

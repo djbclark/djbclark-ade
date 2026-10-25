@@ -6,8 +6,8 @@ lineage: none
 chain: [standalone-relay-refresh-01a1735a]
 repo: djbclark-ade
 workspace: /Users/djbclark/src/one-offs
-branch: master
-head_sha: 1d7bded
+branch: fix/self-slash-codex
+head_sha: c93ac5d2b5f7ff7848a0266fe21b333c69953306
 created_at: 2026-10-25T10:29:47-04:00
 writer: codex
 ---
@@ -30,6 +30,20 @@ that run, completed, and sent its one completion notification. No workflows
 were cancelled or rerun.
 Linux: 3,700 passed, 13 skipped; macOS: 3,703 passed, 10 skipped. Both jobs
 reported 1,320 passing subtests and zero failures.
+
+The first same-TUI lifecycle queue exposed an ADE harness failure before it
+sent anything: its waiter PID disappeared, and prompt detection explicitly
+did not support Codex. This session remained on the same thread. The root
+repair is committed and pushed on `fix/self-slash-codex` at `c93ac5d`:
+`self-slash` now starts its waiter in a separate process session, recognizes
+Codex's shaded composer (including multiline drafts), waits for authoritative
+idle/done state, and uses atomic `agent prompt`. Ambiguous submission failures
+stop without retry. No hook, permission or relay delivery guard was bypassed.
+
+The repair is not promoted to master yet. Its single full Linux/macOS
+[CI run](https://github.com/djbclark/djbclark-ade/actions/runs/40204830764)
+is pending; it covers exact head `c93ac5d2b5f7ff7848a0266fe21b333c69953306`.
+Follow-up documentation changes do not alter that tested code.
 
 Herdr's installed binary was atomically upgraded from
 `0.9.1-preview.2026-09-21-0ff0f27e2226` to the newest published preview,
@@ -99,6 +113,15 @@ Other installed integration version gaps are recorded privately.
    0.134 s and the Graft/Trail startup hook in 0.132 s. Neither historical
    deadline failure reproduced. These are hook-level startup probes, not a new
    paid model turn or an end-to-end fresh-TUI acceptance claim.
+6. The self-slash regression run initially exposed mistakes in the new test
+   stub, not passing acceptance: it omitted the actual `pane get` identity,
+   then invoked the internal child without the parent's follow-up environment.
+   Both fixtures were corrected. The existing lifecycle suite passed; the
+   affected parser/relay run reported 330 passed and 34 passing subtests, with
+   only the new parent-launch test still failing at that intermediate point.
+   The final Codex harness run passed all six tests and three subtests, including
+   an actual detached fake-host parent -> `/new` -> one targeted `/baton` chain.
+   Private logs: `self-slash-focused-tests.log`, `self-slash-codex-tests.log`.
 
 ## Key Decisions
 
@@ -164,9 +187,19 @@ delivery proof, version pins, and stealing another session's Tier 1 pointer.
    `w2Q:p3`, cwd `/Users/djbclark/src/one-offs`, on the same model. The owning
    Codex PID before clearing was 1679; `/new` should create a new thread in
    that same TUI process. Check the actual fresh-session startup for hook
-   failures as well as the targeted baton submission. Report the
-   results without clearing again or repeating completed probes.
-2. The narrow repair recommendation is in Herdr's installer: recognize the
+   failures as well as the targeted baton submission. The first queue sent
+   nothing; the repaired queue is the only intended actual clear/baton chain.
+   Do not clear again or repeat completed probes.
+2. Read `self-slash-ci-result.json` in the private evidence root when
+   `self-slash-ci.done` exists. Otherwise wait for that file; the detached CI
+   watcher already owns the one run. Inspect any failures before declaring
+   repair CI green. After success, integrate current master into the owned
+   branch if needed, push/promote only verified code, and fast-forward the
+   reference checkout only when clean and serialized. The source repair is
+   currently executed from the owned task worktree, not an edited shared tree.
+   Preserve that worktree until the waiter has finished its targeted baton.
+3. Report concise results and remaining limitations after verification.
+4. The narrow repair recommendation is in Herdr's installer: recognize the
    exact safe unquoted legacy hook command and remove all equivalent owned
    registrations while preserving unrelated hooks. `hook_command_variants`
    currently enumerates only canonical/legacy quoted variants. Both preview
@@ -176,13 +209,13 @@ delivery proof, version pins, and stealing another session's Tier 1 pointer.
    Do not call this the timeout cause. Historical 10s/8s command attribution
    still requires an instrumented actual fresh-TUI reproduction with per-hook
    start/finish records; no timeout increase is justified by the current probes.
-3. Coordinate with the owner before promoting the isolated Herdr merge. No live
+5. Coordinate with the owner before promoting the isolated Herdr merge. No live
    session was found with `/Users/djbclark/src/herdr` as its workspace.
-4. Report the remaining managed-integration metadata gap (v8 installed, v10
+6. Report the remaining managed-integration metadata gap (v8 installed, v10
    bundled; identical executable shell bodies). Migration repair belongs to
    the installer/source owner. Do not increase deadlines or treat the old
    version comment as a demonstrated runtime failure.
-5. Use this chain's exact path for continuation:
+7. Use this chain's exact path for continuation:
    `/Users/djbclark/.local/state/handoffs/chains/standalone-relay-refresh-01a1735a/SESSION_LOG.md`.
    Queue only one baton through `self-slash` if it supports the actual host;
    never clear another session or silently substitute a new agent/process.
@@ -195,9 +228,18 @@ The CI notifier at `/tmp/relay-codex-submit-proof/notify-ci.py` completed;
 notification and exact run. Its record is `ci-main-notifier.json`.
 
 The isolated probe completed. Its script is `probe-hooks.py`, result
-`hook-probes.json`. No probe or CI waiter remains to re-arm. The final
-same-session lifecycle waiter is owned by `self-slash`; verify its log after
-continuation, never queue a second baton.
+`hook-probes.json`. All local regression processes completed.
+
+One detached CI watcher remains for the new source repair: record
+`self-slash-ci-watch.json` in the evidence root, script
+`watch-self-slash-ci.py`, exact run `40204830764`, result
+`self-slash-ci-result.json`, completion marker `self-slash-ci.done`.
+It runs in its own process session and sends one completion notification.
+Do not start another watcher or rerun the workflow. If the result is absent,
+wait for the marker using `bin/wait-file`.
+
+The final same-session lifecycle waiter is owned by the repaired `self-slash`;
+verify its log after continuation, never queue a second actual baton.
 
 ## Quick Start
 
