@@ -181,8 +181,10 @@ class TestRelayRules(unittest.TestCase):
         relay.RETRY_AFTER = 0
         sys.argv = ["relay.py", "peer-1", "hello there friend", "--wait", "3"]
         try:
-            with mock.patch.dict(os.environ, {"RELAY_SENDER_NAME": "tester"}):    # not the identity of whoever runs the suite
-                for k in ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER"):
+            # the header names the sender: any real session identity outranks a declared RELAY_SENDER_NAME (sender_name), so the
+            # runner's own (a Hermes or Paseo session, 2026-10-25: header `hermes xxxx`, the typed text never matched MSG) is cut off
+            with mock.patch.dict(os.environ, {"RELAY_SENDER_NAME": "tester"}), mock.patch.object(relay, "own_paseo_id", lambda: ""):
+                for k in ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID", "RELAY_SENDER"):
                     os.environ.pop(k, None)
                 rc = relay.main()
         finally:
