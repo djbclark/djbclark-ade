@@ -325,6 +325,9 @@ class ApplyScript(unittest.TestCase):
 [projects."/x"]
 trust_level = "trusted"
 
+[mcp_servers.above.env]
+API_KEY = "SECRET-ABOVE-1"
+# note SECRET-COMMENT-3
 [shell_environment_policy]
 inherit = "core"
 
@@ -337,9 +340,13 @@ MCP_TIMEOUT = "300000"
 CLAUDE_CODE_HARBOR_KITE = "1"
 GRAFT_NO_GITIGNORE = "1"
 
+[mcp_servers.below.http_headers]
+Authorization = "Bearer SECRET-BELOW-2"
+
 [hooks.state."/y"]
 trusted_hash = "abc"
 """
+    NEIGHBOUR_SECRETS = ("SECRET-ABOVE-1", "SECRET-COMMENT-3", "SECRET-BELOW-2", "SECRETDIGEST-0123")
 
     def run_apply(self, target: pathlib.Path, *flags: str, umask: int | None = None, template: pathlib.Path = TEMPLATE,
                   args: list[str] | None = None) -> subprocess.CompletedProcess:
@@ -384,15 +391,22 @@ trusted_hash = "abc"
             self.assertIn('MCP_TIMEOUT = "SECRETVALUE-9"', t.read_text())
             self.assertEqual(list(pathlib.Path(d).glob("*.bak-*")), [])
 
-    def test_dry_run_and_write_output_hide_every_set_value(self) -> None:
+    def test_dry_run_and_write_output_hide_every_set_value_and_all_neighbours(self) -> None:
+        # 2026-10-25 adversary: unified_diff's 3 lines of context printed the table above the policy.
         with tempfile.TemporaryDirectory() as d:
             t = pathlib.Path(d, "config.toml")
             t.write_text(self.LIVE.format(home=d))
             for flags in ((), ("--write",)):
                 r = self.run_apply(t, *flags)
                 self.assertEqual(r.returncode, 0, r.stderr)
+                if flags:
+                    self.assertIn("SECRET-ABOVE-1", t.read_text())  # the neighbours are still in the file, only the output hides them
                 self.assertIn("include_only", r.stdout)  # the diff itself is shown
-                self.assertNotIn("SECRETDIGEST-0123", r.stdout + r.stderr)
+                for secret in self.NEIGHBOUR_SECRETS:  # the set table, the table above and below, a comment above the header
+                    self.assertNotIn(secret, r.stdout + r.stderr, secret)
+                self.assertNotIn("[mcp_servers", r.stdout)  # not a line of any neighbouring table
+                self.assertNotIn("API_KEY", r.stdout)
+                self.assertNotIn("Authorization", r.stdout)
 
     def test_the_backup_is_created_private_and_holds_the_original_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -442,6 +456,81 @@ trusted_hash = "abc"
                 self.assertIn("codex-env-policy-apply:", r.stderr)
                 self.assertNotIn("Traceback", r.stderr)
                 self.assertNotIn("SECRETDIGEST-0123", r.stdout + r.stderr)
+
+    # ---- the two changed-file refusals, driven deterministically through the module --------------------------------
+
+    def apply_module(self):
+        return load("codex_env_policy_apply_under_test", ROOT / "bin" / "codex-env-policy-apply")
+
+    def edited_by_codex(self, t: pathlib.Path) -> bytes:
+        """What a concurrent Codex write does: new content and a later mtime."""
+        st = t.stat()
+        data = t.read_bytes() + b'\n[projects."/concurrent"]\ntrust_level = "trusted"\n'
+        t.write_bytes(data)
+        os.utime(t, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        return data
+
+    def run_module(self, mod, t: pathlib.Path, home: str) -> tuple[object, str]:
+        import contextlib, io
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": home}), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            try:
+                return mod.main([str(TEMPLATE), str(t), "--write"]), err.getvalue()
+            except SystemExit as e:
+                return e.code, err.getvalue()
+
+    def test_a_change_between_read_and_recheck_refuses_and_keeps_the_concurrent_edit(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(self.LIVE.format(home=d))
+            real_read, calls, edited = mod.read, [], []
+
+            def read_then_edit(path, what):
+                calls.append(what)
+                if what == "target" and calls.count("target") == 2:  # the recheck: Codex wrote just before it
+                    edited.append(self.edited_by_codex(t))
+                return real_read(path, what)
+
+            with mock.patch.object(mod, "read", read_then_edit), mock.patch.object(mod.os, "replace", side_effect=AssertionError("replaced")) as rep:
+                code, err = self.run_module(mod, t, d)
+            self.assertEqual(code, 1)
+            self.assertIn("changed while reading", err)
+            self.assertEqual((rep.call_count, t.read_bytes()), (0, edited[0]))  # no replace; their edit stands, byte for byte
+            self.assertEqual(sorted(os.listdir(d)), ["config.toml"])  # no backup, no temp file
+
+    def test_a_change_after_the_temp_file_is_written_refuses_and_keeps_the_concurrent_edit(self) -> None:
+        mod = self.apply_module()
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(self.LIVE.format(home=d))
+            t.chmod(0o600)
+            real_chmod, edited = mod.os.chmod, []
+
+            def chmod_then_edit(path, mode, *a, **k):
+                real_chmod(path, mode, *a, **k)
+                if os.path.basename(str(path)).startswith(".config.toml."):  # the temp file is complete; Codex writes now
+                    edited.append(self.edited_by_codex(t))
+
+            with mock.patch.object(mod.os, "chmod", chmod_then_edit), mock.patch.object(mod.os, "replace", side_effect=AssertionError("replaced")) as rep:
+                code, err = self.run_module(mod, t, d)
+            self.assertEqual(code, 1)
+            self.assertIn("target changed", err)
+            self.assertEqual((rep.call_count, t.read_bytes()), (0, edited[0]))
+            left = sorted(os.listdir(d))
+            self.assertEqual([n for n in left if not n.startswith("config.toml.bak-")], ["config.toml"])  # temp file removed
+            (bak,) = [n for n in left if n.startswith("config.toml.bak-")]  # the backup of what was read stays, private
+            self.assertEqual((stat_mode(pathlib.Path(d, bak)), pathlib.Path(d, bak).read_text()), (0o600, self.LIVE.format(home=d)))
+
+    def test_toml_parse_errors_are_reduced_to_a_position(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text('a = 1\nSECRET-IN-KEY = "x"\nb = "SECRET-VALUE-4\n')
+            r = self.run_apply(t)
+            self.assertEqual(r.returncode, 1)
+            self.assertRegex(r.stderr, r"line \d+, column \d+")
+            for secret in ("SECRET-IN-KEY", "SECRET-VALUE-4"):
+                self.assertNotIn(secret, r.stdout + r.stderr)
 
 
 def stat_mode(p: pathlib.Path) -> int:

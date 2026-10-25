@@ -3,13 +3,15 @@
 
     codex-env-policy-apply TEMPLATE TARGET [--write]
 
-Dry run by default: prints the unified diff, with every value in the `set` tables hidden (they may hold secrets).
-Touches nothing but the policy tables and the comment block just above them: Codex's own [projects.*],
+Dry run by default: prints a unified diff of the policy span ONLY (the policy tables and the comment block above
+them, old against new), never a line of any neighbouring table, and with every value hidden that is not the template's
+own text or a known policy key (a live `set` table, a comment of the operator's). Touches nothing but the policy tables and the comment block just above them: Codex's own [projects.*],
 [hooks.state.*], [marketplaces.*] and every other byte stay as they are. With --write: nothing at all happens when
 the merged text equals the file (no backup, no temp file, mtime unchanged); otherwise it refuses if TARGET changed
 since it was read (Codex rewrites it), creates TARGET.bak-<UTC time>-env-policy with mode 0600 (O_EXCL), writes a
 sibling temp file (mode of TARGET) and os.replace()s it onto the realpath. The result must parse, keep every
-non-policy table equal and keep the explicit `set` values. Errors name files and keys, never values.
+non-policy table equal and keep the explicit `set` values. Diagnostics name files and `set` keys, never values; a TOML
+parse error is reduced to its line and column (tomllib's own text can quote characters).
 
 Exit: 0 done or nothing to do, 1 refused or failed, 2 bad arguments."""
 import argparse, datetime, difflib, os, re, sys, tempfile, tomllib
@@ -35,7 +37,8 @@ def parse(text, what):
     try:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
-        fail(f"{what} is not valid TOML: {e}")  # tomllib reports a position, never the offending text
+        m = re.search(r"\(at line (\d+), column (\d+)\)", str(e))  # the rest of the message may quote file content
+        fail(f"{what} is not valid TOML" + (f" (line {m.group(1)}, column {m.group(2)}; text withheld)" if m else " (text withheld)"))
 
 
 def policy_span(text, what):
@@ -55,16 +58,32 @@ def policy_span(text, what):
     return (len("\n".join(lines[:n])) + (1 if n else 0)), end
 
 
-def redact(text):
-    """The text with every value under a [shell_environment_policy.*] sub-table hidden."""
-    out, hide = [], False
-    for line in text.split("\n"):
+POLICY_KEYS = {"inherit", "ignore_default_excludes", "include_only", "exclude", "filters", "experimental_use_profile"}
+
+
+def safe_view(span, template_lines):
+    """The lines of a policy span fit to print: values under a [shell_environment_policy.*] sub-table, comments and
+    keys that are neither the template's own text nor a known policy key are hidden."""
+    out, sub, key = [], False, None
+    for line in span.split("\n"):
         m = TABLE.match(line)
+        if line in template_lines or m and m.group(1) == POLICY:
+            out.append(line)
+            if m:
+                sub, key = False, None
+            continue
         if m:
-            hide = m.group(1).startswith(POLICY + ".")
-        elif hide and re.match(r"\s*[^#\s][^=]*=", line):
-            line = line.split("=", 1)[0] + "= <hidden>"
-        out.append(line)
+            sub, key = m.group(1).startswith(POLICY + "."), None
+            out.append(line if sub else "[<table hidden>]")
+        elif line.lstrip().startswith("#"):
+            out.append("# <comment hidden>")
+        elif (km := re.match(r"\s*([A-Za-z0-9_\".-]+)\s*=", line)):
+            key = km.group(1)
+            out.append(f"{km.group(1)} = <hidden>" if sub or key not in POLICY_KEYS else line)
+        elif line.strip() and (sub or key not in POLICY_KEYS):
+            out.append("<continuation hidden>")  # the rest of a multi-line value
+        else:
+            out.append(line)
     return "\n".join(out)
 
 
@@ -102,7 +121,11 @@ def main(argv):
     if new == old:
         print("already applied: nothing to do")
         return 0
-    sys.stdout.writelines(difflib.unified_diff(redact(old).splitlines(1), redact(new).splitlines(1), "live", "new"))
+    # the template's own lines, before the machine's digest goes in: those are safe to print, the digest line is not
+    template_lines = set(tmpl[a0:b0].replace("{{ .home }}", os.path.expanduser("~")).split("\n")) - {""}
+    shown_old = safe_view(old[c:d], template_lines)
+    shown_new = safe_view(block, template_lines)
+    sys.stdout.writelines(difflib.unified_diff(shown_old.splitlines(1), shown_new.splitlines(1), "live policy span", "new policy span"))
     if not a.write:
         return 0
     now = os.stat(target)
