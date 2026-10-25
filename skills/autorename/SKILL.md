@@ -210,8 +210,8 @@ characters before the suffix), `-pt` Paseo tab (at most 17 characters **includin
 a lone tab), `-t` herdr tab, `-p` herdr pane (under 24), the agent in a herdr pane bare `<topic>`
 (`feedback_herdr_tab_pane_naming_convention`). A Paseo agent tab's name **is** the agent's name (`paseo agent update
 --name`), so the agent is named `<topic>-pt`; `paseo_tab_name()` in `autorename.py` is the shortener. It drops the words
-of the workspace title this call applies (the `-pw` name it sets; the kept one when `--auto` keeps the workspace) and of
-the project name, abbreviates, and adds `-2`, `-3` on a clash with another live agent or terminal of the workspace. Check
+of the project name and, when `--auto` keeps an existing `-pw` workspace, of that workspace's title (never of the `-pw`
+name it sets from this same title, so a re-run gives the same tab), abbreviates, and adds `-2`, `-3` ... on a clash with another live agent or terminal of the workspace. Check
 suffixes longest first: `x-pt` also ends in `-t`. The sentence title stays the provider session's title and the `-pw`
 workspace name. The workspace id comes from the agent's record
 under `$PASEO_HOME/agents/`. A direct `/autorename` always renames the agent and the workspace. `--auto` is guarded: it

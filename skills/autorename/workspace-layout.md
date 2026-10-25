@@ -55,7 +55,7 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
 10. **Paseo** (2026-10-24): one top-level agent per Paseo workspace (`<topic>-pw`). Its tab and each worker's tab are
    `<name>-pt`, at most 17 characters with the suffix (shortener: `autorename.py paseo_tab_name`). Workers and adversary
    rounds are sub-agent tabs in the lead's workspace, not new workspaces. Closing a top-level agent's tab archives the
-   agent; only `herdr-tidy` or `self-slash --finish` close one.
+   agent; only `self-slash --finish` (or a `herdr-tidy` close of its herdr host pane) closes one.
 
 ## Configured workspaces and their order
 
