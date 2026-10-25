@@ -89,6 +89,16 @@ class TestRefusal(fb.Harness):
         self.assertEqual(rc, relay.NO_SENDER_EXIT)
         self.assert_nothing_happened()
 
+    def test_a_declared_label_cannot_pose_as_a_hermes_relay(self) -> None:
+        """Adversary r1 A7 (2026-10-25): `hermes xxxx` is the label of a relayed Hermes turn or a Hermes-started relay, never a declared one."""
+        for label in ("hermes abcd1234", "hermes x"):
+            with self.subTest(label=label):
+                os.environ["RELAY_SENDER_NAME"] = label
+                self.assertEqual(relay.sender_name([]), "unknown")
+                rc, _, _ = self.run_main(sess(status="idle"))
+                self.assertEqual(rc, relay.NO_SENDER_EXIT)
+                self.assert_nothing_happened()
+
     def test_a_declared_label_of_unknown_is_refused(self) -> None:
         os.environ["RELAY_SENDER_NAME"] = "unknown"
         rc, _, _ = self.run_main(sess(status="idle"))
