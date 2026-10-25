@@ -1173,6 +1173,24 @@ class TestCodexEverydayKinds(unittest.TestCase):
         self.assertTrue(self.codex().eligible("frontier", {"codex": {"remaining": 1.0}}))
         self.assertTrue(self.codex().eligible("frontier"))
 
+    def test_a_window_with_no_reading_fails_closed_for_the_gated_kinds(self):
+        """One known 95% window must not stand for every window (adversary 7802361, A2): the
+        reader keeps `remaining` = the tightest KNOWN window, and lists the null one."""
+        known = [{"label": "5h", "remaining_percent": 95.0}, {"label": "weekly", "remaining_percent": 80.0}]
+        partial = [known[0], {"label": "weekly", "remaining_percent": None}]
+        whole = r._providers_from_accounts([{"provider": "codex", "windows": known}], 0.0)
+        half = r._providers_from_accounts([{"provider": "codex", "windows": partial}], 0.0)
+        self.assertEqual(half["codex"]["remaining"], 95.0)
+        for kind in self.EVERYDAY:
+            self.assertTrue(self.codex().eligible(kind, whole), kind)
+            self.assertFalse(self.codex().eligible(kind, half), kind)
+        self.assertTrue(self.codex().eligible("frontier", half))      # frontier needs no plenty
+        self.assertTrue(self.codex().eligible("code", {"codex": {"remaining": 95.0}}))   # no windows listed
+
+    def test_only_codex_has_a_plenty_gate(self):
+        """The partial-reading rule lives in the plenty gate: no other pool carries one."""
+        self.assertEqual([s.name for s in r.SERVICES if s.plenty_kinds], ["codex"])
+
     def test_the_default_constant_is_half_the_window(self):
         self.assertEqual(r.PLENTY_MIN, 50.0)
 

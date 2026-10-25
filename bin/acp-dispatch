@@ -389,7 +389,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
@@ -941,10 +941,28 @@ def advisor_tree_snap(repo: Path) -> dict | None:
         return None
 
 
-def refuse_kind(service: str | None, kind: str) -> NoReturn:
+def plenty_now(router: Any, info: dict | None) -> str:
+    """How a pool's reading stands for the `plenty_kinds` gate, in the words the refusal prints."""
+    left = router.plenty_remaining(info)
+    if left is not None:
+        return f"{left:g}% left on its tightest window"
+    if (info or {}).get("remaining") is not None:
+        return "a window has no reading"
+    return "no fresh reading"
+
+
+def plenty_why(router: Any, svc: Any, kind: str, info: dict | None) -> str:
+    return (f" ({svc.name} takes --kind {kind} only while every window has at least "
+            f"{router.PLENTY_MIN:g}% left, [routing].plenty_min; now: {plenty_now(router, info)})")
+
+
+def refuse_kind(service: str | None, kind: str, quota: dict | None = None) -> NoReturn:
+    """Die: `service` is not eligible for `kind`. `quota` is the reading the caller judged by (the
+    one taken after load admission, 2026-10-25); default is a fresh load_snapshot()."""
     router = route_module()
     disabled = router.operator_disabled()
-    quota, _ = router.load_snapshot()
+    if quota is None:
+        quota, _ = router.load_snapshot()
     eligible = sorted(s.name for s in router.discover(quota)
                       if s.eligible(kind, quota) and s.name not in disabled)
     who = ", ".join(eligible) if eligible else "(none)"
@@ -952,10 +970,7 @@ def refuse_kind(service: str | None, kind: str) -> NoReturn:
     svc = router.BY_NAME.get(service) if service else None
     why = ""
     if svc is not None and kind in svc.plenty_kinds:
-        left = (quota.get(svc.name) or {}).get("remaining")
-        now = "no fresh reading" if left is None else f"{left:.0f}% left on its tightest window"
-        why = (f" ({svc.name} takes --kind {kind} only while every window has at least "
-               f"{router.PLENTY_MIN:g}% left, [routing].plenty_min; now: {now})")
+        why = plenty_why(router, svc, kind, quota.get(svc.name))
     die(f"{label} is not eligible for --kind {kind}{why}; eligible: {who}; "
         f"override with ACP_OPERATOR_APPROVED=route-override "
         f"(or run route_agent.py plan --kinds {kind})")

@@ -129,6 +129,24 @@ class TestCodexEverydayGate(RoutingDispatch):
         self.assertIn("codex is not eligible for --kind judgment", low.stderr)
         self.assertIn("40% left", low.stderr)
 
+    def test_a_window_with_no_reading_fails_closed(self):
+        """A known 95% window next to a null one is not "every window has 50%" (adversary 7802361, A2)."""
+        snap = self.tmp / "partial.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "5h", "remaining_percent": 95.0},
+                                             {"label": "weekly", "remaining_percent": None}]}]}}))
+        r = self.dispatch_agent("codex", "gpt-6.1-sol", "--kind", "judgment", "--no-model-check",
+                                "--no-preflight", "--dry-run", "--json", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("codex is not eligible for --kind judgment", r.stderr)
+        self.assertIn("a window has no reading", r.stderr)
+
+    def test_the_refusal_prints_the_reading_with_its_decimal(self):
+        """49.9% is refused; "now: 50% left" would read as the threshold itself (adversary B2)."""
+        low = self.code("gpt-6.1-sol", 49.9, kind="judgment")
+        self.assertEqual(low.returncode, 2, low.stderr)
+        self.assertIn("now: 49.9% left", low.stderr)
+
     def test_judgment_runs_the_everyday_model_never_astra(self):
         r = self.code("gpt-6-astra", 100.0, kind="judgment")
         self.assertEqual(r.returncode, 2, r.stderr)

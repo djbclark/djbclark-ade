@@ -221,9 +221,11 @@ class Service:
     def eligible(self, kind: str, quota: dict[str, Any] | None = None, *,
                  any_headroom: bool = False) -> bool:
         """Can this service take `kind`?  `plenty_kinds` also need a fresh reading of at least
-        PLENTY_MIN in `quota[name]["remaining"]` (the tightest window), else they are not
-        eligible; no `quota` means no reading, so those kinds fail closed.  `any_headroom`
-        skips that gate, for questions about the profile alone (calibrate's history)."""
+        PLENTY_MIN in `quota[name]["remaining"]` (the tightest window) AND a reading for every
+        window the pool lists (`plenty_remaining`: one unknown window means the gate cannot
+        say every window has PLENTY_MIN left, 2026-10-25), else they are not eligible; no
+        `quota` means no reading, so those kinds fail closed.  `any_headroom` skips that gate,
+        for questions about the profile alone (calibrate's history)."""
         if self.retired or self.hermes_only:
             return False
         if kind in ("bulk", "mechanical") and self.never_bulk:
@@ -233,12 +235,24 @@ class Service:
         if kind not in self.good_at:
             return False
         if kind in self.plenty_kinds and not any_headroom:
-            remaining = ((quota or {}).get(self.name) or {}).get("remaining")
+            remaining = plenty_remaining((quota or {}).get(self.name))
             return remaining is not None and remaining >= PLENTY_MIN
         return True
 
     def rank_for(self, kind: str) -> int:
         return self.good_at[kind]
+
+
+def plenty_remaining(info: dict[str, Any] | None) -> float | None:
+    """A pool's binding remaining percent for the `plenty_kinds` gate, or None when it is not
+    known for every window: no reading, or any window the reading lists as null (an aiuse
+    window with `remaining_percent: null` is a window nobody measured; the pool's `remaining`
+    is then only the tightest of the KNOWN ones, which cannot show every window is plentiful)."""
+    info = info or {}
+    remaining = info.get("remaining")
+    if remaining is None or any(v is None for v in (info.get("windows") or {}).values()):
+        return None
+    return remaining
 
 
 # Policy file: env ROUTING_POLICY, else <repo>/config/routing.toml (same
