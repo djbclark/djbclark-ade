@@ -28,8 +28,8 @@ including a read-back through the installed `codex app-server` (no model call).
 2. The newer `filters` table is not used: Codex 0.163.0 ignores it, and `inherit = "all"` would then pass every
    variable.
 3. The live file is a regular file Codex also writes; there is no renderer yet. To change only the policy tables:
-   `bin/codex-env-policy-apply TEMPLATE TARGET` (dry run; `--write` applies) replaces the two `shell_environment_policy` tables (and the comment above
-   them) byte-for-byte, checks that every other table and the `set` values are unchanged, keeps a `.bak-DATE-env-policy`
+   `bin/codex-env-policy-apply TEMPLATE TARGET` (dry run, set values hidden; `--write` applies, and does nothing if already applied) replaces the two `shell_environment_policy` tables (and the comment above
+   them) byte-for-byte, checks that every other table and the `set` values are unchanged, keeps a private (0600, O_EXCL) `.bak-UTC-TIME-env-policy`
    copy, writes a temp file beside the target and `os.replace`s it on the realpath, refusing if the file changed
    while it ran. A running Codex keeps the policy it started with; only sessions started after the change see it.
 

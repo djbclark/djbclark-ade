@@ -323,7 +323,7 @@ trust_level = "trusted"
 inherit = "core"
 
 [shell_environment_policy.set]
-NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "LIVEDIGEST"
+NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123"
 BASH_ENV = "{home}/.bashrc"
 ENABLE_PROMPT_CACHING_1H = "1"
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
@@ -335,9 +335,12 @@ GRAFT_NO_GITIGNORE = "1"
 trusted_hash = "abc"
 """
 
-    def run_apply(self, target: pathlib.Path, *flags: str) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, str(ROOT / "bin" / "codex-env-policy-apply"), str(TEMPLATE), str(target), *flags],
-                              capture_output=True, text=True, env={**os.environ, "HOME": str(target.parent)})
+    def run_apply(self, target: pathlib.Path, *flags: str, umask: int | None = None, template: pathlib.Path = TEMPLATE,
+                  args: list[str] | None = None) -> subprocess.CompletedProcess:
+        argv = args if args is not None else [str(template), str(target), *flags]
+        return subprocess.run([sys.executable, str(ROOT / "bin" / "codex-env-policy-apply"), *argv],
+                              capture_output=True, text=True, env={**os.environ, "HOME": str(target.parent)},
+                              preexec_fn=(lambda: os.umask(umask)) if umask is not None else None)
 
     def test_only_the_policy_changes_and_a_second_run_changes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -362,13 +365,77 @@ trusted_hash = "abc"
             self.assertEqual(self.run_apply(t, "--write").returncode, 0)
             self.assertEqual(t.read_text(), once)
 
-    def test_it_refuses_when_the_explicit_set_would_change(self) -> None:
+    def test_it_refuses_when_the_explicit_set_would_change_and_never_prints_a_value(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             t = pathlib.Path(d, "config.toml")
-            t.write_text(self.LIVE.format(home=d).replace('MCP_TIMEOUT = "300000"', 'MCP_TIMEOUT = "1"'))
+            t.write_text(self.LIVE.format(home=d).replace('MCP_TIMEOUT = "300000"', 'MCP_TIMEOUT = "SECRETVALUE-9"'))
+            for flags in ((), ("--write",)):
+                r = self.run_apply(t, *flags)
+                self.assertEqual(r.returncode, 1, flags)
+                self.assertIn("MCP_TIMEOUT", r.stderr)  # the key is named
+                for secret in ("SECRETVALUE-9", "SECRETDIGEST-0123", "300000"):
+                    self.assertNotIn(secret, r.stdout + r.stderr, secret)
+            self.assertIn('MCP_TIMEOUT = "SECRETVALUE-9"', t.read_text())
+            self.assertEqual(list(pathlib.Path(d).glob("*.bak-*")), [])
+
+    def test_dry_run_and_write_output_hide_every_set_value(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(self.LIVE.format(home=d))
+            for flags in ((), ("--write",)):
+                r = self.run_apply(t, *flags)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("include_only", r.stdout)  # the diff itself is shown
+                self.assertNotIn("SECRETDIGEST-0123", r.stdout + r.stderr)
+
+    def test_the_backup_is_created_private_and_holds_the_original_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            original = self.LIVE.format(home=d).replace("\n", "\r\n").encode()  # CRLF outside the policy must survive too
+            t.write_bytes(original)
+            r = self.run_apply(t, "--write", umask=0)  # a permissive umask must not widen the backup
+            self.assertEqual(r.returncode, 0, r.stderr)
+            (bak,) = pathlib.Path(d).glob("config.toml.bak-*-env-policy")
+            self.assertEqual((stat_mode(bak), bak.read_bytes()), (0o600, original))
+            self.assertTrue(t.read_bytes().startswith(b'model = "m"\r\n\r\n[projects."/x"]\r\n'))
+
+    def test_write_is_a_true_no_op_when_already_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(self.LIVE.format(home=d))
+            self.assertEqual(self.run_apply(t, "--write").returncode, 0)
+            before = (t.read_bytes(), t.stat().st_mtime_ns, t.stat().st_ino, sorted(os.listdir(d)))
+            time.sleep(0.05)
             r = self.run_apply(t, "--write")
-            self.assertNotEqual(r.returncode, 0)
-            self.assertIn('MCP_TIMEOUT = "1"', t.read_text())
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((t.read_bytes(), t.stat().st_mtime_ns, t.stat().st_ino, sorted(os.listdir(d))), before)  # no new backup or temp
+
+    def test_bad_arguments_are_a_usage_error_not_a_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(self.LIVE.format(home=d))
+            for args in ([], [str(TEMPLATE)], [str(TEMPLATE), str(t), "--wrte"], [str(TEMPLATE), str(t), "extra"]):
+                r = self.run_apply(t, args=args)
+                self.assertEqual(r.returncode, 2, args)
+                self.assertIn("usage: codex-env-policy-apply", r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+            self.assertEqual(t.read_text(), self.LIVE.format(home=d))
+
+    def test_unreadable_or_odd_files_fail_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(self.LIVE.format(home=d))
+            missing = pathlib.Path(d, "nope.toml")
+            bad = pathlib.Path(d, "bad.toml")
+            bad.write_text('key = "SECRETDIGEST-0123\n')
+            nodigest = pathlib.Path(d, "nodigest.toml")
+            nodigest.write_text('[shell_environment_policy]\ninherit = "core"\n')
+            for target, template in ((missing, TEMPLATE), (t, missing), (bad, TEMPLATE), (nodigest, TEMPLATE)):
+                r = self.run_apply(target, "--write", template=template)
+                self.assertEqual(r.returncode, 1, (target, template))
+                self.assertIn("codex-env-policy-apply:", r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertNotIn("SECRETDIGEST-0123", r.stdout + r.stderr)
 
 
 def stat_mode(p: pathlib.Path) -> int:

@@ -1,48 +1,138 @@
 #!/usr/bin/env python3
 """Merge the template's [shell_environment_policy] tables into a Codex config.toml atomically.
 
-    codex-env-apply.py TEMPLATE TARGET [--write]
+    codex-env-policy-apply TEMPLATE TARGET [--write]
 
-Dry run by default (prints the unified diff). Touches nothing but the two policy tables: Codex's own
-[projects.*], [hooks.state.*], [marketplaces.*] and every other line stay byte-identical. With --write: refuses if TARGET
-changed since it was read (Codex rewrites it), keeps TARGET.bak-DATE, writes a sibling temp file (0600) and os.replace()s it
-onto the realpath. The result must parse and keep every non-policy table equal."""
-import difflib, os, re, sys, tempfile, tomllib, datetime
-tmpl, target = sys.argv[1], os.path.realpath(sys.argv[2]); write = "--write" in sys.argv
-home = os.path.expanduser("~")
-t = open(tmpl).read()
-old = open(target).read(); st = os.stat(target)
-live = tomllib.loads(old)
+Dry run by default: prints the unified diff, with every value in the `set` tables hidden (they may hold secrets).
+Touches nothing but the policy tables and the comment block just above them: Codex's own [projects.*],
+[hooks.state.*], [marketplaces.*] and every other byte stay as they are. With --write: nothing at all happens when
+the merged text equals the file (no backup, no temp file, mtime unchanged); otherwise it refuses if TARGET changed
+since it was read (Codex rewrites it), creates TARGET.bak-<UTC time>-env-policy with mode 0600 (O_EXCL), writes a
+sibling temp file (mode of TARGET) and os.replace()s it onto the realpath. The result must parse, keep every
+non-policy table equal and keep the explicit `set` values. Errors name files and keys, never values.
+
+Exit: 0 done or nothing to do, 1 refused or failed, 2 bad arguments."""
+import argparse, datetime, difflib, os, re, sys, tempfile, tomllib
+
+POLICY = "shell_environment_policy"
 TABLE = re.compile(r"^\[(.+?)\]\s*$", re.M)
-def policy_span(text, start_at_comment):
-    heads = [m for m in TABLE.finditer(text)]
-    idx = [i for i, m in enumerate(heads) if m.group(1) == "shell_environment_policy"]; assert len(idx) == 1
-    first = heads[idx[0]].start()
-    last = idx[0]
-    while last + 1 < len(heads) and heads[last + 1].group(1).startswith("shell_environment_policy"): last += 1
+
+
+def fail(msg):
+    print(f"codex-env-policy-apply: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read(path, what):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError as e:
+        fail(f"cannot read {what} {path}: {e.strerror}")
+
+
+def parse(text, what):
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        fail(f"{what} is not valid TOML: {e}")  # tomllib reports a position, never the offending text
+
+
+def policy_span(text, what):
+    """(start, end) of the policy tables and the comment block above them."""
+    heads = list(TABLE.finditer(text))
+    idx = [i for i, m in enumerate(heads) if m.group(1) == POLICY]
+    if len(idx) != 1:
+        fail(f"{what} must hold exactly one [{POLICY}] table, found {len(idx)}")
+    first, last = heads[idx[0]].start(), idx[0]
+    while last + 1 < len(heads) and heads[last + 1].group(1).startswith(POLICY + "."):
+        last += 1
     end = heads[last + 1].start() if last + 1 < len(heads) else len(text)
-    if start_at_comment:  # take the comment block just above the table header
-        lines = text[:first].split("\n"); n = len(lines) - 1
-        while n > 0 and lines[n - 1].startswith("#"): n -= 1
-        first = len("\n".join(lines[:n])) + (1 if n else 0)
-    return first, end
-a, b = policy_span(t, True); block = t[a:b].replace("{{ .home }}", home)
-# the machine-specific browser digests stay what the live file has
-block = block.replace("{{ .codex_browser_client_sha256s }}", live["shell_environment_policy"]["set"]["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"])
-assert "{{" not in block, "unfilled placeholder"
-c, d = policy_span(old, True)
-new = old[:c] + block + old[d:]
-nl, ol = tomllib.loads(new), live
-assert {k: v for k, v in nl.items() if k != "shell_environment_policy"} == {k: v for k, v in ol.items() if k != "shell_environment_policy"}, "non-policy content changed"
-oset, nset = ol["shell_environment_policy"]["set"], nl["shell_environment_policy"]["set"]
-assert oset == nset, f"explicit set changed: {oset} vs {nset}"
-sys.stdout.writelines(difflib.unified_diff(old.splitlines(1), new.splitlines(1), "live", "new"))
-if not write: sys.exit(0)
-if open(target).read() != old or os.stat(target).st_mtime_ns != st.st_mtime_ns: sys.exit("target changed while reading; rerun")
-bak = f"{target}.bak-{datetime.date.today()}-env-policy"
-if not os.path.exists(bak): open(bak, "w").write(old); os.chmod(bak, 0o600)
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".config.toml.")
-with os.fdopen(fd, "w") as f: f.write(new); f.flush(); os.fsync(f.fileno())
-os.chmod(tmp, st.st_mode & 0o777)
-if os.stat(target).st_mtime_ns != st.st_mtime_ns: os.unlink(tmp); sys.exit("target changed; rerun")
-os.replace(tmp, target); print("written", target)
+    lines = text[:first].split("\n")
+    n = len(lines) - 1
+    while n > 0 and lines[n - 1].startswith("#"):
+        n -= 1
+    return (len("\n".join(lines[:n])) + (1 if n else 0)), end
+
+
+def redact(text):
+    """The text with every value under a [shell_environment_policy.*] sub-table hidden."""
+    out, hide = [], False
+    for line in text.split("\n"):
+        m = TABLE.match(line)
+        if m:
+            hide = m.group(1).startswith(POLICY + ".")
+        elif hide and re.match(r"\s*[^#\s][^=]*=", line):
+            line = line.split("=", 1)[0] + "= <hidden>"
+        out.append(line)
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="codex-env-policy-apply", description="Merge the template's shell_environment_policy tables into a Codex config.toml.")
+    ap.add_argument("template", help="agents/codex/config.toml.tmpl")
+    ap.add_argument("target", help="the live config.toml")
+    ap.add_argument("--write", action="store_true", help="apply (default: dry run, print the diff)")
+    a = ap.parse_args(argv)
+    target = os.path.realpath(a.target)
+    tmpl = read(a.template, "template").decode("utf-8")
+    raw = read(target, "target")
+    st = os.stat(target)
+    old = raw.decode("utf-8")
+    live = parse(old, "target")
+    a0, b0 = policy_span(tmpl, "template")
+    block = tmpl[a0:b0].replace("{{ .home }}", os.path.expanduser("~"))
+    try:  # the machine-specific browser digests stay what the live file has
+        digests = live[POLICY]["set"]["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"]
+    except KeyError as e:
+        fail(f"target lacks {POLICY}.set key {e}")
+    block = block.replace("{{ .codex_browser_client_sha256s }}", digests)
+    if "{{" in block:
+        fail("template policy block has an unfilled placeholder")
+    c, d = policy_span(old, "target")
+    new = old[:c] + block + old[d:]
+    merged = parse(new, "merged result")
+    rest = lambda cfg: {k: v for k, v in cfg.items() if k != POLICY}
+    if rest(merged) != rest(live):
+        fail("refusing: the merge would change content outside the policy tables")
+    oset, nset = live[POLICY].get("set", {}), merged[POLICY].get("set", {})
+    if oset != nset:
+        diff = sorted(k for k in set(oset) | set(nset) if oset.get(k) != nset.get(k))
+        fail(f"refusing: the merge would change the explicit set (keys: {', '.join(diff)}); values not shown")
+    if new == old:
+        print("already applied: nothing to do")
+        return 0
+    sys.stdout.writelines(difflib.unified_diff(redact(old).splitlines(1), redact(new).splitlines(1), "live", "new"))
+    if not a.write:
+        return 0
+    now = os.stat(target)
+    if read(target, "target") != raw or now.st_mtime_ns != st.st_mtime_ns:
+        fail("target changed while reading; rerun")
+    bak = f"{target}.bak-{datetime.datetime.now(datetime.timezone.utc):%Y%m%dT%H%M%SZ}-env-policy"
+    try:
+        fd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as e:
+        fail(f"cannot create backup {bak}: {e.strerror}")
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
+        f.flush()
+        os.fsync(f.fileno())
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".config.toml.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(new.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, st.st_mode & 0o777)
+        if os.stat(target).st_mtime_ns != st.st_mtime_ns:
+            fail("target changed; rerun (backup kept)")
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    print("written", target, "backup", bak)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
