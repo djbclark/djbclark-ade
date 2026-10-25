@@ -45,7 +45,7 @@ New OpenCode locations load it through V2 plugin discovery. Existing servers
 may retain already-loaded plugins. Confirm setup with the read-only status RPC:
 
 ```bash
-opencode api post '/api/rpc/ade.go-context/status?location[directory]=/absolute/project' --data '{"input":{"sessionID":"ses_probe"}}'
+opencode api --standalone post '/api/rpc/ade.go-context/status?location[directory]=/absolute/project' --data '{"input":{"sessionID":"ses_probe"}}'
 ```
 
 `output.ready: true` proves that this location loaded the guard; `known: false`
