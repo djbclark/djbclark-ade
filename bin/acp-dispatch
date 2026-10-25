@@ -1328,15 +1328,21 @@ def process_matches(rec: dict) -> bool:
 def launchd_print(label: str) -> str | None:
     """`launchctl print gui/$UID/<label>`: its text, "" when the job is not loaded, None when
     launchctl itself is unavailable."""
+    # `print gui/UID/LABEL` splits LABEL on "/": a label that carries the absolute --task path (every
+    # dispatch with --task) is "Bad request" (rc 113), which read as "not loaded" and let reap finalize a
+    # live job as lost once it had waited 120 s in the load gate (2026-10-25). `list LABEL` takes any label.
+    argv = ([launchctl_bin(), "list", label] if "/" in label
+            else [launchctl_bin(), "print", f"gui/{os.getuid()}/{label}"])
     try:
-        r = subprocess.run([launchctl_bin(), "print", f"gui/{os.getuid()}/{label}"], check=False,
-                           capture_output=True, text=True, timeout=20)
+        r = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else ""
 
 
 def launchd_last_exit(label: str) -> int | None:
+    if "/" in label:                 # `list` prints a raw wait status, not a "last exit code" line: unknown, not guessed
+        return None
     text = launchd_print(label)
     if not text:
         return None
