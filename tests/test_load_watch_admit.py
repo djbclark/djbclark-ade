@@ -203,3 +203,31 @@ def test_admit_faked_load_alone_reads_zero_churn(tmp_path):
 def test_admit_waits_out_a_churn_spike(tmp_path):
     r = admit(tmp_path, "--wait", "20", load1=0.1, LW_FAKE_CHURN="90000,90000,1000")
     assert r.returncode == 0, r.stderr
+
+
+def test_calm_boost_raises_the_limit_while_churn_is_low(tmp_path):
+    """2026-10-25: load 1.5-2.0 per core is admitted while the compressor is calm; the default base stays 1.5."""
+    calm = {"LW_FAKE_CHURN": "10000"}
+    assert admit(tmp_path, load1=CORES * 1.9, **calm).returncode == 0
+    rec = json.loads(admit(tmp_path, "--json", load1=CORES * 1.9, **calm).stdout)
+    assert rec["status"] == "ok" and rec["max_per_core"] == 2.0
+    assert admit(tmp_path, load1=CORES * 2.1, **calm).returncode == 75  # still above the boosted limit
+    # a caller that passes the base explicitly (bg does) still gets the boost
+    assert admit(tmp_path, "--max-per-core", "1.5", load1=CORES * 1.9, **calm).returncode == 0
+
+
+def test_calm_boost_off_when_churn_is_high_unreadable_or_disabled(tmp_path):
+    busy = {"LW_FAKE_CHURN": "30000"}  # above the 25000 boost line, below the 60000 hot line
+    assert admit(tmp_path, load1=CORES * 1.9, **busy).returncode == 75
+    assert json.loads(admit(tmp_path, "--json", "--wait", "0", load1=CORES * 1.9, **busy).stdout)["max_per_core"] == 1.5
+    assert admit(tmp_path, "--boost-per-core", "0", load1=CORES * 1.9, LW_FAKE_CHURN="1000").returncode == 75
+    # a faked load without a faked churn reads churn 0 but is not a measurement: no boost
+    assert admit(tmp_path, load1=CORES * 1.9).returncode == 75
+    assert admit(tmp_path, "--boost-per-core", "nan", load1=1, LW_FAKE_CHURN="1").returncode == 2
+
+
+def test_admit_limit_unit():
+    lw = load_module()
+    assert lw.admit_limit(1.5, 20000) == 2.0 and lw.admit_limit(1.5, 25000) == 2.0
+    assert lw.admit_limit(1.5, 25001) == 1.5 and lw.admit_limit(1.5, None) == 1.5
+    assert lw.admit_limit(1.5, 0, boost=0) == 1.5 and lw.admit_limit(3.0, 0, boost=2.0) == 3.0

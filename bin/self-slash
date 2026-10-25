@@ -84,6 +84,12 @@
 # marker of its own (checked 2026-10-20), so the skills (handoff Step 9, loose Rule 4,
 # docs/dispatch-footer.md) also say a sub-agent treats a handoff as document-only.
 #
+# Native OpenCode Go (2026-10-25): an explicit ADE_OPENCODE_SESSION_ID and native
+# directory from a supported host controller select /compact before host lookup. It queues
+# that exact session at a safe point; no parent UI or extra inference probe.
+# Native /new, /clear, /reset and /compact focus are refused until a durable
+# owned handoff and supported successor/baton route can be verified.
+#
 # Hosts: a herdr pane ($HERDR_PANE_ID, via `herdr agent read` / `herdr pane run`),
 # an Orca terminal ($ORCA_TERMINAL_HANDLE, via `orca terminal read --screen` /
 # `orca terminal send --enter`), or a Paseo agent ($PASEO_AGENT_ID, via `paseo wait`
@@ -130,6 +136,9 @@
 # slash command only accepts the autocomplete, so up to two more Enters are sent
 # while the text (or its menu row) is still on screen (verified 2026-10-10 with
 # /rename; /quit left its menu row open, cursor-agent 2026.10.01).
+# Preserve the tool caller's OpenCode selection. GNU tools for host controllers
+# may live in Homebrew, but its opencode can be a different install.
+self_slash_caller_path="$PATH"
 export PATH="/opt/homebrew/bin:$PATH"
 set -u
 # An inherited BASHOPTS=nocasematch (bash >= 4.1 applies it at startup) would make every `case`
@@ -193,6 +202,23 @@ if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; th
 lifecycle=0
 case "$text" in /new|/clear|/reset|/quit|/exit|"/new "*|"/clear "*|"/reset "*|"/quit "*|"/exit "*) lifecycle=1;; esac
 [ "$finish" = 1 ] && lifecycle=1
+# A per-tool OpenCode plugin scope wins over inherited terminal/parent identities.
+# Native compaction queues this exact session at a safe point, including ACP slices;
+# it never invokes a parent lifecycle action. A reset requires a durable handoff and
+# a verified successor, so unsupported native resets fail closed (2026-10-25).
+if [ -n "${ADE_OPENCODE_SESSION_ID:-}" ]; then
+  case "$text" in
+    /compact)
+      if [ "$finish" = 1 ] || [ "$then_set" = 1 ]; then
+        echo "self-slash: native compact takes no lifecycle or --then options" >&2; exit 2
+      fi
+      native_helper="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/opencode-self-compact"
+      if [ "$dry" = 1 ]; then PATH="$self_slash_caller_path" exec python3 "$native_helper" --dry-run; fi
+      PATH="$self_slash_caller_path" exec python3 "$native_helper";;
+    "/compact "*|/new|/clear|/reset|/quit|/exit|"/new "*|"/clear "*|"/reset "*|"/quit "*|"/exit "*)
+      echo "self-slash: native OpenCode accepts /compact without focus; resets need an owned handoff and a verified successor, never a parent terminal clear" >&2; exit 2;;
+  esac
+fi
 # Not for a dispatched slice or a sub-agent: see the header.  The waiter child skips this, so a
 # chain the top-level session started is never cut off.
 if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "${ACP_RUN_AGENT:-}" = "1" ]; then

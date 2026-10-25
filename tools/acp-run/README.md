@@ -252,7 +252,11 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    seconds there to add to the current deadline, or `0` to remove it. Positive
    extensions leave an unlimited turn unlimited. The file is consumed and
    deleted; malformed input is logged and ignored. `deadline_extended` records
-   carry the old and new monotonic deadlines (`null` means unlimited).
+   carry the old and new monotonic deadlines (`null` means unlimited). A costly
+Go advisory turn (`--go-advisory`, see the OpenCode Go section) never extends:
+acp-run deletes the file, logs `deadline_extension_refused` and keeps the deadline
+fixed at start + `--timeout` (at most 600 s), so a hand-edited control file cannot
+bypass it either.
 7. **Safe permission answers**: only an offered `allow_once` or `reject_once`
    option is ever selected. Never an `*_always` option, which an agent may save
    beyond this run (Hermes writes `allow_always` to a permanent allowlist), and
@@ -308,7 +312,7 @@ Landed 2026-10-15 (6528ccf, 77bd2bf, 0221561, faead67, ada7620). Value lists are
 3. A LEVEL or SIZE the agent or model cannot take exits 2 before any prompt and names the valid values. qwen, zcode and agy do not clamp. agy `xhigh`/`max` exit 2.
 4. Read-back, stderr before the summary line: `acp-run: applied: model=... effort=... ctx=...`. Same fields on the JSONL `result` record (`applied`), a separate `applied` record, and `--json`. Unreadable values are marked `(unverified)` (`effort=high(unverified)`). A requested value the agent reports differently is failure class `config`, exit 1 (option response before the prompt, or `usage_update.size` after the turn). Under `--interactive` the line is still printed; a post-turn window mismatch does not change the exit code.
 5. `--meta JSON` deep-merges into `session/new` `_meta` over `systemPrompt` and the deny meta. `--agent-arg ARG` (repeatable) appends to the launch command. `--agent-env K=V` (repeatable; one argument may be `K=V,K2=V2`, split only before another `NAME=`) appends to the child environment. Per host, `~/.config/acp-run.env` or `$ACP_RUN_ENV_FILE`: `ACP_RUN_ARGS_<AGENT>` (shell-split), `ACP_RUN_ENV_<AGENT>="K=V,K=V"`.
-6. `HERDR_PANE_ID`, `HERDR_ENV`, `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` are removed on every run, and `ACP_RUN_AGENT=1` is set (2026-10-20: `bin/self-slash` refuses lifecycle actions when it sees the marker; a slice that kept `PASEO_AGENT_ID` could `/clear` or archive the caller's Paseo agent). (`ACP_RUN` itself is taken: it holds the acp-run path for `session-finder`.) Under `--perm deny`, grok starts without `--always-approve` on a per-run `GROK_HOME`: symlinks to `~/.grok` except `hooks/`, `skills/`, `plugins/`, `installed-plugins/` and `config.toml`. The copy drops `[[hooks.*]]`, `[plugins]`, `[mcp_servers.*]`, `ui.permission_mode`, `ui.yolo`, and ends with `[permission] ask = ["*"]` (deny > ask > allow). tomllib requires the copy to equal the original minus exactly those parts; otherwise grok keeps the user's home and the run says so. A token rewritten as a regular file in the temp home is copied back. `--strip-user-config` is the same strip without the permission table. Every other non-interactive grok run (`--perm all`, what `acp-dispatch` uses) also starts on a stripped `GROK_HOME` without the user's hooks, skills and plugins (2026-10-15), keeping MCP servers, the permission mode and auth (no `ask` rule); the `user_config` log record names the `home`. `ACP_RUN_GROK_USER_HOOKS=1` (or `--keep-user-config`) keeps `~/.grok`; `--interactive` always does.
+6. `HERDR_PANE_ID`, `HERDR_ENV`, `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` and `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY` are removed on every run, and `ACP_RUN_AGENT=1` is set (2026-10-20: `bin/self-slash` refuses lifecycle actions when it sees the marker; a slice that kept `PASEO_AGENT_ID` could `/clear` or archive the caller's Paseo agent). (`ACP_RUN` itself is taken: it holds the acp-run path for `session-finder`.) Under `--perm deny`, grok starts without `--always-approve` on a per-run `GROK_HOME`: symlinks to `~/.grok` except `hooks/`, `skills/`, `plugins/`, `installed-plugins/` and `config.toml`. The copy drops `[[hooks.*]]`, `[plugins]`, `[mcp_servers.*]`, `ui.permission_mode`, `ui.yolo`, and ends with `[permission] ask = ["*"]` (deny > ask > allow). tomllib requires the copy to equal the original minus exactly those parts; otherwise grok keeps the user's home and the run says so. A token rewritten as a regular file in the temp home is copied back. `--strip-user-config` is the same strip without the permission table. Every other non-interactive grok run (`--perm all`, what `acp-dispatch` uses) also starts on a stripped `GROK_HOME` without the user's hooks, skills and plugins (2026-10-15), keeping MCP servers, the permission mode and auth (no `ask` rule); the `user_config` log record names the `home`. `ACP_RUN_GROK_USER_HOOKS=1` (or `--keep-user-config`) keeps `~/.grok`; `--interactive` always does.
 7. `acp-dispatch --effort` and `--context` are first-class. Checked with the model before anything is written (`acp-run <agent> --info --model M --effort E --context C`), stored on the job record, kept by `resume`. `--acp-arg` still forwards other flags; a dash-leading value needs `--acp-arg=--meta`. zcode `--model` is accepted and still optional.
 8. No `--fast`. Use `--set fast=on|off` (claude Opus only), `--set fast=true|false` (cursor), `--set fast-mode=on|off` (codex), or a model id (`grok-4.7-build-fast`, copilot `claude-opus-4.8-fast`). Thinking budget: `--agent-env MAX_THINKING_TOKENS=N` or `ACP_RUN_ENV_CLAUDE`. Not implemented (exit 2, or not a flag): hermes shadow home for effort/context, crush `/set_reasoning_effort`, opencode/qwen context caps (`OPENCODE_CONFIG_CONTENT` `limit.context` untested; a cap cannot raise a window), agy `--auth-method` (`AGY_ACP_DEFAULT_MODEL` via `ACP_RUN_ENV_AGY`), `ZCODE_ACP_QUOTA_AUTO_RESUME=0` (operator's choice). Claude `--context 1m` does not add `[1m]`.
 
@@ -526,7 +530,9 @@ still optional.
 `acp-dispatch extend <out>/jobs/<name>.json 3600` adds an hour to a running
 slice. Use `0` to remove its deadline. The command atomically writes the control
 file and records the requested total limit; acp-run's log confirms application.
-Pending positive extensions accumulate. Finished slices are refused.
+Pending positive extensions accumulate. Finished slices are refused, and so is
+every extension (`0` included) of a costly Go advisory slice, whose record carries
+`--go-advisory` (exit 2, nothing written).
 
 `acp-dispatch resume <out>/jobs/<name>.json --timeout 14400` continues a
 finished slice in its original ACP session. Optional `-p TEXT` or `-f FILE`
@@ -678,8 +684,10 @@ Run `acp-run --help` for every flag.
 
 Needs [uv](https://docs.astral.sh/uv/) and the agents' own CLIs/adapters.
 
-It is a single self-contained script (a `uv run --script` header pulls its
-dependencies). On this machine it lives in djbclark-ade at `tools/acp-run/acp-run`
+The script itself is self-contained (a `uv run --script` header pulls its
+dependencies): a copy on your PATH runs every agent and every non-Go model
+with no other file. On this machine it lives in djbclark-ade
+at `tools/acp-run/acp-run`
 and is reached as `~/.local/bin/acp-run` → `~/ops/site-private/bin/acp-run` →
 `~/ops/site-djbclark/tools/acp-run` → here. Elsewhere, copy the script onto
 your PATH:
@@ -688,6 +696,57 @@ your PATH:
 install -m 755 tools/acp-run/acp-run ~/.local/bin/acp-run
 acp-run --list
 ```
+
+**OpenCode Go models need the Go policy bundle** (added 2026-10-25; guard added
+2026-10-25). The policy stays in one place, `bin/go_model_policy.py` +
+`config/go-model-policy.json`, and the context guard in one place,
+`opencode-plugins/go-context/`. acp-run loads them only when a requested or
+applied model is `opencode-go/…`, from exactly two roots and never from
+`sys.path`, the cwd, the script's own directory or the user's OpenCode config:
+(1) the checkout the script runs from (`tools/acp-run/acp-run` with `../../bin`,
+`../../config` and `../../opencode-plugins`: running or symlinking it in place
+just works), else (2) the installed bundle `~/.local/share/acp-run/go-policy/`:
+
+```text
+~/.local/share/acp-run/go-policy/bin/go_model_policy.py
+~/.local/share/acp-run/go-policy/config/go-model-policy.json
+~/.local/share/acp-run/go-policy/opencode-plugins/go-context/index.js
+~/.local/share/acp-run/go-policy/opencode-plugins/go-context/package.json
+```
+
+```sh
+d=~/.local/share/acp-run/go-policy
+install -d "$d/bin" "$d/config" "$d/opencode-plugins/go-context"
+install -m 644 bin/go_model_policy.py "$d/bin/"
+install -m 644 config/go-model-policy.json "$d/config/"
+install -m 644 opencode-plugins/go-context/index.js opencode-plugins/go-context/package.json "$d/opencode-plugins/go-context/"
+```
+
+Re-run those lines whenever the classification or the guard changes (the copy is
+a snapshot). To track the checkout instead, make `bin`, `config` and
+`opencode-plugins` in `$d` symlinks to the checkout's directories: the guard reads
+`<its real dir>/../../config/go-model-policy.json`, and acp-run refuses a Go launch
+whose guard would read a different policy file than the helper enforces.
+
+Why the guard is part of the bundle: a Go launch with `--perm read-only` or
+deny, or with `--strip-user-config`, replaces OpenCode's global config with a
+per-run 0700 directory (no user plugins, MCP, project config; see above). That
+directory gets exactly one plugin, `plugins/ade-go-context`, a symlink to the
+trusted guard of the root above, so the cost guard survives sanitizing while every
+other plugin stays excluded (a user plugin of the same name is not copied). If the
+guard is absent, incomplete or paired with another policy file, the Go launch is
+refused (exit 2 before any agent starts; exit 1 if it is only noticed later),
+never run unguarded. Non-Go launches never read the guard. A Go launch that is not
+sanitized (`--perm all` without `--strip-user-config`, `--interactive`,
+`--keep-user-config`) runs on the user's own OpenCode config, where the guard is
+whatever the user linked (`opencode-plugins/go-context/README.md`).
+
+Without the bundle, non-Go prompts run as before, and a Go prompt is refused
+before any agent starts (exit 2 at launch, exit 1 if the applied model turns out
+to be Go), with a message naming the paths tried. A missing, unparsable or invalid
+policy never falls back to a permissive default. If a checkout helper exists but
+cannot load its policy, the run is refused rather than falling back to an installed
+snapshot.
 
 The agent table reflects the machine it was written on (for example Cline is
 pinned to the `cline-pass` provider, and `agy` runs Google's first-party ACP
@@ -760,3 +819,17 @@ it would replace this script.
 
 Several of the ideas above come from acpx (MIT): exit code 5, prompt retries on
 transient errors, tool-kind inference from titles, cooperative interrupts.
+
+### OpenCode Go bounded advice (2026-10-25)
+
+OpenCode prompt runs require `--model provider/model`; an unqualified or omitted
+model could resolve to Go without a cost check. Before prompting, the applied
+model must exactly match that qualified ID, with verified read-back; fuzzy
+aliases and unverified resumed selection are refused. Routine models are listed in
+`config/go-model-policy.json` (a standalone copy needs the bundle, see Install). Costly Go models require `--go-advisory --perm
+read-only --timeout 600` (a positive timeout no greater than 600). They refuse
+interactive mode, prompt retries and `--verify`; wrap-up grace is disabled.
+Go model selection through `--set model=...` is refused. Unknown Go models fail
+closed until classified. This does not restrict other providers' models.
+`acp-dispatch` supplies the flag only for an explicit bounded advisory role.
+See [context hygiene](../../docs/context-hygiene.md) for native V2 compaction.

@@ -77,8 +77,8 @@ def hook(monkeypatch, tmp_path, capsys):
 def test_constants_match_the_300k_window():
     assert nudge.AUTO_COMPACT_WINDOW == nudge.ASK_TOTAL == 300_000
     assert nudge.PAGE_TOTAL == 400_000
-    assert nudge.BOUNDARY_TOTAL == 150_000
-    assert nudge.EARLY_GROWTH < nudge.ASK_GROWTH == 200_000
+    assert nudge.BOUNDARY_TOTAL == 120_000
+    assert nudge.EARLY_GROWTH == 32_000 < nudge.ASK_GROWTH == 200_000
 
 
 def test_below_early_tier_stays_silent(hook, tmp_path):
@@ -87,7 +87,7 @@ def test_below_early_tier_stays_silent(hook, tmp_path):
     assert pings == []
 
 
-def test_early_message_at_plus_40k(hook, tmp_path):
+def test_early_message_at_plus_32k(hook, tmp_path):
     out, pings = hook("s-early", _transcript(tmp_path, 50_000, 50_000 + nudge.EARLY_GROWTH))
     assert "Context check" in out
     assert "Do not compact yet" in out
@@ -97,10 +97,10 @@ def test_early_message_at_plus_40k(hook, tmp_path):
     assert out2 == ""
 
 
-def test_boundary_note_once_at_150k(hook, tmp_path):
-    out, _ = hook("s-bound", _transcript(tmp_path, 120_000, nudge.BOUNDARY_TOTAL - 1))
+def test_boundary_note_once_at_120k(hook, tmp_path):
+    out, _ = hook("s-bound", _transcript(tmp_path, 100_000, nudge.BOUNDARY_TOTAL - 1))
     assert "handoff" not in out
-    path = _transcript(tmp_path, 120_000, nudge.BOUNDARY_TOTAL)
+    path = _transcript(tmp_path, 100_000, nudge.BOUNDARY_TOTAL)
     out, _ = hook("s-bound", path)
     assert "At the next task completion" in out
     assert "/new is ready" in out and "self-slash" not in out

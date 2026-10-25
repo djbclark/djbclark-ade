@@ -16,7 +16,7 @@
     acp-dispatch check (PATH)...                         classify reports: PATH is a report file,
                                                          a jobs/<name>.json record, or an out dir
     acp-dispatch finalize RECORD --exit RC               (internal) what the detached runner calls
-    acp-dispatch extend RECORD SECONDS                  add seconds, or 0 for no deadline
+    acp-dispatch extend RECORD SECONDS                  add seconds, or 0 for no deadline (not for a Go advisory slice)
     acp-dispatch tell RECORD MESSAGE [--from NAME]      send a message into a running slice
                                                          (MESSAGE - reads stdin; RECORD may be a
                                                          bare report path when no .json exists)
@@ -1816,6 +1816,10 @@ def extend_locked(record: Path, seconds: int) -> int:
         die("cannot extend a finished slice; use resume")
     if seconds < 0:
         die("seconds must be a whole number, 0 or more")
+    if "--go-advisory" in shlex.split(rec.get("cmd", "")):
+        # a costly Go advisory slice is one bounded turn (go_model_policy advisory_timeout_seconds):
+        # no extension, 0 (unlimited) included; acp-run refuses a hand-edited .extend file too
+        die("cannot extend a costly Go advisory slice: its deadline is fixed (after it finishes, resume with a new bounded --timeout)")
     control = Path(rec["log"] + ".extend")
     with record_lock(control):
         value = seconds
@@ -3951,6 +3955,17 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             "to pick the agent and model")
     service = resolve_service(a.agent, a.model)
     a.kind, a.service = kind, service
+    # Go cost classification applies to resumes too; never resume costly execution.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import go_model_policy
+    go_category = go_model_policy.classification(a.model) if a.agent == "opencode" else None
+    go_advisory = go_category == "advisory" and (getattr(a, "role", None) or (previous or {}).get("role")) == "advise"
+    go_error = go_model_policy.refusal(a.model, advisory=go_advisory, timeout=a.timeout,
+                                       perm=a.perm or "all", context=getattr(a, "context", None)) if a.agent == "opencode" else None
+    if go_error:
+        die(go_error)
+    if go_advisory and kind not in go_model_policy.policy()["advisory_kinds"]:
+        die("Go advisory use requires --kind judgment, research or frontier")
     if not is_resume and kind:
         if is_frontier_model(a.model) and kind != "frontier":
             die(f"model {a.model!r} is a frontier model; use --kind frontier "
@@ -3963,19 +3978,19 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             svc = router.BY_NAME.get(canon)
         if svc is not None:
             quota = router.load_snapshot()[0] if kind in svc.plenty_kinds else None
-            if not svc.eligible(kind, quota) and "route-override" not in approved:
+            if not svc.eligible(kind, quota) and not go_advisory and "route-override" not in approved:
                 refuse_kind(service or svc.name, kind)
         else:
             # Unknown agent/model: only [routing].default_profile kinds.
             if kind not in router.DEFAULT_PROFILE and "route-override" not in approved:
                 refuse_kind(service, kind)
-    if kind == "frontier":
+    if kind == "frontier" or go_advisory:
         role = getattr(a, "role", None) or (previous or {}).get("role") or "advise"
         if role == "exec" and not is_resume and "frontier-exec" not in approved:
             die("--role exec with --kind frontier needs ACP_OPERATOR_APPROVED=frontier-exec "
                 "(frontier is advisor by default; operator 2026-10-18)")
     else:
-        role = "exec"  # --role ignored for non-frontier
+        role = "exec"  # --role applies only to frontier or classified Go advice
     a.role = role
     if role == "advise" and (a.perm or "all") == "deny" and not is_resume:
         # --perm deny gives claude-agent-acp no tools at all: a review slice told to read files
@@ -4160,6 +4175,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         acp_cmd += ["--wrapup-grace", str(a.wrapup_grace), "--wrapup",
                     WRAPUP_TEXT.format(timeout=a.timeout, report=agent_report, done=agent_done)]
     acp_cmd += a.acp_arg or []
+    if go_advisory:
+        acp_cmd += ["--go-advisory"]
     slice_secs = a.timeout + max(a.wrapup_grace, 0)
     # acp-run's wait for a missing agent binary (and bin_settle) runs before its --timeout starts, so it is
     # on top of the slice, not inside it (adversary PR 18 follow-up E)

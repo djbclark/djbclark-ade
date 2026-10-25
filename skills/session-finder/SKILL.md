@@ -166,7 +166,11 @@ a. **Running and not finished → message it, even while it is `working` on
    pane, then the Claude messaging socket; a Hermes gateway conversation by `hermes --resume SID -z`) and tries the next route itself when one fails before sending;
    it errors only when every route has, listing each reason (`--plan` shows the order, `--via R` pins one).
    Don't pick a channel by hand or hand-roll a waiter. A working Claude queues it for its next tool round. Put a
-   long brief in a file and relay one line naming its absolute path. Don't resend
+   long brief in a file and relay one line naming its absolute path. For a headless worker or a custom
+   `acp-dispatch --out` directory absent from the fleet list, pass its exact record:
+   `relay.py /absolute/jobs/name.json "<text asking for ack NAME>" --via dispatch`. The output names
+   its inbox and replies file. `queued` proves only the write; a named `REPLY N:` acknowledgement
+   proves the worker read it. Finished or closed records are refused, never resumed here. Don't resend
    a refused message, and don't hand the operator a clipboard prompt to paste in
    its place: relay it.
 b. **Running but finished** (`finished: /handoff` or `/quit`: its last prompt was a
@@ -334,8 +338,8 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 |---|---|---|
 | claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (route ladder, best first, falls back by itself: keys into its herdr/Orca/tmux pane → Claude socket frame; queued while it works; the pane route is skipped on a typed draft, and an open question stops all routes; a dim/grey suggested prompt is not a draft). A Paseo-hosted one (`where: host=paseo agent=<id>`, or you were handed a `PASEO_AGENT_ID`): `relay.py <sid|name|agent-id> "<text>"` runs `paseo send --behavior steer -- <id> <text>` (its only route; any refusal from `paseo agent inspect` ends the run) with your own `PASEO_AGENT_ID` kept, so Paseo labels it an agent message from you (a caller that is not a Paseo agent gets a `[relay from <name>] ` prefix), never the operator's turn. It re-runs `paseo agent inspect` first and refuses an archived agent, a pending permission or question card (helm only lists a card of a Paseo agent that has no Claude transcript and presses no keys there: the Paseo UI, or `paseo permit allow|deny <agent> -- <request id>` per card, answers it), a status other than idle/running, and text starting with `/`; `--idle S` (finite, > 0) waits for idle first; no draft check, there is no input box. Exit 0 means "accepted" (the daemon's acknowledgement), or "delivered" once a Claude transcript shows the text (2026-10-20). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
-| a headless `acp-dispatch` slice (a bigteam/lead worker: `where: unknown terminal`, no pane) | `acp-dispatch tell <jobs/NAME.json> "<text>"`; `fleet.py show` and `relay.py` name the record (2026-10-18) | `acp-dispatch resume <record>` |
-| an `acp-dispatch` / `acp-run claude` slice (headless; `fleet.py` shows no channel) | `SendMessage({to: "<name>"})`: it is in `ListAgents` as a peer (2026-10-18: hermes-agent-1e, unreachable by relay, listed there). Any agent's slice: `acp-dispatch tell RECORD "<msg>"` (2026-10-18; appends to `jobs/<name>.inbox.md`, also writes to a Claude slice's live socket; the slice answers in `jobs/<name>.replies.md`, `acp-dispatch check` shows them). Slices dispatched before 051a269 lack the footer item that makes them read the inbox: go through their lead | `acp-dispatch resume RECORD` |
+| a headless `acp-dispatch` slice (including custom `--out` records and workers with no fleet row) | `relay.py /absolute/jobs/NAME.json "<text asking for ack NAME>" --via dispatch`; `queued` is not delivery; verify the named acknowledgement in the printed replies file | `acp-dispatch resume <record>` only for a new authorized task, never as a relay side effect |
+| an `acp-dispatch` / `acp-run claude` slice (headless) | Use `relay.py` with its fleet id or exact job-record path as in the previous row; verify a named acknowledgement in the replies file. Slices older than 051a269 lack the inbox-reading footer: reach them through their lead. | `acp-dispatch resume RECORD` only for a new authorized task |
 | hermes (Telegram/desktop chat, `hermes-gw`) | `relay.py <id|sid> "<text>"` (2026-10-23): `hermes --resume <sid> -z` runs one turn in that conversation's own transcript, tagged `[relay from <name>] `; Hermes's reply is printed (untrusted data, not posted in the chat); it refuses Hermes's own conversation, an unknown session is refused before writing, any other failure is "unverified" and a turn past max(100, `--wait`) s is left running (relay.py never kills it; a caller's tool timeout that kills the process tree does, so give the command max(100, `--wait`) + 50 s or run it in the background) and holds a per-conversation lock (a cut-off relay.py counts as unverified: do not resend). `ask_hermes` (MCP) is a separate one-shot session, not this conversation; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
 | hermes (to make it *change* something: `ask_hermes` is read-only) | after djbclark's yes for that run: `ACP_OPERATOR_APPROVED=hermes launch.py --agent hermes --cwd ~ -f brief.md --model <explicit id>`; pick the id from its `new_session` model list, never `custom:*` (2026-10-17: `custom:big-pickle` went to sipb-llms-proxy, not ClinePass) | `launch.py reply <id>` |
@@ -348,6 +352,49 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
 bypass a permission denial; grok is excluded (2026-10-06).
+
+## Direct Herdr control and detached relay workers (2026-10-25)
+
+For direct Herdr control, follow the upstream `herdr` skill's caller-context
+boundary. A precondition must gate execution: check its exit status in a
+separate tool call, or use conditional shell logic, for example:
+
+```bash
+if test "${HERDR_ENV:-}" = 1; then
+  herdr agent list
+else
+  printf '%s\n' 'Direct Herdr control requires a Herdr-managed pane.' >&2
+  exit 1
+fi
+```
+
+A bare `test` followed by another command does not gate that command. Do not
+set `HERDR_ENV=1` to make an outside caller pass this check.
+
+Codex's `shell_environment_policy.inherit = "core"` can omit Herdr context
+from tool subprocesses even when the TUI itself is inside Herdr. In that
+case, recover only this TUI's inherited context from its own live process and
+owning shell, verify that both descend from Herdr and agree on the caller
+IDs, and pass those verified values explicitly to the helper. Confirm that
+`agent get` for that pane names this TUI's exact session ID before controlling
+it. Never substitute the UI-focused pane or another process's context.
+
+This is a boundary for an agent's direct control of its current session.
+Detached `relay.py` delivery workers intentionally scrub caller identity and
+Herdr context; they resolve an explicitly recorded target and verify its
+identity and delivery themselves. Do not add a `HERDR_ENV` requirement to
+those workers or weaken their target and delivery checks. Use the canonical
+relay from outside Herdr when coordinating an explicitly requested peer.
+
+## Codex messages in Herdr (2026-10-25)
+
+Relay submits a Herdr message with one `herdr agent prompt` call, so the entire
+message is bracketed paste followed by submission. Do not replace that with raw
+`pane send-text` plus a separate Enter: Codex can leave a long message unsent.
+A visible message in the composer is not delivery. For Codex, relay verifies the
+exact new user message in the rollout belonging to its session id, under
+`CODEX_HOME` (default `~/.codex`). If that proof is missing, it reports unverified;
+never ask the operator to press Enter as the normal delivery path.
 
 ## 7. How it works (nothing for sessions to do)
 

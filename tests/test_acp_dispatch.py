@@ -754,6 +754,22 @@ class TestSliceControls(Base):
             self.assertEqual(self.record()["timeout"], want)
         self.assertEqual(run(["extend", str(p), "-1"]).returncode, 2)
 
+    def test_extend_refuses_costly_go_advisory_even_for_zero_and_leaves_no_control_file(self):
+        self.dispatch()
+        p = self.record_path()
+        rec = self.record()
+        rec.update(finished=None, status="running", exit=None, timeout=600,
+                   cmd=rec["cmd"] + " --go-advisory --perm read-only --timeout 600")
+        Path(rec["done"]).unlink()
+        p.write_text(json.dumps(rec))
+        for value in ("0", "60"):
+            r = run(["extend", str(p), value])
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("costly Go advisory", r.stderr)
+        self.assertFalse(Path(rec["log"] + ".extend").exists())
+        self.assertEqual(self.record()["timeout"], 600)
+        self.assertEqual(self.record().get("wait_timeout"), rec.get("wait_timeout"))
+
     def test_resume_preserves_session_and_archives_each_report(self):
         self.dispatch(mode="timeout_wrapup")
         self.assertEqual(self.record()["session_id"], "fake-session")

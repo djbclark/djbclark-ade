@@ -80,6 +80,7 @@ class Harness(unittest.TestCase):
                   "ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER"):
             os.environ.pop(k, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
+        os.environ["CODEX_HOME"] = str(self.tmp / "codex")
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
         names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
                  "paseo_run", "paseo_inspect", "paseo_probe", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY", "DEFER_DIR", "DEFER_POLL",
@@ -235,12 +236,84 @@ class TestFallback(Harness):
         self.assertEqual((rc, self.calls), (0, ["socket"]))
         self.assertIn("claude socket", out)
 
-    def test_real_type_line_herdr_send_text_timeout_does_not_fall_back(self) -> None:
+    def test_real_type_line_herdr_prompt_timeout_does_not_fall_back(self) -> None:
         relay.type_line = saved_type_line
         relay.claude_socket = lambda s: "/tmp/x.sock"
         relay.keys_run = lambda *cmd, timeout=10: "failed"
         rc, _, _ = self.run_main(sess())
         self.assertEqual((rc, self.calls), (1, []))
+
+    def test_codex_composer_text_is_not_delivery(self) -> None:
+        relay.screen = lambda chan, lines=20: "  › hello there friend\n    wrapped composer text"
+        rc, out, err = self.run_main(sess(agent="codex", status="idle"), "--wait", "0.01")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertNotIn("; it takes the message now", out)
+
+    def test_codex_delivery_requires_a_new_user_message(self) -> None:
+        tx = self.tmp / "codex.jsonl"
+        tx.write_text("")
+
+        def typed(chan, text):
+            self.calls.append("type")
+            with tx.open("a") as f:
+                f.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}}) + "\n")
+            return True
+
+        relay.type_line = typed
+        rc, out, err = self.run_main(sess(agent="codex", status="idle", transcript=str(tx)))
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": delivered;", out)
+
+    def test_codex_history_echo_and_partial_text_do_not_prove_delivery(self) -> None:
+        tx = self.tmp / "codex.jsonl"
+        tx.write_text(json.dumps({"type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "hello there friend"}]}}) + "\n")
+        mark = tx.stat().st_size
+        with tx.open("a") as f:
+            for role, text in (("assistant", "hello there friend"),
+                               ("user", "hello there friend with operator additions")):
+                f.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": role,
+                    "content": [{"type": "input_text", "text": text}]}}) + "\n")
+        self.assertIsNone(relay.tx_state(tx, mark, "hello there friend"))
+
+    def test_codex_first_prompt_resolves_the_new_session_and_rejects_stale_text(self) -> None:
+        root = Path(os.environ["CODEX_HOME"]) / "sessions/2026/10/25"
+        root.mkdir(parents=True)
+        tx = root / f"rollout-2026-10-25T00-00-00-{SID}.jsonl"
+        current = {}
+
+        def typed(chan, text):
+            current.update(agent="codex", agent_session={"value": SID})
+            tx.write_text(json.dumps({"timestamp": stamp(), "type": "response_item", "payload": {
+                "type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": text}]}}) + "\n")
+            return True
+
+        relay.type_line = typed
+        with mock.patch.object(relay.fleet, "herdr_json", lambda *args: {"agent": dict(current)}):
+            rc, out, err = self.run_main(sess(agent="codex", status="idle", sid=None))
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": delivered;", out)
+        # A session id alone is insufficient when a first-send lookup resolves an
+        # existing rollout: an older equal prompt must not count as this send.
+        current.clear()
+        tx.unlink()
+
+        def stale_typed(chan, text):
+            typed(chan, text)
+            record = json.loads(tx.read_text())
+            record["timestamp"] = "2000-01-01T00:00:00Z"
+            tx.write_text(json.dumps(record) + "\n")
+            return True
+
+        relay.type_line = stale_typed
+        with mock.patch.object(relay.fleet, "herdr_json", lambda *args: {"agent": dict(current)}):
+            rc, out, err = self.run_main(sess(agent="codex", status="idle", sid=None), "--wait", "0.01")
+        self.assertEqual(rc, 1, (out, err))
 
     def armed(self, mark: int = 0, draft: str = "") -> None:
         relay.note_unsent("cccccccc", "hello there friend", draft, mark)
@@ -963,6 +1036,125 @@ class TestOtherRoutes(Harness):
         self.assertEqual(argv[1], "tell")
         self.assertEqual(argv[argv.index("--") + 1:], ["/x/jobs/a.json", "hello there friend"])
         self.assertIn("acp-dispatch", out)
+
+
+class TestExplicitDispatchRecord(Harness):
+    """An acp-dispatch job record named by exact path is a relay target on its own (2026-10-25: a running Collie omp worker whose
+    `--out` record was /private/tmp/.../jobs/collie-native.json was in no bigteam glob and no fleet row, so relay found no session)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.jobs = self.tmp / "elsewhere" / "jobs"    # outside BIGTEAM and STATE_DIR: nothing may find it by searching
+        self.jobs.mkdir(parents=True)
+        self.tell: list[list[str]] = []
+        self.tell_result = (0, "delivered: inbox", "")
+        real_run = relay.subprocess.run
+
+        def run(cmd: Any, **kw: Any) -> Any:
+            if len(cmd) > 1 and Path(cmd[0]).name == "acp-dispatch":
+                self.tell.append(list(cmd))
+                return mock.Mock(returncode=self.tell_result[0], stdout=self.tell_result[1], stderr=self.tell_result[2])
+            return real_run(cmd, **kw)    # `ps` for the record's pid_start
+        patcher = mock.patch.object(relay.subprocess, "run", run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def record(self, name: str = "collie-native", **kw: Any) -> Path:
+        rec = {"name": name, "agent": "omp", "dir": str(self.tmp), "status": "running", "session_id": "01a17369-ff4b-731a-88ea-1731546b7284",
+               "pid": os.getpid(), "finished": None, "closed": None, "exit": None, "report": str(self.jobs / f"{name}-report.md"),
+               "done": str(self.jobs / f"{name}-report.md.done"), **kw}
+        path = self.jobs / f"{name}.json"
+        path.write_text(json.dumps(rec))
+        return path
+
+    def relay_to(self, ident: Any, *argv: str) -> tuple[int, str, str]:
+        relay.fleet.sessions = lambda: []    # a headless omp slice has no fleet row
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = relay.main(["--wait", "2", str(ident), "please ack ack-1", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_running_headless_record_outside_every_glob_is_told_and_only_queued(self) -> None:
+        path = self.record()
+        rc, out, err = self.relay_to(path, "--via", "dispatch", "--json")
+        self.assertEqual(rc, 0, err)
+        res = json.loads(out)
+        self.assertEqual((res["route"], res["result"]), ("dispatch", "queued"))    # the inbox write is not a read
+        want = path.resolve()    # the tmp dir sits behind a symlink on macOS (/var -> /private/var); relay resolves it as acp-dispatch does
+        self.assertEqual((res["inbox"], res["replies"]), (str(want.with_suffix(".inbox.md")), str(want.with_suffix(".replies.md"))))
+        argv = self.tell[0]
+        self.assertEqual(argv[1], "tell")
+        self.assertEqual(argv[argv.index("--") + 1:], [str(path.resolve()), "please ack ack-1"])
+
+    def test_active_record_with_a_stored_pid_start_is_accepted_and_a_reused_pid_is_not(self) -> None:
+        start = relay.subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True, check=False).stdout.strip()
+        self.assertTrue(start)
+        rc, _, err = self.relay_to(self.record("same", pid_start=start))
+        self.assertEqual(rc, 0, err)
+        self.tell.clear()
+        rc, _, err = self.relay_to(self.record("reused", pid_start="Mon Jan  1 00:00:00 1990"))
+        self.assertEqual(rc, 1)
+        self.assertIn("another process now", err)
+        self.assertEqual(self.tell, [])
+
+    def test_a_dead_pid_is_not_a_running_slice(self) -> None:
+        child = relay.subprocess.Popen(["true"])
+        child.wait()
+        rc, _, err = self.relay_to(self.record(pid=child.pid))
+        self.assertEqual(rc, 1)
+        self.assertIn("is gone", err)
+        self.assertEqual(self.tell, [])
+
+    def test_missing_unreadable_and_malformed_records_are_refused_before_any_tell(self) -> None:
+        bad = {"missing": self.jobs / "nope.json", "not json": self.jobs / "junk.json", "a list": self.jobs / "list.json",
+               "no dir": self.jobs / "nodir.json", "agent not a string": self.jobs / "agent.json"}
+        bad["not json"].write_text("{not json")
+        bad["a list"].write_text("[1]")
+        bad["no dir"].write_text(json.dumps({"agent": "omp", "status": "running"}))
+        bad["agent not a string"].write_text(json.dumps({"agent": 7, "dir": "/x", "status": "running"}))
+        for label, path in bad.items():
+            with self.subTest(label):
+                rc, out, err = self.relay_to(path)
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn("relay: not sent:", err)
+        self.assertEqual(self.tell, [])
+
+    def test_finished_or_closed_records_are_refused_and_never_resumed(self) -> None:
+        done_file = self.jobs / "late.done"
+        done_file.write_text("")
+        cases = {"status done": {"status": "done", "finished": 1.0, "exit": 0}, "finished only": {"finished": 1.0},
+                 "closed": {"closed": True}, "no-report": {"status": "no-report"}, "done file present": {"done": str(done_file)}}
+        for label, fields in cases.items():
+            with self.subTest(label):
+                rc, out, err = self.relay_to(self.record(label.replace(" ", "-"), **fields))
+                self.assertEqual((rc, out), (1, ""))
+                self.assertRegex(err, r"is (closed|finished)")
+                self.assertIn("never resumes", err)
+        self.assertEqual(self.tell, [])    # no tell, so nothing could have started an auto-resume
+
+    def test_a_tell_refusal_is_not_sent_and_not_queued(self) -> None:
+        self.tell_result = (1, "", "slice collie-native is finished; the message would never be read.")
+        rc, out, err = self.relay_to(self.record())
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("refused", err)
+        self.assertIn("finished", err)
+
+    def test_the_slice_that_runs_relay_cannot_message_its_own_record(self) -> None:
+        with mock.patch.object(relay.fleet, "ancestors", lambda: {os.getpid()}):
+            rc, _, err = self.relay_to(self.record())
+        self.assertEqual(rc, 1)
+        self.assertIn("this session", err)
+        self.assertEqual(self.tell, [])
+
+    def test_plan_names_the_dispatch_route_and_sends_nothing(self) -> None:
+        rc, out, _ = self.relay_to(self.record(), "--plan")
+        self.assertEqual((rc, out.strip(), self.tell), (0, "dispatch", []))
+
+    def test_a_session_name_that_is_not_a_path_still_goes_through_find(self) -> None:
+        with mock.patch.object(relay, "find_herdr_agent", lambda ident, ss: []):    # never the live herdr
+            rc, _, err = self.relay_to("collie-native")    # no `/`: a name, not a record
+        self.assertEqual(rc, 1)
+        self.assertIn("no session(s) match", err)
 
 
 class TestHermesRoute(Harness):
@@ -2715,14 +2907,26 @@ class TestDeferredSend(Harness):
         self.assertEqual((self.calls, relay.rec_all()), (["type"], []))
 
     def test_a_working_non_claude_pane_is_queued_and_delivered_when_idle(self) -> None:
-        pane = {"v": sess(agent="codex")}
+        tx = self.tmp / "codex.jsonl"
+        tx.write_text("")
+        pane = {"v": sess(agent="codex", transcript=str(tx))}
         relay.fleet.sessions = lambda: [dict(pane["v"]), dict(self.sender, self=True)]
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = relay.main(["peer-fb", "hello there friend", "--wait", "2"])
         self.assertEqual((rc, self.calls, out.getvalue().startswith("queued: ")), (0, [], True), err.getvalue())
         rid = relay.rec_all()[0]["id"]
-        pane["v"] = sess(agent="codex", status="idle")
+        pane["v"] = sess(agent="codex", status="idle", transcript=str(tx))
+
+        def typed(chan, text):
+            self.calls.append("type")
+            with tx.open("a") as f:
+                f.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}}) + "\n")
+            return True
+
+        relay.type_line = typed
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(relay.deliver(rid), 0)
         self.assertEqual((self.calls, relay.rec_read(rid)["state"]), (["type"], "delivered"))    # type_line is the pane send
