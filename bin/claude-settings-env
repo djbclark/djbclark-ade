@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep required `env` keys in ~/.claude/settings.json (2026-10-16).
+"""Keep required and default `env` keys in ~/.claude/settings.json (2026-10-16).
 
 graft's `Stop` hook runs `graft build`, which appends a `/graft/` block to the
 repo's tracked `.gitignore` (`ensureGitignored`), even when `.git/info/exclude`
@@ -7,12 +7,18 @@ already ignores it. The only off switch is the env var `GRAFT_NO_GITIGNORE=1`,
 and the build runs inside hook and MCP child processes that no wrapper on PATH
 sees. Claude Code applies the `env` block of settings.json to every child
 (hooks, stdio MCP servers, Bash tool), so that block is the one place that
-covers them all. settings.json is not tracked here, so this script sets it:
+covers them all. settings.json is not tracked here, so this script sets it.
+Since 2026-10-23 it also adds CLAUDE_CODE_SUBAGENT_MODEL=sonnet (see DEFAULTS):
 
-    claude-settings-env            # add any missing key, print what changed
-    claude-settings-env --check    # exit 1 if a key is missing or different
+    claude-settings-env            # add or correct REQUIRED keys, add absent DEFAULTS
+    claude-settings-env --check    # exit 1 if a REQUIRED key is missing or different,
+                                   # or a DEFAULTS key is absent
 
-Existing keys not listed in REQUIRED are never touched. The file is replaced
+A REQUIRED key has one valid value and is corrected. A DEFAULTS key is a policy
+knob: it is added when absent, and a value the operator set on purpose (say
+`opus`, or `inherit` to opt out) is left alone and reported. Nothing runs this
+script automatically: run it on a new machine or after settings.json is rewritten.
+Keys in neither table are never touched. The file is replaced
 atomically on its realpath, keeping its mode and key order.
 """
 from __future__ import annotations
@@ -30,18 +36,32 @@ REQUIRED = {
     "GRAFT_NO_GITIGNORE": "1",
 }
 
+DEFAULTS = {
+    # Agent-tool sub-agents and teammates with no `model` default to Sonnet instead of
+    # inheriting an Opus or Fable lead's model (djbclark, 2026-10-23; docs/queue.md
+    # "Follow-ups from PRs 29 and 30" item 2). A definition's `model:` or a model passed in
+    # the call still wins (Claude Code 2.1.251+); Explore and Plan ignore it.
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+}
 
-def missing(settings: dict, required: dict[str, str]) -> dict[str, str]:
+
+def missing(settings: dict, required: dict[str, str], defaults: dict[str, str] | None = None) -> dict[str, str]:
     env = settings.get("env") or {}
-    return {k: v for k, v in required.items() if env.get(k) != v}
+    todo = {k: v for k, v in required.items() if env.get(k) != v}
+    todo.update({k: v for k, v in (defaults or {}).items() if k not in env})
+    return todo
 
 
-def apply(path: Path, required: dict[str, str], check: bool) -> int:
+def apply(path: Path, required: dict[str, str], check: bool, defaults: dict[str, str] | None = None) -> int:
     real = path.resolve()
     settings = json.loads(real.read_text())
-    todo = missing(settings, required)
+    env = settings.get("env") or {}
+    for k, v in (defaults or {}).items():
+        if k in env and env[k] != v:
+            print(f"left alone in {path}: {k}={env[k]} (default {v})")
+    todo = missing(settings, required, defaults)
     if not todo:
-        print(f"ok: {', '.join(required)} already set in {path}")
+        print(f"ok: {', '.join([*required, *(defaults or {})])} already set in {path}")
         return 0
     if check:
         print(f"missing in {path}: {', '.join(f'{k}={v}' for k, v in todo.items())}")
@@ -62,10 +82,10 @@ def apply(path: Path, required: dict[str, str], check: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--check", action="store_true", help="report only; exit 1 if a key is missing")
+    ap.add_argument("--check", action="store_true", help="report only; exit 1 if a key is missing or a REQUIRED one differs")
     ap.add_argument("--settings", type=Path, default=Path.home() / ".claude" / "settings.json")
     args = ap.parse_args(argv)
-    return apply(args.settings, REQUIRED, args.check)
+    return apply(args.settings, REQUIRED, args.check, DEFAULTS)
 
 
 if __name__ == "__main__":

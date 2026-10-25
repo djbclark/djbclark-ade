@@ -448,9 +448,12 @@ sets `ZCODE_BIN` to `vendor/zcode.cjs` (fixed 2026-10-15). The earlier
 "refuses every switch" error (`unsupported config option or switch failed:
 model`) was that missing variable: the server followed `which zcode`, a
 symlink, and never injected `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`. The
-2026-10-11 weekly-limit note was a different failure. `--model` works and
-`acp-dispatch zcode` still does not require it. Pass it when you want
-GLM-5.3-Flash. Effort is option `thought` (`low` / `high` / `max` on GLM-5.3,
+2026-10-11 weekly-limit note was a different failure. `--model` works (a bare `GLM-5.3` or
+`GLM-5.3-Flash` means the coding-plan pool's `builtin:zai-coding-plan\<name>`;
+full ids work too, 2026-10-24) and `acp-dispatch zcode` still does not
+require it. Pass it when you want GLM-5.3-Flash. `--perm read-only` and
+`deny` really remove zcode's tools since 2026-10-24 (acp-run's
+`zcode-denylist-shim.cjs`; before it zcode was offered Bash under read-only). Effort is option `thought` (`low` / `high` / `max` on GLM-5.3,
 default max; `medium` and `xhigh` exit 2, no neighbor map). `--context N` is
 only `ZCODE_ACP_AUTO_COMPACT_THRESHOLD`, a compact cap; GLM-5.3's window is
 fixed at 1,000,000. A 2026-10-15 prompt died `project_token_login_failed` at
@@ -766,6 +769,10 @@ method that runs the waves.
     whenever `bin/claude-quota-guard` reports `tight` or worse (see *Probes*). Omp
     spends through the same Claude account: while a shared Claude window is exhausted,
     aiuse marks omp rate-gated and `--available` omits it.
+    Since 2026-10-23 `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` (settings `env`, set by running
+    `bin/claude-settings-env`; `--check` shows drift) makes every unpinned Agent-tool sub-agent and teammate
+    Sonnet: pass `model: "opus"` in the call for a judgment sub-agent; pinned
+    definitions keep theirs; the built-in Explore and Plan agents ignore it.
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and
 `config/routing.toml` is the source of truth: the kinds, each service's

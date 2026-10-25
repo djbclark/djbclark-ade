@@ -111,6 +111,50 @@ class TestAcpRunWaits(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 5)
 
 
+class TestAcpRunNamesTheWrappedExecutable(unittest.TestCase):
+    """Codex 4322594869 (PR 18): YOLO_CMD['crush'] starts with `env NAME=VAL ... crush-acp`, so
+    shutil.which(cmd[0]) found /usr/bin/env and crush skipped the binary wait and the exit-127 path."""
+
+    def acp(self, *args: str, wait: str = "0.5") -> subprocess.CompletedProcess[str]:
+        # PATH has env (/usr/bin) but never crush-acp
+        env = {**os.environ, "PATH": "/usr/bin:/bin", "ACP_RUN_BIN_WAIT": wait, "ACP_RUN_BIN_POLL": "0.1"}
+        return subprocess.run([UV, "run", "--quiet", "--script", str(ACP_RUN), *args], env=env, check=False,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+
+    def test_crush_with_no_crush_acp_waits_then_exits_127(self):
+        r = self.acp("crush", "-p", "hi", "--timeout", "5", "--perm", "all")
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertIn("crush-acp not found on PATH; waiting up to 0.5 s", r.stderr)
+        self.assertIn("acp-run: crush-acp not installed", r.stderr)
+
+    def test_crush_with_the_wait_disabled_is_still_not_installed(self):
+        r = self.acp("crush", "-p", "hi", "--timeout", "5", "--perm", "all", wait="0")
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertNotIn("waiting", r.stderr)
+        self.assertIn("acp-run: crush-acp not installed", r.stderr)
+
+    def test_list_marks_crush_missing_when_only_env_is_on_path(self):
+        r = self.acp("--list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        crush = [ln for ln in r.stdout.splitlines() if ln[3:].startswith("crush ")]
+        self.assertEqual(len(crush), 1, r.stdout)
+        self.assertTrue(crush[0].startswith("-- "), crush[0])
+
+    def test_the_executable_skips_env_and_its_assignments(self):
+        import ast
+        tree = ast.parse(ACP_RUN.read_text())
+        fn = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "agent_executable"]
+        self.assertEqual(len(fn), 1)
+        ns: dict = {"os": os}
+        exec(compile(ast.Module(fn, []), str(ACP_RUN), "exec"), ns)     # noqa: S102 - the repo's own file
+        exe = ns["agent_executable"]
+        self.assertEqual(exe(["env", "A=1", "B=x=y", "crush-acp", "acp", "--yolo"]), "crush-acp")
+        self.assertEqual(exe(["env", "crush-acp"]), "crush-acp")
+        self.assertEqual(exe(["claude-agent-acp"]), "claude-agent-acp")
+        self.assertEqual(exe(["codex-acp", "A=1"]), "codex-acp")        # only env's own assignments are skipped
+        self.assertEqual(exe(["env"]), "env")
+
+
 class TestClassify(unittest.TestCase):
     """The not-installed class needs acp-run's own line and exit 127, not text that merely quotes it."""
 
@@ -212,7 +256,7 @@ class TestPreflightRemembersANotInstalledAgent(Base):
                     unittest.mock.patch.dict(mod["preflight"].__globals__, {"note_outage_in_aiuse": lambda *a: "off"}):
                 first = mod["preflight"]("acp-run", "claude", "m1")
                 second = mod["preflight"]("acp-run", "claude", "m1")
-                state = mod["preflight_state"]("claude", "m1")
+                state = mod["not_installed_state"]("claude")
                 ttl = mod["NOT_INSTALLED_TTL"]
                 # age the negative entry past its TTL: the next dispatch probes again
                 rec = json.loads(state.read_text()) if state.exists() else None
@@ -232,6 +276,32 @@ class TestPreflightRemembersANotInstalledAgent(Base):
         self.assertIn("retry after", second[1])
         self.assertEqual(len(calls), 2, calls)          # probe 1, (cached), probe 3 after the TTL
         self.assertEqual(ttl, 120)
+
+    def test_another_model_of_the_same_agent_reuses_the_negative_result(self):
+        # Codex 4323297404 (PR 22): the record was keyed by (agent, model), so m2 paid the binary wait again;
+        # acp-run picks the executable from the agent alone. A different agent still probes.
+        calls: list = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=self.MISSING)
+        with unittest.mock.patch.dict(os.environ, {"ACP_DISPATCH_PREFLIGHT": str(self.tmp / "pf")}):
+            mod = runpy.run_path(str(SCRIPT))
+            with unittest.mock.patch("subprocess.run", fake_run), \
+                    unittest.mock.patch.dict(mod["preflight"].__globals__, {"note_outage_in_aiuse": lambda *a: "off"}):
+                first = mod["preflight"]("acp-run", "claude", "m1")
+                n_first = len(calls)
+                other_model = mod["preflight"]("acp-run", "claude", "m2")
+                no_model = mod["preflight"]("acp-run", "claude", None)
+                n_same_agent = len(calls)
+                other_agent = mod["preflight"]("acp-run", "codex", "m1")
+        self.assertEqual(first[2], "not-installed")
+        self.assertEqual((other_model[0], other_model[2]), (False, "not-installed"))
+        self.assertEqual((no_model[0], no_model[2]), (False, "not-installed"))
+        self.assertIn("retry after", other_model[1])
+        self.assertEqual(n_same_agent, n_first, calls)      # m2 and the default model never probed
+        self.assertEqual(other_agent[2], "not-installed")
+        self.assertGreater(len(calls), n_same_agent)         # codex had its own probe
 
     def test_other_failures_and_successes_are_not_negatively_cached(self):
         calls, first, second, third, _ = self.run_preflight([(1, "", "boom: connection reset\n")])
