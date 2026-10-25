@@ -191,12 +191,13 @@ id such as w2F:p45, a session id prefix, a Paseo agent id), DIR the directory it
 sending PROCESS: fleet's `self` row (HERDR_PANE_ID, else the pane an ancestor process runs in), PASEO_AGENT_ID (else the agent the Paseo
 daemon hosts above it), CLAUDE_CODE_SESSION_ID, a label declared in RELAY_SENDER_NAME. A Codex tool shell keeps none of these variables
 (this machine's `shell_environment_policy inherit = "core"`), which is why the `codex` process above it is read. Only when nothing resolves
-the header says `unknown (no sender id: checked ...)` and names what was checked.
+the relay REFUSES to send (exit 4, nothing sent, queued or recorded) and names what was checked; the caller re-runs with RELAY_SENDER_NAME=<label> (a job
+or script with no session) or from inside a session. No text is ever sent under `[relay from unknown]`. `--plan` needs no sender.
 
 Exit: 0 delivered or queued (verified in the transcript or pane, or for paseo/dispatch/launch, or a socket frame to a working session, the route's
 acknowledgement; an idle session's socket frame is verified in its transcript; for hermes, the turn ran on the stored transcript;
 queued: a deferred send, `queued: <id>` on stdout, delivered later or the sender is told); 1 not sent (every route failed, listed, or a busy target and a sender that cannot be told) or sent but unverified; 2 usage or a
-refused ack rule. With --ack: 0 delivered, 1 not delivered, 3 unverified, 2 as above.
+refused ack rule; 4 not sent because the sender cannot be resolved (--json: {"sent": false, "error": "no_sender", "reason": ...}; takes precedence over 3 with --ack). With --ack: 0 delivered, 1 not delivered, 3 unverified, 2 and 4 as above.
 """
 import argparse
 import contextlib
@@ -1066,17 +1067,30 @@ def sender_label(me):
     return " ".join(p for p in parts if p) + (f" ({where_})" if where_ else "")
 
 
-SENDER_CHECKED = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME")
+SENDER_ENV = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME")
+NO_SENDER_EXIT = 4    # `not sent: the sender cannot be resolved` (2026-10-25): 0, 1, 2 and (with --ack) 3 were taken
+
+
+class NoSender(Exception):
+    """A text was about to be sent under no resolvable sender: a header `[relay from unknown]` is never sent."""
+
+
+def no_sender_reason():
+    """The refusal text for a caller whose sender cannot be resolved: what was checked, and what the caller re-runs with."""
+    return ("cannot tell who is sending, so the receiver could not answer you. Checked, none resolved: environment variables "
+            f"{', '.join(SENDER_ENV)} (and RELAY_SENDER inside a relayed Hermes turn); the environment of every ancestor process "
+            "(HERDR_PANE_ID, PASEO_AGENT_ID, and the Paseo daemon hosting one); fleet's `self` rows. Re-run with RELAY_SENDER_NAME=<label> "
+            "set (a job or script with no session: a short name such as load-watch, `RELAY_SENDER_NAME=load-watch relay.py ...`), or from "
+            "inside a herdr pane, a Paseo agent or a Claude Code session")
 
 
 def sender_header_name(listed):
-    """sender_name for a header the receiver reads: when nothing resolves, "unknown" plus what was checked (these environment
-    variables, then the environment of this process's ancestors, then fleet's `self` rows), so the receiver and the operator
-    can see why and fix the sender's environment instead of reading a bare `unknown`. Never stored in a record."""
+    """sender_name for a header the receiver reads. NoSender when nothing resolves: main refuses such a relay before any route
+    runs, so this is the second guard that keeps `[relay from unknown]` out of every sent text."""
     name = sender_name(listed)
-    if name != "unknown":
-        return name
-    return f"unknown (no sender id: checked {', '.join(SENDER_CHECKED)}, ancestors, fleet self rows)"
+    if name == "unknown":
+        raise NoSender(no_sender_reason())
+    return name
 
 
 def sender_name(listed):
@@ -2264,7 +2278,7 @@ def defer_send(s, a, text, listed, why):
         hops = hermes_hops()
         label = sender_name(listed)
         if HERMES_SENDER.fullmatch(label) and not hops:
-            label = "unknown"    # a session merely NAMED like a Hermes relay is not one: the deliverer would refuse the label
+            label = "unknown"    # a session merely NAMED like a Hermes relay is not one: the deliverer would refuse the label (and now refuses `unknown` too: exit 4)
         if not ident:
             print(f"relay: [{s['id']}] not sent: that session is busy and cannot take it now; deferring needs an identifiable sender "
                   "(it gets a notice if the send fails). Retry with --idle S, or --no-defer for the plain refusal", file=sys.stderr)
@@ -2658,9 +2672,6 @@ def _main(argv=None, sweep=True):
     if not text:
         print("relay: empty text", file=sys.stderr)
         return 2
-    if sweep and DEFER_DIR.is_dir():
-        with contextlib.suppress(Exception):    # cheap and best effort: never in the way of a relay
-            sweep_all()
     listed = fleet.sessions()
     me = sender_row(listed)
     if a.fyi and a.needs_reply:
@@ -2672,6 +2683,16 @@ def _main(argv=None, sweep=True):
     if a.expect_ack is not None and not EXPECT_ID.fullmatch(a.expect_ack):
         print("relay: --expect-ack ID must be 1-40 characters of letters, digits, `.`, `_`, `-`", file=sys.stderr)
         return 2
+    if not a.plan and sender_name(listed) == "unknown":
+        why = no_sender_reason()
+        print(f"relay: not sent: {why}", file=sys.stderr)
+        if a.json:
+            print(json.dumps({"sent": False, "error": "no_sender", "reason": why, "checked_env": list(SENDER_ENV),
+                              "exit": NO_SENDER_EXIT}, ensure_ascii=False))
+        return NO_SENDER_EXIT
+    if sweep and DEFER_DIR.is_dir():    # after the refusal: a relay that is not sent touches no record
+        with contextlib.suppress(Exception):    # cheap and best effort: never in the way of a relay
+            sweep_all()
     if not a.plan:
         if (a.needs_reply or (me is not None and asks_for_reply(text) and not a.fyi)) and not a.expect_ack:
             print("relay: not sent: this message asks for a reply or action, so it needs --expect-ack ID (a record `--sweep` resolves when "

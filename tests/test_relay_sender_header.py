@@ -61,12 +61,13 @@ class TestHeader(fb.Harness):
             rc = relay.main([target["name"], text, "--wait", "1"])
         return rc, out.getvalue(), err.getvalue()
 
-    def test_nothing_resolved_says_which_variables_were_checked(self) -> None:
+    def test_nothing_resolved_is_not_a_header_but_a_refusal(self) -> None:
+        os.environ.pop("RELAY_SENDER_NAME", None)
         self.assertEqual(relay.sender_name([]), "unknown")
-        header = relay.sender_tag([])
-        self.assertTrue(header.startswith("[relay from unknown ("), header)
-        for name in ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME", "ancestors"):
-            self.assertIn(name, header)
+        with self.assertRaises(relay.NoSender) as cm:
+            relay.sender_tag([])
+        for name in ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME", "ancestor"):
+            self.assertIn(name, str(cm.exception))
 
     def test_a_declared_job_label_is_not_unknown(self) -> None:
         os.environ["RELAY_SENDER_NAME"] = "load-watch"

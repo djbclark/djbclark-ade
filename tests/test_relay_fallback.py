@@ -79,6 +79,7 @@ class Harness(unittest.TestCase):
         for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "CLAUDE_CODE_SESSION_ID", "HERDR_PANE_ID", "HERDR_ENV",
                   "ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER"):
             os.environ.pop(k, None)
+        os.environ["RELAY_SENDER_NAME"] = "harness-job"    # relay refuses a sender it cannot resolve (exit 4): the tests that are not about that run as a declared job
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
         os.environ["CODEX_HOME"] = str(self.tmp / "codex")
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
@@ -3721,6 +3722,7 @@ class TestSenderName(Harness):
         self.assertEqual(relay.sender_name([]), f"paseo {SENDER} (here)")    # the full id: relay.py takes it as it is
 
     def test_unknown_only_when_nothing_identifies_the_caller(self) -> None:
+        os.environ.pop("RELAY_SENDER_NAME")    # the Harness declares one
         self.assertEqual(relay.sender_name([]), "unknown")
         os.environ["PASEO_AGENT_ID"] = "not-a-uuid"
         os.environ["CLAUDE_CODE_SESSION_ID"] = "12345678-aaaa"
