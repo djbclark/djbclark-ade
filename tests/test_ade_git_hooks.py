@@ -22,7 +22,18 @@ import ade_claims  # pyright: ignore[reportMissingImports]  # noqa: E402
 
 GUARD = ROOT / "bin" / "ade-git-guard"
 SHIM = ROOT / "libexec" / "agent-bin" / "git"
-REAL_GIT = shutil.which("git") or "/usr/bin/git"
+
+
+def _real_git():
+    """The first `git` on PATH that is not the guard's shim (an agent's PATH starts with libexec/agent-bin)."""
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        cand = Path(d or ".") / "git"
+        if cand.is_file() and os.access(cand, os.X_OK) and cand.resolve() != GUARD.resolve():
+            return str(cand)
+    return "/usr/bin/git"
+
+
+REAL_GIT = _real_git()
 HOOK_REF = ROOT / "libexec" / "git-hooks" / "reference-transaction"
 HOOK_PUSH = ROOT / "libexec" / "git-hooks" / "pre-push"
 REFUSED = ("aborted by the reference-transaction hook", "by the pre-push hook")
