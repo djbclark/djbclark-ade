@@ -26,7 +26,8 @@ def row(**kw: Any) -> dict[str, Any]:
 
 def item(s: dict[str, Any], kind: str = "unknown") -> dict[str, Any]:
     return {"id": s["id"], "kind": kind, "where": s["where"], "focus": "", "project": "x", "reachable": bool(s.get("chan")), "fp": "",
-            "agent": s["agent"], "name": s["name"], "title": s["title"]}
+            "agent": s["agent"], "name": s["name"], "title": s["title"], "audited": False, "cold": False, "idle_for": None,
+            "finished": "handoff", "cwd": "/x"}
 
 
 class Rig:
@@ -114,16 +115,16 @@ def test_the_fingerprint_names_its_pane_and_process(monkeypatch: pytest.MonkeyPa
     refused(rig, fp, "another pane or process")
 
 
-@pytest.mark.parametrize("kind", ["working", "question", "permission", "plan", "blocked", "busy-background", "finished", "idle", "remote"])
+@pytest.mark.parametrize("kind", ["working", "question", "permission", "plan", "blocked", "busy-background", "finished", "remote"])
 def test_a_known_kind_never_takes_the_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str) -> None:
     rig = Rig(monkeypatch, tmp_path, row(), kind=kind)
-    refused(rig, rig.fp(), "only for a TUI herdr does not detect")
+    refused(rig, rig.fp(), "only for a herdr pane that is idle or a status-unknown TUI")
 
 
 def test_an_unknown_row_herdr_does_detect_or_outside_herdr_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for s in (row(undetected=False), row(status="working"), row(chan=("tmux", "%1"), host="tmux"), row(chan=("orca", "t1"), host="orca")):
         rig = Rig(monkeypatch, tmp_path, s)
-        refused(rig, rig.fp(), "only for a TUI herdr does not detect")
+        refused(rig, rig.fp(), "only for a herdr pane that is idle or a status-unknown TUI")
 
 
 def test_no_channel_and_this_session_are_refused_before_any_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -137,7 +138,7 @@ def test_no_channel_and_this_session_are_refused_before_any_read(monkeypatch: py
 
 def test_the_audit_never_takes_the_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     rig = Rig(monkeypatch, tmp_path, row())
-    refused(rig, rig.fp(), "audit is never sent", text=None)
+    refused(rig, rig.fp(), "audit never takes", text=None)
 
 
 def test_an_idle_session_still_sends_without_the_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -323,3 +324,68 @@ def test_a_detected_idle_session_still_submits_with_agent_prompt(monkeypatch: py
     rig = Argv(monkeypatch, tmp_path, row(undetected=False, status="idle", agent="codex"), kind="idle")
     rig.send(None)
     assert rig.calls == [["herdr", "agent", "prompt", "w1:p1", "please say ok"]]
+
+
+# ---- the flag on a herdr idle row (2026-10-25: a detected agent herdr calls idle, whose `agent send-keys` says "not an active named agent") ----
+
+
+def idle_row(**kw: Any) -> dict[str, Any]:
+    return row(**{"agent": "crush", "status": "idle", "undetected": False, **kw})
+
+
+def test_an_idle_herdr_row_takes_the_flag_with_the_same_fresh_screen_and_pid_guards(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Rig(monkeypatch, tmp_path, idle_row(), kind="idle")
+    fp = rig.fp()
+    rig.send(fp)
+    assert rig.sent == ["please say ok"]
+    rig.sent.clear()
+    rig.screens = [[*READY, "Approve this command? [y/N]"]]
+    refused(rig, fp, "not the one you fingerprinted")
+    rig.screens, rig.s = [READY], idle_row(pid=4343)    # restarted: same pane, same screen, another process
+    refused(rig, fp, "another pane or process")
+    rig.s, rig.screens = idle_row(), [None]    # a failed read
+    refused(rig, fp, "could not be read")
+
+
+def test_an_idle_row_with_the_flag_uses_pane_verbs_only_and_the_plain_send_keeps_agent_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, idle_row(), kind="idle")
+    fp = rig.fp()
+    assert rig.calls == [["herdr", "pane", "read", "w1:p1", "--source", "visible", "--lines", "200"]]    # a detected row's fingerprint read is a pane read
+    rig.calls.clear()
+    rig.send(fp)
+    assert rig.verbs() == ["pane read", "pane read", "pane send-text", "pane send-keys"]
+    assert rig.calls[3] == ["herdr", "pane", "send-keys", "w1:p1", "enter"]
+    assert not any(c[1] == "agent" for c in rig.calls)
+    rig.calls.clear()
+    rig.send(None)    # no flag: unchanged
+    assert rig.calls == [["herdr", "agent", "prompt", "w1:p1", "please say ok"]]
+
+
+def test_an_idle_row_with_the_flag_stops_before_enter_when_typing_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, idle_row(), kind="idle")
+    fp = rig.fp()
+    rig.calls.clear()
+    rig.fail["pane send-text"] = 1
+    with pytest.raises(SystemExit) as e:
+        rig.send(fp)
+    assert rig.verbs() == ["pane read", "pane read", "pane send-text"]
+    assert "unverified" in str(e.value) and "NOT pressed" in str(e.value)
+
+
+def test_only_an_idle_herdr_row_is_offered_and_takes_the_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rig = Rig(monkeypatch, tmp_path, idle_row(), kind="idle")
+    helm.cmd_show(argparse.Namespace(id="w1:p1", json=False), {})
+    out = capsys.readouterr().out
+    assert f"screen-fp: {rig.fp()}" in out
+    assert f"helm.py send w1:p1 --screen-fp {rig.fp()}" in out
+    rig.screens = [None]
+    helm.cmd_show(argparse.Namespace(id="w1:p1", json=False), {})
+    out = capsys.readouterr().out
+    assert "screen unreadable" in out and "helm.py send" not in out
+    for s, kind in ((idle_row(chan=("tmux", "%1"), host="tmux"), "idle"), (idle_row(chan=("orca", "t1"), host="orca"), "idle"),
+                    (idle_row(status="working"), "idle"), (idle_row(chan=None), "idle"), (idle_row(), "working"), (idle_row(), "finished")):
+        rig = Rig(monkeypatch, tmp_path, s, kind)
+        helm.cmd_show(argparse.Namespace(id=s["id"], json=False), {})
+        assert "screen-fp" not in capsys.readouterr().out
+        if s.get("chan"):
+            refused(rig, "0" * 16, "only for a herdr pane that is idle")
