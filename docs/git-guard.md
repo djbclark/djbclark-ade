@@ -47,7 +47,8 @@ operator's shell, Orca and IDEs never go through the shim.
 
 Exit codes: 77 = refused (`EX_NOPERM`); any other code of a shimmed call is the real git's (a call a hook refused ends
 with git's own 128 and `fatal: ... aborted by the reference-transaction hook`). Every `ade_claims.py` subcommand exits 0
-ok, 1 not found, 2 usage, 3 id exists, 4 path owned by another owner's active claim, 77 refused; `install` also 73 and 78.
+ok, 1 not found, 2 usage, 3 id exists, 4 path owned by another owner's active claim, 77 refused; `install` also 73 and 78
+(78 also when git does not say whether `core.hooksPath` is set; an empty `core.hooksPath` is "set").
 
 ## Who is guarded
 
@@ -73,17 +74,28 @@ unexpected exit **fails open** (a warning on stderr, the real git runs).
 `pre-push` refuses a push to `refs/heads/<b>` (deletion included) claimed by another owner of the repository the URL names.
 `git push --no-verify` skips it, so the shim refuses that.
 
-**Fail open.** A hook that fails aborts git for everyone, the operator included, so the stub maps exactly "python exited
-77" to exit 1 and everything else (no python, a traceback, the 10 s alarm) to exit 0. **Fast path:** a caller with no agent
+**Fail open (2026-10-25, round 10).** A hook that fails aborts git for everyone, the operator included, so the installed stub
+runs the checkout's hook as a CHILD (never `exec`) and passes on only its documented refusal code, **77**; every other
+outcome (the hook exits 1, 3 or 126, dies by a signal, is missing, python is missing or crashes, the 10 s alarm, git not
+answering the origin question) exits 0 and lets git proceed, for agents and humans alike. (Before round 10 the stub `exec`'d
+the hook, so a Bash-level crash aborted git; tests now cover that layer.) **Fast path:** a caller with no agent
 marker exits before anything else runs; an agent's call whose stdin names no `HEAD`, `refs/stash` or `refs/heads/` line
 (a fetch of remote-tracking refs and tags) exits after one `grep`, without Python. Measured 2026-10-25, git 2.56: a fetch
 of 500 updated branches opens ~500 reference transactions (one per ref); the test shows Python starts zero times for it.
-A hook never runs a ref-writing git (the transaction's locks are held); it reads `.git/config` itself.
+A hook never runs a ref-writing git (the transaction's locks are held); the one thing it asks git is `git config --get
+remote.origin.url` (no ref lock), so the URL that matches a claim is git's answer: a trailing `# comment`, quotes and
+`[include]`d config are handled by git. Asked of the common dir (a linked worktree's own git dir has no `remote.*`). If git
+does not answer (timeout, cannot start) the claimed-branch rule is skipped: fail open.
 
 **`pack-refs`/`gc`.** `git pack-refs --all` reports every ref it packs as `0 <sha> <ref>` and every loose ref it prunes as
 `<sha> 0 <ref>` without changing a value, so beside any claim it would be refused. The stub exports its parent pid
-(`ADE_HOOK_GIT_PID`); when that git process is `pack-refs` (which `gc` and `maintenance` spawn) the hook lets it through.
-A real `branch -D` of the same packed ref is still refused (tested).
+(`ADE_HOOK_GIT_PID`); when that process is an executable named `git` (its real path: `/proc/PID/exe` on Linux, `sysctl
+KERN_PROCARGS2` on macOS) whose exact argv, parsed word by word, names `pack-refs` (which `gc` and `maintenance` spawn), the
+hook lets it through. A forged `argv[0]` such as `"git pack-refs"` does not count (the parse skips `argv[0]`; tested with
+`subprocess.run(["git pack-refs", "branch", "-f", "cb", "main"], executable=REAL_GIT)`). **Residual (same uid):** a program
+named `git` that sets a `pack-refs` argv and then runs the hook, or one that sets `ADE_HOOK_GIT_PID` to another process's
+`pack-refs`, is believed. If neither /proc nor sysctl answers, nothing is exempted (a maintenance run beside a claim is then
+refused; the operator reruns it). A real `branch -D` of the same packed ref is still refused (tested).
 
 **Chain.** The installed stub runs the ade checkout's hook by absolute path (one copy of the logic; a pasture's cloned `.git/hooks`
 keeps working), then, if present, `NAME.pre-ade`. A refusal stops before the old hook runs. Install is atomic (temp file +
@@ -91,8 +103,8 @@ keeps working), then, if present, `NAME.pre-ade`. A refusal stops before the old
 
 **Lazy install.** The shim's slow path installs the stubs the first time it meets a repository without them, after it has
 allowed the call and before the real git runs, so the very first `git branch -f cb` an agent runs in an unprepared repository
-is already guarded. Never in a directory that is not a repository, never while `core.hooksPath` is set, never fails the
-user's command.
+is already guarded. Never in a directory that is not a repository, never while `git config --get-all core.hooksPath` says it is set (an empty
+value counts: git then looks nowhere) or does not answer, never fails the user's command.
 
 ## The shim (what a hook cannot see)
 
@@ -100,10 +112,20 @@ Evaluated in order; the module docstring has every form.
 
 1. **Fail closed.** A leading option git does not define, or one with no value (`unknown-option`); a subcommand that is not a
    git builtin, not an alias and not in `KNOWN_SUBS` (`unknown-subcommand`: external `git-foo` programs are refused; the
-   operator can allow one call with the override). Config on the command line or in the environment (`-c`, `--config-env`,
-   `GIT_CONFIG_COUNT/KEY_n`, `GIT_CONFIG_PARAMETERS`) whose key, after normalisation, is `core.hookspath` or starts with
-   `hook.`, `include.` or `includeif.`; a `git config` write of such a key or `--edit`; a `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`
-   file that sets `hooksPath` or has a `[hook]`, `[include]` or `[includeIf]` section (`hook-config`). `push --no-verify` (any `--no-v`
+   operator can allow one call with the override). **`git commit-own MSG` goes through git's external-command lookup:**
+   git would run the program `git-commit-own`, which the guard cannot read, so the shim refuses it as `unknown-subcommand`
+   (confirmed 2026-10-25) while `git-commit-own MSG <paths>` called directly works (it is not a git call; the hooks still guard
+   the refs it writes). Same for `git lfs` (run `git-lfs`) and any `git-foo`. The refusal text says so. Config on the command line or in the environment (`-c`,
+   `--config-env`, `GIT_CONFIG_COUNT/KEY_n` read in full, `GIT_CONFIG_PARAMETERS`) whose key, after normalisation, is
+   `core.hookspath` or starts with `hook.`, `include.` or `includeif.`; a `git config` write of such a key or `--edit`;
+   and **`core.hooksPath` set, to any value, an empty one included, in the command, global or system scope as git itself says**
+   (`git config --null --show-scope --get-all core.hooksPath`, run through the real git with the call's own options and the
+   caller's environment, 5 s timeout: `HOME`, `XDG_CONFIG_HOME`, `GIT_CONFIG_GLOBAL/SYSTEM`, `[include]`d files; exit 0 = set,
+   1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused: the repository chose it
+   (husky, pre-commit), the hooks do not run there, and `install` reports it (78). If git answers neither 0 nor 1 (timeout, a
+   config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
+   hooks fail open**. `[hook]` sections and `[include]` of files that set no `hooksPath` are no longer refused: measured
+   2026-10-25, git 2.56, `hook.<name>.enabled=false` does not stop a hook in the hooks directory. `push --no-verify` (any `--no-v`
    prefix; `push-no-verify`) and `send-pack`/`http-push`, which never run `pre-push` (`push-plumbing`).
 2. **Foreign workspace, coarse and read-only.** When the cwd, or any `-C`, `--git-dir`, `--work-tree`, `GIT_DIR` or
    `GIT_WORK_TREE` value the call types (even one a later option moves git away from), resolves under another agent's active
@@ -136,14 +158,21 @@ analyser (and the Claude PreToolUse hook it was for, W5).
    primaries, but a repository no agent has touched through the shim, a plain `git clone` in /tmp by an agent that then runs
    only fast-path reads, or one with `core.hooksPath` set, has none.
 4. **`env -i`, `nix-shell --pure`, unsetting the markers:** the hook sees no agent marker and treats the caller as the operator.
-   Same boundary as the shim.
+   Same boundary as the shim. (A `HOME`/`XDG_CONFIG_HOME` redirected to a config that sets `hooksPath` IS refused by the shim
+   since round 10; run through the real git by absolute path it is not.)
 5. **`git branch -m|-c` destinations** only through the shim (above); **`--output` into a foreign tree** on the fast path.
-6. Plumbing and maintenance stay the operator's call: `checkout-index`, `update-index`, `read-tree`, `fast-import`,
+6. **Writes that never open a ref transaction (listed 2026-10-25, round 10):** editing `.git/packed-refs` or a loose ref file
+   directly (no hook runs; the shim cannot see a file edit), `git replace` and `git notes` (they write `refs/replace/*` and
+   `refs/notes/*`, which no claim names; `replace` changes what a commit LOOKS like without moving the branch; **left out on
+   purpose**, a claim protects a branch's tip, not the view of it), and a repository's own `core.hooksPath` (above).
+7. Plumbing and maintenance stay the operator's call: `checkout-index`, `update-index`, `read-tree`, `fast-import`,
    `prune`/`repack`, `tag -f|-d` (claims name branches, not tags), `notes`, `replace`, `mv -f`, `add '*'`, and everything git
    itself spawns for the shim's rules (`bisect run`, `submodule foreach`, pagers, `!` aliases' children).
-7. **Config-based hooks (git 2.54+, `hook.<event>.command`)** may let `acp-run` inject the guard for repositories nobody
+8. **Config-based hooks (git 2.54+, `hook.<event>.command`)** may let `acp-run` inject the guard for repositories nobody
    installed; whether they run alongside the hooks directory is unverified (`docs/queue.md`). The shim refuses `hook.*` keys
-   regardless.
+   set on the command line or in the environment regardless; in a config FILE they are not judged (measured inert for the
+   hooks directory, 2026-10-25).
+9. **A same-uid program impersonating the `pack-refs` parent** (see above).
 
 ## Refusal, log and override
 

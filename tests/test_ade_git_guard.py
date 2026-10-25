@@ -1374,9 +1374,9 @@ def test_hook_keys_in_the_environment_are_refused(tmp_path, state, env):
 def test_a_config_file_named_by_the_environment_that_sets_hooks_path_is_refused(tmp_path, state, body, bad, var):
     """git itself says whether core.hooksPath is set (includes followed, an empty value counted); no text parsing."""
     repo = mk_repo(tmp_path, state)
-    cfg = tmp_path / "cfg"
     inc = tmp_path / "inc.cfg"
     inc.write_text("[core]\n\thooksPath = /tmp/x\n")
+    cfg = tmp_path / "cfg"
     cfg.write_text(body.replace("{inc}", str(inc)))
     r = run(state, ["branch", "nb"], repo, who="B", GIT_CONFIG_NOSYSTEM="0", **{var: str(cfg)})
     assert refused77(r) == bad, r.stderr

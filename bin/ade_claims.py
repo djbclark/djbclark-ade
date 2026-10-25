@@ -57,28 +57,36 @@ nothing claimed). git's own hooks (GIT_INDEX_FILE set) and pre-commit (PRE_COMMI
 
 HOOKS (the ref enforcement). `hook-ref STATE` (stdin: `<old> <new> <ref>` lines) refuses in `prepared` only, which aborts git's
 transaction ("aborted by the reference-transaction hook"): (a) an update (deletion and a `0 0` line included) of
-`refs/heads/<b>` while another owner's active claim, of a repository whose origin matches, names `<b>` or has `<b>` checked
-out; (b) a `HEAD` or `refs/heads/*` update while the hook runs in a workspace another agent claims (`checkout`, `switch`,
+`refs/heads/<b>` while another owner's active claim, of a repository whose origin matches (`git config --get
+remote.origin.url`, as git answers it: comments, quotes, includes), names `<b>` or has `<b>` checked out; (b) a `HEAD` or `refs/heads/*` update while the hook runs in a workspace another agent claims (`checkout`, `switch`,
 `commit` there, however it was reached: -C, --git-dir, GIT_DIR); (c) a `refs/stash` update in a linked worktree (refs/stash is
 shared). `pack-refs` (and so `gc`, `maintenance`), whose transactions report packing and pruning as `0 new` and `old 0`
-without changing a value, is exempt (the stub exports the git pid; the parent's argv decides). In `committed` it appends
+without changing a value, is exempt (the stub exports the git pid; the parent's real executable name and exact argv decide, never its argv[0]). In `committed` it appends
 one line to guard.log per change to a claimed branch (actor, ref, old, new) and never fails. `hook-push REMOTE URL` (stdin:
 `<local ref> <local oid> <remote ref> <remote oid>`) refuses a push to `refs/heads/<b>` claimed by another owner of the
-repository the URL names. FAIL OPEN: the bash stubs map "python exited 77" to exit 1 and every other outcome (no python, a
-traceback, the 10 s alarm) to exit 0, because a failing hook aborts git for everyone. A hook never runs a ref-writing git.
-`install [DIR]` writes chain-preserving stubs into `$(git rev-parse --git-common-dir)/hooks` (an existing hook of the same
-name is kept as NAME.pre-ade and runs after ours; exit 78 while core.hooksPath is set; 73 when NAME.pre-ade is in the way;
-2 outside a repository); the stub execs the ade checkout's hook by absolute path. The shim installs them lazily.
+repository the URL names. FAIL OPEN:
+the installed stub runs the checkout's hook as a child and passes on only its exit 77; any other outcome (exit 1, 3, 126, a
+signal, a missing file, no python, a traceback, the 10 s alarm, git not answering the origin question) lets git proceed,
+for agents and humans alike. A hook never runs a ref-writing git. `install [DIR]` writes chain-preserving stubs into
+`$(git rev-parse --git-common-dir)/hooks` (an existing hook of the same name is kept as NAME.pre-ade and runs after ours;
+exit 78 while `git config --get-all core.hooksPath` says it is set, an empty value included, or when git does not say; 73 when
+NAME.pre-ade is in the way; 2 outside a repository). The shim installs them lazily, in the same cases.
 
 SHIM RULES (`guard`), evaluated in order. Git is read the way git reads it: option state in order (`restore --staged
 --no-staged` is not staged), long options match by any unique prefix, config is the call's own ordered -c / --config-env /
 GIT_CONFIG_* plus the repository's, relative --git-dir/--work-tree/GIT_DIR/GIT_WORK_TREE are relative to the cwd after every -C.
-  0. FAIL CLOSED: a leading option git does not define (or one missing its value) -> `unknown-option`; a subcommand that is not
-     a git builtin, not an alias and not in KNOWN_SUBS -> `unknown-subcommand`; command-line or environment config whose key,
-     after normalisation, is `core.hookspath` or starts with `hook.`, `include.` or `includeif.`, a `git config` that writes
-     such a key (or `--edit`), a GIT_CONFIG_GLOBAL/SYSTEM file that sets hooksPath or has a [hook]/[include]/[includeIf]
-     section -> `hook-config`; `push --no-verify` (any `--no-v` prefix) and `send-pack`/`http-push`, which skip the pre-push
-     hook -> `push-no-verify`/`push-plumbing`.
+  0. FAIL CLOSED (config is asked of git, not parsed, 2026-10-25): a leading option git does not define (or one missing its
+     value) -> `unknown-option`; a subcommand that is not a git builtin, not an alias and not in KNOWN_SUBS ->
+     `unknown-subcommand` (an external program too: `git commit-own` is refused, run `git-commit-own` directly); command-line or
+     environment config whose key, after normalisation, is `core.hookspath` or starts with `hook.`, `include.` or
+     `includeif.` (the environment's GIT_CONFIG_COUNT is read in full: the pairs are bounded by the environment's own size,
+     never by a cap), a `git config` that writes such a key (or `--edit`), and `core.hooksPath` set (any value, an empty one
+     too) in the command, global or system scope, as `git config --null --show-scope --get-all core.hooksPath` says under the
+     call's own options and the CALLER's environment (HOME, XDG_CONFIG_HOME, GIT_CONFIG_*, includes) -> `hook-config`; a
+     repository's own (local/worktree) hooksPath is not refused (husky and the like; the hooks do not run there, see
+     docs/git-guard.md). When git answers neither 0 (set) nor 1 (unset): timeout, cannot start, a config it cannot read ->
+     `hook-config-unknown`, refused with that reason. `push --no-verify` (any `--no-v` prefix) and `send-pack`/`http-push`,
+     which skip the pre-push hook -> `push-no-verify`/`push-plumbing`.
   1. A workspace with an ACTIVE claim that is not mine (the cwd, or ANY -C, --git-dir, --work-tree, GIT_DIR or GIT_WORK_TREE
      value the call types, even one a later option moves git away from): only the read allowlist runs (FOREIGN_READ: status,
      log, show, diff, rev-parse, ls-files, ls-tree, cat-file, blame, describe, rev-list, for-each-ref, grep, shortlog,
@@ -1689,8 +1697,6 @@ def _hook_workspace(env: dict[str, str], cwd: str) -> Optional[Workspace]:
     return ws
 
 
-def _parent_is_pack_refs(env: dict[str, str]) -> bool:
-    """Whether the git process that runs this hook is `git pack-refs` (which `gc` and `maintenance` spawn). pack-refs
 def _proc_args(pid: int) -> Optional[tuple[str, list[str]]]:
     """(executable path, argv) of process `pid`, exact: /proc/PID/{exe,cmdline} on Linux, sysctl KERN_PROCARGS2 on macOS
     (NUL-separated, so an argv[0] holding spaces stays one word; `ps` joins argv with spaces and cannot tell)."""
@@ -1722,6 +1728,8 @@ def _proc_args(pid: int) -> Optional[tuple[str, list[str]]]:
         return None
 
 
+def _parent_is_pack_refs(env: dict[str, str]) -> bool:
+    """Whether the git process that runs this hook is `git pack-refs` (which `gc` and `maintenance` spawn). pack-refs
     reports every ref it packs as `0 new` and every loose ref it prunes as `old 0`, but changes no value: measured
     2026-10-25, git 2.56. The stub exports the git process's pid in ADE_HOOK_GIT_PID. The process must be an executable
     named `git` (its real path, not its argv[0]) whose argv, parsed word by word, names `pack-refs`; a forged argv[0]
@@ -1852,6 +1860,9 @@ def _stub_text(name: str) -> str:
         f"hook={shlex.quote(str(HOOKS_SRC / name))}",
         'case "$0" in */*) d="${0%/*}" ;; *) d=. ;; esac',
         f'pre="$d/{name}.pre-ade"',
+        "export ADE_HOOK_GIT_PID=$PPID",
+        "# The checkout's hook runs as a child, never exec'd: only its documented refusal code (77) refuses; any other",
+        "# outcome (exit 1, 3, 126, a signal, no such file) lets git proceed, for agents and humans alike.",
         'if [ ! -x "$pre" ]; then',
         '  [ -x "$hook" ] || exit 0',
         '  "$hook" "$@"',
@@ -1881,9 +1892,6 @@ def _stubs_present(common: Path) -> bool:
 
 
 def _install_common(common: Path) -> tuple[int, list[str]]:
-        "export ADE_HOOK_GIT_PID=$PPID",
-        "# The checkout's hook runs as a child, never exec'd: only its documented refusal code (77) refuses; any other",
-        "# outcome (exit 1, 3, 126, a signal, no such file) lets git proceed, for agents and humans alike.",
     """Write the chain-preserving stubs into `<common>/hooks` (atomic; idempotent; an existing hook of the same name that
     is not ours becomes NAME.pre-ade). Returns (exit code, one line per action)."""
     hooks = common / "hooks"
@@ -1922,10 +1930,10 @@ def install_hooks(start: str = ".") -> tuple[int, list[str]]:
         shown = hp.split("\0")[-2] if hp.count("\0") else hp
         return EXIT_HOOKSPATH, [f"core.hooksPath is set (`{shown}`): git would never run the stubs in {out.strip()}/hooks; "
                                 "not installed. Unset it, or call the stubs from the hooks directory it names"]
-    return _install_common(Path(out.strip()))
-
     if rc != 1:
         return EXIT_HOOKSPATH, [f"git did not say whether core.hooksPath is set (exit {rc}); not installed"]
+    return _install_common(Path(out.strip()))
+
 
 def _lazy_install(call: GitCall, env: dict[str, str]) -> None:
     """The shim's slow path installs the hooks the first time it meets a repository without them. Never raises, never in
