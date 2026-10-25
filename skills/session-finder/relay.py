@@ -2522,8 +2522,8 @@ def user_texts(tx, mark):
             o = json.loads(ln)
         except ValueError:
             continue
-        if not isinstance(o, dict) or o.get("isMeta"):
-            continue
+        if not isinstance(o, dict) or o.get("isMeta") or o.get("isCompactSummary") or o.get("isVisibleInTranscriptOnly"):
+            continue    # a compaction summary and a transcript-only notice are the session's own words about the past, never a reply
         kind = o.get("type")
         if kind == "user":
             c = (o.get("message") or {}).get("content")
@@ -2589,8 +2589,8 @@ def note_links_and_expect():
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
         expect_write({"id": CTX["expect"], "state": "open", "sender": me["id"], "sender_label": me.get("name") or "", "tx": tx,
-                      "mark": CTX.get("mark", 0), "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or ""},
-                      "created": now, "within": CTX.get("within") or EXPECT_WITHIN, "acked": None})
+                      "mark": CTX.get("mark", 0), "created": now, "within": CTX.get("within") or EXPECT_WITHIN, "acked": None,
+                      "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8]}})
 
 
 def ack_sweep():
@@ -2602,7 +2602,9 @@ def ack_sweep():
             with contextlib.suppress(OSError):
                 (expect_dir() / f"{r['id']}.json").unlink()
             continue
-        if r.get("state") == "open" and ack_seen(user_texts(r.get("tx"), int(r.get("mark") or 0)), r["id"]):
+        t = r.get("target") or {}
+        who = [w for w in (t.get("id"), t.get("name"), t.get("paseo"), t.get("sid8")) if w]    # only the target's own reply closes it (A2)
+        if r.get("state") == "open" and ack_seen(user_texts(r.get("tx"), int(r.get("mark") or 0)), r["id"], who):
             expect_write({**r, "state": "acked", "acked": now})
             with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
                 data = fleet.links_read()

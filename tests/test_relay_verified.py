@@ -264,6 +264,31 @@ class TestPeerAttribution(unittest.TestCase):
         self.assertFalse(relay.ack_seen([f'<paseo-system from="{agent}9"> ack w1:p1'], "w1:p1", [agent]))
 
 
+class TestExpectationClosedOnlyByItsTarget(Base):
+    """Adversary r1 A2 (2026-10-25): an `--expect-ack` is closed by the target's own reply, not by a compaction summary or a stranger."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
+
+    def swept(self) -> str:
+        return self.run_cli("--sweep")[1]
+
+    def test_a_compaction_summary_that_quotes_the_ack_is_not_a_reply(self) -> None:
+        for flag in ("isCompactSummary", "isVisibleInTranscriptOnly"):
+            with self.subTest(flag=flag):
+                self.append(self.me_tx, {"type": "user", flag: True, "message": {"role": "user", "content": "Summary: waiting for ack build1 from cccccccc."}})
+                self.assertIn("0 resolved", self.swept())
+
+    def test_a_reply_from_another_peer_is_not_the_targets(self) -> None:
+        self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude w7:p7 (other)] ack build1"}})
+        self.assertIn("0 resolved", self.swept())
+
+    def test_the_targets_own_reply_closes_it(self) -> None:
+        self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude cccccccc aka peer-fb (x)] ack build1"}})
+        self.assertIn("1 resolved", self.swept())
+
+
 class TestFirstContact(Base):
     def test_the_first_message_to_a_peer_asks_for_an_ack_and_the_second_does_not(self) -> None:
         self.assertEqual(self.go("PR 61 is merged")[0], 0)
