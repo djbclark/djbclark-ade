@@ -2556,7 +2556,7 @@ def from_peer(text, who):
     m = HEADER_RE.search(text)    # the FIRST header is the relay's own; a header quoted in the body is the sender's words
     if m:
         return (m["id"] or m["id2"]).lower() in names or (m["aka"] or m["aka2"] or "").strip().lower() in names
-    return any(len(w) >= WHO_MIN and re.search(rf"(?<![\w:.-]){re.escape(w)}(?![\w:.-])", text, re.I) for w in names)
+    return any(len(w) >= WHO_MIN and re.search(rf"(?<![\w:.-]){re.escape(w)}(?![\w:-]|\.\w)", text, re.I) for w in names)
 
 
 def ack_seen(texts, token, who=()):

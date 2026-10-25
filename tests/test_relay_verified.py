@@ -274,11 +274,15 @@ class TestExpectationClosedOnlyByItsTarget(Base):
     def swept(self) -> str:
         return self.run_cli("--sweep")[1]
 
+    def quoted(self, flag: str) -> None:
+        self.append(self.me_tx, {"type": "user", flag: True, "message": {"role": "user", "content": "Summary: waiting for ack build1 from cccccccc."}})
+        self.assertIn("0 resolved", self.swept())
+
     def test_a_compaction_summary_that_quotes_the_ack_is_not_a_reply(self) -> None:
-        for flag in ("isCompactSummary", "isVisibleInTranscriptOnly"):
-            with self.subTest(flag=flag):
-                self.append(self.me_tx, {"type": "user", flag: True, "message": {"role": "user", "content": "Summary: waiting for ack build1 from cccccccc."}})
-                self.assertIn("0 resolved", self.swept())
+        self.quoted("isCompactSummary")
+
+    def test_a_transcript_only_notice_that_quotes_the_ack_is_not_a_reply(self) -> None:
+        self.quoted("isVisibleInTranscriptOnly")
 
     def test_a_reply_from_another_peer_is_not_the_targets(self) -> None:
         self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude w7:p7 (other)] ack build1"}})
