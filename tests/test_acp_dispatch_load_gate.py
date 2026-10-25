@@ -167,7 +167,7 @@ class TestLoadGateBeforeQuotaChecks(LoadGate):
 
     def test_competing_slice_started_during_the_wait_counts_against_the_cap(self):
         planted = self.tmp / "state" / "other-task" / "jobs" / "busy.json"
-        gate = self.gate_env(0, OK, FAKE_LW_WRITE=str(planted), FAKE_LW_BODY=json.dumps(self.busy_row()),
+        gate = self.gate_env(0, OK, FAKE_LW_WRITE=str(planted), FAKE_LW_BODY=json.dumps(self.busy_row(estimated_usage_pct=65.0)),
                              **self.snap_codex(70.0))
         r = self.dispatch("--no-model-check", "--no-preflight", env=gate)
         self.assertEqual(r.returncode, 5, r.stderr + r.stdout)
@@ -330,7 +330,9 @@ class TestPendingRunnersHoldTheCap(LoadGate):
         (jobs / f"{name}.json").write_text(json.dumps(row))
 
     def test_pending_record_older_than_the_spawn_grace_counts_against_the_reservation(self):
-        self.plant("waiting", pid=None, pid_start=None, started=time.time() - 2000, load_gate_pending=True)
+        # Leave only 5% of the 70% pool, below the everyday Codex model's 10% floor.
+        self.plant("waiting", pid=None, pid_start=None, started=time.time() - 2000,
+                   load_gate_pending=True, estimated_usage_pct=65.0)
         r = self.dispatch("--no-model-check", "--no-preflight", env=self.snap_codex(70.0))
         self.assertEqual(r.returncode, 5, r.stderr + r.stdout)
         self.assertIn("class=inflight", r.stdout)

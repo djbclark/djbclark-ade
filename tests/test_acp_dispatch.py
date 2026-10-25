@@ -498,8 +498,9 @@ class TestFrontierGates(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_second_codex_slice_is_unavailable_while_one_is_in_flight(self):
-        # Reservation (2026-10-18): 60% in flight + floor 60% estimate vs 70% left → inflight.
-        self.running_codex(60.0)
+        # Everyday Codex models have a 10% floor (2026-10-25): reserve 65 of 70%,
+        # leaving 5%, below that floor. Frontier models retain their separate 60% floor.
+        self.running_codex(65.0)
         r = self.dispatch(env=self.codex_snap(70.0))
         self.assertEqual(r.returncode, 5, (r.stdout, r.stderr))
         rec = self.record()
