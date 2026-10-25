@@ -101,13 +101,14 @@ local shim is unaffected today; revisit if deny/ask rules are ever added.
 
 **The local shim now fails closed anyway** (2026-10-11, operator's call):
 `~/.config/opencode/plugins/rtk.ts` registers no rewrite at all when shell
-permission rules are in effect, and says so on stderr. It asks the host first —
-the v2 plugin context exposes `ctx.permission` with `{ get, hook, list, reply }`,
-so `ctx.permission.list()` gives the *effective* rules (global + project +
-managed), and only `deny`/`ask` entries on `shell`/`*` count. If the host cannot
-answer, it falls back to scanning the global config plus every
-`opencode.json(c)`/`.opencode/opencode.json(c)` from the session directory up to
-the filesystem root, treating an unparsable file as "rules present". The
+permission rules are in effect, and says so on stderr. It does NOT ask the host: `ctx.permission.list()` returns pending permission
+*requests* (`{ id, permission, patterns }`), never effective rules, so an empty
+answer proved nothing (corrected 2026-10-25; the earlier version read it as the
+effective rules and could rewrite past a deny/ask rule). It scans the global
+config plus every `opencode.json(c)`/`.opencode/opencode.json(c)` from the
+session directory up to the filesystem root, treating an unparsable file as
+"rules present". Managed rules outside those files are not seen; the real fix is
+rtk's `hook opencode` (rtk-ai/rtk#4187, #4521). The
 canonical copy lives at `djbclark-ade/opencode-plugins/rtk.ts` and is restored by
 `djbclark-ade/bin/opencode-plugin-guard` (Jobber 03:45) if a tool upgrade
 reverts it.

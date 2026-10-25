@@ -57,28 +57,11 @@ function configDir(): string {
   return xdg ? join(xdg, "opencode") : join(homedir(), ".config", "opencode")
 }
 
-// Preferred source: the host itself. OpenCode 2.0.26 exposes
-// `ctx.permission` = { get, hook, list, reply }, so the *effective* rules
-// (global + project + managed) can be read instead of re-parsing config.
-// Only deny/ask rules matter: making a command no longer match an allow rule
-// cannot widen anything.
-// Returns true = rules present, false = none, null = cannot tell.
-async function rulesFromContext(ctx: any): Promise<boolean | null> {
-  try {
-    if (typeof ctx?.permission?.list !== "function") return null
-    const raw = await ctx.permission.list()
-    const list = Array.isArray(raw) ? raw : Array.isArray(raw?.rules) ? raw.rules : null
-    if (!list) return null
-    return list.some((rule: any) => {
-      const effect = String(rule?.effect ?? "").toLowerCase()
-      const action = String(rule?.action ?? "").toLowerCase()
-      return (effect === "deny" || effect === "ask") && (action === "shell" || action === "*" || action === "")
-    })
-  } catch {
-    return true // an unreadable rule list is treated as rules present
-  }
-}
-
+// The host's `ctx.permission.list()` is NOT a source of effective rules: it
+// lists pending permission *requests* (`{ id, permission, patterns }`, no
+// `effect`), usually empty. Reading it as "no deny/ask rules" let a rewrite
+// bypass real rules (found 2026-10-25 by the Go guard review, PR 64). Only the
+// config scan below decides.
 
 // Global config plus every project config OpenCode would merge, walking up from
 // `base` to the filesystem root (OpenCode's own discovery order).
@@ -158,9 +141,7 @@ async function setup(ctx: any) {
     return
   }
   const base = ctx?.location?.directory ?? ctx?.directory ?? process.cwd()
-  const fromHost = await rulesFromContext(ctx)
-  const ruleBearing = fromHost === null ? declaresPermissionRules(String(base)) : fromHost
-  if (ruleBearing) {
+  if (declaresPermissionRules(String(base))) {
     console.warn(
       "[rtk] OpenCode has shell permission rules in effect; skipping command rewriting so a rewrite cannot bypass a deny/ask rule (see rtk-ai/rtk#4187)",
     )
