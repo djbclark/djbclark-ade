@@ -1017,3 +1017,114 @@ def test_a_fast_forward_that_landed_before_git_timed_out_still_counts_as_applied
     assert "merge warning" in out["problems"]  # adv round 14: a timed-out hook may still run or hold index.lock
     assert out["head_after"] == new
     assert rc in (0, 10)
+
+
+# --- Codex security review of PR 20, finding 4361214081 (2026-10-23): `cp -rL` of an untrusted skill ----------
+
+def grokbot_home(tmp_path, with_copy):
+    """A HOME holding Grok Bot's workflows dir; with_copy adds a managed (`.skill-everywhere`) ade-alpha copy."""
+    home = tmp_path / "home"
+    wf = home / "agent-data" / "workflows"
+    wf.mkdir(parents=True)
+    if with_copy:
+        (wf / "ade-alpha").mkdir()
+        (wf / "ade-alpha" / ".skill-everywhere").write_text("source=x\n")
+        (wf / "ade-alpha" / "SKILL.md").write_text("old\n")
+    return home
+
+
+def run_real_se(tmp_path, home, *args, **extra):
+    return subprocess.run([str(REAL_SE), *args, "alpha"], capture_output=True, text=True, cwd=tmp_path,
+                          env=dict(os.environ, HOME=str(home), SKILL_EVERYWHERE_ADE=str(tmp_path / "skills"),
+                                   CODEX_HOME=str(home / ".codex"), SKILL_EVERYWHERE_ONLY="grokbot", **extra))
+
+
+@pytest.mark.parametrize("kind", ["file-outside", "dir-outside", "dangling", "dir-inside", "fifo-inside"])
+@pytest.mark.parametrize("with_copy", [True, False])
+def test_the_grokbot_copy_never_dereferences_a_symlink_that_leaves_the_skill(tmp_path, kind, with_copy):
+    src = tmp_path / "skills" / "alpha"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: alpha\n---\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret\n")
+    (src / "sub").mkdir()
+    (src / "sub" / "f.txt").write_text("f\n")
+    if kind == "file-outside":
+        os.symlink(outside / "secret.txt", src / "leak")
+    elif kind == "dir-outside":
+        os.symlink(outside, src / "leak")
+    elif kind == "dangling":
+        os.symlink(tmp_path / "gone", src / "leak")
+    elif kind == "dir-inside":  # a directory link can loop (`leak -> .`) or multiply content: refused even in-tree
+        os.symlink(".", src / "leak")
+    else:
+        os.mkfifo(src / "pipe")
+        os.symlink("pipe", src / "leak")
+    home = grokbot_home(tmp_path, with_copy)
+    dest = home / "agent-data" / "workflows" / "ade-alpha"
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    r = run_real_se(tmp_path, home, "--check", TMPDIR=str(tmpdir))
+    rows = [row for row in mod_rows(r.stdout) if row[1] == "grokbot"]
+    assert rows and rows[0][2].startswith("unsafe source symlink"), r.stdout + r.stderr
+    assert load_module().classify(rows[0][2]) == "stuck"
+    assert list(tmpdir.iterdir()) == []  # nothing rendered into a temp dir, so nothing was dereferenced into it
+    r = run_real_se(tmp_path, home, TMPDIR=str(tmpdir))  # link mode: refuses too, leaves the destination alone
+    assert r.returncode == 1 and "unsafe source symlink" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert dest.exists() == with_copy
+    if with_copy:
+        assert (dest / "SKILL.md").read_text() == "old\n"
+    assert not (home / "agent-data" / "workflows" / ".ade-alpha.new").exists()
+
+
+def mod_rows(out):
+    return load_module().parse_skill_check(out)
+
+
+def test_the_grokbot_copy_still_renders_a_symlink_to_a_file_inside_the_skill(tmp_path):
+    src = tmp_path / "skills" / "alpha"
+    (src / "refs").mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: alpha\n---\n")
+    (src / "refs" / "real.md").write_text("real\n")
+    os.symlink("refs/real.md", src / "alias.md")
+    home = grokbot_home(tmp_path, with_copy=False)
+    assert run_real_se(tmp_path, home).returncode == 0
+    alias = home / "agent-data" / "workflows" / "ade-alpha" / "alias.md"
+    assert alias.read_text() == "real\n" and not alias.is_symlink()
+    assert run_real_se(tmp_path, home, "--check").stdout.count("copied") == 1
+
+
+def test_a_report_only_ade_update_asks_the_helper_for_link_targets_only(tmp_path, monkeypatch):
+    mod = load_module()
+    monkeypatch.delenv("SKILL_EVERYWHERE_NO_COPY", raising=False)
+    assert "SKILL_EVERYWHERE_NO_COPY" not in mod.helper_env(tmp_path)  # canonical checkout: the copy target stays
+    assert mod.helper_env(tmp_path, copies=False)["SKILL_EVERYWHERE_NO_COPY"] == "1"
+
+
+def test_the_helper_never_renders_a_copy_for_a_non_canonical_checkout(env):
+    other = clone(env, "other")
+    fake = env.bin / "skill-everywhere"
+    fake.write_text(FAKE_SKILL_EVERYWHERE.format(python=sys.executable).replace(
+        "json.dumps(sys.argv[1:])", 'json.dumps(sys.argv[1:] + [os.environ.get("SKILL_EVERYWHERE_NO_COPY", "")])'))
+    for repo, expect in ((other, "1"), (env.machine, "")):
+        env.se_log.write_text("")
+        r = env.run("--check", repo=repo)
+        assert r.returncode in (0, 10), r.stdout + r.stderr
+        assert env.calls() == [["--check", "alpha", expect]]
+
+
+def test_skill_everywhere_no_copy_skips_the_grokbot_target_only(tmp_path):
+    src = tmp_path / "skills" / "alpha"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: alpha\n---\n")
+    os.symlink(tmp_path, src / "leak")  # would be dereferenced by a copy
+    home = grokbot_home(tmp_path, with_copy=True)
+    env = dict(os.environ, HOME=str(home), SKILL_EVERYWHERE_ADE=str(tmp_path / "skills"), CODEX_HOME=str(home / ".codex"))
+    env.pop("SKILL_EVERYWHERE_ONLY", None)
+    check = lambda **x: subprocess.run([str(REAL_SE), "--check", "alpha"], capture_output=True, text=True, cwd=tmp_path,
+                                       env=dict(env, **x))
+    assert any(row[1] == "grokbot" for row in mod_rows(check().stdout))
+    r = check(SKILL_EVERYWHERE_NO_COPY="1")
+    rows = mod_rows(r.stdout)
+    assert rows and not any(row[1] == "grokbot" for row in rows) and r.stdout.splitlines()[-1] == "== end", r.stdout
