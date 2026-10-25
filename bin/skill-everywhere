@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Make a shared skill visible to every agent TUI on this machine by
 # symlinking it into each TUI's user-level skills dir.
+#     skill-everywhere --all                sync every public/private shared skill
+#     skill-everywhere --check --all        verify every installed target; exit 1 for gaps
 #     skill-everywhere <name>...            link (idempotent, collapses chains)
 #     skill-everywhere --check <name>...    report per-TUI status, change nothing; ends with a "== end" line
 #     skill-everywhere --remove <name>...   remove links this script would make
@@ -66,15 +68,31 @@ omp|~/.omp/agent/skills
 grokbot|copy ~/agent-data/workflows
 '
 
-mode=link dry=0
+mode=link dry=0 all=0
 while [[ ${1:-} == -* ]]; do
   case $1 in
-    --check) mode=check ;; --remove) mode=remove ;; --dry-run|-n) dry=1 ;;
+    --check) mode=check ;; --remove) mode=remove ;; --dry-run|-n) dry=1 ;; --all) all=1 ;;
     *) echo "error: unknown option $1" >&2; exit 2 ;;
   esac
   shift
 done
-[[ $# -gt 0 ]] || { gsed -n '2,13p' "$0" >&2; exit 2; }
+if ((all)); then
+  [[ $# == 0 && $mode != remove ]] || { echo 'error: --all accepts no names and cannot be used with --remove' >&2; exit 2; }
+  names=()
+  for root in "$ade_root" "$priv_root"; do
+    for skill_file in "$root"/*/SKILL.md; do
+      [[ -f $skill_file && -r $skill_file ]] || continue
+      name=${skill_file%/SKILL.md}; name=${name##*/}
+      [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "error: unsafe skill directory name: $name" >&2; exit 2; }
+      # Public wins on a duplicate name, just as with explicit names. Collect
+      # before any mutation; hidden directories and helper-only dirs aren't skills.
+      [[ " ${names[*]:-} " == *" $name "* ]] || names+=("$name")
+    done
+  done
+  ((${#names[@]})) || { echo "error: no readable shared SKILL.md files under $ade_root or $priv_root" >&2; exit 2; }
+  set -- "${names[@]}"
+fi
+[[ $# -gt 0 ]] || { gsed -n '2,15p' "$0" >&2; exit 2; }
 only="${SKILL_EVERYWHERE_ONLY:-}"
 no_copy=0; [[ -z ${SKILL_EVERYWHERE_NO_COPY:-} ]] || no_copy=1
 wanted() { [[ -z $only || ",$only," == *",$1,"* ]]; }
@@ -145,7 +163,8 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
     rm -rf "$tmp"
   fi
   case $mode in
-    check) printf '  %-13s %s (%s)\n' "$bin" "$state" "$dest" ;;
+    check) printf '  %-13s %s (%s)\n' "$bin" "$state" "$dest"
+      if ((all)) && [[ $state != copied ]]; then rc=1; fi ;;
     remove)
       if [[ $state == missing || $state == real* ]]; then printf '  %-13s %s (left alone)\n' "$bin" "$state"
       else act "remove $dest" rm -rf "$dest"; ((dry)) || printf '  %-13s removed %s\n' "$bin" "$dest"; fi ;;
@@ -200,7 +219,8 @@ for name in "$@"; do
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
     case $mode in
-      check) printf '  %-13s %s\n' "$bin" "$state" ;;
+      check) printf '  %-13s %s\n' "$bin" "$state"
+        if ((all)) && [[ $state != linked ]]; then rc=1; fi ;;
       remove)
         if [[ $state == linked ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
         else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
