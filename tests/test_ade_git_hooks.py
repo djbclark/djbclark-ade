@@ -683,3 +683,15 @@ def test_r10_f3_a_forged_argv0_does_not_pass_for_pack_refs(world):
     assert world.cb() != world.main()
 
 
+def test_r10_f5_an_empty_core_hooks_path_counts_as_set_for_install_and_lazy_install(tmp_path, state):
+    repo = tmp_path / "ehp"
+    ok(state, ["init", "-q", "-b", "main", str(repo)], tmp_path)
+    ok(state, ["commit", "-q", "--allow-empty", "-m", "x"], repo)
+    ok(state, ["config", "core.hooksPath", ""], repo)
+    rc, notes = ade_claims.install_hooks(str(repo))
+    assert rc == ade_claims.EXIT_HOOKSPATH and "core.hooksPath is set" in notes[0]
+    r = shim(state, ["branch", "newb"], repo, who="B")
+    assert r.returncode == 0, r.stderr
+    assert not (repo / ".git" / "hooks" / "pre-push").exists()
+
+

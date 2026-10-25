@@ -1923,12 +1923,15 @@ def install_hooks(start: str = ".") -> tuple[int, list[str]]:
     rc, out = _run_git(["-C", start, "rev-parse", "--path-format=absolute", "--git-common-dir"])
     if rc != 0 or not out.strip():
         return 2, [f"{start} is not inside a git repository"]
-    rc, hp = _run_git(["-C", start, "config", "--get", "core.hooksPath"])
-    if hp.strip():
-        return EXIT_HOOKSPATH, [f"core.hooksPath is set ({hp.strip()}): git would never run the stubs in {out.strip()}/hooks; "
+    rc, hp = _run_git(["-C", start, "config", "--null", "--get-all", "core.hooksPath"])
+    if rc == 0:                    # set, even to an empty value: git then looks there (or nowhere), never in <common>/hooks
+        shown = hp.split("\0")[-2] if hp.count("\0") else hp
+        return EXIT_HOOKSPATH, [f"core.hooksPath is set (`{shown}`): git would never run the stubs in {out.strip()}/hooks; "
                                 "not installed. Unset it, or call the stubs from the hooks directory it names"]
     return _install_common(Path(out.strip()))
 
+    if rc != 1:
+        return EXIT_HOOKSPATH, [f"git did not say whether core.hooksPath is set (exit {rc}); not installed"]
 
 def _lazy_install(call: GitCall, env: dict[str, str]) -> None:
     """The shim's slow path installs the hooks the first time it meets a repository without them. Never raises, never in
@@ -1940,8 +1943,8 @@ def _lazy_install(call: GitCall, env: dict[str, str]) -> None:
         common = _common_dir(ws.gitdir)
         if _stubs_present(common):
             return
-        rc, hp = _call_git(call, "config", "--get", "core.hooksPath")
-        if hp.strip():
+        rc, _ = _call_git(call, "config", "--null", "--get-all", "core.hooksPath")
+        if rc != 1:        # 0: set (even to an empty value), git would not run the stubs; anything else: git did not answer
             return
         _install_common(common)
     except Exception:   # noqa: BLE001 - a failed install must never fail the user's git command
