@@ -46,7 +46,7 @@ fails the plugin).
 
 | Plugin | Cause | Local fix |
 |---|---|---|
-| `rtk.ts` (auto-discovered) | v1 shape: `export const RtkOpenCodePlugin: Plugin = async …` — no default object at all | Rewritten to `export default { id: "rtk", server: RtkOpenCodePlugin, setup }`; `setup` re-registers the same `rtk rewrite` on `execute.before` |
+| `rtk.ts` (auto-discovered) | v1 shape: `export const RtkOpenCodePlugin: Plugin = async …` — no default object at all | Rewritten to `export default { id: "rtk", server: RtkOpenCodePlugin, setup }`; automatic rewriting disabled in both entrypoints on 2026-10-25 (see below) |
 | `openusage-telemetry.ts` | The file was **missing** (config still pointed at it, ENOENT) and, once restored from `~/.config/opencode/opencode.bak/plugins/`, still exported a bare v1 function | Restored + `export default { id: "openusage-telemetry", server: OpenUsageTelemetry, setup }`; `setup` relays `ctx.event.subscribe` events to the daemon's `/v1/hook/opencode` |
 
 Also removed the redundant `plugin: ["file://…/openusage-telemetry.ts"]` entry
@@ -84,35 +84,58 @@ reverted afterwards:
    The original string does not match that rule, so the permission engine must
    have seen the **rewritten** command.
 
-**Conclusion: the hook runs before permission evaluation**, so a plugin that
-rewrites a shell command can move it out from under a `deny`/`ask` rule that
-matched the original. That is exactly the gap `rtk rewrite` leaves and the one
-`rtk-ai/rtk#4187` closes by delegating to `rtk hook opencode` (which judges the
-rules) and by reading OpenCode 2's `permissions` list.
+**Conclusion: the hook runs before permission evaluation.** A rewrite can
+change which `deny`/`ask` rule matches the original shell command. The existence
+of an upstream adapter or a successful `rtk hook opencode` invocation is not
+proof that the supported host preserves those matches.
 
-Shape facts confirmed in 2.0.26: `ctx.tool.hook` exists; `execute.before`
-receives `{ agent, id, input, messageID, sessionID, tool }` with `tool` =
-`shell` for bash and `input.command` the raw command, *pre*-rewrite; a plugin
-can mutate `input.command` and the mutation reaches execution. So a
-permission-aware shim is possible: read the rules before rewriting.
+### Correction and current policy (2026-10-25)
 
-Our own `~/.config/opencode/opencode.json` has no `permissions` key, so the
-local shim is unaffected today; revisit if deny/ask rules are ever added.
+The former local shim was unsafe: `ctx.permission.list()` returns **pending
+permission requests**, not effective global, project and managed rules. An empty
+request list incorrectly admitted rewrites. Scanning config files cannot prove
+the complete native permission contract either. The old claim that the shim
+failed closed for effective rules is retracted.
 
-**The local shim now fails closed anyway** (2026-10-11, operator's call):
-`~/.config/opencode/plugins/rtk.ts` registers no rewrite at all when shell
-permission rules are in effect, and says so on stderr. It asks the host first —
-the v2 plugin context exposes `ctx.permission` with `{ get, hook, list, reply }`,
-so `ctx.permission.list()` gives the *effective* rules (global + project +
-managed), and only `deny`/`ask` entries on `shell`/`*` count. If the host cannot
-answer, it falls back to scanning the global config plus every
-`opencode.json(c)`/`.opencode/opencode.json(c)` from the session directory up to
-the filesystem root, treating an unparsable file as "rules present". The
-canonical copy lives at `djbclark-ade/opencode-plugins/rtk.ts` and is restored by
-`djbclark-ade/bin/opencode-plugin-guard` (Jobber 03:45) if a tool upgrade
-reverts it.
+`opencode-plugins/rtk.ts` now registers **no automatic rewriting in either V1
+or V2**. Both entrypoints emit a notice and leave shell commands unchanged.
+Explicit `rtk <command>` calls remain available: native permissions see that
+original command. Re-enable automatic integration only after reviewing and
+verifying its permission contract on each supported host.
 
-## Upstream status (2026-10-11)
+`bin/opencode-plugin-guard` restores this disabled module after a V1 installer
+replaces it and migrates only the exact SHA-256 of our former unsafe managed V2
+copy (`8e46510ecdc95d4268838e435d33752d179675a6005b8de2483c7355b5d7da44`).
+Unknown V2 RTK copies are preserved with exit 1 and a review notice. An old
+`obsolete` sentinel or `upstream-v2-rtk` marker cannot suppress the migration;
+the guard never invokes a hook subcommand to infer safety. Replacement follows
+symlinks and atomically replaces the real target. `--check` reports the needed
+migration without changing plugin bytes. Existing servers may retain loaded
+code: verify native loading at a fresh location and do not restart busy agents.
+An unsafe canonical source is refused without writing, even if a newer guard
+is run from a worktree before the canonical checkout is updated. Dangling or
+cyclic plugin symlinks and non-regular entries are preserved for review without
+creating a destination.
+To clear an unknown-copy warning, review and preserve that copy, then replace it
+with the reviewed disabled module; adopting an upstream adapter also requires
+updating this guard's documented safety policy.
+
+For native smoke tests, verify the loader's `loading plugin` record and absence
+of plugin-load failures alongside the status RPC. OpenCode 2.1.4 did not expose
+this module's `console.warn` notice in captured stderr or its log; absence of
+that notice is not a failed load. The entrypoint tests verify no hooks.
+
+Offline tests cover both entrypoints with empty, pending, malformed, restrictive
+and failing permission responses, plus restore, exact migration, symlink,
+unknown-copy and idempotence cases without inference.
+
+Upstream check on 2026-10-25: [RTK PR 4187](https://github.com/rtk-ai/rtk/pull/4187)
+was merged and supplies a separate permission-aware adapter. Our former
+`permission.list()` shortcut was local; it is not that upstream adapter.
+This change disables our local shim and does not patch RTK's Rust source.
+Adopting an upstream replacement remains a separate contract review.
+
+## Historical upstream status (2026-10-11; not current safety evidence)
 
 1. **openusage**: PR opened — `janekbaraniewski/openusage#421`
    (`fix(opencode): support the OpenCode 2 plugin contract in the telemetry
@@ -129,8 +152,7 @@ reverts it.
    delegation is the only one that works today. Upstream's own review of #4187
    found that a rewrite which does *not* judge OpenCode's rules can change which
    permission rule matches (a MEDIUM authz finding: a `deny`/`ask` pattern for
-   e.g. `git push*` no longer matches after the rewrite). Our local shim is
-   therefore **unverified** for configs that rely on OpenCode `permissions`
-   deny/ask rules for bash. When rtk ships `hook opencode`, switch the shim's
-   delegation to it (it judges the rules); #4187 is where that lands.
+   e.g. `git push*` no longer matches after the rewrite). Automatic rewriting was subsequently disabled on 2026-10-25. Review the actual
+   released contract before considering any replacement; do not switch merely
+   because the subcommand exists.
 

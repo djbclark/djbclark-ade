@@ -86,6 +86,7 @@ skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
 | `tell-chief-of-staff` | Sends a message to the operator's cloud Grok Bot "Chief of Staff" via its inbound webhook, and explains how Chief of Staff can call back into Claude (ask_claude MCP tool). Webhook URL/key live in Keychain. | "tell grok", "tell Chief of Staff", "hand this to grokbot". |
 | `graft` | Tells an agent to use the graft code graph before grepping or reading source. | Loads on its own in any graft-indexed repo. |
 | `todo` | Tracks optional do-whenever tasks as Basic Memory notes. | "what could I work on"; "add to my todo". |
+| `create-hook` | Writes, merges and removes native OpenAI Codex hooks (`~/.codex/hooks.json`, `<repo>/.codex/hooks.json`; PascalCase events, trust review, deny/allow JSON, timeouts), snapshot of Codex 0.164.0 (2026-10-25) with the official docs to re-check. Codex only: Cursor hooks use other paths and names. | "add a Codex hook", "write hooks.json for Codex", "block a command in Codex". |
 
 ## Other tooling
 
