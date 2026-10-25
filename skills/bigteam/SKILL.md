@@ -758,6 +758,25 @@ finds itself and the loop never exits. On 2026-10-03 two such waiters ran for
 liveness use the PID (`kill -0 $pid`) or `wait`; for completion, wait on the
 report file or the `---<name> exit=` line.
 
+**Waiting on a PR: one `bin/pr-wait` per PR head, never three waiters, never re-arm a live one.** `bin/pr-wait PR
+[--head SHA] [--out PREFIX]` waits for the CI checks of that exact head and for Codex's `codex-review-state:v1` marker
+for it (`completed` and `failed` both terminal), then prints one line and writes `PREFIX-{checks,codex,findings,open-findings,summary}.json`
+(2026-10-23; separate CI, Codex and adversary waiters were two thirds of one lead's notification turns). **Read
+`merge_ready` in the summary, not the exit code:** it is true only when at least one CI check succeeded and none
+failed or is pending (skipped and neutral count beside a success, never alone), Codex's code review completed on
+this head and its security review too when the marker carries `security_review`, no unresolved Codex review
+thread of either kind is left (an earlier head's finding stays open until its thread is resolved: PR 32,
+2026-10-23, a P1 left open past two pushes while a head-only filter read 0; security findings carry
+`codex-security-review-finding:v1`, e.g. PR 20 thread 4361214081) and the marker's `has_unresolved_findings` agrees
+with the threads per kind (`findings-mismatch` otherwise; never read it as a clean 0). When it is false,
+`merge_blockers` says why, any of: `codex-<status>`, `security-failed` / `security-running` / `security-other-head`,
+`findings-not-collected`, `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
+`ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`.
+`PREFIX-open-findings.json` lists the open threads of any head, outdated or not, each with `kind` (`code` or `security`). Exit 0 done, 1
+timeout, 2 bad usage, no such PR or the lock guard busy, 3 Codex stuck, 4 a waiter for that head is already alive (the line names its pid and prefix: read its files, do
+not start another), 5 the head moved (wait on the new head), 6 timed out while `gh` failed. After a push, start one for
+the new head; a second for the same head is refused by itself.
+
 ### Jobs and records — work that must outlive the session
 
 What survives a session is a file, not a process. Every slice and every

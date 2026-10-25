@@ -1581,3 +1581,54 @@ def test_adv2_a_borrowed_twin_with_no_reset_or_pace_does_not_age(rig, monkeypatc
     assert d["five_hour_left"] == 40 and d["resets_at"] is None
     assert d["weekly_left"] == (None if live_only else 80) and (d["pace"] is None) == live_only
     assert d["rows_age_s"] == 10
+
+
+# -- PR 36 re-review LOW d: the opposite direction of the borrowed-twin fix ------------------------
+
+def _stale_snapshot_twin(label, resets_at, pace):
+    """A 5 h old snapshot row whose one window lends a reset time and/or a pace to a live summary row."""
+    return {"provider": "claude", "account": "djbclark@gmail.com", "usable_now": True, "age_seconds": 18000,
+            "windows": [_window(label, 90, resets_at, state="ok", pace_percent=pace)]}
+
+
+def _detailed_live_row(label, left, resets_at):
+    return {"provider": "claude", "pool_family": "default", "age_seconds": 10,
+            "windows": [_window(label, left, resets_at, pool_family="default", quota_scope="shared")]}
+
+
+def _weekly_summary_row(headroom=60):
+    return {"provider": "claude", "pool_family": "default", "usable_now": True, "age_seconds": 10,
+            "binding_window": "Claude Code weekly", "headroom_percent": headroom}
+
+
+def test_adv2_a_borrowed_twin_that_supplied_the_shown_weekly_reset_still_ages(rig, monkeypatch):
+    """The weekly summary row borrows its reset time from a 5 h old twin (no pace to lend). The 5-hour window
+    binds, so only `weekly_resets_at` is the reported value that came from the twin: rows_age_s is 18000."""
+    mod = _load_guard_module(monkeypatch, rig)
+    live = [_detailed_live_row("Claude Code 5-hour", 30, FIVE_RESET), _weekly_summary_row()]
+    snap = {"accounts": [_stale_snapshot_twin("Claude Code weekly", WEEK_RESET, None)]}
+    d = mod.decide(0, {"available": live}, snap, [], mod.thresholds(), NOW)
+    assert d["weekly_resets_at"] == WEEK_RESET_N and d["resets_at"] == FIVE_RESET_N and d["pace"] is None
+    assert d["rows_age_s"] == 18000
+
+
+def test_adv2_a_borrowed_twin_that_supplied_the_binding_reset_still_ages(rig, monkeypatch):
+    """The 5-hour summary row binds and borrows its reset time from a 5 h old twin (no pace to lend); the
+    weekly comes from a fresh detailed row. `resets_at` is the value from the twin: rows_age_s is 18000."""
+    mod = _load_guard_module(monkeypatch, rig)
+    live = [_detailed_live_row("Claude Code weekly", 80, WEEK_RESET), _five_hour_summary_row(10)]
+    live[1]["headroom_percent"] = 20
+    snap = {"accounts": [_stale_snapshot_twin("Claude Code 5-hour", FIVE_RESET, None)]}
+    d = mod.decide(0, {"available": live}, snap, [], mod.thresholds(), NOW)
+    assert d["resets_at"] == FIVE_RESET_N and d["weekly_resets_at"] == WEEK_RESET_N and d["five_hour_left"] == 20
+    assert d["rows_age_s"] == 18000
+
+
+def test_adv2_a_borrowed_twin_that_supplied_the_reported_pace_still_ages(rig, monkeypatch):
+    """The weekly summary row borrows only a pace (the twin has no reset time): `pace` is the value from the
+    5 h old twin, so rows_age_s is 18000."""
+    mod = _load_guard_module(monkeypatch, rig)
+    snap = {"accounts": [_stale_snapshot_twin("Claude Code weekly", None, 12)]}
+    d = mod.decide(0, {"available": [_weekly_summary_row()]}, snap, [], mod.thresholds(), NOW)
+    assert d["pace"] == 12 and d["resets_at"] is None and d["weekly_resets_at"] is None
+    assert d["rows_age_s"] == 18000

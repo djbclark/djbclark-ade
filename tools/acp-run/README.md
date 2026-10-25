@@ -41,8 +41,9 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    MCP servers, mode `default`); codex the `read-only` mode (its sandbox runs shell commands
    unasked, so an unasked `execute` does not trip there, 2026-10-19); opencode a
    `permission` block (`OPENCODE_CONFIG_CONTENT`) allowing read, glob, grep, list,
-   webfetch, websearch and denying the rest; zcode `plan` mode with
-   `ZCODE_DISALLOWED_TOOLS` naming only the mutating tools. Every other agent is
+   webfetch, websearch and denying the rest; zcode `plan` mode with the backend session
+   limited to Read, Glob, Grep, LS, WebFetch and WebSearch and Bash, Write, Edit and the
+   other mutating tools removed (`zcode-denylist-shim.cjs`, below). Every other agent is
    refused with exit 2 and a one-line reason (no equivalent mode verified);
    `acp-run <agent> --info` lists the `perm_modes` an agent supports. `deny` gives
    claude no tools at all, so it is for a text-only answer, never a review that
@@ -58,9 +59,21 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      claude-agent-acp gets a session with no built-in tools, no user settings
      (so no `bypassPermissions` default or allow rules), no MCP servers and no
      bypass (`_meta.claudeCode.options`), then mode `default`; zcode starts in
-     `plan` (`ZCODE_ACP_MODE`) with its tools disallowed (`ZCODE_DISALLOWED_TOOLS`,
-     MCP `mcp__*` included) and a per-run settings file (`ZCODE_CLI_SETTINGS_FILE`,
-     removed afterwards) with MCP servers, plugins, skills, subagents and hooks off;
+     `plan` (`ZCODE_ACP_MODE`) with its tools removed from the session and a per-run
+     settings file (`ZCODE_CLI_SETTINGS_FILE`, removed afterwards) with MCP servers,
+     plugins, skills, subagents and hooks off. The tool removal is
+     `tools/acp-run/zcode-denylist-shim.cjs`, started as `ZCODE_BIN` from the per-run dir
+     (2026-10-24): `zcode app-server --stdio` ignores `--disallowed-tools` (so
+     `ZCODE_DISALLOWED_TOOLS` and the settings file's `permission.disallowedTools` removed
+     nothing; a live read-only run was offered Bash and ran `ls` unasked, since plan mode
+     lets read-only shell through) and zcode-acp-server's `session/create` carries no
+     `toolDenylist`. The shim adds `toolDenylist` (`ZCODE_DISALLOWED_TOOLS`) and
+     `toolAllowlist` (`ZCODE_ACP_RUN_ALLOWLIST`: the reading tools under read-only, a name
+     no tool has under deny) to `session/create`, `session/resume` and `session/send`
+     (`send` takes no allowlist). Without a real `vendor/zcode.cjs` the run fails with
+     exit 1 (config) rather than start unguarded. Left over under deny: the Task and
+     plan-mode control tools; the two read-only built-in MCP tools
+     (`mcp__web_reader__webReader`, `mcp__4_5v_mcp__analyze_image`) under read-only;
      agy runs in mode `default`; crush runs without `--yolo` (now added only
      under `all`) and, since 2026-10-13, with **no tools at all** (below);
      opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`.
@@ -411,7 +424,7 @@ acp-run sets `ZCODE_BIN=<pkg>/vendor/zcode.cjs` when that file and `vendor/provi
 
 Provider switch not shown to work (2026-10-16: `builtin:zai` with a Coding Plan API key in `~/.zcode/v2/config.json` is listed and even becomes a new session's `currentValue`, but `set_config_option(model)` to it fails `Provider Registry 中不存在 Model`, `zcode --model builtin:zai/GLM-5.3 --prompt` exits 1 the same way, and `ZCODE_PROVIDER=builtin:zai` is ignored: every turn ran on `account:zai-individual-coding-plan`. Filed zai-org/feedback#1067; the key stays in sudo-secretspec as `ZAI_CODING_PLAN_API_KEY` for when a build can use it. Until then zcode is account login only, and an expired login is acp-dispatch class `auth`, zai-org/feedback#1001.) Plan ids: `account:{zai,bigmodel}-{individual,team}-coding-plan` and `start-plan`, `account:*-offpeak-idle-plan`, `account:*-highspeed-card` (10), plus `builtin:zai-coding-plan`, `builtin:zai` (API key), `builtin:bigmodel*`, `builtin:zai-start-plan`. Custom `~/.zcode/v2/provider_config.json`. Here only `builtin:zai-coding-plan` is on. `zai-start-plan` = `coding_plan_not_entitled`. Pin: `ZCODE_PROVIDER=builtin:zai-coding-plan`. Probes of `builtin:zai` and `builtin:zai-start-plan` still returned only coding-plan GLM-5.3.
 
-Models: `builtin:zai-coding-plan\GLM-5.3`, `builtin:zai-coding-plan\GLM-5.3-Flash` (`--model GLM-5.3-Flash` matches). Registry also GLM-5.2, GLM-5-Turbo (start/team), GLM-5.1/4.x custom. A switch resets effort to `max`.
+Models: `builtin:zai-coding-plan\GLM-5.3`, `builtin:zai-coding-plan\GLM-5.3-Flash` (a bare `--model GLM-5.3` or `GLM-5.3-Flash` means the coding-plan id, 2026-10-24: the list also holds `builtin:zai\GLM-5.3`, the API-key pool, and a full id still works). Registry also GLM-5.2, GLM-5-Turbo (start/team), GLM-5.1/4.x custom. A switch resets effort to `max`.
 
 Effort option `thought`. GLM-5.3 and Flash: `low` `high` `max` (default `max`, cannot disable). GLM-5.2: `disabled` `high` `max`. GLM-5-Turbo and GLM-5.1: `disabled` `enabled`. No map onto a neighbor: `medium` and `xhigh` exit 2 on GLM-5.3. `default` keeps the model default. `disabled` aliases to `none` and matches an option that canonicalizes to `none`.
 
@@ -650,7 +663,7 @@ acp-run claude -C ~/src/repo -i --resume SESSION_ID          # reopen an earlier
 | 2 | usage error |
 | 5 | empty reply and every permission request was denied (the code acpx uses) |
 | 75 | refused to start by `--max-load` |
-| 127 | the agent binary is not on `PATH` after `ACP_RUN_BIN_WAIT` seconds (default 90, `0` disables, at most 600, junk means the default; an upgrade may be relinking it, 2026-10-20) |
+| 127 | the agent binary is not on `PATH` after `ACP_RUN_BIN_WAIT` seconds (default 90, `0` disables, at most 600, junk means the default; an upgrade may be relinking it, 2026-10-20). The binary is the program the launch command runs: for crush, `crush-acp` behind its `env NAME=VAL` wrapper, never `env` (2026-10-23); `--list` marks it `--` the same way |
 | 77 | under `--perm deny` or `read-only` a tool ran without a permission request (tripwire; the turn is cancelled) |
 | 124 | timed out (`session/cancel` sent first, then the agent is killed) |
 | 130, 143 | interrupted by SIGINT, SIGTERM (with `--interactive` also 129 on SIGHUP; Ctrl-C cancels a running turn instead of exiting) |
