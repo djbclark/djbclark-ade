@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The suite never touches the operator's real deferred-send queue (~/.local/state/relay), 2026-10-24.
 
-Named test_zz_ so a full run reaches it last; run alone it still proves a freshly loaded relay.py points at a
-throwaway directory. tests/conftest.py snapshots the real directory (every entry's mtime and size) when the run starts.
+tests/conftest.py points RELAY_DEFER_DIR at a throwaway directory before relay.py is imported. No snapshot of the real
+directory is compared: every agent's relay.py run on the machine changes it while the suite runs.
 """
 from __future__ import annotations
 
@@ -23,7 +23,3 @@ def test_a_freshly_loaded_relay_never_points_at_the_real_queue() -> None:
     spec.loader.exec_module(relay)
     real = conftest.REAL_RELAY_DIR.resolve()
     assert real not in (relay.DEFER_DIR.resolve(), *relay.DEFER_DIR.resolve().parents)
-
-
-def test_the_real_queue_is_unchanged_since_the_run_started() -> None:
-    assert conftest.relay_state_snapshot() == conftest.REAL_RELAY_BEFORE

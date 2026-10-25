@@ -107,11 +107,13 @@ if it cannot; that notice is itself deferred once when the sender is busy (a `ki
 hour, owes no notice, never collapsed with a normal record, so no notice loop). **A caller with no identifiable sender**
 (no verified Paseo id and no fleet `self` row: fleet-watch, load-watch, a cron script) **is not deferred for**: exit 1 "not
 sent: that session is busy and cannot take it now; deferring needs an identifiable sender (it gets a notice if the send
-fails). Retry with --idle S, or --no-defer for the plain refusal"; `load-watch` passes `--no-defer` for every incident
-brief, since a brief that arrives after the load spike is useless. Per target, messages go out in order; at most 20 queued
+fails). Retry with --idle S, or --no-defer for the plain refusal"; `load-watch` and `session-load-watch` pass `--no-defer` for every incident
+brief or load-shedding ask, since a brief that arrives after the load spike is useless. Per target, messages go out in order; at most 20 queued
 per target, 20 per sender and 100 in all (over: exit 1 "deferred queue full (N)"); a pane id reused by another session
-fails the message ("target changed": the agent, session id, transcript or the pid of the TUI in the pane differs; a herdr
-pane whose TUI shows none of the three is not deferred). A Paseo daemon that cannot answer fails a queued message only
+fails the message ("target changed": the agent, session id or transcript differs, or the TUI's pid, taken at queue time as
+the one foreground process named like the agent, is no longer among the pane's foreground pids). At queue time a herdr pane
+with none of session id, transcript or an unambiguous TUI process is not deferred (exit 1); at poll time a pane whose
+processes herdr cannot read is an error, and 3 in a row (about 10-15 s) fail the message. A Paseo daemon that cannot answer fails a queued message only
 after 3 consecutive errors 5 s apart, counted apart from "not found"; a pending permission card is waited for. A record
 `sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
 the notice say "unverified", never "delivered". `--idle S`

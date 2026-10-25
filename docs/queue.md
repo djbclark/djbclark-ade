@@ -19,9 +19,11 @@ process per queued record (at most 100), only the head of a target's queue polls
 bounds can be starved by a same-user process that mints sender keys (100 in all; never silent: exit 1 "deferred queue
 full"), one sender can fill one target's 20, and a deliverer stuck in a send holds its own record's owed notice until a later
 sweep; (7) a Paseo daemon error is tolerated for only 3 looks, 5 s apart (about 10-15 s): raise `DEFER_ERRORS` or space
-the looks if a longer restart must be survived; (8) a herdr pane whose foreground process cannot be read (herdr
-`pane process-info` fails) is not deferred, and one whose process is read wrongly (several foreground processes, none
-named like the agent) is not identified: exit 1 with the `--idle S` hint; (9) two records left by an earlier test run sit in
+the looks if a longer restart must be survived; (8) at QUEUE time a herdr pane row with no session id, transcript or pid is not deferred (exit 1 with the `--idle S` hint)
+when `pane process-info` fails, or when no foreground process, or more than one, is named like the agent (the herdr label
+or a binary `fleet.PROC_AGENTS` maps to it; with one foreground process in all, that one is taken); at POLL time the stored
+pid only has to be among the pane's foreground pids (tool and MCP children come and go), and a pane herdr cannot read
+counts as an error that fails the message only after 3 in a row (about 10-15 s, as in (7)); (9) two records left by an earlier test run sit in
 `~/.local/state/relay/deferred/` (`20261024-194844-fe1631`, `20261024-194854-57fcc1`) and are pruned by a sweep a week after
 they went final; the test suite now points `RELAY_DEFER_DIR` at a temp directory (`tests/conftest.py`) and
 `tests/test_zz_relay_real_state_untouched.py` fails if the real directory changes.

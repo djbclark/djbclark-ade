@@ -1,5 +1,7 @@
 """Shared pytest setup for the djbclark-ade tests."""
+import atexit
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -50,20 +52,8 @@ os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.
 # gets a throwaway queue directory, so no test reads, sweeps, expires or prunes the operator's real deferred-send queue
 # ~/.local/state/relay/deferred (2026-10-24: test_session_relay.py ran relay.main(), whose opportunistic sweep expired and
 # pruned real records and started real deliverers). Unconditional: an outer value must not point the suite at a real queue.
-# tests/test_zz_relay_real_state_untouched.py compares the real directory with this snapshot at the end of the suite.
+# tests/test_zz_relay_real_state_untouched.py proves a freshly loaded relay.py points at this directory, never the real one.
 REAL_RELAY_DIR = Path.home() / ".local/state/relay"
-
-
-def relay_state_snapshot(root: Path = REAL_RELAY_DIR) -> dict[str, tuple[int, int]] | None:
-    """{relative path: (mtime_ns, size)} of everything under ROOT, its directories included; None when ROOT is absent."""
-    if not root.exists():
-        return None
-    snap = {".": (root.stat().st_mtime_ns, 0)}
-    for p in sorted(root.rglob("*")):
-        st = p.lstat()
-        snap[str(p.relative_to(root))] = (st.st_mtime_ns, st.st_size)
-    return snap
-
-
-REAL_RELAY_BEFORE = relay_state_snapshot()
-os.environ["RELAY_DEFER_DIR"] = str(Path(tempfile.mkdtemp(prefix="relay-suite-defer-")) / "relay" / "deferred")
+_DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-defer-"))
+atexit.register(shutil.rmtree, _DEFER_ROOT, ignore_errors=True)
+os.environ["RELAY_DEFER_DIR"] = str(_DEFER_ROOT / "relay" / "deferred")

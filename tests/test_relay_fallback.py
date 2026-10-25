@@ -3251,6 +3251,78 @@ class TestDeferredSend(Harness):
         pane["procs"] = None
         self.assertEqual(relay.target_poll(rec)[0], "error")
 
+    # ---- round 3: a TUI's tool children are foreground processes too ---------------------------------------------
+
+    @staticmethod
+    def proc(pid: int, name: str, *argv: str) -> dict[str, Any]:
+        return {"pid": pid, "name": name, "argv": list(argv) or [name], "argv0": name, "cwd": "/Users/djbclark/ops"}
+
+    def pane(self, row: dict[str, Any], procs: Any) -> dict[str, Any]:
+        """Serve ROW and PROCS (a list, None for a herdr that cannot answer, or a callable) as the pane w2N:pZ."""
+        state = {"row": row, "procs": procs}
+        relay.fleet.sessions = lambda: [dict(state["row"]), dict(self.sender, self=True)]
+        relay.fleet.pane_procs = lambda p: ((state["procs"]() if callable(state["procs"]) else state["procs"]), 50626)
+        return state
+
+    def queue_pane(self) -> str:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 0)
+        return relay.rec_all()[-1]["id"]
+
+    def test_a_pane_with_tool_children_keeps_its_tui_and_stays_the_same_target(self) -> None:
+        tui = self.proc(51921, "omp", "omp", "--auto-approve")
+        state = self.pane(real_omp_row(status="working"), [self.proc(51990, "graft", "graft", "mcp"), tui, self.proc(51991, "cow", "cow", "mcp")])
+        rid = self.queue_pane()
+        self.assertEqual(relay.rec_read(rid)["target"]["pid"], 51921)    # the process named like the agent, not the first one
+        state["row"] = real_omp_row(status="idle")
+        state["procs"] = [self.proc(52100, "bash", "bash", "-c", "make"), tui, self.proc(52101, "make", "make")]    # other children now
+        self.assertEqual(relay.target_poll(relay.rec_read(rid)), ("idle",))
+        relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], self.calls), ("delivered", ["type"]))
+
+    def test_a_tui_is_found_by_the_binary_name_fleet_maps_to_its_label(self) -> None:
+        row = {**real_omp_row(status="working"), "agent": "cursor"}
+        self.pane(row, [self.proc(60001, "node", "node", "/x/mcp-server.js"),
+                        self.proc(60002, "cursor-agent", "/Users/djbclark/.local/bin/cursor-agent", "--yolo")])
+        self.assertEqual(relay.agent_pid(row), 60002)
+        self.pane(row, [self.proc(60001, "node", "node", "/x/mcp-server.js"), self.proc(60003, "node", "node", "/x/cursor-agent")])
+        self.assertEqual(relay.agent_pid(row), 60003)    # node-launched: the script is argv[1]
+
+    def test_a_pane_whose_process_cannot_be_picked_unambiguously_is_not_deferred(self) -> None:
+        for procs in ([self.proc(1, "omp", "omp"), self.proc(2, "omp", "omp", "--sub")],    # two processes named like the agent
+                      [self.proc(1, "graft", "graft"), self.proc(2, "cow", "cow")]):          # several, none named like it
+            self.pane(real_omp_row(status="working"), procs)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 1)
+            self.assertEqual((relay.rec_all(), self.spawned), ([], []))
+            self.assertIn("deferring needs a way to tell this pane's TUI", err.getvalue())
+
+    def test_the_stored_pid_missing_from_a_multi_process_pane_is_a_changed_target(self) -> None:
+        state = self.pane(real_omp_row(status="working"), [self.proc(51921, "omp", "omp"), self.proc(51990, "graft", "graft")])
+        rid = self.queue_pane()
+        state["row"] = real_omp_row(status="idle")
+        state["procs"] = [self.proc(60001, "omp", "omp"), self.proc(51990, "graft", "graft")]    # a new omp; an old child's pid is still there
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "fail")
+        relay.deliver(rid)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], self.calls), ("failed", []))
+        self.assertIn("target changed", rec["outcome"])
+
+    def test_a_herdr_restart_shorter_than_the_error_limit_does_not_fail_a_pane_message(self) -> None:
+        tui = self.proc(51921, "omp", "omp")
+        state = self.pane(real_omp_row(status="working"), [tui, self.proc(51990, "graft", "graft")])
+        rid = self.queue_pane()
+        state["row"] = real_omp_row(status="idle")
+        n = [0]
+
+        def restart(_s: float) -> None:
+            n[0] += 1
+            state["procs"] = [tui] if n[0] >= 2 else None    # herdr answers nothing for two looks (about 10 s), then comes back
+        state["procs"] = None
+        with mock.patch.object(relay.time, "sleep", side_effect=restart):
+            relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], self.calls, n[0]), ("delivered", ["type"], 2))
+
     # ---- round 2: sender identity, notices that are deferred, daemon errors, late sends -------------------------
 
     def test_a_caller_with_no_identifiable_sender_is_refused_not_queued(self) -> None:
@@ -3409,12 +3481,24 @@ class TestDeferredSend(Harness):
         self.assertEqual((self.messages(), relay.rec_read(rid)["notice"]), ([], "done"))
         self.assertEqual(len([a for a, _ in self.sent if a == SENDER]), 1)    # and the notice it owed went out, once
 
-    def test_detach_leaves_the_spawners_directory_and_makes_files_private(self) -> None:
+    def test_detach_leaves_the_spawners_directory_and_sets_no_umask_its_children_would_inherit(self) -> None:
         with (mock.patch.object(relay.os, "fork", return_value=0), mock.patch.object(relay.os, "getppid", return_value=1),
               mock.patch.object(relay.os, "chdir") as chdir, mock.patch.object(relay.os, "umask") as umask):
             relay.detach()
         chdir.assert_called_once_with("/")
-        umask.assert_called_once_with(0o077)
+        umask.assert_not_called()
+
+    def test_the_files_a_deliverer_makes_itself_are_private_whatever_the_umask(self) -> None:
+        old = os.umask(0o022)    # the spawner's usual umask: nothing in the deliverer may depend on it being 077
+        try:
+            rid = self.queue()
+            self.cur = "idle"
+            relay.deliver(rid)
+        finally:
+            os.umask(old)
+        modes = {p.name: p.stat().st_mode & 0o777 for p in relay.DEFER_DIR.parent.rglob("*") if p.is_file()}    # the records, the lock, deferred.log
+        self.assertIn("deferred.log", modes)
+        self.assertEqual(set(modes.values()), {0o600}, modes)
 
     def test_a_cancel_that_races_a_prune_is_a_clean_refusal(self) -> None:
         rid = self.queue()
