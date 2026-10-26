@@ -241,6 +241,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `self-slash --finish` (and a mapped `/quit`) on Paseo now refuses with exit 12 when the Paseo agent holds a watch role in `bin/watch status` (same prefix match as `watch`), so a session that is the load, CFEngine or Paseo watcher is not archived by accident; `--successor` is not refused, the check fails open when `watch status` fails or exceeds `SELF_SLASH_WATCH_TIMEOUT` (20 s), and `SELF_SLASH_ALLOW_WATCHER=1` overrides. The baton and loose skills say how to pick the chain and not to offer finish for a watcher (2026-10-25, #72).
+||||||| 7380c56
 - Codex automatic tab naming reads Herdr’s `result.pane` response and keeps missing titles absent instead of turning JSON null into `none-t` (2026-10-25).
 
 - Clarified dispatch waits: finish downloads before reading dependent artifacts, and use the documented load-watch precheck instead of starting the governor daemon (2026-10-25; direct integration).
