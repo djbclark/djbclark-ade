@@ -31,7 +31,8 @@ samples at least 10 min apart (one sample per reading time; the newest file's va
 hours_to_reset, counted from the account's newest observation of the window (never later than now); exhaust_at = that
 observation + (100 - used) / rate when rate >= MIN_RATE and that is under a year away. Several accounts: the window is
 the account at the worst level, then the highest projection at reset, then the highest `used`. Levels (thresholds:
-THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS JSON merges over them):
+THRESHOLDS below = the fail-safe; config/gates.toml baseline, the active `bin/gate-profile` profile and env
+CLAUDE_GOVERNOR_THRESHOLDS JSON merge over them in that order, see docs/gates.md):
   ok        neither of the below
   tight     any window projected >= 90% at its reset, or 5-hour left < 25, or weekly left < 30
   critical  projected exhaustion more than 10 min before the reset and within 45 min, or any window
@@ -76,6 +77,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_gates  # noqa: E402
+
 THRESHOLDS: dict[str, float] = {
     "stale_min": 45,                      # newest snapshot older than this: exit 10
     "rate_window_min": 90,                # snapshots this recent feed the burn rate
@@ -110,13 +114,14 @@ AGENT_ID = re.compile(r"[0-9a-f-]{7,64}")
 
 # -- environment -------------------------------------------------------------------------------
 
+def gate_config(now: datetime | None = None) -> tuple[dict[str, float], dict[str, Any]]:
+    """(thresholds, info): THRESHOLDS < config/gates.toml < the active gate profile < env CLAUDE_GOVERNOR_THRESHOLDS JSON
+    (bin/ade_gates.py; docs/gates.md). `info` says which profile applies, or why a profile file is ignored."""
+    return ade_gates.load_gates("governor", now or now_utc(), THRESHOLDS)
+
+
 def thresholds() -> dict[str, float]:
-    t = dict(THRESHOLDS)
-    raw = os.environ.get("CLAUDE_GOVERNOR_THRESHOLDS")
-    if raw:
-        for k, v in json.loads(raw).items():
-            t[k] = v
-    return t
+    return gate_config()[0]
 
 
 def now_utc() -> datetime:
@@ -703,8 +708,14 @@ def level_exit(level: str) -> int:
 
 def cmd_run(dry: bool) -> int:
     """`check` and `run --dry-run` are dry=True (nothing is written or called but the read-only list)."""
-    t = thresholds()
     now = now_utc()
+    t, gate_info = gate_config(now)
+    profile = ade_gates.profile_brief(gate_info)
+    if not dry:
+        ade_gates.notify_expired(gate_info, lambda text: ping(text)[0], now)   # once per expired profile file
+        ade_gates.notify_daily(gate_info, lambda text: ping(text)[0], now)     # once per New York day while a profile is active
+    if profile:
+        print(f"gate profile: {profile['name']} until {ade_gates.ny(ade_gates.parse_utc(profile['until']))}")
     path = state_path()
     state = read_state(path)
     snaps = load_snapshots(now, t)
@@ -714,7 +725,8 @@ def cmd_run(dry: bool) -> int:
               file=sys.stderr)
         if not dry:
             first = not state.get("stale_since")
-            state.update({"level": "stale", "checked_at": iso(now), "stale_since": state.get("stale_since") or iso(now)})
+            state.update({"level": "stale", "checked_at": iso(now), "stale_since": state.get("stale_since") or iso(now),
+                          "profile": profile})
             if first:
                 ok, _ = ping(f"djbclark-ade: Claude fleet governor has no fresh aiuse snapshot (newest {age}); no action")
                 state["last_ping"] = {"at": iso(now), "ok": ok, "kind": "stale"}
@@ -742,12 +754,14 @@ def cmd_run(dry: bool) -> int:
     state.pop("stale_since", None)
     state.update({"level": level, "checked_at": iso(now), "snapshot_at": iso(res["snapshot_at"]),
                   "windows": {k: window_state(w) for k, w in res["windows"].items()},
-                  "guard_level": res.get("guard", "ok"), "errors": failed})
+                  "guard_level": res.get("guard", "ok"), "errors": failed, "profile": profile})
     state.setdefault("downshifted", {})
     if changed:
         trig = trigger(res["windows"], level) or max(
             ((k, w) for k, w in res["windows"].items() if k != FABLE_KIND), key=lambda kw: kw[1]["used"])
         text = f"djbclark-ade: Claude {describe(trig[1])}: {'; '.join(changed)}"
+        if profile:
+            text += f" [gate profile {profile['name']} until {ade_gates.ny(ade_gates.parse_utc(profile['until']))}]"
         ok, out = ping(text)
         state["last_ping"] = {"at": iso(now), "ok": ok, "text": text, "kind": "change"}
         if not ok:
@@ -768,6 +782,9 @@ def cmd_status(as_json: bool) -> int:
         print(json.dumps(state, indent=1, sort_keys=True))
         return 0
     print(f"level: {state.get('level', '?')}  checked_at: {state.get('checked_at', '?')}")
+    prof = state.get("profile")
+    if isinstance(prof, dict):
+        print(f"  gate profile: {prof.get('name')} until {prof.get('until')}")
     for kind, w in sorted((state.get("windows") or {}).items()):
         print(f"  {kind}: {w.get('used')}% used, {w.get('rate_per_hour')}%/h, projected "
               f"{w.get('projected_at_reset')}% at reset {w.get('resets_at')}, exhaust {w.get('exhaust_at')} -> {w.get('level')}")

@@ -79,6 +79,8 @@ skill's snapshot in the same turn.
   `code`/`bulk`/`research`/`mechanical` slice to claude and prefers omp Opus for `judgment`. launchd job
   `com.djbclark.claude-fleet-governor` (every 300 s): `bin/claude-fleet-governor --install`, then the printed
   `launchctl bootstrap` line. `check` (the default) changes nothing.
+  Its thresholds, and the quota guard's, are in `config/gates.toml`; `bin/gate-profile set away --for 72h --reason TEXT`
+  loosens them temporarily (expiring, floor-checked, 2026-10-26; `docs/gates.md`).
 - `codex login status`; `opencode models`; `bl quota list`;
   `curl -s localhost:4000/v1/models` (LiteLLM/ClinePass);
   `agy --version`; `devin --version`; `copilot --version`.

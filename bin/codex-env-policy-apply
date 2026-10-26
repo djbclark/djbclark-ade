@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Merge the template's [shell_environment_policy] tables into a Codex config.toml atomically.
+
+    codex-env-policy-apply TEMPLATE TARGET [--write]
+
+Dry run by default: prints a unified diff of the policy span ONLY (the policy tables and the comment block above
+them, old against new), never a line of any neighbouring table. Only the template's own exact lines, table headers and
+the fixed literals `inherit = "core|all|none"` and `ignore_default_excludes = true|false` print; every other
+assignment line (including its key), operator comment and continuation line is hidden; in a sub-table every assignment line is hidden. Touches nothing but the policy tables and the comment block just above them: Codex's own [projects.*],
+[hooks.state.*], [marketplaces.*] and every other byte stay as they are. With --write: nothing at all happens when
+the merged text equals the file (no backup, no temp file, mtime unchanged); otherwise it refuses if TARGET changed
+since it was read (Codex rewrites it), creates TARGET.bak-<UTC time>-env-policy with mode 0600 (O_EXCL), writes a
+sibling temp file (mode of TARGET) and os.replace()s it onto the realpath. The result must parse, keep every
+non-policy table equal and keep the explicit `set` values. Diagnostics name files and `set` keys, never values; a TOML
+parse error is reduced to its line and column (tomllib's own text can quote characters).
+
+Exit: 0 done or nothing to do, 1 refused or failed, 2 bad arguments."""
+import argparse, datetime, difflib, os, re, sys, tempfile, tomllib
+
+POLICY = "shell_environment_policy"
+TABLE = re.compile(r"^\[(.+?)\][ \t]*(?:#[^\r\n]*)?\r?$", re.M)
+
+
+def fail(msg):
+    print(f"codex-env-policy-apply: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read(path, what):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError as e:
+        fail(f"cannot read {what} {path}: {e.strerror}")
+
+
+def parse(text, what):
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        m = re.search(r"\(at line (\d+), column (\d+)\)", str(e))  # the rest of the message may quote file content
+        fail(f"{what} is not valid TOML" + (f" (line {m.group(1)}, column {m.group(2)}; text withheld)" if m else " (text withheld)"))
+
+
+def policy_span(text, what):
+    """(start, end) of the policy tables and the comment block above them."""
+    heads = list(TABLE.finditer(text))
+    idx = [i for i, m in enumerate(heads) if m.group(1) == POLICY]
+    if len(idx) != 1:
+        fail(f"{what} must hold exactly one [{POLICY}] table, found {len(idx)}")
+    first, last = heads[idx[0]].start(), idx[0]
+    while last + 1 < len(heads) and heads[last + 1].group(1).startswith(POLICY + "."):
+        last += 1
+    end = heads[last + 1].start() if last + 1 < len(heads) else len(text)
+    lines = text[:first].split("\n")
+    n = len(lines) - 1
+    while n > 0 and lines[n - 1].startswith("#"):
+        n -= 1
+    return (len("\n".join(lines[:n])) + (1 if n else 0)), end
+
+
+FIXED = (  # the only operator-written lines that print, rebuilt from a literal (a trailing comment is dropped)
+    (re.compile(r'\s*inherit\s*=\s*"(core|all|none)"\s*(#.*)?'), 'inherit = "{}"'),
+    (re.compile(r"\s*ignore_default_excludes\s*=\s*(true|false)\s*(#.*)?"), "ignore_default_excludes = {}"),
+)
+
+
+def safe_view(span, template_lines):
+    """The lines of a policy span fit to print. Printable: blank lines, table headers and lines that are exactly the
+    template's own text, and a few fixed literals (inherit = "core"|"all"|"none", ignore_default_excludes = true|false).
+    Everything else is hidden: operator comments, continuation lines of a value, every other assignment line, including its key. In a
+    sub-table ([shell_environment_policy.*], including the template's own `.set`) every assignment line is hidden
+    first, even when the line equals a template line."""
+    out, mode = [], "pre"  # pre: the comment block above the first header; main; sub; hidden
+    for line in span.split("\n"):
+        line = line.rstrip("\r")
+        m = TABLE.match(line)
+        if m:
+            if line in template_lines:
+                mode = "main" if m.group(1) == POLICY else "sub"
+                out.append(line)
+            else:
+                mode = "hidden"
+                out.append("[<table hidden>]")
+        elif not line.strip():
+            out.append(line)
+        elif line.lstrip().startswith("#"):
+            out.append(line if line in template_lines else "# <comment hidden>")
+        elif re.match(r"\s*[A-Za-z0-9_\".-]+\s*=", line):
+            fixed = next((f.format(fm.group(1)) for rx, f in FIXED if mode == "main" and (fm := rx.fullmatch(line))), None)
+            if fixed:
+                out.append(fixed)
+            elif mode == "main" and line in template_lines:
+                out.append(line)
+            else:
+                out.append("<assignment hidden>")
+        elif mode == "main" and line in template_lines:
+            out.append(line)  # a continuation line that is the template's own text
+        else:
+            out.append("<continuation hidden>")
+    return "\n".join(out)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="codex-env-policy-apply", description="Merge the template's shell_environment_policy tables into a Codex config.toml.")
+    ap.add_argument("template", help="agents/codex/config.toml.tmpl")
+    ap.add_argument("target", help="the live config.toml")
+    ap.add_argument("--write", action="store_true", help="apply (default: dry run, print the diff)")
+    a = ap.parse_args(argv)
+    target = os.path.realpath(a.target)
+    tmpl = read(a.template, "template").decode("utf-8")
+    raw = read(target, "target")
+    st = os.stat(target)
+    old = raw.decode("utf-8")
+    live = parse(old, "target")
+    a0, b0 = policy_span(tmpl, "template")
+    block = tmpl[a0:b0].replace("{{ .home }}", os.path.expanduser("~"))
+    try:  # the machine-specific browser digests stay what the live file has
+        digests = live[POLICY]["set"]["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"]
+    except KeyError as e:
+        fail(f"target lacks {POLICY}.set key {e}")
+    block = block.replace("{{ .codex_browser_client_sha256s }}", digests)
+    if "{{" in block:
+        fail("template policy block has an unfilled placeholder")
+    c, d = policy_span(old, "target")
+    new = old[:c] + block + old[d:]
+    merged = parse(new, "merged result")
+    rest = lambda cfg: {k: v for k, v in cfg.items() if k != POLICY}
+    if rest(merged) != rest(live):
+        fail("refusing: the merge would change content outside the policy tables")
+    oset, nset = live[POLICY].get("set", {}), merged[POLICY].get("set", {})
+    if oset != nset:
+        diff = sorted(k for k in set(oset) | set(nset) if oset.get(k) != nset.get(k))
+        fail(f"refusing: the merge would change the explicit set (keys: {', '.join(diff)}); values not shown")
+    if new == old:
+        print("already applied: nothing to do")
+        return 0
+    # the template's own lines, before the machine's digest goes in: those are safe to print, the digest line is not
+    template_lines = set(tmpl[a0:b0].replace("{{ .home }}", os.path.expanduser("~")).split("\n")) - {""}
+    shown_old = safe_view(old[c:d], template_lines)
+    shown_new = safe_view(block, template_lines)
+    sys.stdout.writelines(difflib.unified_diff(shown_old.splitlines(1), shown_new.splitlines(1), "live policy span", "new policy span"))
+    if not a.write:
+        return 0
+    now = os.stat(target)
+    if read(target, "target") != raw or now.st_mtime_ns != st.st_mtime_ns:
+        fail("target changed while reading; rerun")
+    bak = f"{target}.bak-{datetime.datetime.now(datetime.timezone.utc):%Y%m%dT%H%M%SZ}-env-policy"
+    try:
+        fd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as e:
+        fail(f"cannot create backup {bak}: {e.strerror}")
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
+        f.flush()
+        os.fsync(f.fileno())
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".config.toml.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(new.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, st.st_mode & 0o777)
+        if os.stat(target).st_mtime_ns != st.st_mtime_ns:
+            fail("target changed; rerun (backup kept)")
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    print("written", target, "backup", bak)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

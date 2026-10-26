@@ -400,6 +400,8 @@ running agent per reset period toward omp API credits. Exit 0/1/2, 10 stale data
 `~/.local/state/ade/fleet-governor.json`; launchd `com.djbclark.claude-fleet-governor` (300 s, `--install`).
 `route_agent.py` reads the state's `level` (under 30 min old): at tight/critical `code`, `bulk`, `research` and
 `mechanical` never go to claude, and `judgment` prefers omp `anthropic/claude-opus-5-5`.
+The governor's and the guard's numbers live in `config/gates.toml` and a temporary profile can loosen them (2026-10-26,
+`bin/gate-profile`, [`docs/gates.md`](gates.md)); the level `route_agent.py` reads is computed from the active profile.
 
 1. **Frontier models only for what really needs them (2026-10-18):** judgment
    is `acp-dispatch claude --model opus --kind judgment --effort high` first

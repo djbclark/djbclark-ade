@@ -150,7 +150,7 @@ PROBE = textwrap.dedent("""\
         mod.asyncio.create_subprocess_exec = fake_exec
         mod.connect_to_agent = lambda client, i, o: Conn()
         old = dict(os.environ)
-        os.environ.update({"HERDR_PANE_ID": "w1:p1", "HERDR_ENV": "1", "HERDR_TAB_ID": "w1:t1",
+        os.environ.update({"HERDR_PANE_ID": "w1:p1", "HERDR_ENV": "1", "HERDR_TAB_ID": "w1:t1", "HERDR_WORKSPACE_ID": "w1",
                            "PASEO_AGENT_ID": "agent-1", "PASEO_AGENT_CWD": "/x", "ORCA_TERMINAL_HANDLE": "term-1",
                            "ADE_OPENCODE_SESSION_ID": "ses_parent", "ADE_OPENCODE_DIRECTORY": "/parent",
                            **(extra_env or {})})
@@ -381,14 +381,14 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         self.assertEqual(s["config"]["permission"], {"ask": ["*"]})
         self.assertNotIn("mcp_servers", s["config"])
 
-    def test_herdr_pane_vars_never_reach_the_agent(self):
-        self.assertEqual(self.r["scrub"], ["HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD",
-                                           "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY"])
+    def test_herdr_ids_never_reach_the_agent(self):
+        # 2026-10-25: all four ids. The Codex tool environment passes HERDR_WORKSPACE_ID and HERDR_TAB_ID on
+        # (agents/codex/config.toml.tmpl), so acp-run must not hand a detached agent the caller's workspace or tab.
+        for k in ("HERDR_PANE_ID", "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"):
+            self.assertIn(k, self.r["scrub"])
         for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_zcode"):
             with self.subTest(name=name):
-                self.assertNotIn("HERDR_PANE_ID", self.r[name]["herdr"])
-                self.assertNotIn("HERDR_ENV", self.r[name]["herdr"])
-                self.assertIn("HERDR_TAB_ID", self.r[name]["herdr"])  # only the pane is scrubbed
+                self.assertEqual(self.r[name]["herdr"], [])
 
     def test_paseo_and_orca_self_ids_never_reach_the_agent_and_a_marker_does(self):
         # 2026-10-20: PASEO_AGENT_ID in a dispatched slice let its self-slash clear/archive the caller's agent.
