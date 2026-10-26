@@ -1605,3 +1605,40 @@ def test_a_real_marker_in_an_inline_code_span_is_ignored() -> None:
 def test_a_genuinely_malformed_marker_still_fails_closed() -> None:
     r = adv('<!-- adversary-verdict:v1 {"verdict":"BLOCKED","head":"' + ADV_HEAD + '"} -->')
     assert r["malformed"] and not r["present"]
+
+
+def test_a_shortened_sha_block_is_not_reclassified_as_documentation() -> None:
+    # R3a: `"..." in sha` also matched `b50521af22b1…`, so a real BLOCK typed with an ellipsis was
+    # silently turned into "no verdict" and stopped blocking. Only the TEMPLATE's placeholder skips.
+    for head in ("b50521af22b1…", "<sha>", "b50521af22b1..."):
+        body = '<!-- adversary-verdict:v1 {"verdict":"BLOCK","head":"' + head + '"} -->'
+        r = adv(body)
+        assert r["malformed"] and not r["present"], head
+
+
+def test_a_shortened_sha_block_beside_a_valid_approve_still_blocks() -> None:
+    body = (marker("APPROVE") + "\n"
+            '<!-- adversary-verdict:v1 {"verdict":"BLOCK","head":"b50521af22b1…"} -->')
+    ready, warnings = gate(body)
+    assert not ready, "a BLOCK typed with an ellipsis must not pass"
+    assert warnings == ["adversary-malformed"], warnings
+
+
+def test_a_block_inside_a_broken_fence_still_blocks() -> None:
+    # R3b: _strip_code can over-strip on an unterminated fence or a stray backtick pair, which used to
+    # let a live BLOCK be hidden beside a live APPROVE. A BLOCK naming THIS head is now read from the
+    # RAW body, so no strip bug can hide it.
+    fence = chr(96) * 3
+    for body in (marker("APPROVE") + "\n" + fence + "\n" + marker("BLOCK"),
+                 marker("APPROVE") + "\n" + fence + "py" + fence + " is a span\n" + marker("BLOCK"),
+                 marker("APPROVE") + "\n    " + fence + "\n" + marker("BLOCK")):
+        r = adv(body)
+        assert r["verdict"] == "BLOCK" and r["matches_head"], body
+        assert not passes(body)
+
+
+def test_a_block_in_a_clean_fence_is_still_read_from_the_raw_body() -> None:
+    # The asymmetry: an APPROVE must be live, a BLOCK counts wherever it names this head.
+    fence = chr(96) * 3
+    body = marker("APPROVE") + "\n" + fence + "\n" + marker("BLOCK") + "\n" + fence
+    assert adv(body)["verdict"] == "BLOCK"

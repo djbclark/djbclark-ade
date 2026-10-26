@@ -293,6 +293,20 @@ def _strict_object(pairs):
     return dict(pairs)
 
 
+def _is_placeholder(sha: object) -> bool:
+    """True only for the TEMPLATE's own placeholder head, never for a real-but-shortened sha.
+
+    Narrowed after the re-stamp review (R3a): `"..." in sha or "…" in sha or "<" in sha` also matched
+    `b50521af22b1…`, so a real BLOCK typed with a shortened sha was silently reclassified as
+    "documentation" and stopped blocking. A placeholder is the whole value, and carries no hex run.
+    """
+    if not isinstance(sha, str):
+        return False
+    if not re.fullmatch(r"<[^<>]*>|…|\.\.\.", sha.strip()):
+        return False
+    return not re.search(r"[0-9a-fA-F]{7}", sha)
+
+
 def _strip_code(body: str) -> str:
     """Remove fenced blocks and inline code spans before matching markers.
 
@@ -334,6 +348,38 @@ def adversary_verdict(body: str, head: str) -> dict:
     # Strip fenced blocks and inline code FIRST: a PR documenting the format must not trip its own
     # gate (adversary review, B1).
     text = _strip_code(body)
+
+    # ASYMMETRIC (adversary review, R3b): a BLOCK naming THIS exact head counts WHEREVER it appears,
+    # the raw body included. An APPROVE must be live (outside code) so documentation cannot approve;
+    # a BLOCK must not be hidable by an over-strip bug, a stray backtick, or a malformed fence. Both
+    # directions fail closed, which is the point.
+    for raw in MARKER_RE.findall(body):
+        try:
+            doc = json.loads(raw, object_pairs_hook=_strict_object)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and doc.get("verdict") == "BLOCK":
+            sha = doc.get("head")
+            if isinstance(sha, str) and sha.lower() == head.lower():
+                # Report a conflict if a live APPROVE for this head also exists: the raw-body path
+                # must not lose the `conflict` flag that `assess` and the human line rely on.
+                approves_here = False
+                for raw2 in MARKER_RE.findall(text):
+                    try:
+                        d2 = json.loads(raw2, object_pairs_hook=_strict_object)
+                    except ValueError:
+                        continue
+                    if (isinstance(d2, dict) and d2.get("verdict") == "APPROVE"
+                            and str(d2.get("head", "")).lower() == head.lower()):
+                        approves_here = True
+                        break
+                return {"present": True, "verdict": "BLOCK", "quoted_sha": sha.lower(),
+                        "matches_head": True, "conflict": approves_here, "malformed": False,
+                        "detail": ("the body says BOTH BLOCK and APPROVE for this head - resolve it, "
+                                   "the PR cannot be read as approved" if approves_here
+                                   else "BLOCK for this head (read from the raw body, so no "
+                                        "code-fence or strip bug can hide it)")}
+
     matches = MARKER_RE.findall(text)
     starts = len(MARKER_START_RE.findall(text))
     if not matches:
@@ -370,10 +416,11 @@ def adversary_verdict(body: str, head: str) -> dict:
             problems.append(f"verdict must be exactly APPROVE or BLOCK, got {verdict!r}")
             continue
         if not isinstance(sha, str) or not HEX40.match(sha):
-            # A PLACEHOLDER head is documentation, not a verdict: `<40-hex>` is the template's own
-            # text, and a PR quoting the format must not be reported as malformed (B1). Counted
-            # separately so a body of ONLY documentation is "no marker", not "malformed".
-            if isinstance(sha, str) and ("<" in sha or "…" in sha or "..." in sha):
+            # ASYMMETRIC RULE (adversary review, R3a/R3b): only an APPROVE may be skipped as
+            # documentation, and only when its head is the TEMPLATE's own placeholder. A BLOCK with an
+            # unusable head stays malformed, because downgrading a BLOCK is the failure this gate
+            # exists to prevent - and agents routinely shorten a sha with an ellipsis.
+            if verdict == "APPROVE" and _is_placeholder(sha):
                 placeholders += 1
                 continue
             problems.append(f"head must be a 40-hex sha, got {sha!r}")
