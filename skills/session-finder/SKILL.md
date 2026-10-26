@@ -365,7 +365,7 @@ only where the message asks a question or requests action. An FYI that provably 
    (`RELAY_SENDER_NAME` and no session in its environment: fleet-watch, load-watch, session-load-watch, rumination-watch) never gets the default and keeps the old exits (`queued` and `accepted` exit 0, "taken"); the same job run
    from inside a session (an agent running `fleet-watch --relay-test`) is identified and does get the default, so it passes `--no-ack`: the three watchers in this repo do (fleet-watch's two relay calls are a follow-up in site-djbclark).
    `--json` carries `ack` and `ack_note`, and `"ack_default": true` when the watch was the default. An `ack ID` reply (alone, or with a remark of at most 40 characters in parentheses or after a colon, no `?`, no request word),
-   an ack of an ack and a text **ending** in "no reply needed" are **terminators**: they take no footer, open no link (so nothing loops) and still get this proof. Only the bare shape (`ack ID` alone, or the phrase alone) refuses
+   an ack of an ack and a text whose **last clause** is "no reply needed" are **terminators**: they take no footer, open no link (so nothing loops) and still get this proof. Only the bare shape (`ack ID` alone, or the phrase alone) refuses
    `--expect-ack` and `--needs-reply` (exit 2); on any longer text the flag wins and the text is an ordinary one. `ack the PR and merge it` is no terminator: it goes the normal path with the first-contact footer (the peer answers `ack ID`, one extra message).
    **When the proof is not `delivered`, you handle it** (requester steps, never assume read):
    a. Exit **1**, or a link that fleet shows as `ONE-WAY`: the text did not land or was never answered. Re-send **once** by **another** route (`--via`; `--plan` lists them), never the same route twice.
@@ -388,7 +388,7 @@ only where the message asks a question or requests action. An FYI that provably 
    is refused, never sent (2026-10-25)**: exit 4, nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`), the message names every
    variable and ancestor source checked; **re-run it with `RELAY_SENDER_NAME=<label> relay.py ...`** (a launchd job or script with no session; a relay Hermes starts itself is named `hermes SID8` and sends) or from inside a
    session. `[relay from unknown]` is never sent, so a header you read always names a sender you can answer. A footer
-   `[reply through relay.py to ID: ack X]` means start the answer with `ack X`; an answer that also asks the peer for something is sent with `--needs-reply --expect-ack ID2` (the flags make it an ordinary message, never a terminator). A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
+   `[reply through relay.py to ID: ack X]` means start the answer with `ack X`; an answer that also asks the peer for something is sent with `--needs-reply --expect-ack ID2` (the flags make it an ordinary message, never a terminator). **Never put `--expect-ack`/`--needs-reply` on an ack whose remark asks nothing new (`ack X: done`): an answer to an expectation is never itself flagged unless it asks a new question or requests an action** (otherwise two agents chain acks forever). A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
    An FYI needs no reply. After a relay that is not `delivered`, read its status word; `queued`, `accepted`, `unverified` are not proof.
 
 

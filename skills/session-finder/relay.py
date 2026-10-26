@@ -186,12 +186,13 @@ watcher; also the deliverer's own sends) never gets the default and keeps the le
 (`fleet-watch --relay-test` by an agent) IS identified and does get it, so it passes --no-ack. fleet-watch, load-watch, session-load-watch and
 rumination-watch read 0 as "taken, or queued" (the three in this repo pass --no-ack; fleet-watch's two calls are a follow-up in site-djbclark).
 --json adds "ack_default": true to a run whose watch was the default.
-A TERMINATOR (an `ack ID` reply with at most a short remark in parentheses or after a colon, an ack of an ack, a text ENDING in "no reply needed")
+A TERMINATOR (an `ack ID` reply with at most a short remark in parentheses or after a colon, an ack of an ack, a text whose last clause is "no reply needed")
 is exempt from the reply rule: it carries no footer and opens no link, so it can never start a loop, and needs no --expect-ack for a `?`; it
 still gets the delivery watch. Only the BARE loop shape (`ack ID` alone, or a no-reply phrase alone) refuses --expect-ack or --needs-reply
 (exit 2). An explicit --expect-ack or --needs-reply on any longer text wins: the text is no terminator, it gets the normal footer and
 expectation (`ack q1: merged; now please rebase PR 14` needs the flags and is sent with them; without them it is an ordinary text, answered by
-one first-contact `ack ID`).
+one first-contact `ack ID`). Never put --expect-ack/--needs-reply on an ack whose remark asks nothing new (`ack X: done`): an answer to an
+expectation is never itself flagged unless it asks a new question or requests an action.
 `--expect-ack ID` records (state, never a wait) that a reply `ack ID` is expected; the sent text ends "[reply through relay.py to <your id>:
 ack ID]". It is REQUIRED (exit 2, nothing sent) for a text with a `?` outside a URL or with --needs-reply, from a session relay can identify
 (a launchd script has no transcript an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
@@ -2498,13 +2499,14 @@ NO_ACK_ENV = "RELAY_NO_ACK"
 # The shape is deliberately narrow, because a false terminator is a MISSED message (no footer, no expectation, no link) while a false
 # non-terminator costs one extra `ack ID` from the peer: `ack ID` alone, or with a short remark in parentheses or after a colon (at most
 # REMARK_MAX characters, no `?`, no word that asks for something). `ack the PR and merge it` and `ack q1: now please rebase PR 14 onto
-# master` are requests that begin with `ack`, so they take the normal path. A no-reply phrase counts only at the END of the text, so a
-# quoted or negated mention ("Do not write 'no reply needed': I need an answer") is no terminator.
+# master` are requests that begin with `ack`, so they take the normal path. A no-reply phrase counts only as the LAST CLAUSE of the text (it
+# starts the text or follows `.!?;,([` or a dash, and nothing but closing punctuation follows), so a quoted, reported or negated mention
+# ("Do not write 'no reply needed': I need an answer", "Can you review PR 12? The bot said no reply needed") is no terminator.
 REMARK_MAX = 40
 _NO_REPLY = (r"(?:\bno\s+(?:reply|response|answer|ack(?:nowledge?ment)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)"
              r"|\bno\s+need\s+to\s+(?:reply|respond|ack(?:nowledge)?))")
 _TAIL = r"[\s.!)\]]*"
-NO_REPLY_RE = re.compile(_NO_REPLY + _TAIL + r"$", re.I)
+NO_REPLY_RE = re.compile(r"(?:^|[.!?;,(\[\u2014\u2013-])\s*" + _NO_REPLY + _TAIL + r"$", re.I)
 NO_REPLY_BARE = re.compile(r"(?:no\s+(?:reply|response|answer|ack(?:nowledge?ment)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)"
                            r"|no\s+need\s+to\s+(?:reply|respond|ack(?:nowledge)?))[\s.!]*", re.I)
 _ACK_HEAD = r"ack[ :=]+[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,59})*"
@@ -2520,15 +2522,15 @@ def is_bare_terminator(text):
 
 
 def is_terminator(text):
-    """True for `ack ID` (alone or with a short remark in parentheses or after a colon, never a question or a request) or a text that ends
-    with "no reply needed"."""
+    """True for `ack ID` (alone or with a short remark in parentheses or after a colon, never a question or a request) or a text whose last
+    clause is "no reply needed"."""
     t = text.strip().strip("[]`'\".")
     if ACK_BARE.fullmatch(t):
         return True
     m = ACK_REMARK.fullmatch(t)
     if m:
         return not REQUEST_WORD.search(m.group(1) or m.group(2))
-    return bool(NO_REPLY_RE.search(text))
+    return bool(NO_REPLY_RE.search(t))
 
 
 def sender_identified(listed, me):
