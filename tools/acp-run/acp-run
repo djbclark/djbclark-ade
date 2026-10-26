@@ -3982,7 +3982,7 @@ async def all_models_options(conn, sess, options):
 GIT_IDENTITY_GUARD = Path.home() / ".cache/acp-run/git-identity-guard.sh"
 GIT_IDENTITY_GUARD_SH = r"""#!/bin/bash
 # acp-run's git identity guard: a reference-transaction hook acp-run injects into every agent's git
-# through GIT_CONFIG_COUNT (git_identity_guard in tools/acp-run/acp-run). Refuses a branch update to a
+# through GIT_CONFIG_PARAMETERS (git_identity_guard in tools/acp-run/acp-run). Refuses a branch update to a
 # commit made in the last 10 minutes whose committer is not the operator, outside temp dirs.
 [ "$1" = prepared ] && [ -n "${ACP_RUN_GIT_EMAIL:-}" ] && [ "${ACP_RUN_ALLOW_GIT_IDENTITY:-}" != 1 ] \
     || { cat >/dev/null; exit 0; }
@@ -4010,6 +4010,48 @@ exit 0
 """
 
 
+def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) -> None:
+    """Move complete counted config into Git's quoted transport, which survives KEY-name filtering.
+
+    Git reads COUNT entries before PARAMETERS. Insert new guard pairs between those layers, as
+    the old counted injection did. Validate the entire counted group before changing `env`.
+    This is Git's single-quoted format, not shell execution (shlex.quote can emit unquoted tokens).
+    """
+    raw = env.get("GIT_CONFIG_COUNT")
+    count = 0
+    if raw is not None:
+        number = raw.lstrip(" \t\n\r\v\f")
+        digits = number[1:] if number.startswith(("+", "-")) else number
+        if not digits or not digits.isascii() or not digits.isdigit():
+            raise ValueError("invalid GIT_CONFIG_COUNT: expected a nonnegative integer")
+        try:
+            count = int(raw)
+        except ValueError:
+            raise ValueError("invalid GIT_CONFIG_COUNT: expected a nonnegative integer") from None
+        if count < 0:
+            raise ValueError("invalid GIT_CONFIG_COUNT: expected a nonnegative integer")
+        if count > len(env):
+            raise ValueError("invalid GIT_CONFIG_COUNT: incomplete counted configuration")
+    counted = []
+    for i in range(count):
+        for name in (f"GIT_CONFIG_KEY_{i}", f"GIT_CONFIG_VALUE_{i}"):
+            if name not in env:
+                raise ValueError(f"missing {name}: incomplete counted configuration")
+        if not env[f"GIT_CONFIG_KEY_{i}"]:
+            raise ValueError(f"invalid GIT_CONFIG_KEY_{i}: empty config key")
+        counted.append((env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]))
+    quote = lambda value: "'" + value.replace("'", "'\\''") + "'"
+    tokens = [quote(key) + "=" + quote(value) for key, value in [*counted, *pairs]]
+    if tokens:
+        env["GIT_CONFIG_PARAMETERS"] = " ".join(tokens) + (
+            " " + env["GIT_CONFIG_PARAMETERS"] if env.get("GIT_CONFIG_PARAMETERS") else "")
+    if raw is not None:
+        env.pop("GIT_CONFIG_COUNT")
+        for i in range(count):
+            env.pop(f"GIT_CONFIG_KEY_{i}")
+            env.pop(f"GIT_CONFIG_VALUE_{i}")
+
+
 def git_identity_guard(env: dict) -> None:
     """Every agent's commits stay the operator's (2026-10-18).
 
@@ -4023,26 +4065,25 @@ def git_identity_guard(env: dict) -> None:
     am and cherry-pick keep the author and make the operator the committer, so they pass. The
     identity is read before --strip-user-config can move HOME."""
     if env.get("ACP_RUN_GIT_EMAIL"):
+        git_config_parameters(env)
         return                                   # a nested acp-run: already guarded
+    email = ""
     try:
         email = subprocess.run(["git", "config", "--global", "--get", "user.email"], capture_output=True,
                                text=True, check=False, timeout=5).stdout.strip()
-        if not email:
-            return
-        if not GIT_IDENTITY_GUARD.exists() or GIT_IDENTITY_GUARD.read_text() != GIT_IDENTITY_GUARD_SH:
+        if email and (not GIT_IDENTITY_GUARD.exists() or GIT_IDENTITY_GUARD.read_text() != GIT_IDENTITY_GUARD_SH):
             GIT_IDENTITY_GUARD.parent.mkdir(parents=True, exist_ok=True)
             tmp = GIT_IDENTITY_GUARD.with_name(GIT_IDENTITY_GUARD.name + f".{os.getpid()}")
             tmp.write_text(GIT_IDENTITY_GUARD_SH)
             tmp.chmod(0o755)
             os.replace(tmp, GIT_IDENTITY_GUARD)
     except (OSError, subprocess.SubprocessError):
-        return
-    n = int(env.get("GIT_CONFIG_COUNT") or 0)
-    for i, (key, value) in enumerate((("hook.acp-run-identity.event", "reference-transaction"),
-                                      ("hook.acp-run-identity.command", str(GIT_IDENTITY_GUARD))), n):
-        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
-    env["GIT_CONFIG_COUNT"] = str(n + 2)
-    env["ACP_RUN_GIT_EMAIL"] = email
+        email = ""
+    pairs = (("hook.acp-run-identity.event", "reference-transaction"),
+             ("hook.acp-run-identity.command", str(GIT_IDENTITY_GUARD))) if email else ()
+    git_config_parameters(env, pairs)
+    if email:
+        env["ACP_RUN_GIT_EMAIL"] = email
 
 
 async def run(a, log, err, log_path):
@@ -4056,7 +4097,11 @@ async def run(a, log, err, log_path):
         cmd = [x for x in cmd if x != "--always-approve"]
     root = Path(a.dir).resolve()
     env = dict(os.environ)
-    git_identity_guard(env)
+    try:
+        git_identity_guard(env)
+    except ValueError as e:
+        print(f"acp-run: refusing launch: {e}", file=sys.stderr)
+        return 2
     deny_dir = None
     t0, out, code = time.time(), {"agent": a.agent, "log": str(log_path)}, 1
     handshake_timeout = a.handshake_timeout or HANDSHAKE_TIMEOUT.get(

@@ -886,6 +886,25 @@ def test_r11_f6_the_two_config_pairs_acp_run_puts_in_every_agents_environment_ar
     assert world.cb() != world.main()
 
 
+def test_acp_parameter_transport_is_allowed_but_extra_hooks_and_cli_copies_are_not(world, tmp_path):
+    guard, counted = _acp_env(tmp_path)
+    pairs = [(counted[f"GIT_CONFIG_KEY_{i}"], counted[f"GIT_CONFIG_VALUE_{i}"]) for i in range(2)]
+    params = " ".join("'" + (k + "=" + v).replace("'", "'\\''") + "'" for k, v in pairs)
+    env = {"HOME": counted["HOME"], "GIT_CONFIG_PARAMETERS": params}
+    r = shim(world.state, ["branch", "parameter-transport"], world.repo, who="B", **env)
+    assert r.returncode == 0, r.stderr
+    r = shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", **env)
+    assert refused(r), r.stderr
+    for extra in ["'hook.evil.event=reference-transaction'", "'core.hooksPath=/tmp/other'",
+                  "'hook.acp-run-identity.enabled=false'"]:
+        r = shim(world.state, ["branch", "extra-hook"], world.repo, who="B",
+                 **{**env, "GIT_CONFIG_PARAMETERS": params + " " + extra})
+        assert r.returncode == 77 and "hook-config" in r.stderr, r.stderr
+    for key, value in pairs:
+        r = shim(world.state, ["-c", f"{key}={value}", "branch", "cli-copy"], world.repo, who="B", **env)
+        assert r.returncode == 77 and "hook-config" in r.stderr, r.stderr
+
+
 def test_r11_f6_the_exemption_is_those_two_pairs_from_the_environment_and_nothing_else(world, tmp_path):
     guard, extra = _acp_env(tmp_path)
     other = tmp_path / "other.sh"
@@ -893,7 +912,8 @@ def test_r11_f6_the_exemption_is_those_two_pairs_from_the_environment_and_nothin
     cases = {
         "another command value": {**extra, "GIT_CONFIG_VALUE_1": str(other)},
         "the event pair through -c": None,
-        "the command pair through GIT_CONFIG_PARAMETERS": {"GIT_CONFIG_PARAMETERS": f"'hook.acp-run-identity.command={guard}'"},
+        "another command through GIT_CONFIG_PARAMETERS": {"GIT_CONFIG_PARAMETERS": f"'hook.acp-run-identity.command={other}'"},
+        "another event through GIT_CONFIG_PARAMETERS": {"GIT_CONFIG_PARAMETERS": "'hook.acp-run-identity.event=pre-push'"},
         "a third pair": {**extra, "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_2": "hook.evil.event",
                          "GIT_CONFIG_VALUE_2": "reference-transaction"},
         "another event value": _count_env([("hook.acp-run-identity.event", "pre-push")]),

@@ -1,14 +1,20 @@
 """acp-run's git identity guard (2026-10-18): a skillopt-night replay set a fork's .git/config to
 the upstream maintainer's identity and committed under it. The guard is a config-based
-reference-transaction hook acp-run injects through GIT_CONFIG_COUNT."""
+reference-transaction hook acp-run injects through GIT_CONFIG_PARAMETERS."""
 import ast
+import asyncio
+import io
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
+from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools/acp-run/acp-run"
 OPERATOR = "operator@example.org"
@@ -19,7 +25,7 @@ def load_guard(guard_path: Path):
     tree = ast.parse(SCRIPT.read_text())
     keep = []
     for n in tree.body:
-        if isinstance(n, ast.FunctionDef) and n.name == "git_identity_guard":
+        if isinstance(n, ast.FunctionDef) and n.name in {"git_identity_guard", "git_config_parameters"}:
             keep.append(n)
         elif isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "GIT_IDENTITY_GUARD_SH" for t in n.targets):
             keep.append(n)
@@ -34,7 +40,8 @@ class TestGitIdentityGuard(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="acp-git-id-"))
         gc = self.tmp / "gitconfig"
         gc.write_text(f"[user]\n\tname = Operator\n\temail = {OPERATOR}\n[init]\n\tdefaultBranch = main\n")
-        base = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "ACP_RUN_GIT"))}
+        # Keep assertion failures synthetic: never copy ambient credentials or browser capabilities.
+        base = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR", "SHELL", "LANG", "LC_ALL") if k in os.environ}
         base["GIT_CONFIG_GLOBAL"] = str(gc)
         base["GIT_CONFIG_NOSYSTEM"] = "1"
         guard = load_guard(self.tmp / "guard.sh")
@@ -70,8 +77,125 @@ class TestGitIdentityGuard(unittest.TestCase):
 
     def test_injected_config(self):
         self.assertEqual(self.env["ACP_RUN_GIT_EMAIL"], OPERATOR)
-        self.assertEqual(self.env["GIT_CONFIG_COUNT"], "2")
-        self.assertEqual(self.env["GIT_CONFIG_VALUE_0"], "reference-transaction")
+        self.assertFalse("GIT_CONFIG_COUNT" in self.env)
+        self.assertEqual(self.git(self.real, "config", "--get", "hook.acp-run-identity.event").stdout.strip(),
+                         "reference-transaction")
+
+    def test_installed_codex_keeps_the_guard_and_default_exclusions(self):
+        from test_codex_shell_env_policy import CODEX, SYNTHETIC_SECRETS, base_env, policy_toml, rendered, tool_env
+
+        if not CODEX:
+            self.skipTest("no installed codex")
+        home = str(self.tmp)
+        (self.tmp / "tmp").mkdir()
+        # Only synthetic configuration reaches the RPC probe, never the operator's environment.
+        injected = {k: v for k, v in self.env.items() if k.startswith("GIT_CONFIG_") or k == "ACP_RUN_GIT_EMAIL"}
+        got = tool_env(policy_toml(rendered(home)["shell_environment_policy"]), {**base_env(home), **injected})
+        for name in SYNTHETIC_SECRETS:
+            self.assertNotIn(name, got)
+        self.init(self.real)
+        hook = self.real / ".git/hooks/pre-commit"
+        hook.write_text(f"#!/bin/sh\ntouch '{self.real}/hook-ran'\n")
+        hook.chmod(0o755)
+        r = self.git(self.real, "commit", "-q", "--allow-empty", "-m", "operator", env=got)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.real / "hook-ran").exists())
+        before = self.head(self.real)
+        self.foreign(self.real)
+        for extra in ([], ["--no-verify"]):
+            r = self.git(self.real, "commit", "--allow-empty", "-m", "foreign", *extra, env=got)
+            self.assertNotEqual(r.returncode, 0, r.stderr)
+            self.assertIn("identity guard", r.stderr)
+            self.assertEqual(self.head(self.real), before)
+
+    def test_counted_values_and_existing_parameters_keep_their_order_and_quoting(self):
+        values = ["plain", "space here", "a'b", "a\\b", "line\nbreak", "a=b", "!", ""]
+        env = {**self.env, "GIT_CONFIG_COUNT": str(len(values)),
+               "GIT_CONFIG_PARAMETERS": "'ade.example=parameters'"}
+        for i, value in enumerate(values):
+            env[f"GIT_CONFIG_KEY_{i}"] = "ade.a=b.example"
+            env[f"GIT_CONFIG_VALUE_{i}"] = value
+        env["GIT_CONFIG_PARAMETERS"] = "'ade.a=b.example'='parameters'"
+        load_guard(self.tmp / "guard.sh")(env)  # nested launch still normalizes its caller's counted entries
+        self.assertNotIn("GIT_CONFIG_COUNT", env)
+        r = self.git(self.real, "config", "--get-all", "ade.a=b.example", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "".join(v + "\n" for v in [*values, "parameters"]))
+
+    def test_nested_launch_is_idempotent_and_converts_legacy_guard_pairs(self):
+        guard = load_guard(self.tmp / "guard.sh")
+        env = dict(self.env)
+        guard(env)
+        self.assertEqual(env, self.env)
+        legacy = {**self.env, "GIT_CONFIG_COUNT": "2",
+                  "GIT_CONFIG_KEY_0": "hook.acp-run-identity.event", "GIT_CONFIG_VALUE_0": "reference-transaction",
+                  "GIT_CONFIG_KEY_1": "hook.acp-run-identity.command", "GIT_CONFIG_VALUE_1": str(self.tmp / "guard.sh")}
+        legacy.pop("GIT_CONFIG_PARAMETERS", None)
+        guard(legacy)
+        self.assertEqual(legacy, self.env)
+
+    def test_zero_count_formats_accepted_by_git_are_preserved(self):
+        guard = load_guard(self.tmp / "guard.sh")
+        for count in ("0", "+0", "-0", " 0", "00"):
+            with self.subTest(count=count):
+                env = {**self.env, "GIT_CONFIG_COUNT": count}
+                guard(env)
+                self.assertEqual(env, self.env)
+
+    def test_fresh_guard_preserves_inherited_configuration(self):
+        env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "ade.example",
+               "GIT_CONFIG_VALUE_0": "counted", "GIT_CONFIG_PARAMETERS": "'ade.example=parameters'"}
+        env.pop("ACP_RUN_GIT_EMAIL")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            load_guard(self.tmp / "guard.sh")(env)
+        r = self.git(self.real, "config", "--get-all", "ade.example", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "counted\nparameters\n")
+        r = self.git(self.real, "config", "--get", "hook.acp-run-identity.command", env=env)
+        self.assertEqual(r.stdout.strip(), str(self.tmp / "guard.sh"))
+        self.assertEqual(env["ACP_RUN_GIT_EMAIL"], OPERATOR)
+
+    def test_counted_configuration_is_normalized_even_without_an_operator_identity(self):
+        env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "ade.example", "GIT_CONFIG_VALUE_0": "kept"}
+        env.pop("ACP_RUN_GIT_EMAIL")
+        env.pop("GIT_CONFIG_PARAMETERS")
+        with mock.patch("subprocess.run", return_value=SimpleNamespace(stdout="")):
+            load_guard(self.tmp / "guard.sh")(env)
+        self.assertNotIn("ACP_RUN_GIT_EMAIL", env)
+        r = self.git(self.real, "config", "--get", "ade.example", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "kept\n")
+
+    def test_malformed_counted_config_is_rejected_without_mutation_or_values(self):
+        guard = load_guard(self.tmp / "guard.sh")
+        for fields, missing in [({"GIT_CONFIG_COUNT": "not-a-number"}, "GIT_CONFIG_COUNT"),
+                                ({"GIT_CONFIG_COUNT": "-1"}, "GIT_CONFIG_COUNT"),
+                                ({"GIT_CONFIG_COUNT": "100000000000000000000"}, "GIT_CONFIG_COUNT"),
+                                ({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_VALUE_0": "private-value"}, "GIT_CONFIG_KEY_0"),
+                                ({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "ade.example"}, "GIT_CONFIG_VALUE_0")]:
+            with self.subTest(missing=missing, fields=tuple(fields)):
+                env = {**self.env, **fields}
+                before = dict(env)
+                with self.assertRaisesRegex(ValueError, missing) as raised:
+                    guard(env)
+                self.assertNotIn("private-value", str(raised.exception))
+                self.assertEqual(env, before)
+
+    def test_launch_refuses_incomplete_config_without_starting_an_agent(self):
+        guard = load_guard(self.tmp / "guard.sh")
+        tree = ast.parse(SCRIPT.read_text())
+        tree.body = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "run"]
+        ns = {**guard.__globals__, "AGENTS": {"codex": ([], None)}, "sys": sys}
+        exec(compile(tree, str(SCRIPT), "exec"), ns)  # no ACP SDK or agent process needed
+        args = SimpleNamespace(agent="codex", auth=None, perm="deny", dir=str(self.real))
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"ACP_RUN_GIT_EMAIL": OPERATOR, "GIT_CONFIG_COUNT": "1",
+                                          "GIT_CONFIG_VALUE_0": "private-value"}, clear=True), redirect_stderr(stderr):
+            rc = asyncio.run(ns["run"](args, None, None, None))
+        self.assertEqual(rc, 2)
+        self.assertIn("missing GIT_CONFIG_KEY_0", stderr.getvalue())
+        self.assertNotIn("private-value", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_foreign_local_identity_is_refused_even_with_no_verify(self):
         self.init(self.real)

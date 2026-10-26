@@ -20,6 +20,24 @@ SHIM = ROOT / "libexec" / "agent-bin" / "git"
 GUARD = ROOT / "bin" / "ade-git-guard"
 
 
+@pytest.mark.parametrize("parameters", [
+    "'ade.a=b.example'='a'\\''b=c' 'ade.empty'='' 'ade.flag'",
+    "'ade.old=value=with=equals' 'ade.new'='space here'",
+    "'ade.new'='line\nbreak' 'ade.slash'='a\\b'",
+])
+def test_parameter_key_value_quoting_matches_git(tmp_path, state, parameters):
+    env = base_env(state, GIT_CONFIG_PARAMETERS=parameters)
+    r = subprocess.run(["git", "config", "--null", "--list"], cwd=tmp_path, env=env,
+                       capture_output=True, text=True, check=True)
+    expected = []
+    for item in r.stdout.split("\0"):
+        if item:
+            key, separator, value = item.partition("\n")
+            expected.append((key, value if separator else "true"))
+    call = ade_claims.parse_git_argv(["status"], str(tmp_path), env)
+    assert call.config == expected
+
+
 @pytest.fixture(autouse=True)
 def state(tmp_path, monkeypatch):
     """A private claims registry and guard.log for every test."""

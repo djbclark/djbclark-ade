@@ -763,8 +763,21 @@ def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
     params = env.get("GIT_CONFIG_PARAMETERS", "")
     if params:
         try:
-            for item in shlex.split(params):
-                k, eq, v = item.partition("=")
+            # Git accepts both 'key=value' and 'key'='value'. Preserve quoted '='
+            # in subsection names: shlex.split alone loses that distinction.
+            lexer = shlex.shlex(params, posix=True, punctuation_chars="=")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            tokens = list(lexer)
+            i = 0
+            while i < len(tokens):
+                if i + 1 < len(tokens) and tokens[i + 1] == "=":
+                    k, eq = tokens[i], "="
+                    v = tokens[i + 2] if i + 2 < len(tokens) else "true"
+                    i += 3
+                else:
+                    k, eq, v = tokens[i].partition("=")
+                    i += 1
                 out.append((_ckey(k), v if eq else "true"))
         except ValueError:
             pass
@@ -1492,11 +1505,12 @@ def _template_decision(call: GitCall, env: dict[str, str], alt: str) -> Optional
     return None
 
 
-# The two config pairs acp-run appends to every agent's environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n; tools/acp-run/acp-run,
+# The two config pairs acp-run adds to every agent's environment (GIT_CONFIG_PARAMETERS; legacy COUNT pairs also accepted;
+# tools/acp-run/acp-run,
 # git_identity_guard): a `reference-transaction` config hook that refuses an agent's branch update with the wrong git identity.
 # A config hook only ADDS a hook (measured 2026-10-25, git 2.56: `hook.<name>.enabled=false` does not stop the hooks
 # directory's hook), so these two cannot switch the ref guard off. Exempt exactly this (key, value) shape, from the
-# environment's COUNT pairs only: never `-c`, `--config-env` or GIT_CONFIG_PARAMETERS, and no other `hook.*` key.
+# environment's config only: never `-c` or `--config-env`, and no other `hook.*` key.
 ACP_RUN_IDENTITY_EVENT = ("hook.acp-run-identity.event", "reference-transaction")
 ACP_RUN_IDENTITY_COMMAND_KEY = "hook.acp-run-identity.command"
 
@@ -1510,10 +1524,9 @@ def _acp_run_pair(k: str, v: str) -> bool:
 
 
 def _unexempted_config(call: GitCall, env: dict[str, str]) -> list[tuple[str, str]]:
-    """`call.config` minus the acp-run pairs that came from the environment's COUNT pairs: each such pair is spent once, so a
-    second copy of it (from `-c`, GIT_CONFIG_PARAMETERS or more COUNT pairs than the env holds) stays judged."""
+    """Spend exact ACP pairs from environment config once; command-line copies stay judged."""
     budget: dict[tuple[str, str], int] = {}
-    for k, v in _env_count_config(env):
+    for k, v in _env_config(env):
         if _acp_run_pair(k, v):
             budget[(k, v)] = budget.get((k, v), 0) + 1
     out: list[tuple[str, str]] = []

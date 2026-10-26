@@ -682,13 +682,30 @@ acp-run claude -C ~/src/repo -i --resume SESSION_ID          # reopen an earlier
     final `result` record, which carries `turns`. A one-shot run writes one `turn`
     record too.
 
+## Git identity guard (2026-10-26)
+
+ACP's reference-transaction hook keeps agent commits under the operator's identity,
+without replacing fixture identities in temporary repositories. Its configuration
+travels through `GIT_CONFIG_PARAMETERS`, so Codex's default KEY/SECRET/TOKEN
+environment-name exclusions remain enabled without stripping `GIT_CONFIG_KEY_n`
+out of a counted tuple. No Codex policy change is needed.
+
+Before launching, acp-run converts complete inherited `GIT_CONFIG_COUNT` tuples
+using Git's single-quoted format. Configuration order stays: inherited counted
+entries, ACP's guard entries, then existing `GIT_CONFIG_PARAMETERS` text. Nested
+launches normalize inherited tuples too, without adding the guard twice. An invalid
+count or a missing key/value refuses the launch with exit 2 and a variable-name-only
+diagnostic; the incomplete tuple is never cleared as a fallback. The workspace Git
+guard recognizes only the exact ACP hook event and expected guard path in this
+environment transport, while retaining compatibility with older counted launches.
+
 ## Exit codes
 
 | Code | Meaning |
 | ---- | ------- |
 | 0 | `end_turn` with some output |
 | 1 | another stop reason, an agent error, an empty reply (no text and no tool calls; or no text under `--perm deny` or `read-only`, or after a denied permission), or a delivery-check failure (quota, plan, auth, provider error, truncated reply, or `FAILED fake-tool-calls`: no tool ran and the reply is tool calls printed as text) |
-| 2 | usage error |
+| 2 | usage error, or invalid/incomplete counted Git environment configuration (before agent launch) |
 | 5 | empty reply and every permission request was denied (the code acpx uses) |
 | 75 | refused to start by `--max-load` |
 | 127 | the agent binary is not on `PATH` after `ACP_RUN_BIN_WAIT` seconds (default 90, `0` disables, at most 600, junk means the default; an upgrade may be relinking it, 2026-10-20). The binary is the program the launch command runs: for crush, `crush-acp` behind its `env NAME=VAL` wrapper, never `env` (2026-10-23); `--list` marks it `--` the same way |
