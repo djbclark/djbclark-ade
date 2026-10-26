@@ -574,7 +574,7 @@ def test_unknown_names_are_bucketed(box):
 def test_records_carry_a_schema_and_classifier_version(box):
     box.tool("Read", {"file_path": "/tmp/a"})
     box.prompt()
-    assert all(r["schema"] == 2 and r["classifier_version"] == 3 for r in box.records())
+    assert all(r["schema"] == 2 and r["classifier_version"] == 4 for r in box.records())
 
 
 def test_call_hashes_are_salted_per_session(box):
@@ -918,3 +918,126 @@ def test_r2_a_live_sessions_lock_is_touched_so_another_prune_keeps_it(box):
     assert abs(lock.stat().st_mtime - box.clock) < 1
     box.run({"hook_event_name": "UserPromptSubmit", "prompt": "p"}, sid="other")
     assert lock.exists()
+
+
+def rec_of(box, command):
+    box.tool("Bash", {"command": command.replace("{w}", str(box.work))})
+    return box.records()[-1]
+
+
+@pytest.mark.parametrize("command, want, pclass", [
+    # R3-1: a literal assignment or loop list is resolved; what stays unknown is not the cwd
+    ("S=~/.local/state/x; cat $S/a.md", "private_other", "state"),
+    ("R=~/.claude/state; ls $R", "private_other", "state"),
+    ("W=/tmp/w; rg foo $W", "private_other", "tmp"),
+    ("X=/tmp/a Y=/nix/store/b; cat $Y/f", "external_code", "nix"),                # several on one line
+    ("X='/nix/store/a'; cat \"$X/f\"", "external_code", "nix"),                    # quoted value
+    ("X=/nix/store/a; cat ${X}/f", "external_code", "nix"),
+    ("A=/nix/store; B=$A/x; cat $B/f", "external_code", "nix"),                    # a value built from one
+    ("export P=/nix/store/x; cat $P", "external_code", "nix"),
+    ("cat $HOME/.claude/x", "private_other", "state"),
+    ("X=~/src/other; cat $X/a.py", "own_code", "src"),                             # resolves to own code
+    ("X={w}/lib; cat $X/a.py", "own_code", "cwd"),
+    ("for f in ~/.local/state/x/*.md; do head -5 $f; done", "private_other", "state"),
+    ("for f in /tmp/a ~/.claude/b; do head $f; done", "private_other", "tmp"),
+    ("for f in /tmp/a /nix/store/b; do head $f; done", "external_code", "nix"),    # any external path wins
+    ("for f in a b; do cat $f; done", "own_code", "cwd"),                          # a relative word is the cwd's
+    ("for f in /nix/store/a; do for g in x y; do cat $f/$g; done; done", "external_code", "nix"),
+    ("for f in /nix/store/a; do X=$f; cat $X; done", "external_code", "nix"),     # an assignment after `do`
+    ("cat /nix/store/x \"$OUT\"", "external_code", "nix"),                         # one resolved, one not
+    ("cat {w}/a.py \"$OUT\"", "own_code", "cwd"),
+    # the rest has no literal value
+    ("cat \"$OUT\"", "private_other", "unresolved"),
+    ("cat ${OUT}/a", "private_other", "unresolved"),
+    ("cat $1", "private_other", "unresolved"),
+    ("cat \"${X:-/nix/store/a}\"", "private_other", "unresolved"),
+    ("ls $UNKNOWN", "private_other", "unresolved"),
+    ("X=$(pwd); cat $X/a", "private_other", "unresolved"),                         # a substitution is not literal
+    ("X=`pwd`; cat $X/a", "private_other", "unresolved"),
+    ("(X=/nix/store/x); cat $X", "private_other", "unresolved"),                   # a subshell's assignment leaks not
+    ("X=/nix/store/x; read X; cat $X", "private_other", "unresolved"),
+    ("X=/nix/store/x; unset X; cat $X", "private_other", "unresolved"),
+    ("X=/nix/store/x; Y=$X$Z; cat $Y", "private_other", "unresolved"),
+    ("for f in $(git ls-files); do cat $f; done", "private_other", "unresolved"),
+    ("for f in \"$@\"; do cat $f; done", "private_other", "unresolved"),
+    ("while read f; do cat \"$f\"; done < list", "private_other", "unresolved"),
+    ("X=/nix/store/a bash -c 'cat $X'", "private_other", "unresolved"),            # a child does not see it
+    ("X=/nix/store/a cat $X", "private_other", "unresolved"),                      # $X is expanded before it is set
+    ("cat /dev/null", "private_other", None),                                      # nothing read, nothing unknown
+])
+def test_r3_variable_paths_are_resolved_or_unresolved_never_the_cwd(box, command, want, pclass):
+    r = rec_of(box, command)
+    assert (r["category"], r.get("path_class")) == (want, pclass)
+
+
+def test_r3_an_unresolved_read_does_not_reset_the_run_but_an_own_code_read_does(box):
+    box.tool("Read", {"file_path": "/nix/store/a/x"})
+    box.tool("Bash", {"command": 'cat "$OUT"'})
+    box.tool("Read", {"file_path": "/nix/store/a/y"})
+    box.tool("Bash", {"command": "ls"})
+    box.tool("Read", {"file_path": "/nix/store/a/z"})
+    assert [r["run_length"] for r in box.records()] == [1, 1, 2, 0, 1]
+
+
+def test_r3_a_variable_name_never_reaches_the_record(box):
+    box.tool("Bash", {"command": f'cat "${MARK}"; X={MARK}; cat ${MARK}2'})
+    assert MARK.encode() not in b"".join(p.read_bytes() for p in box.state.iterdir())
+    assert box.records()[-1]["path_class"] == "unresolved"
+
+
+@pytest.mark.parametrize("command, want", [
+    # R3-2: a number that is a word (not the fd touching the operator) leaves `< file` a read
+    ("head -n 5 < /nix/store/x", "external_code"),
+    ("tail -n 20 < /nix/store/x", "external_code"),
+    ("cat 1 < /nix/store/x", "external_code"),
+    ("head -c 100 < /nix/store/x", "external_code"),
+    ("head -5 < /nix/store/x", "external_code"),
+    ("cat 0< /nix/store/x", "external_code"),
+    ("cat 0</nix/store/x", "external_code"),
+    # an fd touching the operator is not a word and not stdin
+    ("echo hi 2>/nix/store/x", "private_other"),
+    ("echo hi 2> /nix/store/x", "private_other"),
+    ("rg foo {w}/lib 2> /nix/store/x", "own_code"),
+    ("rg foo {w}/lib 1>/nix/store/x 2>&1", "own_code"),
+    ("wc -l 2< /nix/store/x", "private_other"),
+    ("wc -l 12< /nix/store/x", "private_other"),
+    ("cat file2< /nix/store/x", "external_code"),                      # a digit inside a word is not an fd
+    ("cat a;3>/nix/store/x; rg foo {w}/lib", "own_code"),
+    ("cat 3<<EOF\nx\nEOF", "private_other"),                           # fd 3 heredoc: no read of a file "3"
+])
+def test_r3_a_number_word_before_a_redirect_is_only_an_fd_when_it_touches_it(box, command, want):
+    assert cat_of(box, command.replace("{w}", str(box.work))) == want
+
+
+@pytest.mark.parametrize("command, want", [
+    # R3-3.2: a substitution inside double quotes is a command that runs
+    ('echo "$(find /nix/store/x)"', "external_code"),
+    ('echo "a `find /nix/store/x` b"', "external_code"),
+    ('echo "x: $(cat /nix/store/a | head -1)"', "external_code"),
+    ('echo "$(echo "$(find /nix/store/x)")"', "external_code"),         # nested
+    ("echo \"$(cat '/nix/store/x')\"", "external_code"),
+    ("echo '$(find /nix/store/x)'", "private_other"),                   # single quotes: text
+    ('echo "\\$(find /nix/store/x)"', "private_other"),                 # escaped: text
+    ('echo "`find /nix/store/x`" ; echo \'`find /tmp`\'', "external_code"),
+    ('echo "$(date)"; rg foo {w}/lib', "own_code"),
+    ('echo "$((1+2))"; rg foo {w}/lib', "own_code"),                    # arithmetic, not a command
+    ('echo "a $(echo ")") b"; rg foo /nix/store/x', "external_code"),   # quote state unchanged; an odd one is skipped
+    ('echo "$(unclosed"; rg foo {w}/lib', "own_code"),
+    ('echo "a $(echo ")") b" \'x; cat /nix/store/x\'', "private_other"),  # a skipped odd one does not push the rest to the coarse split
+    ('echo "$(cat {w}/a.py)"', "own_code"),
+])
+def test_r3_a_substitution_inside_double_quotes_is_scanned(box, command, want):
+    assert cat_of(box, command.replace("{w}", str(box.work))) == want
+
+
+def test_r3_quoted_substitutions_are_bounded_and_silent(box):
+    t0 = time.monotonic()
+    for cmd in ('"' + "$(" * 100_000, '"' + "`a" * 100_000, '"$(' + "(" * 100_000, ('"$(echo x)" ' * 5_000)):
+        box.tool("Bash", {"command": cmd})
+    assert time.monotonic() - t0 < 8
+    assert len(box.records()) == 4
+
+
+def test_r3_a_value_that_grows_past_a_path_is_unknown(box):
+    r = rec_of(box, "X=/nix/store/a;" + "X=$X$X;" * 20 + "cat $X")
+    assert (r["category"], r["path_class"]) == ("private_other", "unresolved")

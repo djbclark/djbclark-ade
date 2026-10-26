@@ -36,12 +36,18 @@ after the server is never kept), `mcp__other`, `mcp__<kind>_server` (a kind matc
 then up to three one- or two-digit version numbers, else "claude-code"; `host_class` (loopback,
 private_ip, internal, public, invalid); `host` only for a public URL whose registrable domain is on the
 fixed ALLOWED_DOMAINS list, and then only that registrable domain, never a sub-domain, port, user, path,
-query or fragment; `path_class` (a fixed enum, never a path segment). NEVER stored: a command, a path, a
+query or fragment; `path_class` (a fixed enum, never a path segment: cwd, src, ops, memory, nix, cache, state,
+home, tmp, other, or `unresolved` for a shell read whose every path word needs an unknown variable). NEVER stored: a command, a path, a
 query, a URL, a prompt, tool output, a host outside the allowlist, a server name outside the allowlist.
 The session id itself is the record's file name (sanitised). Call hashes kept in the state file are
 salted with a per-session random value that sits beside them in the same file, so the salt only stops
 linking the same call across sessions; whoever can read the state directory can still brute-force a
 low-entropy call, and the directory is mode 0700 for that reason. Call hashes never reach the record.
+
+Shell variables: a path word is resolved from the same command's literal assignments (`X=...; cat $X/a`,
+`export`, `$HOME`) and literal for-loop lists; one that still needs an unknown variable (`cat "$OUT"`, a
+`$( )` value, `${X:-y}`) is never the cwd: with no other resolved path the event is private_other with
+`path_class` unresolved, which does not reset run_length. Stated limits: docs/queue.md "D2 built".
 
 Categories: own_code, external_code, memory, web, private_other, task_change (UserPromptSubmit).
 A new UserPromptSubmit, or an idle gap over PRIOR_ART_IDLE_S (default 1800 s), starts a new task and
@@ -74,7 +80,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 SCHEMA = 2
-CLASSIFIER_VERSION = 3
+CLASSIFIER_VERSION = 4
 
 CAP_BYTES = 5 * 1024 * 1024
 CAP_TAIL = b'{"capped":true}\n'
@@ -86,6 +92,9 @@ SCAN_CHARS = 200_000
 MAX_CMD_CHARS = 20_000
 MAX_TOKENS = 2_000
 MAX_PATHS = 50
+SUB_MAX_CHARS = 2_000                                   # a substitution inside double quotes: longest scanned
+MAX_VALUE_CHARS = 4096                                  # a resolved word longer than a path can be is unknown
+SUB_MAX_COUNT = 20                                      # ... and how many per command
 RECENT_CALLS = 30
 EXTERNAL_RUN = 3
 LOCK_WAIT_TOTAL_S = 0.5                                 # wall-clock bound on waiting for the session lock
@@ -164,6 +173,7 @@ QUOTING_MARKERS = ("syntax error", "unexpected eof", "unterminated")
 PATH_KEYS = ("file_path", "path", "notebook_path", "filePath")
 URL_RE = re.compile(r"^https?://", re.I)
 ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
+ASSIGN_BUILTINS = {"export", "declare", "local", "readonly", "typeset"}
 GH_REPO_RE = re.compile(r"^/?repos/([^/]+)/([^/]+)/?(.*)$", re.I | re.S)
 GH_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")           # a literal login; no $VAR, {owner}, :owner
 GH_CODE_TAIL_RE = re.compile(r"^(contents|readme|releases|tags|tarball|zipball|git)(/|\?|$)", re.I)
@@ -327,16 +337,54 @@ def _expand(p: str, cwd: str) -> str:
     return os.path.normpath(p)
 
 
-def _expand_word(w: str, cwd: str) -> str | None:
-    """A shell word as an absolute path; None when it needs a variable we cannot know, or is /dev/*."""
-    home = str(Path.home())
-    for var in ("$HOME", "${HOME}"):
-        if w.startswith(var):
-            w = home + w[len(var):]
-    if "$" in w or "`" in w:
+VAR_REF_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+
+
+def _subst_vars(w: str, env: dict) -> list[str] | None:
+    """The values a shell word takes once its `$NAME` and `${NAME}` references are replaced from env (the
+    literal assignments and loop lists seen earlier in the same command, plus $HOME); one value per
+    combination of loop values. None when a reference has no literal value or any other `$` or backtick
+    form is left (`$(...)`, `$1`, `${X:-y}`)."""
+    out = [w]
+    for name in dict.fromkeys(a or b for a, b in VAR_REF_RE.findall(w)):
+        vals = env.get(name, [str(Path.home())] if name == "HOME" else None)
+        if not vals:
+            return None
+        pat = re.compile(r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (name, name))
+        out = [pat.sub(lambda _m, v=v: v, o) for o in out for v in vals][:MAX_PATHS]
+    return None if any("$" in o or "`" in o or len(o) > MAX_VALUE_CHARS for o in out) else out
+
+
+def _resolve_word(w: str, cwd: str, env: dict) -> list[str] | None:
+    """A shell word as absolute paths (several when it uses a loop variable); [] for an empty value or
+    /dev/*, which name nothing read; None when it needs a variable we cannot know. An unresolved word is
+    NOT the cwd: a read of it is bucketed as path_class `unresolved`."""
+    vals = _subst_vars(w, env)
+    if vals is None:
         return None
-    p = _expand(w, cwd)
-    return None if p == "/dev" or p.startswith("/dev/") else p
+    paths = [_expand(v, cwd) for v in vals if v]
+    return [p for p in paths if p != "/dev" and not p.startswith("/dev/")]
+
+
+def _assign(words: list[str], env: dict) -> None:
+    """Apply `NAME=value` words to env: a literal value is kept; anything else makes the name unknown."""
+    for w in words:
+        name, _, val = w.partition("=")
+        vals = _subst_vars(val, env)
+        env[name] = vals[:1] if vals else None
+
+
+def _for_loop(words: list[str], env: dict) -> None:
+    """`for NAME in w1 w2 ...`: the literal word list becomes NAME's values; a list with a substitution,
+    an unresolved variable or no words (`$(ls)` leaves none) makes NAME unknown."""
+    items: list[str] = []
+    for w in words[3:]:
+        vals = _subst_vars(w, env)
+        if vals is None:
+            items = []
+            break
+        items.extend(vals)
+    env[words[1]] = items[:MAX_PATHS] or None
 
 
 def _under(path: str, root: str) -> bool:
@@ -457,17 +505,54 @@ def _skip_heredoc_body(cmd: str, i: int, word: str, dash: bool) -> int:
     return i
 
 
-def _prepare(cmd: str) -> str:
+def _quoted_sub(cmd: str, i: int) -> str | None:
+    """Inside double quotes, at a `$(` or a backtick: the text of that substitution (None for `$((`, an
+    unclosed one, or one longer than SUB_MAX_CHARS). Parentheses are counted without regard to quotes."""
+    end = min(len(cmd), i + SUB_MAX_CHARS)
+    if cmd[i] == "`":
+        j = i + 1
+        while j < end:
+            if cmd[j] == "\\":
+                j += 1
+            elif cmd[j] == "`":
+                return cmd[i + 1:j]
+            j += 1
+        return None
+    if not cmd.startswith("$(", i) or cmd.startswith("$((", i):
+        return None
+    depth, j = 0, i + 1
+    while j < end:
+        if cmd[j] == "\\":
+            j += 1
+        elif cmd[j] == "(":
+            depth += 1
+        elif cmd[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return cmd[i + 2:j]
+        j += 1
+    return None
+
+
+def _prepare(cmd: str, depth: int = 0) -> str:
     """The command text with what must not be tokenised removed: heredoc bodies (<<WORD, <<-WORD with its
     tab-stripped terminator, quoted forms; an unterminated body runs to the end, as in bash), comments
     (`#` at the start of a word), and backslash-newline continuations; a backtick substitution becomes
-    `$( ... )` and each heredoc operator becomes `<< _`. Quote state follows bash for ' " and backslash."""
+    `$( ... )` and each heredoc operator becomes `<< _ `. A digit word touching `<` or `>` (the fd of
+    `2>f`, `0<f`) becomes the marker word NUL+digits before the operator, so `head -n 5 < f` keeps its
+    `< f`. A `$( ... )` or backtick substitution inside double quotes is copied to the text as it stands
+    and also appended as `( ... )` after it, so what it reads is seen (at most SUB_MAX_COUNT, none that
+    does not tokenise). Quote state follows bash for ' " and backslash."""
+    if "\x00" in cmd:
+        cmd = cmd.replace("\x00", " ")
     out: list[str] = []
     pending: list[tuple[str, bool]] = []
+    subs: list[str] = []
     n, i = len(cmd), 0
-    quote, tick, word_start = "", False, True
+    quote, tick, word_start, digits, tries = "", False, True, 0, 0
     while i < n:
         c = cmd[i]
+        fd, digits = digits, 0
         if quote == "'":
             out.append(c)
             i += 1
@@ -480,10 +565,18 @@ def _prepare(cmd: str) -> str:
             i += 2
             continue
         if quote == '"':
+            if c in "$`" and depth < 2 and tries < 2 * SUB_MAX_COUNT:
+                tries += 1
+                if (inner := _quoted_sub(cmd, i)) is not None and len(subs) < SUB_MAX_COUNT:
+                    subs.append(inner)
             out.append(c)
             i += 1
             quote = "" if c == '"' else quote
             continue
+        if fd and c in "<>":
+            num = "".join(out[-fd:])
+            del out[-fd:]
+            out.append(f" \x00{num} ")
         if c in "'\"":
             quote = c
         elif c == "#" and word_start:
@@ -513,18 +606,31 @@ def _prepare(cmd: str) -> str:
                 continue
         out.append(c)
         i += 1
+        digits = fd + 1 if c in "0123456789" and (fd or word_start) else 0
         word_start = c in " \t;&|("
+    for inner in subs:
+        text = _prepare(inner, depth + 1)
+        try:
+            _lex(text)
+        except ValueError:
+            continue
+        out.append(f"\n( {text} )")
     return "".join(out)
+
+
+def _lex(cmd: str) -> list[str]:
+    """shlex tokens of prepared text; ValueError on an unbalanced quote."""
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=SHELL_PUNCT)
+    lex.whitespace = " \t\r"                           # a newline is a command separator
+    lex.whitespace_split = True
+    lex.commenters = ""
+    return list(itertools.islice(lex, MAX_TOKENS))
 
 
 def _shell_tokens(cmd: str) -> list[str]:
     cmd = _prepare(cmd[:MAX_CMD_CHARS])
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=SHELL_PUNCT)
-        lex.whitespace = " \t\r"                       # a newline is a command separator
-        lex.whitespace_split = True
-        lex.commenters = ""
-        return list(itertools.islice(lex, MAX_TOKENS))
+        return _lex(cmd)
     except ValueError:                                  # unbalanced quote: a coarse split is enough
         toks = re.split(r"(&&|\|\||\|&|[;|&\n()<>])|\s+", cmd)
         return [t.strip("'\"") for t in toks if t and t.strip("'\"")][:MAX_TOKENS]
@@ -549,13 +655,15 @@ def _commands(tokens: list[str]) -> list[Cmd]:
     cmds: list[Cmd] = []
     cur: list[str] = []
     ins: list[str] = []
-    piped = False
+    piped, fd = False, ""
     i, n = 0, len(tokens)
     while i < n:
         t = tokens[i]
         i += 1
         if not _is_punct(t):
-            if not piped and t != "$":
+            if t.startswith("\x00"):  # the fd digits touching the next < or >
+                fd = t[1:]
+            elif not piped and t != "$":
                 cur.append(t)
             continue
         if ("<" in t or ">" in t) and "(" not in t:
@@ -563,9 +671,8 @@ def _commands(tokens: list[str]) -> list[Cmd]:
             if i < n and not _is_punct(tokens[i]):
                 target = tokens[i]
                 i += 1
-            fd_ok = True
-            if cur and cur[-1].isdigit() and not piped:
-                fd_ok = cur.pop() == "0"                # the fd in 2>file
+            fd_ok = fd in ("", "0")                     # 2>file and 3<file are not stdin
+            fd = ""
             if t.strip("\n") == "<" and target is not None and fd_ok and not piped:
                 ins.append(target)
             continue
@@ -711,30 +818,49 @@ def _grep_recursive(args: list[str]) -> bool:
                for a in args)
 
 
-def _read_paths(name: str, args: list[str], inputs: list[str], eff: str) -> list[str]:
-    """Absolute paths a read command reads. `ls rg fd find tree graft` and `grep -r` with no path read the
-    cwd; a stdin reader (`cat head tail wc sed awk less more bat`, grep without -r) with no path reads its
-    `< file` input, else stdin, which is not a read of anything (empty list)."""
+def _read_paths(name: str, args: list[str], inputs: list[str], eff: str, env: dict) -> tuple[list[str], bool]:
+    """(absolute paths a read command reads, whether a path word stayed unresolved). `ls rg fd find tree
+    graft` and `grep -r` with no path read the cwd; a stdin reader (`cat head tail wc sed awk less more
+    bat`, grep without -r) reads its path words and its `< file` input, and with neither it reads stdin,
+    which is not a read of anything. A path word that needs an unknown variable (`cat "$OUT"`) is NOT
+    the cwd: it adds nothing to the paths and sets the flag."""
     pos = _positionals(name, args)[:MAX_PATHS]
     if name in STDIN_READERS and not (name in GREP_CMDS and _grep_recursive(args)):
-        pos = [a for a in pos if a != "-"] or inputs[:MAX_PATHS]
+        pos = [a for a in pos if a != "-"] + inputs[:MAX_PATHS]
         if not pos:
-            return []
-    paths = [p for a in pos if (p := _expand_word(a, eff))]
-    return paths or [os.path.normpath(eff)]
+            return [], False
+    if not pos:
+        return [os.path.normpath(eff)], False
+    paths: list[str] = []
+    unresolved = False
+    for a in pos:
+        got = _resolve_word(a, eff, env)
+        if got is None:
+            unresolved = True
+        else:
+            paths.extend(got)
+    return paths, unresolved
 
 
 def _shell_facts(cmd: str, cwd: str, depth: int = 0) -> dict:
-    """{web: bool, url: str, reads: [[abs path, ...], ...]} for one shell command string."""
-    facts: dict = {"web": False, "url": "", "reads": []}
+    """{web: bool, url: str, reads: [[abs path, ...], ...], unresolved: bool} for one shell command string."""
+    facts: dict = {"web": False, "url": "", "reads": [], "unresolved": False}
     eff = cwd or "/"
-    scopes: list[str] = []
+    env: dict = {}                                      # NAME -> literal values, None when unknown
+    scopes: list[tuple[str, dict]] = []
     for cm in _commands(_shell_tokens(cmd)):
-        if cm.scope:                                    # a `cd` inside ( ... ) or $( ... ) does not leak
+        if cm.scope:                                    # a `cd` or assignment inside ( ... ) does not leak
             if cm.scope == "(":
-                scopes.append(eff)
+                scopes.append((eff, dict(env)))
             elif scopes:
-                eff = scopes.pop()
+                eff, env = scopes.pop()
+            continue
+        lead = list(itertools.dropwhile(lambda w: w in SHELL_KEYWORDS, cm.words))   # `do for g in ...`
+        if lead and all(ENV_ASSIGN_RE.match(w) for w in lead):
+            _assign(lead, env)
+            continue
+        if len(lead) >= 3 and lead[0] == "for" and lead[2] == "in":
+            _for_loop(lead, env)
             continue
         name, args = _unwrap(cm.words)
         if not name:
@@ -742,7 +868,12 @@ def _shell_facts(cmd: str, cwd: str, depth: int = 0) -> dict:
         if name in ("cd", "pushd"):
             tgt = next((a for a in args if not a.startswith("-")), "")
             if tgt != "-":
-                eff = _expand_word(tgt or "~", eff) or eff
+                got = _resolve_word(tgt or "~", eff, env)
+                eff = got[0] if got else eff
+        elif name in ASSIGN_BUILTINS:
+            _assign([a for a in args if ENV_ASSIGN_RE.match(a)], env)
+        elif name in ("read", "unset"):
+            env.update({a: None for a in args if not a.startswith("-")})
         elif name in SHELLS and depth < 2:
             flags = [a for a in args[:3] if a.startswith("-") and not a.startswith("--") and "c" in a]
             if flags and len(args) > args.index(flags[0]) + 1:
@@ -750,6 +881,7 @@ def _shell_facts(cmd: str, cwd: str, depth: int = 0) -> dict:
                 facts["web"] = facts["web"] or sub["web"]
                 facts["url"] = facts["url"] or sub["url"]
                 facts["reads"].extend(sub["reads"])
+                facts["unresolved"] = facts["unresolved"] or sub["unresolved"]
         elif name in FETCH_CMDS:
             url = next((a for a in args if URL_RE.match(a)), "")
             if url and host_info(url)[0] == "public":
@@ -757,8 +889,10 @@ def _shell_facts(cmd: str, cwd: str, depth: int = 0) -> dict:
         elif name == "gh":
             facts["web"] = facts["web"] or _gh_is_prior_art(args)
         elif name in READ_CMDS and not _in_place_edit(name, args):
-            if paths := _read_paths(name, args, cm.inputs, eff):
+            paths, unresolved = _read_paths(name, args, cm.inputs, eff, env)
+            if paths:
                 facts["reads"].append(paths)
+            facts["unresolved"] = facts["unresolved"] or unresolved
     return facts
 
 
@@ -848,6 +982,8 @@ def classify(tool: str, tin: dict, cwd: str) -> tuple[str, dict]:
                     extras["host"] = host
             return "web", extras
         if not facts["reads"]:
+            if facts["unresolved"]:                    # a read of a path we cannot know: not the cwd
+                extras["path_class"] = "unresolved"
             return "private_other", extras
         cat, pclass = _classify_paths([p for paths in facts["reads"] for p in paths], cwd)
         if pclass:
