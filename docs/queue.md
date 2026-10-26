@@ -3,6 +3,16 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Follow-ups after PR 73 and PR 74 (merged 2026-10-25; adversary rounds, none blocking)
+
+PR 73 merged as b2bd2a1, PR 74 as 6f54e89 (adversary `APPROVE` 39cd2db and `APPROVE` 3402d84). Each item below was reproduced by the adversary and judged Low or informational; nothing here is started.
+
+1. **relay.py R5-1 (Low, PR 74 round 5)**: `send_paseo` matches `probe_raw or probe_esc` for every text, but a headerless text (a Paseo-agent sender, `sender_tag()` returns "") is always stored escaped by the daemon, so `probe_raw` only adds false-`delivered` surface there (`ours="it's"` is certified by another message's line `it's green now`). Fix: use the raw probe only when the text carries the `[relay from ` header (`route_paseo` passes `raw=bool(tag)`, or `send_paseo` tests `text.startswith("[relay from ")`); the deferred deliverer keeps both probes (it adds a header and keeps the record's `PASEO_AGENT_ID`).
+2. **relay.py R5-3 (Low, pre-existing)**: a whole text that is a prefix of another pending text from the same sender is certified by that text's line (`done` by `done and merged`). Fix: end-anchor the probes (`probe_raw + '"'`, `probe_esc + '\\n</paseo-system>'`); read Paseo's `delivery.js` join of queued prompts (`\n\n`) before choosing the terminator.
+3. **relay.py, from rounds 2 and 3 of PR 74**: r2 A3 (an `aka` name match; a declared label spelling a session-id header); r2 A6 (a relay that died after reserving an ID blocks its sender's retry for 10 min); r2 A7 (`--expect-ack` to an acp-dispatch record closes only if the slice answers through relay.py); r3 A1 (a Hermes target's `who` holds the date word `sid[:8]`); r3 A2 (`hermes_forged` is a full match, so a suffixed label still poses as Hermes); r3 A3 (a rotated Hermes session's reply never closes); r3 A4 (`who: []` fails open on a hand-edited link); r3 A5 (two stale `inherit = "core"` comments). Details: `~/.local/state/bigteam/adhoc-2026-10-25/adv-relay-r2-report.md` and `adv-relay-r3-report.md`.
+4. **routing (PR 73, round 5 notes)**: LOW, the snapshot-file fallback (pre-existing at ca9d3b6) admits on a file up to 25 minutes old when aiuse itself fails, so "fail-closed" holds only when no snapshot file exists; INFO, a hanging aiuse can now cost up to three timeouts per foreground dispatch; INFO, the dispatch post-load fresh read is unconditional over agents; INFO, two post-run memo readers are not admission boundaries. Also three P3 notes from round 4 (ca9d3b6): legacy stored windows, the docs scope of the window floor, a test `SESSION_FINDER_STATE` leak.
+5. **Open Codex panes**: `w2F:p45` (`~/src/djbclark-ade`) and `w2Q:p1` (`~/ops/site-djbclark/macos`) sit behind permission dialogs only djbclark can answer; relays to both failed (2026-10-25). Not an agent task.
+
 ## relay.py deferred send and Paseo sender label (2026-10-24, branch `feat/relay-deferred-send`, PR #57)
 
 Built, repair round 2 (2026-10-24) after a second adversary BLOCK, not merged: a busy target no longer loses the text (`relay.py`
