@@ -201,8 +201,8 @@ overrides a `?` that is no question. The record (sender, target, age) lives in <
 (its own tool calls and their results never count). A sender with a fleet row but NO readable transcript may use --expect-ack (2026-10-26): its
 record holds `"tx": null`, and relay itself closes it when the TARGET answers through relay.py with a text that BEGINS `ack ID`, sent to the
 session that opened it: both ends come from the fleet's `self` row and the record (id, and session id when both have one), never from the text,
-and it counts only for a send its route PROVED or took on a route with no proof to take (never refused, failed, pulled back, merely queued
-for a deliverer, run by a deliverer, or one whose delivery watch ran and did not see the text, or that ran no watch). A sender WITH a
+and it counts only for a send whose delivery watch ran (never `--no-ack`) and that its route PROVED delivered, or handed to a Paseo daemon or an
+ACP or slice inbox that keeps the text (never refused, failed, pulled back, a pane's unproven "queued", queued for a deliverer, run by a deliverer, or one whose delivery watch ran and did not see the text). A sender WITH a
 transcript keeps exactly its old rule: only its own transcript showing the ack closes it. A third party, a quoted header, another or a
 closed ID and a replay change nothing. `--sweep` also flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
 point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json). FIRST CONTACT: the first message
@@ -1827,6 +1827,8 @@ def route_hermes(c):
 ROUTES = {"paseo": route_paseo, "dispatch": route_dispatch, "launch": route_launch, "socket": route_socket,
           "pane": route_pane, "hermes": route_hermes}
 
+KEEPING_ROUTES = ("paseo", "launch", "dispatch")    # routes whose proofless "accepted"/"queued" means the Paseo daemon, or an inbox file, holds the text; a pane screen match and a socket frame hold nothing
+
 
 def plan(s):
     """Route names for session S, best first: a Paseo-hosted agent by `paseo send` alone (labelled as a peer's
@@ -2811,8 +2813,8 @@ def expect_resolve_by_relay():
     must BEGIN with `ack ID`; the caller (CTX["me"], fleet-derived) must be the expectation's target and the recipient (CTX["s"]) its sender,
     each also matching the session id the record stored, so a third party, a new occupant of the pane, a header quoted in a text or a
     closed or reused ID changes nothing. It resolves ONLY records with no transcript (`tx` null): a transcript-backed record is closed by `ack_sweep` alone, from its own
-    transcript. It counts only when this send was proven delivered or went by a route with no proof (CTX["accepted"]: never a failed, refused,
-    pulled, merely queued, unwatched or watched-and-unseen one), and never inside a deliverer (SENDER_OVERRIDE), which has no proof. The check and the write share one hold of the expectation lock, so a replayed ack finds it acked."""
+    transcript. It counts only when the send's delivery watch ran and this send was proven delivered, or went to a route that keeps a text it cannot prove
+    (CTX["accepted"], KEEPING_ROUTES: never a failed, refused, pulled, `--no-ack`, watched-and-unseen or pane-"queued" one), and never inside a deliverer (SENDER_OVERRIDE), which has no proof. The check and the write share one hold of the expectation lock, so a replayed ack finds it acked."""
     me, s, text = CTX.get("me"), CTX.get("s"), CTX.get("text")
     if SENDER_OVERRIDE[0]:    # a deliverer runs under the stored sender's label, not as a session: its inner send has no proof and its text depends on the queue time
         return 0
@@ -3137,10 +3139,12 @@ def _main(argv=None, sweep=True):
             if word == "delivered":
                 res = (res[0], res[1], "delivered")
             out.update(result=res[2], ack=word, ack_note=note)
-        # What expect_resolve_by_relay may count (a sender with no transcript only): taken by its route, never refused, failed or pulled back,
-        # and either PROVEN (delivered) or on a route with no proof to take. A proof that was available and did not show the text (a watch that
-        # ran out, a --no-ack send nobody watched) is no evidence of delivery: a false ack is worse than a missing one.
-        CTX["accepted"] = res[0] == "ok" and word != "not delivered" and (res[2] == "delivered" or c.get("proof") is None)
+        # What expect_resolve_by_relay may count (a sender with no transcript only): a send whose delivery watch ran (never `--no-ack`: no watch,
+        # nothing counts) and that was either PROVEN (delivered) or handed, with no proof to take, to a route that KEEPS the text until its
+        # recipient reads it (KEEPING_ROUTES, named by the route that answered, never by a screen match). A pane's proofless "queued" is a screen
+        # heuristic over a header identical for every message of one peer, so it counts for nothing; a proof that was available and did not show
+        # the text counts for nothing too. A false ack is worse than a missing one: it silences the OVERDUE page for a dead return path.
+        CTX["accepted"] = bool(a.ack) and res[0] == "ok" and (res[2] == "delivered" or (c.get("proof") is None and name in KEEPING_ROUTES))
         if res[0] == "ok":
             out["via"] = res[1]
         else:

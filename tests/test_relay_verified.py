@@ -22,6 +22,7 @@ import test_relay_fallback as fb  # noqa: E402  # pyright: ignore[reportMissingI
 
 relay, fleet, sess, stamp = fb.relay, fb.fleet, fb.sess, fb.stamp
 REAL_SLEEP = time.sleep
+REAL_FORCED_TAG = relay.forced_tag    # the harness stubs `relay.forced_tag` to "" in setUp; the header-sensitive tests put this one back
 ME_SID = "dddddddd-0000-4000-8000-000000000004"
 
 
@@ -251,8 +252,11 @@ class TestExpectWithoutTranscript(Base):
         self.mallory = sess(id="ffffffff", name="mallory", sid="ffffffff-0000-4000-8000-000000000006", chan=("herdr", "w4:p4"), status="idle")
         self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
 
-    def reply(self, sender: Any, text: str, *argv: str, to: Any = None, tx: bool = False, typed: Any = None, sleep: Any = None) -> tuple[int, str, str]:
-        """TEXT sent through relay.py by session SENDER (the only `self` row) to TO (alice by default)."""
+    def reply(self, sender: Any, text: str, *argv: str, to: Any = None, tx: bool = False, typed: Any = None, sleep: Any = None,
+              route: str | None = "launch") -> tuple[int, str, str]:
+        """TEXT sent through relay.py by session SENDER (the only `self` row) to TO (alice by default). ROUTE: the recipient is reached by a
+        route that KEEPS the text and has no proof to take (an ACP launch inbox write, `queued`), the case this feature closes on; None: the
+        pane route the harness really runs (its screen heuristic and transcript proof)."""
         to = to or self.me
         if tx:
             to = {**to, "transcript": str(self.me_tx)}
@@ -263,7 +267,10 @@ class TestExpectWithoutTranscript(Base):
         self.on_typed = typed or ((lambda t: self.write_delivered_to(self.me_tx, t)) if tx else (lambda t: None))
         self.on_sleep = sleep
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), contextlib.ExitStack() as stack:
+            if route:
+                stack.enter_context(mock.patch.object(relay, "plan", lambda s: [route]))
+                stack.enter_context(mock.patch.dict(relay.ROUTES, {route: lambda c: ("ok", f"{route} inbox", "queued")}))
             rc = relay.main([to["name"], text, "--wait", "1", *argv])
         return rc, out.getvalue(), err.getvalue()
 
@@ -289,7 +296,7 @@ class TestExpectWithoutTranscript(Base):
         self.assertEqual([(r["state"], r["overdue"]) for r in rows], [("acked", False)])
 
     def test_an_ack_with_a_remark_closes_it_and_a_proven_delivery_closes_it_too(self) -> None:
-        rc, out, err = self.reply(self.target, "ack build1: yes, green", tx=True)
+        rc, out, err = self.reply(self.target, "ack build1: yes, green", tx=True, route=None)
         self.assertEqual(rc, 0, (out, err))
         self.assertEqual(self.state(), "acked")
 
@@ -327,7 +334,7 @@ class TestExpectWithoutTranscript(Base):
         saved = relay.ROUTES["pane"]
         relay.ROUTES["pane"] = lambda c: ("unverified", "its input box holds someone else's draft")
         self.addCleanup(relay.ROUTES.__setitem__, "pane", saved)
-        rc, _, _ = self.reply(self.target, "ack build1")
+        rc, _, _ = self.reply(self.target, "ack build1", route=None)
         self.assertEqual(rc, 3)
         self.assertEqual(self.state(), "open")
 
@@ -359,7 +366,7 @@ class TestExpectWithoutTranscript(Base):
 
     def test_an_ack_that_failed_or_was_pulled_back_closes_nothing(self) -> None:
         relay.type_line = lambda chan, text: False
-        rc, _, _ = self.reply(self.target, "ack build1")
+        rc, _, _ = self.reply(self.target, "ack build1", route=None)
         self.assertNotEqual(rc, 0)
         self.assertEqual(self.state(), "open")
         relay.type_line = lambda chan, text: self.on_typed(text) or True
@@ -375,30 +382,34 @@ class TestExpectWithoutTranscript(Base):
 
     def test_an_ack_only_queued_for_later_closes_nothing(self) -> None:
         busy = {**self.me, "agent": "codex", "status": "working"}    # a working non-Claude pane: relay queues the text for a deliverer that runs as no session
-        rc, out, err = self.reply(self.target, "ack build1", to=busy)
+        rc, out, err = self.reply(self.target, "ack build1", to=busy, route=None)
         self.assertIn("queued:", out, (rc, out, err))
         self.assertEqual(self.state(), "open")
 
     def test_a_delivery_proof_that_ran_and_found_nothing_closes_nothing(self) -> None:
         """alice has no transcript of her own, but the ack's ROUTE has one to read (her pane's): the text is queued, nothing takes it."""
-        rc, out, err = self.reply(self.target, "ack build1", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me)
+        rc, out, err = self.reply(self.target, "ack build1", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me, route=None)
         self.assertEqual(rc, 3, (out, err))
         self.assertIn("not in its transcript", err)    # the proof ran and timed out
         self.assertEqual(self.state(), "open")
 
     def test_an_ack_nobody_watched_that_a_proof_could_have_checked_closes_nothing(self) -> None:
-        rc, out, err = self.reply(self.target, "ack build1", "--no-ack", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me)
+        rc, out, err = self.reply(self.target, "ack build1", "--no-ack", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me, route=None)
         self.assertEqual(rc, 0, (out, err))
         self.assertIn("queued", out)
         self.assertEqual(self.state(), "open")
 
-    def test_an_ack_nobody_watched_on_a_route_with_no_proof_to_take_closes_it(self) -> None:
-        rc, out, err = self.reply(self.target, "ack build1", "--no-ack")    # alice has no transcript: nothing could ever prove it
+    def test_an_ack_sent_with_no_ack_closes_nothing_even_on_a_route_that_keeps_the_text(self) -> None:
+        """No delivery watch ran, so nothing counts (adversary r2 A2): the code, the docstring, SKILL item 2, queue item 8 and the CHANGELOG agree."""
+        rc, out, err = self.reply(self.target, "ack build1", "--no-ack")
         self.assertEqual(rc, 0, (out, err))
-        self.assertEqual(self.state(), "acked")
+        self.assertIn("via launch inbox", out)
+        self.assertEqual(self.state(), "open")
+        rc, out, err = self.reply(self.target, "ack build1")    # the same send with its watch does close it: the gate is `--no-ack`, not the route
+        self.assertEqual(self.state(), "acked", (rc, out, err))
 
     def test_a_proof_that_saw_the_text_closes_it(self) -> None:
-        rc, out, err = self.reply(self.target, "ack build1", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me,
+        rc, out, err = self.reply(self.target, "ack build1", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me, route=None,
                                   sleep=lambda: self.write_delivered_to(self.me_tx, "ack build1"))
         self.assertEqual(rc, 0, (out, err))
         self.assertEqual(self.state(), "acked")
@@ -431,6 +442,110 @@ class TestExpectWithoutTranscript(Base):
         rc, _, err = self.go("ack build9", "--expect-ack", "build9")
         self.assertEqual(rc, 2, err)
         self.assertIn("would never end", err)
+
+
+class TestExpectNoTranscriptPaneQueued(Base):
+    """Adversary r2 (BLOCK at 5eb19af, A1/A3): for a sender with NO transcript the relay-side close counts a send only when its delivery watch ran
+    and the route PROVED it delivered or hands the text to something that keeps it (`KEEPING_ROUTES`, named from the route result). A pane route's
+    "queued" with no proof is a screen match on `text[:30]`, which lies inside the sender header that is identical for every message one peer sends:
+    it must never close an expectation, or a dead return path goes unpaged. The tests type the REAL header (the harness stubs it to "")."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.me.update(transcript=None, status="idle", agent="omp")    # a native OMP pane: the pane route's only evidence is the screen
+        self.screen_text = ""
+        relay.screen = lambda chan, lines=20: self.screen_text
+        relay.forced_tag = REAL_FORCED_TAG
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
+        self.rec = relay.expect_read("build1")
+        self.assertIsNone(self.rec["tx"])
+
+    def as_target(self, text: str, *argv: str, typed: Any = None, route: tuple[str, str, Any] | None = None, to: Any = None) -> tuple[int, str, str]:
+        """TEXT sent by the acking target to alice, whose pane never receives it. ROUTE = (name, result, proof): a route stub the gate sees."""
+        rows = [{**(to or self.me), "self": False}, {**self.target, "self": True}]
+        relay.fleet.sessions = lambda: rows
+        self.on_typed = typed or (lambda t: None)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), contextlib.ExitStack() as stack:
+            if route:
+                name, result, proof = route
+
+                def stub(c: dict[str, Any]) -> tuple[str, str, str]:
+                    if proof:
+                        c["proof"] = proof
+                    return ("ok", f"{name} x", result)
+                stack.enter_context(mock.patch.object(relay, "plan", lambda s: [name]))
+                stack.enter_context(mock.patch.dict(relay.ROUTES, {name: stub}))
+            rc = relay.main(["alice", text, "--wait", "1", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def state(self) -> Any:
+        return relay.expect_read("build1")["state"]
+
+    def test_a_stale_line_of_an_earlier_message_from_the_same_peer_is_no_proof(self) -> None:
+        self.as_target("progress note: still building", "--fyi")
+        earlier = self.sent_texts[-1]
+        self.assertTrue(earlier.startswith("[relay from "), earlier)
+        self.screen_text = "  " + earlier + "\n\u203a "    # the earlier message in scrollback; the new text never arrives
+        rc, out, err = self.as_target("ack build1")
+        self.assertEqual(self.sent_texts[-1][:30], earlier[:30], "the first 30 characters are all header")
+        self.assertEqual(self.state(), "open", (rc, out, err))
+        self.assertIn("queued", out)    # the route did call it queued: that is exactly the lie
+
+    def test_our_own_unsubmitted_text_in_a_bordered_input_box_is_no_proof(self) -> None:
+        def typed(t: str) -> None:
+            self.screen_text = "\u2502 " + t + " \u2502"
+        rc, out, err = self.as_target("ack build1", typed=typed)
+        self.assertIn("queued", out)
+        self.assertEqual(self.state(), "open", (rc, out, err))
+
+    def test_the_exact_text_on_the_screen_with_no_proof_to_take_is_still_no_proof(self) -> None:
+        def typed(t: str) -> None:
+            self.screen_text = "  " + t
+        rc, out, err = self.as_target("ack build1", typed=typed)
+        self.assertIn("queued", out)
+        self.assertEqual(self.state(), "open", (rc, out, err))
+
+    def test_a_pane_queued_with_a_transcript_proof_that_did_not_see_it_is_no_proof_either(self) -> None:
+        rc, out, err = self.as_target("ack build1", to={**self.me, "transcript": str(self.me_tx)}, typed=lambda t: self.append(
+            self.me_tx, {"type": "queue-operation", "operation": "enqueue", "content": t}))
+        self.assertIn("not in its transcript", err)
+        self.assertEqual(self.state(), "open", (rc, out, err))
+
+    def test_a_retry_that_finds_our_earlier_copy_queued_is_no_proof_either(self) -> None:
+        """Adversary r2 A3: `retry_leftover` returns "queued" with no proof set, even after reading a transcript."""
+        to = {**self.me, "transcript": str(self.me_tx), "agent": "claude"}
+        enqueue = lambda t: self.append(self.me_tx, {"type": "queue-operation", "operation": "enqueue", "content": t})
+        mark = self.me_tx.stat().st_size
+        rc, out, err = self.as_target("ack build1", to=to, typed=enqueue)    # typed, queued, nothing takes it: unverified
+        self.assertEqual((rc, self.state()), (3, "open"), (out, err))
+        relay.note_unsent(to["id"], self.sent_texts[-1], "", mark, time.time(), str(self.me_tx))    # what an unseen send leaves armed for the retry
+        typed_before = self.calls.count("type")
+        rc, out, err = self.as_target("ack build1", to=to, typed=enqueue)    # the retry reads the transcript, finds our copy queued, types nothing
+        self.assertEqual(self.calls.count("type"), typed_before, "the retry types nothing")
+        self.assertIn("queued", out, (rc, out, err))
+        self.assertEqual(self.state(), "open", (rc, out, err))
+
+    def test_each_route_kind_against_the_gate(self) -> None:
+        never = lambda: None    # a proof that ran to its end and found nothing
+        closes = [("paseo", "accepted", None), ("launch", "queued", None), ("dispatch", "queued", None), ("hermes", "delivered", None),
+                  ("pane", "delivered", None), ("socket", "delivered", None)]
+        stays_open = [("pane", "queued", None), ("socket", "accepted", None), ("socket", "queued", None), ("paseo", "accepted", never),
+                      ("launch", "queued", never), ("dispatch", "queued", never), ("pane", "queued", never), ("socket", "accepted", never)]
+        for want, table in (("acked", closes), ("open", stays_open)):
+            for name, result, proof in table:
+                with self.subTest(route=name, result=result, proof=bool(proof)):
+                    relay.expect_write(self.rec)
+                    rc, out, err = self.as_target("ack build1", route=(name, result, proof))
+                    self.assertEqual(self.state(), want, (rc, out, err))
+
+    def test_no_ack_closes_nothing_on_any_route_kind(self) -> None:
+        for name, result in (("paseo", "accepted"), ("launch", "queued"), ("dispatch", "queued"), ("hermes", "delivered"), ("pane", "delivered")):
+            with self.subTest(route=name):
+                relay.expect_write(self.rec)
+                rc, out, err = self.as_target("ack build1", "--no-ack", route=(name, result, None))
+                self.assertEqual(self.state(), "open", (rc, out, err))
+
 
 
 class TestExpectWithTranscriptIsNotClosedByRelay(Base):
