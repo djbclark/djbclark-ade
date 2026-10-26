@@ -1418,17 +1418,40 @@ class TestExpectAnsweredInsideABlockingSend(Base):
         old["created"] -= 3 * 3600
         rec_path.write_text(json.dumps(old))
         self.assertNotIn("OVERDUE", self.run_cli("--sweep")[1])
-        self.assertTrue(relay.expect_reserve("q1", "cccccccc"), "the ID is free once the send returned")
 
-    def test_an_early_acked_id_frees_after_the_ttl_when_its_relay_died_mid_send(self) -> None:
-        def died() -> None:
+    def test_an_early_acked_id_is_free_the_moment_its_send_returns(self) -> None:
+        """adversary r6 N1 (Q5): no aging here, so this is the `sent` mark at work, not the TTL."""
+        self.ask(lambda: self.answer(self.hermes, "ack q1"))
+        self.assertTrue(relay.expect_reserve("q1", "cccccccc"), "a returned early-acked send frees its ID at once")
+
+    def test_an_early_acked_record_whose_relay_died_before_its_send_returned_frees_after_the_ttl(self) -> None:
+        """adversary r6 N2: a relay that died mid-send leaves an acked+early record with no `sent`; the snapshot taken inside the send stands in for it."""
+        snap: list[dict[str, Any]] = []
+        self.ask(lambda: (self.answer(self.hermes, "ack q1"), snap.append(relay.expect_read("q1"))))
+        rec_path = relay.expect_dir() / "q1.json"
+        rec_path.write_text(json.dumps(snap[0]))    # the record as the dead relay left it
+        self.assertEqual((snap[0]["state"], snap[0].get("early"), snap[0].get("sent")), ("acked", True, None))
+        self.assertFalse(relay.expect_reserve("q1", "cccccccc"), "inside the TTL the dead relay's ID is still held")
+        snap[0]["created"] -= relay.EXPECT_RESERVE_TTL + 5
+        rec_path.write_text(json.dumps(snap[0]))
+        self.assertTrue(relay.expect_reserve("q1", "cccccccc"), "past the TTL the ID is free")
+
+    def test_a_send_blocking_past_the_ttl_loses_even_an_early_answered_id_to_a_second_relay(self) -> None:
+        """Known bound (adversary r6 N2, probe Q3): not reachable at the default --wait 20. The TTL frees the ID while the first send still blocks; the
+        second relay reserves it; when the first send returns, its `open` record overwrites that reservation and the answered question reads as open."""
+        took: list[bool] = []
+
+        def during() -> None:
             self.answer(self.hermes, "ack q1")
             path = relay.expect_dir() / "q1.json"
             rec = json.loads(path.read_text())
             rec["created"] -= relay.EXPECT_RESERVE_TTL + 5
             path.write_text(json.dumps(rec))
-            self.assertTrue(relay.expect_reserve("q1", "cccccccc"))
-        self.ask(died)
+            took.append(relay.expect_reserve("q1", "cccccccc"))
+        self.ask(during)
+        self.assertEqual(took, [True])
+        rec = relay.expect_read("q1")
+        self.assertEqual((rec["state"], rec["sender"], rec.get("early"), rec.get("sent")), ("open", "bbbbbbbb", None, None), rec)
 
     def test_a_route_that_raises_after_an_early_ack_drops_the_record(self) -> None:
         """Known, accepted choice (adversary r5 F4): the send did not finish, so nothing is recorded and the ID is free."""
