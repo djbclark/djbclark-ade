@@ -2569,6 +2569,15 @@ def sender_row(listed):
     return next((x for x in listed if x.get("self")), None)
 
 
+def outcome_result(line):
+    """The route's result word of a deliverer outcome line `relayed to [ID] NAME via VIA: RESULT; it takes ...` (the print at
+    the end of main), or "" for any other shape. Read from the right: NAME is a peer's free-text title and may itself hold
+    `: delivered;`."""
+    if not line.startswith("relayed to [") or "; it takes" not in line:
+        return ""
+    return line.rpartition("; it takes")[0].rpartition(": ")[2]
+
+
 def defer_ack(rid, window):
     """(word, note) of the --ack watch on deferred record RID, for up to WINDOW seconds: its deliverer's outcome line says
     whether the inner send was verified ("delivered") or only taken ("accepted", "queued"). A record still queued when the
@@ -2578,7 +2587,7 @@ def defer_ack(rid, window):
         rec = rec_read(rid) or {}
         st, out = rec.get("state"), rec.get("outcome") or ""
         if st == "delivered":
-            return ("delivered", out) if ": delivered;" in out else ("unverified", f"the deliverer sent it but could not prove it: {out}")
+            return ("delivered", out) if outcome_result(out) == "delivered" else ("unverified", f"the deliverer sent it but could not prove it: {out}")
         if st in ("failed", "expired", "cancelled"):
             return ("unverified" if "unverified" in out else "not delivered", out or st)
         if time.time() >= deadline:

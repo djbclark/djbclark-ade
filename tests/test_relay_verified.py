@@ -157,6 +157,30 @@ class TestAck(Base):
         relay.rec_write({**rec, "state": "failed", "outcome": "unverified, do not resend; check its pane"})
         self.assertEqual(relay.defer_ack(rec["id"], 0)[0], "unverified")
 
+    def test_a_recipient_name_holding_the_delivered_marker_does_not_make_a_queued_send_delivered(self) -> None:
+        """Adversary r3 A2: the outcome line carries the recipient's free-text NAME before the route word, so `": delivered;" in outcome`
+        read a pane's proofless "queued" to a peer titled `alice: delivered; ok` as proof. The line is the REAL one run_captured gives
+        a deliverer's inner send; the result word is read from the right."""
+        self.me.update(transcript=None, status="idle", agent="omp", name="alice: delivered; ok")
+        relay.fleet.sessions = lambda: [{**self.me, "self": False}, {**self.target, "self": True}]
+        self.on_typed = lambda t: None
+        with mock.patch.object(relay, "plan", lambda s: ["pane"]), \
+                mock.patch.dict(relay.ROUTES, {"pane": lambda c: ("ok", "herdr w1:p1", "queued")}):
+            rc, line = relay.run_captured([self.me["id"], "ack build1", "--no-defer", "--no-ack"], "claude cccccccc aka peer-fb")
+        self.assertEqual(rc, 0, line)
+        self.assertIn("alice: delivered; ok via herdr w1:p1: queued; it takes", line)
+        now = time.time()
+        rid = time.strftime("%Y%m%d-%H%M%S") + "-abcdef"
+        relay.rec_write({"id": rid, "target": {"id": self.me["id"]}, "text": "ack build1", "state": "delivered", "outcome": line,
+                         "created": now, "expires": now + 600})
+        self.assertEqual(relay.defer_ack(rid, 1)[0], "unverified", line)
+        relay.rec_write({"id": rid, "target": {"id": self.me["id"]}, "text": "x", "state": "delivered", "created": now, "expires": now + 600,
+                         "outcome": "relayed to [x] alice: delivered; ok via herdr w1:p1: delivered; it takes the message now"})
+        self.assertEqual(relay.defer_ack(rid, 1)[0], "delivered")    # a real delivered result still reads as delivered
+        relay.rec_write({"id": rid, "target": {"id": self.me["id"]}, "text": "x", "state": "delivered", "created": now, "expires": now + 600,
+                         "outcome": "delivered; it takes the message now"})
+        self.assertEqual(relay.defer_ack(rid, 1)[0], "unverified")    # a line of any other shape never reads as delivered
+
     def test_a_route_with_no_transcript_cannot_be_watched_and_says_so_at_once(self) -> None:
         word, note = relay.ack_watch({}, 60)
         self.assertEqual(word, "unverified")
@@ -645,6 +669,26 @@ class TestExpectDelivererNeverCloses(Base):
             self.assertTrue([r for r in rows() if r.get("self")], "fleet marks the Paseo target `self` from PASEO_AGENT_ID")
             self.on_typed = lambda t: None
             rc, line = relay.run_captured(["alice", "ack build1", "--no-defer", "--no-ack"], "codex T")    # deliver()'s exact call
+        self.assertEqual(relay.expect_read("build1")["state"], "open", (rc, line, relay.expect_read("build1")))
+
+    def test_a_deliverer_that_ran_its_watch_on_a_keeping_route_closes_nothing(self) -> None:
+        """The deliverer skip ALONE (adversary r3 A3): the inner send goes by a route that keeps the text (`launch`) and carries --ack, so
+        its watch ran and the gate would admit it; only the deliverer's own identity keeps the record open. deliver() always adds --no-ack,
+        which would hide the guard, so this call does not."""
+        self.me["transcript"] = None
+        self.me["status"] = "idle"
+        relay.expect_write({"id": "build1", "state": "open", "sender": self.me["id"], "sender_sid": self.me["sid"], "sender_label": "alice",
+                            "tx": None, "mark": 0, "created": time.time(), "within": 1800, "acked": None,
+                            "target": {"id": self.PASEO_T[:8], "name": "T", "paseo": self.PASEO_T, "sid8": "", "sid": "", "host": "paseo"}})
+        live = [{"id": self.PASEO_T, "status": "idle", "provider": "codex", "cwd": "/x", "name": "T"}]
+        with mock.patch.object(fleet, "_paseo_ls", lambda *a: live), mock.patch.object(fleet, "_paseo_hosting", lambda anc: set()), \
+                mock.patch.object(relay, "plan", lambda s: ["launch"]), \
+                mock.patch.dict(relay.ROUTES, {"launch": lambda c: ("ok", "launch inbox L", "queued")}), \
+                mock.patch.dict(os.environ, {"PASEO_AGENT_ID": self.PASEO_T}):
+            relay.fleet.sessions = lambda: [{**self.me, "self": False}, *fleet._paseo_rows(set(), [])]
+            rc, line = relay.run_captured(["alice", "ack build1", "--no-defer", "--ack"], "codex T")
+        self.assertEqual(rc, 3, line)    # --ack ran its watch; a keeping route has no proof to take: unverified
+        self.assertIn("via launch inbox L: queued", line)    # the real route result the gate would have counted
         self.assertEqual(relay.expect_read("build1")["state"], "open", (rc, line, relay.expect_read("build1")))
 
 
