@@ -467,7 +467,34 @@ ignore_default_excludes = true
                 for secret in secrets:
                     self.assertNotIn(secret, r.stdout + r.stderr, secret)
                 self.assertIn('inherit = "core"', r.stdout)  # the fixed literal still prints, without its comment
-                self.assertIn("exclude = <hidden>", r.stdout)
+                self.assertIn("<assignment hidden>", r.stdout)
+
+    def test_multiline_strings_never_print_assignment_shaped_content(self) -> None:
+        # PR71 review: a base64-like continuation was mistaken for a key and partly disclosed.
+        for delimiter in ('"""', chr(39) * 3):
+            for flags in ((), ("--write",)):
+                with self.subTest(delimiter=delimiter, flags=flags), tempfile.TemporaryDirectory() as d:
+                    target = pathlib.Path(d, "config.toml")
+                    secret = "c2VjcmV0=="
+                    original = self.LIVE.format(home=d).replace(
+                        'inherit = "core"\n',
+                        'inherit = "core"\nexclude = [' + delimiter + '\n' + secret
+                        + '\nSYNTHETIC_CREDENTIAL = hidden-value\n' + delimiter + ']\n', 1)
+                    tomllib.loads(original)  # exercise valid basic and literal multiline TOML
+                    target.write_text(original)
+                    result = self.run_apply(target, *flags)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for private in (secret, "c2VjcmV0", "SYNTHETIC_CREDENTIAL", "hidden-value"):
+                        self.assertNotIn(private, result.stdout + result.stderr)
+                    self.assertIn("<assignment hidden>", result.stdout)
+                    self.assertIn('inherit = "all"', result.stdout)
+                    if flags:
+                        (backup,) = pathlib.Path(d).glob("config.toml.bak-*-env-policy")
+                        self.assertEqual(backup.read_text(), original)
+                        self.assertEqual(tomllib.loads(target.read_text())["shell_environment_policy"]["set"],
+                                         tomllib.loads(original)["shell_environment_policy"]["set"])
+                    else:
+                        self.assertEqual(target.read_text(), original)
 
     def test_a_subtable_key_named_inherit_is_hidden_even_when_the_header_is_the_templates(self) -> None:
         # 2026-10-25 adversary r2 (C1): the template's own `.set` header used to switch hiding off for what followed.
@@ -477,8 +504,8 @@ ignore_default_excludes = true
         view = mod.safe_view("[shell_environment_policy]\n" + header + '\ninherit = "SECRET-SUB-5"\nENABLE_PROMPT_CACHING_1H = "1"\n'
                              '[shell_environment_policy.extra]\nignore_default_excludes = true  # SECRET-C\n', public)
         self.assertNotIn("SECRET", view)
-        self.assertEqual(view.split("\n")[1:4], [header, "inherit = <hidden>", "ENABLE_PROMPT_CACHING_1H = <hidden>"])
-        self.assertIn("[<table hidden>]\nignore_default_excludes = <hidden>", view)
+        self.assertEqual(view.split("\n")[1:4], [header, "<assignment hidden>", "<assignment hidden>"])
+        self.assertIn("[<table hidden>]\n<assignment hidden>", view)
 
     def test_an_inline_set_in_the_old_policy_never_prints(self) -> None:
         # adversary MSG 4: the old policy may spell its explicit set inline under [shell_environment_policy].
@@ -503,7 +530,7 @@ ignore_default_excludes = true
                 self.assertEqual(r.returncode, 0, (flags, r.stderr))
                 for secret in secrets:
                     self.assertNotIn(secret, r.stdout + r.stderr, secret)
-                self.assertIn("set = <hidden>", r.stdout) if not flags else None
+                self.assertIn("<assignment hidden>", r.stdout) if not flags else None
             after = tomllib.loads(t.read_text())
             self.assertEqual(after["shell_environment_policy"]["set"]["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"], "SECRETDIGEST-0123")
             self.assertEqual(after["hooks"]["state"]["/y"]["trusted_hash"], "SECRET-AFTER-8")  # neighbours kept
