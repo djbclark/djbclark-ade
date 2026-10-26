@@ -1,9 +1,9 @@
 ---
 schema_version: 1
 handoff_id: 7273
-parent_handoff_ids: []
-lineage: none
-chain: [standalone-7273]
+parent_handoff_ids: [299c]
+lineage: inferred
+chain: [standalone-b457]
 repo: djbclark-ade
 workspace: djbclark-ade (lead session fd720445-c4ae-49fa-ae0a-cf2980a49ee8)
 branch: master (shared checkout); work in worktrees, see Where We Are
@@ -14,6 +14,8 @@ writer: claude-code
 # Handoff — ADE ack wave: PRs 75/84/85 merged, PR 87 in repair, D2 live
 
 ## The Goal
+Continues the chain `standalone-b457` (parent handoff 299c, the ack-build wave: PR 75, slices A/B/C); lineage inferred from the matching work, since this session's start prompt did not name the parent.
+
 Drive the relay ack-build wave and the gates, model-tiers and prior-art workstreams to approved, merged PRs: an adversary review per repair round, and djbclark's explicit yes before every merge not pre-approved.
 
 ## Where We Are
@@ -42,7 +44,8 @@ Expect-notx merges BEFORE Codex's PR 79 (both edit `skills/peer-relay/SKILL.md` 
 - [ruling] "1. Install now (Recommended)" for the live D2 hook (djbclark, 2026-10-26)
 
 ## Relations
-- decided_in [[HANDOFF_standalone-7273_ack-wave-prs-and-d2-live_2026-10-26_7273]]
+- continues [[HANDOFF_standalone-b457_ack-build-slices-pr75_2026-10-25_299c]]
+- decided_in [[HANDOFF_standalone-b457_ack-wave-prs-and-d2-live_2026-10-26_7273]]
 
 ## Evidence & Data
 Adversary verdicts: D2 r5 `APPROVE at 50156c6`, r6 `BLOCK at b2c811b`, r7 `APPROVE at 7df8ed6`; expect-notx r3 `APPROVE at 6bcd51f`, r4 `APPROVE at 0b1e0a1`. D2 tests 319 pass; four mutants each fail exactly their own test. Reports under `~/.local/state/bigteam/adhoc-2026-10-25/` (`adv-*-report.md`, `notx-repair-N4/N5-report.md`, `model-tiers-design-report.md`). PR 87 CI at 1a87f88: pytest, pytest-linux, context-policy all SUCCESS.
