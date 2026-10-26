@@ -118,6 +118,9 @@ def main(argv: list[str]) -> int:
     mode = a.mode or ("" if a.no_auto_accept else default_mode(a.provider))
     if mode:
         args += ["--mode", mode]
+    if a.provider == "claude" and mode != "bypassPermissions":
+        # a deliberate non-yolo seat: bin/paseo-bypass-watch must not flip it afterwards
+        args += ["--label", "perm=ask"]
     if a.thinking:
         args += ["--thinking", a.thinking]
     for lab in a.label:
