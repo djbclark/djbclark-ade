@@ -93,6 +93,10 @@ read.
    - **This repo's curated docs.** `docs/queue.md` in `djbclark-ade`
      carries accepted-but-unstarted work and open blockers; a resume plan
      that contradicts the queue is already wrong.
+     Bound large-document reads (2026-10-25): search headings and task IDs
+     first, then read only matching sections with a byte cap before printing.
+     Never print the whole queue or several long skills in one tool result;
+     output truncation is a failed read, so retrieve the missing section.
    - **Memory search** (Basic Memory over `~/ops/site-private/memory`)
      — the `basic-memory` MCP
      `search_notes`, or `bm tool search-notes "<query>"`, for decisions
