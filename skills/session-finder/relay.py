@@ -2,7 +2,7 @@
 """relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
     relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
-                                           [--ack] [--expect-ack ID [--ack-within S]] [--needs-reply | --fyi]
+                                           [--ack | --no-ack] [--expect-ack ID [--ack-within S]] [--needs-reply | --fyi]
     relay.py --pending [--text] [--json] | --cancel ID | --sweep       (the deferred messages and expected acks, below)
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it; a dispatch record is
@@ -175,11 +175,24 @@ own record's notice until a later sweep. That is within the same-user trust boun
 
 VERIFIED MESSAGING (2026-10-25, AGENTS.md standing order 10; docs/queue.md "Verified peer messaging"). Proof, not conversation: a delivery
 proof (the text reached the target's transcript) is mechanical and needs no reply; a reply is required only where the message asks a question
-or requests action. `--ack`: a send that is only "accepted" (a socket frame or Paseo send to a working session) or "queued" (an enqueue not
-yet taken, a deferred record) keeps being watched for up to --wait more seconds, and the exit says which it is: 0 delivered, 1 not delivered
-(not sent, pulled back out of the queue, a deferred record failed, expired or cancelled), 3 unverified (sent, or still queued, with no proof
-yet: do not resend; a route with no transcript to read, an ACP inbox or a Paseo agent that is not Claude, is unverified at once). Without
---ack the exit codes below are unchanged: fleet-watch, load-watch, session-load-watch and rumination-watch read 0 as "taken, or queued".
+or requests action. THE DELIVERY WATCH (default for an agent session, 2026-10-25): a send that is only "accepted" (a socket frame or Paseo send to a
+working session) or "queued" (an enqueue not yet taken, a deferred record) keeps being watched, and the exit says which it is: 0 delivered, 1 not
+delivered (not sent, pulled back out of the queue, a deferred record failed, expired or cancelled), 3 unverified (sent, or still queued, with no
+proof yet: do not resend; a route with no transcript to read, an ACP inbox or a Paseo agent that is not Claude, is unverified at once). The
+watch is on for every caller relay identifies as a session (a fleet `self` row, a Paseo agent, a Claude session, a Hermes turn) and runs
+IMPLICIT_ACK_WAIT (10) seconds at most beyond the send's own --wait; `--ack` asks for it whoever you are and watches --wait seconds; `--no-ack`
+or RELAY_NO_ACK=1 turns the default off. A DECLARED JOB run by launchd (a label in RELAY_SENDER_NAME and no session in its environment: every launchd
+watcher; also the deliverer's own sends) never gets the default and keeps the legacy exits below; the same job run from inside a session
+(`fleet-watch --relay-test` by an agent) IS identified and does get it, so it passes --no-ack. fleet-watch, load-watch, session-load-watch and
+rumination-watch read 0 as "taken, or queued" (the three in this repo pass --no-ack; fleet-watch's two calls are a follow-up in site-djbclark).
+--json adds "ack_default": true to a run whose watch was the default.
+A TERMINATOR (an `ack ID` reply with at most a short remark in parentheses or after a colon, an ack of an ack, a text whose last clause is "no reply needed")
+is exempt from the reply rule: it carries no footer and opens no link, so it can never start a loop, and needs no --expect-ack for a `?`; it
+still gets the delivery watch. Only the BARE loop shape (`ack ID` alone, or a no-reply phrase alone) refuses --expect-ack or --needs-reply
+(exit 2). An explicit --expect-ack or --needs-reply on any longer text wins: the text is no terminator, it gets the normal footer and
+expectation (`ack q1: merged; now please rebase PR 14` needs the flags and is sent with them; without them it is an ordinary text, answered by
+one first-contact `ack ID`). Never put --expect-ack/--needs-reply on an ack whose remark asks nothing new (`ack X: done`): an answer to an
+expectation is never itself flagged unless it asks a new question or requests an action.
 `--expect-ack ID` records (state, never a wait) that a reply `ack ID` is expected; the sent text ends "[reply through relay.py to <your id>:
 ack ID]". It is REQUIRED (exit 2, nothing sent) for a text with a `?` outside a URL or with --needs-reply, from a session relay can identify
 (a launchd script has no transcript an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
@@ -204,7 +217,7 @@ or script with no session) or from inside a session. No text is ever sent under 
 Exit: 0 delivered or queued (verified in the transcript or pane, or for paseo/dispatch/launch, or a socket frame to a working session, the route's
 acknowledgement; an idle session's socket frame is verified in its transcript; for hermes, the turn ran on the stored transcript;
 queued: a deferred send, `queued: <id>` on stdout, delivered later or the sender is told); 1 not sent (every route failed, listed, or a busy target and a sender that cannot be told) or sent but unverified; 2 usage or a
-refused ack rule; 4 not sent because the sender cannot be resolved (--json: {"sent": false, "error": "no_sender", "reason": ...}; takes precedence over 3 with --ack). With --ack: 0 delivered, 1 not delivered, 3 unverified, 2 and 4 as above.
+refused ack rule; 4 not sent because the sender cannot be resolved (--json: {"sent": false, "error": "no_sender", "reason": ...}; takes precedence over 3 with --ack). With the delivery watch (--ack, or the default for an agent session unless --no-ack): 0 delivered, 1 not delivered, 3 unverified, 2 and 4 as above.
 """
 import argparse
 import contextlib
@@ -2016,7 +2029,8 @@ def notify_sender(rec, state, why):
     else:
         text = f"relay: your message to {target_label(rec)} was {state}: {why}"
     try:
-        rc, line = run_captured([ident, text, "--wait", "5"], "relay", scrub=True, notice=True)
+        # "--no-ack" is defence in depth: as_caller(...) sets SENDER_OVERRIDE, so sender_identified is already False; no test fails without the flag
+        rc, line = run_captured([ident, text, "--wait", "5", "--no-ack"], "relay", scrub=True, notice=True)
     except Exception as e:    # a notice never breaks the deliverer
         rc, line = 1, str(e)
     defer_log(rec, "notice", f"rc={rc} {line}")
@@ -2257,8 +2271,9 @@ def deliver(rid):
             t = rec.get("target") or {}
             BUSY["hit"] = False
             try:
+                # "--no-ack" is defence in depth: as_caller(...) sets SENDER_OVERRIDE, so sender_identified is already False; no test fails without the flag
                 rc, line = run_captured([t.get("paseo") or t.get("id") or "", (f"[queued {mins}m ago] " if mins >= 1 else "") + rec.get("text", ""),
-                                         "--no-defer"], rec.get("sender") or "unknown")
+                                         "--no-defer", "--no-ack"], rec.get("sender") or "unknown")
             except (Exception, SystemExit) as e:    # the send may have happened: never `sending` with nothing running, never resent
                 defer_log(rec, "error", f"{type(e).__name__} during the send")
                 finish(rid, "failed", UNVERIFIED_WHY, allowed=("sending",))
@@ -2412,10 +2427,11 @@ def defer_send(s, a, text, listed, why):
     if not a.json:
         print(f"queued: {rid} for [{s['id']}] {s['name']}{'' if fresh else ' (an identical message was already queued)'}: {why}. "
               f"Delivered when it is idle, within {left // 60} min; `relay.py --pending` lists, `relay.py --cancel {rid}` withdraws it")
-    word, note = defer_ack(rid, a.wait) if a.ack else (None, "")
+    word, note = defer_ack(rid, ack_window(a)) if a.ack else (None, "")
     if a.json:
         print(json.dumps({"id": s["id"], "name": s["name"], "state": "queued", "queued": True, "record": rid, "expires_in": left,
-                          "duplicate_of": None if fresh else rid, "reason": why, **({"ack": word, "ack_note": note} if a.ack else {})},
+                          "duplicate_of": None if fresh else rid, "reason": why,
+                          **({"ack": word, "ack_note": note, **({"ack_default": True} if getattr(a, "ack_default", False) else {})} if a.ack else {})},
                          ensure_ascii=False))
     return ack_report(a, s, word, note) if a.ack else 0
 
@@ -2474,6 +2490,62 @@ EXPECT_KEEP = 14 * 86400     # a sweep prunes an expectation this old, answered 
 EXPECT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,39}")
 URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.I)
 CTX = {}    # one main() run: the sender row, target, text and whether the text may have reached the target
+IMPLICIT_ACK_WAIT = 10    # seconds the DEFAULT delivery watch runs after a send that is only accepted or queued (an explicit --ack watches --wait). A plain send
+                          # from a session then takes at most --wait (default 20) plus this: 30 s, where it ended at --wait before; enough for a
+                          # working session's next tool round to log a socket frame or an enqueue, short enough never to hold an agent turn
+NO_ACK_ENV = "RELAY_NO_ACK"
+# A terminator ends a conversation: an `ack ID` reply (an ack of an ack is the same text), or a text that says no reply is needed. It never
+# asks for an answer (no `--expect-ack`, no first-contact footer), so it can never start a loop; it still gets the L1 delivery proof.
+# The shape is deliberately narrow, because a false terminator is a MISSED message (no footer, no expectation, no link) while a false
+# non-terminator costs one extra `ack ID` from the peer: `ack ID` alone, or with a short remark in parentheses or after a colon (at most
+# REMARK_MAX characters, no `?`, no word that asks for something). `ack the PR and merge it` and `ack q1: now please rebase PR 14 onto
+# master` are requests that begin with `ack`, so they take the normal path. A no-reply phrase counts only as the LAST CLAUSE of the text (it
+# starts the text or follows `.!?;,([` or a dash, and nothing but closing punctuation follows), so a quoted, reported or negated mention
+# ("Do not write 'no reply needed': I need an answer", "Can you review PR 12? The bot said no reply needed") is no terminator.
+REMARK_MAX = 40
+_NO_REPLY = (r"(?:\bno\s+(?:reply|response|answer|ack(?:nowledge?ment)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)"
+             r"|\bno\s+need\s+to\s+(?:reply|respond|ack(?:nowledge)?))")
+_TAIL = r"[\s.!)\]]*"
+NO_REPLY_RE = re.compile(r"(?:^|[.!?;,(\[\u2014\u2013-])\s*" + _NO_REPLY + _TAIL + r"$", re.I)
+NO_REPLY_BARE = re.compile(r"(?:no\s+(?:reply|response|answer|ack(?:nowledge?ment)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)"
+                           r"|no\s+need\s+to\s+(?:reply|respond|ack(?:nowledge)?))[\s.!]*", re.I)
+_ACK_HEAD = r"ack[ :=]+[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,59})*"
+ACK_BARE = re.compile(_ACK_HEAD + r"[.!]*", re.I)
+ACK_REMARK = re.compile(_ACK_HEAD + rf"(?:\s*\(([^()?]{{1,{REMARK_MAX}}})\)|\s*:\s*([^?]{{1,{REMARK_MAX}}}))[.!]*", re.I)
+REQUEST_WORD = re.compile(r"\b(?:please|pls|plz|could|would|can\s+you|need|needs|must|then|now|tell\s+me|let\s+me\s+know)\b", re.I)
+
+
+def is_bare_terminator(text):
+    """True when the text is ONLY `ack ID` or ONLY a no-reply phrase: the shape no flag may be put on, since an answer to it would never end."""
+    t = text.strip().strip("[]`'\".")
+    return bool(ACK_BARE.fullmatch(t) or NO_REPLY_BARE.fullmatch(t))
+
+
+def is_terminator(text):
+    """True for `ack ID` (alone or with a short remark in parentheses or after a colon, never a question or a request) or a text whose last
+    clause is "no reply needed"."""
+    t = text.strip().strip("[]`'\".")
+    if ACK_BARE.fullmatch(t):
+        return True
+    m = ACK_REMARK.fullmatch(t)
+    if m:
+        return not REQUEST_WORD.search(m.group(1) or m.group(2))
+    return bool(NO_REPLY_RE.search(t))
+
+
+def sender_identified(listed, me):
+    """True for a caller that is an agent session (a fleet `self` row, or a Paseo agent, Claude session or Hermes turn relay resolves without
+    one), False for a declared job: a label from RELAY_SENDER_NAME and nothing else (every launchd watcher), or a deliverer's stored label
+    (SENDER_OVERRIDE). Only an identified sender gets the default delivery watch."""
+    if SENDER_OVERRIDE[0]:
+        return False
+    return me is not None or sender_name(listed) != (env_sender_label() or "unknown")
+
+
+def ack_window(a):
+    """Seconds an --ack watch runs: --wait for an explicit --ack, IMPLICIT_ACK_WAIT (at most --wait) for the default one."""
+    return min(a.wait, IMPLICIT_ACK_WAIT) if getattr(a, "ack_default", False) else a.wait
+
 
 
 def asks_for_reply(text):
@@ -2705,7 +2777,7 @@ def note_links_and_expect():
     """After a send that may have reached the target (main's CTX): record the link sender -> target (first contact, count) and
     the --expect-ack expectation. Both are state, written atomically."""
     me, s, now = CTX.get("me"), CTX["s"], time.time()
-    if me is None:
+    if me is None or CTX.get("terminator"):    # an ack or a "no reply needed" text opens no link: nobody owes an answer to it, so it would show as ONE-WAY for ever
         return
     tx = me.get("transcript") or ""
     who = peer_words(s)
@@ -2830,7 +2902,10 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--text", action="store_true", dest="show_text", help="with --pending: show a 60-character preview of each text (it stays in the record otherwise)")
     ap.add_argument("--detach", action="store_true", help=argparse.SUPPRESS)    # internal: --deliver forks once more, so init adopts the deliverer
     ap.add_argument("--ack", action="store_true", help="after a send that is only accepted or queued, keep watching the target (up to --wait more seconds) "
-                    "and exit 0 delivered, 1 not delivered, 3 unverified (never 0 for a message not proven to have landed)")
+                    "and exit 0 delivered, 1 not delivered, 3 unverified (never 0 for a message not proven to have landed). The default for a sender that is an "
+                    f"agent session, watching {IMPLICIT_ACK_WAIT} s at most; --ack watches --wait whoever you are")
+    ap.add_argument("--no-ack", action="store_true", help=f"turn the default delivery watch off (also {NO_ACK_ENV}=1): a send that is only accepted or "
+                    "queued exits 0, as for a script. A declared job run by launchd (RELAY_SENDER_NAME, no session in its environment) never gets the default watch")
     ap.add_argument("--expect-ack", metavar="ID", help="record that a reply `ack ID` is expected from the target (REQUIRED when the text has a `?` or --needs-reply); "
                     "--sweep resolves it, --pending lists it")
     ap.add_argument("--needs-reply", action="store_true", help="the text requests action or a reply without asking a question: --expect-ack is then required")
@@ -2877,6 +2952,14 @@ def _main(argv=None, sweep=True):
     if a.fyi and a.needs_reply:
         print("relay: --fyi and --needs-reply contradict each other", file=sys.stderr)
         return 2
+    if a.ack and a.no_ack:
+        print("relay: --ack and --no-ack contradict each other", file=sys.stderr)
+        return 2
+    a.ack_default = False
+    term = is_terminator(text)
+    bare = term and bool(a.needs_reply or a.expect_ack) and is_bare_terminator(text)
+    if term and (a.needs_reply or a.expect_ack):
+        term = False    # an explicit flag wins over the surface text: `ack q1: merged; now please rebase` with --expect-ack is a request, never a terminator
     if a.ack_within is not None and not (math.isfinite(a.ack_within) and a.ack_within > 0):
         print("relay: --ack-within must be a finite number of seconds > 0", file=sys.stderr)
         return 2
@@ -2890,6 +2973,9 @@ def _main(argv=None, sweep=True):
             print(json.dumps({"sent": False, "error": "no_sender", "reason": why, "checked_env": list(SENDER_ENV),
                               "exit": NO_SENDER_EXIT}, ensure_ascii=False))
         return NO_SENDER_EXIT
+    if not a.plan and not a.ack and not a.no_ack and (os.environ.get(NO_ACK_ENV) or "").strip().lower() not in ("1", "true", "yes", "on") \
+            and sender_identified(listed, me):
+        a.ack = a.ack_default = True    # L1, the delivery proof, is for every message from an agent session (djbclark, 2026-10-25); a declared job keeps the legacy exit codes
     if sweep and DEFER_DIR.is_dir():    # after the refusal: a relay that is not sent touches no record
         with contextlib.suppress(Exception):    # cheap and best effort: never in the way of a relay
             sweep_all()
@@ -2897,7 +2983,11 @@ def _main(argv=None, sweep=True):
         if me is not None and not me.get("transcript"):    # fleet's herdr row of a Codex session has its id but no transcript: find its rollout by that exact id (Codex P1, PR 74); any other agent is left as it is
             with contextlib.suppress(Exception):
                 pane_transcript(me)
-        if (a.needs_reply or (me is not None and asks_for_reply(text) and not a.fyi)) and not a.expect_ack:
+        if bare:    # only the bare loop shape (`ack ID`, or a no-reply phrase alone) is refused: an answer to it would never end
+            print("relay: not sent: a bare `ack ID` reply or a text saying only that no reply is needed expects no answer, so it takes no "
+                  "--expect-ack or --needs-reply (an ack of an ack would never end)", file=sys.stderr)
+            return 2
+        if (a.needs_reply or (me is not None and asks_for_reply(text) and not a.fyi and not term)) and not a.expect_ack:
             print("relay: not sent: this message asks for a reply or action, so it needs --expect-ack ID (a record `--sweep` resolves when "
                   "the peer answers `ack ID`; `--pending` lists it). A `?` that is no question: --fyi", file=sys.stderr)
             return 2
@@ -2911,7 +3001,7 @@ def _main(argv=None, sweep=True):
                 return 2
             CTX["reserved"] = (a.expect_ack, me["id"])
         tx_me = Path(me["transcript"]) if me and me.get("transcript") else None
-        CTX.update(me=me, expect=a.expect_ack, within=a.ack_within,
+        CTX.update(me=me, expect=a.expect_ack, within=a.ack_within, terminator=term,
                    mark=tx_me.stat().st_size if tx_me and tx_me.is_file() else 0)
     if is_record_path(a.ident):
         s, why = fleet.dispatch_target(a.ident)    # the caller named the file: no search, no fleet row needed
@@ -2962,7 +3052,7 @@ def _main(argv=None, sweep=True):
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
     CTX["s"] = s
-    if me is not None and not a.plan and not NOTICE[0]:
+    if me is not None and not a.plan and not NOTICE[0] and not term:    # a terminator asks for nothing, so it carries no footer
         if a.expect_ack:
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
         elif fleet.link_get(fleet.links_read()["links"], me, s) is None:
@@ -2998,11 +3088,11 @@ def _main(argv=None, sweep=True):
             return res[2]
         out = {"id": s["id"], "name": s["name"], "status": s["status"], "route": name,
                "result": res[2] if res[0] == "ok" else "unverified", "text": c.get("text_sent", text),
-               "fallbacks": [f"{n}: {w}" for n, w in tried], **c.get("extra", {})}
+               "fallbacks": [f"{n}: {w}" for n, w in tried], **c.get("extra", {}), **({"ack_default": True} if a.ack_default else {})}
         CTX["sent"] = True    # accepted, queued or typed: it may have reached the target
         word = note = None
         if a.ack and res[0] == "ok":
-            word, note = ("delivered", "") if res[2] == "delivered" else ack_watch(c, a.wait)
+            word, note = ("delivered", "") if res[2] == "delivered" else ack_watch(c, ack_window(a))
             if word == "delivered":
                 res = (res[0], res[1], "delivered")
             out.update(result=res[2], ack=word, ack_note=note)
