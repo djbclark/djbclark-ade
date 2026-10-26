@@ -78,7 +78,13 @@ Work the list; each line is a command, not a memory.
    even hands you the fix. **Say in the audit, and in the draft, that you
    searched: which repo, which terms, and the nearest threads found** (operator,
    2026-10-09: "always search for and mention searching for existing issues
-   first"); a bare "no upstream issue exists" is not evidence. Grok Bot: G5.
+   first"); a bare "no upstream issue exists" is not evidence. **Before drafting,
+   read the project's current CONTRIBUTING, agent guardrails and required
+   issue/bug-report template** (2026-10-26: a long draft was shown before the
+   stricter template was found). **When a tool prints issue/PR search results,
+   select compact `number`, `title`, `url`, `state` fields and fetch a body only
+   for a selected match** (2026-10-26: full result bodies were dumped). Grok
+   Bot: G5.
 8. **Deviations from his decisions.** Anything you did that cut against a choice
    he had already made, even reversibly. Disclose it in the audit if you have not
    already; do not let it surface later.
