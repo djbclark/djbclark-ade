@@ -87,9 +87,10 @@ class Harness(unittest.TestCase):
                  "paseo_run", "paseo_inspect", "paseo_probe", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY", "DEFER_DIR", "DEFER_POLL",
                  "spawn_deliverer", "own_cwd", "forced_tag"]
         saved = {n: getattr(relay, n) for n in names}
-        saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record", "pane_procs", "ancestors")}
+        saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record", "pane_procs", "ancestors", "transcript")}
         self.addCleanup(lambda: [setattr(relay, n, v) for n, v in saved.items()])
         self.addCleanup(lambda: [setattr(relay.fleet, n, v) for n, v in saved_fleet.items()])
+        relay.fleet.transcript = lambda sid: None    # never the real ~/.claude: a test that needs a transcript to appear sets it
         relay.fleet.pane_procs = lambda pane: (None, None)    # never the live herdr: a test that needs a pane's processes sets them
         relay.fleet.ancestors = lambda: set()    # hermetic: the test runner's real ancestry (a herdr pane, a Paseo agent) is not under test
         relay.claude_socket = lambda s: None
@@ -1159,6 +1160,53 @@ class TestExplicitDispatchRecord(Harness):
             rc, _, err = self.relay_to("collie-native")    # no `/`: a name, not a record
         self.assertEqual(rc, 1)
         self.assertIn("no session(s) match", err)
+
+
+class TestFreshClaudeTranscript(Harness):
+    """Claude Code creates a session's transcript when its first prompt is submitted (2026-10-25: a fresh native TUI's file was
+    born in the same second as the user line). The fleet row then has no transcript when relay types, so nothing was ever read
+    and a delivered text was reported unverified."""
+
+    TEXT = "line one\nline two\n\nline three"    # folded by relay to one line, as the TUI records it
+
+    def run_fresh(self, *records: str) -> tuple[int, str, str, Path]:
+        """Type with no transcript on disk; the typing step then makes the file hold RECORDS, as the TUI does on submit."""
+        tx = self.tmp / "projects" / f"{SID}.jsonl"
+        relay.fleet.transcript = lambda sid: tx if sid == SID and tx.exists() else None
+
+        def type_and_create(chan: Any, text: str) -> bool:
+            self.calls.append("type")
+            tx.parent.mkdir(parents=True, exist_ok=True)
+            tx.write_text("".join(r + "\n" for r in records))
+            return True
+        relay.type_line = type_and_create
+        relay.screen = lambda chan, lines=20: ""    # the Harness screen shows Claude's queue hint, which would make every case "queued"
+        relay.fleet.sessions = lambda: [sess(status="idle", transcript=None)]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = relay.main(["peer-fb", self.TEXT, "--wait", "2", "--json"])
+        return rc, out.getvalue(), err.getvalue(), tx
+
+    def test_a_user_line_in_a_transcript_created_after_typing_is_delivery(self) -> None:
+        rc, out, err, _ = self.run_fresh(user_line("line one line two line three"))
+        self.assertEqual(rc, 0, err)
+        res = json.loads(out)
+        self.assertEqual((res["route"], res["result"]), ("pane", "delivered"))
+        self.assertEqual(self.calls, ["type"])
+
+    def test_a_new_transcript_without_our_text_or_with_a_stale_copy_is_not_delivery(self) -> None:
+        for label, rec in (("another text", user_line("something else entirely")),
+                           ("our text stamped long before the send", user_line("line one line two line three", offset=-3600))):
+            with self.subTest(label):
+                relay.UNSENT.unlink(missing_ok=True)
+                rc, out, _, _ = self.run_fresh(rec)
+                self.assertEqual(rc, 1)
+                self.assertEqual(json.loads(out)["result"], "unverified")
+
+    def test_a_new_transcript_with_no_user_line_by_the_deadline_stays_unverified(self) -> None:
+        rc, out, _, _ = self.run_fresh()
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out)["result"], "unverified")
 
 
 class TestHermesRoute(Harness):

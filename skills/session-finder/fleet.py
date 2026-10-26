@@ -691,12 +691,47 @@ def pane_procs(pane):
 SID_IN_ARGV = re.compile(r"(?:--resume|--session|--conversation|--id|-s|-r)(?:=|$)")
 
 
+# The installed Hermes entry is a shell shim that `exec`s one Python process: `python3 -I -c <bootstrap> ARGS...`, with no `hermes` in
+# argv at all (2026-10-25: a native Hermes TUI in a herdr pane, which herdr does not detect, was "no session match" to relay). The
+# bootstrap is recognised by its own three lines, never by the word "hermes" somewhere in a `-c` string: its path insert of the
+# `hermes-agent` checkout, its import of the CLI's `main`, and the exit through it.
+_HERMES_SHIM = tuple(re.compile(p) for p in (r"(?m)^sys\.path\.insert\(0, '[^'\n]*/hermes-agent'\)$",
+                                             r"(?m)^from hermes_cli\.main import main$", r"(?m)^sys\.exit\(main\(\)\)$"))
+# top-level flags that end the run without a chat (one query, help, version) or that take a value (so it is not the subcommand)
+_HERMES_ONESHOT = {"-z", "--oneshot", "-q", "--query", "-h", "--help", "-V", "--version", "--print-runtime-command", "--run-module"}
+_HERMES_VALUE_FLAGS = {"-m", "--model", "--provider", "-r", "--resume", "-p", "--profile", "-t", "--toolsets", "-s", "--skills"}
+
+
+def _hermes_native(argv):
+    """True when ARGV is the installed Hermes entry shim running the interactive chat: `<python> -I -c <bootstrap> [flags]` whose
+    bootstrap carries all three marks, and whose arguments name no subcommand other than `chat` (gateway, acp, mcp, cron, serve ...
+    are services or tools, not a TUI) and no single-shot flag. Hermes decides the same way: its first positional being None or
+    "chat" is the chat. An unknown flag's value taken as the subcommand errs to "not a TUI" (the row is then simply not listed)."""
+    if len(argv) < 4 or not os.path.basename(argv[0]).startswith("python") or argv[1:3] != ["-I", "-c"]:
+        return False
+    if not all(m.search(argv[3]) for m in _HERMES_SHIM):
+        return False
+    if any(tok in _HERMES_ONESHOT or tok.startswith("--oneshot") for tok in argv[4:]):
+        return False
+    first, it = None, iter(argv[4:])
+    for tok in it:
+        if tok == "--":
+            first = next(it, None)
+            break
+        if tok in _HERMES_VALUE_FLAGS:
+            next(it, None)
+        elif not tok.startswith("-"):
+            first = tok
+            break
+    return first in (None, "chat")
+
+
 def _tui_of(procs):
     """(agent label, pid, session id, argv) of the TUI running in a pane, from its foreground processes."""
     for pr in procs or []:
         argv = pr["argv"]
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
-        agent = next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None)
+        agent = next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
         if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
         sid = None

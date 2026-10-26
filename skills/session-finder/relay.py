@@ -1417,6 +1417,21 @@ def pane_transcript(s):
     return None
 
 
+def first_prompt_transcript(s, typed_at, deadline):
+    """(path, stamp window) of a Claude session's transcript that did not exist when the text was typed, else None. Claude Code
+    creates the file only when its first prompt is submitted (2026-10-25: a fresh TUI's file was born in the same second as the
+    user line, so the fleet row had no transcript, nothing was ever read, and a delivered text was reported unverified). It is
+    searched by the session's own id, never by cwd or recency; the file is new, so its mark is 0, and only a line stamped since
+    this send began counts."""
+    if s.get("agent") != "claude" or not s.get("sid"):
+        return None
+    path = fleet.transcript(s["sid"])
+    if not path:
+        return None
+    s["transcript"] = str(path)
+    return path, (typed_at - LEAD, deadline + GRACE)
+
+
 def pane_send(c):
     s, a, text = c["s"], c["a"], c["text"]
     chan = tuple(s["chan"])
@@ -1487,6 +1502,8 @@ def pane_send(c):
         window = (typed_at - LEAD, deadline)
     sent_at, retries, stuck, pin, was_ours, gone, pulled = time.time(), 0, False, "*", False, False, False
     while time.time() < deadline:
+        if tx is None and (late := first_prompt_transcript(s, typed_at, deadline)):
+            tx, window = late
         st = tx_state(tx, mark, text, window)
         if st in ("delivered", "queued"):    # queued is not delivered: the operator can still pull it back
             seen = st
@@ -1515,6 +1532,8 @@ def pane_send(c):
                 break
         time.sleep(1)
     if not seen:
+        if tx is None and (late := first_prompt_transcript(s, typed_at, deadline)):
+            tx, window = late
         st = tx_state(tx, mark, text, window)    # one last look: the Enter may have landed in the final second
         seen = st if st in ("delivered", "queued") else None
         pulled = pulled or st == "pulled"

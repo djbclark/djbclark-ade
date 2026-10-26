@@ -29,7 +29,8 @@ rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (t
 as source `canned`, logged on stderr each use, and it takes precedence over
 `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
 pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
-`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s.
+`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s;
+`load_snapshot(bypass_memo=True)` skips the memo (acp-dispatch's post-wait plenty-gate looks).
 
 **Services are discovered, not hardcoded.** The roster changes — agents gain
 an ACP mode, providers appear in aiuse, plans lapse. So the service list is
@@ -54,13 +55,14 @@ The operator's standing routing rules are encoded as hard constraints, not
 preferences, because they encode consequences a score cannot see:
 
 - free and chronically-unused pools first for bulk work;
-- judgment goes to claude's Opus 5.5 at high; the two frontier models, Claude
+- judgment goes to claude's Opus 5.5 at high first, omp's Opus next, and (2026-10-25) codex's gpt-6.1-sol
+  at high only while every window has plenty_min left; the two frontier models, Claude
   Fable 5.1 and codex's gpt-6-astra, are reached ONLY through the explicit
   `frontier` kind, at most one slice per pool per wave, for work that really
   needs them (operator 2026-10-18: a wave of four astra slices emptied
   codex's 5-hour window and every one stopped; Fable at xhigh should almost
   never run). Everyday work goes to the other pools, and ALSO to codex's
-  everyday models (gpt-6.1-sol for code, gpt-6-luna for bulk and mechanical;
+  everyday models (gpt-6.1-sol for judgment and code, gpt-6-luna for bulk and mechanical;
   never astra) while its quota is plentiful (operator 2026-10-25: "if we have
   lots of codex quota and it is the best of available options we can use it for
   non-frontier"): a service's `plenty_kinds` are eligible only while its binding
@@ -221,9 +223,11 @@ class Service:
     def eligible(self, kind: str, quota: dict[str, Any] | None = None, *,
                  any_headroom: bool = False) -> bool:
         """Can this service take `kind`?  `plenty_kinds` also need a fresh reading of at least
-        PLENTY_MIN in `quota[name]["remaining"]` (the tightest window), else they are not
-        eligible; no `quota` means no reading, so those kinds fail closed.  `any_headroom`
-        skips that gate, for questions about the profile alone (calibrate's history)."""
+        PLENTY_MIN in `quota[name]["remaining"]` (the tightest window) AND a reading for every
+        window the pool lists (`plenty_remaining`: one unknown window means the gate cannot
+        say every window has PLENTY_MIN left, 2026-10-25), else they are not eligible; no
+        `quota` means no reading, so those kinds fail closed.  `any_headroom` skips that gate,
+        for questions about the profile alone (calibrate's history)."""
         if self.retired or self.hermes_only:
             return False
         if kind in ("bulk", "mechanical") and self.never_bulk:
@@ -233,12 +237,24 @@ class Service:
         if kind not in self.good_at:
             return False
         if kind in self.plenty_kinds and not any_headroom:
-            remaining = ((quota or {}).get(self.name) or {}).get("remaining")
+            remaining = plenty_remaining((quota or {}).get(self.name))
             return remaining is not None and remaining >= PLENTY_MIN
         return True
 
     def rank_for(self, kind: str) -> int:
         return self.good_at[kind]
+
+
+def plenty_remaining(info: dict[str, Any] | None) -> float | None:
+    """A pool's binding remaining percent for the `plenty_kinds` gate, or None when it is not
+    known for every window: no reading, or any window the reading lists as null (an aiuse
+    window with `remaining_percent: null` is a window nobody measured; the pool's `remaining`
+    is then only the tightest of the KNOWN ones, which cannot show every window is plentiful)."""
+    info = info or {}
+    remaining = info.get("remaining")
+    if remaining is None or any(v is None for v in (info.get("windows") or {}).values()):
+        return None
+    return remaining
 
 
 # Policy file: env ROUTING_POLICY, else <repo>/config/routing.toml (same
@@ -906,7 +922,7 @@ def _parse_available(raw: bytes, label: str) -> tuple[dict[str, Any] | None, str
     return payload, label
 
 
-def aiuse_available() -> tuple[dict[str, Any] | None, str]:
+def aiuse_available(bypass_memo: bool = False) -> tuple[dict[str, Any] | None, str]:
     """`aiuse --available --json` as (payload, source label); (None, reason) on any failure.
 
     Applies aiuse's own read-time overlays (operator credits override, Admin API readings,
@@ -916,7 +932,9 @@ def aiuse_available() -> tuple[dict[str, Any] | None, str]:
     ROUTE_AGENT_AIUSE_TIMEOUT is in seconds, (0, 60], default 20 (the cache read is well
     under one second). Exit 3 means nothing is usable and still prints the JSON. The
     subprocess result (success or failure) is memoised for AIUSE_MEMO_TTL = 30 s, with elapsed
-    seconds added to its ages on reuse (`_reset_aiuse_cache` clears it)."""
+    seconds added to its ages on reuse (`_reset_aiuse_cache` clears it). `bypass_memo=True` skips the
+    memo read and spawns anyway (still storing the result): the admission boundaries that judge a
+    reading after a wait pass it (2026-10-25, Codex review of PR 73); every other caller keeps the memo."""
     canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
     if canned:
         try:
@@ -929,7 +947,7 @@ def aiuse_available() -> tuple[dict[str, Any] | None, str]:
         return None, "aiuse not on PATH"
     timeout = _aiuse_timeout()
     key = (exe, timeout)
-    hit = _AIUSE_MEMO.get(key)
+    hit = None if bypass_memo else _AIUSE_MEMO.get(key)
     if hit is not None:
         elapsed = time.monotonic() - hit[0]
         if 0 <= elapsed < AIUSE_MEMO_TTL:
@@ -993,20 +1011,21 @@ def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
         providers[key] = entry
 
 
-def load_snapshot() -> tuple[dict[str, Any], float | None]:
+def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | None]:
     """Pool state per service: `aiuse --available --json`, else the snapshot file.
 
     Never probes live (the `--available` form reads aiuse's cache, well under a second).
     `--available` lists only usable pools, so a pool the snapshot file knows that is
     missing from a fresh payload is exhausted, excluded or hidden: it reads 0% left rather
     than unknown. Fields 3.8 adds (`expires_at`, `burn_before_reset`, `reading_expired`,
-    `source`) are tolerated when absent; the row's own `resets_at` and windows carry them."""
+    `source`) are tolerated when absent; the row's own `resets_at` and windows carry them.
+    `bypass_memo=True` makes the aiuse read skip its 30 s memo (see aiuse_available)."""
     QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason = "snapshot", "", ""
     accounts, age = _read_snapshot_file()
     providers = _providers_from_accounts(accounts, age)
     canned = bool(os.environ.get("ROUTE_AGENT_AIUSE_JSON"))
     if canned or _aiuse_wanted():
-        payload, label = aiuse_available()
+        payload, label = aiuse_available(bypass_memo)
         fresh: dict[str, Any] | None = None
         p_age: float | None = None
         marked_stale = False
