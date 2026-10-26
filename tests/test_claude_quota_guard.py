@@ -1632,3 +1632,101 @@ def test_adv2_a_borrowed_twin_that_supplied_the_reported_pace_still_ages(rig, mo
     d = mod.decide(0, {"available": [_weekly_summary_row()]}, snap, [], mod.thresholds(), NOW)
     assert d["pace"] == 12 and d["resets_at"] is None and d["weekly_resets_at"] is None
     assert d["rows_age_s"] == 18000
+
+
+# -- gate profiles (config/gates.toml, bin/ade_gates.py, 2026-10-26) -----------------------------------------------
+
+def _profile(rig, **over):
+    path = rig.tmp / "gate-profile.json"
+    stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    s = {"schema": 1, "profile": "away", "since": stamp(NOW - timedelta(hours=1)), "until": stamp(NOW + timedelta(hours=72)),
+         "reason": "away", "set_by": "test", **over}
+    path.write_text(json.dumps(s))
+    return {"GATE_PROFILE_STATE": str(path)}
+
+
+@pytest.mark.parametrize("weekly, base_level, away_level", [
+    (35, "watch", "ok"),         # watch_weekly 40 -> 20
+    (18, "tight", "watch"),      # tight_weekly 30 -> 15
+    (12, "critical", "tight"),   # critical_weekly 15 -> 10
+    (9, "critical", "critical"),  # the hard stop stays
+])
+def test_away_profile_moves_the_weekly_triggers(rig, weekly, base_level, away_level):
+    rig.set_aiuse(aiuse_fixture(weekly=weekly))
+    rig.guard()
+    assert rig.state_json()["level"] == base_level and rig.state_json()["profile"] is None
+    rig.guard(**_profile(rig))
+    st = rig.state_json()
+    assert st["level"] == away_level
+    assert st["profile"] == {"name": "away", "until": "2026-10-26T12:00:00Z"}
+
+
+def test_profile_shows_in_the_human_line_and_status_json(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(**_profile(rig))
+    assert "[gate profile away until Mon Oct 26 8:00 AM EDT]" in r.stdout
+    assert json.loads(rig.guard("status", "--json").stdout)["profile"]["name"] == "away"
+
+
+def test_env_json_beats_the_profile(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=18))
+    r = rig.guard(CLAUDE_QUOTA_GUARD_THRESHOLDS=json.dumps({"tight_weekly": 30, "watch_weekly": 40}), **_profile(rig))
+    assert r.returncode == 2 and rig.state_json()["level"] == "tight"
+
+
+def test_an_expired_profile_means_baseline_and_one_ping(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    env = _profile(rig, since="2026-10-20T12:00:00Z", until="2026-10-23T11:59:00Z")
+    assert rig.guard(**env).returncode == 1                       # baseline watch
+    assert [p for p in rig.pings() if "expired, baseline restored" in p] == ["djbclark-ade: away profile expired, baseline restored "
+                                                                             "(gates were loosened until Fri Oct 23 7:59 AM EDT)"]
+    rig.guard(**env)
+    assert len([p for p in rig.pings() if "expired" in p]) == 1
+    assert json.loads(Path(env["GATE_PROFILE_STATE"]).read_text())["expired_notified"]
+
+
+def test_a_bad_profile_value_is_baseline_not_a_crash(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(**_profile(rig, profile="no-such-profile"))
+    assert r.returncode == 1 and rig.state_json()["profile"] is None
+
+
+def test_a_missing_gates_toml_falls_back_to_the_code_defaults(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(GATES_TOML="/nonexistent/gates.toml", **_profile(rig))
+    assert r.returncode == 1 and "using the code defaults for quota_guard" in r.stderr
+    assert r.stderr.count("using the code defaults") == 1          # logged once per process
+
+
+def test_the_guard_never_sends_the_daily_nudge(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    assert rig.guard(**_profile(rig)).returncode == 0
+    assert rig.pings() == []
+
+
+def _hook_with_profile(rig, session="s1", **kw):
+    env = _profile(rig, **kw)
+    assert rig.guard(**env).returncode in (0, 1)       # ok or watch: the level is not what these tests are about
+    return rig.hook(session=session, **env)
+
+
+def test_hook_prints_one_gates_line_per_session_per_new_york_day_even_at_ok(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    r = _hook_with_profile(rig)
+    assert r.stdout.strip() == "[gates] away profile active until Mon Oct 26 8:00 AM EDT; gate-profile clear restores normal routing"
+    assert rig.hook(session="s1", **_profile(rig)).stdout == ""            # same session, same day
+    assert "[gates]" in rig.hook(session="s2", **_profile(rig)).stdout     # another session
+    rig.now = NOW + timedelta(hours=16)                                    # 12:00 AM EDT the next day; the guard runs again
+    r = _hook_with_profile(rig, session="s1")
+    assert "[gates] away profile active" in r.stdout
+
+
+def test_hook_gates_line_adds_to_the_level_advice_and_stops_with_the_profile(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=18))                                # watch under away
+    r = _hook_with_profile(rig)
+    assert "[quota-guard watch]" in r.stdout and "[gates] away profile active" in r.stdout
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    assert rig.guard(**_profile(rig, until="2026-10-23T11:59:00Z", since="2026-10-20T12:00:00Z")).returncode == 0
+    assert rig.hook(session="s9", **_profile(rig, until="2026-10-23T11:59:00Z", since="2026-10-20T12:00:00Z")).stdout == ""
+    rig.guard()                                                            # baseline: no profile in the state
+    assert rig.hook(session="s10").stdout == ""

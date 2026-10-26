@@ -1,0 +1,408 @@
+#!/usr/bin/env -S python3 -I
+"""gate-profile: a temporary, expiring loosening of the Claude quota gates (config/gates.toml; docs/gates.md).
+
+  gate-profile status [--json]         the active profile or the baseline, time left, the next daily nudge, effective vs
+                                       baseline per changed key, and why a profile file is being ignored
+  gate-profile show NAME               one profile: every key, baseline -> value, floor and direction
+  gate-profile diff NAME               baseline vs profile, changed keys only
+  gate-profile validate                gates.toml parses, floors and profiles are sound, the baseline equals the code
+                                       defaults of both scripts; exit 1 on any problem
+  gate-profile set NAME (--for 72h | --until ISO) --reason TEXT [--by WHO]
+                                       write the profile state (refuses a window over [meta].max_profile_hours, a past
+                                       `until`, a profile that fails validation), log it, ping, recompute both gates now
+  gate-profile extend --for 24h        move the active profile's `until` later (the window since `set` stays within
+                                       max_profile_hours), audit line, ping, recompute
+  gate-profile clear                   drop the profile now (same log, ping and recompute)
+
+`--for` takes Nm, Nh or Nd; `--until` a timezone-aware UTC ISO time (`2026-10-29T21:00:00Z`). Times are printed in
+America/New_York, 12-hour. Exit codes: 0 ok, 1 refused or invalid, 2 usage.
+
+State: ~/.local/state/ade/gate-profile.json (env GATE_PROFILE_STATE), audit log gate-profile.log beside it
+(GATE_PROFILE_LOG), one JSON line per set/extend/clear. Env (tests): GATES_TOML, GATE_PROFILE_PING (default
+~/.local/bin/hermes-ping), GATE_PROFILE_GOVERNOR / GATE_PROFILE_GUARD (the scripts `run` / `check` are asked to recompute
+with; default: beside this file), GATE_PROFILE_NOW (ISO time standing in for the clock). Ping and recompute are soft-fail.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+HERE = Path(os.path.realpath(__file__)).parent
+sys.path[:0] = [d for d in (str(HERE),) if d not in sys.path]   # python3 -I has no script dir
+import ade_gates as g  # noqa: E402
+
+EX_BAD = 1
+DURATION = re.compile(r"(\d+)([mhd])")
+
+
+def now_utc() -> datetime:
+    raw = os.environ.get("GATE_PROFILE_NOW")
+    return (g.parse_utc(raw) if raw else None) or datetime.now(UTC)
+
+
+def code_defaults() -> dict[str, dict[str, float]]:
+    """THRESHOLDS of the two scripts, loaded by path (they have no .py suffix)."""
+    out: dict[str, dict[str, float]] = {}
+    for gate, script in (("governor", "claude-fleet-governor"), ("quota_guard", "claude-quota-guard")):
+        loader = importlib.machinery.SourceFileLoader(f"_gp_{gate}", str(HERE / script))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        out[gate] = {k: float(v) for k, v in mod.THRESHOLDS.items()}
+    return out
+
+
+def fmt(v: float) -> str:
+    return f"{v:g}"
+
+
+def load_all(now: datetime) -> dict[str, Any]:
+    """Effective thresholds and info of both gates, as the scripts would compute them now."""
+    defaults = code_defaults()
+    out: dict[str, Any] = {}
+    for gate in g.GATES:
+        t, info = g.load_gates(gate, now, defaults[gate])
+        out[gate] = {"effective": t, "info": info}
+    return out
+
+
+def left_phrase(until: datetime, now: datetime) -> str:
+    mins = int((until - now).total_seconds() // 60)
+    return f"{mins // 1440}d {mins % 1440 // 60}h {mins % 60}m left" if mins >= 1440 else f"{mins // 60}h {mins % 60}m left"
+
+
+# -- status / show / diff -------------------------------------------------------------------------------------------
+
+def cmd_status(args: argparse.Namespace) -> int:
+    now = now_utc()
+    both = load_all(now)
+    info = both["governor"]["info"]
+    prof = info["profile"]
+    gates: dict[str, Any] = {}
+    for gate in g.GATES:
+        i = both[gate]["info"]
+        changed = {k: {"baseline": i["baseline"][k], "effective": v} for k, v in both[gate]["effective"].items()
+                   if v != i["baseline"].get(k)}
+        gates[gate] = {"effective": both[gate]["effective"], "baseline": i["baseline"], "changed": changed,
+                       "from_profile": i["profile_values"], "from_env": i["env_values"]}
+    nxt = None
+    if prof:
+        fdata, _ = g.read_profile_file()
+        nxt = g.next_nudge(fdata or {}, g.parse_utc(prof["until"]), now)
+    data = {"now": g.iso(now), "profile": prof, "ignored": info["ignored"], "toml_error": info["toml_error"],
+            "expired_unannounced": info["expired"], "gates": gates, "next_nudge": g.iso(nxt) if nxt else None,
+            "restore": "gate-profile clear", "extend": "gate-profile extend --for 24h"}
+    if args.json:
+        print(json.dumps(data, indent=1, sort_keys=True))
+        return 0
+    if prof:
+        until = g.parse_utc(prof["until"])
+        print(f"profile {prof['name']}: active until {g.ny(until)} ({left_phrase(until, now)})")
+        print(f"  reason: {prof.get('reason')}; set by {prof.get('set_by')}; since {g.ny(g.parse_utc(prof['since']))}")
+        if nxt is None:
+            print(f"  next nudge: none (the expiry ping on {g.ny(until)} is the last)")
+        else:
+            print(f"  next nudge: {'due at the next governor run' if nxt <= now else g.ny(nxt)} (one governor ping per New York day)")
+        print("  restore normal routing: gate-profile clear; stay longer: gate-profile extend --for 24h")
+    else:
+        print("baseline: no profile active")
+        if info["ignored"]:
+            print(f"  profile file ignored: {info['ignored']}")
+    if info["toml_error"]:
+        print(f"  gates.toml unusable, code defaults in force: {info['toml_error']}")
+    for gate in g.GATES:
+        d = gates[gate]
+        print(f"{gate}:" + ("" if d["changed"] else " no change from baseline"))
+        for k, v in sorted(d["changed"].items()):
+            src = "env" if k in d["from_env"] else "profile"
+            print(f"  {k}: {fmt(v['baseline'])} -> {fmt(v['effective'])} ({src})")
+    return 0
+
+
+def baselines_for_config(cfg: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """Baseline per gate as the scripts see it: the code default overlaid with the toml table."""
+    defaults = code_defaults()
+    return {gate: {**defaults[gate], **(g.toml_baseline(cfg, gate) or {})} for gate in g.GATES}
+
+
+def need_cfg() -> dict[str, Any] | None:
+    cfg, err = g.read_toml()
+    if cfg is None:
+        print(f"gate-profile: {err}", file=sys.stderr)
+    return cfg
+
+
+def cmd_show(args: argparse.Namespace, only_changed: bool = False) -> int:
+    cfg = need_cfg()
+    if cfg is None:
+        return EX_BAD
+    base = baselines_for_config(cfg)
+    problems = g.profile_problems(cfg, args.name, base)
+    prof = (cfg.get("profiles") or {}).get(args.name)
+    if not isinstance(prof, dict):
+        print(f"gate-profile: no profile {args.name!r} in gates.toml", file=sys.stderr)
+        return EX_BAD
+    print(f"profile {args.name}" + (f": {prof['description']}" if isinstance(prof.get("description"), str) else "")
+          + f" (max {g.max_hours(cfg):g} h)")
+    for gate in g.GATES:
+        tbl = prof.get(gate)
+        if not isinstance(tbl, dict):
+            continue
+        rows = []
+        for k, v in sorted(tbl.items()):
+            b = base[gate].get(k)
+            if only_changed and b is not None and v == b:
+                continue
+            spec = g.floor_spec(cfg, gate, k) or {}
+            bound = f"{spec.get('loosen', '?')} is looser, bound {fmt(spec['bound'])}" if g.is_num(spec.get("bound")) else "not overridable"
+            rows.append(f"  {k}: {fmt(b) if b is not None else '?'} -> {fmt(v) if g.is_num(v) else repr(v)}  ({bound})")
+        if rows:
+            print(f"{gate}:")
+            print("\n".join(rows))
+    for p in problems:
+        print(f"PROBLEM: {p}", file=sys.stderr)
+    return EX_BAD if problems else 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    return cmd_show(args, only_changed=True)
+
+
+# -- validate ----------------------------------------------------------------------------------------------------------
+
+def validate() -> list[str]:
+    cfg, err = g.read_toml()
+    if cfg is None:
+        return [str(err)]
+    out: list[str] = []
+    meta = cfg.get("meta")
+    if not isinstance(meta, dict) or meta.get("schema") != g.SCHEMA:
+        out.append(f"[meta].schema must be {g.SCHEMA}")
+    if not isinstance(meta, dict) or not g.is_num(meta.get("max_profile_hours")) or meta["max_profile_hours"] <= 0:
+        out.append("[meta].max_profile_hours must be a positive number")
+    defaults = code_defaults()
+    for gate in g.GATES:
+        tbl = g.toml_baseline(cfg, gate)
+        if tbl is None:
+            out.append(f"[{gate}] is missing, empty or holds a non-number")
+            continue
+        for k in sorted(set(tbl) | set(defaults[gate])):
+            if k not in tbl:
+                out.append(f"[{gate}].{k}: in the code defaults, missing from gates.toml")
+            elif k not in defaults[gate]:
+                out.append(f"[{gate}].{k}: in gates.toml, unknown to the code")
+            elif tbl[k] != defaults[gate][k]:
+                out.append(f"[{gate}].{k}: gates.toml {fmt(tbl[k])} != code default {fmt(defaults[gate][k])}")
+        floors = (cfg.get("floors") or {}).get(gate) or {}
+        for k, spec in floors.items():
+            if k not in tbl:
+                out.append(f"[floors.{gate}].{k}: no such key in [{gate}]")
+            elif not isinstance(spec, dict):
+                out.append(f"[floors.{gate}].{k}: not a table")
+            elif g.spec_problem(spec):
+                out.append(f"[floors.{gate}].{k}: {g.spec_problem(spec)}")
+            elif g.value_problem(spec, tbl[k], tbl[k]):
+                out.append(f"[floors.{gate}].{k}: the baseline is outside its own bound ({g.value_problem(spec, tbl[k], tbl[k])})")
+    base = baselines_for_config(cfg)
+    profiles = cfg.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        out.append("no [profiles.*] defined")
+    else:
+        for name in sorted(profiles):
+            if not g.NAME_RE.fullmatch(str(name)):
+                out.append(f"profile name {name!r} is not [a-z0-9_-], 32 chars at most")
+            out += g.profile_problems(cfg, name, base)
+    return out
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    problems = validate()
+    for p in problems:
+        print(f"PROBLEM: {p}")
+    if problems:
+        print(f"gates.toml: {len(problems)} problem(s)")
+        return EX_BAD
+    cfg, _ = g.read_toml()
+    print(f"gates.toml ok: baseline equals the code defaults; profiles: {', '.join(sorted(cfg['profiles']))}; "
+          f"max {g.max_hours(cfg):g} h")
+    return 0
+
+
+# -- set / clear -------------------------------------------------------------------------------------------------------
+
+def parse_for(text: str) -> timedelta | None:
+    m = DURATION.fullmatch(text.strip())
+    if not m:
+        return None
+    return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[m.group(2)]: int(m.group(1))})
+
+
+def run_soft(argv: list[str], timeout: int) -> str:
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return "not found"
+    except subprocess.TimeoutExpired:
+        return f"timed out after {timeout}s"
+    except OSError as e:
+        return f"failed ({e.strerror or e})"
+    return f"rc={r.returncode}"
+
+
+def after_change(text: str) -> None:
+    """Ping, then ask both gates to recompute now. Every step soft-fails."""
+    ping = os.environ.get("GATE_PROFILE_PING") or str(Path(os.environ.get("HOME") or Path.home()) / ".local/bin/hermes-ping")
+    gov = os.environ.get("GATE_PROFILE_GOVERNOR") or str(HERE / "claude-fleet-governor")
+    guard = os.environ.get("GATE_PROFILE_GUARD") or str(HERE / "claude-quota-guard")
+    print(f"ping: {run_soft([ping, text], 60)}")
+    print(f"governor recompute: {run_soft([gov, 'run'], 300)}")
+    print(f"guard recompute: {run_soft([guard, 'check'], 120)}")
+
+
+def log_line(entry: dict[str, Any]) -> None:
+    path = g.profile_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def cmd_set(args: argparse.Namespace) -> int:
+    now = now_utc()
+    cfg = need_cfg()
+    if cfg is None:
+        return EX_BAD
+    if not args.reason.strip():
+        print("gate-profile: --reason must not be empty", file=sys.stderr)
+        return EX_BAD
+    if bool(args.for_) == bool(args.until):
+        print("gate-profile: give exactly one of --for and --until", file=sys.stderr)
+        return 2
+    if args.for_:
+        delta = parse_for(args.for_)
+        if delta is None or delta <= timedelta(0):
+            print(f"gate-profile: --for {args.for_!r} is not Nm, Nh or Nd (N > 0)", file=sys.stderr)
+            return EX_BAD
+        until = now + delta
+    else:
+        until = g.parse_utc(args.until)
+        if until is None:
+            print(f"gate-profile: --until {args.until!r} is not a timezone-aware UTC ISO time (e.g. 2026-10-29T21:00:00Z)",
+                  file=sys.stderr)
+            return EX_BAD
+    if until <= now:
+        print(f"gate-profile: until {g.iso(until)} is not in the future", file=sys.stderr)
+        return EX_BAD
+    limit = g.max_hours(cfg)
+    if (until - now).total_seconds() > limit * 3600:
+        print(f"gate-profile: {(until - now).total_seconds() / 3600:g} h is over max_profile_hours {limit:g}", file=sys.stderr)
+        return EX_BAD
+    problems = g.profile_problems(cfg, args.name, baselines_for_config(cfg))
+    if problems:
+        for p in problems:
+            print(f"gate-profile: refused: {p}", file=sys.stderr)
+        return EX_BAD
+    prev, _ = g.read_profile_file()
+    who = args.by or os.environ.get("USER") or "unknown"
+    state = {"schema": g.SCHEMA, "profile": args.name, "since": g.iso(now), "until": g.iso(until),
+             "reason": args.reason.strip(), "set_by": who, "last_daily_nudge": g.ny_date(now)}   # set day: the set ping is its nudge
+    g.atomic_write(g.profile_state_path(), json.dumps(state, indent=1, sort_keys=True) + "\n")
+    log_line({"at": g.iso(now), "action": "set", **{k: state[k] for k in ("profile", "since", "until", "reason", "set_by")},
+              "replaced": prev.get("profile") if isinstance(prev, dict) else None})
+    print(f"profile {args.name} set until {g.ny(until)} ({left_phrase(until, now)}): {state['reason']}")
+    after_change(f"djbclark-ade: gate profile {args.name} SET until {g.ny(until)} by {who}: {state['reason'][:120]}")
+    return 0
+
+
+def cmd_extend(args: argparse.Namespace) -> int:
+    """Move the active profile's `until` later by --for. The same cap as `set`: until - since <= max_profile_hours."""
+    now = now_utc()
+    delta = parse_for(args.for_)
+    if delta is None or delta <= timedelta(0):
+        print(f"gate-profile: --for {args.for_!r} is not Nm, Nh or Nd (N > 0)", file=sys.stderr)
+        return EX_BAD
+    cfg = need_cfg()
+    if cfg is None:
+        return EX_BAD
+    active = g.resolve_profile(cfg, now)["profile"]
+    if active is None:
+        print("gate-profile: no active profile to extend (`status` says why); use `set`", file=sys.stderr)
+        return EX_BAD
+    since, old_until = g.parse_utc(active["since"]), g.parse_utc(active["until"])
+    new_until = old_until + delta
+    limit = g.max_hours(cfg)
+    if (new_until - since).total_seconds() > limit * 3600:
+        print(f"gate-profile: the window would be {(new_until - since).total_seconds() / 3600:g} h, over max_profile_hours "
+              f"{limit:g} (it started {g.ny(since)}); `clear` and `set` a new one instead", file=sys.stderr)
+        return EX_BAD
+    lock = g._state_lock()
+    if lock is None:
+        print("gate-profile: cannot lock the profile state", file=sys.stderr)
+        return EX_BAD
+    with lock:
+        data, _ = g.read_profile_file()
+        if not isinstance(data, dict) or data.get("until") != active["until"]:
+            print("gate-profile: the profile changed while extending; try again", file=sys.stderr)
+            return EX_BAD
+        g.atomic_write(g.profile_state_path(), json.dumps({**data, "until": g.iso(new_until)}, indent=1, sort_keys=True) + "\n")
+    who = os.environ.get("USER") or "unknown"
+    log_line({"at": g.iso(now), "action": "extend", "profile": active["name"], "since": active["since"],
+              "previous_until": active["until"], "until": g.iso(new_until), "set_by": who})
+    print(f"profile {active['name']} extended to {g.ny(new_until)} ({left_phrase(new_until, now)})")
+    after_change(f"djbclark-ade: gate profile {active['name']} EXTENDED to {g.ny(new_until)} by {who}")
+    return 0
+
+
+def cmd_clear(args: argparse.Namespace) -> int:
+    now = now_utc()
+    path = g.profile_state_path()
+    prev, _ = g.read_profile_file()
+    if not path.exists():
+        print("no profile file: baseline already in force")
+        return 0
+    try:
+        path.unlink()
+    except OSError as e:
+        print(f"gate-profile: could not remove {path}: {e}", file=sys.stderr)
+        return EX_BAD
+    name = prev.get("profile") if isinstance(prev, dict) else None
+    log_line({"at": g.iso(now), "action": "clear", "profile": name,
+              "until": prev.get("until") if isinstance(prev, dict) else None,
+              "set_by": os.environ.get("USER") or "unknown"})
+    print(f"profile {name or '(unreadable file)'} cleared: baseline in force")
+    after_change(f"djbclark-ade: gate profile {name} CLEARED, baseline restored")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="gate-profile", description=__doc__.split("\n\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("status")
+    p.add_argument("--json", action="store_true")
+    for n in ("show", "diff"):
+        sub.add_parser(n).add_argument("name")
+    sub.add_parser("validate")
+    p = sub.add_parser("set")
+    p.add_argument("name")
+    p.add_argument("--for", dest="for_", metavar="DURATION")
+    p.add_argument("--until", metavar="ISO")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--by")
+    sub.add_parser("clear")
+    p = sub.add_parser("extend")
+    p.add_argument("--for", dest="for_", metavar="DURATION", required=True)
+    args = ap.parse_args(argv)
+    return {"status": cmd_status, "show": cmd_show, "diff": cmd_diff, "validate": cmd_validate, "set": cmd_set,
+            "clear": cmd_clear, "extend": cmd_extend}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

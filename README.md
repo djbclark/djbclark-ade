@@ -254,6 +254,9 @@ through `tests/test_ade_template_check.py`.
     enforcement points (hooks for refs, the shim for what hooks cannot see), commands, exit codes (0/2/73/77/78),
     claim lifecycle, what is refused and what is not covered, the `ACP_OPERATOR_APPROVED=git-guard` override,
     fail-open, and the integration status (only W1 is built; W2-W4 call sites are listed).
+18. [`docs/gates.md`](docs/gates.md) — `config/gates.toml` and `bin/gate-profile` (2026-10-26): the Claude quota gates'
+    (`claude-fleet-governor`, `claude-quota-guard`) numbers versioned in git with floors a profile may not cross, and a
+    temporary expiring `away` profile (`set --for 72h`), its fail-safe rules and a worked three-day example.
 
 ## Architecture: agent graphs at two altitudes
 

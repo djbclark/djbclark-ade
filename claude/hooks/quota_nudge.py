@@ -22,6 +22,10 @@ under an exclusive flock on <file>.lock (non-blocking, LOCK_RETRIES x LOCK_WAIT_
 sessions' prompts never overwrite each other's acknowledgement; if the lock cannot be had the
 hook prints nothing and changes nothing.
 
+While the guard state names an unexpired gate profile (`profile`: {name, until}, bin/gate-profile, 2026-10-26) it also prints, once per
+session per America/New_York day (any level, `ok` included), "[gates] <name> profile active until <time>; gate-profile clear restores
+normal routing". The state already holds it: no extra file is read.
+
 History: 2026-10-23, after the Claude weekly window ran out 2.6 days early on 2026-10-20
 with a `conserve` alert unread for 11 hours. docs/model-routing.md "Quota guard".
 
@@ -157,6 +161,33 @@ def _unreadable_nudge(raw, session_id, nudges):
     return True
 
 
+def _profile_nudge(st, session_id, nudges):
+    """One line per session per New York day while the guard state names an unexpired gate profile. True when `nudges` changed."""
+    prof = st.get("profile")
+    if not isinstance(prof, dict) or not isinstance(prof.get("name"), str):
+        return False
+    until = _parse(prof.get("until"))
+    if until is None or until <= _now():   # the guard has not run since it expired: say nothing
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        ny = ZoneInfo("America/New_York")
+        local = until.astimezone(ny)
+        today = _now().astimezone(ny).date().isoformat()
+        when = f"{local:%a %b} {local.day} {local.hour % 12 or 12}:{local:%M} {'AM' if local.hour < 12 else 'PM'} {local:%Z}"
+    except Exception:
+        return False
+    key = f"{session_id}#profile"
+    stamp = f"{prof.get('until')}|{today}"
+    if nudges.get(key) == stamp:
+        return False
+    name = prof["name"] if prof["name"].replace("-", "").replace("_", "").isalnum() else "gate"
+    print(f"[gates] {name} profile active until {when}; gate-profile clear restores normal routing", flush=True)
+    nudges.pop(key, None)
+    nudges[key] = stamp
+    return True
+
+
 def _level_nudge(st, session_id, nudges):
     level = st.get("level")
     if level not in LEVELS:
@@ -197,6 +228,7 @@ def main():
         st = _fresh_guard_state()
         if st is not None:
             dirty = _level_nudge(st, session_id, nudges) or dirty
+            dirty = _profile_nudge(st, session_id, nudges) or dirty
         if dirty:
             _save_nudges(dict(list(nudges.items())[-MAX_SESSIONS:]))
 
