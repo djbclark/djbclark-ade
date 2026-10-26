@@ -61,6 +61,9 @@ the state before it pings and records the ping afterwards (a ping cut off by a k
 next run: at least once).
 Thresholds: THRESHOLDS below is the fail-safe; config/gates.toml's [quota_guard] baseline, the active `bin/gate-profile`
 profile and env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) override keys, in that order (bin/ade_gates.py, docs/gates.md).
+A `conserve` alert gives no more than `conserve_alert_level` (0 ok, 1 watch, 2 tight, 3 critical; baseline 2, so the rules
+above hold): the level is min(that number, the level the alert would otherwise give). A temporary profile may lower it to 1,
+so a projection alert alone stops raising `tight` while the operator is away; it never raises a level above what the alert gives.
 
 Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (default
 ~/.cache/aiuse/snapshots), _STATE (default ~/.local/state/ade/quota-guard.json), _PING
@@ -98,6 +101,7 @@ THRESHOLDS = {
     "critical_weekly": 15.0,    # -> critical
     "critical_five_hour": 10.0,  # 5-hour left below this -> critical
     "watch_fable": 15.0,        # Fable sublimit left below this -> watch (advice already bans Fable)
+    "conserve_alert_level": 2.0,  # level cap for a `conserve` alert (0 ok .. 3 critical); 2 = the alert alone may give tight
     "alert_max_age_s": 21600.0,  # ignore snapshot alerts older than this (aiuse's own rows are fresher)
     "period_tolerance_s": 7200.0,  # two resets_at this close are the same reset period (clock jitter)
     "aiuse_timeout_s": 90.0,
@@ -480,14 +484,15 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     weekly_labels = {w["label"].strip().lower(): [x for x in windows if x["kind"] == "weekly"
                                                     and x["label"].strip().lower() == w["label"].strip().lower()]
                      for w in windows if w["kind"] == "weekly"}
+    cap = max(0, min(len(LEVELS) - 1, int(t["conserve_alert_level"])))  # what a `conserve` alert may give at most
     for a in alerts:
         matched = weekly_labels.get(str(a.get("window_label") or "").strip().lower(), [])
         projected = bool(matched) and bool(_RUNNING_PROJECTED.search(str(a.get("message") or "")))
         if projected and all(w["pace_early"] for w in matched):
             continue
-        raise_to("watch")
+        raise_to(LEVELS[min(cap, LEVELS.index("watch"))])
         if projected:
-            raise_to("tight")
+            raise_to(LEVELS[min(cap, LEVELS.index("tight"))])
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
     candidates = [w for w in (weekly, five) if w]

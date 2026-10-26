@@ -32,6 +32,7 @@ and `bin/gate-profile validate` fail on drift, so change a number in both places
 | --- | --- | --- |
 | `*_left*`, `*_weekly`, `critical_five_hour`, `watch_fable` (percent left) | lower | `[bound, baseline]` |
 | `tight_projected` (projection at reset) | higher | `[baseline, bound]` |
+| `conserve_alert_level` (a level: 0 ok, 1 watch, 2 tight, 3 critical) | lower | `[1, 2]` (bound 1 = watch) |
 | every timing, age, lock and exhaustion-window key | not overridable | (unlisted: a profile that sets one is rejected) |
 
 Bounds (2026-10-26): no trigger below 3% left (the aiuse collector is hourly, the guard runs every 15 min, a 5-hour window
@@ -69,7 +70,8 @@ File missing, unreadable, not a JSON object, `schema` not 1; `until` or `since` 
 `until` at or before now (the profile ends exactly at `until`); `since` in the future; `until <= since`; window over
 `max_profile_hours`; unknown profile name; any key not under `[floors]`, any value tighter than the baseline, below a
 `lower` bound or above a `higher` bound, on EITHER gate (the whole profile is rejected, never clamped, so the governor and the guard
-always agree); `gates.toml` missing or unparsable (code defaults apply, logged once to stderr).
+always agree); a profile whose applied guard values break `watch_weekly >= tight_weekly >= critical_weekly` (`validate` also
+checks the baseline); `gates.toml` missing or unparsable (code defaults apply, logged once to stderr).
 
 ## Worked example: three days away
 
@@ -85,12 +87,20 @@ bin/gate-profile clear
 Away draft (values are confirmed by the operator at activation, edit `[profiles.away.*]` in the same PR or commit as
 the activation so the window is in git): governor `tight_projected` 90 -> 500, `tight_left_five_hour` 25 -> 15,
 `tight_left_weekly` 30 -> 15 (`critical_left` stays 10); guard `watch_weekly` 40 -> 20, `tight_weekly` 30 -> 15,
-`critical_weekly` 15 -> 10 (`critical_five_hour`, `watch_fable` unchanged). A weekly window at 65% used with 4d5h left
-(projected 242%, left 35) is `tight` at baseline and `ok` under `away`.
+`critical_weekly` 15 -> 10, `conserve_alert_level` 2 -> 1 (`critical_five_hour`, `watch_fable` unchanged). A weekly window at 65%
+used with 4d5h left (projected 242%, left 35) is `tight` at baseline and `ok` under `away`; with aiuse's `conserve` projection alert
+also live it is `tight` at baseline and `watch` under `away`.
+
+## The `conserve` alert rule
+
+The guard also raises its level on aiuse `conserve` alerts: any Claude alert gives `watch`, and a weekly "projected to run out ...
+before reset" alert gives `tight` (ignored while that window is `pace_early`). That rule is capped by `conserve_alert_level`
+(baseline 2): an alert gives min(that number, the level it would otherwise give), so a baseline run is unchanged. `away` sets 1,
+so the projection alert alone gives `watch` (advice text only) and the governor, which reads the guard's level, does not
+downshift on it. A profile cannot set 0 (an alert always gives at least `watch`); env JSON can, for tests and emergencies.
 
 ## Not covered (2026-10-26)
 
-The guard's level also rises on aiuse `conserve` alerts ("projected to run out ... before reset": tight): that is a rule, not a
-number, and a profile cannot switch it off. `route_agent.py` constants (`plenty_min`, `fable_min_left`,
+`route_agent.py` constants (`plenty_min`, `fable_min_left`,
 `SUBSTRATE_MIN_HEADROOM` in `config/routing.toml` and the script) and the routing policy text in
 `skills/model-routing/SKILL.md` are not profile-controlled.

@@ -577,6 +577,84 @@ def test_pace_early_silences_only_the_projected_alert_not_other_conserve_alerts(
     assert rig.guard().returncode == 1
 
 
+# -- conserve_alert_level: the cap a profile may lower (config/gates.toml, docs/gates.md) ------------
+
+def _away_profile(rig) -> dict:
+    """Env for a valid `away` profile (72 h, around rig.now) in a temp file; the real config/gates.toml defines it."""
+    path = rig.tmp / "gate-profile.json"
+    path.write_text(json.dumps({"schema": 1, "profile": "away", "since": "2026-10-23T11:00:00Z",
+                                "until": "2026-10-26T11:00:00Z", "reason": "test", "set_by": "test"}))
+    return {"GATE_PROFILE_STATE": str(path)}
+
+
+@pytest.mark.parametrize("weekly, alerts", [
+    (60, [alert(PROJECTED)]),
+    (35, [alert(PROJECTED)]),
+    (80, [alert("pace yourself")]),
+    (60, [alert(PROJECTED, window_label="Claude Code 5-hour")]),
+    (60, [alert(PROJECTED, window_label="Claude Code weekly \u2014 Fable")]),
+    (14, [alert(PROJECTED)]),
+    (80, []),
+])
+def test_the_baseline_cap_changes_nothing_a_baseline_run_is_what_an_uncapped_run_gives(tmp_path, weekly, alerts):
+    """Baseline conserve_alert_level is 2 and the highest level an alert ever gives is tight, so a run with the real
+    alert fixture must be byte-identical to one whose cap (env 3) can never bind: the behaviour before the key existed."""
+    states = []
+    for i, over in enumerate(({}, {"CLAUDE_QUOTA_GUARD_THRESHOLDS": json.dumps({"conserve_alert_level": 3})})):
+        (tmp_path / f"r{i}").mkdir()
+        rig = Rig(tmp_path / f"r{i}")
+        rig.set_aiuse(aiuse_fixture(weekly=weekly))
+        rig.set_alerts(alerts)
+        assert rig.guard(**over).returncode in (0, 1, 2, 3)
+        states.append(rig.state.read_bytes())
+    assert states[0] == states[1]
+
+
+def test_away_caps_a_projection_alert_at_watch_where_baseline_says_tight(tmp_path):
+    """Weekly 35% left (above both the baseline 30 and the away 15 tight trigger) with the live projection alert."""
+    levels = {}
+    for name, away in (("baseline", False), ("away", True)):
+        (tmp_path / name).mkdir()
+        rig = Rig(tmp_path / name)
+        rig.set_aiuse(aiuse_fixture(weekly=35))
+        rig.set_alerts([alert(PROJECTED)])
+        r = rig.guard(**(_away_profile(rig) if away else {}))
+        levels[name] = (rig.state_json()["level"], r.returncode)
+        if away:
+            assert rig.state_json()["profile"]["name"] == "away"
+    assert levels == {"baseline": ("tight", 2), "away": ("watch", 1)}
+
+
+def test_the_away_profile_still_gives_watch_on_any_conserve_alert_and_keeps_critical(tmp_path):
+    (tmp_path / "a").mkdir()
+    rig = Rig(tmp_path / "a")
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    rig.set_alerts([alert("pace yourself")])
+    assert rig.guard(**_away_profile(rig)).returncode == 1       # the floor is watch: an alert is never silent
+    (tmp_path / "b").mkdir()
+    rig = Rig(tmp_path / "b")
+    rig.set_aiuse(aiuse_fixture(weekly=8))
+    rig.set_alerts([alert(PROJECTED)])
+    assert rig.guard(**_away_profile(rig)).returncode == 3       # weekly 8 < away critical 10: unaffected by the cap
+
+
+@pytest.mark.parametrize("cap, weekly, alerts, level", [
+    (0, 80, [alert(PROJECTED)], "ok"),             # env has no floor: 0 switches the alert rule off
+    (0, 60, [alert("pace yourself")], "ok"),
+    (0, 14, [alert(PROJECTED)], "critical"),       # ... but never the weekly threshold
+    (1, 60, [alert(PROJECTED)], "watch"),
+    (2, 60, [alert(PROJECTED)], "tight"),
+    (3, 60, [alert(PROJECTED)], "tight"),          # a cap above the alert's own level raises nothing
+    (3, 60, [alert("pace yourself")], "watch"),
+])
+def test_env_json_sets_the_conserve_cap_and_it_only_ever_lowers_what_an_alert_gives(tmp_path, cap, weekly, alerts, level):
+    rig = Rig(tmp_path)
+    rig.set_aiuse(aiuse_fixture(weekly=weekly))
+    rig.set_alerts(alerts)
+    rig.guard(CLAUDE_QUOTA_GUARD_THRESHOLDS=json.dumps({"conserve_alert_level": cap}))
+    assert rig.state_json()["level"] == level
+
+
 # -- windows whose label says neither "5-hour" nor "weekly" (L10) -------------------------------
 
 def test_windows_are_classified_by_minutes_when_the_label_says_nothing(rig):

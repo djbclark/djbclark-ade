@@ -41,6 +41,9 @@ ENV_VARS = {"governor": "CLAUDE_GOVERNOR_THRESHOLDS", "quota_guard": "CLAUDE_QUO
 SCHEMA = 1
 DEFAULT_MAX_HOURS = 240
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+# Keys that must stay in order after a profile is applied, each at least the next (the guard's weekly triggers fire
+# watch, then tight, then critical as the percent left falls; a profile that crosses them would skip a level).
+ORDERINGS = {"quota_guard": ("watch_weekly", "tight_weekly", "critical_weekly")}
 _LOGGED: set[str] = set()
 
 
@@ -178,6 +181,15 @@ def value_problem(spec: dict[str, Any], baseline: float, value: Any) -> str | No
     return None
 
 
+def ordering_problems(gate: str, values: dict[str, Any]) -> list[str]:
+    """Where `values` (a gate's keys after a profile is applied) break ORDERINGS; [] when they hold or a key is absent."""
+    chain = ORDERINGS.get(gate, ())
+    if not all(is_num(values.get(k)) for k in chain):
+        return []
+    return [f"{a} {values[a]:g} must be at least {b} {values[b]:g} (ordering {' >= '.join(chain)})"
+            for a, b in zip(chain, chain[1:]) if values[a] < values[b]]
+
+
 def profile_problems(cfg: dict[str, Any], name: str, baselines: dict[str, dict[str, float]]) -> list[str]:
     """Every reason profile `name` cannot be used; [] when it can. `baselines` is {gate: {key: baseline value}}."""
     profiles = cfg.get("profiles")
@@ -194,6 +206,7 @@ def profile_problems(cfg: dict[str, Any], name: str, baselines: dict[str, dict[s
         if not isinstance(tbl, dict):
             out.append(f"profile {name}.{gate}: not a table")
             continue
+        before = len(out)
         for key, value in tbl.items():
             spec = floor_spec(cfg, gate, key)
             if spec is None:
@@ -204,6 +217,8 @@ def profile_problems(cfg: dict[str, Any], name: str, baselines: dict[str, dict[s
                 why = value_problem(spec, baselines[gate][key], value)
                 if why:
                     out.append(f"profile {name}.{gate}.{key}: {why}")
+        if len(out) == before:  # every value is a valid number: the profile as applied must keep the key order
+            out += [f"profile {name}.{gate}: {p}" for p in ordering_problems(gate, {**baselines.get(gate, {}), **tbl})]
     return out
 
 

@@ -1170,6 +1170,44 @@ class TestGateProfile(Base):
         out = self.run_gov("status")
         self.assertIn("gate profile: away until", out.stdout)
 
+    def guard_state(self, name: str, *, away: bool):
+        """Run the REAL quota guard against a fake aiuse: weekly 35% left plus a live weekly `conserve` projection alert."""
+        from test_claude_quota_guard import PROJECTED, Rig, aiuse_fixture, alert
+        d = self.e.root / name
+        d.mkdir()
+        rig = Rig(d)
+        rig.now = NOW
+        rig.set_aiuse(aiuse_fixture(weekly=35.0))
+        rig.set_alerts([alert(PROJECTED)])
+        r = rig.guard(**({"GATE_PROFILE_STATE": self.state_env["GATE_PROFILE_STATE"]} if away else {}))
+        self.assertEqual(r.returncode, 1 if away else 2, r.stderr)
+        return rig
+
+    def test_a_live_conserve_alert_keeps_the_governor_tight_when_only_the_governor_is_away(self):
+        """The finding this key closes: the governor reads the guard's level, so a guard still at baseline holds it tight."""
+        self.weekly_242()
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        self.profile()
+        rig = self.guard_state("guard_baseline", away=False)
+        self.assertEqual(rig.state_json()["level"], "tight")
+        r = self.run_gov("run", CLAUDE_QUOTA_GUARD_STATE=str(rig.state))
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(self.e.state_json()["level"], "tight")
+        self.assertTrue(self.e.sets())                                      # Opus moved down
+
+    def test_away_with_a_live_conserve_alert_is_watch_at_the_guard_and_moves_no_opus_agent(self):
+        self.weekly_242()
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        self.profile()
+        rig = self.guard_state("guard_away", away=True)
+        st = rig.state_json()
+        self.assertEqual((st["level"], st["profile"]["name"]), ("watch", "away"))
+        r = self.run_gov("run", CLAUDE_QUOTA_GUARD_STATE=str(rig.state))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        gst = self.e.state_json()
+        self.assertEqual((gst["level"], gst["guard_level"]), ("ok", "ok"))   # watch only restricts Fable/Opus Agent-tool sub-agents
+        self.assertEqual(self.e.sets(), [])
+
     def test_away_profile_keeps_the_critical_hard_stop(self):
         resets = NOW + timedelta(days=4, hours=5)
         write_snap(self.e.snaps, NOW, (10, NOW + timedelta(hours=3)), (92, resets), (5, resets))   # weekly left 8 < 10

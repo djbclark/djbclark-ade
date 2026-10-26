@@ -44,6 +44,7 @@ tight_weekly = 30.0                # percent left; weekly left below this: tight
 critical_weekly = 15.0             # percent left; weekly left below this: critical
 critical_five_hour = 10.0          # percent left; 5-hour left below this: critical
 watch_fable = 15.0                 # percent left; Fable sublimit left below this: watch
+conserve_alert_level = 2.0         # level; the most a snapshot `conserve` alert may raise to (0 ok, 1 watch, 2 tight, 3 critical)
 alert_max_age_s = 21600.0          # seconds; ignore snapshot `conserve` alerts older than this
 period_tolerance_s = 7200.0        # seconds; two resets_at this close are the same reset period
 aiuse_timeout_s = 90.0             # seconds; `aiuse --available --json` deadline
@@ -78,6 +79,7 @@ tight_weekly = { loosen = "lower", bound = 8.0 }
 critical_weekly = { loosen = "lower", bound = 3.0 }       # hard stop: never below 3% left
 critical_five_hour = { loosen = "lower", bound = 3.0 }    # hard stop: never below 3% left
 watch_fable = { loosen = "lower", bound = 5.0 }
+conserve_alert_level = { loosen = "lower", bound = 1.0 }  # watch: a profile may stop an alert alone giving tight, never ignore it
 
 # -- profiles -------------------------------------------------------------------------------------------------------
 
@@ -105,4 +107,8 @@ watch_weekly = 20.0
 tight_weekly = 15.0
 # Aligned with the governor's critical_left (10): baseline guard critical (15) is stricter than the governor's.
 critical_weekly = 10.0
+# The aiuse `conserve` projection alert ("projected to run out ... before reset") is a rule, not a threshold: at baseline
+# it alone gives tight. Away that is the same projection the governor's tight_projected above stops acting on (weekly 35%
+# left, projected 242%), and the governor reads this level, so the alert is capped at watch (1: advice only).
+conserve_alert_level = 1.0
 # critical_five_hour and watch_fable: unchanged (10 and 15).

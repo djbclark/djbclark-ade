@@ -212,6 +212,7 @@ def validate() -> list[str]:
                 out.append(f"[floors.{gate}].{k}: {g.spec_problem(spec)}")
             elif g.value_problem(spec, tbl[k], tbl[k]):
                 out.append(f"[floors.{gate}].{k}: the baseline is outside its own bound ({g.value_problem(spec, tbl[k], tbl[k])})")
+        out += [f"[{gate}] baseline: {p}" for p in g.ordering_problems(gate, tbl)]
     base = baselines_for_config(cfg)
     profiles = cfg.get("profiles")
     if not isinstance(profiles, dict) or not profiles:

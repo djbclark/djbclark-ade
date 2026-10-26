@@ -437,6 +437,13 @@ def test_validate_catches_drift_floors_and_directions(cli, tmp_path):
         ("[meta]\nschema = 1", "[meta]\nschema = 2", "schema"),
         ("max_profile_hours = 240", "max_profile_hours = 0", "max_profile_hours"),
         ('loosen = "higher", bound = 1000.0', 'loosen = "sideways", bound = 1000.0', "loosen"),
+        ("conserve_alert_level = 1.0\n", "conserve_alert_level = 0.0\n", "conserve_alert_level: 0 is below the floor 1"),
+        ("conserve_alert_level = 1.0\n", "conserve_alert_level = 2.5\n", "conserve_alert_level: 2.5 is tighter than the baseline 2"),
+        ("watch_weekly = 20.0\ntight_weekly = 15.0\n", "watch_weekly = 15.0\ntight_weekly = 18.0\n",
+         "profile away.quota_guard: watch_weekly 15 must be at least tight_weekly 18"),
+        ("watch_weekly = 20.0\ntight_weekly = 15.0\n", "watch_weekly = 15.0\n",            # tight_weekly left at the baseline 30
+         "profile away.quota_guard: watch_weekly 15 must be at least tight_weekly 30"),
+        ("tight_weekly = 30.0 ", "tight_weekly = 45.0 ", "[quota_guard] baseline: watch_weekly 40 must be at least tight_weekly 45"),
     ]:
         assert old in real, old
         bad = tmp_path / "bad.toml"
@@ -448,6 +455,58 @@ def test_validate_catches_drift_floors_and_directions(cli, tmp_path):
     broken = tmp_path / "broken.toml"
     broken.write_text("[governor\n")
     assert cli.run("validate", GATES_TOML=str(broken)).returncode == 1
+
+
+# -- the real gates.toml through the loader: conserve_alert_level floor and the weekly-trigger ordering ------------------------
+
+REAL = (REPO / "config" / "gates.toml").read_text()
+
+
+def _real_guard(env, monkeypatch, edit: tuple[str, str] | None = None):
+    toml = REAL if edit is None else REAL.replace(*edit, 1)
+    assert edit is None or edit[0] in REAL, edit
+    g.toml_path().write_text(toml)
+    write_state(state_path())
+    return g.load_gates("quota_guard", NOW, _thresholds("claude-quota-guard"))
+
+
+def test_the_away_profile_lowers_the_conserve_cap_to_watch(env, monkeypatch):
+    t, info = _real_guard(env, monkeypatch)
+    assert info["profile"]["name"] == "away", info["ignored"]
+    assert (info["baseline"]["conserve_alert_level"], t["conserve_alert_level"]) == (2.0, 1.0)
+
+
+@pytest.mark.parametrize("edit, why", [
+    (("conserve_alert_level = 1.0\n", "conserve_alert_level = 0.0\n"), "below the floor 1"),   # a profile may never ignore alerts
+    (("conserve_alert_level = 1.0\n", "conserve_alert_level = 3.0\n"), "tighter than the baseline 2"),
+    (("watch_weekly = 20.0\ntight_weekly = 15.0\n", "watch_weekly = 15.0\ntight_weekly = 18.0\n"), "watch_weekly 15 must be at least tight_weekly 18"),
+    (("critical_weekly = 10.0\n", "critical_weekly = 3.0\n"), None),                              # control: a valid change still applies
+    (("watch_weekly = 20.0\ntight_weekly = 15.0\n", "watch_weekly = 15.0\n"), "watch_weekly 15 must be at least tight_weekly 30"),
+])
+def test_a_profile_that_breaks_a_floor_or_the_weekly_order_is_rejected_whole(env, monkeypatch, edit, why):
+    t, info = _real_guard(env, monkeypatch, edit)
+    base = info["baseline"]
+    if why is None:
+        assert info["profile"]["name"] == "away" and t["critical_weekly"] == 3.0
+        return
+    assert info["profile"] is None and why in info["ignored"], info["ignored"]
+    assert t == base                                  # not one key of the profile applies, not even the valid ones
+
+
+def test_env_json_can_still_set_the_conserve_cap_to_zero_under_a_profile(env, monkeypatch):
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_THRESHOLDS", json.dumps({"conserve_alert_level": 0}))
+    t, info = _real_guard(env, monkeypatch)
+    assert info["profile"]["name"] == "away" and t["conserve_alert_level"] == 0.0
+
+
+def test_ordering_problems_unit():
+    ok = {"watch_weekly": 40.0, "tight_weekly": 30.0, "critical_weekly": 15.0}
+    assert g.ordering_problems("quota_guard", ok) == []
+    assert g.ordering_problems("quota_guard", {**ok, "tight_weekly": 15.0, "critical_weekly": 15.0}) == []      # equal is in order
+    assert len(g.ordering_problems("quota_guard", {**ok, "critical_weekly": 31.0})) == 1
+    assert len(g.ordering_problems("quota_guard", {"watch_weekly": 10.0, "tight_weekly": 20.0, "critical_weekly": 30.0})) == 2
+    assert g.ordering_problems("quota_guard", {"watch_weekly": 10.0}) == []                                      # keys absent: nothing to order
+    assert g.ordering_problems("governor", {"a": 1.0}) == []
 
 
 # -- daily nudge ----------------------------------------------------------------------------------------------------------
