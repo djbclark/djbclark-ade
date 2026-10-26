@@ -45,6 +45,7 @@ try:
     import where as _where
 except (ImportError, SyntaxError):   # SyntaxError: an older python (3.9) that cannot parse it; locate nothing
     _where = None
+import nested_pty as _nested
 
 HOME = str(Path.home())
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
@@ -676,7 +677,8 @@ def _paseo_rows(have, anc, include_archived=False):
 
 def pane_procs(pane):
     """Foreground processes of a herdr pane (`pane process-info`): [{pid, name, argv, cwd}], shell pid.
-    None when herdr could not read them (unknown is not empty)."""
+    None when herdr could not read them (unknown is not empty). A pane whose only foreground process is Kiro's terminal shim is
+    answered with the foreground processes of its inner PTY when `nested_pty` can prove them (the cwd is then '': ps has none)."""
     info = herdr_json("pane", "process-info", "--pane", pane).get("process_info")
     if not isinstance(info, dict):
         return None, None
@@ -685,7 +687,25 @@ def pane_procs(pane):
         argv = pr.get("argv") or ([pr["cmdline"]] if pr.get("cmdline") else [])
         procs.append({"pid": pr.get("pid"), "name": pr.get("name") or pr.get("argv0") or "", "argv": argv,
                       "argv0": pr.get("argv0") or "", "cwd": pr.get("cwd") or ""})
-    return procs, info.get("shell_pid")
+    return _kiro_inner(procs, info.get("shell_pid")) or procs, info.get("shell_pid")
+
+
+def _kiro_inner(procs, shell_pid):
+    """The inner-PTY foreground processes behind a Kiro shim, in `pane_procs` shape, or None (not a shim, or not provable)."""
+    if not isinstance(shell_pid, int) or len(procs) != 1 or procs[0].get("argv0") != _nested.OUTER_ARGV0:
+        return None
+    rc, text = run(*_nested.PS_ARGS, timeout=5)
+    rows = _nested.inner_foreground(procs, shell_pid, _nested.parse_ps(text)) if rc == 0 else None
+    if not rows:
+        return None
+    command = lambda pid: run("ps", "-ww", "-o", "command=", "-p", str(pid), timeout=5)[1].strip()
+    out = []
+    for r in rows:
+        argv = _nested.argv_of(r, command)
+        if not argv:
+            return None
+        out.append({"pid": r["pid"], "name": os.path.basename(r["comm"]), "argv": argv, "argv0": argv[0], "cwd": ""})
+    return out
 
 
 SID_IN_ARGV = re.compile(r"(?:--resume|--session|--conversation|--id|-s|-r)(?:=|$)")
@@ -726,12 +746,24 @@ def _hermes_native(argv):
     return first in (None, "chat")
 
 
+# Native TUIs herdr does not detect that PROC_AGENTS (which `_proc_scan` also reads) must not take: recognised by exact argv only.
+def _native_extra(argv):
+    """`goose session ...` (the interactive session; not `goose acp`, `goose web`, `goose run`) and `node .../mastracode ...`."""
+    base = [os.path.basename(a) for a in argv[:2]]
+    if len(base) == 2 and base[0] == "goose" and base[1] == "session":
+        return "goose"
+    if len(base) == 2 and base[0] == "node" and base[1] == "mastracode":
+        return "mastra"
+    return None
+
+
 def _tui_of(procs):
     """(agent label, pid, session id, argv) of the TUI running in a pane, from its foreground processes."""
     for pr in procs or []:
         argv = pr["argv"]
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
-        agent = next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
+        agent = (next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
+                 or _native_extra(argv))
         if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
         sid = None
