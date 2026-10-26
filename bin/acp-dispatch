@@ -1197,7 +1197,7 @@ def _template_re(template: str, **fields: str) -> str:
 
 def footer_items_re() -> str:
     """A regex for the numbered items of the footer TEMPLATE (docs/dispatch-footer.md): each item is its
-    template line, with `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` as one-line wildcards,
+    template line, allowing blank separators between items, with `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` as one-line wildcards,
     so an item that a lead edited or added matches none of them. Each item is judged on its own, so a
     footer that dropped some of the template's items still matches. Matches nothing when the template
     cannot be read: then no footer is provably generated and none is cut. Only the CURRENT template is
@@ -1213,7 +1213,7 @@ def footer_items_re() -> str:
     # lets an item with two placeholders parse two ways, and a crafted tail of such lines backtracked
     # 2^N (20 lines: 3.5 s, doubling per line; PR 22 review).
     slot = {k: r"[^`\n]*" for k in re.findall(r"\{(\w+)\}", template)}
-    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2), **slot) + r"\n" for m in items if m]
+    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2), **slot) + r"\n(?:[ \t]*\n)*" for m in items if m]
     return "(?:" + "|".join(alts) + ")+" if alts else r"(?!)"
 
 

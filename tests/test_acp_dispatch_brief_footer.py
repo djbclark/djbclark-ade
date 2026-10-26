@@ -133,6 +133,27 @@ class TestFooterMatchesTheTemplate(Base):
         self.assertNotIn("first-report.md", sent)
         self.assertIn("stripped", r.stderr)
 
+    def test_blank_separators_between_template_items_are_generated(self):
+        copy = self.footed_copy()
+        text = copy.read_text()
+        self.assertIn("\n4. ", text)
+        _ = copy.write_text(text.replace("\n4. ", "\n \t\n\n4. ", 1))
+        r, sent = self.second(copy)
+        self.assertEqual(sent.count("## Delivery contract (shared footer"), 1, sent)
+        self.assertNotIn("first-report.md", sent)
+        self.assertIn("stripped", r.stderr)
+
+    def test_user_instruction_between_blank_separators_survives(self):
+        copy = self.footed_copy()
+        text = copy.read_text()
+        constraint = "Never push or merge without asking."
+        self.assertIn("\n4. ", text)
+        _ = copy.write_text(text.replace("\n4. ", "\n\n" + constraint + "\n\n4. ", 1))
+        r, sent = self.second(copy)
+        self.assertIn(constraint, sent)
+        self.assertIn("first-report.md", sent)
+        self.assertIn("nothing was stripped", r.stderr)
+
     def test_an_item_appended_to_the_footer_survives(self):
         copy = self.footed_copy()
         text = copy.read_text()
