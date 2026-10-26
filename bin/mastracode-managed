@@ -1,0 +1,87 @@
+#!/usr/bin/env -S python3 -I
+"""mastracode-managed -- run Mastra Code with its Anthropic key from sudo-secretspec.
+
+Usage:
+  mastracode-managed [MASTRACODE ARGS...]   # exec the real mastracode with ANTHROPIC_API_KEY set
+  mastracode-managed --check                # prove the key works: GET /v1/models, no tokens spent
+
+Why (2026-10-25): a bare `mastracode` has no Anthropic login on this Mac (no `/connect` OAuth
+account, no key in its environment), so the Anthropic pack answers "All Anthropic accounts
+unavailable: Not logged in to Anthropic". Mastra Code reads ANTHROPIC_API_KEY from its
+environment at startup (https://code.mastra.ai/configuration, "API keys"), and an OAuth login
+would sit on a Claude Max subscription outside Claude Code, which that page warns may breach
+Anthropic's terms. This launcher supplies the managed key instead.
+
+Only ANTHROPIC_API_KEY reaches the child. `sudo-secretspec run` would put every declared
+secret into the environment of a TUI that runs model-chosen shell commands, so the one value
+is read with `get` into this process's memory and handed to exec; it is never written to disk,
+argv or output. Mastra Code's own settings and `/connect` accounts are untouched, and an
+ANTHROPIC_API_KEY already in the caller's environment wins (nothing is fetched).
+
+Exit: 0 (--check) key accepted; 1 key unavailable or rejected; 127 mastracode not found;
+otherwise whatever mastracode returns (exec replaces this process, so the TTY is the TUI's).
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+SECRET = "ANTHROPIC_API_KEY"
+REASON = "Mastra Code Anthropic access (mastracode-managed)"
+MODELS_URL = "https://api.anthropic.com/v1/models?limit=100"
+
+
+def managed_key():
+    """The managed key, or None with a non-secret reason on stderr."""
+    try:
+        r = subprocess.run(["sudo-secretspec", "get", SECRET, "--reason", REASON],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print("mastracode-managed: sudo-secretspec unavailable: %s" % type(e).__name__, file=sys.stderr)
+        return None
+    key = r.stdout.strip()
+    if r.returncode != 0 or not key:
+        print("mastracode-managed: sudo-secretspec get %s failed (exit %d)" % (SECRET, r.returncode),
+              file=sys.stderr)
+        return None
+    return key
+
+
+def check(key):
+    req = urllib.request.Request(MODELS_URL, headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            ids = [m.get("id", "") for m in json.load(resp).get("data", [])]
+    except urllib.error.HTTPError as e:
+        print("mastracode-managed: Anthropic rejected the key: HTTP %d" % e.code, file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        print("mastracode-managed: Anthropic unreachable: %s" % type(e).__name__, file=sys.stderr)
+        return 1
+    print("mastracode-managed: key accepted (HTTP 200, %d models, sonnet-5-5 listed: %s)"
+          % (len(ids), any("sonnet-5-5" in i for i in ids)))
+    return 0
+
+
+def main(argv):
+    do_check = argv[:1] == ["--check"]
+    env = dict(os.environ)
+    if not env.get(SECRET):
+        key = managed_key()
+        if key is None:
+            return 1
+        env[SECRET] = key
+    if do_check:
+        return check(env[SECRET])
+    real = os.environ.get("MASTRACODE_REAL_BIN") or shutil.which("mastracode")
+    if not real or not os.access(real, os.X_OK):
+        print("mastracode-managed: mastracode not found (npm i -g mastracode)", file=sys.stderr)
+        return 127
+    os.execve(real, [real] + argv, env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
