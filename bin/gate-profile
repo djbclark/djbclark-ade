@@ -287,14 +287,16 @@ def run_soft(argv: list[str], timeout: int) -> tuple[bool, str]:
 
 
 def after_change(text: str) -> bool:
-    """Ping, then ask both gates to recompute now. Every step soft-fails. Call with no lock held. True when the guard recomputed."""
+    """Ping, then ask both gates to recompute now: the guard (the sensor) first, so the governor (the actor) reads its fresh level and
+    does not downshift or hand off on the thresholds the change just replaced. Every step soft-fails. Call with no lock held.
+    True when the guard recomputed."""
     ping = os.environ.get("GATE_PROFILE_PING") or str(Path(os.environ.get("HOME") or Path.home()) / ".local/bin/hermes-ping")
     gov = os.environ.get("GATE_PROFILE_GOVERNOR") or str(HERE / "claude-fleet-governor")
     guard = os.environ.get("GATE_PROFILE_GUARD") or str(HERE / "claude-quota-guard")
     print(f"ping: {run_soft([ping, text], 60)[1]}")
-    print(f"governor recompute: {run_soft([gov, 'run'], 300)[1]}")
     guard_ok, guard_text = run_soft([guard, 'check'], 120)
     print(f"guard recompute: {guard_text}")
+    print(f"governor recompute: {run_soft([gov, 'run'], 300)[1]}")
     return guard_ok
 
 

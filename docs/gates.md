@@ -65,6 +65,9 @@ routing" per session per New York day (any level) while the profile is unexpired
 the original `since` stays within `max_profile_hours`, and it refuses an expired or ignored profile (`clear` and `set` a new
 one instead).
 
+After every `set`, `extend` and `clear` the order is: ping, then the guard's recompute, then the governor's run, so the governor (the actor) reads the
+guard's fresh level and never downshifts or hands off on the thresholds the change just replaced (Codex P2 on PR 84).
+
 ## Fail-safe: when a profile is ignored (baseline applies, `status` says why)
 
 File missing, unreadable, a symlink, FIFO, directory or over 64 KiB, not a JSON object, `schema` not the integer 1 (not `true`,

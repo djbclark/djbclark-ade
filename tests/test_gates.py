@@ -907,6 +907,16 @@ def test_the_set_ping_is_one_clean_clipped_line_and_an_over_long_reason_or_by_is
         assert r.returncode == 1 and "limited to" in r.stderr and not cli.state.exists(), args
 
 
+def test_the_guard_recomputes_before_the_governor_runs_after_every_change(cli):
+    """Codex P2 on PR 84: the governor takes the stricter cached guard level, so a loosening change must refresh the guard first."""
+    for args in (("set", "away", "--for", "2h", "--reason", "x"), ("extend", "--for", "1h"), ("clear",)):
+        cli.calls.unlink(missing_ok=True)
+        r = cli.run(*args)
+        assert r.returncode == 0, (args, r.stderr)
+        order = [ln.split()[0] for ln in cli.called()]
+        assert order == ["ping", "guard", "governor"], (args, order)
+
+
 def test_clear_removes_the_file_and_warns_when_the_guard_recompute_fails(cli):
     cli.run("set", "away", "--for", "2h", "--reason", "x")
     bad = cli.tmp / "bad-guard"
