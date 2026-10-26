@@ -1185,8 +1185,17 @@ def record(data: dict) -> None:
     try:
         st_path = d / f"{key}.state.json"
         st = _load_state(st_path)
-        if agent and not st:                            # a new subagent joins the main agent's task
-            st["task_seq"] = int(_load_state(d / f"{sid}.state.json").get("task_seq", 0) or 0)
+        if agent:                                       # a subagent joins the main agent's current task
+            parent_seq = int(_load_state(d / f"{sid}.state.json").get("task_seq", 0) or 0)
+            if not st:
+                st["task_seq"] = parent_seq
+            elif int(st.get("task_seq", 0) or 0) < parent_seq:
+                # The parent moved to a new task while this subagent was idle (a resumed subagent):
+                # its run, recent calls and web flag belong to the old task. last_ts goes too, so
+                # the idle rule cannot count a second task change on top of this one.
+                st.update(task_seq=parent_seq, web_or_memory=False, run=0, recent=[],
+                          last_failed_call="")
+                st.pop("last_ts", None)
         drops = _drops(d / f"{key}.drops")
         fd = _open_regular(d / f"{sid}.jsonl", os.O_RDWR | os.O_APPEND | os.O_CREAT)
         try:

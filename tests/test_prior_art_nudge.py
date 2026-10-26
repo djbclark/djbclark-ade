@@ -324,6 +324,12 @@ def huge_nesting(depth):
     b'{"tool_name":"Read","tool_input":{"file_path":"/tmp/a"},"tool_response":"ok"}\xff\xfe\x80garbage',
     b'{"tool_name":"Read","tool_response":"bad \xff tail"}',
     b'{"tool_name":"Bash","tool_input":{"command":["bash","-lc"]},"error":"x"}\n{"second":1}',
+], ids=[
+    # Explicit ids: pytest's default id for a 200 KB bytes value lands in PYTEST_CURRENT_TEST,
+    # and Linux refuses an environment string over 128 KB (E2BIG on the hook's subprocess).
+    "empty", "not-json", "empty-array", "null", "number", "string", "open-brace", "truncated-key",
+    "nesting-200k", "nesting-50k-in-input", "input-not-dict", "wrong-field-types",
+    "trailing-garbage", "bad-utf8-response", "two-documents",
 ])
 def test_malformed_events_exit_silently(box, raw):
     box.run(None, raw=raw)
@@ -519,6 +525,21 @@ def test_subagent_state_is_keyed_by_agent_and_inherits_the_task(box):
     assert recs[4]["elapsed_ms"] == 5000 and recs[3]["elapsed_ms"] is None
     assert recs[5]["elapsed_ms"] is None                                # B's first event: nothing before it
     assert len(list(box.state.glob("*.state.json"))) == 3
+
+
+def test_a_resumed_subagent_does_not_carry_the_previous_task_over(box):
+    box.tool("WebSearch", {"query": "q"}, agent_id="agent-A")           # task 0: A saw the web...
+    box.tool("Read", {"file_path": "/nix/store/x/a1"}, agent_id="agent-A")
+    box.tool("Read", {"file_path": "/tmp/dup"}, agent_id="agent-A")
+    box.prompt()                                                        # ...the parent starts task 1
+    box.tool("Read", {"file_path": "/tmp/dup"}, agent_id="agent-A")     # A resumes inside the idle window
+    box.tool("Read", {"file_path": "/nix/store/x/a2"}, agent_id="agent-A")
+    recs = box.records()
+    resumed = recs[4:]
+    assert [r["task_seq"] for r in resumed] == [1, 1]
+    assert [r["web_or_memory_before"] for r in resumed] == [False, False]
+    assert [r["duplicate"] for r in resumed] == [False, False]
+    assert [r["run_length"] for r in resumed] == [0, 1]   # run restarts from the reset, not the old 1
 
 
 def test_missing_or_odd_agent_id_means_the_main_agent(box):
