@@ -2621,7 +2621,7 @@ def _num(value, default=0.0):
     """VALUE as a finite float, else DEFAULT: a record is plain JSON a hand edit can break (adversary r1 A10)."""
     try:
         x = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return x if math.isfinite(x) else default
 

@@ -266,7 +266,8 @@ class TestExpectAck(Base):
         self.go("is the build green?", "--expect-ack", "build1")
         path = relay.expect_dir() / "build1.json"
         rec = json.loads(path.read_text())
-        for edited in ({**rec, "created": "x"}, {k: v for k, v in rec.items() if k != "created"}):
+        # 10**400 is a JSON integer no float holds: float() raises OverflowError (adversary r1 A1)
+        for edited in ({**rec, "created": "x"}, {**rec, "created": 10**400}, {k: v for k, v in rec.items() if k != "created"}):
             path.write_text(json.dumps(edited))
             rc, out = self.run_cli("--pending", "--json")
             self.assertEqual(rc, 0)
