@@ -251,7 +251,7 @@ class TestExpectWithoutTranscript(Base):
         self.mallory = sess(id="ffffffff", name="mallory", sid="ffffffff-0000-4000-8000-000000000006", chan=("herdr", "w4:p4"), status="idle")
         self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
 
-    def reply(self, sender: Any, text: str, *argv: str, to: Any = None, tx: bool = False) -> tuple[int, str, str]:
+    def reply(self, sender: Any, text: str, *argv: str, to: Any = None, tx: bool = False, typed: Any = None, sleep: Any = None) -> tuple[int, str, str]:
         """TEXT sent through relay.py by session SENDER (the only `self` row) to TO (alice by default)."""
         to = to or self.me
         if tx:
@@ -260,7 +260,8 @@ class TestExpectWithoutTranscript(Base):
         rows = [{**sender, "self": True} if r["id"] == sender["id"] else r for r in rows]    # the caller may be another occupant of that pane
         rows = [{**to, "self": to["id"] == sender["id"]} if r["id"] == to["id"] else r for r in rows]
         relay.fleet.sessions = lambda: rows
-        self.on_typed = (lambda t: self.write_delivered_to(self.me_tx, t)) if tx else (lambda t: None)
+        self.on_typed = typed or ((lambda t: self.write_delivered_to(self.me_tx, t)) if tx else (lambda t: None))
+        self.on_sleep = sleep
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = relay.main([to["name"], text, "--wait", "1", *argv])
@@ -378,6 +379,38 @@ class TestExpectWithoutTranscript(Base):
         self.assertIn("queued:", out, (rc, out, err))
         self.assertEqual(self.state(), "open")
 
+    def test_a_delivery_proof_that_ran_and_found_nothing_closes_nothing(self) -> None:
+        """alice has no transcript of her own, but the ack's ROUTE has one to read (her pane's): the text is queued, nothing takes it."""
+        rc, out, err = self.reply(self.target, "ack build1", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me)
+        self.assertEqual(rc, 3, (out, err))
+        self.assertIn("not in its transcript", err)    # the proof ran and timed out
+        self.assertEqual(self.state(), "open")
+
+    def test_an_ack_nobody_watched_that_a_proof_could_have_checked_closes_nothing(self) -> None:
+        rc, out, err = self.reply(self.target, "ack build1", "--no-ack", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertIn("queued", out)
+        self.assertEqual(self.state(), "open")
+
+    def test_an_ack_nobody_watched_on_a_route_with_no_proof_to_take_closes_it(self) -> None:
+        rc, out, err = self.reply(self.target, "ack build1", "--no-ack")    # alice has no transcript: nothing could ever prove it
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.state(), "acked")
+
+    def test_a_proof_that_saw_the_text_closes_it(self) -> None:
+        rc, out, err = self.reply(self.target, "ack build1", to={**self.me, "transcript": str(self.me_tx)}, typed=self.write_queued_to_me,
+                                  sleep=lambda: self.write_delivered_to(self.me_tx, "ack build1"))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.state(), "acked")
+
+    def test_an_ack_that_begins_with_a_quote_is_still_the_targets_own_words(self) -> None:
+        """Adversary r1 A5, kept on purpose: the text is the real target's, sent through relay.py to the sender; the quote changes nothing."""
+        self.reply(self.target, '"ack build1" is what you asked for, but not yet')
+        self.assertEqual(self.state(), "acked")
+
+    def write_queued_to_me(self, text: str) -> None:
+        self.append(self.me_tx, {"type": "queue-operation", "operation": "enqueue", "content": text})
+
     def test_the_sweep_neither_crashes_nor_resolves_and_the_overdue_path_works(self) -> None:
         self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude cccccccc aka peer-fb (x)] ack build1"}})
         rc, out = self.run_cli("--sweep")
@@ -398,6 +431,72 @@ class TestExpectWithoutTranscript(Base):
         rc, _, err = self.go("ack build9", "--expect-ack", "build9")
         self.assertEqual(rc, 2, err)
         self.assertIn("would never end", err)
+
+
+class TestExpectWithTranscriptIsNotClosedByRelay(Base):
+    """Adversary r1 (BLOCK at 426cf09, A1/A2/A5): a sender WITH a transcript keeps exactly its old rule, closed only by `ack ID` in its own
+    transcript. A false ack is worse than a missing one: it silences the OVERDUE page that exists to catch a dead return path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.me["status"] = "idle"
+        rc, out, err = self.go("is the build green?", "--expect-ack", "build1")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertTrue(relay.expect_read("build1")["tx"])
+
+    def reply_as_target(self, text: str, *argv: str) -> tuple[int, str, str]:
+        rows = [{**self.me, "self": False}, {**self.target, "self": True}]
+        relay.fleet.sessions = lambda: rows
+        self.on_typed = lambda t: None    # the ack never lands in alice's transcript (a dead return path)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = relay.main(["alice", text, "--wait", "1", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_an_ack_the_watch_looked_for_and_did_not_see_leaves_it_open(self) -> None:
+        rc, out, err = self.reply_as_target("ack build1")
+        self.assertEqual(rc, 3, (out, err))    # the delivery watch looked in alice's transcript and did not see the ack
+        self.assertEqual(relay.expect_read("build1")["state"], "open", relay.expect_read("build1"))
+
+    def test_an_ack_sent_without_a_watch_leaves_it_open(self) -> None:
+        rc, out, err = self.reply_as_target("ack build1", "--no-ack")
+        self.assertEqual(relay.expect_read("build1")["state"], "open", (rc, out, err, relay.expect_read("build1")))
+
+    def test_even_a_proven_ack_leaves_the_close_to_the_sweep(self) -> None:
+        rows = [{**self.me, "self": False}, {**self.target, "self": True}]
+        relay.fleet.sessions = lambda: rows
+        self.on_typed = lambda t: self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": t}})
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = relay.main(["alice", "ack build1", "--wait", "1"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(relay.expect_read("build1")["state"], "open")    # its own transcript is the proof, and only `--sweep` reads it
+        self.reply_to_me("ack build1")    # what the real typed text looks like in alice's transcript: the relay header, then the text
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+        self.assertNotEqual(relay.expect_read("build1").get("acked_via"), "relay")
+
+
+class TestExpectDelivererNeverCloses(Base):
+    """Adversary r1 A2: the Paseo deliverer runs the inner send as the (Paseo) target with PASEO_AGENT_ID set, --no-defer --no-ack: no delivery
+    proof, and whether the text begins `ack ID` depends on the queue time (`[queued Nm ago] `). It must close nothing."""
+
+    PASEO_T = "12345678-aaaa-4bbb-8ccc-1234567890ab"
+
+    def test_a_deferred_ack_run_by_the_deliverer_closes_nothing(self) -> None:
+        self.me["transcript"] = None
+        self.me["status"] = "idle"
+        relay.expect_write({"id": "build1", "state": "open", "sender": self.me["id"], "sender_sid": self.me["sid"], "sender_label": "alice",
+                            "tx": None, "mark": 0, "created": time.time(), "within": 1800, "acked": None,
+                            "target": {"id": self.PASEO_T[:8], "name": "T", "paseo": self.PASEO_T, "sid8": "", "sid": "", "host": "paseo"}})
+        live = [{"id": self.PASEO_T, "status": "idle", "provider": "codex", "cwd": "/x", "name": "T"}]
+        with mock.patch.object(fleet, "_paseo_ls", lambda *a: live), mock.patch.object(fleet, "_paseo_hosting", lambda anc: set()):
+            os.environ["PASEO_AGENT_ID"] = self.PASEO_T    # what deliver() sets from rec["sender_paseo"]
+            rows = lambda: [{**self.me, "self": False}, *fleet._paseo_rows(set(), [])]
+            relay.fleet.sessions = rows
+            self.assertTrue([r for r in rows() if r.get("self")], "fleet marks the Paseo target `self` from PASEO_AGENT_ID")
+            self.on_typed = lambda t: None
+            rc, line = relay.run_captured(["alice", "ack build1", "--no-defer", "--no-ack"], "codex T")    # deliver()'s exact call
+        self.assertEqual(relay.expect_read("build1")["state"], "open", (rc, line, relay.expect_read("build1")))
 
 
 class TestPeerAttribution(unittest.TestCase):

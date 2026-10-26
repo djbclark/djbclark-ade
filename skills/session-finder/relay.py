@@ -201,8 +201,10 @@ overrides a `?` that is no question. The record (sender, target, age) lives in <
 (its own tool calls and their results never count). A sender with a fleet row but NO readable transcript may use --expect-ack (2026-10-26): its
 record holds `"tx": null`, and relay itself closes it when the TARGET answers through relay.py with a text that BEGINS `ack ID`, sent to the
 session that opened it: both ends come from the fleet's `self` row and the record (id, and session id when both have one), never from the text,
-and it counts only for a send its route accepted or proved (never refused, failed, pulled back or merely queued for a deliverer). A third
-party, a quoted header, another or a closed ID and a replay change nothing. `--sweep` also flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
+and it counts only for a send its route PROVED or took on a route with no proof to take (never refused, failed, pulled back, merely queued
+for a deliverer, run by a deliverer, or one whose delivery watch ran and did not see the text, or that ran no watch). A sender WITH a
+transcript keeps exactly its old rule: only its own transcript showing the ack closes it. A third party, a quoted header, another or a
+closed ID and a replay change nothing. `--sweep` also flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
 point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json). FIRST CONTACT: the first message
 from a session to a peer appends "[first contact from <id>: reply `ack <id>` through relay.py ...]"; ~/.local/state/relay/links.json
 (RELAY_LINKS_FILE) records each link, `--sweep` marks it acked when the sender's transcript holds `ack <id>` naming the peer (or an
@@ -2808,9 +2810,12 @@ def expect_resolve_by_relay():
     cannot see the reply in one, but every reply goes through relay.py, which knows both ends from the fleet, not from the text. The text
     must BEGIN with `ack ID`; the caller (CTX["me"], fleet-derived) must be the expectation's target and the recipient (CTX["s"]) its sender,
     each also matching the session id the record stored, so a third party, a new occupant of the pane, a header quoted in a text or a
-    closed or reused ID changes nothing. It counts only when this send was accepted or delivered (CTX["accepted"]: never a failed, refused,
-    pulled or merely queued one). The check and the write share one hold of the expectation lock, so a replayed ack finds it acked."""
+    closed or reused ID changes nothing. It resolves ONLY records with no transcript (`tx` null): a transcript-backed record is closed by `ack_sweep` alone, from its own
+    transcript. It counts only when this send was proven delivered or went by a route with no proof (CTX["accepted"]: never a failed, refused,
+    pulled, merely queued, unwatched or watched-and-unseen one), and never inside a deliverer (SENDER_OVERRIDE), which has no proof. The check and the write share one hold of the expectation lock, so a replayed ack finds it acked."""
     me, s, text = CTX.get("me"), CTX.get("s"), CTX.get("text")
+    if SENDER_OVERRIDE[0]:    # a deliverer runs under the stored sender's label, not as a session: its inner send has no proof and its text depends on the queue time
+        return 0
     if not (CTX.get("accepted") and isinstance(me, dict) and isinstance(s, dict) and isinstance(text, str) and isinstance(me.get("id"), str)
             and isinstance(s.get("id"), str)):
         return 0
@@ -2819,7 +2824,7 @@ def expect_resolve_by_relay():
     with _flock(defer_dir() / ".expect.lock"):
         for r in expect_all():
             t = r.get("target") if isinstance(r.get("target"), dict) else {}
-            if (r.get("state") == "open" and r.get("sender") == s["id"] and same_sid(r.get("sender_sid"), s.get("sid"))
+            if (r.get("state") == "open" and not r.get("tx") and r.get("sender") == s["id"] and same_sid(r.get("sender_sid"), s.get("sid"))
                     and t.get("id") == me["id"] and same_sid(t.get("sid") or t.get("sid8"), me.get("sid")) and ack_token(r["id"]).match(lead)):
                 atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, "acked_via": "relay"})
                 closed.append((r, t))
@@ -3132,7 +3137,10 @@ def _main(argv=None, sweep=True):
             if word == "delivered":
                 res = (res[0], res[1], "delivered")
             out.update(result=res[2], ack=word, ack_note=note)
-        CTX["accepted"] = res[0] == "ok" and word != "not delivered"    # the send expect_resolve_by_relay may count: taken by its route, never refused, failed or pulled back
+        # What expect_resolve_by_relay may count (a sender with no transcript only): taken by its route, never refused, failed or pulled back,
+        # and either PROVEN (delivered) or on a route with no proof to take. A proof that was available and did not show the text (a watch that
+        # ran out, a --no-ack send nobody watched) is no evidence of delivery: a false ack is worse than a missing one.
+        CTX["accepted"] = res[0] == "ok" and word != "not delivered" and (res[2] == "delivered" or c.get("proof") is None)
         if res[0] == "ok":
             out["via"] = res[1]
         else:
