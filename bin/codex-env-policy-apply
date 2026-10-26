@@ -18,7 +18,7 @@ Exit: 0 done or nothing to do, 1 refused or failed, 2 bad arguments."""
 import argparse, datetime, difflib, os, re, sys, tempfile, tomllib
 
 POLICY = "shell_environment_policy"
-TABLE = re.compile(r"^\[(.+?)\]\s*$", re.M)
+TABLE = re.compile(r"^\[(.+?)\][ \t]*(?:#[^\r\n]*)?\r?$", re.M)
 
 
 def fail(msg):

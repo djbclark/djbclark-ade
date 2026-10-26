@@ -366,6 +366,34 @@ trusted_hash = "abc"
             self.assertEqual(self.run_apply(t, "--write").returncode, 0)
             self.assertEqual(t.read_text(), once)
 
+    def test_table_headers_accept_trailing_comments_without_printing_them(self) -> None:
+        headers = ("[shell_environment_policy]", "[shell_environment_policy.set]",
+                   "[mcp_servers.below.http_headers]")
+        for commented in ((headers[0],), (headers[1],), (headers[2],), headers):
+            for flags in ((), ("--write",)):
+                with self.subTest(commented=commented, flags=flags), tempfile.TemporaryDirectory() as d:
+                    target = pathlib.Path(d, "config.toml")
+                    original = self.LIVE.format(home=d)
+                    for header in commented:
+                        original = original.replace(header, header + " # SYNTHETIC-PRIVATE-COMMENT")
+                    before = tomllib.loads(original)
+                    target.write_text(original)
+                    result = self.run_apply(target, *flags)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for secret in (*self.NEIGHBOUR_SECRETS, "SYNTHETIC-PRIVATE-COMMENT"):
+                        self.assertNotIn(secret, result.stdout + result.stderr)
+                    if flags:
+                        after = tomllib.loads(target.read_text())
+                        self.assertEqual({k: v for k, v in after.items() if k != "shell_environment_policy"},
+                                         {k: v for k, v in before.items() if k != "shell_environment_policy"})
+                        self.assertEqual(after["shell_environment_policy"]["set"], before["shell_environment_policy"]["set"])
+                        suffix = original[original.index("[mcp_servers.below.http_headers]"):]
+                        self.assertTrue(target.read_text().endswith(suffix))
+                        (backup,) = pathlib.Path(d).glob("config.toml.bak-*-env-policy")
+                        self.assertEqual(backup.read_text(), original)
+                    else:
+                        self.assertEqual(target.read_text(), original)
+
     def test_it_refuses_when_the_explicit_set_would_change_and_never_prints_a_value(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             t = pathlib.Path(d, "config.toml")

@@ -38,7 +38,8 @@ policy, including a read-back through the installed `codex app-server` (no model
    byte-for-byte, checks that every other table and the `set` values are unchanged, keeps a private (0600, O_EXCL)
    `.bak-UTC-TIME-env-policy` copy, writes a temp file beside the target and `os.replace`s it on the realpath, and
    refuses (exit 1, nothing replaced) if the file changed after it was read or after the temp file was written.
-   Diagnostics name files and `set` keys, never values; a TOML parse error is reduced to line and column.
+   Table headers may have trailing TOML comments; their comments remain hidden in the diff.
+    Diagnostics name files and `set` keys, never values; a TOML parse error is reduced to line and column.
    A running Codex keeps the policy it started with; only sessions started after the change see it.
 4. Detached fallback. `acp-run` and the relay deliverer already drop the four owner ids. A headless command started
    any other way from a Codex tool (for example `codex exec` or a worker script outside ACP) inherits the whole Codex environment (including the six Herdr names),
