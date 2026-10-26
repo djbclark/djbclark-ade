@@ -510,8 +510,16 @@ def codex_pane_title() -> str | None:
             timeout=5, check=True).stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
-    value = data.get("label") or data.get("title")
-    return str(value).strip() or None
+    # Herdr's CLI wraps the pane in result.pane; older direct responses also work.
+    row = data.get("result", data) if isinstance(data, dict) else None
+    row = row.get("pane", row) if isinstance(row, dict) else None
+    if not isinstance(row, dict):
+        return None
+    for field in ("label", "title"):
+        value = row.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def codex_set_title(title: str) -> bool:

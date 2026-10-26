@@ -358,7 +358,8 @@ args = ["mcp"]
 url = "http://127.0.0.1:6806/mcp"
 
 [shell_environment_policy]
-inherit = "core"
+# Keep the launching terminal's runtime and pane context in tool commands.
+inherit = "all"
 
 [shell_environment_policy.set]
 NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "{{ .codex_browser_client_sha256s }}"

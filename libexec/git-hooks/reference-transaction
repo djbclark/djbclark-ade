@@ -1,0 +1,52 @@
+#!/bin/bash
+# ade-git-guard: the reference-transaction hook (O2, 2026-10-25; PR 59). Installed into a repository as a chain-preserving
+# stub by `ade-git-guard install` (or lazily by the shim); the stub execs THIS file by absolute path, so there is one copy.
+#
+# git calls it for every ref update of every command, with the resolved ref name: `refs/heads/cb` is the same event
+# whether `fetch . main:heads/cb`, `branch -f cb main`, `update-ref` or `push . main:cb` wrote it. In the `prepared` state a
+# non-zero exit aborts the transaction (the caller sees "aborted by the reference-transaction hook"); `committed` is logged.
+#   bin/ade_claims.py hook-ref STATE    the rules (claimed branch, foreign workspace, linked-worktree stash)
+#
+# Fast path, cheapest first: not an agent (no ACP_RUN_AGENT/ADE_CLAIM_ID, no CLAUDECODE/OMPCODE/CODEX_*) -> exit 0 before
+# anything else runs; no line about HEAD, refs/stash or refs/heads/ (a fetch of remote-tracking refs, tags) -> exit 0 without
+# Python. FAIL OPEN: this hook maps "python exited 77" to exit 77 (the one refusal code) and everything else (no python, a traceback, the 10 s alarm)
+# to exit 0, because a git hook that fails aborts the transaction for everyone, the operator included.
+# NEVER runs a ref-writing git (the transaction's locks are held). bash 3.2: no associative arrays, no `case` inside $( ).
+set -u
+
+agent=0
+if [ -n "${ADE_CLAIM_ID:-}" ] || { [ -n "${ACP_RUN_AGENT:-}" ] && [ "${ACP_RUN_AGENT}" != 0 ]; } \
+  || [ -n "${CLAUDECODE:-}" ] || [ -n "${OMPCODE:-}" ]; then
+  agent=1
+else
+  for v in $(compgen -A export); do
+    case "$v" in CODEX_*) agent=1; break ;; esac
+  done
+fi
+[ "$agent" = 1 ] || exit 0
+# git's own hooks (a pre-commit hook's `git checkout` dance) and pre-commit are never refused
+[ -z "${GIT_INDEX_FILE:-}" ] && [ -z "${PRE_COMMIT:-}" ] || exit 0
+case "${1:-}" in prepared | committed) ;; *) exit 0 ;; esac
+
+# whole of stdin without a fork (`read -d ''` returns 1 at EOF; the variable is set), matched with bash's own regex: a fetch
+# opens one transaction per ref, so no `cat` or `grep` process may start for the remote-tracking lines that do not matter
+IFS= read -r -d '' input || true
+nl='
+'
+re="(^|$nl)[^ ]+ [^ ]+ (HEAD|refs/stash)($|$nl)|(^|$nl)[^ ]+ [^ ]+ refs/heads/"
+[[ "$input" =~ $re ]] || exit 0
+
+self="$0"
+case "$self" in */*) ;; *) self="./$self" ;; esac
+while [ -L "$self" ]; do
+  t=$(readlink "$self")
+  case "$t" in /*) self="$t" ;; *) self="${self%/*}/$t" ;; esac
+done
+lib="${self%/*}/../../bin/ade_claims.py"
+py="${ADE_PYTHON:-python3}"
+command -v "$py" > /dev/null 2>&1 && [ -f "$lib" ] || exit 0
+
+printf '%s\n' "$input" | ADE_HOOK_GIT_PID="${ADE_HOOK_GIT_PID:-$PPID}" "$py" -I -S "$lib" hook-ref "$1"
+rc=$?
+[ "$rc" -eq 77 ] && exit 77
+exit 0
