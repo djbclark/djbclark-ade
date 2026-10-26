@@ -19,6 +19,7 @@ OUTER_ARGV0 = "bash (kiro-cli-term)"
 SHELLS = frozenset({"bash", "zsh", "sh", "dash", "fish", "ksh"})
 NO_TTY = frozenset({"", "?", "??", "-"})
 PS_ARGS = ("ps", "-axo", "pid=,ppid=,pgid=,tpgid=,tty=,comm=")
+PROC_ROOT = "/proc"      # patched by tests so a fixture pid never reads a real process
 
 
 def parse_ps(text):
@@ -79,7 +80,7 @@ def argv_of(row, ps_command):
     """argv of ROW: exact from /proc on Linux; elsewhere `ps -ww -o command=` split on blanks, the only form macOS gives.
     PS_COMMAND(pid) returns that text ('' when unreadable)."""
     try:
-        raw = Path(f"/proc/{row['pid']}/cmdline").read_bytes()
+        raw = Path(f"{PROC_ROOT}/{row['pid']}/cmdline").read_bytes()
     except OSError:
         raw = b""
     if raw:

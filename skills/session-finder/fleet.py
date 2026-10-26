@@ -687,15 +687,44 @@ def pane_procs(pane):
         argv = pr.get("argv") or ([pr["cmdline"]] if pr.get("cmdline") else [])
         procs.append({"pid": pr.get("pid"), "name": pr.get("name") or pr.get("argv0") or "", "argv": argv,
                       "argv0": pr.get("argv0") or "", "cwd": pr.get("cwd") or ""})
-    return _kiro_inner(procs, info.get("shell_pid")) or procs, info.get("shell_pid")
+    inner = _kiro_inner(procs, info.get("shell_pid"))
+    if inner is _KIRO_UNKNOWN:      # a confirmed shim whose inner side could not be read: unknown, not a plain shell
+        return None, info.get("shell_pid")
+    return inner or procs, info.get("shell_pid")
+
+
+class _KiroUnknown:
+    """Sentinel result of `_kiro_inner`: the pane IS a Kiro shim but its inner foreground could not be read (ps failed, empty or
+    a live process's argv unreadable). Distinct from None (not a shim, or the chain is absent/ambiguous: herdr's answer stands)
+    and from a list (proven)."""
+    def __repr__(self):
+        return "<kiro inner unknown>"
+
+
+_KIRO_UNKNOWN = _KiroUnknown()
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:      # EPERM: it exists
+        return True
+    return True
 
 
 def _kiro_inner(procs, shell_pid):
-    """The inner-PTY foreground processes behind a Kiro shim, in `pane_procs` shape, or None (not a shim, or not provable)."""
+    """The inner-PTY foreground processes behind a Kiro shim in `pane_procs` shape (proven: a non-empty list, its group leader
+    included), None (not a shim, or no/ambiguous nested chain), or `_KIRO_UNKNOWN` (a shim that could not be read). A member that
+    exited after the ps snapshot is skipped; if the leader itself exited the foreground job is gone and herdr's answer stands."""
     if not isinstance(shell_pid, int) or len(procs) != 1 or procs[0].get("argv0") != _nested.OUTER_ARGV0:
         return None
     rc, text = run(*_nested.PS_ARGS, timeout=5)
-    rows = _nested.inner_foreground(procs, shell_pid, _nested.parse_ps(text)) if rc == 0 else None
+    table = _nested.parse_ps(text) if rc == 0 else {}
+    if not table:      # ps failed, timed out, or printed nothing: `ps -ax` never legitimately does
+        return _KIRO_UNKNOWN
+    rows = _nested.inner_foreground(procs, shell_pid, table)
     if not rows:
         return None
     command = lambda pid: run("ps", "-ww", "-o", "command=", "-p", str(pid), timeout=5)[1].strip()
@@ -703,9 +732,12 @@ def _kiro_inner(procs, shell_pid):
     for r in rows:
         argv = _nested.argv_of(r, command)
         if not argv:
-            return None
+            if _pid_alive(r["pid"]):
+                return _KIRO_UNKNOWN
+            continue
         out.append({"pid": r["pid"], "name": os.path.basename(r["comm"]), "argv": argv, "argv0": argv[0], "cwd": ""})
-    return out
+    leader = rows[0]["pgid"]
+    return out if any(p["pid"] == leader for p in out) else None
 
 
 SID_IN_ARGV = re.compile(r"(?:--resume|--session|--conversation|--id|-s|-r)(?:=|$)")

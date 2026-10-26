@@ -98,19 +98,23 @@ class TestPaneProcs(unittest.TestCase):
     """fleet.pane_procs end to end with herdr and ps replaced at fleet's own boundary."""
 
     def setUp(self):
-        self._saved = (fleet.herdr_json, fleet.run)
+        self._saved = (fleet.herdr_json, fleet.run, fleet._pid_alive, nested_pty.PROC_ROOT)
+        nested_pty.PROC_ROOT = "/nonexistent-proc-root"     # fixture pids must never read a real /proc entry
 
     def tearDown(self):
-        fleet.herdr_json, fleet.run = self._saved
+        fleet.herdr_json, fleet.run, fleet._pid_alive, nested_pty.PROC_ROOT = self._saved
 
-    def drive(self, procs, text, rc=0, argv="/opt/homebrew/bin/goose session"):
+    def drive(self, procs, text, rc=0, argv="/opt/homebrew/bin/goose session", alive=()):
+        """ARGV is the `ps -o command=` text for every pid, or {pid: text} ('' = unreadable); ALIVE the pids still alive."""
         fleet.herdr_json = lambda *a: {"process_info": {"shell_pid": 100, "foreground_processes": procs}}
+        fleet._pid_alive = lambda pid: pid in alive
 
         def run(*cmd, timeout=10):
             if cmd[:2] == ("ps", "-axo"):
                 return rc, text
             if cmd[:3] == ("ps", "-ww", "-o"):
-                return 0, argv + "\n"
+                t = argv.get(int(cmd[-1]), "") if isinstance(argv, dict) else argv
+                return (0, t + "\n") if t else (1, "")
             raise AssertionError(cmd)
         fleet.run = run
         return fleet.pane_procs("w1:p1")
@@ -125,10 +129,32 @@ class TestPaneProcs(unittest.TestCase):
         procs, _ = self.drive([SHIM], "\n".join(BASE.values()), argv="node /x/bin/mastracode --mode auto")
         self.assertEqual(fleet._tui_of(procs)[:2], ("mastra", 300))
 
-    def test_unprovable_chain_keeps_herdrs_plain_shell_answer(self):
-        for text, rc in (("\n".join(BASE.values()) + "\n201 100 201 201 ttys018 zsh", 0), ("", 0), ("\n".join(BASE.values()), 1)):
-            procs, _ = self.drive([SHIM], text, rc=rc)
-            self.assertEqual(procs, [dict(SHIM, argv=SHIM["argv"])])
+    def test_member_that_exited_after_the_snapshot_keeps_the_leader(self):
+        text = "\n".join(BASE.values()) + "\n301 300 300 300 ttys017 node"
+        procs, _ = self.drive([SHIM], text, argv={300: "/opt/homebrew/bin/goose session"}, alive={300})
+        self.assertEqual([p["pid"] for p in procs], [300])
+        self.assertEqual(fleet._tui_of(procs)[:2], ("goose", 300))
+
+    def test_leader_that_exited_after_the_snapshot_leaves_herdrs_answer(self):
+        procs, _ = self.drive([SHIM], "\n".join(BASE.values()), argv="")
+        self.assertEqual(procs, [SHIM])
+
+    def test_unreadable_argv_of_a_live_member_is_unknown(self):
+        text = "\n".join(BASE.values()) + "\n301 300 300 300 ttys017 node"
+        got = self.drive([SHIM], text, argv={300: "/opt/homebrew/bin/goose session"}, alive={300, 301})
+        self.assertEqual(got, (None, 100))
+        self.assertEqual(self.drive([SHIM], "\n".join(BASE.values()), argv="", alive={300}), (None, 100))
+
+    def test_ps_failure_timeout_or_empty_success_on_a_shim_is_unknown(self):
+        good = "\n".join(BASE.values())
+        for text, rc in ((good, 1), (good, 127), ("", 0), ("", 127), ("garbage\n", 0)):
+            self.assertEqual(self.drive([SHIM], text, rc=rc), (None, 100))
+        self.assertEqual(fleet._tui_of(None), (None, None, None, None))
+
+    def test_absent_or_ambiguous_chain_keeps_herdrs_plain_shell_answer(self):
+        for text in ("\n".join(BASE.values()) + "\n201 100 201 201 ttys018 zsh", "100 1 100 100 ttys014 bash (kiro-cli-term)"):
+            procs, shell_pid = self.drive([SHIM], text)
+            self.assertEqual((procs, shell_pid), ([SHIM], 100))
             self.assertEqual(fleet._tui_of(procs), (None, None, None, None))
 
     def test_ordinary_pane_does_not_run_ps(self):
