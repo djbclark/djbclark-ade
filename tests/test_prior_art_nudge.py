@@ -574,7 +574,7 @@ def test_unknown_names_are_bucketed(box):
 def test_records_carry_a_schema_and_classifier_version(box):
     box.tool("Read", {"file_path": "/tmp/a"})
     box.prompt()
-    assert all(r["schema"] == 2 and r["classifier_version"] == 4 for r in box.records())
+    assert all(r["schema"] == 2 and r["classifier_version"] == 5 for r in box.records())
 
 
 def test_call_hashes_are_salted_per_session(box):
@@ -1009,28 +1009,62 @@ def test_r3_a_number_word_before_a_redirect_is_only_an_fd_when_it_touches_it(box
     assert cat_of(box, command.replace("{w}", str(box.work))) == want
 
 
+HEREDOC_IN_QUOTED_SUB = [
+    # R4-1: a heredoc inside "$( )" is text for the outer command, whatever it holds (commit and PR bodies)
+    "git commit -m \"$(cat <<'EOF'\nfix: run `cat node_modules/a.js` first\nEOF\n)\"",                    # A1a
+    "gh pr create --body \"$(cat <<'EOF'\nSee `curl https://example.com/x`\nEOF\n)\"",                    # A1b
+    "git commit -m \"$(cat <<'EOF'\nchange `ls ~/.claude/state` and `gh search code foo`\nEOF\n)\"",     # A1c
+    "git commit -m \"$(cat <<'EOF'\nuse $(cat node_modules/a.js) here\nEOF\n)\"",                          # A1d
+    "git commit -m \"$(cat <<'EOF'\nrun $(find /nix/store/x) then `rg foo /nix/store/y`\nEOF\n)\"",
+    "git commit -m \"$(cat <<EOF\nrun $(curl https://example.com/x)\nEOF\n)\"",                           # unquoted word
+    "git commit -m \"$(cat <<'EOF'\nsubject\n\n```sh\ncat node_modules/a.js\ncurl https://example.com/x\n```\nEOF\n)\"",
+]
+
+
+def test_r4_a_heredoc_inside_a_quoted_substitution_is_the_outer_command_only(box, monkeypatch):
+    monkeypatch.setenv("HOME", str(box.home))
+    pa = _load_hook()
+    for command in HEREDOC_IN_QUOTED_SUB:
+        cat, extras = pa.classify("Bash", {"command": command}, str(box.work))
+        assert (cat, extras) == ("private_other", {}), command
+
+
+@pytest.mark.parametrize("command", HEREDOC_IN_QUOTED_SUB)
+def test_r4_the_hook_records_a_heredoc_inside_a_quoted_substitution_as_no_read(box, command):
+    box.tool("Bash", {"command": command})
+    box.tool("Bash", {"command": "ls"})
+    first, second = box.records()
+    assert first["category"] == "private_other"
+    assert "path_class" not in first and "host_class" not in first
+    assert first["run_length"] == 0 and not second.get("web_or_memory_before")
+
+
 @pytest.mark.parametrize("command, want", [
-    # R3-3.2: a substitution inside double quotes is a command that runs
-    ('echo "$(find /nix/store/x)"', "external_code"),
-    ('echo "a `find /nix/store/x` b"', "external_code"),
-    ('echo "x: $(cat /nix/store/a | head -1)"', "external_code"),
-    ('echo "$(echo "$(find /nix/store/x)")"', "external_code"),         # nested
-    ("echo \"$(cat '/nix/store/x')\"", "external_code"),
-    ("echo '$(find /nix/store/x)'", "private_other"),                   # single quotes: text
-    ('echo "\\$(find /nix/store/x)"', "private_other"),                 # escaped: text
-    ('echo "`find /nix/store/x`" ; echo \'`find /tmp`\'', "external_code"),
+    # R4-1: a substitution inside double quotes is NOT scanned (a documented miss, docs/queue.md); do not
+    # re-add the scan without a heredoc rule that costs nothing (round 4 found it invents reads in commit bodies)
+    ('echo "$(find /nix/store/x)"', "private_other"),
+    ('echo "a `find /nix/store/x` b"', "private_other"),
+    ('echo "x: $(cat /nix/store/a | head -1)"', "private_other"),
+    ('echo "$(curl https://example.com/x)"', "private_other"),
+    ('echo "$(cat {w}/a.py)"', "private_other"),
+    # the same text outside double quotes is a command that runs
+    ('echo $(find /nix/store/x)', "external_code"),
+    ('echo `find /nix/store/x`', "external_code"),
+    ('X=$(cat /nix/store/x); echo "$X"', "external_code"),
+    # single quotes and an escaped `$` are text either way
+    ("echo '$(find /nix/store/x)'", "private_other"),
+    ('echo "\\$(find /nix/store/x)"', "private_other"),
+    # what the quoted text leaves outside it is still read
     ('echo "$(date)"; rg foo {w}/lib', "own_code"),
-    ('echo "$((1+2))"; rg foo {w}/lib', "own_code"),                    # arithmetic, not a command
-    ('echo "a $(echo ")") b"; rg foo /nix/store/x', "external_code"),   # quote state unchanged; an odd one is skipped
+    ('echo "$((1+2))"; rg foo /nix/store/x', "external_code"),
     ('echo "$(unclosed"; rg foo {w}/lib', "own_code"),
-    ('echo "a $(echo ")") b" \'x; cat /nix/store/x\'', "private_other"),  # a skipped odd one does not push the rest to the coarse split
-    ('echo "$(cat {w}/a.py)"', "own_code"),
+    ('echo "a $(echo ")") b"; rg foo /nix/store/x', "external_code"),
 ])
-def test_r3_a_substitution_inside_double_quotes_is_scanned(box, command, want):
+def test_r4_a_substitution_inside_double_quotes_is_not_scanned(box, command, want):
     assert cat_of(box, command.replace("{w}", str(box.work))) == want
 
 
-def test_r3_quoted_substitutions_are_bounded_and_silent(box):
+def test_r4_openers_inside_double_quotes_are_silent_and_fast(box):
     t0 = time.monotonic()
     for cmd in ('"' + "$(" * 100_000, '"' + "`a" * 100_000, '"$(' + "(" * 100_000, ('"$(echo x)" ' * 5_000)):
         box.tool("Bash", {"command": cmd})
@@ -1041,3 +1075,76 @@ def test_r3_quoted_substitutions_are_bounded_and_silent(box):
 def test_r3_a_value_that_grows_past_a_path_is_unknown(box):
     r = rec_of(box, "X=/nix/store/a;" + "X=$X$X;" * 20 + "cat $X")
     assert (r["category"], r["path_class"]) == ("private_other", "unresolved")
+
+
+def _peak_bytes(fn):
+    import tracemalloc
+    tracemalloc.start()
+    try:
+        fn()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def _doubling_loops(reps: int) -> str:
+    """The adversary's dos4b shape: a 4,096-character value, two 50-value loops over it, a word of both."""
+    return ("A=xxxxxxxx; " + "A=$A$A; " * 9 + "for B in " + " ".join(["$A"] * 50) + "; do for C in "
+            + " ".join(["$A"] * 50) + "; do cat " + "$B$C" * reps + "; done; done")
+
+
+@pytest.mark.parametrize("reps", [5, 25, 60])
+def test_r4_loop_products_are_capped_before_they_are_built(box, monkeypatch, reps):
+    monkeypatch.setenv("HOME", str(box.home))
+    pa = _load_hook()
+    cmd = _doubling_loops(reps)
+    out = []
+    peak = _peak_bytes(lambda: out.append(pa.classify("Bash", {"command": cmd}, str(box.work))))
+    assert out[0][0] == "private_other" and out[0][1].get("path_class") == "unresolved"
+    assert peak < 4_000_000, peak                               # the post-product check peaked at 96 .. 591 MB
+
+
+def test_r4_a_product_stops_at_max_paths_while_it_is_built(monkeypatch, box):
+    monkeypatch.setenv("HOME", str(box.home))
+    pa = _load_hook()
+    env = {n: [f"{i}" + "x" * 1000 for i in range(pa.MAX_PATHS)] for n in "ABC"}
+    out = []
+    peak = _peak_bytes(lambda: out.append(pa._subst_vars("$A/$B/$C", env)))
+    assert 0 < len(out[0]) <= pa.MAX_PATHS
+    assert all(len(o) <= pa.MAX_VALUE_CHARS for o in out[0])
+    assert peak < 1_000_000, peak                               # 2,500 combinations of 2 KB was 5 MB
+
+
+def test_r4_a_word_or_value_over_the_bound_is_unknown_not_truncated(box, monkeypatch):
+    monkeypatch.setenv("HOME", str(box.home))
+    pa = _load_hook()
+    big = "y" * pa.MAX_VALUE_CHARS
+    assert pa._subst_vars("$A", {"A": [big]}) == [big]
+    assert pa._subst_vars("$A/", {"A": [big]}) is None
+    assert pa._subst_vars("z" * (pa.MAX_VALUE_CHARS + 1), {}) is None
+
+
+def test_r4_the_hook_survives_the_loop_product_inside_its_deadline(box):
+    t0 = time.monotonic()
+    for reps in (5, 25, 60):
+        box.tool("Bash", {"command": _doubling_loops(reps)})      # run() asserts exit 0 and silence
+    assert time.monotonic() - t0 < 6
+    assert [r["category"] for r in box.records()] == ["private_other"] * 3
+
+
+@pytest.mark.parametrize("command, want, pclass", [
+    # R4-3: a `bash -c` child starts with an empty variable table: nothing of the parent's reaches it,
+    # exported or not (a stated limit, docs/queue.md: bash would pass the exported value)
+    ("export X=/nix/store/a; bash -c 'cat $X'", "private_other", "unresolved"),
+    ("X=/nix/store/a; export X; bash -c 'cat $X'", "private_other", "unresolved"),
+    ("X=/nix/store/a; bash -c 'cat $X'", "private_other", "unresolved"),
+    ("X=/nix/store/a; sh -c 'cat \"$X\"/f'", "private_other", "unresolved"),
+    # an assignment made inside the child is the child's own
+    ("bash -c 'X=/nix/store/a; cat $X'", "external_code", "nix"),
+    ("bash -c 'X=/nix/store/a; bash -c \"cat \\$X\"'", "private_other", "unresolved"),
+    # and what the child does leaves the parent's table alone
+    ("bash -c 'X=/nix/store/a'; cat $X", "private_other", "unresolved"),
+])
+def test_r4_a_child_shell_does_not_inherit_the_variables_of_its_parent(box, command, want, pclass):
+    r = rec_of(box, command)
+    assert (r["category"], r.get("path_class")) == (want, pclass)

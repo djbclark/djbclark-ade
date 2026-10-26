@@ -80,7 +80,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit
 
 SCHEMA = 2
-CLASSIFIER_VERSION = 4
+CLASSIFIER_VERSION = 5
 
 CAP_BYTES = 5 * 1024 * 1024
 CAP_TAIL = b'{"capped":true}\n'
@@ -92,9 +92,7 @@ SCAN_CHARS = 200_000
 MAX_CMD_CHARS = 20_000
 MAX_TOKENS = 2_000
 MAX_PATHS = 50
-SUB_MAX_CHARS = 2_000                                   # a substitution inside double quotes: longest scanned
 MAX_VALUE_CHARS = 4096                                  # a resolved word longer than a path can be is unknown
-SUB_MAX_COUNT = 20                                      # ... and how many per command
 RECENT_CALLS = 30
 EXTERNAL_RUN = 3
 LOCK_WAIT_TOTAL_S = 0.5                                 # wall-clock bound on waiting for the session lock
@@ -343,16 +341,28 @@ VAR_REF_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 def _subst_vars(w: str, env: dict) -> list[str] | None:
     """The values a shell word takes once its `$NAME` and `${NAME}` references are replaced from env (the
     literal assignments and loop lists seen earlier in the same command, plus $HOME); one value per
-    combination of loop values. None when a reference has no literal value or any other `$` or backtick
-    form is left (`$(...)`, `$1`, `${X:-y}`)."""
+    combination of loop values, at most MAX_PATHS. None when a reference has no literal value, any other
+    `$` or backtick form is left (`$(...)`, `$1`, `${X:-y}`), or a value is longer than MAX_VALUE_CHARS
+    (checked while the product is built, so it never allocates past those bounds)."""
+    if len(w) > MAX_VALUE_CHARS:
+        return None
     out = [w]
     for name in dict.fromkeys(a or b for a, b in VAR_REF_RE.findall(w)):
         vals = env.get(name, [str(Path.home())] if name == "HOME" else None)
         if not vals:
             return None
         pat = re.compile(r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (name, name))
-        out = [pat.sub(lambda _m, v=v: v, o) for o in out for v in vals][:MAX_PATHS]
-    return None if any("$" in o or "`" in o or len(o) > MAX_VALUE_CHARS for o in out) else out
+        nxt: list[str] = []
+        for o in out:
+            for v in vals:
+                if len(nxt) >= MAX_PATHS:
+                    break
+                s = pat.sub(lambda _m, v=v: v, o)
+                if len(s) > MAX_VALUE_CHARS:
+                    return None
+                nxt.append(s)
+        out = nxt
+    return None if any("$" in o or "`" in o for o in out) else out
 
 
 def _resolve_word(w: str, cwd: str, env: dict) -> list[str] | None:
@@ -505,51 +515,21 @@ def _skip_heredoc_body(cmd: str, i: int, word: str, dash: bool) -> int:
     return i
 
 
-def _quoted_sub(cmd: str, i: int) -> str | None:
-    """Inside double quotes, at a `$(` or a backtick: the text of that substitution (None for `$((`, an
-    unclosed one, or one longer than SUB_MAX_CHARS). Parentheses are counted without regard to quotes."""
-    end = min(len(cmd), i + SUB_MAX_CHARS)
-    if cmd[i] == "`":
-        j = i + 1
-        while j < end:
-            if cmd[j] == "\\":
-                j += 1
-            elif cmd[j] == "`":
-                return cmd[i + 1:j]
-            j += 1
-        return None
-    if not cmd.startswith("$(", i) or cmd.startswith("$((", i):
-        return None
-    depth, j = 0, i + 1
-    while j < end:
-        if cmd[j] == "\\":
-            j += 1
-        elif cmd[j] == "(":
-            depth += 1
-        elif cmd[j] == ")":
-            depth -= 1
-            if depth == 0:
-                return cmd[i + 2:j]
-        j += 1
-    return None
-
-
-def _prepare(cmd: str, depth: int = 0) -> str:
+def _prepare(cmd: str) -> str:
     """The command text with what must not be tokenised removed: heredoc bodies (<<WORD, <<-WORD with its
     tab-stripped terminator, quoted forms; an unterminated body runs to the end, as in bash), comments
     (`#` at the start of a word), and backslash-newline continuations; a backtick substitution becomes
     `$( ... )` and each heredoc operator becomes `<< _ `. A digit word touching `<` or `>` (the fd of
     `2>f`, `0<f`) becomes the marker word NUL+digits before the operator, so `head -n 5 < f` keeps its
-    `< f`. A `$( ... )` or backtick substitution inside double quotes is copied to the text as it stands
-    and also appended as `( ... )` after it, so what it reads is seen (at most SUB_MAX_COUNT, none that
-    does not tokenise). Quote state follows bash for ' " and backslash."""
+    `< f`. A `$( ... )` or backtick substitution inside double quotes is NOT scanned (`echo "$(find
+    /nix/store)"` is a miss): its text, heredoc body included, stays one quoted word. Quote state follows
+    bash for ' " and backslash."""
     if "\x00" in cmd:
         cmd = cmd.replace("\x00", " ")
     out: list[str] = []
     pending: list[tuple[str, bool]] = []
-    subs: list[str] = []
     n, i = len(cmd), 0
-    quote, tick, word_start, digits, tries = "", False, True, 0, 0
+    quote, tick, word_start, digits = "", False, True, 0
     while i < n:
         c = cmd[i]
         fd, digits = digits, 0
@@ -565,10 +545,6 @@ def _prepare(cmd: str, depth: int = 0) -> str:
             i += 2
             continue
         if quote == '"':
-            if c in "$`" and depth < 2 and tries < 2 * SUB_MAX_COUNT:
-                tries += 1
-                if (inner := _quoted_sub(cmd, i)) is not None and len(subs) < SUB_MAX_COUNT:
-                    subs.append(inner)
             out.append(c)
             i += 1
             quote = "" if c == '"' else quote
@@ -608,13 +584,6 @@ def _prepare(cmd: str, depth: int = 0) -> str:
         i += 1
         digits = fd + 1 if c in "0123456789" and (fd or word_start) else 0
         word_start = c in " \t;&|("
-    for inner in subs:
-        text = _prepare(inner, depth + 1)
-        try:
-            _lex(text)
-        except ValueError:
-            continue
-        out.append(f"\n( {text} )")
     return "".join(out)
 
 
