@@ -37,6 +37,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -181,7 +182,7 @@ def _profile_nudge(st, session_id, nudges):
     stamp = f"{prof.get('until')}|{today}"
     if nudges.get(key) == stamp:
         return False
-    name = prof["name"] if prof["name"].replace("-", "").replace("_", "").isalnum() else "gate"
+    name = prof["name"] if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", prof["name"]) else "gate"     # ASCII only, as ade_gates.NAME_RE
     print(f"[gates] {name} profile active until {when}; gate-profile clear restores normal routing", flush=True)
     nudges.pop(key, None)
     nudges[key] = stamp

@@ -21,7 +21,8 @@ never changes a code path, only these numbers.
 Lowest to highest: the script's `THRESHOLDS` (code default, the fail-safe) < `[governor]` / `[quota_guard]` in `gates.toml`
 < the active profile < env JSON (`CLAUDE_GOVERNOR_THRESHOLDS`, `CLAUDE_QUOTA_GUARD_THRESHOLDS`; tests and emergencies, no
 floors, bad input is an error: governor exit 12, guard exit 64). The baseline must equal the code defaults: `tests/test_gates.py`
-and `bin/gate-profile validate` fail on drift, so change a number in both places in one commit.
+and `bin/gate-profile validate` fail on drift, so change a number in both places in one commit. At run time the baseline is
+guarded as well (below): the file may tighten a code default, never loosen it.
 
 ## `gates.toml`
 
@@ -66,12 +67,53 @@ one instead).
 
 ## Fail-safe: when a profile is ignored (baseline applies, `status` says why)
 
-File missing, unreadable, not a JSON object, `schema` not 1; `until` or `since` missing, naive, or not offset zero;
+File missing, unreadable, a symlink, FIFO, directory or over 64 KiB, not a JSON object, `schema` not the integer 1 (not `true`,
+not `1.0`); `until` or `since` missing, naive, or not offset zero; `profile` not `[a-z0-9_-]` (ASCII, 32 characters at most);
 `until` at or before now (the profile ends exactly at `until`); `since` in the future; `until <= since`; window over
 `max_profile_hours`; unknown profile name; any key not under `[floors]`, any value tighter than the baseline, below a
 `lower` bound or above a `higher` bound, on EITHER gate (the whole profile is rejected, never clamped, so the governor and the guard
-always agree); a profile whose applied guard values break `watch_weekly >= tight_weekly >= critical_weekly` (`validate` also
-checks the baseline); `gates.toml` missing or unparsable (code defaults apply, logged once to stderr).
+always agree); a profile whose applied values break an ordering: guard `watch_weekly >= tight_weekly >= critical_weekly`,
+governor `tight_left_weekly >= critical_left` and `tight_left_five_hour >= critical_left` (`validate` also checks the baseline);
+`gates.toml` missing or unparsable (code defaults apply, logged once to stderr). A number too large for a float (an integer of 400
+digits) is not a number anywhere: baseline, profile, `max_profile_hours` (then the 240 h default), profile file or env JSON
+(a `GateEnvError`, the existing bad-env path); none of them can crash a gate.
+
+## Locking, file reads and run-time guards (2026-10-26, after adversary round 1)
+
+**Lock.** `~/.local/state/ade/gate-profile.json.lock` is an flock that serialises every WRITER of the profile file: the governor's
+and guard's expiry and daily notices (held across their `hermes-ping`, up to 60 s) and `gate-profile set`, `extend` and `clear`
+(held only around their read and write or unlink, never around their ping and recompute: those run the governor, which takes the
+same lock). Readers (the gates' `load_gates`, `status`, `show`, `diff`) never take it, so a ping in flight never delays a
+threshold; writes are atomic replaces. Bounds: a CLI command waits at most 120 s (two 60 s pings back to back; env
+`GATE_PROFILE_LOCK_WAIT` shortens it for tests), then exits 1 with "the profile lock is still held ... nothing changed, try
+again in a minute". The governor and guard wait at most 10 s, then skip that notice; nothing was marked, so the next run
+(5 min, 15 min) retries it. So a ping holding the lock cannot starve a gate run: the worst it costs the governor is 10 s before
+it writes its level, and launchd never starts a second instance of a running job. (`claude-fleet-governor` has no run lock of
+its own, so a manual `run` during a launchd run can overlap: unchanged, not made worse.) A notice's failed-ping restore is a
+compare-and-restore: the mark is taken back only while the file still holds exactly the marked text, so a profile cleared or set
+again by a writer that did not wait (an older `gate-profile`, a hand edit) is never brought back or overwritten. A lock file that
+is a symlink, FIFO or other non-regular file counts as no lock (notices skip, the CLI refuses); nothing blocks on it.
+
+**Baseline guard.** `load_gates` replaces a `gates.toml` baseline value with the code default when the key has a `[floors]` entry
+and the file's value is looser in that direction (lower for a "percent left" key, higher for `tight_projected`), logs it once to
+stderr and lists it in `info["baseline_guarded"]` (`status` prints it). So git can tighten a number without touching code but a
+loosening needs a profile (expiring, floored, pinged). Keys with no floor entry (timings, ages, locks) take the file's value at
+run time; `validate` and `tests/test_gates.py` still fail on ANY drift, tighter or looser. Profile validity is judged against the
+file's baseline, the same verdict in both gates.
+
+**Profile file reads.** `O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC`, `fstat` must say regular file, at most 64 KiB (a real one is
+about 400 bytes). Anything else is the baseline with the reason in `status`. DECIDED: a symlink is refused, even to a valid file:
+`gate-profile set` writes by atomic rename (it replaces a link with a regular file), nothing in this toolchain creates a link
+there, and a link is how a FIFO or `/dev/zero` would be slipped in. A symlinked parent directory is still followed.
+
+**Accepted, as designed.** Env JSON has no floors and beats a profile (setting it needs the launchd plist or the Ansible role, which
+is control of the code already). `set` is mark-before-ping, so a SIGKILL between the mark and the ping loses that day's nudge (the
+next day still nudges) or the expiry ping; a failed ping that returns normally is restored and retried on the next run. A
+governor profile whose `tight_left_weekly` sits at its floor of 8 while a drifted baseline keeps `critical_left` looser is judged
+against the file's baseline (see above); the effective order can then fire critical first, which is stricter, never looser.
+`--reason` is limited to 500 characters and `--by` to 64 (the file is read back with a 64 KiB cap); the `set` ping carries one
+printable line, the reason clipped to 120 characters and `--by` to 40. After `clear`, if the guard recompute fails, the file is
+gone and the gates are at baseline; the quota hook may keep printing its `[gates]` line until the next guard run, and `clear` says so.
 
 ## Worked example: three days away
 

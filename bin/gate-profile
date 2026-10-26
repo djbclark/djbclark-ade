@@ -20,7 +20,12 @@ America/New_York, 12-hour. Exit codes: 0 ok, 1 refused or invalid, 2 usage.
 State: ~/.local/state/ade/gate-profile.json (env GATE_PROFILE_STATE), audit log gate-profile.log beside it
 (GATE_PROFILE_LOG), one JSON line per set/extend/clear. Env (tests): GATES_TOML, GATE_PROFILE_PING (default
 ~/.local/bin/hermes-ping), GATE_PROFILE_GOVERNOR / GATE_PROFILE_GUARD (the scripts `run` / `check` are asked to recompute
-with; default: beside this file), GATE_PROFILE_NOW (ISO time standing in for the clock). Ping and recompute are soft-fail.
+with; default: beside this file), GATE_PROFILE_NOW (ISO time standing in for the clock), GATE_PROFILE_LOCK_WAIT (seconds `set`,
+`extend` and `clear` wait for the profile lock, default 120). Ping and recompute are soft-fail.
+
+Lock: set, extend and clear take the flock beside the state file around their read and write (never around the ping or the
+recompute, which ask the governor and guard for that same lock). A governor or guard ping holds it for up to 60 s, so a command
+waits at most the bound, then refuses with exit 1 and changes nothing: try again. status, show, diff and validate never wait.
 """
 from __future__ import annotations
 
@@ -41,7 +46,9 @@ sys.path[:0] = [d for d in (str(HERE),) if d not in sys.path]   # python3 -I has
 import ade_gates as g  # noqa: E402
 
 EX_BAD = 1
-DURATION = re.compile(r"(\d+)([mhd])")
+DURATION = re.compile(r"([0-9]+)([mhd])")
+MAX_REASON, MAX_BY = 500, 64        # characters; the state file is read back with a 64 KiB cap, so a command may not outgrow it
+PING_REASON, PING_BY = 120, 40      # characters of each in the `set` ping
 
 
 def now_utc() -> datetime:
@@ -120,6 +127,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     if info["toml_error"]:
         print(f"  gates.toml unusable, code defaults in force: {info['toml_error']}")
     for gate in g.GATES:
+        if both[gate]["info"]["baseline_guarded"]:
+            keys = ", ".join(f"{k} ({fmt(v)})" for k, v in sorted(both[gate]["info"]["baseline_guarded"].items()))
+            print(f"  {gate}: gates.toml is looser than the code default for {keys}; the code default is in force")
+    for gate in g.GATES:
         d = gates[gate]
         print(f"{gate}:" + ("" if d["changed"] else " no change from baseline"))
         for k, v in sorted(d["changed"].items()):
@@ -164,7 +175,7 @@ def cmd_show(args: argparse.Namespace, only_changed: bool = False) -> int:
                 continue
             spec = g.floor_spec(cfg, gate, k) or {}
             bound = f"{spec.get('loosen', '?')} is looser, bound {fmt(spec['bound'])}" if g.is_num(spec.get("bound")) else "not overridable"
-            rows.append(f"  {k}: {fmt(b) if b is not None else '?'} -> {fmt(v) if g.is_num(v) else repr(v)}  ({bound})")
+            rows.append(f"  {k}: {fmt(b) if b is not None else '?'} -> {fmt(v) if g.is_num(v) else g._show(v)}  ({bound})")
         if rows:
             print(f"{gate}:")
             print("\n".join(rows))
@@ -185,7 +196,7 @@ def validate() -> list[str]:
         return [str(err)]
     out: list[str] = []
     meta = cfg.get("meta")
-    if not isinstance(meta, dict) or meta.get("schema") != g.SCHEMA:
+    if not isinstance(meta, dict) or type(meta.get("schema")) is not int or meta["schema"] != g.SCHEMA:
         out.append(f"[meta].schema must be {g.SCHEMA}")
     if not isinstance(meta, dict) or not g.is_num(meta.get("max_profile_hours")) or meta["max_profile_hours"] <= 0:
         out.append("[meta].max_profile_hours must be a positive number")
@@ -219,8 +230,6 @@ def validate() -> list[str]:
         out.append("no [profiles.*] defined")
     else:
         for name in sorted(profiles):
-            if not g.NAME_RE.fullmatch(str(name)):
-                out.append(f"profile name {name!r} is not [a-z0-9_-], 32 chars at most")
             out += g.profile_problems(cfg, name, base)
     return out
 
@@ -241,32 +250,52 @@ def cmd_validate(args: argparse.Namespace) -> int:
 # -- set / clear -------------------------------------------------------------------------------------------------------
 
 def parse_for(text: str) -> timedelta | None:
+    """`Nm`, `Nh` or `Nd` as a timedelta; None for anything else, a zero, or a span too big for a timedelta."""
     m = DURATION.fullmatch(text.strip())
     if not m:
         return None
-    return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[m.group(2)]: int(m.group(1))})
+    try:
+        return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[m.group(2)]: int(m.group(1))})
+    except (OverflowError, ValueError):     # 99999999999d; a 4300+ digit number
+        return None
 
 
-def run_soft(argv: list[str], timeout: int) -> str:
+def add_time(base: datetime, delta: timedelta) -> datetime | None:
+    """base + delta, or None past the last representable time."""
+    try:
+        return base + delta
+    except OverflowError:
+        return None
+
+
+def clean(text: str, limit: int) -> str:
+    """One printable line of at most `limit` characters (a message to a phone, from operator text)."""
+    one = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+    return one if len(one) <= limit else one[:limit - 1] + "…"
+
+
+def run_soft(argv: list[str], timeout: int) -> tuple[bool, str]:
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False, stdin=subprocess.DEVNULL)
     except FileNotFoundError:
-        return "not found"
+        return False, "not found"
     except subprocess.TimeoutExpired:
-        return f"timed out after {timeout}s"
+        return False, f"timed out after {timeout}s"
     except OSError as e:
-        return f"failed ({e.strerror or e})"
-    return f"rc={r.returncode}"
+        return False, f"failed ({e.strerror or e})"
+    return r.returncode == 0, f"rc={r.returncode}"
 
 
-def after_change(text: str) -> None:
-    """Ping, then ask both gates to recompute now. Every step soft-fails."""
+def after_change(text: str) -> bool:
+    """Ping, then ask both gates to recompute now. Every step soft-fails. Call with no lock held. True when the guard recomputed."""
     ping = os.environ.get("GATE_PROFILE_PING") or str(Path(os.environ.get("HOME") or Path.home()) / ".local/bin/hermes-ping")
     gov = os.environ.get("GATE_PROFILE_GOVERNOR") or str(HERE / "claude-fleet-governor")
     guard = os.environ.get("GATE_PROFILE_GUARD") or str(HERE / "claude-quota-guard")
-    print(f"ping: {run_soft([ping, text], 60)}")
-    print(f"governor recompute: {run_soft([gov, 'run'], 300)}")
-    print(f"guard recompute: {run_soft([guard, 'check'], 120)}")
+    print(f"ping: {run_soft([ping, text], 60)[1]}")
+    print(f"governor recompute: {run_soft([gov, 'run'], 300)[1]}")
+    guard_ok, guard_text = run_soft([guard, 'check'], 120)
+    print(f"guard recompute: {guard_text}")
+    return guard_ok
 
 
 def log_line(entry: dict[str, Any]) -> None:
@@ -276,23 +305,51 @@ def log_line(entry: dict[str, Any]) -> None:
         fh.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
+def lock_wait() -> float:
+    raw = os.environ.get("GATE_PROFILE_LOCK_WAIT")
+    try:
+        v = float(raw) if raw else g.CLI_LOCK_WAIT
+    except ValueError:
+        return g.CLI_LOCK_WAIT
+    return v if 0 <= v < 1e6 else g.CLI_LOCK_WAIT
+
+
+def cli_lock():
+    """The profile lock for a read-modify-write, or None after printing why (exit 1, nothing changed)."""
+    wait = lock_wait()
+    try:
+        lock = g._state_lock(wait, create=True)
+    except g.LockBusy:
+        print(f"gate-profile: the profile lock is still held after {wait:g} s (a governor or guard ping is in flight); "
+              "nothing changed, try again in a minute", file=sys.stderr)
+        return None
+    if lock is None:
+        print("gate-profile: cannot lock the profile state", file=sys.stderr)
+    return lock
+
+
 def cmd_set(args: argparse.Namespace) -> int:
     now = now_utc()
     cfg = need_cfg()
     if cfg is None:
         return EX_BAD
-    if not args.reason.strip():
+    reason = args.reason.strip()
+    if not reason:
         print("gate-profile: --reason must not be empty", file=sys.stderr)
+        return EX_BAD
+    who = (args.by or os.environ.get("USER") or "unknown").strip() or "unknown"
+    if len(reason) > MAX_REASON or len(who) > MAX_BY:
+        print(f"gate-profile: --reason is limited to {MAX_REASON} characters and --by to {MAX_BY}", file=sys.stderr)
         return EX_BAD
     if bool(args.for_) == bool(args.until):
         print("gate-profile: give exactly one of --for and --until", file=sys.stderr)
         return 2
     if args.for_:
         delta = parse_for(args.for_)
-        if delta is None or delta <= timedelta(0):
-            print(f"gate-profile: --for {args.for_!r} is not Nm, Nh or Nd (N > 0)", file=sys.stderr)
+        until = add_time(now, delta) if delta is not None and delta > timedelta(0) else None
+        if until is None:
+            print(f"gate-profile: --for {args.for_!r} is not Nm, Nh or Nd (N > 0, a span that fits a date)", file=sys.stderr)
             return EX_BAD
-        until = now + delta
     else:
         until = g.parse_utc(args.until)
         if until is None:
@@ -311,15 +368,23 @@ def cmd_set(args: argparse.Namespace) -> int:
         for p in problems:
             print(f"gate-profile: refused: {p}", file=sys.stderr)
         return EX_BAD
-    prev, _ = g.read_profile_file()
-    who = args.by or os.environ.get("USER") or "unknown"
     state = {"schema": g.SCHEMA, "profile": args.name, "since": g.iso(now), "until": g.iso(until),
-             "reason": args.reason.strip(), "set_by": who, "last_daily_nudge": g.ny_date(now)}   # set day: the set ping is its nudge
-    g.atomic_write(g.profile_state_path(), json.dumps(state, indent=1, sort_keys=True) + "\n")
+             "reason": reason, "set_by": who, "last_daily_nudge": g.ny_date(now)}   # set day: the set ping is its nudge
+    lock = cli_lock()
+    if lock is None:
+        return EX_BAD
+    with lock:
+        prev, _ = g.read_profile_file()
+        try:
+            g.atomic_write(g.profile_state_path(), json.dumps(state, indent=1, sort_keys=True) + "\n")
+        except OSError as e:
+            print(f"gate-profile: could not write {g.profile_state_path()}: {e.strerror or e}", file=sys.stderr)
+            return EX_BAD
     log_line({"at": g.iso(now), "action": "set", **{k: state[k] for k in ("profile", "since", "until", "reason", "set_by")},
               "replaced": prev.get("profile") if isinstance(prev, dict) else None})
-    print(f"profile {args.name} set until {g.ny(until)} ({left_phrase(until, now)}): {state['reason']}")
-    after_change(f"djbclark-ade: gate profile {args.name} SET until {g.ny(until)} by {who}: {state['reason'][:120]}")
+    print(f"profile {args.name} set until {g.ny(until)} ({left_phrase(until, now)}): {reason}")
+    after_change(f"djbclark-ade: gate profile {args.name} SET until {g.ny(until)} by {clean(who, PING_BY)}: "
+                 f"{clean(reason, PING_REASON)}")
     return 0
 
 
@@ -328,7 +393,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
     now = now_utc()
     delta = parse_for(args.for_)
     if delta is None or delta <= timedelta(0):
-        print(f"gate-profile: --for {args.for_!r} is not Nm, Nh or Nd (N > 0)", file=sys.stderr)
+        print(f"gate-profile: --for {args.for_!r} is not Nm, Nh or Nd (N > 0, a span that fits a date)", file=sys.stderr)
         return EX_BAD
     cfg = need_cfg()
     if cfg is None:
@@ -338,15 +403,15 @@ def cmd_extend(args: argparse.Namespace) -> int:
         print("gate-profile: no active profile to extend (`status` says why); use `set`", file=sys.stderr)
         return EX_BAD
     since, old_until = g.parse_utc(active["since"]), g.parse_utc(active["until"])
-    new_until = old_until + delta
+    new_until = add_time(old_until, delta)
     limit = g.max_hours(cfg)
-    if (new_until - since).total_seconds() > limit * 3600:
-        print(f"gate-profile: the window would be {(new_until - since).total_seconds() / 3600:g} h, over max_profile_hours "
+    if new_until is None or (new_until - since).total_seconds() > limit * 3600:
+        shown = "too long" if new_until is None else f"{(new_until - since).total_seconds() / 3600:g} h"
+        print(f"gate-profile: the window would be {shown}, over max_profile_hours "
               f"{limit:g} (it started {g.ny(since)}); `clear` and `set` a new one instead", file=sys.stderr)
         return EX_BAD
-    lock = g._state_lock()
+    lock = cli_lock()
     if lock is None:
-        print("gate-profile: cannot lock the profile state", file=sys.stderr)
         return EX_BAD
     with lock:
         data, _ = g.read_profile_file()
@@ -358,28 +423,36 @@ def cmd_extend(args: argparse.Namespace) -> int:
     log_line({"at": g.iso(now), "action": "extend", "profile": active["name"], "since": active["since"],
               "previous_until": active["until"], "until": g.iso(new_until), "set_by": who})
     print(f"profile {active['name']} extended to {g.ny(new_until)} ({left_phrase(new_until, now)})")
-    after_change(f"djbclark-ade: gate profile {active['name']} EXTENDED to {g.ny(new_until)} by {who}")
+    after_change(f"djbclark-ade: gate profile {active['name']} EXTENDED to {g.ny(new_until)} by {clean(who, PING_BY)}")
     return 0
 
 
 def cmd_clear(args: argparse.Namespace) -> int:
     now = now_utc()
     path = g.profile_state_path()
-    prev, _ = g.read_profile_file()
-    if not path.exists():
-        print("no profile file: baseline already in force")
-        return 0
-    try:
-        path.unlink()
-    except OSError as e:
-        print(f"gate-profile: could not remove {path}: {e}", file=sys.stderr)
+    lock = cli_lock()
+    if lock is None:
         return EX_BAD
-    name = prev.get("profile") if isinstance(prev, dict) else None
+    with lock:
+        prev, _ = g.read_profile_file()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            print("no profile file: baseline already in force")
+            return 0
+        except OSError as e:
+            print(f"gate-profile: could not remove {path}: {e.strerror or e}", file=sys.stderr)
+            return EX_BAD
+    raw_name = prev.get("profile") if isinstance(prev, dict) else None
+    name = raw_name if isinstance(raw_name, str) and g.NAME_RE.fullmatch(raw_name) else None
     log_line({"at": g.iso(now), "action": "clear", "profile": name,
               "until": prev.get("until") if isinstance(prev, dict) else None,
               "set_by": os.environ.get("USER") or "unknown"})
-    print(f"profile {name or '(unreadable file)'} cleared: baseline in force")
-    after_change(f"djbclark-ade: gate profile {name} CLEARED, baseline restored")
+    shown = name or ("(unreadable file)" if not isinstance(prev, dict) else "(invalid name)")
+    print(f"profile {shown} cleared: baseline in force")
+    if not after_change(f"djbclark-ade: gate profile {g._safe_name(name)} CLEARED, baseline restored"):
+        print("gate-profile: warning: the guard recompute failed; the gates are at baseline already, but the quota hook may keep "
+              "printing the profile line until the next guard run", file=sys.stderr)
     return 0
 
 

@@ -14,21 +14,30 @@ the baseline applies and info["ignored"] says why: the file parses as {"schema":
 times are timezone-aware UTC; since <= now < until; until - since <= [meta].max_profile_hours; the profile exists in
 gates.toml; every key it sets is listed under [floors.<gate>], moves in that key's `loosen` direction (never tighter than the
 baseline) and stays within `bound`. One bad value rejects the whole profile, for both gates (the governor and the guard
-must agree). An expired file is ignored, left in place as the audit trail, and announced once (`notify_expired`).
+must agree). An expired file is ignored, left in place as the audit trail, and announced once (`notify_expired`). The profile
+file is read as a regular file only (no symlink, FIFO or directory), at most 64 KiB.
+
+The baseline is guarded at run time: a key listed under [floors] whose gates.toml value is looser than the code default in its
+floor direction gets the code default instead (logged once to stderr, info["baseline_guarded"]): the file may tighten or equal
+the code, a loosening belongs in a profile. Keys with no floor entry (timings, ages, locks) take the file's value.
 
 info keys: source ("gates.toml" | "code"), toml_error, toml_path, baseline (the values before profile and env), profile
 ({name, since, until, reason, set_by} or None), ignored (why a state file does not apply, or None), expired (the profile
-dict when the file expired and no one was told yet, else None), profile_values, env_values.
+dict when the file expired and no one was told yet, else None), profile_values, env_values, baseline_guarded ({key: the
+gates.toml value that was replaced by the code default}).
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
+import time
 import tomllib
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -41,14 +50,25 @@ ENV_VARS = {"governor": "CLAUDE_GOVERNOR_THRESHOLDS", "quota_guard": "CLAUDE_QUO
 SCHEMA = 1
 DEFAULT_MAX_HOURS = 240
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
-# Keys that must stay in order after a profile is applied, each at least the next (the guard's weekly triggers fire
-# watch, then tight, then critical as the percent left falls; a profile that crosses them would skip a level).
-ORDERINGS = {"quota_guard": ("watch_weekly", "tight_weekly", "critical_weekly")}
+# Pairs that must stay in order after a profile is applied, each (hi, lo) with hi at least lo. The guard's weekly triggers fire
+# watch, then tight, then critical as the percent left falls; the governor's tight triggers must not fire after its critical one.
+# A profile that crosses a pair is rejected whole.
+ORDERINGS = {
+    "quota_guard": (("watch_weekly", "tight_weekly"), ("tight_weekly", "critical_weekly")),
+    "governor": (("tight_left_weekly", "critical_left"), ("tight_left_five_hour", "critical_left")),
+}
+MAX_PROFILE_BYTES = 64 * 1024     # the profile file is a few hundred bytes; anything bigger is not one
+NOTIFY_LOCK_WAIT = 10.0           # s the governor/guard wait for the state lock before skipping a notice (retried next run)
+CLI_LOCK_WAIT = 120.0             # s `gate-profile set/extend/clear` wait: longer than two 60 s pings (env GATE_PROFILE_LOCK_WAIT)
 _LOGGED: set[str] = set()
 
 
 class GateEnvError(ValueError):
     """The env JSON override is not usable."""
+
+
+class LockBusy(Exception):
+    """The state lock stayed held past the wait bound (a ping is in flight)."""
 
 
 # -- paths ---------------------------------------------------------------------------------------------------------
@@ -72,7 +92,16 @@ def profile_log_path() -> Path:
 # -- small helpers -------------------------------------------------------------------------------------------------
 
 def is_num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """A finite number a float can hold: bool, nan, inf and an integer too large for a float are not numbers."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) < 1e300
+
+
+def _show(v: Any) -> str:
+    """repr(v) for a message; a huge integer (repr raises past 4300 digits) is named, not printed; long text is cut."""
+    if isinstance(v, int) and v.bit_length() > 1024:
+        return "an out-of-range integer"
+    text = repr(v)
+    return text if len(text) <= 80 else text[:77] + "..."
 
 
 def _log_once(msg: str) -> None:
@@ -128,7 +157,7 @@ def read_toml() -> tuple[dict[str, Any] | None, str | None]:
             return tomllib.load(fh), None
     except OSError as e:
         return None, f"{path}: {e.strerror or e}"
-    except tomllib.TOMLDecodeError as e:
+    except (tomllib.TOMLDecodeError, ValueError) as e:     # a 4300+ digit integer raises a plain ValueError
         return None, f"{path}: not valid TOML ({e})"
 
 
@@ -163,7 +192,7 @@ def spec_problem(spec: dict[str, Any]) -> str | None:
 def value_problem(spec: dict[str, Any], baseline: float, value: Any) -> str | None:
     """Why `value` is not an allowed profile value for a key with this floor spec and baseline, or None."""
     if not is_num(value):
-        return f"{value!r} is not a number"
+        return f"{_show(value)} is not a number"
     bad = spec_problem(spec)
     if bad:
         return f"floor spec is malformed: {bad}"
@@ -181,17 +210,33 @@ def value_problem(spec: dict[str, Any], baseline: float, value: Any) -> str | No
     return None
 
 
+def baseline_loosens(cfg: dict[str, Any], gate: str, key: str, value: float, default: float) -> bool:
+    """True when the gates.toml baseline `value` is looser than the code `default` in the key's floor direction. A key with no
+    floor entry has no direction (False); a floor entry whose direction is unreadable trusts only the code default."""
+    spec = floor_spec(cfg, gate, key)
+    if spec is None:
+        return False
+    if spec.get("loosen") == "lower":
+        return value < default
+    if spec.get("loosen") == "higher":
+        return value > default
+    return value != default
+
+
 def ordering_problems(gate: str, values: dict[str, Any]) -> list[str]:
     """Where `values` (a gate's keys after a profile is applied) break ORDERINGS; [] when they hold or a key is absent."""
-    chain = ORDERINGS.get(gate, ())
-    if not all(is_num(values.get(k)) for k in chain):
-        return []
-    return [f"{a} {values[a]:g} must be at least {b} {values[b]:g} (ordering {' >= '.join(chain)})"
-            for a, b in zip(chain, chain[1:]) if values[a] < values[b]]
+    out = []
+    for hi, lo in ORDERINGS.get(gate, ()):
+        a, b = values.get(hi), values.get(lo)
+        if is_num(a) and is_num(b) and a < b:
+            out.append(f"{hi} {a:g} must be at least {lo} {b:g}")
+    return out
 
 
 def profile_problems(cfg: dict[str, Any], name: str, baselines: dict[str, dict[str, float]]) -> list[str]:
     """Every reason profile `name` cannot be used; [] when it can. `baselines` is {gate: {key: baseline value}}."""
+    if not NAME_RE.fullmatch(str(name)):      # a name the gates would ignore at run time must not be set
+        return [f"profile name {_show(name)} is not [a-z0-9_-], 32 chars at most"]
     profiles = cfg.get("profiles")
     prof = profiles.get(name) if isinstance(profiles, dict) else None
     if not isinstance(prof, dict):
@@ -228,18 +273,44 @@ def toml_baselines(cfg: dict[str, Any]) -> dict[str, dict[str, float]]:
 
 # -- the profile state file ------------------------------------------------------------------------------------------
 
-def read_profile_file() -> tuple[dict[str, Any] | None, str | None]:
-    """(parsed dict, None) | (None, None) when there is no file | (None, why) when it cannot be used at all."""
-    path = profile_state_path()
+def _read_regular(path: Path) -> tuple[bytes | None, str | None]:
+    """(bytes, None) | (None, None) when absent | (None, why) for a symlink, FIFO, directory, device, oversized or unreadable file.
+    Never blocks (O_NONBLOCK) and never follows a final symlink (O_NOFOLLOW); the type is checked on the open descriptor."""
     try:
-        text = path.read_text(encoding="utf-8")
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
         return None, None
     except OSError as e:
+        if e.errno == errno.ELOOP:
+            return None, f"{path}: is a symlink (not followed)"
         return None, f"{path}: unreadable ({e.strerror or e})"
     try:
-        data = json.loads(text)
-    except ValueError:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, f"{path}: not a regular file"
+        data = b""
+        while len(data) <= MAX_PROFILE_BYTES:
+            chunk = os.read(fd, MAX_PROFILE_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > MAX_PROFILE_BYTES:
+            return None, f"{path}: larger than {MAX_PROFILE_BYTES // 1024} KiB"
+        return data, None
+    except OSError as e:
+        return None, f"{path}: unreadable ({e.strerror or e})"
+    finally:
+        os.close(fd)
+
+
+def read_profile_file() -> tuple[dict[str, Any] | None, str | None]:
+    """(parsed dict, None) | (None, None) when there is no file | (None, why) when it cannot be used at all."""
+    path = profile_state_path()
+    raw, why = _read_regular(path)
+    if raw is None:
+        return None, why
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):      # bad JSON, bad UTF-8, a 4300+ digit integer, absurd nesting
         return None, f"{path}: corrupt JSON"
     if not isinstance(data, dict):
         return None, f"{path}: not a JSON object"
@@ -253,15 +324,17 @@ def resolve_profile(cfg: dict[str, Any] | None, now: datetime) -> dict[str, Any]
     if data is None:
         res["ignored"] = why
         return res
-    if data.get("schema") != SCHEMA:
-        res["ignored"] = f"profile file schema {data.get('schema')!r} is not {SCHEMA}"
+    schema = data.get("schema")
+    if type(schema) is not int or schema != SCHEMA:      # not True, not 1.0
+        res["ignored"] = f"profile file schema {_show(schema)} is not {SCHEMA}"
         return res
-    name = data.get("profile")
+    raw_name = data.get("profile")
+    name = raw_name if isinstance(raw_name, str) and NAME_RE.fullmatch(raw_name) else None      # ASCII [a-z0-9_-], 32 at most
     since, until = parse_utc(data.get("since")), parse_utc(data.get("until"))
     if until is None:
         res["ignored"] = "`until` is missing or not a UTC time (timezone-aware, offset zero)"
         return res
-    info = {"name": name if isinstance(name, str) else None, "since": data.get("since"), "until": data.get("until"),
+    info = {"name": name, "since": data.get("since"), "until": data.get("until"),
             "reason": data.get("reason"), "set_by": data.get("set_by")}
     if until <= now:
         res["ignored"] = f"profile {name!r} expired at {iso(until)}"
@@ -278,8 +351,8 @@ def resolve_profile(cfg: dict[str, Any] | None, now: datetime) -> dict[str, Any]
         res["ignored"] = "gates.toml is unavailable, so no profile can be checked"
     elif (until - since).total_seconds() > max_hours(cfg) * 3600:
         res["ignored"] = f"window is {(until - since).total_seconds() / 3600:g} h, over max_profile_hours {max_hours(cfg):g}"
-    elif not isinstance(name, str):
-        res["ignored"] = "`profile` is missing or not a string"
+    elif name is None:
+        res["ignored"] = "`profile` is missing or not a valid name ([a-z0-9_-], 32 characters at most)"
     else:
         problems = profile_problems(cfg, name, toml_baselines(cfg))
         if problems:
@@ -299,7 +372,7 @@ def env_overrides(gate: str, known: dict[str, Any]) -> dict[str, float]:
         return {}
     try:
         over = json.loads(raw)
-    except json.JSONDecodeError as e:
+    except (ValueError, RecursionError) as e:       # JSONDecodeError, and the plain ValueError of a 4300+ digit integer
         raise GateEnvError(f"{var} is not JSON: {e}")
     if not isinstance(over, dict):
         raise GateEnvError(f"{var} must be a JSON object")
@@ -318,7 +391,8 @@ def load_gates(gate: str, now: datetime | None = None, defaults: dict[str, Any] 
     now = (now or datetime.now(UTC)).astimezone(UTC)
     base = {k: float(v) for k, v in (defaults or {}).items()}
     info: dict[str, Any] = {"source": "code", "toml_error": None, "toml_path": str(toml_path()), "baseline": dict(base),
-                            "profile": None, "ignored": None, "expired": None, "profile_values": {}, "env_values": {}}
+                            "profile": None, "ignored": None, "expired": None, "profile_values": {}, "env_values": {},
+                            "baseline_guarded": {}}
     cfg, err = read_toml()
     if cfg is not None:
         file_base = toml_baseline(cfg, gate)
@@ -326,7 +400,17 @@ def load_gates(gate: str, now: datetime | None = None, defaults: dict[str, Any] 
             err = f"{toml_path()}: [{gate}] is missing, empty or holds a non-number"
             cfg = None
         else:
-            base.update({k: v for k, v in file_base.items() if k in base or not defaults})
+            accepted: dict[str, float] = {}
+            for k, v in file_base.items():
+                if defaults and k not in base:
+                    continue
+                if defaults and baseline_loosens(cfg, gate, k, v, base[k]):
+                    info["baseline_guarded"][k] = v
+                    _log_once(f"{toml_path()} [{gate}].{k} = {v:g} is looser than the code default {base[k]:g}; using the code "
+                              "default (a loosening belongs in a profile)")
+                    continue
+                accepted[k] = v
+            base.update(accepted)
             info.update(source="gates.toml", baseline=dict(base))
     if err:
         info["toml_error"] = err
@@ -351,12 +435,19 @@ def profile_brief(info: dict[str, Any]) -> dict[str, Any] | None:
 
 # -- expiry notice and daily nudge -----------------------------------------------------------------------------------
 
+def _marked_text(data: dict[str, Any], key: str, value: str) -> str:
+    return json.dumps({**data, key: value}, indent=1, sort_keys=True) + "\n"
+
+
 def _mark_and_ping(data: dict[str, Any], key: str, value: str, text: str, ping: Callable[[str], bool]) -> bool:
     """Write `key: value` into the profile file, then ping; remove the mark again when the ping fails, so a failed ping is
-    retried by the next run and a sent one never is. Call with the state lock held."""
+    retried by the next run and a sent one never is. Call with the state lock held. The mark is taken back only while the file
+    still holds exactly what was marked: a profile that was cleared, set again or extended meanwhile (a writer that did not wait
+    for the lock) is never overwritten or brought back."""
     path = profile_state_path()
+    marked = _marked_text(data, key, value)
     try:
-        atomic_write(path, json.dumps({**data, key: value}, indent=1, sort_keys=True) + "\n")
+        atomic_write(path, marked)
     except OSError as e:
         _log_once(f"could not record {key}: {e}")
         return False
@@ -366,22 +457,44 @@ def _mark_and_ping(data: dict[str, Any], key: str, value: str, text: str, ping: 
     finally:
         if not ok:
             try:
-                atomic_write(path, json.dumps(data, indent=1, sort_keys=True) + "\n")
+                now_raw, _ = _read_regular(path)
+                if now_raw == marked.encode("utf-8"):
+                    atomic_write(path, json.dumps(data, indent=1, sort_keys=True) + "\n")
             except OSError:
                 pass
     return ok
 
 
-def _state_lock():
-    """The flock beside the state file, held for the `with`; None when it cannot be opened (no state dir: nothing to notify).
-    Serialises the governor, the guard and the CLI."""
+def _state_lock(wait: float | None = None, create: bool = False):
+    """The flock beside the state file, held for the `with`; None when it cannot be opened (no state dir: nothing to notify;
+    `create` makes the directory first). Waits at most `wait` seconds (default NOTIFY_LOCK_WAIT) and raises LockBusy after.
+    Serialises every writer of the profile file: the governor's and guard's notices, `gate-profile set/extend/clear`. It is held
+    across a ping (up to 60 s), so a reader never takes it: the gates read the file lock-free (writes are atomic replaces)."""
     path = profile_state_path()
+    lock_path = path.with_name(path.name + ".lock")
     try:
-        lock = open(path.with_name(path.name + ".lock"), "a")
+        if create:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError:
         return None
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    return lock
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        deadline = time.monotonic() + (NOTIFY_LOCK_WAIT if wait is None else wait)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockBusy(f"{lock_path} is held (a ping is in flight)") from None
+                time.sleep(0.05)
+        return os.fdopen(fd, "a")
+    except BaseException:
+        os.close(fd)      # the one path that leaves the descriptor open is the success return, which fdopen owns
+        raise
 
 
 def _safe_name(name: Any) -> str:
@@ -394,7 +507,11 @@ def notify_expired(info: dict[str, Any], ping: Callable[[str], bool], now: datet
     if not isinstance(exp, dict):
         return False
     now = now or datetime.now(UTC)
-    lock = _state_lock()
+    try:
+        lock = _state_lock()
+    except LockBusy as e:
+        _log_once(f"expiry notice skipped, retried next run: {e}")
+        return False
     if lock is None:
         return False
     with lock:
@@ -443,7 +560,11 @@ def notify_daily(info: dict[str, Any], ping: Callable[[str], bool], now: datetim
     until = parse_utc(prof.get("until"))
     if until is None:
         return False
-    lock = _state_lock()
+    try:
+        lock = _state_lock()
+    except LockBusy as e:
+        _log_once(f"daily nudge skipped, retried next run: {e}")
+        return False
     if lock is None:
         return False
     with lock:

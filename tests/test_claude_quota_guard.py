@@ -1808,3 +1808,17 @@ def test_hook_gates_line_adds_to_the_level_advice_and_stops_with_the_profile(rig
     assert rig.hook(session="s9", **_profile(rig, until="2026-10-23T11:59:00Z", since="2026-10-20T12:00:00Z")).stdout == ""
     rig.guard()                                                            # baseline: no profile in the state
     assert rig.hook(session="s10").stdout == ""
+
+
+def test_hook_names_only_an_ascii_profile_name_in_its_gates_line(rig):
+    """The gates refuse any name outside [a-z0-9_-] now; the hook still filters what the guard state holds (a hand-edited or
+    older state file): Unicode letters and digits were let through by str.isalnum()."""
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    env = _profile(rig)
+    assert rig.guard(**env).returncode == 0
+    for name, shown in (("ａway", "gate"), ("away", "away")):
+        st = rig.state_json()
+        st["profile"]["name"] = name
+        rig.state.write_text(json.dumps(st))
+        out = rig.hook(session=f"s-{shown}", **env).stdout
+        assert out.startswith(f"[gates] {shown} profile active until"), out
