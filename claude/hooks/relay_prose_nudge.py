@@ -13,9 +13,9 @@ When a turn ends (Stop) and
      socket route, NO header but the envelope `socket_send` wraps the text in, `<cross-session-message from="relay.py"
      from-name="relay.py (LABEL)" from-mode=...>`, where LABEL is the text the header would carry: the hook reads it as the
      header. Claude Code logs a socket frame for a BUSY receiver as a `queued_command` attachment whose prompt is the bare
-     envelope (124 of 124 real peer attachments, 7 from relay or acp-dispatch), and for an IDLE receiver as a user entry with
+     envelope (all 124 envelope-bearing peer attachments of 174 peer attachments, 7 from relay or acp-dispatch), and for an IDLE receiver as a user entry with
      `isMeta: true`, `origin.kind: "peer"`, a harness prefix (`Another Claude session sent a message:` and a newline), the envelope and a
-     harness suffix after the closing tag (108 of 108 real peer user entries). [INFERENCE] no relay frame to an idle session was
+     harness suffix after the closing tag (all 108 envelope-bearing peer user entries of 176 isMeta peer user entries; the other 68 are teammate or task entries with a different tag and parse to nothing). [INFERENCE] no relay frame to an idle session was
      observed (all 7 relay or acp-dispatch frames were to busy ones); Claude Code's handler sets `isMeta` and the peer origin for
      every socket frame, so the idle form is read the same way. The body is cut at the first closing tag and unescaped.
      A deferred send's `[queued Nm ago] ` tag follows the header (or the envelope) and is skipped. A message with neither
@@ -45,8 +45,8 @@ Known limit (deferred): a text that starts as an exemption but goes on to ask fo
 please`, `No reply needed on the log, but please merge PR 14 now`, `FYI, please merge PR 14`) is read as an ack, a no-reply
 text or FYI and is not nudged, also under a first-contact footer; and a text starting with FYI is silent even WITH a `?`
 (`FYI: load is 11, can you pause your build?`), for every sender, under a first-contact footer or none (relay's reply footer still nudges). Under-nudging only: it cannot loop.
-The fix is one shared definition with relay's `is_terminator` (branch feat/relay-ack-default), after that merges
-(docs/queue.md, "Verified peer messaging"). Accepted: a herdr pane id with no `(DIR)` (the sender's cwd is gone) counts `?`, so
+Slice A merged in #81 (`is_terminator` is on master); sharing that one definition is the follow-up after this PR, not done
+here (docs/queue.md, "Verified peer messaging"). Accepted: a herdr pane id with no `(DIR)` (the sender's cwd is gone) counts `?`, so
 its `--fyi` question is nudged once; two envelopes in one prompt (no harness writes it): only the first is read.
 
 Bounded: reads only the last TAIL_KB (256) KB of the transcript; a turn that began further back is not seen and is not
@@ -143,8 +143,9 @@ def user_text(o):
     """The text of a transcript entry that is a user prompt (including a queued one, whose prompt is a string or a list of
     text blocks), else None: a tool result is no prompt, and a `<task-notification>` (a background task finished) is no new
     turn start, so the relayed message before it stays the turn's start. Other meta entries are skipped, but a user entry with
-    `isMeta` AND `origin.kind == "peer"` is a message from a peer session delivered to an idle one (a relay socket frame): it
-    starts the turn."""
+    `isMeta` AND `origin.kind == "peer"` is a message from a peer session delivered to an idle one: it
+    starts the turn. It is a relay socket frame only when it holds a `<cross-session-message>` envelope; the predicate also admits
+    the teammate or task peer entries (no envelope), which start a turn and parse to nothing, so they are silent."""
     peer = o.get("type") == "user" and o.get("isMeta") is True and isinstance(o.get("origin"), dict) and o["origin"].get("kind") == "peer"
     if (o.get("isMeta") and not peer) or o.get("isCompactSummary") or o.get("isVisibleInTranscriptOnly"):
         return None

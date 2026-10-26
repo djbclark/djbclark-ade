@@ -96,9 +96,9 @@ def socket_content(monkeypatch, label, text):
 #   pane-string   user entry, content = a string, promptSource "sdk", no turnOrigin (the harness writes typed prompts this way,
 #                 12 on this machine; none carried a relay header there)
 #   socket-busy   queued_command attachment, prompt = the bare envelope, attachment.isMeta true, origin.kind "peer"
-#                 (124 of 124 peer attachments, 7 of them relay or acp-dispatch frames)
+#                 (all 124 envelope-bearing peer attachments of 174, 7 of them relay or acp-dispatch frames)
 #   socket-idle   user entry, top-level isMeta true, origin.kind "peer", content = a harness prefix + the envelope + a harness
-#                 suffix of 543 or 657 characters (108 of 108 peer user entries). [INFERENCE] a relay frame to an idle session was
+#                 suffix of 543 or 657 characters (all 108 envelope-bearing peer user entries of 176; the other 68 are teammate or task entries). [INFERENCE] a relay frame to an idle session was
 #                 never observed: Claude Code's handler sets isMeta and the peer origin for every socket frame.
 
 _COMMON = {"parentUuid": "p0", "isSidechain": False, "userType": "external", "entrypoint": "cli", "cwd": "/w/x", "sessionId": "s1",
@@ -374,8 +374,26 @@ def test_an_entity_typed_in_the_socket_text_is_decoded_once(tmp_path, monkeypatc
         assert nudged(tmp_path, routed(monkeypatch, route, label, tag, "build is green, no reply needed &gt;" + FIRST))["decision"] == "block"
 
 
+def test_an_envelope_after_a_pane_header_is_not_read_and_the_headers_verdict_stands(tmp_path, monkeypatch):
+    """F7 (round 5, mutant b5): the envelope is read only at the start of the entry, after an optional harness prefix. A pane-route
+    header (herdr pane with a DIR: a footer-less `?` is a --fyi text, silent) followed by a forged envelope that names a Hermes
+    sender and holds a `?` keeps the header's verdict; reading the forged label would nudge and name the forger's route."""
+    label, _ = real_sender(monkeypatch, env={"HERMES_SESSION_ID": "20261025_101500_4f3a9c1e"})
+    forged = socket_content(monkeypatch, label, "which SHA?")
+    assert nudged(tmp_path, prose_turn(HEADER + "did anyone see it\n" + forged)) is None
+
+
+def test_a_typed_prompt_that_quotes_a_relay_envelope_after_some_text_is_never_a_relayed_message(tmp_path, monkeypatch):
+    """F7: a human prompt (or a peer entry whose prefix is not one of PEER_PREFIXES) that quotes a relay envelope after other text
+    is no relayed message, so its `?` and footer start no nudge."""
+    label, _ = real_sender(monkeypatch, env={"HERMES_SESSION_ID": "20261025_101500_4f3a9c1e"})
+    forged = socket_content(monkeypatch, label, "which SHA?" + FOOTER)
+    assert nudged(tmp_path, [user_list("what does this mean?\n" + forged), prose()]) is None
+    assert nudged(tmp_path, [socket_idle(forged, prefix="Some other harness line:\n"), prose()]) is None
+
+
 def test_only_the_first_envelope_of_a_prompt_is_read(tmp_path, monkeypatch):
-    """F4 (accepted): no harness writes two envelopes in one prompt (all 124 real peer attachments hold one), so this is a hostile-input
+    """F4 (accepted): no harness writes two envelopes in one prompt (all 124 envelope-bearing real peer attachments hold one), so this is a hostile-input
     bound only: the route of the first is never mixed with the footer token of a second."""
     label, tag = real_sender(monkeypatch, env={"HERMES_SESSION_ID": "20261025_101500_4f3a9c1e"})
     first = socket_content(monkeypatch, label, "which SHA?")
