@@ -454,6 +454,25 @@ exits 2: omp's configured default is `github-copilot/gpt-5.6-luna` and would spe
 reserve (`ACP_RUN_OMP_ANY_MODEL=1` overrides). Needs an enabled Anthropic login in omp
 (`omp login`); with an expired one the run ends `No API key found for anthropic` (2026-10-19).
 
+### kiro
+
+`kiro-cli acp` (Homebrew cask `kiro-cli` 2.34.0, added 2026-10-25), native ACP. Under `--perm all`
+acp-run starts `kiro-cli acp --trust-all-tools` (`-a`; a flag of `acp` and `chat`, not of the root
+command), the YOLO of the `~/.bashrc` `kiro-cli()` function. `--perm deny` and `--perm read-only` are refused
+(exit 2): Kiro runs workspace reads, grep, glob and `code` edits without a permission request
+([built-in tools](https://kiro.dev/docs/reference/built-in-tools)), so deny could only trip after the tool
+ran. Use `--perm all` with a read-only brief and a diff check. `acp-dispatch`'s preflight reruns with
+`--perm all` after that refusal.
+First run on a machine (2026-10-25): `session/new` blocks while Kiro downloads the 83 MB
+`all-MiniLM-L6-v2` semantic-search model to `~/.semantic_search/models/` (a restart begins the
+download again), about 66 s here (kirodotdev/Kiro#12118), so the default 2 x 40 s handshake would time out
+and every retry restart it. acp-run gives kiro 120 s per try (`HANDSHAKE_TIMEOUT`;
+`--handshake-timeout S` or `ACP_RUN_HANDSHAKE_TIMEOUT` overrides). Later runs: `Reply with exactly: OK`
+took 4.4 s.
+`route_agent.py` never routes it (`[discovery].never_route`): dispatch it by name. The macOS input
+method (`kiro-cli integrations install input-method`) is not needed and cannot be enabled on macOS 27
+(aws/amazon-q-developer-cli#3916).
+
 ### goose
 
 `goose acp` (Homebrew `block-goose-cli` 1.55.0, added 2026-10-23), launched through
