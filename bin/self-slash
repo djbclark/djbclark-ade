@@ -301,11 +301,11 @@ else
   # session id the hub recorded for the tool call in progress and looks it up in Paseo's own agent
   # state. Refuses (exit 3) rather than guessing, so this is safe to try before giving up.
   SELF_TOOL="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/paseo-self"
-  # Only a Cline tool shell needs it.  A Claude Code session (CLAUDECODE=1) is never one, and the hub's
+  # Only a Cline tool shell needs it. Claude Code (CLAUDECODE=1) and Codex (CODEX_THREAD_ID) are never one, and the hub's
   # newest tool.started row then belongs to some other Cline agent (seen 2026-10-25: it named a
   # stranger while the caller was a Claude session), so there is no one to discover.
-  if [ "${CLAUDECODE:-}" = "1" ]; then
-    echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID unknown to herdr or unset, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset; a Claude Code session is never discovered through the Cline hub); ask the operator to type: $text" >&2; exit 3
+  if [ "${CLAUDECODE:-}" = "1" ] || [ -n "${CODEX_THREAD_ID:-}" ]; then
+    echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID unknown to herdr or unset, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset; a Claude Code or Codex session is never discovered through the Cline hub); ask the operator to type: $text" >&2; exit 3
   elif [ -x "$SELF_TOOL" ]; then
     if discovered=$("$SELF_TOOL" agent 2>/dev/null) && [ -n "$discovered" ]; then
       host=paseo; pane="$discovered"; tui=""
