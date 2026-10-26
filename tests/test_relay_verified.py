@@ -239,6 +239,39 @@ class TestExpectAck(Base):
         self.assertIn("OVERDUE ack build1", out)
         self.assertTrue([r for r in json.loads(self.run_cli("--pending", "--json")[1]) if r.get("kind") == "expect"][0]["overdue"])
 
+    def expect_rows(self) -> list[dict[str, Any]]:
+        return [r for r in json.loads(self.run_cli("--pending", "--json")[1]) if r.get("kind") == "expect"]
+
+    def test_a_row_carries_the_created_time_of_its_record(self) -> None:
+        self.go("is the build green?", "--expect-ack", "build1")
+        rec = json.loads((relay.expect_dir() / "build1.json").read_text())
+        self.assertEqual(self.expect_rows()[0]["created"], rec["created"])
+        self.assertGreater(rec["created"], 0)
+
+    def test_a_reused_id_is_a_new_expectation_with_its_own_created(self) -> None:
+        self.go("is the build green?", "--expect-ack", "build1")
+        path = relay.expect_dir() / "build1.json"
+        rec = json.loads(path.read_text())
+        rec["created"] -= 100    # the first one is clearly older than the second
+        path.write_text(json.dumps(rec))
+        first = self.expect_rows()[0]["created"]
+        self.reply_to_me("ack build1 yes")
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+        self.assertEqual(self.go("and the lint?", "--expect-ack", "build1")[0], 0)
+        second = self.expect_rows()[0]
+        self.assertEqual(second["state"], "open")
+        self.assertGreater(second["created"], first + 50)
+
+    def test_a_hand_edited_or_missing_created_reads_as_zero_and_never_fails_the_listing(self) -> None:
+        self.go("is the build green?", "--expect-ack", "build1")
+        path = relay.expect_dir() / "build1.json"
+        rec = json.loads(path.read_text())
+        for edited in ({**rec, "created": "x"}, {k: v for k, v in rec.items() if k != "created"}):
+            path.write_text(json.dumps(edited))
+            rc, out = self.run_cli("--pending", "--json")
+            self.assertEqual(rc, 0)
+            self.assertEqual([r["created"] for r in json.loads(out) if r.get("kind") == "expect"], [0.0])
+
 
 class TestPeerAttribution(unittest.TestCase):
     """Adversary r1 A4 (2026-10-25): a first-contact `ack` names its peer by the header's ID word, not by a substring."""

@@ -2860,7 +2860,8 @@ def expect_view(now=None):
             continue
         age, within = expect_age(r, now)
         rows.append({"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"),
-                     "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within})
+                     "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within,
+                     "created": _num(r.get("created"))})
     return rows
 
 
