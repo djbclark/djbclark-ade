@@ -375,6 +375,138 @@ class TestDispatch(Base):
         self.assertIn("Current git diff --stat", continuation)
         self.assertTrue((self.out / "s1-report.md").exists(), "old report remains in place")
 
+    def test_preflight_refusal_retains_context_and_reroutes_permissions(self):
+        for perm in ("deny", "read-only"):
+            with self.subTest(perm=perm):
+                name = "refused-" + perm
+                brief = self.tmp / (name + ".md")
+                brief.write_text("Original task: preserve this exact constraint.\n")
+                env = self.base_env(PREFLIGHT_MODE="outage")
+                result = run(["claude", "--model", "m1", "--kind", "judgment",
+                              "--name", name, "-f", str(brief), "-C", str(self.repo),
+                              "--out", str(self.out), "--acp-run", str(self.fake),
+                              "--perm", perm, "--effort", "high", "--context", "1m",
+                              "--timeout", "123", "--wrapup-grace", "7", "--no-auto-resume"], env=env)
+                self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+                old = self.out / "jobs" / (name + ".json")
+                before = old.read_bytes()
+                rec = json.loads(before)
+                self.assertEqual(rec["status"], "unavailable")
+                self.assertEqual(rec["prompt"], brief.read_text())
+                self.assertEqual(rec["brief"], str(brief.resolve()))
+                self.assertEqual(rec["perm"], perm)
+                self.assertNotIn("session_id", rec)
+                self.assertFalse((self.out / (name + ".jsonl")).exists())
+                brief.unlink()  # retained text is independent of the original file
+                result = run(["reroute", str(old), "--agent", "claude", "--model", "m1",
+                              "--acp-run", str(self.fake), "--no-preflight"], env=self.base_env())
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                new = json.loads((self.out / "jobs" / (name + "-reroute-1.json")).read_text())
+                self.assertEqual(new["rerouted_from"], str(old.resolve()))
+                for key in ("perm", "effort", "context", "timeout", "wrapup_grace"):
+                    self.assertEqual(new[key], rec[key], key)
+                self.assertEqual(new["auto_resume"]["state"], "off")
+                self.assertIn("--perm " + perm, new["cmd"])
+                self.assertIn(rec["prompt"], new["prompt"])
+                self.assertEqual(old.read_bytes(), before)
+
+    def test_legacy_unavailable_context_refuses_cleanly_without_launch(self):
+        # Produce a real preflight refusal, then reduce it to the older thin shape.
+        first = self.dispatch(env={"PREFLIGHT_MODE": "outage"})
+        self.assertEqual(first.returncode, 5, first.stdout + first.stderr)
+        old = self.out / "jobs" / "s1.json"
+        rec = self.record()
+        rec.pop("prompt")
+        rec.pop("perm")
+        for brief in (None, str(self.tmp / "missing-brief.md")):
+            with self.subTest(brief=brief):
+                rec["brief"] = brief
+                old.write_text(json.dumps(rec))
+                before = old.read_bytes()
+                probes = self.probes()
+                result = run(["reroute", str(old), "--escalate"], env=self.base_env())
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("-f FILE", result.stderr)
+                self.assertEqual(old.read_bytes(), before)
+                self.assertFalse((self.out / "jobs" / "s1-reroute-1.json").exists())
+                self.assertEqual(self.probes(), probes)
+
+    def test_legacy_unavailable_explicit_task_and_permission_recovery(self):
+        for flag in ("-p", "-f"):
+            with self.subTest(flag=flag):
+                name = "legacy-" + flag[-1]
+                first = self.dispatch(name=name, env={"PREFLIGHT_MODE": "outage"})
+                self.assertEqual(first.returncode, 5, first.stdout + first.stderr)
+                old = self.out / "jobs" / (name + ".json")
+                rec = json.loads(old.read_text())
+                for key in ("prompt", "brief", "perm"):
+                    rec.pop(key, None)
+                old.write_text(json.dumps(rec))
+                before = old.read_bytes()
+                brief = self.tmp / "recovery.md"
+                original = "Recover original task; preserve the read-only constraint."
+                brief.write_text(original)
+                args = ["reroute", str(old), "--agent", "claude", "--model", "m1",
+                        "--kind", "judgment", "--acp-run", str(self.fake), "--no-preflight",
+                        flag, str(brief) if flag == "-f" else original]
+                probes = self.probes()
+                refused = run(args, env=self.base_env())
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertIn("explicit --perm", refused.stderr)
+                self.assertNotIn("Traceback", refused.stderr)
+                self.assertEqual(self.probes(), probes)
+                self.assertEqual(old.read_bytes(), before)
+                self.assertFalse((self.out / "jobs" / (name + "-reroute-1.json")).exists())
+                unsupported = run([*args, "--perm", "read-only"],
+                                  env=self.base_env(FAKE_PERM_MODES='["all"]'))
+                self.assertEqual(unsupported.returncode, 2, unsupported.stdout + unsupported.stderr)
+                self.assertIn("no verified read-only mode", unsupported.stderr)
+                self.assertEqual(old.read_bytes(), before)
+                self.assertFalse((self.out / "jobs" / (name + "-reroute-1.json")).exists())
+                recovered = run([*args, "--perm", "read-only"], env=self.base_env())
+                self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+                new = json.loads((self.out / "jobs" / (name + "-reroute-1.json")).read_text())
+                self.assertEqual(new["rerouted_from"], str(old.resolve()))
+                self.assertIn(original, new["prompt"])
+                self.assertEqual(new["perm"], "read-only")
+                self.assertIn("--perm read-only", new["cmd"])
+                self.assertEqual(old.read_bytes(), before)
+
+    def test_completed_legacy_reroute_recovers_permission_from_command(self):
+        for perm in ("deny", "read-only"):
+            with self.subTest(perm=perm):
+                name = "completed-" + perm
+                first = self.dispatch_agent("claude", "m1", "--perm", perm, name=name)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                old = self.out / "jobs" / (name + ".json")
+                rec = json.loads(old.read_text())
+                rec.pop("perm")  # older completed records retain the checked flag in cmd
+                old.write_text(json.dumps(rec))
+                refused = run(["reroute", str(old), "--agent", "claude", "--model", "m1",
+                               "--perm", "all"], env=self.base_env())
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertIn("preserve recorded permission", refused.stderr)
+                result = run(["reroute", str(old), "--agent", "claude", "--model", "m1",
+                              "--acp-run", str(self.fake), "--no-preflight"], env=self.base_env())
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                new = json.loads((self.out / "jobs" / (name + "-reroute-1.json")).read_text())
+                self.assertEqual(new["perm"], perm)
+                self.assertIn("--perm " + perm, new["cmd"])
+                self.assertEqual(new["rerouted_from"], str(old.resolve()))
+
+    def test_reroute_recovery_cannot_upgrade_recorded_permission(self):
+        first = self.dispatch("--perm", "read-only", env={"PREFLIGHT_MODE": "outage"})
+        self.assertEqual(first.returncode, 5, first.stdout + first.stderr)
+        old = self.out / "jobs" / "s1.json"
+        before = old.read_bytes()
+        result = run(["reroute", str(old), "--agent", "codex", "--model", "m1",
+                      "--perm", "all"], env=self.base_env())
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("preserve recorded permission", result.stderr)
+        self.assertEqual(old.read_bytes(), before)
+        self.assertFalse((self.out / "jobs" / "s1-reroute-1.json").exists())
+
     def test_scoped_perm_is_deprecated_and_runs_as_all(self):
         # operator 2026-10-14: acp-run runs yolo for every agent; scoped: warns and runs as all.
         r = self.dispatch("--perm", "scoped:x")
@@ -1107,6 +1239,22 @@ class TestAiuseNoteExhausted(Base):
         self.assertIn("class=quota", result.stdout)
         # D2/MSG 2: zcode zone-less stamps are Beijing time, so aiuse gets the UTC instant
         self.assertIn("note-exhausted zai --resets-at 2026-10-14T14:56:01+00:00", self.calls()[0])
+        old = self.out / "jobs" / "s1.json"
+        before = old.read_bytes()
+        rec = json.loads(before)
+        self.assertEqual(rec["prompt"], "do it")
+        self.assertEqual(rec["perm"], "all")
+        self.assertNotIn("session_id", rec)
+        self.assertFalse((self.out / "s1.jsonl").exists())
+        recovered = run(["reroute", str(old), "--agent", "claude", "--model", "m1",
+                         "--kind", "judgment", "--acp-run", str(self.fake), "--no-preflight"],
+                        env=self.base_env())
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        new = json.loads((self.out / "jobs" / "s1-reroute-1.json").read_text())
+        self.assertEqual(new["rerouted_from"], str(old.resolve()))
+        self.assertIn("do it", new["prompt"])
+        self.assertEqual(new["perm"], "all")
+        self.assertEqual(old.read_bytes(), before)
 
     def test_agent_metrics_stderr_is_not_classified_as_outage(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}

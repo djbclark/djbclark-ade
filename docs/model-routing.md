@@ -472,8 +472,17 @@ failed on its tier (no-report or partial, not quota) climbs ONE rung of
 agent/model come from `route_agent`'s top route for the next kind excluding
 the failed pool, and the top rung refuses (exit 2). A quota stop whose reset
 is more than `[dispatch].auto_resume_max_wait_hours` (6) away is rerouted the
-same way instead of waiting for an in-place auto-resume. Scoring is pace- and
-reset-aware: a computed
+same way instead of waiting for an in-place auto-resume.
+As of 2026-10-26, preflight-unavailable records retain the original task text,
+permission mode, effort/context and continuation settings. A refused dispatch
+preserves an existing record and appends its refusal, even with `--force`.
+Reroute refuses missing or unreadable original context with exit 2 before launch;
+recover a legacy thin record with `reroute RECORD --agent A --model M -f FILE`
+(or `-p TEXT`) and explicit `--perm all|read-only|deny` when an unavailable
+record lacks permission intent. Recovery never changes a recorded permission;
+reroutes inherit it and run the usual permission and routing gates.
+
+Scoring is pace- and reset-aware: a computed
 burn-first bonus goes to a pool that would waste quota at its reset, and a pace
 penalty to a pool burning fast. `route_agent.py calibrate` reports done rates,
 and `bin/routing-recalibrate` (monthly, launchd) has Opus re-rank `good_at`
