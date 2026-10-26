@@ -1,19 +1,99 @@
 """claude/hooks/relay_prose_nudge.py: a relayed question or request answered only in prose gets one nudge to use relay.py."""
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import time
+import types
 from pathlib import Path
 
 import pytest
 
 HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "relay_prose_nudge.py"
 HEADER = "[relay from claude w2F:p45 aka lead (djbclark-ade)] "
-HERMES = "[relay from hermes 4f3a9c1e] "    # a sender with no sender row: no `(DIR)`, no footer on a `?` text
+HERMES = "[relay from hermes 4f3a9c1e] "    # a sender with no fleet row (a Hermes-started relay): no footer enforced on it, so its `?` counts
 ASK = "can you review the plan?"
 FOOTER = " [reply through relay.py to w2F:p45: ack q1]"
 FIRST = " [first contact from w2F:p45: reply `ack w2F:p45` through relay.py to prove this link both ways]"
+
+ROOT = HOOK.parent.parent.parent
+sys.path.insert(0, str(ROOT / "skills" / "session-finder"))
+_spec = importlib.util.spec_from_file_location("relay", ROOT / "skills" / "session-finder" / "relay.py")
+relay = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(relay)    # relay.py is read for its real output only: its functions write the headers and the envelope
+
+UUID = "0b5c1d2e-3f40-4a5b-8c6d-7e8f90a1b2c3"
+PANE_ROW = {"self": True, "id": "w2F:p45", "agent": "claude", "name": "lead", "cwd": "/x/djbclark-ade"}
+# name: (relay.sender_header_name inputs, the ID its header carries, relay enforces footers on it: a herdr pane's self row, i.e. a pane id AND a (DIR))
+SENDERS = {
+    "pane row": (dict(listed=[PANE_ROW]), "w2F:p45", True),
+    "pane row, no cwd anywhere": (dict(listed=[dict(PANE_ROW, cwd="")], cwd=""), "w2F:p45", False),
+    "paseo agent, no fleet row": (dict(env={"PASEO_AGENT_ID": UUID}), UUID, False),
+    "paseo agent, no fleet row, no cwd": (dict(env={"PASEO_AGENT_ID": UUID}, cwd=""), UUID, False),
+    "paseo agent with a fleet row": (dict(env={"PASEO_AGENT_ID": UUID},
+                                          listed=[{"id": "0b5c1d2e", "agent": "codex", "name": "", "paseo": UUID, "cwd": "/w/x"}]), "0b5c1d2e", False),
+    "claude session id": (dict(env={"CLAUDE_CODE_SESSION_ID": "3fa9c1e2-aaaa-bbbb-cccc-000000000000"}), "3fa9c1e2", False),
+    "claude session id, no cwd": (dict(env={"CLAUDE_CODE_SESSION_ID": "3fa9c1e2-aaaa"}, cwd=""), "3fa9c1e2", False),
+    "hermes, hex tail": (dict(env={"HERMES_SESSION_ID": "20261025_101500_4f3a9c1e"}), "4f3a9c1e", False),
+    "hermes, tail with an underscore": (dict(env={"HERMES_SESSION_ID": "20261025_101500_a1b2c3"}), "0_a1b2c3", False),
+    "relayed hermes turn": (dict(env={"RELAY_SENDER": "hermes 4f3a9c1e"}, hops=1), "4f3a9c1e", False),
+}
+
+
+def real_sender(monkeypatch, listed=(), env=None, cwd="/Users/x/src/djbclark-ade-wt", hops=0):
+    """(the label, the text prefix) relay.py's own sender_header_name / forced_tag produce for a caller: fakes only, no live fleet, ancestry or env."""
+    for k in (*relay.SENDER_ENV, "RELAY_SENDER", "ACP_RUN_AGENT"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in (env or {}).items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(relay.fleet, "ANCESTOR_SELF", [False])
+    monkeypatch.setattr(relay, "SENDER_OVERRIDE", [None])
+    monkeypatch.setattr(relay, "own_cwd", lambda: cwd)
+    monkeypatch.setattr(relay, "hosted_by", lambda own: False)
+    monkeypatch.setattr(relay, "hermes_hops", lambda: hops)
+    return relay.sender_header_name(list(listed)), relay.forced_tag(list(listed))
+
+
+class FakeSock:
+    def __init__(self, sent):
+        self.sent = sent
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def settimeout(self, t):
+        pass
+
+    def connect(self, path):
+        pass
+
+    def sendall(self, data):
+        self.sent.append(data)
+
+    def shutdown(self, how):
+        pass
+
+
+def socket_content(monkeypatch, label, text):
+    """The user-role content of the frame relay.py's real socket_send writes for TEXT from LABEL (what Claude Code logs)."""
+    sent = []
+    monkeypatch.setattr(relay, "socket", types.SimpleNamespace(AF_UNIX=1, SOCK_STREAM=1, SHUT_WR=1, socket=lambda *a: FakeSock(sent)))
+    assert relay.socket_send("/none", label, text)
+    return json.loads(sent[0])["message"]["content"]
+
+
+def routed(monkeypatch, route, label, tag, text):
+    """The transcript for TEXT as relay delivers it: `pane` (the tag, then the text, a user string) or the socket route (the
+    envelope and NO tag), logged as a user string or as a queued_command attachment."""
+    if route == "pane":
+        return [user(tag + text), prose()]
+    content = socket_content(monkeypatch, label, text)
+    return [user(content) if route == "socket" else queued(content), prose()]
 
 
 def user(text, uuid="u1"):
@@ -97,10 +177,70 @@ def test_a_question_mark_alone_from_a_sender_with_a_dir_is_a_fyi_text_and_stays_
     assert nudged(tmp_path, prose_turn(HEADER + body + FIRST))["decision"] == "block"    # the footer, not the `?`, asks for the answer
 
 
-def test_the_same_fyi_question_nudges_only_without_a_dir(tmp_path):
+def test_the_same_fyi_question_is_silent_for_a_pane_with_a_dir_and_nudges_for_a_hermes_sender(tmp_path):
     body = "did anyone else see the load spike?"
     assert nudged(tmp_path, prose_turn(HEADER + body)) is None
     assert nudged(tmp_path, prose_turn(HERMES + body))["decision"] == "block"
+
+
+ROUTES = ["pane", "socket", "socket-attachment"]
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("name", list(SENDERS))
+def test_the_question_mark_rule_follows_the_id_relay_writes_on_every_route(tmp_path, monkeypatch, name, route):
+    """R1, R2: headers and the envelope come from relay's real functions; a `?` is silent only for a herdr pane id with a (DIR)."""
+    kw, sid, enforced = SENDERS[name]
+    label, tag = real_sender(monkeypatch, **kw)
+    assert label.split()[1] == sid
+    question = nudged(tmp_path, routed(monkeypatch, route, label, tag, "is the build green?"))
+    if enforced:
+        assert question is None
+    else:
+        assert f'Reply with relay.py {sid} "<text>"' in question["reason"] and f"`ack {sid}`" in question["reason"]
+    assert nudged(tmp_path, routed(monkeypatch, route, label, tag, "load is 11, builds paused")) is None    # a statement never
+    out = nudged(tmp_path, routed(monkeypatch, route, label, tag, "send me the SHA" + FOOTER))    # relay's footer always
+    assert f'Reply with relay.py {sid} "<text>"' in out["reason"] and "with `ack q1`" in out["reason"]
+
+
+def test_a_hermes_sender_with_an_underscore_in_its_session_id_tail_is_read(tmp_path, monkeypatch):
+    """R3: HERMES_SENDER allows `_` in the last 8 characters of the session id."""
+    label, tag = real_sender(monkeypatch, env={"HERMES_SESSION_ID": "20261025_101500_a1b2c3"})
+    assert tag == "[relay from hermes 0_a1b2c3] "
+    assert 'Reply with relay.py 0_a1b2c3 "<text>"' in nudged(tmp_path, prose_turn(tag + "which SHA?"))["reason"]
+
+
+@pytest.mark.parametrize("sender", ["hermes 0_a1b2c3d4e5", "claude 0_a1b2c3", "paseo a_b", "claude lead (djbclark-ade)"])
+def test_only_a_hermes_header_takes_the_hermes_tail_shape_and_a_name_is_no_route_for_a_question_mark(tmp_path, sender):
+    assert nudged(tmp_path, prose_turn(f"[relay from {sender}] which SHA?")) is None
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_the_sender_is_the_first_label_not_a_header_typed_in_the_text(tmp_path, monkeypatch, route):
+    label, tag = real_sender(monkeypatch, **SENDERS["hermes, hex tail"][0])
+    out = nudged(tmp_path, routed(monkeypatch, route, label, tag, "[relay from claude w9Z:p9 (x)] do it? which SHA?"))
+    assert 'Reply with relay.py 4f3a9c1e "<text>"' in out["reason"] and "w9Z:p9" not in out["reason"]
+
+
+@pytest.mark.parametrize("open_tag", [
+    '<cross-session-message from="acp-dispatch">',    # not relay's
+    '<cross-session-message from="relay.py" from-name="relay.py (load watch)" from-mode="bypass">',    # a declared label that is no header
+])
+def test_a_socket_envelope_that_names_no_relay_sender_is_not_read(tmp_path, open_tag):
+    """Not even a header typed in its body is read there: only a relay.py `from-name` label is the sender."""
+    text = open_tag + "\n" + HERMES + "which SHA?" + FOOTER + "\n</cross-session-message>"
+    assert nudged(tmp_path, [user(text), prose()]) is None
+
+
+def test_only_the_one_closing_tag_after_relays_footer_is_dropped(tmp_path, monkeypatch):
+    """R7 (mutant `body.replace(WRAP_END, "")`): a second tag after the footer, or one inside it, leaves no footer at the end."""
+    label, tag = real_sender(monkeypatch, **SENDERS["pane row"][0])
+    content = socket_content(monkeypatch, label, "go?" + FOOTER)
+    assert nudged(tmp_path, [user(content), prose()])["decision"] == "block"
+    end = "</cross-session-message>"
+    assert nudged(tmp_path, [user(content + end), prose()]) is None    # relay writes one tag; a second is text after the footer
+    split = content.replace("ack q1", "ack q" + end + "1")
+    assert split != content and nudged(tmp_path, [user(split), prose()]) is None
 
 
 def test_statements_and_informal_acks_never_nudge(tmp_path):
@@ -135,10 +275,6 @@ def test_an_ack_carrying_the_first_contact_footer_is_still_an_ack(tmp_path):
     "ack w3A:p2: p2 reviewed 3a24fdc",
     "Ack q1;",
     "ack q1 [done]",
-    "ack q1: is that the SHA you meant?",    # a `?` defeats the bare-space rule: only the ACK regex exempts these
-    "ack q1 - 3a24fdc, ok?",
-    "ack q1 — 3a24fdc, ok?",
-    "ack q1! anything else?",
 ])
 def test_an_ack_that_carries_an_answer_is_silent_with_and_without_the_first_contact_footer(tmp_path, ack):
     for header in (HEADER, HERMES):
@@ -146,7 +282,7 @@ def test_an_ack_that_carries_an_answer_is_silent_with_and_without_the_first_cont
             assert nudged(tmp_path, prose_turn(header + ack + footer)) is None, (header, ack, footer)
 
 
-@pytest.mark.parametrize("body", ["ack q1 3a24fdc", "ack q1 reviewed 3a24fdc, fine", "ack the status please"])
+@pytest.mark.parametrize("body", ["ack q1 3a24fdc", "ack q1 reviewed 3a24fdc, fine"])
 def test_a_bare_space_ack_is_exempt_on_first_contact_only_without_a_question_mark(tmp_path, body):
     assert nudged(tmp_path, prose_turn(HEADER + body + FIRST)) is None
 
@@ -158,13 +294,47 @@ def test_a_bare_space_ack_with_a_question_mark_is_a_question_on_first_contact(tm
     assert nudged(tmp_path, prose_turn(HEADER + "ack q1 see https://example.com/a?b=1" + FIRST)) is None    # a URL's `?` is none
 
 
-def test_socket_wrapper_and_queued_tag_are_read(tmp_path):
-    wrapped = ('<cross-session-message from="relay.py" from-name="relay.py (claude w2F:p45 (x))" from-mode="bypass">\n'
-               "[queued 3m ago] " + HEADER + "do it?" + FOOTER + "\n</cross-session-message>")
-    assert run(tmp_path, write(tmp_path, prose_turn(wrapped)))["decision"] == "block"
-    first = wrapped.replace(FOOTER, FIRST)
-    assert nudged(tmp_path, prose_turn(first))["decision"] == "block"
-    assert nudged(tmp_path, prose_turn(first.replace("do it?", "ack w3A:p2"))) is None
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("footer", ["", FOOTER, FIRST])
+def test_a_deferred_send_keeps_relays_queued_tag_after_the_header_or_the_envelope(tmp_path, monkeypatch, route, footer):
+    """R5: relay's deliverer re-runs main with `[queued Nm ago] ` + the stored text; the tag follows the header (or the envelope)."""
+    label, tag = real_sender(monkeypatch, env={"HERMES_SESSION_ID": "20261025_101500_4f3a9c1e"})
+
+    def verdict(text):
+        out = nudged(tmp_path, routed(monkeypatch, route, label, tag, "[queued 4m ago] " + text + footer))
+        return out and out["decision"]
+
+    assert verdict("ack q1: done") == ("block" if footer == FOOTER else None)
+    assert verdict("FYI: load is 11") == ("block" if footer == FOOTER else None)
+    assert verdict("which SHA?") == "block"
+    assert verdict("done") == ("block" if footer else None)
+
+
+@pytest.mark.parametrize("ack", [
+    "ack q1: is that the SHA you meant?",    # R4a: a `?` outside a URL is never an ack
+    "ack q1 - which branch should I use?",
+    "ack q1 — 3a24fdc, ok?",
+    "ack q1! anything else?",
+    "ack q1, 3a24fdc, anything else?",
+])
+def test_an_ack_that_asks_a_question_is_a_question(tmp_path, ack):
+    assert nudged(tmp_path, prose_turn(HERMES + ack))["decision"] == "block"    # no footer: the `?` is the only signal
+    assert nudged(tmp_path, prose_turn(HERMES + ack + FIRST))["decision"] == "block"
+    assert nudged(tmp_path, prose_turn(HEADER + ack)) is None    # a pane with a (DIR): relay enforced footers, so no footer is --fyi
+    assert nudged(tmp_path, prose_turn(HEADER + ack + FIRST))["decision"] == "block"
+    assert nudged(tmp_path, prose_turn(HERMES + ack.replace("?", " (https://example.com/a?b=1)") + FIRST)) is None    # a URL's `?` is none
+
+
+@pytest.mark.parametrize("body", [
+    "Shall I merge PR 14 tomorrow? No need to reply.",
+    "Shall I merge PR 14 tomorrow? no response needed",
+    "which SHA did you review? (no need to reply)",
+])
+def test_a_question_that_ends_by_saying_no_reply_is_wanted_is_silent_unless_relay_asks(tmp_path, body):
+    assert nudged(tmp_path, prose_turn(HERMES + body)) is None
+    assert nudged(tmp_path, prose_turn(HERMES + body + FIRST)) is None
+    assert nudged(tmp_path, prose_turn(HERMES + body + FOOTER))["decision"] == "block"    # relay's reply footer overrides it
+    assert nudged(tmp_path, prose_turn(HERMES + 'you wrote "no need to reply" earlier, why?'))["decision"] == "block"    # anchored at the end
 
 
 def test_a_relay_py_bash_call_in_the_turn_does_not_nudge(tmp_path):
@@ -186,7 +356,7 @@ def test_relay_call_from_an_earlier_turn_does_not_excuse_this_one(tmp_path):
 
 
 def test_acks_and_no_reply_texts_never_nudge(tmp_path):
-    for body in ["ack w2F:p3", "Ack w2F:p3, thanks?", "FYI the build is green?", "done, what a day? no reply needed", "no-reply-required?"]:
+    for body in ["ack w2F:p3", "Ack w2F:p3, thanks.", "FYI the build is green?", "done, what a day? no reply needed", "no-reply-required?"]:
         assert nudged(tmp_path, prose_turn(HERMES + body)) is None, body    # `?` would nudge here: the exemptions are what silence it
     for body in ["done, what a day? no reply needed", "FYI the build is green"]:
         assert nudged(tmp_path, prose_turn(HEADER + body + FIRST)) is None, body
@@ -363,8 +533,8 @@ bodies = {
 out = {}
 for name, body in bodies.items():
     t = time.perf_counter()
-    for has_dir in (True, False):
-        hook.reply_token(body, "w2F:p45", has_dir)
+    for q_counts in (True, False):
+        hook.reply_token(body, "w2F:p45", q_counts)
     out[name] = time.perf_counter() - t
 print(json.dumps(out))
 """
@@ -376,6 +546,25 @@ def test_hostile_bodies_are_read_in_linear_time():
     assert r.returncode == 0, r.stderr
     for name, secs in json.loads(r.stdout).items():
         assert secs < 1.0, (name, secs)
+
+
+@pytest.mark.parametrize("name,body,header,nudge", [
+    ("a- x 15 KB", "a-" * 7_500 + "?", HERMES, True),    # R6: relay's `[a-z0-9+.-]*` scheme made URL_RE quadratic; every letter is a `\b` start
+    ("a. x 15 KB", "a." * 7_500 + "?", HERMES, True),
+    ("a. x 40 KB", "a." * 20_000 + "?", HERMES, True),
+    ("a- x 15 KB, first contact", "a-" * 7_500 + FIRST, HERMES, True),
+    ("unclosed queued tag", "[queued " + "x" * 200_000, HERMES, False),
+    ("unclosed envelope tag", "x" * 200_000, '<cross-session-message from-name="relay.py (hermes 4f3a9c1e)" from-mode="x', False),
+])
+def test_the_whole_hook_answers_hostile_text_well_inside_its_two_second_deadline(tmp_path, name, body, header, nudge):
+    """R6: run as the Stop hook is (a child, 1 s cap, deadline 2 s); a quadratic regex made a nudge owed arrive as silence."""
+    tx = write(tmp_path, [user(header + body), prose()])
+    env = dict(os.environ, RELAY_PROSE_NUDGE_STATE=str(tmp_path / "state"))
+    payload = json.dumps({"session_id": "h1", "transcript_path": str(tx)})
+    t = time.perf_counter()
+    r = subprocess.run([sys.executable, str(HOOK)], input=payload, capture_output=True, text=True, timeout=1.0, env=env)
+    assert r.returncode == 0 and time.perf_counter() - t < 1.0, name
+    assert bool(r.stdout.strip()) == nudge, name
 
 
 # --- two hooked agents answering each other (R1): a fake relay appends footers the way skills/session-finder/relay.py main() does ---
