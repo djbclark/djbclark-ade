@@ -3,6 +3,10 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Model tiers as data (djbclark, direct, 2026-10-26)
+
+djbclark, 2026-10-26: use Fable where an agent judges it significantly better than Opus, and make the gates shift when a model supersedes Fable (the new model is treated like Fable is now, Fable like Opus is now). The same applies to codex astra, today's second-ranked frontier vendor. Design only, nothing built: [docs/model-tiers-design.md](model-tiers-design.md) (branch `docs/model-tiers-design`). It covers the inventory of hard-coded names and tier rules, `config/model-tiers.toml` with roles per vendor and rank as data, `bin/model-tiers promote/undo`, the `away` frontier allowance as a `[frontier]` gate in `config/gates.toml`, and slices S1-S5. S1 (the away allowance and advice text) stacks on `feat/gates-profile`. Its section F holds 6 OPEN questions for djbclark, plus a proposed rewording of `~/.agents/AGENTS.md` item 32 that only an Opus 5.5 session may apply.
+
 ## Verified peer messaging, round 2: "always acknowledged", and the gaps found (djbclark, direct, 2026-10-25)
 
 djbclark, 2026-10-25, after seeing this relayed text from djbclark-ade-8d: "ack from djbclark-ade-8d (430f45ba), no reply needed beyond this": he wanted it so that **things always need an acknowledgement, and when none arrives the requesting agent has to handle that**; is the missing part just later in the implementation, or a flaw in what already landed? Answer (2026-10-25): mostly rollout and wiring, plus one design scoping that needs his ruling. Builds on "Verified peer messaging" (PR 74, merged 6f54e89; AGENTS.md standing order 10). Nothing below is started.
