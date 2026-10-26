@@ -379,6 +379,11 @@ AGENTS = {
     "crush": (["env", "CRUSH_DISABLE_METRICS=1",
                "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
                "crush-acp", "acp"], "local"),
+    # kiro-cli acp (kiro-cli 2.34.0, Homebrew cask, 2026-10-25): native ACP. Its YOLO is the
+    # persistent --trust-all-tools (-a), a flag of `acp` and `chat`, not of the root command; it
+    # is in YOLO_CMD, not here, so --perm deny runs without it and Kiro asks for every tool.
+    # Never routed by route_agent.py ([discovery].never_route): dispatch it by name.
+    "kiro": (["kiro-cli", "acp"], None),
 }
 # ACP_RUN_AGY_SERVER swaps agy's server command for one run without an edit: a
 # specific agy_acp_server.par instead of the newest one, or a wrapper such as
@@ -440,6 +445,7 @@ YOLO_CMD = {
     "crush": ["env", "CRUSH_DISABLE_METRICS=1",
               "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
               "crush-acp", "acp", "--yolo"],
+    "kiro": ["kiro-cli", "acp", "--trust-all-tools"],
 }
 # Extra environment per agent. agy's ACP server runs the user's global hooks in
 # ~/.gemini/config/hooks.json (Orca/Moshi status hooks); the Orca PreToolUse

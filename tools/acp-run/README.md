@@ -454,6 +454,21 @@ exits 2: omp's configured default is `github-copilot/gpt-5.6-luna` and would spe
 reserve (`ACP_RUN_OMP_ANY_MODEL=1` overrides). Needs an enabled Anthropic login in omp
 (`omp login`); with an expired one the run ends `No API key found for anthropic` (2026-10-19).
 
+### kiro
+
+`kiro-cli acp` (Homebrew cask `kiro-cli` 2.34.0, added 2026-10-25), native ACP. Under `--perm all`
+acp-run starts `kiro-cli acp --trust-all-tools` (`-a`; a flag of `acp` and `chat`, not of the root
+command), the YOLO of the `~/.bashrc` `kiro-cli()` function; under `--perm deny` it starts bare and
+Kiro asks for every tool. Not verified: Kiro's read-only behaviour (`--perm read-only` is refused).
+First run on a machine (2026-10-25): `session/new` blocks while Kiro downloads the 83 MB
+`all-MiniLM-L6-v2` semantic-search model to `~/.semantic_search/models/` (a restart begins the
+download again), about 66 s here, so acp-run's 2 x 40 s handshake times out and every retry
+restarts it. Warm it once: `kiro-cli acp` driven by hand until `session/new` answers, or wait out
+one run with a longer limit. Later runs: `Reply with exactly: OK` took 4.4 s.
+`route_agent.py` never routes it (`[discovery].never_route`): dispatch it by name. The macOS input
+method (`kiro-cli integrations install input-method`) is not needed and cannot be enabled on macOS 27
+(aws/amazon-q-developer-cli#3916).
+
 ### goose
 
 `goose acp` (Homebrew `block-goose-cli` 1.55.0, added 2026-10-23), launched through

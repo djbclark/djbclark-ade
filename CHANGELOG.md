@@ -11,6 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `acp-run kiro` (2026-10-25): `kiro-cli acp`, started with `--trust-all-tools` under `--perm all` and bare under `--perm deny`; `[discovery].never_route` keeps `route_agent.py` from handing it slices. `~/.bashrc` has the matching `kiro-cli()` YOLO function (#PR).
 - `relay.py --ack` (2026-10-25): after a send that is only accepted or queued, watch the target for `--wait` more seconds and exit 0 delivered, 1 not delivered, 3 unverified (new code); without it the exit codes are unchanged, so fleet-watch, load-watch, session-load-watch and rumination-watch keep working (#74).
 - `relay.py --expect-ack ID`, `--needs-reply`, `--fyi`, `--ack-within S` (2026-10-25): a message with a `?` outside a URL, or `--needs-reply`, is refused (exit 2) from an identifiable session without `--expect-ack`; the expectation is a record listed by `--pending` (`"kind": "expect"`, `overdue`) and resolved by `--sweep` when an `ack ID` reply reaches the sender's transcript; an overdue one prints `OVERDUE ack ID` for the operator (#74).
 - First contact (2026-10-25): the first relay from a session to a peer appends a request to reply `ack <sender id>`; `relay.py` keeps `~/.local/state/relay/links.json` and `fleet.py list` shows `link: acked` or `link: ONE-WAY` per peer (#74).
