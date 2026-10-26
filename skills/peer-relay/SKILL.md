@@ -69,9 +69,10 @@ with `--expect-ack`:
    2. **`self` row without a transcript** (relay finds transcripts for Claude rows, and for Codex by its session id; an omp, opencode
       or native Hermes TUI row in a herdr or terminal pane can lack one). The question gate still applies, so a `?` or `--needs-reply`
       text needs `--expect-ack`, and `--expect-ack` is accepted (#87) with a record that holds no transcript (`tx: null`). It closes only
-      when the target answers THROUGH relay.py (item 11) and your send went by a route that proved delivery or keeps the text (a non-Claude
-      Paseo agent, an ACP launch, an acp-dispatch slice, a Hermes gateway session). From a native pane (omp, opencode, Hermes TUI, gemini, pi)
-      it ALWAYS goes `OVERDUE`, even when the target answered: tell djbclark (item 4) and close it by hand. Do not drop the `?`, call it
+      when the target answers THROUGH relay.py (item 11) with a text that begins `ack ID`, and that answer reaches YOU by a route that proves
+      delivery or keeps the text: you are a non-Claude Paseo agent, an ACP launch or an acp-dispatch slice, and the answer was watched (not
+      `--no-ack`) and not only queued for you while busy. In a native pane (omp, opencode, Hermes TUI, gemini, pi) relay reaches you only by the
+      pane route, which proves nothing, so it ALWAYS goes `OVERDUE`, even when the target answered: tell djbclark (item 4) and close it by hand. Do not drop the `?`, call it
       `--fyi`, borrow another session's context, invent a transcript or use another channel.
    3. **No `self` row** (for example a Hermes gateway turn, which relay names `hermes <last 8 of its session id>`, or a script). The
       `?` gate does not apply: send the text as it is, without `--expect-ack` or `--needs-reply` (both are refused here, exit 2: do not
