@@ -59,7 +59,11 @@ level to at least `watch` with the advice "aiuse data <age> old: collector down?
 <state>.lock, saves
 the state before it pings and records the ping afterwards (a ping cut off by a kill is retried
 next run: at least once).
-Thresholds live in THRESHOLDS; env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) overrides keys.
+Thresholds: THRESHOLDS below is the fail-safe; config/gates.toml's [quota_guard] baseline, the active `bin/gate-profile`
+profile and env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) override keys, in that order (bin/ade_gates.py, docs/gates.md).
+A `conserve` alert gives no more than `conserve_alert_level` (0 ok, 1 watch, 2 tight, 3 critical; baseline 2, so the rules
+above hold): the level is min(that number, the level the alert would otherwise give). A temporary profile may lower it to 1,
+so a projection alert alone stops raising `tight` while the operator is away; it never raises a level above what the alert gives.
 
 Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (default
 ~/.cache/aiuse/snapshots), _STATE (default ~/.local/state/ade/quota-guard.json), _PING
@@ -84,6 +88,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_gates  # noqa: E402
+
 HOME = Path.home()
 LABEL = "com.djbclark.claude-quota-guard"
 INTERVAL_SECONDS = 15 * 60  # aiuse's collector is hourly; the guard only reads its cache
@@ -94,6 +101,7 @@ THRESHOLDS = {
     "critical_weekly": 15.0,    # -> critical
     "critical_five_hour": 10.0,  # 5-hour left below this -> critical
     "watch_fable": 15.0,        # Fable sublimit left below this -> watch (advice already bans Fable)
+    "conserve_alert_level": 2.0,  # level cap for a `conserve` alert (0 ok .. 3 critical); 2 = the alert alone may give tight
     "alert_max_age_s": 21600.0,  # ignore snapshot alerts older than this (aiuse's own rows are fresher)
     "period_tolerance_s": 7200.0,  # two resets_at this close are the same reset period (clock jitter)
     "aiuse_timeout_s": 90.0,
@@ -162,21 +170,17 @@ def state_path() -> Path:
     return _path("CLAUDE_QUOTA_GUARD_STATE", HOME / ".local/state/ade/quota-guard.json")
 
 
+def gate_config() -> tuple[dict, dict]:
+    """(thresholds, info): THRESHOLDS < config/gates.toml < the active gate profile < env JSON (bin/ade_gates.py).
+    A bad env JSON is a ConfigError (exit 64)."""
+    try:
+        return ade_gates.load_gates("quota_guard", now(), THRESHOLDS)
+    except ade_gates.GateEnvError as e:
+        raise ConfigError(str(e))
+
+
 def thresholds() -> dict:
-    t = dict(THRESHOLDS)
-    raw = os.environ.get("CLAUDE_QUOTA_GUARD_THRESHOLDS")
-    if raw:
-        try:
-            over = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise ConfigError(f"CLAUDE_QUOTA_GUARD_THRESHOLDS is not JSON: {e}")
-        if not isinstance(over, dict):
-            raise ConfigError("CLAUDE_QUOTA_GUARD_THRESHOLDS must be a JSON object")
-        for k, v in over.items():
-            if k not in t or not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
-                raise ConfigError(f"unknown or non-numeric threshold {k!r}")
-            t[k] = float(v)
-    return t
+    return gate_config()[0]
 
 
 def now() -> datetime:
@@ -480,14 +484,15 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     weekly_labels = {w["label"].strip().lower(): [x for x in windows if x["kind"] == "weekly"
                                                     and x["label"].strip().lower() == w["label"].strip().lower()]
                      for w in windows if w["kind"] == "weekly"}
+    cap = max(0, min(len(LEVELS) - 1, int(t["conserve_alert_level"])))  # what a `conserve` alert may give at most
     for a in alerts:
         matched = weekly_labels.get(str(a.get("window_label") or "").strip().lower(), [])
         projected = bool(matched) and bool(_RUNNING_PROJECTED.search(str(a.get("message") or "")))
         if projected and all(w["pace_early"] for w in matched):
             continue
-        raise_to("watch")
+        raise_to(LEVELS[min(cap, LEVELS.index("watch"))])
         if projected:
-            raise_to("tight")
+            raise_to(LEVELS[min(cap, LEVELS.index("tight"))])
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
     candidates = [w for w in (weekly, five) if w]
@@ -641,7 +646,7 @@ def _locked(t: dict):
 
 # -- subcommands -----------------------------------------------------------
 
-def _check_locked(t: dict) -> dict:
+def _check_locked(t: dict, profile: dict | None = None) -> dict:
     try:
         rc, data = read_aiuse()
         snap, snap_age, snap_name = None, None, None
@@ -660,6 +665,7 @@ def _check_locked(t: dict) -> dict:
     except Exception as e:  # malformed aiuse or snapshot types must never read as `watch` (exit 1)
         raise Unreadable(f"unexpected {type(e).__name__} reading aiuse or the snapshot: {e}")
     st = dict(d)
+    st["profile"] = profile   # {"name", "until"} while a gate profile shapes `t`, else None
     st["unreadable_since"] = st["last_unreadable_pinged_at"] = st["last_unreadable_at"] = None  # a good read ends the episode
     # Data age: the oldest of the payload's top-level age, every judged row's own age (a Claude
     # pool can be hours old inside a fresh snapshot: cswap stalls) and the snapshot file's mtime.
@@ -717,11 +723,12 @@ def _note_unreadable(err: Exception, t: dict) -> None:
 
 
 def cmd_check(args) -> int:
-    t = thresholds()
+    t, gate_info = gate_config()
+    ade_gates.notify_expired(gate_info, lambda text: send_ping(text, t), now())   # once per expired profile file
     try:
         with _locked(t):
             try:
-                st = _check_locked(t)
+                st = _check_locked(t, ade_gates.profile_brief(gate_info))
             except Unreadable as e:
                 _note_unreadable(e, t)
                 raise
@@ -760,6 +767,13 @@ def _age_phrase(seconds) -> str:
     return "age unknown" if short is None else f"{short} old"
 
 
+def _profile_phrase(profile) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    until = ade_gates.parse_utc(profile.get("until"))
+    return f" [gate profile {profile.get('name')} until {ade_gates.ny(until) if until else '?'}]"
+
+
 def _human(st: dict) -> str:
     stale = " (stale)" if st.get("stale") else ""
     since = _parse_ts(st.get("unreadable_since"))
@@ -767,7 +781,7 @@ def _human(st: dict) -> str:
     return (f"claude-quota-guard: {st.get('level', '?')}{stale}: weekly {_fmt(st.get('weekly_left'))} left, "
             f"5-hour {_fmt(st.get('five_hour_left'))}, fable {_fmt(st.get('fable_left'))}, "
             f"resets {_reset_phrase(st.get('resets_at'))}, data {_age_phrase(st.get('data_age_s'))}, "
-            f"checked {st.get('checked_at', '?')}{unreadable}")
+            f"checked {st.get('checked_at', '?')}{unreadable}{_profile_phrase(st.get('profile'))}")
 
 
 def cmd_status(args) -> int:

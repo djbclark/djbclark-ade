@@ -1123,3 +1123,177 @@ class TestPerAccountEndToEnd(Base):
         r = self.e.run("check")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("level: tight", r.stdout)
+
+
+class TestGateProfile(Base):
+    """config/gates.toml and the `away` profile through the real script (bin/ade_gates.py, 2026-10-26)."""
+
+    def weekly_242(self) -> None:
+        """Weekly 65% used, resets in 4d5h, burning 1.75 %/h: projected 242% at the reset, weekly left 35 (not under 30)."""
+        resets = NOW + timedelta(days=4, hours=5)
+        for m in range(90, -1, -10):
+            write_snap(self.e.snaps, NOW - timedelta(minutes=m), (10, NOW + timedelta(hours=3)),
+                       (65 - 1.75 * m / 60, resets), (5, resets))
+
+    def profile(self, **over) -> dict:
+        path = self.e.root / "gate-profile.json"
+        s = {"schema": 1, "profile": "away", "since": (NOW - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "until": (NOW + timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%SZ"), "reason": "away", "set_by": "test", **over}
+        path.write_text(json.dumps(s))
+        self.state_env = {"GATE_PROFILE_STATE": str(path)}
+        return s
+
+    def run_gov(self, *args: str, now: datetime = NOW, **extra):
+        return self.e.run(*args, now=now, extra={**getattr(self, "state_env", {}), **extra})
+
+    def test_baseline_is_tight_on_the_projection_alone(self):
+        self.weekly_242()
+        r = self.run_gov("run")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        st = self.e.state_json()
+        self.assertEqual((st["level"], st["profile"]), ("tight", None))
+        w = st["windows"]["weekly"]
+        self.assertGreaterEqual(w["projected_at_reset"], 200)
+        self.assertGreater(w["left"], 30)
+
+    def test_away_profile_lifts_the_projection_downshift(self):
+        self.weekly_242()
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        self.profile()
+        r = self.run_gov("run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = self.e.state_json()
+        self.assertEqual(st["level"], "ok")
+        self.assertEqual(st["profile"]["name"], "away")
+        self.assertEqual(self.e.sets(), [])                                 # nobody moved off Opus
+        self.assertIn("gate profile: away until", r.stdout)
+        out = self.run_gov("status")
+        self.assertIn("gate profile: away until", out.stdout)
+
+    def guard_state(self, name: str, *, away: bool):
+        """Run the REAL quota guard against a fake aiuse: weekly 35% left plus a live weekly `conserve` projection alert."""
+        from test_claude_quota_guard import PROJECTED, Rig, aiuse_fixture, alert
+        d = self.e.root / name
+        d.mkdir()
+        rig = Rig(d)
+        rig.now = NOW
+        rig.set_aiuse(aiuse_fixture(weekly=35.0))
+        rig.set_alerts([alert(PROJECTED)])
+        r = rig.guard(**({"GATE_PROFILE_STATE": self.state_env["GATE_PROFILE_STATE"]} if away else {}))
+        self.assertEqual(r.returncode, 1 if away else 2, r.stderr)
+        return rig
+
+    def test_a_live_conserve_alert_keeps_the_governor_tight_when_only_the_governor_is_away(self):
+        """The finding this key closes: the governor reads the guard's level, so a guard still at baseline holds it tight."""
+        self.weekly_242()
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        self.profile()
+        rig = self.guard_state("guard_baseline", away=False)
+        self.assertEqual(rig.state_json()["level"], "tight")
+        r = self.run_gov("run", CLAUDE_QUOTA_GUARD_STATE=str(rig.state))
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(self.e.state_json()["level"], "tight")
+        self.assertTrue(self.e.sets())                                      # Opus moved down
+
+    def test_away_with_a_live_conserve_alert_is_watch_at_the_guard_and_moves_no_opus_agent(self):
+        self.weekly_242()
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        self.profile()
+        rig = self.guard_state("guard_away", away=True)
+        st = rig.state_json()
+        self.assertEqual((st["level"], st["profile"]["name"]), ("watch", "away"))
+        r = self.run_gov("run", CLAUDE_QUOTA_GUARD_STATE=str(rig.state))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        gst = self.e.state_json()
+        self.assertEqual((gst["level"], gst["guard_level"]), ("ok", "ok"))   # watch only restricts Fable/Opus Agent-tool sub-agents
+        self.assertEqual(self.e.sets(), [])
+
+    def test_away_profile_keeps_the_critical_hard_stop(self):
+        resets = NOW + timedelta(days=4, hours=5)
+        write_snap(self.e.snaps, NOW, (10, NOW + timedelta(hours=3)), (92, resets), (5, resets))   # weekly left 8 < 10
+        self.profile()
+        r = self.run_gov("run")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_away_profile_moves_the_left_percent_trigger(self):
+        resets = NOW + timedelta(days=4, hours=5)
+        write_snap(self.e.snaps, NOW, (10, NOW + timedelta(hours=3)), (78, resets), (5, resets))   # weekly left 22: < 30, > 15
+        self.assertEqual(self.run_gov("run").returncode, 1)
+        self.profile()
+        self.assertEqual(self.run_gov("run").returncode, 0)
+
+    def test_an_expired_profile_means_baseline_and_one_ping(self):
+        self.weekly_242()
+        self.profile(since=(NOW - timedelta(hours=70)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     until=(NOW - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        r = self.run_gov("run")
+        self.assertEqual(r.returncode, 1, r.stderr)                          # baseline tight again
+        pings = [c[0] for c in self.e.calls("ping")]
+        self.assertEqual(len([p for p in pings if "away profile expired, baseline restored" in p]), 1)
+        self.assertTrue(Path(self.state_env["GATE_PROFILE_STATE"]).exists())  # the audit trail stays
+        self.run_gov("run")
+        pings = [c[0] for c in self.e.calls("ping")]
+        self.assertEqual(len([p for p in pings if "expired" in p]), 1)        # not repeated
+
+    def test_check_never_announces_an_expiry(self):
+        self.weekly_242()
+        self.profile(until=(NOW - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     since=(NOW - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.run_gov("check")
+        self.assertEqual(self.e.calls("ping"), [])
+        self.assertNotIn("expired_notified", json.loads(Path(self.state_env["GATE_PROFILE_STATE"]).read_text()))
+
+    def test_env_json_beats_the_profile(self):
+        self.weekly_242()
+        self.profile()
+        r = self.run_gov("run", CLAUDE_GOVERNOR_THRESHOLDS=json.dumps({"tight_projected": 90}))
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_the_change_ping_names_the_profile(self):
+        self.weekly_242()
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        self.profile()
+        self.run_gov("run", CLAUDE_GOVERNOR_THRESHOLDS=json.dumps({"tight_projected": 90}))   # env undoes the loosening: downshift
+        text = self.e.calls("ping")[-1][0]
+        self.assertIn("[gate profile away until", text)
+
+    def test_a_missing_gates_toml_falls_back_to_the_code_defaults(self):
+        self.weekly_242()
+        self.profile()
+        r = self.run_gov("run", GATES_TOML="/nonexistent/gates.toml")
+        self.assertEqual(r.returncode, 1, r.stderr)                          # code defaults: tight, the profile cannot apply
+        self.assertIn("using the code defaults for governor", r.stderr)
+        self.assertIsNone(self.e.state_json()["profile"])
+
+    def nudges(self) -> list[str]:
+        return [c[0] for c in self.e.calls("ping") if "profile active until" in c[0]]
+
+    def test_daily_nudge_once_per_new_york_day_while_a_profile_is_active(self):
+        self.ok()
+        self.profile()                                                      # NOW is Fri 9:00 AM EDT; until Mon 9:00 AM EDT
+        self.assertEqual(self.run_gov("run").returncode, 0)
+        self.assertEqual(len(self.nudges()), 1)
+        self.assertIn("away profile active until Mon Oct 26 9:00 AM EDT, 3 days left; restore normal routing now: gate-profile clear",
+                      self.nudges()[0])
+        self.run_gov("run")
+        self.run_gov("run", now=NOW + timedelta(minutes=5))
+        self.assertEqual(len(self.nudges()), 1)                             # the same day: not again
+        self.run_gov("run", now=NOW + timedelta(hours=15) - timedelta(seconds=1))   # 11:59:59 PM EDT: still Friday
+        self.assertEqual(len(self.nudges()), 1)
+        self.run_gov("run", now=NOW + timedelta(hours=15))                  # 12:00 AM EDT Saturday
+        self.assertEqual(len(self.nudges()), 2)
+        self.assertEqual(json.loads(Path(self.state_env["GATE_PROFILE_STATE"]).read_text())["last_daily_nudge"], "2026-10-24")
+
+    def test_check_and_baseline_never_nudge(self):
+        self.ok()
+        self.run_gov("run")                                                 # no profile file at all
+        self.profile()
+        self.run_gov("check")                                               # dry run changes nothing
+        self.assertEqual(self.nudges(), [])
+        self.assertNotIn("last_daily_nudge", json.loads(Path(self.state_env["GATE_PROFILE_STATE"]).read_text()))
+
+    def test_no_nudge_after_the_profile_expires(self):
+        self.ok()
+        self.profile(until=(NOW + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.run_gov("run", now=NOW + timedelta(hours=2))
+        self.assertEqual(self.nudges(), [])
