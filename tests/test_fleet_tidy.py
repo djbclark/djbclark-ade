@@ -98,6 +98,41 @@ class TestBusy(unittest.TestCase):
 
 
 class TestPaneDetection(unittest.TestCase):
+    def test_cline_cached_tui_is_agent_not_background_work(self):
+        wrapper = {"pid": 20, "argv0": "node", "argv": ["node", "/opt/lib/cline/bin/cline", "--tui"]}
+        native = {"pid": 21, "argv0": "/opt/lib/cline/bin/.cline", "argv": ["/opt/lib/cline/bin/.cline", "--tui", "--thinking", "low"]}
+        agent, pid, _, _ = fleet._tui_of([wrapper, native])
+        self.assertEqual((agent, pid), ("cline", 21))
+        row = {"pid": pid, "status": "unknown"}
+        fleet.mark_busy(row, {20: (1, "node /opt/lib/cline/bin/cline --tui"), 21: (20, "/opt/lib/cline/bin/.cline --tui")})
+        self.assertEqual(row["status"], "unknown")
+        fleet.mark_busy(row, {21: (20, "/opt/lib/cline/bin/.cline --tui"), 22: (21, "python /tmp/real-work.py")})
+        self.assertEqual(row["status"], "busy-background")
+
+    def test_cline_native_service_and_one_shot_are_not_tuis(self):
+        for args in [["hub", "start"], ["core", "daemon"], ["--acp"], ["--headless", "task"], ["--zen"], ["--version"], ["--tui", "--acp"]]:
+            with self.subTest(args=args):
+                proc = {"pid": 21, "argv0": "/opt/lib/cline/bin/.cline", "argv": ["/opt/lib/cline/bin/.cline", *args]}
+                self.assertEqual(fleet._tui_of([proc]), (None, None, None, None))
+
+    def test_cline_cache_preference_requires_matching_launcher(self):
+        wrapper = {"pid": 20, "argv0": "node", "argv": ["node", "/other/cline/bin/cline", "--tui"]}
+        native = {"pid": 21, "argv0": "/opt/lib/cline/bin/.cline", "argv": ["/opt/lib/cline/bin/.cline", "--tui"]}
+        self.assertEqual(fleet._tui_of([wrapper, native])[:2], ("cline", 20))
+
+    def test_cline_installed_symlink_still_selects_native_tui(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "lib/cline/bin"
+            package.mkdir(parents=True)
+            (package / "cline").touch()
+            link = root / "cline"
+            link.symlink_to(package / "cline")
+            wrapper = {"pid": 20, "argv0": "node", "argv": ["node", str(link), "--tui"]}
+            binary = str(package / ".cline")
+            native = {"pid": 21, "argv0": binary, "argv": [binary, "--tui"]}
+            self.assertEqual(fleet._tui_of([wrapper, native])[:2], ("cline", 21))
+
     def test_tui_from_process_info(self):
         procs = [{"pid": 9, "name": "python3.13", "argv0": "python", "argv": ["/x/bin/python", "/x/bin/token-savior"], "cwd": ""},
                  {"pid": 7, "name": "node", "argv0": "node", "argv": ["node", "/Users/d/.local/bin/zcode", "--mode", "yolo"], "cwd": ""}]
