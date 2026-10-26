@@ -662,6 +662,25 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("would send to paseo test-agent", r.stdout + r.stderr)
 
+    def test_a_codex_session_is_never_discovered_through_the_cline_hub(self) -> None:
+        # Missing tool-shell host variables must not route Codex to another agent.
+        hub = SCRIPT.parent / "paseo-self"
+        tmp_script = self.home / "self-slash"
+        tmp_script.write_bytes(SCRIPT.read_bytes())
+        tmp_script.chmod(0o755)
+        fake_hub = tmp_script.parent / hub.name
+        marker = self.home / "hub-called"
+        fake_hub.write_text('#!/bin/bash\nprintf called > "$FAKE_HUB_MARKER"\nprintf "stranger-agent\\n"\n')
+        fake_hub.chmod(0o755)
+        env = {k: v for k, v in self.env.items() if k not in ("PASEO_AGENT_ID", "CLAUDECODE")}
+        r = subprocess.run([str(tmp_script), "--dry-run", "/new"], text=True, capture_output=True,
+                           timeout=60, check=False,
+                           env={**env, "CODEX_THREAD_ID": "synthetic-thread", "FAKE_HUB_MARKER": str(marker)})
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("never discovered through the Cline hub", r.stderr)
+        self.assertFalse(marker.exists(), "unrelated Cline discovery must not run")
+        self.assertEqual(self.paseo_calls(), [])
+
     def test_a_claude_session_is_never_discovered_through_the_cline_hub(self) -> None:
         # paseo-self names the newest tool.started in the hub, another Cline agent's when the caller is Claude
         self.fake_herdr()
