@@ -80,6 +80,7 @@ class Harness(unittest.TestCase):
                   "ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER"):
             os.environ.pop(k, None)
         os.environ["RELAY_SENDER_NAME"] = "harness-job"    # relay refuses a sender it cannot resolve (exit 4): the tests that are not about that run as a declared job
+        os.environ["RELAY_NO_ACK"] = "1"    # the route tests assert the route's own result as a session sender; the default delivery watch (2026-10-25) is tested in test_relay_verified.py, which pops this
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
         os.environ["CODEX_HOME"] = str(self.tmp / "codex")
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
