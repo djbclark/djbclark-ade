@@ -526,7 +526,7 @@ def notify(inc, g, top, path, load1, ncpu, dry):
             # --no-defer: the brief is time-critical, so a busy session that cannot take it now is "could not reach it"
             # (the fixer line below), never "queued": a queued brief arrives after the load spike it is about
             r = subprocess.run([sys.executable, str(SF / "relay.py"), target, line, "--no-defer"], capture_output=True,
-                               text=True, timeout=60)
+                               text=True, timeout=60, env=relay_env())
             relayed = r.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -584,6 +584,12 @@ SEND_RETRY_BUDGET_S = 30.0
 _paseo_down = False
 
 
+def relay_env():
+    """The environment for a relay.py call: relay refuses a sender it cannot resolve (exit 4, 2026-10-25), and this watcher runs
+    from launchd with no session identity, so it declares one. A session identity still wins (relay reads RELAY_SENDER_NAME last)."""
+    return {**os.environ, "RELAY_SENDER_NAME": os.environ.get("RELAY_SENDER_NAME") or "load-watch"}
+
+
 def send_transient(r):
     """True when a failed `paseo send` reports one of the SEND_TRANSIENT codes: the exact `error.code` of the
     --json error on stderr (stdout is tried too). Anything else, including non-JSON output, is not transient."""
@@ -618,7 +624,7 @@ def send_to(w, text, defer=False):
         argv = [cli, "send", "--no-wait", "--json", "--behavior", "steer", "--", w["target"], text]
         retries = 0 if _paseo_down else SEND_RETRIES
     else:
-        env, argv = None, [sys.executable, str(SF / "relay.py"), w["target"], text, *([] if defer else ["--no-defer"])]
+        env, argv = relay_env(), [sys.executable, str(SF / "relay.py"), w["target"], text, *([] if defer else ["--no-defer"])]
         retries = 0
     started = time.monotonic()
     for attempt in range(retries + 1):

@@ -353,6 +353,37 @@ Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
 bypass a permission denial; grok is excluded (2026-10-06).
 
+## Verified peer messaging (2026-10-25, standing order 10; docs/queue.md "Verified peer messaging")
+
+Proof, not conversation: delivery proof (the text reached the target's transcript) is mechanical and needs no reply; a reply is required
+only where the message asks a question or requests action. An FYI that provably landed needs none.
+
+1. **`--ack`**: `relay.py <id> "<text>" --ack`. A send that is only `accepted` (a socket frame or Paseo send to a working session) or `queued`
+   (an enqueue Claude Code has not taken yet, a deferred record) is watched for up to `--wait` more seconds and exits **0 delivered**,
+   **1 not delivered** (not sent, pulled back out of the queue, failed or expired), **3 unverified** (sent or still queued, no proof yet: do not resend; an
+   ACP inbox or a Paseo agent with no Claude transcript has nothing to read, so it is unverified at once). Without `--ack` the exit codes
+   are unchanged (`queued` and `accepted` still exit 0), because fleet-watch, load-watch, session-load-watch and rumination-watch read 0 as "taken".
+   `--json` carries `ack` and `ack_note`. Use `--ack` whenever you will act on "they have it".
+2. **A question or an action request needs `--expect-ack ID`**: a `?` outside a URL, or `--needs-reply`, is refused (exit 2, nothing sent) without it
+   when you are an identifiable session; `--fyi` overrides a `?` that is no question. `ID` is 1-40 characters of `A-Za-z0-9._-`, unique among open ones. The sent text
+   ends `[reply through relay.py to <your id>: ack ID]`. It is **state, not a wait**: `relay.py --pending` lists it (sender, target, age, `OVERDUE`;
+   `--json` rows have `"kind": "expect"`), and `relay.py --sweep` resolves it when a user-role line in YOUR transcript says `ack ID` under the target's relay header (its ID word or `aka` name; a Hermes session answers as `hermes <last 8 of its session id>`;
+   two sessions with one name are not told apart, and a same-uid process can forge a header) (your own tool calls and results never count). After `--ack-within S` (default 1800) with no answer it is OVERDUE: the sweep prints `OVERDUE ack ID: ...`, and **you tell the operator**; never assume read.
+3. **First contact**: the first message from your session to a peer carries ` [first contact from <your id>: reply `ack <your id>` through relay.py ...]`.
+   The ledger `~/.local/state/relay/links.json` records who you messaged; `--sweep` marks the link acked when a user line in your transcript says `ack <your id>` and names the peer
+   (or an `--expect-ack` from it resolved); `fleet.py list` then shows `link: acked` or `link: ONE-WAY` (sent, never answered) under that peer.
+4. **Inbound**: a message tagged `[relay from KIND ID (DIR)]` (`KIND ID aka NAME (DIR)` for a named session; or `[queued Nm ago] [relay from ...]`, or a Paseo
+   agent message) that **asks a question or requests action is answered by `relay.py <ID> "<answer>"`** (ID is the second word: a herdr pane id such as w2F:p45, a session
+   id prefix, a Paseo agent id; a job's declared label, `[relay from load-watch]`, has no ID and cannot be replied to: tell the operator instead), never only in your own prose: your prose does not reach it. The sender is read from the sending process (2026-10-25): fleet's `self`
+   row, `HERDR_PANE_ID` or the pane an ancestor runs in, `PASEO_AGENT_ID` or the Paseo agent above it, `CLAUDE_CODE_SESSION_ID`, `HERMES_SESSION_ID` (a relay Hermes starts itself is `hermes SID8`), `RELAY_SENDER_NAME`. A Codex tool shell
+   has none of these variables (`shell_environment_policy inherit = "core"`), so relay reads the `codex` process above it. **A relay whose sender resolves to none of these
+   is refused, never sent (2026-10-25)**: exit 4, nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`), the message names every
+   variable and ancestor source checked; **re-run it with `RELAY_SENDER_NAME=<label> relay.py ...`** (a launchd job or script with no session; a relay Hermes starts itself is named `hermes SID8` and sends) or from inside a
+   session. `[relay from unknown]` is never sent, so a header you read always names a sender you can answer. A footer
+   `[reply through relay.py to ID: ack X]` means start the answer with `ack X`. A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
+   An FYI needs no reply. After a relay that is not `delivered`, read its status word; `queued`, `accepted`, `unverified` are not proof.
+
+
 ## Direct Herdr control and detached relay workers (2026-10-25)
 
 For direct Herdr control, follow the upstream `herdr` skill's caller-context
