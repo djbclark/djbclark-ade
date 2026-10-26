@@ -195,10 +195,14 @@ one first-contact `ack ID`). Never put --expect-ack/--needs-reply on an ack whos
 expectation is never itself flagged unless it asks a new question or requests an action.
 `--expect-ack ID` records (state, never a wait) that a reply `ack ID` is expected; the sent text ends "[reply through relay.py to <your id>:
 ack ID]". It is REQUIRED (exit 2, nothing sent) for a text with a `?` outside a URL or with --needs-reply, from a session relay can identify
-(a launchd script has no transcript an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
+(a launchd script has no session an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
 overrides a `?` that is no question. The record (sender, target, age) lives in <deferred dir>/expect/ and shows in `--pending`
 (`--json` rows with "kind": "expect" and "overdue"); `--sweep` resolves it when a user-role line of the SENDER's transcript says `ack ID`
-(its own tool calls and their results never count), and flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
+(its own tool calls and their results never count). A sender with a fleet row but NO readable transcript may use --expect-ack (2026-10-26): its
+record holds `"tx": null`, and relay itself closes it when the TARGET answers through relay.py with a text that BEGINS `ack ID`, sent to the
+session that opened it: both ends come from the fleet's `self` row and the record (id, and session id when both have one), never from the text,
+and it counts only for a send its route accepted or proved (never refused, failed, pulled back or merely queued for a deliverer). A third
+party, a quoted header, another or a closed ID and a replay change nothing. `--sweep` also flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
 point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json). FIRST CONTACT: the first message
 from a session to a peer appends "[first contact from <id>: reply `ack <id>` through relay.py ...]"; ~/.local/state/relay/links.json
 (RELAY_LINKS_FILE) records each link, `--sweep` marks it acked when the sender's transcript holds `ack <id>` naming the peer (or an
@@ -2428,6 +2432,7 @@ def defer_send(s, a, text, listed, why):
         print(f"queued: {rid} for [{s['id']}] {s['name']}{'' if fresh else ' (an identical message was already queued)'}: {why}. "
               f"Delivered when it is idle, within {left // 60} min; `relay.py --pending` lists, `relay.py --cancel {rid}` withdraws it")
     word, note = defer_ack(rid, ack_window(a)) if a.ack else (None, "")
+    CTX["accepted"] = word == "delivered"    # a record only queued is not delivered yet: the deliverer runs as no session, so it cannot close an expectation
     if a.json:
         print(json.dumps({"id": s["id"], "name": s["name"], "state": "queued", "queued": True, "record": rid, "expires_in": left,
                           "duplicate_of": None if fresh else rid, "reason": why,
@@ -2792,10 +2797,40 @@ def note_links_and_expect():
         data["links"][key] = ln
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
-        expect_write({"id": CTX["expect"], "state": "open", "sender": me["id"], "sender_label": me.get("name") or "", "tx": tx,
-                      "mark": CTX.get("mark", 0), "created": now, "within": CTX.get("within") or EXPECT_WITHIN, "acked": None,
+        expect_write({"id": CTX["expect"], "state": "open", "sender": me["id"], "sender_sid": me.get("sid") or "", "sender_label": me.get("name") or "",
+                      "tx": tx or None, "mark": CTX.get("mark", 0), "created": now, "within": CTX.get("within") or EXPECT_WITHIN, "acked": None,
                       "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
                              "sid": s.get("sid") or "", "host": s.get("host") or ""}})
+
+
+def expect_resolve_by_relay():
+    """Resolve, from the relay's own send, the open expectations the text just sent answers (2026-10-26): a session with no readable transcript
+    cannot see the reply in one, but every reply goes through relay.py, which knows both ends from the fleet, not from the text. The text
+    must BEGIN with `ack ID`; the caller (CTX["me"], fleet-derived) must be the expectation's target and the recipient (CTX["s"]) its sender,
+    each also matching the session id the record stored, so a third party, a new occupant of the pane, a header quoted in a text or a
+    closed or reused ID changes nothing. It counts only when this send was accepted or delivered (CTX["accepted"]: never a failed, refused,
+    pulled or merely queued one). The check and the write share one hold of the expectation lock, so a replayed ack finds it acked."""
+    me, s, text = CTX.get("me"), CTX.get("s"), CTX.get("text")
+    if not (CTX.get("accepted") and isinstance(me, dict) and isinstance(s, dict) and isinstance(text, str) and isinstance(me.get("id"), str)
+            and isinstance(s.get("id"), str)):
+        return 0
+    lead, now, closed = text.strip().lstrip("[`'\""), time.time(), []
+    same_sid = lambda a, b: not (isinstance(a, str) and isinstance(b, str) and a and b and not (a.startswith(b) or b.startswith(a)))
+    with _flock(defer_dir() / ".expect.lock"):
+        for r in expect_all():
+            t = r.get("target") if isinstance(r.get("target"), dict) else {}
+            if (r.get("state") == "open" and r.get("sender") == s["id"] and same_sid(r.get("sender_sid"), s.get("sid"))
+                    and t.get("id") == me["id"] and same_sid(t.get("sid") or t.get("sid8"), me.get("sid")) and ack_token(r["id"]).match(lead)):
+                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, "acked_via": "relay"})
+                closed.append((r, t))
+    for r, t in closed:
+        with links_lock():    # an answer to a question proves the return path, as in `ack_sweep`
+            data = fleet.links_read()
+            ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})
+            if isinstance(ln, dict) and not ln.get("acked"):
+                ln["acked"] = now
+                atomic_json(fleet.LINKS_FILE, data)
+    return len(closed)
 
 
 def expect_age(r, now):
@@ -2817,7 +2852,7 @@ def ack_sweep():
             continue
         t = r.get("target") if isinstance(r.get("target"), dict) else {}
         who = peer_words({**t, "sid": t.get("sid") or t.get("sid8")})    # only the target's own reply closes it (A2)
-        if r.get("state") == "open" and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
+        if r.get("state") == "open" and r.get("tx") and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
             expect_write({**r, "state": "acked", "acked": now})
             with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
                 data = fleet.links_read()
@@ -2877,6 +2912,7 @@ def main(argv=None, sweep=True):
     if CTX.get("sent") and CTX.get("s") is not None:
         try:
             note_links_and_expect()
+            expect_resolve_by_relay()
         except Exception as e:    # noqa: BLE001 - the message is out; the ledger is advisory state
             print(f"relay: could not record the link or expectation: {type(e).__name__}: {e}", file=sys.stderr)
     return rc
@@ -2992,16 +3028,16 @@ def _main(argv=None, sweep=True):
                   "the peer answers `ack ID`; `--pending` lists it). A `?` that is no question: --fyi", file=sys.stderr)
             return 2
         if a.expect_ack:
-            if me is None or not me.get("transcript"):
-                print("relay: not sent: --expect-ack needs this session's own transcript to watch for the reply, and none is known "
-                      "(a script with no session cannot be answered)", file=sys.stderr)
+            if me is None:
+                print("relay: not sent: --expect-ack needs a session an answer can reach, and this caller has none (a launchd script or "
+                      "RELAY_SENDER_NAME job cannot be answered)", file=sys.stderr)
                 return 2
             if not expect_reserve(a.expect_ack, me["id"]):
                 print(f"relay: not sent: an expectation {a.expect_ack!r} is already open (relay.py --pending); pick another ID", file=sys.stderr)
                 return 2
             CTX["reserved"] = (a.expect_ack, me["id"])
         tx_me = Path(me["transcript"]) if me and me.get("transcript") else None
-        CTX.update(me=me, expect=a.expect_ack, within=a.ack_within, terminator=term,
+        CTX.update(me=me, expect=a.expect_ack, within=a.ack_within, terminator=term, text=text,
                    mark=tx_me.stat().st_size if tx_me and tx_me.is_file() else 0)
     if is_record_path(a.ident):
         s, why = fleet.dispatch_target(a.ident)    # the caller named the file: no search, no fleet row needed
@@ -3096,6 +3132,7 @@ def _main(argv=None, sweep=True):
             if word == "delivered":
                 res = (res[0], res[1], "delivered")
             out.update(result=res[2], ack=word, ack_note=note)
+        CTX["accepted"] = res[0] == "ok" and word != "not delivered"    # the send expect_resolve_by_relay may count: taken by its route, never refused, failed or pulled back
         if res[0] == "ok":
             out["via"] = res[1]
         else:

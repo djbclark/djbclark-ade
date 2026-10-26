@@ -243,6 +243,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `relay.py --expect-ack` works for a sender with a fleet row but no readable transcript (a native Hermes or OMP session) (2026-10-26): the record stores `tx: null`, `--sweep` reads no transcript for it, and the expectation is closed by relay itself when the target answers through relay.py with a text that begins `ack ID` to the session that opened it (identity from the fleet, only for a send the route accepted or proved); a caller with no session (a launchd script) is still refused `--expect-ack`, now with a message saying so (#NN).
+
 - `self-slash --finish` (and a mapped `/quit`) on Paseo now refuses with exit 12 when the Paseo agent holds a watch role in `bin/watch status` (same prefix match as `watch`), so a session that is the load, CFEngine or Paseo watcher is not archived by accident; `--successor` is not refused, the check fails open when `watch status` fails or exceeds `SELF_SLASH_WATCH_TIMEOUT` (20 s), and `SELF_SLASH_ALLOW_WATCHER=1` overrides. The baton and loose skills say how to pick the chain and not to offer finish for a watcher (2026-10-25, #72).
 ||||||| 7380c56
 - Codex automatic tab naming reads Herdr’s `result.pane` response and keeps missing titles absent instead of turning JSON null into `none-t` (2026-10-25).
