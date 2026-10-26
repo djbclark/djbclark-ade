@@ -722,7 +722,9 @@ def test_hostile_bodies_are_read_in_linear_time():
     ("a- x 15 KB, first contact", "a-" * 7_500 + FIRST, HERMES, True),
     ("unclosed queued tag", "[queued " + "x" * 200_000, HERMES, False),
     ("unclosed envelope tag", "x" * 200_000, '<cross-session-message from-name="relay.py (hermes 4f3a9c1e)" from-mode="x', False),
-])
+], ids=["a-x15KB", "a.x15KB", "a.x40KB", "a-x15KB-first-contact", "unclosed-queued-tag", "unclosed-envelope-tag"])
+# `ids` is explicit: pytest's default id embeds the 200 KB body, and pytest copies the id into PYTEST_CURRENT_TEST, which the
+# child inherits; Linux refuses an environment string over 128 KB (execve E2BIG, seen on CI) while macOS does not.
 def test_the_whole_hook_answers_hostile_text_well_inside_its_two_second_deadline(tmp_path, name, body, header, nudge):
     """R6: run as the Stop hook is (a child, 1 s cap, deadline 2 s); a quadratic regex made a nudge owed arrive as silence."""
     entry = socket_busy(header + body) if header.startswith("<cross-session-message") else user(header + body)    # the real busy shape
