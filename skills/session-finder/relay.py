@@ -2687,10 +2687,11 @@ def expect_reserve(eid, sender):
 
 
 def expect_release(eid, sender):
-    """Drop the reservation of ID made by SENDER, when it is still a reservation (the relay sent nothing)."""
+    """Drop the reservation of ID made by SENDER, when it is still a reservation (the relay sent nothing), or an acknowledgment that reservation
+    took early: a send that did not happen is never an `acked`."""
     with _flock(defer_dir() / ".expect.lock"):
         old = expect_read(eid)
-        if old and old.get("state") == "reserved" and old.get("sender") == sender:
+        if old and old.get("sender") == sender and (old.get("state") == "reserved" or (old.get("state") == "acked" and old.get("early"))):
             with contextlib.suppress(OSError):
                 (expect_dir() / f"{eid}.json").unlink()
 
@@ -2810,10 +2811,39 @@ def note_links_and_expect():
         data["links"][key] = ln
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
-        expect_write({"id": CTX["expect"], "state": "open", "sender": me["id"], "sender_sid": me.get("sid") or "", "sender_label": me.get("name") or "",
-                      "tx": tx or None, "mark": CTX.get("mark", 0), "created": now, "within": CTX.get("within") or EXPECT_WITHIN, "acked": None,
-                      "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
-                             "sid": s.get("sid") or "", "host": s.get("host") or ""}})
+        early = None
+        with _flock(defer_dir() / ".expect.lock"):
+            old = expect_read(CTX["expect"])
+            if old and old.get("state") == "acked" and old.get("early") and old.get("sender") == me["id"]:
+                early = _num(old.get("acked"), now)    # the target answered while this send was still running: never reopen what is closed
+            else:
+                atomic_json(expect_dir() / f"{CTX['expect']}.json", {"id": CTX["expect"], "state": "open", "created": now, "acked": None,
+                                                                     "within": CTX.get("within") or EXPECT_WITHIN, **expect_identity(me, s, CTX.get("mark", 0))})
+        if early is not None:
+            with links_lock():    # the answer that closed it proves the return path too, and the link did not exist yet when it came
+                data = fleet.links_read()
+                ln = fleet.link_get(data["links"], me, s)
+                if isinstance(ln, dict) and not ln.get("acked"):
+                    ln["acked"] = early
+                    atomic_json(fleet.LINKS_FILE, data)
+
+
+def expect_identity(me, s, mark):
+    """The fields of an expectation that name its two ends: the sender (session id, label, transcript, how far the transcript was read) and the
+    target. `expect_stamp` puts them on the reservation, `note_links_and_expect` on the open record."""
+    return {"sender": me["id"], "sender_sid": me.get("sid") or "", "sender_label": me.get("name") or "", "tx": me.get("transcript") or None,
+            "mark": mark, "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
+                                     "sid": s.get("sid") or "", "host": s.get("host") or ""}}
+
+
+def expect_stamp(eid, me, s, mark, within):
+    """Name both ends on the reservation of ID, before the send: a target that answers while the send is still blocking (Hermes returns only
+    after its whole turn) is found by `expect_resolve_by_relay`, which closes a reservation like an open record (2026-10-26, Codex P2, PR 87).
+    Only the reservation `me` made is touched."""
+    with _flock(defer_dir() / ".expect.lock"):
+        old = expect_read(eid)
+        if old and old.get("state") == "reserved" and old.get("sender") == me["id"]:
+            atomic_json(expect_dir() / f"{eid}.json", {**old, "within": within or EXPECT_WITHIN, **expect_identity(me, s, mark)})
 
 
 def expect_resolve_by_relay():
@@ -2835,9 +2865,10 @@ def expect_resolve_by_relay():
     with _flock(defer_dir() / ".expect.lock"):
         for r in expect_all():
             t = r.get("target") if isinstance(r.get("target"), dict) else {}
-            if (r.get("state") == "open" and not r.get("tx") and r.get("sender") == s["id"] and same_sid(r.get("sender_sid"), s.get("sid"))
+            reserved = r.get("state") == "reserved" and now - _num(r.get("created"), now) < EXPECT_RESERVE_TTL    # its send is still running: an answer inside it is kept, not lost
+            if ((r.get("state") == "open" or reserved) and not r.get("tx") and r.get("sender") == s["id"] and same_sid(r.get("sender_sid"), s.get("sid"))
                     and t.get("id") == me["id"] and same_sid(t.get("sid") or t.get("sid8"), me.get("sid")) and ack_token(r["id"]).match(lead)):
-                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, "acked_via": "relay"})
+                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, "acked_via": "relay", **({"early": True} if reserved else {})})
                 closed.append((r, t))
     for r, t in closed:
         with links_lock():    # an answer to a question proves the return path, as in `ack_sweep`
@@ -3105,6 +3136,9 @@ def _main(argv=None, sweep=True):
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
     CTX["s"] = s
+    if CTX.get("reserved") and CTX.get("me") is not None:    # name both ends before the send, so an answer inside a blocking send finds the reservation
+        with contextlib.suppress(Exception):
+            expect_stamp(CTX["reserved"][0], CTX["me"], s, CTX.get("mark", 0), CTX.get("within"))
     if me is not None and not a.plan and not NOTICE[0] and not term:    # a terminator asks for nothing, so it carries no footer
         if a.expect_ack:
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
