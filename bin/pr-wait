@@ -293,6 +293,31 @@ def _strict_object(pairs):
     return dict(pairs)
 
 
+def _strip_code(body: str) -> str:
+    """Remove fenced blocks and inline code spans before matching markers.
+
+    WHY (adversary review, B1): a PR that DOCUMENTS the format quotes the template in backticks or a
+    fence. Reading those as live markers made every such PR unmergeable (`malformed` blocks by
+    default), which broke the report-only-by-default property in practice. The review also disposed of
+    the counter-argument: the body is author-controlled, so an author who wants a BLOCK gone simply
+    deletes it - the gate guards against MISTAKES, not forgery. Reading fences protected nothing and
+    created false blocks.
+
+    A placeholder head (`<40-hex>`) is documentation too, and is rejected in `adversary_verdict`.
+    """
+    out, in_fence = [], False
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        out.append("" if in_fence else line)
+    text = "\n".join(out)
+    # Inline code spans: ``x`` then `x`. Non-greedy, so `a` and `b` are stripped separately.
+    text = re.sub(r"``.+?``", " ", text, flags=re.DOTALL)
+    return re.sub(r"`[^`\n]+`", " ", text)
+
+
 
 
 def adversary_verdict(body: str, head: str) -> dict:
@@ -306,8 +331,11 @@ def adversary_verdict(body: str, head: str) -> dict:
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                 "conflict": False, "malformed": False, "detail": "no PR body"}
 
-    matches = MARKER_RE.findall(body)
-    starts = len(MARKER_START_RE.findall(body))
+    # Strip fenced blocks and inline code FIRST: a PR documenting the format must not trip its own
+    # gate (adversary review, B1).
+    text = _strip_code(body)
+    matches = MARKER_RE.findall(text)
+    starts = len(MARKER_START_RE.findall(text))
     if not matches:
         if starts:
             # A marker START with no `-->`: malformed, NOT absent.
@@ -322,6 +350,7 @@ def adversary_verdict(body: str, head: str) -> dict:
     # Validate EVERY marker, so a malformed one beside a good one is still reported.
     parsed: list[dict] = []
     problems: list[str] = []
+    placeholders = 0
     if starts > len(matches):
         problems.append(f"{starts - len(matches)} marker(s) with no closing `-->`")
     for raw in matches:
@@ -341,11 +370,23 @@ def adversary_verdict(body: str, head: str) -> dict:
             problems.append(f"verdict must be exactly APPROVE or BLOCK, got {verdict!r}")
             continue
         if not isinstance(sha, str) or not HEX40.match(sha):
+            # A PLACEHOLDER head is documentation, not a verdict: `<40-hex>` is the template's own
+            # text, and a PR quoting the format must not be reported as malformed (B1). Counted
+            # separately so a body of ONLY documentation is "no marker", not "malformed".
+            if isinstance(sha, str) and ("<" in sha or "…" in sha or "..." in sha):
+                placeholders += 1
+                continue
             problems.append(f"head must be a 40-hex sha, got {sha!r}")
             continue
         parsed.append({"verdict": verdict, "head": sha.lower()})
 
     if not parsed:
+        if placeholders and not problems:
+            # Every marker was the template's own placeholder: documentation, not a verdict.
+            return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
+                    "conflict": False, "malformed": False,
+                    "detail": f"{placeholders} marker(s) carry a placeholder head (<40-hex>): "
+                              f"documentation, not a verdict"}
         # A marker was present but unusable: its OWN outcome, so a typo is visibly a typo.
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                 "conflict": False, "malformed": True,
@@ -1049,7 +1090,14 @@ def main(argv: list[str]) -> int:
                 # ONE call to `pulls/{pr}`: keep the document, because the adversary verdict is read
                 # from the same one (its body + labels) rather than fetching the endpoint again.
                 pr_document = pr_doc(a.repo, a.pr)
-                head = pr_document["head"]["sha"]
+                # A malformed document must RETRY like any other gh failure, not raise a traceback
+                # (adversary review, B3): the deleted pr_head() wrapped this in GhError.
+                try:
+                    head = pr_document["head"]["sha"]
+                except (KeyError, TypeError) as e:
+                    raise GhError(f"pulls/{a.pr}: no head sha: {e}") from e
+                if not isinstance(head, str) or not head:
+                    raise GhError(f"pulls/{a.pr}: no head sha")
                 break
             except GhError as e:
                 if e.not_found:

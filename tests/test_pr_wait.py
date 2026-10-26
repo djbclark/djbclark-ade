@@ -1568,3 +1568,40 @@ def test_the_gate_is_report_only_by_default() -> None:
     ready, warnings = gate(marker("BLOCK"), required=False)
     assert ready, "a missing/stale verdict must not block without opt-in"
     assert warnings == ["adversary-stale-or-blocked"], "but it must still be REPORTED"
+
+
+def test_a_pr_documenting_the_format_does_not_trip_its_own_gate() -> None:
+    # B1: PR 66's own body quotes the template, and reading it as a live marker made every PR that
+    # documents the format unmergeable (malformed blocks by default).
+    documented = (
+        "The marker is:\n\n"
+        "```\n"
+        '<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->\n'
+        "```\n\n"
+        "and inline: `<!-- adversary-verdict:v1 {\"verdict\":\"APPROVE\",\"head\":\"<40-hex>\"} -->`\n"
+    )
+    r = adv(documented)
+    assert not r["malformed"], r["detail"]
+    assert not r["present"], "documentation is not a verdict"
+
+
+def test_a_placeholder_head_alone_is_documentation_not_malformed() -> None:
+    body = '<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<40-hex>"} -->'
+    r = adv(body)
+    assert not r["malformed"] and not r["present"]
+    assert "placeholder" in r["detail"]
+
+
+def test_a_real_marker_inside_a_fence_is_ignored() -> None:
+    # The review's argument: the body is author-controlled, so reading fences protects nothing and
+    # only creates false blocks. A quoted marker is text, not a claim.
+    assert not adv("```\n" + marker("APPROVE") + "\n```")["present"]
+
+
+def test_a_real_marker_in_an_inline_code_span_is_ignored() -> None:
+    assert not adv("the previous marker was `" + marker("APPROVE") + "`")["present"]
+
+
+def test_a_genuinely_malformed_marker_still_fails_closed() -> None:
+    r = adv('<!-- adversary-verdict:v1 {"verdict":"BLOCKED","head":"' + ADV_HEAD + '"} -->')
+    assert r["malformed"] and not r["present"]
