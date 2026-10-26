@@ -51,7 +51,9 @@ Shell variables: a path word is resolved from the same command's literal assignm
 
 Categories: own_code, external_code, memory, web, private_other, task_change (UserPromptSubmit).
 A new UserPromptSubmit, or an idle gap over PRIOR_ART_IDLE_S (default 1800 s), starts a new task and
-resets the run counters. `PRIOR_ART_SHADOW=0` disables recording. A UserPromptSubmit also prunes files
+resets the run counters. A subagent follows its parent's prompts only: when the user's prompt count has
+moved since the subagent's last event, its state is reset (and its elapsed_ms is null); the parent's idle
+gap, which happens while a subagent works, does not reset it. `PRIOR_ART_SHADOW=0` disables recording. A UserPromptSubmit also prunes files
 older than PRIOR_ART_RETENTION_DAYS (default 30) from the state directory, at most once a day.
 
 MUST exit 0 silently on every failure (malformed event, deep JSON, unwritable state dir, bad UTF-8)
@@ -1103,6 +1105,11 @@ def prune(d: Path, keep_prefix: str, now: float) -> None:
 
 # ---- records ----------------------------------------------------------------------------------
 
+def _count(v) -> int:
+    """A state counter read back from disk: a non-negative int, else 0 (a corrupt file must not drop events)."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 1 << 31 else 0
+
+
 def build_record(data: dict, st: dict, now: float, agent: str = "", dropped: int = 0) -> dict:
     event = str(data.get("hook_event_name") or "PostToolUse")
     event = event if event in KNOWN_EVENTS else "other"
@@ -1114,8 +1121,10 @@ def build_record(data: dict, st: dict, now: float, agent: str = "", dropped: int
 
     last_ts = st.get("last_ts")
     elapsed = int((now - last_ts) * 1000) if isinstance(last_ts, (int, float)) and now >= last_ts else None
-    new_task = event == "UserPromptSubmit" or (
-        isinstance(last_ts, (int, float)) and now - last_ts > _idle_s())
+    prompt = event == "UserPromptSubmit" and not agent
+    new_task = prompt or (isinstance(last_ts, (int, float)) and now - last_ts > _idle_s())
+    if prompt:
+        st["prompt_seq"] = _count(st.get("prompt_seq")) + 1
     if new_task:
         st.update(task_seq=int(st.get("task_seq", 0)) + 1, web_or_memory=False, run=0,
                   recent=[], last_failed_call="")
@@ -1186,15 +1195,18 @@ def record(data: dict) -> None:
         st_path = d / f"{key}.state.json"
         st = _load_state(st_path)
         if agent:                                       # a subagent joins the main agent's current task
-            parent_seq = int(_load_state(d / f"{sid}.state.json").get("task_seq", 0) or 0)
+            parent = _load_state(d / f"{sid}.state.json")
+            parent_seq, prompts = _count(parent.get("task_seq")), _count(parent.get("prompt_seq"))
             if not st:
-                st["task_seq"] = parent_seq
-            elif int(st.get("task_seq", 0) or 0) < parent_seq:
-                # The parent moved to a new task while this subagent was idle (a resumed subagent):
-                # its run, recent calls and web flag belong to the old task. last_ts goes too, so
-                # the idle rule cannot count a second task change on top of this one.
-                st.update(task_seq=parent_seq, web_or_memory=False, run=0, recent=[],
-                          last_failed_call="")
+                st.update(task_seq=parent_seq, prompt_seq_seen=prompts)
+            elif _count(st.get("prompt_seq_seen")) != prompts:
+                # The user sent a new prompt while this subagent was idle (a resumed subagent): its run,
+                # recent calls and web flag belong to the old task. Only the parent's UserPromptSubmit
+                # counts, never the parent's idle rule (the parent is quiet while a subagent works), and
+                # the test is "differs", so no counter of the subagent's own can put it ahead. last_ts
+                # goes too, so the subagent's idle rule cannot count a second change on top.
+                st.update(task_seq=parent_seq, prompt_seq_seen=prompts, web_or_memory=False, run=0,
+                          recent=[], last_failed_call="")
                 st.pop("last_ts", None)
         drops = _drops(d / f"{key}.drops")
         fd = _open_regular(d / f"{sid}.jsonl", os.O_RDWR | os.O_APPEND | os.O_CREAT)

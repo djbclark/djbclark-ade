@@ -542,6 +542,45 @@ def test_a_resumed_subagent_does_not_carry_the_previous_task_over(box):
     assert [r["run_length"] for r in resumed] == [0, 1]   # run restarts from the reset, not the old 1
 
 
+def test_a_subagent_ahead_of_its_parent_is_still_reset_by_the_parents_next_prompt(box):
+    # adversary r6 F1: the subagent's own idle rule moves its task_seq ahead of the parent's
+    box.tool("WebSearch", {"query": "q"}, agent_id="agent-A")
+    box.tool("Read", {"file_path": "/tmp/dup"}, agent_id="agent-A", advance=2000)     # A's own idle: seq 1
+    box.prompt()                                                                      # parent: seq 1
+    box.tool("Read", {"file_path": "/tmp/dup"}, agent_id="agent-A")
+    last = box.records()[-1]
+    assert last["web_or_memory_before"] is False and last["duplicate"] is False
+    assert last["task_seq"] == 1
+
+
+def test_the_parents_idle_gap_does_not_reset_a_subagent_that_is_working(box):
+    # adversary r6 F2: the parent is quiet while its subagent works; only a user prompt is a boundary
+    box.tool("Read", {"file_path": "/tmp/a"})                                         # parent, then silent
+    box.tool("WebSearch", {"query": "q"}, agent_id="agent-A")
+    box.tool("Read", {"file_path": "/nix/store/x/a1"}, agent_id="agent-A", advance=1000)
+    box.tool("Read", {"file_path": "/nix/store/x/a2"}, agent_id="agent-A", advance=1000)
+    box.tool("Read", {"file_path": "/tmp/b"}, advance=1)                              # parent's idle task change
+    box.tool("Read", {"file_path": "/nix/store/x/a3"}, agent_id="agent-A")
+    recs = box.records()
+    assert [r["task_seq"] for r in recs[:1]] == [0] and recs[4]["task_seq"] == 1     # the parent did change task
+    assert recs[5]["agent"] == recs[1]["agent"]
+    assert recs[5]["web_or_memory_before"] is True and recs[5]["run_length"] == 3
+
+
+def test_a_subagent_payload_naming_a_user_prompt_does_not_move_the_task(box):
+    box.prompt()
+    box.prompt()
+    box.run({"hook_event_name": "UserPromptSubmit", "prompt": "x", "agent_id": "agent-A"})
+    assert box.records()[-1]["task_seq"] == 2
+
+
+def test_a_corrupt_parent_counter_does_not_drop_subagent_events(box):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    (box.state / "sess-1.state.json").write_text('{"task_seq": "x", "prompt_seq": 1e400}')
+    box.tool("Read", {"file_path": "/tmp/a"}, agent_id="agent-A")
+    assert len(box.records()) == 2
+
+
 def test_missing_or_odd_agent_id_means_the_main_agent(box):
     for aid in (None, "", 7, ["x"]):
         box.tool("Read", {"file_path": "/tmp/a"}, agent_id=aid)
