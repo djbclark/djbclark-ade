@@ -11,6 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `claude/hooks/relay_prose_nudge.py` (2026-10-25), a Claude Code Stop hook registered in `agents/claude/settings.json.tmpl`: when a turn began with a `[relay from KIND ID ...]` message and made no `relay.py` call (and no `SendMessage` to that sender), it blocks the stop once with the reminder to answer through `relay.py <ID>`; silent for `ack`, `no reply needed` and `FYI` texts, a repeated Stop and any parse error (#NN).
 - `relay.py --ack` (2026-10-25): after a send that is only accepted or queued, watch the target for `--wait` more seconds and exit 0 delivered, 1 not delivered, 3 unverified (new code); without it the exit codes are unchanged, so fleet-watch, load-watch, session-load-watch and rumination-watch keep working (#74).
 - `relay.py --expect-ack ID`, `--needs-reply`, `--fyi`, `--ack-within S` (2026-10-25): a message with a `?` outside a URL, or `--needs-reply`, is refused (exit 2) from an identifiable session without `--expect-ack`; the expectation is a record listed by `--pending` (`"kind": "expect"`, `overdue`) and resolved by `--sweep` when an `ack ID` reply reaches the sender's transcript; an overdue one prints `OVERDUE ack ID` for the operator (#74).
 - First contact (2026-10-25): the first relay from a session to a peer appends a request to reply `ack <sender id>`; `relay.py` keeps `~/.local/state/relay/links.json` and `fleet.py list` shows `link: acked` or `link: ONE-WAY` per peer (#74).
