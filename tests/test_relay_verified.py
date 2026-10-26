@@ -16,6 +16,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import test_relay_fallback as fb  # noqa: E402  # pyright: ignore[reportMissingImports]
 
@@ -29,6 +30,7 @@ class Base(fb.Harness):
 
     def setUp(self) -> None:
         super().setUp()
+        os.environ.pop("RELAY_NO_ACK", None)    # the harness restores the environment after each test
         saved = fleet.LINKS_FILE
         fleet.LINKS_FILE = self.tmp / "links.json"
         self.addCleanup(setattr, fleet, "LINKS_FILE", saved)
@@ -546,6 +548,151 @@ class TestFirstContact(Base):
 
     def test_no_ledger_means_no_link_line(self) -> None:
         self.assertNotIn("link", fleet.annotate_links([dict(self.target), dict(self.me)])[0])
+
+
+class TestDefaultDeliveryWatch(Base):
+    """L1, the delivery proof, is the default for a sender that is an agent session (djbclark, 2026-10-25); a declared job keeps the legacy
+    exits (fleet-watch, load-watch, session-load-watch and rumination-watch read 0 as "taken, or queued"); --no-ack turns it off for anyone."""
+
+    def test_a_session_whose_send_is_only_queued_exits_3_not_0_without_asking_for_ack(self) -> None:
+        self.on_typed = self.write_queued
+        rc, out, err = self.go("hello there friend")
+        self.assertEqual(rc, 3, (out, err))
+        self.assertIn("ack: unverified", err)
+
+    def test_the_default_watch_ends_delivered_when_a_turn_takes_the_queued_copy(self) -> None:
+        self.on_typed = self.write_queued
+        self.on_sleep = lambda: self.write_delivered(self.sent_texts[0])
+        rc, out, err = self.go("hello there friend", "--json")
+        self.assertEqual(rc, 0, (out, err))
+        row = json.loads(out)
+        self.assertEqual((row["ack"], row["ack_default"]), ("delivered", True))
+
+    def test_a_queued_copy_pulled_back_is_exit_1_by_default_too(self) -> None:
+        self.on_typed = self.write_queued
+        self.on_sleep = lambda: self.append(self.tx, {"type": "queue-operation", "operation": "popAll"})
+        self.assertEqual(self.go("hello there friend")[0], 1)
+
+    def test_no_ack_and_the_environment_switch_restore_the_legacy_exit(self) -> None:
+        self.on_typed = self.write_queued
+        rc, out, err = self.go("hello there friend", "--no-ack")
+        self.assertEqual((rc, self.sleeps), (0, []), (out, err))
+        with mock.patch.dict(os.environ, {"RELAY_NO_ACK": "1"}):
+            rc, out, err = self.go("hello there friend again")
+        self.assertEqual((rc, self.sleeps), (0, []), (out, err))
+
+    def test_an_explicit_ack_wins_over_nothing_and_contradicting_flags_are_refused(self) -> None:
+        rc, _, err = self.go("hello there friend", "--ack", "--no-ack")
+        self.assertEqual((rc, self.calls), (2, []), err)
+
+    def test_the_json_field_marks_only_a_default_watch(self) -> None:
+        self.on_typed = self.write_queued
+        self.assertIn("ack_default", json.loads(self.go("hello there friend", "--json")[1]))
+        self.assertNotIn("ack_default", json.loads(self.go("hello there friend", "--json", "--ack")[1]))
+
+    def test_the_default_watch_is_capped_and_an_explicit_one_is_not(self) -> None:
+        from argparse import Namespace
+        self.assertEqual(relay.ack_window(Namespace(wait=60.0, ack_default=True)), relay.IMPLICIT_ACK_WAIT)
+        self.assertEqual(relay.ack_window(Namespace(wait=3.0, ack_default=True)), 3.0)
+        self.assertEqual(relay.ack_window(Namespace(wait=60.0, ack_default=False)), 60.0)
+        self.assertEqual(relay.ack_window(Namespace(wait=60.0)), 60.0)
+
+    def test_a_declared_job_keeps_the_legacy_exit_codes_bit_for_bit(self) -> None:
+        self.on_typed = self.write_queued
+        rc, out, err = self.go("hello there friend", rows=[])
+        self.assertEqual((rc, self.sleeps), (0, []), (out, err))
+        self.assertNotIn("ack:", out + err)
+        rc, out, err = self.go("hello there friend", "--json", rows=[])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ack_default", json.loads(out))
+        rc, out, err = self.go("hello there friend", "--ack", rows=[])    # explicit stays "verify, whoever I am"
+        self.assertEqual(rc, 3, (out, err))
+
+    def test_a_session_relay_resolves_without_a_self_row_is_watched_and_a_bare_label_is_not(self) -> None:
+        self.on_typed = self.write_queued
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "eeeeeeee-0000-4000-8000-000000000005"}):
+            rc, out, err = self.go("hello there friend", rows=[])    # no `self` row, but a Claude session id: a session, not a declared job
+        self.assertEqual(rc, 3, (out, err))
+        rc, out, err = self.go("hello there friend again", rows=[])    # only RELAY_SENDER_NAME: a declared job
+        self.assertEqual(rc, 0, (out, err))
+
+    def test_a_deliverers_own_send_is_never_watched(self) -> None:
+        self.on_typed = self.write_queued
+        with relay.as_caller("some-label"):
+            rc, out, err = self.go("hello there friend")
+        self.assertEqual((rc, self.sleeps), (0, []), (out, err))
+
+    def test_delivered_and_failed_exits_do_not_depend_on_the_default(self) -> None:
+        self.assertEqual(self.go("hello there friend")[0], 0)
+        self.assertEqual(self.go("hello there friend", rows=[])[0], 0)
+        relay.type_line = lambda chan, text: False
+        self.assertEqual(self.go("hello there friend two")[0], 1)
+        self.assertEqual(self.go("hello there friend two", rows=[])[0], 1)
+
+    def test_a_deferred_record_is_watched_by_default_for_a_session_only(self) -> None:
+        windows: list[float] = []
+        with mock.patch.object(relay, "defer_ack", lambda rid, window: windows.append(window) or ("unverified", "still queued")), \
+                mock.patch.object(relay, "agent_pid", lambda s: 0):
+            for default, expect_rc in ((True, 3), (False, 0)):
+                ns = relay.argparse.Namespace(wait=60.0, ack=default, ack_default=default, json=True, defer_for=None)
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    rc = relay.defer_send(self.target, ns, f"queue me {default}", [self.me], "it is working")
+                self.assertEqual(rc, expect_rc)
+                if default:
+                    self.assertEqual(json.loads(out.getvalue())["ack_default"], True)
+        self.assertEqual(windows, [relay.IMPLICIT_ACK_WAIT])
+
+
+class TestTerminators(Base):
+    """An `ack ID` reply, a text saying no reply is needed and an ack of an ack end a conversation: no expectation, no first-contact footer,
+    no link, so nothing loops. Each still gets its delivery proof."""
+
+    def assertQuiet(self, text: str, *argv: str) -> None:
+        rc, out, err = self.go(text, *argv)
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.sent_texts[-1], text)    # no `[first contact ...]`, no `[reply through relay.py ...]`
+        self.assertEqual(relay.expect_all(), [])
+        self.assertFalse(fleet.LINKS_FILE.exists())
+
+    def test_an_ack_reply_expects_nothing_and_asks_for_nothing(self) -> None:
+        self.assertQuiet("ack build1")
+
+    def test_a_first_contact_ack_and_an_ack_of_an_ack_are_the_same_quiet_text(self) -> None:
+        self.assertQuiet("ack cccccccc")
+        self.assertQuiet("ack w34:p4")
+        self.assertQuiet("ack ack1 thanks, got it")
+
+    def test_a_text_saying_no_reply_is_needed_is_exempt_even_with_a_question_mark(self) -> None:
+        self.assertQuiet("did the build finish? no reply needed")
+        self.assertQuiet("FYI PR 63 merged, no response required")
+
+    def test_the_terminator_still_gets_the_delivery_proof(self) -> None:
+        rc, out, err = self.go("ack build1")
+        self.assertIn("ack: delivered", out)
+        self.on_typed = self.write_queued
+        rc, out, err = self.go("ack build2")
+        self.assertEqual(rc, 3, (out, err))
+        self.assertIn("ack: unverified", err)
+        self.assertEqual(relay.expect_all(), [])
+
+    def test_a_terminator_takes_no_expectation_flag(self) -> None:
+        for flag in (("--expect-ack", "x1"), ("--needs-reply",)):
+            rc, _, err = self.go("ack build1", *flag)
+            self.assertEqual((rc, self.calls), (2, []), err)
+        self.assertEqual(relay.expect_all(), [])
+
+    def test_a_question_that_merely_starts_with_ack_is_not_a_terminator(self) -> None:
+        rc, _, err = self.go("ack build1, is it green?")
+        self.assertEqual((rc, self.calls), (2, []), err)
+        self.assertIn("--expect-ack", err)
+
+    def test_the_detector(self) -> None:
+        for text in ("ack build1", "ACK: build1", "ack=build1", "ack bbbbbbbb", "ack w2F:p45", "`ack x`", "no reply needed", "No reply is required.",
+                     "no need to reply", "ack build1 got it, thanks"):
+            self.assertTrue(relay.is_terminator(text), text)
+        for text in ("ack the PR and merge it?", "please ack when done", "reply ack build1 to me", "is the build green?", "acknowledge this",
+                     "ack build1 " + "x" * 120):
+            self.assertFalse(relay.is_terminator(text), text)
 
 
 class TestCodexSenderRollout(Base):

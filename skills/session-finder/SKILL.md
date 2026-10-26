@@ -358,12 +358,18 @@ bypass a permission denial; grok is excluded (2026-10-06).
 Proof, not conversation: delivery proof (the text reached the target's transcript) is mechanical and needs no reply; a reply is required
 only where the message asks a question or requests action. An FYI that provably landed needs none.
 
-1. **`--ack`**: `relay.py <id> "<text>" --ack`. A send that is only `accepted` (a socket frame or Paseo send to a working session) or `queued`
-   (an enqueue Claude Code has not taken yet, a deferred record) is watched for up to `--wait` more seconds and exits **0 delivered**,
+1. **The delivery watch is on by default for an agent session** (2026-10-25; `--ack` asks for it whoever you are). A send that is only `accepted` (a socket frame or Paseo send to a working session) or `queued`
+   (an enqueue Claude Code has not taken yet, a deferred record) is watched for up to 10 s (`--ack`: `--wait` s) more, so a plain send takes at most `--wait` (default 20) + 10 s, and exits **0 delivered**,
    **1 not delivered** (not sent, pulled back out of the queue, failed or expired), **3 unverified** (sent or still queued, no proof yet: do not resend; an
-   ACP inbox or a Paseo agent with no Claude transcript has nothing to read, so it is unverified at once). Without `--ack` the exit codes
-   are unchanged (`queued` and `accepted` still exit 0), because fleet-watch, load-watch, session-load-watch and rumination-watch read 0 as "taken".
-   `--json` carries `ack` and `ack_note`. Use `--ack` whenever you will act on "they have it".
+   ACP inbox or a Paseo agent with no Claude transcript has nothing to read, so it is unverified at once). `--no-ack` (or `RELAY_NO_ACK=1`) turns the default off for any caller. A **declared job**
+   (`RELAY_SENDER_NAME`, no session: fleet-watch, load-watch, session-load-watch, rumination-watch) never gets the default and keeps the old exits (`queued` and `accepted` exit 0, "taken"); the three
+   watchers in this repo also pass `--no-ack`. `--json` carries `ack` and `ack_note`, and `"ack_default": true` when the watch was the default. An `ack ID` reply, an ack of an ack and a text
+   saying "no reply needed" are **terminators**: they take no `--expect-ack`, carry no footer, open no link (so nothing loops) and still get this proof.
+   **When the proof is not `delivered`, you handle it** (requester steps, never assume read):
+   a. Exit **1**, or a link that fleet shows as `ONE-WAY`: the text did not land or was never answered. Re-send **once** by **another** route (`--via`; `--plan` lists them), never the same route twice.
+   b. Exit **3** (`unverified`), `queued`, or `accepted`: do **not** resend yet; read the target's transcript (or `relay.py --pending` for a deferred record) for the text first. Only a text that is absent is re-sent, by a different `--via`.
+   c. An `OVERDUE ack ID` line from `--sweep`: ask for a named ack in a new message (`... please reply ack ID2`, with `--expect-ack ID2`).
+   d. Still unproven after that: report to the operator with the exact line from `relay.py --pending` (or the `OVERDUE ack ID: ...` line). Never assume read.
 2. **A question or an action request needs `--expect-ack ID`**: a `?` outside a URL, or `--needs-reply`, is refused (exit 2, nothing sent) without it
    when you are an identifiable session; `--fyi` overrides a `?` that is no question. `ID` is 1-40 characters of `A-Za-z0-9._-`, unique among open ones. The sent text
    ends `[reply through relay.py to <your id>: ack ID]`. It is **state, not a wait**: `relay.py --pending` lists it (sender, target, age, `OVERDUE`;
