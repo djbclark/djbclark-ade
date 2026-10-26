@@ -112,25 +112,28 @@ def test_memory_and_web_tools(box):
     box.tool("WebSearch", {"query": "x"})
     box.tool("mcp__firecrawl__firecrawl_search", {"query": "x"})
     box.tool("mcp__exa__web_search_exa", {"query": "x"})
-    box.tool("mcp__jina__read_url", {"url": "https://jina.example/a?q=1"})
+    box.tool("mcp__jina__read_url", {"url": "https://docs.python.org/3/a?q=1"})
     box.tool("mcp__parallel-search__web_search", {"query": "x"})
     box.tool("Bash", {"command": "~/ops/site-private/bin/web-get https://docs.example.org/p?q=1"})
     assert cats(box) == ["memory"] + ["web"] * 6
-    hosts = [r.get("host") for r in box.records()]
-    assert hosts[4:] == ["jina.example", None, "docs.example.org"]
+    recs = box.records()
+    assert [r.get("host") for r in recs][4:] == ["python.org", None, None]          # only allowlisted domains
+    assert [r.get("host_class") for r in recs][4:] == ["public", None, "public"]
 
 
-def test_web_fetch_records_only_the_host(box):
-    box.tool("WebFetch", {"url": f"https://Docs.Example.com:8443/a/b?token={MARK}#frag", "prompt": "p"})
-    (rec,) = box.records()
-    assert rec["category"] == "web" and rec["host"] == "docs.example.com"
-    assert "/a/b" not in json.dumps(rec)
+def test_web_fetch_records_only_an_allowlisted_registrable_domain(box):
+    box.tool("WebFetch", {"url": f"https://u:p@Docs.Python.ORG:8443/a/b?token={MARK}#frag", "prompt": "p"})
+    box.tool("WebFetch", {"url": f"https://{MARK}host.example.com/a?q=1"})
+    first, second = box.records()
+    assert first["category"] == "web" and first["host"] == "python.org" and first["host_class"] == "public"
+    assert second["host_class"] == "public" and "host" not in second
+    assert "/a/b" not in json.dumps(first) and MARK.lower() not in json.dumps(second).lower()
 
 
 def test_web_failure_is_a_web_event_with_failed_set(box):
     for _ in range(3):
         box.tool("Read", {"file_path": "/nix/store/x/a.py"})
-    box.fail("WebFetch", {"url": "https://example.com/x"}, error="timeout")
+    box.fail("WebFetch", {"url": "https://github.com/x"}, error="timeout")
     box.tool("Read", {"file_path": "/nix/store/x/b.py"})
     recs = box.records()
     assert recs[3]["category"] == "web" and recs[3]["failed"] is True
@@ -252,9 +255,9 @@ def test_exactly_one_record_per_event_with_fixed_fields(box):
     assert len(recs) == len(events) + 2
     want = {"ts", "session", "event", "client", "tool", "category", "failed", "bytes", "tokens_est",
             "web_or_memory_before", "run_length", "external_run", "duplicate", "retry",
-            "quoting_failure", "task_seq", "elapsed_ms"}
+            "quoting_failure", "task_seq", "elapsed_ms", "schema", "classifier_version"}
     for r in recs:
-        assert want <= set(r) and set(r) <= want | {"host", "path_top"}
+        assert want <= set(r) and set(r) <= want | {"host", "host_class", "path_class", "agent", "dropped"}
         assert r["ts"].endswith("+00:00")
 
 
@@ -268,8 +271,8 @@ def test_no_raw_private_text_reaches_any_state_file(box):
         ("WebSearch", {"query": f"{MARK} private query"}),
         ("mcp__firecrawl__firecrawl_search", {"query": MARK}),
         ("mcp__basic-memory__search_notes", {"query": MARK}),
-        ("WebFetch", {"url": f"https://example.com/{MARK}?q={MARK}", "prompt": MARK}),
-        ("Bash", {"command": f"web-get 'https://example.com/{MARK}?k={MARK}'"}),
+        ("WebFetch", {"url": f"https://github.com/{MARK}?q={MARK}", "prompt": MARK}),
+        ("Bash", {"command": f"web-get 'https://github.com/{MARK}?k={MARK}'"}),
         ("Bash", {"command": f"ssh {MARK} 'echo \"{MARK}'"}),
     ]
     for name, tin in tin_paths:
@@ -280,7 +283,7 @@ def test_no_raw_private_text_reaches_any_state_file(box):
     blob = b"".join(p.read_bytes() for p in box.state.iterdir())
     assert blob and MARK.encode() not in blob
     assert len(box.records()) == len(tin_paths) + 3
-    assert b"example.com" in blob                                        # the host name is allowed
+    assert b"github.com" in blob                                         # an allowlisted domain is kept
 
 
 def test_modes_are_private(box):
@@ -345,7 +348,7 @@ def test_five_megabyte_payload_finishes_within_the_deadline_and_counts_bytes(box
     big = "é" * (2_600_000)                                             # 5.2 MB of UTF-8
     t0 = time.monotonic()
     box.tool("Bash", {"command": "cat big"}, {"stdout": big, "stderr": ""})
-    assert time.monotonic() - t0 < 4
+    assert time.monotonic() - t0 < 2                                    # the hook deadline
     (rec,) = box.records()
     assert rec["bytes"] == 5_200_000 and rec["tokens_est"] == 1_300_000
 
@@ -381,3 +384,318 @@ def test_parallel_events_each_leave_exactly_one_record(box):
         assert p.stdout.read() == b"" and p.stderr.read() == b""
     recs = box.records()
     assert len(recs) == 12 and sorted(r["run_length"] for r in recs) == list(range(1, 13))
+
+
+# ---- repair round 1 (adversary D1-D10): Bash parsing, web and memory names, subagents, files -----
+
+def cat_of(box, command, **tin):
+    box.tool("Bash", {"command": command, **tin})
+    return box.records()[-1]["category"]
+
+
+@pytest.mark.parametrize("command, want", [
+    ("rg foo {w}/lib 2>/dev/null", "own_code"),                       # redirect target is not a path
+    ("rg foo {w}/lib >/tmp/out 2>&1", "own_code"),
+    ("git log --oneline | head -5", "private_other"),                 # pipe filters are not reads
+    ("echo hi | wc -l", "private_other"),
+    ("cat /nix/store/a/b.py | rg x", "external_code"),                # the first stage is the read
+    ("git status && rg foo /nix/store/abc", "external_code"),         # any stage of a compound command
+    ("cd /nix/store/abc && cat a.py", "external_code"),               # cd moves the relative paths
+    ("cd /tmp/x; ls", "private_other"),
+    ("sudo -u root cat /nix/store/a", "external_code"),               # sudo options are not the command
+    ("env X=1 FOO=2 rg bar /nix/store/a", "external_code"),
+    ("timeout 20 rg bar /nix/store/a", "external_code"),
+    ("rg '/usr/bin/env' .", "own_code"),                              # the pattern is not a path
+    ("rg -e '/usr/bin' /nix/store/x", "external_code"),
+    ("bash -lc 'rg foo /nix/store/x'", "external_code"),
+    ("(cd /nix/store/x && rg foo)", "external_code"),
+    ("for f in a b; do rg foo /nix/store/x; done", "external_code"),
+    ("sed -i s/a/b/ /nix/store/x", "private_other"),                  # an edit, not a read
+    ("find /nix/store/x -name '*.py' | head", "external_code"),
+    ("cat <<EOF\nrg foo /nix/store/x\nEOF", "own_code"),              # heredoc body is text
+    ("echo \"unterminated | rg foo /nix/store/x", "private_other"),  # broken quoting stays safe
+])
+def test_bash_classification(box, command, want):
+    assert cat_of(box, command.format(w=box.work)) == want
+
+
+@pytest.mark.parametrize("command, want", [
+    ("curl -s https://api.github.com/repos/a/b/issues", "web"),
+    ("env X=1 curl -sL https://example.org/a | head", "web"),
+    ("curl -s http://localhost:18804/mcp", "private_other"),
+    ("curl -s http://10.0.0.5/x", "private_other"),
+    ("curl -s https://abc.sipb.cloud/x", "private_other"),
+    ("gh search code 'foo bar' --limit 5", "web"),
+    ("gh api repos/someone/lib/contents/README.md", "web"),
+    ("gh api repos/djbclark/djbclark-ade/pulls/5", "private_other"),
+    ("gh repo view someone/lib", "web"),
+    ("gh pr view 5", "private_other"),
+    ("ssh h 'curl https://example.org/a'", "private_other"),         # the agent did not fetch it
+])
+def test_bash_web_lookups(box, command, want):
+    assert cat_of(box, command) == want
+
+
+@pytest.mark.parametrize("tool, want", [
+    ("mcp__claude_ai_Exa__web_search_exa", "web"),
+    ("mcp__claude_ai_Firecrawl__firecrawl_search", "web"),
+    ("mcp__claude_ai_Context7__query-docs", "web"),
+    ("mcp__context7__get-library-docs", "web"),
+    ("mcp__deepwiki__ask_question", "web"),
+    ("mcp__plugin_context7_context7__query-docs", "web"),
+    ("mcp__github__search_code", "web"),
+    ("mcp__github__create_issue", "private_other"),
+    ("mcp__claude_ai_Gmail__search_threads", "private_other"),
+    ("mcp__basic-memory__search_notes", "memory"),
+    ("mcp__claude_ai_Basic_Memory__read_note", "memory"),
+    ("mcp__graft__ask", "own_code"),
+])
+def test_mcp_servers_are_classified_by_server_name(box, tool, want):
+    box.tool(tool, {"query": "q"})
+    assert cats(box) == [want]
+
+
+def test_memory_files_are_memory_reads(box):
+    h = box.home
+    box.tool("Read", {"file_path": f"{h}/ops/site-private/memory/feedback_x.md"})
+    box.tool("Read", {"file_path": f"{h}/.claude/projects/-Users-x/memory/MEMORY.md"})
+    box.tool("Bash", {"command": f"rg foo {h}/ops/site-private/memory 2>/dev/null"})
+    box.tool("Bash", {"command": "cat ~/.agents/AGENTS.md"})
+    box.tool("Read", {"file_path": f"{h}/ops/site-private/bin/tool"})
+    assert cats(box) == ["memory"] * 4 + ["own_code"]
+    assert [r.get("path_class") for r in box.records()] == ["memory"] * 4 + ["ops"]
+
+
+def test_memory_and_web_events_feed_the_run_counters(box):
+    box.tool("Read", {"file_path": "/nix/store/x/a.py"})
+    box.tool("Bash", {"command": "gh search code foo"})
+    box.tool("Bash", {"command": "cat /nix/store/x/b.py 2>/dev/null | head"})
+    recs = box.records()
+    assert [r["run_length"] for r in recs] == [1, 0, 1]
+    assert [r["web_or_memory_before"] for r in recs] == [False, False, True]
+
+
+def test_path_class_is_a_fixed_enum(box):
+    h = box.home
+    for p in (f"{box.work}/a.py", f"{h}/src/other/a.py", f"{h}/ops/x/a.py", "/nix/store/x/a.py",
+              f"{h}/.cache/x/a.py", f"{h}/.local/state/x", "/tmp/x", f"{h}/Downloads/x", "/etc/hosts"):
+        box.tool("Read", {"file_path": p})
+    assert [r["path_class"] for r in box.records()] == [
+        "cwd", "src", "ops", "nix", "cache", "state", "tmp", "home", "other"]
+    assert all("path_top" not in r for r in box.records())
+
+
+# ---- subagents --------------------------------------------------------------------------------
+
+def test_subagents_do_not_share_carry_over_state(box):
+    def sub(name, tin, agent, **kw):
+        return box.tool(name, tin, agent_id=agent, **kw)
+    sub("Read", {"file_path": "/nix/store/x/a1"}, "agent-A")
+    sub("Read", {"file_path": "/nix/store/x/a2"}, "agent-A")
+    sub("WebSearch", {"query": "q"}, "agent-B")                         # B's web search...
+    sub("Read", {"file_path": "/nix/store/x/a3"}, "agent-A")            # ...is not A's
+    sub("Read", {"file_path": str(box.work / "own")}, "agent-B")        # B's own-code read resets B only
+    sub("Read", {"file_path": "/nix/store/x/a4"}, "agent-A")
+    box.tool("Read", {"file_path": "/nix/store/x/m1"})                  # the main agent, no agent_id
+    recs = box.records()
+    assert [r["run_length"] for r in recs] == [1, 2, 0, 3, 0, 4, 1]
+    assert [r["web_or_memory_before"] for r in recs] == [False] * 4 + [True] + [False] * 2   # only B saw the web
+    assert [r["duplicate"] for r in recs] == [False] * 7
+    agents = [r.get("agent") for r in recs]
+    assert agents[0] == agents[1] == agents[3] == agents[5] and agents[2] == agents[4]
+    assert agents[0] != agents[2] and agents[6] is None and len(agents[0]) == 8
+    assert "agent-A" not in json.dumps(recs)
+
+
+def test_subagent_state_is_keyed_by_agent_and_inherits_the_task(box):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    box.prompt()
+    box.prompt()
+    box.tool("Read", {"file_path": "/tmp/a"}, agent_id="agent-A")
+    box.tool("Read", {"file_path": "/tmp/a"}, agent_id="agent-A", advance=5)
+    box.tool("Read", {"file_path": "/tmp/a"}, agent_id="agent-B", advance=5)
+    recs = box.records()
+    assert [r["task_seq"] for r in recs[3:]] == [2, 2, 2]
+    assert recs[4]["elapsed_ms"] == 5000 and recs[3]["elapsed_ms"] is None
+    assert recs[5]["elapsed_ms"] is None                                # B's first event: nothing before it
+    assert len(list(box.state.glob("*.state.json"))) == 3
+
+
+def test_missing_or_odd_agent_id_means_the_main_agent(box):
+    for aid in (None, "", 7, ["x"]):
+        box.tool("Read", {"file_path": "/tmp/a"}, agent_id=aid)
+    assert all("agent" not in r for r in box.records())
+    assert [r["duplicate"] for r in box.records()] == [False, True, True, True]
+
+
+# ---- privacy of names -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url, klass, host", [
+    ("http://localhost:18804/mcp", "loopback", None),
+    ("http://127.0.0.1/x", "loopback", None),
+    ("http://[::1]:80/x", "loopback", None),
+    ("https://10.0.0.5/", "private_ip", None),
+    ("https://192.168.1.2:8443/", "private_ip", None),
+    ("https://[2001:db8::1]/x", "private_ip", None),                   # documentation range: not global
+    ("https://8.8.8.8/x", "public", None),
+    ("https://myhost/x", "internal", None),
+    ("https://abc.sipb.cloud/x", "internal", None),
+    ("https://printer.local/x", "internal", None),
+    ("https://" + MARK + "capability.example.com/x", "public", None),
+    ("https://docs.python.org/3/", "public", "python.org"),
+    ("https://GitHub.com./a", "public", "github.com"),
+    ("https://u:p@raw.githubusercontent.com:8443/a?q=1", "public", "githubusercontent.com"),
+    ("https://www.example.co.uk/x", "public", None),
+    ("https://[::1", "invalid", None),
+    ("notaurl", "invalid", None),
+])
+def test_url_host_is_bucketed_never_stored_verbatim(box, url, klass, host):
+    box.tool("WebFetch", {"url": url})
+    (rec,) = box.records()
+    assert rec["host_class"] == klass and rec.get("host") == host
+    assert MARK.lower() not in json.dumps(rec).lower()
+
+
+def test_unknown_names_are_bucketed(box):
+    box.tool("mcp__SECRETMARK25__x", {})
+    box.tool("mcp__claude_ai_SECRETMARK_memory__x", {})                # matches a kind by suffix only
+    box.tool("mcp__firecrawl__firecrawl_search", {"query": "q"})
+    box.tool("mcp__claude_ai_Exa__web_search_exa", {"query": "q"})
+    box.tool("SECRETMARKTool", {})
+    box.tool("Read", {"file_path": "/tmp/a"}, model="SECRETMARK-model")
+    box.tool("Read", {"file_path": "/tmp/a"}, model="claude-opus-5-5")
+    recs = box.records()
+    assert [r["tool"] for r in recs[:5]] == [
+        "mcp__other", "mcp__memory_server", "mcp__firecrawl__firecrawl_search",
+        "mcp__claude_ai_exa__web_search_exa", "other"]
+    assert [r["client"] for r in recs[5:]] == ["claude-code", "claude-opus-5-5"]
+    assert MARK.lower() not in b"".join(p.read_bytes() for p in box.state.iterdir()).decode().lower()
+
+
+def test_records_carry_a_schema_and_classifier_version(box):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    box.prompt()
+    assert all(r["schema"] == 2 and r["classifier_version"] == 2 for r in box.records())
+
+
+def test_call_hashes_are_salted_per_session(box):
+    import hashlib
+    box.tool("Bash", {"command": "git status"})
+    st = json.loads((box.state / f"{SID}.state.json").read_text())
+    bare = hashlib.sha256(("Bash" + json.dumps({"command": "git status"}, sort_keys=True)).encode()).hexdigest()[:12]
+    assert st["recent"] and bare not in st["recent"]
+    box.run({"tool_name": "Bash", "tool_input": {"command": "git status"}}, sid="other")
+    other = json.loads((box.state / "other.state.json").read_text())
+    assert other["recent"] != st["recent"] and other["salt"] != st["salt"]
+
+
+# ---- hostile files (D5) -----------------------------------------------------------------------
+
+def test_planted_symlinks_are_not_followed(box, tmp_path):
+    box.tool("Read", {"file_path": "/tmp/a"})                         # creates the three files
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep\n")
+    for suffix in ("jsonl", "lock", "state.json"):
+        f = box.state / f"{SID}.{suffix}"
+        f.unlink()
+        f.symlink_to(victim)
+    box.tool("Read", {"file_path": "/tmp/b"})
+    box.tool("Read", {"file_path": "/tmp/c"})
+    assert victim.read_text() == "keep\n"
+
+
+def test_planted_state_symlink_cannot_switch_recording_off(box, tmp_path):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    target = tmp_path / "capped.json"
+    target.write_text('{"capped":true}')
+    (box.state / f"{SID}.state.json").unlink()
+    (box.state / f"{SID}.state.json").symlink_to(target)
+    box.tool("Read", {"file_path": "/tmp/b"})
+    assert len(box.records()) == 2 and target.read_text() == '{"capped":true}'
+
+
+@pytest.mark.parametrize("suffix", ["jsonl", "lock", "state.json"])
+def test_fifo_in_place_of_a_file_never_blocks_the_hook(box, suffix):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    f = box.state / f"{SID}.{suffix}"
+    f.unlink()
+    os.mkfifo(f)
+    t0 = time.monotonic()
+    box.tool("Read", {"file_path": "/tmp/b"})
+    assert time.monotonic() - t0 < 2
+
+
+def test_existing_state_dir_is_tightened_to_0700(box):
+    box.state.mkdir(mode=0o755)
+    box.state.chmod(0o755)
+    box.tool("Read", {"file_path": "/tmp/a"})
+    assert stat.S_IMODE(box.state.stat().st_mode) == 0o700 and len(box.records()) == 1
+
+
+def test_state_dir_that_is_a_symlink_is_refused(box, tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    box.state.symlink_to(real)
+    box.tool("Read", {"file_path": "/tmp/a"})
+    assert list(real.iterdir()) == []
+
+
+# ---- pruning (D8) and dropped events (D9) -----------------------------------------------------
+
+def test_prune_removes_old_files_once_a_day_and_keeps_the_rest(box):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    day = 86_400
+    fresh_old = {}
+    for name in ("old.jsonl", "old.state.json", "old.lock", "old.aXXXX.drops", ".st-leftover", f"{SID}.zzz.state.json"):
+        p = box.state / name
+        p.write_text("x")
+        os.utime(p, (box.clock - 40 * day, box.clock - 40 * day))
+        fresh_old[name] = p
+    young = box.state / "young.jsonl"
+    young.write_text("x")
+    os.utime(young, (box.clock - 3 * day, box.clock - 3 * day))
+    unrelated = box.state / "notes.txt"
+    unrelated.write_text("x")
+    os.utime(unrelated, (box.clock - 90 * day, box.clock - 90 * day))
+    box.prompt()
+    left = {p.name for p in box.state.iterdir()}
+    assert not {"old.jsonl", "old.state.json", "old.lock", "old.aXXXX.drops", ".st-leftover"} & left
+    assert {"young.jsonl", "notes.txt", f"{SID}.jsonl", f"{SID}.zzz.state.json", ".prune-stamp"} <= left
+    again = box.state / "again.jsonl"                                  # a second prompt the same day: no scan
+    again.write_text("x")
+    os.utime(again, (box.clock - 40 * day, box.clock - 40 * day))
+    box.prompt()
+    assert again.exists()
+    box.prompt(advance=2 * day)
+    assert not again.exists()
+
+
+def test_prune_never_follows_symlinks_and_honours_the_retention_setting(box, tmp_path):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("x")
+    link = box.state / "old.jsonl"
+    link.symlink_to(outside)
+    os.utime(link, (box.clock - 99 * 86_400,) * 2, follow_symlinks=False)
+    short = box.state / "short.jsonl"
+    short.write_text("x")
+    os.utime(short, (box.clock - 2 * 86_400,) * 2)
+    box.run({"hook_event_name": "UserPromptSubmit", "prompt": "p"}, PRIOR_ART_RETENTION_DAYS="1")
+    assert outside.exists() and not short.exists()
+
+
+def test_events_lost_to_a_held_lock_are_counted_in_the_next_record(box):
+    import fcntl
+    box.tool("Read", {"file_path": "/tmp/a"})
+    fd = os.open(box.state / f"{SID}.lock", os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        box.tool("Read", {"file_path": "/tmp/b"})
+        box.tool("Read", {"file_path": "/tmp/c"})
+    finally:
+        os.close(fd)
+    assert len(box.records()) == 1
+    box.tool("Read", {"file_path": "/tmp/d"})
+    box.tool("Read", {"file_path": "/tmp/e"})
+    recs = box.records()
+    assert [r.get("dropped") for r in recs] == [None, 2, None]
