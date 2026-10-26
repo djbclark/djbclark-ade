@@ -43,3 +43,19 @@ def test_explicit_mode_wins(tmp_path):
 
 def test_other_provider_keeps_its_own_default(tmp_path):
     assert "modeId" not in dry_run(tmp_path, "--provider", "omp", "--model", "x")
+
+
+def test_no_auto_accept_keeps_a_claude_seat_prompting(tmp_path):
+    assert "modeId" not in dry_run(tmp_path, "--provider", "claude", "--model", "claude-sonnet-5-5", "--no-auto-accept")
+
+
+def test_a_mode_that_looks_like_a_flag_is_refused(tmp_path):
+    helper = tmp_path / "helper"
+    helper.write_text(f'#!/bin/sh\nexec "{NODE}" "$@"\n')
+    helper.chmod(0o755)
+    env = dict(os.environ, PASEO_NEW_SEAT_HELPER=str(helper), PASEO_NEW_SEAT_CLI_DIST=str(tmp_path))
+    proc = subprocess.run(
+        [sys.executable, str(BIN / "paseo-new-seat"), "--title", "t", "--cwd", str(tmp_path),
+         "--provider", "claude", "--mode=--allow-new-workspace", "--dry-run"],
+        env=env, capture_output=True, text=True, timeout=60, check=False)
+    assert proc.returncode == 2 and "not a mode id" in proc.stderr

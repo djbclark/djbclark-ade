@@ -40,7 +40,9 @@ USAGE
 --mode is the provider's own permission-mode id. Every seat runs yolo (home rule 16, 2026-10-26: a
 claude seat opened without a mode started in `default` and prompted), so a claude seat gets
 `bypassPermissions` unless --mode says otherwise; any other provider keeps its own default (an omp
-seat is already Full Access, and a claude mode id means nothing to it).
+seat is already Full Access, and a claude mode id means nothing to it). `--no-auto-accept` drops that
+default too (a seat that prompts); a security-sensitive claude slice passes `--no-auto-accept` or
+`--mode default`/`plan`.
 
 --thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --label tags the
 agent (bin/watch uses watch=<domain>); --json prints one JSON line {id, shortId, autoAccept} instead of the
@@ -109,7 +111,11 @@ def main(argv: list[str]) -> int:
         args += ["--prompt", a.prompt]
     if a.workspace:
         args += ["--workspace", a.workspace]
-    mode = a.mode or default_mode(a.provider)
+    if a.mode.startswith("-"):  # the node half reads flags by name, so a value like that would switch one on
+        print(f"paseo-new-seat: --mode {a.mode!r} is not a mode id", file=sys.stderr)
+        return 2
+    # --no-auto-accept asks for a seat that prompts: the yolo default must not undo it
+    mode = a.mode or ("" if a.no_auto_accept else default_mode(a.provider))
     if mode:
         args += ["--mode", mode]
     if a.thinking:
