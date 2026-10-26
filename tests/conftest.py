@@ -50,6 +50,11 @@ if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1")
 os.environ["CLAUDE_GOVERNOR_STATE"] = "/nonexistent/claude-governor-state.json"
 # the governor also reads the quota guard's state (bin/claude-quota-guard): a test never sees the real one
 os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.json"
+# the gate profile (bin/ade_gates.py, bin/gate-profile, 2026-10-26) loosens both gates' numbers while it is active: a test never reads the
+# operator's real profile, writes the real audit log, pings, or recomputes the real governor and guard. Pinned to missing paths
+# unconditionally; tests/test_gates.py points them at fixtures per test.
+for _var in ("GATE_PROFILE_STATE", "GATE_PROFILE_LOG", "GATE_PROFILE_PING", "GATE_PROFILE_GOVERNOR", "GATE_PROFILE_GUARD"):
+    os.environ[_var] = f"/nonexistent/{_var.lower()}"
 # relay.py reads RELAY_DEFER_DIR once, at import: every test module that loads it (test_relay_*.py, test_session_relay.py)
 # gets a throwaway queue directory, so no test reads, sweeps, expires or prunes the operator's real deferred-send queue
 # ~/.local/state/relay/deferred (2026-10-24: test_session_relay.py ran relay.main(), whose opportunistic sweep expired and

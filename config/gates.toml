@@ -1,0 +1,114 @@
+# Claude quota gate rules, versioned in git (2026-10-26; docs/gates.md).
+#
+# Two scripts turn the aiuse Claude readings into a level that sessions act on:
+#   [governor]    bin/claude-fleet-governor (launchd every 300 s): projects the 5-hour and weekly windows
+#                 to their resets, downshifts Opus/Fable agents to Sonnet at tight/critical.
+#   [quota_guard] bin/claude-quota-guard (launchd every 15 min): watch/tight/critical from the weekly and
+#                 5-hour "left" percentages; feeds claude/hooks/quota_nudge.py and the governor.
+#
+# Precedence, lowest to highest (bin/ade_gates.py `load_gates`):
+#   code default (THRESHOLDS in each script, the fail-safe when this file is missing or unparsable)
+#   < this file's [governor] / [quota_guard] baseline
+#   < the active profile, while ~/.local/state/ade/gate-profile.json names one that is valid and unexpired
+#   < env JSON (CLAUDE_GOVERNOR_THRESHOLDS / CLAUDE_QUOTA_GUARD_THRESHOLDS: tests and emergencies).
+#
+# The baseline below MUST equal the code defaults (tests/test_gates.py and `bin/gate-profile validate` check it):
+# change a number in both places, in one commit.
+#
+# A profile is a TEMPORARY loosening, set with `bin/gate-profile set NAME --for 72h --reason TEXT`. It
+# can only touch keys listed under [floors.*], only in the stated direction, never past the bound;
+# anything else, or an expired or over-long window, and the baseline applies (fail-safe).
+
+[meta]
+schema = 1
+max_profile_hours = 240   # a profile window longer than this (until - since) is refused by `set` and ignored by the gates
+
+# -- baseline: the CURRENT values, exactly the code defaults --------------------------------------------------
+
+[governor]
+stale_min = 45                     # minutes; newest snapshot older than this: exit 10, no action
+rate_window_min = 90               # minutes; snapshots this recent feed the burn-rate fit
+reset_tolerance_min = 5            # minutes; samples share the current window when resets_at is within this
+min_span_min = 10                  # minutes; first to last sample must span at least this to give a rate
+tight_projected = 90.0             # percent; projected usage at reset at or above this: tight
+tight_left_five_hour = 25.0        # percent left; 5-hour window left below this: tight
+tight_left_weekly = 30.0           # percent left; weekly window left below this: tight
+critical_left = 10.0               # percent left; any window left below this: critical
+critical_exhaust_before_reset_min = 10   # minutes; exhaustion at least this long before the reset ...
+critical_exhaust_within_min = 45         # minutes; ... and no further away than this: critical
+state_fresh_min = 30               # minutes; route_agent trusts the written level this long (read there)
+
+[quota_guard]
+watch_weekly = 40.0                # percent left; weekly left below this: watch
+tight_weekly = 30.0                # percent left; weekly left below this: tight
+critical_weekly = 15.0             # percent left; weekly left below this: critical
+critical_five_hour = 10.0          # percent left; 5-hour left below this: critical
+watch_fable = 15.0                 # percent left; Fable sublimit left below this: watch
+conserve_alert_level = 2.0         # level; the most a snapshot `conserve` alert may raise to (0 ok, 1 watch, 2 tight, 3 critical)
+alert_max_age_s = 21600.0          # seconds; ignore snapshot `conserve` alerts older than this
+period_tolerance_s = 7200.0        # seconds; two resets_at this close are the same reset period
+aiuse_timeout_s = 90.0             # seconds; `aiuse --available --json` deadline
+ping_timeout_s = 30.0              # seconds; hermes-ping deadline
+stale_age_s = 10800.0              # seconds; data older than this (dead collector) is "stale", never pinged
+lock_retries = 10.0                # count; non-blocking flock attempts ...
+lock_wait_s = 0.5                  # seconds; ... this far apart, then exit 10
+
+# -- floors: what a profile may touch ---------------------------------------------------------------------------
+#
+# A key listed here is overridable by a profile; an UNLISTED key is not (every timing, age, lock and
+# exhaustion-window key is unlisted on purpose: loosening them changes what the gate can see, not how
+# much quota it lets a session spend). Per key:
+#   loosen = "lower"   lower is looser (a "percent left" trigger): profile value in [bound, baseline]
+#   loosen = "higher"  higher is looser (a projection trigger):     profile value in [baseline, bound]
+#   bound              the limit a profile may never cross
+# A profile with ANY value outside its range is rejected as a whole (never clamped): baseline applies.
+#
+# Why these bounds: the aiuse collector is hourly and the guard runs every 15 min, so a 5-hour window can
+# burn through ~25 points between two readings. Below 3% left nothing can react before exhaustion, so no
+# trigger may sit below 3. "Tight" triggers keep a margin above the "critical" ones.
+
+[floors.governor]
+tight_projected = { loosen = "higher", bound = 1000.0 }   # 1000% = the projection never triggers by itself; critical exhaustion rules stay
+tight_left_five_hour = { loosen = "lower", bound = 10.0 } # never looser than the baseline critical_left (10)
+tight_left_weekly = { loosen = "lower", bound = 8.0 }     # keeps a margin over the critical floor of 3
+critical_left = { loosen = "lower", bound = 3.0 }         # hard stop: never below 3% left
+
+[floors.quota_guard]
+watch_weekly = { loosen = "lower", bound = 15.0 }
+tight_weekly = { loosen = "lower", bound = 8.0 }
+critical_weekly = { loosen = "lower", bound = 3.0 }       # hard stop: never below 3% left
+critical_five_hour = { loosen = "lower", bound = 3.0 }    # hard stop: never below 3% left
+watch_fable = { loosen = "lower", bound = 5.0 }
+conserve_alert_level = { loosen = "lower", bound = 1.0 }  # watch: a profile may stop an alert alone giving tight, never ignore it
+
+# -- profiles -------------------------------------------------------------------------------------------------------
+
+# DRAFT: the operator confirms values at activation.
+# "away": nobody is at the keyboard for days (planned 3-day absence, 2026-10-26) and the Claude quota should
+# be spent down on queued work instead of guarded for a human who is not there. Loosening only.
+[profiles.away]
+description = "operator away for days: spend the weekly quota down further before the reset"
+
+[profiles.away.governor]
+# A weekly window projected far past 100% at its reset (65% used with 4d5h left projects 242%) is tight at
+# baseline whatever its absolute headroom. Away, that projection is the point of the profile: stop it from
+# driving the Opus/Fable -> Sonnet downshift. Critical exhaustion (more than 10 min before the reset and
+# within 45 min) is untouched, and so is critical_left, so a window about to hit zero still stops work.
+tight_projected = 500.0
+# Left-percent triggers fall from 25/30 to 15, so work continues until 15% is left; the hard stop stays at 10.
+tight_left_five_hour = 15.0
+tight_left_weekly = 15.0
+# critical_left: unchanged (10), the hard stop is kept.
+
+[profiles.away.quota_guard]
+# Same 15% tight trigger as the governor above (the governor also reads the guard's level, so the two
+# must move together), watch at 20 so the advice text stays quiet until the last 20%.
+watch_weekly = 20.0
+tight_weekly = 15.0
+# Aligned with the governor's critical_left (10): baseline guard critical (15) is stricter than the governor's.
+critical_weekly = 10.0
+# The aiuse `conserve` projection alert ("projected to run out ... before reset") is a rule, not a threshold: at baseline
+# it alone gives tight. Away that is the same projection the governor's tight_projected above stops acting on (weekly 35%
+# left, projected 242%), and the governor reads this level, so the alert is capped at watch (1: advice only).
+conserve_alert_level = 1.0
+# critical_five_hour and watch_fable: unchanged (10 and 15).
