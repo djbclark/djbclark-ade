@@ -69,7 +69,9 @@ def test_fetches_only_the_one_secret_and_adds_only_it(mm, calls, monkeypatch):
     path, child_argv, env = calls.exec[0]
     assert child_argv == [path, "--permission-mode", "auto", "-p", "two words"]
     assert env["ANTHROPIC_API_KEY"] == FAKE_KEY and env["KEEP_ME"] == "1"
-    assert env == {**before, "ANTHROPIC_API_KEY": FAKE_KEY}
+    assert set(env) - set(before) == {"ANTHROPIC_API_KEY"}
+    assert all(env[k] == before[k] for k in before)
+    assert env["ANTHROPIC_API_KEY"] == FAKE_KEY
 
 
 def test_preset_key_wins_and_nothing_is_fetched(mm, calls, monkeypatch):
@@ -123,7 +125,7 @@ def _fake_https(monkeypatch, code, body=b"", headers=()):
 
 
 def test_check_refuses_a_redirect_and_never_forwards_the_key(mm, monkeypatch, capfd):
-    seen = _fake_https(monkeypatch, 302, headers=[("Location", "http://elsewhere.invalid/v1/models")])
+    seen = _fake_https(monkeypatch, 302, headers=[("Location", "https://elsewhere.invalid/v1/models")])
     assert mm.check(FAKE_KEY) == 1
     assert [u for u, _ in seen] == [mm.MODELS_URL]  # the Location was not requested
     assert "HTTP 302" in capfd.readouterr().err
