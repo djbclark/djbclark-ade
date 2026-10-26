@@ -27,6 +27,17 @@ For each request:
    with findings ranked by severity, each with file:line, the concrete
    failure scenario, and the fix you expect. "No findings" is a valid
    verdict; say it explicitly.
+4. **Your verdict goes in the PR body as a machine-readable marker** (AGENTS.md
+   rule 1), naming the head you reviewed:
+
+   ```
+   <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
+   ```
+
+   `pr-wait` reads that marker and **not** your prose, so a verdict written only
+   as sentences is invisible to the gate. Put the marker in **prose, outside
+   backticks and fences** — a marker inside code is documentation and is
+   ignored. Your findings still go in prose below it.
 4. If any part of the review was declined to you or cut short, say so in the
    verdict rather than presenting it as complete.
 5. A probe of a tool that writes (a backup, export, sync, apply or install
