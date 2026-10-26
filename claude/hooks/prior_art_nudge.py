@@ -18,8 +18,8 @@ state keyed on the session alone interleaves parallel subagents), replaced atomi
 <session id>.lock. Every file is opened O_NOFOLLOW | O_NONBLOCK and must be a regular file.
 
 Fields: ts (UTC ISO), schema and classifier_version (so a later reclassification can tell old rows from
-new; the records keep no raw input), session (first 12 hex of sha256 of the session id), event, client
-(the payload's `model` if it looks like a known model family, else "claude-code"), tool (see PRIVACY),
+new; the records keep no raw input), session (first 12 hex of sha256 of the session id), event (one of
+the three registered hook names, else "other"), client (see PRIVACY), tool (see PRIVACY),
 category, failed, bytes (UTF-8 length of the tool response or error text), tokens_est (bytes // 4, an
 estimate), web_or_memory_before (a web or memory event earlier in the same task), run_length
 (consecutive external-tree reads without a web, memory or own-code event between; `external_run` is
@@ -29,8 +29,11 @@ main agent), `host_class` and `host` for a fetched URL, `path_class` for a read 
 lost to a held lock since the previous record).
 
 PRIVACY, exactly what is stored: the category and the booleans, counts and timestamps above; the session
-pseudonym; `tool` only when it is a known built-in tool name or an MCP tool of a known server (everything
-else is "other" or "mcp__other"); `client` only for a known model family; `host_class` (loopback,
+pseudonym; `event` only as one of PostToolUse, PostToolUseFailure, UserPromptSubmit or "other"; `tool`
+only as a known built-in tool name, `mcp__<server>` for an MCP server on the fixed lists (the tool name
+after the server is never kept), `mcp__other`, `mcp__<kind>_server` (a kind matched by suffix only) or
+"other"; `client` only as a model family from a fixed list, for Claude its tier (opus, sonnet, haiku),
+then up to three one- or two-digit version numbers, else "claude-code"; `host_class` (loopback,
 private_ip, internal, public, invalid); `host` only for a public URL whose registrable domain is on the
 fixed ALLOWED_DOMAINS list, and then only that registrable domain, never a sub-domain, port, user, path,
 query or fragment; `path_class` (a fixed enum, never a path segment). NEVER stored: a command, a path, a
@@ -60,16 +63,18 @@ import json
 import os
 import re
 import shlex
+import socket
 import stat
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 SCHEMA = 2
-CLASSIFIER_VERSION = 2
+CLASSIFIER_VERSION = 3
 
 CAP_BYTES = 5 * 1024 * 1024
 CAP_TAIL = b'{"capped":true}\n'
@@ -83,18 +88,22 @@ MAX_TOKENS = 2_000
 MAX_PATHS = 50
 RECENT_CALLS = 30
 EXTERNAL_RUN = 3
-LOCK_RETRIES = 25
-LOCK_WAIT_S = 0.02
+LOCK_WAIT_TOTAL_S = 0.5                                 # wall-clock bound on waiting for the session lock
+LOCK_POLL_S = 0.02
 DEFAULT_IDLE_S = 1800
 DEFAULT_RETENTION_DAYS = 30
 PRUNE_EVERY_S = 86_400
 PRUNE_MAX_SCAN = 20_000
 PRUNE_MAX_DELETE = 2_000
+# Prune only what this tool names: <session id>[.a<12 hex>].(jsonl|state.json|lock|drops) and mkstemp leftovers.
+PRUNE_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}\.(a[0-9a-f]{12}\.)?(jsonl|state\.json|lock|drops)$")
+PRUNE_TMP_RE = re.compile(r"^\.st-[a-z0-9_]{8}$")
 OWN_GITHUB_OWNERS = ("djbclark",)
 
 WEB_TOOLS = {"WebSearch", "WebFetch"}
-# MCP servers, by normalised name (lower case, "-" -> "_", "claude_ai_" and "plugin_<x>_" prefixes
-# stripped; a server also matches as the tail "_<name>"). Tool names after the server are free-form.
+# MCP servers, by normalised name (lower case, "-" -> "_", a "claude_ai_" prefix stripped; a server also
+# matches as the tail "_<name>", which covers "plugin_<x>_<name>"). The tool name after the server is
+# never recorded.
 WEB_SERVERS = ("firecrawl", "exa", "jina", "parallel", "parallel_search", "tavily", "perplexity",
                "brave_search", "context7", "deepwiki", "duckduckgo", "kagi", "searxng", "web_search")
 MEMORY_SERVERS = ("basic_memory", "memory", "mem0", "openmemory")
@@ -108,8 +117,9 @@ KNOWN_TOOLS = {
     "ExitPlanMode", "AskUserQuestion", "ToolSearch", "TaskOutput", "TaskStop", "Monitor",
     "ScheduleWakeup", "shell", "shell_command", "exec_command", "apply_patch",
 }
-KNOWN_MODELS_RE = re.compile(r"^(claude|gpt|o\d|gemini|grok|qwen|glm|kimi|deepseek|mistral)[a-z0-9._-]{0,40}$", re.I)
-MCP_TOOL_RE = re.compile(r"^[A-Za-z0-9_-]{1,60}$")
+KNOWN_EVENTS = {"PostToolUse", "PostToolUseFailure", "UserPromptSubmit"}
+MODEL_FAMILIES = ("claude", "gpt", "gemini", "grok", "qwen", "glm", "kimi", "deepseek", "mistral")
+CLAUDE_TIERS = ("opus", "sonnet", "haiku")
 READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead", "LSP"}
 SHELL_TOOLS = {"Bash", "shell", "shell_command", "exec_command"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
@@ -154,7 +164,21 @@ QUOTING_MARKERS = ("syntax error", "unexpected eof", "unterminated")
 PATH_KEYS = ("file_path", "path", "notebook_path", "filePath")
 URL_RE = re.compile(r"^https?://", re.I)
 ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_]\w*=")
-GH_REPO_RE = re.compile(r"^/?repos/([^/]+)/", re.I)
+GH_REPO_RE = re.compile(r"^/?repos/([^/]+)/([^/]+)/?(.*)$", re.I | re.S)
+GH_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")           # a literal login; no $VAR, {owner}, :owner
+GH_CODE_TAIL_RE = re.compile(r"^(contents|readme|releases|tags|tarball|zipball|git)(/|\?|$)", re.I)
+GH_API_VALUE_OPTS = {"-X", "--method", "-H", "--header", "-f", "--raw-field", "-F", "--field", "-q", "--jq",
+                     "-t", "--template", "--input", "--hostname", "--cache", "-p", "--preview"}
+GH_REPO_VALUE_OPTS = {"-R", "--repo", "--json", "-q", "--jq", "-t", "--template", "-b", "--branch",
+                      "--hostname"}
+GH_URL_RE = re.compile(r"^https?://github\.com/([^/]+)/", re.I)
+# Read commands that read stdin when given no path (a no-path run of them is not a read of the cwd), and
+# those that default to the cwd.
+STDIN_READERS = {"cat", "head", "tail", "wc", "sed", "gsed", "awk", "gawk", "less", "more", "bat",
+                 "grep", "egrep", "fgrep", "ggrep"}
+GREP_CMDS = {"grep", "egrep", "fgrep", "ggrep"}
+NUMERIC_HOST_RE = re.compile(r"^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+)){0,3}$")
+HEREDOC_WORD_END = " \t\r\n;&|<>()"
 MEMORY_REL_RE = re.compile(r"^(\.claude/projects/[^/]+/memory|ops/[^/]+/memory|\.agents|kb|basic-memory)(/|$)")
 SID_BAD_RE = re.compile(r"[^A-Za-z0-9._-]")
 SHELL_PUNCT = ";&|<>()\n"
@@ -224,8 +248,25 @@ def tool_label(tool: str) -> str:
             return "mcp__other"
         if norm not in ALL_SERVERS:                     # matched only by a suffix: keep the kind, not the name
             return f"mcp__{kind}_server"
-        return f"mcp__{server.lower()}__{name}"[:100] if name and MCP_TOOL_RE.match(name) else f"mcp__{server.lower()}"
+        return f"mcp__{server.lower()}"
     return "other"
+
+
+def client_label(model: str) -> str:
+    """A model family from a fixed list, for Claude its tier, then up to three small version numbers: a
+    value built only from fixed words and digits, so no free text from the payload reaches the record."""
+    m = re.sub(r"\[.*", "", model.lower()[:60])
+    fam = next((f for f in MODEL_FAMILIES if m.startswith(f)), "")
+    if not fam and re.match(r"o[0-9]", m):
+        fam = "o"
+    if not fam:
+        return "claude-code"
+    label = fam
+    if fam == "claude":
+        tier = next((t for t in CLAUDE_TIERS if t in m), "")
+        label += f"-{tier}" if tier else ""
+    nums = [s for s in re.split(r"[-._]", m[len(fam):]) if re.fullmatch(r"[0-9]{1,2}", s)][:3]
+    return "-".join([label, *nums])
 
 
 def read_event() -> dict | None:
@@ -381,8 +422,103 @@ def _command(tin: dict) -> str:
     return cmd if isinstance(cmd, str) else ""
 
 
+def _heredoc_word(cmd: str, i: int) -> tuple[str, int] | None:
+    """The delimiter of a heredoc whose `<<` (and `-`) ends just before i, and the index after it."""
+    n = len(cmd)
+    while i < n and cmd[i] in " \t":
+        i += 1
+    start, word = i, []
+    while i < n and cmd[i] not in HEREDOC_WORD_END:
+        c = cmd[i]
+        if c in "'\"":
+            j = cmd.find(c, i + 1)
+            if j < 0:
+                return None
+            word.append(cmd[i + 1:j])
+            i = j + 1
+        elif c == "\\" and i + 1 < n:
+            word.append(cmd[i + 1])
+            i += 2
+        else:
+            word.append(c)
+            i += 1
+    return ("".join(word), i) if i > start else None
+
+
+def _skip_heredoc_body(cmd: str, i: int, word: str, dash: bool) -> int:
+    """Index after the terminator line of a heredoc body that starts at i (end of text if none)."""
+    n = len(cmd)
+    while i < n:
+        j = cmd.find("\n", i)
+        line = cmd[i:n if j < 0 else j].rstrip("\r")
+        i = n if j < 0 else j + 1
+        if (line.lstrip("\t") if dash else line) == word:
+            break
+    return i
+
+
+def _prepare(cmd: str) -> str:
+    """The command text with what must not be tokenised removed: heredoc bodies (<<WORD, <<-WORD with its
+    tab-stripped terminator, quoted forms; an unterminated body runs to the end, as in bash), comments
+    (`#` at the start of a word), and backslash-newline continuations; a backtick substitution becomes
+    `$( ... )` and each heredoc operator becomes `<< _`. Quote state follows bash for ' " and backslash."""
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    n, i = len(cmd), 0
+    quote, tick, word_start = "", False, True
+    while i < n:
+        c = cmd[i]
+        if quote == "'":
+            out.append(c)
+            i += 1
+            quote = "" if c == "'" else quote
+            continue
+        if c == "\\":
+            if cmd[i + 1:i + 2] != "\n":
+                out.append(cmd[i:i + 2])
+                word_start = False
+            i += 2
+            continue
+        if quote == '"':
+            out.append(c)
+            i += 1
+            quote = "" if c == '"' else quote
+            continue
+        if c in "'\"":
+            quote = c
+        elif c == "#" and word_start:
+            j = cmd.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        elif c == "`":
+            out.append(")" if tick else "$(")
+            tick, word_start = not tick, True
+            i += 1
+            continue
+        elif c == "\n":
+            out.append(c)
+            i += 1
+            word_start = True
+            for word, dash in pending:
+                i = _skip_heredoc_body(cmd, i, word, dash)
+            pending.clear()
+            continue
+        elif c == "<" and cmd.startswith("<<", i) and not cmd.startswith("<<<", i) and cmd[i - 1:i] != "<":
+            dash = cmd.startswith("-", i + 2)
+            found = _heredoc_word(cmd, i + 2 + dash)
+            if found:
+                pending.append((found[0], dash))
+                out.append("<< _ ")
+                i, word_start = found[1], True
+                continue
+        out.append(c)
+        i += 1
+        word_start = c in " \t;&|("
+    return "".join(out)
+
+
 def _shell_tokens(cmd: str) -> list[str]:
-    cmd = cmd[:MAX_CMD_CHARS]
+    cmd = _prepare(cmd[:MAX_CMD_CHARS])
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=SHELL_PUNCT)
         lex.whitespace = " \t\r"                       # a newline is a command separator
@@ -398,51 +534,50 @@ def _is_punct(tok: str) -> bool:
     return bool(tok) and all(c in SHELL_PUNCT for c in tok)
 
 
-def _commands(tokens: list[str]) -> list[list[str]]:
-    """The first command of every pipeline, as a word list: split on && || ; & newline and parentheses,
-    drop everything after the first | (a pipe filter is not a read), and drop redirect operators with
-    their targets and heredoc bodies."""
-    cmds: list[list[str]] = []
+class Cmd(NamedTuple):
+    """One command of a pipeline's head: its words, its `< file` input redirects, and, for the marker
+    entries that stand for a parenthesis, scope "(" or ")" with no words."""
+    words: list
+    inputs: list
+    scope: str = ""
+
+
+def _commands(tokens: list[str]) -> list[Cmd]:
+    """The first command of every pipeline: split on && || ; & newline and parentheses (each parenthesis
+    also yields a scope marker), drop everything after the first | (a pipe filter is not a read), drop
+    redirect operators and their targets, but keep the target of a `< file` as the command's input."""
+    cmds: list[Cmd] = []
     cur: list[str] = []
+    ins: list[str] = []
     piped = False
-    heredoc = body = None
-    prev_nl = False
     i, n = 0, len(tokens)
     while i < n:
         t = tokens[i]
         i += 1
-        if body is not None:                            # inside a heredoc body
-            if t == body and prev_nl:
-                body = None
-            prev_nl = "\n" in t and _is_punct(t)
-            continue
         if not _is_punct(t):
-            prev_nl = False
             if not piped and t != "$":
                 cur.append(t)
             continue
-        redirect = ("<" in t or ">" in t) and "(" not in t
-        if redirect:
-            if t.strip("\n") in ("<<", "<<-") and i < n:
-                heredoc = tokens[i]
+        if ("<" in t or ">" in t) and "(" not in t:
+            target = None
+            if i < n and not _is_punct(tokens[i]):
+                target = tokens[i]
                 i += 1
-            elif i < n and not _is_punct(tokens[i]):
-                i += 1                                  # the redirect target
-            if cur and cur[-1].isdigit():
-                cur.pop()                               # the fd in 2>file
+            fd_ok = True
+            if cur and cur[-1].isdigit() and not piped:
+                fd_ok = cur.pop() == "0"                # the fd in 2>file
+            if t.strip("\n") == "<" and target is not None and fd_ok and not piped:
+                ins.append(target)
             continue
-        core = t.replace("\n", "")
-        if core in ("|", "|&"):
+        if t.replace("\n", "") in ("|", "|&"):
             piped = True
             continue
         if cur:
-            cmds.append(cur)
-        cur, piped = [], False
-        prev_nl = "\n" in t
-        if prev_nl and heredoc is not None:
-            body, heredoc = heredoc, None
+            cmds.append(Cmd(cur, ins))
+        cur, ins, piped = [], [], False
+        cmds.extend(Cmd([], [], ch) for ch in t if ch in "()")
     if cur:
-        cmds.append(cur)
+        cmds.append(Cmd(cur, ins))
     return cmds
 
 
@@ -529,29 +664,79 @@ def _in_place_edit(name: str, args: list[str]) -> bool:
                                            for a in args)
 
 
+def _gh_positionals(args: list[str], value_opts: set) -> list[str]:
+    pos: list[str] = []
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        i += 1
+        if a == "--":
+            pos.extend(args[i:])
+            break
+        if a.startswith("-") and a != "-":
+            i += 1 if "=" not in a and a in value_opts else 0
+        else:
+            pos.append(a)
+    return pos
+
+
+def _gh_other_owner(owner: str) -> bool:
+    """A literal GitHub login that is not ours; a variable, placeholder or unknown form is not."""
+    return bool(GH_OWNER_RE.match(owner)) and owner.lower() not in OWN_GITHUB_OWNERS
+
+
 def _gh_is_prior_art(args: list[str]) -> bool:
-    pos = [a for a in args if not a.startswith("-")]
+    """`gh search`; `gh api repos/<other owner>/<repo>/<code or docs path>` (not PR, issue or CI polling);
+    `gh repo view|clone <other owner>/<repo>`. An owner that is a variable or placeholder is unknown."""
+    pos = _gh_positionals(args, GH_REPO_VALUE_OPTS)
     if not pos:
         return False
     if pos[0] == "search":
         return True
     if pos[0] == "api":
-        for a in pos[1:3]:
-            m = GH_REPO_RE.match(a)
-            if m:
-                return m.group(1).lower() not in OWN_GITHUB_OWNERS
+        for a in _gh_positionals(args[args.index("api") + 1:], GH_API_VALUE_OPTS):
+            if m := GH_REPO_RE.match(a):
+                return _gh_other_owner(m.group(1)) and bool(GH_CODE_TAIL_RE.match(m.group(3)))
         return False
-    if pos[0] == "repo" and len(pos) >= 3 and pos[1] in ("view", "clone") and "/" in pos[2]:
-        return pos[2].split("/")[0].lower() not in OWN_GITHUB_OWNERS
+    if pos[0] == "repo" and len(pos) >= 3 and pos[1] in ("view", "clone"):
+        m = GH_URL_RE.match(pos[2])
+        owner = m.group(1) if m else pos[2].partition("/")[0] if "/" in pos[2] else ""
+        return _gh_other_owner(owner)
     return False
+
+
+def _grep_recursive(args: list[str]) -> bool:
+    return any(a in ("--recursive", "--dereference-recursive", "--directories=recurse")
+               or (a.startswith("-") and not a.startswith("--") and ("r" in a[1:] or "R" in a[1:]))
+               for a in args)
+
+
+def _read_paths(name: str, args: list[str], inputs: list[str], eff: str) -> list[str]:
+    """Absolute paths a read command reads. `ls rg fd find tree graft` and `grep -r` with no path read the
+    cwd; a stdin reader (`cat head tail wc sed awk less more bat`, grep without -r) with no path reads its
+    `< file` input, else stdin, which is not a read of anything (empty list)."""
+    pos = _positionals(name, args)[:MAX_PATHS]
+    if name in STDIN_READERS and not (name in GREP_CMDS and _grep_recursive(args)):
+        pos = [a for a in pos if a != "-"] or inputs[:MAX_PATHS]
+        if not pos:
+            return []
+    paths = [p for a in pos if (p := _expand_word(a, eff))]
+    return paths or [os.path.normpath(eff)]
 
 
 def _shell_facts(cmd: str, cwd: str, depth: int = 0) -> dict:
     """{web: bool, url: str, reads: [[abs path, ...], ...]} for one shell command string."""
     facts: dict = {"web": False, "url": "", "reads": []}
     eff = cwd or "/"
-    for words in _commands(_shell_tokens(cmd)):
-        name, args = _unwrap(words)
+    scopes: list[str] = []
+    for cm in _commands(_shell_tokens(cmd)):
+        if cm.scope:                                    # a `cd` inside ( ... ) or $( ... ) does not leak
+            if cm.scope == "(":
+                scopes.append(eff)
+            elif scopes:
+                eff = scopes.pop()
+            continue
+        name, args = _unwrap(cm.words)
         if not name:
             continue
         if name in ("cd", "pushd"):
@@ -572,8 +757,8 @@ def _shell_facts(cmd: str, cwd: str, depth: int = 0) -> dict:
         elif name == "gh":
             facts["web"] = facts["web"] or _gh_is_prior_art(args)
         elif name in READ_CMDS and not _in_place_edit(name, args):
-            paths = [p for a in _positionals(name, args)[:MAX_PATHS] if (p := _expand_word(a, eff))]
-            facts["reads"].append(paths or [os.path.normpath(eff)])
+            if paths := _read_paths(name, args, cm.inputs, eff):
+                facts["reads"].append(paths)
     return facts
 
 
@@ -588,10 +773,15 @@ def host_info(url: str) -> tuple[str, str]:
         return "invalid", ""
     if not host:
         return "invalid", ""
+    ip = None
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        ip = None
+        if NUMERIC_HOST_RE.match(host):                 # 127.1, 0x7f.1, 2130706433: the forms curl accepts
+            try:
+                ip = ipaddress.ip_address(socket.inet_aton(host))
+            except (OSError, ValueError):
+                return "invalid", ""
     if ip is not None:
         if ip.is_loopback:
             return "loopback", ""
@@ -748,12 +938,15 @@ def _ensure_dir(d: Path) -> None:
 
 def _lock(path: Path) -> int:
     fd = _open_regular(path, os.O_RDWR | os.O_CREAT)
-    for _ in range(LOCK_RETRIES):
+    deadline = time.monotonic() + LOCK_WAIT_TOTAL_S      # wall clock, not tries: sleeps stretch under load
+    while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return fd
         except OSError:
-            time.sleep(LOCK_WAIT_S)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(LOCK_POLL_S)
     os.close(fd)
     return -1
 
@@ -792,8 +985,7 @@ def prune(d: Path, keep_prefix: str, now: float) -> None:
             if scanned > PRUNE_MAX_SCAN or deleted >= PRUNE_MAX_DELETE:
                 break
             name = e.name
-            if name.startswith(keep_prefix) or not (name.endswith((".jsonl", ".state.json", ".lock", ".drops"))
-                                                    or name.startswith(".st-")):
+            if name.startswith(keep_prefix) or not (PRUNE_NAME_RE.match(name) or PRUNE_TMP_RE.match(name)):
                 continue
             try:
                 st = e.stat(follow_symlinks=False)
@@ -808,6 +1000,7 @@ def prune(d: Path, keep_prefix: str, now: float) -> None:
 
 def build_record(data: dict, st: dict, now: float, agent: str = "", dropped: int = 0) -> dict:
     event = str(data.get("hook_event_name") or "PostToolUse")
+    event = event if event in KNOWN_EVENTS else "other"
     tool = str(data.get("tool_name") or "")
     tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     resp = data.get("tool_response") if "tool_response" in data else data.get("error")
@@ -823,14 +1016,13 @@ def build_record(data: dict, st: dict, now: float, agent: str = "", dropped: int
                   recent=[], last_failed_call="")
     st.setdefault("salt", os.urandom(8).hex())
 
-    model = str(data.get("model") or "")
     rec: dict = {
         "ts": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="milliseconds"),
         "schema": SCHEMA,
         "classifier_version": CLASSIFIER_VERSION,
         "session": _sha(sid)[:12],
         "event": event,
-        "client": model[:60] if KNOWN_MODELS_RE.match(model) else "claude-code",
+        "client": client_label(str(data.get("model") or "")),
     }
     if agent:
         rec["agent"] = agent[1:9]
@@ -883,6 +1075,8 @@ def record(data: dict) -> None:
     if lock_fd < 0:
         _count_drop(d / f"{key}.drops")
         return
+    with contextlib.suppress(OSError):                  # a live session's lock must not look 30 days old
+        os.utime(lock_fd, (now, now))
     try:
         st_path = d / f"{key}.state.json"
         st = _load_state(st_path)

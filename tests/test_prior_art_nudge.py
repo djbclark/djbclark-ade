@@ -412,7 +412,7 @@ def cat_of(box, command, **tin):
     ("for f in a b; do rg foo /nix/store/x; done", "external_code"),
     ("sed -i s/a/b/ /nix/store/x", "private_other"),                  # an edit, not a read
     ("find /nix/store/x -name '*.py' | head", "external_code"),
-    ("cat <<EOF\nrg foo /nix/store/x\nEOF", "own_code"),              # heredoc body is text
+    ("cat <<EOF\nrg foo /nix/store/x\nEOF", "private_other"),         # heredoc body is text; cat reads stdin
     ("echo \"unterminated | rg foo /nix/store/x", "private_other"),  # broken quoting stays safe
 ])
 def test_bash_classification(box, command, want):
@@ -566,8 +566,7 @@ def test_unknown_names_are_bucketed(box):
     box.tool("Read", {"file_path": "/tmp/a"}, model="claude-opus-5-5")
     recs = box.records()
     assert [r["tool"] for r in recs[:5]] == [
-        "mcp__other", "mcp__memory_server", "mcp__firecrawl__firecrawl_search",
-        "mcp__claude_ai_exa__web_search_exa", "other"]
+        "mcp__other", "mcp__memory_server", "mcp__firecrawl", "mcp__claude_ai_exa", "other"]
     assert [r["client"] for r in recs[5:]] == ["claude-code", "claude-opus-5-5"]
     assert MARK.lower() not in b"".join(p.read_bytes() for p in box.state.iterdir()).decode().lower()
 
@@ -575,7 +574,7 @@ def test_unknown_names_are_bucketed(box):
 def test_records_carry_a_schema_and_classifier_version(box):
     box.tool("Read", {"file_path": "/tmp/a"})
     box.prompt()
-    assert all(r["schema"] == 2 and r["classifier_version"] == 2 for r in box.records())
+    assert all(r["schema"] == 2 and r["classifier_version"] == 3 for r in box.records())
 
 
 def test_call_hashes_are_salted_per_session(box):
@@ -702,3 +701,220 @@ def test_events_lost_to_a_held_lock_are_counted_in_the_next_record(box):
     box.tool("Read", {"file_path": "/tmp/e"})
     recs = box.records()
     assert [r.get("dropped") for r in recs] == [None, 2, None]
+
+
+# ---- repair round 2 (adversary R2-1 .. R2-8) --------------------------------------------------------
+
+def _load_hook():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("prior_art_nudge_under_test", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("command, want", [
+    # R2-1: an owner that is a variable or placeholder is unknown, never web
+    ("gh api repos/$REPO/pulls/3", "private_other"),
+    ("gh api repos/${REPO}/contents/a.py", "private_other"),
+    ("gh api repos/{owner}/{repo}/contents/a.py", "private_other"),
+    ("gh api repos/:owner/:repo/readme", "private_other"),
+    ("gh api 'repos/$O/$R/releases'", "private_other"),
+    ("gh repo clone $O/$R", "private_other"),
+    # polling another owner's PRs, issues and CI is not prior-art reading
+    ("gh api repos/someone/lib/pulls/3", "private_other"),
+    ("gh api repos/someone/lib/issues?state=open", "private_other"),
+    ("gh api repos/someone/lib/actions/runs", "private_other"),
+    ("gh api repos/someone/lib/commits/abc/check-runs", "private_other"),
+    ("gh api repos/someone/lib", "private_other"),
+    # code, docs and releases of another owner are
+    ("gh api repos/someone/lib/contents/a.py", "web"),
+    ("gh api repos/someone/lib/readme", "web"),
+    ("gh api repos/someone/lib/releases/latest", "web"),
+    ("gh api repos/someone/lib/git/trees/main", "web"),
+    ("gh api repos/someone/lib/tarball", "web"),
+    ("gh api repos/someone/$R/contents/a.py", "web"),                 # the owner is literal; the repo is not
+    ("gh api repos/djbclark/x/contents/a.py", "private_other"),      # our own owner
+    # R2-8.3: options before the endpoint
+    ("gh api -X GET --jq .x repos/someone/lib/contents/a.py", "web"),
+    ("gh api --jq .name -H 'Accept: x' repos/someone/lib/readme", "web"),
+    ("gh api -X GET repos/someone/lib/pulls/3", "private_other"),
+    ("gh repo view https://github.com/djbclark/x", "private_other"),
+    ("gh repo view https://github.com/someone/lib", "web"),
+    # a value that looks like an endpoint is not the endpoint
+    ("gh api --input repos/someone/lib/contents/b.json repos/djbclark/x/contents/a", "private_other"),
+])
+def test_r2_gh_owner_and_path_shapes(box, command, want):
+    assert cat_of(box, command) == want
+
+
+@pytest.mark.parametrize("command, want", [
+    # R2-2: a stdin reader with no path is not a read of the cwd
+    ("cat > {w}/new.py <<'EOF'\nhello\nEOF", "private_other"),
+    ("cat >> {w}/new.py <<EOF\nhello\nEOF", "private_other"),
+    ("cat", "private_other"),
+    ("head -5", "private_other"),
+    ("tail -n 20", "private_other"),
+    ("wc -l", "private_other"),
+    ("sed -n 1,5p", "private_other"),
+    ("awk '{print $1}'", "private_other"),
+    ("grep foo", "private_other"),
+    ("cat -", "private_other"),
+    ("cat <<< hello", "private_other"),
+    # its `< file` input is the read
+    ("wc -l < /nix/store/x", "external_code"),
+    ("grep foo < /nix/store/x", "external_code"),
+    ("cat < {w}/a.py", "own_code"),
+    ("head -3 0< {w}/a.py", "own_code"),
+    ("wc -l 3< /nix/store/x", "private_other"),                       # fd 3 is not stdin
+    ("cat {w}/a.py | wc -l < /nix/store/x", "own_code"),              # a filter stage's input is not the read
+    ("cat | wc -l < /nix/store/x", "private_other"),
+    # these default to the cwd
+    ("ls", "own_code"),
+    ("rg foo", "own_code"),
+    ("fd x", "own_code"),
+    ("find . -name x", "own_code"),
+    ("tree", "own_code"),
+    ("grep -rn foo", "own_code"),
+    ("grep -R foo", "own_code"),
+    ("grep --recursive foo", "own_code"),
+    ("cd /nix/store/x && grep -r foo", "external_code"),
+    # R2-6: a path in a filter stage does not change the read
+    ("cat ~/src/a | rg x /tmp", "own_code"),
+    ("rg foo ~/src/a | head /nix/store/x", "own_code"),
+])
+def test_r2_stdin_readers_and_cwd_defaults(box, command, want):
+    assert cat_of(box, command.replace("{w}", str(box.work))) == want
+
+
+@pytest.mark.parametrize("command, want", [
+    # R2-3: a heredoc body is text, whatever it holds (an apostrophe sends shlex to its fallback)
+    ("rg foo {w}/lib <<'EOF'\nit's here\nfind /nix/store/x\nEOF", "own_code"),
+    ("rg foo {w}/lib <<EOF\nfind /nix/store/x\nEOF", "own_code"),
+    ('rg foo {w}/lib <<"EOF"\nfind /nix/store/x\nEOF', "own_code"),
+    ("rg foo {w}/lib <<\\EOF\nit's find /nix/store/x\nEOF", "own_code"),
+    ("rg foo {w}/lib << 'EOF'\nfind /nix/store/x\nEOF", "own_code"),
+    ("cat <<'EOF'\nx\nEOF\nrg foo /nix/store/y", "external_code"),               # quoted WORD: its quotes are not the word
+    ('cat <<"EOF"\nx\nEOF\nrg foo /nix/store/y', "external_code"),
+    ("cat <<\\EOF\nx\nEOF\nrg foo /nix/store/y", "external_code"),
+    ("cat << 'EOF'\nx\nEOF\nrg foo /nix/store/y", "external_code"),
+    ("cat <<-EOF\n\tfind /nix/store/x\n\tEOF\nrg foo {w}/lib", "own_code"),      # <<- strips tabs of the terminator
+    ("cat <<EOF\n\tEOF\nfind /nix/store/x\nEOF\nrg foo {w}/lib", "own_code"),    # only a bare WORD ends it
+    ("rg foo {w}/lib <<A <<B\nfind /nix/store/x\nA\nfind /nix/store/y\nB\nls", "own_code"),
+    ("cat <<EOF\nfind /nix/store/x", "private_other"),                           # unterminated: body to the end
+    ("cat <<EOF\nEOF\nrg foo /nix/store/x", "external_code"),                    # the command after it is seen
+    ("cat <<< 'find /nix/store/x'\nrg foo {w}/lib", "own_code"),                 # a here-string has no body
+    ("echo \"a << b\"\nrg foo /nix/store/x\nb", "external_code"),                # << inside quotes is not a heredoc
+    ('echo "<< EOF "\nrg foo /nix/store/x\nEOF', "external_code"),
+    ("echo '<< EOF '\nrg foo /nix/store/x\nEOF", "external_code"),
+    # backticks split like $( ... )
+    ("echo `rg foo /nix/store/x`", "external_code"),
+    ("echo `cd /nix/store/x; ls`; rg foo {w}/lib", "external_code"),
+    ("echo `cd /tmp`; rg foo", "own_code"),
+    # comments and line continuations
+    ("rg foo {w}/lib # don't find /nix/store/x", "own_code"),
+    ("rg foo \\\n   /nix/store/x", "external_code"),                             # a continuation joins the lines
+    ("rg '#' {w}/lib", "own_code"),
+    ("echo a#b; rg foo /nix/store/x", "external_code"),                          # a # inside a word is no comment
+    ("rg foo {w}/lib\\\n/sub", "own_code"),
+])
+def test_r2_heredocs_comments_backticks_continuations(box, command, want):
+    assert cat_of(box, command.replace("{w}", str(box.work))) == want
+
+
+@pytest.mark.parametrize("command, want", [
+    ("(cd /nix/store/x); rg foo", "own_code"),                        # R2-8.4: cd inside ( ) does not leak
+    ("(cd /nix/store/x && rg foo); rg bar", "external_code"),
+    ("echo $(cd /nix/store/x); rg foo", "own_code"),
+    ("cd /nix/store/x && (cd /tmp); rg foo", "external_code"),        # a cd outside it persists
+    ("(cd /nix/store/x); (cd /tmp); rg foo", "own_code"),
+    ("( (cd /nix/store/x) ); rg foo", "own_code"),
+])
+def test_r2_cd_in_a_subshell_does_not_leak(box, command, want):
+    assert cat_of(box, command) == want
+
+
+@pytest.mark.parametrize("url, want", [
+    ("http://127.1/x", "private_other"),                              # R2-8.1: loopback short forms
+    ("http://0x7f.1/x", "private_other"),
+    ("http://2130706433/x", "private_other"),
+    ("http://0300.0250.0.1/x", "private_other"),                      # 192.168.0.1 in octal
+    ("http://8.8.8.8/x", "web"),
+    ("http://134744072/x", "web"),                                    # 8.8.8.8 as one number
+    ("https://example.org/x", "web"),
+])
+def test_r2_numeric_hosts_are_classified_by_their_address(box, url, want):
+    assert cat_of(box, f"curl -s {url}") == want
+
+
+def test_r2_lock_wait_is_bounded_by_the_wall_clock(tmp_path, monkeypatch):
+    import fcntl
+    pa = _load_hook()
+    lock = tmp_path / "s.lock"
+    holder = os.open(lock, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    real_sleep = time.sleep
+    monkeypatch.setattr(pa.time, "sleep", lambda _s: real_sleep(0.3))       # a loaded machine: sleeps stretch
+    try:
+        t0 = time.monotonic()
+        fd = pa._lock(lock)
+        waited = time.monotonic() - t0
+    finally:
+        os.close(holder)
+    assert fd == -1 and waited < 1.5, waited
+
+
+def test_r2_dropped_event_is_counted_before_the_hook_deadline(box):
+    import fcntl
+    box.tool("Read", {"file_path": "/tmp/a"})
+    fd = os.open(box.state / f"{SID}.lock", os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        t0 = time.monotonic()
+        box.tool("Read", {"file_path": "/tmp/b"})
+        assert time.monotonic() - t0 < 1.5
+    finally:
+        os.close(fd)
+    assert (box.state / f"{SID}.drops").stat().st_size == 1
+
+
+def test_r2_event_tool_and_client_never_carry_payload_text(box):
+    box.tool("Read", {"file_path": "/tmp/a"}, hook_event_name=f"PostToolUse{MARK}")
+    box.tool(f"mcp__exa__{MARK}tool", {"query": "q"})
+    box.tool("mcp__github__search_code", {"query": "q"})
+    box.tool("Read", {"file_path": "/tmp/a"}, model=f"claude{MARK}")
+    box.tool("Read", {"file_path": "/tmp/a"}, model="claude-sonnet-5-5-20261010[1m]")
+    box.tool("Read", {"file_path": "/tmp/a"}, model=f"gpt-6-{MARK}")
+    box.tool("Read", {"file_path": "/tmp/a"}, model="o3-mini")
+    recs = box.records()
+    assert [r["event"] for r in recs][:2] == ["other", "PostToolUse"]
+    assert [r["tool"] for r in recs[1:3]] == ["mcp__exa", "mcp__github"]
+    assert [r["client"] for r in recs[3:]] == ["claude", "claude-sonnet-5-5", "gpt-6", "o-3"]
+    assert MARK.lower() not in b"".join(p.read_bytes() for p in box.state.iterdir()).decode().lower()
+
+
+def test_r2_prune_deletes_only_names_it_writes(box):
+    box.tool("Read", {"file_path": "/tmp/a"})
+    old = box.clock - 40 * 86_400
+    ours = ["s9.jsonl", "s9.a0123456789ab.state.json", "s9.a0123456789ab.drops", "s9.lock", ".st-ab12_9zx"]
+    foreign = ["notes.txt", "my notes.jsonl", ".hidden.jsonl", "x" * 120 + ".jsonl", "s9.jsonl.bak",
+               ".st-short", ".st-way-too-long-name", "-.json", "a.state.json.old", "readme.lock.txt"]
+    for name in ours + foreign:
+        p = box.state / name
+        p.write_text("x")
+        os.utime(p, (old, old))
+    box.prompt()
+    left = {p.name for p in box.state.iterdir()}
+    assert not set(ours) & left
+    assert set(foreign) <= left
+
+
+def test_r2_a_live_sessions_lock_is_touched_so_another_prune_keeps_it(box):
+    box.run({"tool_name": "Read", "tool_input": {"file_path": "/tmp/a"}}, sid="live")
+    lock = box.state / "live.lock"
+    old = box.clock - 40 * 86_400
+    os.utime(lock, (old, old))
+    box.run({"tool_name": "Read", "tool_input": {"file_path": "/tmp/a"}}, sid="live")
+    assert abs(lock.stat().st_mtime - box.clock) < 1
+    box.run({"hook_event_name": "UserPromptSubmit", "prompt": "p"}, sid="other")
+    assert lock.exists()
