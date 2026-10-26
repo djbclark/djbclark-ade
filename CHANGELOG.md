@@ -249,6 +249,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- Fixed `pr-wait` re-requesting a terminal code review while security review was still pending; security completion remains required (#86).
+
 - Fixed `self-slash` to refuse Cline hub discovery for Codex sessions with missing host variables, preventing lifecycle commands from targeting another agent (#71).
 
 - `session-finder` finds the TUI behind Kiro's nested PTY (2026-10-25): `fleet.pane_procs` answers a pane whose only foreground process is the `bash (kiro-cli-term)` shim with the foreground process group of its single inner shell's tty (`nested_pty.py`, one `ps` snapshot incl. `tpgid`; ambiguous, stale, tty-less or shell-only chains keep herdr's plain-shell answer), and `_tui_of` recognises `goose session` and `node .../mastracode` as `goose` and `mastra`. ([#78](https://github.com/djbclark/djbclark-ade/pull/78))
