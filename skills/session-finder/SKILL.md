@@ -358,16 +358,24 @@ bypass a permission denial; grok is excluded (2026-10-06).
 Proof, not conversation: delivery proof (the text reached the target's transcript) is mechanical and needs no reply; a reply is required
 only where the message asks a question or requests action. An FYI that provably landed needs none.
 
-1. **`--ack`**: `relay.py <id> "<text>" --ack`. A send that is only `accepted` (a socket frame or Paseo send to a working session) or `queued`
-   (an enqueue Claude Code has not taken yet, a deferred record) is watched for up to `--wait` more seconds and exits **0 delivered**,
+1. **The delivery watch is on by default for an agent session** (2026-10-25; `--ack` asks for it whoever you are). A send that is only `accepted` (a socket frame or Paseo send to a working session) or `queued`
+   (an enqueue Claude Code has not taken yet, a deferred record) is watched for up to 10 s (`--ack`: `--wait` s) more, so a plain send takes at most `--wait` (default 20) + 10 s, and exits **0 delivered**,
    **1 not delivered** (not sent, pulled back out of the queue, failed or expired), **3 unverified** (sent or still queued, no proof yet: do not resend; an
-   ACP inbox or a Paseo agent with no Claude transcript has nothing to read, so it is unverified at once). Without `--ack` the exit codes
-   are unchanged (`queued` and `accepted` still exit 0), because fleet-watch, load-watch, session-load-watch and rumination-watch read 0 as "taken".
-   `--json` carries `ack` and `ack_note`. Use `--ack` whenever you will act on "they have it".
+   ACP inbox or a Paseo agent with no Claude transcript has nothing to read, so it is unverified at once). `--no-ack` (or `RELAY_NO_ACK=1`) turns the default off for any caller. A **declared job run by launchd**
+   (`RELAY_SENDER_NAME` and no session in its environment: fleet-watch, load-watch, session-load-watch, rumination-watch) never gets the default and keeps the old exits (`queued` and `accepted` exit 0, "taken"); the same job run
+   from inside a session (an agent running `fleet-watch --relay-test`) is identified and does get the default, so it passes `--no-ack`: the three watchers in this repo do (fleet-watch's two relay calls are a follow-up in site-djbclark).
+   `--json` carries `ack` and `ack_note`, and `"ack_default": true` when the watch was the default. An `ack ID` reply (alone, or with a remark of at most 40 characters in parentheses or after a colon, no `?`, no request word),
+   an ack of an ack and a text whose **last clause** is "no reply needed" are **terminators**: they take no footer, open no link (so nothing loops) and still get this proof. Only the bare shape (`ack ID` alone, or the phrase alone) refuses
+   `--expect-ack` and `--needs-reply` (exit 2); on any longer text the flag wins and the text is an ordinary one. `ack the PR and merge it` is no terminator: it goes the normal path with the first-contact footer (the peer answers `ack ID`, one extra message).
+   **When the proof is not `delivered`, you handle it** (requester steps, never assume read):
+   a. Exit **1**, or a link that fleet shows as `ONE-WAY`: the text did not land or was never answered. Re-send **once** by **another** route (`--via`; `--plan` lists them), never the same route twice.
+   b. Exit **3** (`unverified`), `queued`, or `accepted`: do **not** resend yet; read the target's transcript (or `relay.py --pending` for a deferred record) for the text first. Only a text that is absent is re-sent, by a different `--via`.
+   c. An `OVERDUE ack ID` line from `--sweep`: ask for a named ack in a new message (`... please reply ack ID2`, with `--expect-ack ID2`).
+   d. Still unproven after that: report to the operator with the exact line from `relay.py --pending` (or the `OVERDUE ack ID: ...` line). Never assume read.
 2. **A question or an action request needs `--expect-ack ID`**: a `?` outside a URL, or `--needs-reply`, is refused (exit 2, nothing sent) without it
    when you are an identifiable session; `--fyi` overrides a `?` that is no question. `ID` is 1-40 characters of `A-Za-z0-9._-`, unique among open ones. The sent text
    ends `[reply through relay.py to <your id>: ack ID]`. It is **state, not a wait**: `relay.py --pending` lists it (sender, target, age, `OVERDUE`;
-   `--json` rows have `"kind": "expect"`), and `relay.py --sweep` resolves it when a user-role line in YOUR transcript says `ack ID` under the target's relay header (its ID word or `aka` name; a Hermes session answers as `hermes <last 8 of its session id>`;
+   `--json` rows have `"kind": "expect"` and the keys `kind, id, state, sender, target, age_s, within_s, overdue, created`; `created` is the record's creation time (fractional epoch seconds, `0.0` when missing, non-numeric or non-finite; use it verbatim, never round or truncate it), which with the ID names one expectation, since a closed expectation's ID may be reused), and `relay.py --sweep` resolves it when a user-role line in YOUR transcript says `ack ID` under the target's relay header (its ID word or `aka` name; a Hermes session answers as `hermes <last 8 of its session id>`;
    two sessions with one name are not told apart, and a same-uid process can forge a header) (your own tool calls and results never count). After `--ack-within S` (default 1800) with no answer it is OVERDUE: the sweep prints `OVERDUE ack ID: ...`, and **you tell the operator**; never assume read.
 3. **First contact**: the first message from your session to a peer carries ` [first contact from <your id>: reply `ack <your id>` through relay.py ...]`.
    The ledger `~/.local/state/relay/links.json` records who you messaged; `--sweep` marks the link acked when a user line in your transcript says `ack <your id>` and names the peer
@@ -380,7 +388,7 @@ only where the message asks a question or requests action. An FYI that provably 
    is refused, never sent (2026-10-25)**: exit 4, nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`), the message names every
    variable and ancestor source checked; **re-run it with `RELAY_SENDER_NAME=<label> relay.py ...`** (a launchd job or script with no session; a relay Hermes starts itself is named `hermes SID8` and sends) or from inside a
    session. `[relay from unknown]` is never sent, so a header you read always names a sender you can answer. A footer
-   `[reply through relay.py to ID: ack X]` means start the answer with `ack X`. A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
+   `[reply through relay.py to ID: ack X]` means start the answer with `ack X`; an answer that also asks the peer for something is sent with `--needs-reply --expect-ack ID2` (the flags make it an ordinary message, never a terminator). **Never put `--expect-ack`/`--needs-reply` on an ack whose remark asks nothing new (`ack X: done`): an answer to an expectation is never itself flagged unless it asks a new question or requests an action** (otherwise two agents chain acks forever). A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
    An FYI needs no reply. After a relay that is not `delivered`, read its status word; `queued`, `accepted`, `unverified` are not proof.
 
 

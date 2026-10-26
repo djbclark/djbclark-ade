@@ -17,15 +17,14 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
    names the file's absolute path.
 2. **Find the ident first** when you do not have it: `python3 -I ~/src/djbclark-ade/skills/session-finder/session-find.py "<topic>"`
    (or `fleet.py list`). `relay.py <ident> "x" --plan` prints the routes it would try and sends nothing.
-3. **Read the exit code.** 0 = delivered, **or queued** (stdout `queued: <id> ...`: the peer is working and cannot take it
+3. **Read the exit code.** 0 = delivered, **or queued** when you used `--no-ack` or are a declared job (stdout `queued: <id> ...`: the peer is working and cannot take it
    now, so relay stored it and a detached deliverer sends it when the peer is idle; it never sends it twice, and tells the sender
    with one `relay: your message to ... was failed|expired|unverified` line if it cannot: do not resend a queued message,
    `relay.py --pending` lists it, `relay.py --cancel <id>` withdraws it). A caller relay cannot identify (no Paseo id, no fleet
    session row: Hermes itself, a script) is never queued for: it gets exit 1 "deferring needs an identifiable sender", so
    retry later or use `--idle S`. 1 = not sent (every route failed, listed on
    stderr; also "deferred queue full") or sent but
-   unverified: **never resend** an "unverified" message, a second copy would be delivered. 2 = usage. 3 = only with `--ack`: sent but not proven
-   to have landed (never resend). 4 = **not sent: relay cannot tell who is sending** (nothing was sent or queued): a relay you start from your own terminal
+   unverified: **never resend** an "unverified" message, a second copy would be delivered. 2 = usage. 3 = sent but not proven to have landed (never resend): relay watches the delivery by default for every sender it identifies (a Hermes-started relay, `hermes SID8`, is identified), up to 10 s after `--wait`, and a send that is only queued or accepted then exits 3, not 0; `--no-ack` (or `RELAY_NO_ACK=1`) turns that off, and `--ack` asks for the watch whoever you are. 4 = **not sent: relay cannot tell who is sending** (nothing was sent or queued): a relay you start from your own terminal
    tool or a background process is named `hermes <last 8 characters of your HERMES_SESSION_ID>` and sends; one from a process with no `HERMES_SESSION_ID`
    (a cron script, `execute_code`) exits 4 with the list of what was checked: re-run it as `RELAY_SENDER_NAME=<short label> python3 -I ... relay.py <ident> "<text>"`.
    **A relay.py that is cut off, times out or is killed counts as unverified, not as failed.** To a Hermes conversation

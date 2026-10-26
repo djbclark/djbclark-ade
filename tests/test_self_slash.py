@@ -164,13 +164,14 @@ class SelfSlashPaseoTests(unittest.TestCase):
     def log_text(self) -> str:
         return self.log.read_text() if self.log.exists() else ""
 
-    def wait_log(self, needle: str, timeout: float = 20.0) -> str:
+    def wait_log(self, needle: str, timeout: float = 20.0, count: int = 1) -> str:
+        """Wait until NEEDLE occurs COUNT times in the log (COUNT 2 proves a second worker's own line, not a stale first one)."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            if needle in self.log_text():
+            if self.log_text().count(needle) >= count:
                 return self.log_text()
             time.sleep(0.1)
-        self.fail(f"{needle!r} never reached the log:\n{self.log_text()}\ncalls: {self.paseo_calls()}")
+        self.fail(f"{needle!r} x{count} never reached the log:\n{self.log_text()}\ncalls: {self.paseo_calls()}")
 
     def wait_lock_gone(self, timeout: float = 20.0) -> None:
         end = time.monotonic() + timeout
@@ -224,6 +225,13 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.hold_watch("test-agent")
         r = self.run_ss("--finish", SELF_SLASH_ALLOW_WATCHER="1")
         self.assertEqual(r.returncode, 0, r.stderr)
+        # the override's own worker: a second archive line (the first one is already in the log), and its
+        # exit trap has released the locks, so nothing is still writing under the temp dir at cleanup
+        self.wait_log("finish: archived test-agent", count=2)
+        self.wait_lock_gone()
+        archives = [c for c in self.paseo_calls() if c.startswith("agent archive")]
+        self.assertEqual(archives, ["agent archive -- test-agent"] * 2, self.paseo_calls())
+        self.assertNotIn("refused", self.log_text())
 
     def test_a_watch_holder_can_still_hand_over_through_a_successor(self) -> None:
         self.hold_watch("test-agent")

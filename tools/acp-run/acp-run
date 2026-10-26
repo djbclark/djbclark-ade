@@ -130,7 +130,7 @@ request; quota, plan and auth failures are never retried. Default 0.
 average per CPU core is above L; with --load-wait S (env ACP_RUN_LOAD_WAIT)
 it waits up to S seconds for the load to drop first. Off by default.
 --handshake-timeout S (env ACP_RUN_HANDSHAKE_TIMEOUT) bounds initialize and
-session/new each; default 40 s, claude 90 s (HANDSHAKE_TIMEOUT).
+session/new each; default 40 s, claude 90 s, kiro 120 s (HANDSHAKE_TIMEOUT).
 --handshake-tries N (default 2) starts a fresh agent after a handshake timeout,
 or after a transient ACP error in initialize or session/new (backoff 1, 2, 4..
 10 s; nothing has run yet). The error names the step that hung.
@@ -379,6 +379,13 @@ AGENTS = {
     "crush": (["env", "CRUSH_DISABLE_METRICS=1",
                "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
                "crush-acp", "acp"], "local"),
+    # kiro-cli acp (kiro-cli 2.34.0, Homebrew cask, 2026-10-25): native ACP. Its YOLO is the
+    # persistent --trust-all-tools (-a), a flag of `acp` and `chat`, not of the root command; it
+    # is in YOLO_CMD, not here. --perm deny is refused (DENY_UNSUPPORTED): Kiro runs workspace
+    # reads, grep, glob and `code` edits without a permission request, so only the tripwire
+    # would catch them, after the tool ran (adversary BLOCK H1, 2026-10-25).
+    # Never routed by route_agent.py ([discovery].never_route): dispatch it by name.
+    "kiro": (["kiro-cli", "acp"], None),
 }
 # ACP_RUN_AGY_SERVER swaps agy's server command for one run without an edit: a
 # specific agy_acp_server.par instead of the newest one, or a wrapper such as
@@ -440,6 +447,7 @@ YOLO_CMD = {
     "crush": ["env", "CRUSH_DISABLE_METRICS=1",
               "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
               "crush-acp", "acp", "--yolo"],
+    "kiro": ["kiro-cli", "acp", "--trust-all-tools"],
 }
 # Extra environment per agent. agy's ACP server runs the user's global hooks in
 # ~/.gemini/config/hooks.json (Orca/Moshi status hooks); the Orca PreToolUse
@@ -477,7 +485,8 @@ GLOBAL_RULES = {"agy": ["~/.gemini/GEMINI.md"]}
 # session/new spends 13 s in its SDK initialize phase on an idle machine and
 # 17-24 s at load 20-70 (measured 2026-10-05), so 40 s was too close; acpx
 # allows it 60 s. Overridden by --handshake-timeout / ACP_RUN_HANDSHAKE_TIMEOUT.
-HANDSHAKE_TIMEOUT = {"claude": 90}
+# kiro: the first session/new downloads an 83 MB model (about 66 s, kirodotdev/Kiro#12118)
+HANDSHAKE_TIMEOUT = {"claude": 90, "kiro": 120}
 HANDSHAKE_TIMEOUT_DEFAULT = 40
 # Removed from the agent's environment on every run (see run()): the caller's herdr pane,
 # Paseo agent and Orca terminal (2026-10-20: a dispatched slice that inherited
@@ -603,6 +612,10 @@ DENY_UNSUPPORTED = {
               " operator 2026-10-15), or set CURSOR_CONFIG_DIR to a config with approvalMode allowlist",
 }
 DENY_UNSUPPORTED_OVERRIDE_ENV = {"cursor": "CURSOR_CONFIG_DIR"}
+DENY_UNSUPPORTED["kiro"] = (
+    "kiro-cli acp runs read, grep, glob and workspace `code` edits without a session/request_permission"
+    " (kiro.dev/docs/reference/built-in-tools, 2026-10-25), so a deny run would only be caught by the"
+    " tripwire after the tool ran; run it under --perm all with a read-only brief and a diff check")
 DENY_ENV = {
     # opencode's PermissionConfig accepts one action for every tool (config schema,
     # https://opencode.ai/config.json, checked 2026-10-12 against v2.0.27).
@@ -4721,7 +4734,7 @@ def main():
         default=env_float("ACP_RUN_HANDSHAKE_TIMEOUT"),
         metavar="SECS",
         help="seconds for initialize and for session/new, each (default 40,"
-        " claude 90; env ACP_RUN_HANDSHAKE_TIMEOUT)",
+        " claude 90, kiro 120; env ACP_RUN_HANDSHAKE_TIMEOUT)",
     )
     ap.add_argument(
         "--session-id",
