@@ -780,8 +780,10 @@ def _hermes_native(argv):
 
 # Native TUIs herdr does not detect that PROC_AGENTS (which `_proc_scan` also reads) must not take: recognised by exact argv only.
 def _native_extra(argv):
-    """`goose session ...` (the interactive session; not `goose acp`, `goose web`, `goose run`) and `node .../mastracode ...`."""
+    """Exact native interactive entries, excluding service and one-shot commands."""
     base = [os.path.basename(a) for a in argv[:2]]
+    if base and base[0] == ".cline" and "--tui" in argv[1:] and not {"--acp", "--headless", "--zen", "hub", "core"}.intersection(argv[1:]):
+        return "cline"
     if len(base) == 2 and base[0] == "goose" and base[1] == "session":
         return "goose"
     if len(base) == 2 and base[0] == "node" and base[1] == "mastracode":
@@ -791,7 +793,20 @@ def _native_extra(argv):
 
 def _tui_of(procs):
     """(agent label, pid, session id, argv) of the TUI running in a pane, from its foreground processes."""
-    for pr in procs or []:
+    procs = list(procs or [])
+    # npm's Cline launcher waits for its cached native TUI. Select that actual
+    # TUI, rather than treating it as background work below the Node launcher.
+    # Restrict this preference to the exact sibling cache used by that launcher.
+    for pr in procs:
+        argv = pr["argv"]
+        if _native_extra(argv) != "cline":
+            continue
+        launcher = str(Path(argv[0]).with_name("cline"))
+        if any(len(p["argv"]) >= 2 and os.path.basename(p["argv"][0]) == "node"
+               and os.path.realpath(p["argv"][1]) == os.path.realpath(launcher) for p in procs):
+            procs = [pr] + [p for p in procs if p is not pr]
+            break
+    for pr in procs:
         argv = pr["argv"]
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
         agent = (next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
