@@ -287,6 +287,10 @@ legacy `--then "/baton /path"` is rewritten once, keeping every byte of the path
 once, never with extra Enters, and counts as sent only when that Codex session's rollout holds the exact message;
 otherwise the waiter exits 8 and logs `NOT confirmed delivered`: report that, never type it again.
 
+If Codex tool commands lack host variables, `self-slash` refuses Cline hub discovery rather than choosing another agent.
+Verify the current Codex thread against the host and its parent-process identity before restoring host variables for a lifecycle call;
+never substitute an agent discovered through an unrelated client's shared hub.
+
 **One contract on every host (2026-10-25, agreed with the Paseo lead):** (a) the default is the same agent with
 a fresh context, the command above: no new process, and its name, model, effort, mode, pane or workspace are
 kept (verified live on herdr, Orca and Paseo); (b) a NEW process only when something cannot change in place (a

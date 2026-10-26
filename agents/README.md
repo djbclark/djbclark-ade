@@ -14,6 +14,38 @@ these with the companion's data, as a `modify_` merge and never a symlink, becau
 | [opencode/opencode.json.tmpl](opencode/opencode.json.tmpl) | `~/.config/opencode/opencode.json` | opencode reads `opencode.jsonc` too; that file is a 50-byte `$schema` stub, so it is not templated. `tui.json` and `cli.json` beside them hold no secrets and are not templated yet |
 | [hermes/config.yaml.tmpl](hermes/config.yaml.tmpl) | `~/.hermes/config.yaml` | Hermes writes it too; `~/.hermes` is its own git repo |
 
+## Codex tool environment (2026-10-25)
+
+`[shell_environment_policy]` in `codex/config.toml.tmpl` decides which variables a Codex tool command gets. It is
+`inherit = "all"` (operator ruling, 2026-10-25: a tool keeps the launching terminal's environment, which restores the
+Herdr pane ids `HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`, the routing paths `HERDR_SOCKET_PATH
+HERDR_BIN_PATH`, and multiplexer and runtime variables such as `TERM`, `TMUX` and `SSH_AUTH_SOCK`), with Codex's default
+`KEY`/`SECRET`/`TOKEN` name exclusions kept on (`ignore_default_excludes = false`) and the `set` keys applied after
+them. There is no `include_only` allowlist: an arbitrary terminal environment reaches tools by decision. Outside Herdr
+no `HERDR_*` variable exists, so none appears; no value is written into the file. `acp-run` drops the four owner ids
+from the agents it starts; the relay deliverer keeps no owner id. `tests/test_codex_shell_env_policy.py` pins the
+policy, including a read-back through the installed `codex app-server` (no model call).
+
+1. `ignore_default_excludes = false` is the one filter: it removes variables whose names contain `KEY`, `SECRET` or
+   `TOKEN` before `set` runs. `set` values are never removed by it.
+2. Do not add `include_only` or `filters` without an operator decision: Codex 0.163.0 ignores `filters`, and
+   `include_only` runs after `set`.
+3. The live file is a regular file Codex also writes and it holds credentials (MCP headers, tokens): **never `rg`,
+   `grep -C`, `cat` or diff it, or print any context around the policy; use the helper's dry run.**
+   `bin/codex-env-policy-apply TEMPLATE TARGET` prints a diff of the policy span only (the two `shell_environment_policy`
+   tables and the comment block above them, old against new; only the template's own lines and `inherit`/`ignore_default_excludes` literals print, every other assignment line (including its key), comment and continuation is hidden;
+   no line of any neighbouring table); `--write` applies it and does nothing if already applied. It replaces that span
+   byte-for-byte, checks that every other table and the `set` values are unchanged, keeps a private (0600, O_EXCL)
+   `.bak-UTC-TIME-env-policy` copy, writes a temp file beside the target and `os.replace`s it on the realpath, and
+   refuses (exit 1, nothing replaced) if the file changed after it was read or after the temp file was written.
+   Table headers may have trailing TOML comments; their comments remain hidden in the diff.
+    Diagnostics name files and `set` keys, never values; a TOML parse error is reduced to line and column.
+   A running Codex keeps the policy it started with; only sessions started after the change see it.
+4. Detached fallback. `acp-run` and the relay deliverer already drop the four owner ids. A headless command started
+   any other way from a Codex tool (for example `codex exec` or a worker script outside ACP) inherits the whole Codex environment (including the six Herdr names),
+   so it must clear the owner ids itself: `env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID
+   COMMAND`. `HERDR_SOCKET_PATH` and `HERDR_BIN_PATH` are service routing, not identity, and may stay.
+
 ## Placeholder syntax
 
 1. `{{ .field }}` is a value the companion provides (table below).
