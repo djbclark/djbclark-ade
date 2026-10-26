@@ -68,7 +68,7 @@ class RelayPaseo(unittest.TestCase):
         fake.chmod(0o755)
         saved_env = dict(os.environ)
         os.environ.update(PASEO_CLI=str(fake), FAKE_LOG=str(self.log), FAKE_ENVLOG=str(self.envlog), FAKE_KNOWN=AGENT,
-                          PASEO_AGENT_ID=CALLER)
+                          PASEO_AGENT_ID=CALLER, RELAY_NO_ACK="1")    # these tests assert the route's own result; the default delivery watch is tested in test_relay_verified.py
         for k in ("FAKE_PROVIDER", "FAKE_STATUS", "FAKE_WAIT_RC", "FAKE_ARCHIVED", "FAKE_PENDING", "FAKE_ID", "FAKE_CWD",
                   "CLAUDE_CODE_SESSION_ID", "ACP_RUN_AGENT"):    # an acp-run slice running the suite sets ACP_RUN_AGENT: it changes who is tagged as the sender
             os.environ.pop(k, None)

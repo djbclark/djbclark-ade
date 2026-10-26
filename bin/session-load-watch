@@ -55,7 +55,7 @@ def ask(target, pct, minutes, dry_run):
         return 0
     # --no-defer: a load-shedding ask is time-critical; queued until the busy session is idle, it would arrive after the load is gone
     env = {**os.environ, "RELAY_SENDER_NAME": os.environ.get("RELAY_SENDER_NAME") or "session-load-watch"}    # relay refuses a sender it cannot resolve (exit 4)
-    return subprocess.run([sys.executable, str(RELAY), target, msg, "--no-defer"], env=env).returncode
+    return subprocess.run([sys.executable, str(RELAY), target, msg, "--no-defer", "--no-ack"], env=env).returncode
 
 
 def main():
