@@ -623,6 +623,9 @@ def test_fifo_in_place_of_a_file_never_blocks_the_hook(box, suffix):
     t0 = time.monotonic()
     box.tool("Read", {"file_path": "/tmp/b"})
     assert time.monotonic() - t0 < 2
+    assert stat.S_ISFIFO(f.lstat().st_mode) or suffix == "state.json"      # never replaced or written through
+    if suffix == "lock":
+        assert len(box.records()) == 1                                    # a non-regular lock is refused
 
 
 def test_existing_state_dir_is_tightened_to_0700(box):
@@ -681,7 +684,7 @@ def test_prune_never_follows_symlinks_and_honours_the_retention_setting(box, tmp
     short.write_text("x")
     os.utime(short, (box.clock - 2 * 86_400,) * 2)
     box.run({"hook_event_name": "UserPromptSubmit", "prompt": "p"}, PRIOR_ART_RETENTION_DAYS="1")
-    assert outside.exists() and not short.exists()
+    assert outside.exists() and link.is_symlink() and not short.exists()
 
 
 def test_events_lost_to_a_held_lock_are_counted_in_the_next_record(box):
