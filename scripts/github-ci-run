@@ -35,11 +35,11 @@ fi
 
 target_sha=$(git rev-parse --verify "$ref^{commit}")
 short=$(git rev-parse --short=8 "$target_sha")
-slug=$(echo "$ref" | gtr '/:' '--' | gtr -c 'A-Za-z0-9._-' '-' | gsed 's/-\+/-/g; s/^-//; s/-$//')
+slug=$(echo "$ref" | tr '/:' '--' | tr -c 'A-Za-z0-9._-' '-' | gsed 's/-\+/-/g; s/^-//; s/-$//')
 [ -n "$slug" ] || slug=head
 run_branch="ci/run/${slug}-${short}"
 
-work=$(gmktemp -d)
+work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export GIT_DIR="$top/.git"
 export GIT_INDEX_FILE="$work/index"
@@ -61,7 +61,7 @@ for path in "${overlay_paths[@]}"; do
   fi
 done
 if overlay_git ls-tree -r --name-only "$base_ref" | ggrep -q '^scripts/ci/'; then
-  overlay_git archive "$base_ref" -- scripts/ci | gtar -x -C "$GIT_WORK_TREE"
+  overlay_git archive "$base_ref" -- scripts/ci | tar -x -C "$GIT_WORK_TREE"
 fi
 
 # Neutralise workflows that would fire on a push to ci/run/**.
