@@ -12,14 +12,17 @@ environment at startup (https://code.mastra.ai/configuration, "API keys"), and a
 would sit on a Claude Max subscription outside Claude Code, which that page warns may breach
 Anthropic's terms. This launcher supplies the managed key instead.
 
-Only ANTHROPIC_API_KEY reaches the child. `sudo-secretspec run` would put every declared
-secret into the environment of a TUI that runs model-chosen shell commands, so the one value
-is read with `get` into this process's memory and handed to exec; it is never written to disk,
-argv or output. Mastra Code's own settings and `/connect` accounts are untouched, and an
-ANTHROPIC_API_KEY already in the caller's environment wins (nothing is fetched).
+Only ANTHROPIC_API_KEY is added to the child's environment; the caller's environment passes
+through unchanged. `sudo-secretspec run` would put every declared secret into the environment
+of a TUI that runs model-chosen shell commands, so the one value is read with `get` into this
+process's memory and handed to exec; it is never written to disk, argv or output. Mastra Code's
+own settings and `/connect` accounts are untouched, and an ANTHROPIC_API_KEY already in the
+caller's environment wins (nothing is fetched). Install it only under this name, never as
+`mastracode`.
 
-Exit: 0 (--check) key accepted; 1 key unavailable or rejected; 127 mastracode not found;
-otherwise whatever mastracode returns (exec replaces this process, so the TTY is the TUI's).
+Exit: 0 (--check) key accepted; 1 key unavailable or rejected; 126 exec failed; 127 mastracode
+not found (or resolving to this wrapper); otherwise whatever mastracode returns (exec replaces
+this process, so the TTY is the TUI's).
 """
 import json
 import os
@@ -32,12 +35,22 @@ import urllib.request
 SECRET = "ANTHROPIC_API_KEY"
 REASON = "Mastra Code Anthropic access (mastracode-managed)"
 MODELS_URL = "https://api.anthropic.com/v1/models?limit=100"
+# The canonical client, as bin/web-get prefers it, so a PATH entry cannot shadow it.
+CLIENT = "/usr/local/bin/sudo-secretspec"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib copies every header, x-api-key included, to a redirect target: never follow one."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 def managed_key():
     """The managed key, or None with a non-secret reason on stderr."""
+    exe = CLIENT if os.access(CLIENT, os.X_OK) else "sudo-secretspec"
     try:
-        r = subprocess.run(["sudo-secretspec", "get", SECRET, "--reason", REASON],
+        r = subprocess.run([exe, "get", SECRET, "--reason", REASON],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
         print("mastracode-managed: sudo-secretspec unavailable: %s" % type(e).__name__, file=sys.stderr)
@@ -53,7 +66,7 @@ def managed_key():
 def check(key):
     req = urllib.request.Request(MODELS_URL, headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=20) as resp:
             ids = [m.get("id", "") for m in json.load(resp).get("data", [])]
     except urllib.error.HTTPError as e:
         print("mastracode-managed: Anthropic rejected the key: HTTP %d" % e.code, file=sys.stderr)
@@ -80,7 +93,14 @@ def main(argv):
     if not real or not os.access(real, os.X_OK):
         print("mastracode-managed: mastracode not found (npm i -g mastracode)", file=sys.stderr)
         return 127
-    os.execve(real, [real] + argv, env)
+    if os.path.realpath(real) == os.path.realpath(__file__):
+        print("mastracode-managed: MASTRACODE_REAL_BIN/PATH resolves to this wrapper", file=sys.stderr)
+        return 127
+    try:
+        os.execve(real, [real] + argv, env)
+    except OSError as e:
+        print("mastracode-managed: exec failed: %s" % type(e).__name__, file=sys.stderr)
+        return 126
 
 
 if __name__ == "__main__":
