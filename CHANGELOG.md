@@ -11,7 +11,6 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- `session-finder` finds the TUI behind Kiro's nested PTY (2026-10-25): `fleet.pane_procs` answers a pane whose only foreground process is the `bash (kiro-cli-term)` shim with the foreground process group of its single inner shell's tty (`nested_pty.py`, one `ps` snapshot incl. `tpgid`; ambiguous, stale, tty-less or shell-only chains keep herdr's plain-shell answer), and `_tui_of` recognises `goose session` and `node .../mastracode` as `goose` and `mastra`.
 - `relay.py --ack` (2026-10-25): after a send that is only accepted or queued, watch the target for `--wait` more seconds and exit 0 delivered, 1 not delivered, 3 unverified (new code); without it the exit codes are unchanged, so fleet-watch, load-watch, session-load-watch and rumination-watch keep working (#74).
 - `relay.py --expect-ack ID`, `--needs-reply`, `--fyi`, `--ack-within S` (2026-10-25): a message with a `?` outside a URL, or `--needs-reply`, is refused (exit 2) from an identifiable session without `--expect-ack`; the expectation is a record listed by `--pending` (`"kind": "expect"`, `overdue`) and resolved by `--sweep` when an `ack ID` reply reaches the sender's transcript; an overdue one prints `OVERDUE ack ID` for the operator (#74).
 - First contact (2026-10-25): the first relay from a session to a peer appends a request to reply `ack <sender id>`; `relay.py` keeps `~/.local/state/relay/links.json` and `fleet.py list` shows `link: acked` or `link: ONE-WAY` per peer (#74).
@@ -241,6 +240,8 @@ agent what changed and what is new. Entries end with the pull request number.
   the canonical checkout (#20).
 
 ### Fixed
+
+- `session-finder` finds the TUI behind Kiro's nested PTY (2026-10-25): `fleet.pane_procs` answers a pane whose only foreground process is the `bash (kiro-cli-term)` shim with the foreground process group of its single inner shell's tty (`nested_pty.py`, one `ps` snapshot incl. `tpgid`; ambiguous, stale, tty-less or shell-only chains keep herdr's plain-shell answer), and `_tui_of` recognises `goose session` and `node .../mastracode` as `goose` and `mastra`. ([#78](https://github.com/djbclark/djbclark-ade/pull/78))
 
 - `self-slash --finish` (and a mapped `/quit`) on Paseo now refuses with exit 12 when the Paseo agent holds a watch role in `bin/watch status` (same prefix match as `watch`), so a session that is the load, CFEngine or Paseo watcher is not archived by accident; `--successor` is not refused, the check fails open when `watch status` fails or exceeds `SELF_SLASH_WATCH_TIMEOUT` (20 s), and `SELF_SLASH_ALLOW_WATCHER=1` overrides. The baton and loose skills say how to pick the chain and not to offer finish for a watcher (2026-10-25, #72).
 ||||||| 7380c56
