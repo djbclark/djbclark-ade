@@ -11,6 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `bin/paseo-new-seat --mode ID` (2026-10-26): a claude seat now starts in `bypassPermissions` unless `--mode` says otherwise (it set only the `auto_accept` feature, which leaves a claude seat in `default`, so a new seat could prompt); other providers keep their own default. (PR number added on merge)
 - `acp-run kiro` (2026-10-25): `kiro-cli acp`, started with `--trust-all-tools` under `--perm all`, `--perm deny` and `--perm read-only` refused (Kiro runs workspace reads and edits without asking), a 120 s handshake limit for its first-run model download; `[discovery].never_route` keeps `route_agent.py` from handing it slices. `~/.bashrc` has the matching `kiro-cli()` YOLO function (#76).
 - `relay.py --ack` (2026-10-25): after a send that is only accepted or queued, watch the target for `--wait` more seconds and exit 0 delivered, 1 not delivered, 3 unverified (new code); without it the exit codes are unchanged, so fleet-watch, load-watch, session-load-watch and rumination-watch keep working (#74).
 - `relay.py --expect-ack ID`, `--needs-reply`, `--fyi`, `--ack-within S` (2026-10-25): a message with a `?` outside a URL, or `--needs-reply`, is refused (exit 2) from an identifiable session without `--expect-ack`; the expectation is a record listed by `--pending` (`"kind": "expect"`, `overdue`) and resolved by `--sweep` when an `ack ID` reply reaches the sender's transcript; an overdue one prints `OVERDUE ack ID` for the operator (#74).

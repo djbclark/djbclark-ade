@@ -27,7 +27,7 @@ const has = (name) => argv.includes(name);
 
 if (argv.length === 0 || has("--help") || has("-h")) {
   console.error("usage: paseo-new-seat.mjs create --title T --provider P --model M --cwd D "
-    + "[--prompt TEXT] [--workspace ID] [--thinking ID] [--label k=v]... [--json] [--auto-accept] [--dry-run]");
+    + "[--prompt TEXT] [--workspace ID] [--mode ID] [--thinking ID] [--label k=v]... [--json] [--auto-accept] [--dry-run]");
   process.exit(argv.length ? 0 : 2);
 }
 if (argv[0] !== "create") {
@@ -45,6 +45,7 @@ const allowNewWorkspace = has("--allow-new-workspace");
 const autoAccept = has("--auto-accept");
 const dryRun = has("--dry-run");
 const thinking = opt("--thinking");
+const mode = opt("--mode");
 const wantJson = has("--json");
 // --label k=v, repeatable (bin/watch tags the agents it starts with watch=<domain>)
 const labels = {};
@@ -74,6 +75,9 @@ if (!workspaceId && !allowNewWorkspace) {
 
 const config = {
   ...(model ? { model } : {}),
+  // The provider's own permission mode (claude: bypassPermissions). auto_accept is a separate feature
+  // flag and does not change a claude seat's mode, so without this a claude seat starts in `default`.
+  ...(mode ? { modeId: mode } : {}),
   // The whole point: the feature rides along WITH the create, so there is no grey window.
   ...(autoAccept ? { featureValues: { auto_accept: true } } : {}),
 };

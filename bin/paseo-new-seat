@@ -34,8 +34,13 @@ that config, then verifies the shield from the agent's state file.
 
 USAGE
   paseo-new-seat --title "Dann Chat 3" --prompt "..." [--provider cline] [--model M]
-                 [--cwd DIR] [--workspace ID] [--thinking ID] [--label k=v]... [--json]
+                 [--cwd DIR] [--workspace ID] [--mode ID] [--thinking ID] [--label k=v]... [--json]
                  [--no-auto-accept] [--dry-run]
+
+--mode is the provider's own permission-mode id. Every seat runs yolo (home rule 16, 2026-10-26: a
+claude seat opened without a mode started in `default` and prompted), so a claude seat gets
+`bypassPermissions` unless --mode says otherwise; any other provider keeps its own default (an omp
+seat is already Full Access, and a claude mode id means nothing to it).
 
 --thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --label tags the
 agent (bin/watch uses watch=<domain>); --json prints one JSON line {id, shortId, autoAccept} instead of the
@@ -66,6 +71,11 @@ def usage() -> int:
     return 2
 
 
+def default_mode(provider: str) -> str:
+    """The yolo mode for a provider whose default mode prompts; "" leaves the provider's own default."""
+    return "bypassPermissions" if provider == "claude" else ""
+
+
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="paseo-new-seat", add_help=False)
     p.add_argument("--title", required=True)
@@ -77,6 +87,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--allow-new-workspace", action="store_true",
                    help="permit creating a NEW workspace (refused by default: the implicit path "
                         "littered four empty `main` workspaces on 2026-10-25)")
+    p.add_argument("--mode", default="", help="the provider's permission-mode id (claude defaults to "
+                                              "bypassPermissions)")
     p.add_argument("--thinking", default="")
     p.add_argument("--label", action="append", default=[])
     p.add_argument("--json", action="store_true")
@@ -97,6 +109,9 @@ def main(argv: list[str]) -> int:
         args += ["--prompt", a.prompt]
     if a.workspace:
         args += ["--workspace", a.workspace]
+    mode = a.mode or default_mode(a.provider)
+    if mode:
+        args += ["--mode", mode]
     if a.thinking:
         args += ["--thinking", a.thinking]
     for lab in a.label:
