@@ -434,7 +434,7 @@ class TestExpectWithoutTranscript(Base):
         self.assertEqual(self.state(), "open")
 
     def test_an_ack_sent_with_no_ack_closes_nothing_even_on_a_route_that_keeps_the_text(self) -> None:
-        """No delivery watch ran, so nothing counts (adversary r2 A2): the code, the docstring, SKILL item 2, queue item 8 and the CHANGELOG agree."""
+        """No delivery watch ran, so nothing counts (adversary r2 A2): the code, the docstring, SKILL item 2, queue item 9 and the CHANGELOG agree."""
         rc, out, err = self.reply(self.target, "ack build1", "--no-ack")
         self.assertEqual(rc, 0, (out, err))
         self.assertIn("via launch inbox", out)
