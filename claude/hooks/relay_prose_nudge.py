@@ -6,11 +6,18 @@ receiver's own prose; the sender sees only what relay.py sends. The skill text (
 peer messaging") says so and nothing enforced it. This hook does, softly.
 
 When a turn ends (Stop) and
-  1. the turn began with a user message from a relay sender, in one of the two shapes skills/session-finder/relay.py writes:
+  1. the turn began with a user message from a relay sender, in a shape skills/session-finder/relay.py writes and Claude Code logs
+     (each shape below is a real transcript form, counted 2026-10-26 in ~/.claude/projects, structure only):
      the header at the very start, `[relay from KIND ID (DIR)]` or `[relay from KIND ID aka NAME (DIR)]` (`sender_tag` /
-     `forced_tag`: the pane, inbox and Paseo routes); or, on the socket route, NO header but the envelope `socket_send`
-     wraps the text in, `<cross-session-message from="relay.py" from-name="relay.py (LABEL)" from-mode=...>`, where LABEL
-     is the text the header would carry: the hook reads it as the header (the closing tag is dropped from the end only).
+     `forced_tag`: the pane, inbox and Paseo routes; logged as a user entry or a `queued_command` attachment); or, on the
+     socket route, NO header but the envelope `socket_send` wraps the text in, `<cross-session-message from="relay.py"
+     from-name="relay.py (LABEL)" from-mode=...>`, where LABEL is the text the header would carry: the hook reads it as the
+     header. Claude Code logs a socket frame for a BUSY receiver as a `queued_command` attachment whose prompt is the bare
+     envelope (124 of 124 real peer attachments, 7 from relay or acp-dispatch), and for an IDLE receiver as a user entry with
+     `isMeta: true`, `origin.kind: "peer"`, a harness prefix (`Another Claude session sent a message:` and a newline), the envelope and a
+     harness suffix after the closing tag (108 of 108 real peer user entries). [INFERENCE] no relay frame to an idle session was
+     observed (all 7 relay or acp-dispatch frames were to busy ones); Claude Code's handler sets `isMeta` and the peer origin for
+     every socket frame, so the idle form is read the same way. The body is cut at the first closing tag and unescaped.
      A deferred send's `[queued Nm ago] ` tag follows the header (or the envelope) and is skipped. A message with neither
      (Paseo's own label for a Paseo-hosted sender, a non-relay envelope) is not read, and
   2. the turn made no relay.py call (a Bash tool call whose command contains `relay.py`) and no SendMessage call to that
@@ -34,10 +41,13 @@ these), so acks and acks of acks never provoke more messages; a header with no u
 `load watch`); a second Stop for the same relayed message (a state file per session remembers the turn's key, and Claude
 Code's own `stop_hook_active` flag also ends it); anything unreadable.
 
-Known limit: an `ack ...` text (or one starting `no reply needed`) that goes on to ask for an action without a `?` (`ack the
-status please`, `No reply needed on the log, but please merge PR 14 now`) is read as an ack and is not nudged, also under a
-first-contact footer. The fix is one shared definition with relay's `is_terminator` (branch feat/relay-ack-default), after that
-merges (docs/queue.md, "Verified peer messaging").
+Known limit (deferred): a text that starts as an exemption but goes on to ask for an action without a `?` (`ack the status
+please`, `No reply needed on the log, but please merge PR 14 now`, `FYI, please merge PR 14`) is read as an ack, a no-reply
+text or FYI and is not nudged, also under a first-contact footer; and a text starting with FYI is silent even WITH a `?`
+(`FYI: load is 11, can you pause your build?`), for every sender, under a first-contact footer or none (relay's reply footer still nudges). Under-nudging only: it cannot loop.
+The fix is one shared definition with relay's `is_terminator` (branch feat/relay-ack-default), after that merges
+(docs/queue.md, "Verified peer messaging"). Accepted: a herdr pane id with no `(DIR)` (the sender's cwd is gone) counts `?`, so
+its `--fyi` question is nudged once; two envelopes in one prompt (no harness writes it): only the first is read.
 
 Bounded: reads only the last TAIL_KB (256) KB of the transcript; a turn that began further back is not seen and is not
 nudged. No network, never calls relay.py. Fails open: any error is exit 0 with no output. RELAY_PROSE_NUDGE_OFF=1
@@ -64,8 +74,13 @@ LABEL_CORE = (r"(?P<kind>[A-Za-z0-9._-]{1,16}) (?P<id>[A-Za-z0-9:._-]{1,40})"
 LABEL = re.compile(LABEL_CORE)
 HEADER = re.compile(rf"^\s*\[relay from {LABEL_CORE}\]\s*(?P<body>.*)$", re.S)
 # relay.py `socket_send`: `<cross-session-message from="relay.py" from-name="relay.py ({sender})" from-mode="bypass">\nBODY\n</...>`,
-# with NO `[relay from]` header in BODY (`route_socket` passes the bare text).
-ENVELOPE = re.compile(r"^\s*<cross-session-message\b(?P<attrs>[^>]*)>\s*(?P<body>.*)$", re.S)
+# with NO `[relay from]` header in BODY (`route_socket` passes the bare text), BODY XML-escaped (`& < >`). Claude Code logs it
+# two ways (real transcripts, 2026-10-26): a BUSY receiver, a `queued_command` attachment whose prompt is the bare envelope; an
+# IDLE receiver, a user entry with top-level `isMeta` and `origin.kind == "peer"` whose content is one of PEER_PREFIXES, the
+# envelope, then a harness suffix (`\n\nThis came from another Claude session ...`, 543 or 657 characters) after the closing tag.
+PEER_PREFIXES = ("Another Claude session sent a message:\n", "Another Claude session sent a message while you were working:\n",
+                 "A peer session sent a message while you were working:\n")
+ENVELOPE = re.compile(rf"^\s*(?:{'|'.join(map(re.escape, PEER_PREFIXES))})?<cross-session-message\b(?P<attrs>[^>]*)>\s*(?P<body>.*)$", re.S)
 FROM_NAME = re.compile(r'\bfrom-name="relay\.py \((?P<label>[^"]{1,200})\)" from-mode="')
 WRAP_END = "</cross-session-message>"
 # The deferred deliverer re-runs main with `[queued Nm ago] ` before the stored text (relay.py `--deliver`), so it follows the header.
@@ -82,7 +97,7 @@ HERMES_TAIL = re.compile(r"[A-Za-z0-9_-]{1,8}")
 REPLY_MARK = "[reply through relay.py to "
 REPLY_FOOTER = re.compile(r"\[reply through relay\.py to [A-Za-z0-9:._-]+: ack (?P<tok>[A-Za-z0-9][A-Za-z0-9._-]{0,39})\]")
 FIRST_MARK = "[first contact from "
-FIRST_CONTACT = re.compile(r"\[first contact from (?P<id>[A-Za-z0-9:._-]+): reply `ack [^\]]*\]")
+FIRST_CONTACT = re.compile(r"\[first contact from (?P<id>[A-Za-z0-9:._-]{1,40}): reply `ack [^\]]*\]")
 # Copied from skills/session-finder/relay.py (URL_RE, asks_for_reply: relay.py is a heavy import for a hook with a 2 s deadline),
 # with the scheme bounded: relay's `[a-z0-9+.-]*` is quadratic on `a-a-a-...` (15 KB takes seconds, the hook deadline is 2 s).
 URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://\S+", re.I)
@@ -127,8 +142,11 @@ def block_text(c):
 def user_text(o):
     """The text of a transcript entry that is a user prompt (including a queued one, whose prompt is a string or a list of
     text blocks), else None: a tool result is no prompt, and a `<task-notification>` (a background task finished) is no new
-    turn start, so the relayed message before it stays the turn's start."""
-    if o.get("isMeta") or o.get("isCompactSummary") or o.get("isVisibleInTranscriptOnly"):
+    turn start, so the relayed message before it stays the turn's start. Other meta entries are skipped, but a user entry with
+    `isMeta` AND `origin.kind == "peer"` is a message from a peer session delivered to an idle one (a relay socket frame): it
+    starts the turn."""
+    peer = o.get("type") == "user" and o.get("isMeta") is True and isinstance(o.get("origin"), dict) and o["origin"].get("kind") == "peer"
+    if (o.get("isMeta") and not peer) or o.get("isCompactSummary") or o.get("isVisibleInTranscriptOnly"):
         return None
     text = None
     if o.get("type") == "user":
@@ -213,14 +231,15 @@ def usable_id(kind, sid):
 
 def parse_start(text):
     """(the label's match, the body after it) for a turn-starting TEXT that relay.py sent, else None: a `[relay from ...]` header at
-    the start, or the socket envelope's `from-name` label (the body then carries no header)."""
+    the start, or the socket envelope's `from-name` label (the body then carries no header). On the socket route the body is
+    cut at the FIRST literal closing tag (relay XML-escapes `<` in the text, so that tag is the wrapper's own; this drops the
+    harness suffix an idle receiver's entry carries after it, and any second envelope: only the first is read), then unescaped
+    (`&gt;` ends `no reply needed >`)."""
     env = ENVELOPE.match(text)
     if env:
         f = FROM_NAME.search(env["attrs"])
         m = LABEL.fullmatch(f["label"]) if f else None
-        body = env["body"].rstrip()
-        if body.endswith(WRAP_END):    # the closing tag follows relay's footer; stripped there only, never from the middle
-            body = body[:-len(WRAP_END)].rstrip()
+        body = env["body"].partition(WRAP_END)[0].rstrip().replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
         return (m, body) if m else None
     m = HEADER.match(text)
     return (m, m["body"].rstrip()) if m else None
