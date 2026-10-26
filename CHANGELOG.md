@@ -250,8 +250,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- Accept blank separators between generated dispatch footer rules while retaining user-authored instructions.
-
+- Fixed dispatch footer stripping to accept blank separator lines between generated footer items, keeping any user-written line between them (2026-10-26) (#88).
 - Fixed rerouting after a preflight refusal by retaining task and permission intent and supporting explicit legacy recovery (2026-10-26) (#88).
 - Fixed `pr-wait` re-requesting a terminal code review while security review was still pending; security completion remains required (#86).
 
