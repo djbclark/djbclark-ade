@@ -12,17 +12,19 @@ When a turn ends (Stop) and
      `[relay from KIND ID aka NAME (DIR)]`), and
   2. the turn made no relay.py call (a Bash tool call whose command contains `relay.py`) and no SendMessage call to that
      sender (its `to` equals the header's ID or `aka` name), and
-  3. the text asks for an answer (SKILL item 4: a question or a request for action): it carries relay's own
-     `[reply through relay.py to ID: ack X]` footer or `[first contact from ID: ...]` footer, or has a `?` outside a URL
-     (relay.py `asks_for_reply`'s detector),
+  3. the text asks for an answer (SKILL item 4: a question or a request for action): it ends with relay's own
+     `[reply through relay.py to ID: ack X]` footer or `[first contact from ID: ...]` footer, or, for a header with no
+     `(DIR)` suffix (a sender with no sender row, such as a Hermes-started relay), has a `?` outside a URL (relay.py
+     `asks_for_reply`'s detector; a header with `(DIR)` and no footer is by construction a `--fyi` text or a relay
+     NOTICE, so a `?` alone does not count there),
 it prints `{"decision": "block", "reason": "<nudge>"}`, which is how a Stop hook hands text to the model: the session
 continues one more step; the nudge names the route and says to end the turn if the text needs no answer.
 
 Never nudged: a statement, "noted, thanks" or "received" (no question, no footer); a relayed text that asks for no reply
-(`ack <ID>`, a text starting with FYI, one starting or ending `no reply needed`; relay's reply footer overrides these), so
-acks and acks of acks never provoke more messages; a header with no usable ID (a declared label such as `load watch`);
-a second Stop for the same relayed message (a state file per session remembers the turn's key, and Claude Code's own
-`stop_hook_active` flag also ends it); anything unreadable.
+(`ack <ID>` with or without an answer after it, a text starting with FYI, one starting or ending `no reply needed`; relay's
+reply footer overrides these), so acks and acks of acks never provoke more messages; a header with no usable ID (a declared
+label such as `load watch`); a second Stop for the same relayed message (a state file per session remembers the turn's key,
+and Claude Code's own `stop_hook_active` flag also ends it); anything unreadable.
 
 Bounded: reads only the last TAIL_KB (256) KB of the transcript; a turn that began further back is not seen and is not
 nudged. No network, never calls relay.py. Fails open: any error is exit 0 with no output. RELAY_PROSE_NUDGE_OFF=1
@@ -41,26 +43,36 @@ MAX_STATES = 200
 
 # The header skills/session-finder/relay.py `sender_label` writes: `[relay from KIND ID (aka NAME)? ((DIR))?]`. Every part is
 # in relay's own sanitised charset, so a declared label with spaces (`load watch`), a hand-typed `Dann 5 (lead, x)` or an id
-# with shell characters never parses; the id is copied into the model's instructions, so its charset is the safe one.
+# with shell characters never parses; the id is copied into the model's instructions, so its charset is the safe one. `aka`
+# and `DIR` also take `…` (U+2026): `sender_label` clips a long name with fleet.clip, which prefixes one.
 HEADER = re.compile(
     r"^\s*(?:<cross-session-message\b[^>]*>\s*)?(?:\[queued [^\]]*\]\s*)?"
     r"\[relay from (?P<kind>[A-Za-z0-9._-]{1,16}) (?P<id>[A-Za-z0-9:._-]{1,40})"
-    r"(?: aka (?P<aka>[A-Za-z0-9._ -]{1,40}))?(?: \((?P<dir>[A-Za-z0-9._-]{1,48})\))?\]\s*(?P<body>.*)$",
+    r"(?: aka (?P<aka>[A-Za-z0-9._ …-]{1,40}))?(?: \((?P<dir>[A-Za-z0-9._…-]{1,48})\))?\]\s*(?P<body>.*)$",
     re.S)
+WRAP_END = "</cross-session-message>"
 # A header names an answerable sender only with a `(DIR)` suffix (only `sender_label` writes one) or an ID shape: a herdr pane
 # id, a session-id hex prefix or uuid (a Paseo agent id, `hermes SID8`).
 ID_SHAPE = re.compile(r"w[A-Za-z0-9]+:p\d+|[0-9a-fA-F]{6,}(?:-[0-9a-fA-F]+)*")
-# relay.py appends these to the texts that want an answer (relay.py main(): `--expect-ack`, first contact).
-REPLY_FOOTER = re.compile(r"\[reply through relay\.py to [^\s\]]+: ack (?P<tok>[^\s\]]+)\]")
-FIRST_CONTACT = re.compile(r"\[first contact from (?P<id>[A-Za-z0-9:._-]+): reply `ack ")
-FIRST_CONTACT_TAIL = re.compile(r"\s*\[first contact from [^\]]*\]\s*$")
+# relay.py appends exactly one of these, last, to the texts that want an answer (relay.py main(): `--expect-ack`, first
+# contact), so each is read only at the END of the body (a quoted one earlier decides nothing). The charsets are relay's own:
+# EXPECT_ID for the `ack` token, the sender id's for the route.
+REPLY_MARK = "[reply through relay.py to "
+REPLY_FOOTER = re.compile(r"\[reply through relay\.py to [A-Za-z0-9:._-]+: ack (?P<tok>[A-Za-z0-9][A-Za-z0-9._-]{0,39})\]")
+FIRST_MARK = "[first contact from "
+FIRST_CONTACT = re.compile(r"\[first contact from (?P<id>[A-Za-z0-9:._-]+): reply `ack [^\]]*\]")
 # Copied from skills/session-finder/relay.py (URL_RE, asks_for_reply: relay.py is a heavy import for a hook with a 2 s deadline).
 URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.I)
 # Exemptions: a text that is itself an `ack <ID>`, starts with FYI, or starts or ends with `no reply needed`. Anchored, so a
 # quote of one inside a real question ("you wrote `no reply needed`, but ...?") or `fyi-digest` exempts nothing.
 NO_REPLY_PHRASE = r"no[ -]reply[ -](?:needed|required|necessary|expected)"
 NO_REPLY = re.compile(rf"^\W*{NO_REPLY_PHRASE}|{NO_REPLY_PHRASE}\W*$|^\W*FYI\b(?![-_])", re.I)
-ACK = re.compile(r"^\s*ack\s+\S+\s*(?:$|[,.;]|\[)", re.I)
+# `ack TOKEN` ended by end of text, `, . ; : !`, ` - `, ` — ` or a bracket: the shapes of an ack that carries an answer
+# (`ack q1: 3a24fdc.`). `Ack the status?`, `ack, but ...?`, `ACK? ...`, `acknowledge ...` are not. (Not relay's `ack_token`,
+# whose tail is free: it would exempt `Ack the status?`.)
+ACK = re.compile(r"^\s*ack\s+[A-Za-z0-9:._-]+?\s*(?:$|[,.;:!]|\s[-—]|\[)", re.I)
+# `ack TOKEN` followed by anything: with the first-contact footer only (see reply_token) and no `?` it is still an ack.
+ACK_BARE = re.compile(r"^\s*ack\s+[A-Za-z0-9:._-]+\s", re.I)
 
 
 def state_dir():
@@ -153,21 +165,41 @@ def remember(session, key):
         p.unlink(missing_ok=True)
 
 
-def reply_token(body, sender_id):
+def split_footer(body):
+    """(text before relay's footer, "reply" | "first" | None, the footer's token). relay appends one footer, last: only a footer
+    at the very end counts, found with `rfind` and one `fullmatch` (linear, whatever the body holds)."""
+    i = body.rfind(REPLY_MARK)
+    if i >= 0:
+        r = REPLY_FOOTER.fullmatch(body[i:].rstrip())
+        if r:
+            return body[:i], "reply", r["tok"]
+    i = body.rfind(FIRST_MARK)
+    if i >= 0:
+        f = FIRST_CONTACT.fullmatch(body[i:].rstrip())
+        if f:
+            return body[:i], "first", f["id"]
+    return body, None, None
+
+
+def reply_token(body, sender_id, has_dir):
     """The `ack` token the sender expects when BODY wants an answer (a question or request for action, SKILL item 4), else None.
     Wants one: relay's own `[reply through relay.py to ID: ack X]` footer (X), its `[first contact from ID: ...]` footer
-    (the sender's ID), or a `?` outside a URL (the header ID). The reply footer overrides every exemption; the exemptions
-    (an `ack <ID>` text, `no reply needed`, FYI) silence the other two, so acks and acks of acks never provoke messages."""
-    r = REPLY_FOOTER.search(body)
-    if r:
-        return r["tok"]
-    plain = FIRST_CONTACT_TAIL.sub("", body)
+    (the sender's ID), or, for a header with no `(DIR)`, a `?` outside a URL (the header ID). The reply footer overrides every
+    exemption; the exemptions (an `ack <ID>` text, `no reply needed`, FYI) silence the other two, so acks and acks of acks never
+    provoke messages. relay refuses a `?` text unless it carries the reply footer or `--fyi`, so a footer-less `?` text from a
+    sender with a sender row (a header with `(DIR)`) is a `--fyi` text or a NOTICE: silent. A sender with no row (a
+    Hermes-started relay, `hermes SID8`) has no `(DIR)` and no footer, and its `?` is the only signal there is."""
+    plain, kind, tok = split_footer(body)
+    if kind == "reply":
+        return tok
     if ACK.match(plain) or NO_REPLY.search(plain):
         return None
-    f = FIRST_CONTACT.search(body)
-    if f:
-        return f["id"]
-    return sender_id if "?" in URL_RE.sub(" ", body) else None
+    stripped = URL_RE.sub(" ", plain)
+    if kind == "first":
+        # `ack q1 3a24fdc`: an ack that answers (a bare space after the token) is exempt only without a `?`, so the question
+        # `Ack the status? ...` is not swallowed.
+        return None if ACK_BARE.match(plain) and "?" not in stripped else tok
+    return None if has_dir else (sender_id if "?" in stripped else None)
 
 
 def decide(data):
@@ -192,7 +224,10 @@ def decide(data):
     m = HEADER.match(start)
     if not m or not (m["dir"] or ID_SHAPE.fullmatch(m["id"])):
         return None
-    token = reply_token(m["body"], m["id"])
+    body = m["body"].rstrip()
+    if body.endswith(WRAP_END):    # the socket route's closing tag follows relay's footer
+        body = body[:-len(WRAP_END)]
+    token = reply_token(body, m["id"], bool(m["dir"]))
     if not token:
         return None
     names = {m["id"].lower(), (m["aka"] or "").strip().lower()} - {""}
