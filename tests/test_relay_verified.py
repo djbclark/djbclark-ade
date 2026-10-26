@@ -1376,25 +1376,68 @@ class TestExpectAnsweredInsideABlockingSend(Base):
         self.assertEqual(rc, 1, (out, err))
         self.assertIsNone(relay.expect_read("q1"))
 
+    def asked_and_answered(self, who: Any, text: str, eid: str, *answer_argv: str) -> None:
+        """A real case: the ask succeeds (rc 0) and WHO's answer ran as a nested relay inside its blocking send. Each case has its own ID, so the
+        ask is never refused as a duplicate (adversary r5 F2: an `open` ID refused the later cases before they ran)."""
+        ran = len(self.nested)
+        rc, out, err = self.ask(lambda: self.answer(who, text, *answer_argv), eid=eid)
+        self.assertEqual(rc, 0, (eid, out, err))
+        self.assertEqual(len(self.nested), ran + 1, f"the nested answer for {eid} did not run")
+
     def test_another_id_a_third_party_or_a_stale_reservation_close_nothing(self) -> None:
-        self.ask(lambda: self.answer(self.hermes, "ack q9"))
+        self.asked_and_answered(self.hermes, "ack q9", "q1")
         self.assertEqual(relay.expect_read("q1")["state"], "open", "another id")
-        relay.expect_release("q1", "bbbbbbbb")
-        self.ask(lambda: self.answer(self.mallory, "ack q1"))
-        self.assertEqual(relay.expect_read("q1")["state"], "open", "a third party")
-        relay.expect_release("q1", "bbbbbbbb")
-        self.ask(lambda: self.answer(self.hermes, "ack q1 yes", "--no-ack"))
-        self.assertEqual(relay.expect_read("q1")["state"], "open", "a send with no delivery watch")
-        relay.expect_write({**relay.expect_read("q1"), "state": "acked"})    # an old closed ID is free again
+        self.asked_and_answered(self.mallory, "ack q2", "q2")
+        self.assertEqual(relay.expect_read("q2")["state"], "open", "a third party")
+        self.asked_and_answered(self.hermes, "ack q3 yes", "q3", "--no-ack")
+        self.assertEqual(relay.expect_read("q3")["state"], "open", "a send with no delivery watch")
+        occupant = {**self.hermes, "sid": "20261025_99999999"}    # the same Hermes id, a new occupant (another session id)
+        self.asked_and_answered(occupant, "ack q4", "q4")
+        self.assertEqual(relay.expect_read("q4")["state"], "open", "the same id, another session")
 
         def stale() -> None:
+            path = relay.expect_dir() / "q5.json"
+            rec = json.loads(path.read_text())
+            rec["created"] -= relay.EXPECT_RESERVE_TTL + 5
+            path.write_text(json.dumps(rec))
+            self.answer(self.hermes, "ack q5")
+        rc, out, err = self.ask(stale, eid="q5")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(relay.expect_read("q5")["state"], "open", "a reservation past its TTL")
+
+    def test_a_second_relay_cannot_take_the_id_while_the_answered_send_is_still_running(self) -> None:
+        """adversary r5 F1: the early ack closed the reservation, which freed the ID mid-send; a second relay then reserved it, and the first
+        relay's open step reopened its answered question and overwrote the second's reservation."""
+        took: list[bool] = []
+        self.ask(lambda: (self.answer(self.hermes, "ack q1"), took.append(relay.expect_reserve("q1", "cccccccc"))))
+        self.assertEqual(took, [False], "an early-acked ID still belongs to its running send")
+        rec = relay.expect_read("q1")
+        self.assertEqual((rec["state"], rec["sender"], rec.get("early"), rec.get("sent")), ("acked", "bbbbbbbb", True, True), rec)
+        rec_path = relay.expect_dir() / "q1.json"
+        old = json.loads(rec_path.read_text())
+        old["created"] -= 3 * 3600
+        rec_path.write_text(json.dumps(old))
+        self.assertNotIn("OVERDUE", self.run_cli("--sweep")[1])
+        self.assertTrue(relay.expect_reserve("q1", "cccccccc"), "the ID is free once the send returned")
+
+    def test_an_early_acked_id_frees_after_the_ttl_when_its_relay_died_mid_send(self) -> None:
+        def died() -> None:
+            self.answer(self.hermes, "ack q1")
             path = relay.expect_dir() / "q1.json"
             rec = json.loads(path.read_text())
             rec["created"] -= relay.EXPECT_RESERVE_TTL + 5
             path.write_text(json.dumps(rec))
+            self.assertTrue(relay.expect_reserve("q1", "cccccccc"))
+        self.ask(died)
+
+    def test_a_route_that_raises_after_an_early_ack_drops_the_record(self) -> None:
+        """Known, accepted choice (adversary r5 F4): the send did not finish, so nothing is recorded and the ID is free."""
+        def boom() -> None:
             self.answer(self.hermes, "ack q1")
-        self.ask(stale)
-        self.assertEqual(relay.expect_read("q1")["state"], "open", "a reservation past its TTL")
+            raise RuntimeError("route died")
+        with self.assertRaises(RuntimeError):
+            self.ask(boom)
+        self.assertIsNone(relay.expect_read("q1"))
 
     def test_an_unproven_pane_queue_inside_the_blocking_send_closes_nothing(self) -> None:
         self.ask(lambda: self.answer(self.hermes, "ack q1", route=("pane", "queued", None)))

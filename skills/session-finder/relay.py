@@ -2673,15 +2673,18 @@ EXPECT_RESERVE_TTL = 600    # a reservation whose relay died before it sent or r
 
 
 def expect_reserve(eid, sender):
-    """Claim --expect-ack ID before the send (adversary r1 A6, 2026-10-25): under the expectation lock, False when ID is open or freshly
-    reserved by another relay, else a `reserved` record takes it (an acked, stale or reserved-then-abandoned ID is free). Check and claim are
-    one step, so two concurrent senders of one ID cannot both send. `note_links_and_expect` turns it into the `open` record; a relay that
-    sends nothing calls `expect_release`."""
+    """Claim --expect-ack ID before the send (adversary r1 A6, 2026-10-25): under the expectation lock, False when ID is open, freshly
+    reserved by another relay, or answered early inside a send that has not returned yet (`acked` + `early`, no `sent`: the send still owns
+    the ID, adversary r5 F1, 2026-10-26), else a `reserved` record takes it (an acked, stale or reserved-then-abandoned ID is free). Check and
+    claim are one step, so two concurrent senders of one ID cannot both send. `note_links_and_expect` turns it into the `open` record, or marks
+    an early-acked one `sent`; a relay that sends nothing calls `expect_release`."""
     now = time.time()
     with _flock(defer_dir() / ".expect.lock"):
         old = expect_read(eid)
-        if old and (old.get("state") == "open" or (old.get("state") == "reserved" and now - _num(old.get("created"), now) < EXPECT_RESERVE_TTL)):
-            return False
+        if old:
+            fresh = now - _num(old.get("created"), now) < EXPECT_RESERVE_TTL
+            if old.get("state") == "open" or (fresh and (old.get("state") == "reserved" or (old.get("state") == "acked" and old.get("early") and not old.get("sent")))):
+                return False
         atomic_json(expect_dir() / f"{eid}.json", {"id": eid, "state": "reserved", "sender": sender, "created": now})
     return True
 
@@ -2816,6 +2819,7 @@ def note_links_and_expect():
             old = expect_read(CTX["expect"])
             if old and old.get("state") == "acked" and old.get("early") and old.get("sender") == me["id"]:
                 early = _num(old.get("acked"), now)    # the target answered while this send was still running: never reopen what is closed
+                atomic_json(expect_dir() / f"{CTX['expect']}.json", {**old, "sent": True})    # the send returned: the ID is free again for the next question
             else:
                 atomic_json(expect_dir() / f"{CTX['expect']}.json", {"id": CTX["expect"], "state": "open", "created": now, "acked": None,
                                                                      "within": CTX.get("within") or EXPECT_WITHIN, **expect_identity(me, s, CTX.get("mark", 0))})
