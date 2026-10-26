@@ -410,6 +410,75 @@ class TestDispatch(Base):
                 self.assertIn(rec["prompt"], new["prompt"])
                 self.assertEqual(old.read_bytes(), before)
 
+    def test_repeat_preflight_refusal_refreshes_task_and_permission(self):
+        brief = self.tmp / "retry.md"
+        for text, perm, effort, context, timeout in (
+                ("Brief A: first task", "deny", "high", "1m", "123"),
+                ("Brief B: latest task", "read-only", "low", "200k", "321")):
+            brief.write_text(text)
+            result = run(["claude", "--model", "m1", "--kind", "judgment", "--name", "retry",
+                          "-f", str(brief), "-C", str(self.repo), "--out", str(self.out),
+                          "--acp-run", str(self.fake), "--perm", perm, "--effort", effort,
+                          "--context", context, "--timeout", timeout],
+                         env=self.base_env(PREFLIGHT_MODE="outage"))
+            self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+            rec = json.loads((self.out / "jobs" / "retry.json").read_text())
+            self.assertEqual(rec["status"], "unavailable")
+            self.assertEqual(rec["prompt"], text)
+            self.assertEqual(rec["perm"], perm)
+            self.assertEqual(rec["effort"], effort)
+            self.assertEqual(rec["context"], context)
+            self.assertEqual(rec["timeout"], int(timeout))
+            self.assertNotIn("refusals", rec)
+            self.assertFalse((self.out / "retry.jsonl").exists())
+
+    def test_legacy_thin_record_gains_context_on_repeated_preflight_refusal(self):
+        first = self.dispatch(env={"PREFLIGHT_MODE": "outage"})
+        self.assertEqual(first.returncode, 5, first.stdout + first.stderr)
+        old = self.out / "jobs" / "s1.json"
+        rec = self.record()
+        for key in ("prompt", "brief", "perm"):
+            rec.pop(key, None)
+        old.write_text(json.dumps(rec))
+        brief = self.tmp / "latest.md"
+        brief.write_text("Latest task after legacy refusal")
+        result = run(["codex", "--model", "m1", "--kind", "frontier", "--name", "s1",
+                      "-f", str(brief), "-C", str(self.repo), "--out", str(self.out),
+                      "--acp-run", str(self.fake), "--perm", "read-only"],
+                     env=self.base_env(PREFLIGHT_MODE="outage"))
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        after = self.record()
+        self.assertEqual(after["prompt"], brief.read_text())
+        self.assertEqual(after["brief"], str(brief.resolve()))
+        self.assertEqual(after["perm"], "read-only")
+        self.assertNotIn("refusals", after)
+        self.assertFalse((self.out / "s1.jsonl").exists())
+
+    def test_cross_agent_or_model_reroute_drops_old_effort_and_context(self):
+        for target_agent, target_model, kind, role in (
+                ("codex", "m1", "frontier", "advise"),
+                ("claude", "claude-opus-5-5-high", "judgment", "exec")):
+            with self.subTest(agent=target_agent, model=target_model):
+                name = "cross-" + target_agent
+                first = self.dispatch_agent("claude", "m1", "--effort", "high", "--context", "1m",
+                                            name=name, env={"PREFLIGHT_MODE": "outage"})
+                self.assertEqual(first.returncode, 5, first.stdout + first.stderr)
+                old = self.out / "jobs" / (name + ".json")
+                before = old.read_bytes()
+                rec = json.loads(before)
+                self.assertEqual((rec["effort"], rec["context"]), ("high", "1m"))
+                result = run(["reroute", str(old), "--agent", target_agent, "--model", target_model,
+                              "--kind", kind, "--role", role, "--acp-run", str(self.fake),
+                              "--no-preflight"], env=self.base_env())
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                new = json.loads((self.out / "jobs" / (name + "-reroute-1.json")).read_text())
+                self.assertIsNone(new["effort"])
+                self.assertIsNone(new["context"])
+                self.assertNotIn("--effort", new["cmd"])
+                self.assertNotIn("--context", new["cmd"])
+                self.assertEqual(new["rerouted_from"], str(old.resolve()))
+                self.assertEqual(old.read_bytes(), before)
+
     def test_legacy_unavailable_context_refuses_cleanly_without_launch(self):
         # Produce a real preflight refusal, then reduce it to the older thin shape.
         first = self.dispatch(env={"PREFLIGHT_MODE": "outage"})

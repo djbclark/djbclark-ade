@@ -1122,15 +1122,22 @@ def git_identity_warning(repo: Path) -> str | None:
             "--unset user.name; and the same for user.email")
 
 
-def keep_record_note_refusal(record: Path, reason: str, cls: str) -> bool:
+def keep_record_note_refusal(record: Path, reason: str, cls: str,
+                             previous: dict | None = None) -> bool:
     """A refused resume must not replace the record of the run it would have continued
     (2026-10-18: three finished codex records lost log, session id, cmd and brief to a headroom
     refusal, and the next resume crashed). Append the refusal to `refusals` under the record's lock;
-    False when there is no readable record to keep."""
+    False when there is no readable launched run to keep (a preflight-only
+    unavailable record is replaced with the latest attempt's intent)."""
     try:
         with record_lock(record):
             rec = json.loads(record.read_text())
             if not isinstance(rec, dict):
+                return False
+            # A preflight-only attempt has no paid run to preserve. A new refusal
+            # must record the latest task and constraints, including for thin records.
+            if (previous is None and rec.get("status") == "unavailable"
+                    and not any(rec.get(k) for k in ("log", "session_id", "cmd"))):
                 return False
             rec.setdefault("refusals", []).append({"at": time.time(), "class": cls, "detail": reason})
             write_record(record, rec)
@@ -1147,7 +1154,7 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
     jobs.mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
     record = jobs / f"{a.name}.json"
-    if record.exists() and keep_record_note_refusal(record, reason, cls):
+    if record.exists() and keep_record_note_refusal(record, reason, cls, previous):
         print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
         return exit_code
     # A preflight refusal launches no session, but still needs the original task and
@@ -4011,7 +4018,7 @@ def reroute_record(a: argparse.Namespace) -> int:
     # record continue, but gates still run (only a resume with previous skips them).
     kind = getattr(a, "kind", None) or old.get("kind")
     role = getattr(a, "role", None) or old.get("role")
-    effort = old.get("effort")
+    effort = None
     if getattr(a, "escalate", False):
         # Operator decision 1.4 (2026-10-18): cheap first — a failed slice climbs ONE rung of
         # the ladder in config/routing.toml, never straight to the top. The agent×model is
@@ -4037,6 +4044,13 @@ def reroute_record(a: argparse.Namespace) -> int:
         kind = nxt
         if nxt == "frontier" and not getattr(a, "role", None):
             role = "advise"    # never inherit exec into frontier without frontier-exec approval
+    # Effort/context belong to one agent/model; another route uses its own
+    # effort (when supplied above) and defaults, never the old model's limits.
+    same_target = a.agent == old.get("agent") and a.model == old.get("model")
+    inherit_options = same_target and not getattr(a, "escalate", False)
+    if inherit_options:
+        effort = old.get("effort")
+    context = old.get("context") if inherit_options else None
     new_svc = resolve_service(a.agent, a.model)
     old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
     if a.est_pct is not None:
@@ -4059,7 +4073,7 @@ def reroute_record(a: argparse.Namespace) -> int:
         load_wait=getattr(a, "load_wait", None), no_load_gate=getattr(a, "no_load_gate", False),
         est_pct=est,
         checkpoint=True, acp_run=a.acp_run, acp_arg=[],
-        effort=effort, context=old.get("context"),
+        effort=effort, context=context,
         no_auto_resume=(old.get("auto_resume") or {}).get("state") == "off",
         kind=kind, role=role, from_record=True)
     rc = dispatch(ns)
