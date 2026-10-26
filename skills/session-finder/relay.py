@@ -181,11 +181,17 @@ delivered (not sent, pulled back out of the queue, a deferred record failed, exp
 proof yet: do not resend; a route with no transcript to read, an ACP inbox or a Paseo agent that is not Claude, is unverified at once). The
 watch is on for every caller relay identifies as a session (a fleet `self` row, a Paseo agent, a Claude session, a Hermes turn) and runs
 IMPLICIT_ACK_WAIT (10) seconds at most beyond the send's own --wait; `--ack` asks for it whoever you are and watches --wait seconds; `--no-ack`
-or RELAY_NO_ACK=1 turns the default off. A DECLARED JOB (a label in RELAY_SENDER_NAME and no session: every launchd watcher; also the
-deliverer's own sends) never gets the default and keeps the legacy exits below: fleet-watch, load-watch, session-load-watch and rumination-watch
-read 0 as "taken, or queued" (the three in this repo also pass --no-ack). --json adds "ack_default": true to a run whose watch was the default.
-A TERMINATOR (an `ack ID` reply, an ack of an ack, a text saying "no reply needed") is exempt from the reply rule: it takes no --expect-ack or
---needs-reply (exit 2), needs none for a `?`, carries no footer and opens no link, so it can never start a loop; it still gets the delivery watch.
+or RELAY_NO_ACK=1 turns the default off. A DECLARED JOB run by launchd (a label in RELAY_SENDER_NAME and no session in its environment: every launchd
+watcher; also the deliverer's own sends) never gets the default and keeps the legacy exits below; the same job run from inside a session
+(`fleet-watch --relay-test` by an agent) IS identified and does get it, so it passes --no-ack. fleet-watch, load-watch, session-load-watch and
+rumination-watch read 0 as "taken, or queued" (the three in this repo pass --no-ack; fleet-watch's two calls are a follow-up in site-djbclark).
+--json adds "ack_default": true to a run whose watch was the default.
+A TERMINATOR (an `ack ID` reply with at most a short remark in parentheses or after a colon, an ack of an ack, a text ENDING in "no reply needed")
+is exempt from the reply rule: it carries no footer and opens no link, so it can never start a loop, and needs no --expect-ack for a `?`; it
+still gets the delivery watch. Only the BARE loop shape (`ack ID` alone, or a no-reply phrase alone) refuses --expect-ack or --needs-reply
+(exit 2). An explicit --expect-ack or --needs-reply on any longer text wins: the text is no terminator, it gets the normal footer and
+expectation (`ack q1: merged; now please rebase PR 14` needs the flags and is sent with them; without them it is an ordinary text, answered by
+one first-contact `ack ID`).
 `--expect-ack ID` records (state, never a wait) that a reply `ack ID` is expected; the sent text ends "[reply through relay.py to <your id>:
 ack ID]". It is REQUIRED (exit 2, nothing sent) for a text with a `?` outside a URL or with --needs-reply, from a session relay can identify
 (a launchd script has no transcript an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
@@ -2022,6 +2028,7 @@ def notify_sender(rec, state, why):
     else:
         text = f"relay: your message to {target_label(rec)} was {state}: {why}"
     try:
+        # "--no-ack" is defence in depth: as_caller(...) sets SENDER_OVERRIDE, so sender_identified is already False; no test fails without the flag
         rc, line = run_captured([ident, text, "--wait", "5", "--no-ack"], "relay", scrub=True, notice=True)
     except Exception as e:    # a notice never breaks the deliverer
         rc, line = 1, str(e)
@@ -2263,6 +2270,7 @@ def deliver(rid):
             t = rec.get("target") or {}
             BUSY["hit"] = False
             try:
+                # "--no-ack" is defence in depth: as_caller(...) sets SENDER_OVERRIDE, so sender_identified is already False; no test fails without the flag
                 rc, line = run_captured([t.get("paseo") or t.get("id") or "", (f"[queued {mins}m ago] " if mins >= 1 else "") + rec.get("text", ""),
                                          "--no-defer", "--no-ack"], rec.get("sender") or "unknown")
             except (Exception, SystemExit) as e:    # the send may have happened: never `sending` with nothing running, never resent
@@ -2487,15 +2495,40 @@ IMPLICIT_ACK_WAIT = 10    # seconds the DEFAULT delivery watch runs after a send
 NO_ACK_ENV = "RELAY_NO_ACK"
 # A terminator ends a conversation: an `ack ID` reply (an ack of an ack is the same text), or a text that says no reply is needed. It never
 # asks for an answer (no `--expect-ack`, no first-contact footer), so it can never start a loop; it still gets the L1 delivery proof.
-ACK_TEXT = re.compile(r"ack[ :=]+[A-Za-z0-9][A-Za-z0-9._:-]{0,59}(?![A-Za-z0-9._:-])[^?]{0,100}", re.I)
-NO_REPLY_RE = re.compile(r"\bno\s+(?:reply|response|answer|ack(?:nowledge?ment)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)\b"
-                         r"|\bno\s+need\s+to\s+(?:reply|respond|ack(?:nowledge)?)\b", re.I)
+# The shape is deliberately narrow, because a false terminator is a MISSED message (no footer, no expectation, no link) while a false
+# non-terminator costs one extra `ack ID` from the peer: `ack ID` alone, or with a short remark in parentheses or after a colon (at most
+# REMARK_MAX characters, no `?`, no word that asks for something). `ack the PR and merge it` and `ack q1: now please rebase PR 14 onto
+# master` are requests that begin with `ack`, so they take the normal path. A no-reply phrase counts only at the END of the text, so a
+# quoted or negated mention ("Do not write 'no reply needed': I need an answer") is no terminator.
+REMARK_MAX = 40
+_NO_REPLY = (r"(?:\bno\s+(?:reply|response|answer|ack(?:nowledge?ment)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)"
+             r"|\bno\s+need\s+to\s+(?:reply|respond|ack(?:nowledge)?))")
+_TAIL = r"[\s.!)\]]*"
+NO_REPLY_RE = re.compile(_NO_REPLY + _TAIL + r"$", re.I)
+NO_REPLY_BARE = re.compile(r"(?:no\s+(?:reply|response|answer|ack(?:nowledge?ment)?)\s+(?:is\s+)?(?:needed|required|necessary|expected)"
+                           r"|no\s+need\s+to\s+(?:reply|respond|ack(?:nowledge)?))[\s.!]*", re.I)
+_ACK_HEAD = r"ack[ :=]+[A-Za-z0-9][A-Za-z0-9._-]{0,59}(?::[A-Za-z0-9][A-Za-z0-9._-]{0,59})*"
+ACK_BARE = re.compile(_ACK_HEAD + r"[.!]*", re.I)
+ACK_REMARK = re.compile(_ACK_HEAD + rf"(?:\s*\(([^()?]{{1,{REMARK_MAX}}})\)|\s*:\s*([^?]{{1,{REMARK_MAX}}}))[.!]*", re.I)
+REQUEST_WORD = re.compile(r"\b(?:please|pls|plz|could|would|can\s+you|need|needs|must|then|now|tell\s+me|let\s+me\s+know)\b", re.I)
+
+
+def is_bare_terminator(text):
+    """True when the text is ONLY `ack ID` or ONLY a no-reply phrase: the shape no flag may be put on, since an answer to it would never end."""
+    t = text.strip().strip("[]`'\".")
+    return bool(ACK_BARE.fullmatch(t) or NO_REPLY_BARE.fullmatch(t))
 
 
 def is_terminator(text):
-    """True for an `ack ID` reply (optionally a short remark after the ID, never a question) or a text that says no reply is needed."""
+    """True for `ack ID` (alone or with a short remark in parentheses or after a colon, never a question or a request) or a text that ends
+    with "no reply needed"."""
     t = text.strip().strip("[]`'\".")
-    return bool(ACK_TEXT.fullmatch(t) or NO_REPLY_RE.search(text))
+    if ACK_BARE.fullmatch(t):
+        return True
+    m = ACK_REMARK.fullmatch(t)
+    if m:
+        return not REQUEST_WORD.search(m.group(1) or m.group(2))
+    return bool(NO_REPLY_RE.search(text))
 
 
 def sender_identified(listed, me):
@@ -2870,7 +2903,7 @@ def _main(argv=None, sweep=True):
                     "and exit 0 delivered, 1 not delivered, 3 unverified (never 0 for a message not proven to have landed). The default for a sender that is an "
                     f"agent session, watching {IMPLICIT_ACK_WAIT} s at most; --ack watches --wait whoever you are")
     ap.add_argument("--no-ack", action="store_true", help=f"turn the default delivery watch off (also {NO_ACK_ENV}=1): a send that is only accepted or "
-                    "queued exits 0, as for a script. A declared job (RELAY_SENDER_NAME, no session) never gets the default watch")
+                    "queued exits 0, as for a script. A declared job run by launchd (RELAY_SENDER_NAME, no session in its environment) never gets the default watch")
     ap.add_argument("--expect-ack", metavar="ID", help="record that a reply `ack ID` is expected from the target (REQUIRED when the text has a `?` or --needs-reply); "
                     "--sweep resolves it, --pending lists it")
     ap.add_argument("--needs-reply", action="store_true", help="the text requests action or a reply without asking a question: --expect-ack is then required")
@@ -2922,6 +2955,9 @@ def _main(argv=None, sweep=True):
         return 2
     a.ack_default = False
     term = is_terminator(text)
+    bare = term and bool(a.needs_reply or a.expect_ack) and is_bare_terminator(text)
+    if term and (a.needs_reply or a.expect_ack):
+        term = False    # an explicit flag wins over the surface text: `ack q1: merged; now please rebase` with --expect-ack is a request, never a terminator
     if a.ack_within is not None and not (math.isfinite(a.ack_within) and a.ack_within > 0):
         print("relay: --ack-within must be a finite number of seconds > 0", file=sys.stderr)
         return 2
@@ -2945,9 +2981,9 @@ def _main(argv=None, sweep=True):
         if me is not None and not me.get("transcript"):    # fleet's herdr row of a Codex session has its id but no transcript: find its rollout by that exact id (Codex P1, PR 74); any other agent is left as it is
             with contextlib.suppress(Exception):
                 pane_transcript(me)
-        if term and (a.needs_reply or a.expect_ack):
-            print("relay: not sent: an `ack ID` reply or a text saying no reply is needed expects no answer, so it takes no --expect-ack or "
-                  "--needs-reply (an ack of an ack would never end)", file=sys.stderr)
+        if bare:    # only the bare loop shape (`ack ID`, or a no-reply phrase alone) is refused: an answer to it would never end
+            print("relay: not sent: a bare `ack ID` reply or a text saying only that no reply is needed expects no answer, so it takes no "
+                  "--expect-ack or --needs-reply (an ack of an ack would never end)", file=sys.stderr)
             return 2
         if (a.needs_reply or (me is not None and asks_for_reply(text) and not a.fyi and not term)) and not a.expect_ack:
             print("relay: not sent: this message asks for a reply or action, so it needs --expect-ack ID (a record `--sweep` resolves when "
