@@ -11,7 +11,8 @@ research-web-python-lsp-report.md).
 
 Record  ~/.claude/state/prior-art-shadow/<session id>.jsonl   (dir `PRIOR_ART_STATE` overrides;
 dir mode 0700, file mode 0600, one O_APPEND write per line, capped at 5 MB with one last
-`{"capped":true}` line). Carry-over (previous timestamp, run counters, a salt, recent call hashes) lives
+`{"capped":true}` line). Carry-over (previous timestamp, run counters, a salt, recent call hashes, and the prompt counters
+`prompt_seq` / `prompt_seq_seen`) lives
 in <session id>.state.json for the main agent and <session id>.<agent key>.state.json for each subagent
 (Claude Code puts the PARENT's session_id and the subagent's own `agent_id` in every hook payload, so
 state keyed on the session alone interleaves parallel subagents), replaced atomically under
@@ -50,7 +51,7 @@ Shell variables: a path word is resolved from the same command's literal assignm
 `path_class` unresolved, which does not reset run_length. Stated limits: docs/queue.md "D2 built".
 
 Categories: own_code, external_code, memory, web, private_other, task_change (UserPromptSubmit).
-A new UserPromptSubmit, or an idle gap over PRIOR_ART_IDLE_S (default 1800 s), starts a new task and
+A new UserPromptSubmit of the main agent, or an idle gap over PRIOR_ART_IDLE_S (default 1800 s), starts a new task and
 resets the run counters. A subagent follows its parent's prompts only: when the user's prompt count has
 moved since the subagent's last event, its state is reset (and its elapsed_ms is null); the parent's idle
 gap, which happens while a subagent works, does not reset it. `PRIOR_ART_SHADOW=0` disables recording. A UserPromptSubmit also prunes files
