@@ -382,12 +382,16 @@ only where the message asks a question or requests action. An FYI that provably 
    session. `[relay from unknown]` is never sent, so a header you read always names a sender you can answer. A footer
    `[reply through relay.py to ID: ack X]` means start the answer with `ack X`. A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
    An FYI needs no reply. After a relay that is not `delivered`, read its status word; `queued`, `accepted`, `unverified` are not proof.
-5. **Prose-only answer nudge (2026-10-25)**: `claude/hooks/relay_prose_nudge.py`, a Claude Code **Stop** hook, enforces item 4 for Claude sessions. When the turn that
-   just ended began with a `[relay from KIND ID ...]` text (also behind `[queued Nm ago]` or relay's `<cross-session-message>` wrapper) and made no Bash call containing `relay.py`
+5. **Prose-only answer nudge (2026-10-25)**: `claude/hooks/relay_prose_nudge.py`, a Claude Code **Stop** hook, enforces item 4 for Claude sessions: **a question or an
+   action request only**. When the turn that just ended began with a `[relay from KIND ID ...]` text (also behind `[queued Nm ago]` or relay's `<cross-session-message>` wrapper;
+   the header needs a `(DIR)` suffix or a pane-id, hex-prefix or uuid ID, so a declared label such as `load watch` names no target) that asks for an answer (it carries relay's own
+   `[reply through relay.py to ID: ack X]` or `[first contact from ID: ...]` footer, or has a `?` outside a URL, the detector `relay.py` uses) and the turn made no Bash call containing `relay.py`
    and no `SendMessage` to that sender (its header ID or `aka` name), it returns `{"decision": "block", "reason": "You answered a relayed message in prose; the sender does not
-   see it. Reply with relay.py <ID> \"<text>\" ..."}`: the session takes one more step. Never for an `ack <ID>` text, `no reply needed` or `FYI` (acks and acks of acks
-   never provoke messages), never twice for one relayed message (a state file per session in `~/.claude/state/relay-prose-nudges/`, and Claude Code's `stop_hook_active`), and
-   silent on any parse error. It reads only the last 256 KB of the transcript (a turn that began further back is not nudged), uses no network and never calls relay.py.
+   see it. Reply with relay.py <ID> \"<text>\" ... If it needs no answer, end the turn; if it asks for one, start your relay reply with `ack X`."}`: the session takes one more step.
+   Never for a statement, "noted, thanks" or "received" (no question, no footer), never for an `ack <ID>` text, one starting `FYI` or one starting or ending `no reply needed` (relay's reply
+   footer overrides these; a quoted "no reply needed" inside a question exempts nothing), so acks and acks of acks never provoke messages; never twice for one relayed message
+   (a state file per session in `~/.claude/state/relay-prose-nudges/`, and Claude Code's `stop_hook_active`), and silent on any parse error. A `queued_command` prompt given as a list of text blocks is read like a user
+   message; a `<task-notification>` entry does not start a new turn. It reads only the last 256 KB of the transcript (a turn that began further back is not nudged), uses no network and never calls relay.py.
    `RELAY_PROSE_NUDGE_OFF=1` disables it. Registered in `agents/claude/settings.json.tmpl` under `Stop`; the live `~/.claude/settings.json` gets it only by the operator's install
    (docs/queue.md, "Verified peer messaging, round 2").
 
