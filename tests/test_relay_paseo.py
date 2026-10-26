@@ -75,9 +75,11 @@ class RelayPaseo(unittest.TestCase):
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved_env)))
         saved_attrs = [(relay.fleet, "sessions", relay.fleet.sessions), (relay.fleet, "ancestors", relay.fleet.ancestors),
                        (relay.where, "real_cwd", relay.where.real_cwd), (relay, "hosted_by", relay.hosted_by),
-                       (relay, "DEFER_DIR", relay.DEFER_DIR), (relay, "spawn_deliverer", relay.spawn_deliverer)]
+                       (relay, "DEFER_DIR", relay.DEFER_DIR), (relay, "spawn_deliverer", relay.spawn_deliverer),
+                       (relay, "own_cwd", relay.own_cwd)]
         self.addCleanup(lambda: [setattr(o, n, v) for o, n, v in saved_attrs])
         relay.fleet.ancestors = lambda: set()    # hermetic: the test runner's real ancestry is not under test
+        relay.own_cwd = lambda: "/work/here"    # a sender row with no cwd is named by the directory of the process
         relay.hosted_by = lambda agent_id: agent_id == CALLER    # the test runner "is" the CALLER agent
         relay.DEFER_DIR = Path(self.tmp.name) / "relay" / "deferred"    # never the real queue, and a deferral never starts a real deliverer
         os.environ["RELAY_DEFER_DIR"] = str(relay.DEFER_DIR)
@@ -140,7 +142,10 @@ class RelayPaseo(unittest.TestCase):
         me = fleet._rec(id="cccccccc", agent="claude", name="the caller", sid="cccccccc-0000-4000-8000-000000000003", self=True)
         rc, _out, err = self.main([sess(), me], SID, "ping", "--wait", "1")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.sends(), [f"send --no-wait --behavior steer --json -- {AGENT} [relay from the caller] ping"])
+        sends = self.sends()
+        self.assertEqual(len(sends), 1)
+        self.assertTrue(sends[0].startswith(f"send --no-wait --behavior steer --json -- {AGENT} [relay from claude cccccccc aka the caller (here)] ping"), sends)
+        self.assertIn("reply `ack cccccccc` through relay.py", sends[0])    # first contact asks for the ack
         self.assertEqual([e for e in self.envs() if e.startswith("send ")], ["send NOID"])
 
     def test_the_sender_tag_falls_back_to_the_session_id_prefix(self) -> None:
@@ -148,7 +153,7 @@ class RelayPaseo(unittest.TestCase):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "dddddddd-0000-4000-8000-000000000004"
         rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.sends(), [f"send --no-wait --behavior steer --json -- {AGENT} [relay from dddddddd] ping"])
+        self.assertEqual(self.sends(), [f"send --no-wait --behavior steer --json -- {AGENT} [relay from claude dddddddd (here)] ping"])
 
     def test_option_looking_text_stays_after_double_dash(self) -> None:
         # without `--` this reads as `--prompt-file=...` and makes paseo send a local file (adversary 2)
@@ -243,6 +248,97 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["result"], "delivered")
 
+    HDR = "[relay from claude cccccccc aka the caller (djbclark-ade-relay-verified-wt)] "    # longer than any fixed-length probe prefix
+
+    def send_and_probe(self, tx: Path, text: str, arrives: str | None) -> tuple[str | None, Any]:
+        """send_paseo(TEXT) to a fake agent whose transcript TX gets the line ARRIVES while the send runs (None: nothing arrives)."""
+        real_run = relay.paseo_run
+
+        def run_and_record(*args: str, **kw: Any) -> tuple[int, str, str]:
+            res = real_run(*args, **kw)
+            if args[0] == "send" and arrives is not None:
+                with tx.open("a") as fh:
+                    _ = fh.write(json.dumps({"text": arrives}) + "\n")
+            return res
+
+        relay.paseo_run = run_and_record
+        try:
+            s = sess(transcript=str(tx))
+            seen = relay.send_paseo(s, text, 1)
+        finally:
+            relay.paseo_run = real_run
+        return seen, s.get("proof")
+
+    def test_two_relays_sharing_one_sender_header_are_not_certified_by_one_transcript_line(self) -> None:
+        # Codex P1, PR 74: the probe was the first 40 characters, which the expanded header alone fills, so a line of
+        # message A certified message B (and an --ack watch) of the same sender to the same target
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        first, second = self.HDR + "first body", self.HDR + "second body"
+        self.assertEqual(self.send_and_probe(tx, first, first)[0], "delivered")
+        seen, proof = self.send_and_probe(tx, second, first)    # concurrent relays: only A's line reached the transcript during B's send
+        self.assertEqual(seen, "accepted")
+        self.assertIsNone(proof())    # the --ack watch is not fooled either
+        with tx.open("a") as fh:
+            _ = fh.write(json.dumps({"text": second}) + "\n")
+        self.assertEqual(proof(), "delivered")    # and it still sees the message once it does arrive
+
+    SPECIAL = "use <b> & \"q\" 's' tail"
+
+    def esc(self, text: str) -> str:
+        return "".join(relay.XML_ESCAPES.get(c, c) for c in text)
+
+    def envelope(self, body: str) -> str:
+        """The Paseo 0.13.0 text of a send that carries a source agent: its label around the XML-escaped body."""
+        return '<paseo-system version="1" kind="agent-message" source-agent-id="a1" message-id="m2">\n' + body + "\n</paseo-system>"
+
+    def test_a_paseo_agent_message_is_verified_whole_with_its_escapes_past_the_old_probe_length(self) -> None:
+        # a source-bearing send (a Paseo-hosted sender) carries no relay header: Paseo wraps the XML-escaped text in its own label
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        text = "x" * 50 + " " + self.SPECIAL
+        line = self.envelope(self.esc(text))
+        self.assertEqual(self.send_and_probe(tx, text, line)[0], "delivered")
+        self.assertEqual(self.send_and_probe(tx, text, line.replace("tail", "other"))[0], "accepted")    # same first 50 characters, another end
+
+    def test_the_relay_prefix_route_is_verified_whole(self) -> None:
+        # no source agent on this route: Paseo stores the text raw
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        self.assertEqual(self.send_and_probe(tx, self.HDR + "ping & more", self.HDR + "ping & more")[0], "delivered")
+
+    def test_a_sourceless_send_is_stored_raw_and_delivered_with_every_special_character(self) -> None:
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        seen, proof = self.send_and_probe(tx, self.SPECIAL, self.SPECIAL)
+        self.assertEqual(seen, "delivered")
+        self.assertIsNone(proof)    # nothing left to wait for
+
+    def test_a_source_bearing_send_is_stored_escaped_and_delivered(self) -> None:
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        self.assertEqual(self.send_and_probe(tx, self.SPECIAL, self.envelope(self.esc(self.SPECIAL)))[0], "delivered")
+
+    def test_the_ack_proof_accepts_the_raw_and_the_escaped_whole_text(self) -> None:
+        for stored in (self.SPECIAL, self.envelope(self.esc(self.SPECIAL))):
+            tx = Path(self.tmp.name) / "tx.jsonl"
+            _ = tx.write_text("{}\n")
+            seen, proof = self.send_and_probe(tx, self.SPECIAL, None)    # nothing arrives during the send window
+            self.assertEqual(seen, "accepted", stored)
+            self.assertIsNone(proof(), stored)
+            with tx.open("a") as fh:
+                _ = fh.write(json.dumps({"text": stored}) + "\n")
+            self.assertEqual(proof(), "delivered", stored)
+
+    def test_a_text_present_in_neither_form_stays_accepted(self) -> None:
+        tx = Path(self.tmp.name) / "tx.jsonl"
+        _ = tx.write_text("{}\n")
+        # the other message's escaped line, a half-escaped mix, and an unrelated line: none is the whole text in either form
+        for line in (self.esc(self.SPECIAL.replace("tail", "other")), self.SPECIAL.replace("&", "&amp;"), "unrelated"):
+            seen, proof = self.send_and_probe(tx, self.SPECIAL, line)
+            self.assertEqual(seen, "accepted", line)
+            self.assertIsNone(proof(), line)
+
     def test_unknown_terminal_for_a_pid_nobody_hosts_still_errors_and_names_paseo(self) -> None:
         s = sess(host="terminal", chan=None, paseo=None, where="unknown terminal")
         rc, _out, err = self.main([s], SID, "ping", "--wait", "1")
@@ -332,12 +428,19 @@ class RelayPaseo(unittest.TestCase):
             self.assertIn("built-ins", err)
         self.assertFalse(self.sends())
 
-    def test_an_empty_or_junk_paseo_agent_id_still_gets_the_sender_tag(self) -> None:
+    def test_an_empty_or_junk_paseo_agent_id_does_not_identify_the_sender(self) -> None:
+        # a junk id names nobody: the send is refused (exit 4, nothing sent) unless the caller declares a label
         for value in (" ", "", "not-a-uuid"):
             os.environ["PASEO_AGENT_ID"] = value
+            os.environ.pop("RELAY_SENDER_NAME", None)
+            sent = len(self.sends())
             rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
-            self.assertEqual(rc, 0, err)
-            self.assertTrue(all("[relay from " in s_ for s_ in self.sends()), (value, self.sends()))
+            self.assertEqual(rc, 4, (value, err))
+            self.assertEqual(len(self.sends()), sent, value)
+            os.environ["RELAY_SENDER_NAME"] = "junk-id-test"
+            rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
+            self.assertEqual(rc, 0, (value, err))
+            self.assertTrue(all("[relay from " in s_ and "junk-id-test" in s_ for s_ in self.sends()), (value, self.sends()))
 
     def test_slash_text_is_not_refused_in_the_middle_of_a_message(self) -> None:
         rc, _out, err = self.main([sess()], SID, "see /tmp/x and /clear", "--wait", "1")
@@ -496,6 +599,25 @@ class WherePaseo(unittest.TestCase):
             where.run = saved
         self.assertEqual(env["PASEO_AGENT_ID"], AGENT)
         self.assertEqual(env["HERDR_ENV"], "1")
+
+    def ps_env(self, argv: str, eww: str) -> dict[str, str]:
+        def run(*cmd: str) -> str:
+            return eww if cmd[:2] == ("ps", "eww") else argv if cmd[:2] == ("ps", "-ww") else ""
+        saved = where.run
+        where.run = run
+        try:
+            return where.env_of(999999999)    # no /proc entry: the ps path
+        finally:
+            where.run = saved
+
+    def test_every_key_is_read_only_from_the_env_part_of_ps_eww(self) -> None:
+        """Adversary r1 A5 (2026-10-25): a prompt in argv that quotes HERDR_PANE_ID=w5:p3 names no pane of that process."""
+        argv = "/bin/codex exec HERDR_PANE_ID=w5:p3 TMUX=/tmp/fake,1,0"
+        self.assertEqual(self.ps_env(argv, f"{argv} PATH=/bin"), {})
+        self.assertEqual(self.ps_env(argv, f"{argv} HERDR_PANE_ID=w1:p1 HERDR_PANE_ID=w9:p9"), {"HERDR_PANE_ID": "w1:p1"})
+
+    def test_no_key_is_read_when_the_argv_cannot_be_separated(self) -> None:
+        self.assertEqual(self.ps_env("totally different", "/bin/x HERDR_PANE_ID=w5:p3 HERDR_ENV=1"), {})
 
     def test_paseo_agent_id_is_dropped_when_the_argv_cannot_be_separated(self) -> None:
         def run(*cmd: str) -> str:

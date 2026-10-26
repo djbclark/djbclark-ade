@@ -195,6 +195,21 @@ def ancestors():
     return pids
 
 
+ANCESTOR_SELF = [True]   # relay.as_caller(scrub=True) sets False: a notice sender hides every id of the session, ancestry included
+_ANC_PANE = [None]       # set by sessions(): the herdr pane an ancestor of this process runs in, when HERDR_PANE_ID is unset
+
+
+def ancestor_pane(anc):
+    """The herdr pane this process runs in, read from an ancestor's environment, or None. Codex's `shell_environment_policy
+    inherit = "core"` (this machine's ~/.codex/config.toml) strips HERDR_PANE_ID from the shell Codex runs a command in, but
+    the `codex` TUI process above that shell keeps it. Used only when this process's own HERDR_PANE_ID is unset; ancestors
+    naming two different panes name none (nothing is guessed)."""
+    if os.environ.get("HERDR_PANE_ID") or not ANCESTOR_SELF[0] or not _where:
+        return None
+    panes = {_where.env_of(pid).get("HERDR_PANE_ID") for pid in anc} - {None, ""}
+    return panes.pop() if len(panes) == 1 else None
+
+
 def short(path):
     return "~" + path[len(HOME):] if path and path.startswith(HOME) else path or ""
 
@@ -359,7 +374,7 @@ def _from_herdr(s, a):
              where=f"herdr · ws {herdr_label('workspace', a['workspace_id'])} · tab {herdr_label('tab', a['tab_id'])}")
     s.update(pane=a["pane_id"], tab=a["tab_id"], workspace=a["workspace_id"], label=a.get("label") or "",
              herdr_status=a.get("agent_status") or "unknown")
-    if a["pane_id"] == os.environ.get("HERDR_PANE_ID"):
+    if a["pane_id"] == (os.environ.get("HERDR_PANE_ID") or _ANC_PANE[0]):
         s["self"] = True
     if a.get("agent_status") in ("idle", "working", "blocked", "done"):
         s["status"] = "idle" if a["agent_status"] == "done" else a["agent_status"]
@@ -676,12 +691,47 @@ def pane_procs(pane):
 SID_IN_ARGV = re.compile(r"(?:--resume|--session|--conversation|--id|-s|-r)(?:=|$)")
 
 
+# The installed Hermes entry is a shell shim that `exec`s one Python process: `python3 -I -c <bootstrap> ARGS...`, with no `hermes` in
+# argv at all (2026-10-25: a native Hermes TUI in a herdr pane, which herdr does not detect, was "no session match" to relay). The
+# bootstrap is recognised by its own three lines, never by the word "hermes" somewhere in a `-c` string: its path insert of the
+# `hermes-agent` checkout, its import of the CLI's `main`, and the exit through it.
+_HERMES_SHIM = tuple(re.compile(p) for p in (r"(?m)^sys\.path\.insert\(0, '[^'\n]*/hermes-agent'\)$",
+                                             r"(?m)^from hermes_cli\.main import main$", r"(?m)^sys\.exit\(main\(\)\)$"))
+# top-level flags that end the run without a chat (one query, help, version) or that take a value (so it is not the subcommand)
+_HERMES_ONESHOT = {"-z", "--oneshot", "-q", "--query", "-h", "--help", "-V", "--version", "--print-runtime-command", "--run-module"}
+_HERMES_VALUE_FLAGS = {"-m", "--model", "--provider", "-r", "--resume", "-p", "--profile", "-t", "--toolsets", "-s", "--skills"}
+
+
+def _hermes_native(argv):
+    """True when ARGV is the installed Hermes entry shim running the interactive chat: `<python> -I -c <bootstrap> [flags]` whose
+    bootstrap carries all three marks, and whose arguments name no subcommand other than `chat` (gateway, acp, mcp, cron, serve ...
+    are services or tools, not a TUI) and no single-shot flag. Hermes decides the same way: its first positional being None or
+    "chat" is the chat. An unknown flag's value taken as the subcommand errs to "not a TUI" (the row is then simply not listed)."""
+    if len(argv) < 4 or not os.path.basename(argv[0]).startswith("python") or argv[1:3] != ["-I", "-c"]:
+        return False
+    if not all(m.search(argv[3]) for m in _HERMES_SHIM):
+        return False
+    if any(tok in _HERMES_ONESHOT or tok.startswith("--oneshot") for tok in argv[4:]):
+        return False
+    first, it = None, iter(argv[4:])
+    for tok in it:
+        if tok == "--":
+            first = next(it, None)
+            break
+        if tok in _HERMES_VALUE_FLAGS:
+            next(it, None)
+        elif not tok.startswith("-"):
+            first = tok
+            break
+    return first in (None, "chat")
+
+
 def _tui_of(procs):
     """(agent label, pid, session id, argv) of the TUI running in a pane, from its foreground processes."""
     for pr in procs or []:
         argv = pr["argv"]
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
-        agent = next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None)
+        agent = next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
         if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
         sid = None
@@ -939,6 +989,7 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
     (test/trial launches their starter drives; helm should ignore them, hcom trial 6g). include_archived adds
     the archived Paseo agents as `ended` rows (fleet.py --all)."""
     anc = ancestors()
+    _ANC_PANE[0] = ancestor_pane(anc)
     agents = herdr_json("agent", "list").get("agents") or []
     panes = herdr_json("pane", "list").get("panes") or []
     by_sid = {(a.get("agent_session") or {}).get("value"): a for a in agents if a.get("agent_session")}
@@ -1292,6 +1343,59 @@ def ago(ts):
     return f"{sec // 86400}d" if sec >= 86400 else (f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}m")
 
 
+# Who has messaged whom, and who ever answered (2026-10-25, queue.md "Verified peer messaging"): relay.py writes
+# the ledger (under its own flock, atomically); fleet only reads it, so a one-way link shows in `fleet.py list`.
+LINKS_FILE = Path(os.environ.get("RELAY_LINKS_FILE") or Path.home() / ".local/state/relay/links.json")
+
+
+def link_key(sender, target):
+    return f"{sender}>{target}"
+
+
+def link_get(links, me, s):
+    """The link record sender ME -> target S in LINKS, or None. A herdr pane id is reused by the next session in the pane, so a record that
+    stored a session id (`sender_sid`, `target_sid`) for either end counts only while that end still has it (adversary r1 A11, 2026-10-25):
+    the new occupant starts as a first contact. A record or an end without a session id is matched by the pane id alone, as before."""
+    ln = links.get(link_key(me["id"], s["id"]))
+    if not isinstance(ln, dict):
+        return None
+    for stored, now in ((ln.get("sender_sid"), me.get("sid")), (ln.get("target_sid"), s.get("sid"))):
+        if stored and now and stored != now:
+            return None
+    return ln
+
+
+def links_read():
+    """The link ledger as {"links": {"<sender>><target>": {sent, first_sent, last_sent, acked, ...}}}; empty when missing or unreadable.
+    Every field is read with .get: an older record may lack a newer one."""
+    try:
+        d = json.loads(LINKS_FILE.read_text())
+    except (OSError, ValueError):
+        d = None
+    if not isinstance(d, dict) or not isinstance(d.get("links"), dict):
+        return {"links": {}}
+    return d
+
+
+def annotate_links(ss):
+    """Set `link` on every row THIS session (the `self` row) has messaged: {"sent": N, "acked": epoch|None}. A link whose peer
+    never answered with `ack <our id>` is one-way: sent, never proven read."""
+    me = next((s for s in ss if s.get("self")), None)
+    if not me:
+        return ss
+    links = links_read()["links"]
+    for s in ss:
+        ln = link_get(links, me, s)
+        if ln is not None:
+            try:
+                sent = int(ln.get("sent") or 0)
+            except (TypeError, ValueError):    # a hand-edited ledger must not stop `fleet.py list`
+                sent = 0
+            s["link"] = {"sent": sent, "acked": ln.get("acked") or None}
+    return ss
+
+
+
 def render(s):
     who = s["agent"] + (f" {s['name']}" if s["name"] else "")
     head = f"[{s['id']}] {who}  {s['status']}  {short(s['cwd'])}"
@@ -1308,6 +1412,10 @@ def render(s):
         lines.append(f"    title: {s['title']}")
     if s["where"]:
         lines.append(f"    where: {s['where']}" + (f"   focus: {s['focus']}" if s["focus"] else ""))
+    if s.get("link"):
+        ln = s["link"]
+        lines.append(f"    link: acked {ago(ln['acked'])} ago" if ln.get("acked") else
+                     f"    link: ONE-WAY, we sent {ln.get('sent', 0)} message(s) and it never answered `ack <our id>` through relay.py: delivered at best, never proven read")
     lines.append(f"    reach: {s['reach']}")
     if s.get("launch") and s["launch"].get("final"):
         lines.append(f"    last: {clip(s['launch']['final'], 200)}")
@@ -1404,6 +1512,7 @@ def main():
         return 0 if items else 1
     ss = sessions(include_shell=a.all or a.cmd == "show", include_archived=a.all)
     warn = messaging_warning()
+    annotate_links(ss)
     if warn:
         print(warn, file=sys.stderr)
     if a.cmd == "show":

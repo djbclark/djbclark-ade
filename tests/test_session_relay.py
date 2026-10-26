@@ -19,6 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, override
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SF = ROOT / "skills" / "session-finder"
@@ -32,6 +33,9 @@ relay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(relay)
 # main() records unsent messages; keep the tests' records out of the real ledger
 relay.UNSENT = Path(tempfile.mkdtemp(prefix="relay-test-")) / "relay-unsent.json"
+
+
+MSG = "[relay from tester] hello there friend"    # what relay types: the sender header, then the text (A1, 2026-10-25)
 
 
 def sess(**kw: Any) -> dict[str, Any]:
@@ -177,7 +181,12 @@ class TestRelayRules(unittest.TestCase):
         relay.RETRY_AFTER = 0
         sys.argv = ["relay.py", "peer-1", "hello there friend", "--wait", "3"]
         try:
-            rc = relay.main()
+            # the header names the sender: any real session identity outranks a declared RELAY_SENDER_NAME (sender_name), so the
+            # runner's own (a Hermes or Paseo session, 2026-10-25: header `hermes xxxx`, the typed text never matched MSG) is cut off
+            with mock.patch.dict(os.environ, {"RELAY_SENDER_NAME": "tester"}), mock.patch.object(relay, "own_paseo_id", lambda: ""):
+                for k in ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID", "RELAY_SENDER"):
+                    os.environ.pop(k, None)
+                rc = relay.main()
         finally:
             (relay.fleet.sessions, relay.type_line, relay.draft, relay.press_enter, relay.screen,
              relay.RETRY_AFTER, sys.argv) = saved
@@ -187,12 +196,12 @@ class TestRelayRules(unittest.TestCase):
 
     def test_text_left_in_the_box_gets_another_enter(self) -> None:
         # first read is the pre-send draft check (empty), then the text sits in the box once, then it is gone
-        rc, enters = self.run_main(["", "hello there friend", ""], "Press up to edit queued messages")
+        rc, enters = self.run_main(["", MSG, ""], "Press up to edit queued messages")
         self.assertEqual(rc, 0)
         self.assertEqual(enters, ["enter"])
 
     def test_queue_hint_is_not_delivery_while_the_text_is_still_in_the_box(self) -> None:
-        rc, enters = self.run_main([""] + ["hello there friend"] * 50, "Press up to edit queued messages")
+        rc, enters = self.run_main([""] + [MSG] * 50, "Press up to edit queued messages")
         self.assertEqual(rc, 1)
         self.assertEqual(enters, ["enter"] * relay.ENTER_RETRIES)
 

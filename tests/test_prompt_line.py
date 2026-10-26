@@ -47,5 +47,55 @@ class PromptLineTest(unittest.TestCase):
         self.assertIsNone(prompt_line.classify(box_bottom, prompt_line.OMP_MARK))
 
 
+BG = f"{E}48;2;65;69;76m"
+OFF = f"{E}0m"
+FOOTER = "GPT-6.1-Sol high · ~/src/example"
+
+
+def shaded(*rows: str) -> str:
+    """A Codex composer: every row in one background, then the unshaded footer."""
+    return "".join(f"{BG}{row}{OFF}\n" for row in rows) + FOOTER + "\n"
+
+
+class CodexComposerRegionTest(unittest.TestCase):
+    def classify(self, screen: str) -> str | None:
+        return prompt_line.classify(screen, "›")
+
+    def test_a_marker_looking_row_inside_the_shaded_region_is_draft_content(self) -> None:
+        for last in ("›", "› "):
+            with self.subTest(last=last):
+                self.assertEqual(self.classify(shaded("› keep this operator draft", last)),
+                                 "keep this operator draft\n›")
+
+    def test_leading_empty_prompt_then_typed_text_then_a_marker_looking_row(self) -> None:
+        self.assertEqual(self.classify(shaded("› ", "typed continuation", "›")), "typed continuation\n›")
+
+    def test_several_marker_looking_continuations_keep_every_row(self) -> None:
+        self.assertEqual(self.classify(shaded("› first", "› second", "›", "› third")), "first\n› second\n›\n› third")
+
+    def test_only_marker_looking_rows_are_still_a_draft(self) -> None:
+        self.assertEqual(self.classify(shaded("› ", "›")), "›")
+
+    def test_an_unshaded_transcript_quote_is_not_a_composer(self) -> None:
+        self.assertIsNone(self.classify("› quoted transcript\nordinary output\n"))
+        self.assertIsNone(self.classify("› quoted transcript\n" + shaded("typed text, no marker row")))
+        # an unstyled quote below a styled draft is no composer boundary either: fail closed
+        self.assertIsNone(self.classify(shaded("› draft") + "› quote after it\n"))
+
+    def test_a_prior_shaded_block_apart_from_the_composer_is_not_the_draft(self) -> None:
+        old = shaded("› an earlier message the operator already sent", "its second line")
+        old = old.replace(FOOTER + "\n", "assistant answer\n")
+        self.assertEqual(self.classify(old + shaded(f"› {E}2mAsk Codex to do anything{OFF}", "")), "")
+        self.assertEqual(self.classify(old + shaded("› unsent draft", "›")), "unsent draft\n›")
+
+    def test_a_current_empty_composer_does_not_hide_behind_an_older_drafted_block(self) -> None:
+        old = shaded("› older", "text").replace(FOOTER + "\n", "assistant answer\n")
+        self.assertEqual(self.classify(old + shaded("› ", "")), "")
+
+    def test_text_above_the_first_visible_marker_in_the_region_counts(self) -> None:
+        # the screen window can cut a long draft: the shaded rows above the first visible marker are still draft text
+        self.assertEqual(self.classify(shaded("scrolled-off tail of a draft", "›")), "scrolled-off tail of a draft")
+
+
 if __name__ == "__main__":
     unittest.main()

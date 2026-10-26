@@ -549,7 +549,7 @@ fork) is detected by hash, not by size.
 
 ### 6.4 Memory
 
-Basic Memory stays: markdown in git plus a per-machine index<sup>[57](#C25)</sup>. The seven empty
+Basic Memory stays: markdown in git plus a per-machine index<sup>[57](#C25)</sup>. The eight empty
 `~/agent-memory/*` projects are removed or pointed into the companion. `hermes-memory` moves into
 the companion. The SiYuan and `~/kb` stores are out of scope (section 5). Concurrency is the
 lock-and-push rule of section 4.6.

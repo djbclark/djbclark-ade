@@ -127,7 +127,7 @@ with:
 
 Durable machine facts belong in the curated layer, not a handoff: an
 operator-verified fact goes to `docs/` or the relevant skill; model-mined
-leads land in `~/basic-memory/mined/` via `bin/mine_sessions.py`. A
+leads used to land in `~/basic-memory/mined/` via `~/ops/site-djbclark/bin/mine_sessions.py`. That folder was moved to `~/ops/site-private/memory/basic-memory/mined/` (frozen since 2026-08-24, to be archived per queue ruling 5); nothing writes to it now, so the lead has no home yet. A
 handoff that carries them becomes a second canon that nobody updates.
 
 ## Step 4 — Write the file
@@ -155,12 +155,34 @@ the ops-djbclark suite or `<repo-root>/docs/handoffs/` otherwise (slug:
     ## The Goal
     ## Where We Are
     ## What We Tried            <- failed approaches, chronological, with why
-    ## Key Decisions            <- chosen AND rejected
+    ## Key Decisions            <- chosen AND rejected, as prose
+    ## Decisions               <- the same decisions in indexed form, one per line (syntax below)
+    ## Relations                <- indexed relations, one per line (syntax below)
     ## Evidence & Data          <- real numbers, file paths
     ## Operator Feedback
     ## Where We're Going        <- ordered; item 1 is THE next action
     ## Detached jobs            <- one entry per open job record, or "none"
     ## Quick Start              <- exact commands for the next session
+
+`## Decisions` and `## Relations` are indexed by Basic Memory: handoffs written
+to `~/ops/site-private/memory/handoffs/` become observations and relations. Use
+exactly this syntax (checked 2026-10-25 against Basic Memory 0.24.1's observation and
+relation parser):
+- `- [decision] <choice>; rejected: <alternative>; because <reason>`
+- `- [ruling] <what djbclark said, quoted> (djbclark, YYYY-MM-DD)`
+- `- continues [[<previous handoff's file stem, HANDOFF_..._<id>>]]` (a handoff resolves by its file stem,
+  never by its `# Handoff — <title>` heading)
+- `- decided_in [[<file stem of the handoff that made the decision>]]` (the first handoff of a chain has no earlier
+  one: use its own stem); a PR is no note, so give it as a Markdown link inside the observation, and end the
+  line with the link plus a full stop, never with a closing parenthesis after the link (Basic Memory's parser
+  drops a `[category] ...` line that contains `](` and ends in `)`): `- [decision] <choice>; rejected:
+  <alternative>; because <reason>; in [PR N](https://github.com/OWNER/REPO/pull/N).`
+- no `part_of [[<repo>]]`: no repo notes exist in the store, so it would never resolve (create the repo note first
+  if you want that relation)
+
+A `[ruling]` is only for something djbclark said, quoted and dated, never for
+your own choice. An agent's own design choice is a `[decision]` with a
+`decided_in` relation to the handoff that made it, or a PR link as above.
 
 Each `## Detached jobs` entry gives: the job file (`.../jobs/<name>.json`), the
 report path, the `.done` path (and whether it exists now), the exact `rearm`
@@ -184,6 +206,7 @@ next `/baton` re-arms from these entries.
       (or the section says "none"), and nothing in the doc assumes a
       `run_in_background` task or waiter survives the session
 - [ ] Parent linkage (ids, or explicit none)
+- [ ] `## Decisions` and `## Relations` use the indexed syntax; every `[ruling]` is quoted and dated
 - [ ] Redaction: no credentials, tokens, .env values, key material,
       anywhere in the doc
 
@@ -255,6 +278,14 @@ then start a baton and continue running without human intervention"). Run
 to this same agent and then exactly one `/baton` into the fresh session; on herdr and Orca it sends
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
+
+On a **Codex** pane (herdr reports the pane's agent as `codex`) the same command sends the built-in `/new` and then
+`$baton`: Codex invokes a skill with `$`, and `/baton` there is plain text that starts nothing (2026-10-25). Nothing
+changes in how you call it; `self-slash` chooses the spelling and `--dry-run` prints the text it will send. If you give
+`--then` yourself on Codex, single-quote the `$` so the shell keeps it: `--then '$baton /path/SESSION_LOG.md'` (the
+legacy `--then "/baton /path"` is rewritten once, keeping every byte of the path). A Codex skill prompt is submitted
+once, never with extra Enters, and counts as sent only when that Codex session's rollout holds the exact message;
+otherwise the waiter exits 8 and logs `NOT confirmed delivered`: report that, never type it again.
 
 **One contract on every host (2026-10-25, agreed with the Paseo lead):** (a) the default is the same agent with
 a fresh context, the command above: no new process, and its name, model, effort, mode, pane or workspace are

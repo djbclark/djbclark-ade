@@ -5,6 +5,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 # Never make fixtures inside the real dispatch state root. A slice that ran these tests with
 # TMPDIR under its task dir (2026-10-14, gnu-normalize) left 80 acpd-* fixture trees there, whose
 # fake jobs/*.json records reap, the in-flight cap and dispatch history then scanned as real.
@@ -57,3 +59,13 @@ REAL_RELAY_DIR = Path.home() / ".local/state/relay"
 _DEFER_ROOT = Path(tempfile.mkdtemp(prefix="relay-suite-defer-"))
 atexit.register(shutil.rmtree, _DEFER_ROOT, ignore_errors=True)
 os.environ["RELAY_DEFER_DIR"] = str(_DEFER_ROOT / "relay" / "deferred")
+# fleet.LINKS_FILE (who has messaged whom, and who ever acked; relay.py writes it, fleet.py list reads it, 2026-10-25): never the
+# operator's real ledger. Unconditional, like RELAY_DEFER_DIR.
+os.environ["RELAY_LINKS_FILE"] = str(_DEFER_ROOT / "relay" / "links.json")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_relay_links():
+    """No test inherits another's first-contact state: relay.py's footer and the link ledger depend on it (2026-10-25)."""
+    Path(os.environ["RELAY_LINKS_FILE"]).unlink(missing_ok=True)
+    yield

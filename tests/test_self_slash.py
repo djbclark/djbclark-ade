@@ -13,6 +13,7 @@ tests poll the self-slash log for its last line.
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import tempfile
 import textwrap
@@ -117,6 +118,11 @@ class SelfSlashPaseoTests(unittest.TestCase):
         fake = bindir / "paseo"
         _ = fake.write_text(FAKE_PASEO)
         fake.chmod(0o755)
+        self.watch = tmp / "fake-watch"
+        _ = self.watch.write_text('#!/bin/bash\ncat "$FAKE_WATCH_JSON"\n')
+        self.watch.chmod(0o755)
+        self.watch_json = tmp / "watch.json"
+        _ = self.watch_json.write_text("[]")
         self.calls = tmp / "paseo-calls.txt"
         self.log = self.home / ".local" / "state" / "self-slash.log"
         self.lockdir = self.home / ".local" / "state" / "self-slash"
@@ -124,7 +130,8 @@ class SelfSlashPaseoTests(unittest.TestCase):
                if not k.startswith(("HERDR_", "ORCA_", "PASEO_", "SELF_SLASH_", "FAKE_", "ACP_RUN_AGENT"))}
         env.update(HOME=str(self.home), PATH=f"{bindir}:{os.environ['PATH']}",
                    PASEO_AGENT_ID="test-agent", PASEO_CLI=str(fake), FAKE_LOG=str(self.calls),
-                   SELF_SLASH_THEN_DELAY="0", SELF_SLASH_WAIT="30")
+                   SELF_SLASH_THEN_DELAY="0", SELF_SLASH_WAIT="30",
+                   SELF_SLASH_WATCH_CMD=str(self.watch), FAKE_WATCH_JSON=str(self.watch_json))
         self.env = env
         self.children: list[int] = []
         self.addCleanup(self._kill_children)
@@ -196,6 +203,46 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertFalse(any("--force" in c for c in calls), calls)
         self.assertFalse(any(c.startswith("send") for c in calls), calls)
         self.wait_lock_gone()
+
+    def hold_watch(self, target: str) -> None:
+        _ = self.watch_json.write_text(json.dumps([{"domain": "load", "holder": {"target": target, "name": "loadwatch"}},
+                                                   {"domain": "paseo", "holder": None}]))
+
+    def test_finish_and_quit_are_refused_for_a_watch_holder(self) -> None:
+        self.hold_watch("test-agent")
+        for args in (("--finish",), ("/quit",)):
+            r = self.run_ss(*args)
+            self.assertEqual(r.returncode, 12, r.stderr)
+            self.assertIn("holds a watch role", r.stderr)
+        self.assertFalse([c for c in self.paseo_calls() if c.startswith("agent archive")], self.paseo_calls())
+
+    def test_finish_is_allowed_for_a_non_holder_and_with_the_override(self) -> None:
+        self.hold_watch("some-other-agent")
+        self.assertEqual(self.run_ss("--finish").returncode, 0)
+        self.wait_log("finish: archived test-agent")
+        self.wait_lock_gone()
+        self.hold_watch("test-agent")
+        r = self.run_ss("--finish", SELF_SLASH_ALLOW_WATCHER="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_watch_holder_can_still_hand_over_through_a_successor(self) -> None:
+        self.hold_watch("test-agent")
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        self.assertNotIn("refused", self.log_text())
+
+    def test_holder_prefix_matches_like_bin_watch(self) -> None:
+        self.hold_watch("test-ag")
+        self.assertEqual(self.run_ss("--finish").returncode, 12)
+
+    def test_watch_status_failure_or_timeout_fails_open(self) -> None:
+        for body in ("exit 1", "echo not-json", "sleep 5"):
+            _ = self.watch.write_text(f"#!/bin/bash\n{body}\n")
+            r = self.run_ss("--finish", SELF_SLASH_WATCH_TIMEOUT="1")
+            self.assertEqual(r.returncode, 0, (body, r.stderr))
+            self.wait_log("finish: archived test-agent")
+            self.wait_lock_gone()
 
     # (b)
     def test_quit_on_paseo_maps_to_finish_and_sends_no_text(self) -> None:

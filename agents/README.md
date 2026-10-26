@@ -17,19 +17,19 @@ these with the companion's data, as a `modify_` merge and never a symlink, becau
 ## Codex tool environment (2026-10-25)
 
 `[shell_environment_policy]` in `codex/config.toml.tmpl` decides which variables a Codex tool command gets. It is
-`inherit = "all"` plus an exact legacy `include_only` allowlist: the variables `inherit = "core"` gave (`HOME LANG
-LC_ALL LC_CTYPE LOGNAME PATH SHELL TEMP TMP TMPDIR USER`, read back from Codex 0.164.0 on macOS), the four Herdr
-owner ids (`HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`), the two routing paths seen in a live Codex process
-on 2026-10-25 (`HERDR_SOCKET_PATH HERDR_BIN_PATH`, service locations, not identity) and the `set` keys. Any other
-`HERDR_*` (`HERDR_SESSION`, `HERDR_ACTIVE_*`, plugin variables) stays out. Outside Herdr none of the six exists, so none
-appears; no value is written into the file. `acp-run` drops the four owner ids from the agents it starts; the relay
-deliverer keeps no owner id. `tests/test_codex_shell_env_policy.py` pins it,
-including a read-back through the installed `codex app-server` (no model call).
+`inherit = "all"` (operator ruling, 2026-10-25: a tool keeps the launching terminal's environment, which restores the
+Herdr pane ids `HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`, the routing paths `HERDR_SOCKET_PATH
+HERDR_BIN_PATH`, and multiplexer and runtime variables such as `TERM`, `TMUX` and `SSH_AUTH_SOCK`), with Codex's default
+`KEY`/`SECRET`/`TOKEN` name exclusions kept on (`ignore_default_excludes = false`) and the `set` keys applied after
+them. There is no `include_only` allowlist: an arbitrary terminal environment reaches tools by decision. Outside Herdr
+no `HERDR_*` variable exists, so none appears; no value is written into the file. `acp-run` drops the four owner ids
+from the agents it starts; the relay deliverer keeps no owner id. `tests/test_codex_shell_env_policy.py` pins the
+policy, including a read-back through the installed `codex app-server` (no model call).
 
-1. `include_only` runs after `set` (probed 2026-10-25, Codex 0.160.1, 0.163.0, 0.164.0): add a `set` key and its
-   name to the allowlist together.
-2. The newer `filters` table is not used: Codex 0.163.0 ignores it, and `inherit = "all"` would then pass every
-   variable.
+1. `ignore_default_excludes = false` is the one filter: it removes variables whose names contain `KEY`, `SECRET` or
+   `TOKEN` before `set` runs. `set` values are never removed by it.
+2. Do not add `include_only` or `filters` without an operator decision: Codex 0.163.0 ignores `filters`, and
+   `include_only` runs after `set`.
 3. The live file is a regular file Codex also writes and it holds credentials (MCP headers, tokens): **never `rg`,
    `grep -C`, `cat` or diff it, or print any context around the policy; use the helper's dry run.**
    `bin/codex-env-policy-apply TEMPLATE TARGET` prints a diff of the policy span only (the two `shell_environment_policy`
@@ -41,7 +41,7 @@ including a read-back through the installed `codex app-server` (no model call).
    Diagnostics name files and `set` keys, never values; a TOML parse error is reduced to line and column.
    A running Codex keeps the policy it started with; only sessions started after the change see it.
 4. Detached fallback. `acp-run` and the relay deliverer already drop the four owner ids. A headless command started
-   any other way from a Codex tool (for example `codex exec` or a worker script outside ACP) inherits all six names,
+   any other way from a Codex tool (for example `codex exec` or a worker script outside ACP) inherits the whole Codex environment (including the six Herdr names),
    so it must clear the owner ids itself: `env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID
    COMMAND`. `HERDR_SOCKET_PATH` and `HERDR_BIN_PATH` are service routing, not identity, and may stay.
 

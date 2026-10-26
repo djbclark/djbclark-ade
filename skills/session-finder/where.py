@@ -40,9 +40,11 @@ def run(*cmd):
 
 def env_of(pid):
     """The KEYS found in PID's environment. Linux: /proc/<pid>/environ, exact. Elsewhere `ps eww` prints the
-    argv and then the environment on one line, so PASEO_AGENT_ID is taken only from after the argv (the
-    process's own `ps -o command=`), first occurrence: an argv word or a later value that contains
-    ` PASEO_AGENT_ID=<other>` cannot override it (adversary, 2026-10-20)."""
+    argv and then the environment on one line, so EVERY key is taken only from after the argv (the process's own
+    `ps -o command=`), first occurrence: an argv word or a later value that contains ` KEY=<other>` cannot
+    override or invent one (adversary, 2026-10-20 for PASEO_AGENT_ID; 2026-10-25, r1 A5, for every key: a prompt in argv
+    quoting `HERDR_PANE_ID=w5:p3` named a pane the process is not in). An argv that cannot be separated from the
+    environment yields nothing."""
     try:
         raw = Path(f"/proc/{int(pid)}/environ").read_bytes()
     except (OSError, ValueError):
@@ -58,15 +60,10 @@ def env_of(pid):
     args = run("ps", "-ww", "-o", "command=", "-p", str(pid)).strip()
     env_part = out.strip()[len(args):] if args and out.strip().startswith(args) else None
     env = {}
-    for tok in out.split(" "):
-        k, sep, v = tok.partition("=")
-        if sep and k in KEYS and k != "PASEO_AGENT_ID":
-            env[k] = v.strip()
     for tok in (env_part or "").split(" "):
         k, sep, v = tok.partition("=")
-        if sep and k == "PASEO_AGENT_ID":
+        if sep and k in KEYS and k not in env:
             env[k] = v.strip()
-            break
     return env
 
 

@@ -341,17 +341,48 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 | a headless `acp-dispatch` slice (including custom `--out` records and workers with no fleet row) | `relay.py /absolute/jobs/NAME.json "<text asking for ack NAME>" --via dispatch`; `queued` is not delivery; verify the named acknowledgement in the printed replies file | `acp-dispatch resume <record>` only for a new authorized task, never as a relay side effect |
 | an `acp-dispatch` / `acp-run claude` slice (headless) | Use `relay.py` with its fleet id or exact job-record path as in the previous row; verify a named acknowledgement in the replies file. Slices older than 051a269 lack the inbox-reading footer: reach them through their lead. | `acp-dispatch resume RECORD` only for a new authorized task |
 | hermes (Telegram/desktop chat, `hermes-gw`) | `relay.py <id|sid> "<text>"` (2026-10-23): `hermes --resume <sid> -z` runs one turn in that conversation's own transcript, tagged `[relay from <name>] `; Hermes's reply is printed (untrusted data, not posted in the chat); it refuses Hermes's own conversation, an unknown session is refused before writing, any other failure is "unverified" and a turn past max(100, `--wait`) s is left running (relay.py never kills it; a caller's tool timeout that kills the process tree does, so give the command max(100, `--wait`) + 50 s or run it in the background) and holds a per-conversation lock (a cut-off relay.py counts as unverified: do not resend). `ask_hermes` (MCP) is a separate one-shot session, not this conversation; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
-| hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
+| hermes (CLI in a pane) | `helm.py send <pane> "<text>"` when herdr shows it idle; a native Hermes TUI herdr does not detect is the row below (`show`, then `send --screen-fp`) | same |
 | hermes (to make it *change* something: `ask_hermes` is read-only) | after djbclark's yes for that run: `ACP_OPERATOR_APPROVED=hermes launch.py --agent hermes --cwd ~ -f brief.md --model <explicit id>`; pick the id from its `new_session` model list, never `custom:*` (2026-10-17: `custom:big-pickle` went to sipb-llms-proxy, not ClinePass) | `launch.py reply <id>` |
 | muse | `muse session-message send --target <uuid|name>`, body on stdin | `muse resume <id>` |
-| codex, cursor, opencode, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:` | the `resume:` line session-history prints |
-| a TUI herdr does not detect (`zcode`, `muse`, …; listed from `pane process-info`, status `unknown`) | `helm.py send <pane> "<text>"` only after reading its screen | the `resume:` line session-history prints |
+| codex, cursor, opencode, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:`. A herdr-idle agent whose agent API refuses input (`agent_not_ready: not an active named agent`, seen on a Crush pane 2026-10-25): `helm.py show <id>`, read the screen (empty input, nothing pending), then `helm.py send <id> --screen-fp <fp> "<text>"` (pane verbs; fresh-screen and pane checks, plus the pid where fleet knows it; never for a working, question, permission, plan, finished or self row). Without the flag an idle row still uses `agent prompt` | the `resume:` line session-history prints |
+| a TUI herdr does not detect (`zcode`, `muse`, a native Hermes TUI, …; listed from `pane process-info`, status `unknown`: never idle by itself, `helm.py send` refuses it) | `helm.py show <pane>` (prints the screen and `screen-fp`, both from one capture; none, and no send command, if herdr could not read the screen), read that screen, and only if it shows an idle, empty input (a dimmed suggestion is not a draft) and no pending question, approval or plan: `helm.py send <pane> --screen-fp <fp> "<text>"` (2026-10-25). Herdr has no agent entry for such a TUI (`herdr agent read` and `agent prompt` fail `agent_not_found`), so helm reads with `herdr pane read` and types with `pane send-text` then `pane send-keys enter`, after the second fingerprint check; a failed typing never presses Enter, is never retried and reports "unverified, do not resend". It is refused if the screen is unreadable or changed since (elapsed-time counters are ignored, so a turn that shows only as a ticking timer is not seen), is another pane or process, or the row is not such a TUI; nothing is inferred from the screen. `sent` is a submit, not a read: verify on screen (`helm.py show`) or by a named acknowledgement in the text | the `resume:` line session-history prints |
 | anything in Ghostty/iTerm/ssh with no channel | tell the operator the `where:` line | — |
 | a pane `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
 
 Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
 bypass a permission denial; grok is excluded (2026-10-06).
+
+## Verified peer messaging (2026-10-25, standing order 10; docs/queue.md "Verified peer messaging")
+
+Proof, not conversation: delivery proof (the text reached the target's transcript) is mechanical and needs no reply; a reply is required
+only where the message asks a question or requests action. An FYI that provably landed needs none.
+
+1. **`--ack`**: `relay.py <id> "<text>" --ack`. A send that is only `accepted` (a socket frame or Paseo send to a working session) or `queued`
+   (an enqueue Claude Code has not taken yet, a deferred record) is watched for up to `--wait` more seconds and exits **0 delivered**,
+   **1 not delivered** (not sent, pulled back out of the queue, failed or expired), **3 unverified** (sent or still queued, no proof yet: do not resend; an
+   ACP inbox or a Paseo agent with no Claude transcript has nothing to read, so it is unverified at once). Without `--ack` the exit codes
+   are unchanged (`queued` and `accepted` still exit 0), because fleet-watch, load-watch, session-load-watch and rumination-watch read 0 as "taken".
+   `--json` carries `ack` and `ack_note`. Use `--ack` whenever you will act on "they have it".
+2. **A question or an action request needs `--expect-ack ID`**: a `?` outside a URL, or `--needs-reply`, is refused (exit 2, nothing sent) without it
+   when you are an identifiable session; `--fyi` overrides a `?` that is no question. `ID` is 1-40 characters of `A-Za-z0-9._-`, unique among open ones. The sent text
+   ends `[reply through relay.py to <your id>: ack ID]`. It is **state, not a wait**: `relay.py --pending` lists it (sender, target, age, `OVERDUE`;
+   `--json` rows have `"kind": "expect"`), and `relay.py --sweep` resolves it when a user-role line in YOUR transcript says `ack ID` under the target's relay header (its ID word or `aka` name; a Hermes session answers as `hermes <last 8 of its session id>`;
+   two sessions with one name are not told apart, and a same-uid process can forge a header) (your own tool calls and results never count). After `--ack-within S` (default 1800) with no answer it is OVERDUE: the sweep prints `OVERDUE ack ID: ...`, and **you tell the operator**; never assume read.
+3. **First contact**: the first message from your session to a peer carries ` [first contact from <your id>: reply `ack <your id>` through relay.py ...]`.
+   The ledger `~/.local/state/relay/links.json` records who you messaged; `--sweep` marks the link acked when a user line in your transcript says `ack <your id>` and names the peer
+   (or an `--expect-ack` from it resolved); `fleet.py list` then shows `link: acked` or `link: ONE-WAY` (sent, never answered) under that peer.
+4. **Inbound**: a message tagged `[relay from KIND ID (DIR)]` (`KIND ID aka NAME (DIR)` for a named session; or `[queued Nm ago] [relay from ...]`, or a Paseo
+   agent message) that **asks a question or requests action is answered by `relay.py <ID> "<answer>"`** (ID is the second word: a herdr pane id such as w2F:p45, a session
+   id prefix, a Paseo agent id; a job's declared label, `[relay from load-watch]`, has no ID and cannot be replied to: tell the operator instead), never only in your own prose: your prose does not reach it. The sender is read from the sending process (2026-10-25): fleet's `self`
+   row, `HERDR_PANE_ID` or the pane an ancestor runs in, `PASEO_AGENT_ID` or the Paseo agent above it, `CLAUDE_CODE_SESSION_ID`, `HERMES_SESSION_ID` (a relay Hermes starts itself is `hermes SID8`), `RELAY_SENDER_NAME`. A Codex tool shell
+   has none of these variables (`shell_environment_policy inherit = "core"`), so relay reads the `codex` process above it. **A relay whose sender resolves to none of these
+   is refused, never sent (2026-10-25)**: exit 4, nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`), the message names every
+   variable and ancestor source checked; **re-run it with `RELAY_SENDER_NAME=<label> relay.py ...`** (a launchd job or script with no session; a relay Hermes starts itself is named `hermes SID8` and sends) or from inside a
+   session. `[relay from unknown]` is never sent, so a header you read always names a sender you can answer. A footer
+   `[reply through relay.py to ID: ack X]` means start the answer with `ack X`. A message that asks `ack <id>` as first contact: send `relay.py <id> "ack <id>"`.
+   An FYI needs no reply. After a relay that is not `delivered`, read its status word; `queued`, `accepted`, `unverified` are not proof.
+
 
 ## Direct Herdr control and detached relay workers (2026-10-25)
 
@@ -377,7 +408,9 @@ case, recover only this TUI's inherited context from its own live process and
 owning shell, verify that both descend from Herdr and agree on the caller
 IDs, and pass those verified values explicitly to the helper. Confirm that
 `agent get` for that pane names this TUI's exact session ID before controlling
-it. Never substitute the UI-focused pane or another process's context.
+it. A verified live server handoff can reparent the owning shell; retain the
+previous caller-context receipt and confirm the same TUI/session mapping with
+the new server. Never substitute the UI-focused pane or another process's context.
 
 This is a boundary for an agent's direct control of its current session.
 Detached `relay.py` delivery workers intentionally scrub caller identity and
@@ -387,6 +420,27 @@ those workers or weaken their target and delivery checks. Use the canonical
 relay from outside Herdr when coordinating an explicitly requested peer.
 
 ## Codex messages in Herdr (2026-10-25)
+
+`self-slash` also supports Codex's shaded `›` composer. It preserves multiline
+drafts, waits for Herdr to report `idle` or `done`, and submits through the
+atomic agent surface. Its detached waiter starts a new process session so a
+tool executor's process-group cleanup cannot take it down. An ambiguous Codex
+submission failure ends the waiter without a resend. A queued lifecycle is
+not proof it ran: check `self-slash.log` and the new thread before reporting
+automatic continuation.
+
+**Skill versus built-in in a Codex pane (2026-10-25).** Codex invokes a skill as `$name` and keeps `/name` for its
+built-ins (`/new`, `/compact`, `/quit`). `self-slash` keeps `/new` and the other built-ins as they are and sends the
+follow-up skill as `$baton` (default `--then`), rewriting a legacy `--then "/baton PATH"` once into `$baton PATH`
+(exact command name `/baton` at the start only; the rest of the text is untouched). It chooses by the provider herdr
+reports for the pane, confirmed again with `herdr agent get` (provider, this pane, idle or done) right before the
+submit; a missing or different identity submits nothing (exit 8), a pane herdr reports no agent for gets no baton
+follow-up at all (exit 3), and `$baton` is refused (exit 2) for any other client. In a shell, single-quote it:
+`--then '$baton PATH'`. A Codex skill prompt goes in with one `herdr agent prompt`, no Enter and no retry, and is
+reported sent only when herdr still names the same pane as codex and that session's rollout holds a user message that
+is exactly the text, byte for byte (paths with runs of spaces are not folded), stamped after the submit
+(`SELF_SLASH_RECEIPT_WAIT`, default 30 s); otherwise exit 8 `NOT confirmed delivered`. Text still in the composer or a
+zero exit from herdr is not proof.
 
 Relay submits a Herdr message with one `herdr agent prompt` call, so the entire
 message is bracketed paste followed by submission. Do not replace that with raw

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """Codex tool-subprocess environment policy in agents/codex/config.toml.tmpl (2026-10-25).
 
-`inherit = "core"` stripped the Herdr pane identity from every tool Codex ran, so a Herdr-aware tool could not
-find its own pane (HERDR_ENV, HERDR_WORKSPACE_ID, HERDR_TAB_ID, HERDR_PANE_ID were set in the Codex process and
-its parent shell, absent in the tool). The template now says `inherit = "all"` plus a legacy `include_only`
-allowlist: the old core set, the six Herdr names (four owner ids, two routing paths) and the explicit `set` keys, and nothing else.
+`inherit = "core"` stripped the Herdr pane identity (HERDR_ENV, HERDR_WORKSPACE_ID, HERDR_TAB_ID, HERDR_PANE_ID, and
+the routing paths HERDR_SOCKET_PATH, HERDR_BIN_PATH) and the multiplexer and runtime variables of the launching
+terminal from every tool Codex ran. Operator ruling (2026-10-25, after a first allowlist design): the template says
+`inherit = "all"` with Codex's default KEY/SECRET/TOKEN name exclusions on and the explicit `set` keys applied after
+them. Inheriting an arbitrary terminal environment is intentional; these tests prove what that policy does, not
+whether it should.
 
 Three layers:
 
-1. Structure of the rendered policy (always runs). Facts about Codex it depends on, probed 2026-10-25 on 0.160.1,
-   0.163.0 and 0.164.0: `include_only` runs AFTER `set` (a `set` key that is not listed vanishes); 0.163.0 ignores
-   the newer `filters` table, so under `inherit = "all"` it would pass the whole environment.
+1. Structure of the rendered policy (always runs).
 2. The installed Codex, through `codex app-server` and `thread/shellCommand` (the `!cmd` path): no model is
    called, a throwaway CODEX_HOME holds the rendered policy, and the tool's real environment is read back.
    Skipped where `codex` is not installed (hosted CI).
 3. The detached-child scrub: what `acp-run` and the relay deliverer would start a Codex with, run through the
-   same probe, shows no Herdr id.
+   same probe, shows none of the four owner ids.
 """
 from __future__ import annotations
 
@@ -39,10 +39,9 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "agents" / "codex" / "config.toml.tmpl"
 
-CORE = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TEMP", "TMP", "TMPDIR", "USER")
 OWNER = ("HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID")  # who this pane is
 ROUTING = ("HERDR_SOCKET_PATH", "HERDR_BIN_PATH")  # which Herdr to talk to: service paths, not identity
-HERDR = OWNER + ROUTING  # the six names the allowlist admits (live Codex process, 2026-10-25)
+HERDR = OWNER + ROUTING  # the six names a live Codex process had (2026-10-25)
 SET_KEYS = {
     "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "DIGESTS",
     "BASH_ENV": "HOME/.bashrc",
@@ -54,10 +53,13 @@ SET_KEYS = {
 }
 IN_HERDR = {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w9", "HERDR_TAB_ID": "w9:t7", "HERDR_PANE_ID": "w9:p7",
             "HERDR_SOCKET_PATH": "/tmp/herdr-test.sock", "HERDR_BIN_PATH": "/tmp/herdr-test-bin"}
-# Other HERDR_* names: a named session, plugin popup context, the active-pane hints. Never wanted in a tool's environment.
-HERDR_NEIGHBOURS = {"HERDR_SESSION": "other", "HERDR_ACTIVE_PANE_ID": "w1:p1", "HERDR_PLUGIN_ID": "p", "HERDR_FUTURE_THING": "x"}
-SYNTHETIC_SECRETS = {"ZZ_SYNTHETIC_SECRET": "s3", "OPENAI_API_KEY": "k1", "GITHUB_TOKEN": "t1", "AWS_SESSION": "a1",
-                     "DB_PASSWORD": "p1", "SSH_AUTH_SOCK": "/tmp/agent.sock", "ANTHROPIC_AUTH": "x1", "TERM": "xterm"}
+# Other HERDR_* names: a named session, plugin popup context, the active-pane hints. `inherit = "all"` passes them too.
+HERDR_NEIGHBOURS = {"HERDR_SESSION": "other", "HERDR_ACTIVE_PANE_ID": "w1:p1", "HERDR_PLUGIN_ID": "p"}
+# What `inherit = "core"` dropped and the launching terminal's context needs (the operator's ruling).
+TERMINAL_CONTEXT = {"TERM": "xterm-256color", "COLORTERM": "truecolor", "TMUX": "/tmp/tmux-1/default,1,0", "TMUX_PANE": "%3",
+                    "SSH_AUTH_SOCK": "/tmp/agent.sock", "XDG_STATE_HOME": "/x/state", "TZ": "UTC", "HTTPS_PROXY": "http://p"}
+# Names Codex's default exclusions (KEY, SECRET, TOKEN) remove before `set` runs.
+SYNTHETIC_SECRETS = {"ZZ_SYNTHETIC_SECRET": "s3", "OPENAI_API_KEY": "k1", "GITHUB_TOKEN": "t1"}
 
 
 def rendered(home: str) -> dict:
@@ -89,26 +91,11 @@ class Policy(unittest.TestCase):
         want = {**SET_KEYS, "BASH_ENV": self.home + "/.bashrc"}
         self.assertEqual(self.p["set"], want)
 
-    def test_every_set_key_is_on_the_allowlist(self) -> None:
-        # include_only runs after set: an unlisted set key is silently dropped (probed on Codex 0.160.1-0.164.0).
-        allowed = {x.upper() for x in self.p["include_only"]}
-        for k in self.p["set"]:
-            self.assertIn(k.upper(), allowed, k)
-
-    def test_the_allowlist_is_core_plus_the_six_herdr_names_plus_set_keys_and_nothing_else(self) -> None:
-        names = self.p["include_only"]
-        self.assertEqual(len(names), len(set(names)), "duplicate entry")
-        self.assertEqual(set(names), set(CORE) | set(HERDR) | set(self.p["set"]))
-        for n in names:
-            self.assertNotRegex(n, r"[*?\[]", f"{n}: a pattern, not a name")
-
-    def test_inherit_all_is_never_unfiltered(self) -> None:
+    def test_inherit_all_keeps_codex_default_exclusions(self) -> None:
         self.assertEqual(self.p["inherit"], "all")
-        self.assertTrue(self.p["include_only"])
-        self.assertIs(self.p.get("ignore_default_excludes"), False)  # KEY/SECRET/TOKEN names go first, whatever is listed
-        # 0.163.0 ignores `filters`; mixing it with include_only is rejected by 0.164.0.
-        self.assertNotIn("filters", self.p)
-        self.assertNotIn("exclude", self.p)
+        self.assertIs(self.p.get("ignore_default_excludes"), False)  # KEY/SECRET/TOKEN names are removed first
+        for k in ("include_only", "exclude", "filters"):  # the operator's ruling: no allowlist, no extra filter
+            self.assertNotIn(k, self.p)
 
     def test_no_fixed_pane_id_is_written_into_the_policy(self) -> None:
         # ids come from the process Codex runs in: nothing in the policy may name a pane
@@ -188,7 +175,7 @@ def noise(env: dict[str, str]) -> dict[str, str]:
     tidy = lambda v: re.sub(r"codex-arg0\w+", "codex-arg0X", re.sub(r"/cxpol-[^/:]+", "/cxpol-X", v))  # per-run temp names
     # PATH: Codex adds its own directories and the login shell reorders it, run to run; compare its entries as a set.
     return {k: (frozenset(tidy(v).split(":")) if k == "PATH" else tidy(v)) for k, v in env.items()
-            if not k.startswith("CODEX_") and k not in ("PWD", "SHLVL", "_", "OLDPWD")}
+            if not k.startswith("CODEX_") and k not in ("PWD", "SHLVL", "_", "OLDPWD", "__CF_USER_TEXT_ENCODING")}
 
 
 @unittest.skipUnless(CODEX and sys.platform in ("darwin", "linux"), "no installed codex")
@@ -221,38 +208,39 @@ class InstalledCodex(unittest.TestCase):
 
     def test_the_old_policy_really_stripped_it(self) -> None:
         # The bug itself, on the installed Codex: otherwise the fix tests above prove nothing.
-        got = tool_env(self.old_toml, {**base_env(self.home), **IN_HERDR})
+        got = tool_env(self.old_toml, {**base_env(self.home), **IN_HERDR, **TERMINAL_CONTEXT})
         self.assertEqual([k for k in got if k.startswith("HERDR_")], [])
+        self.assertEqual([k for k in TERMINAL_CONTEXT if k in got], [])
 
     def test_outside_herdr_nothing_herdr_appears(self) -> None:
         got = tool_env(self.new_toml, base_env(self.home))
         self.assertEqual([k for k in got if k.startswith("HERDR_")], [])
 
-    def test_only_the_six_exact_names_pass_and_no_secret_does(self) -> None:
-        env = {**base_env(self.home), **IN_HERDR, **HERDR_NEIGHBOURS}
-        got = tool_env(self.new_toml, env)
-        self.assertEqual({k: v for k, v in got.items() if k.startswith("HERDR_")}, IN_HERDR)  # six names, values untouched
+    def test_the_launching_terminals_context_reaches_the_tool(self) -> None:
+        got = tool_env(self.new_toml, {**base_env(self.home), **IN_HERDR, **HERDR_NEIGHBOURS, **TERMINAL_CONTEXT})
+        for k, v in {**TERMINAL_CONTEXT, **HERDR_NEIGHBOURS}.items():
+            self.assertEqual(got.get(k), v, k)
+
+    def test_default_exclusions_still_remove_key_secret_token_names(self) -> None:
+        got = tool_env(self.new_toml, {**base_env(self.home), **TERMINAL_CONTEXT})
         for k in SYNTHETIC_SECRETS:
             self.assertNotIn(k, got, k)
+        self.assertIn("SSH_AUTH_SOCK", got)
 
-    def test_core_and_explicit_set_are_exactly_what_inherit_core_gave(self) -> None:
-        # Same host environment under the old and the new policy: outside Herdr the tool sees the same thing; inside,
-        # the same plus the six names. Catches a core variable this Codex has and the allowlist forgot.
-        rich = {**base_env(self.home), "COLORTERM": "truecolor", "XDG_STATE_HOME": "/x", "LC_MESSAGES": "C",
-                "TZ": "UTC", "EDITOR": "vi", "HTTPS_PROXY": "http://p", "USERNAME": "tester", "NO_COLOR": "1",
-                **HERDR_NEIGHBOURS}  # old policy strips these; the allowlist must too
+    def test_explicit_set_wins_over_the_inherited_value(self) -> None:
+        env = {**base_env(self.home), "MCP_TIMEOUT": "1", "BASH_ENV": "/elsewhere", "GRAFT_NO_GITIGNORE": "0"}
+        got = tool_env(self.new_toml, env)
+        for k, v in self.new["set"].items():
+            self.assertEqual(got.get(k), v, k)
+
+    def test_core_and_explicit_set_survive_exactly_as_under_inherit_core(self) -> None:
+        # Same host environment under the old and the new policy: everything the old policy gave is still there with
+        # the same value (nothing narrower), and the new one adds only what inherit core had dropped.
+        rich = {**base_env(self.home), **TERMINAL_CONTEXT, "LC_MESSAGES": "C", "EDITOR": "vi", "NO_COLOR": "1"}
         before = noise(tool_env(self.old_toml, rich))
         after = noise(tool_env(self.new_toml, rich))
-        self.assertEqual(after, before)
-        inside = noise(tool_env(self.new_toml, {**rich, **IN_HERDR}))
-        self.assertEqual({k: v for k, v in inside.items() if k not in IN_HERDR}, before)
-        for k, v in self.new["set"].items():
-            self.assertEqual(after.get(k), v, k)
-        for k in CORE:
-            if k == "PATH":  # Codex and the login shell extend it; it must still hold the caller's directories
-                self.assertLessEqual(set(rich[k].split(":")), after[k])
-            else:
-                self.assertEqual(after.get(k), rich[k], k)
+        self.assertEqual({k: v for k, v in after.items() if k in before}, before)
+        self.assertEqual(sorted(set(after) - set(before)), sorted([*TERMINAL_CONTEXT, "EDITOR", "LC_MESSAGES", "NO_COLOR"]))
 
 
 # ---- layer 3: detached children -----------------------------------------------------------------------------------
@@ -369,8 +357,8 @@ trusted_hash = "abc"
             self.assertEqual({k: v for k, v in after.items() if k != "shell_environment_policy"},
                              {k: v for k, v in before.items() if k != "shell_environment_policy"})
             self.assertEqual(after["shell_environment_policy"]["set"], before["shell_environment_policy"]["set"])  # machine digest kept
-            self.assertEqual((after["shell_environment_policy"]["inherit"], set(HERDR) <= set(after["shell_environment_policy"]["include_only"])),
-                             ("all", True))
+            self.assertEqual((after["shell_environment_policy"]["inherit"], after["shell_environment_policy"]["ignore_default_excludes"],
+                              "include_only" in after["shell_environment_policy"]), ("all", False, False))
             self.assertEqual(stat_mode(t), 0o600)  # Codex keeps its config private
             self.assertEqual(len(list(pathlib.Path(d).glob("config.toml.bak-*-env-policy"))), 1)
             self.assertEqual([p.name for p in pathlib.Path(d).glob(".config.toml.*")], [])  # no temp file left
@@ -401,7 +389,7 @@ trusted_hash = "abc"
                 self.assertEqual(r.returncode, 0, r.stderr)
                 if flags:
                     self.assertIn("SECRET-ABOVE-1", t.read_text())  # the neighbours are still in the file, only the output hides them
-                self.assertIn("include_only", r.stdout)  # the diff itself is shown
+                self.assertIn('inherit = "all"', r.stdout)  # the diff itself is shown
                 for secret in self.NEIGHBOUR_SECRETS:  # the set table, the table above and below, a comment above the header
                     self.assertNotIn(secret, r.stdout + r.stderr, secret)
                 self.assertNotIn("[mcp_servers", r.stdout)  # not a line of any neighbouring table
@@ -491,6 +479,34 @@ ignore_default_excludes = true
         self.assertNotIn("SECRET", view)
         self.assertEqual(view.split("\n")[1:4], [header, "inherit = <hidden>", "ENABLE_PROMPT_CACHING_1H = <hidden>"])
         self.assertIn("[<table hidden>]\nignore_default_excludes = <hidden>", view)
+
+    def test_an_inline_set_in_the_old_policy_never_prints(self) -> None:
+        # adversary MSG 4: the old policy may spell its explicit set inline under [shell_environment_policy].
+        def live(d: str, timeout: str) -> str:
+            inline = ('set = { NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "SECRETDIGEST-0123", BASH_ENV = "%s/.bashrc", ENABLE_PROMPT_CACHING_1H = "1", '
+                      'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1", MCP_TIMEOUT = "%s", CLAUDE_CODE_HARBOR_KITE = "1", GRAFT_NO_GITIGNORE = "1" }' % (d, timeout))
+            return f'model = "m"\n\n[projects."/x"]\ntrust_level = "trusted"\n\n[shell_environment_policy]\ninherit = "core"\n{inline}\n\n[hooks.state."/y"]\ntrusted_hash = "SECRET-AFTER-8"\n'
+        secrets = ("SECRETDIGEST-0123", "SECRET-INLINE-7", "SECRET-AFTER-8")
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(live(d, "SECRET-INLINE-7"))  # differs from the template's set: refused, key named, no value
+            for flags in ((), ("--write",)):
+                r = self.run_apply(t, *flags)
+                self.assertEqual(r.returncode, 1, flags)
+                self.assertIn("MCP_TIMEOUT", r.stderr)
+                for secret in secrets:
+                    self.assertNotIn(secret, r.stdout + r.stderr, secret)
+            self.assertEqual(t.read_text(), live(d, "SECRET-INLINE-7"))
+            t.write_text(live(d, "300000"))  # equal to the template's set: applied, nothing printed
+            for flags in ((), ("--write",)):
+                r = self.run_apply(t, *flags)
+                self.assertEqual(r.returncode, 0, (flags, r.stderr))
+                for secret in secrets:
+                    self.assertNotIn(secret, r.stdout + r.stderr, secret)
+                self.assertIn("set = <hidden>", r.stdout) if not flags else None
+            after = tomllib.loads(t.read_text())
+            self.assertEqual(after["shell_environment_policy"]["set"]["NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S"], "SECRETDIGEST-0123")
+            self.assertEqual(after["hooks"]["state"]["/y"]["trusted_hash"], "SECRET-AFTER-8")  # neighbours kept
 
     # ---- the two changed-file refusals, driven deterministically through the module --------------------------------
 

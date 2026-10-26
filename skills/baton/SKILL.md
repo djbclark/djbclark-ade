@@ -18,6 +18,13 @@ turns it off), so after a handoff nobody types this; a `/baton` that arrives
 right after a `/clear` is that follow-up (`~/.local/state/self-slash.log`
 shows `then: /baton` and `sent /baton`), not a request for anything else.
 
+**Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
+`$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed
+into a Codex composer is just text and starts nothing (seen live 2026-10-25, three Enters later it still sat in the
+composer). `self-slash` picks the spelling from the provider herdr reports for the pane, so in a Codex pane the
+follow-up above is `$baton`, and a `--then "/baton PATH"` is rewritten once to `$baton PATH`. The same skill answers
+to either spelling; treat `$baton PATH` exactly like `/baton PATH`. Never write `$baton` for a Claude pane.
+
 `/baton` never clears, compacts or starts a new session itself: `/new` queues
 `/baton`, so a `/baton` that started a `/new` would recurse. If the pointer
 has nothing to resume (no open work, `latest_handoff` already finished), say
@@ -36,6 +43,15 @@ This is a thin entry point, not a separate protocol. Follow the
 the staleness check against real `HEAD`, state a resume plan before
 touching anything, bootstrap a minimal log if none exists — never ask
 the operator for information the file already answers).
+
+**Which chain, before resolving by directory (2026-10-25).** A `/baton` queued by `self-slash "/new"`
+belongs to the chain that session just handed off, and the directory can name a different one: a fresh
+load watcher resumed the repo's `main` chain while its own was `load-spike-monitor-t`, and then queued
+its own archive. First run `bin/watch status` and read `~/.local/state/self-slash.log`: if this
+agent (`$PASEO_AGENT_ID`) holds a watch role, or the newest `then: /baton` line for it follows a handoff
+naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
+directory-resolved pointer whose owner is another live session is not yours: say so and look further.
+On Paseo, `self-slash --finish` refuses a watch holder (exit 12; `--successor` is allowed, and the guard fails open if `watch status` fails or takes over 20 s); herdr and Orca watchers are not guarded.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,

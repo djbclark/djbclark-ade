@@ -115,6 +115,54 @@ class TestPaneDetection(unittest.TestCase):
         self.assertEqual(fleet._tui_of([{"pid": 1, "name": "bash", "argv0": "bash", "argv": ["-bash"], "cwd": ""}])[0], None)
 
 
+class TestHermesNativeEntry(Patched):
+    """The installed Hermes entry shim runs ONE python process, `python -I -c <bootstrap> ARGS`, with no `hermes` in argv; herdr does not
+    detect it (2026-10-25). The bootstrap here is a portable stand-in carrying the three marker lines of the real one."""
+
+    BOOT = "\n".join(["import os, re, sys", "sys.path.insert(0, '/opt/example/hermes-agent')", "from hermes_cli.main import main",
+                      "sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])", "sys.exit(main())", ""])
+
+    def proc(self, *args: str, boot: str | None = None, argv0: str = "/opt/example/bin/python3") -> list[dict]:
+        return [{"pid": 77, "name": "python3.14", "argv0": argv0, "argv": [argv0, "-I", "-c", boot or self.BOOT, *args], "cwd": ""}]
+
+    def test_the_entry_shim_is_a_native_hermes_tui_with_its_session_id(self):
+        self.assertEqual(fleet._tui_of(self.proc("--yolo"))[:3], ("hermes", 77, None))
+        self.assertEqual(fleet._tui_of(self.proc())[:2], ("hermes", 77))
+        self.assertEqual(fleet._tui_of(self.proc("--model", "m1", "chat", "--yolo"))[:2], ("hermes", 77))
+        self.assertEqual(fleet._tui_of(self.proc("--yolo", "--resume", "20261025_000000_abc123"))[:3],
+                         ("hermes", 77, "20261025_000000_abc123"))
+
+    def test_python_that_merely_mentions_hermes_is_not_a_tui(self):
+        mention = "import sys\nprint('hermes_cli.main import main; hermes-agent')\n"
+        no_exit = "\n".join(self.BOOT.splitlines()[:3] + [""])    # path and import, never the exit through main
+        commented = self.BOOT.replace("from hermes_cli.main import main", "# from hermes_cli.main import main")
+        other_path = self.BOOT.replace("/opt/example/hermes-agent", "/opt/example/other-agent")
+        for label, procs in {"a print": self.proc(boot=mention), "no exit": self.proc(boot=no_exit), "commented import": self.proc(boot=commented),
+                             "another checkout": self.proc(boot=other_path),
+                             "no -I": [{**self.proc()[0], "argv": ["/opt/example/bin/python3", "-c", self.BOOT]}],
+                             "script argument": [{**self.proc()[0], "argv": ["/opt/example/bin/python3", "/opt/example/hermes-agent/run.py"]}],
+                             "not python": [{**self.proc()[0], "argv": ["/bin/sh", "-I", "-c", self.BOOT]}]}.items():
+            with self.subTest(label):
+                self.assertEqual(fleet._tui_of(procs), (None, None, None, None))
+
+    def test_services_tools_and_single_shot_runs_of_the_shim_are_not_a_tui(self):
+        for args in (("gateway", "run"), ("--yolo", "gateway"), ("--model", "m1", "acp"), ("mcp", "serve"), ("cron", "list"), ("-z", "hi"),
+                     ("--oneshot=hi",), ("chat", "-q", "hi"), ("--version",), ("--print-runtime-command",), ("--", "gateway")):
+            with self.subTest(args):
+                self.assertEqual(fleet._tui_of(self.proc(*args)), (None, None, None, None))
+
+    def test_an_undetected_native_hermes_pane_becomes_a_status_unknown_row(self):
+        self.patch(fleet, "pane_procs", lambda pane: (self.proc("--yolo"), 70))
+        self.patch(fleet, "herdr_label", lambda kind, ident: ident)
+        self.patch(fleet, "_where", None)
+        pane = {"pane_id": "w1:p1", "cwd": "/x", "tab_id": "w1:t1", "workspace_id": "w1"}
+        tuis, shells = fleet._pane_only([pane], set())
+        self.assertEqual((len(tuis), shells), (1, []))
+        self.assertEqual({k: tuis[0][k] for k in ("id", "agent", "host", "chan", "status", "undetected", "pid")},
+                         {"id": "w1:p1", "agent": "hermes", "host": "herdr", "chan": ("herdr", "w1:p1"), "status": "unknown",
+                          "undetected": True, "pid": 77})
+
+
 class TestLedger(Patched):
     def setUp(self):
         super().setUp()

@@ -95,7 +95,7 @@ def safe_view(span, template_lines):
             else:
                 out.append(f"{km.group(1)} = <hidden>")
         elif mode == "main" and line in template_lines:
-            out.append(line)  # a continuation line that is the template's own text (an include_only entry row)
+            out.append(line)  # a continuation line that is the template's own text
         else:
             out.append("<continuation hidden>")
     return "\n".join(out)

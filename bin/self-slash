@@ -15,6 +15,17 @@
 # resuming from its Tier 1 pointer with nobody typing; --no-then (or --then "")
 # turns it off.  The follow-up starts SELF_SLASH_THEN_DELAY (default 10) seconds
 # after the first send so the fresh session is up; it is logged as "then: ...".
+# Codex (2026-10-25, a herdr pane whose `agent` herdr reports as codex, re-confirmed by `herdr agent get` right before every
+# submit; a missing or different identity submits nothing, exit 8): a SKILL is invoked as `$baton`, a built-in stays `/new`,
+# `/compact`, `/quit`.  The default follow-up there is `$baton`, and a legacy `--then "/baton PATH"` (or a `/baton` text) is
+# rewritten ONCE to `$baton PATH`: only the exact command name `/baton` at the start, every byte after it kept.  An explicit
+# `$baton PATH` is also taken, on a Codex pane only (single-quote it so the shell keeps the `$`: --then '$baton PATH'); any other
+# `$word` is refused (exit 2).  Another client keeps `/baton`; a herdr pane that reports NO agent gets no baton follow-up at
+# all (exit 3, nothing sent, even with --dry-run), because its syntax cannot be known.  --dry-run and the log show the text
+# actually sent.  A Codex skill prompt goes in ONCE by `herdr agent prompt`, no Enter follows, and it counts as sent only when
+# herdr still names that pane as codex and that session's rollout holds a user message that IS the exact text (byte for byte,
+# not whitespace-folded; stamped after the submit; SELF_SLASH_RECEIPT_WAIT s, default 30); else exit 8 "NOT confirmed
+# delivered", never retried.  Screen text and a zero exit from herdr are not receipts.
 #
 # --finish: end this session after the turn.  On herdr and Orca that is the real built-in
 # /quit.  On Paseo /quit is not a command (the daemon runs only clear, compact, context,
@@ -171,6 +182,7 @@ text="${1:-}"
 finish_flag=$finish
 [ "$finish" = 1 ] && [ -z "$text" ] && text="/quit"
 [ -n "$text" ] || { echo "usage: self-slash [--delay S] [--dry-run] [--then \"/cmd\" | --no-then] \"/command args\"
+       (Codex panes run a skill as \$baton and a built-in as /new; single-quote the \$ in the shell: --then '\$baton PATH')
        self-slash [--delay S] [--dry-run] --finish   (end the session; Paseo: archive this agent)
        self-slash [--delay S] [--dry-run] --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT]
                   [--workspace ID] [--keep-workspace] [--baton PATH]
@@ -183,12 +195,38 @@ finish_flag=$finish
                   empty mode passes none), bypassPermissions for a claude successor from another provider, else the
                   provider's own default; without --mode, an inspect of this agent that lacks a Provider or a Mode
                   value exits 11 and starts nothing)
-       exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
-       7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
+       exit codes: 2 usage, 3 no host or unknown baton syntax, 4 draft in the input box, 5 no prompt, 6 session still working,
+       7 refused (gap check or lifecycle already queued), 8 archive refused or Codex submission unconfirmed (identity, target change or no rollout receipt), 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
-       11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable)" >&2; exit 2; }
+       11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable),
+       12 bare --finish refused: this agent holds a watch role (Paseo; bin/watch status; --successor is not refused))" >&2; exit 2; }
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ -n "$successor" ] && [ "$finish" != 1 ]; then echo "self-slash: --successor needs --finish (it replaces the bare archive)" >&2; exit 2; fi
+# A Paseo agent that holds a watch role (bin/watch status) is not archived by --finish or a mapped /quit: the
+# role would go unheld (2026-10-25: a /baton-resumed load watcher queued its own archive and caught it only by
+# killing the waiter).  Not for --successor (that path hands over), and only on Paseo: herdr/Orca watchers
+# register other ids.  Checked in the parent and again in the waiter child, after its environment is restored.
+# FAILS OPEN when `watch status` fails, times out (20 s, SELF_SLASH_WATCH_TIMEOUT) or returns bad JSON.  A holder
+# matches by the same prefix rule as bin/watch.  SELF_SLASH_ALLOW_WATCHER=1 overrides; SELF_SLASH_WATCH_CMD
+# replaces the watch binary (tests).  Exit 12.
+refuse_if_watcher() {
+  [ "$finish" = 1 ] && [ -z "$successor" ] && [ "$host" = paseo ] && [ -n "$pane" ] && [ "${SELF_SLASH_ALLOW_WATCHER-}" != 1 ] || return 0
+  local watch_cmd watch_json
+  watch_cmd="${SELF_SLASH_WATCH_CMD:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")/watch}"
+  watch_json="$(gtimeout "${SELF_SLASH_WATCH_TIMEOUT:-20}" "$watch_cmd" status --json 2>/dev/null)"
+  if printf '%s' "$watch_json" | python3 -c 'import json, sys
+aid = sys.argv[1]
+try:
+    rows = json.load(sys.stdin)
+    held = any(isinstance(r.get("holder"), dict) and (t := str(r["holder"].get("target") or "")) and
+               (t == aid or aid.startswith(t) or t.startswith(aid)) for r in rows)
+except Exception:
+    held = False
+sys.exit(0 if held else 1)' "$pane" 2>/dev/null; then
+    echo "$(gdate '+%F %T') $host $pane: refused: this agent holds a watch role (bin/watch status); archiving it would leave the role unheld. Hand it over first, or set SELF_SLASH_ALLOW_WATCHER=1." >&2
+    exit 12
+  fi
+}
 if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s_title" ] || [ -n "$s_workspace" ] || [ "$s_keepws" = 1 ] || [ -n "$s_baton" ]; }; then echo "self-slash: --thinking, --mode, --title, --workspace, --keep-workspace and --baton only go with --successor" >&2; exit 2; fi
 # Plain-id character sets spelled out: bash 3.2 matches a bracket range ([a-z]) by locale
 # collation, so under en_US.UTF-8 it also takes upper-case and accented letters (adversary
@@ -291,13 +329,42 @@ if [ -n "$successor" ] && [ "$host" = herdr ]; then
   case "$successor" in claude/?*) ;; *) echo "self-slash: on herdr the successor is claude/MODEL (got: $successor); another provider: hand off and start it in a new pane by hand" >&2; exit 2;; esac
   if [ -n "$s_title$s_workspace" ] || [ "$s_keepws" = 1 ]; then echo "self-slash: --title, --workspace and --keep-workspace are Paseo options; herdr names the tab from this one and never closes the old pane" >&2; exit 2; fi
 fi
-case "$text" in /*) ;; *) echo "self-slash: only slash commands are sent (got: $text)" >&2; exit 2;; esac
+# Codex: see the header.  $codex is 1 only for a herdr pane herdr reports as codex.
+codex=0; [ "$host" = herdr ] && [ "$tui" = codex ] && codex=1
+# The waiter sees the pane again: if what herdr reports now is not what the parent saw, the follow-up syntax chosen
+# there may be wrong for this target, so nothing is sent.
+if [ "${SELF_SLASH_CHILD:-}" = "1" ] && [ -n "${SELF_SLASH_TUI+x}" ] && [ "$SELF_SLASH_TUI" != "$tui" ]; then
+  echo "$(gdate '+%F %T') $host $pane: target changed: the parent saw agent '${SELF_SLASH_TUI:-none}', herdr reports '${tui:-none}' now; NOT sent: ${text:0:80}"; exit 8
+fi
 if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then
   then="${SELF_SLASH_THEN:-}"
 elif [ "$then_set" = 0 ]; then
   case "$text" in /new|/clear|/reset|"/new "*|"/clear "*|"/reset "*) then="/baton";; esac
 fi
-case "$then" in ""|/*) ;; *) echo "self-slash: --then takes a slash command (got: $then)" >&2; exit 2;; esac
+# A baton follow-up, requested, legacy or generated, is a skill whose syntax depends on the client (/baton on Claude, $baton on
+# Codex).  A herdr pane that reports no agent could be either, so it would be queued blind: refused before anything is sent.
+if [ "$host" = herdr ] && [ -z "$tui" ]; then
+  for b in "$text" "$then"; do
+    case "$b" in /baton|/baton[[:space:]]*|'$baton'|'$baton'[[:space:]]*)
+      echo "self-slash: herdr reports no agent for $pane, so the syntax of a baton follow-up (/baton for Claude, \$baton for Codex) is unknown; nothing was sent; ask the operator to type it: $(clean "$b")" >&2; exit 3;;
+    esac
+  done
+fi
+if [ "$codex" = 1 ]; then
+  # Exact command name /baton only (the end or whitespace after it); `$baton PATH` already in place is left alone.
+  case "$text" in /baton|/baton[[:space:]]*) text='$baton'"${text#/baton}";; esac
+  case "$then" in /baton|/baton[[:space:]]*) then='$baton'"${then#/baton}";; esac
+fi
+case "$text" in
+  /*) ;;
+  '$baton'|'$baton'[[:space:]]*) [ "$codex" = 1 ] || { echo "self-slash: \$baton is a Codex skill and goes only to a herdr pane herdr reports as codex (host $host, agent '${tui:-none}'); got: $text" >&2; exit 2; };;
+  *) echo "self-slash: only slash commands (or \$baton on a Codex pane) are sent (got: $text)" >&2; exit 2;;
+esac
+case "$then" in
+  ""|/*) ;;
+  '$baton'|'$baton'[[:space:]]*) [ "$codex" = 1 ] || { echo "self-slash: --then \$baton is a Codex skill and goes only to a herdr pane herdr reports as codex (host $host, agent '${tui:-none}'); got: $then" >&2; exit 2; };;
+  *) echo "self-slash: --then takes a slash command (got: $then)" >&2; exit 2;;
+esac
 if [ "$host" = paseo ]; then
   # Paseo's Claude provider knows /clear, not Claude Code's /new or /reset aliases.
   case "$text" in /new|/reset) text="/clear";; "/new "*|"/reset "*) text="/clear";; esac
@@ -318,6 +385,7 @@ if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then
   successor="${SELF_SLASH_SUCCESSOR:-}"; s_thinking="${SELF_SLASH_S_THINKING:-}"; s_mode="${SELF_SLASH_S_MODE:-}"; s_title="${SELF_SLASH_S_TITLE:-}"
   s_workspace="${SELF_SLASH_S_WORKSPACE:-}"; s_keepws="${SELF_SLASH_S_KEEPWS:-0}"; s_baton="${SELF_SLASH_S_BATON:-}"
 fi
+refuse_if_watcher
 # --baton goes into the successor's first prompt and the log: an absolute path to an existing
 # regular file of printable characters only (a relative path would resolve in the successor's cwd, a
 # newline could forge a log line; adversary adv-selfslash-1, L1).  The waiter child re-checks the
@@ -328,12 +396,12 @@ if [ -n "$s_baton" ]; then
   [ -f "$s_baton" ] || { echo "self-slash: --baton is not an existing regular file: $s_baton" >&2; exit 2; }
 fi
 s_thinking="${s_thinking:-high}"
-# herdr names the TUI in the pane's `agent` field.  Prompt detection knows Claude Code (❯), cursor-agent (→) and omp
+# herdr names the TUI in the pane's `agent` field. Prompt detection knows Codex (›), Claude Code (❯), cursor-agent (→) and omp
 # (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
 # and gave up).  Another TUI cannot be read, so say so now: the waiter would only log "gave up" after ~50 s.
-case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; *) marker="❯";; esac
-if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
-  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor and omp, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
+case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; *) marker="❯";; esac
+if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp and codex, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
 fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
@@ -476,13 +544,22 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
       echo "self-slash: another lifecycle action won the lock for $host $pane (pid $(lock_pid "$tlock")); not queuing." >&2; exit 7
     fi
   fi
-  SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" SELF_SLASH_FINISH="$finish" \
+  # A tool executor may clean up its process group after the parent exits.
+  # Detach before Popen returns; nohup alone does not create a new session.
+  child=$(SELF_SLASH_CHILD=1 SELF_SLASH_TUI="$tui" SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" SELF_SLASH_FINISH="$finish" \
     SELF_SLASH_SUCCESSOR="$successor" SELF_SLASH_S_THINKING="$s_thinking" SELF_SLASH_S_MODE="$s_mode" SELF_SLASH_S_TITLE="$s_title" \
     SELF_SLASH_S_WORKSPACE="$s_workspace" SELF_SLASH_S_KEEPWS="$s_keepws" SELF_SLASH_S_BATON="$s_baton" \
     SELF_SLASH_TLOCK="$([ "$lifecycle" = 1 ] && echo "$tlock")" \
-    nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
+    python3 - "$0" "$delay" "$text" "$log" <<'PY'
+import subprocess, sys
+with open(sys.argv[4], "ab") as log:
+    child = subprocess.Popen([sys.argv[1], "--delay", sys.argv[2], sys.argv[3]],
+                             stdin=subprocess.DEVNULL, stdout=log,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+print(child.pid)
+PY
+  ) || { [ "$lifecycle" != 1 ] || [ "$(lock_pid "$tlock")" != "$$" ] || rm -f "$tlock"; echo "self-slash: could not detach waiter" >&2; exit 1; }
   if [ "$lifecycle" = 1 ]; then
-    child=$!
     # Replace the placeholder only while it is still ours; if not, the child must not run.
     if [ "$(lock_pid "$tlock")" = "$$" ]; then lock_stamp "$child" > "$tlock.$$" && mv -f "$tlock.$$" "$tlock"
     else kill "$child" 2>/dev/null; echo "self-slash: the lifecycle lock for $host $pane changed hands; not queuing." >&2; exit 7; fi
@@ -527,6 +604,107 @@ t = json.load(sys.stdin).get("result", {}).get("terminal", {})
 print("\n".join(t.get("tail") or []))'
   fi
 }
+# Codex identity and receipt (2026-10-25).  `ident PANE`: `herdr agent get` must succeed and name provider codex, this pane,
+# an idle or done status and a well-formed session record; prints "<session id>\t<rollout size>" (either may be empty/0 right
+# after /new: Codex publishes a session id only with its first prompt) and exits 0, else prints the reason and exits 1.
+# `wait PANE SID SIZE TEXT TYPED_AT SECS`: after the submit, polls herdr until the pane STILL reports codex and this same
+# pane (a working status is expected; a failed or malformed answer proves nothing; another provider or pane ends the wait,
+# exit 1) and the session it names has a rollout line, after the byte SIZE (from byte 0 when the session id changed since
+# SID), stamped no earlier than TYPED_AT, whose user message is TEXT byte for byte; exit 0 only then.  The rollout shape and
+# the id-to-file lookup are relay.py's (loaded, not copied); the comparison is deliberately NOT relay's whitespace-folded
+# tx_state, because a path in TEXT may hold significant runs of spaces.  Any other mode: exit 2.
+codex_proof() {
+  python3 - "$(dirname "$(grealpath "$0")")/../skills/session-finder/relay.py" "$@" <<'PY'
+import importlib.util, json, subprocess, sys, time
+relay_py, mode = sys.argv[1], sys.argv[2]
+
+def agent(pane):
+    """herdr's agent record for PANE, or None when herdr fails or answers with something else."""
+    try:
+        r = subprocess.run(["herdr", "agent", "get", pane], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=15)
+        a = (json.loads(r.stdout).get("result") or {}).get("agent")
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        return None
+    return a if r.returncode == 0 and isinstance(a, dict) else None
+
+def session(a):
+    """(well-formed, session id): "" when herdr names none; a session record of any other shape is malformed."""
+    s = a.get("agent_session")
+    if s is None or (isinstance(s, dict) and s.get("value") is None):
+        return True, ""
+    return (True, s["value"]) if isinstance(s, dict) and isinstance(s.get("value"), str) else (False, "")
+
+def load_relay():
+    spec = importlib.util.spec_from_file_location("relay", relay_py)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+def receipt(relay, tx, mark, text, since):
+    """TX, after byte MARK, holds a user message whose single input_text block IS TEXT exactly, stamped >= SINCE."""
+    with open(tx, "rb") as fh:
+        fh.seek(mark)
+        lines = fh.read().decode("utf-8", "replace").split("\n")
+    for ln in lines:
+        try:
+            o = json.loads(ln)
+        except ValueError:
+            continue
+        p = o.get("payload") if isinstance(o, dict) and o.get("type") == "response_item" else None
+        if not (isinstance(p, dict) and p.get("type") == "message" and p.get("role") == "user"
+                and isinstance(p.get("content"), list)):
+            continue
+        blocks = [b.get("text") for b in p["content"] if isinstance(b, dict) and b.get("type") == "input_text"]
+        ts = relay._ts(o)
+        if blocks == [text] and ts is not None and ts >= since:
+            return True
+    return False
+
+if mode == "ident":
+    pane = sys.argv[3]
+    a = agent(pane)
+    why = None
+    if a is None:
+        why = "herdr agent get failed or returned no agent record"
+    elif a.get("agent") != "codex":
+        why = f"herdr agent get reports agent {a.get('agent')!r}, not codex"
+    elif a.get("pane_id") != pane:
+        why = f"herdr agent get names pane {a.get('pane_id')!r}, not {pane}"
+    elif a.get("agent_status") not in ("idle", "done"):
+        why = f"codex status {a.get('agent_status') or 'unknown'}"
+    elif not session(a)[0]:
+        why = "herdr agent get names a malformed session record"
+    if why:
+        print(" ".join(why.split())[:160])
+        sys.exit(1)
+    sid, size = session(a)[1], 0
+    if sid:
+        tx = load_relay().pane_transcript({"agent": "codex", "sid": sid})
+        size = tx.stat().st_size if tx and tx.is_file() else 0
+    print(f"{sid}\t{size}")
+    sys.exit(0)
+elif mode == "wait":
+    pane, pre_sid, pre_size, text, typed_at, secs = sys.argv[3:9]
+    relay = load_relay()
+    typed_at, deadline = float(typed_at), time.time() + float(secs)
+    while True:
+        a = agent(pane)
+        if a is not None:
+            if a.get("agent") != "codex" or a.get("pane_id") != pane:
+                sys.exit(f"after the submit herdr reports agent {a.get('agent')!r} on pane {a.get('pane_id')!r}, not codex on {pane}")
+            ok, sid = session(a)
+            tx = relay.pane_transcript({"agent": "codex", "sid": sid}) if ok and sid else None
+            if tx is not None and tx.is_file() and receipt(relay, tx, int(pre_size) if sid == pre_sid else 0, text, typed_at):
+                print("delivered")
+                sys.exit(0)
+        if time.time() >= deadline:
+            sys.exit("no exact user message in the rollout before the deadline")
+        time.sleep(0.5)
+else:
+    sys.exit(f"codex_proof: unknown mode {mode!r}")
+PY
+}
 send_text() {
   if [ "$host" = paseo ]; then
     # PASEO_AGENT_ID unset so the daemon does not envelope the send as agent-to-agent
@@ -535,7 +713,31 @@ send_text() {
     echo "$(gdate '+%F %T') $host $pane: paseo send: $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-160)"
     return 0
   elif [ "$host" = herdr ]; then
-    herdr pane run "$pane" "$text" || return 1
+    if [ "$tui" = codex ]; then
+      # The target is looked at again right before the submit: provider, pane and status come from herdr itself.
+      if ! ident=$(codex_proof ident "$pane" 2>>"$log"); then
+        echo "$(gdate '+%F %T') $host $pane: Codex identity not confirmed ($(clean "$ident")); NOT submitted: ${text:0:80}"
+        exit 8
+      fi
+      pre_sid=${ident%%$'\t'*}; pre_size=${ident#*$'\t'}
+      typed_at=$(gdate +%s.%N)
+      if ! herdr agent prompt "$pane" "$text"; then
+        echo "$(gdate '+%F %T') $host $pane: Codex submission failed or is unverified; NOT retried"
+        exit 8
+      fi
+      case "$text" in
+        '$baton'|'$baton'[[:space:]]*)
+          # A skill prompt: one submit, no Enter, no retry.  Only the rollout's exact user message is a receipt.
+          if codex_proof wait "$pane" "$pre_sid" "$pre_size" "$text" "$typed_at" "${SELF_SLASH_RECEIPT_WAIT:-30}" >/dev/null 2>>"$log"; then
+            echo "$(gdate '+%F %T') $host $pane: Codex transcript holds exactly: ${text:0:80}"
+            return 0
+          fi
+          echo "$(gdate '+%F %T') $host $pane: Codex transcript does not show ${text:0:80} within ${SELF_SLASH_RECEIPT_WAIT:-30}s; NOT confirmed delivered, NOT retried, no Enter sent"
+          exit 8;;
+      esac
+    else
+      herdr pane run "$pane" "$text" || return 1
+    fi
     # The first Enter after a slash command can only accept the autocomplete row, and the
     # command stays on the input line unrun (Claude Code too: /reload-plugins was logged
     # "sent" on 2026-10-18 and never ran). So for every TUI, press Enter again while the
@@ -631,6 +833,14 @@ import json, sys
 pane = sys.argv[1]
 for p in json.load(sys.stdin).get("result", {}).get("panes", []):
     if p.get("pane_id") == pane: print(p.get("agent_status", "")); break' "$pane" 2>/dev/null)
+    if [ "$tui" = codex ]; then
+      # A Codex composer remains visible mid-turn. Unknown/blocked state is
+      # never permission to submit a lifecycle command or answer a dialog.
+      case "$st" in idle|done) return 0;; esac
+      [ "$said" = 1 ] || { echo "$(gdate '+%F %T') $host $pane: codex status ${st:-unknown}, waiting for idle before sending"; said=1; }
+      [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(gdate '+%F %T') $host $pane: codex did not become idle; NOT sent: ${text:0:80}"; exit 6; }
+      sleep 5; waited=$((waited+5)); continue
+    fi
     [ "$st" = working ] || return 0
     # herdr says "working" whenever Claude Code's title glyph is busy, which it
     # also is while only a BACKGROUND sub-agent runs and the main turn is over

@@ -3,6 +3,26 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Research: web prior art before code spelunking, Python over bash, Kiro/LSP (djbclark, direct, 2026-10-25)
+
+Three research questions, one frontier consult (Codex `gpt-6-astra`, advise only, 2026-10-25; it searches the web first and cites sources). **Nothing here is built.** The consult returns recommendations; djbclark rules on them before any implementation slice. Existing rules this extends: `~/CLAUDE.md` items 14 and 7 (search first), `feedback_web_search_before_local_spelunking.md`, `feedback_prefer_python_over_shell.md`.
+
+1. **Make every agent more likely to run a web prior-art search before spending tokens reading code.** The search tools cost no money (the shared self-hosted Firecrawl on SIPB Hyades, Exa, Jina, Parallel; djbclark believes SearXNG is also available, which the consult is asked to verify); the open question is the **token cost of processing results versus the tokens a search saves**, which nobody has measured. Deliver: a recommended mechanism (a hook nudge, a skill, a sub-agent that returns a digest, `read_url` with a `question`, cached research notes in Basic Memory), a budget (how many tokens a search may cost before it stops paying), when NOT to search, and how we would measure it.
+2. **Move as much agent work as possible from bash to Python**, possibly with typing extensions or checkers that help AI (pyright/ty/basedpyright strict, `typing_extensions`, pydantic/msgspec, beartype, typed subprocess wrappers, PEP 723 `uv run --script`, a shared typed helper library for argv runs, SSH, atomic writes, JSON/TOML). Djbclark's expectation: this removes the frequent nested-quoting and heredoc failures (three cycles lost on 2026-10-25). Deliver: which tools, a Bash-tool hook that detects quoting-heavy commands and steers to Python (we already have PreToolUse guards for `| head &&` and bare `sed`), a helper-library sketch, and evidence from CodeAct-style "Python as the action space" work.
+3. **Kiro CLI's LSP integration (language server protocol) for coding accuracy and speed.** Find out what `kiro-cli` (2.34.0 is installed at `~/.local/bin/kiro-cli`) actually does with LSP, whether other agents can reuse it, and which of our TUIs already have LSP (Claude Code has an `LSP` tool; check Codex, omp, OpenCode, Cline, Copilot). Deliver: measured or cited accuracy/speed gains, token cost of diagnostics, and a recommended integration seam (one shared LSP service versus per-agent), with the servers worth running here (pyright/ty, TypeScript, gopls, rust-analyzer, nixd, bash-language-server).
+
+Status: consult dispatched 2026-10-25, record `~/.local/state/bigteam/adhoc-2026-10-25/jobs/research-web-python-lsp.json`, report `~/.local/state/bigteam/adhoc-2026-10-25/research-web-python-lsp-report.md`. Next: read the report, bring djbclark the ranked recommendations and the decisions it needs, then queue implementation slices (each sized for a Sonnet worker) only on his yes.
+
+## Follow-ups after PR 73 and PR 74 (merged 2026-10-25; adversary rounds, none blocking)
+
+PR 73 merged as b2bd2a1, PR 74 as 6f54e89 (adversary `APPROVE` 39cd2db and `APPROVE` 3402d84). Each item below was reproduced by the adversary and judged Low or informational; nothing here is started.
+
+1. **relay.py R5-1 (Low, PR 74 round 5)**: `send_paseo` matches `probe_raw or probe_esc` for every text, but a headerless text (a Paseo-agent sender, `sender_tag()` returns "") is always stored escaped by the daemon, so `probe_raw` only adds false-`delivered` surface there (`ours="it's"` is certified by another message's line `it's green now`). Fix: use the raw probe only when the text carries the `[relay from ` header (`route_paseo` passes `raw=bool(tag)`, or `send_paseo` tests `text.startswith("[relay from ")`); the deferred deliverer keeps both probes (it adds a header and keeps the record's `PASEO_AGENT_ID`).
+2. **relay.py R5-3 (Low, pre-existing)**: a whole text that is a prefix of another pending text from the same sender is certified by that text's line (`done` by `done and merged`). Fix: end-anchor the probes (`probe_raw + '"'`, `probe_esc + '\\n</paseo-system>'`); read Paseo's `delivery.js` join of queued prompts (`\n\n`) before choosing the terminator.
+3. **relay.py, from rounds 2 and 3 of PR 74**: r2 A3 (an `aka` name match; a declared label spelling a session-id header); r2 A6 (a relay that died after reserving an ID blocks its sender's retry for 10 min); r2 A7 (`--expect-ack` to an acp-dispatch record closes only if the slice answers through relay.py); r3 A1 (a Hermes target's `who` holds the date word `sid[:8]`); r3 A2 (`hermes_forged` is a full match, so a suffixed label still poses as Hermes); r3 A3 (a rotated Hermes session's reply never closes); r3 A4 (`who: []` fails open on a hand-edited link); r3 A5 (two stale `inherit = "core"` comments). Details: `~/.local/state/bigteam/adhoc-2026-10-25/adv-relay-r2-report.md` and `adv-relay-r3-report.md`.
+4. **routing (PR 73, round 5 notes)**: LOW, the snapshot-file fallback (pre-existing at ca9d3b6) admits on a file up to 25 minutes old when aiuse itself fails, so "fail-closed" holds only when no snapshot file exists; INFO, a hanging aiuse can now cost up to three timeouts per foreground dispatch; INFO, the dispatch post-load fresh read is unconditional over agents; INFO, two post-run memo readers are not admission boundaries. Also three P3 notes from round 4 (ca9d3b6): legacy stored windows, the docs scope of the window floor, a test `SESSION_FINDER_STATE` leak.
+5. **Open Codex panes**: `w2F:p45` (`~/src/djbclark-ade`) and `w2Q:p1` (`~/ops/site-djbclark/macos`) sit behind permission dialogs only djbclark can answer; relays to both failed (2026-10-25). Not an agent task.
+
 ## relay.py deferred send and Paseo sender label (2026-10-24, branch `feat/relay-deferred-send`, PR #57)
 
 Built, repair round 2 (2026-10-24) after a second adversary BLOCK, not merged: a busy target no longer loses the text (`relay.py`
@@ -827,14 +847,6 @@ petitions; it does not intercept Claude Code's own tool calls, MCP calls (`WebSe
 `2fado ask`. Overlaps: the SF-Q16 item below (Paseo Telegram plugin replacing Hermes's relay, blocked on a Paseo version range), `hermes-ping`, Hermes's
 `permissions_respond`, `/helm`, and Herald (spoken waiting alert). Ties to the "ask before costly steps" rule in `feedback_heavy_web_search`.
 
-## ade-git-guard (PR 59) residuals from adversary round 8 (2026-10-25)
-
-Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry run's ref lines) and N3 (`--namespace` not passed to the dry run); the repair slice
-`iso-w1-r8fix` also takes N2, N4 (text only) and N5. Left open on purpose (djbclark ruling 2026-10-25, report `adv-iso-w1-r8-report.md` B6 and B7):
-1. **N6, low**: without `-v` the porcelain listing omits up-to-date refs, so a claimed `refs/heads/X` behind a glob or mirror mapping that is unchanged at dry-run time but moves
-   on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
-2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
-
 ## ade-git-guard (PR 59): redesign O2 adopted after round 9 BLOCK on 7df76ad (djbclark, 2026-10-25)
 
 Round 9 (Opus, `adv-iso-w1-r9-report.md`) BLOCKed on F1: `git --attr-source HEAD <write>` and `git --shallow-file /dev/null fetch origin +main:cb` move a claimed branch with rc 0, because
@@ -848,6 +860,30 @@ unmoved. Build slice `o2-build-pr59` (Sonnet 5.5 via omp) dispatched 2026-10-25;
 disabling through config, no-ref harms in a foreign tree, false refusals of the owner). Open follow-ups: upstream report that `branch -m/-c` destinations are not reported to the hook (files backend);
 config-based hooks (git 2.54+) as an install route, verify composition first; wire `ade-git-guard install` into `cow-pasture`, `acp-dispatch` and `acp-run` (W2/W3/W4). F2 (docs pointer to the N6/N7
 entries) is moot once `docs/git-guard.md` is rewritten.
+
+## ade-git-guard (PR 59): O2 redesign built on the PR branch (2026-10-25); what is left
+
+djbclark adopted the frontier advisor's O2 design (`frontier-pr59-design-report.md`, 2026-10-25) after nine adversary rounds of argv-parser bypasses: refs are enforced by
+git's `reference-transaction` and `pre-push` hooks, the shim shrank to what hooks cannot see and fails closed (`docs/git-guard.md`). The rounds-8 and -9 residuals N6 and N7 and
+the r9 F1 (`--attr-source`, `--shallow-file`) are gone with the dry-run preflight they were about (an unknown leading option is now refused). Open:
+1. **Next adversary round, with a NEW brief** (O2 plan step 5): argv spelling is out of scope by construction. Ask for (a) ref writes that reach disk without a reference transaction
+   (a `packed-refs` edit, `git replace`, `git notes`, a `symbolic-ref` of a per-worktree ref), (b) hook disabling through config the shim does not see (`HOME`/`XDG_CONFIG_HOME`
+   pointing at a file, `GIT_CONFIG_SYSTEM`, a repo-level `core.hooksPath` written by hand), (c) no-ref harms in a foreign tree, (d) false refusals of the owner's ordinary work.
+2. **Upstream report, `branch -m|-M|-c|-C` destinations (git, files backend)**: a rename reports its SOURCE deletion to `reference-transaction` but not the destination creation, and
+   a copy reports nothing (measured on git 2.56 in /tmp, 2026-10-25; git-hooks-ext documents the same for 2.27-2.55; Jiang Xin's 2022 series did not land). Dupe-search git's list,
+   draft a minimal reproduction (a hook that logs stdin; `git branch -c a b`), file it (AGENTS.md item 38). Until it lands the shim keeps the destination rule.
+3. **Config-based hooks (git 2.54+, `hook.<event>.command`)**: they may let `acp-run` inject the guard through `GIT_CONFIG_COUNT` into repositories nobody installed. Verify FIRST whether
+   a config hook for `reference-transaction` runs alongside `.git/hooks/reference-transaction` or replaces it, and whether `-c hook.*.enabled=false` from an agent beats an env-injected one
+   (the shim refuses `hook.*` keys regardless). Do not build on it before that is measured.
+4. **Wire the call sites** (not in PR 59): W2 `cow-pasture create` runs `ade-git-guard install <pasture>`; W3 `acp-dispatch` exports `ADE_CLAIM_ID` and installs in the repository at claim
+   time; W4 `acp-run` puts `libexec/agent-bin` first on agents' PATH; the operator runs `ade-git-guard install` once over `~/src/*` and `~/orca/projects/*`. Check Hermes (it turns repository
+   hooks off in its trees) before relying on the hooks there.
+5. **`git replay`, `git history`, `git refs migrate` (new in 2.54-2.56)** write refs and should reach the hook (NOT measured); the shim's `KNOWN_SUBS` lists them as ordinary subcommands.
+   Re-measure the hook on each when a claimed branch is in play.
+6. **Output files into an unclaimed checkout (accepted residual, 2026-10-25; Codex threads on PR 59 for `stash show --output` and `format-patch -o`)**: replayed at ac2fc56, `git stash show -p
+   --output=f` and `git format-patch -1 -o .` replace a peer's uncommitted file in an unclaimed checkout (rc 0); in a claimed foreign workspace they are refused. `docs/git-guard.md`
+   NOT covered item 14 says so. If djbclark wants it closed: a slim shim rule refusing `--output*`, `-o` and `--output-directory` on `stash show` and `format-patch` when the target lies
+   outside the caller's claimed workspace (the O2 removal of the output-file rules is the reason it is open), plus tests that fail before and an adversary round.
 
 ## acp-dispatch launchd label with a slash (PR 62, merged e15aeb9, 2026-10-25): lows from adversary round 1
 
@@ -867,7 +903,13 @@ states the rule. Build items, each one Sonnet `code` slice with a test:
    (today `queued` exits 0 like a delivery); add `--expect-ack ID` that waits for a reply message naming the sender.
 2. **First-contact ack**: the first relay to a session this sender has never messaged appends "reply `ack <sender id>` through relay.py"; `fleet.py` records which peers have ever acked, so a one-way link shows as such.
 3. **Inbound relays**: a relayed message that asks a question is answered by a relay to its sender (the footer names the route); a reply written only in the receiver's prose is flagged by the `session-finder` skill text and by a Stop-hook nudge when a turn began with `[relay from ...]` and ended with no `relay.py` call.
+
+**Landed 2026-10-25 (branch `feat/relay-verified-delivery`, PR #NN; `skills/session-finder/relay.py`, `fleet.py`, SKILL.md "Verified peer messaging"):**
+1. `--ack` is opt-in: without it `queued`/`accepted` still exit 0 because fleet-watch, load-watch, session-load-watch and rumination-watch read 0 as "taken or queued" (checked 2026-10-25); with it a send that is only accepted or queued is watched for `--wait` more seconds and exits 0 delivered, 1 not delivered, 3 unverified (new). Proof per route: pane enqueue (transcript `tx_state`), Claude socket frame to a working session and Paseo send to a Claude agent (the text or envelope in its transcript), deferred record (the deliverer's outcome line must say `: delivered;`). ACP inbox (`launch`, `dispatch`) has no transcript to read: unverified at once.
+2. `--expect-ack ID` (+ `--needs-reply`, `--fyi`, `--ack-within S`): a `?` outside a URL or `--needs-reply` from an identifiable session is refused (exit 2) without it; the record is `<deferred dir>/expect/ID.json`, listed by `--pending` (rows `"kind": "expect"`, `overdue`), resolved by `--sweep` from the sender's transcript. Escalation (D) is print-only: `--sweep` prints `OVERDUE ack ID ...` lines; the lead wires `hermes-ping` there (hook: `relay.py --sweep` output, or `relay.py --pending --json | jq '.[] | select(.overdue)'`, from fleet-watch).
+3. First contact: footer on the first send per sender>target pair; `~/.local/state/relay/links.json` ledger; `fleet.py list` shows `link: acked | ONE-WAY`. Not done by design (left for the lead): the Stop-hook nudge (see the report's DECIDED).
 4. **Home instruction file (Opus only)**: item 24 (3) of `~/.claude/CLAUDE.md` gains one clause pointing at standing order 10; dispatched `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment` on 2026-10-25.
+5. **Refuse an unresolvable sender (djbclark, 2026-10-25, relayed by the load-watcher agent bb2a32df)**: every relayed text must carry reverse contact info, so a relay whose sender cannot be resolved is not sent: exit 4 (`NO_SENDER_EXIT`; 0, 1, 2, 3 were taken), nothing sent, queued, deferred or recorded, `--json` `{"sent": false, "error": "no_sender", ...}`, the text names what was checked and says to re-run with `RELAY_SENDER_NAME=<label>`; `--plan` unaffected. `[relay from unknown]` no longer exists in any sent text. Callers that run with no session now declare a sender: `bin/load-watch` (`relay_env()`, both relay calls), `bin/session-load-watch`, `launchd/com.djbclark.rumination-watch.plist` (already did); `fleet-watch upstream` (site-djbclark, outside this repo) still needs `RELAY_SENDER_NAME=fleet-watch` (report 2026-10-25).
 
 Scoping (Dann 5, lead of techno-euphora, relayed 2026-10-25, after djbclark asked whether relay should ALWAYS require a reply): mandate PROOF, not conversation. Delivery proof (the text reached the
 target's transcript) is mechanical and needs no reply; a reply (the target read it and acted) costs the target a turn, and a send to a working cline or ACP agent cannot steer, so forcing one on every message
