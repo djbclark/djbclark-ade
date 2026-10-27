@@ -210,7 +210,7 @@ directory, lock, log append, counter) asks instead of allowing; the lock is poll
 are opened `O_NOFOLLOW|O_NONBLOCK` and checked with `fstat` on the opened fd, reads included (no stat-then-open, so a file
 swapped in during the read cannot block it; the guard state and `gates.toml` are read `O_NONBLOCK`, regular files only), so a
 symlink or a FIFO planted in its place asks at once instead of hanging (the
-hook has no `timeout` in `settings.json`, and a timed-out PreToolUse hook lets the call through). The counter is written before
+hook entry in `settings.json` carries `"timeout": 15` and `"onFailure": "block"` since 2026-10-27 (djbclark's choice; Claude Code 2.1.295 or later): a stalled, timed-out or unstartable hook then blocks the Agent/Task call instead of letting it through, and a missing or broken hook script blocks every Agent/Task call). The counter is written before
 the log row, so a failed write never leaves an `allowed-judged` row for a call that asked; a counted call with no row only
 over-counts, which is safe.
 
