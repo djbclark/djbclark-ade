@@ -252,6 +252,23 @@ class TestExpectAck(Base):
         self.reply_to_me("ack build12")
         self.assertIn("0 resolved", self.run_cli("--sweep")[1])
 
+    def test_a_sentence_final_period_after_the_id_is_still_the_ack(self) -> None:
+        self.go("is the build green?", "--expect-ack", "build1")
+        self.reply_to_me("ack build1.")
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+
+    def test_ack_token_takes_a_final_period_only_before_whitespace_or_the_end(self) -> None:
+        pat = relay.ack_token("build1")
+        for good in ("ack build1", "ack build1.", "Ack: build1. thanks", "ack=build1. ", "ack build1 done."):
+            self.assertTrue(pat.search(good), good)
+        for bad in ("ack build1.more", "ack build1.-x", "ack build1..x", "ack build1-x", "ack build1_x", "ack build12.", "ack build1.2"):
+            self.assertFalse(pat.search(bad), bad)
+
+    def test_a_dotted_longer_id_is_not_the_ack_in_a_sweep(self) -> None:
+        self.go("is the build green?", "--expect-ack", "build1")
+        self.reply_to_me("ack build1.more")
+        self.assertIn("0 resolved", self.run_cli("--sweep")[1])
+
     def test_an_unanswered_expectation_goes_overdue_and_the_sweep_flags_it_for_the_operator(self) -> None:
         self.go("is the build green?", "--expect-ack", "build1", "--ack-within", "60")
         path = relay.expect_dir() / "build1.json"

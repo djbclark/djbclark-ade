@@ -2800,8 +2800,10 @@ def scan_texts(tx, mark):
 
 
 def ack_token(token):
-    """`ack <TOKEN>` as a reply writes it (case-insensitive, `ack:` or `ack=` too), not inside a longer word or id."""
-    return re.compile(rf"(?<![\w-])ack[ :=]+{re.escape(token)}(?![\w.-])", re.I)
+    """`ack <TOKEN>` as a reply writes it (case-insensitive, `ack:` or `ack=` too), not inside a longer word or id. A sentence-final
+    period closes it (`ack ID.`, 2026-10-27: two real acks were missed) only when whitespace or the end of the text follows it, so
+    `ID.more`, `ID.-x` and `ID..x` stay longer ids."""
+    return re.compile(rf"(?<![\w-])ack[ :=]+{re.escape(token)}(?![\w-])(?!\.(?!\s|$))", re.I)
 
 
 HEADER_RE = re.compile(r'\[relay from (?P<kind>[^\s\]]+) (?P<id>[^\s\]]+)(?: aka (?P<aka>[^()\]]+?))?(?= \(|\])'
