@@ -640,6 +640,50 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         rows = r.plan(["frontier", "judgment", "judgment"], quota=IDLE)
         self.assertEqual([c.service.name for _, c in rows], ["codex", "claude", "claude"])
 
+    def gate_env(self, profile: bool, tighten_min_left: float | None = None) -> dict[str, str]:
+        """Env pointing the frontier gate at a temp profile (the shipped `away`, active now) and a temp gates.toml copy."""
+        tmp = Path(tempfile.mkdtemp(prefix="ragate-"))
+        toml = (Path(r.__file__).resolve().parent.parent / "config" / "gates.toml").read_text()
+        if tighten_min_left is not None:
+            toml = toml.replace("frontier1_min_left = 10.0 ", f"frontier1_min_left = {tighten_min_left} ", 1)
+        (tmp / "gates.toml").write_text(toml)
+        now = datetime.now(UTC)
+        stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        (tmp / "profile.json").write_text(json.dumps({"schema": 1, "profile": "away", "since": stamp(now - timedelta(hours=1)),
+                                                      "until": stamp(now + timedelta(hours=24)), "reason": "t", "set_by": "t"}))
+        return {"GATES_TOML": str(tmp / "gates.toml"),
+                "GATE_PROFILE_STATE": str(tmp / "profile.json" if profile else tmp / "none.json")}
+
+    def test_the_away_profile_lets_a_wave_put_two_frontier_slices_on_claude_but_still_one_on_codex(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=True)):
+            rows = r.plan(["frontier"] * 5, quota=IDLE)
+        self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", "claude", None, None])
+        with mock.patch.dict(os.environ, self.gate_env(profile=False)):
+            rows = r.plan(["frontier"] * 5, quota=IDLE)
+        self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", None, None, None])
+
+    def test_the_fable_floor_comes_from_the_frontier_gate(self):
+        q = {**IDLE, "codex": {"remaining": 0.0}, "claude": {"remaining": 90.0, "sublimits": {"fable": 15.0}}}
+        with mock.patch.dict(os.environ, self.gate_env(profile=False)):
+            self.assertEqual(r.route("frontier", quota=q).model, "fable --effort high")
+        with mock.patch.dict(os.environ, self.gate_env(profile=False, tighten_min_left=20.0)):      # a baseline may tighten
+            self.assertEqual(r.route("frontier", quota=q).model, "opus --effort high")
+        with mock.patch.dict(os.environ, self.gate_env(profile=True)):                              # away leaves the floor at 10
+            self.assertEqual(r.route("frontier", quota=q).model, "fable --effort high")
+
+    def test_the_policy_no_longer_carries_the_moved_keys(self):
+        self.assertNotIn("frontier_per_wave", r.POLICY["routing"])
+        self.assertNotIn("fable_min_left", r.POLICY["routing"])
+        with mock.patch.dict(os.environ, self.gate_env(profile=True)):
+            gate = r.policy_public()["frontier_gate"]
+        self.assertEqual((gate["frontier1_per_wave"], gate["frontier2_per_wave"], gate["frontier1_min_left"]), (2.0, 1.0, 10.0))
+
+    def test_per_wave_key_by_pool(self):
+        """frontier1_per_wave is the claude pool's, frontier2_per_wave every other pool's (codex's max_parallel = 1 hides it in plan)."""
+        gate = {"frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0}
+        self.assertEqual([r.frontier_per_wave(p, gate) for p in ("claude", "codex", "antigravity-claude", "unknown")], [2, 1, 1, 1])
+        self.assertEqual(r.frontier_per_wave("codex", {"frontier1_per_wave": 1.0, "frontier2_per_wave": 3.0}), 3)
+
     def test_dispatch_line_uses_the_acp_agent_name(self):
         q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
         c = r.route("code", quota=q)
@@ -803,8 +847,6 @@ class TestRoutingPolicyToml(unittest.TestCase):
             pace_penalty_above = 1.5
             pace_penalty = 6.0
             pace_penalty_judgment_factor = 0.5
-            frontier_per_wave = 1
-            fable_min_left = 10.0
             default_profile = { bulk = 60 }
 
             [calibrate]
@@ -862,8 +904,6 @@ class TestRoutingPolicyToml(unittest.TestCase):
             pace_penalty_above = 1.5
             pace_penalty = 6.0
             pace_penalty_judgment_factor = 0.5
-            frontier_per_wave = 1
-            fable_min_left = 10.0
             default_profile = { bulk = 60 }
 
             [calibrate]
@@ -921,8 +961,6 @@ class TestRoutingPolicyToml(unittest.TestCase):
             pace_penalty_above = 1.5
             pace_penalty = 6.0
             pace_penalty_judgment_factor = 0.5
-            frontier_per_wave = 1
-            fable_min_left = 10.0
             default_profile = { bulk = 60 }
 
             [discovery]

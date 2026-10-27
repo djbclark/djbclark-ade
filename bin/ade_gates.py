@@ -3,11 +3,16 @@
 Imported by bin/claude-fleet-governor, bin/claude-quota-guard and bin/gate-profile (they run under `python3 -I`, so each
 puts this directory on sys.path first, the way bin/acp-dispatch does for failover.py). Not a program.
 
-  load_gates(gate, now, defaults) -> (thresholds, info)      gate: "governor" | "quota_guard"
+  load_gates(gate, now, defaults) -> (thresholds, info)      gate: "governor" | "quota_guard" | "frontier"
 
 Precedence, lowest to highest: `defaults` (the script's THRESHOLDS: the fail-safe when config/gates.toml is missing or
 unparsable) < gates.toml baseline < the active profile < env JSON (CLAUDE_GOVERNOR_THRESHOLDS /
-CLAUDE_QUOTA_GUARD_THRESHOLDS; tests and emergencies; bad input raises GateEnvError).
+CLAUDE_QUOTA_GUARD_THRESHOLDS; tests and emergencies; bad input raises GateEnvError). The `frontier` gate has NO threshold
+env override: its keys are the away frontier allowance (docs/gates.md), and a threshold an agent can put in the environment
+must not widen it. The path variables still redirect the INPUTS (GATES_TOML, GATE_PROFILE_STATE; acp-dispatch also
+CLAUDE_QUOTA_GUARD_STATE and HOME), so a CLI consumer started by an agent can be pointed at a self-written profile: a
+`frontier_judged` record in a dispatch record is an audit trail, not proof that the allowance was granted. The Claude Code
+hook takes its environment from the Claude process, which a session cannot change.
 
 A profile (state: ~/.local/state/ade/gate-profile.json, env GATE_PROFILE_STATE) applies only when ALL of these hold; otherwise
 the baseline applies and info["ignored"] says why: the file parses as {"schema": 1, "profile", "since", "until", ...}; both
@@ -39,13 +44,14 @@ import sys
 import tempfile
 import time
 import tomllib
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-GATES = ("governor", "quota_guard")
+GATES = ("governor", "quota_guard", "frontier")
 ENV_VARS = {"governor": "CLAUDE_GOVERNOR_THRESHOLDS", "quota_guard": "CLAUDE_QUOTA_GUARD_THRESHOLDS"}
 SCHEMA = 1
 DEFAULT_MAX_HOURS = 240
@@ -57,6 +63,22 @@ ORDERINGS = {
     "quota_guard": (("watch_weekly", "tight_weekly"), ("tight_weekly", "critical_weekly")),
     "governor": (("tight_left_weekly", "critical_left"), ("tight_left_five_hour", "critical_left")),
 }
+
+# The `frontier` gate (docs/gates.md "Frontier allowance"): the code default is the fail-safe baseline, exactly today's rule
+# (no judged use, one frontier slice per pool per wave, no Agent-tool calls without asking).
+FRONTIER_DEFAULTS = {
+    "frontier1_judged": 0.0,                 # 1 = an agent may pick the claude frontier model on its own judgment
+    "frontier2_judged": 0.0,                 # same for the codex frontier model
+    "frontier1_per_wave": 1.0,               # frontier slices in flight per wave on the claude pool
+    "frontier2_per_wave": 1.0,               # same on the codex pool
+    "frontier1_agent_calls_per_day": 0.0,    # Agent-tool frontier-1 calls allowed without asking per New York day (0: always ask)
+    "frontier1_min_left": 10.0,              # percent of the frontier-1 cap that must be left
+    "frontier2_min_left": 60.0,              # percent left on the codex binding window
+}
+FRONTIER_REASON_MIN, FRONTIER_REASON_MAX = 10, 200
+GUARD_STATE_MAX_AGE_S = 30 * 60              # quota-guard.json older than this proves nothing about the level
+JUDGED_OK_LEVELS = ("ok", "watch")           # tight and critical are the stop signal in every profile
+JUDGED_OK_REASONS = ("weekly",)              # the only watch reason a profile may spend through (not stale, fable cap, alert, snapshot-only)
 MAX_PROFILE_BYTES = 64 * 1024     # the profile file is a few hundred bytes; anything bigger is not one
 NOTIFY_LOCK_WAIT = 10.0           # s the governor/guard wait for the state lock before skipping a notice (retried next run)
 CLI_LOCK_WAIT = 120.0             # s `gate-profile set/extend/clear` wait: longer than two 60 s pings (env GATE_PROFILE_LOCK_WAIT)
@@ -153,7 +175,10 @@ def atomic_write(path: Path, text: str) -> None:
 def read_toml() -> tuple[dict[str, Any] | None, str | None]:
     path = toml_path()
     try:
-        with path.open("rb") as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)      # a FIFO with no writer would block a plain open forever
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None, f"{path}: not a regular file"
             return tomllib.load(fh), None
     except OSError as e:
         return None, f"{path}: {e.strerror or e}"
@@ -210,12 +235,35 @@ def value_problem(spec: dict[str, Any], baseline: float, value: Any) -> str | No
     return None
 
 
+def code_direction(gate: str, key: str) -> str | None:
+    """"lower" or "higher" for a `frontier` key (its defaults are all "off": `*_min_left` lower is looser, every other key higher
+    is looser), None for any other key. The direction comes from the code, never from a file's floor entry."""
+    if gate == "frontier" and key in FRONTIER_DEFAULTS:
+        return "lower" if key.endswith("_min_left") else "higher"
+    return None
+
+
+def effective_spec(cfg: dict[str, Any], gate: str, key: str) -> dict[str, Any] | None:
+    """The floor spec in force: the file's `[floors]` entry, except that a `frontier` key takes the code's direction over the
+    entry's `loosen` (the entry's `bound` stays). None when the key has no floor entry."""
+    spec = floor_spec(cfg, gate, key)
+    direction = code_direction(gate, key)
+    if spec is None or direction is None:
+        return spec
+    return {**spec, "loosen": direction}
+
+
 def baseline_loosens(cfg: dict[str, Any], gate: str, key: str, value: float, default: float) -> bool:
     """True when the gates.toml baseline `value` is looser than the code `default` in the key's floor direction. A key with no
-    floor entry has no direction (False); a floor entry whose direction is unreadable trusts only the code default."""
-    spec = floor_spec(cfg, gate, key)
-    if spec is None:
-        return False
+    floor entry has no direction (False). A `frontier` key always has one, from the code (`code_direction`), so a floor entry's
+    `loosen` is ignored there; a floor entry whose direction is unreadable trusts only the code default."""
+    direction = code_direction(gate, key)
+    if direction is not None:
+        spec = {"loosen": direction}
+    else:
+        spec = floor_spec(cfg, gate, key)
+        if spec is None:
+            return False
     if spec.get("loosen") == "lower":
         return value < default
     if spec.get("loosen") == "higher":
@@ -253,7 +301,7 @@ def profile_problems(cfg: dict[str, Any], name: str, baselines: dict[str, dict[s
             continue
         before = len(out)
         for key, value in tbl.items():
-            spec = floor_spec(cfg, gate, key)
+            spec = effective_spec(cfg, gate, key)
             if spec is None:
                 out.append(f"profile {name}.{gate}.{key}: not overridable (no [floors.{gate}] entry)")
             elif key not in baselines.get(gate, {}):
@@ -366,8 +414,8 @@ def resolve_profile(cfg: dict[str, Any] | None, now: datetime) -> dict[str, Any]
 # -- the loader ----------------------------------------------------------------------------------------------------
 
 def env_overrides(gate: str, known: dict[str, Any]) -> dict[str, float]:
-    var = ENV_VARS[gate]
-    raw = os.environ.get(var)
+    var = ENV_VARS.get(gate)
+    raw = os.environ.get(var) if var else None
     if not raw:
         return {}
     try:
@@ -431,6 +479,60 @@ def profile_brief(info: dict[str, Any]) -> dict[str, Any] | None:
     """The `profile` field of the gates' state files: {"name", "until"} or None."""
     p = info.get("profile")
     return {"name": p.get("name"), "until": p.get("until")} if isinstance(p, dict) else None
+
+
+# -- the frontier allowance ------------------------------------------------------------------------------------------
+
+def load_frontier(now: datetime | None = None) -> tuple[dict[str, float], dict[str, Any]]:
+    """The effective `frontier` gate (FRONTIER_DEFAULTS < gates.toml < active profile) and its info dict."""
+    return load_gates("frontier", now, FRONTIER_DEFAULTS)
+
+
+def frontier_reason(text: Any) -> tuple[str | None, str | None]:
+    """(reason, problem) for a `frontier-reason`: (None, None) when missing or blank (baseline treatment), (None, why) when
+    given but not one line of FRONTIER_REASON_MIN..MAX characters, else (the stripped one-line reason, None)."""
+    if text is None:
+        return None, None
+    if not isinstance(text, str):
+        return None, "a frontier-reason must be text"
+    s = text.strip()
+    if not s:
+        return None, None
+    if any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in s):
+        return None, "a frontier-reason is one line, no control or format character"
+    if not FRONTIER_REASON_MIN <= len(s) <= FRONTIER_REASON_MAX:
+        return None, f"a frontier-reason is {FRONTIER_REASON_MIN}-{FRONTIER_REASON_MAX} characters (got {len(s)})"
+    return s, None
+
+
+def judged_guard_block(state: Any, t: dict[str, float], now: datetime) -> str | None:
+    """Why the claude frontier model's judged use is NOT allowed by the quota guard's state file, or None when it is. Fails closed:
+    a missing, unreadable, stale, future-dated or unexplained state blocks. `t` is the effective `frontier` gate."""
+    if not isinstance(state, dict):
+        return "the quota guard state is missing or unreadable"
+    checked = parse_utc(state.get("checked_at"))
+    if checked is None:
+        return "the quota guard state has no usable checked_at"
+    age = (now - checked).total_seconds()
+    if not -60 <= age <= GUARD_STATE_MAX_AGE_S:
+        return f"the quota guard state is {age / 60:.0f} min old (limit {GUARD_STATE_MAX_AGE_S // 60})"
+    level = state.get("level")
+    if level not in JUDGED_OK_LEVELS:
+        return f"the quota guard level is {level!r}: the baseline rules apply at tight and critical"
+    if state.get("stale") is not False:
+        return "the quota guard data is stale"
+    reasons = state.get("reasons")
+    if level == "watch" and (not isinstance(reasons, list) or not reasons
+                             or any(r not in JUDGED_OK_REASONS for r in reasons)):
+        return f"the quota guard is at watch for a reason other than the weekly window ({reasons!r})"
+    if level == "ok" and reasons not in (None, []):
+        return f"the quota guard reports reasons {reasons!r} at level ok"
+    left = state.get("fable_left")
+    if not is_num(left):
+        return "the frontier-1 cap reading (fable_left) is missing"
+    if left < t.get("frontier1_min_left", FRONTIER_DEFAULTS["frontier1_min_left"]):
+        return f"the frontier-1 cap has {left:g}% left (floor {t['frontier1_min_left']:g}%)"
+    return None
 
 
 # -- expiry notice and daily nudge -----------------------------------------------------------------------------------

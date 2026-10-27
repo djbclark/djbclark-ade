@@ -258,7 +258,8 @@ through `tests/test_ade_template_check.py`.
     fail-open, and the integration status (only W1 is built; W2-W4 call sites are listed).
 18. [`docs/gates.md`](docs/gates.md) — `config/gates.toml` and `bin/gate-profile` (2026-10-26): the Claude quota gates'
     (`claude-fleet-governor`, `claude-quota-guard`) numbers versioned in git with floors a profile may not cross, and a
-    temporary expiring `away` profile (`set --for 72h`), its fail-safe rules and a worked three-day example.
+    temporary expiring `away` profile (`set --for 72h`), its fail-safe rules and a worked three-day example, and (2026-10-27)
+    the `[frontier]` gate: an agent may use a frontier model on its own judgment with a one-line `--frontier-reason`, capped.
 
 ## Architecture: agent graphs at two altitudes
 

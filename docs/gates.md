@@ -7,7 +7,7 @@ them for a bounded time (a planned absence) without anyone editing code, an env 
 | piece | what |
 | --- | --- |
 | [`config/gates.toml`](../config/gates.toml) | the baseline (the current values), the floors a profile may not cross, and the profiles (`away`, a draft) |
-| [`bin/ade_gates.py`](../bin/ade_gates.py) | the loader both scripts call: `load_gates(gate, now, defaults) -> (thresholds, info)` |
+| [`bin/ade_gates.py`](../bin/ade_gates.py) | the loader the scripts call: `load_gates(gate, now, defaults) -> (thresholds, info)` (gates `governor`, `quota_guard`, `frontier`) |
 | [`bin/gate-profile`](../bin/gate-profile) | the CLI: `status [--json]`, `show`, `diff`, `validate`, `set`, `clear` |
 | `~/.local/state/ade/gate-profile.json` | the active profile (env `GATE_PROFILE_STATE`); audit log `gate-profile.log` beside it (`GATE_PROFILE_LOG`) |
 
@@ -35,6 +35,8 @@ with no floor entry (a timing, age, lock or exhaustion-window key) is not guarde
 | `*_left*`, `*_weekly`, `critical_five_hour`, `watch_fable` (percent left) | lower | `[bound, baseline]` |
 | `tight_projected` (projection at reset) | higher | `[baseline, bound]` |
 | `conserve_alert_level` (a level: 0 ok, 1 watch, 2 tight, 3 critical) | lower | `[1, 2]` (bound 1 = watch) |
+| `frontier1_judged`, `frontier2_judged`, `frontier*_per_wave`, `frontier1_agent_calls_per_day` (a count or 0/1 switch) | higher | `[baseline, bound]` |
+| `frontier*_min_left` (percent left) | lower | `[bound, baseline]` |
 | every timing, age, lock and exhaustion-window key | not overridable | (unlisted: a profile that sets one is rejected) |
 
 Bounds (2026-10-26): no trigger below 3% left (the aiuse collector is hourly, the guard runs every 15 min, a 5-hour window
@@ -147,8 +149,73 @@ before reset" alert gives `tight` (ignored while that window is `pace_early`). T
 so the projection alert alone gives `watch` (advice text only) and the governor, which reads the guard's level, does not
 downshift on it. A profile cannot set 0 (an alert always gives at least `watch`); env JSON can, for tests and emergencies.
 
+## Frontier allowance: the `[frontier]` gate (2026-10-27)
+
+A third gate, read by `bin/route_agent.py`, `bin/acp-dispatch`, `claude/hooks/frontier_agent_gate.py`, `bin/claude-quota-guard`
+(advice, state) and `claude/hooks/quota_nudge.py` (daily line). Code default: `ade_gates.FRONTIER_DEFAULTS`; load it with
+`ade_gates.load_frontier()`. **No threshold env override** (an agent can set an environment variable; the allowance must not widen that
+way). The path variables `GATES_TOML` and `GATE_PROFILE_STATE` (and, for `acp-dispatch`, `CLAUDE_QUOTA_GUARD_STATE` and `HOME`)
+still redirect the inputs, so a CLI consumer started by an agent can be pointed at a self-written profile: a `frontier_judged`
+record in a dispatch record is an audit trail, not proof that a grant existed. The Claude Code hook takes its environment from
+the Claude process, which a session cannot change. Baseline (every number is today's rule): no judged use, one frontier slice per pool per wave, no Agent-tool frontier call
+without asking.
+
+| key | baseline | `away` | floor (`loosen`, bound) | meaning |
+| --- | --- | --- | --- | --- |
+| `frontier1_judged` | 0 | 1 | higher, 1 | 1: an agent MAY pick the claude frontier model (Fable) on its own judgment, with a reason |
+| `frontier2_judged` | 0 | 1 | higher, 1 | same for the codex frontier model (gpt-6-astra) |
+| `frontier1_per_wave` | 1 | 2 | higher, 2 | frontier slices per wave on the claude pool (moved from `routing.toml` `frontier_per_wave`) |
+| `frontier2_per_wave` | 1 | 1 | higher, 1 | the same on the codex pool |
+| `frontier1_agent_calls_per_day` | 0 | 4 | higher, 6 | Agent-tool frontier-1 calls allowed without asking per America/New_York day (0: always ask) |
+| `frontier1_min_left` | 10 | 10 | lower, 10 | percent of the Fable cap that must be left (moved from `routing.toml` `fable_min_left`); a profile may not lower it |
+| `frontier2_min_left` | 60 | 60 | lower, 40 | percent left on the codex binding window |
+
+`route_agent.py` reads `frontier1_per_wave` (pool `claude`) and `frontier2_per_wave` (every other pool) in `plan`, and
+`frontier1_min_left` in `suggest_model`; the keys are gone from `config/routing.toml`.
+
+**What a granted allowance is.** While `away` (or any profile setting the keys) is active, an agent MAY use a frontier model
+where it judges it significantly better than judgment, if it states why in one line. The checks, in order:
+
+| step | `claude/hooks/frontier_agent_gate.py` (Agent tool, Fable) | `bin/acp-dispatch --kind frontier --frontier-reason TEXT` |
+| --- | --- | --- |
+| gate | `frontier1_judged` and `frontier1_agent_calls_per_day` at least 1, else ask | the family's `*_judged` at least 1 (claude pool: 1, codex pool: 2) |
+| guard | `quota-guard.json` at most 30 min old, level `ok`, or `watch` whose `reasons` are only `["weekly"]`, `stale` false, `fable_left` at least `frontier1_min_left`; else ask | claude: the same check; codex: the pool reading at least `frontier2_min_left` (no reading: not granted) |
+| reason | a `frontier-reason: TEXT` line in the prompt, 10-200 characters, one line, no control or format character (so no tab, zero-width joiner or soft hyphen); else ask (the ask text names the format) | `--frontier-reason`, same bounds; empty or missing: baseline treatment; non-empty but out of bounds or multi-line: exit 2 |
+| cap | allowed-judged calls today (NY) below `frontier1_agent_calls_per_day`, counted from the log AND `agent-calls-day.json` (the larger) | fewer than `*_per_wave` frontier slices in flight on the pool |
+| record | log row `decision: allowed-judged`, reason, profile name and `until` | `frontier_reason`, `frontier_judged` (family, profile, until, cap, in flight), `frontier_judged_note` (why not) in the dispatch record, one stderr line |
+
+Unchanged under any profile: advise-only (no `frontier-exec`), the `fable-xhigh` approval, no lead session on a frontier model
+(the governor's move), and the `tight`/`critical` stop signal (judged use needs level `ok`, or `watch` for the weekly window
+alone: a stale collector, an alert, a snapshot-only row or the Fable cap at `watch` keep the baseline). A profile that expires
+mid-wave ends the allowance on the next call (each call re-reads the profile); a slice already running is not stopped.
+
+Decisions and limits (2026-10-27): (1) `acp-dispatch` never refuses a dispatch the baseline allows: omitting the reason is
+exactly today's behaviour, so the allowance there is recorded and capped, not a lock; only the Agent-tool hook asks.
+(2) The per-wave cap in `acp-dispatch` counts `frontier`-kind slices in flight on the pool (a wave has no id there).
+(3) The guard writes `reasons` (which triggers fired: `weekly`, `five_hour`, `fable`, `alert`, `snapshot-only`, `exhausted`,
+`stale`) and `frontier_allowance` (`judged`, `agent_calls_per_day`) into `quota-guard.json`; the daily nudge line says "allowed"
+only when `frontier_allowance.judged` is true. (4) Same-user files (`agent-calls.jsonl`, the day counter, the profile, the guard
+state, `GATES_TOML`) can be edited by any agent: the double counter, the regular-file and future-dated-row checks, the
+fail-closed parse errors and the lock raise the cost of spoofing the cap, they do not make it impossible. The hook also trusts
+its process environment: a session can start a child `claude` or `acp-run` with `ACP_OPERATOR_APPROVED=frontier-agent` set,
+and that child's frontier sub-agents then pass unasked and uncapped (pre-existing, not closed by the gate). For the `frontier`
+gate both a `gates.toml` baseline and a profile value are judged by the code's direction (`*_min_left` lower is looser, every
+other key higher), never by a floor entry's `loosen`, so a flipped floor entry cannot loosen the baseline or let a profile pass
+the entry's `bound` in the wrong direction; the `bound` itself is still a `gates.toml` edit (same-user, above). (5) A reason is
+self-asserted: it bounds nothing but the audit trail; the cap, the floors and the guard level bound the spend. (6) Residual:
+`gate-profile set` and `extend` have no operator check (no tty, approval token or Touch ID; `--by` is free text), so any agent
+can grant the allowance by setting `away`. Mitigations: `set` sends a `hermes-ping` and every change is appended to
+`gate-profile.log`. (7) In the Agent-tool hook, once a call is identified as a frontier call, any error in its own state (state
+directory, lock, log append, counter) asks instead of allowing; the lock is polled for 5 s, then asks. The log, lock and counter
+are opened `O_NOFOLLOW|O_NONBLOCK` and checked with `fstat` on the opened fd, reads included (no stat-then-open, so a file
+swapped in during the read cannot block it; the guard state and `gates.toml` are read `O_NONBLOCK`, regular files only), so a
+symlink or a FIFO planted in its place asks at once instead of hanging (the
+hook has no `timeout` in `settings.json`, and a timed-out PreToolUse hook lets the call through). The counter is written before
+the log row, so a failed write never leaves an `allowed-judged` row for a call that asked; a counted call with no row only
+over-counts, which is safe.
+
 ## Not covered (2026-10-26)
 
-`route_agent.py` constants (`plenty_min`, `fable_min_left`,
-`SUBSTRATE_MIN_HEADROOM` in `config/routing.toml` and the script) and the routing policy text in
-`skills/model-routing/SKILL.md` are not profile-controlled.
+`route_agent.py` constants (`plenty_min`, `SUBSTRATE_MIN_HEADROOM` in `config/routing.toml` and the script) and the routing
+policy text in `skills/model-routing/SKILL.md` are not profile-controlled. (`frontier_per_wave` and `fable_min_left` moved
+to the `[frontier]` gate on 2026-10-27, above.)

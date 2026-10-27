@@ -647,12 +647,26 @@ method that runs the waves.
    1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
        without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
        `fable-deep` agent runs at `high`.
+   1e. **Away frontier allowance** (2026-10-27, operator): while a gate profile
+       sets `frontier1_judged` / `frontier2_judged` (`away` does; baseline: 0,
+       so none of this applies), you MAY use Fable or `gpt-6-astra` where you
+       judge it significantly better than Opus 5.5 for that piece of work, if
+       you say why in one line: `acp-dispatch ... --kind frontier
+       --frontier-reason "10-200 chars"`; Agent tool: a `frontier-reason: ...`
+       line in the sub-agent prompt. Caps: `frontier1_per_wave` / `frontier2_per_wave`
+       slices in flight per pool, and (Agent tool, Fable) `frontier1_agent_calls_per_day`
+       calls per New York day. It needs a fresh quota-guard state at level `ok`
+       (or `watch` for the weekly window alone) with the Fable cap at least
+       `frontier1_min_left`; at `tight`/`critical`, stale data or an exhausted
+       cap the baseline rules stand. Unchanged: advise-only, 1d's approval, no lead
+       session on a frontier model. `gate-profile clear` ends it at once. Detail:
+       `docs/gates.md` "Frontier allowance".
 2. **Fable and "claude" are one pool.** `aiuse --available` lists two routing
    entries, but Fable is a model sublimit: **at most 50% of the shared Claude
    weekly**, and every Fable run bills the shared 5-hour and weekly windows too
    (`cswap list`: read the 5h, 7d and Fable lines together; the fullest
    binds). Under 10% of the Fable cap, judgment falls back to Opus 5.5 at the
-   same effort (`route_agent.py` does this; `FABLE_MIN_LEFT`).
+   same effort (`route_agent.py` does this; `frontier1_min_left` in `config/gates.toml` `[frontier]`).
 3. **Everyday work goes to the other pools** (and to codex's everyday models
    while its quota is plentiful, item 1b), so the frontier windows stay for
    item 1: implementation with a clear shape, tests, refactors, doc writing,

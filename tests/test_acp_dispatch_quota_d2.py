@@ -101,9 +101,7 @@ burn_first_waste_min = 30.0
 pace_penalty_above = 1.5
 pace_penalty = 6.0
 pace_penalty_judgment_factor = 0.5
-frontier_per_wave = 1
 plenty_min = 50.0
-fable_min_left = 10.0
 default_profile = { bulk = 60, mechanical = 60 }
 
 [calibrate]
