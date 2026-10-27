@@ -5,8 +5,10 @@ Operator 2026-10-18: Fable is scarce. acp-dispatch gates it, but an Agent-tool s
 passes through acp-dispatch: `fable-deep` and `model: fable` reached it unseen (the opencodex
 `ocx-*` sub-agents that also did were retired with the proxy on 2026-10-19). Each such call is appended to ~/.local/state/frontier-gate/agent-calls.jsonl and returns
 "ask", so the operator confirms it. Skipped when ACP_OPERATOR_APPROVED names `frontier-agent` or `fable-deep` (any
-frontier sub-agent this session) or FRONTIER_GATE_OFF=1. Fails open on any error before the call is known to be a frontier
-call; after that an error asks (an approved session still passes), never allows.
+frontier sub-agent this session) or FRONTIER_GATE_OFF=1. The script fails open on any error it catches before the call is known
+to be a frontier call; after that an error asks (an approved session still passes), never allows. An error it cannot catch (an
+import or startup failure, a timeout, a missing file) blocks the Agent/Task call, because the settings entry has `onFailure: block`
+(docs/gates.md decision 7); the live path is a symlink into the shared djbclark-ade checkout, so that checkout must keep this file.
 
 Frontier allowance (2026-10-27, docs/gates.md "Frontier allowance"; config/gates.toml [frontier] is the standing baseline, a gate profile may only equal it).
 In order, a call is allowed without asking only when ALL hold; the first failure asks and the ask text names it:
@@ -33,8 +35,10 @@ import re
 import stat
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+UTC = timezone.utc  # datetime.UTC needs Python 3.11; settings.json blocks on a hook that cannot start (macOS /usr/bin/python3 is 3.9)
 
 FRONTIER_AGENTS = {"fable-deep": "Fable"}
 STATE_DIR = Path.home() / ".local/state/frontier-gate"

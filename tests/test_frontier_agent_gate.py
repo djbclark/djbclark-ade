@@ -473,5 +473,26 @@ class TestStateReads(unittest.TestCase):
             self.count()
 
 
+class TestSettingsTemplate(unittest.TestCase):
+    """The hook entry blocks on failure and times out well under Claude Code's 600 s default (djbclark, 2026-10-27)."""
+
+    def test_the_frontier_hook_entry_has_a_timeout_and_blocks_on_failure(self):
+        tmpl = json.loads((HOOK.parents[2] / "agents/claude/settings.json.tmpl").read_text())
+        hooks = [h for grp in tmpl["hooks"]["PreToolUse"] for h in grp["hooks"]
+                 if "frontier_agent_gate.py" in h["command"]]
+        self.assertEqual(len(hooks), 1)
+        self.assertEqual(hooks[0].get("onFailure"), "block")
+        self.assertEqual(hooks[0].get("timeout"), 15)
+
+    def test_a_plain_agent_call_exits_0_under_an_old_python(self):
+        # `onFailure: block` turns any startup failure into a block of every Agent/Task call; macOS /usr/bin/python3 is 3.9.
+        old = "/usr/bin/python3"
+        if not os.path.exists(old):
+            self.skipTest("no /usr/bin/python3")
+        r = subprocess.run([old, str(HOOK)], capture_output=True, text=True, timeout=10, input=json.dumps(
+            {"tool_name": "Agent", "tool_input": {"subagent_type": "general-purpose", "prompt": "x"}}))
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
