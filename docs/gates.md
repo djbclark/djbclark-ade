@@ -22,7 +22,8 @@ Lowest to highest: the script's `THRESHOLDS` (code default, the fail-safe) < `[g
 < the active profile < env JSON (`CLAUDE_GOVERNOR_THRESHOLDS`, `CLAUDE_QUOTA_GUARD_THRESHOLDS`; tests and emergencies, no
 floors, bad input is an error: governor exit 12, guard exit 64). The baseline must equal the code defaults: `tests/test_gates.py`
 and `bin/gate-profile validate` fail on drift, so change a number in both places in one commit. At run time the baseline is
-guarded as well (below): the file may tighten a code default, never loosen it.
+guarded too (below), but only for keys with a `[floors]` entry: the file may tighten such a code default, never loosen it. A key
+with no floor entry (a timing, age, lock or exhaustion-window key) is not guarded at run time and takes the file's value.
 
 ## `gates.toml`
 
@@ -95,7 +96,9 @@ it writes its level, and launchd never starts a second instance of a running job
 its own, so a manual `run` during a launchd run can overlap: unchanged, not made worse.) A notice's failed-ping restore is a
 compare-and-restore: the mark is taken back only while the file still holds exactly the marked text, so a profile cleared or set
 again by a writer that did not wait (an older `gate-profile`, a hand edit) is never brought back or overwritten. A lock file that
-is a symlink, FIFO or other non-regular file counts as no lock (notices skip, the CLI refuses); nothing blocks on it.
+is a symlink, FIFO or other non-regular file counts as no lock and nothing blocks on it: the notices skip and name the lock path
+once on stderr (so they stay off until it is removed), `set` and `extend` refuse naming it, and `clear` goes on without the lock
+(no writer can hold that lock either) after naming it, so a profile can always be cleared.
 
 **Baseline guard.** `load_gates` replaces a `gates.toml` baseline value with the code default when the key has a `[floors]` entry
 and the file's value is looser in that direction (lower for a "percent left" key, higher for `tight_projected`), logs it once to

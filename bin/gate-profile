@@ -30,6 +30,7 @@ waits at most the bound, then refuses with exit 1 and changes nothing: try again
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -316,8 +317,10 @@ def lock_wait() -> float:
     return v if 0 <= v < 1e6 else g.CLI_LOCK_WAIT
 
 
-def cli_lock():
-    """The profile lock for a read-modify-write, or None after printing why (exit 1, nothing changed)."""
+def cli_lock(unlocked_ok: bool = False):
+    """The profile lock for a read-modify-write, or None after printing why (exit 1, nothing changed). An unusable lock path
+    (a link, FIFO, directory, unreadable file) is named on stderr; with `unlocked_ok` the caller goes on without a lock (no writer
+    can hold that lock either) and gets a context manager that holds nothing."""
     wait = lock_wait()
     try:
         lock = g._state_lock(wait, create=True)
@@ -326,7 +329,13 @@ def cli_lock():
               "nothing changed, try again in a minute", file=sys.stderr)
         return None
     if lock is None:
-        print("gate-profile: cannot lock the profile state", file=sys.stderr)
+        path = g.state_lock_path()
+        if unlocked_ok:
+            print(f"gate-profile: cannot lock the profile state ({path} is not a usable regular file); no writer can hold it "
+                  "either, so going on without it", file=sys.stderr)
+            return contextlib.nullcontext()
+        print(f"gate-profile: cannot lock the profile state: {path} is not a usable regular file (remove it); nothing changed",
+              file=sys.stderr)
     return lock
 
 
@@ -420,6 +429,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
         if not isinstance(data, dict) or data.get("until") != active["until"]:
             print("gate-profile: the profile changed while extending; try again", file=sys.stderr)
             return EX_BAD
+        data.pop("expired_notified", None)            # a mark from an expiry that raced this extend must not silence the new expiry
         g.atomic_write(g.profile_state_path(), json.dumps({**data, "until": g.iso(new_until)}, indent=1, sort_keys=True) + "\n")
     who = os.environ.get("USER") or "unknown"
     log_line({"at": g.iso(now), "action": "extend", "profile": active["name"], "since": active["since"],
@@ -432,7 +442,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
 def cmd_clear(args: argparse.Namespace) -> int:
     now = now_utc()
     path = g.profile_state_path()
-    lock = cli_lock()
+    lock = cli_lock(unlocked_ok=True)
     if lock is None:
         return EX_BAD
     with lock:

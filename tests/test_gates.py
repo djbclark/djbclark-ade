@@ -951,3 +951,89 @@ def test_a_profile_that_puts_the_governors_tight_triggers_below_critical_is_reje
     r = subprocess.run([sys.executable, "-I", str(CLI), "validate"], capture_output=True, text=True, timeout=60,
                        env={"PATH": os.environ["PATH"], "HOME": "/nonexistent", "GATES_TOML": str(g.toml_path())})
     assert r.returncode == 1 and "profile away.governor:" in r.stdout and why in r.stdout
+
+
+# -- adversary round 2 follow-up (2026-10-27): deep toml, an unusable lock path, a stale expiry mark -------------------------
+
+DEEP_TOML = "x = " + "[" * 5000 + "]" * 5000 + "\n"           # past the interpreter's recursion limit
+
+
+@pytest.mark.parametrize("gate, defaults", [("governor", CODE_DEFAULTS), ("quota_guard", GUARD_DEFAULTS)])
+def test_a_deeply_nested_gates_toml_is_unreadable_not_a_crash(env, gate, defaults):
+    g.toml_path().write_text(DEEP_TOML)
+    t, info = g.load_gates(gate, NOW, defaults)
+    assert t == defaults and "not valid TOML" in info["toml_error"]
+
+
+def test_the_cli_reads_a_deeply_nested_gates_toml_as_unreadable_not_a_traceback(env, cli):
+    g.toml_path().write_text(DEEP_TOML)
+    for args in (("status",), ("validate",)):
+        r = cli.run(*args, GATES_TOML=str(g.toml_path()))
+        assert "Traceback" not in r.stderr and "RecursionError" not in r.stderr, (args, r.stderr[-300:])
+    assert cli.run("validate", GATES_TOML=str(g.toml_path())).returncode == 1
+
+
+LOCK_KINDS = ["fifo", "dir", "dangling_symlink", "symlink_to_valid_file"]
+
+
+def _break_lock(cli, kind: str) -> Path:
+    lock = Path(f"{cli.state}.lock")
+    lock.unlink(missing_ok=True)
+    _plant(kind, lock, cli.tmp)
+    return lock
+
+
+@pytest.mark.parametrize("kind", LOCK_KINDS)
+def test_clear_works_without_a_usable_lock_and_names_the_lock_path(cli, kind):
+    assert cli.run("set", "away", "--for", "2h", "--reason", "x").returncode == 0
+    lock = _break_lock(cli, kind)
+    target = lock.resolve() if lock.is_symlink() else None
+    before = target.read_bytes() if target is not None and target.exists() else None
+    r = cli.run("clear", GATE_PROFILE_LOCK_WAIT="0.5")
+    assert r.returncode == 0 and not cli.state.exists(), r.stderr
+    assert str(lock) in r.stderr and "cleared: baseline in force" in r.stdout
+    after = target.read_bytes() if target is not None and target.exists() else None
+    assert after == before                                                              # a link's target is never written through
+
+
+@pytest.mark.parametrize("kind", LOCK_KINDS)
+def test_set_and_extend_refuse_an_unusable_lock_naming_its_path(cli, kind):
+    assert cli.run("set", "away", "--for", "2h", "--reason", "x").returncode == 0
+    lock = _break_lock(cli, kind)
+    before = cli.state.read_text()
+    for args in (("set", "away", "--for", "3h", "--reason", "y"), ("extend", "--for", "1h")):
+        r = cli.run(*args)
+        assert r.returncode == 1 and str(lock) in r.stderr, (args, r.stderr)
+        assert cli.state.read_text() == before
+
+
+@pytest.mark.parametrize("kind", LOCK_KINDS)
+def test_the_notices_say_so_once_when_the_lock_path_is_unusable(env, cli, capsys, kind):
+    lock = _break_lock(cli, kind)
+    write_state(state_path(), since="2026-10-26T12:00:00Z", until="2026-10-29T16:00:00Z", last_daily_nudge="2026-10-26")
+    _, active = gov(NOW + timedelta(days=1))
+    sent: list[str] = []
+    for _ in range(2):
+        assert _bounded(lambda: g.notify_daily(active, lambda m: sent.append(m) or True, NOW + timedelta(days=1))) is False
+    write_state(state_path(), until=g.iso(NOW - timedelta(minutes=1)), since=g.iso(NOW - timedelta(hours=70)))
+    _, expired = gov()
+    for _ in range(2):
+        assert _bounded(lambda: g.notify_expired(expired, lambda m: sent.append(m) or True, NOW)) is False
+    err = capsys.readouterr().err
+    assert sent == [] and err.count(str(lock)) == 2, err                         # one line per notice kind, not one per run
+    assert "daily nudge skipped" in err and "expiry notice skipped" in err
+
+
+def test_extend_does_not_carry_a_stale_expiry_mark_so_the_real_expiry_pings(env, cli):
+    # the state an expiry notice that raced `extend` leaves: an unexpired profile that already carries `expired_notified`
+    write_state(state_path(), since=g.iso(NOW - timedelta(hours=1)), until=g.iso(NOW + timedelta(hours=2)),
+                expired_notified=g.iso(NOW - timedelta(minutes=5)))
+    r = cli.run("extend", "--for", "1h", GATES_TOML=str(g.toml_path()))
+    assert r.returncode == 0, r.stderr
+    saved = json.loads(Path(state_path()).read_text())
+    assert "expired_notified" not in saved and saved["until"] == g.iso(NOW + timedelta(hours=3))
+    later = NOW + timedelta(hours=4)
+    _, info = gov(later)
+    assert info["expired"] is not None and info["expired"]["name"] == "away"
+    sent: list[str] = []
+    assert g.notify_expired(info, lambda m: sent.append(m) or True, later) is True and len(sent) == 1

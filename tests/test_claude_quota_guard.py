@@ -1822,3 +1822,11 @@ def test_hook_names_only_an_ascii_profile_name_in_its_gates_line(rig):
         rig.state.write_text(json.dumps(st))
         out = rig.hook(session=f"s-{shown}", **env).stdout
         assert out.startswith(f"[gates] {shown} profile active until"), out
+
+
+def test_a_deeply_nested_gates_toml_is_the_code_defaults_not_a_crash(rig):
+    deep = rig.tmp / "deep.toml"
+    deep.write_text("x = " + "[" * 5000 + "]" * 5000 + "\n")
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(GATES_TOML=str(deep), **_profile(rig))
+    assert r.returncode == 1 and "RecursionError" not in r.stderr and "using the code defaults for quota_guard" in r.stderr
