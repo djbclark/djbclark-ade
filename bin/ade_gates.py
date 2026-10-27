@@ -235,13 +235,31 @@ def value_problem(spec: dict[str, Any], baseline: float, value: Any) -> str | No
     return None
 
 
+def code_direction(gate: str, key: str) -> str | None:
+    """"lower" or "higher" for a `frontier` key (its defaults are all "off": `*_min_left` lower is looser, every other key higher
+    is looser), None for any other key. The direction comes from the code, never from a file's floor entry."""
+    if gate == "frontier" and key in FRONTIER_DEFAULTS:
+        return "lower" if key.endswith("_min_left") else "higher"
+    return None
+
+
+def effective_spec(cfg: dict[str, Any], gate: str, key: str) -> dict[str, Any] | None:
+    """The floor spec in force: the file's `[floors]` entry, except that a `frontier` key takes the code's direction over the
+    entry's `loosen` (the entry's `bound` stays). None when the key has no floor entry."""
+    spec = floor_spec(cfg, gate, key)
+    direction = code_direction(gate, key)
+    if spec is None or direction is None:
+        return spec
+    return {**spec, "loosen": direction}
+
+
 def baseline_loosens(cfg: dict[str, Any], gate: str, key: str, value: float, default: float) -> bool:
     """True when the gates.toml baseline `value` is looser than the code `default` in the key's floor direction. A key with no
-    floor entry has no direction (False). A `frontier` key always has one, from the code, never from the file (its defaults are
-    all "off": `*_min_left` lower is looser, every other key higher is looser), so a floor entry's `loosen` is ignored there; a
-    floor entry whose direction is unreadable trusts only the code default."""
-    if gate == "frontier" and key in FRONTIER_DEFAULTS:
-        spec = {"loosen": "lower" if key.endswith("_min_left") else "higher"}
+    floor entry has no direction (False). A `frontier` key always has one, from the code (`code_direction`), so a floor entry's
+    `loosen` is ignored there; a floor entry whose direction is unreadable trusts only the code default."""
+    direction = code_direction(gate, key)
+    if direction is not None:
+        spec = {"loosen": direction}
     else:
         spec = floor_spec(cfg, gate, key)
         if spec is None:
@@ -283,7 +301,7 @@ def profile_problems(cfg: dict[str, Any], name: str, baselines: dict[str, dict[s
             continue
         before = len(out)
         for key, value in tbl.items():
-            spec = floor_spec(cfg, gate, key)
+            spec = effective_spec(cfg, gate, key)
             if spec is None:
                 out.append(f"profile {name}.{gate}.{key}: not overridable (no [floors.{gate}] entry)")
             elif key not in baselines.get(gate, {}):

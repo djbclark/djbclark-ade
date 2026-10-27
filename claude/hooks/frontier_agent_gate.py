@@ -19,7 +19,8 @@ In order, a call is allowed without asking only when ALL hold; the first failure
      regular file, has an unparsable row or a row dated in the future asks.
 An allowed call is logged with `decision: "allowed-judged"`, the reason, the profile name and its `until`. Any error in these
 steps, or in the state directory, the lock (polled for 5 s, then asks) or the log append, asks; it never allows. State files
-are opened O_NOFOLLOW|O_NONBLOCK and must be regular files, so a symlink or FIFO asks instead of hanging. The decision, the
+are opened O_NOFOLLOW|O_NONBLOCK and checked with fstat on the opened fd (log and counter reads included, no stat then open),
+so a planted symlink or FIFO asks at once, and a file swapped in during the read cannot make it block. The decision, the
 counter write (first) and the log append run under one lock, so parallel calls cannot both take the last slot.
 """
 
@@ -78,27 +79,35 @@ def _guard_state():
         return None
 
 
+def _read_state(path):
+    """The text of a state file, None when it is absent. One open does the type check (`_open_regular`: a symlink, FIFO or other
+    special file raises), so a file swapped in after a stat cannot make the read block."""
+    try:
+        fd = _open_regular(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd) as fh:
+        return fh.read()
+
+
 def _count_today(g, now):
     """Allowed-judged calls today per the log and the day counter; raises ValueError on any sign of tampering."""
     today = g.ny_date(now)
     logged = 0
-    if LOG.is_symlink() or (LOG.exists() and not LOG.is_file()):
-        raise ValueError("agent-calls.jsonl is not a regular file")
-    if LOG.exists():
-        for line in LOG.read_text().splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            at = row["at"]
-            if not isinstance(at, (int, float)) or isinstance(at, bool) or at > now.timestamp() + 60:
-                raise ValueError("agent-calls.jsonl has a row without a usable past time")
-            if row.get("decision") == "allowed-judged" and g.ny_date(datetime.fromtimestamp(at, UTC)) == today:
-                logged += 1
+    text = _read_state(LOG)
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        at = row["at"]
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or at > now.timestamp() + 60:
+            raise ValueError("agent-calls.jsonl has a row without a usable past time")
+        if row.get("decision") == "allowed-judged" and g.ny_date(datetime.fromtimestamp(at, UTC)) == today:
+            logged += 1
     counted = 0
-    if DAY_COUNTER.is_symlink() or (DAY_COUNTER.exists() and not DAY_COUNTER.is_file()):
-        raise ValueError("agent-calls-day.json is not a regular file")
-    if DAY_COUNTER.exists():
-        day = json.loads(DAY_COUNTER.read_text())
+    text = _read_state(DAY_COUNTER)
+    if text is not None:
+        day = json.loads(text)
         if day.get("day") == today:
             n = day.get("n")
             if type(n) is not int or n < 0:

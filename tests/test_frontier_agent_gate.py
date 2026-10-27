@@ -390,5 +390,66 @@ class TestAwayAllowance(unittest.TestCase):
         self.assertIn("ImportError", self.rows()[-1]["ask_reason"])
 
 
+class TestStateReads(unittest.TestCase):
+    """`_count_today` reads the log and the day counter through `_open_regular` (adversary round 3, P3-1): a file swapped for a
+    FIFO between a type check and the read must raise, never block. A racing test would be flaky, so the swap is done inside
+    `_open_regular`'s call, which is the only place a check and an open meet."""
+
+    def setUp(self):
+        import sys
+        import types
+        self.hook = types.ModuleType("frontier_agent_gate_under_test")
+        self.hook.__file__ = str(HOOK)
+        exec(compile(HOOK.read_text().split("\ntry:\n    data = json.load", 1)[0], str(HOOK), "exec"), self.hook.__dict__)   # the defs, not main
+        sys.path.insert(0, str(HOOK.parents[2] / "bin"))
+        import ade_gates
+        self.g = ade_gates
+        self.dir = Path(tempfile.mkdtemp(prefix="fgate-read-"))
+        self.hook.LOG, self.hook.DAY_COUNTER = self.dir / "agent-calls.jsonl", self.dir / "agent-calls-day.json"
+        self.now = datetime.now(UTC)
+
+    def swap_in_a_fifo_before_the_open(self, target: Path):
+        real = self.hook._open_regular
+
+        def racing(path, flags, mode=0o600):
+            if path == target:
+                tmp = path.with_name(path.name + ".swap")
+                os.mkfifo(tmp)
+                os.replace(tmp, path)
+            return real(path, flags, mode)
+        self.hook._open_regular = racing
+
+    def count(self):
+        import signal
+        signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(AssertionError("the read blocked on a FIFO")))
+        signal.alarm(5)
+        try:
+            return self.hook._count_today(self.g, self.now)
+        finally:
+            signal.alarm(0)
+
+    def test_absent_files_count_zero(self):
+        self.assertEqual(self.count()[0], 0)
+
+    def test_a_log_swapped_for_a_fifo_during_the_read_raises_instead_of_blocking(self):
+        self.hook.LOG.write_text("")
+        self.swap_in_a_fifo_before_the_open(self.hook.LOG)
+        with self.assertRaises(OSError):
+            self.count()
+
+    def test_a_counter_swapped_for_a_fifo_during_the_read_raises_instead_of_blocking(self):
+        self.hook.DAY_COUNTER.write_text("{}")
+        self.swap_in_a_fifo_before_the_open(self.hook.DAY_COUNTER)
+        with self.assertRaises(OSError):
+            self.count()
+
+    def test_a_symlinked_log_raises(self):
+        target = self.dir / "elsewhere"
+        target.write_text("")
+        self.hook.LOG.symlink_to(target)
+        with self.assertRaises(OSError):
+            self.count()
+
+
 if __name__ == "__main__":
     unittest.main()

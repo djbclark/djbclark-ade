@@ -199,15 +199,17 @@ state, `GATES_TOML`) can be edited by any agent: the double counter, the regular
 fail-closed parse errors and the lock raise the cost of spoofing the cap, they do not make it impossible. The hook also trusts
 its process environment: a session can start a child `claude` or `acp-run` with `ACP_OPERATOR_APPROVED=frontier-agent` set,
 and that child's frontier sub-agents then pass unasked and uncapped (pre-existing, not closed by the gate). For the `frontier`
-gate a `gates.toml` baseline is judged by the code's direction (`*_min_left` lower is looser, every other key higher), never by a
-floor entry's `loosen`, so a flipped floor entry cannot loosen it. (5) A reason is
+gate both a `gates.toml` baseline and a profile value are judged by the code's direction (`*_min_left` lower is looser, every
+other key higher), never by a floor entry's `loosen`, so a flipped floor entry cannot loosen the baseline or let a profile pass
+the entry's `bound` in the wrong direction; the `bound` itself is still a `gates.toml` edit (same-user, above). (5) A reason is
 self-asserted: it bounds nothing but the audit trail; the cap, the floors and the guard level bound the spend. (6) Residual:
 `gate-profile set` and `extend` have no operator check (no tty, approval token or Touch ID; `--by` is free text), so any agent
 can grant the allowance by setting `away`. Mitigations: `set` sends a `hermes-ping` and every change is appended to
 `gate-profile.log`. (7) In the Agent-tool hook, once a call is identified as a frontier call, any error in its own state (state
 directory, lock, log append, counter) asks instead of allowing; the lock is polled for 5 s, then asks. The log, lock and counter
-are opened `O_NOFOLLOW|O_NONBLOCK` and must be regular files (the guard state and `gates.toml` are read `O_NONBLOCK`, regular
-files only), so a symlink or a FIFO in its place asks at once instead of hanging (the
+are opened `O_NOFOLLOW|O_NONBLOCK` and checked with `fstat` on the opened fd, reads included (no stat-then-open, so a file
+swapped in during the read cannot block it; the guard state and `gates.toml` are read `O_NONBLOCK`, regular files only), so a
+symlink or a FIFO planted in its place asks at once instead of hanging (the
 hook has no `timeout` in `settings.json`, and a timed-out PreToolUse hook lets the call through). The counter is written before
 the log row, so a failed write never leaves an `allowed-judged` row for a call that asked; a counted call with no row only
 over-counts, which is safe.

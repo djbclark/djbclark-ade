@@ -1149,6 +1149,44 @@ def test_a_flipped_frontier_floor_direction_does_not_loosen_the_baseline(fenv):
     assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day"}
 
 
+def flipped_floor_toml(text, floor_key, loosen, bound, baseline, profile_key, profile_value):
+    """The shipped file with one frontier floor's `loosen`/`bound` rewritten, its baseline raised and the away profile set to a value."""
+    import re
+    text = re.sub(rf"(?m)^{floor_key} = \{{.*\}}", f'{floor_key} = {{ loosen = "{loosen}", bound = {bound} }}', text)
+    text = re.sub(rf"(?ms)(^\[frontier\]\n.*?^){floor_key} = [0-9.]+", rf"\g<1>{floor_key} = {baseline}", text, count=1)
+    def in_profile(m):
+        body = m.group(1)
+        if re.search(rf"(?m)^{profile_key} = ", body):
+            body = re.sub(rf"(?m)^{profile_key} = [0-9.]+", f"{profile_key} = {profile_value}", body)
+        else:
+            body += f"{profile_key} = {profile_value}\n"
+        return body + m.group(2)
+    return re.sub(r"(?ms)(^\[profiles\.away\.frontier\]\n.*?)(^\[|\Z)", in_profile, text, count=1)
+
+
+@pytest.mark.parametrize("key, loosen, bound, baseline, value, why", [
+    ("frontier1_agent_calls_per_day", "lower", 0, 100, 100, "above the ceiling 0"),      # code: higher is looser, so 100 busts a bound of 0
+    ("frontier1_min_left", "higher", 100, 0, 0, "below the floor 100"),                   # code: lower is looser, so 0 busts a bound of 100
+])
+def test_a_flipped_frontier_floor_cannot_let_a_profile_exceed_its_bound(fenv, key, loosen, bound, baseline, value, why):
+    """The profile check uses the code direction too (adversary round 3, P3-2), not only the baseline guard."""
+    text = flipped_floor_toml(fenv.read_text(), key, loosen, bound, baseline, key, value)
+    fenv.write_text(text)
+    write_state(state_path())
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and why in info["ignored"], (t, info["ignored"])
+
+
+def test_the_code_direction_leaves_the_shipped_floors_and_other_gates_alone(fenv):
+    cfg, err = g.read_toml()
+    assert err is None
+    assert g.profile_problems(cfg, "away", g.toml_baselines(cfg)) == []
+    assert g.effective_spec(cfg, "frontier", "frontier1_min_left") == g.floor_spec(cfg, "frontier", "frontier1_min_left")
+    assert g.effective_spec(cfg, "frontier", "frontier1_per_wave")["loosen"] == "higher"
+    assert g.effective_spec(cfg, "governor", "no_such_key") is None
+    assert g.code_direction("quota_guard", "frontier1_min_left") is None
+
+
 @pytest.mark.parametrize("text", ["line\u2028two reason", "zero\u200dwidth joiner", "soft\u00adhyphen reason", "tab\there reason", "esc\x1b[31m red"])
 def test_a_frontier_reason_with_a_control_or_format_character_names_that_rule(text):
     reason, problem = g.frontier_reason(text)
