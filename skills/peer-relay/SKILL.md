@@ -77,6 +77,9 @@ with `--expect-ack`:
    3. **No `self` row** (for example a Hermes gateway turn, which relay names `hermes <last 8 of its session id>`, or a script). The
       `?` gate does not apply: send the text as it is, without `--expect-ack` or `--needs-reply` (both are refused here, exit 2: do not
       retry them), use `--ack` for proof of delivery only, never assume a reply or that it was read, and tell djbclark when no answer comes.
+      A Hermes conversation can still CLOSE an expectation another session opened toward it: its `relay.py <ID> "ack X"` (item 11) closes the
+      record when relay proves the caller, from the full HERMES_SESSION_ID and its process tree (its own relayed turn or the gateway), never from
+      `RELAY_SENDER` or the 8-character label. It can never OPEN one.
 
    `ID` starts with an ASCII letter or digit, then up to 39 more ASCII letters, digits, `.`, `_` or `-`, and is unique among open
    expectations. `--needs-reply` marks an action or reply request that asks no question; `--fyi` is only for genuine information that
@@ -85,7 +88,7 @@ with `--expect-ack`:
    user line in your transcript says `ack ID`, `OVERDUE` after `--ack-within S`, default 1800: tell djbclark). `--ack` is separate: it
    verifies delivery. In state 1 use both when you will act on "they have it" and wait for an answer. `queued`, `accepted` and
    `unverified` are still not delivered (item 3). Full contract: `session-finder/SKILL.md`, "--expect-ack".
-11. **A reply goes through relay.py** (2026-10-26): when a peer's text ends `[reply through relay.py to ID: ack X]`, answer with `relay.py <ID> "ack X"` and nothing else. A sender with no readable transcript is told its question was answered only by that relay call; an answer in prose, or through another channel, leaves its `--expect-ack` open until it goes OVERDUE.
+11. **A reply goes through relay.py** (2026-10-26): when a peer's text ends `[reply through relay.py to ID: ack X]`, answer with `relay.py <ID> "ack X"` and nothing else. A sender with no readable transcript is told its question was answered only by that relay call; an answer in prose, or through another channel, leaves its `--expect-ack` open until it goes OVERDUE. A Hermes conversation's reply counts the same way (relay proves the conversation from `HERMES_SESSION_ID` and the process tree); a relay run from a shell outside Hermes, whatever variables it sets, does not.
 
 Canonical copy: `~/src/djbclark-ade/skills/peer-relay/SKILL.md`. Hermes installs or links it into
 `~/.hermes/skills/` itself; the repo does not write that tree.
