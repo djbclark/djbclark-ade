@@ -38,8 +38,12 @@ For each request:
    `pr-wait` reads that marker and **not** your prose, so a verdict written only
    as sentences is invisible to the gate. Two mistakes hard-block the PR as
    `malformed`: `verdict` is exactly `APPROVE` or `BLOCK` in capitals ("APPROVE,
-   no findings" maps to `APPROVE`), and `head` is the **full 40-character sha**,
-   never a `…`/`...` abbreviation. Your findings still go in prose below it.
+   no findings" maps to `APPROVE`), and `head` must be the **full 40-character
+   sha** — write it out in full, never a `…`/`...` abbreviation. `pr-wait` can
+   still rescue a BLOCK whose head is a 7+ hex prefix, some of it written with an
+   ellipsis, but do not rely on it: an APPROVE with a shortened head is
+   `malformed`, and a head that matches nothing blocks. Your findings still go in
+   prose below it.
 5. If any part of the review was declined to you or cut short, say so in the
    verdict rather than presenting it as complete.
 6. A probe of a tool that writes (a backup, export, sync, apply or install

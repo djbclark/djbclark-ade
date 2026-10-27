@@ -189,14 +189,16 @@ pull request here is expected to meet these; flag any it misses.
    prose filter, so that parser was deleted rather than patched; a third round, on this marker design,
    found that a shortened head let a BLOCK be stripped away (fixed in PR 66). Match the `:v1` suffix,
    as rule 9 does for `codex-review-state:v1` — a non-`:v1` `adversary-verdict:` marker is
-   **malformed**. Four more properties worth knowing:
+   **malformed**. Five more properties worth knowing:
 
    1. **An APPROVE must be live** (outside code spans and fences), and **a BLOCK naming the current
       head counts wherever it appears**, the raw body included, whether the head is the full 40-hex sha
-      or a 7+ hex prefix of it — so no code-fence or stripping bug can hide one. The asymmetry is
-      deliberate: documentation cannot approve, and a BLOCK cannot be hidden.
-   2. **A live marker takes `verdict` exactly `APPROVE` or `BLOCK`, in capitals, and `head` the full
-      40-hex sha.** Anything else — `approve`, "APPROVE, no findings", a `…`/`...` abbreviation — is
+      or a 7+ hex prefix of it, with or without a trailing `…`/`...` — so no code-fence or stripping
+      bug can hide one. The asymmetry is deliberate: documentation cannot approve, and a BLOCK cannot
+      be hidden.
+   2. **The `verdict` value is exactly `APPROVE` or `BLOCK`, in capitals, and an APPROVE's `head` is
+      the full 40-hex sha** (a BLOCK may be shortened, property 1). Anything else — `approve`,
+      "APPROVE, no findings", a `…`/`...` abbreviation on an APPROVE, a head that matches nothing — is
       **malformed**, and `malformed` always blocks.
    3. **An APPROVE inside code spans or fences, or an APPROVE whose head is the template's `<40-hex>`
       placeholder, is documentation and is ignored.** That is what lets a PR describe this format
@@ -206,6 +208,11 @@ pull request here is expected to meet these; flag any it misses.
    4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
       missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
       report a readable bad one.
+   5. **The marker's JSON is delimited by its own braces, not by the first `<!--`** (2026-10-27): a
+      `note` may quote the format, and a body that documents the marker is not read as a second
+      mistyped one. The marker's JSON must also be written where `pr-wait` reads it live — a marker
+      whose JSON is partly inside a code span is **malformed**, never approved, because masking code
+      cannot "repair" JSON nobody wrote.
 
    Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
    is the head merged.
