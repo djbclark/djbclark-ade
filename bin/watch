@@ -77,6 +77,9 @@ LOAD_WATCH = os.environ.get("WATCH_LOAD_WATCH") or str(HERE / "load-watch")
 
 EFFORTS = ["minimal", "low", "medium", "high"]   # ceiling is high on purpose: watchers coordinate, /bigteam slices code
 DEAD_STATUS = {"error", "closed", "archived"}
+# Providers whose yolo is a permission MODE, not the auto_accept feature: codex has no auto_accept and starts in `auto`
+# (Default Permissions), where an unattended watcher can stall on a prompt (found 2026-10-27).
+YOLO_MODE = {"codex": "full-access"}
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 CTX_BIG_TOKENS = 120_000
 LAUNCH_STALE_S = 600       # a `launching` record with a dead pid older than this is dropped regardless
@@ -617,6 +620,8 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
             "--cwd", cwd, "--workspace", wid, "--label", f"watch={domain}", "--prompt", prompt_for(domain, row, title), "--json"]
     if plan.get("thinking"):
         argv += ["--thinking", plan["thinking"]]
+    if plan["provider"] in YOLO_MODE:
+        argv += ["--mode", YOLO_MODE[plan["provider"]]]
     rc, out, err = run(argv, 120)
     aid = ""
     for ln in reversed(out.strip().splitlines()):

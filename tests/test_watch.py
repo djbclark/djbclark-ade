@@ -280,11 +280,23 @@ def test_launch_passes_yolo_workspace_label_and_skill_prompt(env):
     assert argv[argv.index("--title") + 1] == "watch alpha 1"
     assert "name it \"watch alpha 1\"" in argv[argv.index("--prompt") + 1]
     assert argv[argv.index("--label") + 1] == "watch=alpha"
+    assert "--mode" not in argv, "omp's yolo is the auto_accept feature, not a mode"
     assert argv[argv.index("--prompt") + 1].startswith("/alphawatch\n")
     # a second domain row-name run reuses the workspace rather than creating another
     watch(env, "up", "--force")
     ws = json.loads((Path(env["_tmp"]) / "paseo.json").read_text())["ws"]
     assert len(ws) == 1
+
+
+def test_codex_watcher_is_created_in_full_access_mode(env):
+    stubs = Path(env["_tmp"]) / "stubs"
+    (stubs / "paseo").write_text(PASEO_STUB.replace('{"provider": "omp", "status": "available"}',
+                                                    '{"provider": "omp", "status": "available"}, {"provider": "codex", "status": "available"}'))
+    (stubs / "route_agent.py").write_text(ROUTE_STUB.replace('"agent": "omp"', '"agent": "codex"'))
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    argv = seat_calls(env)[0]
+    assert argv[argv.index("--provider") + 1] == "codex" and argv[argv.index("--mode") + 1] == "full-access"
 
 
 def titles(env):
