@@ -34,10 +34,12 @@ that config, then verifies the shield from the agent's state file.
 
 USAGE
   paseo-new-seat --title "Dann Chat 3" --prompt "..." [--provider cline] [--model M]
-                 [--cwd DIR] [--workspace ID] [--thinking ID] [--label k=v]... [--json]
+                 [--cwd DIR] [--workspace ID] [--thinking ID] [--mode ID] [--label k=v]... [--json]
                  [--no-auto-accept] [--dry-run]
 
---thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --label tags the
+--thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --mode creates the
+agent in that permission mode and verifies it (codex has no auto_accept feature: its yolo is mode `full-access`,
+so a codex seat without --mode runs in `auto`, Default Permissions, and can stall on a prompt; 2026-10-27); --label tags the
 agent (bin/watch uses watch=<domain>); --json prints one JSON line {id, shortId, autoAccept} instead of the
 two text lines. An empty --model starts the provider's own default model.
 
@@ -78,6 +80,7 @@ def main(argv: list[str]) -> int:
                    help="permit creating a NEW workspace (refused by default: the implicit path "
                         "littered four empty `main` workspaces on 2026-10-25)")
     p.add_argument("--thinking", default="")
+    p.add_argument("--mode", default="")
     p.add_argument("--label", action="append", default=[])
     p.add_argument("--json", action="store_true")
     p.add_argument("--no-auto-accept", action="store_true")
@@ -99,6 +102,8 @@ def main(argv: list[str]) -> int:
         args += ["--workspace", a.workspace]
     if a.thinking:
         args += ["--thinking", a.thinking]
+    if a.mode:
+        args += ["--mode", a.mode]
     for lab in a.label:
         args += ["--label", lab]
     if a.json:
