@@ -3,7 +3,8 @@
 # Profiles from docs/model-routing.md "Which AI for which work", rewritten
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
-# only through the `frontier` kind, one slice per pool per wave; judgment is
+# only through the `frontier` kind, one slice per pool per wave (two on claude under the standing
+# allowance of 2026-10-27 while the quota guard passes, docs/gates.md); judgment is
 # Opus 5.5 at high first, omp Opus next, and codex gpt-6.1-sol at high as a lower-ranked,
 # eligible pool while its quota is plentiful (operator 2026-10-25); everyday work goes to the
 # OTHER pools, plus codex's everyday

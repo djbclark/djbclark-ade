@@ -609,7 +609,8 @@ method that runs the waves.
        astra (frontier-only).
    1b. **`frontier`** is the only route to codex `gpt-6-astra` (`--kind
        frontier --effort high`) or Fable 5.1 (`--kind frontier --effort high`):
-       one slice per pool per wave, for
+       one slice per pool per wave (two on claude under the standing allowance of 2026-10-27
+       while the quota guard passes, `docs/gates.md`), for
        work that really needs a frontier model to look it over. Examples: a
        security-relevant or concurrency fix's final review, debugging that
        has defeated real attempts, an adjudication no cheaper model settles, a
@@ -647,20 +648,24 @@ method that runs the waves.
    1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
        without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
        `fable-deep` agent runs at `high`.
-   1e. **Away frontier allowance** (2026-10-27, operator): while a gate profile
-       sets `frontier1_judged` / `frontier2_judged` (`away` does; baseline: 0,
-       so none of this applies), you MAY use Fable or `gpt-6-astra` where you
-       judge it significantly better than Opus 5.5 for that piece of work, if
-       you say why in one line: `acp-dispatch ... --kind frontier
-       --frontier-reason "10-200 chars"`; Agent tool: a `frontier-reason: ...`
-       line in the sub-agent prompt. Caps: `frontier1_per_wave` / `frontier2_per_wave`
-       slices in flight per pool, and (Agent tool, Fable) `frontier1_agent_calls_per_day`
-       calls per New York day. It needs a fresh quota-guard state at level `ok`
-       (or `watch` for the weekly window alone) with the Fable cap at least
-       `frontier1_min_left`; at `tight`/`critical`, stale data or an exhausted
-       cap the baseline rules stand. Unchanged: advise-only, 1d's approval, no lead
-       session on a frontier model. `gate-profile clear` ends it at once. Detail:
-       `docs/gates.md` "Frontier allowance".
+   1e. **Frontier allowance** (2026-10-27, operator; a standing rule, no profile
+       needed: `config/gates.toml` `[frontier]` is the baseline, ruled "Frontier
+       model use should still be open when required"): you MAY use Fable or
+       `gpt-6-astra` where you judge it significantly better than Opus 5.5 for
+       that piece of work, if you say why in one line: `acp-dispatch ... --kind
+       frontier --frontier-reason "10-200 chars"`; Agent tool: a
+       `frontier-reason: ...` line in the sub-agent prompt. Caps:
+       `frontier1_per_wave` (2) / `frontier2_per_wave` (1) slices in flight per
+       pool, and (Agent tool, Fable) `frontier1_agent_calls_per_day` (4) calls per
+       New York day. It needs a fresh quota-guard state at level `ok` (or `watch`
+       for the weekly window alone) with the Fable cap at least
+       `frontier1_min_left` (the planner's 2-per-wave claude cap too: at the closed 1 without it); at `tight`/`critical`, stale or missing data or an exhausted
+       cap the closed rules stand (frontier only through `acp-dispatch --kind
+       frontier`, an Agent-tool call asks). The code default is all-closed: a
+       missing or unreadable `gates.toml` closes it. Unchanged: advise-only, 1d's
+       approval, no lead session on a frontier model. `gate-profile` cannot
+       tighten it; closing it is a PR to `[frontier]`. Detail: `docs/gates.md`
+       "Frontier allowance".
 2. **Fable and "claude" are one pool.** `aiuse --available` lists two routing
    entries, but Fable is a model sublimit: **at most 50% of the shared Claude
    weekly**, and every Fable run bills the shared 5-hour and weekly windows too

@@ -28,7 +28,8 @@ quoting a chain, and update its snapshot if you change one.
 > codex `gpt-6.1-sol` at `high` as an eligible, lower-ranked pool only while every codex
 > window has >= 50% left; codex astra and Fable 5.1
 > (`high`) are reached only through the `frontier` kind, one slice per pool
-> per wave, for work that really needs them (codex's everyday models, `gpt-6.1-sol` and
+> per wave (two on claude under the standing allowance of 2026-10-27 while the quota guard
+> passes, `docs/gates.md`), for work that really needs them (codex's everyday models, `gpt-6.1-sol` and
 > `gpt-6-luna`, also take `judgment`/`code`/`bulk`/`mechanical` while every codex window has
 > >= 50% left, operator 2026-10-25); `acp-dispatch` allows one fresh
 > codex slice in flight machine-wide (replaced the same night by a per-service
@@ -407,7 +408,7 @@ The governor's and the guard's numbers live in `config/gates.toml` and a tempora
    is `acp-dispatch claude --model opus --kind judgment --effort high` first
    (2026-10-25: omp Opus next; codex `gpt-6.1-sol --effort high` while every codex window
    has `plenty_min` left, rank 3; never astra or Fable); the
-   `frontier` kind, one slice per pool per wave, reaches codex `gpt-6-astra`
+   `frontier` kind, one slice per pool per wave (two on claude under the standing allowance, 2026-10-27, while the quota guard passes: `docs/gates.md`), reaches codex `gpt-6-astra`
    (`acp-dispatch codex --model gpt-6-astra --kind frontier --effort high`;
    in-flight slices reserve quota, so a second one is refused when the first
    leaves no room) and Fable 5.1 (`fable-deep`, or `acp-dispatch claude

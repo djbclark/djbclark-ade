@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import route_agent as r
+from test_gates import close_frontier_baseline
 
 IDLE = {
     "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
@@ -631,19 +633,30 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
             if kind not in ("frontier", "judgment", "code", "bulk", "mechanical"):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
-    def test_a_wave_puts_at_most_one_frontier_slice_on_each_pool(self):
-        rows = r.plan(["frontier"] * 4, quota=IDLE)
+    def test_a_closed_baseline_puts_at_most_one_frontier_slice_on_each_pool(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=False, closed=True)):
+            rows = r.plan(["frontier"] * 4, quota=IDLE)
         names = [c.service.name if c else None for _, c in rows]
         self.assertEqual(names, ["codex", "claude", None, None])
+
+    def test_the_standing_baseline_puts_two_frontier_slices_on_claude_and_one_on_codex(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=False)):       # the shipped gates.toml copy, no profile
+            rows = r.plan(["frontier"] * 4, quota=IDLE)
+        names = [c.service.name if c else None for _, c in rows]
+        self.assertEqual(names, ["codex", "claude", "claude", None])
 
     def test_judgment_slices_after_a_frontier_slice_stay_on_claude(self):
         rows = r.plan(["frontier", "judgment", "judgment"], quota=IDLE)
         self.assertEqual([c.service.name for _, c in rows], ["codex", "claude", "claude"])
 
-    def gate_env(self, profile: bool, tighten_min_left: float | None = None) -> dict[str, str]:
-        """Env pointing the frontier gate at a temp profile (the shipped `away`, active now) and a temp gates.toml copy."""
+    def gate_env(self, profile: bool, tighten_min_left: float | None = None, closed: bool = False,
+                 guard: str | None = "ok") -> dict[str, str]:
+        """Env pointing the frontier gate at a temp profile (the shipped `away`, active now) and a temp gates.toml copy; `closed` closes its
+        [frontier] baseline (the pre-2026-10-27 rule)."""
         tmp = Path(tempfile.mkdtemp(prefix="ragate-"))
         toml = (Path(r.__file__).resolve().parent.parent / "config" / "gates.toml").read_text()
+        if closed:
+            toml = close_frontier_baseline(toml)
         if tighten_min_left is not None:
             toml = toml.replace("frontier1_min_left = 10.0 ", f"frontier1_min_left = {tighten_min_left} ", 1)
         (tmp / "gates.toml").write_text(toml)
@@ -651,14 +664,60 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
         (tmp / "profile.json").write_text(json.dumps({"schema": 1, "profile": "away", "since": stamp(now - timedelta(hours=1)),
                                                       "until": stamp(now + timedelta(hours=24)), "reason": "t", "set_by": "t"}))
+        guard_file = tmp / "quota-guard.json"
+        if guard is not None:       # None: no state file (a missing guard state)
+            age = timedelta(minutes=60) if guard == "stale" else timedelta(seconds=30)
+            level = "ok" if guard == "stale" else guard
+            guard_file.write_text(json.dumps({"checked_at": stamp(now - age), "level": level, "stale": False, "reasons": [],
+                                              "fable_left": 97.0}))
         return {"GATES_TOML": str(tmp / "gates.toml"),
-                "GATE_PROFILE_STATE": str(tmp / "profile.json" if profile else tmp / "none.json")}
+                "GATE_PROFILE_STATE": str(tmp / "profile.json" if profile else tmp / "none.json"),
+                "CLAUDE_QUOTA_GUARD_STATE": str(guard_file)}
 
-    def test_the_away_profile_lets_a_wave_put_two_frontier_slices_on_claude_but_still_one_on_codex(self):
-        with mock.patch.dict(os.environ, self.gate_env(profile=True)):
+    @staticmethod
+    def claude_slices() -> int:
+        rows = r.plan(["frontier"] * 3, quota=IDLE)
+        return sum(1 for _, c in rows if c and c.service.name == "claude")
+
+    def test_a_guard_state_path_that_is_a_fifo_is_a_closed_guard_not_a_hang_in_the_planner(self):
+        """The shared guard-state reader opens O_NONBLOCK and checks fstat: a FIFO there means no state (fails closed, claude cap 1)."""
+        env = self.gate_env(profile=False, guard=None)
+        os.mkfifo(env["CLAUDE_QUOTA_GUARD_STATE"])
+        script = ("import sys; sys.path.insert(0, sys.argv[1]); import route_agent as r; "
+                  "rows = r.plan(['frontier'] * 3, quota=None); "
+                  "print(sum(1 for _, c in rows if c and c.service.name == 'claude'))")
+        res = subprocess.run([sys.executable, "-I", "-c", script, str(Path(r.__file__).resolve().parent)],
+                             env={**env, "PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")},
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual((res.returncode, res.stdout.strip()), (0, "1"), res.stderr)
+
+    def test_the_standing_per_wave_cap_needs_the_guard_to_pass_at_tight_critical_stale_and_missing(self):
+        """Operator ruling 2026-10-27: quota-guard tight/critical STOPS the allowance; a stale or missing state fails closed. The planner
+        is the only per-wave limit a lead sees, so its 2-per-wave claude cap falls back to the closed 1 (adversary round 1 P1)."""
+        for guard, want in (("ok", 2), ("tight", 1), ("critical", 1), ("stale", 1), (None, 1)):
+            with self.subTest(guard=guard), mock.patch.dict(os.environ, self.gate_env(profile=False, guard=guard)):
+                self.assertEqual(self.claude_slices(), want)
+                codex = [c.service.name if c else None for _, c in r.plan(["frontier"] * 3, quota={**IDLE, "claude": {"remaining": 0.0}})]
+                self.assertEqual(codex.count("codex"), 1)           # codex's cap is 1 whatever the guard says
+
+    def test_the_standing_per_wave_cap_for_a_non_claude_pool_needs_its_reading_at_the_floor(self):
+        gate = {"frontier2_per_wave": 3.0, "frontier2_judged": 1.0, "frontier2_min_left": 60.0}
+        self.assertEqual(r.frontier_per_wave("codex", gate, {"codex": {"remaining": 60.0}}), 3)
+        self.assertEqual(r.frontier_per_wave("codex", gate, {"codex": {"remaining": 59.9}}), 1)
+        self.assertEqual(r.frontier_per_wave("codex", gate, {}), 1)
+        self.assertEqual(r.frontier_per_wave("codex", gate, {"codex": {"remaining": 90.0}}), 3)
+        self.assertEqual(r.frontier_per_wave("codex", {**gate, "frontier2_judged": 0.0}, {"codex": {"remaining": 90.0}}), 1)
+
+    def test_the_standing_baseline_lets_a_wave_put_two_frontier_slices_on_claude_but_still_one_on_codex_with_no_profile(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=False)):           # the shipped gates.toml [frontier] (2026-10-27)
             rows = r.plan(["frontier"] * 5, quota=IDLE)
         self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", "claude", None, None])
-        with mock.patch.dict(os.environ, self.gate_env(profile=False)):
+
+    def test_the_away_profile_over_a_closed_baseline_raises_a_wave_to_two_frontier_slices_on_claude(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=True, closed=True)):
+            rows = r.plan(["frontier"] * 5, quota=IDLE)
+        self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", "claude", None, None])
+        with mock.patch.dict(os.environ, self.gate_env(profile=False, closed=True)):
             rows = r.plan(["frontier"] * 5, quota=IDLE)
         self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", None, None, None])
 
@@ -680,9 +739,11 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
 
     def test_per_wave_key_by_pool(self):
         """frontier1_per_wave is the claude pool's, frontier2_per_wave every other pool's (codex's max_parallel = 1 hides it in plan)."""
-        gate = {"frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0}
-        self.assertEqual([r.frontier_per_wave(p, gate) for p in ("claude", "codex", "antigravity-claude", "unknown")], [2, 1, 1, 1])
-        self.assertEqual(r.frontier_per_wave("codex", {"frontier1_per_wave": 1.0, "frontier2_per_wave": 3.0}), 3)
+        gate = {"frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0, "frontier1_judged": 1.0, "frontier2_judged": 1.0,
+                "frontier1_min_left": 10.0, "frontier2_min_left": 60.0}
+        with mock.patch.dict(os.environ, self.gate_env(profile=False)):
+            self.assertEqual([r.frontier_per_wave(p, gate, IDLE) for p in ("claude", "codex", "antigravity-claude", "unknown")], [2, 1, 1, 1])
+            self.assertEqual(r.frontier_per_wave("codex", {**gate, "frontier1_per_wave": 1.0, "frontier2_per_wave": 3.0}, IDLE), 3)
 
     def test_dispatch_line_uses_the_acp_agent_name(self):
         q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}

@@ -10,16 +10,17 @@ to be a frontier call; after that an error asks (an approved session still passe
 import or startup failure, a timeout, a missing file) blocks the Agent/Task call, because the settings entry has `onFailure: block`
 (docs/gates.md decision 7); the live path is a symlink into the shared djbclark-ade checkout, so that checkout must keep this file.
 
-Away allowance (2026-10-27, docs/gates.md "Frontier allowance"; config/gates.toml [frontier], only a gate profile raises it).
+Frontier allowance (2026-10-27, docs/gates.md "Frontier allowance"; config/gates.toml [frontier] is the standing baseline, a gate profile may only equal it).
 In order, a call is allowed without asking only when ALL hold; the first failure asks and the ask text names it:
-  1. the effective gate has frontier1_judged >= 1 and frontier1_agent_calls_per_day >= 1 (baseline: 0, always ask);
+  1. the effective gate has frontier1_judged >= 1 and frontier1_agent_calls_per_day >= 1 (code default, used when gates.toml is
+     missing or unreadable: 0, always ask);
   2. quota-guard.json is fresh (30 min), level ok, or watch only for the weekly window, not stale, and the frontier-1 cap
      (`fable_left`) is at least frontier1_min_left;
   3. the sub-agent prompt has a line `frontier-reason: TEXT`, TEXT one line of 10-200 characters;
   4. fewer than frontier1_agent_calls_per_day calls were allowed today (America/New_York) per the log AND the day counter
      file (agent-calls-day.json): the larger counts, so truncating one file does not reset the cap. A log that is not a
      regular file, has an unparsable row or a row dated in the future asks.
-An allowed call is logged with `decision: "allowed-judged"`, the reason, the profile name and its `until`. Any error in these
+An allowed call is logged with `decision: "allowed-judged"`, the reason and, while a gate profile is active, its name and `until`. Any error in these
 steps, or in the state directory, the lock (polled for 5 s, then asks) or the log append, asks; it never allows. State files
 are opened O_NOFOLLOW|O_NONBLOCK and checked with fstat on the opened fd (log and counter reads included, no stat then open),
 so a planted symlink or FIFO asks at once, and a file swapped in during the read cannot make it block. The decision, the
@@ -121,11 +122,11 @@ def _count_today(g, now):
 
 
 def _judged(g, tool_input, now, ctx):
-    """(allowed, why, extra): the away allowance for this call; the caller holds the lock. Never allows on an error.
-    Sets ctx["live"] once the gate has an allowance to explain (past step 1), so a baseline ask never mentions it."""
+    """(allowed, why, extra): the frontier allowance for this call; the caller holds the lock. Never allows on an error.
+    Sets ctx["live"] once the gate has an allowance to explain (past step 1), so a closed-gate ask never mentions it."""
     t, info = g.load_frontier(now)
     if t["frontier1_judged"] < 1 or t["frontier1_agent_calls_per_day"] < 1:
-        return False, None, {}      # baseline: no allowance to explain
+        return False, None, {}      # closed gate (gates.toml unreadable, or closed by a PR): no allowance to explain
     ctx["live"] = True
     prof = info.get("profile") or {}
     extra = {"profile": prof.get("name"), "profile_until": prof.get("until")}
@@ -140,7 +141,7 @@ def _judged(g, tool_input, now, ctx):
     used, today = _count_today(g, now)
     cap = int(t["frontier1_agent_calls_per_day"])
     if used >= cap:
-        return False, f"{used} of {cap} away Agent-tool frontier calls are already used today", extra
+        return False, f"{used} of {cap} frontier Agent-tool calls are already used today", extra
     return True, None, {**extra, "frontier_reason": reason, "day": today, "n_today": used + 1}
 
 
@@ -228,6 +229,6 @@ except Exception as e:  # noqa: BLE001 - the gate's own state is unusable: ask, 
 if approved or allowed:
     sys.exit(0)
 _ask(agent, model, what, (
-    f" The away allowance (config/gates.toml [frontier], while a gate profile allows it) was not applied: {why}. To use it "
+    f" The frontier allowance (config/gates.toml [frontier]) was not applied: {why}. To use it "
     "add a line `frontier-reason: TEXT` (one line, 10-200 characters, why this is significantly better than Opus 5.5) "
     "to the sub-agent prompt.") if why and ctx.get("live") else "")

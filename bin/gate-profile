@@ -131,7 +131,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     for gate in g.GATES:
         if both[gate]["info"]["baseline_guarded"]:
             keys = ", ".join(f"{k} ({fmt(v)})" for k, v in sorted(both[gate]["info"]["baseline_guarded"].items()))
-            print(f"  {gate}: gates.toml is looser than the code default for {keys}; the code default is in force")
+            print(f"  {gate}: gates.toml is looser than the code default or floor bound for {keys}; the code default is in force")
     for gate in g.GATES:
         d = gates[gate]
         print(f"{gate}:" + ("" if d["changed"] else " no change from baseline"))
@@ -213,6 +213,13 @@ def validate() -> list[str]:
                 out.append(f"[{gate}].{k}: in the code defaults, missing from gates.toml")
             elif k not in defaults[gate]:
                 out.append(f"[{gate}].{k}: in gates.toml, unknown to the code")
+            elif g.code_direction(gate, k) == "higher":
+                # the standing frontier allowance: the baseline may stand between the all-closed code default and its floor bound
+                lim = g.baseline_limit(cfg, gate, k, defaults[gate][k])
+                if tbl[k] < defaults[gate][k]:
+                    out.append(f"[{gate}].{k}: gates.toml {fmt(tbl[k])} is tighter than the code default {fmt(defaults[gate][k])}")
+                elif tbl[k] > lim:
+                    out.append(f"[{gate}].{k}: gates.toml {fmt(tbl[k])} is above its floor bound {fmt(lim)} (code default {fmt(defaults[gate][k])})")
             elif tbl[k] != defaults[gate][k]:
                 out.append(f"[{gate}].{k}: gates.toml {fmt(tbl[k])} != code default {fmt(defaults[gate][k])}")
         floors = (cfg.get("floors") or {}).get(gate) or {}
@@ -244,7 +251,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"gates.toml: {len(problems)} problem(s)")
         return EX_BAD
     cfg, _ = g.read_toml()
-    print(f"gates.toml ok: baseline equals the code defaults; profiles: {', '.join(sorted(cfg['profiles']))}; "
+    print(f"gates.toml ok: baseline equals the code defaults (the frontier allowance: within its floors); profiles: {', '.join(sorted(cfg['profiles']))}; "
           f"max {g.max_hours(cfg):g} h")
     return 0
 
