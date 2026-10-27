@@ -27,9 +27,38 @@ For each request:
    with findings ranked by severity, each with file:line, the concrete
    failure scenario, and the fix you expect. "No findings" is a valid
    verdict; say it explicitly.
-4. If any part of the review was declined to you or cut short, say so in the
+4. **Your verdict ends with a machine-readable marker** (AGENTS.md rule 1), on its
+   own raw line after the findings, naming the head you reviewed:
+
+   <!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<40-hex sha you reviewed>"} -->
+
+   Two things about that line: it is an HTML comment, so it renders invisibly
+   in a Markdown viewer — read the file itself — and it is a TEMPLATE, so
+   replace the placeholder head with the real sha (and `APPROVE` with a
+   `BLOCK` when you block); pasted literally it approves nothing: an APPROVE
+   with the placeholder head is read as documentation (no verdict,
+   `adversary-missing`), and a BLOCK with it is `malformed`.
+   You never edit, commit or push, so emit the marker as a **raw line in your
+   reply** — not inside backticks or a fence, where an APPROVE would read as
+   documentation and be ignored (a BLOCK naming this head is rescued from the
+   raw body anyway, but write it raw) — for the teammate to paste into the PR
+   body.
+   `pr-wait` reads that marker and **not** your prose, so a verdict written only
+   as sentences is invisible to the gate. Two mistakes hard-block the PR as
+   `malformed`: `verdict` is exactly `APPROVE` or `BLOCK` in capitals ("APPROVE,
+   no findings" maps to `APPROVE`), and `head` must be the **full 40-character
+   sha** — write it out in full, never a `…`/`...` abbreviation. `pr-wait` can
+   still rescue a BLOCK whose head is a 7+ hex prefix, some of it written with an
+   ellipsis, but do not rely on it: a BLOCK whose shortened head is not a prefix
+   of this head is `malformed`, and an APPROVE with any shortened sha is
+   `malformed` (a bare `…`/`...` in the head is the template placeholder
+   instead, and approves nothing). A full 40-hex sha of a **different**
+   commit is not malformed — it is a verdict for that head, reported as
+   other-head and report-only — but it does not approve this one. Your findings
+   go in prose above it.
+5. If any part of the review was declined to you or cut short, say so in the
    verdict rather than presenting it as complete.
-5. A probe of a tool that writes (a backup, export, sync, apply or install
+6. A probe of a tool that writes (a backup, export, sync, apply or install
    command) runs only against a throwaway HOME or directory you created, and
    through a guard script that refuses any other target (set HOME, the
    destination and every path flag to your work dir; `set -u`; exit before the
@@ -39,7 +68,7 @@ For each request:
    the real HOME and touched 274 Cursor `-shm` files. A dry-run or check mode
    the brief explicitly allows is the one exception, and the brief names it.
 
-6. A probe that exercises `acp-dispatch` pins the runner and checks it before it
+7. A probe that exercises `acp-dispatch` pins the runner and checks it before it
    trusts the result. `dispatch` and `reroute` take `--acp-run <scratch fake>`:
    pin it, then assert `shlex.split(rec["cmd"])[0]` equals the fake (`cmd` is a
    shell-quoted string, never index it directly). `resume` has no `--acp-run`:

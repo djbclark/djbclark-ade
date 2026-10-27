@@ -11,6 +11,18 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- AGENTS.md rule 1, `claude/agents/adversary.md` and the bigteam adversary brief now describe the
+  verdict marker as `bin/pr-wait` enforces it (2026-10-27): a BLOCK counts by the full sha **or a 7+
+  hex prefix** of the head, with or without a trailing `…`/`...`, while the `verdict` value must be
+  exactly `APPROVE` or `BLOCK` in capitals and an APPROVE carries the **full 40-hex** head (an APPROVE
+  with any shortened sha, or a BLOCK whose shortened head is not a prefix of this head, is `malformed`;
+  a full sha of another commit is other-head and report-only); the marker's JSON is delimited by its
+  own braces, so a `note` may quote the format and a marker whose JSON is partly inside code is
+  `malformed` rather than approved; an APPROVE inside a fenced block or a single-line inline span — the
+  only shapes `pr-wait` blanks — or with the template placeholder is documentation; `malformed` and
+  `adversary-fetch-failed` always block, and the opt-in is named (`--adversary-required`, or an
+  `adversary-required` label). The adversary now emits the marker as a raw line for the lead to paste,
+  since it never edits the PR itself (PR 67).
 - `config/gates.toml`, `bin/ade_gates.py` and `bin/gate-profile` (2026-10-26): the Claude quota gates' thresholds (`claude-fleet-governor`, `claude-quota-guard`) now load from a versioned `gates.toml` baseline (code `THRESHOLDS` stay the fail-safe), and `gate-profile set away --for 72h --reason TEXT` applies a temporary, expiring, floor-checked loosening (ignored entirely when expired, corrupt, over `max_profile_hours` or outside its floors; it can also cap the aiuse `conserve` alert at `watch` through `conserve_alert_level`) with an audit log, one ping at set/clear/expiry, `profile` in both state files and an immediate recompute; `docs/gates.md` (#84).
 - Gate profile reminders (2026-10-26): while a profile is active the first `claude-fleet-governor run` of each America/New_York day sends one `hermes-ping` ("away profile active until ..., N days left; restore normal routing now: gate-profile clear"), `gate-profile extend --for 24h` moves `until` within `max_profile_hours`, `gate-profile status` shows the next nudge, and `quota_nudge.py` prints one `[gates]` line per session per day while the guard state names an unexpired profile (#84).
 - Gate profile hardening (2026-10-26, adversary round 1): `gate-profile set`, `extend` and `clear` now take the state lock around their read and write (waiting at most 120 s, then refusing with exit 1 and a message; the governor and guard skip a notice after 10 s and retry it next run), so a failed expiry or daily ping can no longer bring a cleared profile back or overwrite a new one (its restore is compare-and-restore); a `gates.toml` baseline looser than the code default in a key's floor direction is replaced by the code default at run time and logged; a huge integer cannot crash a gate; the profile file must be a regular file of at most 64 KiB (no symlink, FIFO or directory); `schema` must be the integer 1 and the profile name ASCII `[a-z0-9_-]` at run time and in the hook; `--by`/`--reason` are bounded; the governor's tight triggers must stay at or above `critical_left`; `clear` warns when the guard recompute fails The guard now recomputes before the governor runs after every `set`, `extend` and `clear`, so the governor never acts on the replaced thresholds (Codex review) (#84).
