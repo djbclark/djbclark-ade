@@ -26,6 +26,8 @@
                                                          what became of a finished slice's work,
                                                          for route_agent.py calibrate (merges)
     acp-dispatch reroute RECORD (--agent A --model M | --escalate) [--detach --no-wait]
+                 [-p TEXT | -f FILE] [--perm all|read-only|deny]
+                 (legacy recovery: original task and missing permission intent must be explicit)
                  (--escalate climbs one rung of [escalation] in config/routing.toml,
                   never straight to the top; agent/model from route_agent's top route)
     acp-dispatch auto-resume RECORD --attempt N          (internal) what the scheduled resume
@@ -1120,15 +1122,22 @@ def git_identity_warning(repo: Path) -> str | None:
             "--unset user.name; and the same for user.email")
 
 
-def keep_record_note_refusal(record: Path, reason: str, cls: str) -> bool:
+def keep_record_note_refusal(record: Path, reason: str, cls: str,
+                             previous: dict | None = None) -> bool:
     """A refused resume must not replace the record of the run it would have continued
     (2026-10-18: three finished codex records lost log, session id, cmd and brief to a headroom
     refusal, and the next resume crashed). Append the refusal to `refusals` under the record's lock;
-    False when there is no readable record to keep."""
+    False when there is no readable launched run to keep (a preflight-only
+    unavailable record is replaced with the latest attempt's intent)."""
     try:
         with record_lock(record):
             rec = json.loads(record.read_text())
             if not isinstance(rec, dict):
+                return False
+            # A preflight-only attempt has no paid run to preserve. A new refusal
+            # must record the latest task and constraints, including for thin records.
+            if (previous is None and rec.get("status") == "unavailable"
+                    and not any(rec.get(k) for k in ("log", "session_id", "cmd"))):
                 return False
             rec.setdefault("refusals", []).append({"at": time.time(), "class": cls, "detail": reason})
             write_record(record, rec)
@@ -1145,15 +1154,24 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
     jobs.mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
     record = jobs / f"{a.name}.json"
-    if previous and keep_record_note_refusal(record, reason, cls):
+    if record.exists() and keep_record_note_refusal(record, reason, cls, previous):
         print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
         return exit_code
+    # A preflight refusal launches no session, but still needs the original task and
+    # launch constraints for a later reroute. Capture the text, not just a mutable path.
+    prompt = read_brief(a.prompt_file) if a.prompt_file else a.prompt
     rec = {"name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
            "task": a.task, "out": str(out), "record": str(record), "report": str(report),
            "done": str(done_path(report)), "status": "unavailable", "unavailable_class": cls,
            "detail": reason, "remaining_percent": remaining, "estimated_usage_pct": estimate,
            "kind": getattr(a, "kind", None), "service": getattr(a, "service", None),
            "role": getattr(a, "role", None),
+           "prompt": prompt, "brief": str(Path(a.prompt_file).resolve()) if a.prompt_file else None,
+           "perm": a.perm or "all", "effort": getattr(a, "effort", None),
+           "context": getattr(a, "context", None), "timeout": a.timeout,
+           "wrapup_grace": a.wrapup_grace, "lead": a.lead,
+           "acp_arg": a.acp_arg or [], "checkpoint": getattr(a, "checkpoint", False),
+           "auto_resume": {"state": "off"} if getattr(a, "no_auto_resume", False) else None,
            "started": time.time(), "finished": time.time(), "exit": exit_code, "pid": None, **(extra or {})}
     write_record(record, rec)
     print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
@@ -1179,7 +1197,7 @@ def _template_re(template: str, **fields: str) -> str:
 
 def footer_items_re() -> str:
     """A regex for the numbered items of the footer TEMPLATE (docs/dispatch-footer.md): each item is its
-    template line, with `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` as one-line wildcards,
+    template line, allowing blank separators between items, with `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` as one-line wildcards,
     so an item that a lead edited or added matches none of them. Each item is judged on its own, so a
     footer that dropped some of the template's items still matches. Matches nothing when the template
     cannot be read: then no footer is provably generated and none is cut. Only the CURRENT template is
@@ -1195,7 +1213,7 @@ def footer_items_re() -> str:
     # lets an item with two placeholders parse two ways, and a crafted tail of such lines backtracked
     # 2^N (20 lines: 3.5 s, doubling per line; PR 22 review).
     slot = {k: r"[^`\n]*" for k in re.findall(r"\{(\w+)\}", template)}
-    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2), **slot) + r"\n" for m in items if m]
+    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2), **slot) + r"\n(?:[ \t]*\n)*" for m in items if m]
     return "(?:" + "|".join(alts) + ")+" if alts else r"(?!)"
 
 
@@ -3954,7 +3972,37 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
 def reroute_record(a: argparse.Namespace) -> int:
     old_path = Path(a.record).expanduser().resolve()
     old = json.loads(old_path.read_text())
-    original = old.get("prompt") or Path(old["brief"]).read_text().split("## Delivery contract", 1)[0]
+    # Validate recovery before consulting routing, touching records or launching anything.
+    try:
+        if a.prompt_file:
+            original = read_brief(a.prompt_file)
+        elif a.prompt is not None:
+            original = a.prompt
+        else:
+            original = old.get("prompt") or (
+                read_brief(old["brief"]) if old.get("brief") else None)
+    except (OSError, UnicodeError, TypeError) as e:
+        die(f"cannot read original brief: {e}; recover with reroute -p TEXT or -f FILE", 2)
+    if not isinstance(original, str) or not original.strip():
+        die("record has no original brief; recover with reroute -p TEXT or -f FILE", 2)
+    perm = old.get("perm")
+    if not perm and old.get("status") != "unavailable":
+        # Completed legacy records may only carry their checked permission in cmd.
+        try:
+            cmd = shlex.split(old.get("cmd") or "")
+        except ValueError as e:
+            die(f"cannot read recorded command permission: {e}", 2)
+        if "--perm" in cmd and cmd.index("--perm") + 1 < len(cmd):
+            perm = cmd[cmd.index("--perm") + 1]
+    if a.perm is not None:
+        if perm and a.perm != perm:
+            die(f"reroute --perm must preserve recorded permission {perm!r}", 2)
+        perm = a.perm
+    if not perm:
+        if old.get("status") == "unavailable":
+            die("unavailable record has no permission intent; recover with explicit "
+                "--perm all|read-only|deny", 2)
+        perm = "all"  # compatibility with completed records predating permission metadata
     checkpoint = Path(old["report"]).read_text() if Path(old["report"]).exists() else "(no checkpoint report)"
     diff_cmd = ["git", "-C", old["dir"], "diff", "--stat"]
     diff = subprocess.run(diff_cmd, check=False, capture_output=True, text=True).stdout.strip() or "(no diff stat)"
@@ -3996,6 +4044,13 @@ def reroute_record(a: argparse.Namespace) -> int:
         kind = nxt
         if nxt == "frontier" and not getattr(a, "role", None):
             role = "advise"    # never inherit exec into frontier without frontier-exec approval
+    # Effort/context belong to one agent/model; another route uses its own
+    # effort (when supplied above) and defaults, never the old model's limits.
+    same_target = a.agent == old.get("agent") and a.model == old.get("model")
+    inherit_options = same_target and not getattr(a, "escalate", False)
+    if inherit_options:
+        effort = old.get("effort")
+    context = old.get("context") if inherit_options else None
     new_svc = resolve_service(a.agent, a.model)
     old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
     if a.est_pct is not None:
@@ -4010,14 +4065,16 @@ def reroute_record(a: argparse.Namespace) -> int:
         est = None
     ns = argparse.Namespace(
         agent=a.agent, model=a.model, name=f"{base}-{n}", dir=old["dir"], task=old.get("task"),
-        out=old["out"], perm=old.get("perm") or "all", timeout=a.timeout or old.get("timeout", DEFAULT_TIMEOUT),
+        out=old["out"], perm=perm, timeout=a.timeout if a.timeout is not None else old.get("timeout", DEFAULT_TIMEOUT),
         wrapup_grace=old.get("wrapup_grace", DEFAULT_WRAPUP_GRACE), lead=old.get("lead", DEFAULT_LEAD),
         prompt=prompt, prompt_file=None, detach=a.detach, no_wait=a.no_wait, wait_timeout=None,
         force=False, dry_run=False, json=False, tee=False, no_model_check=False,
         no_preflight=a.no_preflight, min_headroom=a.min_headroom,
         load_wait=getattr(a, "load_wait", None), no_load_gate=getattr(a, "no_load_gate", False),
         est_pct=est,
-        checkpoint=True, acp_run=a.acp_run, acp_arg=[], effort=effort,
+        checkpoint=True, acp_run=a.acp_run, acp_arg=[],
+        effort=effort, context=context,
+        no_auto_resume=(old.get("auto_resume") or {}).get("state") == "off",
         kind=kind, role=role, from_record=True)
     rc = dispatch(ns)
     new_path = jobs / f"{base}-{n}.json"
@@ -5047,6 +5104,11 @@ def main(argv: list[str] | None = None) -> int:
                                    "route for the next kind, excluding the failed pool; every "
                                    "gate still runs; refused (exit 2) at the top rung")
             sub.add_argument("--model")
+            prompt = sub.add_mutually_exclusive_group()
+            prompt.add_argument("-p", "--prompt", help="recover the original task text for a legacy record")
+            prompt.add_argument("-f", "--prompt-file", help="recover the original task from this readable brief")
+            sub.add_argument("--perm", choices=("all", "read-only", "deny"),
+                             help="recover missing permission intent; must match any recorded permission")
             sub.add_argument("--kind", choices=_routing_policy.KINDS,
                              help="override the inherited kind (gates still run)")
             sub.add_argument("--role", choices=("advise", "exec"),
