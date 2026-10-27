@@ -164,13 +164,14 @@ class SelfSlashPaseoTests(unittest.TestCase):
     def log_text(self) -> str:
         return self.log.read_text() if self.log.exists() else ""
 
-    def wait_log(self, needle: str, timeout: float = 20.0) -> str:
+    def wait_log(self, needle: str, timeout: float = 20.0, count: int = 1) -> str:
+        """Wait until NEEDLE occurs COUNT times in the log (COUNT 2 proves a second worker's own line, not a stale first one)."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            if needle in self.log_text():
+            if self.log_text().count(needle) >= count:
                 return self.log_text()
             time.sleep(0.1)
-        self.fail(f"{needle!r} never reached the log:\n{self.log_text()}\ncalls: {self.paseo_calls()}")
+        self.fail(f"{needle!r} x{count} never reached the log:\n{self.log_text()}\ncalls: {self.paseo_calls()}")
 
     def wait_lock_gone(self, timeout: float = 20.0) -> None:
         end = time.monotonic() + timeout
@@ -224,6 +225,13 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.hold_watch("test-agent")
         r = self.run_ss("--finish", SELF_SLASH_ALLOW_WATCHER="1")
         self.assertEqual(r.returncode, 0, r.stderr)
+        # the override's own worker: a second archive line (the first one is already in the log), and its
+        # exit trap has released the locks, so nothing is still writing under the temp dir at cleanup
+        self.wait_log("finish: archived test-agent", count=2)
+        self.wait_lock_gone()
+        archives = [c for c in self.paseo_calls() if c.startswith("agent archive")]
+        self.assertEqual(archives, ["agent archive -- test-agent"] * 2, self.paseo_calls())
+        self.assertNotIn("refused", self.log_text())
 
     def test_a_watch_holder_can_still_hand_over_through_a_successor(self) -> None:
         self.hold_watch("test-agent")
@@ -661,6 +669,25 @@ class SelfSlashPaseoTests(unittest.TestCase):
         r = self.run_ss("--dry-run", "/new", HERDR_ENV="1", HERDR_PANE_ID="w2F:p34")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("would send to paseo test-agent", r.stdout + r.stderr)
+
+    def test_a_codex_session_is_never_discovered_through_the_cline_hub(self) -> None:
+        # Missing tool-shell host variables must not route Codex to another agent.
+        hub = SCRIPT.parent / "paseo-self"
+        tmp_script = self.home / "self-slash"
+        tmp_script.write_bytes(SCRIPT.read_bytes())
+        tmp_script.chmod(0o755)
+        fake_hub = tmp_script.parent / hub.name
+        marker = self.home / "hub-called"
+        fake_hub.write_text('#!/bin/bash\nprintf called > "$FAKE_HUB_MARKER"\nprintf "stranger-agent\\n"\n')
+        fake_hub.chmod(0o755)
+        env = {k: v for k, v in self.env.items() if k not in ("PASEO_AGENT_ID", "CLAUDECODE")}
+        r = subprocess.run([str(tmp_script), "--dry-run", "/new"], text=True, capture_output=True,
+                           timeout=60, check=False,
+                           env={**env, "CODEX_THREAD_ID": "synthetic-thread", "FAKE_HUB_MARKER": str(marker)})
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("never discovered through the Cline hub", r.stderr)
+        self.assertFalse(marker.exists(), "unrelated Cline discovery must not run")
+        self.assertEqual(self.paseo_calls(), [])
 
     def test_a_claude_session_is_never_discovered_through_the_cline_hub(self) -> None:
         # paseo-self names the newest tool.started in the hub, another Cline agent's when the caller is Claude

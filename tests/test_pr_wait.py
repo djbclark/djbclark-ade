@@ -1077,6 +1077,19 @@ def test_a_review_stuck_running_is_requested_once_more_never_a_third_time(world:
     assert "posted @codex review" in note and "re-requested" in note and "openai/codex#55890" in note
 
 
+@pytest.mark.parametrize("code_status", ["completed", "failed"])
+def test_terminal_code_is_not_requested_again_while_security_runs(world: World, code_status: str) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, code_status, security=sec_review(status="running"))]))
+    result = world.run("--rerequest-after", "0.1", "--codex-stuck", "0.8", "--timeout", "5")
+    assert result.returncode == 3, result.stdout + result.stderr  # security still gates completion
+    assert world.posts() == 1, "a pending security review must not restart a terminal code review"
+    summary = world.file("summary")
+    assert summary["codex"]["status"] == code_status and summary["security_status"] == "running"
+    assert summary["merge_ready"] is False
+    assert "manual request is sometimes stuck" not in summary["codex_request_note"]
+
+
 def test_no_re_request_before_the_running_window_ends(world: World) -> None:
     world.route(TIMELINE, ok([committed(HEAD)]))
     world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))

@@ -89,10 +89,11 @@ the cap of two POST ATTEMPTS per head (an errored POST counts, and is saved BEFO
 own-request state file bound the duplicates. If a gh call fails (check
 suites, timeline, user) the case is undecidable: nothing is posted, `codex_request_note` says so, and the
 next poll retries (re-reading both before any post). At most TWO requests per head: if the marker for the
-head is still non-terminal (`running`) `--rerequest-after` seconds (default 600) after pr-wait's own request,
-it re-requests ONCE more (only when the timeline shows fewer than two requests and pr-wait has made fewer than
+code review is still non-terminal (`running`) `--rerequest-after` seconds (default 600) after pr-wait's own request,
+it re-requests ONCE more. A terminal code review is never requested again while security is pending.
+The retry happens only when the timeline shows fewer than two requests and pr-wait has made fewer than
 two POST attempts: a POST that errored spends one, and then `codex_request_note` says the re-request was
-skipped); then `codex_request_note`
+skipped; then `codex_request_note`
 points to openai/codex#55890 (a manual request sometimes stays "Running") and the usual `--codex-stuck`
 bound ends the wait. The delay is pr-wait's own wall clock (a wait, not an ordering decision). The count of
 pr-wait's own requests, of its POST attempts, the time of the last request, a pending attempt and the ids of the
@@ -1317,7 +1318,7 @@ def main(argv: list[str]) -> int:
         if s["state_note"]:
             parts.append(s["state_note"])
         parts.extend(s["warnings"])
-        if (not a.no_codex and rq["own"] and match is not None and not review_terminal(match, head)
+        if (not a.no_codex and rq["own"] and match is not None and code_review(match).get("status") not in TERMINAL
                 and result != "done"):
             parts.append(f"Codex stayed {code_review(match).get('status') or 'non-terminal'} after {rq['own']} "
                          f"request(s): a manual request is sometimes stuck 'Running' ({STUCK_ISSUE})")
@@ -1520,11 +1521,11 @@ def main(argv: list[str]) -> int:
         pending = rq["attempt_at"] is not None  # an earlier POST errored: it may have landed
         if rq["attempts"] >= MAX_REQUESTS and not pending:
             if (match is not None and rq["own"] == 1 and rq["last_at"] is not None  # due() would hold: say why not
-                    and not review_terminal(match, head) and time.time() - rq["last_at"] >= a.rerequest_after):
+                    and code_review(match).get("status") not in TERMINAL and time.time() - rq["last_at"] >= a.rerequest_after):
                 s["state_note"] = f"re-request skipped: {rq['attempts']} POST attempts already (one errored)"
             return  # every POST of the head's cap was tried (an errored one counts): never another
-        if match is not None and review_terminal(match, head):
-            s["state_note"] = "no request needed: the marker for the head is terminal" if not rq["own"] else ""
+        if match is not None and code_review(match).get("status") in TERMINAL:
+            s["state_note"] = "no request needed: the code review for the head is terminal" if not rq["own"] else ""
             return
 
         def first() -> bool:

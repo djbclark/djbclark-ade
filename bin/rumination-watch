@@ -214,7 +214,7 @@ def to_session(text: str) -> bool:
     relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
     if not relay.is_file():
         return False
-    rc, _ = run(["python3", "-I", str(relay), ident, text, "--idle", "300"], timeout=320)
+    rc, _ = run(["python3", "-I", str(relay), ident, text, "--idle", "300", "--no-ack"], timeout=320)
     return rc == 0
 
 

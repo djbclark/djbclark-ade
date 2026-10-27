@@ -357,9 +357,16 @@ args = ["mcp"]
 [mcp_servers.siyuan]
 url = "http://127.0.0.1:6806/mcp"
 
+# Tool subprocess environment (2026-10-25, operator ruling: keep the launching terminal's context). `inherit = "core"`
+# stripped the Herdr pane ids (HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID, plus HERDR_SOCKET_PATH and
+# HERDR_BIN_PATH) and the multiplexer and runtime variables of the terminal Codex was started in, so Herdr-aware
+# tools could not find their own pane. `inherit = "all"` passes everything the Codex process has, by decision; no
+# allowlist. Codex's default KEY/SECRET/TOKEN name exclusions stay on (`ignore_default_excludes = false`), and the
+# `set` keys below still apply after them. acp-run (SCRUB_ENV) drops the four owner ids before it starts an agent,
+# so a detached child never gets the caller's pane identity.
 [shell_environment_policy]
-# Keep the launching terminal's runtime and pane context in tool commands.
 inherit = "all"
+ignore_default_excludes = false
 
 [shell_environment_policy.set]
 NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "{{ .codex_browser_client_sha256s }}"

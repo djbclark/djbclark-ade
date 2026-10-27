@@ -85,7 +85,9 @@ suggest_better_delta = 3
 # 2026-10-15..19; the gate is lifted (operator 2026-10-19, see the omp [[service]] below),
 # so omp is a curated service now and discovery never needs to guess its profile.
 # clinepass: reserved as the lifeline/substrate of BOTH Hermes and Dann (operator 2026-10-23) — never a slice target.
-never_route = ["hermes", "clinepass"]
+# kiro (2026-10-25): acp-run knows it for explicit dispatch, but its billing and quality are
+# unprofiled, so discovery must not hand it slices.
+never_route = ["hermes", "clinepass", "kiro"]
 # cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
 # into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
 operator_gated = ["cline"]
