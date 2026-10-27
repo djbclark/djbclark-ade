@@ -184,6 +184,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- Changed refusal handling to preserve launched records while refreshing unlaunched attempts, and scoped effort/context inheritance to the same agent and model (2026-10-26) (#88).
 - `relay.py` delivery watch on by default for an agent session (2026-10-25): a send that is only accepted or queued is watched 10 s more and exits 0 delivered, 1 not delivered or 3 unverified (a declared job run by launchd, such as the load and rumination watchers, keeps the old exits); `--no-ack` and `RELAY_NO_ACK=1` turn it off, `--json` adds `ack_default`; an `ack ID` reply (alone, or with a short remark in parentheses or after a colon) and a text whose last clause is "no reply needed" carry no first-contact footer and open no link; only a bare `ack ID` or a lone "no reply needed" refuses `--expect-ack`/`--needs-reply` (exit 2), and on any longer text an explicit flag wins; SKILL.md gains the requester steps for exit 1, exit 3, `OVERDUE` and `ONE-WAY` (#81).
 - `relay.py` refuses to send when it cannot resolve the sender (2026-10-25): a relay from a process with no session identity (a launchd job, a script, a Hermes turn) and no `RELAY_SENDER_NAME` exits 4 with nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`) and names every variable and ancestor source it checked; `[relay from unknown]` is never sent. `bin/load-watch` and `bin/session-load-watch` now declare `RELAY_SENDER_NAME` for their relay calls (#74).
 - `bin/ade-git-guard`, round 11 (2026-10-25): the reference-transaction hook reads `remote.origin.url` from the repository's own config only (`git config --local --includes`, caller's `-c`, `GIT_CONFIG_*`, HOME and XDG removed) and an unanswered question widens the claim rule instead of skipping it; an empty `argv[0]` no longer shifts the macOS `pack-refs` parent parse; the shim refuses `clone -c/--config` hook keys and every non-default template source on `clone` and `init` (`--template`, `GIT_TEMPLATE_DIR`, `init.templateDir`) and exempts exactly acp-run's two `hook.acp-run-identity.*` environment pairs from its hook-key rule; a foreign claim now takes precedence over an unanswered config question, so the refusal names the owner (#59).
@@ -249,6 +250,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- Fixed dispatch footer stripping to accept blank separator lines between generated footer items, keeping any user-written line between them (2026-10-26) (#88).
+- Fixed rerouting after a preflight refusal by retaining task and permission intent and supporting explicit legacy recovery (2026-10-26) (#88).
 - Fixed `pr-wait` re-requesting a terminal code review while security review was still pending; security completion remains required (#86).
 
 - Fixed `self-slash` to refuse Cline hub discovery for Codex sessions with missing host variables, preventing lifecycle commands from targeting another agent (#71).
