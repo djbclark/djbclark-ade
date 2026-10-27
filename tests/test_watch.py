@@ -28,6 +28,10 @@ elif a[:2] == ["workspace", "create"]:
     w = {"workspaceId": "wks_" + a[a.index("--title") + 1], "name": a[a.index("--title") + 1], "cwd": a[a.index("--path") + 1]}
     s["ws"].append(w); save(); print(json.dumps(w))
 elif a[:2] == ["agent", "stop"]: pass
+elif a[:2] == ["agent", "update"]:
+    for x in s["agents"]:
+        if x["id"] == a[2]: x["name"] = a[a.index("--name") + 1]
+    save()
 elif a[:2] == ["agent", "archive"]:
     s["agents"] = [x for x in s["agents"] if x["id"] != a[-1]]; save()
 else: sys.exit(9)
@@ -39,7 +43,7 @@ d = os.environ["STUB_DIR"]; f = d + "/paseo.json"
 time.sleep(float(os.environ.get("STUB_SEAT_SLEEP", "0")))
 s = json.load(open(f)) if os.path.exists(f) else {"agents": [], "ws": []}
 aid = str(uuid.uuid4())
-s["agents"].append({"id": aid, "shortId": aid[:7], "name": "x", "status": "idle", "argv": sys.argv[1:]})
+s["agents"].append({"id": aid, "shortId": aid[:7], "name": sys.argv[sys.argv.index("--title") + 1], "status": "idle", "argv": sys.argv[1:]})
 json.dump(s, open(f, "w"))
 open(d + "/seat.log", "a").write(json.dumps(sys.argv[1:]) + "\\n")
 if not os.environ.get("STUB_NO_REGISTER"):
@@ -84,6 +88,7 @@ REGISTRY = """
 window_days = 14
 register_timeout_s = 2
 poll_s = 0.2
+workspace_cwd = "{cwd}"
 
 [domain.alpha]
 skill = "/alphawatch"
@@ -146,11 +151,11 @@ def set_role(env, target):
     (Path(env["_tmp"]) / "role").write_text(f"{target}\nname: someone\nsince: 2026-10-25 09:00:00\n")
 
 
-def add_agent(env, status="idle"):
+def add_agent(env, status="idle", name=None):
     f = Path(env["_tmp"]) / "paseo.json"
     s = json.loads(f.read_text()) if f.exists() else {"agents": [], "ws": []}
     aid = str(uuid.uuid4())
-    s["agents"].append({"id": aid, "shortId": aid[:7], "status": status})
+    s["agents"].append({"id": aid, "shortId": aid[:7], "status": status, "name": name})
     f.write_text(json.dumps(s))
     return aid
 
@@ -271,13 +276,63 @@ def test_launch_passes_yolo_workspace_label_and_skill_prompt(env):
     rc, out = watch(env, "up")
     assert rc == 0, out
     argv = seat_calls(env)[0]
-    assert argv[argv.index("--workspace") + 1] == "wks_watch-alpha"
+    assert argv[argv.index("--workspace") + 1] == "wks_watch"
+    assert argv[argv.index("--title") + 1] == "watch alpha 1"
+    assert "name it \"watch alpha 1\"" in argv[argv.index("--prompt") + 1]
     assert argv[argv.index("--label") + 1] == "watch=alpha"
     assert argv[argv.index("--prompt") + 1].startswith("/alphawatch\n")
     # a second domain row-name run reuses the workspace rather than creating another
     watch(env, "up", "--force")
     ws = json.loads((Path(env["_tmp"]) / "paseo.json").read_text())["ws"]
     assert len(ws) == 1
+
+
+def titles(env):
+    return {a["id"]: a["name"] for a in agents(env)}
+
+
+def test_each_new_watcher_gets_the_next_base36_number_and_the_old_one_is_retired(env):
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    (first,) = titles(env)
+    assert titles(env) == {first: "watch alpha 1"}
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0 and "retired:" in out, out
+    t = titles(env)
+    assert first not in t and "'watch alpha 1' -> 'x watch alpha 1'" in out, (out, t)   # renamed, then archived by --force
+    assert "watch alpha 2" in t.values()
+    # past 9 the number goes a, b, ... z, 10: a stale seq file at 9 makes the next launch `a`
+    (Path(env["_tmp"]) / "state" / "alpha.seq").write_text("9\n")
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0 and "watch alpha a" in titles(env).values(), (out, titles(env))
+    (Path(env["_tmp"]) / "state" / "alpha.seq").write_text("z\n")
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0 and "watch alpha 10" in titles(env).values(), (out, titles(env))
+
+
+def test_replacing_a_holder_not_started_by_watch_renames_it_and_leaves_it_running(env):
+    old = add_agent(env, name="watch alpha")      # legacy unnumbered title = generation 0
+    set_role(env, old)
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0, out
+    t = titles(env)
+    assert t[old] == "x watch alpha"
+    assert sorted(v for k, v in t.items() if k != old) == ["watch alpha 1"]
+
+
+def test_a_launch_that_never_registers_retires_nothing(env):
+    old = add_agent(env, name="watch alpha 3")
+    set_role(env, old)
+    rc, out = watch(env, "up", "--force", extra={"STUB_NO_REGISTER": "1"})
+    assert rc == 1 and "not registered" in out, out
+    assert titles(env)[old] == "watch alpha 3"
+    assert "watch alpha 4" in titles(env).values()
+
+
+def test_numbers_continue_past_titles_that_are_already_retired(env):
+    add_agent(env, name="x watch alpha 7")
+    rc, out = watch(env, "up")
+    assert rc == 0 and "watch alpha 8" in titles(env).values(), (out, titles(env))
 
 
 def test_down_stops_only_the_agent_it_started(env):

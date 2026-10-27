@@ -4,7 +4,7 @@
 # Row keys
 #   skill          slash command the launched agent gets as its first prompt (its SKILL.md is
 #                  skills/<skill minus "/">/SKILL.md, named in the prompt as a fallback)
-#   cwd            directory of the domain's Paseo workspace (workspace title: watch-<domain>)
+#   cwd            the domain's checkout, named in the agent's prompt (the daemon runs every agent in the shared [defaults] workspace's cwd)
 #   chain          Tier 1 handoff chain the skill records the role in (its SESSION_LOG.md size is a
 #                  complexity/context signal)
 #   kind           route_agent.py task kind for a busy or normal domain; kind_idle for a quiet one
@@ -23,6 +23,8 @@
 window_days = 14          # how far back "recent events" looks
 register_timeout_s = 300  # how long `up` waits for the new agent to show as holder + channel test
 poll_s = 5
+workspace = "watch"                   # ONE Paseo workspace holds every watcher tab; agent titles are `watch <domain> <base36 n>`
+workspace_cwd = "~/src/djbclark-ade"  # the project that workspace is created under (every watcher then runs there)
 
 [domain.cfengine]
 skill = "/cfenginewatch"

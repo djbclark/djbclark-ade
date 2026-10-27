@@ -2,7 +2,7 @@
 name: watch
 description: >-
   Bring up every watcher session: run `bin/watch` so each domain (CFEngine upstream PRs, Paseo contributions,
-  machine load) has one live registered watcher agent in its own Paseo workspace, starting only missing ones,
+  machine load) has one live registered watcher agent, all in one shared `watch` Paseo workspace and titled `watch <domain> <n>`, starting only missing ones,
   with model, effort and context chosen from quota and recent event load. Idempotent. Use for /watch, "start
   the watchers", "bring up the watchers", "make sure the watchers are running". Not for becoming a watcher
   yourself.
@@ -47,7 +47,14 @@ $W up                     # start what is missing; verify each registration
    above high, never Fable.
 4. Context: standard; the `[1m]` variant only when chain log plus largest brief need over ~120k tokens.
 5. The launched agent is created through `bin/paseo-new-seat` (auto-accept on from the first tool call) in
-   the workspace `watch-<domain>` (found again on re-runs, created once), first prompt the domain's skill.
+   the one shared workspace `watch` (`[defaults] workspace`, found again on re-runs, created once under
+   `workspace_cwd`; Paseo runs every agent in that cwd, so the prompt names the domain's own checkout from `cwd`), first prompt the domain's skill.
+6. Title: `watch <domain> <n>`, `n` the next base-36 number (`0-9a-z`, so `…9`, `…a`, … `…z`, `…10`) per domain: one
+   past every numbered title Paseo still lists (retired and archived included) and past `~/.local/state/watch/<domain>.seq`,
+   so a number is never reused; an unnumbered `watch <domain>` counts as 0. The prompt tells the agent to register under
+   that same name. After the new agent is registered and its channel test passes, every other live `watch <domain> <n>` and
+   the holder it replaced gets `x ` put before its title (`x watch paseo 2`), via `paseo agent update --name`; a launch
+   that does not register retires nothing.
 
 ## Registration is verified
 
