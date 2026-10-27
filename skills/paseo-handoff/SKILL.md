@@ -12,7 +12,9 @@ Transfer the current task — context, decisions, failed attempts, constraints �
 
 ## Prerequisites
 
-Read the **paseo** skill. Call `list_profiles` before choosing the receiving agent. Do not create it until you have read the configured profiles and their `notes`.
+Read the **paseo** skill. Use `list_profiles` and read configured profiles' `notes` when that MCP tool is exposed. In a terminal-only session without Paseo MCP, use the CLI fallback in **paseo** instead; do not invent a `paseo profile` command or treat an unavailable tool as an absent profile catalog.
+
+**Check execution mode first (2026-10-27).** Plan Mode permits inspection only: no handoff writes, claims, launches or peer notices. Say that mode is the blocker and retain the selected destination. When Default mode resumes and the operator says “go”, continue without asking again.
 
 ## Parsing arguments
 
@@ -61,5 +63,11 @@ Prepare the handoff in a dedicated workspace:
 3. Return the agent and workspace to the user, explaining that it remains in your subagent track until they detach it manually.
 
 Do not encode independence as a create mode and do not invoke CLI or wire-level detach operations. Detach is a user gesture in the subagents track.
+
+Verify startup once with `paseo inspect <agent-id> --json` and verify the returned workspace against `paseo workspace ls --json`; check provider/model, mode and cwd. This is a startup check, not a wait for completion. If placement resolves to a shared reference checkout, the initial brief must require every edit/test/commit in a separately claimed task worktree.
+
+For a durable continuation, first use **handoff** to write and commit the Tier 2 brief in the claimed task worktree and **session-handoff** to update the owned Tier 1 chain. Put the explicit chain pointer in the initial prompt; a bare `/baton` from a shared checkout can resume another chain. Do not run handoff's same-session `/new` when transferring to Paseo.
+
+After startup, tell every still-relevant peer the new agent ID/title, workspace ID/name, task worktree and chain pointer through **peer-relay**. Check `delivered`; carry queued/unverified records without resending. A permission/question-card refusal remains blocked: report it and leave the notice for after that card is resolved, never bypass it. Preserve the old transcript until the receiver is verified; do not archive a workspace containing other agents or terminals.
 
 Do not wait or poll for the agent to finish.
