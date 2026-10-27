@@ -169,7 +169,11 @@ a fan-out needs from it:
    when omp is unavailable, and the lead passes the Agent tool's `model: "sonnet"`
    override whenever `~/.local/state/ade/quota-guard.json` says `tight` or
    `critical` (`bin/claude-quota-guard`; a `[quota-guard <level>]` line from the
-   UserPromptSubmit hook says the same). The lead session itself runs on Opus 5.5
+   UserPromptSubmit hook says the same). **Whatever route runs it, the brief says the verdict ends
+   with the marker line** `<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<full
+   40-hex sha>"} -->`, raw (not in a fence), for the lead to paste into the PR body: the omp and
+   Agent-tool routes read a free-form brief, not `claude/agents/adversary.md`, so a marker in this
+   file alone never reaches them (AGENTS.md rule 1, PR 67). The lead session itself runs on Opus 5.5
    high (Sonnet 5.5 at medium when it only drives a pipeline, high only for a judgment turn; `[lead] pipeline_effort`), never Fable
    (`model-routing`, *Routing policy* item 12).
    **`frontier` slices** are the rare few that really need a frontier model

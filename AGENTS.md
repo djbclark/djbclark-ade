@@ -179,22 +179,33 @@ pull request here is expected to meet these; flag any it misses.
    ```
 
    **Flag the PR if the marker is missing, malformed, says BLOCK, or names a head other than the
-   current one.** `pr-wait`'s report-only default is a property of the *tool*, not of this rule.
+   current one.** `pr-wait`'s report-only default is a property of the *tool*, not of this rule: it
+   blocks on a missing, other-head or BLOCK marker only when it is asked to, with
+   `--adversary-required` or an `adversary-required` label on the PR.
 
    `pr-wait` reads that marker and reports it as `adversary` / `adversary_warnings`; it does **not**
-   read prose, so **prose verdicts do not count**. The first version parsed English and three adversary
-   rounds found false approvals and false misses, including a BLOCK silently deleted by a prose filter,
-   so that parser was deleted rather than patched. Match the `:v1` suffix, as rule 9 does for
-   `codex-review-state:v1` — a non-`:v1` `adversary-verdict:` marker is **malformed**. Three more
-   properties worth knowing:
+   read prose, so **prose verdicts do not count**. The first version parsed English and **two**
+   adversary rounds found false approvals and false misses, including a BLOCK silently deleted by a
+   prose filter, so that parser was deleted rather than patched; a third round, on this marker design,
+   found that a shortened head let a BLOCK be stripped away (fixed in PR 66). Match the `:v1` suffix,
+   as rule 9 does for `codex-review-state:v1` — a non-`:v1` `adversary-verdict:` marker is
+   **malformed**. Four more properties worth knowing:
 
-   1. **An APPROVE must be live** (outside code spans and fences), and **a BLOCK naming the current head
-      counts wherever it appears**, the raw body included — so no code-fence or stripping bug can hide
-      one. The asymmetry is deliberate: documentation cannot approve, and a BLOCK cannot be hidden.
-   2. **A marker inside code spans or fences, and a head of exactly `<40-hex>`, are documentation and
-      are ignored.** That is what lets a PR describe this format without tripping its own gate.
-   3. **`malformed` always blocks**, with or without the opt-in — a missing, other-head or BLOCK marker
-      is reported only. Fail closed on an unreadable verdict; report a readable bad one.
+   1. **An APPROVE must be live** (outside code spans and fences), and **a BLOCK naming the current
+      head counts wherever it appears**, the raw body included, whether the head is the full 40-hex sha
+      or a 7+ hex prefix of it — so no code-fence or stripping bug can hide one. The asymmetry is
+      deliberate: documentation cannot approve, and a BLOCK cannot be hidden.
+   2. **A live marker takes `verdict` exactly `APPROVE` or `BLOCK`, in capitals, and `head` the full
+      40-hex sha.** Anything else — `approve`, "APPROVE, no findings", a `…`/`...` abbreviation — is
+      **malformed**, and `malformed` always blocks.
+   3. **An APPROVE inside code spans or fences, or an APPROVE whose head is the template's `<40-hex>`
+      placeholder, is documentation and is ignored.** That is what lets a PR describe this format
+      without tripping its own gate. Nothing inside code can approve, and a placeholder approves
+      nothing; a BLOCK is never skipped this way (property 1), and a **BLOCK** whose head is the
+      placeholder is `malformed` rather than documentation.
+   4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
+      missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
+      report a readable bad one.
 
    Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
    is the head merged.

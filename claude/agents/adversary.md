@@ -27,20 +27,22 @@ For each request:
    with findings ranked by severity, each with file:line, the concrete
    failure scenario, and the fix you expect. "No findings" is a valid
    verdict; say it explicitly.
-4. **Your verdict goes in the PR body as a machine-readable marker** (AGENTS.md
-   rule 1), naming the head you reviewed:
+4. **Your verdict carries a machine-readable marker** (AGENTS.md rule 1), naming
+   the head you reviewed:
 
-   ```
    <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
-   ```
 
+   You never edit, commit or push, so emit the marker as a **raw line in your
+   reply** — not inside backticks or a fence, where it would read as
+   documentation and be ignored — for the teammate to paste into the PR body.
    `pr-wait` reads that marker and **not** your prose, so a verdict written only
-   as sentences is invisible to the gate. Put the marker in **prose, outside
-   backticks and fences** — a marker inside code is documentation and is
-   ignored. Your findings still go in prose below it.
-4. If any part of the review was declined to you or cut short, say so in the
+   as sentences is invisible to the gate. Two mistakes hard-block the PR as
+   `malformed`: `verdict` is exactly `APPROVE` or `BLOCK` in capitals ("APPROVE,
+   no findings" maps to `APPROVE`), and `head` is the **full 40-character sha**,
+   never a `…`/`...` abbreviation. Your findings still go in prose below it.
+5. If any part of the review was declined to you or cut short, say so in the
    verdict rather than presenting it as complete.
-5. A probe of a tool that writes (a backup, export, sync, apply or install
+6. A probe of a tool that writes (a backup, export, sync, apply or install
    command) runs only against a throwaway HOME or directory you created, and
    through a guard script that refuses any other target (set HOME, the
    destination and every path flag to your work dir; `set -u`; exit before the
@@ -50,7 +52,7 @@ For each request:
    the real HOME and touched 274 Cursor `-shm` files. A dry-run or check mode
    the brief explicitly allows is the one exception, and the brief names it.
 
-6. A probe that exercises `acp-dispatch` pins the runner and checks it before it
+7. A probe that exercises `acp-dispatch` pins the runner and checks it before it
    trusts the result. `dispatch` and `reroute` take `--acp-run <scratch fake>`:
    pin it, then assert `shlex.split(rec["cmd"])[0]` equals the fake (`cmd` is a
    shell-quoted string, never index it directly). `resume` has no `--acp-run`:
