@@ -797,9 +797,6 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
             return 0
         rc, msg = launch(domain, row, dflt, pv, plan, replaces)
         log(domain, msg)
-        if rc == 0 and args.force and rec and rec.get("agent_id") and pv.agent(rec["agent_id"]):
-            ok, w = stop_agent(pv, rec["agent_id"])
-            log(domain, f"stopped our previous agent {rec['agent_id'][:8]}: {w}")
         return rc
     finally:
         if lock:

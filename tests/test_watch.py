@@ -299,7 +299,7 @@ def test_each_new_watcher_gets_the_next_base36_number_and_the_old_one_is_retired
     rc, out = watch(env, "up", "--force")
     assert rc == 0 and "retired:" in out, out
     t = titles(env)
-    assert first not in t and "'watch alpha 1' -> 'x watch alpha 1'" in out, (out, t)   # renamed, then archived by --force
+    assert t[first] == "x watch alpha 1", (out, t)   # --force retires the old tab (renamed, still listed), never archives it
     assert "watch alpha 2" in t.values()
     # past 9 the number goes a, b, ... z, 10: a stale seq file at 9 makes the next launch `a`
     (Path(env["_tmp"]) / "state" / "alpha.seq").write_text("9\n")
