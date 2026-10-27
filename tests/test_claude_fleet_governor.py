@@ -1265,6 +1265,16 @@ class TestGateProfile(Base):
         self.assertIn("using the code defaults for governor", r.stderr)
         self.assertIsNone(self.e.state_json()["profile"])
 
+    def test_a_deeply_nested_gates_toml_is_the_code_defaults_not_a_crash(self):
+        self.weekly_242()
+        self.profile()
+        deep = self.e.root / "deep.toml"
+        deep.write_text("x = " + "[" * 5000 + "]" * 5000 + "\n")
+        r = self.run_gov("run", GATES_TOML=str(deep))
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertNotIn("RecursionError", r.stderr)
+        self.assertIn("using the code defaults for governor", r.stderr)
+
     def nudges(self) -> list[str]:
         return [c[0] for c in self.e.calls("ping") if "profile active until" in c[0]]
 

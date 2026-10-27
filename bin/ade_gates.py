@@ -157,7 +157,7 @@ def read_toml() -> tuple[dict[str, Any] | None, str | None]:
             return tomllib.load(fh), None
     except OSError as e:
         return None, f"{path}: {e.strerror or e}"
-    except (tomllib.TOMLDecodeError, ValueError) as e:     # a 4300+ digit integer raises a plain ValueError
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as e:     # 4300+ digit integer: ValueError; 5000 nested arrays: RecursionError
         return None, f"{path}: not valid TOML ({e})"
 
 
@@ -465,13 +465,17 @@ def _mark_and_ping(data: dict[str, Any], key: str, value: str, text: str, ping: 
     return ok
 
 
+def state_lock_path() -> Path:
+    path = profile_state_path()
+    return path.with_name(path.name + ".lock")
+
+
 def _state_lock(wait: float | None = None, create: bool = False):
     """The flock beside the state file, held for the `with`; None when it cannot be opened (no state dir: nothing to notify;
     `create` makes the directory first). Waits at most `wait` seconds (default NOTIFY_LOCK_WAIT) and raises LockBusy after.
     Serialises every writer of the profile file: the governor's and guard's notices, `gate-profile set/extend/clear`. It is held
     across a ping (up to 60 s), so a reader never takes it: the gates read the file lock-free (writes are atomic replaces)."""
-    path = profile_state_path()
-    lock_path = path.with_name(path.name + ".lock")
+    lock_path = state_lock_path()
     try:
         if create:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -513,6 +517,7 @@ def notify_expired(info: dict[str, Any], ping: Callable[[str], bool], now: datet
         _log_once(f"expiry notice skipped, retried next run: {e}")
         return False
     if lock is None:
+        _log_once(f"expiry notice skipped, cannot lock {state_lock_path()} (not a usable regular file)")
         return False
     with lock:
         data, _ = read_profile_file()
@@ -566,6 +571,7 @@ def notify_daily(info: dict[str, Any], ping: Callable[[str], bool], now: datetim
         _log_once(f"daily nudge skipped, retried next run: {e}")
         return False
     if lock is None:
+        _log_once(f"daily nudge skipped, cannot lock {state_lock_path()} (not a usable regular file)")
         return False
     with lock:
         data, _ = read_profile_file()
