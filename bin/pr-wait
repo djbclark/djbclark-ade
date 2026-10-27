@@ -278,26 +278,40 @@ def pr_doc(repo: str, pr: int) -> dict:
 #   7. The strip may only REPLACE with spaces, never delete (bundled review of 66/67, C2): deletion
 #      joined the text on either side, so a typo could be "repaired" into valid JSON nobody wrote.
 #      Code is CommonMark's: equal-length runs per line, and a backtick in a backtick fence's info
-#      string means inline code, not a fence (C2/C3). A rescued BLOCK still reports `malformed` from
-#      the LIVE validation, so the rescue cannot launder a typo (C5).
-# The marker is matched LOOSELY (anything up to the closing `-->`) and then validated, so a marker
-# with broken JSON is reported as `malformed` rather than as an absence. A strict `{...}` regex cannot
-# see a malformed marker at all, which would make a typo indistinguishable from "no verdict".
+#      string means inline code, not a fence (C2/C3). It also never changes the LENGTH, so every index
+#      still points at the same character of the raw body (C2'). A rescued BLOCK still reports
+#      `malformed` from the LIVE validation, so the rescue cannot launder a typo (C5).
+#   8. The marker BOUNDARY is JSON-AWARE (bundled review of 66/67, C1 and C1'): a `<!--`, a `-->` or a
+#      brace inside a JSON STRING is content, so a BLOCK whose `note` quotes the delimiter is still one
+#      marker - in a fence, in the live text and in the raw-body rescue alike. Only a start whose JSON
+#      does not balance falls back to a capture that may not cross another `<!--`, which is what stops
+#      an unclosed start quoted in prose from swallowing the next marker. And masking may not "repair"
+#      JSON: a live marker whose JSON slice differs between the raw body and the stripped text is
+#      `malformed`, not approved (C2').
+# A marker whose JSON is broken is still CAPTURED and then reported as `malformed`, never as an
+# absence: a strict `{...}` regex cannot see a malformed marker at all, which would make a typo
+# indistinguishable from "no verdict". The capture is the JSON-aware one below; only a start whose JSON
+# does not balance falls back to a loose capture up to the closing `-->`.
 #
-# TEMPERED (bundled adversary review of 66/67, C1): the group may not cross another `<!--`. Without
-# that, an UNCLOSED start quoted in prose - `Every marker begins <!-- adversary-verdict:v1` - ran
-# non-greedily to the NEXT `-->`, swallowing the BLOCK marker that followed, and `findall` resumed
-# past it: the BLOCK was never examined and the body read as a live APPROVE, merge_ready: true, with
-# the FULL sha. A marker's JSON cannot legitimately contain `<!--`, so nothing is lost.
-MARKER_RE = re.compile(r"<!--\s*adversary-verdict:v1\s*((?:(?!<!--).)*?)\s*-->", re.DOTALL)
-# A marker START with no closing `-->` is invisible to MARKER_RE, and GitHub renders an unclosed
+# The BOUNDARY is JSON-AWARE (`_marker_spans`), never a regex. An UNCLOSED start quoted in prose -
+# `Every marker begins <!-- adversary-verdict:v1` - used to run to the NEXT `-->`, swallowing the BLOCK
+# that followed, and `findall` resumed past it: the body read as a live APPROVE, merge_ready: true
+# (bundled review, C1). Tempering the REGEX fixed that and broke the mirror case: a marker whose JSON
+# `note` reads `"literal <!-- x"` was then invisible to the raw-body rescue, so a BLOCK vanished again
+# (C1', a fail-open the lead reproduced). So the scanner walks the JSON object from each canonical
+# start with string and escape awareness - `<!--`, `-->` and braces inside a string are CONTENT - and
+# only a start whose JSON does not balance falls back to a TEMPERED capture that may not cross another
+# `<!--`, which is what keeps C1's prose-swallow closed. Both directions are pinned by tests.
+CANONICAL_START_RE = re.compile(r"<!--\s*adversary-verdict:v1")
+# A marker START with no closing `-->` is invisible to `_marker_spans`, and GitHub renders an unclosed
 # `<!--` as a comment to the end of the body, so a human does not see it either. Count the starts and
 # compare with the matches: any excess is malformed (adversary review, A2).
 #
 # WIDENED (adversary review of 4a56c01, B2): a `:`-anchored start missed `adversary-verdict {...}`
 # and `adversary_verdict:v1 ...`, so a TYPO beside a valid APPROVE was neither seen nor reported and
-# the body read as approved. Any near-miss now counts as a start, and a start that MARKER_RE cannot
-# parse is malformed - a typo reads as a typo.
+# the body read as approved. Any near-miss now counts as a start, and a start that `_marker_spans`
+# cannot capture is malformed - a typo reads as a typo. The WIDE pattern only COUNTS starts; only
+# `CANONICAL_START_RE` may yield a marker, so a near-miss spelling is never parsed into a verdict.
 MARKER_START_RE = re.compile(r"<!--\s*adversary[-_ ]?verdict\b", re.IGNORECASE)
 HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 # A shortened sha is what agents actually type (adversary review of 4a56c01, B1): the marker spec asks
@@ -440,24 +454,39 @@ def _strip_code(body: str) -> str:
     Now: a fence opens only at indent <= 3 (4+ spaces is an indented code block in CommonMark, not a
     fence), only when a backtick fence's INFO STRING holds no backtick (CommonMark 4.5 - otherwise the
     line is inline code, review C3), remembers its character and length, and closes only on the SAME
-    character at >= that length with nothing but whitespace after it. Code spans are per-line, because a
-    span cannot cross an HTML block and `<!--` starts one; see `_mask_spans` for the equal-length runs.
+    character at >= that length with nothing but whitespace after it. Code spans are scanned per line,
+    which is the shape `_mask_spans` implements for the equal-length runs.
+
+    OFFSETS ARE EXACT, and that is a contract, not a detail (bundled review, C2'): every line is masked
+    in place and the lines are rejoined with `"\n"` after splitting on `"\n"`, so the result is the same
+    length as `body` and every index in it points at the same character of `body`. `splitlines()` would
+    silently drop a trailing newline and rewrite `\r\n` as `\n`, shifting every offset after the first
+    such line - and `adversary_verdict` relies on those offsets to compare a marker's JSON to the same
+    slice of the raw body.
 
     HONEST ABOUT THE ERROR DIRECTION (review C3): an over-strip can still hide a MALFORMED or near-miss
     marker, and so lose its `malformed` warning; what it cannot do is lose a BLOCK naming this head,
     because that is read from the RAW body. Every replacement is a same-width run of spaces, so the text
-    outside code is byte-identical and no marker can be "repaired" into a different one.
+    outside code is byte-identical and no marker can be "repaired" into a different one; a live marker
+    whose JSON slice differs between body and stripped text is now `malformed`, never read (C2').
 
     KNOWN LIMIT, accepted by djbclark at the bundled review of 66/67: a BLOCK whose head is MISTYPED -
     not a prefix of this head at all - and that sits inside code is documentation, so a body with such
     a quote beside a live APPROVE still reads as approved. Recognising it would mean guessing which
     quoted near-miss markers are claims, which is the unbounded English-parsing problem this design
     removed; a BLOCK that names this head is covered by the raw-body rescue above.
+
+    KNOWN LIMITS, documented and deliberately NOT fixed (lead's ruling, C1a/b/c): code shapes outside
+    "fenced blocks and inline spans" are still read as LIVE markers, so a quoted real APPROVE for this
+    head in one of them approves the PR. Reproduced for three shapes: (a) an INLINE SPAN BROKEN ACROSS A
+    LINE, (b) a 4-SPACE INDENTED CODE BLOCK, (c) a FENCED BLOCK INSIDE A BLOCKQUOTE. Each is a false
+    APPROVE only in the direction that needs a human to paste our own template; none can hide a BLOCK,
+    which is the asymmetry this gate relies on.
     """
     out: list[str] = []
     fence = ""  # the open fence: "" when outside, else its character
     fence_len = 0
-    for line in body.splitlines():
+    for line in body.split("\n"):
         # Indentation is measured with tabs expanded (a tab is four columns), but the TEXT kept is the
         # original, so every masked line keeps its own length.
         lead = line[: len(line) - len(line.lstrip(" \t"))]
@@ -484,20 +513,112 @@ def _strip_code(body: str) -> str:
     return "\n".join(out)
 
 
+def _json_object_end(text: str, i: int) -> int:
+    """Index just past the JSON object that starts at `text[i] == '{'`, or -1 if it never balances.
+
+    String- and escape-aware ON PURPOSE (bundled review, C1'): a `{`, `}` or `<!--` inside a JSON
+    string is CONTENT, so a marker whose `note` quotes the delimiter still has findable boundaries. A
+    regex cannot express this, which is why the boundary moved here.
+    """
+    depth = 0
+    in_str = False
+    escaped = False
+    k, n = i, len(text)
+    while k < n:
+        c = text[k]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return k + 1
+        k += 1
+    return -1
+
+
+_MARKER_WS = " \t\r\n"
+
+
+def _marker_spans(text: str) -> list[tuple[int, int, int]]:
+    """Every CANONICAL marker start in `text`, as `(start, json_start, json_end)` offsets.
+
+    `start` is the `<!--`; the captured JSON is `text[json_start:json_end]`. Only
+    `adversary-verdict:v1` exactly (lowercase) can yield a span: a near-miss spelling is COUNTED by
+    `_classify_starts` and never parsed, so a typo cannot become a verdict.
+
+    TWO BOUNDARY RULES, and both are load-bearing (bundled review of 66/67, C1 and C1'):
+    1. The `-->` is looked for AFTER a BALANCED JSON OBJECT, so a `<!--` inside a string is content and
+       a BLOCK whose note quotes the delimiter is still one marker (C1'). A tempered regex got this
+       backwards and lost that BLOCK entirely.
+    2. Only the FALLBACK - a start whose JSON does not balance - is a loose capture, and it may not
+       cross another `<!--` (C1). That is what stops an unclosed start quoted in prose from running to
+       the next marker's `-->`, swallowing the BLOCK that follows.
+
+    A start with neither shape is not a marker at all; `_classify_starts` reports it as a typo.
+    """
+    spans: list[tuple[int, int, int]] = []
+    n = len(text)
+    # A candidate that starts INSIDE a marker already accepted is content - a `note` documenting the
+    # format quotes the start - so the scan resumes after that marker's `-->` (C1').
+    consumed = 0
+    for m in MARKER_START_RE.finditer(text):
+        if m.start() < consumed:
+            continue
+        # The WIDE start only locates the candidate; the canonical one says where `:v1` ends, and the
+        # JSON begins after that.
+        cm = CANONICAL_START_RE.match(text, m.start())
+        if not cm:
+            continue
+        q = cm.end()
+        while q < n and text[q] in _MARKER_WS:
+            q += 1
+        if q < n and text[q] == "{":
+            end = _json_object_end(text, q)
+            if end != -1:
+                r = end
+                while r < n and text[r] in _MARKER_WS:
+                    r += 1
+                if text.startswith("-->", r):
+                    spans.append((m.start(), q, end))
+                    consumed = r + 3
+                    continue
+        rest = text[cm.end():]
+        close = rest.find("-->")
+        nxt = rest.find("<!--")
+        if close != -1 and (nxt == -1 or close < nxt):
+            spans.append((m.start(), cm.end(), cm.end() + close))
+            consumed = cm.end() + close + 3
+    return spans
 
 
 def _classify_starts(text: str) -> tuple[int, int]:
-    """Count marker STARTS that `MARKER_RE` cannot parse: `(unclosed, wrong_form)`.
+    """Count marker STARTS that `_marker_spans` cannot capture: `(unclosed, wrong_form)`.
 
     A start is any near-miss spelling (`adversary-verdict`, `adversary_verdict`, a case variant, a
     dropped `:`). It is `wrong_form` when a `-->` closes it, because then it really is a marker and only
     its spelling is wrong; it is `unclosed` when no `-->` follows before the next `<!--`, in which case
     GitHub renders the rest of the body as a comment and a human cannot see it either.
     """
-    valid = {m.start() for m in MARKER_RE.finditer(text)}
+    spans = _marker_spans(text)
+    valid = {start for start, _js, _je in spans}
+
+    def _inside_a_marker(pos: int) -> bool:
+        # A marker-shaped text INSIDE another marker's JSON (a `note` documenting the format) is content,
+        # not a start of its own; counting it would make a correct body `malformed`.
+        return any(js <= pos < je for _s, js, je in spans)
+
     unclosed = wrongform = 0
     for m in MARKER_START_RE.finditer(text):
-        if m.start() in valid:
+        if m.start() in valid or _inside_a_marker(m.start()):
             continue
         rest = text[m.end():]
         close = rest.find("-->")
@@ -524,7 +645,7 @@ def adversary_verdict(body: str, head: str) -> dict:
     # gate (adversary review, B1).
     text = _strip_code(body)
 
-    matches = MARKER_RE.findall(text)
+    spans = _marker_spans(text)
     unclosed, wrongform = _classify_starts(text)
 
     # VALIDATION COMES FIRST (bundled adversary review of 66/67, C5). Before this, the raw-body BLOCK
@@ -542,7 +663,16 @@ def adversary_verdict(body: str, head: str) -> dict:
     # Validate EVERY LIVE marker, so a malformed one beside a good one is still reported.
     parsed: list[dict] = []
     placeholders = 0
-    for raw in matches:
+    for _start, jstart, jend in spans:
+        raw = text[jstart:jend]
+        # MASKING MAY NOT "REPAIR" JSON (bundled review, C2'). Stripping replaces code with spaces, so
+        # ``{"verdict":"APPROVE", `junk` "head":"..."}`` kept its structural commas and parentheses and
+        # parsed as valid JSON nobody wrote. `_strip_code` preserves offsets exactly, so the same slice
+        # of the raw body shows what is actually there: if they differ, part of this JSON was code, and
+        # what was written cannot be read. Malformed, not approved.
+        if raw != body[jstart:jend]:
+            problems.append("marker's JSON is partly inside code, so it cannot be read as written")
+            continue
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
         except ValueError as e:
@@ -584,9 +714,14 @@ def adversary_verdict(body: str, head: str) -> dict:
     # every `4a56c01db7c2…` BLOCK dependent on the stripper, and four ordinary Markdown shapes defeated
     # it. `_head_matches` is the whole rescue now, so no strip bug can lose a BLOCK. `malformed` still
     # comes from the live validation above (C5): the rescue may not launder a typo.
-    for raw in MARKER_RE.findall(body):
+    #
+    # The SAME JSON-aware scanner finds the markers here (bundled review, C1'): a tempered regex made a
+    # BLOCK whose JSON `note` quoted `<!--` invisible to this loop, so the rescue could not see the one
+    # thing it exists for. `_marker_spans` reads `<!--` inside a string as content, in the raw body
+    # exactly as in the stripped text.
+    for _start, jstart, jend in _marker_spans(body):
         try:
-            doc = json.loads(raw, object_pairs_hook=_strict_object)
+            doc = json.loads(body[jstart:jend], object_pairs_hook=_strict_object)
         except ValueError:
             continue
         if isinstance(doc, dict) and doc.get("verdict") == "BLOCK":
@@ -595,9 +730,9 @@ def adversary_verdict(body: str, head: str) -> dict:
                 # Report a conflict if a live APPROVE for this head also exists: the raw-body path
                 # must not lose the `conflict` flag that `assess` and the human line rely on.
                 approves_here = False
-                for raw2 in MARKER_RE.findall(text):
+                for _s2, js2, je2 in _marker_spans(text):
                     try:
-                        d2 = json.loads(raw2, object_pairs_hook=_strict_object)
+                        d2 = json.loads(text[js2:je2], object_pairs_hook=_strict_object)
                     except ValueError:
                         continue
                     if (isinstance(d2, dict) and d2.get("verdict") == "APPROVE"
@@ -615,7 +750,7 @@ def adversary_verdict(body: str, head: str) -> dict:
                                         f"{str(sha).strip()} (read from the raw body, so no "
                                         f"code-fence or strip bug can hide it)")}
 
-    if not matches:
+    if not spans:
         if problems:
             # A marker START that is not a marker: malformed, NOT absent. A typo reads as a typo, and
             # the REASON is named (adversary review of 4a56c01, B3): an unclosed `<!--` and a marker

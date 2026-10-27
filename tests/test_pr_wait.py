@@ -2072,3 +2072,110 @@ def test_strip_code_masks_with_spaces_and_never_changes_a_line() -> None:
     assert not dst[2].strip() and not dst[3].strip() and not dst[4].strip(), "the fence is masked"
     assert "span" not in dst[5] and dst[5].startswith("a ") and dst[5].endswith(" end")
     assert dst[6] == src[6] and dst[7] == src[7], "neither line is a fence"
+
+
+# ---- the lead's re-review of 6083bcb: C1' (regression) and C2' ---------------------------------
+#
+# C1 was fixed by TEMPERING the marker regex so it could not cross another `<!--`. That closed the
+# prose-swallow and opened the mirror: the SAME regex drove the raw-body BLOCK rescue, and extra JSON
+# fields are accepted (no schema check), so a BLOCK whose `note` quoted the delimiter became invisible
+# to the rescue. A fail-open in the one direction this gate promises never to fail open. The boundary
+# is now a JSON-aware scanner (`_marker_spans`), shared by the live path and the rescue, and BOTH
+# directions are pinned here: the tempered capture survives as the FALLBACK, for starts whose JSON
+# does not balance.
+
+def _marker_with_note(verdict: str, note: str, head: str = ADV_HEAD) -> str:
+    """A valid marker carrying an EXTRA field - which the gate accepts, by design."""
+    return (f'<!-- adversary-verdict:v1 {{"verdict":"{verdict}","head":"{head}",'
+            f'"note":"{note}"}} -->')
+
+
+def test_c1_prime_a_fenced_block_that_quotes_the_delimiter_is_not_hidden() -> None:
+    # At 6083bcb this body read as a clean APPROVE (parent 838413b read BLOCK): the fenced BLOCK's
+    # `note` holds `<!--`, the tempered group stopped there, the JSON failed to parse, and the rescue
+    # that exists to read a fenced BLOCK skipped it.
+    body = (marker("APPROVE") + "\n" + FENCE3 + "\n"
+            + _marker_with_note("BLOCK", "literal <!-- x") + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_c1_prime_a_live_block_that_quotes_the_delimiter_is_a_block_not_a_typo() -> None:
+    # Same body without the fence: the marker is LIVE, so the tempered group's truncation made valid
+    # JSON look malformed (6083bcb: APPROVE + malformed). A delimiter inside a JSON string is CONTENT.
+    body = marker("APPROVE") + "\n" + _marker_with_note("BLOCK", "literal <!-- x")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_c1_prime_a_near_miss_start_that_quotes_the_delimiter_never_becomes_a_marker() -> None:
+    # The scanner must not widen what COUNTS as a marker. A near-miss spelling is a start for
+    # `_classify_starts` only, however valid its JSON, so it is reported as a typo and never parsed
+    # into a verdict - a typo may not block, and it may not approve either.
+    body = ('<!-- adversary-verdict {"verdict":"BLOCK","head":"' + ADV_HEAD
+            + '","note":"literal <!-- x"} -->\n' + marker("APPROVE"))
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c2_prime_masking_may_not_repair_json_at_a_structural_boundary() -> None:
+    # PRE-EXISTING (the lead found it at both revisions), and still wrong: `_strip_code` replaces code
+    # with SPACES, so a span sitting where JSON expects whitespace left the punctuation intact -
+    # {"verdict":"APPROVE", `junk` "head":"…"} parsed as valid JSON nobody wrote, and read clean-
+    # APPROVE. The live slice of the RAW body at the same offsets says what was actually written, so a
+    # marker whose JSON differs between the two is `malformed`, never approved.
+    body = ('<!-- adversary-verdict:v1 {"verdict":"APPROVE", `junk` "head":"' + ADV_HEAD + '"} -->')
+    r = adv(body)
+    assert not r["present"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+    # Outside code the same JSON is a real verdict: the fix is the repair, not a blanket refusal.
+    assert passes(body.replace("`junk`", ""))
+
+
+def test_strip_code_preserves_every_offset_including_crlf_and_a_trailing_newline() -> None:
+    # The C2' check compares slices by INDEX, so `_strip_code` may not change the length by one byte.
+    # `splitlines()` dropped a trailing newline and rewrote `\r\n` as `\n`, shifting every offset
+    # after the first such line - which turned a clean APPROVE on a CRLF body into `malformed`.
+    strip = load_module()._strip_code
+    for body in ("text `span` and " + marker("APPROVE") + "\n",
+                 "text `span`\r\n\r\n" + marker("APPROVE") + "\r\n",
+                 "trailing\n\n",
+                 ""):
+        out = strip(body)
+        assert len(out) == len(body), (body, out)
+        # Same line structure: every line terminator survives byte for byte.
+        assert out[len(out.rstrip("\r\n")):] == body[len(body.rstrip("\r\n")):], (body, out)
+    crlf = "Intro\r\n\r\n" + marker("APPROVE") + "\r\n"
+    assert strip(crlf).endswith("\r\n") and len(strip(crlf)) == len(crlf)
+    r = adv(crlf)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and not r["malformed"], r
+
+
+def test_c1_prime_a_note_that_documents_the_marker_is_content_not_a_second_start() -> None:
+    # The JSON-aware scanner accepts the WHOLE marker, so a `note` quoting the format is inside that
+    # marker's JSON. Counting the quoted start as a second start made a CORRECT body `malformed`, which
+    # is the same fail-closed-but-wrong direction as C1 in the other guise. `_classify_starts` skips a
+    # start inside an accepted marker, and the scanner resumes after that marker's `-->`.
+    quoted_start = 'see <!-- adversary-verdict:v1 in the docs'
+    r = adv(_marker_with_note("APPROVE", quoted_start))
+    assert r["verdict"] == "APPROVE" and r["matches_head"], r
+    assert not r["malformed"], r
+    # The same shape with a WHOLE marker nested in the note, escaped as JSON requires.
+    nested = json.dumps({"verdict": "APPROVE", "head": ADV_HEAD})
+    note = "like <!-- adversary-verdict:v1 " + nested + " --> ok"
+    body = ('<!-- adversary-verdict:v1 '
+            + json.dumps({"verdict": "APPROVE", "head": ADV_HEAD, "note": note})
+            + ' -->')
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and not r["malformed"], r
+    # And two REAL markers are still two: the skip must not spill past the accepted marker.
+    assert adv(body + "\n" + marker("BLOCK"))["verdict"] == "BLOCK"
