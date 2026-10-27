@@ -70,4 +70,28 @@ For a durable continuation, first use **handoff** to write and commit the Tier 2
 
 After startup, tell every still-relevant peer the new agent ID/title, workspace ID/name, task worktree and chain pointer through **peer-relay**. Check `delivered`; carry queued/unverified records without resending. A permission/question-card refusal remains blocked: report it and leave the notice for after that card is resolved, never bypass it. Preserve the old transcript until the receiver is verified; do not archive a workspace containing other agents or terminals.
 
+## Peer notices belong to the successor (operator, 2026-10-27)
+
+`relay.py --expect-ack` and the first-contact footer tell the peer to reply to the **sender's own** id (`relay.py` footer, `me[id]`),
+and the expectation watches the **sender's** transcript. A notice sent by the retiring session therefore sends every late ack to a
+window that is about to close (2026-10-27: a peer's ack reached the old session after the transfer and would have been lost).
+
+1. The retiring session sends no location notice. It puts the durable peer list in the Tier 2 document: per peer the id, title,
+   workspace, any relay record ID already sent with its status (`delivered`, `queued`, `unverified`, `failed` or blocked by a
+   question card) and the ack token it was asked for.
+2. The **successor** sends the notices from its real identity (`relay.py PEER "<text>" --expect-ack TOKEN`; a first contact asks for a
+   named ack), so replies and expectations land in the surviving transcript. Notices already sent by the old session are adopted and
+   watched by the successor with `relay.py --pending` / `--sweep`; they are never resent or hand-edited. A deliberate new return-path
+   check from the successor is a new contact, not a duplicate.
+3. Queued, unverified and card-blocked statuses survive the transfer unchanged and are never called delivered. A blocked peer is
+   notified after its card resolves, not around it.
+4. The old session only verifies that the successor accepted this duty (its own named ack); completion never depends on the old model
+   or window forwarding a late reply.
+5. Acceptance scenario: the old session exits before a peer's delayed ack and before a queued notice delivers. The successor's
+   `relay.py --pending` still lists the expectation open, the later ack resolves it by `--sweep`, and the queued notice is still shown
+   as queued until relay itself reports `delivered`.
+
+CLI gotcha (2026-10-27): `paseo logs --json` prints rendered text, not parseable JSON, on this install; `inspect` and `logs` do not
+share an encoding. Match a token in logs as text.
+
 Do not wait or poll for the agent to finish.
