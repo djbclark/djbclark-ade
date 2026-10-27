@@ -7,8 +7,12 @@ puts this directory on sys.path first, the way bin/acp-dispatch does for failove
 
 Precedence, lowest to highest: `defaults` (the script's THRESHOLDS: the fail-safe when config/gates.toml is missing or
 unparsable) < gates.toml baseline < the active profile < env JSON (CLAUDE_GOVERNOR_THRESHOLDS /
-CLAUDE_QUOTA_GUARD_THRESHOLDS; tests and emergencies; bad input raises GateEnvError). The `frontier` gate has NO env override:
-its keys are the away frontier allowance (docs/gates.md), and an environment variable an agent can set must not widen it.
+CLAUDE_QUOTA_GUARD_THRESHOLDS; tests and emergencies; bad input raises GateEnvError). The `frontier` gate has NO threshold
+env override: its keys are the away frontier allowance (docs/gates.md), and a threshold an agent can put in the environment
+must not widen it. The path variables still redirect the INPUTS (GATES_TOML, GATE_PROFILE_STATE; acp-dispatch also
+CLAUDE_QUOTA_GUARD_STATE and HOME), so a CLI consumer started by an agent can be pointed at a self-written profile: a
+`frontier_judged` record in a dispatch record is an audit trail, not proof that the allowance was granted. The Claude Code
+hook takes its environment from the Claude process, which a session cannot change.
 
 A profile (state: ~/.local/state/ade/gate-profile.json, env GATE_PROFILE_STATE) applies only when ALL of these hold; otherwise
 the baseline applies and info["ignored"] says why: the file parses as {"schema": 1, "profile", "since", "until", ...}; both
@@ -40,6 +44,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -229,10 +234,14 @@ def value_problem(spec: dict[str, Any], baseline: float, value: Any) -> str | No
 
 def baseline_loosens(cfg: dict[str, Any], gate: str, key: str, value: float, default: float) -> bool:
     """True when the gates.toml baseline `value` is looser than the code `default` in the key's floor direction. A key with no
-    floor entry has no direction (False); a floor entry whose direction is unreadable trusts only the code default."""
+    floor entry has no direction (False), except a `frontier` key, whose code defaults are all "off" and so always have one
+    (`*_min_left`: lower is looser, every other key: higher); a floor entry whose direction is unreadable trusts only the
+    code default."""
     spec = floor_spec(cfg, gate, key)
     if spec is None:
-        return False
+        if gate != "frontier" or key not in FRONTIER_DEFAULTS:
+            return False
+        spec = {"loosen": "lower" if key.endswith("_min_left") else "higher"}
     if spec.get("loosen") == "lower":
         return value < default
     if spec.get("loosen") == "higher":
@@ -467,7 +476,7 @@ def frontier_reason(text: Any) -> tuple[str | None, str | None]:
     s = text.strip()
     if not s:
         return None, None
-    if any(ord(c) < 32 or ord(c) == 127 for c in s):
+    if any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in s):
         return None, "a frontier-reason is one line (no newline or control character)"
     if not FRONTIER_REASON_MIN <= len(s) <= FRONTIER_REASON_MAX:
         return None, f"a frontier-reason is {FRONTIER_REASON_MIN}-{FRONTIER_REASON_MAX} characters (got {len(s)})"

@@ -1122,6 +1122,18 @@ def test_a_gates_toml_baseline_cannot_turn_the_allowance_on(fenv):
     assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day", "frontier1_min_left"}
 
 
+def test_a_missing_frontier_floor_table_still_guards_every_frontier_key(fenv):
+    fenv.write_text(fenv.read_text().replace("[floors.frontier]", "[floors.unused]", 1)
+                    .replace("frontier1_judged = 0 ", "frontier1_judged = 1 ", 1)
+                    .replace("frontier1_agent_calls_per_day = 0 ", "frontier1_agent_calls_per_day = 6 ", 1)
+                    .replace("frontier1_min_left = 10.0 ", "frontier1_min_left = 1.0 ", 1)
+                    .replace("frontier2_min_left = 60.0 ", "frontier2_min_left = 70.0 ", 1))
+    t, info = front()
+    assert (t["frontier1_judged"], t["frontier1_agent_calls_per_day"], t["frontier1_min_left"]) == (0, 0, 10)
+    assert t["frontier2_min_left"] == 70                       # tighter than the code default: the file may tighten
+    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day", "frontier1_min_left"}
+
+
 def test_no_environment_variable_changes_the_frontier_gate(fenv, monkeypatch):
     assert "frontier" not in g.ENV_VARS
     for var in (*g.ENV_VARS.values(), "FRONTIER_GATE_THRESHOLDS", "CLAUDE_FRONTIER_THRESHOLDS"):
@@ -1174,7 +1186,8 @@ def test_judged_guard_block_age_and_cap_boundaries():
 
 @pytest.mark.parametrize("text, ok", [("a" * 9, False), ("a" * 10, True), ("  " + "a" * 200 + "  ", True), ("a" * 201, False),
                                       ("", None), ("   ", None), (None, None), ("ten chars\nmore", False), ("tab\tin the reason", False),
-                                      (12345, False)])
+                                      (12345, False), ("ten chars\u2028more", False), ("ten chars\u0085more", False),
+                                      ("ten chars\u009bmore", False), ("ten chars\u202emore", False)])
 def test_frontier_reason_form(text, ok):
     reason, problem = g.frontier_reason(text)
     if ok is None:

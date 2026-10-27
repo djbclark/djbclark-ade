@@ -153,8 +153,11 @@ downshift on it. A profile cannot set 0 (an alert always gives at least `watch`)
 
 A third gate, read by `bin/route_agent.py`, `bin/acp-dispatch`, `claude/hooks/frontier_agent_gate.py`, `bin/claude-quota-guard`
 (advice, state) and `claude/hooks/quota_nudge.py` (daily line). Code default: `ade_gates.FRONTIER_DEFAULTS`; load it with
-`ade_gates.load_frontier()`. **No env override** (an agent can set an environment variable; the allowance must not widen that
-way). Baseline (every number is today's rule): no judged use, one frontier slice per pool per wave, no Agent-tool frontier call
+`ade_gates.load_frontier()`. **No threshold env override** (an agent can set an environment variable; the allowance must not widen that
+way). The path variables `GATES_TOML` and `GATE_PROFILE_STATE` (and, for `acp-dispatch`, `CLAUDE_QUOTA_GUARD_STATE` and `HOME`)
+still redirect the inputs, so a CLI consumer started by an agent can be pointed at a self-written profile: a `frontier_judged`
+record in a dispatch record is an audit trail, not proof that a grant existed. The Claude Code hook takes its environment from
+the Claude process, which a session cannot change. Baseline (every number is today's rule): no judged use, one frontier slice per pool per wave, no Agent-tool frontier call
 without asking.
 
 | key | baseline | `away` | floor (`loosen`, bound) | meaning |
@@ -194,7 +197,11 @@ exactly today's behaviour, so the allowance there is recorded and capped, not a 
 only when `frontier_allowance.judged` is true. (4) Same-user files (`agent-calls.jsonl`, the day counter, the profile, the guard
 state, `GATES_TOML`) can be edited by any agent: the double counter, the regular-file and future-dated-row checks, the
 fail-closed parse errors and the lock raise the cost of spoofing the cap, they do not make it impossible. (5) A reason is
-self-asserted: it bounds nothing but the audit trail; the cap, the floors and the guard level bound the spend.
+self-asserted: it bounds nothing but the audit trail; the cap, the floors and the guard level bound the spend. (6) Residual:
+`gate-profile set` and `extend` have no operator check (no tty, approval token or Touch ID; `--by` is free text), so any agent
+can grant the allowance by setting `away`. Mitigations: `set` sends a `hermes-ping` and every change is appended to
+`gate-profile.log`. (7) In the Agent-tool hook, once a call is identified as a frontier call, any error in its own state (state
+directory, lock, log append, counter) asks instead of allowing; the lock is polled for 5 s, then asks.
 
 ## Not covered (2026-10-26)
 

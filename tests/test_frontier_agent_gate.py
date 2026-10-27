@@ -290,6 +290,60 @@ class TestAwayAllowance(unittest.TestCase):
         self.assertEqual(proc.wait(timeout=20), 0)
         self.assertEqual(self.rows()[-1]["decision"], "allowed-judged")
 
+    # -- the gate's own state is unusable: a frontier call asks, at baseline and under away (adversary round 1, A1) ------------
+
+    def asks_both_ways(self, why_part: str):
+        for label, profile in (("baseline", False), ("away", True)):
+            with self.subTest(label):
+                out = self.call(profile=profile)
+                self.assertAsks(out, "could not use its own state")
+                self.assertIn(why_part, out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    @property
+    def gate_dir(self) -> Path:
+        return self.home / ".local/state/frontier-gate"
+
+    def test_a_log_path_that_is_a_directory_asks(self):
+        self.log.mkdir(parents=True)
+        self.asks_both_ways("IsADirectoryError")
+
+    def test_a_lock_path_that_is_a_symlink_asks(self):
+        self.gate_dir.mkdir(parents=True)
+        (self.gate_dir / "agent-calls.lock").symlink_to(self.home / "elsewhere")
+        self.asks_both_ways("OSError")
+
+    def test_a_state_dir_that_is_a_file_asks(self):
+        self.gate_dir.parent.mkdir(parents=True)
+        self.gate_dir.write_text("not a directory")
+        self.asks_both_ways("FileExistsError")
+
+    def test_a_lock_held_by_another_process_asks_after_the_wait(self):
+        import fcntl
+        self.gate_dir.mkdir(parents=True)
+        with open(self.gate_dir / "agent-calls.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            started = time.monotonic()
+            self.asks_both_ways("held by another process")
+            self.assertGreaterEqual(time.monotonic() - started, 9.0)         # two calls, 5 s each, never an indefinite wait
+        self.assertFalse(self.log.exists())
+
+    def test_an_approved_session_still_passes_when_the_state_is_unusable(self):
+        self.log.mkdir(parents=True)
+        self.assertIsNone(self.call(env={"ACP_OPERATOR_APPROVED": "frontier-agent"}))
+
+    def test_an_import_failure_at_baseline_does_not_advertise_the_allowance(self):
+        hooks = self.home / "tree/claude/hooks"                  # no bin/ beside it and no ~/src checkout under the test HOME
+        hooks.mkdir(parents=True)
+        copy = hooks / HOOK.name
+        copy.write_text(HOOK.read_text())
+        base = {k: v for k, v in os.environ.items() if k not in ("ACP_OPERATOR_APPROVED", "FRONTIER_GATE_OFF")}
+        proc = subprocess.run(["python3", str(copy)], input=json.dumps({"tool_name": "Agent", "tool_input": {
+            "model": "fable", "prompt": REASON}}), capture_output=True, text=True, env={**base, "HOME": str(self.home)}, check=True)
+        out = json.loads(proc.stdout)
+        self.assertAsks(out)
+        self.assertNotIn("allowance", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("ImportError", self.rows()[-1]["ask_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
