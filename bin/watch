@@ -24,6 +24,9 @@ up       per domain, in this order:
            4. registration is verified: the domain's own status command must show the NEW agent as holder and
               its channel test must pass within register_timeout_s; otherwise `not registered: <reason>`,
               exit 1, the agent is left running for inspection
+         Every agent lives in ONE shared Paseo workspace (config [defaults] workspace, "watch") and is titled
+         `watch <domain> <n>`, n the next per-domain base-36 number (0-9a-z); once the new agent is registered,
+         the superseded ones (and the holder it replaced) are renamed `x <old title>`.
          `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
          line to a live Paseo holder (default: a holder that Paseo lists as alive counts, because the test line
          costs the holder a model turn each tick)
@@ -111,7 +114,8 @@ def sub(argv: list[str], agent: str = "") -> list[str]:
 def load_registry() -> tuple[dict, dict]:
     with open(REGISTRY, "rb") as f:
         d = tomllib.load(f)
-    defaults = {"window_days": 14, "register_timeout_s": 300, "poll_s": 5, **d.get("defaults", {})}
+    defaults = {"window_days": 14, "register_timeout_s": 300, "poll_s": 5, "workspace": "watch",
+                "workspace_cwd": "~/src/djbclark-ade", **d.get("defaults", {})}
     return defaults, d.get("domain", {})
 
 
@@ -154,6 +158,15 @@ class Paseo:
             self._agents = [a for a in d if isinstance(a, dict)] if isinstance(d, list) else None
         return self._agents
 
+    def all_agents(self) -> list[dict]:
+        """Every agent the daemon still lists, archived included (title numbering must never reuse a number)."""
+        rc, out, _ = run([PASEO, "agent", "ls", "-g", "-a", "--json"], 30)
+        try:
+            d = json.loads(out) if rc == 0 else []
+        except ValueError:
+            d = []
+        return [a for a in d if isinstance(a, dict)] if isinstance(d, list) else []
+
     def agent(self, ident: str) -> dict | None:
         for a in self.agents() or []:
             if ident and (a.get("id") == ident or (len(ident) >= 7 and str(a.get("id", "")).startswith(ident))):
@@ -178,8 +191,11 @@ class Paseo:
                 self._models[provider] = []
         return self._models[provider]
 
-    def workspace_for(self, domain: str, cwd: str, create: bool) -> tuple[str | None, str]:
-        title = f"watch-{domain}"
+    def workspace_for(self, dflt: dict, create: bool) -> tuple[str | None, str]:
+        """The one shared workspace every watcher agent lives in (checked 2026-10-27: Paseo runs an agent in
+        the workspace's cwd whatever --cwd says, so the prompt names the domain's checkout instead)."""
+        title = dflt["workspace"]
+        cwd = os.path.expanduser(dflt["workspace_cwd"])
         rc, out, err = run([PASEO, "workspace", "ls", "--background", "--json"], 30)
         try:
             rows = json.loads(out) if rc == 0 else []
@@ -486,14 +502,71 @@ def plan_line(p: dict) -> str:
 
 
 # ---------------------------------------------------------------------------------------------- launching
-def prompt_for(domain: str, row: dict) -> str:
+B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def to_b36(n: int) -> str:
+    s = ""
+    while True:
+        n, r = divmod(n, 36)
+        s = B36[r] + s
+        if n == 0:
+            return s
+
+
+def title_re(domain: str) -> re.Pattern:
+    """`watch <domain> <b36>`, with the `x ` prefix of a retired one; an unnumbered `watch <domain>` is generation 0."""
+    return re.compile(rf"^(x )?watch {re.escape(domain)}(?: ([0-9a-z]+))?$")
+
+
+def seq_path(domain: str) -> Path:
+    return STATE / f"{domain}.seq"
+
+
+def next_tag(domain: str, pv: Paseo) -> str:
+    """The next base-36 generation number for the domain: past every numbered title the daemon still lists
+    (retired and archived included) and past the last one we handed out, so a number is never reused."""
+    top = 0
+    for a in pv.all_agents():
+        m = title_re(domain).match(a.get("name") or "")
+        if m:
+            top = max(top, int(m.group(2) or "0", 36))
+    try:
+        top = max(top, int(seq_path(domain).read_text().strip() or "0", 36))
+    except (OSError, ValueError):
+        pass
+    return to_b36(top + 1)
+
+
+def retire_superseded(domain: str, pv: Paseo, new_aid: str, replaced: Holder | None) -> list[str]:
+    """Once the new watcher is registered and tested: every other live `watch <domain> <n>` agent, and the holder it
+    replaced, gets `x ` put before its title. Returns one line per rename."""
+    pv.agents(refresh=True)
+    pat = title_re(domain)
+    done = []
+    for a in pv.agents() or []:
+        name = a.get("name") or ""
+        m = pat.match(name)
+        rid = str(a.get("id") or "")
+        is_replaced = bool(replaced and replaced.target and len(replaced.target) >= 7 and rid.startswith(replaced.target))
+        if a.get("id") == new_aid or name.startswith("x ") or not (is_replaced or (m and not m.group(1))):
+            continue
+        rc, out, err = run([PASEO, "agent", "update", str(a["id"]), "--name", f"x {name}"], 30)
+        done.append(f"{str(a['id'])[:8]} {name!r} -> {'x ' + name!r}" if rc == 0
+                    else f"{str(a['id'])[:8]} {name!r} NOT renamed: {(err or out).strip()[:120]}")
+    return done
+
+
+def prompt_for(domain: str, row: dict, title: str) -> str:
     if row.get("prompt"):
         return row["prompt"]
     skill = row["skill"]
     skill_md = ROOT / "skills" / skill.lstrip("/") / "SKILL.md"
     return (f"{skill}\n\nYou were started by `watch up` as the {domain} watcher, in an unattended Paseo session. "
+            f"Paseo runs you in the shared watch workspace's directory; the {domain} domain's checkout is "
+            f"{row.get('cwd', '-')}, so use absolute paths there (and `git -C`) instead of relying on your cwd. "
             f"Do section 1 of {skill_md} now (if `{skill}` is not a command in this harness, read that file and follow "
-            f"it): register yourself as the watcher (target: your own $PASEO_AGENT_ID; name it \"watch {domain}\"), run "
+            f"it): register yourself as the watcher (target: your own $PASEO_AGENT_ID; name it \"{title}\"), run "
             f"the channel test, record the role in the Tier 1 log of chain {row.get('chain', '-')}, then stop and wait. "
             f"Events arrive as messages. Never /loop or CronCreate.")
 
@@ -531,13 +604,17 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
     cwd = os.path.expanduser(row["cwd"])
     if not Path(cwd).is_dir():
         return 1, f"not launched: cwd {cwd} does not exist"
-    wid, how = pv.workspace_for(domain, cwd, create=True)
+    wid, how = pv.workspace_for(dflt, create=True)
     if not wid:
         return 1, f"not launched: {how}"
+    tag = next_tag(domain, pv)
+    title = f"watch {domain} {tag}"
+    STATE.mkdir(parents=True, exist_ok=True)
+    seq_path(domain).write_text(tag + "\n")
     save_rec(domain, {"domain": domain, "state": "launching", "pid": os.getpid(), "started_at": now_s(),
                       "started_epoch": time.time(), "workspace_id": wid, "plan": plan_line(plan)})
-    argv = [NEW_SEAT, "--title", f"watch {domain}", "--provider", plan["provider"], "--model", plan.get("model", ""),
-            "--cwd", cwd, "--workspace", wid, "--label", f"watch={domain}", "--prompt", prompt_for(domain, row), "--json"]
+    argv = [NEW_SEAT, "--title", title, "--provider", plan["provider"], "--model", plan.get("model", ""),
+            "--cwd", cwd, "--workspace", wid, "--label", f"watch={domain}", "--prompt", prompt_for(domain, row, title), "--json"]
     if plan.get("thinking"):
         argv += ["--thinking", plan["thinking"]]
     rc, out, err = run(argv, 120)
@@ -555,7 +632,7 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
     rec = load_rec(domain) or {}
     rec.update(agent_id=aid, state="starting", workspace=how, auto_accept_verified=(rc == 0))
     save_rec(domain, rec)
-    log(domain, f"started agent {aid[:8]} in workspace {wid} ({how}): {plan_line(plan)}{note}")
+    log(domain, f"started agent {aid[:8]} as {title!r} in workspace {dflt['workspace']} {wid} ({how}): {plan_line(plan)}{note}")
     ok, why = wait_registered(domain, row, aid, dflt)
     rec = load_rec(domain) or rec
     if ok:
@@ -563,6 +640,8 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
         save_rec(domain, rec)
         if replaces:
             log(domain, f"replaced holder {replaces.target[:8]} ({replaces.name}); it was told by the new registration")
+        for line in retire_superseded(domain, pv, aid, replaces):
+            log(domain, f"retired: {line}")
         return 0, f"registered: {why}"
     rec.update(state="unregistered", reason=why, checked_at=now_s())
     save_rec(domain, rec)
@@ -713,14 +792,11 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
         if plan.get("governor_hold"):
             log(domain, f"  - {plan['governor_hold']}", dry)
         if dry:
-            ws, how = pv.workspace_for(domain, os.path.expanduser(row["cwd"]), create=False)
-            log(domain, f"would launch: {plan_line(plan)}; workspace watch-{domain} ({how}); first prompt {row['skill']}", dry)
+            ws, how = pv.workspace_for(dflt, create=False)
+            log(domain, f"would launch: {plan_line(plan)}; title 'watch {domain} {next_tag(domain, pv)}' in workspace {dflt['workspace']} ({how}); first prompt {row['skill']}", dry)
             return 0
         rc, msg = launch(domain, row, dflt, pv, plan, replaces)
         log(domain, msg)
-        if rc == 0 and args.force and rec and rec.get("agent_id") and pv.agent(rec["agent_id"]):
-            ok, w = stop_agent(pv, rec["agent_id"])
-            log(domain, f"stopped our previous agent {rec['agent_id'][:8]}: {w}")
         return rc
     finally:
         if lock:
