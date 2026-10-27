@@ -122,6 +122,7 @@ def test_gates_toml_baseline_equals_the_code_defaults():
     cfg = tomllib.loads((REPO / "config" / "gates.toml").read_text())
     assert cfg["governor"] == pytest.approx(_thresholds("claude-fleet-governor"))
     assert cfg["quota_guard"] == pytest.approx(_thresholds("claude-quota-guard"))
+    assert cfg["frontier"] == pytest.approx(g.FRONTIER_DEFAULTS)
 
 
 def test_the_shipped_gates_toml_validates():
@@ -1037,3 +1038,148 @@ def test_extend_does_not_carry_a_stale_expiry_mark_so_the_real_expiry_pings(env,
     assert info["expired"] is not None and info["expired"]["name"] == "away"
     sent: list[str] = []
     assert g.notify_expired(info, lambda m: sent.append(m) or True, later) is True and len(sent) == 1
+
+
+# -- the [frontier] gate (2026-10-27): floors, baseline guard, no env override, the guard-state check, the reason form ----------
+
+@pytest.fixture
+def fenv(tmp_path, monkeypatch):
+    """A copy of the SHIPPED gates.toml, a missing profile state and no env override; returns the toml path."""
+    toml = tmp_path / "gates.toml"
+    toml.write_text((REPO / "config" / "gates.toml").read_text())
+    monkeypatch.setenv("GATES_TOML", str(toml))
+    monkeypatch.setenv("GATE_PROFILE_STATE", str(tmp_path / "state" / "gate-profile.json"))
+    for var in g.ENV_VARS.values():
+        monkeypatch.delenv(var, raising=False)
+    g._LOGGED.clear()
+    return toml
+
+
+def front(now=NOW):
+    return g.load_frontier(now)
+
+
+def test_frontier_baseline_is_todays_rule(fenv):
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and info["profile"] is None
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0, 0)
+    assert (t["frontier1_per_wave"], t["frontier2_per_wave"], t["frontier1_min_left"]) == (1, 1, 10)
+
+
+def test_the_shipped_away_profile_applies_the_ruled_values(fenv):
+    write_state(state_path())
+    t, info = front()
+    assert info["profile"]["name"] == "away" and info["ignored"] is None
+    assert t == {**g.FRONTIER_DEFAULTS, "frontier1_judged": 1.0, "frontier2_judged": 1.0, "frontier1_per_wave": 2.0,
+                 "frontier2_per_wave": 1.0, "frontier1_agent_calls_per_day": 4.0}
+
+
+def test_an_expired_profile_gives_the_frontier_baseline(fenv):
+    write_state(state_path(), since=g.iso(NOW - timedelta(hours=80)), until=g.iso(NOW - timedelta(seconds=1)))
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and "expired" in info["ignored"]
+
+
+@pytest.mark.parametrize("key, value, why", [
+    ("frontier1_judged", 2, "above the ceiling 1"),
+    ("frontier2_judged", 2, "above the ceiling 1"),
+    ("frontier1_per_wave", 3, "above the ceiling 2"),
+    ("frontier2_per_wave", 2, "above the ceiling 1"),
+    ("frontier1_agent_calls_per_day", 7, "above the ceiling 6"),
+    ("frontier1_min_left", 9.9, "below the floor 10"),
+    ("frontier2_min_left", 39.9, "below the floor 40"),
+    ("frontier1_per_wave", 0, "tighter than the baseline 1"),
+    ("frontier1_min_left", 11, "tighter than the baseline 10"),
+    ("frontier1_judged", -1, "tighter than the baseline 0"),
+    ("frontier1_per_wave", "2", "not a number"),
+    ("frontier3_judged", 1, "not overridable"),
+])
+def test_the_floors_refuse_a_looser_frontier_value_and_the_whole_profile_is_baseline(fenv, key, value, why):
+    shown = value if isinstance(value, (int, float)) else f'"{value}"'
+    good = "frontier2_judged" if key == "frontier1_judged" else "frontier1_judged"       # a valid companion value
+    fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{good} = 1\n{key} = {shown}\n")
+    write_state(state_path(), profile="t")
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS, f"one bad value rejects the whole profile: even the valid {good} = 1"
+    assert why in info["ignored"], info["ignored"]
+
+
+@pytest.mark.parametrize("key, value", [("frontier1_agent_calls_per_day", 6), ("frontier1_per_wave", 2), ("frontier2_min_left", 40),
+                                        ("frontier2_per_wave", 1), ("frontier1_min_left", 10)])
+def test_a_frontier_value_at_its_bound_is_allowed(fenv, key, value):
+    fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{key} = {value}\n")
+    write_state(state_path(), profile="t")
+    t, info = front()
+    assert info["ignored"] is None and t[key] == float(value)
+
+
+def test_a_gates_toml_baseline_cannot_turn_the_allowance_on(fenv):
+    fenv.write_text(fenv.read_text().replace("frontier1_judged = 0 ", "frontier1_judged = 1 ", 1)
+                    .replace("frontier1_agent_calls_per_day = 0 ", "frontier1_agent_calls_per_day = 5 ", 1)
+                    .replace("frontier1_min_left = 10.0 ", "frontier1_min_left = 1.0 ", 1))
+    t, info = front()
+    assert (t["frontier1_judged"], t["frontier1_agent_calls_per_day"], t["frontier1_min_left"]) == (0, 0, 10)
+    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day", "frontier1_min_left"}
+
+
+def test_no_environment_variable_changes_the_frontier_gate(fenv, monkeypatch):
+    assert "frontier" not in g.ENV_VARS
+    for var in (*g.ENV_VARS.values(), "FRONTIER_GATE_THRESHOLDS", "CLAUDE_FRONTIER_THRESHOLDS"):
+        monkeypatch.setenv(var, json.dumps({"frontier1_judged": 1, "frontier1_agent_calls_per_day": 99}))
+    assert front()[0] == g.FRONTIER_DEFAULTS
+    assert g.env_overrides("frontier", dict(g.FRONTIER_DEFAULTS)) == {}
+
+
+def test_a_missing_gates_toml_is_the_frontier_code_default(fenv, monkeypatch):
+    monkeypatch.setenv("GATES_TOML", "/nonexistent/gates.toml")
+    write_state(state_path())
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and info["profile"] is None
+
+
+GUARD_OK = {"level": "ok", "reasons": [], "stale": False, "fable_left": 50.0, "checked_at": g.iso(NOW - timedelta(minutes=1))}
+
+
+def test_judged_guard_block_passes_a_fresh_ok_state_and_a_weekly_watch():
+    t = g.FRONTIER_DEFAULTS
+    assert g.judged_guard_block(GUARD_OK, t, NOW) is None
+    assert g.judged_guard_block({**GUARD_OK, "level": "watch", "reasons": ["weekly"]}, t, NOW) is None
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"level": "tight"}, "tight"), ({"level": "critical"}, "critical"), ({"level": None}, "None"),
+    ({"stale": True}, "stale"), ({"stale": None}, "stale"),
+    ({"level": "watch", "reasons": ["fable"]}, "other than the weekly"),
+    ({"level": "watch", "reasons": ["weekly", "stale"]}, "other than the weekly"),
+    ({"level": "watch", "reasons": []}, "other than the weekly"),
+    ({"reasons": ["weekly"]}, "at level ok"),
+    ({"fable_left": 9.99}, "frontier-1 cap has"), ({"fable_left": None}, "missing"), ({"fable_left": True}, "missing"),
+    ({"checked_at": None}, "checked_at"), ({"checked_at": "2026-10-26T11:59:00"}, "checked_at"),
+])
+def test_judged_guard_block_refuses(over, why):
+    st = {**GUARD_OK, **over}
+    assert why in g.judged_guard_block(st, g.FRONTIER_DEFAULTS, NOW)
+
+
+def test_judged_guard_block_age_and_cap_boundaries():
+    t = g.FRONTIER_DEFAULTS
+    at = lambda secs: {**GUARD_OK, "checked_at": g.iso(NOW - timedelta(seconds=secs))}      # noqa: E731
+    assert g.judged_guard_block(at(1800), t, NOW) is None and "min old" in g.judged_guard_block(at(1801), t, NOW)
+    assert g.judged_guard_block(at(-60), t, NOW) is None and "min old" in g.judged_guard_block(at(-61), t, NOW)
+    assert g.judged_guard_block({**GUARD_OK, "fable_left": 10.0}, t, NOW) is None
+    assert g.judged_guard_block({**GUARD_OK, "fable_left": 19.9}, {**t, "frontier1_min_left": 20.0}, NOW) is not None
+    for bad in (None, [], "ok", 7):
+        assert "missing or unreadable" in g.judged_guard_block(bad, t, NOW)
+
+
+@pytest.mark.parametrize("text, ok", [("a" * 9, False), ("a" * 10, True), ("  " + "a" * 200 + "  ", True), ("a" * 201, False),
+                                      ("", None), ("   ", None), (None, None), ("ten chars\nmore", False), ("tab\tin the reason", False),
+                                      (12345, False)])
+def test_frontier_reason_form(text, ok):
+    reason, problem = g.frontier_reason(text)
+    if ok is None:
+        assert (reason, problem) == (None, None)             # missing or blank: the baseline treatment, not an error
+    elif ok:
+        assert reason == text.strip() and problem is None
+    else:
+        assert reason is None and problem

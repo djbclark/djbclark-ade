@@ -24,7 +24,9 @@ hook prints nothing and changes nothing.
 
 While the guard state names an unexpired gate profile (`profile`: {name, until}, bin/gate-profile, 2026-10-26) it also prints, once per
 session per America/New_York day (any level, `ok` included), "[gates] <name> profile active until <time>; gate-profile clear restores
-normal routing". The state already holds it: no extra file is read.
+normal routing". The state already holds it: no extra file is read. When the state's `frontier_allowance.judged` is true (2026-10-27: the
+guard found a gate profile allowing judged frontier use, level ok/watch-for-weekly, cap floor held) the line instead says the frontier
+model is allowed where the agent judges it significantly better, with a one-line `frontier-reason`, and the per-day Agent-tool cap.
 
 History: 2026-10-23, after the Claude weekly window ran out 2.6 days early on 2026-10-20
 with a `conserve` alert unread for 11 hours. docs/model-routing.md "Quota guard".
@@ -45,6 +47,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LEVELS = ("ok", "watch", "tight", "critical")
+FRONTIER1, JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/model-tiers-design.md)
 MAX_AGE_SECONDS = 2 * 3600
 MAX_SESSIONS = 200
 LOCK_RETRIES = 10
@@ -183,7 +186,16 @@ def _profile_nudge(st, session_id, nudges):
     if nudges.get(key) == stamp:
         return False
     name = prof["name"] if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", prof["name"]) else "gate"     # ASCII only, as ade_gates.NAME_RE
-    print(f"[gates] {name} profile active until {when}; gate-profile clear restores normal routing", flush=True)
+    allow = st.get("frontier_allowance")
+    calls = allow.get("agent_calls_per_day") if isinstance(allow, dict) else None
+    if isinstance(allow, dict) and allow.get("judged") is True and isinstance(calls, int) and not isinstance(calls, bool):
+        # the guard says judged frontier use is in force right now (profile, level, reasons and cap floor all hold)
+        cap = f"at most {calls} Agent-tool calls today" if calls > 0 else "no Agent-tool call without asking"
+        print(f"[gates] {name} profile active until {when}: {FRONTIER1} (frontier) is allowed where you judge it significantly "
+              f"better than {JUDGMENT}; give the reason in one line (acp-dispatch --kind frontier --frontier-reason \"...\"; Agent tool: "
+              f"a \"frontier-reason: ...\" prompt line), {cap}. gate-profile clear restores normal routing.", flush=True)
+    else:
+        print(f"[gates] {name} profile active until {when}; gate-profile clear restores normal routing", flush=True)
     nudges.pop(key, None)
     nudges[key] = stamp
     return True

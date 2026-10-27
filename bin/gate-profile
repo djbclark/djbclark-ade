@@ -58,7 +58,7 @@ def now_utc() -> datetime:
 
 
 def code_defaults() -> dict[str, dict[str, float]]:
-    """THRESHOLDS of the two scripts, loaded by path (they have no .py suffix)."""
+    """THRESHOLDS of the two scripts, loaded by path (they have no .py suffix), and ade_gates.FRONTIER_DEFAULTS."""
     out: dict[str, dict[str, float]] = {}
     for gate, script in (("governor", "claude-fleet-governor"), ("quota_guard", "claude-quota-guard")):
         loader = importlib.machinery.SourceFileLoader(f"_gp_{gate}", str(HERE / script))
@@ -66,6 +66,7 @@ def code_defaults() -> dict[str, dict[str, float]]:
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
         out[gate] = {k: float(v) for k, v in mod.THRESHOLDS.items()}
+    out["frontier"] = {k: float(v) for k, v in g.FRONTIER_DEFAULTS.items()}
     return out
 
 

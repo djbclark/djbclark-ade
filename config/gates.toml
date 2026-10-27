@@ -5,6 +5,10 @@
 #                 to their resets, downshifts Opus/Fable agents to Sonnet at tight/critical.
 #   [quota_guard] bin/claude-quota-guard (launchd every 15 min): watch/tight/critical from the weekly and
 #                 5-hour "left" percentages; feeds claude/hooks/quota_nudge.py and the governor.
+#   [frontier]    the frontier-model allowance (2026-10-27): per-wave caps and cap floors read by bin/route_agent.py,
+#                 bin/acp-dispatch and claude/hooks/frontier_agent_gate.py; `*_judged` and the agent-call cap are 0 at
+#                 baseline, which is today's rule: a frontier model only through `acp-dispatch --kind frontier`, an
+#                 Agent-tool frontier sub-agent always asks. Only a profile raises them. It has no env override.
 #
 # Precedence, lowest to highest (bin/ade_gates.py `load_gates`):
 #   code default (THRESHOLDS in each script, the fail-safe when this file is missing or unparsable)
@@ -53,6 +57,15 @@ stale_age_s = 10800.0              # seconds; data older than this (dead collect
 lock_retries = 10.0                # count; non-blocking flock attempts ...
 lock_wait_s = 0.5                  # seconds; ... this far apart, then exit 10
 
+[frontier]
+frontier1_judged = 0               # 1 = an agent may pick the claude frontier model (Fable) on its own judgment, with a reason; 0 = today's rule
+frontier2_judged = 0               # same for the codex frontier model (gpt-6-astra)
+frontier1_per_wave = 1             # frontier slices per wave on the claude pool (was routing.toml frontier_per_wave)
+frontier2_per_wave = 1             # same on the codex pool (astra's 5-hour window holds about one hard slice, 2026-10-18)
+frontier1_agent_calls_per_day = 0  # Agent-tool frontier-1 calls allowed without asking, per America/New_York day (0: always ask)
+frontier1_min_left = 10.0          # percent of the frontier-1 (Fable) cap that must be left (was routing.toml fable_min_left)
+frontier2_min_left = 60.0          # percent left on the codex binding window before judged frontier-2 use
+
 # -- floors: what a profile may touch ---------------------------------------------------------------------------
 #
 # A key listed here is overridable by a profile; an UNLISTED key is not (every timing, age, lock and
@@ -80,6 +93,15 @@ critical_weekly = { loosen = "lower", bound = 3.0 }       # hard stop: never bel
 critical_five_hour = { loosen = "lower", bound = 3.0 }    # hard stop: never below 3% left
 watch_fable = { loosen = "lower", bound = 5.0 }
 conserve_alert_level = { loosen = "lower", bound = 1.0 }  # watch: a profile may stop an alert alone giving tight, never ignore it
+
+[floors.frontier]
+frontier1_judged = { loosen = "higher", bound = 1 }
+frontier2_judged = { loosen = "higher", bound = 1 }
+frontier1_per_wave = { loosen = "higher", bound = 2 }
+frontier2_per_wave = { loosen = "higher", bound = 1 }     # astra's 5-hour window holds about one hard slice (2026-10-18)
+frontier1_agent_calls_per_day = { loosen = "higher", bound = 6 }
+frontier1_min_left = { loosen = "lower", bound = 10.0 }   # a profile may not lower the cap floor
+frontier2_min_left = { loosen = "lower", bound = 40.0 }
 
 # -- profiles -------------------------------------------------------------------------------------------------------
 
@@ -112,3 +134,15 @@ critical_weekly = 10.0
 # left, projected 242%), and the governor reads this level, so the alert is capped at watch (1: advice only).
 conserve_alert_level = 1.0
 # critical_five_hour and watch_fable: unchanged (10 and 15).
+
+[profiles.away.frontier]
+# Judged use (2026-10-27, operator): while this profile is active an agent MAY use a frontier model where it judges it
+# significantly better than claude judgment, with a one-line reason (acp-dispatch --frontier-reason; Agent tool: a
+# `frontier-reason:` prompt line), capped per wave and (Agent tool) per day. Advise-only, the xhigh/max approval, no lead
+# session on a frontier model and the tight/critical stop signal are unchanged. docs/gates.md "Frontier allowance".
+frontier1_judged = 1
+frontier2_judged = 1
+frontier1_per_wave = 2
+frontier2_per_wave = 1
+frontier1_agent_calls_per_day = 4
+# frontier1_min_left and frontier2_min_left: unchanged (10 and 60), the cap floors are kept.

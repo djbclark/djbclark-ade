@@ -128,10 +128,36 @@ _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgmen
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 
 
+_FRONTIER1, _JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/model-tiers-design.md)
+
+
+def _away_advice(away: dict, reasons: list, resets_at: str | None, fable_left, watch_frontier) -> str | None:
+    """The `watch` text while a gate profile allows judged frontier use (design C4), or None for the baseline text. Only a
+    watch caused by the weekly window or the frontier-1 cap qualifies: any other reason (stale data, an alert, a snapshot-only
+    row) and tight/critical keep the baseline text."""
+    if not reasons or any(r not in ("weekly", "fable") for r in reasons):
+        return None
+    who = f"{away['name']} until {away['until']}"
+    if "fable" in reasons:
+        left = f"{fable_left:g}" if isinstance(fable_left, (int, float)) else "?"
+        return (f"1. Claude quota watch ({who}): the {_FRONTIER1} cap has {left}% left (watch below {watch_frontier:g}%), so no "
+                f"{_FRONTIER1}: use {_JUDGMENT}.\n2. Adversary rounds via {_ADVERSARY}.")
+    n = away["calls"]
+    cap = f"at most {n} Agent-tool calls today" if n > 0 else "no Agent-tool call without asking"
+    return (f"1. Claude quota watch ({who}): {_JUDGMENT} Agent-tool sub-agents as needed; {_FRONTIER1} only where significantly "
+            f"better than {_JUDGMENT}, with a one-line frontier-reason, {cap}.\n"
+            f"2. Adversary rounds via {_ADVERSARY}.\n3. Route code/bulk slices to other pools.")
+
+
 def _advice(level: str, resets_at: str | None, source: str = "available",
-            stale_age: float | None = None) -> str:
+            stale_age: float | None = None, away: dict | None = None, reasons: list | None = None,
+            fable_left=None, watch_frontier: float = 15.0) -> str:
     if level == "ok":
         return ""
+    if away and level == "watch" and stale_age is None and source != "snapshot-only":
+        text = _away_advice(away, reasons or [], resets_at, fable_left, watch_frontier)
+        if text is not None:
+            return text
     items = [
         "Claude quota watch: no Fable or Opus Agent-tool sub-agents.",
         f"Adversary rounds via {_ADVERSARY}.",
@@ -448,39 +474,43 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
     level = "ok"
 
-    def raise_to(new: str) -> None:
+    reasons: set[str] = set()   # what fired a level above ok: weekly, five_hour, fable, alert, snapshot-only, exhausted
+
+    def raise_to(new: str, why: str) -> None:
         nonlocal level
+        if LEVELS.index(new) > 0:
+            reasons.add(why)
         if LEVELS.index(new) > LEVELS.index(level):
             level = new
 
     if not windows and not live_only:
         if rc != AIUSE_NOTHING_USABLE:
             raise Unreadable("aiuse has no Claude window (not in `available`, `excluded` or the snapshot)")
-        raise_to("critical")  # aiuse found nothing usable and Claude is not among it: exhausted
+        raise_to("critical", "exhausted")  # aiuse found nothing usable and Claude is not among it: exhausted
     if rc == AIUSE_NOTHING_USABLE:
         # exit 3 is the live verdict that nothing is usable: critical whatever the snapshot shows
         # (its numbers only fill the state fields; the source stays `snapshot`, not `snapshot-only`)
-        raise_to("critical")
+        raise_to("critical", "exhausted")
     blocked = (judge_usable and any(r.get("usable_now") is False for r in rows)) or any(
         w["exhausted"] for w in windows if w["kind"] in ("weekly", "five_hour"))
     if blocked:
-        raise_to("critical")  # exhausted shared window, or a frozen measurement
+        raise_to("critical", "exhausted")  # exhausted shared window, or a frozen measurement
     elif source == "snapshot" and rc != AIUSE_NOTHING_USABLE:
         # Claude is in the raw snapshot but aiuse dropped it from --available (a live 429 or a
         # note the snapshot predates): the snapshot's numbers are not to be trusted to say `ok`.
-        raise_to("watch")
+        raise_to("watch", "snapshot-only")
         source = "snapshot-only"
     if weekly:
         if weekly["left"] < t["watch_weekly"]:
-            raise_to("watch")
+            raise_to("watch", "weekly")
         if weekly["left"] < t["tight_weekly"]:
-            raise_to("tight")
+            raise_to("tight", "weekly")
         if weekly["left"] < t["critical_weekly"]:
-            raise_to("critical")
+            raise_to("critical", "weekly")
     if five and five["left"] < t["critical_five_hour"]:
-        raise_to("critical")
+        raise_to("critical", "five_hour")
     if fable and fable["left"] < t["watch_fable"]:
-        raise_to("watch")
+        raise_to("watch", "fable")
     weekly_labels = {w["label"].strip().lower(): [x for x in windows if x["kind"] == "weekly"
                                                     and x["label"].strip().lower() == w["label"].strip().lower()]
                      for w in windows if w["kind"] == "weekly"}
@@ -490,9 +520,9 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
         projected = bool(matched) and bool(_RUNNING_PROJECTED.search(str(a.get("message") or "")))
         if projected and all(w["pace_early"] for w in matched):
             continue
-        raise_to(LEVELS[min(cap, LEVELS.index("watch"))])
+        raise_to(LEVELS[min(cap, LEVELS.index("watch"))], "alert")
         if projected:
-            raise_to(LEVELS[min(cap, LEVELS.index("tight"))])
+            raise_to(LEVELS[min(cap, LEVELS.index("tight"))], "alert")
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
     candidates = [w for w in (weekly, five) if w]
@@ -525,6 +555,7 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     return {
         "rows_age_s": rows_age,
         "level": level,
+        "reasons": sorted(reasons),
         "weekly_left": weekly_left,
         "five_hour_left": five_left,
         "fable_left": shown_fable["left"] if shown_fable else None,
@@ -678,7 +709,16 @@ def _check_locked(t: dict, profile: dict | None = None) -> dict:
     stale_age = data_age if st["stale"] else None
     if st["stale"] and _rank(st["level"]) < _rank("watch"):
         st["level"] = "watch"  # a dead collector: frozen numbers can never climb, so never say ok
-    st["advice"] = _advice(st["level"], st["resets_at"], st["source"], stale_age)
+    if st["stale"]:
+        st["reasons"] = sorted(set(st.get("reasons") or []) | {"stale"})
+    ft, _ = ade_gates.load_frontier(now())     # judged frontier use (config/gates.toml [frontier]; a profile only)
+    until = ade_gates.parse_utc((profile or {}).get("until"))
+    judged = bool(profile and until and ft["frontier1_judged"] >= 1)
+    away = {"name": profile.get("name"), "until": ade_gates.ny(until), "calls": int(ft["frontier1_agent_calls_per_day"])} if judged else None
+    st["advice"] = _advice(st["level"], st["resets_at"], st["source"], stale_age, away, st["reasons"], st["fable_left"], t["watch_fable"])
+    # what the nudge may announce: judged use is in force only when the same check the Agent-tool hook runs passes on this state
+    st["frontier_allowance"] = {"judged": judged and ade_gates.judged_guard_block(st, ft, now()) is None,
+                                "agent_calls_per_day": int(ft["frontier1_agent_calls_per_day"])}
     prev = load_state()
     due = plan_ping(prev, st, t)
     if st["stale"]:

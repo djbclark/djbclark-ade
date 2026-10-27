@@ -117,6 +117,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ade_gates  # noqa: E402  (the frontier gate: config/gates.toml [frontier], docs/gates.md)
+
 DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
 SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
 ORCA_DATA = Path.home() / ("Library/Application Support/orca/profiles/"
@@ -136,7 +139,7 @@ NON_ACP_HEADLESS = frozenset({"muse"})  # zcode joined acp-run 2026-10-08 (zcode
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
 
-# KINDS, BURN_FIRST_*, FRONTIER_PER_WAVE and the curated SERVICES rows are
+# KINDS, BURN_FIRST_* and the curated SERVICES rows are
 # loaded from config/routing.toml (see load_policy / apply_policy below).
 
 
@@ -290,13 +293,11 @@ BURN_FIRST_WASTE_MIN: float
 PACE_PENALTY_ABOVE: float
 PACE_PENALTY: float
 PACE_PENALTY_JUDGMENT_FACTOR: float
-FRONTIER_PER_WAVE: int
 PLENTY_MIN: float
 QUALITY_MAX_RANK_GAP: dict[str, int]
 DEFAULT_PROFILE: dict[str, int]
 NEVER_ROUTE: frozenset[str]
 OPERATOR_GATED: frozenset[str]
-FABLE_MIN_LEFT: float
 ALIASES: dict[str, str]
 DISPATCH_EXTRA: dict[str, str]
 HERMES_MODELS: dict[str, list[str]]
@@ -388,8 +389,8 @@ def apply_policy(data: dict[str, Any]) -> None:
     global POLICY, SERVICES, BY_NAME, KINDS, BURN_FIRST_MIN, BURN_FIRST_BONUS
     global BURN_FIRST_WASTE_MIN, PACE_PENALTY_ABOVE, PACE_PENALTY
     global PACE_PENALTY_JUDGMENT_FACTOR, QUALITY_MAX_RANK_GAP
-    global FRONTIER_PER_WAVE, PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
-    global FABLE_MIN_LEFT, ALIASES, DISPATCH_EXTRA, HERMES_MODELS
+    global PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
+    global ALIASES, DISPATCH_EXTRA, HERMES_MODELS
     global HERMES_PROVIDER_NAME
     global CALIBRATE_MIN_OUTCOMES, CALIBRATE_MIN_PEERS
     global CALIBRATE_SUGGEST_WORSE_BELOW
@@ -411,11 +412,9 @@ def apply_policy(data: dict[str, Any]) -> None:
         PACE_PENALTY_ABOVE = float(routing["pace_penalty_above"])
         PACE_PENALTY = float(routing["pace_penalty"])
         PACE_PENALTY_JUDGMENT_FACTOR = float(routing["pace_penalty_judgment_factor"])
-        FRONTIER_PER_WAVE = int(routing["frontier_per_wave"])
         PLENTY_MIN = float(routing["plenty_min"])
         QUALITY_MAX_RANK_GAP = {str(k): int(v) for k, v in
                                 (routing.get("quality_max_rank_gap") or {}).items()}
-        FABLE_MIN_LEFT = float(routing["fable_min_left"])
         DEFAULT_PROFILE = {str(k): int(v) for k, v in routing["default_profile"].items()}
 
         NEVER_ROUTE = frozenset(discovery["never_route"])
@@ -469,6 +468,7 @@ def policy_public() -> dict[str, Any]:
         }
     return {
         "path": str(POLICY_PATH),
+        "frontier_gate": frontier_gate(),
         "routing": {
             "kinds": list(KINDS),
             "burn_first_min": BURN_FIRST_MIN,
@@ -477,9 +477,7 @@ def policy_public() -> dict[str, Any]:
             "pace_penalty_above": PACE_PENALTY_ABOVE,
             "pace_penalty": PACE_PENALTY,
             "pace_penalty_judgment_factor": PACE_PENALTY_JUDGMENT_FACTOR,
-            "frontier_per_wave": FRONTIER_PER_WAVE,
             "plenty_min": PLENTY_MIN,
-            "fable_min_left": FABLE_MIN_LEFT,
             "default_profile": dict(DEFAULT_PROFILE),
         },
         "calibrate": {
@@ -548,9 +546,10 @@ def policy_markdown() -> str:
     lines.append(f"| dispatch.estimate_floor | {floors} |")
     frontiers = ", ".join(d.get("frontier_models") or []) or "(none)"
     lines.append(f"| dispatch.frontier_models | {frontiers} |")
-    lines.append(f"| routing.frontier_per_wave | {FRONTIER_PER_WAVE} |")
+    fg = frontier_gate()
+    lines.append(f"| gates.frontier1_per_wave / frontier2_per_wave | {fg['frontier1_per_wave']:g} / {fg['frontier2_per_wave']:g} |")
     lines.append(f"| routing.plenty_min | {PLENTY_MIN:g} |")
-    lines.append(f"| routing.fable_min_left | {FABLE_MIN_LEFT} |")
+    lines.append(f"| gates.frontier1_min_left | {fg['frontier1_min_left']:g} |")
     lines.append(f"| routing.burn_first_min | {BURN_FIRST_MIN} |")
     lines.append(f"| routing.burn_first_waste_min | {BURN_FIRST_WASTE_MIN} |")
     lines.append(f"| routing.pace_penalty_above | {PACE_PENALTY_ABOVE} |")
@@ -1232,7 +1231,7 @@ def installed_roster() -> set[str]:
     return names
 
 
-# DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED, FABLE_MIN_LEFT and ALIASES
+# DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED and ALIASES
 # come from config/routing.toml via apply_policy.
 
 
@@ -1262,6 +1261,18 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
 # tight or critical and is fresh, the Claude subscription is treated as an exhausted pool for the
 # kinds below (2026-10-23: `plan --kind code` printed `claude 30% left` with the 5-hour window
 # projected to run out before its reset).
+def frontier_gate() -> dict[str, float]:
+    """The effective `frontier` gate (config/gates.toml [frontier] under any active profile; bin/ade_gates.py). Re-read per call: a
+    profile can end or be cleared while a long process runs, and the file is tiny."""
+    return ade_gates.load_frontier()[0]
+
+
+def frontier_per_wave(pool: str, gate: dict[str, float] | None = None) -> int:
+    """Most frontier slices one wave puts on `pool`: frontier1_per_wave for claude, frontier2_per_wave for every other pool."""
+    gate = gate or frontier_gate()
+    return int(gate["frontier1_per_wave" if pool == "claude" else "frontier2_per_wave"])
+
+
 GOVERNOR_STATE = Path.home() / ".local" / "state" / "ade" / "fleet-governor.json"   # CLAUDE_GOVERNOR_STATE overrides
 GOVERNOR_FRESH = 30 * 60
 GOVERNOR_HOLD_KINDS = frozenset({"code", "bulk", "research", "mechanical"})
@@ -1343,7 +1354,7 @@ def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
             raise ValueError("routine Go routing requires a classified routine model")
     if svc.name == "claude" and kind == "frontier":
         fable = (info.get("sublimits") or {}).get("fable")
-        if fable is not None and fable < FABLE_MIN_LEFT:
+        if fable is not None and fable < frontier_gate()["frontier1_min_left"]:
             model = "opus --effort high"
     return model
 
@@ -1510,7 +1521,8 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
     for kind in kinds:
         skip = full
         if kind == "frontier":
-            skip = full | {n for n, k in frontier.items() if k >= FRONTIER_PER_WAVE}
+            gate = frontier_gate()
+            skip = full | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate)}
         choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip)
         if choice is not None:
             name = choice.service.name
