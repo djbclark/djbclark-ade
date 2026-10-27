@@ -27,23 +27,31 @@ For each request:
    with findings ranked by severity, each with file:line, the concrete
    failure scenario, and the fix you expect. "No findings" is a valid
    verdict; say it explicitly.
-4. **Your verdict carries a machine-readable marker** (AGENTS.md rule 1), naming
-   the head you reviewed:
+4. **Your verdict ends with a machine-readable marker** (AGENTS.md rule 1), on its
+   own raw line after the findings, naming the head you reviewed:
 
-   <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
+   <!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<40-hex sha you reviewed>"} -->
 
+   Two things about that line: it is an HTML comment, so it renders invisibly
+   in a Markdown viewer — read the file itself — and it is a TEMPLATE, so
+   replace the placeholder head with the real sha (and `APPROVE` with a
+   `BLOCK` when you block); pasted literally it is `malformed`.
    You never edit, commit or push, so emit the marker as a **raw line in your
-   reply** — not inside backticks or a fence, where it would read as
-   documentation and be ignored — for the teammate to paste into the PR body.
+   reply** — not inside backticks or a fence, where an APPROVE would read as
+   documentation and be ignored (a BLOCK naming this head is rescued from the
+   raw body anyway, but write it raw) — for the teammate to paste into the PR
+   body.
    `pr-wait` reads that marker and **not** your prose, so a verdict written only
    as sentences is invisible to the gate. Two mistakes hard-block the PR as
    `malformed`: `verdict` is exactly `APPROVE` or `BLOCK` in capitals ("APPROVE,
    no findings" maps to `APPROVE`), and `head` must be the **full 40-character
    sha** — write it out in full, never a `…`/`...` abbreviation. `pr-wait` can
    still rescue a BLOCK whose head is a 7+ hex prefix, some of it written with an
-   ellipsis, but do not rely on it: an APPROVE with a shortened head is
-   `malformed`, and a head that matches nothing blocks. Your findings still go in
-   prose below it.
+   ellipsis, but do not rely on it: an APPROVE whose shortened head is not a
+   prefix of this head is `malformed`. A full 40-hex sha of a **different**
+   commit is not malformed — it is a verdict for that head, reported as
+   other-head and report-only — but it does not approve this one. Your findings
+   go in prose above it.
 5. If any part of the review was declined to you or cut short, say so in the
    verdict rather than presenting it as complete.
 6. A probe of a tool that writes (a backup, export, sync, apply or install

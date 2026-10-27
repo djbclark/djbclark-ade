@@ -13,11 +13,13 @@ agent what changed and what is new. Entries end with the pull request number.
 
 - AGENTS.md rule 1, `claude/agents/adversary.md` and the bigteam adversary brief now describe the
   verdict marker as `bin/pr-wait` enforces it (2026-10-27): a BLOCK counts by the full sha **or a 7+
-  hex prefix** of the head, with or without a trailing `…`/`...`, where an APPROVE takes an exact-case
-  `APPROVE`/`BLOCK` and the **full 40-hex** head (a shortened head is `malformed` for an APPROVE and
-  rescued for a BLOCK); the marker's JSON is delimited by its own braces, so a `note` may quote the
-  format and a marker whose JSON is partly inside code is `malformed` rather than approved; an APPROVE
-  inside code or with the template placeholder is documentation, `malformed` and
+  hex prefix** of the head, with or without a trailing `…`/`...`, while the `verdict` value must be
+  exactly `APPROVE` or `BLOCK` in capitals and an APPROVE carries the **full 40-hex** head (a
+  shortened head that is not a prefix of this head is `malformed`; a full sha of another commit is
+  other-head and report-only); the marker's JSON is delimited by its own braces, so a `note` may quote
+  the format and a marker whose JSON is partly inside code is `malformed` rather than approved; an
+  APPROVE inside a fenced block or a single-line inline span — the only shapes `pr-wait` blanks — or
+  with the template placeholder is documentation, `malformed` and
   `adversary-fetch-failed` always block, and the opt-in is named (`--adversary-required`, or an
   `adversary-required` label). The adversary now emits the marker as a raw line for the lead to paste,
   since it never edits the PR itself (PR 67).

@@ -191,20 +191,27 @@ pull request here is expected to meet these; flag any it misses.
    as rule 9 does for `codex-review-state:v1` — a non-`:v1` `adversary-verdict:` marker is
    **malformed**. Five more properties worth knowing:
 
-   1. **An APPROVE must be live** (outside code spans and fences), and **a BLOCK naming the current
-      head counts wherever it appears**, the raw body included, whether the head is the full 40-hex sha
-      or a 7+ hex prefix of it, with or without a trailing `…`/`...` — so no code-fence or stripping
-      bug can hide one. The asymmetry is deliberate: documentation cannot approve, and a BLOCK cannot
-      be hidden.
+   1. **An APPROVE must be live, and a BLOCK naming the current head counts wherever it appears** —
+      the raw body included, whether the head is the full 40-hex sha or a 7+ hex prefix of it, with or
+      without a trailing `…`/`...` — so no code-fence or stripping bug can hide one. "Live" means
+      outside the two shapes `pr-wait` blanks: a **fenced block whose fence sits at indent <= 3**, and
+      a **single-line inline span**. Three shapes it does not blank read as live too, so an APPROVE
+      quoted there counts: a 4-space **indented code block**, a **fence inside a blockquote**, and an
+      **inline span broken across a line** (documented limit, `_strip_code`'s C1a/b/c note; it only
+      misfires when a human pastes our own template). The asymmetry is deliberate: documentation
+      cannot approve, and a BLOCK cannot be hidden.
    2. **The `verdict` value is exactly `APPROVE` or `BLOCK`, in capitals, and an APPROVE's `head` is
       the full 40-hex sha** (a BLOCK may be shortened, property 1). Anything else — `approve`,
-      "APPROVE, no findings", a `…`/`...` abbreviation on an APPROVE, a head that matches nothing — is
-      **malformed**, and `malformed` always blocks.
-   3. **An APPROVE inside code spans or fences, or an APPROVE whose head is the template's `<40-hex>`
-      placeholder, is documentation and is ignored.** That is what lets a PR describe this format
-      without tripping its own gate. Nothing inside code can approve, and a placeholder approves
-      nothing; a BLOCK is never skipped this way (property 1), and a **BLOCK** whose head is the
-      placeholder is `malformed` rather than documentation.
+      "APPROVE, no findings", a `…`/`...` abbreviation on an APPROVE, a **shortened head that is not a
+      prefix of this head** — is **malformed**, and `malformed` always blocks. A **full 40-hex sha of
+      another commit is not malformed**: it is a verdict for a different head, reported as other-head
+      and report-only (property 4).
+   3. **An APPROVE inside a fenced block or a single-line inline span, or an APPROVE whose head is the
+      template's `<40-hex>` placeholder, is documentation and is ignored.** That is what lets a PR
+      describe this format without tripping its own gate: nothing in those two blanked shapes can
+      approve, and a placeholder approves nothing. A BLOCK is never skipped this way (property 1), and
+      a **live** BLOCK whose head is the placeholder is `malformed` rather than documentation; a BLOCK
+      in code that does not name this head is documentation too (the accepted limit in `_strip_code`).
    4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
       missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
       report a readable bad one.
