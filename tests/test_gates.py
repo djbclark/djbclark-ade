@@ -1134,6 +1134,35 @@ def test_a_missing_frontier_floor_table_still_guards_every_frontier_key(fenv):
     assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day", "frontier1_min_left"}
 
 
+def test_a_flipped_frontier_floor_direction_does_not_loosen_the_baseline(fenv):
+    """The code direction rules the frontier gate: a floor entry whose `loosen` disagrees (adversary round 2, A4) changes nothing."""
+    text = (fenv.read_text()
+            .replace('frontier1_judged = { loosen = "higher", bound = 1 }', 'frontier1_judged = { loosen = "lower", bound = 0 }')
+            .replace('frontier1_agent_calls_per_day = { loosen = "higher", bound = 6 }',
+                     'frontier1_agent_calls_per_day = { loosen = "lower", bound = 0 }')
+            .replace("frontier1_judged = 0 ", "frontier1_judged = 1 ", 1)
+            .replace("frontier1_agent_calls_per_day = 0 ", "frontier1_agent_calls_per_day = 6 ", 1))
+    assert 'loosen = "lower", bound = 0' in text
+    fenv.write_text(text)
+    t, info = front()
+    assert (t["frontier1_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0)
+    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day"}
+
+
+@pytest.mark.parametrize("text", ["line\u2028two reason", "zero\u200dwidth joiner", "soft\u00adhyphen reason", "tab\there reason", "esc\x1b[31m red"])
+def test_a_frontier_reason_with_a_control_or_format_character_names_that_rule(text):
+    reason, problem = g.frontier_reason(text)
+    assert reason is None and "one line, no control or format character" in problem
+
+
+def test_a_gates_toml_that_is_a_fifo_is_unusable_not_a_hang(tmp_path, monkeypatch):
+    fifo = tmp_path / "gates.toml"
+    os.mkfifo(fifo)
+    monkeypatch.setenv("GATES_TOML", str(fifo))
+    cfg, err = g.read_toml()
+    assert cfg is None and "not a regular file" in err
+
+
 def test_no_environment_variable_changes_the_frontier_gate(fenv, monkeypatch):
     assert "frontier" not in g.ENV_VARS
     for var in (*g.ENV_VARS.values(), "FRONTIER_GATE_THRESHOLDS", "CLAUDE_FRONTIER_THRESHOLDS"):

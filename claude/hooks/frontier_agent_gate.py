@@ -18,14 +18,17 @@ In order, a call is allowed without asking only when ALL hold; the first failure
      file (agent-calls-day.json): the larger counts, so truncating one file does not reset the cap. A log that is not a
      regular file, has an unparsable row or a row dated in the future asks.
 An allowed call is logged with `decision: "allowed-judged"`, the reason, the profile name and its `until`. Any error in these
-steps, or in the state directory, the lock (polled for 5 s, then asks) or the log append, asks; it never allows. The decision and
-the append run under one lock, so parallel calls cannot both take the last slot.
+steps, or in the state directory, the lock (polled for 5 s, then asks) or the log append, asks; it never allows. State files
+are opened O_NOFOLLOW|O_NONBLOCK and must be regular files, so a symlink or FIFO asks instead of hanging. The decision, the
+counter write (first) and the log append run under one lock, so parallel calls cannot both take the last slot.
 """
 
+import errno
 import fcntl
 import json
 import os
 import re
+import stat
 import sys
 import time
 from datetime import UTC, datetime
@@ -51,10 +54,26 @@ def _gates():
     raise ImportError("ade_gates.py not found")
 
 
+def _open_regular(path, flags, mode=0o600):
+    """An fd on a regular file, never a symlink (O_NOFOLLOW), never blocking on a FIFO (O_NONBLOCK: ENXIO with no reader)."""
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, f"{path.name} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _guard_state():
     path = Path(os.environ.get("CLAUDE_QUOTA_GUARD_STATE") or Path.home() / ".local/state/ade/quota-guard.json")
     try:
-        return json.loads(path.read_text())
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)    # a FIFO with no writer would block a plain read
+        with os.fdopen(fd) as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
+            return json.load(fh)
     except (OSError, ValueError):
         return None
 
@@ -114,13 +133,24 @@ def _judged(g, tool_input, now, ctx):
 
 def _write_counter(today, n):
     tmp = DAY_COUNTER.with_name(f".{DAY_COUNTER.name}.{os.getpid()}")
-    tmp.write_text(json.dumps({"day": today, "n": n}))
-    os.replace(tmp, DAY_COUNTER)
+    fd = _open_regular(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"day": today, "n": n}))
+        os.replace(tmp, DAY_COUNTER)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _append_log(row):
+    with os.fdopen(_open_regular(LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT), "a") as fh:
+        fh.write(json.dumps(row) + "\n")
 
 
 def _take_lock():
     """The state lock, polled without blocking for LOCK_WAIT seconds; raises TimeoutError when another process keeps it."""
-    fd = os.open(LOCK, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = _open_regular(LOCK, os.O_WRONLY | os.O_CREAT)
     deadline = time.monotonic() + LOCK_WAIT
     while True:
         try:
@@ -174,10 +204,9 @@ try:
     row["decision"] = "allowed-approved" if approved else "allowed-judged" if allowed else "asked"
     if why:
         row["ask_reason"] = why
-    with LOG.open("a") as fh:
-        fh.write(json.dumps(row) + "\n")
     if allowed:
-        _write_counter(row["day"], row["n_today"])
+        _write_counter(row["day"], row["n_today"])    # before the row: a failed write must not leave an `allowed-judged` row for a call that asks
+    _append_log(row)
 except Exception as e:  # noqa: BLE001 - the gate's own state is unusable: ask, never allow
     if approved:
         sys.exit(0)

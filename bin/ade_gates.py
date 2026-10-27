@@ -175,7 +175,10 @@ def atomic_write(path: Path, text: str) -> None:
 def read_toml() -> tuple[dict[str, Any] | None, str | None]:
     path = toml_path()
     try:
-        with path.open("rb") as fh:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)      # a FIFO with no writer would block a plain open forever
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None, f"{path}: not a regular file"
             return tomllib.load(fh), None
     except OSError as e:
         return None, f"{path}: {e.strerror or e}"
@@ -234,14 +237,15 @@ def value_problem(spec: dict[str, Any], baseline: float, value: Any) -> str | No
 
 def baseline_loosens(cfg: dict[str, Any], gate: str, key: str, value: float, default: float) -> bool:
     """True when the gates.toml baseline `value` is looser than the code `default` in the key's floor direction. A key with no
-    floor entry has no direction (False), except a `frontier` key, whose code defaults are all "off" and so always have one
-    (`*_min_left`: lower is looser, every other key: higher); a floor entry whose direction is unreadable trusts only the
-    code default."""
-    spec = floor_spec(cfg, gate, key)
-    if spec is None:
-        if gate != "frontier" or key not in FRONTIER_DEFAULTS:
-            return False
+    floor entry has no direction (False). A `frontier` key always has one, from the code, never from the file (its defaults are
+    all "off": `*_min_left` lower is looser, every other key higher is looser), so a floor entry's `loosen` is ignored there; a
+    floor entry whose direction is unreadable trusts only the code default."""
+    if gate == "frontier" and key in FRONTIER_DEFAULTS:
         spec = {"loosen": "lower" if key.endswith("_min_left") else "higher"}
+    else:
+        spec = floor_spec(cfg, gate, key)
+        if spec is None:
+            return False
     if spec.get("loosen") == "lower":
         return value < default
     if spec.get("loosen") == "higher":
@@ -477,7 +481,7 @@ def frontier_reason(text: Any) -> tuple[str | None, str | None]:
     if not s:
         return None, None
     if any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in s):
-        return None, "a frontier-reason is one line (no newline or control character)"
+        return None, "a frontier-reason is one line, no control or format character"
     if not FRONTIER_REASON_MIN <= len(s) <= FRONTIER_REASON_MAX:
         return None, f"a frontier-reason is {FRONTIER_REASON_MIN}-{FRONTIER_REASON_MAX} characters (got {len(s)})"
     return s, None

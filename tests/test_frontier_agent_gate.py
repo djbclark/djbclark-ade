@@ -18,7 +18,7 @@ class TestFrontierAgentGate(unittest.TestCase):
         base = {k: v for k, v in os.environ.items() if k not in ("ACP_OPERATOR_APPROVED", "FRONTIER_GATE_OFF")}
         proc = subprocess.run(["python3", str(HOOK)], input=json.dumps(
             {"tool_name": tool, "tool_input": tool_input, "session_id": "s1", "cwd": "/x"}),
-            capture_output=True, text=True, env={**base, "HOME": str(home), **env}, check=True)
+            capture_output=True, text=True, env={**base, "HOME": str(home), **env}, check=True, timeout=10)
         out = json.loads(proc.stdout) if proc.stdout.strip() else None
         return out, home / ".local/state/frontier-gate/agent-calls.jsonl"
 
@@ -229,7 +229,8 @@ class TestAwayAllowance(unittest.TestCase):
         target = self.home / "elsewhere.jsonl"
         target.write_text("")
         self.log.symlink_to(target)
-        self.assertAsks(self.call(), "regular file")
+        self.assertAsks(self.call(), "could not use its own state")
+        self.assertEqual(target.read_text(), "")                 # never followed
 
     def test_a_broken_gates_toml_is_baseline(self):
         bad = self.home / "gates.toml"
@@ -326,6 +327,50 @@ class TestAwayAllowance(unittest.TestCase):
             self.asks_both_ways("held by another process")
             self.assertGreaterEqual(time.monotonic() - started, 9.0)         # two calls, 5 s each, never an indefinite wait
         self.assertFalse(self.log.exists())
+
+    # -- a FIFO in place of a state file asks within seconds and never hangs (adversary round 2, A1; run_hook has a 10 s timeout) --
+
+    def fifo(self, name: str) -> Path:
+        self.gate_dir.mkdir(parents=True, exist_ok=True)
+        path = self.gate_dir / name
+        os.mkfifo(path)
+        return path
+
+    def test_a_lock_path_that_is_a_fifo_asks(self):
+        self.fifo("agent-calls.lock")
+        self.asks_both_ways("OSError")
+
+    def test_a_log_path_that_is_a_fifo_asks(self):
+        self.fifo("agent-calls.jsonl")
+        self.asks_both_ways("OSError")
+
+    def test_a_quota_guard_state_that_is_a_fifo_is_no_guard(self):
+        fifo = self.state / "quota-guard.json"
+        os.mkfifo(fifo)
+        out = self.call(guard=str(fifo))
+        self.assertAsks(out, "away allowance")
+        self.assertEqual(self.rows()[-1]["decision"], "asked")
+
+    def test_a_counter_temp_path_that_is_a_fifo_asks_and_logs_no_grant(self):
+        self.fifo(".agent-calls-day.json.4242")                  # the hook below is run with its pid pinned to 4242
+        base = {k: v for k, v in os.environ.items() if k not in ("ACP_OPERATOR_APPROVED", "FRONTIER_GATE_OFF")}
+        runner = f"import os, runpy; os.getpid = lambda: 4242; runpy.run_path({str(HOOK)!r}, run_name='__main__')"
+        proc = subprocess.run(["python3", "-c", runner], input=json.dumps({"tool_name": "Agent", "tool_input": {
+            "model": "fable", "prompt": REASON}}), capture_output=True, text=True, timeout=10, check=True,
+            env={**base, "HOME": str(self.home), "GATE_PROFILE_STATE": self.profile(), "CLAUDE_QUOTA_GUARD_STATE": self.guard()})
+        self.assertAsks(json.loads(proc.stdout), "FileExistsError")
+        self.assertEqual([r["decision"] for r in self.rows()] if self.log.exists() else [], [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_a_failed_counter_write_leaves_no_allowed_row(self):
+        """The counter is written before the row, so a call that asks never has an `allowed-judged` row (adversary round 2, A2)."""
+        self.gate_dir.mkdir(parents=True)
+        for name in ("agent-calls.jsonl", "agent-calls.lock"):
+            (self.gate_dir / name).touch()
+        self.gate_dir.chmod(0o555)                               # the files stay writable, a new temp file cannot be created
+        self.addCleanup(self.gate_dir.chmod, 0o755)
+        self.assertAsks(self.call(), "could not use its own state")
+        self.assertNotIn("allowed-judged", [r["decision"] for r in self.rows()])
 
     def test_an_approved_session_still_passes_when_the_state_is_unusable(self):
         self.log.mkdir(parents=True)

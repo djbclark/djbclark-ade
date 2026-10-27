@@ -180,7 +180,7 @@ where it judges it significantly better than judgment, if it states why in one l
 | --- | --- | --- |
 | gate | `frontier1_judged` and `frontier1_agent_calls_per_day` at least 1, else ask | the family's `*_judged` at least 1 (claude pool: 1, codex pool: 2) |
 | guard | `quota-guard.json` at most 30 min old, level `ok`, or `watch` whose `reasons` are only `["weekly"]`, `stale` false, `fable_left` at least `frontier1_min_left`; else ask | claude: the same check; codex: the pool reading at least `frontier2_min_left` (no reading: not granted) |
-| reason | a `frontier-reason: TEXT` line in the prompt, 10-200 characters, one line; else ask (the ask text names the format) | `--frontier-reason`, same bounds; empty or missing: baseline treatment; non-empty but out of bounds or multi-line: exit 2 |
+| reason | a `frontier-reason: TEXT` line in the prompt, 10-200 characters, one line, no control or format character (so no tab, zero-width joiner or soft hyphen); else ask (the ask text names the format) | `--frontier-reason`, same bounds; empty or missing: baseline treatment; non-empty but out of bounds or multi-line: exit 2 |
 | cap | allowed-judged calls today (NY) below `frontier1_agent_calls_per_day`, counted from the log AND `agent-calls-day.json` (the larger) | fewer than `*_per_wave` frontier slices in flight on the pool |
 | record | log row `decision: allowed-judged`, reason, profile name and `until` | `frontier_reason`, `frontier_judged` (family, profile, until, cap, in flight), `frontier_judged_note` (why not) in the dispatch record, one stderr line |
 
@@ -196,12 +196,21 @@ exactly today's behaviour, so the allowance there is recorded and capped, not a 
 `stale`) and `frontier_allowance` (`judged`, `agent_calls_per_day`) into `quota-guard.json`; the daily nudge line says "allowed"
 only when `frontier_allowance.judged` is true. (4) Same-user files (`agent-calls.jsonl`, the day counter, the profile, the guard
 state, `GATES_TOML`) can be edited by any agent: the double counter, the regular-file and future-dated-row checks, the
-fail-closed parse errors and the lock raise the cost of spoofing the cap, they do not make it impossible. (5) A reason is
+fail-closed parse errors and the lock raise the cost of spoofing the cap, they do not make it impossible. The hook also trusts
+its process environment: a session can start a child `claude` or `acp-run` with `ACP_OPERATOR_APPROVED=frontier-agent` set,
+and that child's frontier sub-agents then pass unasked and uncapped (pre-existing, not closed by the gate). For the `frontier`
+gate a `gates.toml` baseline is judged by the code's direction (`*_min_left` lower is looser, every other key higher), never by a
+floor entry's `loosen`, so a flipped floor entry cannot loosen it. (5) A reason is
 self-asserted: it bounds nothing but the audit trail; the cap, the floors and the guard level bound the spend. (6) Residual:
 `gate-profile set` and `extend` have no operator check (no tty, approval token or Touch ID; `--by` is free text), so any agent
 can grant the allowance by setting `away`. Mitigations: `set` sends a `hermes-ping` and every change is appended to
 `gate-profile.log`. (7) In the Agent-tool hook, once a call is identified as a frontier call, any error in its own state (state
-directory, lock, log append, counter) asks instead of allowing; the lock is polled for 5 s, then asks.
+directory, lock, log append, counter) asks instead of allowing; the lock is polled for 5 s, then asks. The log, lock and counter
+are opened `O_NOFOLLOW|O_NONBLOCK` and must be regular files (the guard state and `gates.toml` are read `O_NONBLOCK`, regular
+files only), so a symlink or a FIFO in its place asks at once instead of hanging (the
+hook has no `timeout` in `settings.json`, and a timed-out PreToolUse hook lets the call through). The counter is written before
+the log row, so a failed write never leaves an `allowed-judged` row for a call that asked; a counted call with no row only
+over-counts, which is safe.
 
 ## Not covered (2026-10-26)
 
