@@ -35,7 +35,9 @@ For each request:
    Two things about that line: it is an HTML comment, so it renders invisibly
    in a Markdown viewer — read the file itself — and it is a TEMPLATE, so
    replace the placeholder head with the real sha (and `APPROVE` with a
-   `BLOCK` when you block); pasted literally it is `malformed`.
+   `BLOCK` when you block); pasted literally it approves nothing: an APPROVE
+   with the placeholder head is read as documentation (no verdict,
+   `adversary-missing`), and a BLOCK with it is `malformed`.
    You never edit, commit or push, so emit the marker as a **raw line in your
    reply** — not inside backticks or a fence, where an APPROVE would read as
    documentation and be ignored (a BLOCK naming this head is rescued from the
@@ -47,8 +49,10 @@ For each request:
    no findings" maps to `APPROVE`), and `head` must be the **full 40-character
    sha** — write it out in full, never a `…`/`...` abbreviation. `pr-wait` can
    still rescue a BLOCK whose head is a 7+ hex prefix, some of it written with an
-   ellipsis, but do not rely on it: an APPROVE whose shortened head is not a
-   prefix of this head is `malformed`. A full 40-hex sha of a **different**
+   ellipsis, but do not rely on it: a BLOCK whose shortened head is not a prefix
+   of this head is `malformed`, and an APPROVE with any shortened sha is
+   `malformed` (a bare `…`/`...` in the head is the template placeholder
+   instead, and approves nothing). A full 40-hex sha of a **different**
    commit is not malformed — it is a verdict for that head, reported as
    other-head and report-only — but it does not approve this one. Your findings
    go in prose above it.

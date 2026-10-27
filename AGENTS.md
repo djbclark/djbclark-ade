@@ -201,11 +201,12 @@ pull request here is expected to meet these; flag any it misses.
       misfires when a human pastes our own template). The asymmetry is deliberate: documentation
       cannot approve, and a BLOCK cannot be hidden.
    2. **The `verdict` value is exactly `APPROVE` or `BLOCK`, in capitals, and an APPROVE's `head` is
-      the full 40-hex sha** (a BLOCK may be shortened, property 1). Anything else — `approve`,
-      "APPROVE, no findings", a `…`/`...` abbreviation on an APPROVE, a **shortened head that is not a
-      prefix of this head** — is **malformed**, and `malformed` always blocks. A **full 40-hex sha of
-      another commit is not malformed**: it is a verdict for a different head, reported as other-head
-      and report-only (property 4).
+      the full 40-hex sha** (a BLOCK may be shortened, property 1). Anything else is **malformed**, and
+      `malformed` always blocks: `approve`, "APPROVE, no findings", an APPROVE with any shortened sha
+      (a bare `…`/`...` head is the template's placeholder instead, and approves nothing — property 3),
+      a BLOCK whose shortened head is not a prefix of this head. A **full 40-hex sha of another commit
+      is not malformed**: it is a verdict for a different head, reported as other-head and report-only
+      (property 4).
    3. **An APPROVE inside a fenced block or a single-line inline span, or an APPROVE whose head is the
       template's `<40-hex>` placeholder, is documentation and is ignored.** That is what lets a PR
       describe this format without tripping its own gate: nothing in those two blanked shapes can
