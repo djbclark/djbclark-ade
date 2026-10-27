@@ -23,6 +23,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
 import route_agent as r
+from test_gates import close_frontier_baseline
 
 IDLE = {
     "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
@@ -631,19 +632,29 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
             if kind not in ("frontier", "judgment", "code", "bulk", "mechanical"):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
-    def test_a_wave_puts_at_most_one_frontier_slice_on_each_pool(self):
-        rows = r.plan(["frontier"] * 4, quota=IDLE)
+    def test_a_closed_baseline_puts_at_most_one_frontier_slice_on_each_pool(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=False, closed=True)):
+            rows = r.plan(["frontier"] * 4, quota=IDLE)
         names = [c.service.name if c else None for _, c in rows]
         self.assertEqual(names, ["codex", "claude", None, None])
+
+    def test_the_standing_baseline_puts_two_frontier_slices_on_claude_and_one_on_codex(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=False)):       # the shipped gates.toml copy, no profile
+            rows = r.plan(["frontier"] * 4, quota=IDLE)
+        names = [c.service.name if c else None for _, c in rows]
+        self.assertEqual(names, ["codex", "claude", "claude", None])
 
     def test_judgment_slices_after_a_frontier_slice_stay_on_claude(self):
         rows = r.plan(["frontier", "judgment", "judgment"], quota=IDLE)
         self.assertEqual([c.service.name for _, c in rows], ["codex", "claude", "claude"])
 
-    def gate_env(self, profile: bool, tighten_min_left: float | None = None) -> dict[str, str]:
-        """Env pointing the frontier gate at a temp profile (the shipped `away`, active now) and a temp gates.toml copy."""
+    def gate_env(self, profile: bool, tighten_min_left: float | None = None, closed: bool = False) -> dict[str, str]:
+        """Env pointing the frontier gate at a temp profile (the shipped `away`, active now) and a temp gates.toml copy; `closed` closes its
+        [frontier] baseline (the pre-2026-10-27 rule)."""
         tmp = Path(tempfile.mkdtemp(prefix="ragate-"))
         toml = (Path(r.__file__).resolve().parent.parent / "config" / "gates.toml").read_text()
+        if closed:
+            toml = close_frontier_baseline(toml)
         if tighten_min_left is not None:
             toml = toml.replace("frontier1_min_left = 10.0 ", f"frontier1_min_left = {tighten_min_left} ", 1)
         (tmp / "gates.toml").write_text(toml)
@@ -654,11 +665,16 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         return {"GATES_TOML": str(tmp / "gates.toml"),
                 "GATE_PROFILE_STATE": str(tmp / "profile.json" if profile else tmp / "none.json")}
 
-    def test_the_away_profile_lets_a_wave_put_two_frontier_slices_on_claude_but_still_one_on_codex(self):
-        with mock.patch.dict(os.environ, self.gate_env(profile=True)):
+    def test_the_standing_baseline_lets_a_wave_put_two_frontier_slices_on_claude_but_still_one_on_codex_with_no_profile(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=False)):           # the shipped gates.toml [frontier] (2026-10-27)
             rows = r.plan(["frontier"] * 5, quota=IDLE)
         self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", "claude", None, None])
-        with mock.patch.dict(os.environ, self.gate_env(profile=False)):
+
+    def test_the_away_profile_over_a_closed_baseline_raises_a_wave_to_two_frontier_slices_on_claude(self):
+        with mock.patch.dict(os.environ, self.gate_env(profile=True, closed=True)):
+            rows = r.plan(["frontier"] * 5, quota=IDLE)
+        self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", "claude", None, None])
+        with mock.patch.dict(os.environ, self.gate_env(profile=False, closed=True)):
             rows = r.plan(["frontier"] * 5, quota=IDLE)
         self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "claude", None, None, None])
 

@@ -8,11 +8,11 @@ puts this directory on sys.path first, the way bin/acp-dispatch does for failove
 Precedence, lowest to highest: `defaults` (the script's THRESHOLDS: the fail-safe when config/gates.toml is missing or
 unparsable) < gates.toml baseline < the active profile < env JSON (CLAUDE_GOVERNOR_THRESHOLDS /
 CLAUDE_QUOTA_GUARD_THRESHOLDS; tests and emergencies; bad input raises GateEnvError). The `frontier` gate has NO threshold
-env override: its keys are the away frontier allowance (docs/gates.md), and a threshold an agent can put in the environment
-must not widen it. The path variables still redirect the INPUTS (GATES_TOML, GATE_PROFILE_STATE; acp-dispatch also
-CLAUDE_QUOTA_GUARD_STATE and HOME), so a CLI consumer started by an agent can be pointed at a self-written profile: a
-`frontier_judged` record in a dispatch record is an audit trail, not proof that the allowance was granted. The Claude Code
-hook takes its environment from the Claude process, which a session cannot change.
+env override: its keys are the frontier allowance (docs/gates.md; a standing baseline since 2026-10-27), and a threshold an
+agent can put in the environment must not widen it. The path variables still redirect the INPUTS (GATES_TOML,
+GATE_PROFILE_STATE; acp-dispatch also CLAUDE_QUOTA_GUARD_STATE and HOME), so a CLI consumer started by an agent can be
+pointed at a self-written gates.toml or profile: a `frontier_judged` record in a dispatch record is an audit trail, not proof
+that the allowance was granted. The Claude Code hook takes its environment from the Claude process, which a session cannot change.
 
 A profile (state: ~/.local/state/ade/gate-profile.json, env GATE_PROFILE_STATE) applies only when ALL of these hold; otherwise
 the baseline applies and info["ignored"] says why: the file parses as {"schema": 1, "profile", "since", "until", ...}; both
@@ -24,7 +24,9 @@ file is read as a regular file only (no symlink, FIFO or directory), at most 64 
 
 The baseline is guarded at run time: a key listed under [floors] whose gates.toml value is looser than the code default in its
 floor direction gets the code default instead (logged once to stderr, info["baseline_guarded"]): the file may tighten or equal
-the code, a loosening belongs in a profile. Keys with no floor entry (timings, ages, locks) take the file's value.
+the code, a loosening belongs in a profile. Keys with no floor entry (timings, ages, locks) take the file's value. The one
+exception is the `frontier` gate's "higher is looser" keys, which may rise to their floor `bound` (`baseline_limit`): the
+standing frontier allowance, while FRONTIER_DEFAULTS stays all-closed so a missing or unreadable gates.toml means closed.
 
 info keys: source ("gates.toml" | "code"), toml_error, toml_path, baseline (the values before profile and env), profile
 ({name, since, until, reason, set_by} or None), ignored (why a state file does not apply, or None), expired (the profile
@@ -64,8 +66,9 @@ ORDERINGS = {
     "governor": (("tight_left_weekly", "critical_left"), ("tight_left_five_hour", "critical_left")),
 }
 
-# The `frontier` gate (docs/gates.md "Frontier allowance"): the code default is the fail-safe baseline, exactly today's rule
-# (no judged use, one frontier slice per pool per wave, no Agent-tool calls without asking).
+# The `frontier` gate (docs/gates.md "Frontier allowance"): the code default is the FAIL-SAFE, all closed: exactly the pre-2026-10-27
+# rule (no judged use, one frontier slice per pool per wave, no Agent-tool calls without asking). It is what applies when gates.toml
+# is missing or unreadable, so the hook asks. The standing allowance is gates.toml's [frontier] baseline, capped by its floors.
 FRONTIER_DEFAULTS = {
     "frontier1_judged": 0.0,                 # 1 = an agent may pick the claude frontier model on its own judgment
     "frontier2_judged": 0.0,                 # same for the codex frontier model
@@ -253,13 +256,27 @@ def effective_spec(cfg: dict[str, Any], gate: str, key: str) -> dict[str, Any] |
     return {**spec, "loosen": direction}
 
 
+def baseline_limit(cfg: dict[str, Any], gate: str, key: str, default: float) -> float:
+    """The loosest gates.toml baseline `key` may take: the code `default`, except a `frontier` key whose direction is "higher"
+    (every key but `*_min_left`), which may rise to its floor entry's numeric `bound`: the standing frontier allowance (2026-10-27)
+    is the file's baseline and its floor, while the code default stays all-closed. A missing or non-numeric bound trusts only the
+    code default, and `*_min_left` baselines are never looser than it."""
+    if code_direction(gate, key) == "higher":
+        spec = floor_spec(cfg, gate, key)
+        if spec is not None and is_num(spec.get("bound")):
+            return float(spec["bound"])
+    return default
+
+
 def baseline_loosens(cfg: dict[str, Any], gate: str, key: str, value: float, default: float) -> bool:
-    """True when the gates.toml baseline `value` is looser than the code `default` in the key's floor direction. A key with no
-    floor entry has no direction (False). A `frontier` key always has one, from the code (`code_direction`), so a floor entry's
-    `loosen` is ignored there; a floor entry whose direction is unreadable trusts only the code default."""
+    """True when the gates.toml baseline `value` is looser than `baseline_limit` (the code `default`, or a frontier floor bound) in the
+    key's floor direction. A key with no floor entry has no direction (False). A `frontier` key always has one, from the code
+    (`code_direction`), so a floor entry's `loosen` is ignored there; a floor entry whose direction is unreadable trusts only the
+    code default."""
     direction = code_direction(gate, key)
     if direction is not None:
         spec = {"loosen": direction}
+        default = baseline_limit(cfg, gate, key, default)
     else:
         spec = floor_spec(cfg, gate, key)
         if spec is None:
@@ -454,8 +471,9 @@ def load_gates(gate: str, now: datetime | None = None, defaults: dict[str, Any] 
                     continue
                 if defaults and baseline_loosens(cfg, gate, k, v, base[k]):
                     info["baseline_guarded"][k] = v
-                    _log_once(f"{toml_path()} [{gate}].{k} = {v:g} is looser than the code default {base[k]:g}; using the code "
-                              "default (a loosening belongs in a profile)")
+                    lim = baseline_limit(cfg, gate, k, base[k])
+                    _log_once(f"{toml_path()} [{gate}].{k} = {v:g} is looser than the {'code default' if lim == base[k] else 'floor bound'} "
+                              f"{lim:g}; using the code default (a loosening belongs in a profile)")
                     continue
                 accepted[k] = v
             base.update(accepted)

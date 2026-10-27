@@ -131,31 +131,32 @@ _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re
 _FRONTIER1, _JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/model-tiers-design.md)
 
 
-def _away_advice(away: dict, reasons: list, resets_at: str | None, fable_left, watch_frontier) -> str | None:
-    """The `watch` text while a gate profile allows judged frontier use (design C4), or None for the baseline text. Only a
-    watch caused by the weekly window or the frontier-1 cap qualifies: any other reason (stale data, an alert, a snapshot-only
-    row) and tight/critical keep the baseline text."""
+def _frontier_advice(frontier: dict, reasons: list, resets_at: str | None, fable_left, watch_frontier) -> str | None:
+    """The `watch` text while the effective gate allows judged frontier use (design C4: the standing baseline since 2026-10-27, or a
+    profile), or None for the closed text. Only a watch caused by the weekly window or the frontier-1 cap qualifies: any other
+    reason (stale data, an alert, a snapshot-only row) and tight/critical keep the closed text. `frontier["name"]`/`["until"]` are
+    set only when a profile is the source; the expiry is shown only then."""
     if not reasons or any(r not in ("weekly", "fable") for r in reasons):
         return None
-    who = f"{away['name']} until {away['until']}"
+    who = f" ({frontier['name']} until {frontier['until']})" if frontier.get("name") else ""
     if "fable" in reasons:
         left = f"{fable_left:g}" if isinstance(fable_left, (int, float)) else "?"
-        return (f"1. Claude quota watch ({who}): the {_FRONTIER1} cap has {left}% left (watch below {watch_frontier:g}%), so no "
+        return (f"1. Claude quota watch{who}: the {_FRONTIER1} cap has {left}% left (watch below {watch_frontier:g}%), so no "
                 f"{_FRONTIER1}: use {_JUDGMENT}.\n2. Adversary rounds via {_ADVERSARY}.")
-    n = away["calls"]
+    n = frontier["calls"]
     cap = f"at most {n} Agent-tool calls today" if n > 0 else "no Agent-tool call without asking"
-    return (f"1. Claude quota watch ({who}): {_JUDGMENT} Agent-tool sub-agents as needed; {_FRONTIER1} only where significantly "
+    return (f"1. Claude quota watch{who}: {_JUDGMENT} Agent-tool sub-agents as needed; {_FRONTIER1} only where significantly "
             f"better than {_JUDGMENT}, with a one-line frontier-reason, {cap}.\n"
             f"2. Adversary rounds via {_ADVERSARY}.\n3. Route code/bulk slices to other pools.")
 
 
 def _advice(level: str, resets_at: str | None, source: str = "available",
-            stale_age: float | None = None, away: dict | None = None, reasons: list | None = None,
+            stale_age: float | None = None, frontier: dict | None = None, reasons: list | None = None,
             fable_left=None, watch_frontier: float = 15.0) -> str:
     if level == "ok":
         return ""
-    if away and level == "watch" and stale_age is None and source != "snapshot-only":
-        text = _away_advice(away, reasons or [], resets_at, fable_left, watch_frontier)
+    if frontier and level == "watch" and stale_age is None and source != "snapshot-only":
+        text = _frontier_advice(frontier, reasons or [], resets_at, fable_left, watch_frontier)
         if text is not None:
             return text
     items = [
@@ -711,11 +712,13 @@ def _check_locked(t: dict, profile: dict | None = None) -> dict:
         st["level"] = "watch"  # a dead collector: frozen numbers can never climb, so never say ok
     if st["stale"]:
         st["reasons"] = sorted(set(st.get("reasons") or []) | {"stale"})
-    ft, _ = ade_gates.load_frontier(now())     # judged frontier use (config/gates.toml [frontier]; a profile only)
+    ft, _ = ade_gates.load_frontier(now())     # judged frontier use (config/gates.toml [frontier]: the standing baseline, or a profile)
     until = ade_gates.parse_utc((profile or {}).get("until"))
-    judged = bool(profile and until and ft["frontier1_judged"] >= 1)
-    away = {"name": profile.get("name"), "until": ade_gates.ny(until), "calls": int(ft["frontier1_agent_calls_per_day"])} if judged else None
-    st["advice"] = _advice(st["level"], st["resets_at"], st["source"], stale_age, away, st["reasons"], st["fable_left"], t["watch_fable"])
+    judged = ft["frontier1_judged"] >= 1
+    # `name`/`until` name the profile only while one is active; with none the baseline itself allows it and the text says nothing of expiry
+    frontier = {"name": profile.get("name") if profile and until else None, "until": ade_gates.ny(until) if profile and until else None,
+                "calls": int(ft["frontier1_agent_calls_per_day"])} if judged else None
+    st["advice"] = _advice(st["level"], st["resets_at"], st["source"], stale_age, frontier, st["reasons"], st["fable_left"], t["watch_fable"])
     # what the nudge may announce: judged use is in force only when the same check the Agent-tool hook runs passes on this state
     st["frontier_allowance"] = {"judged": judged and ade_gates.judged_guard_block(st, ft, now()) is None,
                                 "agent_calls_per_day": int(ft["frontier1_agent_calls_per_day"])}

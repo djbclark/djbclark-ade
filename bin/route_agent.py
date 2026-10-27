@@ -1262,8 +1262,8 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
 # kinds below (2026-10-23: `plan --kind code` printed `claude 30% left` with the 5-hour window
 # projected to run out before its reset).
 def frontier_gate() -> dict[str, float]:
-    """The effective `frontier` gate (config/gates.toml [frontier] under any active profile; bin/ade_gates.py). Re-read per call: a
-    profile can end or be cleared while a long process runs, and the file is tiny."""
+    """The effective `frontier` gate (config/gates.toml [frontier]: the standing allowance since 2026-10-27, all-closed when the file is
+    unreadable; bin/ade_gates.py). Re-read per call: a profile can end or be cleared while a long process runs, and the file is tiny."""
     return ade_gates.load_frontier()[0]
 
 

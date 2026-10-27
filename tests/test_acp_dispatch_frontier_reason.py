@@ -1,4 +1,4 @@
-"""acp-dispatch --frontier-reason and the away frontier allowance (2026-10-27, docs/gates.md "Frontier allowance").
+"""acp-dispatch --frontier-reason and the frontier allowance (standing baseline since 2026-10-27, docs/gates.md "Frontier allowance").
 
 End to end through the fake acp-run (the claude pool: the guard's state file; the profile and gates.toml are the shipped ones),
 and `frontier_judged` / `frontier_inflight` driven directly for the codex floor and the per-wave cap.
@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_acp_dispatch import SCRIPT, Base
+from test_gates import close_frontier_baseline
 
 _loader = importlib.machinery.SourceFileLoader("acp_dispatch_frontier_reason", str(SCRIPT))
 _spec = importlib.util.spec_from_loader("acp_dispatch_frontier_reason", _loader)
@@ -51,10 +52,16 @@ class Gates:
         path.write_text(json.dumps({k: v for k, v in st.items() if v is not None}))
         return str(path)
 
-    def env(self, profile: bool = True, guard: bool | dict = True, **extra: str) -> dict[str, str]:
+    def closed_toml(self) -> str:
+        """The shipped gates.toml with its [frontier] BASELINE closed (the pre-2026-10-27 rule): floors and profile unchanged."""
+        path = self.dir / "closed-gates.toml"
+        path.write_text(close_frontier_baseline((Path(__file__).resolve().parents[1] / "config/gates.toml").read_text()))
+        return str(path)
+
+    def env(self, profile: bool = True, guard: bool | dict = True, closed: bool = False, **extra: str) -> dict[str, str]:
         return {"GATE_PROFILE_STATE": self.profile() if profile else str(self.dir / "no-profile.json"),
                 "CLAUDE_QUOTA_GUARD_STATE": self.guard(**(guard if isinstance(guard, dict) else {})) if guard
-                else str(self.dir / "no-guard.json"), **extra}
+                else str(self.dir / "no-guard.json"), **({"GATES_TOML": self.closed_toml()} if closed else {}), **extra}
 
 
 class TestFrontierReasonFlow(Base):
@@ -85,19 +92,29 @@ class TestFrontierReasonFlow(Base):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual((rec["frontier_reason"], rec["frontier_judged"], rec["frontier_judged_note"]), (None, None, None), reason)
 
-    def test_baseline_records_the_reason_but_grants_nothing(self):
-        r, rec = self.go("--frontier-reason", REASON, profile=False)
+    def test_the_standing_baseline_grants_with_no_profile(self):
+        r, rec = self.go("--frontier-reason", REASON, profile=False)         # the shipped gates.toml [frontier] is open (2026-10-27)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(rec["frontier_reason"], REASON)
+        self.assertIsNone(rec["frontier_judged_note"])
+        self.assertEqual((rec["frontier_judged"]["family"], rec["frontier_judged"]["profile"], rec["frontier_judged"]["until"],
+                          rec["frontier_judged"]["per_wave"]), (1, None, None, 2))
+        self.assertIn(f"acp-dispatch: frontier judged use: {REASON}", r.stderr)
+
+    def test_a_closed_baseline_records_the_reason_but_grants_nothing(self):
+        r, rec = self.go("--frontier-reason", REASON, profile=False, closed=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(rec["frontier_reason"], REASON)
         self.assertIsNone(rec["frontier_judged"])
-        self.assertIn("no away allowance is in force", rec["frontier_judged_note"])
+        self.assertIn("no frontier allowance is in force", rec["frontier_judged_note"])
 
-    def test_an_expired_profile_grants_nothing(self):
+    def test_an_expired_profile_over_a_closed_baseline_grants_nothing(self):
         path = self.g.profile(hours_left=-1)
-        r, rec = self.go("--frontier-reason", REASON, env={"GATE_PROFILE_STATE": path, "CLAUDE_QUOTA_GUARD_STATE": self.g.guard()})
+        r, rec = self.go("--frontier-reason", REASON, env={"GATE_PROFILE_STATE": path, "CLAUDE_QUOTA_GUARD_STATE": self.g.guard(),
+                                                           "GATES_TOML": self.g.closed_toml()})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIsNone(rec["frontier_judged"])
-        self.assertIn("no away allowance", rec["frontier_judged_note"])
+        self.assertIn("no frontier allowance", rec["frontier_judged_note"])
 
     def test_a_missing_stale_or_stopped_guard_grants_nothing(self):
         cases = [(False, "missing or unreadable"), ({"level": "tight"}, "tight"), ({"level": "critical"}, "critical"),
@@ -195,7 +212,7 @@ class TestFrontierJudged(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GATES_TOML": str(bad)}):
             j, note = self.judged()
         self.assertIsNone(j)
-        self.assertIn("no away allowance", note)
+        self.assertIn("no frontier allowance", note)
 
 
 if __name__ == "__main__":

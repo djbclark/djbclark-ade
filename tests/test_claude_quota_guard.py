@@ -24,6 +24,8 @@ REPO = Path(__file__).resolve().parent.parent
 GUARD = REPO / "bin" / "claude-quota-guard"
 HOOK = REPO / "claude" / "hooks" / "quota_nudge.py"
 
+from test_gates import close_frontier_baseline  # noqa: E402
+
 NOW = datetime(2026, 10, 23, 12, 0, 0, tzinfo=timezone.utc)
 WEEK_RESET = (NOW + timedelta(days=3)).isoformat()
 FIVE_RESET = (NOW + timedelta(hours=3)).isoformat()
@@ -125,6 +127,14 @@ class Rig:
     def pings(self):
         return self.ping_log.read_text().splitlines() if self.ping_log.exists() else []
 
+    def closed_gates(self) -> str:
+        """A gates.toml copy whose [frontier] BASELINE is closed (the pre-2026-10-27 rule): the tests written against a closed baseline
+        keep their meaning; the standing-baseline tests at the end of the file pass the shipped file."""
+        path = self.tmp / "closed-gates.toml"
+        if not path.exists():
+            path.write_text(close_frontier_baseline((REPO / "config" / "gates.toml").read_text()))
+        return str(path)
+
     def env(self, **over):
         env = {"HOME": str(self.home), "PATH": f"{self.fakebin}:/usr/bin:/bin", "TZ": "UTC",
                "CLAUDE_QUOTA_GUARD_AIUSE": str(self.aiuse),
@@ -133,6 +143,7 @@ class Rig:
                "CLAUDE_QUOTA_GUARD_PING": str(self.ping),
                "CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS": str(self.launch_agents),
                "CLAUDE_QUOTA_NUDGE_STATE": str(self.nudges),
+               "GATES_TOML": self.closed_gates(),
                "CLAUDE_QUOTA_GUARD_NOW": self.now.isoformat()}
         env.update(over)
         return env
@@ -1834,7 +1845,7 @@ def test_a_deeply_nested_gates_toml_is_the_code_defaults_not_a_crash(rig):
     assert r.returncode == 1 and "RecursionError" not in r.stderr and "using the code defaults for quota_guard" in r.stderr
 
 
-# -- the away frontier allowance in the advice and the state (2026-10-27, docs/gates.md "Frontier allowance") --------------
+# -- the frontier allowance under the away profile over a CLOSED baseline, in the advice and the state (2026-10-27, docs/gates.md "Frontier allowance") --
 
 AWAY_WATCH = "Claude quota watch (away until Mon Oct 26 8:00 AM EDT): Opus 5.5 Agent-tool sub-agents as needed; Fable 5.1 only where"
 BASE_WATCH = "Claude quota watch: no Fable or Opus Agent-tool sub-agents."
@@ -1930,3 +1941,85 @@ def test_hook_gates_line_is_the_plain_one_when_the_allowance_is_not_in_force(rig
     r = rig.hook(session="s1", **env)
     assert "[gates] away profile active until Mon Oct 26 8:00 AM EDT; gate-profile clear restores normal routing" in r.stdout
     assert "frontier-reason" not in r.stdout
+
+
+# -- the standing baseline (2026-10-27 ruling): no profile needed; every test above runs over a CLOSED baseline (Rig.env) ---------
+
+STANDING_GATES = {"GATES_TOML": str(REPO / "config" / "gates.toml")}
+STANDING_WATCH = ("1. Claude quota watch: Opus 5.5 Agent-tool sub-agents as needed; Fable 5.1 only where significantly better than "
+                  "Opus 5.5, with a one-line frontier-reason, at most 4 Agent-tool calls today.")
+
+
+def _standing(rig, weekly, fable=97.0, **kw):
+    rig.set_aiuse(aiuse_fixture(weekly=weekly, fable=fable))
+    rig.guard(**STANDING_GATES, **kw)
+    return rig.state_json()
+
+
+def test_standing_watch_names_the_allowance_with_no_profile_and_no_expiry(rig):
+    st = _standing(rig, 35)
+    assert st["profile"] is None and st["level"] == "watch" and st["reasons"] == ["weekly"]
+    assert st["advice"].splitlines()[0] == STANDING_WATCH
+    assert "away" not in st["advice"] and BASE_WATCH not in st["advice"]
+    assert st["frontier_allowance"] == {"judged": True, "agent_calls_per_day": 4}
+
+
+def test_standing_ok_has_no_advice_but_the_allowance_is_in_force(rig):
+    st = _standing(rig, 80)
+    assert st["advice"] == "" and st["frontier_allowance"] == {"judged": True, "agent_calls_per_day": 4}
+
+
+@pytest.mark.parametrize("weekly, level", [(25, "tight"), (9, "critical")])
+def test_standing_tight_and_critical_stop_the_allowance(rig, weekly, level):
+    st = _standing(rig, weekly)
+    assert st["level"] == level and st["advice"].splitlines()[0].startswith(f"1. Claude quota {level}: no Fable or Opus Agent-tool sub-agents.")
+    assert st["frontier_allowance"]["judged"] is False
+
+
+def test_standing_frontier1_cap_at_watch_says_use_opus(rig):
+    st = _standing(rig, 80, fable=10)
+    assert st["reasons"] == ["fable"] and st["frontier_allowance"]["judged"] is False
+    assert st["advice"].splitlines()[0] == ("1. Claude quota watch: the Fable 5.1 cap has 10% left (watch below 15%), "
+                                            "so no Fable 5.1: use Opus 5.5.")
+
+
+def test_standing_other_watch_reasons_keep_the_closed_text(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    rig.set_alerts([], age_s=4 * 3600)                               # a dead collector: stale
+    rig.guard(**STANDING_GATES)
+    st = rig.state_json()
+    assert st["stale"] and st["advice"].splitlines()[0].startswith(f"1. {BASE_WATCH}")
+    assert st["frontier_allowance"]["judged"] is False
+
+
+def test_standing_hook_prints_one_frontier_allowance_line_per_session_per_day(rig):
+    st = _standing(rig, 80)
+    assert st["profile"] is None
+    out = rig.hook(session="s1", **STANDING_GATES).stdout
+    assert out.startswith("[gates] frontier allowance: Fable 5.1 (frontier) is allowed where you judge it significantly better than "
+                          "Opus 5.5;") and out.strip().endswith("at most 4 Agent-tool calls today.") and "profile" not in out, out
+    assert rig.hook(session="s1", **STANDING_GATES).stdout == ""                 # same session, same day
+    assert "[gates] frontier allowance" in rig.hook(session="s2", **STANDING_GATES).stdout
+    rig.now = NOW + timedelta(hours=16)                                          # the next New York day; the guard runs again
+    _standing(rig, 80)
+    assert "[gates] frontier allowance" in rig.hook(session="s1", **STANDING_GATES).stdout
+
+
+def test_standing_hook_says_nothing_of_the_allowance_when_the_guard_stops_it(rig):
+    _standing(rig, 25)                                               # tight
+    assert "frontier allowance" not in rig.hook(session="s1", **STANDING_GATES).stdout
+
+
+def test_a_profile_over_the_standing_baseline_keeps_the_profile_line_and_adds_no_second_one(rig):
+    st = _standing(rig, 80, **_profile(rig))
+    assert st["profile"]["name"] == "away"
+    out = rig.hook(session="s1", **STANDING_GATES, **_profile(rig)).stdout
+    assert out.startswith("[gates] away profile active until Mon Oct 26 8:00 AM EDT: Fable 5.1 (frontier) is allowed") and "frontier allowance:" not in out
+
+
+def test_the_frontier_advice_names_a_profile_only_when_one_is_the_source(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    standing = {"name": None, "until": None, "calls": 4}
+    text = mod._advice("watch", "r", "available", None, standing, ["weekly"], 50.0, 15.0)
+    assert text.startswith("1. Claude quota watch: Opus 5.5") and "(" not in text.splitlines()[0]
+    assert mod._advice("watch", "r", "available", None, standing, ["weekly", "alert"], 50.0, 15.0) == mod._advice("watch", "r")

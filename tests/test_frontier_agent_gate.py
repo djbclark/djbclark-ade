@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 HOOK = Path(__file__).resolve().parents[1] / "claude/hooks/frontier_agent_gate.py"
 
+from test_gates import close_frontier_baseline  # noqa: E402
+
 
 class TestFrontierAgentGate(unittest.TestCase):
     def run_hook(self, tool_input: dict, tool: str = "Agent", home: Path | None = None, **env: str) -> tuple[dict | None, Path]:
@@ -90,9 +92,16 @@ class TestAwayAllowance(unittest.TestCase):
         path.write_text(json.dumps(st))
         return str(path)
 
-    def call(self, prompt: str | None = REASON, profile=True, guard=True, tool_input=None, env=None):
+    def closed_toml(self) -> str:
+        """A gates.toml copy whose [frontier] BASELINE is the all-closed code default (the pre-2026-10-27 rule), floors and profile as shipped."""
+        path = self.state / "closed-gates.toml"
+        path.write_text(close_frontier_baseline((HOOK.parents[2] / "config/gates.toml").read_text()))
+        return str(path)
+
+    def call(self, prompt: str | None = REASON, profile=True, guard=True, tool_input=None, env=None, closed=False):
         env = {"GATE_PROFILE_STATE": self.profile() if profile is True else (profile or str(self.state / "none.json")),
                "CLAUDE_QUOTA_GUARD_STATE": self.guard() if guard is True else (guard or str(self.state / "none2.json")),
+               **({"GATES_TOML": self.closed_toml()} if closed else {}),
                **(env or {})}
         ti = {"subagent_type": "general-purpose", "model": "fable", "description": "adjudicate",
               **({"prompt": prompt} if prompt is not None else {}), **(tool_input or {})}
@@ -116,23 +125,36 @@ class TestAwayAllowance(unittest.TestCase):
         self.assertIsNotNone(row["profile_until"])
         self.assertEqual(json.loads(self.counter.read_text())["n"], 1)
 
-    def test_baseline_asks_whatever_the_prompt_says(self):
-        out = self.call(profile=False)                       # no profile file: baseline, calls_per_day 0
+    def test_the_standing_baseline_allows_with_no_profile(self):
+        self.assertIsNone(self.call(profile=False))              # no profile file: the gates.toml baseline (2026-10-27 ruling) applies
+        row = self.rows()[-1]
+        self.assertEqual((row["decision"], row["profile"], row["profile_until"], row["n_today"]), ("allowed-judged", None, None, 1))
+        self.assertEqual(json.loads(self.counter.read_text())["n"], 1)
+        self.assertAsks(self.call(profile=False, prompt=None), "frontier-reason: TEXT")      # the reason is still required
+
+    def test_a_closed_baseline_asks_whatever_the_prompt_says(self):
+        out = self.call(profile=False, closed=True)         # no profile file over a closed gates.toml: calls_per_day 0
         self.assertAsks(out)
-        self.assertNotIn("away allowance", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertNotIn("frontier allowance", out["hookSpecificOutput"]["permissionDecisionReason"])
         self.assertEqual(self.rows()[-1]["decision"], "asked")
 
-    def test_an_expired_profile_gives_baseline(self):
+    def test_an_expired_profile_gives_a_closed_baseline(self):
         now = datetime.now(UTC)
         path = self.profile(since=_ts(now - timedelta(hours=80)), until=_ts(now - timedelta(minutes=1)))
-        self.assertAsks(self.call(profile=path))
+        self.assertAsks(self.call(profile=path, closed=True))
         self.assertFalse(self.counter.exists())
 
-    def test_a_profile_that_expires_between_two_calls_ends_the_allowance(self):
+    def test_a_profile_that_expires_between_two_calls_changes_nothing_under_the_standing_baseline(self):
         self.assertIsNone(self.call())
         now = datetime.now(UTC)
         path = self.profile(since=_ts(now - timedelta(hours=80)), until=_ts(now - timedelta(seconds=1)))
-        self.assertAsks(self.call(profile=path))
+        self.assertIsNone(self.call(profile=path))                    # the standing baseline needs no profile
+
+    def test_a_profile_that_expires_between_two_calls_ends_the_allowance_over_a_closed_baseline(self):
+        self.assertIsNone(self.call(closed=True))
+        now = datetime.now(UTC)
+        path = self.profile(since=_ts(now - timedelta(hours=80)), until=_ts(now - timedelta(seconds=1)))
+        self.assertAsks(self.call(profile=path, closed=True))
 
     def test_a_missing_or_unreadable_guard_state_asks(self):
         self.assertAsks(self.call(guard=False), "missing or unreadable")
@@ -240,7 +262,7 @@ class TestAwayAllowance(unittest.TestCase):
     def test_no_env_variable_widens_the_allowance(self):
         env = {"FRONTIER_GATE_THRESHOLDS": json.dumps({"frontier1_judged": 1, "frontier1_agent_calls_per_day": 99}),
                "CLAUDE_QUOTA_GUARD_THRESHOLDS": json.dumps({"frontier1_judged": 1})}
-        self.assertAsks(self.call(profile=False, env=env))
+        self.assertAsks(self.call(profile=False, env=env, closed=True))
 
     def test_the_off_switch_and_the_approval_keywords_skip_the_allowance(self):
         out, log = self.run_hook({"subagent_type": "fable-deep"}, home=self.home, FRONTIER_GATE_OFF="1")
@@ -348,7 +370,7 @@ class TestAwayAllowance(unittest.TestCase):
         fifo = self.state / "quota-guard.json"
         os.mkfifo(fifo)
         out = self.call(guard=str(fifo))
-        self.assertAsks(out, "away allowance")
+        self.assertAsks(out, "frontier allowance")
         self.assertEqual(self.rows()[-1]["decision"], "asked")
 
     def test_a_counter_temp_path_that_is_a_fifo_asks_and_logs_no_grant(self):

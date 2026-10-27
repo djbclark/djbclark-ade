@@ -122,7 +122,20 @@ def test_gates_toml_baseline_equals_the_code_defaults():
     cfg = tomllib.loads((REPO / "config" / "gates.toml").read_text())
     assert cfg["governor"] == pytest.approx(_thresholds("claude-fleet-governor"))
     assert cfg["quota_guard"] == pytest.approx(_thresholds("claude-quota-guard"))
-    assert cfg["frontier"] == pytest.approx(g.FRONTIER_DEFAULTS)
+
+
+def test_the_shipped_frontier_baseline_is_the_ruled_standing_allowance_and_its_floors_equal_it():
+    """The code default stays all-closed (fail-safe); gates.toml carries the ruling of 2026-10-27, floors included."""
+    import tomllib
+    cfg = tomllib.loads((REPO / "config" / "gates.toml").read_text())
+    assert cfg["frontier"] == pytest.approx(STANDING)
+    floors = cfg["floors"]["frontier"]
+    for k, v in STANDING.items():
+        if not k.endswith("_min_left"):
+            assert floors[k] == {"loosen": "higher", "bound": v}, k       # the baseline may not exceed what the floors allow
+    assert (cfg["frontier"]["frontier1_min_left"], cfg["frontier"]["frontier2_min_left"]) == (
+        g.FRONTIER_DEFAULTS["frontier1_min_left"], g.FRONTIER_DEFAULTS["frontier2_min_left"])
+    assert all(g.FRONTIER_DEFAULTS[k] == 0 for k in ("frontier1_judged", "frontier2_judged", "frontier1_agent_calls_per_day"))
 
 
 def test_the_shipped_gates_toml_validates():
@@ -445,6 +458,11 @@ def test_validate_catches_drift_floors_and_directions(cli, tmp_path):
         ("tight_projected = 500.0", "tight_projected = 50.0", "tighter than the baseline"),
         ("tight_projected = 500.0", "tight_projected = 5000.0", "above the ceiling 1000"),
         ("watch_weekly = 20.0", "watch_weekly = 10.0", "below the floor 15"),
+        ("frontier1_per_wave = 2 ", "frontier1_per_wave = 3 ", "[frontier].frontier1_per_wave: gates.toml 3 is above its floor bound 2"),
+        ("frontier1_agent_calls_per_day = 4 ", "frontier1_agent_calls_per_day = 5 ", "frontier1_agent_calls_per_day: gates.toml 5 is above its floor bound 4"),
+        ("frontier1_per_wave = 2 ", "frontier1_per_wave = 0 ", "frontier1_per_wave: gates.toml 0 is tighter than the code default 1"),
+        ("frontier1_min_left = 10.0 ", "frontier1_min_left = 9.0 ", "[frontier].frontier1_min_left: gates.toml 9 != code default 10"),
+        ("frontier2_min_left = 60.0 ", "frontier2_min_left = 50.0 ", "[frontier].frontier2_min_left: gates.toml 50 != code default 60"),
         ("tight_weekly = 15.0\n# Aligned", "tight_weekly = 15.0\nlock_wait_s = 0.1\n# Aligned", "not overridable"),
         ("[meta]\nschema = 1", "[meta]\nschema = 2", "schema"),
         ("max_profile_hours = 240", "max_profile_hours = 0", "max_profile_hours"),
@@ -467,6 +485,14 @@ def test_validate_catches_drift_floors_and_directions(cli, tmp_path):
     broken = tmp_path / "broken.toml"
     broken.write_text("[governor\n")
     assert cli.run("validate", GATES_TOML=str(broken)).returncode == 1
+
+
+def test_validate_accepts_a_closed_frontier_baseline(cli, tmp_path):
+    """Closing the standing allowance is a PR to `[frontier]` alone: the code defaults are inside the allowed range."""
+    closed = tmp_path / "closed.toml"
+    closed.write_text(close_frontier_baseline((REPO / "config/gates.toml").read_text()))
+    r = cli.run("validate", GATES_TOML=str(closed))
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # -- the real gates.toml through the loader: conserve_alert_level floor and the weekly-trigger ordering ------------------------
@@ -1055,26 +1081,74 @@ def fenv(tmp_path, monkeypatch):
     return toml
 
 
+STANDING = {"frontier1_judged": 1.0, "frontier2_judged": 1.0, "frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0,
+            "frontier1_agent_calls_per_day": 4.0, "frontier1_min_left": 10.0, "frontier2_min_left": 60.0}     # the 2026-10-27 ruling
+
+
+def close_frontier_baseline(text: str) -> str:
+    """The shipped file with its `[frontier]` BASELINE set to the all-closed code defaults (floors and the away profile unchanged)."""
+    import re
+    def close(m):
+        body = m.group(0)
+        for k, v in g.FRONTIER_DEFAULTS.items():
+            body = re.sub(rf"(?m)^{k} = [0-9.]+", f"{k} = {v:g}", body, count=1)
+        return body
+    out = re.sub(r"(?ms)^\[frontier\]\n.*?(?=^\[|\Z)", close, text, count=1)
+    assert out != text
+    return out
+
+
+@pytest.fixture
+def fenv_closed(fenv):
+    """`fenv` with a CLOSED frontier baseline: the pre-2026-10-27 rule, so the profile floors and fail-closed behaviour stay covered."""
+    fenv.write_text(close_frontier_baseline(fenv.read_text()))
+    return fenv
+
+
 def front(now=NOW):
     return g.load_frontier(now)
 
 
-def test_frontier_baseline_is_todays_rule(fenv):
+def test_the_shipped_frontier_baseline_is_the_ruled_standing_allowance(fenv):
+    t, info = front()
+    assert t == STANDING and info["profile"] is None and info["baseline_guarded"] == {} and info["toml_error"] is None
+
+
+def test_a_closed_frontier_baseline_is_the_code_default(fenv_closed):
     t, info = front()
     assert t == g.FRONTIER_DEFAULTS and info["profile"] is None
     assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0, 0)
     assert (t["frontier1_per_wave"], t["frontier2_per_wave"], t["frontier1_min_left"]) == (1, 1, 10)
 
 
-def test_the_shipped_away_profile_applies_the_ruled_values(fenv):
+def test_the_shipped_away_profile_equals_the_standing_baseline(fenv):
     write_state(state_path())
     t, info = front()
     assert info["profile"]["name"] == "away" and info["ignored"] is None
-    assert t == {**g.FRONTIER_DEFAULTS, "frontier1_judged": 1.0, "frontier2_judged": 1.0, "frontier1_per_wave": 2.0,
-                 "frontier2_per_wave": 1.0, "frontier1_agent_calls_per_day": 4.0}
+    assert t == STANDING
 
 
-def test_an_expired_profile_gives_the_frontier_baseline(fenv):
+def test_the_shipped_away_profile_raises_a_closed_baseline_to_the_ruled_values(fenv_closed):
+    write_state(state_path())
+    t, info = front()
+    assert info["profile"]["name"] == "away" and info["ignored"] is None
+    assert t == STANDING
+
+
+@pytest.mark.parametrize("key, value, why", [("frontier1_judged", 0, "tighter than the baseline 1"),
+                                              ("frontier1_agent_calls_per_day", 3, "tighter than the baseline 4"),
+                                              ("frontier1_agent_calls_per_day", 5, "above the ceiling 4"),
+                                              ("frontier1_per_wave", 3, "above the ceiling 2"),
+                                              ("frontier2_min_left", 70, "tighter than the baseline 60")])
+def test_a_profile_can_neither_tighten_nor_widen_the_standing_baseline(fenv, key, value, why):
+    """gate-profile cannot close the standing allowance (a value under the baseline rejects the whole profile) nor pass its floors."""
+    fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{key} = {value}\n")
+    write_state(state_path(), profile="t")
+    t, info = front()
+    assert t == STANDING and why in info["ignored"], (t, info["ignored"])
+
+
+def test_an_expired_profile_gives_the_frontier_baseline(fenv_closed):
     write_state(state_path(), since=g.iso(NOW - timedelta(hours=80)), until=g.iso(NOW - timedelta(seconds=1)))
     t, info = front()
     assert t == g.FRONTIER_DEFAULTS and "expired" in info["ignored"]
@@ -1085,7 +1159,7 @@ def test_an_expired_profile_gives_the_frontier_baseline(fenv):
     ("frontier2_judged", 2, "above the ceiling 1"),
     ("frontier1_per_wave", 3, "above the ceiling 2"),
     ("frontier2_per_wave", 2, "above the ceiling 1"),
-    ("frontier1_agent_calls_per_day", 7, "above the ceiling 6"),
+    ("frontier1_agent_calls_per_day", 5, "above the ceiling 4"),
     ("frontier1_min_left", 9.9, "below the floor 10"),
     ("frontier2_min_left", 39.9, "below the floor 40"),
     ("frontier1_per_wave", 0, "tighter than the baseline 1"),
@@ -1094,7 +1168,8 @@ def test_an_expired_profile_gives_the_frontier_baseline(fenv):
     ("frontier1_per_wave", "2", "not a number"),
     ("frontier3_judged", 1, "not overridable"),
 ])
-def test_the_floors_refuse_a_looser_frontier_value_and_the_whole_profile_is_baseline(fenv, key, value, why):
+def test_the_floors_refuse_a_looser_frontier_value_and_the_whole_profile_is_baseline(fenv_closed, key, value, why):
+    fenv = fenv_closed
     shown = value if isinstance(value, (int, float)) else f'"{value}"'
     good = "frontier2_judged" if key == "frontier1_judged" else "frontier1_judged"       # a valid companion value
     fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{good} = 1\n{key} = {shown}\n")
@@ -1104,45 +1179,54 @@ def test_the_floors_refuse_a_looser_frontier_value_and_the_whole_profile_is_base
     assert why in info["ignored"], info["ignored"]
 
 
-@pytest.mark.parametrize("key, value", [("frontier1_agent_calls_per_day", 6), ("frontier1_per_wave", 2), ("frontier2_min_left", 40),
+@pytest.mark.parametrize("key, value", [("frontier1_agent_calls_per_day", 4), ("frontier1_per_wave", 2), ("frontier2_min_left", 40),
                                         ("frontier2_per_wave", 1), ("frontier1_min_left", 10)])
-def test_a_frontier_value_at_its_bound_is_allowed(fenv, key, value):
+def test_a_frontier_value_at_its_bound_is_allowed(fenv_closed, key, value):
+    fenv = fenv_closed
     fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{key} = {value}\n")
     write_state(state_path(), profile="t")
     t, info = front()
     assert info["ignored"] is None and t[key] == float(value)
 
 
-def test_a_gates_toml_baseline_cannot_turn_the_allowance_on(fenv):
-    fenv.write_text(fenv.read_text().replace("frontier1_judged = 0 ", "frontier1_judged = 1 ", 1)
-                    .replace("frontier1_agent_calls_per_day = 0 ", "frontier1_agent_calls_per_day = 5 ", 1)
+def test_a_gates_toml_baseline_past_its_floor_bound_is_replaced_by_the_code_default(fenv):
+    """The standing numbers are the ceiling a hand edit of the baseline can reach: a value past its floor bound, or a lower
+    `*_min_left`, gets the code default; the in-bound standing values stay."""
+    fenv.write_text(fenv.read_text().replace("frontier1_agent_calls_per_day = 4 ", "frontier1_agent_calls_per_day = 5 ", 1)
+                    .replace("frontier1_per_wave = 2 ", "frontier1_per_wave = 3 ", 1)
                     .replace("frontier1_min_left = 10.0 ", "frontier1_min_left = 1.0 ", 1))
     t, info = front()
-    assert (t["frontier1_judged"], t["frontier1_agent_calls_per_day"], t["frontier1_min_left"]) == (0, 0, 10)
-    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day", "frontier1_min_left"}
+    assert (t["frontier1_agent_calls_per_day"], t["frontier1_per_wave"], t["frontier1_min_left"]) == (0, 1, 10)
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier2_per_wave"]) == (1, 1, 1)
+    assert set(info["baseline_guarded"]) == {"frontier1_agent_calls_per_day", "frontier1_per_wave", "frontier1_min_left"}
+
+
+def test_a_frontier_min_left_baseline_is_never_looser_than_the_code_default_even_inside_its_floor(fenv):
+    """frontier2_min_left's floor is 40 (a profile may go there), but the baseline may not: 50 is inside the floor and still guarded."""
+    fenv.write_text(fenv.read_text().replace("frontier2_min_left = 60.0 ", "frontier2_min_left = 50.0 ", 1))
+    t, info = front()
+    assert t["frontier2_min_left"] == 60 and set(info["baseline_guarded"]) == {"frontier2_min_left"}
 
 
 def test_a_missing_frontier_floor_table_still_guards_every_frontier_key(fenv):
+    """With no floor entry there is no bound to rise to: every standing key above its code default falls back to it."""
     fenv.write_text(fenv.read_text().replace("[floors.frontier]", "[floors.unused]", 1)
-                    .replace("frontier1_judged = 0 ", "frontier1_judged = 1 ", 1)
-                    .replace("frontier1_agent_calls_per_day = 0 ", "frontier1_agent_calls_per_day = 6 ", 1)
                     .replace("frontier1_min_left = 10.0 ", "frontier1_min_left = 1.0 ", 1)
                     .replace("frontier2_min_left = 60.0 ", "frontier2_min_left = 70.0 ", 1))
     t, info = front()
-    assert (t["frontier1_judged"], t["frontier1_agent_calls_per_day"], t["frontier1_min_left"]) == (0, 0, 10)
-    assert t["frontier2_min_left"] == 70                       # tighter than the code default: the file may tighten
-    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day", "frontier1_min_left"}
+    assert t == {**g.FRONTIER_DEFAULTS, "frontier2_min_left": 70.0}     # tighter than the code default: the file may tighten
+    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier2_judged", "frontier1_per_wave", "frontier1_agent_calls_per_day",
+                                             "frontier1_min_left"}
 
 
 def test_a_flipped_frontier_floor_direction_does_not_loosen_the_baseline(fenv):
-    """The code direction rules the frontier gate: a floor entry whose `loosen` disagrees (adversary round 2, A4) changes nothing."""
+    """The code direction rules the frontier gate: a floor entry whose `loosen` disagrees (adversary round 2, A4) changes nothing:
+    its `bound` (0) still caps the baseline, so the standing 1 and 4 are looser than it and the code default stands."""
     text = (fenv.read_text()
             .replace('frontier1_judged = { loosen = "higher", bound = 1 }', 'frontier1_judged = { loosen = "lower", bound = 0 }')
-            .replace('frontier1_agent_calls_per_day = { loosen = "higher", bound = 6 }',
-                     'frontier1_agent_calls_per_day = { loosen = "lower", bound = 0 }')
-            .replace("frontier1_judged = 0 ", "frontier1_judged = 1 ", 1)
-            .replace("frontier1_agent_calls_per_day = 0 ", "frontier1_agent_calls_per_day = 6 ", 1))
-    assert 'loosen = "lower", bound = 0' in text
+            .replace('frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }',
+                     'frontier1_agent_calls_per_day = { loosen = "lower", bound = 0 }'))
+    assert text.count('loosen = "lower", bound = 0') == 2
     fenv.write_text(text)
     t, info = front()
     assert (t["frontier1_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0)
@@ -1168,8 +1252,9 @@ def flipped_floor_toml(text, floor_key, loosen, bound, baseline, profile_key, pr
     ("frontier1_agent_calls_per_day", "lower", 0, 100, 100, "above the ceiling 0"),      # code: higher is looser, so 100 busts a bound of 0
     ("frontier1_min_left", "higher", 100, 0, 0, "below the floor 100"),                   # code: lower is looser, so 0 busts a bound of 100
 ])
-def test_a_flipped_frontier_floor_cannot_let_a_profile_exceed_its_bound(fenv, key, loosen, bound, baseline, value, why):
+def test_a_flipped_frontier_floor_cannot_let_a_profile_exceed_its_bound(fenv_closed, key, loosen, bound, baseline, value, why):
     """The profile check uses the code direction too (adversary round 3, P3-2), not only the baseline guard."""
+    fenv = fenv_closed
     text = flipped_floor_toml(fenv.read_text(), key, loosen, bound, baseline, key, value)
     fenv.write_text(text)
     write_state(state_path())
@@ -1201,7 +1286,7 @@ def test_a_gates_toml_that_is_a_fifo_is_unusable_not_a_hang(tmp_path, monkeypatc
     assert cfg is None and "not a regular file" in err
 
 
-def test_no_environment_variable_changes_the_frontier_gate(fenv, monkeypatch):
+def test_no_environment_variable_changes_the_frontier_gate(fenv_closed, monkeypatch):
     assert "frontier" not in g.ENV_VARS
     for var in (*g.ENV_VARS.values(), "FRONTIER_GATE_THRESHOLDS", "CLAUDE_FRONTIER_THRESHOLDS"):
         monkeypatch.setenv(var, json.dumps({"frontier1_judged": 1, "frontier1_agent_calls_per_day": 99}))
@@ -1214,6 +1299,18 @@ def test_a_missing_gates_toml_is_the_frontier_code_default(fenv, monkeypatch):
     write_state(state_path())
     t, info = front()
     assert t == g.FRONTIER_DEFAULTS and info["profile"] is None
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("text", ["[frontier\n", "[frontier]\nfrontier1_judged = \"1\"\n", "", "[governor]\na = 1\n"])
+def test_an_unreadable_or_invalid_gates_toml_leaves_the_frontier_gate_closed(fenv, text):
+    """The standing allowance lives only in a readable [frontier] table: corrupt TOML, a non-number, an empty file or a file with no
+    [frontier] table all fall back to the all-closed code default (so the hook asks)."""
+    fenv.write_text(text)
+    write_state(state_path())
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and info["toml_error"] is not None
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0, 0)       # closed, not merely "the default"
 
 
 GUARD_OK = {"level": "ok", "reasons": [], "stale": False, "fable_left": 50.0, "checked_at": g.iso(NOW - timedelta(minutes=1))}
