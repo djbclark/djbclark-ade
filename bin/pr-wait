@@ -287,7 +287,9 @@ def pr_doc(repo: str, pr: int) -> dict:
 #      does not balance falls back to a capture that may not cross another `<!--`, which is what stops
 #      an unclosed start quoted in prose from swallowing the next marker. And masking may not "repair"
 #      JSON: a live marker whose JSON slice differs between the raw body and the stripped text is
-#      `malformed`, not approved (C2').
+#      `malformed`, not approved (C2'). The rescue scans EVERY start, with no `consumed` cursor (D1): a
+#      candidate is accepted before its JSON is validated, so letting a rejected outer one hide the
+#      BLOCK inside it read as a clean false APPROVE.
 # A marker whose JSON is broken is still CAPTURED and then reported as `malformed`, never as an
 # absence: a strict `{...}` regex cannot see a malformed marker at all, which would make a typo
 # indistinguishable from "no verdict". The capture is the JSON-aware one below; only a start whose JSON
@@ -548,7 +550,7 @@ def _json_object_end(text: str, i: int) -> int:
 _MARKER_WS = " \t\r\n"
 
 
-def _marker_spans(text: str) -> list[tuple[int, int, int]]:
+def _marker_spans(text: str, *, nested: bool = False) -> list[tuple[int, int, int]]:
     """Every CANONICAL marker start in `text`, as `(start, json_start, json_end)` offsets.
 
     `start` is the `<!--`; the captured JSON is `text[json_start:json_end]`. Only
@@ -564,14 +566,27 @@ def _marker_spans(text: str) -> list[tuple[int, int, int]]:
        the next marker's `-->`, swallowing the BLOCK that follows.
 
     A start with neither shape is not a marker at all; `_classify_starts` reports it as a typo.
+
+    THE `consumed` CURSOR IS FOR READING, NOT FOR FINDING (bundled review, D1). A candidate is
+    accepted as soon as its braces balance and a `-->` follows - BEFORE anyone knows whether that JSON
+    is valid - so a start nested inside a REJECTED outer candidate is skipped forever. That is correct
+    for the live path, where an accepted marker's interior is content; it was a fail-open in the
+    raw-body BLOCK rescue, which iterated these same spans, `continue`d on the outer parse failure and
+    never revisited a real same-head BLOCK inside the region: `verdict=APPROVE, malformed=False`. The
+    rescue therefore calls this with `nested=True`, which drops the cursor and reports one span per
+    start. No false BLOCK is introduced: a marker quoted inside a `note` is ESCAPED in the body
+    (`{\\"verdict\\":...`), so its slice cannot parse, and an unescaped quote inside a JSON string
+    cannot exist in valid JSON at all.
     """
     spans: list[tuple[int, int, int]] = []
     n = len(text)
     # A candidate that starts INSIDE a marker already accepted is content - a `note` documenting the
-    # format quotes the start - so the scan resumes after that marker's `-->` (C1').
+    # format quotes the start - so the scan resumes after that marker's `-->` (C1'). The raw-body
+    # rescue opts out (`nested=True`, D1): there, a rejected outer candidate must not hide the BLOCK
+    # inside it.
     consumed = 0
     for m in MARKER_START_RE.finditer(text):
-        if m.start() < consumed:
+        if not nested and m.start() < consumed:
             continue
         # The WIDE start only locates the candidate; the canonical one says where `:v1` ends, and the
         # JSON begins after that.
@@ -718,8 +733,12 @@ def adversary_verdict(body: str, head: str) -> dict:
     # The SAME JSON-aware scanner finds the markers here (bundled review, C1'): a tempered regex made a
     # BLOCK whose JSON `note` quoted `<!--` invisible to this loop, so the rescue could not see the one
     # thing it exists for. `_marker_spans` reads `<!--` inside a string as content, in the raw body
-    # exactly as in the stripped text.
-    for _start, jstart, jend in _marker_spans(body):
+    # exactly as in the stripped text. It runs with `nested=True` (bundled review, D1): the live scan's
+    # `consumed` cursor skips starts inside a candidate it has already accepted, and acceptance happens
+    # before the JSON is validated - so a real same-head BLOCK nested inside an INVALID outer candidate
+    # was invisible here and the body read as a clean APPROVE. The rescue rescans every start; escaped
+    # JSON quoted in a `note` still cannot parse, so no false BLOCK arrives that way.
+    for _start, jstart, jend in _marker_spans(body, nested=True):
         try:
             doc = json.loads(body[jstart:jend], object_pairs_hook=_strict_object)
         except ValueError:

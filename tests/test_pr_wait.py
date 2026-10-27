@@ -2179,3 +2179,76 @@ def test_c1_prime_a_note_that_documents_the_marker_is_content_not_a_second_start
     assert r["verdict"] == "APPROVE" and r["matches_head"] and not r["malformed"], r
     # And two REAL markers are still two: the skip must not spill past the accepted marker.
     assert adv(body + "\n" + marker("BLOCK"))["verdict"] == "BLOCK"
+
+
+# ---- the lead's re-review of eb90d20: D1, a BLOCK nested in a REJECTED candidate ---------------
+#
+# `_marker_spans` accepts a candidate as soon as its braces balance and a `-->` follows - before
+# anything validates that JSON - and then sets `consumed` past it. The LIVE path wants exactly that
+# (an accepted marker's interior is content). The raw-body BLOCK rescue iterated the SAME spans, so
+# when the outer candidate's JSON was junk the rescue `continue`d and never revisited a real
+# same-head BLOCK that had started inside the region: `verdict=APPROVE, conflict=False,
+# malformed=False`. Two reviewers reached it independently, from two shapes, and both read a clean
+# false APPROVE at eb90d20 while 6083bcb read BLOCK: the same fail-open class as C1' in a new guise.
+#
+# The fix is scoped to the rescue: `_marker_spans(..., nested=True)` drops the cursor so every start
+# is scanned on its own. The boundary rules are unchanged, and no false BLOCK arrives - a marker
+# quoted inside a `note` is ESCAPED in the body, so its slice cannot parse, and an unescaped quote
+# inside a JSON string cannot exist in valid JSON.
+
+def test_d1_a_fenced_block_nested_in_an_invalid_outer_candidate_is_still_a_block() -> None:
+    # Reproducer A (codex): the outer `{"note":` candidate's braces balance OVER the inner marker, so
+    # it was accepted and `consumed` skipped the BLOCK; its own JSON does not parse, so the rescue
+    # skipped the span and found nothing. At eb90d20: APPROVE / conflict False / malformed False.
+    body = (marker("APPROVE") + "\n" + FENCE3 + "\n"
+            + '<!-- adversary-verdict:v1 {"note":\n'
+            + marker("BLOCK") + "\n"
+            + '} -->\n' + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_d1_quote_parity_across_the_scan_cannot_swallow_a_block() -> None:
+    # Reproducer B (claude): prose quotes an unclosed start whose opening quote runs on into the
+    # fenced marker below, so the candidate's slice spans a literal newline inside a JSON string -
+    # invalid JSON, accepted span, consumed, BLOCK gone. Same false APPROVE at eb90d20.
+    body = (marker("APPROVE") + "\n"
+            + 'A marker begins `<!-- adversary-verdict:v1 {"verdict":"` and so on.\n\n'
+            + FENCE3 + "\n"
+            + _marker_with_note("BLOCK", 'the \\"never\\" filter') + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_d1_the_rescue_reports_a_nested_start_and_the_live_scan_still_skips_it() -> None:
+    # The mechanism, pinned at both layers: the same body yields one span to the live scan (the outer
+    # APPROVE, whose interior is content) and two to the rescue. If the live scan ever reports the
+    # nested start too, a `note` documenting the format becomes `malformed`; if the rescue ever skips
+    # it again, D1 is back.
+    mod = load_module()
+    outer = ('<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"' + ADV_HEAD
+             + '","note":"see:\n' + '<!-- adversary-verdict:v1 {"verdict":"BLOCK","head":"'
+             + ADV_HEAD + '"} -->"}\n-->')
+    body = outer  # the note holds an UNESCAPED start: the outer JSON is therefore junk
+    assert len(mod._marker_spans(body)) == 1, mod._marker_spans(body)
+    assert len(mod._marker_spans(body, nested=True)) == 2, mod._marker_spans(body, nested=True)
+
+
+def test_d1_an_escaped_nested_marker_is_still_not_a_second_verdict() -> None:
+    # The other direction: the cursor was dropped only in the rescue, and a marker quoted inside a
+    # VALID `note` is escaped, so its slice cannot parse as JSON and cannot become a BLOCK. Without
+    # this, every APPROVE documenting the format would come back as a conflict with itself.
+    nested = json.dumps({"verdict": "BLOCK", "head": ADV_HEAD})
+    note = "like <!-- adversary-verdict:v1 " + nested + " --> ok"
+    body = ('<!-- adversary-verdict:v1 '
+            + json.dumps({"verdict": "APPROVE", "head": ADV_HEAD, "note": note}) + ' -->')
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"], r
+    assert not r["conflict"] and not r["malformed"], r
+    assert passes(body)
