@@ -460,7 +460,16 @@ class TestSettingsTemplate(unittest.TestCase):
                  if "frontier_agent_gate.py" in h["command"]]
         self.assertEqual(len(hooks), 1)
         self.assertEqual(hooks[0].get("onFailure"), "block")
-        self.assertLessEqual(hooks[0].get("timeout", 600), 15)
+        self.assertEqual(hooks[0].get("timeout"), 15)
+
+    def test_a_plain_agent_call_exits_0_under_an_old_python(self):
+        # `onFailure: block` turns any startup failure into a block of every Agent/Task call; macOS /usr/bin/python3 is 3.9.
+        old = "/usr/bin/python3"
+        if not os.path.exists(old):
+            self.skipTest("no /usr/bin/python3")
+        r = subprocess.run([old, str(HOOK)], capture_output=True, text=True, timeout=10, input=json.dumps(
+            {"tool_name": "Agent", "tool_input": {"subagent_type": "general-purpose", "prompt": "x"}}))
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
 
 
 if __name__ == "__main__":
