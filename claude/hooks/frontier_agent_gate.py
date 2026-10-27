@@ -35,9 +35,9 @@ import stat
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 UTC = timezone.utc  # datetime.UTC needs Python 3.11; settings.json blocks on a hook that cannot start (macOS /usr/bin/python3 is 3.9)
-from pathlib import Path
 
 FRONTIER_AGENTS = {"fable-deep": "Fable"}
 STATE_DIR = Path.home() / ".local/state/frontier-gate"
