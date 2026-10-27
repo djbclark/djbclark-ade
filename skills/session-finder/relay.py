@@ -76,7 +76,9 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                caller; only nested `hermes -z` turns are counted, a fourth is refused; both variables are ignored when
                another agent sits between the relay and RELAY_HOP_PARENT, the pid of the relay that started the turn, such as a
                Claude session started in the turn; covers relays Hermes starts through its terminal tool or a background process, not from its
-               execute_code sandbox, which strips RELAY_*). Hermes's reply goes to a
+               execute_code sandbox, which strips RELAY_*). A relay made inside that turn, or by a native gateway conversation, speaks for THAT
+               conversation, not for the asker whose herdr pane the turn inherits: relay proves it from the full HERMES_SESSION_ID and its process tree
+               (`hermes_caller`), so an `ack ID` it sends closes an --expect-ack aimed at the conversation; it can never open one. Hermes's reply goes to a
                0600 file under RELAY_HERMES_DIR (default ~/.local/state/session-finder/relay-hermes, pruned after 7
                days) and is printed here as untrusted data: control, format and escape characters stripped, at most
                4000 characters (a cut reply's cleaned text is kept in the file, whose path is printed).
@@ -201,6 +203,7 @@ overrides a `?` that is no question. The record (sender, target, age) lives in <
 (its own tool calls and their results never count). A sender with a fleet row but NO readable transcript may use --expect-ack (2026-10-26): its
 record holds `"tx": null`, and relay itself closes it when the TARGET answers through relay.py with a text that BEGINS `ack ID`, sent to the
 session that opened it: both ends come from the fleet's `self` row and the record (id, and session id when both have one), never from the text,
+and a Hermes gateway conversation is the target's end when relay PROVES it (`hermes_caller`: the full HERMES_SESSION_ID equal to one live `hermes-gw` row's session id, and this process below that conversation's own turn process or the gateway process, no other agent between; never RELAY_SENDER, RELAY_HOPS or the 8-character label), compared by the full session id: a Hermes conversation can CLOSE an expectation with `ack ID` but never OPEN one (--expect-ack from it exits 2),
 and it counts only for a send whose delivery watch ran (never `--no-ack`) and that its route PROVED delivered, or handed to a Paseo daemon or an
 ACP or slice inbox that keeps the text (never refused, failed, pulled back, a pane's unproven "queued", queued for a deliverer, run by a deliverer, or one whose delivery watch ran and did not see the text). A sender WITH a
 transcript keeps exactly its old rule: only its own transcript showing the ack closes it. A third party, a quoted header, another or a
@@ -1179,6 +1182,58 @@ def hermes_native():
     a live session. A label of this shape in RELAY_SENDER_NAME is refused (`env_sender_label`)."""
     label = f"hermes {(os.environ.get('HERMES_SESSION_ID') or '').strip()[-8:]}"
     return label if HERMES_SENDER.fullmatch(label) else ""
+
+
+def descends_from(table, pid, anchor):
+    """True when walking up from PID in TABLE (pid -> (ppid, command), `fleet.proc_table`) reaches ANCHOR with no agent other than Hermes on the
+    way. Strict, unlike `turn_is_above` (which counts the top of the tree, right for a hop count, wrong for an identity): the top of the
+    tree, a pid missing from TABLE or 40 steps without ANCHOR is False, and so is a Claude, Codex or other agent session started inside a
+    Hermes turn, which inherits the turn's HERMES_SESSION_ID and must not speak as it."""
+    for _ in range(40):
+        if pid == anchor:
+            return True
+        if pid <= 1 or pid not in table:
+            return False
+        ppid, cmd = table[pid]
+        if any(fleet.PROC_AGENTS.get(os.path.basename(p)) not in (None, "hermes") for p in cmd.split()[:2]):
+            return False
+        pid = ppid
+    return False
+
+
+def hermes_turn_pid(sid):
+    """The pid `route_hermes` wrote into the lock file of conversation SID (the `hermes --resume SID -z` process, which holds the lock for the
+    whole turn, also one left running after the asker's relay returned), else None."""
+    try:
+        pid = hermes_lock_path(sid).read_text().strip()
+    except OSError:
+        return None
+    return int(pid) if pid.isdigit() else None
+
+
+def hermes_gateway_pid():
+    """The pid in `gateway.pid` beside Hermes's state.db (the process every native gateway conversation runs in), else None."""
+    try:
+        return int(json.loads((fleet.HERMES_DB.parent / "gateway.pid").read_text())["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def hermes_caller(listed):
+    """The Hermes gateway row (`hermes-gw`) this process speaks for, or None. Hermes exports HERMES_SESSION_ID to every command of a
+    conversation; it counts only when it equals, in full, the session id of exactly one live gateway row AND this process descends from
+    that conversation's turn process (the pid in its lock file) or from the gateway process, with no other agent between: a variable any
+    shell can set proves nothing alone. NOT trusted for identity: RELAY_SENDER, RELAY_HOPS, RELAY_HOP_PARENT, the 8-character label,
+    HERMES_SESSION_KEY. Never inside a deliverer (SENDER_OVERRIDE). Same-uid residuals (a deliberate forger inside the gateway process, an
+    omp or Paseo-hosted agent inside a turn, a rotated session id) are bounds, documented in docs/queue.md."""
+    sid = (os.environ.get("HERMES_SESSION_ID") or "").strip()
+    if SENDER_OVERRIDE[0] or not sid:
+        return None
+    rows = [x for x in listed if x.get("host") == "hermes-gw" and x.get("sid") == sid]
+    if len(rows) != 1:
+        return None
+    table, anchors = fleet.proc_table(), {hermes_turn_pid(sid), hermes_gateway_pid()} - {None}
+    return rows[0] if any(descends_from(table, os.getppid(), p) for p in anchors) else None
 
 
 def env_sender_label() -> str:
@@ -2853,12 +2908,12 @@ def expect_stamp(eid, me, s, mark, within):
 def expect_resolve_by_relay():
     """Resolve, from the relay's own send, the open expectations the text just sent answers (2026-10-26): a session with no readable transcript
     cannot see the reply in one, but every reply goes through relay.py, which knows both ends from the fleet, not from the text. The text
-    must BEGIN with `ack ID`; the caller (CTX["me"], fleet-derived) must be the expectation's target and the recipient (CTX["s"]) its sender,
+    must BEGIN with `ack ID`; the caller (fleet's `self` row, CTX["me"], or the Hermes conversation `hermes_caller` proves, CTX["caller"], matched by its full session id) must be the expectation's target and the recipient (CTX["s"]) its sender,
     each also matching the session id the record stored, so a third party, a new occupant of the pane, a header quoted in a text or a
     closed or reused ID changes nothing. It resolves ONLY records with no transcript (`tx` null): a transcript-backed record is closed by `ack_sweep` alone, from its own
     transcript. It counts only when the send's delivery watch ran and this send was proven delivered, or went to a route that keeps a text it cannot prove
     (CTX["accepted"], KEEPING_ROUTES: never a failed, refused, pulled, `--no-ack`, watched-and-unseen or pane-"queued" one), and never inside a deliverer (SENDER_OVERRIDE), which has no proof. The check and the write share one hold of the expectation lock, so a replayed ack finds it acked."""
-    me, s, text = CTX.get("me"), CTX.get("s"), CTX.get("text")
+    me, s, text = CTX.get("caller") or CTX.get("me"), CTX.get("s"), CTX.get("text")    # a Hermes caller (`hermes_caller`) has no `me`: it closes, never opens
     if SENDER_OVERRIDE[0]:    # a deliverer runs under the stored sender's label, not as a session: its inner send has no proof and its text depends on the queue time
         return 0
     if not (CTX.get("accepted") and isinstance(me, dict) and isinstance(s, dict) and isinstance(text, str) and isinstance(me.get("id"), str)
@@ -2871,7 +2926,8 @@ def expect_resolve_by_relay():
             t = r.get("target") if isinstance(r.get("target"), dict) else {}
             reserved = r.get("state") == "reserved" and now - _num(r.get("created"), now) < EXPECT_RESERVE_TTL    # its send is still running: an answer inside it is kept, not lost
             if ((r.get("state") == "open" or reserved) and not r.get("tx") and r.get("sender") == s["id"] and same_sid(r.get("sender_sid"), s.get("sid"))
-                    and t.get("id") == me["id"] and same_sid(t.get("sid") or t.get("sid8"), me.get("sid")) and ack_token(r["id"]).match(lead)):
+                    and t.get("id") == me["id"] and ack_token(r["id"]).match(lead)
+                    and (bool(me.get("sid")) and t.get("sid") == me["sid"] if me.get("host") == "hermes-gw" else same_sid(t.get("sid") or t.get("sid8"), me.get("sid")))):    # a gateway row: the full sid, exactly (its 8-character forms are a date and a suffix)
                 atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, "acked_via": "relay", **({"early": True} if reserved else {})})
                 closed.append((r, t))
     for r, t in closed:
@@ -3061,6 +3117,11 @@ def _main(argv=None, sweep=True):
             print(json.dumps({"sent": False, "error": "no_sender", "reason": why, "checked_env": list(SENDER_ENV),
                               "exit": NO_SENDER_EXIT}, ensure_ascii=False))
         return NO_SENDER_EXIT
+    caller = None if a.plan else hermes_caller(listed)
+    if caller is not None:    # this process speaks for that Hermes conversation: a `self` mark is its asker's (a relayed turn inherits the asker's pane), not its own
+        listed = [{**x, "self": False} if x.get("self") else x for x in listed]
+        me = None
+    CTX["caller"] = caller
     if not a.plan and not a.ack and not a.no_ack and (os.environ.get(NO_ACK_ENV) or "").strip().lower() not in ("1", "true", "yes", "on") \
             and sender_identified(listed, me):
         a.ack = a.ack_default = True    # L1, the delivery proof, is for every message from an agent session (djbclark, 2026-10-25); a declared job keeps the legacy exit codes
@@ -3082,7 +3143,7 @@ def _main(argv=None, sweep=True):
         if a.expect_ack:
             if me is None:
                 print("relay: not sent: --expect-ack needs a session an answer can reach, and this caller has none (a launchd script or "
-                      "RELAY_SENDER_NAME job cannot be answered)", file=sys.stderr)
+                      "RELAY_SENDER_NAME job cannot be answered; a Hermes conversation can close an expectation with `ack ID` but not open one)", file=sys.stderr)
                 return 2
             if not expect_reserve(a.expect_ack, me["id"]):
                 print(f"relay: not sent: an expectation {a.expect_ack!r} is already open (relay.py --pending); pick another ID", file=sys.stderr)

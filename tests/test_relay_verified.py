@@ -1288,23 +1288,36 @@ class TestCodexSenderRollout(Base):
 class TestExpectAnsweredInsideABlockingSend(Base):
     """Codex P2, PR 87 (2026-10-26): a sender with no transcript reserves its --expect-ack ID, then SENDS; the open record is written only after the send
     returns. A Hermes target answers inside that send (its route waits for the whole turn), so its `ack ID` reached the relay while the record was still
-    `reserved`, and was lost: the open record then went OVERDUE for a question that was answered. The route's send is the only stub here: the target's
-    answer is a real nested `relay.main` call (a real process in life), the resolver and the state files are the real ones."""
+    `reserved`, and was lost: the open record then went OVERDUE for a question that was answered. Codex P2 #2 (2026-10-27): the Hermes caller has NO
+    fleet `self` row (`fleet._hermes_gateway` builds its row with `self: False`), so the close never fired on the production identity path while
+    these tests fabricated one. Now the Hermes answer is run as production runs it: the gateway row is never `self`, the process has HERMES_SESSION_ID,
+    and `hermes_caller` proves it from the process tree (`answer_as_hermes`). The route's send is the only stub: the target's answer is a real nested
+    `relay.main` call (a real process in life), the resolver and the state files are the real ones; `fleet.proc_table`, `os.getppid`, `fleet.HERMES_DB` and
+    `relay.HERMES_DIR` are the fixtures of the process tree and Hermes's files."""
 
     HSID = "20261025_abcdef12"
+    TURN_PID, GATEWAY_PID, PPID, MID_PID = 5151, 4242, 7001, 7002
 
     def setUp(self) -> None:
         super().setUp()
+        os.environ.pop("HERMES_SESSION_ID", None)    # whatever Hermes runs the tests is not under test
         self.me.update(transcript=None, status="idle")
         self.hermes = sess(id=f"hermes:{self.HSID[-8:]}", agent="hermes", host="hermes-gw", sid=self.HSID, chan=None, name="tg-chat", status="idle")
         self.mallory = sess(id="ffffffff", name="mallory", sid="ffffffff-0000-4000-8000-000000000006", chan=("herdr", "w4:p4"), status="idle")
         self.nested: list[tuple[int, str, str]] = []
+        self.hdir = self.tmp / "relay-hermes"
+        self.hdir.mkdir()
+        hdb = self.tmp / "hermes" / "state.db"
+        hdb.parent.mkdir()
+        (hdb.parent / "gateway.pid").write_text(json.dumps({"pid": self.GATEWAY_PID, "kind": "hermes-gateway"}))
+        for target, name, value in ((relay, "HERMES_DIR", self.hdir), (relay.fleet, "HERMES_DB", hdb)):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-    def answer(self, who: Any, text: str, *argv: str, route: tuple[str, str, Any] = ("launch", "queued", None)) -> None:
-        """WHO (a fleet row) sends TEXT to alice through relay.py, as its own process would: main() resets the module's per-run CTX, so the
-        outer run's is put back."""
+    def run_nested(self, rows: list[dict[str, Any]], text: str, argv: tuple[str, ...], route: tuple[str, str, Any], *patches: Any) -> None:
+        """A nested `relay.main` to alice over ROWS with the route stubbed: main() resets the module's per-run CTX, so the outer run's is put back."""
         name, result, proof = route
-        rows = [{**self.me, "self": False}, {**who, "self": True}]
         outer_rows, saved_ctx = relay.fleet.sessions, dict(relay.CTX)
 
         def stub(c: dict[str, Any]) -> tuple[str, str, str]:
@@ -1314,14 +1327,44 @@ class TestExpectAnsweredInsideABlockingSend(Base):
         out, err = io.StringIO(), io.StringIO()
         relay.fleet.sessions = lambda: rows
         try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch.object(relay, "plan", lambda s: [name]), \
-                    mock.patch.dict(relay.ROUTES, {name: stub}):
+            with contextlib.ExitStack() as stack:
+                for ctx in (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch.object(relay, "plan", lambda s: [name]),
+                            mock.patch.dict(relay.ROUTES, {name: stub}), *patches):
+                    stack.enter_context(ctx)
                 rc = relay.main(["alice", text, "--wait", "1", *argv])
         finally:
             relay.fleet.sessions = outer_rows
             relay.CTX.clear()
             relay.CTX.update(saved_ctx)
         self.nested.append((rc, out.getvalue(), err.getvalue()))
+
+    def answer(self, who: Any, text: str, *argv: str, route: tuple[str, str, Any] = ("launch", "queued", None)) -> None:
+        """A SESSION WHO (a herdr pane, the real `self` path) sends TEXT to alice through relay.py as its own process would. Never a Hermes gateway
+        row: fleet gives that none (Codex P2 #2); use `answer_as_hermes`."""
+        self.assertNotEqual(who.get("host"), "hermes-gw", "a gateway row is never `self`: answer_as_hermes")
+        self.run_nested([{**self.me, "self": False}, {**who, "self": True}], text, argv, route)
+
+    def hermes_world(self, sid: str, anchor: Any = "turn", chain: dict[int, tuple[int, str]] | None = None, env: dict[str, str] | None = None,
+                     locks: dict[str, int] | None = None) -> list[Any]:
+        """The patches of a process that Hermes started: HERMES_SESSION_ID = SID (plus ENV), the process tree CHAIN (default: relay -> shell -> ANCHOR;
+        "turn" = the conversation's `hermes --resume -z` pid held in its lock file, "gateway" = the pid in gateway.pid, a pid number, or None for a tree
+        that reaches pid 1 with neither), and the lock files (this conversation's own turn pid, besides LOCKS: sid -> pid)."""
+        for lock_sid, pid in {self.HSID: self.TURN_PID, **(locks or {})}.items():
+            relay.hermes_lock_path(lock_sid).write_text(f"{pid}\n")
+        anchor_pid = {"turn": self.TURN_PID, "gateway": self.GATEWAY_PID}.get(anchor) if isinstance(anchor, str) else anchor
+        table = chain if chain is not None else {self.PPID: (self.MID_PID, "/bin/zsh -c relay.py"),
+                                                 self.MID_PID: (anchor_pid or 1, "python3 -I -c import os"), **({anchor_pid: (1, "launchd")} if anchor_pid else {})}
+        return [mock.patch.dict(os.environ, {"HERMES_SESSION_ID": sid, **(env or {})}), mock.patch.object(relay.fleet, "proc_table", lambda: table),
+                mock.patch.object(relay.os, "getppid", lambda: self.PPID)]
+
+    def answer_as_hermes(self, sid: str, text: str, *argv: str, rows: list[dict[str, Any]] | None = None, deliverer: str | None = None,
+                         route: tuple[str, str, Any] = ("launch", "queued", None), **world: Any) -> None:
+        """The production identity of a Hermes conversation answering alice through relay.py: no `self` mark on its row, the `hermes_world` of SID
+        (ANCHOR, CHAIN, ENV, LOCKS as there), ROWS (default: alice and the conversation, nothing `self`), DELIVERER a label to run as (a deliverer)."""
+        patches = self.hermes_world(sid, **world)
+        if deliverer:
+            patches.append(mock.patch.object(relay, "SENDER_OVERRIDE", [deliverer]))
+        self.run_nested(rows if rows is not None else [{**self.me, "self": False}, self.hermes], text, argv, route, *patches)
 
     def ask(self, during: Any, *argv: str, verdict: tuple[str, str, Any] = ("ok", "hermes turn", "delivered"), eid: str = "q1") -> tuple[int, str, str]:
         """alice asks the Hermes target; its route blocks, and DURING it runs `during()`; the route then returns VERDICT."""
@@ -1340,7 +1383,7 @@ class TestExpectAnsweredInsideABlockingSend(Base):
         self.assertEqual((seen[0]["state"], seen[0]["sender"], seen[0]["target"]["id"], seen[0]["tx"]), ("reserved", "bbbbbbbb", self.hermes["id"], None))
 
     def test_a_hermes_answer_inside_the_blocking_send_closes_it_and_it_never_goes_overdue(self) -> None:
-        rc, out, err = self.ask(lambda: self.answer(self.hermes, "ack q1: green"))
+        rc, out, err = self.ask(lambda: self.answer_as_hermes(self.HSID, "ack q1: green"))    # the turn the asker's relay started: its anchor is the lock-file pid
         self.assertEqual(rc, 0, (out, err))
         self.assertEqual(self.nested[0][0], 3, self.nested)    # alice has no transcript: the answer was accepted, not provable
         rec = relay.expect_read("q1")
@@ -1360,14 +1403,14 @@ class TestExpectAnsweredInsideABlockingSend(Base):
     def test_an_answer_after_the_send_returned_still_closes_the_open_record(self) -> None:
         self.assertEqual(self.ask(lambda: None)[0], 0)
         self.assertEqual(relay.expect_read("q1")["state"], "open")
-        self.answer(self.hermes, "ack q1")
+        self.answer_as_hermes(self.HSID, "ack q1", anchor="gateway")    # the send returned: a native gateway conversation, no turn of ours
         self.assertEqual(relay.expect_read("q1")["state"], "acked")
 
     def test_a_send_that_did_not_happen_leaves_no_record_even_when_something_answered(self) -> None:
         rc, out, err = self.ask(lambda: None, verdict=("stop", "the route refused it", 1))
         self.assertEqual(rc, 1, (out, err))
         self.assertIsNone(relay.expect_read("q1"), "a refused send releases the ID")
-        rc, out, err = self.ask(lambda: self.answer(self.hermes, "ack q1"), verdict=("stop", "the route refused it", 1))
+        rc, out, err = self.ask(lambda: self.answer_as_hermes(self.HSID, "ack q1"), verdict=("stop", "the route refused it", 1))
         self.assertEqual(rc, 1, (out, err))
         self.assertIsNone(relay.expect_read("q1"), "never an `acked` for a send that did not happen")
 
@@ -1376,40 +1419,128 @@ class TestExpectAnsweredInsideABlockingSend(Base):
         self.assertEqual(rc, 1, (out, err))
         self.assertIsNone(relay.expect_read("q1"))
 
-    def asked_and_answered(self, who: Any, text: str, eid: str, *answer_argv: str) -> None:
-        """A real case: the ask succeeds (rc 0) and WHO's answer ran as a nested relay inside its blocking send. Each case has its own ID, so the
-        ask is never refused as a duplicate (adversary r5 F2: an `open` ID refused the later cases before they ran)."""
+    def asked_and_answered(self, text: str, eid: str, *answer_argv: str, who: Any = None, nested_rc: int = 3, **hermes: Any) -> None:
+        """A real case: the ask succeeds (rc 0) and the answer ran as a nested relay inside its blocking send, with exit NESTED_RC (3: alice has no
+        transcript, so the answer was accepted, not provable). The answerer is WHO, a herdr session (the real `self` path), else the Hermes conversation
+        HERMES["sid"] (default HSID) as production runs it (`answer_as_hermes`). Each case has its own ID, so the ask is never refused as a duplicate
+        (adversary r5 F2: an `open` ID refused the later cases before they ran)."""
+        sid = hermes.pop("sid", self.HSID)
         ran = len(self.nested)
-        rc, out, err = self.ask(lambda: self.answer(who, text, *answer_argv), eid=eid)
+        send = (lambda: self.answer(who, text, *answer_argv)) if who else (lambda: self.answer_as_hermes(sid, text, *answer_argv, **hermes))
+        rc, out, err = self.ask(send, eid=eid)
         self.assertEqual(rc, 0, (eid, out, err))
         self.assertEqual(len(self.nested), ran + 1, f"the nested answer for {eid} did not run")
+        self.assertEqual(self.nested[-1][0], nested_rc, (eid, self.nested[-1]))
 
-    def test_another_id_a_third_party_or_a_stale_reservation_close_nothing(self) -> None:
-        self.asked_and_answered(self.hermes, "ack q9", "q1")
+    def test_another_id_a_third_party_a_missing_watch_or_a_stale_reservation_close_nothing(self) -> None:
+        self.asked_and_answered("ack q9", "q1")
         self.assertEqual(relay.expect_read("q1")["state"], "open", "another id")
-        self.asked_and_answered(self.mallory, "ack q2", "q2")
+        self.asked_and_answered("ok, ack q6", "q6")
+        self.assertEqual(relay.expect_read("q6")["state"], "open", "the token is not at the start of the text")
+        self.asked_and_answered("ack q2", "q2", who=self.mallory)
         self.assertEqual(relay.expect_read("q2")["state"], "open", "a third party")
-        self.asked_and_answered(self.hermes, "ack q3 yes", "q3", "--no-ack")
+        self.asked_and_answered("ack q3 yes", "q3", "--no-ack", nested_rc=0)
         self.assertEqual(relay.expect_read("q3")["state"], "open", "a send with no delivery watch")
-        occupant = {**self.hermes, "sid": "20261025_99999999"}    # the same Hermes id, a new occupant (another session id)
-        self.asked_and_answered(occupant, "ack q4", "q4")
-        self.assertEqual(relay.expect_read("q4")["state"], "open", "the same id, another session")
 
         def stale() -> None:
             path = relay.expect_dir() / "q5.json"
             rec = json.loads(path.read_text())
             rec["created"] -= relay.EXPECT_RESERVE_TTL + 5
             path.write_text(json.dumps(rec))
-            self.answer(self.hermes, "ack q5")
+            self.answer_as_hermes(self.HSID, "ack q5")
         rc, out, err = self.ask(stale, eid="q5")
         self.assertEqual(rc, 0, (out, err))
         self.assertEqual(relay.expect_read("q5")["state"], "open", "a reservation past its TTL")
+
+    def test_a_relayed_turn_keeps_the_asker_s_herdr_pane_out_of_its_identity_and_closes(self) -> None:
+        """A2 (D1): a relayed Hermes turn inherits its asker's HERDR_PANE_ID, so fleet marks the asker's row `self`; the answer to that very asker was refused
+        as 'that is this session' and could never close. A recognised Hermes caller drops that mark."""
+        asker_self = [{**self.me, "self": True}, self.hermes]
+        rc, out, err = self.ask(lambda: self.answer_as_hermes(self.HSID, "ack q1: green", rows=asker_self))
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.nested[0][0], 3, self.nested)
+        self.assertNotIn("this session", self.nested[0][2])
+        rec = relay.expect_read("q1")
+        self.assertEqual((rec["state"], rec.get("acked_via"), rec.get("early")), ("acked", "relay", True), rec)
+
+    def test_a_hermes_caller_is_refused_the_open_not_the_close(self) -> None:
+        """A Hermes conversation closes an expectation by relay but never opens one (E4): the refusal stays, exit 2, and says what a Hermes caller can do."""
+        self.answer_as_hermes(self.HSID, "is it green?", "--expect-ack", "q7", anchor="gateway")
+        rc, _, err = self.nested[-1]
+        self.assertEqual(rc, 2, err)
+        self.assertIn("close an expectation with `ack ID` but not open one", err)
+        self.assertIsNone(relay.expect_read("q7"))
+        self.answer_as_hermes("", "is it green?", "--expect-ack", "q8")    # no HERMES_SESSION_ID, no session: as before
+        rc, _, err = self.nested[-1]
+        self.assertEqual(rc, 2, err)
+        self.assertIn("this caller has none", err)
+        self.assertIsNone(relay.expect_read("q8"))
+
+    def test_identity_another_conversation_with_the_same_last_eight_characters_closes_nothing(self) -> None:
+        other = {**self.hermes, "sid": "20261026_abcdef12"}    # the same row id `hermes:abcdef12`, another day: only the full sid tells them apart
+        self.asked_and_answered("ack q1", "q1", sid=other["sid"], rows=[{**self.me, "self": False}, self.hermes, other], locks={other["sid"]: 5152}, anchor=5152)
+        self.assertEqual(relay.expect_read("q1")["state"], "open")
+
+    def test_identity_a_new_occupant_of_the_same_id_closes_nothing(self) -> None:
+        occupant = {**self.hermes, "sid": "20261025_99999999"}    # the same Hermes id, a new occupant (another session id)
+        self.asked_and_answered("ack q1", "q1", sid=occupant["sid"], rows=[{**self.me, "self": False}, occupant], locks={occupant["sid"]: 5153}, anchor=5153)
+        self.assertEqual(relay.expect_read("q1")["state"], "open")
+
+    def test_identity_forged_environment_in_a_plain_shell_closes_nothing(self) -> None:
+        forged = {"RELAY_HOPS": "1", "RELAY_SENDER": "hermes abcdef12", "RELAY_HOP_PARENT": str(self.MID_PID + 90)}
+        self.asked_and_answered("ack q1", "q1", anchor=None, env=forged)
+        self.assertEqual(relay.expect_read("q1")["state"], "open", "the right variables, no Hermes anywhere above this process")
+
+    def test_identity_a_claude_session_inside_the_turn_closes_nothing(self) -> None:
+        chain = {self.PPID: (self.MID_PID, "/bin/zsh -c relay.py"), self.MID_PID: (7003, "/usr/local/bin/claude --resume"),
+                 7003: (self.TURN_PID, "python3 -I -c import os"), self.TURN_PID: (1, "launchd")}
+        self.asked_and_answered("ack q1", "q1", chain=chain)
+        self.assertEqual(relay.expect_read("q1")["state"], "open", "an agent between the relay and the turn is that agent's, not Hermes's")
+
+    def test_identity_a_turn_of_another_conversation_closes_nothing(self) -> None:
+        self.asked_and_answered("ack q1", "q1", anchor=6262, locks={"20261025_00000001": 6262})    # claims HSID from inside the turn of another conversation
+        self.assertEqual(relay.expect_read("q1")["state"], "open")
+
+    def test_identity_a_delegated_child_closes_nothing_of_its_parent(self) -> None:
+        child = sess(id="hermes:cccccccc", agent="hermes", host="hermes-gw", sid="20261025_cccccccc", chan=None, name="delegate", status="idle")
+        self.asked_and_answered("ack q1", "q1", sid=child["sid"], anchor="gateway", rows=[{**self.me, "self": False}, self.hermes, child])
+        self.assertEqual(relay.expect_read("q1")["state"], "open")
+
+    def test_identity_a_session_id_that_is_a_prefix_or_an_extension_of_the_row_s_closes_nothing(self) -> None:
+        self.asked_and_answered("ack q1", "q1", sid=self.HSID[:-3], anchor="gateway")
+        self.assertEqual(relay.expect_read("q1")["state"], "open", "a strict prefix")
+        self.asked_and_answered("ack q2", "q2", sid=self.HSID + "0", anchor="gateway")
+        self.assertEqual(relay.expect_read("q2")["state"], "open", "an extension")
+
+    def test_identity_a_record_that_only_holds_the_date_prefix_stays_open(self) -> None:
+        """An 8-character form of a Hermes sid is a date shared by every conversation of that day: it never closes a record (A3)."""
+        def thin() -> None:
+            path = relay.expect_dir() / "q1.json"
+            rec = json.loads(path.read_text())
+            rec["target"].pop("sid", None)
+            rec["target"]["sid8"] = self.HSID[:8]
+            path.write_text(json.dumps(rec))
+            self.answer_as_hermes(self.HSID, "ack q1", anchor="gateway")
+        rc, out, err = self.ask(thin)
+        self.assertEqual((rc, len(self.nested), self.nested[0][0]), (0, 1, 3), (out, err, self.nested))
+        self.assertEqual(relay.expect_read("q1")["state"], "open")
+
+    def test_identity_a_deliverer_never_speaks_as_hermes(self) -> None:
+        self.asked_and_answered("ack q1", "q1", deliverer="codex dddddddd (w)", nested_rc=0)
+        self.assertEqual(relay.expect_read("q1")["state"], "open", "a deliverer has no proof")
+        with contextlib.ExitStack() as stack:
+            for patch in self.hermes_world(self.HSID, anchor="gateway"):
+                stack.enter_context(patch)
+            rows = [{**self.me, "self": False}, self.hermes]
+            self.assertEqual(relay.hermes_caller(rows), self.hermes)
+            with mock.patch.object(relay, "SENDER_OVERRIDE", ["codex dddddddd (w)"]):
+                self.assertIsNone(relay.hermes_caller(rows))
 
     def test_a_second_relay_cannot_take_the_id_while_the_answered_send_is_still_running(self) -> None:
         """adversary r5 F1: the early ack closed the reservation, which freed the ID mid-send; a second relay then reserved it, and the first
         relay's open step reopened its answered question and overwrote the second's reservation."""
         took: list[bool] = []
-        self.ask(lambda: (self.answer(self.hermes, "ack q1"), took.append(relay.expect_reserve("q1", "cccccccc"))))
+        self.ask(lambda: (self.answer_as_hermes(self.HSID, "ack q1"), took.append(relay.expect_reserve("q1", "cccccccc"))))
         self.assertEqual(took, [False], "an early-acked ID still belongs to its running send")
         rec = relay.expect_read("q1")
         self.assertEqual((rec["state"], rec["sender"], rec.get("early"), rec.get("sent")), ("acked", "bbbbbbbb", True, True), rec)
@@ -1421,13 +1552,13 @@ class TestExpectAnsweredInsideABlockingSend(Base):
 
     def test_an_early_acked_id_is_free_the_moment_its_send_returns(self) -> None:
         """adversary r6 N1 (Q5): no aging here, so this is the `sent` mark at work, not the TTL."""
-        self.ask(lambda: self.answer(self.hermes, "ack q1"))
+        self.ask(lambda: self.answer_as_hermes(self.HSID, "ack q1"))
         self.assertTrue(relay.expect_reserve("q1", "cccccccc"), "a returned early-acked send frees its ID at once")
 
     def test_an_early_acked_record_whose_relay_died_before_its_send_returned_frees_after_the_ttl(self) -> None:
         """adversary r6 N2: a relay that died mid-send leaves an acked+early record with no `sent`; the snapshot taken inside the send stands in for it."""
         snap: list[dict[str, Any]] = []
-        self.ask(lambda: (self.answer(self.hermes, "ack q1"), snap.append(relay.expect_read("q1"))))
+        self.ask(lambda: (self.answer_as_hermes(self.HSID, "ack q1"), snap.append(relay.expect_read("q1"))))
         rec_path = relay.expect_dir() / "q1.json"
         rec_path.write_text(json.dumps(snap[0]))    # the record as the dead relay left it
         self.assertEqual((snap[0]["state"], snap[0].get("early"), snap[0].get("sent")), ("acked", True, None))
@@ -1442,7 +1573,7 @@ class TestExpectAnsweredInsideABlockingSend(Base):
         took: list[bool] = []
 
         def during() -> None:
-            self.answer(self.hermes, "ack q1")
+            self.answer_as_hermes(self.HSID, "ack q1")
             path = relay.expect_dir() / "q1.json"
             rec = json.loads(path.read_text())
             rec["created"] -= relay.EXPECT_RESERVE_TTL + 5
@@ -1456,14 +1587,14 @@ class TestExpectAnsweredInsideABlockingSend(Base):
     def test_a_route_that_raises_after_an_early_ack_drops_the_record(self) -> None:
         """Known, accepted choice (adversary r5 F4): the send did not finish, so nothing is recorded and the ID is free."""
         def boom() -> None:
-            self.answer(self.hermes, "ack q1")
+            self.answer_as_hermes(self.HSID, "ack q1")
             raise RuntimeError("route died")
         with self.assertRaises(RuntimeError):
             self.ask(boom)
         self.assertIsNone(relay.expect_read("q1"))
 
     def test_an_unproven_pane_queue_inside_the_blocking_send_closes_nothing(self) -> None:
-        self.ask(lambda: self.answer(self.hermes, "ack q1", route=("pane", "queued", None)))
+        self.ask(lambda: self.answer_as_hermes(self.HSID, "ack q1", route=("pane", "queued", None)))
         self.assertEqual(relay.expect_read("q1")["state"], "open")
 
 
