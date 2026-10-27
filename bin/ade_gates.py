@@ -10,7 +10,7 @@ unparsable) < gates.toml baseline < the active profile < env JSON (CLAUDE_GOVERN
 CLAUDE_QUOTA_GUARD_THRESHOLDS; tests and emergencies; bad input raises GateEnvError). The `frontier` gate has NO threshold
 env override: its keys are the frontier allowance (docs/gates.md; a standing baseline since 2026-10-27), and a threshold an
 agent can put in the environment must not widen it. The path variables still redirect the INPUTS (GATES_TOML,
-GATE_PROFILE_STATE; acp-dispatch also CLAUDE_QUOTA_GUARD_STATE and HOME), so a CLI consumer started by an agent can be
+GATE_PROFILE_STATE; acp-dispatch and route_agent also CLAUDE_QUOTA_GUARD_STATE and HOME), so a CLI consumer started by an agent can be
 pointed at a self-written gates.toml or profile: a `frontier_judged` record in a dispatch record is an audit trail, not proof
 that the allowance was granted. The Claude Code hook takes its environment from the Claude process, which a session cannot change.
 
@@ -338,11 +338,12 @@ def toml_baselines(cfg: dict[str, Any]) -> dict[str, dict[str, float]]:
 
 # -- the profile state file ------------------------------------------------------------------------------------------
 
-def _read_regular(path: Path) -> tuple[bytes | None, str | None]:
+def _read_regular(path: Path, follow: bool = False) -> tuple[bytes | None, str | None]:
     """(bytes, None) | (None, None) when absent | (None, why) for a symlink, FIFO, directory, device, oversized or unreadable file.
-    Never blocks (O_NONBLOCK) and never follows a final symlink (O_NOFOLLOW); the type is checked on the open descriptor."""
+    Never blocks (O_NONBLOCK) and, unless `follow`, never follows a final symlink (O_NOFOLLOW); the type is checked on the open
+    descriptor. `follow=True` is for the quota guard's state file, which the hook also reads without O_NOFOLLOW."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW) | os.O_CLOEXEC)
     except FileNotFoundError:
         return None, None
     except OSError as e:
@@ -559,10 +560,14 @@ def guard_state_path() -> Path:
 
 
 def read_guard_state() -> Any:
-    """The parsed quota guard state, or None when the file is missing or unreadable (`judged_guard_block` fails closed on None)."""
+    """The parsed quota guard state, or None when the file is missing, not a regular file, over 64 KiB or unparsable
+    (`judged_guard_block` fails closed on None). Never blocks on a FIFO (same open as the hook's `_guard_state`)."""
+    raw, _ = _read_regular(guard_state_path(), follow=True)
+    if raw is None:
+        return None
     try:
-        return json.loads(guard_state_path().read_text())
-    except (OSError, ValueError):
+        return json.loads(raw)
+    except ValueError:
         return None
 
 

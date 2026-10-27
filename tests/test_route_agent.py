@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -677,6 +678,18 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
     def claude_slices() -> int:
         rows = r.plan(["frontier"] * 3, quota=IDLE)
         return sum(1 for _, c in rows if c and c.service.name == "claude")
+
+    def test_a_guard_state_path_that_is_a_fifo_is_a_closed_guard_not_a_hang_in_the_planner(self):
+        """The shared guard-state reader opens O_NONBLOCK and checks fstat: a FIFO there means no state (fails closed, claude cap 1)."""
+        env = self.gate_env(profile=False, guard=None)
+        os.mkfifo(env["CLAUDE_QUOTA_GUARD_STATE"])
+        script = ("import sys; sys.path.insert(0, sys.argv[1]); import route_agent as r; "
+                  "rows = r.plan(['frontier'] * 3, quota=None); "
+                  "print(sum(1 for _, c in rows if c and c.service.name == 'claude'))")
+        res = subprocess.run([sys.executable, "-I", "-c", script, str(Path(r.__file__).resolve().parent)],
+                             env={**env, "PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")},
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual((res.returncode, res.stdout.strip()), (0, "1"), res.stderr)
 
     def test_the_standing_per_wave_cap_needs_the_guard_to_pass_at_tight_critical_stale_and_missing(self):
         """Operator ruling 2026-10-27: quota-guard tight/critical STOPS the allowance; a stale or missing state fails closed. The planner

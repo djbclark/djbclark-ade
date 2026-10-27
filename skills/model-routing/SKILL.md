@@ -609,7 +609,8 @@ method that runs the waves.
        astra (frontier-only).
    1b. **`frontier`** is the only route to codex `gpt-6-astra` (`--kind
        frontier --effort high`) or Fable 5.1 (`--kind frontier --effort high`):
-       one slice per pool per wave, for
+       one slice per pool per wave (two on claude under the standing allowance of 2026-10-27
+       while the quota guard passes, `docs/gates.md`), for
        work that really needs a frontier model to look it over. Examples: a
        security-relevant or concurrency fix's final review, debugging that
        has defeated real attempts, an adjudication no cheaper model settles, a

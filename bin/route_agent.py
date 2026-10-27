@@ -58,7 +58,8 @@ preferences, because they encode consequences a score cannot see:
 - judgment goes to claude's Opus 5.5 at high first, omp's Opus next, and (2026-10-25) codex's gpt-6.1-sol
   at high only while every window has plenty_min left; the two frontier models, Claude
   Fable 5.1 and codex's gpt-6-astra, are reached ONLY through the explicit
-  `frontier` kind, at most one slice per pool per wave, for work that really
+  `frontier` kind, at most one slice per pool per wave (two on claude under the
+  standing allowance of 2026-10-27 while the quota guard passes: docs/gates.md), for work that really
   needs them (operator 2026-10-18: a wave of four astra slices emptied
   codex's 5-hour window and every one stopped; Fable at xhigh should almost
   never run). Everyday work goes to the other pools, and ALSO to codex's

@@ -1386,3 +1386,36 @@ def test_frontier_reason_form(text, ok):
         assert reason == text.strip() and problem is None
     else:
         assert reason is None and problem
+
+
+_READ_GUARD = "import sys; sys.path.insert(0, sys.argv[1]); import ade_gates as g; print(repr(g.read_guard_state()))"
+
+
+def _read_guard_bounded(path: Path) -> str:
+    """`read_guard_state()` in a child with a 10 s kill: a reader that blocks on a FIFO fails the test (TimeoutExpired) instead of hanging the run."""
+    r = subprocess.run([sys.executable, "-I", "-c", _READ_GUARD, str(BIN)], env={"CLAUDE_QUOTA_GUARD_STATE": str(path), "PATH": os.environ["PATH"]},
+                       capture_output=True, text=True, timeout=10, check=True)
+    return r.stdout.strip()
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dir", "oversized", "missing"])
+def test_the_guard_state_file_must_be_a_small_regular_file_never_waited_on(tmp_path, kind):
+    path = tmp_path / "quota-guard.json"
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "dir":
+        path.mkdir()
+    elif kind == "oversized":
+        path.write_text(json.dumps({"level": "ok", "pad": "x" * 70000}))
+    assert _read_guard_bounded(path) == "None"
+
+
+def test_the_guard_state_file_still_reads_as_a_regular_file_or_a_link_to_one(tmp_path):
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"level": "ok", "pad": "x" * 30000}))
+    assert "'level': 'ok'" in _read_guard_bounded(real)
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    assert "'level': 'ok'" in _read_guard_bounded(link)         # the hook's reader follows a link too: behaviour kept
+    real.write_text("not json")
+    assert _read_guard_bounded(real) == "None"
