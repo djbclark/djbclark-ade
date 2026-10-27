@@ -18,7 +18,13 @@ jobs:
   pytest:
     if: ${{ github.event.inputs.context_only != 'true' }}
     runs-on: macos-latest
-    timeout-minutes: 30
+    # 45, not 30: the macOS runner is the slow leg. Four consecutive green runs measured 1446 s,
+    # 1588 s, 1615 s and 1702 s against a 1800 s cap, and on 2026-10-27 the suite crossed it —
+    # run 40533487414 was cancelled with "The job has exceeded the maximum execution time of
+    # 30m0s" while pytest-linux passed in 17m0s and context-policy in 14 s. The cap has to sit
+    # above the suite's real cost plus drift, or a slow runner reports a wall-clock timeout as a
+    # code failure. pytest-linux stays at 30 (1130-1150 s measured): raise it when it needs it.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout

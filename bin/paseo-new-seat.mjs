@@ -27,7 +27,7 @@ const has = (name) => argv.includes(name);
 
 if (argv.length === 0 || has("--help") || has("-h")) {
   console.error("usage: paseo-new-seat.mjs create --title T --provider P --model M --cwd D "
-    + "[--prompt TEXT] [--workspace ID] [--thinking ID] [--label k=v]... [--json] [--auto-accept] [--dry-run]");
+    + "[--prompt TEXT] [--workspace ID] [--thinking ID] [--mode ID] [--label k=v]... [--json] [--auto-accept] [--dry-run]");
   process.exit(argv.length ? 0 : 2);
 }
 if (argv[0] !== "create") {
@@ -45,6 +45,7 @@ const allowNewWorkspace = has("--allow-new-workspace");
 const autoAccept = has("--auto-accept");
 const dryRun = has("--dry-run");
 const thinking = opt("--thinking");
+const mode = opt("--mode");
 const wantJson = has("--json");
 // --label k=v, repeatable (bin/watch tags the agents it starts with watch=<domain>)
 const labels = {};
@@ -80,7 +81,7 @@ const config = {
 
 if (dryRun) {
   console.log(JSON.stringify({ title, provider, cwd, workspaceId: workspaceId ?? null,
-    prompt: prompt ?? null, config, thinkingOptionId: thinking ?? null, labels }, null, 1));
+    prompt: prompt ?? null, config, modeId: mode ?? null, thinkingOptionId: thinking ?? null, labels }, null, 1));
   process.exit(0);
 }
 
@@ -94,6 +95,7 @@ async function work() {
     provider, cwd, title, config,
     ...(workspaceId ? { workspaceId } : {}),
     ...(thinking ? { thinkingOptionId: thinking } : {}),
+    ...(mode ? { modeId: mode } : {}),
     ...(Object.keys(labels).length ? { labels } : {}),
     ...(prompt ? { initialPrompt: prompt } : {}),
   });
@@ -106,31 +108,49 @@ async function work() {
     return 0;
   }
 
-  // Verify the shield from the agent's own state file, which is what the UI icon reflects.
-  const slug = String(cwd).replace(/\//g, "-").replace(/^-/, "");
-  const stateFile = path.join(os.homedir(), ".paseo", "agents", slug, `${id}.json`);
-  const readFeature = () => {
+  // Verify from the agent's own state file, which is what the UI reflects. The file lives under the
+  // agent's REAL cwd, and the daemon runs a workspace's agents in the workspace's cwd whatever --cwd says
+  // (2026-10-27), so find it by id instead of deriving the directory from --cwd.
+  const agentsDir = path.join(os.homedir(), ".paseo", "agents");
+  const findState = () => {
     try {
-      const d = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-      const feats = d.features ?? [];
-      const f = feats.find((x) => x?.id === "auto_accept");
-      if (f) return f.value === true;
-      // The provider published other features but not this one (omp: only fast_mode; its default
-      // mode is already Full Access): nothing to switch on, so not a failure. An empty list may just
-      // be a provider that has not loaded its features yet, so that stays unverified.
-      return feats.length > 0 ? "n/a" : undefined;
-    } catch { return undefined; }
+      for (const d of fs.readdirSync(agentsDir)) {
+        const f = path.join(agentsDir, d, `${id}.json`);
+        if (fs.existsSync(f)) return f;
+      }
+    } catch { /* not there yet */ }
+    return undefined;
   };
+  const readState = () => {
+    try { return JSON.parse(fs.readFileSync(findState(), "utf8")); } catch { return undefined; }
+  };
+  const readFeature = () => {
+    const d = readState();
+    if (!d) return undefined;
+    const feats = d.features ?? [];
+    const f = feats.find((x) => x?.id === "auto_accept");
+    if (f) return f.value === true;
+    // The provider published other features but not this one (omp: only fast_mode; its default
+    // mode is already Full Access): nothing to switch on, so not a failure. An empty list may just
+    // be a provider that has not loaded its features yet, so that stays unverified.
+    return feats.length > 0 ? "n/a" : undefined;
+  };
+  const modeOk = () => !mode || readState()?.lastModeId === mode;
   let on = readFeature();
-  for (let i = 0; i < 20 && on !== true && on !== "n/a"; i++) {
+  for (let i = 0; i < 20 && !((on === true || on === "n/a") && modeOk()); i++) {
     await new Promise((r) => setTimeout(r, 250));
     on = readFeature();
   }
-  if (wantJson) console.log(JSON.stringify({ id, shortId: id.slice(0, 8), autoAccept: on === "n/a" ? null : on === true }));
-  else console.log(on === true ? "auto_accept: on (verified)"
-    : on === "n/a" ? "auto_accept: not offered by this provider (nothing to switch on)"
-    : "auto_accept: NOT verified - the shield may be grey; run paseo-set-model autoaccept " + id.slice(0, 8));
-  return on === true || on === "n/a" ? 0 : 4;
+  const fine = (on === true || on === "n/a") && modeOk();
+  if (wantJson) console.log(JSON.stringify({ id, shortId: id.slice(0, 8), autoAccept: on === "n/a" ? null : on === true,
+    ...(mode ? { mode, modeApplied: modeOk() } : {}) }));
+  else {
+    console.log(on === true ? "auto_accept: on (verified)"
+      : on === "n/a" ? "auto_accept: not offered by this provider (nothing to switch on)"
+      : "auto_accept: NOT verified - the shield may be grey; run paseo-set-model autoaccept " + id.slice(0, 8));
+    if (mode) console.log(modeOk() ? `mode: ${mode} (verified)` : `mode: ${mode} NOT applied; run paseo agent mode ${id.slice(0, 8)} ${mode}`);
+  }
+  return fine ? 0 : 4;
 }
 
 try {
