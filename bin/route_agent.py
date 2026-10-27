@@ -1267,10 +1267,26 @@ def frontier_gate() -> dict[str, float]:
     return ade_gates.load_frontier()[0]
 
 
-def frontier_per_wave(pool: str, gate: dict[str, float] | None = None) -> int:
-    """Most frontier slices one wave puts on `pool`: frontier1_per_wave for claude, frontier2_per_wave for every other pool."""
+def frontier_per_wave(pool: str, gate: dict[str, float] | None = None, quota: dict[str, Any] | None = None,
+                      now: datetime | None = None) -> int:
+    """Most frontier slices one wave puts on `pool`: frontier1_per_wave for claude, frontier2_per_wave for every other pool.
+
+    A cap above the closed per-wave (ade_gates.FRONTIER_DEFAULTS, 1) is the standing allowance (gates.toml, docs/gates.md), and it holds only
+    while that allowance's own checks pass (2026-10-27, adversary round 1 P1): the family's `*_judged` key at 1 or more, and
+    `ade_gates.judged_pool_block` (the one copy acp-dispatch's grant uses) empty: for claude a fresh quota guard state at ok or at watch for
+    the weekly window with the Fable cap above its floor, so a missing, stale, tight or critical guard falls back to the closed cap; for
+    any other pool its reading in `quota` at least frontier2_min_left. Otherwise the closed per-wave."""
     gate = gate or frontier_gate()
-    return int(gate["frontier1_per_wave" if pool == "claude" else "frontier2_per_wave"])
+    fam = 1 if pool == "claude" else 2
+    cap = int(gate[f"frontier{fam}_per_wave"])
+    closed = int(ade_gates.FRONTIER_DEFAULTS[f"frontier{fam}_per_wave"])
+    if cap <= closed:
+        return cap
+    if gate.get(f"frontier{fam}_judged", 0) < 1:
+        return closed
+    block = ade_gates.judged_pool_block(fam, gate, now or datetime.now(UTC), ade_gates.read_guard_state() if fam == 1 else None,
+                                        ((quota or {}).get(pool) or {}).get("remaining"))
+    return closed if block else cap
 
 
 GOVERNOR_STATE = Path.home() / ".local" / "state" / "ade" / "fleet-governor.json"   # CLAUDE_GOVERNOR_STATE overrides
@@ -1522,7 +1538,7 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
         skip = full
         if kind == "frontier":
             gate = frontier_gate()
-            skip = full | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate)}
+            skip = full | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
         choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip)
         if choice is not None:
             name = choice.service.name

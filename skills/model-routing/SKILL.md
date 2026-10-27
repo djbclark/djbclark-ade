@@ -658,7 +658,7 @@ method that runs the waves.
        pool, and (Agent tool, Fable) `frontier1_agent_calls_per_day` (4) calls per
        New York day. It needs a fresh quota-guard state at level `ok` (or `watch`
        for the weekly window alone) with the Fable cap at least
-       `frontier1_min_left`; at `tight`/`critical`, stale data or an exhausted
+       `frontier1_min_left` (the planner's 2-per-wave claude cap too: at the closed 1 without it); at `tight`/`critical`, stale or missing data or an exhausted
        cap the closed rules stand (frontier only through `acp-dispatch --kind
        frontier`, an Agent-tool call asks). The code default is all-closed: a
        missing or unreadable `gates.toml` closes it. Unchanged: advise-only, 1d's

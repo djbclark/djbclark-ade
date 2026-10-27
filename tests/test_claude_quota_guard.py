@@ -2010,6 +2010,24 @@ def test_standing_hook_says_nothing_of_the_allowance_when_the_guard_stops_it(rig
     assert "frontier allowance" not in rig.hook(session="s1", **STANDING_GATES).stdout
 
 
+def test_standing_hook_announces_the_allowance_only_while_the_guard_state_is_fresh_enough_for_the_gate(rig):
+    """The hook and acp-dispatch ask on a guard state over 30 min old (ade_gates.GUARD_STATE_MAX_AGE_S); the daily line must not say
+    "allowed" then, though the hook's own read accepts a state up to 2 h old (adversary 2026-10-27 P3c)."""
+    _standing(rig, 80)
+    rig.now = NOW + timedelta(minutes=60)
+    assert "frontier allowance" not in rig.hook(session="s1", **STANDING_GATES).stdout
+    rig.now = NOW + timedelta(minutes=10)
+    assert "[gates] frontier allowance" in rig.hook(session="s1", **STANDING_GATES).stdout
+
+
+def test_the_nudge_hook_uses_the_gates_own_guard_state_age_limit():
+    import ade_gates
+    spec = importlib.util.spec_from_file_location("quota_nudge_age", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.GUARD_STATE_MAX_AGE_S == ade_gates.GUARD_STATE_MAX_AGE_S
+
+
 def test_a_profile_over_the_standing_baseline_keeps_the_profile_line_and_adds_no_second_one(rig):
     st = _standing(rig, 80, **_profile(rig))
     assert st["profile"]["name"] == "away"

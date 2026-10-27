@@ -1189,6 +1189,32 @@ def test_a_frontier_value_at_its_bound_is_allowed(fenv_closed, key, value):
     assert info["ignored"] is None and t[key] == float(value)
 
 
+@pytest.mark.parametrize("bound, baseline", [("nan", 3), ("inf", 3), ('"4"', 3), ("true", 1), ("[4]", 3), ("{}", 3)])
+def test_a_non_numeric_floor_bound_closes_that_key_at_run_time_and_fails_validate(fenv, cli, bound, baseline):
+    """`baseline_limit` trusts a floor bound only when it is a finite-comparable number: a nan or inf bound would make `value > bound`
+    never or always hold, a string or bool is not a number. The key falls back to the code default (adversary round 1 P2)."""
+    floor = 'frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }'
+    text = fenv.read_text()
+    assert floor in text
+    text = (text.replace(floor, f'frontier1_agent_calls_per_day = {{ loosen = "higher", bound = {bound} }}', 1)
+            .replace("frontier1_agent_calls_per_day = 4 ", f"frontier1_agent_calls_per_day = {baseline} ", 1))
+    fenv.write_text(text)
+    t, info = front()
+    assert t["frontier1_agent_calls_per_day"] == 0 and set(info["baseline_guarded"]) == {"frontier1_agent_calls_per_day"}
+    assert t["frontier1_per_wave"] == 2 and t["frontier1_judged"] == 1          # every other key keeps the standing value
+    r = cli.run("validate", GATES_TOML=str(fenv))
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_a_non_table_floor_entry_closes_that_key_at_run_time_and_fails_validate(fenv, cli):
+    floor = 'frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }'
+    fenv.write_text(fenv.read_text().replace(floor, "frontier1_agent_calls_per_day = 4", 1))
+    t, info = front()
+    assert t["frontier1_agent_calls_per_day"] == 0 and set(info["baseline_guarded"]) == {"frontier1_agent_calls_per_day"}
+    r = cli.run("validate", GATES_TOML=str(fenv))
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
 def test_a_gates_toml_baseline_past_its_floor_bound_is_replaced_by_the_code_default(fenv):
     """The standing numbers are the ceiling a hand edit of the baseline can reach: a value past its floor bound, or a lower
     `*_min_left`, gets the code default; the in-bound standing values stay."""
@@ -1355,7 +1381,7 @@ def test_judged_guard_block_age_and_cap_boundaries():
 def test_frontier_reason_form(text, ok):
     reason, problem = g.frontier_reason(text)
     if ok is None:
-        assert (reason, problem) == (None, None)             # missing or blank: the baseline treatment, not an error
+        assert (reason, problem) == (None, None)             # missing or blank: the closed treatment, not an error
     elif ok:
         assert reason == text.strip() and problem is None
     else:

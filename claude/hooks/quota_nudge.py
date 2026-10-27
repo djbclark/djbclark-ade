@@ -50,6 +50,7 @@ from pathlib import Path
 LEVELS = ("ok", "watch", "tight", "critical")
 FRONTIER1, JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/model-tiers-design.md)
 MAX_AGE_SECONDS = 2 * 3600
+GUARD_STATE_MAX_AGE_S = 30 * 60   # the frontier hook's and acp-dispatch's limit (ade_gates.GUARD_STATE_MAX_AGE_S); a test pins them equal
 MAX_SESSIONS = 200
 LOCK_RETRIES = 10
 LOCK_WAIT_S = 0.02
@@ -168,7 +169,11 @@ def _unreadable_nudge(raw, session_id, nudges):
 
 def _frontier_text(st):
     """The sentence saying the frontier model is allowed, or None unless the guard state says judged use is in force right now
-    (`frontier_allowance.judged`: the effective gate, level ok/watch-for-weekly and the cap floor all hold)."""
+    (`frontier_allowance.judged`: the effective gate, level ok/watch-for-weekly and the cap floor all hold) and the state's `checked_at`
+    is within GUARD_STATE_MAX_AGE_S (30 min, not this hook's 2 h): the same freshness the gate itself demands."""
+    checked = _parse(st.get("checked_at"))
+    if checked is None or not -60 <= (_now() - checked).total_seconds() <= GUARD_STATE_MAX_AGE_S:
+        return None        # the hook and acp-dispatch ask on a state this old, so this line must not say "allowed" (adversary 2026-10-27 P3c)
     allow = st.get("frontier_allowance")
     calls = allow.get("agent_calls_per_day") if isinstance(allow, dict) else None
     if not (isinstance(allow, dict) and allow.get("judged") is True and isinstance(calls, int) and not isinstance(calls, bool)):

@@ -507,7 +507,7 @@ def load_frontier(now: datetime | None = None) -> tuple[dict[str, float], dict[s
 
 
 def frontier_reason(text: Any) -> tuple[str | None, str | None]:
-    """(reason, problem) for a `frontier-reason`: (None, None) when missing or blank (baseline treatment), (None, why) when
+    """(reason, problem) for a `frontier-reason`: (None, None) when missing or blank (closed treatment), (None, why) when
     given but not one line of FRONTIER_REASON_MIN..MAX characters, else (the stripped one-line reason, None)."""
     if text is None:
         return None, None
@@ -536,7 +536,7 @@ def judged_guard_block(state: Any, t: dict[str, float], now: datetime) -> str | 
         return f"the quota guard state is {age / 60:.0f} min old (limit {GUARD_STATE_MAX_AGE_S // 60})"
     level = state.get("level")
     if level not in JUDGED_OK_LEVELS:
-        return f"the quota guard level is {level!r}: the baseline rules apply at tight and critical"
+        return f"the quota guard level is {level!r}: the closed rules apply at tight and critical"
     if state.get("stale") is not False:
         return "the quota guard data is stale"
     reasons = state.get("reasons")
@@ -551,6 +551,31 @@ def judged_guard_block(state: Any, t: dict[str, float], now: datetime) -> str | 
     if left < t.get("frontier1_min_left", FRONTIER_DEFAULTS["frontier1_min_left"]):
         return f"the frontier-1 cap has {left:g}% left (floor {t['frontier1_min_left']:g}%)"
     return None
+
+
+def guard_state_path() -> Path:
+    """Where the quota guard's state file lives (CLAUDE_QUOTA_GUARD_STATE, default ~/.local/state/ade/quota-guard.json)."""
+    return Path(os.environ.get("CLAUDE_QUOTA_GUARD_STATE") or Path.home() / ".local/state/ade/quota-guard.json")
+
+
+def read_guard_state() -> Any:
+    """The parsed quota guard state, or None when the file is missing or unreadable (`judged_guard_block` fails closed on None)."""
+    try:
+        return json.loads(guard_state_path().read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def judged_pool_block(family: int, t: dict[str, float], now: datetime, guard_state: Any, remaining: Any) -> str | None:
+    """Why the allowance's cap checks fail for frontier `family` (1 claude, 2 codex and the other pools), or None when they pass.
+    claude: `judged_guard_block` on the quota guard's state. Other pools: the pool reading at least `frontier2_min_left`. One copy for
+    acp-dispatch's grant and route_agent's per-wave cap."""
+    if family == 1:
+        return judged_guard_block(guard_state, t, now)
+    floor = t["frontier2_min_left"]
+    if is_num(remaining) and remaining >= floor:
+        return None
+    return f"the codex pool has {'no reading' if not is_num(remaining) else f'{remaining:g}% left'} (floor {floor:g}%)"
 
 
 # -- expiry notice and daily nudge -----------------------------------------------------------------------------------

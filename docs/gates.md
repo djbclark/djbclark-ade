@@ -162,7 +162,8 @@ environment from the Claude process, which a session cannot change.
 
 **A standing rule, not a profile (operator, 2026-10-27: "I changed plans, not going to be away, but Frontier model use should still be
 open when required").** The ruled numbers are the `[frontier]` BASELINE in `config/gates.toml`, no expiry, no profile: judged use on for
-both frontier models, two claude frontier slices per wave, one codex, four Agent-tool Fable calls a day, behind the same guard checks.
+both frontier models, two claude frontier slices per wave, one codex, four Agent-tool Fable calls a day, behind the same guard checks (the
+hook, `acp-dispatch` and, since the 2026-10-27 repair, `route_agent.py plan`'s per-wave cap: below).
 `ade_gates.FRONTIER_DEFAULTS` stays ALL-CLOSED (no judged use, one frontier slice per pool per wave, no Agent-tool frontier call without
 asking): it is the fail-safe, so a missing, unreadable or invalid `gates.toml` means closed and the hook asks. The run-time baseline
 guard accepts a "higher is looser" frontier key up to its `[floors.frontier]` `bound` (`ade_gates.baseline_limit`; the code default above
@@ -173,8 +174,13 @@ redundant and harmless; a profile cannot tighten (a value below the baseline rej
 so `gate-profile set` neither closes nor widens the allowance. **To close it:** a PR setting `[frontier]` back to the code defaults
 (`frontier1_judged`, `frontier2_judged`, `frontier1_agent_calls_per_day` 0; per-wave keys 1), which `validate` accepts, and, so an
 `away` profile cannot raise it again, the matching `[floors.frontier]` bounds and `[profiles.away.frontier]` values (or delete that
-table). Residual (2026-10-27): the floors live in the same file as the baseline, so a PR (or a same-user edit of `GATES_TOML`) can
-raise both; that is a reviewed, committed change, not a runtime path.
+table). **Residual (2026-10-27):** the floors live in the same file as the baseline, so a PR can raise both, and so can an uncommitted edit.
+The installed hook `~/.claude/hooks/frontier_agent_gate.py` is a symlink into the shared `~/src/djbclark-ade` checkout and resolves
+`config/gates.toml` through it, so an uncommitted edit of a baseline key plus its floor `bound` in that working tree widens the allowance
+for the hook with NO `gate-profile set` hermes-ping and NO `gate-profile.log` line (the pre-2026-10-27 route, a profile, left both). A
+CLI consumer started by an agent (`acp-dispatch`, `route_agent.py`) needs only `GATES_TOML` redirected to a self-written file, where the
+profile route also needed `GATE_PROFILE_STATE`. So the claim is not "only a reviewed PR widens it": a same-user edit does, unlogged. The
+guard checks, the daily cap's counter and log, and the hook's tamper checks still bind; no code change is made for this.
 
 | key | code default (fail-safe) | baseline (standing) | `away` | floor (`loosen`, bound) | meaning |
 | --- | --- | --- | --- | --- | --- |
@@ -186,8 +192,13 @@ raise both; that is a reviewed, committed change, not a runtime path.
 | `frontier1_min_left` | 10 | 10 | 10 | lower, 10 | percent of the Fable cap that must be left (moved from `routing.toml` `fable_min_left`); a profile may not lower it |
 | `frontier2_min_left` | 60 | 60 | 60 | lower, 40 | percent left on the codex binding window |
 
-`route_agent.py` reads `frontier1_per_wave` (pool `claude`) and `frontier2_per_wave` (every other pool) in `plan`, and
-`frontier1_min_left` in `suggest_model`; the keys are gone from `config/routing.toml`.
+`route_agent.py` reads `frontier1_per_wave` (pool `claude`) and `frontier2_per_wave` (every other pool) in `plan` (via
+`frontier_per_wave`), and `frontier1_min_left` in `suggest_model`; the keys are gone from `config/routing.toml`. A per-wave cap above the
+closed 1 is the standing allowance and holds only while its guard checks pass (2026-10-27, adversary round 1 P1): the family's `*_judged`
+key at 1, and `ade_gates.judged_pool_block` (the one copy `acp-dispatch`'s grant uses) empty: for the claude pool a fresh
+(`GUARD_STATE_MAX_AGE_S`, 30 min) quota-guard state at `ok` or at `watch` for the weekly window with `fable_left` at least
+`frontier1_min_left`, for any other pool its quota reading at least `frontier2_min_left`. At `tight`, `critical`, a stale or missing
+guard state the planner puts at most the closed 1 slice per pool on a wave.
 
 **What a granted allowance is.** While the effective gate allows it (the standing baseline; no profile is needed), an agent MAY use a
 frontier model where it judges it significantly better than judgment, if it states why in one line. The checks, in order:

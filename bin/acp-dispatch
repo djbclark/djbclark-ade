@@ -753,17 +753,7 @@ def frontier_judged(reason: str | None, service: str | None, model: str | None, 
         fam = FRONTIER_POOLS[service]
         if t[f"frontier{fam}_judged"] < 1:
             return None, "frontier-reason recorded; no frontier allowance is in force (closed gate: gates.toml unreadable or closed)"
-        if fam == 1:
-            path = Path(os.environ.get("CLAUDE_QUOTA_GUARD_STATE") or Path.home() / ".local/state/ade/quota-guard.json")
-            try:
-                state = json.loads(path.read_text())
-            except (OSError, ValueError):
-                state = None
-            block = ade_gates.judged_guard_block(state, t, now)
-        else:
-            floor = t["frontier2_min_left"]
-            block = (None if remaining is not None and remaining >= floor else
-                     f"the codex pool has {'no reading' if remaining is None else f'{remaining:g}% left'} (floor {floor:g}%)")
+        block = ade_gates.judged_pool_block(fam, t, now, ade_gates.read_guard_state() if fam == 1 else None, remaining)
         if block:
             return None, f"frontier-reason recorded; frontier allowance not granted: {block}"
         cap, used = int(t[f"frontier{fam}_per_wave"]), frontier_inflight(busy)
