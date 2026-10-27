@@ -260,14 +260,20 @@ def pr_doc(repo: str, pr: int) -> dict:
 # lacked it saw no state on PR 12 and ran its full 30 minutes). Same shape here, on purpose.
 #
 # THE PROPERTIES, each of which a test covers:
-#   1. `:v1` is part of the match. A marker without it is not this marker.
-#   2. A missing or unknown `verdict` value is `adversary-missing` - never a default. Fail closed.
-#   3. `head` must be 40 hex AND equal the PR head. Another head is `adversary-other-head`, not a pass.
+#   1. `:v1` is part of the match. A near-miss spelling (`adversary-verdict`, `adversary_verdict`, a
+#      case variant, a dropped `:`) is NOT this marker: it is `adversary-malformed`, never a default
+#      and never silently absent.
+#   2. A missing or unknown `verdict` value is `adversary-malformed` too - never a default. Fail closed.
+#   3. `head` must be 40 hex AND equal the PR head. Another head is `adversary-stale-or-blocked`, not a
+#      pass, and the human line says "other head" rather than "missing".
 #   4. A malformed marker is `adversary-malformed`, its own outcome, so a typo reads as a typo rather
 #      than as an absence.
 #   5. NEVER fall back to prose. No marker means "no machine-readable verdict", full stop; a fallback
 #      would reintroduce the parser through the back door and the failure would be invisible again.
-#   6. A BLOCK can never be downgraded by anything - no ordering, no other field, no warning.
+#   6. ASYMMETRIC, and this is the property the gate exists for: an APPROVE must be LIVE (outside code)
+#      and name this head exactly; a BLOCK naming this head - full 40-hex, or a 7+ hex prefix of it with
+#      or without a trailing `…`/`...` - is read from the RAW body, so no ordering, other field, warning,
+#      code fence or strip bug can downgrade it (adversary review of 4a56c01, B1/B5c).
 # The marker is matched LOOSELY (anything up to the closing `-->`) and then validated, so a marker
 # with broken JSON is reported as `malformed` rather than as an absence. A strict `{...}` regex cannot
 # see a malformed marker at all, which would make a typo indistinguishable from "no verdict".
@@ -275,8 +281,17 @@ MARKER_RE = re.compile(r"<!--\s*adversary-verdict:v1\s*(.*?)\s*-->", re.DOTALL)
 # A marker START with no closing `-->` is invisible to MARKER_RE, and GitHub renders an unclosed
 # `<!--` as a comment to the end of the body, so a human does not see it either. Count the starts and
 # compare with the matches: any excess is malformed (adversary review, A2).
-MARKER_START_RE = re.compile(r"<!--\s*adversary-verdict:", re.IGNORECASE)
+#
+# WIDENED (adversary review of 4a56c01, B2): a `:`-anchored start missed `adversary-verdict {...}`
+# and `adversary_verdict:v1 ...`, so a TYPO beside a valid APPROVE was neither seen nor reported and
+# the body read as approved. Any near-miss now counts as a start, and a start that MARKER_RE cannot
+# parse is malformed - a typo reads as a typo.
+MARKER_START_RE = re.compile(r"<!--\s*adversary[-_ ]?verdict\b", re.IGNORECASE)
 HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+# A shortened sha is what agents actually type (adversary review of 4a56c01, B1): the marker spec asks
+# for 40 hex, but a verdict pasted from a terminal routinely reads `4a56c01db7c2…`. Seven is git's own
+# minimum abbreviation, so anything shorter is not a claim about a commit at all.
+SHORT_HEX_RE = re.compile(r"[0-9a-f]{7,39}", re.IGNORECASE)
 
 
 def _strict_object(pairs):
@@ -307,6 +322,32 @@ def _is_placeholder(sha: object) -> bool:
     return not re.search(r"[0-9a-fA-F]{7}", sha)
 
 
+def _head_matches(sha: object, head: str) -> bool:
+    """True when `sha` names `head` - exactly, or as a shortened sha an agent actually typed.
+
+    WHY (adversary review of 4a56c01, B1): the spec asks for 40 hex, but a verdict copied from a
+    terminal carries `4a56c01db7c2…`. The raw-body pass below is what makes a BLOCK unhidable, and it
+    was a FULL-sha-only rescue, so every shortened BLOCK depended on the stripper being right - and
+    four ordinary Markdown shapes made it wrong (indented fence line, odd fence counts, mixed fence
+    characters, an unterminated fence). A shortened sha is therefore matched by PREFIX here.
+
+    A 40-hex value of another commit is still another head: prefixes are capped at 39 hex, so only a
+    value that is a strict prefix of `head` can match, and the placeholder template (`<40-hex>`) carries
+    no hex run of 7 and never matches.
+    """
+    if not isinstance(sha, str):
+        return False
+    s = sha.strip()
+    if s.lower() == head.lower():
+        return True
+    for suffix in ("\u2026", "..."):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    s = s.strip().lower()
+    return bool(SHORT_HEX_RE.fullmatch(s)) and head.lower().startswith(s)
+
+
 def _strip_code(body: str) -> str:
     """Remove fenced blocks and inline code spans before matching markers.
 
@@ -318,20 +359,71 @@ def _strip_code(body: str) -> str:
     created false blocks.
 
     A placeholder head (`<40-hex>`) is documentation too, and is rejected in `adversary_verdict`.
+
+    REWRITTEN CommonMark-FAITHFUL (adversary review of 4a56c01, B1). The first version toggled on every
+    line whose `lstrip()` began with ``` or ~~~, so an ORDINARY structure over-stripped and blanked the
+    rest of the body - and with it a BLOCK: a 4-space-indented fence line, a 4-backtick fence holding an
+    odd number of 3-backtick lines, a `~~~` fence holding a ``` line, or an unterminated fence. An odd
+    number of toggles left `in_fence` true to the end of the body.
+
+    Now: a fence opens only at indent <= 3 (4+ spaces is an indented code block in CommonMark, not a
+    fence), remembers its character and length, and closes only on the SAME character at >= that length
+    with nothing but whitespace after it. Code spans are per-line, because a span cannot cross an HTML
+    block and `<!--` starts one. The remaining direction of error is a FALSE BLOCK, never a false
+    approve, and the raw-body pass is the real guarantee for a BLOCK anyway.
     """
-    out, in_fence = [], False
+    out: list[str] = []
+    fence = ""  # the open fence: "" when outside, else its character
+    fence_len = 0
     for line in body.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
+        expanded = line.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        stripped = expanded[indent:] if indent <= 3 else expanded
+        run = len(stripped) - len(stripped.lstrip(stripped[0])) if stripped else 0
+        char = stripped[0] if stripped else ""
+        if fence:
+            if (indent <= 3 and char == fence and run >= fence_len
+                    and not stripped[run:].strip()):
+                fence, fence_len = "", 0
+            out.append("")
             continue
-        out.append("" if in_fence else line)
+        if indent <= 3 and char in "`~" and run >= 3:
+            # An INFO STRING after the fence run is allowed (```` ```sh ````); only a closing fence must
+            # be bare.
+            fence, fence_len = char, run
+            out.append("")
+            continue
+        out.append(line)
     text = "\n".join(out)
-    # Inline code spans: ``x`` then `x`. Non-greedy, so `a` and `b` are stripped separately.
-    text = re.sub(r"``.+?``", " ", text, flags=re.DOTALL)
+    # Inline code spans, PER LINE (``x`` then `x`). Not DOTALL: a span that crossed a line would swallow
+    # a marker, and in CommonMark it cannot cross the HTML block that `<!--` starts.
+    text = re.sub(r"``[^`\n]+``", " ", text)
     return re.sub(r"`[^`\n]+`", " ", text)
 
 
+
+
+def _classify_starts(text: str) -> tuple[int, int]:
+    """Count marker STARTS that `MARKER_RE` cannot parse: `(unclosed, wrong_form)`.
+
+    A start is any near-miss spelling (`adversary-verdict`, `adversary_verdict`, a case variant, a
+    dropped `:`). It is `wrong_form` when a `-->` closes it, because then it really is a marker and only
+    its spelling is wrong; it is `unclosed` when no `-->` follows before the next `<!--`, in which case
+    GitHub renders the rest of the body as a comment and a human cannot see it either.
+    """
+    valid = {m.start() for m in MARKER_RE.finditer(text)}
+    unclosed = wrongform = 0
+    for m in MARKER_START_RE.finditer(text):
+        if m.start() in valid:
+            continue
+        rest = text[m.end():]
+        close = rest.find("-->")
+        nxt = rest.find("<!--")
+        if close != -1 and (nxt == -1 or close < nxt):
+            wrongform += 1
+        else:
+            unclosed += 1
+    return unclosed, wrongform
 
 
 def adversary_verdict(body: str, head: str) -> dict:
@@ -349,10 +441,14 @@ def adversary_verdict(body: str, head: str) -> dict:
     # gate (adversary review, B1).
     text = _strip_code(body)
 
-    # ASYMMETRIC (adversary review, R3b): a BLOCK naming THIS exact head counts WHEREVER it appears,
-    # the raw body included. An APPROVE must be live (outside code) so documentation cannot approve;
-    # a BLOCK must not be hidable by an over-strip bug, a stray backtick, or a malformed fence. Both
-    # directions fail closed, which is the point.
+    # ASYMMETRIC (adversary review, R3b): a BLOCK naming THIS head counts WHEREVER it appears, the raw
+    # body included. An APPROVE must be live (outside code) so documentation cannot approve; a BLOCK
+    # must not be hidable by an over-strip bug, a stray backtick, or a malformed fence. Both directions
+    # fail closed, which is the point.
+    #
+    # SHORTENED shas are matched by prefix (adversary review of 4a56c01, B1): a full-sha-only rescue left
+    # every `4a56c01db7c2…` BLOCK dependent on the stripper, and four ordinary Markdown shapes defeated
+    # it. `_head_matches` is the whole rescue now, so no strip bug can lose a BLOCK.
     for raw in MARKER_RE.findall(body):
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
@@ -360,7 +456,7 @@ def adversary_verdict(body: str, head: str) -> dict:
             continue
         if isinstance(doc, dict) and doc.get("verdict") == "BLOCK":
             sha = doc.get("head")
-            if isinstance(sha, str) and sha.lower() == head.lower():
+            if _head_matches(sha, head):
                 # Report a conflict if a live APPROVE for this head also exists: the raw-body path
                 # must not lose the `conflict` flag that `assess` and the human line rely on.
                 approves_here = False
@@ -370,25 +466,36 @@ def adversary_verdict(body: str, head: str) -> dict:
                     except ValueError:
                         continue
                     if (isinstance(d2, dict) and d2.get("verdict") == "APPROVE"
-                            and str(d2.get("head", "")).lower() == head.lower()):
+                            and _head_matches(d2.get("head"), head)):
                         approves_here = True
                         break
-                return {"present": True, "verdict": "BLOCK", "quoted_sha": sha.lower(),
+                exact = str(sha).strip().lower() == head.lower()
+                return {"present": True, "verdict": "BLOCK", "quoted_sha": str(sha).strip().lower(),
                         "matches_head": True, "conflict": approves_here, "malformed": False,
                         "detail": ("the body says BOTH BLOCK and APPROVE for this head - resolve it, "
                                    "the PR cannot be read as approved" if approves_here
-                                   else "BLOCK for this head (read from the raw body, so no "
-                                        "code-fence or strip bug can hide it)")}
+                                   else "BLOCK for this head" if exact
+                                   else f"BLOCK for this head, quoted as the shortened sha "
+                                        f"{str(sha).strip()} (read from the raw body, so no "
+                                        f"code-fence or strip bug can hide it)")}
 
     matches = MARKER_RE.findall(text)
-    starts = len(MARKER_START_RE.findall(text))
+    unclosed, wrongform = _classify_starts(text)
     if not matches:
-        if starts:
-            # A marker START with no `-->`: malformed, NOT absent.
+        if unclosed or wrongform:
+            # A marker START that is not a marker: malformed, NOT absent. A typo reads as a typo, and
+            # the REASON is named (adversary review of 4a56c01, B3): an unclosed `<!--` and a marker
+            # that is not exactly `adversary-verdict:v1` are different mistakes.
+            why = []
+            if wrongform:
+                why.append(f"{wrongform} marker(s) that are not `adversary-verdict:v1` "
+                           f"(exact, lowercase): a dropped `:`, a `_` or an odd case")
+            if unclosed:
+                why.append(f"{unclosed} marker(s) with no closing `-->` "
+                           f"(an unclosed `<!--` runs to the end of the body)")
             return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                     "conflict": False, "malformed": True,
-                    "detail": f"{starts} adversary-verdict marker(s) with no closing `-->` "
-                              f"(an unclosed `<!--` runs to the end of the body)"}
+                    "detail": "adversary-verdict marker is malformed: " + "; ".join(why)}
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                 "conflict": False, "malformed": False,
                 "detail": "no adversary-verdict marker in the PR body (prose verdicts are not read)"}
@@ -397,8 +504,11 @@ def adversary_verdict(body: str, head: str) -> dict:
     parsed: list[dict] = []
     problems: list[str] = []
     placeholders = 0
-    if starts > len(matches):
-        problems.append(f"{starts - len(matches)} marker(s) with no closing `-->`")
+    if wrongform:
+        problems.append(f"{wrongform} marker(s) that are not `adversary-verdict:v1` (exact, "
+                        f"lowercase)")
+    if unclosed:
+        problems.append(f"{unclosed} marker(s) with no closing `-->`")
     for raw in matches:
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
@@ -443,8 +553,10 @@ def adversary_verdict(body: str, head: str) -> dict:
     blocks = [p for p in for_marker if p["verdict"] == "BLOCK"]
     approves = [p for p in for_marker if p["verdict"] == "APPROVE"]
 
-    # INVARIANT: a BLOCK is never downgraded. If a body carries both for this head it is a conflict,
-    # and the verdict reported is the BLOCK.
+    # INVARIANT, STATED ASYMMETRICALLY (adversary review of 4a56c01, B5c): a BLOCK naming this head -
+    # full 40-hex, or a 7+ hex prefix of it with or without a trailing `…`/`...` - is read from the RAW
+    # body above, so nothing downstream can downgrade it; an APPROVE must be live. If a body carries
+    # both for this head it is a conflict, and the verdict reported is the BLOCK.
     if blocks:
         return {"present": True, "verdict": "BLOCK", "quoted_sha": blocks[0]["head"],
                 "matches_head": True, "conflict": bool(approves), "malformed": bool(problems),
@@ -693,10 +805,12 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     The adversary verdict (added 2026-10-25) is read from a MACHINE-READABLE MARKER in the PR body,
     never from prose: `<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->`.
     A verdict counts only if the marker is well formed, names exactly APPROVE or BLOCK, and names this
-    head. `malformed` is its own outcome and is NEVER ok, even when a valid APPROVE sits beside it; a
-    BLOCK is never downgraded by anything. Prose verdicts are not read at all - the first version parsed
-    English and three adversary rounds found false approvals and false misses, so that parser was
-    deleted rather than patched.
+    head. `malformed` is its own outcome and is NEVER ok, even when a valid APPROVE sits beside it. The
+    rule is ASYMMETRIC: an APPROVE must be live (outside code), while a BLOCK naming this head - full
+    40-hex, or a 7+ hex prefix of it - is read from the RAW body, so no code fence or strip bug can hide
+    one. Prose verdicts are not read at all - the first version parsed English and TWO adversary rounds
+    found false approvals and false misses, so that parser was deleted rather than patched (a third
+    round reviewed this marker design).
     """
     mismatch: list[str] = []
     blockers: list[str] = []
@@ -1222,6 +1336,12 @@ def main(argv: list[str]) -> int:
         ci_state = "done" if s["ci_done"] else "pending"
         if s["ci_done"] and not checks:
             ci_state = "no-checks"
+        if s["adversary"] is None:
+            # EVERY exit path reports the adversary, not only `done` (adversary review of 4a56c01, B4).
+            # A run that timed out or saw the head move still owes the reader an answer, and an
+            # UNCOLLECTED verdict is an UNKNOWN: leaving it absent made `adversary_warnings` empty and
+            # nothing block, which is the same "an unknown reads as a pass" hole F5 closed for fetches.
+            collect_adversary()
         judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, security_review(s["codex_match"]),
                         head, s["review"], s["adversary"],
                         adversary_required=(a.adversary_required
@@ -1260,12 +1380,20 @@ def main(argv: list[str]) -> int:
             # that went unnoticed on PR 61 (2026-10-25), so it is printed even when it does not block.
             adv = judged.get("adversary")
             if adv is not None:
+                # NAME THE OUTCOME (adversary review of 4a56c01, B4). Every non-pass used to print
+                # "missing", so a malformed marker, a marker for another head and a failed fetch all
+                # read as an absent one - and the detail string that says otherwise was the only clue.
+                state = ("FETCH FAILED" if adv.get("fetch_failed")
+                         else "malformed" if adv.get("malformed") else None)
                 if adv.get("matches_head"):
                     v = str(adv.get("verdict") or "").upper()
-                    parts.append(f"adversary: {'BLOCK' if v.startswith('BLOCK') else adv.get('verdict')}"
-                                 f" at this head")
+                    line = (f"adversary: {'BLOCK' if v.startswith('BLOCK') else adv.get('verdict')}"
+                            f" at this head")
+                    if state:
+                        line += f" ({state.lower()} beside it)"
+                    parts.append(line)
                 else:
-                    parts.append(f"adversary: {'FETCH FAILED' if adv.get('fetch_failed') else 'missing'}"
+                    parts.append(f"adversary: {state or ('other head' if adv.get('present') else 'missing')}"
                                  f" - {adv.get('detail')}")
             parts.append("merge_ready: " + ("yes" if judged["merge_ready"]
                                             else "no (" + ", ".join(judged["merge_blockers"]) + ")"))
@@ -1490,7 +1618,6 @@ def main(argv: list[str]) -> int:
                     request_step(match)
             # finish only when both hold on this same poll
             if s["ci_done"] and s["codex_done"] and collect_findings():
-                collect_adversary()  # a warning, never a gate: its failure must not block finishing
                 return finish("done", EXIT_DONE)
 
         now = time.monotonic()

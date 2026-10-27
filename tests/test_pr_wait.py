@@ -1497,7 +1497,7 @@ def test_an_empty_body_reports_no_verdict() -> None:
     assert not r["present"] and r["detail"] == "no PR body"
 
 
-# --- property 6: a BLOCK can never be downgraded ---------------------------------------------
+# --- property 6: a BLOCK is never downgraded (the rule is asymmetric) -------------------------
 
 
 
@@ -1539,8 +1539,10 @@ def gate(body: str, required: bool = True, head: str = ADV_HEAD) -> tuple[bool, 
 
 def test_the_gate_blocks_a_malformed_marker_beside_a_valid_approve() -> None:
     # The A1 finding: `assess()` ignored `malformed`, so a typo in a BLOCK let the PR through.
+    # A BLOCK whose head is a PREFIX of this head is not a typo any more: it is a BLOCK for this head
+    # (adversary review of 4a56c01, B1) and is covered by its own test below.
     for broken in ('{"verdict":"BLOCKED","head":"' + ADV_HEAD + '"}',
-                   '{"verdict":"BLOCK","head":"' + ADV_HEAD[:7] + '"}',
+                   '{"verdict":"BLOCK","head":"b50521a"}',
                    '{"verdict":"BLOCK","head":"' + ADV_HEAD + '"}'):  # the third is unclosed below
         body = marker("APPROVE") + "\n<!-- adversary-verdict:v1 " + broken
         ready, warnings = gate(body)
@@ -1642,3 +1644,280 @@ def test_a_block_in_a_clean_fence_is_still_read_from_the_raw_body() -> None:
     fence = chr(96) * 3
     body = marker("APPROVE") + "\n" + fence + "\n" + marker("BLOCK") + "\n" + fence
     assert adv(body)["verdict"] == "BLOCK"
+
+
+# ---- adversary review of 4a56c01 (2026-10-27): B1-B6 ------------------------------------------
+#
+# The blocker: `_strip_code` toggled on every line whose `lstrip()` began with ``` or ~~~, so an ODD
+# number of fence-looking lines left `in_fence` true to the end of the body and blanked a live marker.
+# Paired with a raw-body rescue that took only a FULL 40-hex sha, that hid a BLOCK typed with a
+# shortened sha beside a valid APPROVE: `merge_ready: true`, reproduced through `main()` with
+# `--adversary-required` as well. Two independent fixes, because either alone leaves the class open:
+# the raw-body pass takes a shortened sha by PREFIX (so no strip bug can lose a BLOCK), and
+# `_strip_code` follows CommonMark (so the class stops arising). Pinned at each layer.
+
+TICK = chr(96)
+FENCE3 = TICK * 3
+
+
+def strip(body: str) -> str:
+    return load_module()._strip_code(body)
+
+
+def test_strip_a_fence_opens_only_at_an_indent_of_three_spaces_or_less() -> None:
+    # B1c: `line.lstrip()` treated a 4-space-indented fence line as a fence; CommonMark does not.
+    for spaces in (0, 1, 2, 3):
+        body = " " * spaces + FENCE3 + "\nSECRET\n" + " " * spaces + FENCE3
+        assert "SECRET" not in strip(body), f"{spaces} spaces"
+    for spaces in (4, 5):
+        body = " " * spaces + FENCE3 + "\nSECRET\n"
+        assert "SECRET" in strip(body), f"{spaces} spaces"
+    assert "SECRET" in strip("\t" + FENCE3 + "\nSECRET\n"), "a tab expands to four spaces"
+
+
+def test_strip_a_fence_remembers_its_character_and_length() -> None:
+    four = TICK * 4
+    # B1a: an inner 3-backtick line does not close a 4-backtick fence.
+    assert "SECRET" not in strip(four + "md\n" + FENCE3 + "sh\nSECRET\n" + four + "\nAFTER\n")
+    # B1b: a ``` line does not close a ~~~ fence.
+    assert "SECRET" not in strip("~~~md\n" + FENCE3 + "\nSECRET\n~~~\nAFTER\n")
+    # A LONGER closing fence does close it.
+    assert "SECRET" not in strip(four + "\nSECRET\n" + TICK * 5 + "\nAFTER\n")
+    assert "AFTER" in strip(four + "\nSECRET\n" + TICK * 5 + "\nAFTER\n")
+
+
+def test_strip_a_fence_line_may_carry_an_info_string_but_a_closing_fence_must_be_bare() -> None:
+    assert "SECRET" not in strip(FENCE3 + "sh\nSECRET\n" + FENCE3)
+    body = FENCE3 + "md\n" + FENCE3 + " trailing\nSECRET\n" + FENCE3 + "\nAFTER\n"
+    assert "SECRET" not in strip(body) and "AFTER" in strip(body)
+
+
+def test_strip_an_unterminated_fence_runs_to_the_end_of_the_body() -> None:
+    # B1e: CommonMark agrees (everything after a fence with no closer is code), which is exactly why
+    # the raw-body pass, not the stripper, is the guarantee for a BLOCK.
+    assert "SECRET" not in strip(FENCE3 + "md\nSECRET\n")
+
+
+def test_strip_an_inline_span_does_not_cross_a_line() -> None:
+    # B1d: the `` … `` regex used DOTALL, so a span crossed lines and swallowed the marker after it. A
+    # span cannot cross the HTML block that `<!--` starts.
+    body = "use ``x here\nand `` there\n" + marker("BLOCK")
+    assert marker("BLOCK") in strip(body)
+
+
+def test_head_matches_takes_a_full_sha_and_any_shortened_prefix_of_this_head() -> None:
+    m = load_module()
+    for sha in (ADV_HEAD, ADV_HEAD.upper(), ADV_HEAD[:7], ADV_HEAD[:12],
+                ADV_HEAD[:12] + "\u2026", ADV_HEAD[:12] + "...", " " + ADV_HEAD[:12] + " "):
+        assert m._head_matches(sha, ADV_HEAD), sha
+
+
+def test_head_matches_rejects_another_commit_a_placeholder_and_a_non_prefix() -> None:
+    m = load_module()
+    other = "b" * 40
+    for sha in (other, other[:12] + "\u2026", "<40-hex>", "<sha>", "\u2026", "...",
+                ADV_HEAD[:6], ADV_HEAD + "0", None, 42, ""):
+        assert not m._head_matches(sha, ADV_HEAD), sha
+
+
+def test_b1_an_ordinary_markdown_structure_cannot_hide_a_shortened_block() -> None:
+    # B1a-B1c and B1e, each reproduced at 4a56c01 as merge_ready: true. A BLOCK naming this head by a
+    # SHORTENED sha must survive every one of them, because it is read from the raw body.
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    shapes = {
+        "indented fence line (B1c)": "    " + FENCE3 + "\n",
+        "four-backtick fence, odd inner (B1a)": TICK * 4 + "md\n" + FENCE3 + "sh\n" + TICK * 4 + "\n",
+        "tilde fence holding a backtick line (B1b)": "~~~md\n" + FENCE3 + "sh\n~~~\n",
+        "unterminated fence (B1e)": FENCE3 + "md\n",
+    }
+    for label, structure in shapes.items():
+        body = marker("APPROVE") + "\n\n" + structure + "\n" + short
+        r = adv(body)
+        assert r["verdict"] == "BLOCK" and r["matches_head"], (label, r)
+        ready, warnings = gate(body)
+        assert not ready and warnings == ["adversary-stale-or-blocked"], (label, warnings)
+        # Report-only by default is the DESIGN, so the gate must still report the BLOCK.
+        assert gate(body, required=False)[1] == ["adversary-stale-or-blocked"], label
+
+
+def test_b1_a_shortened_block_is_read_as_a_block_not_as_malformed() -> None:
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    alone = adv(short)
+    assert alone["verdict"] == "BLOCK" and not alone["malformed"] and not alone["conflict"]
+    assert "shortened sha" in alone["detail"] and "raw body" in alone["detail"]
+    beside = adv(marker("APPROVE") + "\n\n" + short)
+    assert beside["verdict"] == "BLOCK" and beside["conflict"]
+
+
+def test_b1_the_two_shapes_that_stayed_malformed_still_block() -> None:
+    # The two shapes the review listed that did NOT reach merge_ready at 4a56c01: the shortened BLOCK
+    # survived long enough to be read as malformed, and malformed always blocks. Pin that too, now
+    # that the stripper no longer over-strips them.
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    for label, structure in {
+        "stray double backtick (B1d)": "use ``x here\nand `` there\n\n",
+        "balanced four-backtick fence": TICK * 4 + "md\n" + FENCE3 + "sh\necho\n" + FENCE3 + "\n" + TICK * 4 + "\n\n",
+    }.items():
+        body = marker("APPROVE") + "\n\n" + structure + short
+        assert adv(body)["verdict"] == "BLOCK", label
+        ready, warnings = gate(body)
+        assert not ready, label
+
+
+def test_a_near_miss_spelling_beside_a_valid_approve_is_malformed_not_ignored() -> None:
+    # B2: a `:`-anchored start regex missed `adversary-verdict {...}` and `adversary_verdict:v1 ...`,
+    # so a typo'd BLOCK beside a valid APPROVE read as approved and merge-ready.
+    for start in ("adversary-verdict", "adversary_verdict:v1", "Adversary-Verdict:v1",
+                  "adversary verdict:v1"):
+        body = (marker("APPROVE") + "\n<!-- " + start
+                + ' {"verdict":"BLOCK","head":"' + ADV_HEAD + '"} -->')
+        assert adv(body)["malformed"], start
+        ready, warnings = gate(body)
+        assert not ready and warnings == ["adversary-malformed"], (start, warnings)
+
+
+def test_a_near_miss_spelling_names_the_wrong_spelling_not_an_unclosed_comment() -> None:
+    # B3: every unparseable start was reported as "no closing -->", which defeats "a typo reads as a
+    # typo" - the two mistakes are different.
+    wrong = adv('<!-- adversary-verdict:v2 {"verdict":"APPROVE","head":"' + ADV_HEAD + '"} -->')
+    assert wrong["malformed"] and "no closing" not in wrong["detail"]
+    assert "exact, lowercase" in wrong["detail"]
+    unclosed = adv('<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"' + ADV_HEAD + '"')
+    assert unclosed["malformed"] and "no closing" in unclosed["detail"]
+    assert "exact, lowercase" not in unclosed["detail"]
+
+
+# ---- the same properties through main(), against the fake gh -----------------------------------
+#
+# B6: these regressions each bit once and none had an end-to-end test. `serve()` replaces the happy
+# fixture's `pulls/{pr}` document, which is where the body and the labels come from.
+
+def serve(world: World, body: str, labels: list | None = None, n: int = 1) -> None:
+    doc = ok({"head": {"sha": HEAD}, "body": body, "labels": labels or []})
+    world.route(f"repos/{REPO}/pulls/{PR}", *([doc] * n))
+
+
+def test_main_reads_an_approve_out_of_the_pr_body(world: World) -> None:
+    serve(world, marker("APPROVE", HEAD))
+    r = world.run("--head", HEAD)
+    assert r.returncode == 0, r.stderr
+    s = world.file("summary")
+    assert s["adversary"]["verdict"] == "APPROVE" and s["adversary_warnings"] == []
+    assert s["merge_ready"] is True and s["merge_blockers"] == []
+    assert "adversary: APPROVE at this head" in r.stdout
+
+
+def test_main_reports_a_missing_marker_without_blocking(world: World) -> None:
+    serve(world, "nothing machine-readable here")
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-missing"] and s["merge_ready"] is True
+    assert "adversary: missing" in r.stdout
+
+
+def test_main_blocks_a_malformed_marker_without_being_asked(world: World) -> None:
+    serve(world, '<!-- adversary-verdict:v1 {broken -->')
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-malformed"]
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["adversary-malformed"]
+    # B4: the human line names the outcome instead of saying "missing".
+    assert "adversary: malformed" in r.stdout
+
+
+def test_main_reports_a_block_without_blocking_by_default(world: World) -> None:
+    serve(world, marker("BLOCK", HEAD))
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-stale-or-blocked"]
+    assert s["merge_ready"] is True, "a BLOCK is report-only unless the gate is opted in"
+    assert "adversary: BLOCK at this head" in r.stdout
+
+
+def test_main_blocks_a_block_when_opted_in(world: World) -> None:
+    serve(world, marker("BLOCK", HEAD))
+    world.run("--head", HEAD, "--adversary-required")
+    s = world.file("summary")
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["adversary-stale-or-blocked"]
+
+
+def test_main_names_an_other_head_verdict_in_the_human_line(world: World) -> None:
+    serve(world, marker("APPROVE", OTHER_HEAD))
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-stale-or-blocked"] and s["merge_ready"] is True
+    assert "adversary: other head" in r.stdout
+
+
+def test_main_names_a_failed_body_fetch_and_blocks(world: World) -> None:
+    # `pulls/{PR}` failing is not only "no verdict": with no document nothing about the PR can be
+    # judged, so the run cannot be called ready either. The adversary warning must NAME the failure
+    # and must block, rather than leave `adversary_warnings` empty (the F5 class).
+    world.route(f"repos/{REPO}/pulls/{PR}", fail())
+    r = world.run("--head", HEAD, "--timeout", "1")
+    s = world.file("summary")
+    assert s["adversary"]["fetch_failed"] is True
+    assert s["adversary_warnings"] == ["adversary-fetch-failed"]
+    assert s["merge_ready"] is False and "adversary-fetch-failed" in s["merge_blockers"]
+    assert "adversary: FETCH FAILED" in r.stdout
+
+
+def test_main_reports_the_verdict_on_a_timeout_not_only_on_done(world: World) -> None:
+    # B4b: `collect_adversary` used to run only on the `done` path, so a timed-out run reported
+    # `adversary: null` and `adversary_warnings: []` - an uncollected verdict read as no finding.
+    serve(world, marker("BLOCK", HEAD), n=99)
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                *([checks_page(run_obj("test", "in_progress", None))] * 99))
+    r = world.run("--head", HEAD, "--timeout", "1")
+    s = world.file("summary")
+    assert s["result"] == "timeout"
+    assert s["adversary"]["verdict"] == "BLOCK" and s["adversary"]["matches_head"]
+    assert s["adversary_warnings"] == ["adversary-stale-or-blocked"]
+    assert "adversary: BLOCK at this head" in r.stdout
+
+
+def edited_body_run(world: World, *extra: str) -> dict:
+    """One body edit mid-wait: the PR document says APPROVE, then BLOCK, and CI finishes on the next poll."""
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                checks_page(run_obj("test", "in_progress", None)),
+                checks_page(run_obj("test")),
+                checks_page(run_obj("test")))
+    world.route(f"repos/{REPO}/pulls/{PR}",
+                ok({"head": {"sha": HEAD}, "body": marker("APPROVE", HEAD), "labels": []}),
+                ok({"head": {"sha": HEAD}, "body": marker("BLOCK", HEAD), "labels": []}),
+                ok({"head": {"sha": HEAD}, "body": marker("BLOCK", HEAD), "labels": []}))
+    r = world.run(*extra)
+    assert r.returncode == 0, r.stderr
+    return world.file("summary")
+
+
+def test_main_sees_a_body_edited_from_approve_to_block_mid_wait(world: World) -> None:
+    assert edited_body_run(world)["adversary"]["verdict"] == "BLOCK"
+
+
+def test_main_sees_that_edit_with_an_explicit_head_too(world: World) -> None:
+    # `--head` used to leave `pr_doc` None, so the body was never read at all.
+    assert edited_body_run(world, "--head", HEAD)["adversary"]["verdict"] == "BLOCK"
+
+
+def test_main_honours_an_adversary_required_label_added_mid_wait(world: World) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                checks_page(run_obj("test", "in_progress", None)),
+                checks_page(run_obj("test")),
+                checks_page(run_obj("test")))
+    world.route(f"repos/{REPO}/pulls/{PR}",
+                ok({"head": {"sha": HEAD}, "body": "", "labels": []}),
+                ok({"head": {"sha": HEAD}, "body": "",
+                    "labels": [{"name": "adversary-required"}]}),
+                ok({"head": {"sha": HEAD}, "body": "",
+                    "labels": [{"name": "adversary-required"}]}))
+    world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_required"] is True
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["adversary-missing"]
+
+
+def test_main_fetches_the_pr_document_once_per_poll_plus_the_resolve(world: World) -> None:
+    serve(world, marker("APPROVE", HEAD))
+    world.run()
+    assert world.calls(f"pulls/{PR}") == 2, "one resolve, one poll"
