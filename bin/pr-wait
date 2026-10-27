@@ -275,10 +275,21 @@ def pr_doc(repo: str, pr: int) -> dict:
 #      and name this head exactly; a BLOCK naming this head - full 40-hex, or a 7+ hex prefix of it with
 #      or without a trailing `…`/`...` - is read from the RAW body, so no ordering, other field, warning,
 #      code fence or strip bug can downgrade it (adversary review of 4a56c01, B1/B5c).
+#   7. The strip may only REPLACE with spaces, never delete (bundled review of 66/67, C2): deletion
+#      joined the text on either side, so a typo could be "repaired" into valid JSON nobody wrote.
+#      Code is CommonMark's: equal-length runs per line, and a backtick in a backtick fence's info
+#      string means inline code, not a fence (C2/C3). A rescued BLOCK still reports `malformed` from
+#      the LIVE validation, so the rescue cannot launder a typo (C5).
 # The marker is matched LOOSELY (anything up to the closing `-->`) and then validated, so a marker
 # with broken JSON is reported as `malformed` rather than as an absence. A strict `{...}` regex cannot
 # see a malformed marker at all, which would make a typo indistinguishable from "no verdict".
-MARKER_RE = re.compile(r"<!--\s*adversary-verdict:v1\s*(.*?)\s*-->", re.DOTALL)
+#
+# TEMPERED (bundled adversary review of 66/67, C1): the group may not cross another `<!--`. Without
+# that, an UNCLOSED start quoted in prose - `Every marker begins <!-- adversary-verdict:v1` - ran
+# non-greedily to the NEXT `-->`, swallowing the BLOCK marker that followed, and `findall` resumed
+# past it: the BLOCK was never examined and the body read as a live APPROVE, merge_ready: true, with
+# the FULL sha. A marker's JSON cannot legitimately contain `<!--`, so nothing is lost.
+MARKER_RE = re.compile(r"<!--\s*adversary-verdict:v1\s*((?:(?!<!--).)*?)\s*-->", re.DOTALL)
 # A marker START with no closing `-->` is invisible to MARKER_RE, and GitHub renders an unclosed
 # `<!--` as a comment to the end of the body, so a human does not see it either. Count the starts and
 # compare with the matches: any excess is malformed (adversary review, A2).
@@ -291,8 +302,11 @@ MARKER_START_RE = re.compile(r"<!--\s*adversary[-_ ]?verdict\b", re.IGNORECASE)
 HEX40 = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 # A shortened sha is what agents actually type (adversary review of 4a56c01, B1): the marker spec asks
 # for 40 hex, but a verdict pasted from a terminal routinely reads `4a56c01db7c2…`. Seven is git's own
-# minimum abbreviation, so anything shorter is not a claim about a commit at all.
-SHORT_HEX_RE = re.compile(r"[0-9a-f]{7,39}", re.IGNORECASE)
+# minimum abbreviation, so anything shorter is not a claim about a commit at all. The cap is 40, not 39
+# (bundled review of 66/67, C4): a FULL sha carrying a trailing `…` was legitimate per the documented
+# property and read as malformed. At equal length `startswith` is equality, so another commit still
+# cannot match.
+SHORT_HEX_RE = re.compile(r"[0-9a-f]{7,40}", re.IGNORECASE)
 
 
 def _strict_object(pairs):
@@ -332,9 +346,13 @@ def _head_matches(sha: object, head: str) -> bool:
     four ordinary Markdown shapes made it wrong (indented fence line, odd fence counts, mixed fence
     characters, an unterminated fence). A shortened sha is therefore matched by PREFIX here.
 
-    A 40-hex value of another commit is still another head: prefixes are capped at 39 hex, so only a
-    value that is a strict prefix of `head` can match, and the placeholder template (`<40-hex>`) carries
-    no hex run of 7 and never matches.
+    A 40-hex value of another commit is still another head: the prefix comparison runs against a head of
+    the same length, so only a value that is a strict prefix of `head` - or `head` itself - can match,
+    and the placeholder template (`<40-hex>`) carries no hex run of 7 and never matches.
+
+    A FULL sha with a trailing `…`/`...` counts too (bundled review of 66/67, C4): the ellipsis is
+    stripped before the comparison, and the run length is capped at 40 so a 40-hex value survives
+    `fullmatch`; at equal length `startswith` is equality, so a different commit still cannot match.
     """
     if not isinstance(sha, str):
         return False
@@ -349,8 +367,60 @@ def _head_matches(sha: object, head: str) -> bool:
     return bool(SHORT_HEX_RE.fullmatch(s)) and head.lower().startswith(s)
 
 
+def _mask_spans(line: str) -> str:
+    """Blank every code span on ONE line, CommonMark 6.1's equal-length backtick runs (review C2).
+
+    WHY (bundled adversary review of 66/67, C2): the old stripper used two fixed regexes -
+    ``` ``[^`\\n]+`` ``` then `` `[^`\\n]+` `` - and neither can see a DOUBLE-backtick span that CONTAINS
+    a single backtick (`` ``literal `X` `` `` is ONE span in CommonMark). The single-backtick regex then
+    matched from the inner backtick and left the outer delimiters in place, so a marker inside such a
+    span stayed LIVE and a false APPROVE came out: `merge_ready: true` from a body that only QUOTED a
+    marker.
+
+    Now a span opens with a run of n backticks and closes at the next run of EXACTLY n; the content may
+    contain backticks of any other run length, and an unmatched run is literal text (which is what
+    CommonMark says). Replaced by SPACES of the same width, never deleted: deletion would concatenate
+    the text on either side, so a body could be "repaired" into different JSON - an author's typo must
+    stay a typo.
+    """
+    out: list[str] = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] != "`":
+            out.append(line[i])
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        run = j - i
+        close = -1
+        k = j
+        while True:
+            m = line.find("`" * run, k)
+            if m == -1:
+                break
+            end = m + run
+            if (m > 0 and line[m - 1] == "`") or (end < n and line[end] == "`"):
+                # Part of a longer run: only an EXACT run closes a span.
+                while end < n and line[end] == "`":
+                    end += 1
+                k = end
+                continue
+            close = m
+            break
+        if close == -1:
+            out.append(line[i:j])
+            i = j
+        else:
+            start = i
+            i = close + run
+            out.append(" " * (i - start))
+    return "".join(out)
+
+
 def _strip_code(body: str) -> str:
-    """Remove fenced blocks and inline code spans before matching markers.
+    """Blank fenced blocks and inline code spans before matching markers, CommonMark-faithfully.
 
     WHY (adversary review, B1): a PR that DOCUMENTS the format quotes the template in backticks or a
     fence. Reading those as live markers made every such PR unmergeable (`malformed` blocks by
@@ -368,38 +438,50 @@ def _strip_code(body: str) -> str:
     number of toggles left `in_fence` true to the end of the body.
 
     Now: a fence opens only at indent <= 3 (4+ spaces is an indented code block in CommonMark, not a
-    fence), remembers its character and length, and closes only on the SAME character at >= that length
-    with nothing but whitespace after it. Code spans are per-line, because a span cannot cross an HTML
-    block and `<!--` starts one. The remaining direction of error is a FALSE BLOCK, never a false
-    approve, and the raw-body pass is the real guarantee for a BLOCK anyway.
+    fence), only when a backtick fence's INFO STRING holds no backtick (CommonMark 4.5 - otherwise the
+    line is inline code, review C3), remembers its character and length, and closes only on the SAME
+    character at >= that length with nothing but whitespace after it. Code spans are per-line, because a
+    span cannot cross an HTML block and `<!--` starts one; see `_mask_spans` for the equal-length runs.
+
+    HONEST ABOUT THE ERROR DIRECTION (review C3): an over-strip can still hide a MALFORMED or near-miss
+    marker, and so lose its `malformed` warning; what it cannot do is lose a BLOCK naming this head,
+    because that is read from the RAW body. Every replacement is a same-width run of spaces, so the text
+    outside code is byte-identical and no marker can be "repaired" into a different one.
+
+    KNOWN LIMIT, accepted by djbclark at the bundled review of 66/67: a BLOCK whose head is MISTYPED -
+    not a prefix of this head at all - and that sits inside code is documentation, so a body with such
+    a quote beside a live APPROVE still reads as approved. Recognising it would mean guessing which
+    quoted near-miss markers are claims, which is the unbounded English-parsing problem this design
+    removed; a BLOCK that names this head is covered by the raw-body rescue above.
     """
     out: list[str] = []
     fence = ""  # the open fence: "" when outside, else its character
     fence_len = 0
     for line in body.splitlines():
-        expanded = line.expandtabs(4)
-        indent = len(expanded) - len(expanded.lstrip(" "))
-        stripped = expanded[indent:] if indent <= 3 else expanded
+        # Indentation is measured with tabs expanded (a tab is four columns), but the TEXT kept is the
+        # original, so every masked line keeps its own length.
+        lead = line[: len(line) - len(line.lstrip(" \t"))]
+        indent = len(lead.expandtabs(4))
+        stripped = line[len(lead):]
         run = len(stripped) - len(stripped.lstrip(stripped[0])) if stripped else 0
         char = stripped[0] if stripped else ""
         if fence:
             if (indent <= 3 and char == fence and run >= fence_len
                     and not stripped[run:].strip()):
                 fence, fence_len = "", 0
-            out.append("")
+            out.append(" " * len(line))
             continue
         if indent <= 3 and char in "`~" and run >= 3:
             # An INFO STRING after the fence run is allowed (```` ```sh ````); only a closing fence must
-            # be bare.
+            # be bare. A backtick in a BACKTICK fence's info string makes it inline code, not a fence.
+            if char == "`" and "`" in stripped[run:]:
+                out.append(_mask_spans(line))
+                continue
             fence, fence_len = char, run
-            out.append("")
+            out.append(" " * len(line))
             continue
-        out.append(line)
-    text = "\n".join(out)
-    # Inline code spans, PER LINE (``x`` then `x`). Not DOTALL: a span that crossed a line would swallow
-    # a marker, and in CommonMark it cannot cross the HTML block that `<!--` starts.
-    text = re.sub(r"``[^`\n]+``", " ", text)
-    return re.sub(r"`[^`\n]+`", " ", text)
+        out.append(_mask_spans(line))
+    return "\n".join(out)
 
 
 
@@ -442,6 +524,57 @@ def adversary_verdict(body: str, head: str) -> dict:
     # gate (adversary review, B1).
     text = _strip_code(body)
 
+    matches = MARKER_RE.findall(text)
+    unclosed, wrongform = _classify_starts(text)
+
+    # VALIDATION COMES FIRST (bundled adversary review of 66/67, C5). Before this, the raw-body BLOCK
+    # rescue returned `malformed: False` unconditionally, so a BLOCK beside a LIVE malformed marker
+    # reported a clean block and the typo vanished: the body looked like one assertable verdict. A
+    # malformed marker is never ok, so the block must carry the flag too. Every early return below
+    # reports the `problems` collected here for the same reason.
+    problems: list[str] = []
+    if wrongform:
+        problems.append(f"{wrongform} marker(s) that are not `adversary-verdict:v1` (exact, "
+                        f"lowercase)")
+    if unclosed:
+        problems.append(f"{unclosed} marker(s) with no closing `-->`")
+
+    # Validate EVERY LIVE marker, so a malformed one beside a good one is still reported.
+    parsed: list[dict] = []
+    placeholders = 0
+    for raw in matches:
+        try:
+            doc = json.loads(raw, object_pairs_hook=_strict_object)
+        except ValueError as e:
+            problems.append(f"marker is not valid JSON: {e}")
+            continue
+        if not isinstance(doc, dict):
+            problems.append("marker is not a JSON object")
+            continue
+        verdict = doc.get("verdict")
+        sha = doc.get("head")
+        # EXACT match: the spec says "APPROVE"|"BLOCK". A lowercase or odd-cased value is outside it
+        # and fails closed (adversary review, A5).
+        if verdict not in ("APPROVE", "BLOCK"):
+            problems.append(f"verdict must be exactly APPROVE or BLOCK, got {verdict!r}")
+            continue
+        if isinstance(sha, str) and HEX40.match(sha):
+            parsed.append({"verdict": verdict, "head": sha.lower()})
+            continue
+        # A BLOCK naming this head by a SHORTENED sha is the raw-body rescue's own shape, not a typo:
+        # it is matched by `_head_matches` below and is therefore NOT a problem. Every other unusable
+        # head stays malformed.
+        if verdict == "BLOCK" and _head_matches(sha, head):
+            continue
+        # ASYMMETRIC RULE (adversary review, R3a/R3b): only an APPROVE may be skipped as
+        # documentation, and only when its head is the TEMPLATE's own placeholder. A BLOCK with an
+        # unusable head stays malformed, because downgrading a BLOCK is the failure this gate
+        # exists to prevent - and agents routinely shorten a sha with an ellipsis.
+        if verdict == "APPROVE" and _is_placeholder(sha):
+            placeholders += 1
+            continue
+        problems.append(f"head must be a 40-hex sha, got {sha!r}")
+
     # ASYMMETRIC (adversary review, R3b): a BLOCK naming THIS head counts WHEREVER it appears, the raw
     # body included. An APPROVE must be live (outside code) so documentation cannot approve; a BLOCK
     # must not be hidable by an over-strip bug, a stray backtick, or a malformed fence. Both directions
@@ -449,7 +582,8 @@ def adversary_verdict(body: str, head: str) -> dict:
     #
     # SHORTENED shas are matched by prefix (adversary review of 4a56c01, B1): a full-sha-only rescue left
     # every `4a56c01db7c2…` BLOCK dependent on the stripper, and four ordinary Markdown shapes defeated
-    # it. `_head_matches` is the whole rescue now, so no strip bug can lose a BLOCK.
+    # it. `_head_matches` is the whole rescue now, so no strip bug can lose a BLOCK. `malformed` still
+    # comes from the live validation above (C5): the rescue may not launder a typo.
     for raw in MARKER_RE.findall(body):
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
@@ -472,7 +606,8 @@ def adversary_verdict(body: str, head: str) -> dict:
                         break
                 exact = str(sha).strip().lower() == head.lower()
                 return {"present": True, "verdict": "BLOCK", "quoted_sha": str(sha).strip().lower(),
-                        "matches_head": True, "conflict": approves_here, "malformed": False,
+                        "matches_head": True, "conflict": approves_here,
+                        "malformed": bool(problems),
                         "detail": ("the body says BOTH BLOCK and APPROVE for this head - resolve it, "
                                    "the PR cannot be read as approved" if approves_here
                                    else "BLOCK for this head" if exact
@@ -480,10 +615,8 @@ def adversary_verdict(body: str, head: str) -> dict:
                                         f"{str(sha).strip()} (read from the raw body, so no "
                                         f"code-fence or strip bug can hide it)")}
 
-    matches = MARKER_RE.findall(text)
-    unclosed, wrongform = _classify_starts(text)
     if not matches:
-        if unclosed or wrongform:
+        if problems:
             # A marker START that is not a marker: malformed, NOT absent. A typo reads as a typo, and
             # the REASON is named (adversary review of 4a56c01, B3): an unclosed `<!--` and a marker
             # that is not exactly `adversary-verdict:v1` are different mistakes.
@@ -500,43 +633,6 @@ def adversary_verdict(body: str, head: str) -> dict:
         return {"present": False, "verdict": None, "quoted_sha": None, "matches_head": False,
                 "conflict": False, "malformed": False,
                 "detail": "no adversary-verdict marker in the PR body (prose verdicts are not read)"}
-
-    # Validate EVERY marker, so a malformed one beside a good one is still reported.
-    parsed: list[dict] = []
-    problems: list[str] = []
-    placeholders = 0
-    if wrongform:
-        problems.append(f"{wrongform} marker(s) that are not `adversary-verdict:v1` (exact, "
-                        f"lowercase)")
-    if unclosed:
-        problems.append(f"{unclosed} marker(s) with no closing `-->`")
-    for raw in matches:
-        try:
-            doc = json.loads(raw, object_pairs_hook=_strict_object)
-        except ValueError as e:
-            problems.append(f"marker is not valid JSON: {e}")
-            continue
-        if not isinstance(doc, dict):
-            problems.append("marker is not a JSON object")
-            continue
-        verdict = doc.get("verdict")
-        sha = doc.get("head")
-        # EXACT match: the spec says "APPROVE"|"BLOCK". A lowercase or odd-cased value is outside it
-        # and fails closed (adversary review, A5).
-        if verdict not in ("APPROVE", "BLOCK"):
-            problems.append(f"verdict must be exactly APPROVE or BLOCK, got {verdict!r}")
-            continue
-        if not isinstance(sha, str) or not HEX40.match(sha):
-            # ASYMMETRIC RULE (adversary review, R3a/R3b): only an APPROVE may be skipped as
-            # documentation, and only when its head is the TEMPLATE's own placeholder. A BLOCK with an
-            # unusable head stays malformed, because downgrading a BLOCK is the failure this gate
-            # exists to prevent - and agents routinely shorten a sha with an ellipsis.
-            if verdict == "APPROVE" and _is_placeholder(sha):
-                placeholders += 1
-                continue
-            problems.append(f"head must be a 40-hex sha, got {sha!r}")
-            continue
-        parsed.append({"verdict": verdict, "head": sha.lower()})
 
     if not parsed:
         if placeholders and not problems:
@@ -808,10 +904,13 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     A verdict counts only if the marker is well formed, names exactly APPROVE or BLOCK, and names this
     head. `malformed` is its own outcome and is NEVER ok, even when a valid APPROVE sits beside it. The
     rule is ASYMMETRIC: an APPROVE must be live (outside code), while a BLOCK naming this head - full
-    40-hex, or a 7+ hex prefix of it - is read from the RAW body, so no code fence or strip bug can hide
-    one. Prose verdicts are not read at all - the first version parsed English and TWO adversary rounds
-    found false approvals and false misses, so that parser was deleted rather than patched (a third
-    round reviewed this marker design).
+    40-hex, or a 7+ hex prefix of it with or without a trailing `…`/`...` - is read from the RAW body, so
+    no code fence or strip bug can hide one. The rescue may not launder a typo: `malformed` is reported
+    from the LIVE validation even when the verdict comes from the raw body (bundled review, C5). Prose
+    verdicts are not read at all - the first version parsed English and TWO adversary rounds found false
+    approvals and false misses, so that parser was deleted rather than patched (a third round reviewed
+    this marker design, and a bundled review of 66/67 found the strip/raw interaction still failed open
+    in five shapes; each is now pinned by a test).
     """
     mismatch: list[str] = []
     blockers: list[str] = []

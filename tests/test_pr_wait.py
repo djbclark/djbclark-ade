@@ -1934,3 +1934,141 @@ def test_main_fetches_the_pr_document_once_per_poll_plus_the_resolve(world: Worl
     serve(world, marker("APPROVE", HEAD))
     world.run()
     assert world.calls(f"pulls/{PR}") == 2, "one resolve, one poll"
+
+
+# ---- the bundled adversary review of 66/67: C1-C5 ---------------------------------------------
+#
+# Two of three re-reviewers found the SAME class again: the raw-body/strip interaction still failed
+# open, and every finding below reached `merge_ready: true` from a body that merely QUOTED a marker
+# or mistyped one. Each fix is pinned through `adv()` and, where the failure was reached through
+# `assess()`, through the real gate: a property that holds only inside `adversary_verdict` is not the
+# property the gate promises.
+
+def test_c1_an_unclosed_marker_start_quoted_in_code_cannot_swallow_a_block() -> None:
+    # MARKER_RE was non-greedy but unbounded, so the unclosed start below ran to the NEXT `-->` - the
+    # fenced BLOCK's own - and the JSON parse failed, `continue` skipped it, `findall` resumed AFTER
+    # the BLOCK, and the body read as a live APPROVE with the full sha. PR 67's subject is exactly
+    # this kind of quoting, so the doc-writing PR could approve itself.
+    body = (marker("APPROVE") + "\nEvery marker begins `<!-- adversary-verdict:v1`.\n"
+            + FENCE3 + "\n" + marker("BLOCK") + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_c1_an_unclosed_start_in_plain_prose_blocks_and_is_reported_malformed() -> None:
+    # The same shape without backticks: the BLOCK must survive, and the stray start is a typo that is
+    # REPORTED as well - "a BLOCK beside a typo" is not the same body as "a BLOCK".
+    body = (marker("APPROVE") + "\nEvery marker begins <!-- adversary-verdict:v1\n"
+            + FENCE3 + "\n" + marker("BLOCK") + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c2_a_double_backtick_span_holding_one_backtick_is_still_code() -> None:
+    # CommonMark 6.1: a span opens with n backticks and closes at the next run of EXACTLY n, so
+    # ``literal `<marker>` `` is ONE span. The old pair of fixed regexes could not see it, matched from
+    # the INNER backtick, and left the marker live: a quoted APPROVE read as a real one.
+    body = "``literal `" + marker("APPROVE") + "``\n"
+    assert not adv(body)["present"]
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-missing"], warnings
+    # Outside the span the same marker is a verdict, so the fix is the span and not a blanket refusal.
+    assert passes(body + "\n" + marker("APPROVE"))
+
+
+def test_c2_the_strip_never_repairs_invalid_json_into_a_different_marker() -> None:
+    # Spans used to be replaced with "" - DELETION concatenates the text on either side, so an author's
+    # typo could be closed up into valid JSON that was never written. Every replacement is now a run of
+    # spaces of the same width.
+    broken = marker("APPROVE").replace('"} -->', '","unexpected"} -->')
+    assert broken != marker("APPROVE")
+    assert adv(broken)["malformed"], "the unquoted typo is a typo"
+    quoted = "``literal `" + broken + "``"
+    r = adv(quoted)
+    assert not r["present"] and not r["malformed"], r
+
+
+def test_c3_a_backtick_in_an_info_string_is_not_a_fence() -> None:
+    # CommonMark 4.5: a backtick fence's info string may not contain a backtick. A line like ```a`b is
+    # therefore INLINE CODE, not a fence - and treating it as one blanked the rest of the body, which
+    # hid the malformed marker below and let the APPROVE read clean.
+    body = (marker("APPROVE") + "\n" + FENCE3 + "a`b\n"
+            + '<!-- adversary-verdict:v1 {"verdict":"APPROVE"}\n')
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c4_a_full_sha_with_a_trailing_ellipsis_is_a_block_not_a_typo() -> None:
+    # The property is documented as "full 40-hex, OR a 7+ hex prefix with or without a trailing …".
+    # `[0-9a-f]{7,39}` could not match a full sha carrying an ellipsis, so a legitimate BLOCK read as
+    # malformed: report-only by default, which means it silently stopped blocking in the opt-in case
+    # that matters. At equal length `startswith` is equality, so the cap can go to 40 safely.
+    for tail in ("\u2026", "..."):
+        r = adv(marker("BLOCK", ADV_HEAD + tail))
+        assert r["verdict"] == "BLOCK" and not r["malformed"] and r["matches_head"], (tail, r)
+        ready, warnings = gate(marker("BLOCK", ADV_HEAD + tail))
+        assert not ready and warnings == ["adversary-stale-or-blocked"], (tail, warnings)
+    # Widening the cap must not make another commit match. An ellipsized sha of a DIFFERENT commit is
+    # not a prefix of this head, so it does not match; it also is not 40-hex, so it stays a malformed
+    # head rather than a stale verdict - the fail-closed direction, unchanged here.
+    other = adv(marker("BLOCK", OTHER_HEAD + "\u2026"))
+    assert not other["matches_head"] and other["malformed"], other
+
+
+def test_c5_a_raw_body_block_cannot_report_a_clean_verdict_beside_a_live_typo() -> None:
+    # The raw-body rescue returned `malformed: False` unconditionally, so a BLOCK beside a LIVE
+    # malformed marker reported a clean block: the typo vanished from the summary and the body looked
+    # like one assertable verdict. Validation now runs first and the rescue carries its result.
+    body = ('<!-- adversary-verdict:v2 {"verdict":"APPROVE","head":"' + ADV_HEAD + '"} -->\n'
+            + marker("BLOCK"))
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c5_a_shortened_block_beside_a_live_typo_is_malformed_too() -> None:
+    # The shortened-sha rescue is the one that always said "clean", so it laundered a BLOCK beside a
+    # typo. The prefix BLOCK is NOT itself a problem - it is the shape the rescue exists for - but the
+    # broken marker beside it still reports.
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    body = '<!-- adversary-verdict:v1 {broken -->\n' + short
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["malformed"], r
+    assert "shortened sha" in r["detail"] and "raw body" in r["detail"]
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_strip_code_masks_with_spaces_and_never_changes_a_line() -> None:
+    # The invariant every fail-open shape above depends on: stripping may only REPLACE characters with
+    # spaces. A line's length never changes, no line is added or removed, and every surviving non-space
+    # character is the original one at the same position - so no marker can be repaired into another.
+    body = "\n".join([
+        "plain text  ",
+        "\tindented with a tab ",
+        FENCE3 + "sh",
+        "in the fence ",
+        FENCE3,
+        "a `span` and ``a `span` with a tick`` end",
+        "    " + FENCE3 + " (four spaces: indented code, not a fence)",
+        FENCE3 + "a`b (not a fence: a backtick in the info string)",
+        "",
+    ])
+    src = body.splitlines()
+    dst = load_module()._strip_code(body).splitlines()
+    assert len(dst) == len(src)
+    for line_in, line_out in zip(src, dst):
+        assert len(line_in) == len(line_out), (line_in, line_out)
+        for a, b in zip(line_in, line_out):
+            assert b == " " or b == a, (line_in, line_out)
+    assert dst[0] == src[0] and dst[1] == src[1], "live lines are untouched"
+    assert not dst[2].strip() and not dst[3].strip() and not dst[4].strip(), "the fence is masked"
+    assert "span" not in dst[5] and dst[5].startswith("a ") and dst[5].endswith(" end")
+    assert dst[6] == src[6] and dst[7] == src[7], "neither line is a fence"
