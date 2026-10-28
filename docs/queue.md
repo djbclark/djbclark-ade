@@ -3,6 +3,32 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Context visibility in Paseo and compact/handoff discipline: examine, search, discuss, fix (djbclark via session ab4e97be, 2026-10-27)
+
+djbclark: "all of this needs to be examined, searched about, talked about, and fixed." Only measured so far, nothing fixed. The brief with the
+scripts is `~/.local/state/ade-briefs/context-visibility-and-handoff-audit-2026-10-27.md` (relay id 37f55ad9). Related: `docs/context-hygiene.md`,
+memory `reference_paseo_claude_context_window_controls.md`, `feedback_self_compact.md`.
+
+1. **Measured 2026-10-27 (transcripts Oct 23-27, `~/.local/state/self-slash.log`).** Paseo Desktop's context meter divides by the manifest's 1M window and
+   ignores `autoCompactWindow` (300000, ruled 2026-10-24, unchanged), so a session at its real wall reads about 27% (upstream getpaseo/paseo#4949, open).
+   `paseo inspect --json` `LastUsage` read all zeros on a running Claude agent; `bin/context-budget-check` measures only the fresh-session baseline.
+   48 native compactions on Oct 23-27, all `trigger=auto`, `preTokens` median about 267k; self-slash `/compact` used once (Oct 25); 27 handoff cycles
+   (tapering: 4, 9, 10, 3, 1 per day); 4 "gave up, no empty input prompt seen" (nothing sent) and 2 failed successor launches on Oct 23-24.
+   Not checked: whether `context_size_nudge.py` warnings were seen and acted on (`~/.claude/state/context-nudges.json`, 484 sessions, levels up to 19),
+   why handoffs did not fire before the wall, non-Claude agents.
+2. **Order of work.** (a) Examine the nudge state against the 35 sessions that peaked at 200-270k and the two failure classes (root-cause fix in this repo,
+   code not only docs, `~/CLAUDE.md` item 11). (b) Web search first (item 14): how others surface live per-agent context, Paseo's plans for #4949 and any
+   context API. (c) Talk to djbclark with numbered options before building: a live per-agent readout (tokens vs 300k, perhaps through fleet-watch), tighter
+   nudge tiers or an automatic task-boundary handoff, and a comment on #4949 (item 38: dupe-search first). (d) Build what he picks, in a claimed workspace,
+   with tests, a CHANGELOG line and an adversary verdict. Ask before touching `~/.claude/settings.json`.
+
+## Sibling `RecursionError` readers: governor and quota-guard (adversary r1 on PR 97, PR 98 merged 2026-10-28 as 1f56db3; djbclark ruled last in the queue)
+
+PR 98 made `ade_gates.read_guard_state` read a `RecursionError` from `json` as unreadable. Two readers of the same guard state files keep the exposure
+(Python 3.13 and older raise `RecursionError` on deeply nested JSON under the 64 KiB cap): `guard_level` in `bin/claude-fleet-governor` and `load_state` in
+`bin/claude-quota-guard`. Optionally make the hook call `g.read_guard_state()` instead of its own copy (r1 finding 2). Failing tests first, forcing
+`RecursionError` the way PR 98's test does (a real nest does not trip on Python 3.14); one adversary round; CHANGELOG `Fixed` line.
+
 ## Verified peer messaging, round 2: "always acknowledged", and the gaps found (djbclark, direct, 2026-10-25)
 
 djbclark, 2026-10-25, after seeing this relayed text from djbclark-ade-8d: "ack from djbclark-ade-8d (430f45ba), no reply needed beyond this": he wanted it so that **things always need an acknowledgement, and when none arrives the requesting agent has to handle that**; is the missing part just later in the implementation, or a flaw in what already landed? Answer (2026-10-25): mostly rollout and wiring, plus one design scoping that needs his ruling. Builds on "Verified peer messaging" (PR 74, merged 6f54e89; AGENTS.md standing order 10). Nothing below is started.
