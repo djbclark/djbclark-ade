@@ -90,13 +90,20 @@ with `--expect-ack`:
    `unverified` are still not delivered (item 3). Full contract: `session-finder/SKILL.md`, "--expect-ack".
 11. **A reply goes through relay.py** (2026-10-26): when a peer's text ends `[reply through relay.py to ID: ack X]`, answer with `relay.py <ID> "ack X"` and nothing else. A sender with no readable transcript is told its question was answered only by that relay call; an answer in prose, or through another channel, leaves its `--expect-ack` open until it goes OVERDUE. A Hermes conversation's reply counts the same way (relay reads the conversation from `HERMES_SESSION_ID` and the process tree); a relay run from a shell outside Hermes that only sets variables does not, unless a pid left in that conversation's lock file (kept at least 7 days after its last relayed turn, until a later relay into Hermes prunes it) or in `gateway.pid` now belongs to the shell or one of its ancestors (pid reuse; relay checks no liveness), but a same-user process that also writes that conversation's lock file or `~/.hermes/gateway.pid` can forge it (the same class as `HERDR_PANE_ID`).
 
-Canonical copy: `~/src/djbclark-ade/skills/peer-relay/SKILL.md`. Hermes installs or links it into
-`~/.hermes/skills/` itself; the repo does not write that tree.
-
-12. **Adopt retired expectations explicitly** (2026-10-28): from the successor, run
+12. **Adopt finished senders' expectations explicitly** (2026-10-28): after the old session finishes, FIRST run
     `relay.py --transfer-expectations OLD_SENDER` (all open expectations), or
     `relay.py --transfer-expectations OLD_SENDER --id TOKEN --id TOKEN2` (selected tokens).
-    Use the exact fleet id, full session id or Paseo id of one verifiably finished sender; live, missing or ambiguous
-    rows refuse with exit 2. Then `relay.py --pending` shows the new owner and `relay.py --sweep` watches its transcript.
-    Tell peers to direct delayed `ack TOKEN` replies to the successor. Transfer sends nothing, preserves target/status/age,
-    and never marks a queued notice delivered. Full contract: `session-finder/SKILL.md`, "Handoff transfer".
+    Use the exact fleet id, full session id or Paseo id of one row carrying `finished`: Claude transcript `/handoff` or `/quit`,
+    or ACP `done` (heuristics, not proof of exit; ACP can take another turn). Non-Claude Paseo agents have no such evidence
+    and cannot be transferred yet (exit 2), as do live/missing/ambiguous/self refusals. A same-pane successor with the same
+    fleet id cannot transfer, even with distinct session ids. Unswept OLD-transcript acks are settled as `acked` before adoption;
+    records failing ownership/target safety stay unchanged and are listed as `skipped`. Text/JSON list `transferred`, `acked`,
+    `skipped`, `missing`. Any explicit `--id` not transferred exits 1 with `missing: [...]` (absent, closed, another sender's,
+    skipped, or just settled as `acked`); partial transfers still take effect. Without explicit ids, zero transfers exits 0.
+    THEN tell peers to direct delayed `ack TOKEN` replies to the successor; an ack already in the SUCCESSOR's transcript before
+    the transfer offset is not counted. `--pending` shows the new owner and `--sweep` watches its transcript. Transfer sends
+    nothing, preserves target/status/age, and never marks a queued notice delivered. Full contract: `session-finder/SKILL.md`,
+    "Handoff transfer".
+
+Canonical copy: `~/src/djbclark-ade/skills/peer-relay/SKILL.md`. Hermes installs or links it into
+`~/.hermes/skills/` itself; the repo does not write that tree.
