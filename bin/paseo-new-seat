@@ -35,7 +35,12 @@ that config, then verifies the shield from the agent's state file.
 USAGE
   paseo-new-seat --title "Dann Chat 3" --prompt "..." [--provider cline] [--model M]
                  [--cwd DIR] [--workspace ID] [--thinking ID] [--mode ID] [--label k=v]... [--json]
-                 [--no-auto-accept] [--dry-run]
+                 [--no-auto-accept] [--dry-run] [--probe]
+
+--probe is for a throwaway test seat ("Reply ok and stop."): it waits for the turn to end, then archives the
+agent so no tab is left behind (exit 5 when the agent was created but could not be archived). A live probe is
+the exception: prefer --dry-run, and use --probe only when the real create path must run (2026-10-28: two
+hand-run "zz probe" seats were left in the shared `watch` workspace, an omp one and a codex one).
 
 --thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --mode creates the
 agent in that permission mode and verifies it (codex has no auto_accept feature: its yolo is mode `full-access`,
@@ -43,7 +48,8 @@ so a codex seat without --mode runs in `auto`, Default Permissions, and can stal
 agent (bin/watch uses watch=<domain>); --json prints one JSON line {id, shortId, autoAccept} instead of the
 two text lines. An empty --model starts the provider's own default model.
 
-Exit: 0 created and verified; 1 error; 2 usage; 4 created but the shield did not come up green.
+Exit: 0 created and verified; 1 error; 2 usage; 4 created but the shield did not come up green;
+5 --probe: created but not archived.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 APP = "/Applications/Paseo.app/Contents"
@@ -66,6 +73,32 @@ USAGE = (__doc__ or "").split("USAGE")[-1].strip("\n") + "\n"
 def usage() -> int:
     print(USAGE, file=sys.stderr)
     return 2
+
+
+def _paseo(*argv: str) -> subprocess.CompletedProcess:
+    return subprocess.run([os.environ.get("PASEO_NEW_SEAT_PASEO") or "paseo", *argv],
+                          capture_output=True, text=True, check=False)
+
+
+def archive_probe(agent_id: str, wait_s: float) -> int:
+    """Wait for the probe's turn to end, then archive it. Never leaves the tab open silently."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        r = _paseo("agent", "ls", "-g", "--json")
+        try:
+            rows = json.loads(r.stdout) if r.returncode == 0 else []
+        except ValueError:
+            rows = []
+        row = next((x for x in rows if x.get("id") == agent_id), None)
+        if row is not None and row.get("status") not in ("running", "initializing"):
+            break
+        time.sleep(float(os.environ.get("PASEO_NEW_SEAT_POLL") or 2))
+    r = _paseo("agent", "archive", agent_id)
+    if r.returncode != 0:
+        print(f"paseo-new-seat: probe {agent_id[:8]} created but not archived: "
+              f"{(r.stderr or r.stdout).strip()}", file=sys.stderr)
+        return 5
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -85,6 +118,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--no-auto-accept", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--probe", action="store_true")
     p.add_argument("-h", "--help", action="store_true")
     try:
         a = p.parse_args(argv)
@@ -106,7 +140,7 @@ def main(argv: list[str]) -> int:
         args += ["--mode", a.mode]
     for lab in a.label:
         args += ["--label", lab]
-    if a.json:
+    if a.json or (a.probe and not a.dry_run):
         args += ["--json"]
     if a.allow_new_workspace:
         args += ["--allow-new-workspace"]
@@ -121,11 +155,25 @@ def main(argv: list[str]) -> int:
     env["PASEO_NODE_ENV"] = "production"
     env["PASEO_NEW_SEAT_CLI_DIST"] = os.environ.get("PASEO_NEW_SEAT_CLI_DIST") or DEFAULT_CLI_DIST
     try:
-        return subprocess.run([helper, "--disable-warning=DEP0040", str(MJS), *args],
-                              env=env, check=False).returncode
+        if not a.probe or a.dry_run:
+            return subprocess.run([helper, "--disable-warning=DEP0040", str(MJS), *args],
+                                  env=env, check=False).returncode
+        r = subprocess.run([helper, "--disable-warning=DEP0040", str(MJS), *args],
+                           env=env, check=False, stdout=subprocess.PIPE, text=True)
     except OSError as e:
         print(f"paseo-new-seat: cannot run {helper}: {e}", file=sys.stderr)
         return 1
+    sys.stdout.write(r.stdout)
+    if r.returncode not in (0, 4):
+        return r.returncode
+    try:
+        rec = json.loads(r.stdout.strip().splitlines()[-1])
+        agent_id = str(rec["id"])
+    except (ValueError, KeyError, IndexError):
+        print("paseo-new-seat: --probe could not read the new agent id; not archived", file=sys.stderr)
+        return 5
+    rc = archive_probe(agent_id, float(os.environ.get("PASEO_NEW_SEAT_PROBE_WAIT") or 120))
+    return rc or r.returncode
 
 
 if __name__ == "__main__":

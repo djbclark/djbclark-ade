@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""bin/pytest — run this repo's pytest with the exact dependencies CI installs.
+
+The bare `python3` on this machine has no pytest (2026-10-28: the third session in a row to hit
+"No module named pytest" and to rediscover the `uv run --with` incantation from an old handoff). CI
+runs `uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest
+tests/ -q`; this wrapper is that command, so `tests/test_bin_pytest.py` fails when the two drift.
+
+It is named `pytest` on purpose: `bg` recognises a test run by the command's basename (`pytest`, or `-m pytest`),
+and a differently named wrapper is treated as a build and refused (2026-10-28). `bin/` is not on PATH, so this
+never shadows Homebrew's own `pytest`; call it by path.
+
+USAGE
+  ~/ops/site-private/bin/bg bin/pytest [PYTEST ARGS]     # always through bg; no args = tests/ -q
+  bin/pytest --print                                         # print the command, run nothing
+
+Runs from the repo root of the checkout this file is in (a worktree runs its own tests).
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+DEPS = ["pytest", "pyyaml", "agent-client-protocol>=0.9,<1.0"]
+ROOT = Path(os.path.realpath(__file__)).parent.parent
+
+
+def command(args: list[str]) -> list[str]:
+    argv = ["uv", "run"]
+    for dep in DEPS:
+        argv += ["--with", dep]
+    return argv + ["python", "-m", "pytest", *(args or ["tests/", "-q"])]
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["--print"]:
+        print(" ".join(command([])))
+        return 0
+    os.chdir(ROOT)
+    os.execvp("uv", command(argv))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
