@@ -642,6 +642,25 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("--workspace vis ", next(c for c in self.paseo_calls() if c.startswith("run ")))
 
+    def test_successor_uses_the_workspace_id_from_its_own_state_file_when_cwd_is_shared(self) -> None:
+        # 2026-10-28: three workspaces shared ~/src/djbclark-ade, the successor was refused and nothing started
+        cwd = self.succ_env()["FAKE_CWD"]
+        two = f'[{{"workspaceId": "a", "cwd": "{cwd}"}}, {{"workspaceId": "b", "cwd": "{cwd}"}}]'
+        state = self.home / ".paseo" / "agents" / "slug"
+        state.mkdir(parents=True)
+        _ = (state / "test-agent.json").write_text('{"workspaceId": "b"}')
+        r = self.run_waiter(FAKE_WS_JSON=two)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--workspace b ", next(c for c in self.paseo_calls() if c.startswith("run ")))
+        # placed by the state file only: the shared workspace is never archived
+        self.assertFalse(any(c.startswith("workspace archive") for c in self.paseo_calls()))
+        # an id that is in no shared row does not place anything: still refused
+        _ = (state / "test-agent.json").write_text('{"workspaceId": "zzz"}')
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=two)
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("several workspaces", r.stdout)
+
     def test_successor_archive_refusal_exits_8_and_leaves_the_successor(self) -> None:
         r = self.run_waiter(FAKE_ARCHIVE_FAIL="1")
         self.assertEqual(r.returncode, 8, r.stdout + r.stderr)

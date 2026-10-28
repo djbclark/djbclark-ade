@@ -909,6 +909,25 @@ sys.exit(3)' "$1" "${@:3}" 2>/dev/null
 }
 jfield() { local text="$1"; shift; jfield_py 0 "$text" "$@"; }
 jfield_nn() { local text="$1"; shift; jfield_py 1 "$text" "$@"; }
+# own_workspace_id AGENT-ID: the workspaceId in this agent's own Paseo state file, or nothing.  Three
+# workspaces shared one cwd on 2026-10-28 and the successor was refused ("several workspaces share this
+# cwd"); `paseo agent inspect` prints no workspace (upstream getpaseo/paseo#7592) but the state file
+# does.  It only places the successor (never proof for archiving a workspace).
+own_workspace_id() {
+  python3 -c '
+import glob, json, os, re, sys
+agent = sys.argv[1]
+if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent):
+    sys.exit(0)
+home = os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
+for f in glob.glob(os.path.join(home, "agents", "*", agent + ".json")):
+    try:
+        v = json.load(open(f)).get("workspaceId")
+    except (OSError, ValueError, AttributeError):
+        continue
+    if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_-]+", v):
+        print(v); break' "$1" 2>/dev/null
+}
 # workspace_plan AGENT-CWD: from `paseo workspace ls --background --json` on stdin print one JSON
 # object: ws (where the successor goes), cwd (its --cwd: the target workspace's own row when
 # --workspace names one, else "" = this agent's), old_ws (this agent's workspace), proven (1 only
@@ -920,6 +939,7 @@ workspace_plan() {
   python3 -c '
 import json, os, sys
 agent_cwd = os.path.realpath(sys.argv[1]); override, target = sys.argv[2], sys.argv[3]
+own = sys.argv[4] if len(sys.argv) > 4 else ""
 out = dict(ws="", cwd="", old_ws="", proven="0", old_iso="", old_cwd="", note="", err="")
 def emit():
     print(json.dumps(out)); sys.exit(0)
@@ -958,7 +978,10 @@ else:
             out["proven"] = "1"
     elif len(hit) > 1:
         fg = [r for r in hit if not r.get("background")]
-        if len(fg) == 1:
+        if own and any(r["workspaceId"] == own for r in hit):
+            old = own
+            out["note"] = "several workspaces share this cwd; " + old + " is the workspaceId in this agent state file, so the successor goes there, and it is never archived"
+        elif len(fg) == 1:
             old = fg[0]["workspaceId"]
             out["note"] = "several workspaces share this cwd; " + old + " was picked by preference and is never archived"
         else:
@@ -1008,7 +1031,8 @@ successor_paseo() {
   cwd="${PASEO_AGENT_CWD:-$old_cwd}"
   [ -n "$cwd" ] || successor_fail "this agent cwd is unknown"
   wsout=$(pcli workspace ls --background --json 2>&1) || successor_fail "workspace ls failed: $(printf '%s' "$wsout" | gtr -s ' \n' ' ' | gcut -c1-200)"
-  plan=$(printf '%s' "$wsout" | workspace_plan "$cwd" "${SELF_SLASH_WORKSPACE:-}" "$s_workspace")
+  own_ws=$(own_workspace_id "$pane")
+  plan=$(printf '%s' "$wsout" | workspace_plan "$cwd" "${SELF_SLASH_WORKSPACE:-}" "$s_workspace" "$own_ws")
   [ -n "$plan" ] || successor_fail "workspace ls output could not be read"
   perr=$(jfield "$plan" err); [ -z "$perr" ] || successor_fail "$perr (SELF_SLASH_WORKSPACE=<id> or --workspace <id> names one)"
   ws=$(jfield "$plan" ws); run_cwd=$(jfield "$plan" cwd); run_cwd="${run_cwd:-$cwd}"
