@@ -81,14 +81,19 @@ window that is about to close (2026-10-27: a peer's ack reached the old session 
    question card) and the ack token it was asked for.
 2. The **successor** sends the notices from its real identity (`relay.py PEER "<text>" --expect-ack TOKEN`; a first contact asks for a
    named ack), so replies and expectations land in the surviving transcript. Notices already sent by the old session are adopted and
-   watched by the successor with `relay.py --pending` / `--sweep`; they are never resent or hand-edited. A deliberate new return-path
+   watched after retirement with `relay.py --transfer-expectations OLD_SENDER` (or add repeatable `--id TOKEN` to select
+   expectations), then `relay.py --pending` / `--sweep`. OLD_SENDER is its exact fleet id, full session id or Paseo id; relay
+   requires a unique fleet row marked finished, and refuses live, missing or ambiguous rows (exit 2). They are never resent
+   or hand-edited. Peers send their late `ack TOKEN` to the successor id; transfer does not forward messages. A deliberate new return-path
    check from the successor is a new contact, not a duplicate.
 3. Queued, unverified and card-blocked statuses survive the transfer unchanged and are never called delivered. A blocked peer is
    notified after its card resolves, not around it.
 4. The old session only verifies that the successor accepted this duty (its own named ack); completion never depends on the old model
    or window forwarding a late reply.
 5. Acceptance scenario: the old session exits before a peer's delayed ack and before a queued notice delivers. The successor's
-   `relay.py --pending` still lists the expectation open, the later ack resolves it by `--sweep`, and the queued notice is still shown
+   `relay.py --transfer-expectations OLD_SENDER --id TOKEN` adopts the open expectation while the old sender is still
+   fleet-verifiable as finished; `relay.py --pending` lists its new owner. The later ack sent to the successor resolves it
+   by `relay.py --sweep`, and the queued notice is still shown
    as queued until relay itself reports `delivered`.
 
 CLI gotcha (2026-10-27): `paseo logs --json` prints rendered text, not parseable JSON, on this install; `inspect` and `logs` do not

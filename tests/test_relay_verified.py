@@ -315,6 +315,138 @@ class TestExpectAck(Base):
             self.assertEqual([r["created"] for r in json.loads(out) if r.get("kind") == "expect"], [0.0])
 
 
+class TestTransferExpectations(Base):
+    """A retired sender explicitly hands its outstanding questions to a real successor."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
+        self.before = relay.expect_read("build1")
+        self.successor_tx = self.tmp / "successor.jsonl"
+        self.successor_tx.write_text("{}\n")
+        self.successor = sess(id="eeeeeeee", name="successor", sid="eeeeeeee-0000-4000-8000-000000000005",
+                              transcript=str(self.successor_tx), status="working")
+        self.successor["self"] = True
+        self.old = {**self.me, "self": False, "finished": "/handoff"}
+        self.rows = [self.old, self.successor, self.target]
+        relay.fleet.sessions = lambda: self.rows
+
+    def transfer(self, *args: str) -> tuple[int, str]:
+        return self.run_cli("--transfer-expectations", self.old["id"], *args)
+
+    def test_transfer_finished_sender_preserves_question_and_age_and_pending_shows_new_owner(self) -> None:
+        self.assertEqual(self.transfer()[0], 0)
+        r = relay.expect_read("build1")
+        for key in ("id", "state", "target", "created", "within", "acked"):
+            self.assertEqual(r[key], self.before[key], key)
+        self.assertEqual(r["sender"], self.successor["id"])
+        self.assertEqual(r["sender_sid"], self.successor["sid"])
+        self.assertEqual(r["tx"], str(self.successor_tx))
+        self.assertEqual(r["transferred_from"]["sender"], self.old["id"])
+        self.assertEqual(r["transferred_from"]["tx"], str(self.me_tx))
+        self.assertGreater(r["transferred_at"], 0)
+        rows = json.loads(self.run_cli("--pending", "--json")[1])
+        self.assertEqual([x["sender"] for x in rows if x.get("kind") == "expect"], ["successor"])
+        self.assertIn("from successor", self.run_cli("--pending")[1])
+
+    def test_transfer_live_or_blocked_or_unknown_sender_is_refused_without_changes(self) -> None:
+        for finished, status in (("", "working"), ("", "idle"), ("", "blocked")):
+            self.old.update(finished=finished, status=status)
+            self.assertEqual(self.transfer()[0], 2)
+            self.assertEqual(relay.expect_read("build1"), self.before)
+        self.rows.remove(self.old)
+        self.assertEqual(self.transfer()[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
+
+    def test_transfer_unrelated_closed_reserved_and_different_session_records_are_untouched(self) -> None:
+        others = [{**self.before, "id": "other", "sender": "ffffffff"},
+                  {**self.before, "id": "closed", "state": "acked"},
+                  {**self.before, "id": "reserved", "state": "reserved"},
+                  {**self.before, "id": "reused", "sender_sid": "another-session"}]
+        for r in others:
+            relay.expect_write(r)
+        self.assertEqual(self.transfer()[0], 0)
+        for r in others:
+            self.assertEqual(relay.expect_read(r["id"]), r)
+
+    def test_transfer_is_idempotent_including_file_bytes(self) -> None:
+        self.assertEqual(self.transfer()[0], 0)
+        path = relay.expect_dir() / "build1.json"
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        self.assertEqual(self.transfer("--json"), (0, json.dumps({"transferred": [], "sender": self.successor["id"]}) + "\n"))
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
+    def test_transfer_late_ack_in_successor_resolves_by_sweep_old_transcript_does_not(self) -> None:
+        self.assertEqual(self.transfer()[0], 0)
+        self.reply_to_me("ack build1")
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "open")
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from peer-fb] ack build1"}})
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
+    def test_transfer_ignores_old_successor_text_and_ack_from_wrong_peer(self) -> None:
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from peer-fb] ack build1"}})
+        self.assertEqual(self.transfer()[0], 0)
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from mallory] ack build1"}})
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "open")
+
+    def test_transfer_repeatable_ids_select_only_named_tokens(self) -> None:
+        for eid in ("build2", "build3"):
+            relay.expect_write({**self.before, "id": eid})
+        self.assertEqual(self.transfer("--id", "build1", "--id", "build3")[0], 0)
+        self.assertEqual(relay.expect_read("build2")["sender"], self.old["id"])
+        self.assertEqual(relay.expect_read("build3")["sender"], self.successor["id"])
+
+    def test_transfer_full_session_identity_works_but_prefix_name_and_ambiguity_do_not(self) -> None:
+        for ident in ("", self.old["sid"][:10], self.old["name"]):
+            self.assertEqual(self.run_cli("--transfer-expectations", ident)[0], 2)
+        self.rows.append({**self.old, "id": "duplicate"})
+        self.assertEqual(self.run_cli("--transfer-expectations", self.old["sid"])[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
+        self.rows.pop()
+        self.assertEqual(self.run_cli("--transfer-expectations", self.old["sid"])[0], 0)
+
+    def test_transfer_requires_real_successor_and_refuses_self_or_finished_caller(self) -> None:
+        for changes in ({"self": False}, {"finished": "done"}, {"id": self.old["id"]}):
+            saved = dict(self.successor)
+            self.successor.update(changes)
+            self.assertEqual(self.transfer()[0], 2)
+            self.assertEqual(relay.expect_read("build1"), self.before)
+            self.successor.clear()
+            self.successor.update(saved)
+
+    def test_transfer_null_transcript_record_adopts_successor_transcript(self) -> None:
+        relay.expect_write({**self.before, "tx": None})
+        self.assertEqual(self.transfer()[0], 0)
+        self.assertEqual(relay.expect_read("build1")["tx"], str(self.successor_tx))
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from peer-fb] ack build1"}})
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
+    def test_transfer_successor_without_transcript_keeps_relay_ack_path(self) -> None:
+        self.successor["transcript"] = None
+        with mock.patch.object(relay, "pane_transcript", return_value=None):
+            self.assertEqual(self.transfer()[0], 0)
+        r = relay.expect_read("build1")
+        self.assertIsNone(r["tx"])
+        relay.CTX.update(me=self.target, s=self.successor, text="ack build1", accepted=True)
+        self.assertEqual(relay.expect_resolve_by_relay(), 1)
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
+    def test_transfer_bad_token_and_mixed_commands_never_change_records(self) -> None:
+        for args in (("--id", "../x"), ("--pending",), ("--sweep",), ("--plan",), ("someone", "text")):
+            self.assertEqual(self.transfer(*args)[0], 2)
+            self.assertEqual(relay.expect_read("build1"), self.before)
+        self.assertEqual(self.run_cli("--id", "build1")[0], 2)
+
+    def test_transfer_unreadable_successor_transcript_changes_nothing(self) -> None:
+        self.successor["transcript"] = str(self.tmp / "missing.jsonl")
+        self.assertEqual(self.transfer()[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
+
+
 class TestExpectWithoutTranscript(Base):
     """2026-10-26: a sender with a fleet self row but NO readable transcript can ask a question (`--expect-ack`). Its expectation is closed by
     the relay itself when the TARGET's reply goes through relay.py, with the identity from the fleet, never from the text."""

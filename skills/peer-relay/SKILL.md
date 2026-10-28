@@ -92,3 +92,11 @@ with `--expect-ack`:
 
 Canonical copy: `~/src/djbclark-ade/skills/peer-relay/SKILL.md`. Hermes installs or links it into
 `~/.hermes/skills/` itself; the repo does not write that tree.
+
+12. **Adopt retired expectations explicitly** (2026-10-28): from the successor, run
+    `relay.py --transfer-expectations OLD_SENDER` (all open expectations), or
+    `relay.py --transfer-expectations OLD_SENDER --id TOKEN --id TOKEN2` (selected tokens).
+    Use the exact fleet id, full session id or Paseo id of one verifiably finished sender; live, missing or ambiguous
+    rows refuse with exit 2. Then `relay.py --pending` shows the new owner and `relay.py --sweep` watches its transcript.
+    Tell peers to direct delayed `ack TOKEN` replies to the successor. Transfer sends nothing, preserves target/status/age,
+    and never marks a queued notice delivered. Full contract: `session-finder/SKILL.md`, "Handoff transfer".
