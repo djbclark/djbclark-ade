@@ -22,6 +22,14 @@ memory `reference_paseo_claude_context_window_controls.md`, `feedback_self_compa
    nudge tiers or an automatic task-boundary handoff, and a comment on #4949 (item 38: dupe-search first). (d) Build what he picks, in a claimed workspace,
    with tests, a CHANGELOG line and an adversary verdict. Ask before touching `~/.claude/settings.json`.
 
+## Port the Linux suite and the g-tool symlinks to uutils (found 2026-10-28; PR 102 pinned CI to `ubuntu-24.04` as the stopgap)
+
+`ubuntu-latest` moved to `ubuntu-26.04` on 2026-10-28, whose coreutils are Rust uutils multicall binaries. The `pytest-linux` step that symlinks `~/.local/bin/g<tool>`
+to `command -v <tool>` then fails ("Requested utility `gtr` does not match executable name"), 90 tests failed (`test_ade_git_hooks`, `test_self_slash*`,
+`test_wait_file`, `test_acp_dispatch*`, others) and the job hit its 30 minute cap (run 40723793153; last green run 40669526660 on 24.04). Wanted: a wrapper script per
+tool (`exec tr "$@"` style, or GNU coreutils from the `gnu-coreutils` package if the image has it) instead of a symlink, the suite green on 26.04, then unpin. The
+pin comment in `.github/workflows/test.yml` says the same. GitHub retires an old image on its own schedule, so this is not optional forever.
+
 ## Sibling `RecursionError` readers: governor and quota-guard (adversary r1 on PR 97, PR 98 merged 2026-10-28 as 1f56db3; djbclark ruled last in the queue)
 
 PR 98 made `ade_gates.read_guard_state` read a `RecursionError` from `json` as unreadable. Two readers of the same guard state files keep the exposure
