@@ -55,7 +55,9 @@ $W up                     # start what is missing; verify each registration
    so a number is never reused; an unnumbered `watch <domain>` counts as 0. The prompt tells the agent to register under
    that same name. After the new agent is registered and its channel test passes, every other live `watch <domain> <n>` and
    the holder it replaced gets `x ` put before its title (`x watch paseo 2`), via `paseo agent update --name`; a launch
-   that does not register retires nothing.
+   that does not register retires nothing. Each retired `x` agent that is idle is then archived (the role,
+   the Tier 1 chain log and the channel registration are already the new agent's); one with a turn in flight is
+   left and archived by a later `watch up` once idle, so no work is thrown away (2026-10-28).
 
 ## Registration is verified
 

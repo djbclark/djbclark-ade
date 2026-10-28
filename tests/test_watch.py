@@ -19,7 +19,7 @@ d = os.environ["STUB_DIR"]; f = d + "/paseo.json"
 s = json.load(open(f)) if os.path.exists(f) else {"agents": [], "ws": []}
 a = sys.argv[1:]
 def save(): json.dump(s, open(f, "w"))
-if a[:3] == ["agent", "ls", "-g"]: print(json.dumps(s["agents"]))
+if a[:3] == ["agent", "ls", "-g"]: print(json.dumps(s["agents"] if "-a" in a else [x for x in s["agents"] if not x.get("archived")]))
 elif a[:2] == ["provider", "ls"]: print(json.dumps([{"provider": "omp", "status": "available"}, {"provider": "opencode", "status": "unavailable"}]))
 elif a[:2] == ["provider", "models"]: print(json.dumps([{"id": "anthropic/claude-sonnet-5-5", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
                                                       {"id": "anthropic/claude-sonnet-5-5[1m]", "thinkingOptionIds": ["low", "medium", "high"]}]))
@@ -33,7 +33,9 @@ elif a[:2] == ["agent", "update"]:
         if x["id"] == a[2]: x["name"] = a[a.index("--name") + 1]
     save()
 elif a[:2] == ["agent", "archive"]:
-    s["agents"] = [x for x in s["agents"] if x["id"] != a[-1]]; save()
+    for x in s["agents"]:
+        if x["id"] == a[-1]: x["archived"] = True
+    save()
 else: sys.exit(9)
 '''
 
@@ -139,7 +141,7 @@ def watch(env, *args, wait=True, extra=None):
 
 def agents(env):
     f = Path(env["_tmp"]) / "paseo.json"
-    return json.loads(f.read_text())["agents"] if f.exists() else []
+    return [a for a in json.loads(f.read_text())["agents"] if not a.get("archived")] if f.exists() else []
 
 
 def seat_calls(env):
@@ -311,7 +313,7 @@ def test_each_new_watcher_gets_the_next_base36_number_and_the_old_one_is_retired
     rc, out = watch(env, "up", "--force")
     assert rc == 0 and "retired:" in out, out
     t = titles(env)
-    assert t[first] == "x watch alpha 1", (out, t)   # --force retires the old tab (renamed, still listed), never archives it
+    assert first not in t, (out, t)   # --force retires the old tab (renamed, then archived because it was idle)
     assert "watch alpha 2" in t.values()
     # past 9 the number goes a, b, ... z, 10: a stale seq file at 9 makes the next launch `a`
     (Path(env["_tmp"]) / "state" / "alpha.seq").write_text("9\n")
@@ -328,8 +330,24 @@ def test_replacing_a_holder_not_started_by_watch_renames_it_and_leaves_it_runnin
     rc, out = watch(env, "up", "--force")
     assert rc == 0, out
     t = titles(env)
-    assert t[old] == "x watch alpha"
-    assert sorted(v for k, v in t.items() if k != old) == ["watch alpha 1"]
+    assert old not in t          # idle: renamed `x watch alpha`, then archived
+    assert sorted(t.values()) == ["watch alpha 1"]
+
+
+def test_a_retired_watcher_with_a_turn_in_flight_is_kept_and_archived_once_idle(env):
+    old = add_agent(env, name="watch alpha", status="running")
+    set_role(env, old)
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0, out
+    assert titles(env)[old] == "x watch alpha" and "left running" in out, (out, titles(env))
+    f = Path(env["_tmp"]) / "paseo.json"
+    s = json.loads(f.read_text())
+    for a in s["agents"]:
+        if a["id"] == old:
+            a["status"] = "idle"
+    f.write_text(json.dumps(s))
+    rc, out = watch(env, "up")
+    assert rc == 0 and old not in titles(env), (out, titles(env))
 
 
 def test_a_launch_that_never_registers_retires_nothing(env):

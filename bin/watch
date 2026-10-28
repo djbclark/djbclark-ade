@@ -26,7 +26,8 @@ up       per domain, in this order:
               exit 1, the agent is left running for inspection
          Every agent lives in ONE shared Paseo workspace (config [defaults] workspace, "watch") and is titled
          `watch <domain> <n>`, n the next per-domain base-36 number (0-9a-z); once the new agent is registered,
-         the superseded ones (and the holder it replaced) are renamed `x <old title>`.
+         the superseded ones (and the holder it replaced) are renamed `x <old title>`, and every idle `x` one is then
+         archived (a retired one with a turn in flight is left and archived on a later `up`; 2026-10-28)
          `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
          line to a live Paseo holder (default: a holder that Paseo lists as alive counts, because the test line
          costs the holder a model turn each tick)
@@ -560,6 +561,29 @@ def retire_superseded(domain: str, pv: Paseo, new_aid: str, replaced: Holder | N
     return done
 
 
+def archive_retired(domain: str, pv: Paseo, holder_target: str | None) -> list[str]:
+    """Archive every IDLE retired `x watch <domain> [<n>]` agent. The new watcher registered before anything was
+    retired, so the role, the Tier 1 chain log and the channel registration are already its own; what the old agent
+    still holds is only its idle context. A retired agent with a turn in flight is left alone (no work thrown
+    away) and swept on a later `watch up`. The agent that holds the role right now is never archived."""
+    pv.agents(refresh=True)
+    pat = title_re(domain)
+    done = []
+    for a in pv.agents() or []:
+        name = a.get("name") or ""
+        m = pat.match(name)
+        rid = str(a.get("id") or "")
+        if not (m and m.group(1)) or (holder_target and len(holder_target) >= 7 and rid.startswith(holder_target)):
+            continue
+        if a.get("status") != "idle":
+            done.append(f"{rid[:8]} {name!r} left running (status {a.get('status')!r}); archived once idle")
+            continue
+        rc, out, err = run([PASEO, "agent", "archive", rid], 60)
+        done.append(f"{rid[:8]} {name!r} archived" if rc == 0
+                    else f"{rid[:8]} {name!r} NOT archived: {(err or out).strip()[:120]}")
+    return done
+
+
 def prompt_for(domain: str, row: dict, title: str) -> str:
     if row.get("prompt"):
         return row["prompt"]
@@ -647,6 +671,8 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
             log(domain, f"replaced holder {replaces.target[:8]} ({replaces.name}); it was told by the new registration")
         for line in retire_superseded(domain, pv, aid, replaces):
             log(domain, f"retired: {line}")
+        for line in archive_retired(domain, pv, aid):
+            log(domain, f"archive: {line}")
         return 0, f"registered: {why}"
     rec.update(state="unregistered", reason=why, checked_at=now_s())
     save_rec(domain, rec)
@@ -760,6 +786,9 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
         h, hnote = query_holder(row)
         if hnote:
             log(domain, f"holder query error: {hnote}", dry)
+        if not dry and not hnote:
+            for line in archive_retired(domain, pv, h.target if h else None):
+                log(domain, f"archive: {line}")
         replaces = None
         if h:
             alive, why = holder_alive(row, h, pv, args.probe, send=not dry)
