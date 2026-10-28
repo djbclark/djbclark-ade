@@ -398,3 +398,13 @@ def test_one_million_context_only_when_the_briefs_need_it(env):
     (chain / "SESSION_LOG.md").write_text("x" * 600_000)
     rc, out = watch(env, "up", "--dry-run")
     assert "claude-sonnet-5-5[1m]" in out and "context 1m" in out, out
+
+
+def test_any_idle_x_titled_agent_is_archived_and_a_busy_one_waits(env):
+    idle = add_agent(env, name="x Dann 5")
+    busy = add_agent(env, name="x Dann 6", status="running")
+    plain = add_agent(env, name="Dann 7")
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    t = titles(env)
+    assert idle not in t and t[busy] == "x Dann 6" and t[plain] == "Dann 7", (out, t)
