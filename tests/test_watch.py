@@ -313,7 +313,7 @@ def test_each_new_watcher_gets_the_next_base36_number_and_the_old_one_is_retired
     rc, out = watch(env, "up", "--force")
     assert rc == 0 and "retired:" in out, out
     t = titles(env)
-    assert first not in t, (out, t)   # --force retires the old tab (renamed, then archived because it was idle)
+    assert t[first] == "x watch alpha 1", (out, t)   # --force renames the replaced holder and never archives it
     assert "watch alpha 2" in t.values()
     # past 9 the number goes a, b, ... z, 10: a stale seq file at 9 makes the next launch `a`
     (Path(env["_tmp"]) / "state" / "alpha.seq").write_text("9\n")
@@ -330,16 +330,17 @@ def test_replacing_a_holder_not_started_by_watch_renames_it_and_leaves_it_runnin
     rc, out = watch(env, "up", "--force")
     assert rc == 0, out
     t = titles(env)
-    assert old not in t          # idle: renamed `x watch alpha`, then archived
-    assert sorted(t.values()) == ["watch alpha 1"]
+    assert t[old] == "x watch alpha"   # renamed, kept as a tab, never archived
+    assert sorted(t.values()) == ["watch alpha 1", "x watch alpha"]
 
 
 def test_a_retired_watcher_with_a_turn_in_flight_is_kept_and_archived_once_idle(env):
-    old = add_agent(env, name="watch alpha", status="running")
-    set_role(env, old)
+    holder = add_agent(env, name="watch alpha 2")
+    set_role(env, holder)
+    old = add_agent(env, name="watch alpha 1", status="running")   # an older generation, not the role holder
     rc, out = watch(env, "up", "--force")
     assert rc == 0, out
-    assert titles(env)[old] == "x watch alpha" and "left running" in out, (out, titles(env))
+    assert titles(env)[old] == "x watch alpha 1" and "left running" in out, (out, titles(env))
     f = Path(env["_tmp"]) / "paseo.json"
     s = json.loads(f.read_text())
     for a in s["agents"]:
@@ -348,6 +349,7 @@ def test_a_retired_watcher_with_a_turn_in_flight_is_kept_and_archived_once_idle(
     f.write_text(json.dumps(s))
     rc, out = watch(env, "up")
     assert rc == 0 and old not in titles(env), (out, titles(env))
+    assert titles(env)[holder] == "x watch alpha 2"   # the force-replaced holder is never archived
 
 
 def test_a_launch_that_never_registers_retires_nothing(env):
@@ -408,3 +410,13 @@ def test_any_idle_x_titled_agent_is_archived_and_a_busy_one_waits(env):
     assert rc == 0, out
     t = titles(env)
     assert idle not in t and t[busy] == "x Dann 6" and t[plain] == "Dann 7", (out, t)
+
+
+def test_a_force_replaced_non_watch_holder_survives_the_other_sweep(env):
+    old = add_agent(env, name="Dann main")
+    set_role(env, old)
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0, out
+    assert titles(env)[old] == "x Dann main", (out, titles(env))
+    rc, out = watch(env, "up")
+    assert rc == 0 and titles(env)[old] == "x Dann main", (out, titles(env))

@@ -80,6 +80,13 @@ def _paseo(*argv: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False)
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
 def archive_probe(agent_id: str, wait_s: float) -> int:
     """Wait for the probe's turn to end, then archive it. Never leaves the tab open silently."""
     deadline = time.monotonic() + wait_s
@@ -92,7 +99,7 @@ def archive_probe(agent_id: str, wait_s: float) -> int:
         row = next((x for x in rows if x.get("id") == agent_id), None)
         if row is not None and row.get("status") not in ("running", "initializing"):
             break
-        time.sleep(float(os.environ.get("PASEO_NEW_SEAT_POLL") or 2))
+        time.sleep(_env_float("PASEO_NEW_SEAT_POLL", 2))
     r = _paseo("agent", "archive", agent_id)
     if r.returncode != 0:
         print(f"paseo-new-seat: probe {agent_id[:8]} created but not archived: "
@@ -172,7 +179,7 @@ def main(argv: list[str]) -> int:
     except (ValueError, KeyError, IndexError):
         print("paseo-new-seat: --probe could not read the new agent id; not archived", file=sys.stderr)
         return 5
-    rc = archive_probe(agent_id, float(os.environ.get("PASEO_NEW_SEAT_PROBE_WAIT") or 120))
+    rc = archive_probe(agent_id, _env_float("PASEO_NEW_SEAT_PROBE_WAIT", 120))
     return rc or r.returncode
 
 

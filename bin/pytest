@@ -19,6 +19,7 @@ Runs from the repo root of the checkout this file is in (a worktree runs its own
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -35,7 +36,7 @@ def command(args: list[str]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     if argv[:1] == ["--print"]:
-        print(" ".join(command([])))
+        print(shlex.join(command([])))
         return 0
     os.chdir(ROOT)
     os.execvp("uv", command(argv))

@@ -542,6 +542,41 @@ def next_tag(domain: str, pv: Paseo) -> str:
     return to_b36(top + 1)
 
 
+def kept_path() -> Path:
+    return STATE / "kept.json"
+
+
+def load_kept() -> set[str]:
+    """Full agent ids of holders a `--force` replaced: renamed `x ...` but never archived by either sweep."""
+    try:
+        d = json.loads(kept_path().read_text())
+        return {str(i) for i in d} if isinstance(d, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def keep_id(rid: str) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    ids = sorted(load_kept() | {rid})
+    tmp = kept_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(ids, indent=1) + "\n")
+    os.replace(tmp, kept_path())
+
+
+def archive_if_idle(pv: Paseo, rid: str, name: str) -> str:
+    """Archive one retired agent, re-reading its status first: the sweep's snapshot may be minutes old, and the
+    operator may have woken or re-titled the agent since."""
+    pv.agents(refresh=True)
+    cur = pv.agent(rid)
+    if cur is None:
+        return f"{rid[:8]} {name!r} already gone"
+    if (cur.get("name") or "") != name or cur.get("status") != "idle":
+        return f"{rid[:8]} {name!r} left running (status {cur.get('status')!r}); archived once idle"
+    rc, out, err = run([PASEO, "agent", "archive", rid], 60)
+    return (f"{rid[:8]} {name!r} archived" if rc == 0
+            else f"{rid[:8]} {name!r} NOT archived: {(err or out).strip()[:120]}")
+
+
 def retire_superseded(domain: str, pv: Paseo, new_aid: str, replaced: Holder | None) -> list[str]:
     """Once the new watcher is registered and tested: every other live `watch <domain> <n>` agent, and the holder it
     replaced, gets `x ` put before its title. Returns one line per rename."""
@@ -555,6 +590,8 @@ def retire_superseded(domain: str, pv: Paseo, new_aid: str, replaced: Holder | N
         is_replaced = bool(replaced and replaced.target and len(replaced.target) >= 7 and rid.startswith(replaced.target))
         if a.get("id") == new_aid or name.startswith("x ") or not (is_replaced or (m and not m.group(1))):
             continue
+        if is_replaced:
+            keep_id(rid)   # before the rename, so no sweep can see the new title without the guard
         rc, out, err = run([PASEO, "agent", "update", str(a["id"]), "--name", f"x {name}"], 30)
         done.append(f"{str(a['id'])[:8]} {name!r} -> {'x ' + name!r}" if rc == 0
                     else f"{str(a['id'])[:8]} {name!r} NOT renamed: {(err or out).strip()[:120]}")
@@ -565,22 +602,22 @@ def archive_retired(domain: str, pv: Paseo, holder_target: str | None) -> list[s
     """Archive every IDLE retired `x watch <domain> [<n>]` agent. The new watcher registered before anything was
     retired, so the role, the Tier 1 chain log and the channel registration are already its own; what the old agent
     still holds is only its idle context. A retired agent with a turn in flight is left alone (no work thrown
-    away) and swept on a later `watch up`. The agent that holds the role right now is never archived."""
+    away) and swept on a later `watch up`. The agent that holds the role right now, and a holder a `--force`
+    replaced (kept.json), are never archived."""
     pv.agents(refresh=True)
     pat = title_re(domain)
+    kept = load_kept()
     done = []
     for a in pv.agents() or []:
         name = a.get("name") or ""
         m = pat.match(name)
         rid = str(a.get("id") or "")
-        if not (m and m.group(1)) or (holder_target and len(holder_target) >= 7 and rid.startswith(holder_target)):
+        if not (m and m.group(1)) or rid in kept or (holder_target and len(holder_target) >= 7 and rid.startswith(holder_target)):
             continue
         if a.get("status") != "idle":
             done.append(f"{rid[:8]} {name!r} left running (status {a.get('status')!r}); archived once idle")
             continue
-        rc, out, err = run([PASEO, "agent", "archive", rid], 60)
-        done.append(f"{rid[:8]} {name!r} archived" if rc == 0
-                    else f"{rid[:8]} {name!r} NOT archived: {(err or out).strip()[:120]}")
+        done.append(archive_if_idle(pv, rid, name))
     return done
 
 
@@ -839,20 +876,20 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
 
 def archive_other_retired(pv: Paseo) -> list[str]:
     """Any other agent whose title starts with `x ` (djbclark's retired-seat convention, 2026-10-28) is archived once
-    idle; a busy one waits for a later run. `x watch ...` titles belong to archive_retired, which knows the holders."""
+    idle; a busy one waits for a later run. `x watch ...` titles belong to archive_retired, which knows the holders.
+    A holder a `--force` replaced (kept.json) is never archived, whatever its title."""
     pv.agents(refresh=True)
+    kept = load_kept()
     done = []
     for a in pv.agents() or []:
         name = a.get("name") or ""
         rid = str(a.get("id") or "")
-        if not name.startswith("x ") or name.startswith("x watch ") or not rid:
+        if not name.startswith("x ") or name.startswith("x watch ") or not rid or rid in kept:
             continue
         if a.get("status") != "idle":
             done.append(f"{rid[:8]} {name!r} left running (status {a.get('status')!r}); archived once idle")
             continue
-        rc, out, err = run([PASEO, "agent", "archive", rid], 60)
-        done.append(f"{rid[:8]} {name!r} archived" if rc == 0
-                    else f"{rid[:8]} {name!r} NOT archived: {(err or out).strip()[:120]}")
+        done.append(archive_if_idle(pv, rid, name))
     return done
 
 

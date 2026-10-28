@@ -29,7 +29,7 @@ $W up                     # start what is missing; verify each registration
 2. Exit 0 all good; 1 a launch did not register (the agent is left running: look at it, `paseo ls`);
    3 no eligible route (say why: the plan prints route_agent's reason).
 3. A live holder is never replaced. `up --force DOMAIN` replaces one only when the operator says so; the replaced agent is renamed `x …`
-   and left running (never archived), so it stays a tab.
+   and left running (never archived, its id is recorded in `kept.json`), so it stays a tab.
    `up --probe` also sends the channel test line to live Paseo holders (costs each a turn).
 4. `watch down DOMAIN` drops the role (`--relay-off <agent>` / `watcher clear <agent>`: clears only if that
    agent still holds it) and archives the agent `watch` started; an agent it did not start is never touched.
@@ -55,7 +55,7 @@ $W up                     # start what is missing; verify each registration
    so a number is never reused; an unnumbered `watch <domain>` counts as 0. The prompt tells the agent to register under
    that same name. After the new agent is registered and its channel test passes, every other live `watch <domain> <n>` and
    the holder it replaced gets `x ` put before its title (`x watch paseo 2`), via `paseo agent update --name`; a launch
-   that does not register retires nothing. Each retired `x` agent that is idle is then archived (the role,
+   that does not register retires nothing. Each retired `x` agent that is idle is then archived, except a `--force`-replaced holder (the role,
    the Tier 1 chain log and the channel registration are already the new agent's); one with a turn in flight is
    left and archived by a later `watch up` once idle, so no work is thrown away (2026-10-28).
 
