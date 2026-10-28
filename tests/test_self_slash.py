@@ -654,6 +654,24 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertIn("--workspace b ", next(c for c in self.paseo_calls() if c.startswith("run ")))
         # placed by the state file only: the shared workspace is never archived
         self.assertFalse(any(c.startswith("workspace archive") for c in self.paseo_calls()))
+        # and not because an earlier guard happened to keep it: with --workspace naming a third row elsewhere
+        # the ONLY guard left is `proven`, so the log must show it kept the shared workspace for that reason
+        three = (f'[{{"workspaceId": "a", "cwd": "{cwd}", "isolation": "local"}}, {{"workspaceId": "b", "cwd": "{cwd}", "isolation": "local"}},'
+                 f' {{"workspaceId": "c", "cwd": "{cwd}-elsewhere", "isolation": "local"}}]')
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=three, SELF_SLASH_S_WORKSPACE="c")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(any(c.startswith("workspace archive") for c in self.paseo_calls()))
+        self.assertIn("b kept: several workspaces share this cwd; b is the workspaceId in this agent state file", self.log_text() + r.stdout)
+        # two state files that disagree place nothing (first match must not win by directory order)
+        other = self.home / ".paseo" / "agents" / "slug2"
+        other.mkdir(parents=True)
+        _ = (other / "test-agent.json").write_text('{"workspaceId": "a"}')
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=two)
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("several workspaces", r.stdout)
+        (other / "test-agent.json").unlink()
         # an id that is in no shared row does not place anything: still refused
         _ = (state / "test-agent.json").write_text('{"workspaceId": "zzz"}')
         self.calls.unlink()

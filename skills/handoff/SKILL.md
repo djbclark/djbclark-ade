@@ -413,8 +413,8 @@ tab ever opened ("several workspaces share this cwd"). After any `self-slash` th
 "hand this off to a new tab" request, wait about 30 s and then check, and report what you saw, never "should start":
 
 1. `tail -5 ~/.local/state/self-slash.log` shows no `successor: ... NOT archived` line for this agent;
-2. `paseo agent ls -g --json` lists the new agent (title, status idle or running, `ParentAgentId` null), and say its title and workspace
-   name to the operator;
+2. `paseo agent ls -g --json` lists the new agent (title, status idle or running) and `paseo agent inspect <new id> --json` shows
+   `ParentAgentId` null (`ls` does not carry it); say its title and workspace name to the operator;
 3. if either check fails, say so at once, with the log line, and start the successor by hand (below) or ask which route; do not claim a handoff.
 
 **Partial handoff: the operator keeps this session** ("hand X off to a new tab", "I still use this agent for other things"). The
