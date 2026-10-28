@@ -567,7 +567,7 @@ def read_guard_state() -> Any:
         return None
     try:
         return json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):      # bad JSON, bad UTF-8, absurd nesting
         return None
 
 

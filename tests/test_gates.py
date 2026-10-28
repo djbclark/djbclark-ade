@@ -1410,6 +1410,20 @@ def test_the_guard_state_file_must_be_a_small_regular_file_never_waited_on(tmp_p
     assert _read_guard_bounded(path) == "None"
 
 
+_READ_GUARD_RECURSION = ("import sys, json; sys.path.insert(0, sys.argv[1]); import ade_gates as g\n"
+                         "def deep(raw): raise RecursionError('maximum recursion depth exceeded')\n"
+                         "json.loads = deep\n"           # whether json.loads raises on a 64 KiB nest varies by Python (3.14 parses it): force the raise
+                         "print(repr(g.read_guard_state()))")
+
+
+def test_a_guard_state_file_that_json_cannot_nest_deep_enough_to_read_is_unreadable_not_a_crash(tmp_path):
+    path = tmp_path / "quota-guard.json"
+    path.write_bytes(b"[" * 32768 + b"]" * 32768)        # exactly 64 KiB, under the size cap, so it reaches json.loads
+    r = subprocess.run([sys.executable, "-I", "-c", _READ_GUARD_RECURSION, str(BIN)], env={"CLAUDE_QUOTA_GUARD_STATE": str(path), "PATH": os.environ["PATH"]},
+                       capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0 and r.stdout.strip() == "None", r.stderr[-300:]
+
+
 def test_the_guard_state_file_still_reads_as_a_regular_file_or_a_link_to_one(tmp_path):
     real = tmp_path / "real.json"
     real.write_text(json.dumps({"level": "ok", "pad": "x" * 30000}))
