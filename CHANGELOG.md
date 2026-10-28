@@ -11,7 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- `bin/watch up` (2026-10-28) archives each retired `x watch <domain> <n>` agent once it is idle, right after the replacement registers and on every later `up`; one with a turn in flight is kept until idle; any other idle agent titled `x ...` is archived the same way (#100).
+- `bin/watch up` (2026-10-28) archives each retired `x watch <domain> <n>` agent once it is idle, right after the replacement registers and on every later `up`; one with a turn in flight is kept until idle; any other idle agent titled `x ...` is archived the same way; a holder replaced by `up --force` is renamed `x ...` but never archived (#100).
 - `bin/paseo-new-seat --probe` (2026-10-28) waits for a throwaway seat's turn to end and archives it, so a live test no longer leaves a "zz probe" tab in the shared `watch` workspace; exit 5 when the seat was created but could not be archived (#100).
 - `bin/pytest` (2026-10-28) runs the suite with the dependencies CI installs (`uv run --with pytest --with pyyaml --with agent-client-protocol`); the bare `python3` has no pytest; use `~/ops/site-private/bin/bg bin/pytest -q tests/test_x.py`; `tests/test_bin_pytest.py` keeps it in step with `.github/workflows/test.yml` (#100).
 - The frontier Agent-tool hook entry in `agents/claude/settings.json.tmpl` now sets `"timeout": 15` and `"onFailure": "block"` (2026-10-27), so a stalled, timed-out or unstartable `frontier_agent_gate.py` blocks the Agent/Task call instead of letting it through (#96).

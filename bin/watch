@@ -27,7 +27,8 @@ up       per domain, in this order:
          Every agent lives in ONE shared Paseo workspace (config [defaults] workspace, "watch") and is titled
          `watch <domain> <n>`, n the next per-domain base-36 number (0-9a-z); once the new agent is registered,
          the superseded ones (and the holder it replaced) are renamed `x <old title>`, and every idle `x` one is then
-         archived (so is any other idle agent titled `x ...`) (a retired one with a turn in flight is left and archived on a later `up`; 2026-10-28)
+         archived (so is any other idle agent titled `x ...`), except a `--force`-replaced holder, whose id is kept in
+         ~/.local/state/watch/kept.json and which is never archived (a retired one with a turn in flight is left and archived on a later `up`; 2026-10-28)
          `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
          line to a live Paseo holder (default: a holder that Paseo lists as alive counts, because the test line
          costs the holder a model turn each tick)
