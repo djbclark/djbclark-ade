@@ -398,11 +398,25 @@ def test_bad_usage(world: World) -> None:
     assert world.run("--repo", "nonsense").returncode == 2
 
 
+_MODULE_CACHE = None
+
+
 def load_module():
-    ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
-    ld.exec_module(mod)
-    return mod
+    """The pr-wait module, loaded ONCE.
+
+    Cached because exec'ing the 1,400-line script on every call is pure overhead: the module is
+    stateless at import (main() is guarded), so one instance is correct. The first version of the
+    adversary tests called this per test, which added ~18s of interpreter work to the suite and made
+    the wall-clock-sensitive Codex tests (`--codex-stuck 1.5`, `--rerequest-after 0.5`) miss their
+    polling windows - a flake that looked like a code regression and was not.
+    """
+    global _MODULE_CACHE
+    if _MODULE_CACHE is None:
+        ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
+        ld.exec_module(mod)
+        _MODULE_CACHE = mod
+    return _MODULE_CACHE
 
 
 def test_second_waiter_for_the_same_head_is_refused(world: World) -> None:
@@ -1394,3 +1408,847 @@ def test_an_adopted_comment_id_is_saved_in_the_state_file(world: World) -> None:
     assert world.posts() == 1
     state = request_state(world)
     assert state["own"] == 1 and state["adopted_ids"] == [42]
+
+
+# ---- adversary verdict MARKER in the PR body ------------------------------------------------
+#
+# Rewritten 2026-10-25 for the MARKER design (Dann 5's ruling after two adversary rounds). The first
+# version parsed English; round 1 found six false APPROVEs and five false MISSES, round 2 found
+# fourteen NEW false APPROVEs including a BLOCK silently deleted by a prose filter. The prose parser
+# and its heuristics are DELETED, not patched: correctness there would mean "no sentence anyone could
+# write defeats it", which is unbounded.
+#
+# Every test below is one of Dann 5's six required properties, plus the regressions the review found.
+
+ADV_HEAD = "a" * 40
+OTHER_HEAD = "b" * 40
+
+
+def marker(verdict: str, head: str = ADV_HEAD) -> str:
+    return f'<!-- adversary-verdict:v1 {{"verdict":"{verdict}","head":"{head}"}} -->'
+
+
+def adv(body: str, head: str = ADV_HEAD) -> dict:
+    return load_module().adversary_verdict(body, head)
+
+
+def passes(body: str, head: str = ADV_HEAD) -> bool:
+    """The same predicate assess() uses: matched AND not a BLOCK."""
+    r = adv(body, head)
+    return bool(r["matches_head"]) and not str(r["verdict"] or "").upper().startswith("BLOCK")
+
+
+# --- property 1: the :v1 suffix is part of the match -----------------------------------------
+
+def test_a_marker_without_the_v1_suffix_is_not_this_marker() -> None:
+    # Rule 9 records a waiter whose regex lacked :v1 seeing no state on PR 12 and running 30 minutes.
+    body = '<!-- adversary-verdict {"verdict":"APPROVE","head":"' + ADV_HEAD + '"} -->'
+    assert not adv(body)["present"]
+
+
+def test_the_canonical_marker_approves_this_head() -> None:
+    assert passes(marker("APPROVE"))
+
+
+def test_the_canonical_marker_blocks_this_head() -> None:
+    r = adv(marker("BLOCK"))
+    assert r["present"] and r["matches_head"] and r["verdict"] == "BLOCK"
+    assert not passes(marker("BLOCK"))
+
+
+# --- property 2: a missing or unknown verdict value fails closed ------------------------------
+
+def test_an_unknown_verdict_value_is_malformed_not_a_default() -> None:
+    body = '<!-- adversary-verdict:v1 {"verdict":"LGTM","head":"' + ADV_HEAD + '"} -->'
+    r = adv(body)
+    assert not r["present"] and r["malformed"]
+    assert "APPROVE or BLOCK" in r["detail"]
+
+
+def test_a_missing_verdict_field_is_malformed() -> None:
+    body = '<!-- adversary-verdict:v1 {"head":"' + ADV_HEAD + '"} -->'
+    r = adv(body)
+    assert not r["present"] and r["malformed"]
+
+
+# --- property 3: head must be 40 hex and must equal the PR head -------------------------------
+
+def test_a_marker_for_another_head_is_not_a_pass() -> None:
+    r = adv(marker("APPROVE", OTHER_HEAD))
+    assert r["present"] and not r["matches_head"]
+    assert "NOT this head" in r["detail"]
+
+
+def test_a_short_head_is_malformed() -> None:
+    r = adv(marker("APPROVE", ADV_HEAD[:7]))
+    assert not r["present"] and r["malformed"]
+    assert "40-hex" in r["detail"]
+
+
+# --- property 4: a malformed marker is its own outcome ---------------------------------------
+
+def test_a_marker_that_is_not_json_is_malformed() -> None:
+    r = adv('<!-- adversary-verdict:v1 {"verdict":"APPROVE","head": -->')
+    assert not r["present"] and r["malformed"]
+    assert "malformed" in r["detail"]
+
+
+# --- property 5: never fall back to prose ----------------------------------------------------
+
+def test_prose_verdicts_with_no_marker_are_simply_missing() -> None:
+    for body in (f"> **APPROVE, no findings** (head {ADV_HEAD})",
+                 f"VERDICT: APPROVE {ADV_HEAD}",
+                 f"Adversary: APPROVE (head {ADV_HEAD})",
+                 f"**Codex verdict:** APPROVE at {ADV_HEAD}"):
+        r = adv(body)
+        assert not r["present"], body
+        assert "marker" in r["detail"], body
+
+
+def test_an_empty_body_reports_no_verdict() -> None:
+    r = adv("")
+    assert not r["present"] and r["detail"] == "no PR body"
+
+
+# --- property 6: a BLOCK is never downgraded (the rule is asymmetric) -------------------------
+
+
+
+def test_a_block_beats_an_approve_for_the_same_head() -> None:
+    body = marker("APPROVE") + "\n\n" + marker("BLOCK")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["conflict"] and r["matches_head"]
+    assert not passes(body)
+    assert "BOTH" in r["detail"]
+
+
+def test_an_approve_for_another_head_does_not_block_the_block_for_this_head() -> None:
+    body = marker("APPROVE", OTHER_HEAD) + "\n\n" + marker("BLOCK")
+    assert not passes(body)
+
+
+def test_a_malformed_marker_beside_a_good_one_still_reports_the_verdict() -> None:
+    body = '<!-- adversary-verdict:v1 {broken -->' + "\n\n" + marker("APPROVE")
+    r = adv(body)
+    assert r["present"] and r["matches_head"] and r["malformed"]
+
+
+def gate(body: str, required: bool = True, head: str = ADV_HEAD) -> tuple[bool, list[str]]:
+    """Run the REAL gate (`assess`), not a copy of its predicate.
+
+    The first version of these tests only called `adversary_verdict` / a copied predicate, so the
+    gate itself (the blocker names, the report-only default, `malformed` handling) was untested —
+    which is how a malformed BLOCK beside a valid APPROVE reached `merge_ready: true`.
+    """
+    mod = load_module()
+    adv = mod.adversary_verdict(body, head)
+    adv["required_by_label"] = False
+    cr = {"has_any_findings": False, "has_unresolved_findings": False}
+    counts = {"total": 1, "success": 1, "fail": 0, "pending": 0, "skipped": 0, "neutral": 0}
+    review = {"for_head": [], "open": [], "finding_comments": {"code": 0, "security": 0}}
+    r = mod.assess(False, "done", counts, "completed", cr, None, head, review, adv, required)
+    return r["merge_ready"], r["adversary_warnings"]
+
+
+def test_the_gate_blocks_a_malformed_marker_beside_a_valid_approve() -> None:
+    # The A1 finding: `assess()` ignored `malformed`, so a typo in a BLOCK let the PR through.
+    # A BLOCK whose head is a PREFIX of this head is not a typo any more: it is a BLOCK for this head
+    # (adversary review of 4a56c01, B1) and is covered by its own test below.
+    for broken in ('{"verdict":"BLOCKED","head":"' + ADV_HEAD + '"}',
+                   '{"verdict":"BLOCK","head":"b50521a"}',
+                   '{"verdict":"BLOCK","head":"' + ADV_HEAD + '"}'):  # the third is unclosed below
+        body = marker("APPROVE") + "\n<!-- adversary-verdict:v1 " + broken
+        ready, warnings = gate(body)
+        assert not ready, body
+        assert warnings == ["adversary-malformed"], warnings
+
+
+def test_the_gate_reports_malformed_as_its_own_warning_not_as_missing() -> None:
+    ready, warnings = gate('<!-- adversary-verdict:v1 {broken -->')
+    assert not ready
+    assert warnings == ["adversary-malformed"]
+
+
+def test_the_gate_passes_a_good_approve() -> None:
+    ready, warnings = gate(marker("APPROVE"))
+    assert ready and warnings == []
+
+
+def test_the_gate_blocks_a_block() -> None:
+    ready, warnings = gate(marker("BLOCK"))
+    assert not ready and warnings == ["adversary-stale-or-blocked"]
+
+
+def test_the_gate_is_report_only_by_default() -> None:
+    ready, warnings = gate(marker("BLOCK"), required=False)
+    assert ready, "a missing/stale verdict must not block without opt-in"
+    assert warnings == ["adversary-stale-or-blocked"], "but it must still be REPORTED"
+
+
+def test_a_pr_documenting_the_format_does_not_trip_its_own_gate() -> None:
+    # B1: PR 66's own body quotes the template, and reading it as a live marker made every PR that
+    # documents the format unmergeable (malformed blocks by default).
+    documented = (
+        "The marker is:\n\n"
+        "```\n"
+        '<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->\n'
+        "```\n\n"
+        "and inline: `<!-- adversary-verdict:v1 {\"verdict\":\"APPROVE\",\"head\":\"<40-hex>\"} -->`\n"
+    )
+    r = adv(documented)
+    assert not r["malformed"], r["detail"]
+    assert not r["present"], "documentation is not a verdict"
+
+
+def test_a_placeholder_head_alone_is_documentation_not_malformed() -> None:
+    body = '<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<40-hex>"} -->'
+    r = adv(body)
+    assert not r["malformed"] and not r["present"]
+    assert "placeholder" in r["detail"]
+
+
+def test_a_real_marker_inside_a_fence_is_ignored() -> None:
+    # The review's argument: the body is author-controlled, so reading fences protects nothing and
+    # only creates false blocks. A quoted marker is text, not a claim.
+    assert not adv("```\n" + marker("APPROVE") + "\n```")["present"]
+
+
+def test_a_real_marker_in_an_inline_code_span_is_ignored() -> None:
+    assert not adv("the previous marker was `" + marker("APPROVE") + "`")["present"]
+
+
+def test_a_genuinely_malformed_marker_still_fails_closed() -> None:
+    r = adv('<!-- adversary-verdict:v1 {"verdict":"BLOCKED","head":"' + ADV_HEAD + '"} -->')
+    assert r["malformed"] and not r["present"]
+
+
+def test_a_shortened_sha_block_is_not_reclassified_as_documentation() -> None:
+    # R3a: `"..." in sha` also matched `b50521af22b1…`, so a real BLOCK typed with an ellipsis was
+    # silently turned into "no verdict" and stopped blocking. Only the TEMPLATE's placeholder skips.
+    for head in ("b50521af22b1…", "<sha>", "b50521af22b1..."):
+        body = '<!-- adversary-verdict:v1 {"verdict":"BLOCK","head":"' + head + '"} -->'
+        r = adv(body)
+        assert r["malformed"] and not r["present"], head
+
+
+def test_a_shortened_sha_block_beside_a_valid_approve_still_blocks() -> None:
+    body = (marker("APPROVE") + "\n"
+            '<!-- adversary-verdict:v1 {"verdict":"BLOCK","head":"b50521af22b1…"} -->')
+    ready, warnings = gate(body)
+    assert not ready, "a BLOCK typed with an ellipsis must not pass"
+    assert warnings == ["adversary-malformed"], warnings
+
+
+def test_a_block_inside_a_broken_fence_still_blocks() -> None:
+    # R3b: _strip_code can over-strip on an unterminated fence or a stray backtick pair, which used to
+    # let a live BLOCK be hidden beside a live APPROVE. A BLOCK naming THIS head is now read from the
+    # RAW body, so no strip bug can hide it.
+    fence = chr(96) * 3
+    for body in (marker("APPROVE") + "\n" + fence + "\n" + marker("BLOCK"),
+                 marker("APPROVE") + "\n" + fence + "py" + fence + " is a span\n" + marker("BLOCK"),
+                 marker("APPROVE") + "\n    " + fence + "\n" + marker("BLOCK")):
+        r = adv(body)
+        assert r["verdict"] == "BLOCK" and r["matches_head"], body
+        assert not passes(body)
+
+
+def test_a_block_in_a_clean_fence_is_still_read_from_the_raw_body() -> None:
+    # The asymmetry: an APPROVE must be live, a BLOCK counts wherever it names this head.
+    fence = chr(96) * 3
+    body = marker("APPROVE") + "\n" + fence + "\n" + marker("BLOCK") + "\n" + fence
+    assert adv(body)["verdict"] == "BLOCK"
+
+
+# ---- adversary review of 4a56c01 (2026-10-27): B1-B6 ------------------------------------------
+#
+# The blocker: `_strip_code` toggled on every line whose `lstrip()` began with ``` or ~~~, so an ODD
+# number of fence-looking lines left `in_fence` true to the end of the body and blanked a live marker.
+# Paired with a raw-body rescue that took only a FULL 40-hex sha, that hid a BLOCK typed with a
+# shortened sha beside a valid APPROVE: `merge_ready: true`, reproduced through `main()` with
+# `--adversary-required` as well. Two independent fixes, because either alone leaves the class open:
+# the raw-body pass takes a shortened sha by PREFIX (so no strip bug can lose a BLOCK), and
+# `_strip_code` follows CommonMark (so the class stops arising). Pinned at each layer.
+
+TICK = chr(96)
+FENCE3 = TICK * 3
+
+
+def strip(body: str) -> str:
+    return load_module()._strip_code(body)
+
+
+def test_strip_a_fence_opens_only_at_an_indent_of_three_spaces_or_less() -> None:
+    # B1c: `line.lstrip()` treated a 4-space-indented fence line as a fence; CommonMark does not.
+    for spaces in (0, 1, 2, 3):
+        body = " " * spaces + FENCE3 + "\nSECRET\n" + " " * spaces + FENCE3
+        assert "SECRET" not in strip(body), f"{spaces} spaces"
+    for spaces in (4, 5):
+        body = " " * spaces + FENCE3 + "\nSECRET\n"
+        assert "SECRET" in strip(body), f"{spaces} spaces"
+    assert "SECRET" in strip("\t" + FENCE3 + "\nSECRET\n"), "a tab expands to four spaces"
+
+
+def test_strip_a_fence_remembers_its_character_and_length() -> None:
+    four = TICK * 4
+    # B1a: an inner 3-backtick line does not close a 4-backtick fence.
+    assert "SECRET" not in strip(four + "md\n" + FENCE3 + "sh\nSECRET\n" + four + "\nAFTER\n")
+    # B1b: a ``` line does not close a ~~~ fence.
+    assert "SECRET" not in strip("~~~md\n" + FENCE3 + "\nSECRET\n~~~\nAFTER\n")
+    # A LONGER closing fence does close it.
+    assert "SECRET" not in strip(four + "\nSECRET\n" + TICK * 5 + "\nAFTER\n")
+    assert "AFTER" in strip(four + "\nSECRET\n" + TICK * 5 + "\nAFTER\n")
+
+
+def test_strip_a_fence_line_may_carry_an_info_string_but_a_closing_fence_must_be_bare() -> None:
+    assert "SECRET" not in strip(FENCE3 + "sh\nSECRET\n" + FENCE3)
+    body = FENCE3 + "md\n" + FENCE3 + " trailing\nSECRET\n" + FENCE3 + "\nAFTER\n"
+    assert "SECRET" not in strip(body) and "AFTER" in strip(body)
+
+
+def test_strip_an_unterminated_fence_runs_to_the_end_of_the_body() -> None:
+    # B1e: CommonMark agrees (everything after a fence with no closer is code), which is exactly why
+    # the raw-body pass, not the stripper, is the guarantee for a BLOCK.
+    assert "SECRET" not in strip(FENCE3 + "md\nSECRET\n")
+
+
+def test_strip_an_inline_span_does_not_cross_a_line() -> None:
+    # B1d: the `` … `` regex used DOTALL, so a span crossed lines and swallowed the marker after it. A
+    # span cannot cross the HTML block that `<!--` starts.
+    body = "use ``x here\nand `` there\n" + marker("BLOCK")
+    assert marker("BLOCK") in strip(body)
+
+
+def test_head_matches_takes_a_full_sha_and_any_shortened_prefix_of_this_head() -> None:
+    m = load_module()
+    for sha in (ADV_HEAD, ADV_HEAD.upper(), ADV_HEAD[:7], ADV_HEAD[:12],
+                ADV_HEAD[:12] + "\u2026", ADV_HEAD[:12] + "...", " " + ADV_HEAD[:12] + " "):
+        assert m._head_matches(sha, ADV_HEAD), sha
+
+
+def test_head_matches_rejects_another_commit_a_placeholder_and_a_non_prefix() -> None:
+    m = load_module()
+    other = "b" * 40
+    for sha in (other, other[:12] + "\u2026", "<40-hex>", "<sha>", "\u2026", "...",
+                ADV_HEAD[:6], ADV_HEAD + "0", None, 42, ""):
+        assert not m._head_matches(sha, ADV_HEAD), sha
+
+
+def test_b1_an_ordinary_markdown_structure_cannot_hide_a_shortened_block() -> None:
+    # B1a-B1c and B1e, each reproduced at 4a56c01 as merge_ready: true. A BLOCK naming this head by a
+    # SHORTENED sha must survive every one of them, because it is read from the raw body.
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    shapes = {
+        "indented fence line (B1c)": "    " + FENCE3 + "\n",
+        "four-backtick fence, odd inner (B1a)": TICK * 4 + "md\n" + FENCE3 + "sh\n" + TICK * 4 + "\n",
+        "tilde fence holding a backtick line (B1b)": "~~~md\n" + FENCE3 + "sh\n~~~\n",
+        "unterminated fence (B1e)": FENCE3 + "md\n",
+    }
+    for label, structure in shapes.items():
+        body = marker("APPROVE") + "\n\n" + structure + "\n" + short
+        r = adv(body)
+        assert r["verdict"] == "BLOCK" and r["matches_head"], (label, r)
+        ready, warnings = gate(body)
+        assert not ready and warnings == ["adversary-stale-or-blocked"], (label, warnings)
+        # Report-only by default is the DESIGN, so the gate must still report the BLOCK.
+        assert gate(body, required=False)[1] == ["adversary-stale-or-blocked"], label
+
+
+def test_b1_a_shortened_block_is_read_as_a_block_not_as_malformed() -> None:
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    alone = adv(short)
+    assert alone["verdict"] == "BLOCK" and not alone["malformed"] and not alone["conflict"]
+    assert "shortened sha" in alone["detail"] and "raw body" in alone["detail"]
+    beside = adv(marker("APPROVE") + "\n\n" + short)
+    assert beside["verdict"] == "BLOCK" and beside["conflict"]
+
+
+def test_b1_the_two_shapes_that_stayed_malformed_still_block() -> None:
+    # The two shapes the review listed that did NOT reach merge_ready at 4a56c01: the shortened BLOCK
+    # survived long enough to be read as malformed, and malformed always blocks. Pin that too, now
+    # that the stripper no longer over-strips them.
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    for label, structure in {
+        "stray double backtick (B1d)": "use ``x here\nand `` there\n\n",
+        "balanced four-backtick fence": TICK * 4 + "md\n" + FENCE3 + "sh\necho\n" + FENCE3 + "\n" + TICK * 4 + "\n\n",
+    }.items():
+        body = marker("APPROVE") + "\n\n" + structure + short
+        assert adv(body)["verdict"] == "BLOCK", label
+        ready, warnings = gate(body)
+        assert not ready, label
+
+
+def test_a_near_miss_spelling_beside_a_valid_approve_is_malformed_not_ignored() -> None:
+    # B2: a `:`-anchored start regex missed `adversary-verdict {...}` and `adversary_verdict:v1 ...`,
+    # so a typo'd BLOCK beside a valid APPROVE read as approved and merge-ready.
+    for start in ("adversary-verdict", "adversary_verdict:v1", "Adversary-Verdict:v1",
+                  "adversary verdict:v1"):
+        body = (marker("APPROVE") + "\n<!-- " + start
+                + ' {"verdict":"BLOCK","head":"' + ADV_HEAD + '"} -->')
+        assert adv(body)["malformed"], start
+        ready, warnings = gate(body)
+        assert not ready and warnings == ["adversary-malformed"], (start, warnings)
+
+
+def test_a_near_miss_spelling_names_the_wrong_spelling_not_an_unclosed_comment() -> None:
+    # B3: every unparseable start was reported as "no closing -->", which defeats "a typo reads as a
+    # typo" - the two mistakes are different.
+    wrong = adv('<!-- adversary-verdict:v2 {"verdict":"APPROVE","head":"' + ADV_HEAD + '"} -->')
+    assert wrong["malformed"] and "no closing" not in wrong["detail"]
+    assert "exact, lowercase" in wrong["detail"]
+    unclosed = adv('<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"' + ADV_HEAD + '"')
+    assert unclosed["malformed"] and "no closing" in unclosed["detail"]
+    assert "exact, lowercase" not in unclosed["detail"]
+
+
+# ---- the same properties through main(), against the fake gh -----------------------------------
+#
+# B6: these regressions each bit once and none had an end-to-end test. `serve()` replaces the happy
+# fixture's `pulls/{pr}` document, which is where the body and the labels come from.
+
+def serve(world: World, body: str, labels: list | None = None, n: int = 1) -> None:
+    doc = ok({"head": {"sha": HEAD}, "body": body, "labels": labels or []})
+    world.route(f"repos/{REPO}/pulls/{PR}", *([doc] * n))
+
+
+def test_main_reads_an_approve_out_of_the_pr_body(world: World) -> None:
+    serve(world, marker("APPROVE", HEAD))
+    r = world.run("--head", HEAD)
+    assert r.returncode == 0, r.stderr
+    s = world.file("summary")
+    assert s["adversary"]["verdict"] == "APPROVE" and s["adversary_warnings"] == []
+    assert s["merge_ready"] is True and s["merge_blockers"] == []
+    assert "adversary: APPROVE at this head" in r.stdout
+
+
+def test_main_reports_a_missing_marker_without_blocking(world: World) -> None:
+    serve(world, "nothing machine-readable here")
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-missing"] and s["merge_ready"] is True
+    assert "adversary: missing" in r.stdout
+
+
+def test_main_blocks_a_malformed_marker_without_being_asked(world: World) -> None:
+    serve(world, '<!-- adversary-verdict:v1 {broken -->')
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-malformed"]
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["adversary-malformed"]
+    # B4: the human line names the outcome instead of saying "missing".
+    assert "adversary: malformed" in r.stdout
+
+
+def test_main_reports_a_block_without_blocking_by_default(world: World) -> None:
+    serve(world, marker("BLOCK", HEAD))
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-stale-or-blocked"]
+    assert s["merge_ready"] is True, "a BLOCK is report-only unless the gate is opted in"
+    assert "adversary: BLOCK at this head" in r.stdout
+
+
+def test_main_blocks_a_block_when_opted_in(world: World) -> None:
+    serve(world, marker("BLOCK", HEAD))
+    world.run("--head", HEAD, "--adversary-required")
+    s = world.file("summary")
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["adversary-stale-or-blocked"]
+
+
+def test_main_names_an_other_head_verdict_in_the_human_line(world: World) -> None:
+    serve(world, marker("APPROVE", OTHER_HEAD))
+    r = world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_warnings"] == ["adversary-stale-or-blocked"] and s["merge_ready"] is True
+    assert "adversary: other head" in r.stdout
+
+
+def test_main_names_a_failed_body_fetch_and_blocks(world: World) -> None:
+    # `pulls/{PR}` failing is not only "no verdict": with no document nothing about the PR can be
+    # judged, so the run cannot be called ready either. The adversary warning must NAME the failure
+    # and must block, rather than leave `adversary_warnings` empty (the F5 class).
+    world.route(f"repos/{REPO}/pulls/{PR}", fail())
+    r = world.run("--head", HEAD, "--timeout", "1")
+    s = world.file("summary")
+    assert s["adversary"]["fetch_failed"] is True
+    assert s["adversary_warnings"] == ["adversary-fetch-failed"]
+    assert s["merge_ready"] is False and "adversary-fetch-failed" in s["merge_blockers"]
+    assert "adversary: FETCH FAILED" in r.stdout
+
+
+def test_main_reports_the_verdict_on_a_timeout_not_only_on_done(world: World) -> None:
+    # B4b: `collect_adversary` used to run only on the `done` path, so a timed-out run reported
+    # `adversary: null` and `adversary_warnings: []` - an uncollected verdict read as no finding.
+    serve(world, marker("BLOCK", HEAD), n=99)
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                *([checks_page(run_obj("test", "in_progress", None))] * 99))
+    r = world.run("--head", HEAD, "--timeout", "1")
+    s = world.file("summary")
+    assert s["result"] == "timeout"
+    assert s["adversary"]["verdict"] == "BLOCK" and s["adversary"]["matches_head"]
+    assert s["adversary_warnings"] == ["adversary-stale-or-blocked"]
+    assert "adversary: BLOCK at this head" in r.stdout
+
+
+def edited_body_run(world: World, *extra: str) -> dict:
+    """One body edit mid-wait: the PR document says APPROVE, then BLOCK, and CI finishes on the next poll."""
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                checks_page(run_obj("test", "in_progress", None)),
+                checks_page(run_obj("test")),
+                checks_page(run_obj("test")))
+    world.route(f"repos/{REPO}/pulls/{PR}",
+                ok({"head": {"sha": HEAD}, "body": marker("APPROVE", HEAD), "labels": []}),
+                ok({"head": {"sha": HEAD}, "body": marker("BLOCK", HEAD), "labels": []}),
+                ok({"head": {"sha": HEAD}, "body": marker("BLOCK", HEAD), "labels": []}))
+    r = world.run(*extra)
+    assert r.returncode == 0, r.stderr
+    return world.file("summary")
+
+
+def test_main_sees_a_body_edited_from_approve_to_block_mid_wait(world: World) -> None:
+    assert edited_body_run(world)["adversary"]["verdict"] == "BLOCK"
+
+
+def test_main_sees_that_edit_with_an_explicit_head_too(world: World) -> None:
+    # `--head` used to leave `pr_doc` None, so the body was never read at all.
+    assert edited_body_run(world, "--head", HEAD)["adversary"]["verdict"] == "BLOCK"
+
+
+def test_main_honours_an_adversary_required_label_added_mid_wait(world: World) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                checks_page(run_obj("test", "in_progress", None)),
+                checks_page(run_obj("test")),
+                checks_page(run_obj("test")))
+    world.route(f"repos/{REPO}/pulls/{PR}",
+                ok({"head": {"sha": HEAD}, "body": "", "labels": []}),
+                ok({"head": {"sha": HEAD}, "body": "",
+                    "labels": [{"name": "adversary-required"}]}),
+                ok({"head": {"sha": HEAD}, "body": "",
+                    "labels": [{"name": "adversary-required"}]}))
+    world.run("--head", HEAD)
+    s = world.file("summary")
+    assert s["adversary_required"] is True
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["adversary-missing"]
+
+
+def test_main_fetches_the_pr_document_once_per_poll_plus_the_resolve(world: World) -> None:
+    serve(world, marker("APPROVE", HEAD))
+    world.run()
+    assert world.calls(f"pulls/{PR}") == 2, "one resolve, one poll"
+
+
+# ---- the bundled adversary review of 66/67: C1-C5 ---------------------------------------------
+#
+# Two of three re-reviewers found the SAME class again: the raw-body/strip interaction still failed
+# open, and every finding below reached `merge_ready: true` from a body that merely QUOTED a marker
+# or mistyped one. Each fix is pinned through `adv()` and, where the failure was reached through
+# `assess()`, through the real gate: a property that holds only inside `adversary_verdict` is not the
+# property the gate promises.
+
+def test_c1_an_unclosed_marker_start_quoted_in_code_cannot_swallow_a_block() -> None:
+    # MARKER_RE was non-greedy but unbounded, so the unclosed start below ran to the NEXT `-->` - the
+    # fenced BLOCK's own - and the JSON parse failed, `continue` skipped it, `findall` resumed AFTER
+    # the BLOCK, and the body read as a live APPROVE with the full sha. PR 67's subject is exactly
+    # this kind of quoting, so the doc-writing PR could approve itself.
+    body = (marker("APPROVE") + "\nEvery marker begins `<!-- adversary-verdict:v1`.\n"
+            + FENCE3 + "\n" + marker("BLOCK") + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_c1_an_unclosed_start_in_plain_prose_blocks_and_is_reported_malformed() -> None:
+    # The same shape without backticks: the BLOCK must survive, and the stray start is a typo that is
+    # REPORTED as well - "a BLOCK beside a typo" is not the same body as "a BLOCK".
+    body = (marker("APPROVE") + "\nEvery marker begins <!-- adversary-verdict:v1\n"
+            + FENCE3 + "\n" + marker("BLOCK") + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c2_a_double_backtick_span_holding_one_backtick_is_still_code() -> None:
+    # CommonMark 6.1: a span opens with n backticks and closes at the next run of EXACTLY n, so
+    # ``literal `<marker>` `` is ONE span. The old pair of fixed regexes could not see it, matched from
+    # the INNER backtick, and left the marker live: a quoted APPROVE read as a real one.
+    body = "``literal `" + marker("APPROVE") + "``\n"
+    assert not adv(body)["present"]
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-missing"], warnings
+    # Outside the span the same marker is a verdict, so the fix is the span and not a blanket refusal.
+    assert passes(body + "\n" + marker("APPROVE"))
+
+
+def test_c2_the_strip_never_repairs_invalid_json_into_a_different_marker() -> None:
+    # Spans used to be replaced with "" - DELETION concatenates the text on either side, so an author's
+    # typo could be closed up into valid JSON that was never written. Every replacement is now a run of
+    # spaces of the same width.
+    broken = marker("APPROVE").replace('"} -->', '","unexpected"} -->')
+    assert broken != marker("APPROVE")
+    assert adv(broken)["malformed"], "the unquoted typo is a typo"
+    quoted = "``literal `" + broken + "``"
+    r = adv(quoted)
+    assert not r["present"] and not r["malformed"], r
+
+
+def test_c3_a_backtick_in_an_info_string_is_not_a_fence() -> None:
+    # CommonMark 4.5: a backtick fence's info string may not contain a backtick. A line like ```a`b is
+    # therefore INLINE CODE, not a fence - and treating it as one blanked the rest of the body, which
+    # hid the malformed marker below and let the APPROVE read clean.
+    body = (marker("APPROVE") + "\n" + FENCE3 + "a`b\n"
+            + '<!-- adversary-verdict:v1 {"verdict":"APPROVE"}\n')
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c4_a_full_sha_with_a_trailing_ellipsis_is_a_block_not_a_typo() -> None:
+    # The property is documented as "full 40-hex, OR a 7+ hex prefix with or without a trailing …".
+    # `[0-9a-f]{7,39}` could not match a full sha carrying an ellipsis, so a legitimate BLOCK read as
+    # malformed: report-only by default, which means it silently stopped blocking in the opt-in case
+    # that matters. At equal length `startswith` is equality, so the cap can go to 40 safely.
+    for tail in ("\u2026", "..."):
+        r = adv(marker("BLOCK", ADV_HEAD + tail))
+        assert r["verdict"] == "BLOCK" and not r["malformed"] and r["matches_head"], (tail, r)
+        ready, warnings = gate(marker("BLOCK", ADV_HEAD + tail))
+        assert not ready and warnings == ["adversary-stale-or-blocked"], (tail, warnings)
+    # Widening the cap must not make another commit match. An ellipsized sha of a DIFFERENT commit is
+    # not a prefix of this head, so it does not match; it also is not 40-hex, so it stays a malformed
+    # head rather than a stale verdict - the fail-closed direction, unchanged here.
+    other = adv(marker("BLOCK", OTHER_HEAD + "\u2026"))
+    assert not other["matches_head"] and other["malformed"], other
+
+
+def test_c5_a_raw_body_block_cannot_report_a_clean_verdict_beside_a_live_typo() -> None:
+    # The raw-body rescue returned `malformed: False` unconditionally, so a BLOCK beside a LIVE
+    # malformed marker reported a clean block: the typo vanished from the summary and the body looked
+    # like one assertable verdict. Validation now runs first and the rescue carries its result.
+    body = ('<!-- adversary-verdict:v2 {"verdict":"APPROVE","head":"' + ADV_HEAD + '"} -->\n'
+            + marker("BLOCK"))
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c5_a_shortened_block_beside_a_live_typo_is_malformed_too() -> None:
+    # The shortened-sha rescue is the one that always said "clean", so it laundered a BLOCK beside a
+    # typo. The prefix BLOCK is NOT itself a problem - it is the shape the rescue exists for - but the
+    # broken marker beside it still reports.
+    short = marker("BLOCK", ADV_HEAD[:12] + "\u2026")
+    body = '<!-- adversary-verdict:v1 {broken -->\n' + short
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["malformed"], r
+    assert "shortened sha" in r["detail"] and "raw body" in r["detail"]
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_strip_code_masks_with_spaces_and_never_changes_a_line() -> None:
+    # The invariant every fail-open shape above depends on: stripping may only REPLACE characters with
+    # spaces. A line's length never changes, no line is added or removed, and every surviving non-space
+    # character is the original one at the same position - so no marker can be repaired into another.
+    body = "\n".join([
+        "plain text  ",
+        "\tindented with a tab ",
+        FENCE3 + "sh",
+        "in the fence ",
+        FENCE3,
+        "a `span` and ``a `span` with a tick`` end",
+        "    " + FENCE3 + " (four spaces: indented code, not a fence)",
+        FENCE3 + "a`b (not a fence: a backtick in the info string)",
+        "",
+    ])
+    src = body.splitlines()
+    dst = load_module()._strip_code(body).splitlines()
+    assert len(dst) == len(src)
+    for line_in, line_out in zip(src, dst):
+        assert len(line_in) == len(line_out), (line_in, line_out)
+        for a, b in zip(line_in, line_out):
+            assert b == " " or b == a, (line_in, line_out)
+    assert dst[0] == src[0] and dst[1] == src[1], "live lines are untouched"
+    assert not dst[2].strip() and not dst[3].strip() and not dst[4].strip(), "the fence is masked"
+    assert "span" not in dst[5] and dst[5].startswith("a ") and dst[5].endswith(" end")
+    assert dst[6] == src[6] and dst[7] == src[7], "neither line is a fence"
+
+
+# ---- the lead's re-review of 6083bcb: C1' (regression) and C2' ---------------------------------
+#
+# C1 was fixed by TEMPERING the marker regex so it could not cross another `<!--`. That closed the
+# prose-swallow and opened the mirror: the SAME regex drove the raw-body BLOCK rescue, and extra JSON
+# fields are accepted (no schema check), so a BLOCK whose `note` quoted the delimiter became invisible
+# to the rescue. A fail-open in the one direction this gate promises never to fail open. The boundary
+# is now a JSON-aware scanner (`_marker_spans`), shared by the live path and the rescue, and BOTH
+# directions are pinned here: the tempered capture survives as the FALLBACK, for starts whose JSON
+# does not balance.
+
+def _marker_with_note(verdict: str, note: str, head: str = ADV_HEAD) -> str:
+    """A valid marker carrying an EXTRA field - which the gate accepts, by design."""
+    return (f'<!-- adversary-verdict:v1 {{"verdict":"{verdict}","head":"{head}",'
+            f'"note":"{note}"}} -->')
+
+
+def test_c1_prime_a_fenced_block_that_quotes_the_delimiter_is_not_hidden() -> None:
+    # At 6083bcb this body read as a clean APPROVE (parent 838413b read BLOCK): the fenced BLOCK's
+    # `note` holds `<!--`, the tempered group stopped there, the JSON failed to parse, and the rescue
+    # that exists to read a fenced BLOCK skipped it.
+    body = (marker("APPROVE") + "\n" + FENCE3 + "\n"
+            + _marker_with_note("BLOCK", "literal <!-- x") + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_c1_prime_a_live_block_that_quotes_the_delimiter_is_a_block_not_a_typo() -> None:
+    # Same body without the fence: the marker is LIVE, so the tempered group's truncation made valid
+    # JSON look malformed (6083bcb: APPROVE + malformed). A delimiter inside a JSON string is CONTENT.
+    body = marker("APPROVE") + "\n" + _marker_with_note("BLOCK", "literal <!-- x")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_c1_prime_a_near_miss_start_that_quotes_the_delimiter_never_becomes_a_marker() -> None:
+    # The scanner must not widen what COUNTS as a marker. A near-miss spelling is a start for
+    # `_classify_starts` only, however valid its JSON, so it is reported as a typo and never parsed
+    # into a verdict - a typo may not block, and it may not approve either.
+    body = ('<!-- adversary-verdict {"verdict":"BLOCK","head":"' + ADV_HEAD
+            + '","note":"literal <!-- x"} -->\n' + marker("APPROVE"))
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+
+
+def test_c2_prime_masking_may_not_repair_json_at_a_structural_boundary() -> None:
+    # PRE-EXISTING (the lead found it at both revisions), and still wrong: `_strip_code` replaces code
+    # with SPACES, so a span sitting where JSON expects whitespace left the punctuation intact -
+    # {"verdict":"APPROVE", `junk` "head":"…"} parsed as valid JSON nobody wrote, and read clean-
+    # APPROVE. The live slice of the RAW body at the same offsets says what was actually written, so a
+    # marker whose JSON differs between the two is `malformed`, never approved.
+    body = ('<!-- adversary-verdict:v1 {"verdict":"APPROVE", `junk` "head":"' + ADV_HEAD + '"} -->')
+    r = adv(body)
+    assert not r["present"] and r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-malformed"], warnings
+    # Outside code the same JSON is a real verdict: the fix is the repair, not a blanket refusal.
+    assert passes(body.replace("`junk`", ""))
+
+
+def test_strip_code_preserves_every_offset_including_crlf_and_a_trailing_newline() -> None:
+    # The C2' check compares slices by INDEX, so `_strip_code` may not change the length by one byte.
+    # `splitlines()` dropped a trailing newline and rewrote `\r\n` as `\n`, shifting every offset
+    # after the first such line - which turned a clean APPROVE on a CRLF body into `malformed`.
+    strip = load_module()._strip_code
+    for body in ("text `span` and " + marker("APPROVE") + "\n",
+                 "text `span`\r\n\r\n" + marker("APPROVE") + "\r\n",
+                 "trailing\n\n",
+                 ""):
+        out = strip(body)
+        assert len(out) == len(body), (body, out)
+        # Same line structure: every line terminator survives byte for byte.
+        assert out[len(out.rstrip("\r\n")):] == body[len(body.rstrip("\r\n")):], (body, out)
+    crlf = "Intro\r\n\r\n" + marker("APPROVE") + "\r\n"
+    assert strip(crlf).endswith("\r\n") and len(strip(crlf)) == len(crlf)
+    r = adv(crlf)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and not r["malformed"], r
+
+
+def test_c1_prime_a_note_that_documents_the_marker_is_content_not_a_second_start() -> None:
+    # The JSON-aware scanner accepts the WHOLE marker, so a `note` quoting the format is inside that
+    # marker's JSON. Counting the quoted start as a second start made a CORRECT body `malformed`, which
+    # is the same fail-closed-but-wrong direction as C1 in the other guise. `_classify_starts` skips a
+    # start inside an accepted marker, and the scanner resumes after that marker's `-->`.
+    quoted_start = 'see <!-- adversary-verdict:v1 in the docs'
+    r = adv(_marker_with_note("APPROVE", quoted_start))
+    assert r["verdict"] == "APPROVE" and r["matches_head"], r
+    assert not r["malformed"], r
+    # The same shape with a WHOLE marker nested in the note, escaped as JSON requires.
+    nested = json.dumps({"verdict": "APPROVE", "head": ADV_HEAD})
+    note = "like <!-- adversary-verdict:v1 " + nested + " --> ok"
+    body = ('<!-- adversary-verdict:v1 '
+            + json.dumps({"verdict": "APPROVE", "head": ADV_HEAD, "note": note})
+            + ' -->')
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"] and not r["malformed"], r
+    # And two REAL markers are still two: the skip must not spill past the accepted marker.
+    assert adv(body + "\n" + marker("BLOCK"))["verdict"] == "BLOCK"
+
+
+# ---- the lead's re-review of eb90d20: D1, a BLOCK nested in a REJECTED candidate ---------------
+#
+# `_marker_spans` accepts a candidate as soon as its braces balance and a `-->` follows - before
+# anything validates that JSON - and then sets `consumed` past it. The LIVE path wants exactly that
+# (an accepted marker's interior is content). The raw-body BLOCK rescue iterated the SAME spans, so
+# when the outer candidate's JSON was junk the rescue `continue`d and never revisited a real
+# same-head BLOCK that had started inside the region: `verdict=APPROVE, conflict=False,
+# malformed=False`. Two reviewers reached it independently, from two shapes, and both read a clean
+# false APPROVE at eb90d20 while 6083bcb read BLOCK: the same fail-open class as C1' in a new guise.
+#
+# The fix is scoped to the rescue: `_marker_spans(..., nested=True)` drops the cursor so every start
+# is scanned on its own. The boundary rules are unchanged, and no false BLOCK arrives - a marker
+# quoted inside a `note` is ESCAPED in the body, so its slice cannot parse, and an unescaped quote
+# inside a JSON string cannot exist in valid JSON.
+
+def test_d1_a_fenced_block_nested_in_an_invalid_outer_candidate_is_still_a_block() -> None:
+    # Reproducer A (codex): the outer `{"note":` candidate's braces balance OVER the inner marker, so
+    # it was accepted and `consumed` skipped the BLOCK; its own JSON does not parse, so the rescue
+    # skipped the span and found nothing. At eb90d20: APPROVE / conflict False / malformed False.
+    body = (marker("APPROVE") + "\n" + FENCE3 + "\n"
+            + '<!-- adversary-verdict:v1 {"note":\n'
+            + marker("BLOCK") + "\n"
+            + '} -->\n' + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_d1_quote_parity_across_the_scan_cannot_swallow_a_block() -> None:
+    # Reproducer B (claude): prose quotes an unclosed start whose opening quote runs on into the
+    # fenced marker below, so the candidate's slice spans a literal newline inside a JSON string -
+    # invalid JSON, accepted span, consumed, BLOCK gone. Same false APPROVE at eb90d20.
+    body = (marker("APPROVE") + "\n"
+            + 'A marker begins `<!-- adversary-verdict:v1 {"verdict":"` and so on.\n\n'
+            + FENCE3 + "\n"
+            + _marker_with_note("BLOCK", 'the \\"never\\" filter') + "\n" + FENCE3 + "\n")
+    r = adv(body)
+    assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
+    assert not r["malformed"], r
+    ready, warnings = gate(body)
+    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+
+
+def test_d1_the_rescue_reports_a_nested_start_and_the_live_scan_still_skips_it() -> None:
+    # The mechanism, pinned at both layers: the same body yields one span to the live scan (the outer
+    # APPROVE, whose interior is content) and two to the rescue. If the live scan ever reports the
+    # nested start too, a `note` documenting the format becomes `malformed`; if the rescue ever skips
+    # it again, D1 is back.
+    mod = load_module()
+    outer = ('<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"' + ADV_HEAD
+             + '","note":"see:\n' + '<!-- adversary-verdict:v1 {"verdict":"BLOCK","head":"'
+             + ADV_HEAD + '"} -->"}\n-->')
+    body = outer  # the note holds an UNESCAPED start: the outer JSON is therefore junk
+    assert len(mod._marker_spans(body)) == 1, mod._marker_spans(body)
+    assert len(mod._marker_spans(body, nested=True)) == 2, mod._marker_spans(body, nested=True)
+
+
+def test_d1_an_escaped_nested_marker_is_still_not_a_second_verdict() -> None:
+    # The other direction: the cursor was dropped only in the rescue, and a marker quoted inside a
+    # VALID `note` is escaped, so its slice cannot parse as JSON and cannot become a BLOCK. Without
+    # this, every APPROVE documenting the format would come back as a conflict with itself.
+    nested = json.dumps({"verdict": "BLOCK", "head": ADV_HEAD})
+    note = "like <!-- adversary-verdict:v1 " + nested + " --> ok"
+    body = ('<!-- adversary-verdict:v1 '
+            + json.dumps({"verdict": "APPROVE", "head": ADV_HEAD, "note": note}) + ' -->')
+    r = adv(body)
+    assert r["verdict"] == "APPROVE" and r["matches_head"], r
+    assert not r["conflict"] and not r["malformed"], r
+    assert passes(body)

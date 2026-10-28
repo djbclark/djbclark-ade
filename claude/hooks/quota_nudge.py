@@ -24,7 +24,10 @@ hook prints nothing and changes nothing.
 
 While the guard state names an unexpired gate profile (`profile`: {name, until}, bin/gate-profile, 2026-10-26) it also prints, once per
 session per America/New_York day (any level, `ok` included), "[gates] <name> profile active until <time>; gate-profile clear restores
-normal routing". The state already holds it: no extra file is read.
+normal routing". The state already holds it: no extra file is read. When the state's `frontier_allowance.judged` is true (2026-10-27: the
+guard found the effective gate, standing baseline or profile, allowing judged frontier use, level ok/watch-for-weekly, cap floor held)
+the line says the frontier model is allowed where the agent judges it significantly better, with a one-line `frontier-reason`, and the
+per-day Agent-tool cap; with no profile active that is its own once-per-day line, "[gates] frontier allowance: ...".
 
 History: 2026-10-23, after the Claude weekly window ran out 2.6 days early on 2026-10-20
 with a `conserve` alert unread for 11 hours. docs/model-routing.md "Quota guard".
@@ -45,7 +48,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LEVELS = ("ok", "watch", "tight", "critical")
+FRONTIER1, JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/model-tiers-design.md)
 MAX_AGE_SECONDS = 2 * 3600
+GUARD_STATE_MAX_AGE_S = 30 * 60   # the frontier hook's and acp-dispatch's limit (ade_gates.GUARD_STATE_MAX_AGE_S); a test pins them equal
 MAX_SESSIONS = 200
 LOCK_RETRIES = 10
 LOCK_WAIT_S = 0.02
@@ -162,28 +167,56 @@ def _unreadable_nudge(raw, session_id, nudges):
     return True
 
 
+def _frontier_text(st):
+    """The sentence saying the frontier model is allowed, or None unless the guard state says judged use is in force right now
+    (`frontier_allowance.judged`: the effective gate, level ok/watch-for-weekly and the cap floor all hold) and the state's `checked_at`
+    is within GUARD_STATE_MAX_AGE_S (30 min, not this hook's 2 h): the same freshness the gate itself demands."""
+    checked = _parse(st.get("checked_at"))
+    if checked is None or not -60 <= (_now() - checked).total_seconds() <= GUARD_STATE_MAX_AGE_S:
+        return None        # the hook and acp-dispatch ask on a state this old, so this line must not say "allowed" (adversary 2026-10-27 P3c)
+    allow = st.get("frontier_allowance")
+    calls = allow.get("agent_calls_per_day") if isinstance(allow, dict) else None
+    if not (isinstance(allow, dict) and allow.get("judged") is True and isinstance(calls, int) and not isinstance(calls, bool)):
+        return None
+    cap = f"at most {calls} Agent-tool calls today" if calls > 0 else "no Agent-tool call without asking"
+    return (f"{FRONTIER1} (frontier) is allowed where you judge it significantly "
+            f"better than {JUDGMENT}; give the reason in one line (acp-dispatch --kind frontier --frontier-reason \"...\"; Agent tool: "
+            f"a \"frontier-reason: ...\" prompt line), {cap}")
+
+
 def _profile_nudge(st, session_id, nudges):
-    """One line per session per New York day while the guard state names an unexpired gate profile. True when `nudges` changed."""
+    """One line per session per New York day: while the guard state names an unexpired gate profile, that; with no profile, the frontier
+    allowance line when the standing baseline allows judged use (2026-10-27). True when `nudges` changed."""
     prof = st.get("profile")
-    if not isinstance(prof, dict) or not isinstance(prof.get("name"), str):
-        return False
-    until = _parse(prof.get("until"))
-    if until is None or until <= _now():   # the guard has not run since it expired: say nothing
-        return False
+    until = _parse(prof.get("until")) if isinstance(prof, dict) and isinstance(prof.get("name"), str) else None
     try:
         from zoneinfo import ZoneInfo
         ny = ZoneInfo("America/New_York")
-        local = until.astimezone(ny)
         today = _now().astimezone(ny).date().isoformat()
-        when = f"{local:%a %b} {local.day} {local.hour % 12 or 12}:{local:%M} {'AM' if local.hour < 12 else 'PM'} {local:%Z}"
+        local = until.astimezone(ny) if until is not None else None
+        when = f"{local:%a %b} {local.day} {local.hour % 12 or 12}:{local:%M} {'AM' if local.hour < 12 else 'PM'} {local:%Z}" if local else None
     except Exception:
         return False
+    frontier = _frontier_text(st)
+    if until is None or until <= _now():   # no profile, or the guard has not run since it expired: only the standing allowance may speak
+        if frontier is None:
+            return False
+        key, stamp = f"{session_id}#frontier", today
+        if nudges.get(key) == stamp:
+            return False
+        print(f"[gates] frontier allowance: {frontier}.", flush=True)
+        nudges.pop(key, None)
+        nudges[key] = stamp
+        return True
     key = f"{session_id}#profile"
     stamp = f"{prof.get('until')}|{today}"
     if nudges.get(key) == stamp:
         return False
     name = prof["name"] if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", prof["name"]) else "gate"     # ASCII only, as ade_gates.NAME_RE
-    print(f"[gates] {name} profile active until {when}; gate-profile clear restores normal routing", flush=True)
+    if frontier is not None:
+        print(f"[gates] {name} profile active until {when}: {frontier}. gate-profile clear restores normal routing.", flush=True)
+    else:
+        print(f"[gates] {name} profile active until {when}; gate-profile clear restores normal routing", flush=True)
     nudges.pop(key, None)
     nudges[key] = stamp
     return True

@@ -124,6 +124,20 @@ def test_gates_toml_baseline_equals_the_code_defaults():
     assert cfg["quota_guard"] == pytest.approx(_thresholds("claude-quota-guard"))
 
 
+def test_the_shipped_frontier_baseline_is_the_ruled_standing_allowance_and_its_floors_equal_it():
+    """The code default stays all-closed (fail-safe); gates.toml carries the ruling of 2026-10-27, floors included."""
+    import tomllib
+    cfg = tomllib.loads((REPO / "config" / "gates.toml").read_text())
+    assert cfg["frontier"] == pytest.approx(STANDING)
+    floors = cfg["floors"]["frontier"]
+    for k, v in STANDING.items():
+        if not k.endswith("_min_left"):
+            assert floors[k] == {"loosen": "higher", "bound": v}, k       # the baseline may not exceed what the floors allow
+    assert (cfg["frontier"]["frontier1_min_left"], cfg["frontier"]["frontier2_min_left"]) == (
+        g.FRONTIER_DEFAULTS["frontier1_min_left"], g.FRONTIER_DEFAULTS["frontier2_min_left"])
+    assert all(g.FRONTIER_DEFAULTS[k] == 0 for k in ("frontier1_judged", "frontier2_judged", "frontier1_agent_calls_per_day"))
+
+
 def test_the_shipped_gates_toml_validates():
     r = subprocess.run([sys.executable, "-I", str(CLI), "validate"], capture_output=True, text=True, timeout=60,
                        env={"PATH": os.environ["PATH"], "HOME": "/nonexistent"})
@@ -444,6 +458,11 @@ def test_validate_catches_drift_floors_and_directions(cli, tmp_path):
         ("tight_projected = 500.0", "tight_projected = 50.0", "tighter than the baseline"),
         ("tight_projected = 500.0", "tight_projected = 5000.0", "above the ceiling 1000"),
         ("watch_weekly = 20.0", "watch_weekly = 10.0", "below the floor 15"),
+        ("frontier1_per_wave = 2 ", "frontier1_per_wave = 3 ", "[frontier].frontier1_per_wave: gates.toml 3 is above its floor bound 2"),
+        ("frontier1_agent_calls_per_day = 4 ", "frontier1_agent_calls_per_day = 5 ", "frontier1_agent_calls_per_day: gates.toml 5 is above its floor bound 4"),
+        ("frontier1_per_wave = 2 ", "frontier1_per_wave = 0 ", "frontier1_per_wave: gates.toml 0 is tighter than the code default 1"),
+        ("frontier1_min_left = 10.0 ", "frontier1_min_left = 9.0 ", "[frontier].frontier1_min_left: gates.toml 9 != code default 10"),
+        ("frontier2_min_left = 60.0 ", "frontier2_min_left = 50.0 ", "[frontier].frontier2_min_left: gates.toml 50 != code default 60"),
         ("tight_weekly = 15.0\n# Aligned", "tight_weekly = 15.0\nlock_wait_s = 0.1\n# Aligned", "not overridable"),
         ("[meta]\nschema = 1", "[meta]\nschema = 2", "schema"),
         ("max_profile_hours = 240", "max_profile_hours = 0", "max_profile_hours"),
@@ -466,6 +485,14 @@ def test_validate_catches_drift_floors_and_directions(cli, tmp_path):
     broken = tmp_path / "broken.toml"
     broken.write_text("[governor\n")
     assert cli.run("validate", GATES_TOML=str(broken)).returncode == 1
+
+
+def test_validate_accepts_a_closed_frontier_baseline(cli, tmp_path):
+    """Closing the standing allowance is a PR to `[frontier]` alone: the code defaults are inside the allowed range."""
+    closed = tmp_path / "closed.toml"
+    closed.write_text(close_frontier_baseline((REPO / "config/gates.toml").read_text()))
+    r = cli.run("validate", GATES_TOML=str(closed))
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # -- the real gates.toml through the loader: conserve_alert_level floor and the weekly-trigger ordering ------------------------
@@ -951,3 +978,458 @@ def test_a_profile_that_puts_the_governors_tight_triggers_below_critical_is_reje
     r = subprocess.run([sys.executable, "-I", str(CLI), "validate"], capture_output=True, text=True, timeout=60,
                        env={"PATH": os.environ["PATH"], "HOME": "/nonexistent", "GATES_TOML": str(g.toml_path())})
     assert r.returncode == 1 and "profile away.governor:" in r.stdout and why in r.stdout
+
+
+# -- adversary round 2 follow-up (2026-10-27): deep toml, an unusable lock path, a stale expiry mark -------------------------
+
+DEEP_TOML = "x = " + "[" * 5000 + "]" * 5000 + "\n"           # past the interpreter's recursion limit
+
+
+@pytest.mark.parametrize("gate, defaults", [("governor", CODE_DEFAULTS), ("quota_guard", GUARD_DEFAULTS)])
+def test_a_deeply_nested_gates_toml_is_unreadable_not_a_crash(env, gate, defaults):
+    g.toml_path().write_text(DEEP_TOML)
+    t, info = g.load_gates(gate, NOW, defaults)
+    assert t == defaults and "not valid TOML" in info["toml_error"]
+
+
+def test_the_cli_reads_a_deeply_nested_gates_toml_as_unreadable_not_a_traceback(env, cli):
+    g.toml_path().write_text(DEEP_TOML)
+    for args in (("status",), ("validate",)):
+        r = cli.run(*args, GATES_TOML=str(g.toml_path()))
+        assert "Traceback" not in r.stderr and "RecursionError" not in r.stderr, (args, r.stderr[-300:])
+    assert cli.run("validate", GATES_TOML=str(g.toml_path())).returncode == 1
+
+
+LOCK_KINDS = ["fifo", "dir", "dangling_symlink", "symlink_to_valid_file"]
+
+
+def _break_lock(cli, kind: str) -> Path:
+    lock = Path(f"{cli.state}.lock")
+    lock.unlink(missing_ok=True)
+    _plant(kind, lock, cli.tmp)
+    return lock
+
+
+@pytest.mark.parametrize("kind", LOCK_KINDS)
+def test_clear_works_without_a_usable_lock_and_names_the_lock_path(cli, kind):
+    assert cli.run("set", "away", "--for", "2h", "--reason", "x").returncode == 0
+    lock = _break_lock(cli, kind)
+    target = lock.resolve() if lock.is_symlink() else None
+    before = target.read_bytes() if target is not None and target.exists() else None
+    r = cli.run("clear", GATE_PROFILE_LOCK_WAIT="0.5")
+    assert r.returncode == 0 and not cli.state.exists(), r.stderr
+    assert str(lock) in r.stderr and "cleared: baseline in force" in r.stdout
+    after = target.read_bytes() if target is not None and target.exists() else None
+    assert after == before                                                              # a link's target is never written through
+
+
+@pytest.mark.parametrize("kind", LOCK_KINDS)
+def test_set_and_extend_refuse_an_unusable_lock_naming_its_path(cli, kind):
+    assert cli.run("set", "away", "--for", "2h", "--reason", "x").returncode == 0
+    lock = _break_lock(cli, kind)
+    before = cli.state.read_text()
+    for args in (("set", "away", "--for", "3h", "--reason", "y"), ("extend", "--for", "1h")):
+        r = cli.run(*args)
+        assert r.returncode == 1 and str(lock) in r.stderr, (args, r.stderr)
+        assert cli.state.read_text() == before
+
+
+@pytest.mark.parametrize("kind", LOCK_KINDS)
+def test_the_notices_say_so_once_when_the_lock_path_is_unusable(env, cli, capsys, kind):
+    lock = _break_lock(cli, kind)
+    write_state(state_path(), since="2026-10-26T12:00:00Z", until="2026-10-29T16:00:00Z", last_daily_nudge="2026-10-26")
+    _, active = gov(NOW + timedelta(days=1))
+    sent: list[str] = []
+    for _ in range(2):
+        assert _bounded(lambda: g.notify_daily(active, lambda m: sent.append(m) or True, NOW + timedelta(days=1))) is False
+    write_state(state_path(), until=g.iso(NOW - timedelta(minutes=1)), since=g.iso(NOW - timedelta(hours=70)))
+    _, expired = gov()
+    for _ in range(2):
+        assert _bounded(lambda: g.notify_expired(expired, lambda m: sent.append(m) or True, NOW)) is False
+    err = capsys.readouterr().err
+    assert sent == [] and err.count(str(lock)) == 2, err                         # one line per notice kind, not one per run
+    assert "daily nudge skipped" in err and "expiry notice skipped" in err
+
+
+def test_extend_does_not_carry_a_stale_expiry_mark_so_the_real_expiry_pings(env, cli):
+    # the state an expiry notice that raced `extend` leaves: an unexpired profile that already carries `expired_notified`
+    write_state(state_path(), since=g.iso(NOW - timedelta(hours=1)), until=g.iso(NOW + timedelta(hours=2)),
+                expired_notified=g.iso(NOW - timedelta(minutes=5)))
+    r = cli.run("extend", "--for", "1h", GATES_TOML=str(g.toml_path()))
+    assert r.returncode == 0, r.stderr
+    saved = json.loads(Path(state_path()).read_text())
+    assert "expired_notified" not in saved and saved["until"] == g.iso(NOW + timedelta(hours=3))
+    later = NOW + timedelta(hours=4)
+    _, info = gov(later)
+    assert info["expired"] is not None and info["expired"]["name"] == "away"
+    sent: list[str] = []
+    assert g.notify_expired(info, lambda m: sent.append(m) or True, later) is True and len(sent) == 1
+
+
+# -- the [frontier] gate (2026-10-27): floors, baseline guard, no env override, the guard-state check, the reason form ----------
+
+@pytest.fixture
+def fenv(tmp_path, monkeypatch):
+    """A copy of the SHIPPED gates.toml, a missing profile state and no env override; returns the toml path."""
+    toml = tmp_path / "gates.toml"
+    toml.write_text((REPO / "config" / "gates.toml").read_text())
+    monkeypatch.setenv("GATES_TOML", str(toml))
+    monkeypatch.setenv("GATE_PROFILE_STATE", str(tmp_path / "state" / "gate-profile.json"))
+    for var in g.ENV_VARS.values():
+        monkeypatch.delenv(var, raising=False)
+    g._LOGGED.clear()
+    return toml
+
+
+STANDING = {"frontier1_judged": 1.0, "frontier2_judged": 1.0, "frontier1_per_wave": 2.0, "frontier2_per_wave": 1.0,
+            "frontier1_agent_calls_per_day": 4.0, "frontier1_min_left": 10.0, "frontier2_min_left": 60.0}     # the 2026-10-27 ruling
+
+
+def close_frontier_baseline(text: str) -> str:
+    """The shipped file with its `[frontier]` BASELINE set to the all-closed code defaults (floors and the away profile unchanged)."""
+    import re
+    def close(m):
+        body = m.group(0)
+        for k, v in g.FRONTIER_DEFAULTS.items():
+            body = re.sub(rf"(?m)^{k} = [0-9.]+", f"{k} = {v:g}", body, count=1)
+        return body
+    out = re.sub(r"(?ms)^\[frontier\]\n.*?(?=^\[|\Z)", close, text, count=1)
+    assert out != text
+    return out
+
+
+@pytest.fixture
+def fenv_closed(fenv):
+    """`fenv` with a CLOSED frontier baseline: the pre-2026-10-27 rule, so the profile floors and fail-closed behaviour stay covered."""
+    fenv.write_text(close_frontier_baseline(fenv.read_text()))
+    return fenv
+
+
+def front(now=NOW):
+    return g.load_frontier(now)
+
+
+def test_the_shipped_frontier_baseline_is_the_ruled_standing_allowance(fenv):
+    t, info = front()
+    assert t == STANDING and info["profile"] is None and info["baseline_guarded"] == {} and info["toml_error"] is None
+
+
+def test_a_closed_frontier_baseline_is_the_code_default(fenv_closed):
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and info["profile"] is None
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0, 0)
+    assert (t["frontier1_per_wave"], t["frontier2_per_wave"], t["frontier1_min_left"]) == (1, 1, 10)
+
+
+def test_the_shipped_away_profile_equals_the_standing_baseline(fenv):
+    write_state(state_path())
+    t, info = front()
+    assert info["profile"]["name"] == "away" and info["ignored"] is None
+    assert t == STANDING
+
+
+def test_the_shipped_away_profile_raises_a_closed_baseline_to_the_ruled_values(fenv_closed):
+    write_state(state_path())
+    t, info = front()
+    assert info["profile"]["name"] == "away" and info["ignored"] is None
+    assert t == STANDING
+
+
+@pytest.mark.parametrize("key, value, why", [("frontier1_judged", 0, "tighter than the baseline 1"),
+                                              ("frontier1_agent_calls_per_day", 3, "tighter than the baseline 4"),
+                                              ("frontier1_agent_calls_per_day", 5, "above the ceiling 4"),
+                                              ("frontier1_per_wave", 3, "above the ceiling 2"),
+                                              ("frontier2_min_left", 70, "tighter than the baseline 60")])
+def test_a_profile_can_neither_tighten_nor_widen_the_standing_baseline(fenv, key, value, why):
+    """gate-profile cannot close the standing allowance (a value under the baseline rejects the whole profile) nor pass its floors."""
+    fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{key} = {value}\n")
+    write_state(state_path(), profile="t")
+    t, info = front()
+    assert t == STANDING and why in info["ignored"], (t, info["ignored"])
+
+
+def test_an_expired_profile_gives_the_frontier_baseline(fenv_closed):
+    write_state(state_path(), since=g.iso(NOW - timedelta(hours=80)), until=g.iso(NOW - timedelta(seconds=1)))
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and "expired" in info["ignored"]
+
+
+@pytest.mark.parametrize("key, value, why", [
+    ("frontier1_judged", 2, "above the ceiling 1"),
+    ("frontier2_judged", 2, "above the ceiling 1"),
+    ("frontier1_per_wave", 3, "above the ceiling 2"),
+    ("frontier2_per_wave", 2, "above the ceiling 1"),
+    ("frontier1_agent_calls_per_day", 5, "above the ceiling 4"),
+    ("frontier1_min_left", 9.9, "below the floor 10"),
+    ("frontier2_min_left", 39.9, "below the floor 40"),
+    ("frontier1_per_wave", 0, "tighter than the baseline 1"),
+    ("frontier1_min_left", 11, "tighter than the baseline 10"),
+    ("frontier1_judged", -1, "tighter than the baseline 0"),
+    ("frontier1_per_wave", "2", "not a number"),
+    ("frontier3_judged", 1, "not overridable"),
+])
+def test_the_floors_refuse_a_looser_frontier_value_and_the_whole_profile_is_baseline(fenv_closed, key, value, why):
+    fenv = fenv_closed
+    shown = value if isinstance(value, (int, float)) else f'"{value}"'
+    good = "frontier2_judged" if key == "frontier1_judged" else "frontier1_judged"       # a valid companion value
+    fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{good} = 1\n{key} = {shown}\n")
+    write_state(state_path(), profile="t")
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS, f"one bad value rejects the whole profile: even the valid {good} = 1"
+    assert why in info["ignored"], info["ignored"]
+
+
+@pytest.mark.parametrize("key, value", [("frontier1_agent_calls_per_day", 4), ("frontier1_per_wave", 2), ("frontier2_min_left", 40),
+                                        ("frontier2_per_wave", 1), ("frontier1_min_left", 10)])
+def test_a_frontier_value_at_its_bound_is_allowed(fenv_closed, key, value):
+    fenv = fenv_closed
+    fenv.write_text(fenv.read_text() + f"\n[profiles.t.frontier]\n{key} = {value}\n")
+    write_state(state_path(), profile="t")
+    t, info = front()
+    assert info["ignored"] is None and t[key] == float(value)
+
+
+@pytest.mark.parametrize("bound, baseline", [("nan", 3), ("inf", 3), ('"4"', 3), ("true", 1), ("[4]", 3), ("{}", 3)])
+def test_a_non_numeric_floor_bound_closes_that_key_at_run_time_and_fails_validate(fenv, cli, bound, baseline):
+    """`baseline_limit` trusts a floor bound only when it is a finite-comparable number: a nan or inf bound would make `value > bound`
+    never or always hold, a string or bool is not a number. The key falls back to the code default (adversary round 1 P2)."""
+    floor = 'frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }'
+    text = fenv.read_text()
+    assert floor in text
+    text = (text.replace(floor, f'frontier1_agent_calls_per_day = {{ loosen = "higher", bound = {bound} }}', 1)
+            .replace("frontier1_agent_calls_per_day = 4 ", f"frontier1_agent_calls_per_day = {baseline} ", 1))
+    fenv.write_text(text)
+    t, info = front()
+    assert t["frontier1_agent_calls_per_day"] == 0 and set(info["baseline_guarded"]) == {"frontier1_agent_calls_per_day"}
+    assert t["frontier1_per_wave"] == 2 and t["frontier1_judged"] == 1          # every other key keeps the standing value
+    r = cli.run("validate", GATES_TOML=str(fenv))
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_a_non_table_floor_entry_closes_that_key_at_run_time_and_fails_validate(fenv, cli):
+    floor = 'frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }'
+    fenv.write_text(fenv.read_text().replace(floor, "frontier1_agent_calls_per_day = 4", 1))
+    t, info = front()
+    assert t["frontier1_agent_calls_per_day"] == 0 and set(info["baseline_guarded"]) == {"frontier1_agent_calls_per_day"}
+    r = cli.run("validate", GATES_TOML=str(fenv))
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_a_gates_toml_baseline_past_its_floor_bound_is_replaced_by_the_code_default(fenv):
+    """The standing numbers are the ceiling a hand edit of the baseline can reach: a value past its floor bound, or a lower
+    `*_min_left`, gets the code default; the in-bound standing values stay."""
+    fenv.write_text(fenv.read_text().replace("frontier1_agent_calls_per_day = 4 ", "frontier1_agent_calls_per_day = 5 ", 1)
+                    .replace("frontier1_per_wave = 2 ", "frontier1_per_wave = 3 ", 1)
+                    .replace("frontier1_min_left = 10.0 ", "frontier1_min_left = 1.0 ", 1))
+    t, info = front()
+    assert (t["frontier1_agent_calls_per_day"], t["frontier1_per_wave"], t["frontier1_min_left"]) == (0, 1, 10)
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier2_per_wave"]) == (1, 1, 1)
+    assert set(info["baseline_guarded"]) == {"frontier1_agent_calls_per_day", "frontier1_per_wave", "frontier1_min_left"}
+
+
+def test_a_frontier_min_left_baseline_is_never_looser_than_the_code_default_even_inside_its_floor(fenv):
+    """frontier2_min_left's floor is 40 (a profile may go there), but the baseline may not: 50 is inside the floor and still guarded."""
+    fenv.write_text(fenv.read_text().replace("frontier2_min_left = 60.0 ", "frontier2_min_left = 50.0 ", 1))
+    t, info = front()
+    assert t["frontier2_min_left"] == 60 and set(info["baseline_guarded"]) == {"frontier2_min_left"}
+
+
+def test_a_missing_frontier_floor_table_still_guards_every_frontier_key(fenv):
+    """With no floor entry there is no bound to rise to: every standing key above its code default falls back to it."""
+    fenv.write_text(fenv.read_text().replace("[floors.frontier]", "[floors.unused]", 1)
+                    .replace("frontier1_min_left = 10.0 ", "frontier1_min_left = 1.0 ", 1)
+                    .replace("frontier2_min_left = 60.0 ", "frontier2_min_left = 70.0 ", 1))
+    t, info = front()
+    assert t == {**g.FRONTIER_DEFAULTS, "frontier2_min_left": 70.0}     # tighter than the code default: the file may tighten
+    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier2_judged", "frontier1_per_wave", "frontier1_agent_calls_per_day",
+                                             "frontier1_min_left"}
+
+
+def test_a_flipped_frontier_floor_direction_does_not_loosen_the_baseline(fenv):
+    """The code direction rules the frontier gate: a floor entry whose `loosen` disagrees (adversary round 2, A4) changes nothing:
+    its `bound` (0) still caps the baseline, so the standing 1 and 4 are looser than it and the code default stands."""
+    text = (fenv.read_text()
+            .replace('frontier1_judged = { loosen = "higher", bound = 1 }', 'frontier1_judged = { loosen = "lower", bound = 0 }')
+            .replace('frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }',
+                     'frontier1_agent_calls_per_day = { loosen = "lower", bound = 0 }'))
+    assert text.count('loosen = "lower", bound = 0') == 2
+    fenv.write_text(text)
+    t, info = front()
+    assert (t["frontier1_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0)
+    assert set(info["baseline_guarded"]) == {"frontier1_judged", "frontier1_agent_calls_per_day"}
+
+
+def flipped_floor_toml(text, floor_key, loosen, bound, baseline, profile_key, profile_value):
+    """The shipped file with one frontier floor's `loosen`/`bound` rewritten, its baseline raised and the away profile set to a value."""
+    import re
+    text = re.sub(rf"(?m)^{floor_key} = \{{.*\}}", f'{floor_key} = {{ loosen = "{loosen}", bound = {bound} }}', text)
+    text = re.sub(rf"(?ms)(^\[frontier\]\n.*?^){floor_key} = [0-9.]+", rf"\g<1>{floor_key} = {baseline}", text, count=1)
+    def in_profile(m):
+        body = m.group(1)
+        if re.search(rf"(?m)^{profile_key} = ", body):
+            body = re.sub(rf"(?m)^{profile_key} = [0-9.]+", f"{profile_key} = {profile_value}", body)
+        else:
+            body += f"{profile_key} = {profile_value}\n"
+        return body + m.group(2)
+    return re.sub(r"(?ms)(^\[profiles\.away\.frontier\]\n.*?)(^\[|\Z)", in_profile, text, count=1)
+
+
+@pytest.mark.parametrize("key, loosen, bound, baseline, value, why", [
+    ("frontier1_agent_calls_per_day", "lower", 0, 100, 100, "above the ceiling 0"),      # code: higher is looser, so 100 busts a bound of 0
+    ("frontier1_min_left", "higher", 100, 0, 0, "below the floor 100"),                   # code: lower is looser, so 0 busts a bound of 100
+])
+def test_a_flipped_frontier_floor_cannot_let_a_profile_exceed_its_bound(fenv_closed, key, loosen, bound, baseline, value, why):
+    """The profile check uses the code direction too (adversary round 3, P3-2), not only the baseline guard."""
+    fenv = fenv_closed
+    text = flipped_floor_toml(fenv.read_text(), key, loosen, bound, baseline, key, value)
+    fenv.write_text(text)
+    write_state(state_path())
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and why in info["ignored"], (t, info["ignored"])
+
+
+def test_the_code_direction_leaves_the_shipped_floors_and_other_gates_alone(fenv):
+    cfg, err = g.read_toml()
+    assert err is None
+    assert g.profile_problems(cfg, "away", g.toml_baselines(cfg)) == []
+    assert g.effective_spec(cfg, "frontier", "frontier1_min_left") == g.floor_spec(cfg, "frontier", "frontier1_min_left")
+    assert g.effective_spec(cfg, "frontier", "frontier1_per_wave")["loosen"] == "higher"
+    assert g.effective_spec(cfg, "governor", "no_such_key") is None
+    assert g.code_direction("quota_guard", "frontier1_min_left") is None
+
+
+@pytest.mark.parametrize("text", ["line\u2028two reason", "zero\u200dwidth joiner", "soft\u00adhyphen reason", "tab\there reason", "esc\x1b[31m red"])
+def test_a_frontier_reason_with_a_control_or_format_character_names_that_rule(text):
+    reason, problem = g.frontier_reason(text)
+    assert reason is None and "one line, no control or format character" in problem
+
+
+def test_a_gates_toml_that_is_a_fifo_is_unusable_not_a_hang(tmp_path, monkeypatch):
+    fifo = tmp_path / "gates.toml"
+    os.mkfifo(fifo)
+    monkeypatch.setenv("GATES_TOML", str(fifo))
+    cfg, err = g.read_toml()
+    assert cfg is None and "not a regular file" in err
+
+
+def test_no_environment_variable_changes_the_frontier_gate(fenv_closed, monkeypatch):
+    assert "frontier" not in g.ENV_VARS
+    for var in (*g.ENV_VARS.values(), "FRONTIER_GATE_THRESHOLDS", "CLAUDE_FRONTIER_THRESHOLDS"):
+        monkeypatch.setenv(var, json.dumps({"frontier1_judged": 1, "frontier1_agent_calls_per_day": 99}))
+    assert front()[0] == g.FRONTIER_DEFAULTS
+    assert g.env_overrides("frontier", dict(g.FRONTIER_DEFAULTS)) == {}
+
+
+def test_a_missing_gates_toml_is_the_frontier_code_default(fenv, monkeypatch):
+    monkeypatch.setenv("GATES_TOML", "/nonexistent/gates.toml")
+    write_state(state_path())
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and info["profile"] is None
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("text", ["[frontier\n", "[frontier]\nfrontier1_judged = \"1\"\n", "", "[governor]\na = 1\n"])
+def test_an_unreadable_or_invalid_gates_toml_leaves_the_frontier_gate_closed(fenv, text):
+    """The standing allowance lives only in a readable [frontier] table: corrupt TOML, a non-number, an empty file or a file with no
+    [frontier] table all fall back to the all-closed code default (so the hook asks)."""
+    fenv.write_text(text)
+    write_state(state_path())
+    t, info = front()
+    assert t == g.FRONTIER_DEFAULTS and info["toml_error"] is not None
+    assert (t["frontier1_judged"], t["frontier2_judged"], t["frontier1_agent_calls_per_day"]) == (0, 0, 0)       # closed, not merely "the default"
+
+
+GUARD_OK = {"level": "ok", "reasons": [], "stale": False, "fable_left": 50.0, "checked_at": g.iso(NOW - timedelta(minutes=1))}
+
+
+def test_judged_guard_block_passes_a_fresh_ok_state_and_a_weekly_watch():
+    t = g.FRONTIER_DEFAULTS
+    assert g.judged_guard_block(GUARD_OK, t, NOW) is None
+    assert g.judged_guard_block({**GUARD_OK, "level": "watch", "reasons": ["weekly"]}, t, NOW) is None
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"level": "tight"}, "tight"), ({"level": "critical"}, "critical"), ({"level": None}, "None"),
+    ({"stale": True}, "stale"), ({"stale": None}, "stale"),
+    ({"level": "watch", "reasons": ["fable"]}, "other than the weekly"),
+    ({"level": "watch", "reasons": ["weekly", "stale"]}, "other than the weekly"),
+    ({"level": "watch", "reasons": []}, "other than the weekly"),
+    ({"reasons": ["weekly"]}, "at level ok"),
+    ({"fable_left": 9.99}, "frontier-1 cap has"), ({"fable_left": None}, "missing"), ({"fable_left": True}, "missing"),
+    ({"checked_at": None}, "checked_at"), ({"checked_at": "2026-10-26T11:59:00"}, "checked_at"),
+])
+def test_judged_guard_block_refuses(over, why):
+    st = {**GUARD_OK, **over}
+    assert why in g.judged_guard_block(st, g.FRONTIER_DEFAULTS, NOW)
+
+
+def test_judged_guard_block_age_and_cap_boundaries():
+    t = g.FRONTIER_DEFAULTS
+    at = lambda secs: {**GUARD_OK, "checked_at": g.iso(NOW - timedelta(seconds=secs))}      # noqa: E731
+    assert g.judged_guard_block(at(1800), t, NOW) is None and "min old" in g.judged_guard_block(at(1801), t, NOW)
+    assert g.judged_guard_block(at(-60), t, NOW) is None and "min old" in g.judged_guard_block(at(-61), t, NOW)
+    assert g.judged_guard_block({**GUARD_OK, "fable_left": 10.0}, t, NOW) is None
+    assert g.judged_guard_block({**GUARD_OK, "fable_left": 19.9}, {**t, "frontier1_min_left": 20.0}, NOW) is not None
+    for bad in (None, [], "ok", 7):
+        assert "missing or unreadable" in g.judged_guard_block(bad, t, NOW)
+
+
+@pytest.mark.parametrize("text, ok", [("a" * 9, False), ("a" * 10, True), ("  " + "a" * 200 + "  ", True), ("a" * 201, False),
+                                      ("", None), ("   ", None), (None, None), ("ten chars\nmore", False), ("tab\tin the reason", False),
+                                      (12345, False), ("ten chars\u2028more", False), ("ten chars\u0085more", False),
+                                      ("ten chars\u009bmore", False), ("ten chars\u202emore", False)])
+def test_frontier_reason_form(text, ok):
+    reason, problem = g.frontier_reason(text)
+    if ok is None:
+        assert (reason, problem) == (None, None)             # missing or blank: the closed treatment, not an error
+    elif ok:
+        assert reason == text.strip() and problem is None
+    else:
+        assert reason is None and problem
+
+
+_READ_GUARD = "import sys; sys.path.insert(0, sys.argv[1]); import ade_gates as g; print(repr(g.read_guard_state()))"
+
+
+def _read_guard_bounded(path: Path) -> str:
+    """`read_guard_state()` in a child with a 10 s kill: a reader that blocks on a FIFO fails the test (TimeoutExpired) instead of hanging the run."""
+    r = subprocess.run([sys.executable, "-I", "-c", _READ_GUARD, str(BIN)], env={"CLAUDE_QUOTA_GUARD_STATE": str(path), "PATH": os.environ["PATH"]},
+                       capture_output=True, text=True, timeout=10, check=True)
+    return r.stdout.strip()
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dir", "oversized", "missing"])
+def test_the_guard_state_file_must_be_a_small_regular_file_never_waited_on(tmp_path, kind):
+    path = tmp_path / "quota-guard.json"
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "dir":
+        path.mkdir()
+    elif kind == "oversized":
+        path.write_text(json.dumps({"level": "ok", "pad": "x" * 70000}))
+    assert _read_guard_bounded(path) == "None"
+
+
+_READ_GUARD_RECURSION = ("import sys, json; sys.path.insert(0, sys.argv[1]); import ade_gates as g\n"
+                         "def deep(raw): raise RecursionError('maximum recursion depth exceeded')\n"
+                         "json.loads = deep\n"           # whether json.loads raises on a 64 KiB nest varies by Python (3.14 parses it): force the raise
+                         "print(repr(g.read_guard_state()))")
+
+
+def test_a_guard_state_file_that_json_cannot_nest_deep_enough_to_read_is_unreadable_not_a_crash(tmp_path):
+    path = tmp_path / "quota-guard.json"
+    path.write_bytes(b"[" * 32768 + b"]" * 32768)        # exactly 64 KiB, under the size cap, so it reaches json.loads
+    r = subprocess.run([sys.executable, "-I", "-c", _READ_GUARD_RECURSION, str(BIN)], env={"CLAUDE_QUOTA_GUARD_STATE": str(path), "PATH": os.environ["PATH"]},
+                       capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0 and r.stdout.strip() == "None", r.stderr[-300:]
+
+
+def test_the_guard_state_file_still_reads_as_a_regular_file_or_a_link_to_one(tmp_path):
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"level": "ok", "pad": "x" * 30000}))
+    assert "'level': 'ok'" in _read_guard_bounded(real)
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    assert "'level': 'ok'" in _read_guard_bounded(link)         # the hook's reader follows a link too: behaviour kept
+    real.write_text("not json")
+    assert _read_guard_bounded(real) == "None"

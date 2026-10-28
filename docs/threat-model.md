@@ -195,8 +195,10 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 ### 4.3 Unenforced review and merge
 
 * **Control (procedure only).** AGENTS.md, Code review section (PR 9, merged 2026-10-20), rule
-  1 asks the PR body to quote the adversary verdict with the head SHA, and whoever merges to use
-  `gh pr merge --squash --match-head-commit <reviewed sha>`. The adversary runs on request before a PR is
+  1 requires the PR body to carry the adversary verdict as a machine-readable marker naming the head
+  reviewed (`<!-- adversary-verdict:v1 {...} -->`, since 2026-10-25), and whoever merges to use
+  `gh pr merge --squash --match-head-commit <reviewed sha>`. `bin/pr-wait` reads that marker as of
+  2026-10-27 (PR 66) and reports it; it does not read prose. The adversary runs on request before a PR is
   opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent. Codex's code review ("Codex Review")
   ran after an `@codex review` comment on PR 10, and Codex's Security Review ran with it, labelled
   "Automatically triggered" (the repo setting is "whenever code review runs"); whether either runs unasked on
@@ -212,8 +214,10 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   review on PRs 7, 8, 9 and 10 within about a minute of each one opening, before any other review. It approves
   automatically. It is not a review: do not count it as a control, do not read GitHub's "Approved" badge as
   human approval, and do not add a ruleset whose required-approval count it could satisfy.
-* **Gap 3.** The PR body is written by the author, so a verdict line is self-asserted: nothing fetches
-  the adversary's report and compares. Treat the quote as a claim and check the SHA against the PR head.
+* **Gap 3.** The PR body is written by the author, so a verdict **marker** is self-asserted: nothing
+  fetches the adversary's report and compares. `bin/pr-wait` now checks the marker's shape and that its
+  `head` equals the PR head, which catches a stale or typo'd verdict — but a fabricated APPROVE marker
+  for the correct head is still indistinguishable from a real one. Treat it as a claim.
   Nothing enforces any of this: no required check, no required review, and nothing stops a direct push to
   `master`.
 

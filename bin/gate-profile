@@ -30,6 +30,7 @@ waits at most the bound, then refuses with exit 1 and changes nothing: try again
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -57,7 +58,7 @@ def now_utc() -> datetime:
 
 
 def code_defaults() -> dict[str, dict[str, float]]:
-    """THRESHOLDS of the two scripts, loaded by path (they have no .py suffix)."""
+    """THRESHOLDS of the two scripts, loaded by path (they have no .py suffix), and ade_gates.FRONTIER_DEFAULTS."""
     out: dict[str, dict[str, float]] = {}
     for gate, script in (("governor", "claude-fleet-governor"), ("quota_guard", "claude-quota-guard")):
         loader = importlib.machinery.SourceFileLoader(f"_gp_{gate}", str(HERE / script))
@@ -65,6 +66,7 @@ def code_defaults() -> dict[str, dict[str, float]]:
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
         out[gate] = {k: float(v) for k, v in mod.THRESHOLDS.items()}
+    out["frontier"] = {k: float(v) for k, v in g.FRONTIER_DEFAULTS.items()}
     return out
 
 
@@ -129,7 +131,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     for gate in g.GATES:
         if both[gate]["info"]["baseline_guarded"]:
             keys = ", ".join(f"{k} ({fmt(v)})" for k, v in sorted(both[gate]["info"]["baseline_guarded"].items()))
-            print(f"  {gate}: gates.toml is looser than the code default for {keys}; the code default is in force")
+            print(f"  {gate}: gates.toml is looser than the code default or floor bound for {keys}; the code default is in force")
     for gate in g.GATES:
         d = gates[gate]
         print(f"{gate}:" + ("" if d["changed"] else " no change from baseline"))
@@ -211,6 +213,13 @@ def validate() -> list[str]:
                 out.append(f"[{gate}].{k}: in the code defaults, missing from gates.toml")
             elif k not in defaults[gate]:
                 out.append(f"[{gate}].{k}: in gates.toml, unknown to the code")
+            elif g.code_direction(gate, k) == "higher":
+                # the standing frontier allowance: the baseline may stand between the all-closed code default and its floor bound
+                lim = g.baseline_limit(cfg, gate, k, defaults[gate][k])
+                if tbl[k] < defaults[gate][k]:
+                    out.append(f"[{gate}].{k}: gates.toml {fmt(tbl[k])} is tighter than the code default {fmt(defaults[gate][k])}")
+                elif tbl[k] > lim:
+                    out.append(f"[{gate}].{k}: gates.toml {fmt(tbl[k])} is above its floor bound {fmt(lim)} (code default {fmt(defaults[gate][k])})")
             elif tbl[k] != defaults[gate][k]:
                 out.append(f"[{gate}].{k}: gates.toml {fmt(tbl[k])} != code default {fmt(defaults[gate][k])}")
         floors = (cfg.get("floors") or {}).get(gate) or {}
@@ -242,7 +251,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"gates.toml: {len(problems)} problem(s)")
         return EX_BAD
     cfg, _ = g.read_toml()
-    print(f"gates.toml ok: baseline equals the code defaults; profiles: {', '.join(sorted(cfg['profiles']))}; "
+    print(f"gates.toml ok: baseline equals the code defaults (the frontier allowance: within its floors); profiles: {', '.join(sorted(cfg['profiles']))}; "
           f"max {g.max_hours(cfg):g} h")
     return 0
 
@@ -316,8 +325,10 @@ def lock_wait() -> float:
     return v if 0 <= v < 1e6 else g.CLI_LOCK_WAIT
 
 
-def cli_lock():
-    """The profile lock for a read-modify-write, or None after printing why (exit 1, nothing changed)."""
+def cli_lock(unlocked_ok: bool = False):
+    """The profile lock for a read-modify-write, or None after printing why (exit 1, nothing changed). An unusable lock path
+    (a link, FIFO, directory, unreadable file) is named on stderr; with `unlocked_ok` the caller goes on without a lock (no writer
+    can hold that lock either) and gets a context manager that holds nothing."""
     wait = lock_wait()
     try:
         lock = g._state_lock(wait, create=True)
@@ -326,7 +337,13 @@ def cli_lock():
               "nothing changed, try again in a minute", file=sys.stderr)
         return None
     if lock is None:
-        print("gate-profile: cannot lock the profile state", file=sys.stderr)
+        path = g.state_lock_path()
+        if unlocked_ok:
+            print(f"gate-profile: cannot lock the profile state ({path} is not a usable regular file); no writer can hold it "
+                  "either, so going on without it", file=sys.stderr)
+            return contextlib.nullcontext()
+        print(f"gate-profile: cannot lock the profile state: {path} is not a usable regular file (remove it); nothing changed",
+              file=sys.stderr)
     return lock
 
 
@@ -420,6 +437,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
         if not isinstance(data, dict) or data.get("until") != active["until"]:
             print("gate-profile: the profile changed while extending; try again", file=sys.stderr)
             return EX_BAD
+        data.pop("expired_notified", None)            # a mark from an expiry that raced this extend must not silence the new expiry
         g.atomic_write(g.profile_state_path(), json.dumps({**data, "until": g.iso(new_until)}, indent=1, sort_keys=True) + "\n")
     who = os.environ.get("USER") or "unknown"
     log_line({"at": g.iso(now), "action": "extend", "profile": active["name"], "since": active["since"],
@@ -432,7 +450,7 @@ def cmd_extend(args: argparse.Namespace) -> int:
 def cmd_clear(args: argparse.Namespace) -> int:
     now = now_utc()
     path = g.profile_state_path()
-    lock = cli_lock()
+    lock = cli_lock(unlocked_ok=True)
     if lock is None:
         return EX_BAD
     with lock:
