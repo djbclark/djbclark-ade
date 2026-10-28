@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -82,9 +83,10 @@ def _paseo(*argv: str) -> subprocess.CompletedProcess:
 
 def _env_float(name: str, default: float) -> float:
     try:
-        return float(os.environ.get(name) or default)
+        v = float(os.environ.get(name) or default)
     except ValueError:
         return default
+    return v if math.isfinite(v) and v >= 0 else default
 
 
 def archive_probe(agent_id: str, wait_s: float) -> int:
@@ -171,14 +173,19 @@ def main(argv: list[str]) -> int:
         print(f"paseo-new-seat: cannot run {helper}: {e}", file=sys.stderr)
         return 1
     sys.stdout.write(r.stdout)
-    if r.returncode not in (0, 4):
-        return r.returncode
     try:
         rec = json.loads(r.stdout.strip().splitlines()[-1])
         agent_id = str(rec["id"])
     except (ValueError, KeyError, IndexError):
-        print("paseo-new-seat: --probe could not read the new agent id; not archived", file=sys.stderr)
-        return 5
+        if r.returncode in (0, 4):
+            print("paseo-new-seat: --probe could not read the new agent id; not archived", file=sys.stderr)
+            return 5
+        if r.returncode == 1:   # the helper fails after creating the agent when the daemon returns no id
+            print("paseo-new-seat: helper failed; a seat may have been created and left open (paseo agent ls)",
+                  file=sys.stderr)
+        return r.returncode
+    if r.returncode not in (0, 4):
+        return archive_probe(agent_id, 0) or r.returncode
     rc = archive_probe(agent_id, _env_float("PASEO_NEW_SEAT_PROBE_WAIT", 120))
     return rc or r.returncode
 

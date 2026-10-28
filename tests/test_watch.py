@@ -420,3 +420,29 @@ def test_a_force_replaced_non_watch_holder_survives_the_other_sweep(env):
     assert titles(env)[old] == "x Dann main", (out, titles(env))
     rc, out = watch(env, "up")
     assert rc == 0 and titles(env)[old] == "x Dann main", (out, titles(env))
+
+
+def test_an_unreadable_kept_file_archives_nothing_and_is_not_overwritten(env):
+    idle = add_agent(env, name="x Dann 5")
+    kept = Path(env["_tmp"]) / "state" / "kept.json"
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    kept.write_text("{not json")
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    assert idle in titles(env) and "unreadable" in out, (out, titles(env))
+    holder = add_agent(env, name="watch alpha 1")
+    set_role(env, holder)
+    rc, out = watch(env, "up", "--force")
+    assert titles(env)[holder] == "watch alpha 1", (out, titles(env))   # not renamed: it could not be protected
+    assert kept.read_text() == "{not json"
+
+
+def test_kept_ids_accumulate_across_force_replacements(env):
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    (first,) = titles(env)
+    for _ in range(2):
+        rc, out = watch(env, "up", "--force")
+        assert rc == 0, out
+    kept = json.loads((Path(env["_tmp"]) / "state" / "kept.json").read_text())
+    assert first in kept and len(kept) == 2, kept

@@ -547,21 +547,31 @@ def kept_path() -> Path:
     return STATE / "kept.json"
 
 
-def load_kept() -> set[str]:
-    """Full agent ids of holders a `--force` replaced: renamed `x ...` but never archived by either sweep."""
+def load_kept() -> set[str] | None:
+    """Full agent ids of holders a `--force` replaced: renamed `x ...` but never archived by either sweep.
+    A missing file is the empty set; one that cannot be read or parsed is None, and the callers fail closed."""
     try:
         d = json.loads(kept_path().read_text())
-        return {str(i) for i in d} if isinstance(d, list) else set()
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return set()
+    except (OSError, ValueError):
+        return None
+    return {str(i) for i in d} if isinstance(d, list) else None
 
 
-def keep_id(rid: str) -> None:
+def keep_id(rid: str) -> bool:
+    """Record `rid` under an flock (read, merge, atomic replace), so two `--force` runs cannot lose each other's id.
+    False when the file is unreadable: it is never overwritten, because that would forget every kept id."""
     STATE.mkdir(parents=True, exist_ok=True)
-    ids = sorted(load_kept() | {rid})
-    tmp = kept_path().with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(ids, indent=1) + "\n")
-    os.replace(tmp, kept_path())
+    with open(STATE / "kept.lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        cur = load_kept()
+        if cur is None:
+            return False
+        tmp = kept_path().with_name(f"kept.json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(sorted(cur | {rid}), indent=1) + "\n")
+        os.replace(tmp, kept_path())
+    return True
 
 
 def archive_if_idle(pv: Paseo, rid: str, name: str) -> str:
@@ -570,7 +580,7 @@ def archive_if_idle(pv: Paseo, rid: str, name: str) -> str:
     pv.agents(refresh=True)
     cur = pv.agent(rid)
     if cur is None:
-        return f"{rid[:8]} {name!r} already gone"
+        return f"{rid[:8]} {name!r} not listed (gone, or the daemon could not be asked); nothing archived"
     if (cur.get("name") or "") != name or cur.get("status") != "idle":
         return f"{rid[:8]} {name!r} left running (status {cur.get('status')!r}); archived once idle"
     rc, out, err = run([PASEO, "agent", "archive", rid], 60)
@@ -591,8 +601,9 @@ def retire_superseded(domain: str, pv: Paseo, new_aid: str, replaced: Holder | N
         is_replaced = bool(replaced and replaced.target and len(replaced.target) >= 7 and rid.startswith(replaced.target))
         if a.get("id") == new_aid or name.startswith("x ") or not (is_replaced or (m and not m.group(1))):
             continue
-        if is_replaced:
-            keep_id(rid)   # before the rename, so no sweep can see the new title without the guard
+        if is_replaced and not keep_id(rid):   # before the rename, so no sweep can see the new title without the guard
+            done.append(f"{rid[:8]} {name!r} NOT renamed: kept.json is unreadable, so it could not be protected")
+            continue
         rc, out, err = run([PASEO, "agent", "update", str(a["id"]), "--name", f"x {name}"], 30)
         done.append(f"{str(a['id'])[:8]} {name!r} -> {'x ' + name!r}" if rc == 0
                     else f"{str(a['id'])[:8]} {name!r} NOT renamed: {(err or out).strip()[:120]}")
@@ -608,6 +619,8 @@ def archive_retired(domain: str, pv: Paseo, holder_target: str | None) -> list[s
     pv.agents(refresh=True)
     pat = title_re(domain)
     kept = load_kept()
+    if kept is None:
+        return ["kept.json is unreadable; nothing archived"]
     done = []
     for a in pv.agents() or []:
         name = a.get("name") or ""
@@ -881,6 +894,8 @@ def archive_other_retired(pv: Paseo) -> list[str]:
     A holder a `--force` replaced (kept.json) is never archived, whatever its title."""
     pv.agents(refresh=True)
     kept = load_kept()
+    if kept is None:
+        return ["kept.json is unreadable; nothing archived"]
     done = []
     for a in pv.agents() or []:
         name = a.get("name") or ""
