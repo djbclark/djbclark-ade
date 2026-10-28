@@ -28,8 +28,10 @@ def run(extra: list[str], archive_rc: int = 0, helper_body: str | None = None, e
         paseo = d / "paseo"
         paseo.write_text(
             '#!/bin/sh\necho "$*" >> "%s"\n'
-            'if [ "$2" = ls ]; then echo \'[{"id":"%s","status":"idle"}]\'; fi\n'
-            'if [ "$2" = archive ]; then exit %d; fi\n' % (log, AID, archive_rc))
+            'if [ "$2" = ls ]; then n=$(grep -c " ls " "%s"); '
+            'if [ "$n" -lt 2 ]; then st=running; else st=idle; fi; '
+            'echo "[{\\"id\\":\\"%s\\",\\"status\\":\\"$st\\"}]"; fi\n'
+            'if [ "$2" = archive ]; then exit %d; fi\n' % (log, log, AID, archive_rc))
         for f in (helper, paseo):
             f.chmod(f.stat().st_mode | stat.S_IXUSR)
         env = {**os.environ, "PASEO_NEW_SEAT_HELPER": str(helper), "PASEO_NEW_SEAT_PASEO": str(paseo),

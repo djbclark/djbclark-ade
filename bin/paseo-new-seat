@@ -176,7 +176,7 @@ def main(argv: list[str]) -> int:
     try:
         rec = json.loads(r.stdout.strip().splitlines()[-1])
         agent_id = str(rec["id"])
-    except (ValueError, KeyError, IndexError):
+    except (ValueError, KeyError, IndexError, TypeError):
         if r.returncode in (0, 4):
             print("paseo-new-seat: --probe could not read the new agent id; not archived", file=sys.stderr)
             return 5

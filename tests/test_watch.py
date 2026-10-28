@@ -446,3 +446,15 @@ def test_kept_ids_accumulate_across_force_replacements(env):
         assert rc == 0, out
     kept = json.loads((Path(env["_tmp"]) / "state" / "kept.json").read_text())
     assert first in kept and len(kept) == 2, kept
+
+
+def test_concurrent_keep_id_calls_lose_no_id(env):
+    state = Path(env["_tmp"]) / "state"
+    code = ("import sys, importlib.machinery as m, importlib.util as u\n"
+            "l = m.SourceFileLoader('watch_mod', sys.argv[1]); sp = u.spec_from_loader('watch_mod', l)\n"
+            "mod = u.module_from_spec(sp); l.exec_module(mod)\n"
+            "assert mod.keep_id(sys.argv[2])\n")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(WATCH), f"id-{i}"], env={**os.environ, "WATCH_STATE": str(state)})
+             for i in range(32)]
+    assert [p.wait() for p in procs] == [0] * 32
+    assert sorted(json.loads((state / "kept.json").read_text())) == sorted(f"id-{i}" for i in range(32))

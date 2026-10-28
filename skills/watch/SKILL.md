@@ -29,7 +29,7 @@ $W up                     # start what is missing; verify each registration
 2. Exit 0 all good; 1 a launch did not register (the agent is left running: look at it, `paseo ls`);
    3 no eligible route (say why: the plan prints route_agent's reason).
 3. A live holder is never replaced. `up --force DOMAIN` replaces one only when the operator says so; the replaced agent is renamed `x …`
-   and left running (never archived, its id is recorded in `kept.json`), so it stays a tab.
+   and left running (never archived, its id is recorded in `kept.json`), so it stays a tab. If `kept.json` cannot be read, `up` archives nothing and does not rename a `--force`-replaced holder, rather than guess.
    `up --probe` also sends the channel test line to live Paseo holders (costs each a turn).
 4. `watch down DOMAIN` drops the role (`--relay-off <agent>` / `watcher clear <agent>`: clears only if that
    agent still holds it) and archives the agent `watch` started; an agent it did not start is never touched.
