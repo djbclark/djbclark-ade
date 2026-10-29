@@ -12,7 +12,6 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Added
 
 - Added an OpenCode V2 Cargo permission gate that required compile/test commands, including release builds, to use the full bg path and preserved native permission decisions (PR pending).
-
 - Added `relay.py --transfer-expectations OLD_SENDER [--id TOKEN ...]` to settle unswept old-transcript acks before adopting a finished sender's open ack expectations into the successor identity and transcript, preserving their status and age; reported skipped tokens and exited 1 with `missing` for requested tokens not transferred (#101).
 - `self-slash --finish --successor` on Paseo reads its own workspace id from the agent state file (`~/.paseo/agents/*/<id>.json`, `PASEO_HOME` honoured) when several workspaces share its cwd (2026-10-28: three shared `~/src/djbclark-ade`, the successor was refused and no tab opened); the id only places the successor and the shared workspace is never archived. `skills/handoff` Step 9 now says to verify a successor started (log line, `paseo agent ls`) before reporting it, and how to hand a slice to a new tab while keeping the current session (`paseo-new-seat --workspace ... --prompt "/baton CHAIN"`, no autorename) (#103).
 - The frontier Agent-tool hook entry in `agents/claude/settings.json.tmpl` now sets `"timeout": 15` and `"onFailure": "block"` (2026-10-27), so a stalled, timed-out or unstartable `frontier_agent_gate.py` blocks the Agent/Task call instead of letting it through (#96).

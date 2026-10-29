@@ -27,6 +27,17 @@ const deny = [
   "cargo run -- --help", "bg cargo build", "bgb cargo build",
   "echo --help; cargo build", "bash -lc 'cargo build --release'",
   "~/ops/site-private/bin/bg cargo check; cargo build",
+  "timeout 1800 cargo build --release", "gtimeout -k 5 600 cargo test",
+  "sudo cargo build", "sudo -k -n cargo build", "sudo -u root cargo build",
+  "caffeinate -i cargo build --release", "rustup run stable cargo build", "rustup run stable -- cargo build",
+  "env -S 'cargo build --release'",
+  "xargs cargo build", "cargo install ripgrep --version 14.1.0",
+  "cargo install --version 0.1.0 sudo-secretspec-cli",
+  "CARGO_TARGET_DIR=/tmp/t \\\n  cargo build --release", "cargo \\\n  build --release",
+  "nice -n 10 \\\n  cargo build", "cargo nextest run", "cargo fix --allow-dirty", "cargo d",
+  "cargo miri test", "cargo llvm-cov", "cargo package", "cargo publish",
+  "grep -q x <<< y\ncargo build --release", 'echo "see <<EOF"\ncargo build',
+  "echo $((1<<4))\ncargo build", "/tmp/bg cargo build",
 ];
 const allow = [
   "~/ops/site-private/bin/bg cargo build -p sudo-secretspec-cli --release",
@@ -36,6 +47,9 @@ const allow = [
   "cargo install --list", "echo 'cargo build --release'", 'printf "%s" "cargo build"',
   "cat <<'EOF'\ncargo build\nEOF", "# cargo build\necho done",
   "ssh builder cargo build --release", "command -v cargo",
+  "$HOME/ops/site-private/bin/bg cargo build --release",
+  '"$HOME/ops/site-private/bin/bg" cargo test', "${HOME}/ops/site-private/bin/bg cargo build",
+  "timeout 600 ~/ops/site-private/bin/bg cargo build", "cat <<EOF\ncargo build\nEOF",
 ];
 for (const cmd of deny) assert.equal(requiresBg(cmd), true, cmd);
 for (const cmd of allow) assert.equal(requiresBg(cmd), false, cmd);

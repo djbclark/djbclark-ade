@@ -1,11 +1,36 @@
 // 2026-10-28: require bg for Cargo compilation, including release builds.
 // This is an accidental-bypass guard, not a sandbox for arbitrary scripts.
 const reason = "Cargo builds and tests must run through ~/ops/site-private/bin/bg (use the full path). --release is not an exemption. If bg refuses or waits, use the repo's CI route or fix the refusal; never retry bare cargo.";
-const compile = new Set(["build", "b", "test", "t", "check", "c", "clippy", "bench", "run", "r", "rustc", "rustdoc", "doc", "install"]);
-const wrappers = new Set(["env", "time", "nice", "nohup", "command", "exec", "rtk", "bg", "bgb"]);
+const compile = new Set(["build", "b", "test", "t", "check", "c", "clippy", "bench", "run", "r", "rustc", "rustdoc", "doc", "d", "install", "fix", "nextest", "miri", "llvm-cov", "package", "publish"]);
+const wrappers = new Set(["env", "time", "nice", "nohup", "command", "exec", "rtk", "bg", "bgb", "timeout", "gtimeout", "sudo", "caffeinate", "xargs"]);
 const valueOptions = new Set(["--manifest-path", "--config", "--color", "--target-dir", "--lockfile-path", "-Z", "-C"]);
+const wrapperValues = {
+  env: ["-u", "--unset", "-C", "--chdir"], nice: ["-n", "--adjustment"],
+  timeout: ["-k", "--kill-after", "-s", "--signal"], gtimeout: ["-k", "--kill-after", "-s", "--signal"],
+  sudo: ["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "-T", "-R", "--chroot", "--chdir"],
+  caffeinate: ["-w", "-t"], xargs: ["-n", "-I", "-L", "-P", "-s", "--max-args", "--max-lines", "--max-procs", "--replace"],
+};
 const basename = (s) => s.split("/").pop();
 const assignment = (s) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(s);
+const fullBg = (s) => /^(?:~|\$HOME|\$\{HOME\})\/ops\/(?:site-private|site-djbclark)\/bin\/bg$/.test(s)
+  || /^\/(?:[^/\s]+\/)*ops\/(?:site-private|site-djbclark)\/bin\/bg$/.test(s);
+
+function heredocs(line) {
+  const result = []; let quote = "", arithmetic = 0;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\\" && quote !== "'") { i++; continue; }
+    if (quote) { if (c === quote) quote = ""; continue; }
+    if (c === "'" || c === '"') { quote = c; continue; }
+    if (c === "#" && (i === 0 || /\s/.test(line[i - 1]))) break;
+    if (line.slice(i, i + 3) === "$((") { arithmetic++; i += 2; continue; }
+    if (arithmetic) { if (line.slice(i, i + 2) === "))") { arithmetic--; i++; } continue; }
+    if (c !== "<" || line[i - 1] === "<" || line[i + 2] === "<") continue;
+    const m = line.slice(i).match(/^<<(-?)\s*(['"]?)([A-Za-z_][\w-]*)\2(?=\s|;|$)/);
+    if (m) { result.push({delimiter: m[3], tabs: m[1] === "-"}); i += m[0].length - 1; }
+  }
+  return result;
+}
 
 // Keep quoted arguments as arguments, so echo 'cargo build' is harmless and a
 // quoted executable path remains executable. Do not inspect heredoc data.
@@ -13,8 +38,9 @@ function segments(command) {
   const lines = command.split("\n"), kept = [];
   for (let i = 0; i < lines.length; i++) {
     kept.push(lines[i]);
-    const m = lines[i].match(/<<-?\s*['"]?(\w+)['"]?/);
-    if (m) while (++i < lines.length && lines[i].trim() !== m[1]) {}
+    for (const h of heredocs(lines[i])) {
+      while (++i < lines.length && (h.tabs ? lines[i].replace(/^\t+/, "") : lines[i]) !== h.delimiter) {}
+    }
   }
   const result = []; let args = [], word = "", quote = "", started = false;
   const token = () => { if (started) args.push(word); word = ""; started = false; };
@@ -22,7 +48,10 @@ function segments(command) {
   const text = kept.join("\n");
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (c === "\\" && quote !== "'") { started = true; word += text[++i] ?? ""; continue; }
+    if (c === "\\" && quote !== "'") {
+      if (text[i + 1] === "\n") { i++; continue; }
+      started = true; word += text[++i] ?? ""; continue;
+    }
     if (quote) { if (c === quote) quote = ""; else word += c; continue; }
     if (c === "'" || c === '"') { quote = c; started = true; continue; }
     if (c === "#" && !started) { while (i < text.length && text[i] !== "\n") i++; segment(); continue; }
@@ -40,14 +69,22 @@ export function requiresBg(command, depth = 0) {
     while (args.length) {
       if (assignment(args[0]) || ["then", "do", "else", "!", "{"].includes(args[0])) { args.shift(); continue; }
       const name = basename(args[0]);
+      if (name === "rustup" && args[1] === "run") {
+        args.splice(0, 2); if (args[0] === "--install") args.shift(); args.shift();
+        if (args[0] === "--") args.shift(); continue;
+      }
       if (!wrappers.has(name)) break;
-      if (name === "bg" && /^(?:\/|~\/)/.test(args[0])) { args.length = 0; break; }
+      if (name === "bg" && fullBg(args[0])) { args.length = 0; break; }
       args.shift();
       if (name === "command" && ["-v", "-V"].includes(args[0])) { args.length = 0; break; }
       while (args[0]?.startsWith("-")) {
         const option = args.shift();
-        if (["-n", "-u", "--unset", "-C", "--chdir"].includes(option)) args.shift();
+        if (name === "env" && ["-S", "--split-string"].includes(option)) {
+          args.unshift(...segments(args.shift() ?? "").flat()); break;
+        }
+        if ((wrapperValues[name] ?? []).includes(option)) args.shift();
       }
+      if (["timeout", "gtimeout"].includes(name)) args.shift();
     }
     if (!args.length) continue;
     if (["bash", "sh", "zsh"].includes(basename(args[0]))) {
@@ -60,10 +97,11 @@ export function requiresBg(command, depth = 0) {
       const option = args.shift();
       if (valueOptions.has(option)) args.shift();
     }
-    if (!compile.has(args.shift())) continue;
+    const subcommand = args.shift();
+    if (!compile.has(subcommand)) continue;
     const separator = args.indexOf("--");
     const options = separator < 0 ? args : args.slice(0, separator);
-    if (options.some((s) => ["--help", "-h", "--version", "-V", "--list"].includes(s))) continue;
+    if (options.some((s) => ["--help", "-h"].includes(s)) || (subcommand === "install" && options.includes("--list"))) continue;
     return true;
   }
   return false;
