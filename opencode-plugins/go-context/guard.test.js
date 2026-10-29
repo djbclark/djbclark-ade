@@ -324,6 +324,8 @@ test("a primary crossing the ceiling before its first idle is softened, then re-
   assert.equal(softened.system.length, 1);
   assert.doesNotMatch(softened.system[0].text, /start a fresh session/);
   assert.doesNotMatch(softened.system[0].text, /Automatic handoff required/);
+  assert.doesNotMatch(softened.system[0].text, /This is a child/);
+  assert.match(softened.system[0].text, /If this is a child/);
   // The wake is dropped, but the idle still confirms a primary (child === false).
   f.ctx.session.prompt = async () => { throw new Error("wake dropped"); };
   await f.idle();
@@ -397,6 +399,7 @@ test("a child session's context notice never says to start a fresh session", asy
   assert.doesNotMatch(event.system[0].text, /start a fresh session/);
   assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
   assert.match(event.system[0].text, /report back to your parent/);
+  assert.match(event.system[0].text, /This is a child or dispatched session/);
 });
 
 test("a child session's context notice is softened even before its first idle", async () => {
@@ -435,6 +438,20 @@ test("a dispatched slice's context notice never says to start a fresh session", 
   assert.doesNotMatch(event.system[0].text, /start a fresh session/);
   assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
   assert.match(event.system[0].text, /report back to your parent/);
+  assert.match(event.system[0].text, /This is a child or dispatched session/);
+});
+
+test("a dispatched slice stays child-safe even when its record says primary (child: false)", async () => {
+  const seed = { [storageKey]: { ses_one: { model: "deepseek-v4.1-flash", pending: false, sampleAt: 0, attemptAt: 0, handoffTries: 0, child: false } } };
+  const f = await fixture(null, seed);
+  await f.context();
+  await f.step(112000);
+  process.env.ACP_RUN_AGENT = "1"; // afterEach restores the ambient value
+  const event = await f.context();
+  assert.equal(event.system.length, 1);
+  assert.doesNotMatch(event.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
+  assert.match(event.system[0].text, /This is a child or dispatched session/);
 });
 
 test("a malformed persisted record (negative handoffTries) fails closed", async () => {
