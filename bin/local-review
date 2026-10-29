@@ -37,7 +37,10 @@ Rules (each one a way a local review could lie, so each is pinned by a test):
   4. NOTHING IS POSTED. No comment, no review, no label: the result is a local file only a same-user process can write. Quote the summary line in the PR body.
   5. ONE RUN PER HEAD AT A TIME: a flock on a lock file, released when the process dies (no stale lock) and only AFTER the result is published, so another run's
      `in progress` record is never overwritten by an older verdict; a second run exits 4.
-  6. THE REVIEWED TREE IS UNTRUSTED INPUT. Codex runs as you, in a worktree of the PR, with a read-only sandbox, no network and no token in its environment (the files in your home stay readable by the model); a diff or an AGENTS.md in
+  6. THE VERDICT TEXT IS PROSE. Whether a no-findings message is a completed review is decided by the structural bindings of rule 1 (transcript header, `exec`, equal
+     channels) plus a refusal wording list scoped to the review itself; no list is complete, so an unusual refusal worded around it after a bound transcript with an
+     `exec` block can still read clean. A false `failed` costs a rerun; read the `.out` of a clean result when a merge matters.
+  7. THE REVIEWED TREE IS UNTRUSTED INPUT. Codex runs as you, in a worktree of the PR, with a read-only sandbox, no network and no token in its environment (the files in your home stay readable by the model); a diff or an AGENTS.md in
      the PR can still try to talk the model into "no issues", as it can the GitHub bot. Do not review a PR from someone you do not trust with it.
      Residual: a tool process that is reparented to init between two 2-second looks AND works outside the worktree escapes (no cgroups on macOS).
 
@@ -69,10 +72,15 @@ FINDING_RE = re.compile(r"^- \[(P[0-3])\]\s+(\S.*)$")
 FINDING_SHAPED_RE = re.compile(r"(?i)\[\s*P\s*\d\s*\]|^\W*P\d\b|\*\*\s*P\d")
 # Wording of a review that did NOT happen. Narrow on purpose (round 8): it only fires on inability to review/inspect/read/finish, or on an abort, a size or
 # context limit, a denied or blocked sandbox. "I could not run tests" and "the patch fixes the failed command" are ordinary summaries of a finished review.
-INABILITY = r"(?:unable|not able|could ?n[o']t|can ?n[o']t|failed|(?:didn'?t|did not) (?:finish|complete))"
+INABILITY = r"(?:unable|not able|(?:wasn|weren)'?t able|could ?n[o']t|can ?n[o']t|failed|(?:didn'?t|did not) (?:finish|complete))"
 UNDONE = r"(?:review\w*|complet\w*|finish\w*|inspect\w*|access\w*|read(?!-)|load\w*)"
-REFUSAL_RE = re.compile(rf"(?i)\b{INABILITY}\s+(?:to\s+)?(?:\w+\s+){{0,2}}{UNDONE}\b|\b(?:abort\w*|ran out|exhausted|incomplete|partial review|too large|not reviewed|"
-                        r"inaccessible|stopped early|cut short|nothing was reviewed|denied access|blocked (?:every|all))\b|not logged in|codex login")
+STATE = r"(?:aborted|incomplete|partial|blocked|failed|stopped|cut short|unavailable|inaccessible)"
+REFUSAL_RE = re.compile(
+    rf"(?i)\b{INABILITY}\s+(?:to\s+)?(?:\w+\s+){{0,2}}{UNDONE}\b"    # "I wasn't able to review the patch"
+    rf"|\b(?:review|analysis|inspection)\b[^.\n]{{0,25}}\b{STATE}\b"    # "the review was incomplete"; never a bare "incomplete records"
+    rf"|\b(?:repository|repo|checkout|worktree|diff|patch)\b[^.\n]{{0,15}}\b(?:inaccessible|unavailable)\b"    # "the repository is unavailable"
+    r"|\b(?:stopped early|cut short|ran out of (?:context|budget|tokens)|nothing was reviewed|not reviewed|partial review|too large to review|"
+    r"context window (?:was )?exhausted|denied access|blocked (?:every|all))\b|\baborted\b|not logged in|codex login")
 GENERATED = (".cursor/hooks.json", ".claude/settings.json")
 SECRET_ENV_RE = re.compile(r"(?i)(token|secret|passw|credential|api_?key)|^(GH|GITHUB)_")
 KEEP_ENV_RE = re.compile(r"^(CODEX_|OPENAI_)")

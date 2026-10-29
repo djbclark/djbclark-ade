@@ -70,6 +70,8 @@ Full review comments:
   no_issues) say "I did not find any actionable issues in the patch. Nothing in the diff needs changing." ;;
   aborted_with_hook) echo '{"changed": true}' > "$PWD/.cursor/hooks.json"; say "$(printf -- 'Review aborted: the context window was exhausted.\n- [P2] Hooks point at the worktree — %s/.cursor/hooks.json:7-7' "$PWD")" ;;
   tests_unrunnable) say "I found no actionable issues in this patch. I could not run tests in the read-only sandbox. The patch also fixes the failed command." ;;
+  wasnt_able) say "I wasn't able to review the patch because the repository is unavailable." ;;
+  incomplete_records) say "The patch correctly handles incomplete records and rejects inaccessible paths, and I found no actionable issues." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -252,6 +254,7 @@ def test_a_finding_on_a_hook_file_the_pr_itself_edits_is_never_ignored(world: Wo
     ("noexec", "not a verdict"),
     ("aborted", "not a verdict"),    # the wording the adversary found filing clean when an exec block existed
     ("asks", "not a verdict"),
+    ("wasnt_able", "not a verdict"),    # Codex P1 on PR 130 (round 9)
     ("aborted_with_hook", "not a verdict"),    # one ignored generated-file finding must not turn an incomplete review into clean    # a question is not a verdict
     ("wrong_sandbox", "does not show the review this run asked for"),    # a config that overrode the read-only sandbox
     ("wrong_base", "does not show the review this run asked for"),
@@ -297,6 +300,11 @@ def test_a_preflight_timeout_is_failed_not_the_findings_exit(world: World) -> No
     (world.tmp / "bin" / "gh").write_text("#!/bin/bash\nsleep 30\n")
     r = world.run(env={"LOCAL_REVIEW_GH_TIMEOUT": "1"}, timeout=60)
     assert r.returncode == 3 and "timed out before the review started" in r.stderr and "Traceback" not in r.stderr, (r.returncode, r.stderr)
+
+
+def test_a_summary_that_merely_discusses_incomplete_records_or_inaccessible_paths_is_clean(world: World) -> None:
+    """Codex P2 on PR 130 (round 9): the refusal vocabulary is scoped to the review itself, not matched anywhere in the message."""
+    assert world.run(mode="incomplete_records").returncode == 0
 
 
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
