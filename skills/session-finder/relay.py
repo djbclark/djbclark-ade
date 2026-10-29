@@ -211,8 +211,9 @@ which shows every received message as `[Message received] <sender title>` and th
 Paseo agent, which has no transcript, is now "delivered" instead of "unverified". Only a RECEIVED message counts (a `[Message received]` entry and its text;
 the agent's reasoning, tool output and replies never do), and the text must NOT have been in the timeline before the send (a copy already there cannot be told
 from one that scrolled out of the 80-entry window: the send stays "accepted"), must be at least 10 characters, and is polled 6 s at most before the --ack watch
-takes over; a caller that wants no proof (--no-ack, a launchd job) gets the instant "accepted" it always had and no timeline read; a text over 240 characters is
-matched by its last 160 (its ack footer); a timeline that cannot be read (daemon down, no output) is no witness. The return direction: `--sweep` reads a
+takes over; a caller that wants no proof (--no-ack, a launchd job) gets the instant "accepted" it always had and no timeline read; the WHOLE text is matched (a tail
+shared by two long texts would let one certify the other); a received message is `[Message received] <sender>` + text (a send from a Paseo agent) or `[User] <text>` (any other
+sender); the text is rendered, not typed, so an agent that prints such a line itself could forge one (the transcript witness has the same boundary); a timeline that cannot be read (daemon down, no output) is no witness. The return direction: `--sweep` reads a
 transcript-less SENDER's own Paseo timeline, once per sender, for `ack ID` (and the first-contact `ack <id>`) from the target: the entry's own sender title
 (or a relay header at the very START of its text) must name the target, a name quoted later in a text is nothing, and an ack already in the timeline when the
 question was sent (`tl_base`, taken before the send) cannot answer it, so a reused ID or an old `ack <id>` closes nothing; expectations and links written
@@ -416,7 +417,7 @@ def silent_seconds(info):
     return max(0, int(time.time() - when.timestamp()))
 
 
-CONTROL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[\]P^_X][^\x07\x1b]*(?:\x07|\x1b\\)?|[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+CONTROL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[\]P^_X][^\x07\x1b]*(?:\x07|\x1b\\)?|[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def clean_text(text, n=100):
@@ -478,7 +479,7 @@ SCREEN_ROWS = 8    # a dialog is at the bottom of the screen: only the last rows
 SCREEN_KINDS = (    # (kind, pattern) in priority order over the last SCREEN_ROWS rows: dialog chrome, not words that merely appear in prose
     ("picker", re.compile(r"↑/↓[^\n]{0,50}enter to select|enter to select[^\n]{0,50}(?:esc|ctrl\+c)[^\n]{0,20}(?:cancel|exit)"
                           r"|(?:^[ \t]*[❯›>▶●]?[ \t]*\d+[.)][ \t]+\S[^\n]*\n){2,}[^\n]*(?:esc|enter)[^\n]*(?:cancel|select|go back)", re.I | re.M)),
-    ("permission", re.compile(r"(?:do you want to|would you like to)[^\n]*\?[ \t]*\n(?:[^\n]*\n){0,3}[ \t]*[❯›>▶●]?[ \t]*1[.)][ \t]+yes"
+    ("permission", re.compile(r"(?:do you want to|would you like to)[^\n]*\?[ \t│┃|]*\n(?:[^\n]*\n){0,3}[ \t│┃|]*[❯›>▶●]?[ \t]*1[.)][ \t]+yes"
                               r"|\[(?:y/n|Y/n|y/N)\][ \t]*$|\((?:y/n|Y/n|y/N)\)[ \t]*$|^[ \t]*[❯›>▶●]?[ \t]*\d+[.)][ \t]+yes, (?:and )?(?:don'?t|do not) ask again", re.I | re.M)),
     ("slash_menu", re.compile(r"(?:^[ \t]*/[a-z][\w-]*[ \t]{2,}\S[^\n]*\n){3}\Z", re.I | re.M)),
     ("busy", re.compile(r"esc to interrupt|ctrl\+c to interrupt|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]", re.I)),
@@ -514,7 +515,7 @@ def pane_look(s):
     if blocking or claims:
         agree = blocking == claims or not ev[1:]
         shown = kind if blocking else "an unclassified dialog"
-        why = f"blocked on a question or permission prompt ({shown}{': ' + line if line else ''}): a message would land in or behind that dialog (helm.py answer)"
+        why = f"blocked on a question or permission prompt ({shown}): a message would land in or behind that dialog (helm.py answer)"    # the screen row stays in `--why`'s evidence: it can hold a command or a token
         if not agree:
             why += (f" [the status says {status} but the screen shows a {kind}]" if blocking else f" [the status says blocked but the screen shows {kind}]")
         return {"state": "card:" + (kind if blocking else "unknown"), "why": why, "deliverable": False, "agree": agree, "evidence": ev}
@@ -643,12 +644,12 @@ def probe_proof(tx, mark, *probes):
 
 # The Paseo timeline as a SECOND witness (2026-10-29, djbclark: "use both methods redundantly to ensure bidirectional ack"). A Paseo agent's own
 # activity log (`paseo logs ID --tail N`, curated text, no timestamps) shows every message it received as `[Message received] <sender title>`
-# and the text on the next line, UNescaped (checked 2026-10-29: `a&b <c> "q"` is shown as typed, though the Claude transcript keeps it
-# XML-escaped). It needs no transcript file, so it proves a delivery to a codex, omp, opencode or cline agent, which the transcript never
-# could ("unverified" for 5 days), and it is a second witness for a Claude one. Either witness alone proves.
+# and the text on the next line (a send from a Paseo agent), or as `[User] <text>` (a send from anything else: a pane, a launchd job, a deliverer;
+# checked live 2026-10-29), UNescaped (`a&b <c> "q"` is shown as typed, though the Claude transcript keeps it XML-escaped). It needs no transcript
+# file, so it proves a delivery to a codex, omp, opencode or cline agent, which the transcript never could ("unverified" for 5 days), and it is a
+# second witness for a Claude one. Either witness alone proves. Residual, within the trust boundary the transcript witness has too: the text is
+# rendered, not typed, so an agent that prints a line `[Message received] x` itself can forge an entry (no typed event is available from the CLI).
 TIMELINE_TAIL = 80          # curated entries read per look
-TIMELINE_LONG = 240         # a text longer than this is matched by its last TIMELINE_PART characters (its footer, which carries the ack id)
-TIMELINE_PART = 160
 TIMELINE_MIN = 10           # a folded text shorter than this proves nothing: `ack x` is as likely to be the agent's own output as a received message
 TIMELINE_PHASE = 6          # seconds a send polls the timeline before it hands the proof to the --ack watch (Paseo shows a steer within ~2-3 s)
 TIMELINE_READ = 10          # timeout of one `paseo logs`
@@ -668,15 +669,14 @@ def tl_norm(text):
 
 
 def timeline_probe(text):
-    """What to look for in a timeline: the whole text whitespace-folded, or (a long one) its tail, where the ack id sits."""
-    n = tl_norm(text)
-    return n if len(n) <= TIMELINE_LONG else n[-TIMELINE_PART:]
+    """What to look for in a timeline: the WHOLE text, whitespace-folded (a tail shared by two long texts would let one certify the other)."""
+    return tl_norm(text)
 
 
 def timeline_messages(agent_id):
     """The messages an agent RECEIVED, from its timeline: [(sender title, folded body)], one per `[Message received] <title>` entry and the line after
-    it (a relay text is one line). Reasoning, tool output and the agent's own replies are other entries and never count (Codex, PR 124).
-    None when the timeline cannot be read."""
+    it (a relay text is one line), and one per `[User] <text>` entry (title ""; a sender that is not a Paseo agent). Reasoning, tool output and the
+    agent's own replies are other entries and never count. None when the timeline cannot be read."""
     tl = paseo_timeline(agent_id)
     if tl is None:
         return None
@@ -684,6 +684,8 @@ def timeline_messages(agent_id):
     for i, row in enumerate(rows):
         if row.startswith("[Message received]"):
             out.append((tl_norm(row[len("[Message received]"):]), tl_norm(rows[i + 1] if i + 1 < len(rows) else "")))
+        elif row.startswith("[User] "):
+            out.append(("", tl_norm(row[len("[User] "):])))
     return out
 
 
@@ -693,34 +695,50 @@ def timeline_count(agent_id, probe):
     return None if msgs is None else sum(1 for _title, body in msgs if probe in body)
 
 
+def timeline_key(title, body):
+    """A short key of one received message: its sender title and folded body."""
+    return hashlib.sha256(f"{title}\x00{body}".encode()).hexdigest()[:16]
+
+
 def timeline_base(me):
-    """The folded bodies of the messages a transcript-less Paseo SENDER (fleet row ME) had received before it sent, taken before the send: an `ack`
-    that is already there cannot answer a question not yet asked (a reused ID, the same `ack <id>` from an earlier contact). None for a sender
-    with a transcript, no Paseo id, or an unreadable timeline."""
+    """{key: count} of the messages a transcript-less Paseo SENDER (fleet row ME) had received before it sent, taken before the send (hashes, not
+    the text: a record never holds another agent's words). An `ack` already there cannot answer a question not yet asked (a reused ID, the same
+    `ack <id>` from an earlier contact). None for a sender with a transcript or no Paseo id, and for a timeline that could not be read: with no
+    baseline the timeline closes nothing (timeline_ack), the safe direction."""
     pid = me.get("paseo") if isinstance(me, dict) else None
     if me is None or me.get("transcript") or not (isinstance(pid, str) and UUID.fullmatch(pid)):
         return None
     msgs = timeline_messages(pid)
-    return None if msgs is None else [body[:300] for _title, body in msgs]
+    if msgs is None:
+        return None
+    counts: dict[str, int] = {}
+    for title, body in msgs:
+        k = timeline_key(title, body)
+        counts[k] = counts.get(k, 0) + 1
+    return counts
 
 
-def timeline_ack(messages, token, who, base=()):
-    """True when MESSAGES (timeline_messages of the sender) hold a NEW `ack TOKEN` from one of WHO. New: its body is not among BASE (what was
-    there before the question was sent). From: a relay header at the very START of the body names one of WHO (a peer that is not a Paseo agent
-    writes one), else the entry's own sender title is one of WHO exactly; a name quoted later in the body, or a title that merely contains
-    one, establishes nothing (Codex, PR 124)."""
+def timeline_ack(messages, token, who, base=None):
+    """True when MESSAGES (timeline_messages of the sender) hold a NEW `ack TOKEN` from one of WHO. New: the count of that exact message (sender
+    title and body) now exceeds its count in BASE, what was there before the question was sent, so a repeat of an identical ack after the question
+    closes it and the old copy does not; BASE None (never taken, or unreadable) closes nothing. From: a relay header at the very START of the body
+    names one of WHO (a peer that is not a Paseo agent writes one), else the entry's own sender title is one of WHO exactly; a name quoted later in
+    a body, or a title that merely contains one, establishes nothing. Residual: two Paseo agents can share a title (Codex, PR 124)."""
+    if not isinstance(base, dict):
+        return False
     names = {w.lower() for w in who if isinstance(w, str) and w}
-    seen = {b[:300] for b in (base or ()) if isinstance(b, str)}
     pat = ack_token(token)
+    seen: dict[str, int] = {}
     for title, body in messages or []:
-        if body[:300] in seen or not pat.search(body):
+        if not pat.search(body):
             continue
         m = HEADER_RE.match(body)
-        if m:
-            ok = (m["id"] or m["id2"]).lower() in names or (m["aka"] or m["aka2"] or "").strip().lower() in names
-        else:
-            ok = title.lower() in names
-        if ok:
+        ok = ((m["id"] or m["id2"]).lower() in names or (m["aka"] or m["aka2"] or "").strip().lower() in names) if m else title.lower() in names
+        if not ok:
+            continue
+        k = timeline_key(title, body)
+        seen[k] = seen.get(k, 0) + 1
+        if seen[k] > _num(base.get(k)):
             return True
     return False
 
@@ -3333,6 +3351,7 @@ def transfer_expectations(old_sender, ids, as_json=False):
         print("relay: transfer refused: successor transcript is unreadable", file=sys.stderr)
         return 2
     transferred, acked, skipped, now = [], [], [], time.time()
+    tl_base = timeline_base(me)    # the successor's own timeline, read before the lock: an ack already in it cannot settle an adopted question
     with _flock(defer_dir() / ".expect.lock"):
         for r in expect_all():
             if (r.get("state") != "open" or r.get("sender") != old[0].get("id")
@@ -3352,7 +3371,7 @@ def transfer_expectations(old_sender, ids, as_json=False):
                 atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now})
                 acked.append((r, t))
                 continue
-            identity = expect_identity(me, {"id": "unused"}, mark)
+            identity = expect_identity(me, {"id": "unused"}, mark, tl_base)
             identity.pop("target")    # preserve the target byte-for-byte, including legacy fields
             atomic_json(expect_dir() / f"{r['id']}.json", {**r, **identity,
                         "transferred_from": {"sender": r.get("sender"), "sender_sid": r.get("sender_sid"),

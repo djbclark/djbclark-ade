@@ -50,7 +50,7 @@ case "$1 $2" in
   "permit ls") echo "${FAKE_PERMITS:-[]}" ;;
   "wait "*) exit "${FAKE_WAIT_RC:-0}" ;;
   "logs "*) [ -n "$FAKE_TIMELINE" ] && [ -f "$FAKE_TIMELINE" ] && cat "$FAKE_TIMELINE" ;;
-  "send "*) if [ -n "$FAKE_TIMELINE" ] && [ "${FAKE_TL_APPEND:-1}" = 1 ]; then if [ "${FAKE_TL_KIND:-message}" = message ]; then printf '[Message received] %s\\n%s\\n' "${FAKE_TL_FROM:-some peer}" "${@: -1}" >> "$FAKE_TIMELINE"; else printf '[Thought] %s\\n' "${@: -1}" >> "$FAKE_TIMELINE"; fi; fi
+  "send "*) if [ -n "$FAKE_TIMELINE" ] && [ "${FAKE_TL_APPEND:-1}" = 1 ]; then if [ "${FAKE_TL_KIND:-message}" = message ]; then printf '[Message received] %s\\n%s\\n' "${FAKE_TL_FROM:-some peer}" "${@: -1}" >> "$FAKE_TIMELINE"; elif [ "$FAKE_TL_KIND" = user ]; then printf '[User] %s\\n' "${@: -1}" >> "$FAKE_TIMELINE"; else printf '[Thought] %s\\n' "${@: -1}" >> "$FAKE_TIMELINE"; fi; fi
     echo '{"ok": true}' ;;
 esac
 """
@@ -554,18 +554,31 @@ class RelayPaseo(unittest.TestCase):
         rc, out, err = self.main([self.codex()], SID, 'a&b <c> "q" ]x[', "--wait", "5", "--ack")
         self.assertEqual((rc, ": delivered;" in out), (0, True), err)
 
-    def test_a_long_text_is_matched_by_its_tail_where_the_ack_id_sits(self) -> None:
+    def test_a_long_text_is_matched_whole_so_two_long_texts_sharing_a_tail_never_certify_each_other(self) -> None:
         self.timeline(EMPTY_TIMELINE)
-        long_text = "word " * 80 + "tail [reply through relay.py to zz: ack T-long]"
-        self.assertGreater(len(long_text), relay.TIMELINE_LONG)
-        self.assertEqual(relay.timeline_probe(long_text), " ".join(long_text.split())[-relay.TIMELINE_PART:])
-        rc, out, err = self.main([self.codex()], SID, long_text, "--wait", "5", "--ack")
+        tail = "tail [reply through relay.py to zz: ack T-long]"
+        a, b = "alpha " * 80 + tail, "bravo " * 80 + tail
+        self.assertEqual(relay.timeline_probe(a), " ".join(a.split()))
+        rc, out, err = self.main([self.codex()], SID, a, "--wait", "5", "--ack")
         self.assertEqual((rc, ": delivered;" in out), (0, True), err)
+        os.environ["FAKE_TL_APPEND"] = "0"    # b is sent but never shown; a, with the same last 160 characters, is
+        rc, out, err = self.main([self.codex()], SID, b, "--wait", "2", "--ack")
+        self.assertEqual((rc, ": accepted;" in out), (3, True), err)
+
+    def test_a_message_from_a_sender_that_is_not_a_paseo_agent_shows_as_a_user_entry_and_counts(self) -> None:
+        self.timeline(EMPTY_TIMELINE)
+        os.environ["FAKE_TL_KIND"] = "user"    # `paseo send` with no source agent: the timeline shows `[User] <text>` (checked live, 2026-10-29)
+        rc, out, err = self.main([self.codex()], SID, "hello there friend", "--wait", "5", "--ack")
+        self.assertEqual((rc, ": delivered;" in out), (0, True), err)
+        self.timeline("[User] [relay from claude peer-long-name (d)] ack tok12", "[Thought] x")
+        self.assertEqual(relay.timeline_messages(AGENT), [("", "[relay from claude peer-long-name (d)] ack tok12")])
+        self.assertEqual(self.sweep("tok12", "[User] [relay from claude peer-long-name (d)] ack tok12"), (1, "acked"))    # a non-Paseo peer's header names it
+        self.assertEqual(self.sweep("tok13", "[User] ack tok13 from peer-long-name"), (0, "open"))    # no header, no title: nothing says who
 
     def expectation(self, token: str, **kw: Any) -> None:
         relay.atomic_json(relay.expect_dir() / f"{token}.json", {
             "id": token, "state": "open", "created": time.time(), "acked": None, "within": 1800, "sender": "cccccccc", "sender_sid": "",
-            "sender_label": "me", "tx": None, "sender_paseo": CALLER, "mark": 0,
+            "sender_label": "me", "tx": None, "sender_paseo": CALLER, "mark": 0, "tl_base": {},    # a readable, empty timeline when the question was asked
             "target": {"id": "dddddddd", "name": "peer-long-name", "paseo": AGENT, "sid8": "", "sid": "", "host": "paseo"}, **kw})
 
     def sweep(self, token: str, *timeline: str, **kw: Any) -> tuple[int, str]:
@@ -590,15 +603,24 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual(self.sweep("tok5", "[Message received] anything", "[relay from claude peer-long-name (d)] ack tok5"), (1, "acked"))    # a non-Paseo peer's own header names it
 
     def test_an_ack_that_was_already_in_the_timeline_before_the_question_cannot_answer_it(self) -> None:
-        self.assertEqual(self.sweep("tok3", "[Message received] peer-long-name", "ack tok3", tl_base=["ack tok3"]), (0, "open"))    # a reused ID: the old reply
-        self.assertEqual(self.sweep("tok8", "[Message received] peer-long-name", "ack tok8 done", tl_base=["ack tok8"]), (1, "acked"))    # a new one differs
+        old = {relay.timeline_key("peer-long-name", "ack tok3"): 1}
+        self.assertEqual(self.sweep("tok3", "[Message received] peer-long-name", "ack tok3", tl_base=old), (0, "open"))    # a reused ID: the old reply
+        self.assertEqual(self.sweep("tok10", "[Message received] peer-long-name", "ack tok10", "[Message received] peer-long-name", "ack tok10",
+                                    tl_base={relay.timeline_key("peer-long-name", "ack tok10"): 1}), (1, "acked"))    # an identical repeat AFTER the question: a second copy
+        self.assertEqual(self.sweep("tok8", "[Message received] peer-long-name", "ack tok8 done",
+                                    tl_base={relay.timeline_key("peer-long-name", "ack tok8"): 1}), (1, "acked"))    # a new one differs
+        self.assertEqual(self.sweep("tok11", "[Message received] peer-long-name", "ack tok11", tl_base=None), (0, "open"))    # no baseline (unreadable): the timeline closes nothing
 
     def test_a_hand_edited_sender_paseo_is_skipped_never_an_exception(self) -> None:
         self.assertEqual(self.sweep("tok9", "[Message received] peer-long-name", "ack tok9", sender_paseo=["x"]), (0, "open"))
 
     def test_a_transcript_less_senders_baseline_is_what_it_had_received_before_it_asked(self) -> None:
         self.timeline("[Message received] peer-long-name", "ack old1", "[Shell] ls")
-        self.assertEqual(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}), ["ack old1"])
+        self.assertEqual(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}), {relay.timeline_key("peer-long-name", "ack old1"): 1})
+        self.timeline(EMPTY_TIMELINE)
+        self.assertEqual(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}), {})    # readable and empty: a baseline that closes the next ack
+        os.environ.pop("FAKE_TIMELINE")
+        self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}))    # unreadable: no baseline
         self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": "/x.jsonl"}))    # a transcript has its own mark
         self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": "", "transcript": None}))
 
@@ -607,7 +629,7 @@ class RelayPaseo(unittest.TestCase):
         now = time.time()
         key = relay.fleet.link_key("cccccccc", "dddddddd")
         relay.atomic_json(links, {"links": {key: {"sender": "cccccccc", "target": "dddddddd", "first_sent": now, "last_sent": now, "sent": 1, "acked": None,
-                                                  "tx": "", "mark": 0, "who": ["peer-long-name"], "sender_paseo": CALLER}}})
+                                                  "tx": "", "mark": 0, "who": ["peer-long-name"], "sender_paseo": CALLER, "tl_base": {}}}})
         self.timeline("[Message received] peer-long-name", "ack cccccccc")
         with mock.patch.object(relay.fleet, "LINKS_FILE", links):
             acked, _ = relay.ack_sweep()
@@ -677,6 +699,8 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual(relay.classify_screen("  1. sonnet\n  2. opus\n  Esc to cancel")[0], "picker")
         self.assertEqual(relay.classify_screen("Bash command\n  rm -rf x\nDo you want to proceed?\n❯ 1. Yes\n  2. No")[0], "permission")
         self.assertEqual(relay.classify_screen("Run it? [y/N]")[0], "permission")
+        self.assertEqual(relay.classify_screen("│ Do you want to proceed?        │\n│ ❯ 1. Yes                       │\n│   2. No                        │")[0], "permission")    # a boxed dialog
+        self.assertEqual(relay.clean_text("a\u202eb\u200bc\ufeffd"), "a b c d")    # bidi override, zero-width and BOM characters
         self.assertEqual(relay.classify_screen("  /help     show help\n  /clear    clear the screen\n  /model    switch model\n")[0], "slash_menu")
         self.assertEqual(relay.classify_screen("✻ Thinking… (12s · esc to interrupt)")[0], "busy")
         self.assertEqual(relay.classify_screen("❯ \n  ? for shortcuts")[0], "unknown")
@@ -697,6 +721,8 @@ class RelayPaseo(unittest.TestCase):
             self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("card:picker", False, False))
             self.assertIn("the status says idle but the screen shows a picker", d["why"])
             self.assertTrue(relay.card_why(d["why"]))
+            self.assertNotIn("sonnet", d["why"])    # the screen row can hold a command or a token: evidence for `--why` only
+            self.assertEqual([e for e in d["evidence"] if e["src"] == "screen"][0]["line"], "1. sonnet")
             self.assertEqual(relay.pane_look({**pane, "status": "blocked"})["agree"], True)
         with mock.patch.object(relay, "screen", lambda chan, lines=20: "❯ \n  ? for shortcuts"):
             self.assertEqual(relay.pane_look(pane)["state"], "idle")
