@@ -262,3 +262,90 @@ def test_a_delivered_pass_clears_the_streak(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "run", stuck)
     rw._pass(a)                                   # streak 1 again, not 3
     assert told == []
+
+
+# --- the line survives the seat saying no ---------------------------------------------------------
+#
+# `state["last"] = cur` runs BEFORE the send, so a refused line was consumed by the change-detector
+# and never spoken again: the seat stayed dark and the watcher stayed quiet about it. Mail tends to
+# arrive exactly WHILE the seat is busy, so this is the everyday collision, not an edge case.
+
+def quiet_pass(rw):
+    return rw.argparse.Namespace(dry_run=False, quiet=True)
+
+
+def test_a_refused_line_is_kept_and_retried(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["from eve"], "jobs": [], "prs": [], "stale": None})
+    sent = []
+    monkeypatch.setattr(rw, "to_session", lambda text: sent.append(text) or "skipped")
+    rw._pass(quiet_pass(rw))
+    assert len(sent) == 1 and "from eve" in sent[0]
+    pending = rw.load_state()["pending"]
+    assert pending and "from eve" in pending[0], "a refused line must be carried, not consumed"
+
+    # The survey has NOT changed (nothing new arrived), so only the pending list can make it speak.
+    monkeypatch.setattr(rw, "to_session", lambda text: sent.append(text) or "delivered")
+    rw._pass(quiet_pass(rw))
+    assert len(sent) == 2 and "from eve" in sent[1], "the retry has to happen on the next pass"
+    assert rw.load_state()["pending"] == [], "and only a real send clears it"
+
+
+def test_the_pending_list_cannot_grow_without_bound(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: True)
+    monkeypatch.setattr(rw, "PENDING_MAX", 2)
+    monkeypatch.setattr(rw, "to_session", lambda text: "skipped")
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["a", "b", "c", "d"],
+                                               "jobs": [], "prs": [], "stale": None})
+    rw._pass(quiet_pass(rw))
+    assert len(rw.load_state()["pending"]) <= 2
+
+
+def test_relay_accepted_is_not_reported_as_delivered(monkeypatch, tmp_path):
+    """`--no-ack` means relay.py prints `accepted`: proof the daemon took it, not proof it arrived."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    # Verbatim relay.py shapes, from its own print at relay.py:3858/3865 — the words sit after
+    # "via <route>: ", so a startswith() test sees none of them.
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
+        0, "relayed to [d2a505dd] Dann 7 via paseo: accepted; it takes the message when its turn ends"))
+    assert rw.to_session("x") == "accepted"
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
+        0, "relayed to [d2a505dd] Dann 7 via paseo: queued; it takes the message when its turn ends"))
+    assert rw.to_session("x") == "queued"
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
+        0, "relayed to [d2a505dd] Dann 7 via paseo: delivered; it takes the message when its turn ends"))
+    assert rw.to_session("x") == "delivered"
+
+
+def test_a_broken_fleet_read_is_not_a_dead_seat(monkeypatch, tmp_path):
+    """C3: `fleet.py` timing out is a blind watcher. Paging him "no live session" is false advice."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": "0000dead-0000-4000-8000-000000000000"}})
+    fleet = tmp_path / "src/djbclark-ade/skills/session-finder/fleet.py"
+    fleet.parent.mkdir(parents=True)
+    fleet.write_text("")
+    mail = rw.REPO / "projects/hiwymi/spec/composite-individual/tools/peer-comms/peer_mail.py"
+    mail.parent.mkdir(parents=True)
+    mail.write_text("")
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (1, "boom"))
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    ident, why = rw.owner_session()
+    assert ident == ""
+    assert "broken READ" in why and "no live session" not in why
+
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [], "prs": [], "stale": None})
+    rw._pass(quiet_pass(rw))
+    assert len(told) == 1
+    assert "cannot READ the fleet" in told[0]
+    assert "no live session" not in told[0], "a timeout must not be sold as a dead seat"

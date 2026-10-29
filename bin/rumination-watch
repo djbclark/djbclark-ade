@@ -214,14 +214,22 @@ def live_sessions() -> dict[str, dict]:
     global _LIVE_CACHE
     if _LIVE_CACHE is not None:
         return _LIVE_CACHE
+    global _LIVE_ERR
     out: dict[str, dict] = {}
     fleet = HOME / "src/djbclark-ade/skills/session-finder/fleet.py"
-    if fleet.is_file():
+    if not fleet.is_file():
+        _LIVE_ERR = f"no fleet.py at {fleet}"
+    else:
         rc, text = run(["python3", "-I", str(fleet), "--json"], timeout=90)
         try:
             rows = json.loads(text) if rc == 0 else []
         except ValueError:
             rows = []
+        if rc != 0 or not isinstance(rows, list):
+            # Empty is still the safe direction for SENDING (nothing goes out unverified), but it is
+            # NOT the same fact as "every seat is dead", and the operator message must not confuse
+            # them: telling him to start a seat because fleet.py timed out is false advice.
+            _LIVE_ERR = f"fleet.py unreadable (rc {rc}): {text[:120]}"
         for row in rows if isinstance(rows, list) else []:
             pid = str(row.get("paseo") or "")
             if pid:
@@ -231,6 +239,7 @@ def live_sessions() -> dict[str, dict]:
 
 
 _LIVE_CACHE: dict[str, dict] | None = None
+_LIVE_ERR = ""            # why the fleet read failed, "" when it succeeded (feeds the message)
 
 
 def usable(ident: str) -> bool:
@@ -294,6 +303,9 @@ def owner_session() -> tuple[str, str]:
         first = first or f"{src}={ident[:8]}"
         if usable(ident):
             return ident, src
+    if _LIVE_ERR:
+        return "", (f"cannot check which session is live: {_LIVE_ERR} — this is a broken READ, not "
+                    f"a dead seat ({ROLE!r} registry/peer_mail said {first or 'nothing'})")
     return "", (f"no live session for {ROLE!r} (registry/peer_mail gave {first or 'nothing'})")
 
 
@@ -356,8 +368,13 @@ def to_session(text: str) -> str:
         return "unreachable"
     rc, out = run(["python3", "-I", str(relay), ident, text, "--no-ack"], timeout=320)
     if rc == 0:
-        word = "queued" if out.startswith("queued") else "delivered"
-    elif "cannot take it now" in out or "is busy" in out:
+        # relay.py's OWN vocabulary, not a friendlier one: "queued" on deferral, "accepted" when the
+        # daemon took it with no transcript proof (`--no-ack`), nothing else on a proven delivery.
+        # The toolchain treats accepted-vs-delivered as load-bearing everywhere; a log that says
+        # "delivered" for "accepted" teaches the next reader to trust a word that was never earned.
+        word = ("queued" if ": queued" in out or out.startswith("queued")
+                else "accepted" if ": accepted" in out else "delivered")
+    elif "not sent" in out or "cannot take it now" in out:
         # Not a failure to hide: a launchd job has no sender identity, so relay.py will not defer for
         # us. WHICH refusal it is decides whether the seat is dark, so ask (see `why_blocked`).
         state, detail = why_blocked(ident)
@@ -397,6 +414,10 @@ def should_tell_djbclark(item: str, state: dict, now: float) -> bool:
 # A refused pass is a turn boundary, not an outage: the seat is usually mid-work. Only the two words
 # that mean "this will not end by itself" are darkness, and only after they repeat this many passes.
 SEAT_STUCK_PASSES = int(os.environ.get("RW_STUCK_PASSES", 3))
+
+# A line the seat refused is kept and retried, not dropped (see `_pass`). Cap so a seat that stays
+# busy for a day cannot grow the state file without bound; the newest lines are the ones that matter.
+PENDING_MAX = int(os.environ.get("RW_PENDING_MAX", 6))
 
 DARK_MEANING = {
     "card:question": "a question card is waiting for an answer, so it cannot take text",
@@ -514,11 +535,28 @@ def _pass(a: argparse.Namespace) -> int:
     # time with a watcher running the whole while.
     ident, why = owner_session()
     if not ident and should_tell_djbclark("no live session", state, now):
-        spoke_djb = to_djbclark(
-            f"Dann: no live session for {ROLE!r} ({why}). Nothing is listening; the rumination "
-            "watcher has nowhere to speak. A new seat (or the registry row) fixes it."
-        ) or spoke_djb
+        if _LIVE_ERR:
+            said = (
+                f"Dann: the rumination watcher cannot READ the fleet ({_LIVE_ERR}), so it stopped "
+                "trying to reach your seat. That is a blind watcher, not necessarily a dead seat — "
+                "do not start a new one on this message alone. `python3 -I "
+                "~/src/djbclark-ade/skills/session-finder/fleet.py --json` by hand says which."
+            )
+        else:
+            said = (
+                f"Dann: no live session for {ROLE!r} ({why}). Nothing is listening; the rumination "
+                "watcher has nowhere to speak. A new seat (or the registry row) fixes it."
+            )
+        spoke_djb = to_djbclark(said) or spoke_djb
         log(f"no live session: {why} (told djbclark={spoke_djb})")
+
+    # A line aimed at a seat that refused it has NOT been delivered, and `state["last"] = cur` above
+    # has already consumed the change, so without this the announcement is lost for good. Mail
+    # arrives BECAUSE the seat is busy mid-turn, so this is the common collision, not the edge case.
+    # Kept at the front, retried next pass, cleared only by a real send.
+    pending = [str(x) for x in (state.get("pending") or [])][-PENDING_MAX:]
+    if pending:
+        lines = [p for p in pending if p not in lines] + lines
 
     if lines:
         summary = "rumination: " + "; ".join(lines)
@@ -537,7 +575,13 @@ def _pass(a: argparse.Namespace) -> int:
         for item in needs_him:
             if should_tell_djbclark(item, state, now):
                 spoke_djb = to_djbclark(f"Dann: {item}") or spoke_djb
-        log(f"spoke session={spoke_session or 'none'} djbclark={spoke_djb}: {summary}")
+        if spoke_session in ("delivered", "accepted", "queued"):
+            state["pending"] = []
+        else:
+            # Still owed to the seat: the next pass prepends these and tries again.
+            state["pending"] = lines[-PENDING_MAX:]
+        log(f"spoke session={spoke_session or 'none'} djbclark={spoke_djb}"
+            f" pending={len(state['pending'])}: {summary}")
     else:
         # A QUIET pass still has to notice a wedged seat. Without this probe, darkness is only ever
         # seen on a pass that had something to say, and a seat that stops working stops producing
@@ -581,7 +625,7 @@ def cmd_test(a: argparse.Namespace) -> int:
         print(f"session target: UNRESOLVED - {src}")
     print(f"session relay:  {outcome}")
     print(f"djbclark topic: {'ok' if ok_d else 'FAILED (is inbox-target dann resolvable?)'}")
-    return 0 if (outcome in ("delivered", "queued") or ok_d) else 1
+    return 0 if (outcome in ("delivered", "accepted", "queued") or ok_d) else 1
 
 
 def cmd_autoaccept(a: argparse.Namespace) -> int:
