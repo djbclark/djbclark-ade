@@ -787,8 +787,10 @@ report file or the `---<name> exit=` line.
 [--head SHA] [--out PREFIX]` waits for the CI checks of that exact head and for Codex's `codex-review-state:v1` marker
 for it (`completed` and `failed` both terminal), then prints one line and writes `PREFIX-{checks,codex,findings,open-findings,summary}.json`
 (2026-10-23; separate CI, Codex and adversary waiters were two thirds of one lead's notification turns). **Read
-`merge_ready` in the summary, not the exit code:** it is true only when at least one CI check succeeded and none
-failed or is pending (skipped and neutral count beside a success, never alone), Codex's code review completed on
+`merge_ready` in the summary, not the exit code:** it is true only when CI has a succeeded check and none failed or is pending
+(skipped and neutral count beside a success, never alone), or a verified current-head `docs-only` CI waiver (a merge of
+master is never waived) substitutes
+for pending/absent CI (failed checks still block); and Codex's code review completed on
 this head and its security review too when the marker carries `security_review`, no unresolved Codex review
 thread of either kind is left (an earlier head's finding stays open until its thread is resolved: PR 32,
 2026-10-23, a P1 left open past two pushes while a head-only filter read 0; security findings carry
@@ -796,7 +798,15 @@ thread of either kind is left (an earlier head's finding stays open until its th
 with the threads per kind (`findings-mismatch` otherwise; never read it as a clean 0). When it is false,
 `merge_blockers` says why, any of: `codex-<status>`, `security-failed` / `security-running` / `security-other-head`,
 `findings-not-collected`, `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
-`ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`.
+`ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`, and `ci-waiver-*`
+(`untrusted-tool`, `malformed`, `mismatch`, `needs-adversary`). See [CI waiver](../../docs/ci-waiver.md).
+When `ci_state` is `waived`, merge ONLY via trusted-master `bin/ci-waiver merge PR --head SHA`,
+never `gh pr merge`. It lands a merge commit, not a squash, so it can push the exact proved tree
+fast-forward only and make the reviewed head reachable for GitHub. A lost master race is rejected
+before landing; re-run after `merge-race-lost`. Nothing enforces wrapper-only; bypasses retain the
+race. Uncertain outcomes require inspect/re-verify, never another push; use
+`bin/ci-waiver verify PR --sha SHA`. Ordinary PRs retain
+`gh pr merge --squash --match-head-commit SHA` (2026-10-29).
 `PREFIX-open-findings.json` lists the open threads of any head, outdated or not, each with `kind` (`code` or `security`). Exit 0 done, 1
 timeout, 2 bad usage, no such PR or the lock guard busy, 3 Codex stuck, 4 a waiter for that head is already alive (the line names its pid and prefix: read its files, do
 not start another), 5 the head moved (wait on the new head), 6 timed out while `gh` failed. After a push, start one for

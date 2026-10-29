@@ -1,0 +1,516 @@
+#!/usr/bin/env -S python3 -I
+"""Mechanically classify CI waivers using trusted master's policy; see docs/ci-waiver.md.
+
+ci-waiver classify --repo-dir DIR --pr N [--repo OWNER/NAME] [--json]
+ci-waiver classify --repo-dir DIR --base REF --head REF [--repo OWNER/NAME] [--json]
+
+ci-waiver merge PR --head SHA [--repo OWNER/NAME]
+ci-waiver verify PR --sha SHA [--repo OWNER/NAME]
+
+PR mode uses a fresh private GitHub store and proves both API base and current
+master; JSON names master and merge_tree. Master-side renames, deletions or mode
+changes on PR paths refuse. Multiple merge bases and PR-history merges refuse.
+Offline base/head mode retains its explicit base. Only docs-only is waivable.
+The operator-authorized merge wrapper requires trusted master's review gates,
+reclassifies and rechecks checks, creates a merge commit with the proved tree and
+parents [proved master, reviewed head], then pushes fast-forward only. A lost
+master race is rejected before anything lands. Waived PRs MUST use this wrapper;
+nothing enforces that rule for callers who bypass it. Ordinary PRs use squash.
+verify rechecks a landed merge without writing. Only proved landed mismatches
+print REVERT; unknown outcomes print inspect/re-verify hints, never retry a push.
+Exit 0: classification printed (including none), or merge verified; 1: merge
+refused/verification failed; 2: bad usage. See docs/ci-waiver.md.
+This file deliberately imports no repository Python code.
+"""
+from __future__ import annotations
+import argparse
+import contextlib
+import fnmatch
+import json
+import os
+import posixpath
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+from pathlib import Path
+
+WAIVABLE_PATHS = ("CHANGELOG.md", "docs/handoffs/**")
+DEFAULT_REPO = "djbclark/djbclark-ade"
+WORKFLOW_PATHS = ("tests", "claude/hooks/handoff-tools/tests")
+# GitHub records a PR retarget as any of these (automatic retarget of a stacked PR after
+# its base branch is deleted is base_ref_deleted + automatic_base_change_succeeded).
+RETARGET_EVENTS = ("base_ref_changed", "base_ref_deleted", "automatic_base_change_succeeded")
+
+
+def normalized(path):
+    path = unicodedata.normalize("NFC", path.replace("\\", "/")).casefold()
+    if path.startswith("/") or ".." in path.split("/") or re.match(r"^[a-z]:", path):
+        raise ValueError("unsafe-path:" + path)
+    return posixpath.normpath(path)
+
+
+def waivable(path):
+    return any(fnmatch.fnmatchcase(path, p) for p in WAIVABLE_PATHS)
+
+
+def excluded(path):
+    p = normalized(path)
+    parts = p.split("/")
+    return (any(part.startswith(".git") for part in parts) or "tests" in parts
+            or parts[-1] in ("conftest.py", "pyproject.toml", "pytest.ini", ".pytest.ini",
+                             "pytest.toml", ".pytest.toml", "setup.cfg", "tox.ini", "uv.lock", "uv.toml")
+            or parts[0] in ("pytest.py", "pytest", "_pytest")
+            or fnmatch.fnmatchcase(parts[-1], "requirements*.txt")
+            or fnmatch.fnmatchcase(parts[-1], "test_*.py")
+            or p.startswith("config/") or p in ("config", "bin/pr-wait", "bin/ci-waiver")
+            or any(p == q or p.startswith(q + "/") for q in WORKFLOW_PATHS))
+
+
+class Repository:
+    def __init__(self, directory):
+        self.directory = Path(directory).resolve(strict=True)
+        common = self.git("rev-parse", "--git-common-dir").stdout.decode().strip()
+        if (self.directory / common / "info/grafts").exists():
+            raise ValueError("git-grafts-present")
+
+    def git(self, *args, allowed=(0,), env=None):
+        if env is None:
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        else:
+            env = dict(env)
+        env.pop("GIT_REPLACE_REF_BASE", None)
+        env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
+        r = subprocess.run(["git", "-c", "core.commitGraph=false", "-c", "gc.writeCommitGraph=false",
+                            "-c", "fetch.writeCommitGraph=false", *args], cwd=self.directory, env=env,
+                           capture_output=True, timeout=60)
+        if r.returncode not in allowed:
+            operation = list(args)
+            while operation[:1] == ["-c"]:
+                del operation[:2]
+            raise ValueError("git-error:" + operation[0])
+        return r
+
+    def sha(self, ref):
+        value = self.git("rev-parse", "--verify", "--end-of-options", ref + "^{commit}").stdout.decode().strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise ValueError("unreadable-commit")
+        return value
+
+    def paths(self, a, b):
+        return [p.decode("utf-8", "surrogateescape") for p in
+                self.git("diff", "--no-renames", "--name-only", "-z", a, b, "--").stdout.split(b"\0") if p]
+
+    def safe_doc_modes(self, a, b):
+        fields = self.git("diff", "--raw", "--no-abbrev", "--no-renames", "-z", a, b, "--").stdout.split(b"\0")
+        for i in range(0, len(fields) - 1, 2):
+            path = fields[i + 1].decode("utf-8", "surrogateescape")
+            if waivable(path):
+                old, new = fields[i].split()[:2]
+                if old not in (b":000000", b":100644") or new not in (b"000000", b"100644"):
+                    raise ValueError("unsafe-doc-mode:" + path)
+
+
+    def master_touched_pr_paths(self, base, master, paths):
+        fields = self.git("diff", "--raw", "--no-abbrev", "--find-renames", "-z", base, master, "--").stdout.split(b"\0")
+        touched, i = set(paths), 0
+        while i < len(fields) - 1:
+            header = fields[i].split()
+            old, new, status = header[0], header[1], header[-1]
+            count = 2 if status.startswith((b"R", b"C")) else 1
+            names = {p.decode("utf-8", "surrogateescape") for p in fields[i + 1:i + 1 + count]}
+            if names & touched and (status.startswith(b"R") or new == b"000000"
+                                    or old != b":000000" and new != b"000000" and old[1:] != new):
+                return True
+            i += count + 1
+        return False
+
+
+class GitHubRepository(Repository):
+    """Only objects fetched by this invocation; never opens the checkout's gitdir."""
+
+    def __init__(self, directory, repo):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            raise ValueError("invalid-github-repository")
+        self.directory = Path(directory)
+        self.url = f"https://github.com/{repo}.git"
+        self.fetched = set()
+        self.git("-c", "init.templateDir=", "init", "--bare", ".")
+
+    def git(self, *args, **kwargs):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1")
+        env.update({k: v for k, v in kwargs.pop("env", {}).items() if k in IDENTITY_ENV})
+        # No inherited GIT_DIR, object directories, alternates, templates or config.
+        kwargs["env"] = env
+        return super().git("-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                           "-c", "core.hooksPath=" + os.devnull, *args, **kwargs)
+
+    def sha(self, ref):
+        if not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{40}", ref):
+            raise ValueError("unreadable-github-commit")
+        if ref not in self.fetched:
+            self.git("fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", self.url, ref)
+            if super().sha(ref) != ref:
+                raise ValueError("fetched-commit-mismatch")
+            self.fetched.add(ref)
+        return ref
+
+
+def gh(endpoint):
+    r = subprocess.run(["gh", "api", "--hostname", "github.com", "--paginate", endpoint], capture_output=True, text=True, timeout=120)
+    if r.returncode:
+        raise ValueError("gh-error:" + endpoint.split("?")[0])
+    decoder, docs, i = json.JSONDecoder(), [], 0
+    while i < len(r.stdout):
+        if r.stdout[i].isspace():
+            i += 1
+            continue
+        doc, i = decoder.raw_decode(r.stdout, i)
+        docs.append(doc)
+    if not docs:
+        raise ValueError("empty-gh-response")
+    return docs
+
+
+def items(endpoint, key=None):
+    out = []
+    for doc in gh(endpoint):
+        part = doc[key] if key else doc
+        if not isinstance(part, list) or any(not isinstance(x, dict) for x in part):
+            raise ValueError("unreadable-list")
+        out.extend(part)
+    return out
+
+
+def classify_pair(r, base, head, result):
+    """Prove the PR history and prospective merge against this exact base."""
+    ancestors = r.git("merge-base", "--all", base, head).stdout.decode().split()
+    if len(ancestors) > 1:
+        raise ValueError("multiple-merge-bases")
+    ancestor = r.sha(ancestors[0])
+    if r.git("rev-list", "--min-parents=2", ancestor + ".." + head).stdout.strip():
+        raise ValueError("merge-in-pr-history")
+    changed = r.paths(ancestor, head)
+    hard = ["hard-exclusion:" + p for p in changed if excluded(p)]
+    if hard:
+        return {**result, "reasons": hard}
+    r.safe_doc_modes(ancestor, head)
+    if changed and all(waivable(p) for p in changed):
+        merged = r.git("merge-tree", "--write-tree", base, head, allowed=(0, 1))
+        if merged.returncode:
+            raise ValueError("merge-result-not-docs-only")
+        tree = merged.stdout.decode().splitlines()[0]
+        if not re.fullmatch(r"[0-9a-f]{40}", tree):
+            raise ValueError("merge-result-not-docs-only")
+        merged_paths = r.paths(base, tree)
+        if not merged_paths or any(excluded(p) or not waivable(p) for p in merged_paths):
+            raise ValueError("merge-result-not-docs-only")
+        try:
+            r.safe_doc_modes(base, tree)
+        except ValueError:
+            raise ValueError("merge-result-not-docs-only") from None
+        return {**result, "class": "docs-only", "reasons": ["only-waivable-paths"], "merge_tree": tree}
+    reasons = ["touches-nonwaivable:" + p for p in changed if not waivable(p)] or ["no-changes"]
+    return {**result, "reasons": reasons}
+
+
+def classify(base, head, repo, pr, repo_dir):
+    result = {"class": "none", "reasons": [], "head": None, "master": None}
+    try:
+        with contextlib.ExitStack() as stack:
+            if pr is not None:
+                doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+                if doc["base"]["ref"] != "master":
+                    raise ValueError("base-not-master")
+                base, head = doc["base"]["sha"], doc["head"]["sha"]
+                r = GitHubRepository(stack.enter_context(tempfile.TemporaryDirectory(prefix="ci-waiver-objects-")), repo)
+                master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
+                result["master"] = master
+            else:
+                r = Repository(repo_dir)
+            if r.git("rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
+                raise ValueError("shallow-history")
+            base, head = r.sha(base), r.sha(head)
+            result["head"] = head
+            if pr is not None:
+                if r.git("merge-base", "--is-ancestor", base, master, allowed=(0, 1)).returncode:
+                    raise ValueError("base-not-on-master")
+                timeline = items(f"repos/{repo}/issues/{pr}/timeline?per_page=100")
+                if any(e.get("event") in RETARGET_EVENTS for e in timeline):
+                    raise ValueError("pr-base-retargeted")
+            if pr is not None:
+                # Compare both rename endpoints and mode changes, including
+                # renames into a PR-changed path.
+                touched = r.paths(base, head)
+                if r.master_touched_pr_paths(base, master, touched):
+                    raise ValueError("master-touched-pr-paths")
+                original = classify_pair(r, base, head, result)
+                if original["class"] != "docs-only":
+                    return original
+                return classify_pair(r, master, head, result)
+            return classify_pair(r, base, head, result)
+    except Exception as e:
+        return {**result, "reasons": [str(e)[:240] or type(e).__name__]}
+
+
+
+def review_gate(r, master, repo, pr, head, directory):
+    """Execute only the trusted master's waiter, without posting review requests."""
+    own = r.git("show", master + ":bin/ci-waiver").stdout
+    if own != Path(__file__).resolve().read_bytes():
+        raise ValueError("merge-tool-differs-from-master")
+    waiter = Path(directory) / "pr-wait"
+    waiter.write_bytes(r.git("show", master + ":bin/pr-wait").stdout)
+    completed = subprocess.run([sys.executable, "-I", str(waiter), str(pr), "--repo", repo,
+                                "--head", head, "--no-request", "--timeout", "0", "--ci-grace", "0",
+                                "--out", str(Path(directory) / "gate"), "--json"],
+                               cwd=directory, capture_output=True, text=True, timeout=300)
+    if completed.returncode:
+        raise ValueError("merge-review-gate-failed")
+    report = json.loads(completed.stdout)
+    waiver = report.get("ci_waiver") or {}
+    markers = waiver.get("markers") or []
+    if (report.get("head") != head or report.get("merge_ready") is not True
+            or waiver.get("malformed") or not markers
+            or any(m.get("head") != head or m.get("class") != "docs-only" for m in markers)
+            or (waiver.get("classification") or {}).get("class") != "docs-only"):
+        raise ValueError("merge-review-gate-refused")
+
+
+def recheck_checks(repo, pr, head):
+    """gh pr checks, with an API confirmation for its nonzero no-checks case."""
+    check = subprocess.run(["gh", "pr", "checks", str(pr), "--repo", "https://github.com/" + repo,
+                            "--json", "bucket"], capture_output=True, text=True, timeout=120)
+    if check.returncode in (0, 8):
+        checks = json.loads(check.stdout)
+        if not isinstance(checks, list) or any(c.get("bucket") not in ("pass", "pending", "skipping") for c in checks):
+            raise ValueError("merge-checks-refused")
+    elif check.returncode == 1:
+        # gh returns 1 when the PR has no checks. Never interpret another API or
+        # transport failure as absence; independently require two empty lists.
+        runs = items(f"repos/{repo}/commits/{head}/check-runs?per_page=100", "check_runs")
+        statuses = items(f"repos/{repo}/commits/{head}/statuses?per_page=100")
+        if runs or statuses:
+            raise ValueError("merge-checks-unreadable")
+    else:
+        raise ValueError("merge-checks-unreadable")
+
+
+class LandedMismatch(ValueError):
+    """A proved commit mismatch; transport/identity errors are not mismatches."""
+
+
+def verify_merge(r, commit, proof):
+    """Check parents, first-parent paths/modes and the exact proved merge tree."""
+    commit = r.sha(commit)
+    parents = r.git("rev-list", "--parents", "-n", "1", commit).stdout.decode().split()[1:]
+    paths = r.paths(parents[0], commit) if parents else []
+    if parents != [proof["master"], proof["head"]]:
+        raise LandedMismatch("merge-parents-differ-from-proof; first-parent paths=" + json.dumps(paths))
+    if not paths or any(excluded(p) or not waivable(p) for p in paths):
+        raise LandedMismatch("merge-paths-not-docs-only; first-parent paths=" + json.dumps(paths))
+    try:
+        r.safe_doc_modes(parents[0], commit)
+    except ValueError as e:
+        if str(e).startswith("unsafe-doc-mode:"):
+            raise LandedMismatch(str(e)) from e
+        raise
+    tree = r.git("rev-parse", commit + "^{tree}").stdout.decode().strip()
+    if tree != proof["merge_tree"]:
+        raise LandedMismatch("merge-tree-differs-from-proof")
+
+
+def revert_instructions(repo, pr, commit):
+    # Never mutate here. Start at current master, never at another branch's commit.
+    branch = "revert-waiver-" + commit[:12]
+    return (f"REVERT: {commit}\n"
+            + shlex.join(["git", "fetch", "origin", "master"]) + "\n"
+            + shlex.join(["git", "merge-base", "--is-ancestor", commit, "origin/master"])
+            + "  # STOP if nonzero: commit is not on master\n"
+            + shlex.join(["git", "switch", "-c", branch, "origin/master"]) + "\n"
+            + shlex.join(["git", "revert", "-m1", commit]) + "\n"
+            + shlex.join(["git", "push", "origin", "HEAD:refs/heads/" + branch]) + "\n"
+            + shlex.join(["gh", "pr", "create", "--repo", "https://github.com/" + repo,
+                          "--base", "master", "--head", branch, "--title", "Revert unsafe CI-waiver merge",
+                          "--body", f"Revert {commit}: verification failed for PR {pr}."]))
+
+
+IDENTITY_ENV = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
+
+
+def commit_identity():
+    # Resolve exactly as a normal git commit in the caller's checkout, then carry
+    # only identity into the isolated store (no inherited object/config variables).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k in IDENTITY_ENV}
+    identity = {}
+    for role in ("AUTHOR", "COMMITTER"):
+        result = subprocess.run(["git", "var", "GIT_" + role + "_IDENT"], env=env,
+                                capture_output=True, text=True, timeout=60)
+        match = re.fullmatch(r"(.+) <([^<>]+)> (\d+ [+-]\d{4})\n?", result.stdout)
+        if result.returncode or not match:
+            raise ValueError("merge-identity-unavailable")
+        identity.update(zip(("GIT_" + role + "_" + field for field in ("NAME", "EMAIL", "DATE")), match.groups()))
+    return identity
+
+
+def inspect_hint(repo, pr, commit):
+    return ("VERIFY FAILED: inspect only; do not retry the push. "
+            + shlex.join(["gh", "pr", "view", str(pr), "--repo", "https://github.com/" + repo,
+                          "--json", "mergedAt,mergeCommit,headRefOid,baseRefName"])
+            + "\nRe-verify: " + shlex.join(["bin/ci-waiver", "verify", str(pr), "--sha", commit, "--repo", repo]))
+
+
+def merged_identity(doc, head, commit):
+    if doc.get("head", {}).get("sha") != head or doc.get("base", {}).get("ref") != "master":
+        raise ValueError("merged-pr-identity-mismatch")
+    return doc.get("merged") is True and doc.get("merge_commit_sha") == commit
+
+
+def on_master(r, repo, commit):
+    master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
+    return r.git("merge-base", "--is-ancestor", commit, master, allowed=(0, 1)).returncode == 0
+
+
+def verify_pr(repo, pr, commit):
+    """Read-only recovery: reconstruct the proof from the landed parents."""
+    landed = False
+    try:
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ValueError("verify-sha-must-be-full-sha")
+        with tempfile.TemporaryDirectory(prefix="ci-waiver-verify-") as directory:
+            r = GitHubRepository(directory, repo)
+            doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+            head = doc.get("head", {}).get("sha")
+            if not merged_identity(doc, head, commit):
+                raise ValueError("merge-outcome-unverified")
+            r.sha(commit)
+            if not on_master(r, repo, commit):
+                raise ValueError("merge-not-on-master")
+            landed = True
+            parents = r.git("rev-list", "--parents", "-n", "1", commit).stdout.decode().split()[1:]
+            if len(parents) != 2 or parents[1] != head:
+                paths = r.paths(parents[0], commit) if parents else []
+                raise LandedMismatch("merge-parents-differ-from-proof; first-parent paths=" + json.dumps(paths))
+            proof = classify_pair(r, parents[0], head, {"class": "none", "reasons": []})
+            if proof.get("class") != "docs-only":
+                raise LandedMismatch("landed-merge-not-docs-only:" + ",".join(proof.get("reasons", [])))
+            proof.update(master=parents[0], head=head)
+            verify_merge(r, commit, proof)
+            print(json.dumps({"merged": commit, "verified": True, "head": head, "master": parents[0]}))
+            return 0
+    except Exception as e:
+        print("CI-WAIVER VERIFY FAILED: " + str(e), file=sys.stderr)
+        if landed and isinstance(e, LandedMismatch):
+            print(revert_instructions(repo, pr, commit), file=sys.stderr)
+        else:
+            print(inspect_hint(repo, pr, commit), file=sys.stderr)
+        return 1
+
+
+def merge_pr(repo, pr, head):
+    """Prove the tree, create it, then push once without forcing master."""
+    attempted, commit, landed = False, None, False
+    try:
+        if not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise ValueError("merge-head-must-be-full-sha")
+        with tempfile.TemporaryDirectory(prefix="ci-waiver-merge-") as directory:
+            r = GitHubRepository(directory, repo)
+            master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
+            review_gate(r, master, repo, pr, head, directory)
+            proof = classify(None, None, repo, pr, None)
+            if (proof.get("class") != "docs-only" or proof.get("head") != head
+                    or not re.fullmatch(r"[0-9a-f]{40}", proof.get("master") or "")
+                    or not re.fullmatch(r"[0-9a-f]{40}", proof.get("merge_tree") or "")):
+                raise ValueError("merge-precheck-refused:" + ",".join(proof.get("reasons", [])))
+            proved_master = r.sha(proof["master"])
+            if r.git("show", proved_master + ":bin/ci-waiver").stdout != Path(__file__).resolve().read_bytes():
+                raise ValueError("merge-tool-differs-from-master")
+            r.sha(head)
+            # Recreate the tree in THIS private store; the classifier's temporary
+            # store is gone, and an unreferenced merge-tree object cannot be fetched.
+            local_proof = classify_pair(r, proved_master, head, {"class": "none", "reasons": []})
+            if local_proof.get("class") != "docs-only" or local_proof.get("merge_tree") != proof["merge_tree"]:
+                raise ValueError("merge-local-proof-differs")
+            recheck_checks(repo, pr, head)
+            commit = r.git("commit-tree", proof["merge_tree"], "-p", proved_master, "-p", head,
+                           "-m", f"Merge reviewed docs-only PR {pr}", "-m", f"Reviewed head {head}",
+                           env=commit_identity()).stdout.decode().strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise ValueError("merge-commit-unreadable")
+            doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+            if (doc.get("head", {}).get("sha") != head or doc.get("base", {}).get("ref") != "master"
+                    or doc.get("state") != "open" or doc.get("merged") is True):
+                raise ValueError("merge-pr-identity-changed-before-push")
+            attempted = True
+            pushed = r.git("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+                           "push", "https://github.com/" + repo + ".git", commit + ":refs/heads/master",
+                           allowed=(0, 1))
+            if pushed.returncode:
+                # Only an explicit server/ref rejection proves nothing landed.
+                if b"[remote rejected]" in pushed.stderr or (b"[rejected]" in pushed.stderr and
+                        (b"non-fast-forward" in pushed.stderr or b"fetch first" in pushed.stderr)):
+                    attempted = False
+                    raise ValueError("merge-race-lost: push rejected; nothing merged; re-run")
+                raise ValueError("merge-push-outcome-unverified")
+            # GitHub can take a moment to mark the PR merged. Never push twice.
+            for attempt in range(5):
+                doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+                if merged_identity(doc, head, commit):
+                    break
+                if attempt < 4:
+                    time.sleep(1)
+            else:
+                raise ValueError("merge-outcome-unverified")
+            if not on_master(r, repo, commit):
+                raise ValueError("merge-not-on-master")
+            landed = True
+            verify_merge(r, commit, proof)
+            print(json.dumps({"merged": commit, "head": head, "master": proof["master"],
+                              "merge_tree": proof["merge_tree"], "verified": True}))
+            return 0
+    except Exception as e:
+        print("CI-WAIVER MERGE FAILED: " + str(e), file=sys.stderr)
+        if landed and isinstance(e, LandedMismatch):
+            print(revert_instructions(repo, pr, commit), file=sys.stderr)
+        elif attempted:
+            print(inspect_hint(repo, pr, commit), file=sys.stderr)
+        return 1
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+    m = sub.add_parser("merge", help="operator-authorized fast-forward-only push of a proved merge commit")
+    m.add_argument("pr", type=int)
+    m.add_argument("--head", required=True)
+    m.add_argument("--repo", default=DEFAULT_REPO)
+    v = sub.add_parser("verify", help="read-only verification of an existing landed merge")
+    v.add_argument("pr", type=int)
+    v.add_argument("--sha", required=True)
+    v.add_argument("--repo", default=DEFAULT_REPO)
+    c = sub.add_parser("classify")
+    c.add_argument("--repo-dir", required=True)
+    c.add_argument("--pr", type=int)
+    c.add_argument("--repo", default=DEFAULT_REPO)
+    c.add_argument("--base")
+    c.add_argument("--head")
+    c.add_argument("--json", action="store_true")
+    a = p.parse_args()
+    if a.command in ("merge", "verify"):
+        if a.pr < 1:
+            p.error("PR must be positive")
+        return merge_pr(a.repo, a.pr, a.head) if a.command == "merge" else verify_pr(a.repo, a.pr, a.sha)
+    if (a.pr is None and not (a.base and a.head)) or (a.pr is not None and (a.base or a.head)):
+        p.error("use --pr N OR both --base REF --head REF")
+    result = classify(a.base, a.head, a.repo, a.pr, a.repo_dir)
+    print(json.dumps(result) if a.json else f"{result['class']}: {', '.join(result['reasons'])} (head {result['head']})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -11,6 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- Added mechanical `docs-only` CI waivers, exact-head review markers and workflow filtering; proved candidates against API base and current master, refused unsafe histories/results and master-side path changes, and required the waiver merge wrapper: it created a merge commit with the proved tree and reviewed parents and pushed without force, preventing the master race on that path (a rejected race landed nothing); added read-only landed-merge verification and limited manual revert instructions to proved landed mismatches; documented that bypassing the procedural wrapper-only rule retained the race. (#118)
 - BarnOwl `:g show my subs` inside the client (`skills/barnowl/g-cmd.pl`, loaded from `~/.owl/startup`). The shell command `bin/g` uses `grok-4.5` at low effort.
 - BarnOwl from plain English: `skills/barnowl` (`/barnowl`), the slash command `/g`, and the shell command `bin/g` (`g list my subs`). `scripts/bo` reads live subscriptions from the tmux session `barnowl` and types a BarnOwl command into that client.
 - `relay.py --why IDENT [--json]` (exit 0 = can take a text now, 1 = something is in the way) says why a session cannot be sent text yet, from two methods compared: a Paseo agent by `paseo agent inspect` (pending cards by tool: question / permission / plan), `paseo permit ls` (the card's own text, shown by `--why` only and stripped of control characters) and `paseo logs` (its last activity), a pane TUI by the multiplexer status and a classification of the bottom rows of its screen (picker, permission prompt, open slash menu, turn running); states idle, working, silent (running, nothing new for 15 min), card:question|permission|plan|picker|unknown, archived, gone, error, refused (a hard stop such as the caller's own session), and a disagreement between the methods is reported with the blocking reading winning. Card refusals and queue lines name the kind (`a QUESTION (AskUserQuestion)`), the deliverer files its latest reason (kind and tool, never the card's text) on the record and in `deferred.log`, `relay.py --pending` shows it as `[why: ...]` (`look` in `--json`), and an expired record's outcome carries it (#124).
@@ -406,6 +407,8 @@ agent what changed and what is new. Entries end with the pull request number.
   run" instead of "sent" (2026-10-20).
 
 ### Security
+
+- Pinned CI waiver tools to GitHub's API master SHA and private fetched object stores, refused waivers for PRs with a `base_ref_changed`, `base_ref_deleted` or `automatic_base_change_succeeded` timeline event, expanded explicit pytest/uv exclusions, and required unquoted waiver approvals (#118).
 
 - `firecrawl-router`: the serve-only form refuses a non-loopback `--listen` like `--open` does,
   and the address actually bound is checked before the first request is served (#14).

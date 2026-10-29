@@ -21,6 +21,7 @@ Each doc carries its own summary.
 
 | Doc | For |
 |---|---|
+| [docs/ci-waiver.md](docs/ci-waiver.md) | Mechanical CI waiver classes, path-safety proof, independent review and current-head markers (2026-10-28) |
 | [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
 | [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow since 2026-10-11) |
@@ -222,8 +223,10 @@ pull request here is expected to meet these; flag any it misses.
       whose JSON is partly inside a code span is **malformed**, never approved, because masking code
       cannot "repair" JSON nobody wrote.
 
-   Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
-   is the head merged.
+   When `ci_state` is `waived`, merge ONLY with trusted-master `bin/ci-waiver merge PR --head SHA`,
+   never `gh pr merge`. This lands a merge commit so the proved tree can be pushed fast-forward only
+   and GitHub can recognize the reviewed head as merged. Ordinary PRs use
+   `gh pr merge --squash --match-head-commit <reviewed sha>`. Wrapper-only is procedural, not enforced.
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper and `bin/pytest`
@@ -283,3 +286,68 @@ pull request here is expected to meet these; flag any it misses.
     tense, ending with the PR number; `Added`, `Changed`, `Fixed`, `Removed` or `Security`.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.
+11. **CI waiver (2026-10-28; cut to `docs-only` 2026-10-29): the classifier, never an agent's claim, decides.**
+    `bin/ci-waiver classify --repo-dir /ABS/REPO --pr N --json` permits only one class, `docs-only`:
+    a nonempty diff whose every path matches the exact, case-sensitive `WAIVABLE_PATHS`
+    (`CHANGELOG.md`, `docs/handoffs/**`). Multiple merge bases are refused as `multiple-merge-bases`;
+    any merge commit in the unique merge base's `ancestor..head` range is refused as
+    `merge-in-pr-history`, before path classification. **A merge of master is never waived**.
+    Online, every history/path/mode/merge-tree check runs against both API base and fetched current
+    master; output reports `master` and successful `merge_tree` (carried in pr-wait classification).
+    Master-side renames (either endpoint), deletions or mode changes on base-to-head paths refuse
+    as `master-touched-pr-paths`; this blunt endpoint check may deny benign changes too.
+    A candidate also requires a clean `git merge-tree --write-tree base head` result whose
+    nonempty diff against base has only allowlisted, nonexcluded paths and safe file modes;
+    an unsafe or conflicting result is `merge-result-not-docs-only`. A `master-merge` class was built
+    and removed after
+    five adversary rounds, each finding a new hole in proving an earlier green run's provenance from
+    GitHub's API, which exposes current metadata, not what a run tested (docs/ci-waiver.md, A4).
+    Hard exclusions deny `.git*` components (including workflows), nested `tests/`, `conftest.py`,
+    `test_*.py`, `config/`, `bin/pr-wait`, `bin/ci-waiver`, and files named `pyproject.toml`,
+    `pytest.ini`, `.pytest.ini`, `pytest.toml`, `.pytest.toml`, `setup.cfg`, `tox.ini`, `uv.lock`,
+    `uv.toml` or `requirements*.txt` at any depth, plus root `pytest.py`, `pytest/`, `_pytest/`.
+    This open-ended denylist additionally fences the whole PR diff; every changed path must also
+    positively match `WAIVABLE_PATHS`. Symlinks, gitlinks, executable/mode changes are refused.
+    Failed checks are never waived.
+    An independent adversary on `omp --model anthropic/claude-opus-5-5 --effort high` or
+    stronger, never the author, must review the exact head and supply a live adversary APPROVE.
+    An agent that can request a waiver may not self-approve it. Add this live marker to the PR body:
+
+    ```
+    <!-- ci-waiver:v1 {"class":"docs-only","head":"<40-hex>","reviewer":"<agent id>"} -->
+    ```
+
+    The class and full head must match the classifier; malformed markers (any other class included)
+    block. Pending or absent CI then becomes `waived`; Codex and open-finding gates still apply. See
+    [docs/ci-waiver.md](docs/ci-waiver.md) for the proof, exclusions and explicit squash message.
+
+    A waiver report requires a `pr-wait` byte-identical
+    to GitHub's master SHA from `branches/master`, fetched from the explicit GitHub HTTPS URL.
+    The waiter and online classifier use fresh private bare object stores populated only by their
+    GitHub fetches, without checkout objects/config, alternates, templates or inherited `GIT_*`.
+    Replacement objects, grafts and commit graphs are disabled; every fetched SHA is verified.
+    Fetch errors deny the waiver. The PR base must be a master ancestor, and a `base_ref_changed`,
+    `base_ref_deleted` or `automatic_base_change_succeeded` timeline event (GitHub's retarget
+    records; other or future names are not recognized) refuses the waiver.
+    Allowlisted paths match exactly, case-sensitively without normalization; exclusions alone normalize.
+    Trust remains in GitHub's API, `gh` and the runner's Git binary. Offline base/head mode reads a
+    given repo but cannot be invoked by `pr-wait`. Waiver
+    APPROVEs must also be outside quotes, indentation and code. The
+    reviewer is not authenticated: agents share a GitHub account. The operator's
+    pinned merge yes is the authority; a waiver only changes `pr-wait`'s report.
+    A PR whose `ci_state` is `waived` MUST be merged ONLY with trusted-master
+    `bin/ci-waiver merge PR --head SHA`, never `gh pr merge`. The wrapper requires the existing
+    waiter gates, reclassifies against fresh master and rechecks `gh pr checks`. It creates a merge
+    commit (not a squash) with parents [proved master, reviewed head] and exactly the proved tree,
+    checks the API head immediately before pushing and after, and pushes master once without force.
+    A non-fast-forward rejects a lost master race before anything lands; re-run after rejection.
+    GitHub marking is checked up to five times; uncertainty is inspect/re-verify only, never a second
+    push. The post-push check verifies parents, tree and safe waivable first-parent paths/modes;
+    parent mismatch reports those paths. `bin/ci-waiver verify PR --sha SHA` rechecks an existing
+    landed merge without writing. Only a proved mismatch on master prints `REVERT` instructions:
+    fetch master, prove SHA ancestry (STOP on failure), branch from origin/master, `git revert -m1 SHA`.
+    Retargets and transient failures get inspect/re-verify hints, never a recipe pulling another branch
+    into master. The wrapper PREVENTS the master race on its path; nothing enforces wrapper-only or
+    protects bypassing callers. Ordinary PRs retain head-pinned squash. See docs/ci-waiver.md C3.
+    Waiver markers in code, blockquotes or indented blocks are malformed; their only
+    keys are class/head/reviewer and optional author (reviewer must differ).

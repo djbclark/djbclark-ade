@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-PR_WAIT = Path(__file__).resolve().parent.parent / "bin" / "pr-wait"
+PR_WAIT = Path(os.environ.get("PR_WAIT_TEST_SCRIPT", Path(__file__).resolve().parent.parent / "bin" / "pr-wait"))
 REPO = "djbclark/djbclark-ade"
 PR = 7
 HEAD = "a" * 40
@@ -35,9 +35,10 @@ skip = False
 method, ep = "GET", None
 for a in args[1:]:
     if skip:
-        method, skip = a, False
-    elif a == "-X":
-        skip = True
+        if skip == "-X": method = a
+        skip = False
+    elif a in ("-X", "--hostname"):
+        skip = a
     elif not a.startswith("-") and ep is None:
         ep = a.split("?")[0]
 routes = json.load(open(os.path.join(d, "scenario.json")))["routes"]
@@ -64,6 +65,265 @@ def ok(out: object) -> dict:
 
 def fail(err: str = "gh: connection reset", rc: int = 1) -> dict:
     return {"out": "", "err": err, "rc": rc}
+
+
+def waiver_body(head=HEAD, cls="docs-only", adversary=True):
+    body = '<!-- ci-waiver:v1 ' + json.dumps({"class": cls, "head": head, "reviewer": "independent-opus"}) + ' -->'
+    if adversary:
+        body += '\n<!-- adversary-verdict:v1 ' + json.dumps({"verdict": "APPROVE", "head": HEAD}) + ' -->'
+    return body
+
+
+@pytest.mark.parametrize("classified_head", [OLD, NEW, None])
+def test_ci_waiver_r4_classified_head_race(classified_head):
+    mod = load_module()
+    body = waiver_body()
+    marker = mod.ci_waiver_marker(body)
+    marker["classification"] = {"class": "docs-only", "head": HEAD, "reasons": []}
+    adv = mod.adversary_from_doc({"body": body}, HEAD)
+    assert mod.waiver_gate(marker, HEAD, adv, {"fail": 0, "pending": 3}) == (True, [])
+    # The PR document/markers/APPROVE still name HEAD, but the independent
+    # classifier observed another head (or omitted it). No other guard changes.
+    marker["classification"]["head"] = classified_head
+    assert mod.waiver_gate(marker, HEAD, adv, {"fail": 0, "pending": 3}) == (
+        False, ["ci-waiver-mismatch"])
+
+
+def test_ci_waiver_master_merge_is_not_a_waiver_class():
+    mod = load_module()
+    # A marker naming the removed class is malformed, never merely mismatched.
+    marker = mod.ci_waiver_marker(waiver_body(cls="master-merge"))
+    assert marker["malformed"] and not marker["markers"]
+    # A classifier answering with the removed class never satisfies a docs-only marker.
+    marker = mod.ci_waiver_marker(waiver_body())
+    marker["classification"] = {"class": "master-merge", "head": HEAD, "reasons": []}
+    adv = mod.adversary_from_doc({"body": waiver_body()}, HEAD)
+    assert mod.waiver_gate(marker, HEAD, adv, {"fail": 0, "pending": 3}) == (False, ["ci-waiver-mismatch"])
+
+
+@pytest.mark.parametrize("case", ["origin", "rewrites", "replace", "grafts", "api-error", "bad-api-sha", "different-waiter"])
+def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch, case):
+    # Replay spoof.py with real Git objects; substitute only the HTTPS transport
+    # with a local authentic repository so this regression needs no network.
+    mod = load_module()
+    real_run = subprocess.run
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    def git(path, *args):
+        return real_run(["git", "-c", "user.name=fixture", "-c", "user.email=f@test", *args],
+                        cwd=path, env=env, check=True, capture_output=True, text=True).stdout.strip()
+    authentic, evil, victim = (tmp_path / n for n in ("authentic", "evil", "victim"))
+    for path in (authentic, evil, victim):
+        path.mkdir()
+        git(path, "init", "-q", "-b", "master")
+    for path, reason, cls in ((authentic, "authentic-master", "none"), (evil, "attacker", "docs-only")):
+        (path / "bin").mkdir()
+        (path / "bin/pr-wait").write_bytes(PR_WAIT.read_bytes())
+        (path / "bin/ci-waiver").write_text("import json; print(" + repr(json.dumps({
+            "class": cls, "reasons": [reason], "head": HEAD})) + ")\n")
+        git(path, "add", "bin")
+        git(path, "commit", "-qm", "tools")
+    master = git(authentic, "rev-parse", "HEAD")
+    if case == "different-waiter":
+        with (authentic / "bin/pr-wait").open("ab") as f:
+            f.write(b"\n# changed waiter\n")
+        git(authentic, "add", "bin/pr-wait")
+        git(authentic, "commit", "-qm", "different waiter")
+        master = git(authentic, "rev-parse", "HEAD")
+    (victim / "code.py").write_text("def f(:\n")
+    git(victim, "add", "code.py")
+    git(victim, "commit", "-qm", "broken")
+    git(victim, "remote", "add", "origin", str(evil))
+    if case == "rewrites":
+        git(victim, "config", "url." + str(evil) + ".insteadOf", "https://github.com/")
+        git(victim, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        global_config = tmp_path / "global-config"
+        global_config.write_text('[url "' + str(evil) + '"]\n insteadOf = https://github.com/\n')
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "url." + str(evil) + ".insteadOf")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/")
+    elif case == "replace":
+        # The replacement is in the checkout, not the isolated snapshot repo.
+        git(victim, "fetch", str(evil), "master")
+        git(victim, "update-ref", "refs/replace/" + master, git(evil, "rev-parse", "HEAD"))
+    elif case == "grafts":
+        (victim / ".git/info/grafts").write_text(git(victim, "rev-parse", "HEAD") + "\n")
+    def api(*args):
+        assert args == ("api", "--hostname", "github.com", f"repos/{REPO}/branches/master")
+        if case == "api-error":
+            raise mod.GhError("unavailable")
+        return json.dumps({"commit": {"sha": "invalid" if case == "bad-api-sha" else master}})
+    monkeypatch.setattr(mod, "gh", api)
+    fetches = []
+    def transport(argv, **kwargs):
+        if argv[0] == "git":
+            assert Path(kwargs["cwd"]) != victim
+            assert "GIT_OBJECT_DIRECTORY" not in kwargs["env"]
+            assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in kwargs["env"]
+        elif "classify" in argv:
+            assert "--pr" in argv and "--base" not in argv and "--head" not in argv
+            assert argv[argv.index("--repo-dir") + 1] != str(victim)
+            assert Path(kwargs["cwd"]) != victim
+        if argv[0] == "git" and "fetch" in argv and f"https://github.com/{REPO}.git" in argv:
+            fetches.append(argv)
+            assert argv[-1] == master
+            isolated_env = kwargs["env"]
+            assert Path(isolated_env["GIT_DIR"]) != victim / ".git"
+            for key in ("url." + str(evil) + ".insteadOf", "remote.origin.url"):
+                check = real_run(["git", "config", "--get", key], cwd=kwargs["cwd"],
+                                 env=isolated_env, capture_output=True)
+                assert check.returncode == 1
+            argv = [str(authentic) if a == f"https://github.com/{REPO}.git" else a for a in argv]
+            # Fixture-only file transport; production permits HTTPS exclusively.
+            argv = [argv[0], "-c", "protocol.file.allow=always", *argv[1:]]
+        return real_run(argv, **kwargs)
+    monkeypatch.setattr(mod.subprocess, "run", transport)
+    got = mod.classify_ci_waiver(REPO, PR, repo_dir=str(victim))
+    if case in ("api-error", "bad-api-sha", "different-waiter"):
+        assert got["reasons"] == ["ci-waiver-untrusted-tool"]
+        assert len(fetches) == (1 if case == "different-waiter" else 0)
+    else:
+        assert got["reasons"] == ["authentic-master"]
+        assert len(fetches) == 1
+    waiver = mod.ci_waiver_marker(waiver_body())
+    waiver["classification"] = got
+    adv = mod.adversary_from_doc({"body": waiver_body()}, HEAD)
+    waived, blockers = mod.waiver_gate(waiver, HEAD, adv, {"fail": 0, "pending": 3})
+    assert not waived
+    if "ci-waiver-untrusted-tool" in got["reasons"]:
+        assert "ci-waiver-untrusted-tool" in blockers
+
+
+@pytest.mark.parametrize("case,blocker", [
+    ("valid", None), ("no-adversary", "ci-waiver-needs-adversary"),
+    ("short-head", "ci-waiver-malformed"), ("fenced", "ci-waiver-malformed"),
+    ("master-merge-marker", "ci-waiver-malformed"), ("other-head", "ci-waiver-mismatch"),
+    ("failed", "ci-failed"), ("no-checks", None), ("bad-version", "ci-waiver-malformed"),
+    ("partly-code", "ci-waiver-malformed"), ("nested-note", "ci-waiver-malformed"), ("symlink", None),
+    ("blockquote", "ci-waiver-malformed"), ("indent", "ci-waiver-malformed"),
+    ("multiline-inline", "ci-waiver-malformed"), ("inline", "ci-waiver-malformed"),
+    ("lazyquote", "ci-waiver-malformed"), ("same-author", "ci-waiver-malformed"),
+    ("extra-key", "ci-waiver-malformed"), ("different-author", None),
+    ("untrusted-waiter", "ci-waiver-untrusted-tool"), ("fetch-error", "ci-waiver-untrusted-tool"),
+    ("local-evil-classifier", "ci-waiver-mismatch"),
+    ("untrusted-master-sha", "ci-waiver-untrusted-tool"),
+    ("r3-classifier-fetch-error", "ci-waiver-mismatch"),
+    ("r2-approve-blockquote", "ci-waiver-needs-adversary"),
+    ("r2-approve-indent", "ci-waiver-needs-adversary"),
+    ("r2-approve-lazyquote", "ci-waiver-needs-adversary"),
+    ("r2-approve-multiline-code", "ci-waiver-needs-adversary"),
+    ("r2-quoted-block", "ci-waiver-needs-adversary"),
+])
+def test_ci_waiver_waiter_gate(world, case, blocker):
+    # A deterministic local git shim lets the REAL classifier prove a docs-only diff;
+    # the waiter and classifier still read the PR independently through fake gh.
+    fake_git = world.dir / "git"
+    fake_git.write_text('''#!/usr/bin/env python3
+import sys,os
+from pathlib import Path
+a=sys.argv[1:]
+while a[:1]==['-c']: a=a[2:]
+if a==['rev-parse','--show-toplevel']: print(os.getcwd())
+elif a[:1]==['init']: sys.exit(0)
+elif a==['rev-parse','--git-common-dir']: print('.git')
+elif a==['rev-parse','--git-path','objects']: print('.')
+elif a[:1]==['fetch']: sys.exit(1 if os.environ.get('WAIVER_FETCH_FAIL') or (os.environ.get('WAIVER_FETCH_HEAD_FAIL') and a[-1]=='a'*40) else 0)
+elif a[:1]==['show']:
+    name=a[-1].split(':')[-1].split('/')[-1]
+    data=(Path(os.environ['WAIVER_TRUST_SOURCE']) / name).read_bytes()
+    if name=='pr-wait' and os.environ.get('WAIVER_BAD_WAITER'): data+=b'\\n# different master\\n'
+    sys.stdout.buffer.write(data)
+elif a==['rev-parse','--is-shallow-repository']: print('false')
+elif a[:2]==['rev-parse','--verify'] and a[-1].startswith('b'*40) and os.environ.get('WAIVER_BAD_MASTER'): print('c'*40)
+elif a[0]=='rev-parse': print('a'*40 if a[-1].startswith('a') else 'b'*40)
+elif a[0]=='merge-base': print('b'*40)
+elif a[0]=='rev-list': pass
+elif a[0]=='merge-tree': print('c'*40)
+elif a[0]=='diff':
+    if '--raw' not in a: sys.stdout.buffer.write(os.environ.get('WAIVER_CHANGED_PATH','CHANGELOG.md').encode()+b'\\0')
+else: sys.exit(1)
+''')
+    fake_git.chmod(0o755)
+    world.env["WAIVER_TRUST_SOURCE"] = str(PR_WAIT.parent)
+    world.route(f"repos/{REPO}/branches/master", ok({"commit": {"sha": OLD}}))
+    world.route(f"repos/{REPO}/issues/{PR}/timeline", ok([]))
+    body = waiver_body(head=HEAD[:12] if case == "short-head" else OLD if case == "other-head" else HEAD,
+                       cls="master-merge" if case == "master-merge-marker" else "docs-only",
+                       adversary=case != "no-adversary")
+    if case == "fenced":
+        body = "```\n" + body + "\n```"
+    elif case == "r3-classifier-fetch-error":
+        world.env["WAIVER_FETCH_HEAD_FAIL"] = "1"
+    elif case.startswith("r2-"):
+        first, approve = body.split("\n", 1)
+        if case == "r2-quoted-block":
+            body += "\n\n> " + approve.replace('"APPROVE"', '"BLOCK"')
+        else:
+            shape = {"r2-approve-blockquote": "> " + approve,
+                     "r2-approve-indent": "    " + approve,
+                     "r2-approve-lazyquote": "> quote\n" + approve,
+                     "r2-approve-multiline-code": "`\n" + approve + "\n`"}
+            body = first + "\n\n" + shape[case]
+    elif case == "bad-version":
+        body = body.replace("ci-waiver:v1", "ci-waiver:v2")
+    elif case == "partly-code":
+        body = body.replace('"class":', '`junk` "class":')
+    elif case == "nested-note":
+        marker = {"class": "docs-only", "head": HEAD, "reviewer": "opus", "note": '<!-- ci-waiver:v1 {"head":"text"} -->'}
+        body = '<!-- ci-waiver:v1 ' + json.dumps(marker) + ' -->\n' + waiver_body().split('\n')[1]
+    elif case in ("blockquote", "indent", "multiline-inline", "inline", "lazyquote"):
+        first, rest = body.split("\n", 1)
+        formats = {"blockquote": "> " + first, "indent": "    " + first,
+                   "multiline-inline": "`\n" + first + "\n`", "inline": "`" + first + "`",
+                   "lazyquote": "> quoted paragraph\n" + first}
+        body = formats[case] + "\n\n" + rest
+    elif case in ("same-author", "different-author", "extra-key"):
+        first, rest = body.split("\n", 1)
+        marker = json.loads(first[len('<!-- ci-waiver:v1 '):-len(' -->')])
+        marker["author" if case != "extra-key" else "unexpected"] = (
+            " Independent-Opus " if case == "same-author" else "other-agent")
+        body = '<!-- ci-waiver:v1 ' + json.dumps(marker) + ' -->\n' + rest
+    if case == "untrusted-waiter":
+        world.env["WAIVER_BAD_WAITER"] = "1"
+    elif case == "fetch-error":
+        world.env["WAIVER_FETCH_FAIL"] = "1"
+    elif case == "untrusted-master-sha":
+        world.env["WAIVER_BAD_MASTER"] = "1"
+    elif case == "local-evil-classifier":
+        world.env["WAIVER_CHANGED_PATH"] = "bin/ci-waiver"
+    world.route(f"repos/{REPO}/pulls/{PR}", ok({"head": {"sha": HEAD}, "base": {"ref": "master", "sha": OLD}, "body": body}))
+    runs = [] if case == "no-checks" else [run_obj("test", "in_progress", None)]
+    if case == "failed":
+        runs.append(run_obj("lint", conclusion="failure"))
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs", checks_page(*runs))
+    if case in ("symlink", "local-evil-classifier"):
+        link = world.dir / "pr-wait-link"
+        if case == "symlink":
+            link.symlink_to(PR_WAIT)
+        else:
+            link.write_bytes(PR_WAIT.read_bytes())
+            (world.dir / "ci-waiver").write_text('import json; print(json.dumps({"class":"docs-only","head":"' + HEAD + '"}))')
+        argv = world.argv("--timeout", "1", "--no-request", "--json")
+        argv[2] = str(link)
+        r = subprocess.run(argv, env=world.env, capture_output=True, text=True, timeout=30)
+    else:
+        r = world.run("--timeout", "1", "--no-request", "--json")
+    assert r.returncode == (0 if blocker is None else 1), r.stderr
+    result = world.file("summary")
+    assert result["merge_ready"] is (blocker is None), result
+    if blocker:
+        assert blocker in result["merge_blockers"]
+    else:
+        assert result["ci"]["state"] == result["ci_state"] == "waived"
+        assert result["merge_command"] == f"bin/ci-waiver merge {PR} --head {HEAD} --repo {REPO}"
+        assert "gh pr merge" not in result["merge_command"]
+        if case == "valid":
+            human = world.run("--timeout", "1", "--no-request")
+            assert human.returncode == 0 and "merge ONLY with " + result["merge_command"] in human.stdout
+        assert result["adversary_required"] is True
+        assert result["ci_waiver"]["classification"]["master"] == OLD
+        assert result["ci_waiver"]["classification"]["merge_tree"] == "c" * 40
 
 
 def run_obj(name: str, status: str = "completed", conclusion: str | None = "success") -> dict:

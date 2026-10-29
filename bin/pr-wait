@@ -5,6 +5,28 @@
              [--interval S] [--codex-stuck S] [--ci-grace S] [--no-codex] [--no-request]
              [--rerequest-after S] [--json]
 
+CI waiver (2026-10-28): a live ci-waiver:v1 marker (class "docs-only" only) for the classified
+current head, plus an independent live adversary APPROVE, satisfies pending/absent CI as `waived`.
+Failed checks still block. Multiple merge bases or a merge in the unique ancestor..head
+range are NOT waivable, including merges of master. A candidate requires a clean merge-tree
+result against both API base and current master with only waivable paths and safe modes.
+ci_waiver.classification reports master/merge_tree and refuses master-side renames, deletions or mode
+changes on PR paths. When ci_state is waived, merge ONLY with trusted-master
+bin/ci-waiver merge PR --head SHA, never gh pr merge. It creates a merge commit (not squash)
+with proved tree/parents and pushes once without force: a lost master race is rejected before
+landing. Nothing enforces wrapper-only; bypasses retain the race. Ordinary PRs keep
+gh pr merge --squash --match-head-commit SHA. Post-push identity/commit checks and read-only
+ci-waiver verify PR --sha SHA handle recovery; only proved landed mismatches print REVERT.
+See docs/ci-waiver.md; malformed, mismatched or
+unreviewed claims add ci-waiver-malformed/mismatch/needs-adversary blockers.
+Repair (2026-10-29): own bytes must match GitHub's API master SHA, fetched by
+explicit HTTPS URL without local remote/URL config. Replacement objects/grafts
+are disabled; waiver APPROVEs must be outside quotes, indentation and code. The
+self-contained classifier executes in a fresh private GitHub object store; online
+repo-dir is ignored. Trust failures add ci-waiver-untrusted-tool.
+Reviewer identity is not authenticated; the operator's pinned merge yes remains
+the authority, with gh pr checks rechecked immediately before merging.
+
 Why (2026-10-23): three waiters per head (CI, Codex, adversary) were two thirds of the
 notification turns of a 579-turn lead transcript, and the load watcher found eight duplicate
 waiters on 2026-10-20. This is the one aggregating waiter: it wakes the lead once, when
@@ -57,14 +79,15 @@ security_status, findings_for_head (and _by_kind), open_findings (unresolved Cod
 not; open_findings_by_kind) and open_findings_outdated (the outdated subset), findings_mismatch (list of
 reasons; per kind the marker and the threads disagree: has_unresolved_findings true with no open thread of
 that kind, false with some, or has_any_findings true with no Codex finding comment of that kind; never
-print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when: at least one CI
-check succeeded and none failed or is pending (skipped and neutral count as passed beside a success,
-never alone), Codex's code review completed on this head, the security review too when the marker carries
+print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when CI has a succeeded check
+and none failed or is pending (skipped and neutral count beside a success, never alone), or a verified
+current-head waiver substitutes for pending/absent CI (failed checks still block); plus Codex's code review completed on this head, the security review too when the marker carries
 it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings as
 a boolean for each review it carries. merge_blockers lists why not: codex-<status>, security-<status>
 (security-failed, security-running, security-other-head), findings-not-collected, marker-unverified,
 security-marker-unverified, no-checks, ci-pending, ci-failed, ci-none-succeeded, open-findings,
-findings-mismatch, codex-skipped. The exit code does not carry it: the caller reads merge_ready.
+findings-mismatch, codex-skipped, ci-waiver-untrusted-tool, ci-waiver-malformed, ci-waiver-mismatch,
+ci-waiver-needs-adversary. The exit code does not carry it: the caller reads merge_ready.
 
 Requesting the review (2026-10-24; operator: "Make pr-wait request the review itself"). The Codex bot
 reviews on PR open and draft-to-ready, NOT on a push: a pushed head needs a comment `@codex review`
@@ -142,10 +165,12 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
 import time
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -550,7 +575,7 @@ def _json_object_end(text: str, i: int) -> int:
 _MARKER_WS = " \t\r\n"
 
 
-def _marker_spans(text: str, *, nested: bool = False) -> list[tuple[int, int, int]]:
+def _marker_spans(text: str, *, nested: bool = False, marker: str = "adversary-verdict") -> list[tuple[int, int, int]]:
     """Every CANONICAL marker start in `text`, as `(start, json_start, json_end)` offsets.
 
     `start` is the `<!--`; the captured JSON is `text[json_start:json_end]`. Only
@@ -585,12 +610,14 @@ def _marker_spans(text: str, *, nested: bool = False) -> list[tuple[int, int, in
     # rescue opts out (`nested=True`, D1): there, a rejected outer candidate must not hide the BLOCK
     # inside it.
     consumed = 0
-    for m in MARKER_START_RE.finditer(text):
+    wide = MARKER_START_RE if marker == "adversary-verdict" else re.compile(r"<!--\s*ci[-_ ]?waiver\b", re.IGNORECASE)
+    canonical = CANONICAL_START_RE if marker == "adversary-verdict" else re.compile(r"<!--\s*ci-waiver:v1")
+    for m in wide.finditer(text):
         if not nested and m.start() < consumed:
             continue
         # The WIDE start only locates the candidate; the canonical one says where `:v1` ends, and the
         # JSON begins after that.
-        cm = CANONICAL_START_RE.match(text, m.start())
+        cm = canonical.match(text, m.start())
         if not cm:
             continue
         q = cm.end()
@@ -615,7 +642,7 @@ def _marker_spans(text: str, *, nested: bool = False) -> list[tuple[int, int, in
     return spans
 
 
-def _classify_starts(text: str) -> tuple[int, int]:
+def _classify_starts(text: str, marker: str = "adversary-verdict") -> tuple[int, int]:
     """Count marker STARTS that `_marker_spans` cannot capture: `(unclosed, wrong_form)`.
 
     A start is any near-miss spelling (`adversary-verdict`, `adversary_verdict`, a case variant, a
@@ -623,7 +650,7 @@ def _classify_starts(text: str) -> tuple[int, int]:
     its spelling is wrong; it is `unclosed` when no `-->` follows before the next `<!--`, in which case
     GitHub renders the rest of the body as a comment and a human cannot see it either.
     """
-    spans = _marker_spans(text)
+    spans = _marker_spans(text, marker=marker)
     valid = {start for start, _js, _je in spans}
 
     def _inside_a_marker(pos: int) -> bool:
@@ -632,7 +659,8 @@ def _classify_starts(text: str) -> tuple[int, int]:
         return any(js <= pos < je for _s, js, je in spans)
 
     unclosed = wrongform = 0
-    for m in MARKER_START_RE.finditer(text):
+    wide = MARKER_START_RE if marker == "adversary-verdict" else re.compile(r"<!--\s*ci[-_ ]?waiver\b", re.IGNORECASE)
+    for m in wide.finditer(text):
         if m.start() in valid or _inside_a_marker(m.start()):
             continue
         rest = text[m.end():]
@@ -834,8 +862,153 @@ def adversary_from_doc(doc: dict, head: str) -> dict:
     """
     labels = {l.get("name") for l in (doc.get("labels") or []) if isinstance(l, dict)}
     out = adversary_verdict(doc.get("body") or "", head)
+    strict = adversary_verdict(_strict_live_text(doc.get("body") or ""), head)
+    out["waiver_live_approve"] = (strict.get("verdict") == "APPROVE"
+                                  and strict.get("matches_head") and not strict.get("malformed"))
     out["required_by_label"] = "adversary-required" in labels
     return out
+
+
+def _strict_live_text(body: str) -> str:
+    """Mask code, blockquotes and indentation without changing character offsets."""
+    text = _strip_code(body)
+    # Waivers use stricter quoting rules than legacy adversary markers. Lazy
+    # blockquote continuations are conservatively quoted until a blank line.
+    offset, quote = 0, False
+    chars = list(text)
+    for line in body.splitlines(keepends=True):
+        if not line.strip():
+            quote = False
+        lead = line[:len(line) - len(line.lstrip(" \t"))]
+        quote = quote or line.lstrip().startswith(">")
+        if quote or len(lead.expandtabs(4)) >= 4:
+            chars[offset:offset + len(line)] = " " * len(line)
+        offset += len(line)
+    text = "".join(chars)
+    # Equal-length backtick runs may span lines (CommonMark code spans).
+    runs = list(re.finditer(r"`+", text))
+    consumed = -1
+    chars = list(text)
+    for i, run in enumerate(runs):
+        if run.start() < consumed:
+            continue
+        close = next((r for r in runs[i + 1:] if len(r.group()) == len(run.group())), None)
+        if close:
+            chars[run.start():close.end()] = " " * (close.end() - run.start())
+            consumed = close.end()
+    return "".join(chars)
+
+
+def ci_waiver_marker(body: str) -> dict:
+    """Read LIVE CI waiver markers using the adversary parser's exact JSON/code boundaries."""
+    text = _strict_live_text(body)
+    spans = _marker_spans(text, marker="ci-waiver")
+    unclosed, wrongform = _classify_starts(text, marker="ci-waiver")
+    raw_spans = _marker_spans(body, marker="ci-waiver")
+    raw_bad = _classify_starts(body, marker="ci-waiver")
+    quoted = any(s not in {x[0] for x in spans} for s, _b, _e in raw_spans)
+    out = {"present": bool(raw_spans or any(raw_bad)),
+           "malformed": bool(unclosed or wrongform or any(raw_bad) or quoted), "markers": []}
+    for _start, begin, end in spans:
+        try:
+            raw = text[begin:end]
+            if raw != body[begin:end]:
+                raise ValueError("JSON partly in code")
+            doc = json.loads(raw, object_pairs_hook=_strict_object)
+            if (not isinstance(doc, dict) or doc.get("class") != "docs-only"
+                    or not isinstance(doc.get("head"), str) or not HEX40.fullmatch(doc["head"])
+                    or not isinstance(doc.get("reviewer"), str) or not doc["reviewer"].strip()
+                    or set(doc) - {"class", "head", "reviewer", "author"}
+                    or ("author" in doc and (not isinstance(doc["author"], str) or not doc["author"].strip()
+                        or doc["author"].strip().casefold() == doc["reviewer"].strip().casefold()))):
+                raise ValueError("invalid waiver fields")
+            out["markers"].append(doc)
+        except ValueError:
+            out["malformed"] = True
+    return out
+
+
+def classify_ci_waiver(repo: str, pr: int, repo_dir: str | None = None) -> dict:
+    """Pin GitHub's master SHA, require identical waiter, execute its classifier.
+
+    This is an integrity check, not authentication of the PR's claimed reviewer.
+    An edited waiter cannot certify itself; the operator uses a trusted copy.
+    repo_dir is retained for callers but never consulted: no checkout Git or objects.
+    """
+    try:
+        def git_bytes(*args, isolated=None):
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull,
+                       GIT_ATTR_NOSYSTEM="1")
+            if isolated is not None:
+                env["GIT_DIR"] = str(isolated)
+            r = subprocess.run(["git", "-c", "core.commitGraph=false", "-c", "gc.writeCommitGraph=false",
+                                "-c", "fetch.writeCommitGraph=false", *args], cwd=tmp, env=env,
+                               capture_output=True, timeout=GH_TIMEOUT)
+            if r.returncode:
+                raise ValueError("untrusted Git evidence")
+            return r.stdout
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            raise ValueError("invalid GitHub repository")
+        master_doc = json.loads(gh("api", "--hostname", "github.com", f"repos/{repo}/branches/master"))
+        master = master_doc["commit"]["sha"]
+        if not isinstance(master, str) or not HEX40.fullmatch(master):
+            raise ValueError("unreadable trusted master")
+        with tempfile.TemporaryDirectory(prefix="ci-waiver-trusted-") as tmp:
+            isolated = Path(tmp) / "git"
+            # Never fetch with checkout config: no remote.*, url.*.insteadOf,
+            # templates, global/system config, inherited -c config or Git hooks.
+            git_bytes("-c", "init.templateDir=", "init", "--bare", str(isolated))
+            git_bytes("-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                      "-c", "core.hooksPath=" + os.devnull,
+                      "fetch", "--no-tags", "--no-write-fetch-head",
+                      f"https://github.com/{repo}.git", master, isolated=isolated)
+            fetched = git_bytes("rev-parse", "--verify", master + "^{commit}",
+                                isolated=isolated).decode().strip()
+            if fetched != master:
+                raise ValueError("fetched master mismatch")
+            trusted_waiter = git_bytes("show", master + ":bin/pr-wait", isolated=isolated)
+            trusted_classifier = git_bytes("show", master + ":bin/ci-waiver", isolated=isolated)
+            if trusted_waiter != Path(__file__).resolve().read_bytes():
+                raise ValueError("waiter differs from master")
+            path = Path(tmp) / "ci-waiver"
+            path.write_bytes(trusted_classifier)
+            path.chmod(0o700)
+            r = subprocess.run([sys.executable, "-I", str(path), "classify", "--repo-dir", tmp,
+                                "--pr", str(pr), "--repo", repo, "--json"], cwd=tmp,
+                               capture_output=True, text=True, timeout=GH_TIMEOUT)
+            if r.returncode:
+                raise ValueError("trusted classifier failed")
+            doc = json.loads(r.stdout)
+            if not isinstance(doc, dict):
+                raise ValueError("classifier shape")
+            return doc
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, GhError):
+        return {"class": "none", "reasons": ["ci-waiver-untrusted-tool"], "head": None}
+
+
+def waiver_gate(waiver: dict | None, head: str, adversary: dict | None, counts: dict) -> tuple[bool, list[str]]:
+    """A waiver implies a current live adversary APPROVE; a failed check always wins."""
+    if not waiver or not waiver.get("present"):
+        return False, []
+    classified = waiver.get("classification") or {}
+    if "ci-waiver-untrusted-tool" in classified.get("reasons", []):
+        return False, ["ci-waiver-untrusted-tool"] + (["ci-waiver-malformed"] if waiver.get("malformed") else [])
+    if waiver.get("malformed"):
+        return False, ["ci-waiver-malformed"]
+    markers = waiver.get("markers") or []
+    blockers = []
+    if (classified.get("class") != "docs-only"
+            or classified.get("head") != head or not markers
+            or any(m["head"] != head or m["class"] != classified["class"] for m in markers)):
+        blockers.append("ci-waiver-mismatch")
+    adv = adversary or {}
+    if (adv.get("verdict") != "APPROVE" or not adv.get("matches_head")
+            or not adv.get("waiver_live_approve")
+            or adv.get("malformed") or adv.get("fetch_failed") or adv.get("conflict")):
+        blockers.append("ci-waiver-needs-adversary")
+    return not blockers and not counts["fail"], blockers
 
 
 def fetch_checks(repo: str, sha: str) -> list[dict]:
@@ -1031,7 +1204,7 @@ def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict
 
 def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, sr: dict | None,
            head: str, review: dict | None, adversary: dict | None = None,
-           adversary_required: bool = False) -> dict:
+           adversary_required: bool = False, waiver: dict | None = None) -> dict:
     """The findings and merge_ready fields of the summary.
 
     Both Codex reviews are judged the same way: the code review (`code_review`, mark
@@ -1039,8 +1212,9 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     `codex-security-review-finding:v1`). Mismatch (the marker and the threads disagree, so never a clean "0"),
     per kind: the marker says `has_unresolved_findings: true` and no open Codex thread of that kind was
     found, or `false` and some was; or `has_any_findings: true` and no Codex finding comment of that kind
-    exists at all. merge_ready needs: at least one CI check that really succeeded, none failing or pending
-    (skipped and neutral checks count as passed beside it, never alone); Codex's code review completed on
+    exists at all. merge_ready needs: either a succeeded CI check with none failing/pending
+    (skipped/neutral count beside success, never alone), or a verified current-head CI waiver
+    substituting for pending/absent checks (failed checks still block); Codex's code review completed on
     this head; its security review completed on this head too WHEN the marker carries `security_review`
     (a marker without one is not blocked on it: the open threads of both kinds still gate, and the summary
     says `security_status: absent`); zero open Codex threads of either kind (outdated or not); no mismatch;
@@ -1051,7 +1225,9 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`, plus - ONLY when the
     adversary gate is switched on (`--adversary-required` or an `adversary-required` label), or when a
     fetch failed or the marker is malformed - `adversary-missing`, `adversary-stale-or-blocked`,
-    `adversary-fetch-failed` or `adversary-malformed`.
+    `adversary-fetch-failed` or `adversary-malformed`. A waiver also requires the adversary gate
+    and may add `ci-waiver-untrusted-tool`, `ci-waiver-malformed`, `ci-waiver-mismatch` or
+    `ci-waiver-needs-adversary`.
 
     The adversary verdict (added 2026-10-25) is read from a MACHINE-READABLE MARKER in the PR body,
     never from prose: `<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->`.
@@ -1106,9 +1282,14 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
                 blockers.append("marker-unverified")
             if sr is not None and not isinstance(sr.get("has_unresolved_findings"), bool):
                 blockers.append("security-marker-unverified")
+    waived, waiver_blockers = waiver_gate(waiver, head, adversary, counts)
+    blockers.extend(waiver_blockers)
+    adversary_required = adversary_required or bool(waiver and waiver.get("present"))
+    if waived:
+        ci_state = "waived"
     if ci_state == "no-checks":
         blockers.append("no-checks")
-    elif ci_state != "done":
+    elif ci_state not in ("done", "waived"):
         blockers.append("ci-pending")
     if counts["fail"]:
         blockers.append("ci-failed")
@@ -1157,7 +1338,7 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
             # Reported whether or not it blocks, so a PR that should carry a verdict shows up even
             # where blocking is not switched on. `adversary` is the raw finding for the PR body.
             "adversary": adversary, "adversary_warnings": adversary_warnings,
-            "adversary_required": adversary_required}
+            "adversary_required": adversary_required, "ci_state": ci_state, "ci_waiver": waiver}
 
 
 # ---- files ----------------------------------------------------------------------------------------
@@ -1559,7 +1740,7 @@ def main(argv: list[str]) -> int:
     s = {"checks": None, "codex_match": None, "codex_newest": None, "review": None,
          "ci_done": False, "codex_done": a.no_codex, "since": None, "since_source": None,
          "codex_clock": start, "running_seen": False, "posted": [], "state_note": "", "warnings": [],
-         "adversary": None, "pr_doc": pr_document}
+         "adversary": None, "pr_doc": pr_document, "ci_waiver": None}
     rq_path = sd / f"request-{slug}-{a.pr}-{head}.json"
     rq = load_request_state(rq_path)  # pr-wait's own requests for this head, across runs
     rq_ctx: dict = {"exists": False, "allowed": None}
@@ -1599,12 +1780,16 @@ def main(argv: list[str]) -> int:
         judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, security_review(s["codex_match"]),
                         head, s["review"], s["adversary"],
                         adversary_required=(a.adversary_required
-                                            or bool((s["adversary"] or {}).get("required_by_label"))))
+                                            or bool((s["adversary"] or {}).get("required_by_label"))),
+                        waiver=s.get("ci_waiver"))
+        ci_state = judged["ci_state"]
         summary = {"result": result, "exit": code, "repo": a.repo, "pr": a.pr, "head": head,
                    "new_head": new_head, "ci": {"state": ci_state, **counts}, "codex": codex,
                    **judged, "codex_requested": rq["own"], "codex_request_note": request_note(s["codex_match"], result),
                    "since": s["since"], "since_source": s["since_source"], "errors": errors[-3:],
                    "elapsed_s": round(time.monotonic() - start, 1), "out": out}
+        if ci_state == "waived":
+            summary["merge_command"] = shlex.join(["bin/ci-waiver", "merge", str(a.pr), "--head", head, "--repo", a.repo])
         write_atomic(f"{out}-checks.json", checks)
         write_atomic(f"{out}-codex.json", None if a.no_codex else (s["codex_match"] or s["codex_newest"] or {}))
         write_atomic(f"{out}-findings.json", None if s["review"] is None else s["review"]["for_head"])
@@ -1651,6 +1836,8 @@ def main(argv: list[str]) -> int:
                                  f" - {adv.get('detail')}")
             parts.append("merge_ready: " + ("yes" if judged["merge_ready"]
                                             else "no (" + ", ".join(judged["merge_blockers"]) + ")"))
+            if ci_state == "waived":
+                parts.append("merge ONLY with " + summary["merge_command"])
             if new_head:
                 parts.append(f"new head {new_head[:12]}")
             if errors and code in (EXIT_TIMEOUT, EXIT_GH):
@@ -1836,6 +2023,7 @@ def main(argv: list[str]) -> int:
 
     while True:
         fails.clear()
+        s["ci_waiver"] = None  # Never reuse a waiver after a failed current-head/check fetch.
         codex_polled = False
         s["ci_done"], s["codex_done"] = False, a.no_codex  # both re-judged on every poll, never latched
         # Keep the document this poll fetched: the adversary verdict is judged from the CURRENT body
@@ -1852,12 +2040,20 @@ def main(argv: list[str]) -> int:
         if cur is not None and cur.lower() != head:
             return finish("head-moved", EXIT_MOVED, cur)
         if cur is not None:
+            s["adversary"] = adversary_from_doc(doc, head)
+            waiver = ci_waiver_marker(doc.get("body") or "")
+            if waiver["present"]:
+                waiver["classification"] = classify_ci_waiver(a.repo, a.pr)
             checks = attempt(fetch_checks, a.repo, head)
             if checks is not None:
+                s["ci_waiver"] = waiver
                 s["checks"] = checks
                 s["ci_done"] = not any(c["state"] == "pending" for c in checks) and bool(
                     checks or time.monotonic() - start >= a.ci_grace
                 )
+                waived, _ = waiver_gate(waiver, head, s["adversary"], ci_counts(checks))
+                if waived:
+                    s["ci_done"] = True
             if not a.no_codex:
                 comments = attempt(api_items, issue_comments)
                 if comments is not None:
