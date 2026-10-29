@@ -93,7 +93,6 @@ with `--expect-ack`:
 11. **A reply goes through relay.py** (2026-10-26): when a peer's text ends `[reply through relay.py to ID: ack X]`, answer with `relay.py <ID> "ack X"` and nothing else. A sender with no readable transcript is told its question was answered only by that relay call; an answer in prose, or through another channel, leaves its `--expect-ack` open until it goes OVERDUE. A Hermes conversation's reply counts the same way (relay reads the conversation from `HERMES_SESSION_ID` and the process tree); a relay run from a shell outside Hermes that only sets variables does not, unless a pid left in that conversation's lock file (kept at least 7 days after its last relayed turn, until a later relay into Hermes prunes it) or in `gateway.pid` now belongs to the shell or one of its ancestors (pid reuse; relay checks no liveness), but a same-user process that also writes that conversation's lock file or `~/.hermes/gateway.pid` can forge it (the same class as `HERDR_PANE_ID`).
 
 12. **Adopt finished senders' expectations explicitly** (2026-10-28): after the old session finishes, FIRST run
-13. **An ack 6 hours past due is assumed lost** (operator, 2026-10-28): `relay.py --sweep` prints `ASSUMED LOST` and `--pending --json` carries `"assumed_lost": true`. **Only for an expectation you opened** (its `sender` is you): re-route that work once to another owner or route, or do it in a claimed workspace, without asking the operator, and note the new owner or new `--expect-ack` ID in your own state so a successor does not re-route again. Another sender's row is theirs: leave it. The row stays `open` and is never called delivered, read or acked, and its state is never hand-edited. Earlier than 6 hours past due the sweep still says to tell the operator.
     `relay.py --transfer-expectations OLD_SENDER` (all open expectations), or
     `relay.py --transfer-expectations OLD_SENDER --id TOKEN --id TOKEN2` (selected tokens).
     Use the exact fleet id, full session id or Paseo id of one row carrying `finished`: Claude transcript `/handoff` or `/quit`,
@@ -107,6 +106,8 @@ with `--expect-ack`:
     the transfer offset is not counted. `--pending` shows the new owner and `--sweep` watches its transcript. Transfer sends
     nothing, preserves target/status/age, and never marks a queued notice delivered. Full contract: `session-finder/SKILL.md`,
     "Handoff transfer".
+
+13. **An ack 6 hours past due is assumed lost** (operator, 2026-10-28): `relay.py --sweep` prints `ASSUMED LOST` and `--pending --json` carries `"assumed_lost": true`. **Only for an expectation you opened** (its `sender` is you): re-route that work once to another owner or route, or do it in a claimed workspace, without asking the operator, and note the new owner or new `--expect-ack` ID in your own state so a successor does not re-route again. Another sender's row is theirs: leave it. The row stays `open` and is never called delivered, read or acked, and its state is never hand-edited. Earlier than 6 hours past due the sweep still says to tell the operator.
 
 Canonical copy: `~/src/djbclark-ade/skills/peer-relay/SKILL.md`. Hermes installs or links it into
 `~/.hermes/skills/` itself; the repo does not write that tree.
