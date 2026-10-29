@@ -198,13 +198,64 @@ def test_loop_with_a_failing_label_filter_never_touches_and_keeps_going(w: World
     assert w.mode_calls() == []
 
 
-@pytest.mark.parametrize("mode", ["plan", "acceptEdits", "auto", "someFutureMode"])
-def test_only_default_mode_is_acted_on(w: World, mode: str):
+@pytest.mark.parametrize("mode", ["default", "auto"])
+def test_default_and_auto_seats_are_flipped_once_and_verified(w: World, mode: str):
+    w.set_agents({"aaa-1": agent("promptable", mode=mode)})
+    r = w.run("--json")
+    assert r.returncode == 0, r.stderr
+    assert w.mode_calls() == ["agent mode aaa-1 bypassPermissions"]
+    assert w.mode_of("aaa-1") == "bypassPermissions"
+    assert json.loads(r.stdout.splitlines()[-1])["set"] == ["aaa-1"]
+    assert w.handled()["aaa-1"]["result"] == "set"
+    assert any(ln.startswith("agent inspect aaa-1") for ln in w.calls.read_text().splitlines())
+    assert w.run().returncode == 0
+    assert len(w.mode_calls()) == 1  # handled: never touched again
+
+
+@pytest.mark.parametrize("mode", ["plan", "acceptEdits", "bypassPermissions", "someFutureMode"])
+def test_only_default_and_auto_modes_are_acted_on(w: World, mode: str):
     w.set_agents({"aaa-1": agent("deliberate", mode=mode)})
     assert w.run().returncode == 0
     assert w.mode_calls() == []
     assert w.mode_of("aaa-1") == mode
     assert w.handled()["aaa-1"]["result"] == "recorded"
+
+
+def test_an_auto_seat_labelled_perm_ask_keeps_its_mode(w: World):
+    # The control seat proves the pass acts; the exemption must cover `auto` seats, not only `default` ones.
+    w.set_agents({"ask-auto": agent("asker", mode="auto"), "ctl-1": agent("control", mode="auto")},
+                 labels={"ask-auto": {"perm": "ask"}})
+    assert w.run().returncode == 0
+    assert w.mode_calls() == ["agent mode ctl-1 bypassPermissions"]
+    assert w.mode_of("ask-auto") == "auto"
+    assert w.handled()["ask-auto"]["result"] == "recorded"
+    assert "agent ls --label perm=ask --json" in w.calls.read_text().splitlines()
+
+
+def test_an_auto_seat_that_moves_to_plan_after_a_failed_set_sticks(w: World):
+    w.set_agents({"aaa-1": agent("slow", mode="auto")}, fail_mode=["aaa-1"])
+    assert w.run().returncode == 0
+    assert len(w.mode_calls()) == 1  # attempt 1 failed, the agent is queued for a retry
+    data = json.loads(w.fixture.read_text())
+    data["agents"]["aaa-1"]["mode"] = "plan"  # the operator's choice between two passes
+    data["fail_mode"] = []
+    w.fixture.write_text(json.dumps(data))
+    assert w.run().returncode == 0
+    assert len(w.mode_calls()) == 1  # the retry re-checked the mode and left plan alone
+    assert w.mode_of("aaa-1") == "plan"
+    assert w.handled()["aaa-1"]["result"] == "recorded"
+
+
+def test_a_failed_auto_set_is_retried_while_still_auto(w: World):
+    w.set_agents({"aaa-1": agent("slow", mode="auto")}, fail_mode=["aaa-1"])
+    assert w.run().returncode == 0
+    data = json.loads(w.fixture.read_text())
+    data["fail_mode"] = []
+    w.fixture.write_text(json.dumps(data))
+    assert w.run().returncode == 0
+    assert len(w.mode_calls()) == 2  # the retry still sees `auto` and acts
+    assert w.mode_of("aaa-1") == "bypassPermissions"
+    assert w.handled()["aaa-1"]["result"] == "set"
 
 
 def test_a_later_plan_sticks_even_after_a_failed_set(w: World):
@@ -336,38 +387,48 @@ def test_loop_reads_the_exemption_on_every_pass(w: World):
     assert w.mode_of("ask-1") == "default"
 
 
-def test_state_is_loaded_while_the_lock_is_held(tmp_path: Path, monkeypatch):
-    # Loading before locking lets two passes read the same state and lose one's records.
+def _lock_probe(lock_path: Path) -> bool:
+    """True when another fd cannot take the pass lock, i.e. the pass is holding it."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)  # a pass that skips the lock gets here with no directory yet
+    probe = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False  # we got it: the pass was not holding it
+        except BlockingIOError:
+            return True
+    finally:
+        os.close(probe)
+
+
+def test_state_is_loaded_and_saved_while_the_lock_is_held(tmp_path: Path, monkeypatch):
+    # Loading before locking lets two passes read the same state and lose one's records; saving after
+    # releasing lets a second pass load the old file and then overwrite this pass's records.
     loader = importlib.machinery.SourceFileLoader("paseo_bypass_watch_lock_under_test", str(SCRIPT))
     mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(mod)
     state_path = tmp_path / "s" / "state.json"
     lock_path = state_path.with_name(state_path.name + ".lock")
-    seen: list[bool] = []
-    real_load = mod.load_state
+    loads: list[bool] = []
+    saves: list[bool] = []
+    real_load, real_save = mod.load_state, mod.save_state
 
     def load_checking_the_lock(path):
-        lock_path.parent.mkdir(parents=True, exist_ok=True)  # load-before-lock gets here with no directory yet
-        probe = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            try:
-                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                seen.append(False)  # we got it: the pass was not holding it
-            except BlockingIOError:
-                seen.append(True)
-        finally:
-            os.close(probe)
+        loads.append(_lock_probe(lock_path))
         return real_load(path)
 
+    def save_checking_the_lock(path, state):
+        saves.append(_lock_probe(lock_path))
+        return real_save(path, state)
+
     monkeypatch.setattr(mod, "load_state", load_checking_the_lock)
+    monkeypatch.setattr(mod, "save_state", save_checking_the_lock)
     monkeypatch.setattr(mod, "one_pass", lambda state, max_age, dry_run: {"set": []})
     assert mod.run_pass(state_path, 120.0, False, False) is True
-    assert seen == [True]
-    probe = os.open(lock_path, os.O_RDWR)
-    try:
-        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released after the pass
-    finally:
-        os.close(probe)
+    assert loads == [True]
+    assert saves == [True]
+    assert state_path.exists()
+    assert _lock_probe(lock_path) is False  # released after the pass
 
 
 def test_archived_agent_is_untouched(w: World):

@@ -1,17 +1,21 @@
 #!/usr/bin/env -S python3 -I
-"""paseo-bypass-watch: put freshly created Paseo Claude agents that start in `default` into bypassPermissions. No model.
+"""paseo-bypass-watch: put freshly created Paseo Claude agents that start in `default` or `auto` into bypassPermissions. No model.
 
   paseo-bypass-watch [--once | --loop SECONDS] [--dry-run] [--state PATH] [--max-age SECONDS] [--json]
 
 Why (djbclark, home rule 16: every agent runs yolo): Paseo has no default-mode setting and no
 create-time hook, so a Claude seat opened from the Paseo UI or by a hand-typed `paseo agent run`
-starts in `default` ("Always Ask") and prompts. `bin/paseo-new-seat` covers seats we open ourselves;
-this watcher covers the rest by setting the mode shortly after creation.
+starts in `default` ("Always Ask") and prompts. This build's claude provider also advertises `auto`
+(the classifier mode) as its default and the UI may preselect it, so `auto` counts as a mode that
+can prompt. `bin/paseo-new-seat` covers seats we open ourselves; this watcher covers the rest by
+setting the mode shortly after creation.
 
-Latency, honestly: the flip lands roughly 6-15 s after creation (each paseo call starts an Electron
-helper, ~3 s), and `agent mode` does not answer a permission prompt that is already pending. A seat
-opened with an initial prompt can therefore still stall once, until someone answers that prompt.
-Prefer `--loop 10` or longer: a pass costs about one `agent ls` plus ~8 s per new agent.
+Latency, honestly: the flip lands roughly 10-25 s after creation under `--loop 10` (each paseo call
+starts an Electron helper, ~3 s), and `agent mode` does not answer a permission prompt that is
+already pending. A seat opened with an initial prompt can therefore still stall once, until someone
+answers that prompt.
+Prefer `--loop 10` or longer: a pass costs two `ls` calls (the plain list and `--label perm=ask`, ~3 s
+each) plus ~8 s per new agent.
 
 One pass:
   0. `$PASEO_CLI agent ls --json` (read-only). Items carry id, name, provider ("claude/<model>"),
@@ -29,19 +33,21 @@ One pass:
   2. For each agent whose provider is claude, whose status is not `closed`, whose id is not exempt
      and not in the state file, `$PASEO_CLI agent inspect ID --json` supplies Archived, Mode and
      CreatedAt (ISO).
-  3. An agent that is not archived, whose Mode is exactly `default` and which is younger than
+  3. An agent that is not archived, whose Mode is exactly `default` or `auto` and which is younger than
      --max-age (default 120 s) gets `$PASEO_CLI agent mode ID bypassPermissions`, a re-fetch and a
      check, and one stdout line `set ID name`; its id is then recorded as handled.
-  4. Any other unseen claude agent (too old, archived, closed, exempt, or in ANY mode but `default`)
-     is only recorded. The claude modes in this Paseo build are plan, default, acceptEdits, auto,
-     bypassPermissions; the watcher acts on `default` only, so a seat in `auto` (the classifier mode;
-     the UI may preselect it) is recorded untouched. Handled means never touched again: a mode the
+  4. Any other unseen claude agent (too old, archived, closed, exempt, or in ANY mode but
+     `default` and `auto`) is only recorded. The claude modes in this Paseo build are plan, default,
+     acceptEdits, auto, bypassPermissions; the watcher acts on `default` and `auto` (the classifier
+     mode the UI may preselect); plan, acceptEdits, bypassPermissions and any unknown mode are a
+     deliberate choice and stay untouched. Handled means never touched again: a mode the
      operator picks later (plan, say) sticks if it is picked after the watcher has acted, or more
-     than a few seconds (about one CLI start-up, ~3 s) before it acts. There is no compare-and-set:
-     a `plan` picked inside that window is overwritten and the seat is recorded `set`.
+     than a few seconds (about one CLI start-up, ~3 s) before it acts. There is no compare-and-set, for
+     an `auto` seat as for a `default` one: a `plan` picked inside that window is overwritten and the
+     seat is recorded `set`.
   5. A failing `agent mode` (or a re-fetch that still shows another mode) is logged to stderr and
      not recorded; it is retried on the next pass, 5 attempts in all, then recorded as failed. Each
-     retry inspects again and acts only while Mode is still `default`, whatever the age.
+     retry inspects again and acts only while Mode is still `default` or `auto`, whatever the age.
   Agents of any other provider are never touched and never recorded.
 
 One pass at a time: a pass holds flock(LOCK_EX|LOCK_NB) on `<state>.lock` from loading the state
@@ -83,7 +89,7 @@ from pathlib import Path
 
 DEFAULT_CLI = "/Applications/Paseo.app/Contents/Resources/bin/paseo"
 TARGET_MODE = "bypassPermissions"
-ACT_ON_MODE = "default"
+ACT_ON_MODES = frozenset({"default", "auto"})  # the modes that can prompt; every other mode is a deliberate choice
 MAX_ATTEMPTS = 5
 CALL_TIMEOUT = 60
 MIN_LOOP = 1.0
@@ -259,7 +265,7 @@ def one_pass(state: dict, max_age: float, dry_run: bool) -> dict:
         retrying = agent_id in attempts  # the set decision was taken on an earlier pass
         skip = (
             pick(info, "archived") is True
-            or pick(info, "mode") != ACT_ON_MODE  # plan, acceptEdits, auto, bypass...: a deliberate choice; retries re-check it too
+            or pick(info, "mode") not in ACT_ON_MODES  # plan, acceptEdits, bypass...: a deliberate choice; retries re-check it too
             or (not retrying and (age is None or age >= max_age))
         )
         if skip:
@@ -308,7 +314,7 @@ def run_pass(state_path: Path, max_age: float, dry_run: bool, as_json: bool) -> 
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="paseo-bypass-watch", description="Set new Paseo Claude agents to bypassPermissions.")
+    p = argparse.ArgumentParser(prog="paseo-bypass-watch", description="Set new Paseo Claude agents that start in default or auto mode to bypassPermissions.")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="one pass, then exit (default)")
     mode.add_argument("--loop", type=float, metavar="SECONDS", help=f"repeat every SECONDS (at least {MIN_LOOP:g}; 10 or more is kind to the Paseo CLI)")
