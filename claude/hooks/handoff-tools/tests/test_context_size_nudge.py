@@ -601,11 +601,15 @@ def test_zero_usage_error_stub_is_not_a_context_reading(hook, tmp_path):
     assert nudge._usage_from_line(_usage(0).encode()) is None
     path = _transcript(tmp_path, 100_000)
     hook("s-zero", path)
-    _append(path, _usage(0))  # "You've hit your session limit": zero usage, no growth
-    _append(path, _usage(105_000))
+    # "You've hit your session limit": the stub is the newest record when the next prompt
+    # arrives (the usual sequence: the user re-prompts after the reset)
+    _append(path, _usage(0))
     out, _ = hook("s-zero", path)
     assert out == ""
     assert hook.state()["s-zero"]["baseline"] == 100_000
+    _append(path, _usage(140_000))  # +40k of real growth, not 140k from a zero baseline
+    out, _ = hook("s-zero", path)
+    assert "Context is large" not in out and "still growing" not in out
 
 
 def test_page_once_at_plus_300k(hook, tmp_path):
