@@ -123,19 +123,30 @@ c7fbc11d ade-ops-pt 153k/267k (57%) wall in 114k
 
 It exists because `paseo inspect` carries no context fields and Paseo's own bar divides by a 1M
 window and ignores `autoCompactWindow` (upstream getpaseo/paseo#4949, open 2026-10-28). Flags:
-`--json` (list of records for scripts), `--min-pct N` (hide emptier agents and unknown sizes),
-`--source auto|paseo|recent`, `--recent-minutes M`. Read-only, exit 0 always (2 for bad usage). It is
+`--json` (list of records for scripts), `--min-pct N` (hide emptier agents and unknown sizes; compared
+unrounded), `--source auto|paseo|recent`, `--recent-minutes M` (both numbers finite and not negative,
+else exit 2). Read-only, writes not even bytecode, exit 0 always (2 for bad usage). Titles and cwd go
+through `fleet.py`'s `clean_text` onto one line; ids must be uuids. It is
 not wired into `fleet-watch` or `settings.json`.
 
 1. **Tokens.** The newest non-sidechain assistant usage block of the session transcript,
    `input + cache_read + cache_creation`: `_last_context_tokens` of
    `claude/hooks/context_size_nudge.py`, imported from the same checkout, so the nudge hook and this
    readout read one number. A transcript whose newest record is a `compact_boundary` prints
-   `compacted` (no request since); an unreadable one prints `?`.
-2. **Ceiling.** `autoCompactWindow` from `~/.claude/settings.json` (300,000 today) minus the 33,000
-   autocompact buffer: 267,000. With no such setting, the model window (1M when `model` carries
-   `[1m]`, else 200k) minus 33,000. Project settings are not read.
-3. **Which agents.** `paseo ls --json` supplies the agent ids and titles for every `claude...`
+   `compacted` (no request since); an unreadable one prints `?`. Only the last 2 MB of the transcript is
+   read (the hook's limit): an agent whose newest usage block is further back (one turn of huge tool
+   output) prints `?` although the transcript is fine.
+2. **Ceiling, per agent.** The agent's window minus the hook's `AUTO_COMPACT_BUFFER` (33,000,
+   imported). Window = min(configured, model window). Configured: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+   of the `context-watch` process (assumed to beat settings), else `modelSettings[<model>].autoCompactWindow`,
+   else `autoCompactWindow` of `~/.claude/settings.json` (300,000 today, so 267,000); `"auto"` counts as
+   unset. Model window: 1M for a `[1m]` id, 200k for Haiku (Claude Code caps the window at the model's),
+   unknown for any other id; the model comes from the provider string (`claude/<model>`), else the
+   transcript's newest assistant record. With neither: 1M when settings `model` carries `[1m]`, else
+   200k (a guess). Not read, because unknowable from outside: the agent's own env, project settings,
+   `--autocompact`. The nudge hook hard-codes its own 300,000 window; only the buffer is shared, so
+   the two disagree if the setting changes.
+3. **Which agents.** `paseo ls -g --background --json` supplies the agent ids and titles for every `claude...`
    provider; it carries no session id, so the session is `persistence.sessionId` in
    `~/.paseo/agents/*/<agent id>.json` and the transcript is `~/.claude/projects/*/<sessionId>.jsonl`.
    An agent with no state file prints `?`: the newest transcript of its cwd is not guessed because

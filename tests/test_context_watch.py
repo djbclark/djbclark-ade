@@ -58,18 +58,19 @@ class Box:
                 "id": agent_id, "provider": provider.split("/")[0], "cwd": "/Users/x/src/proj",
                 "title": title, "persistence": {"sessionId": session}}))
 
-    def run(self, *args):
-        body = "#!/bin/sh\n"
+    def run(self, *args, env=None, input=""):
+        body = f"#!/bin/sh\necho \"$@\" > '{self.fake.parent / 'argv.txt'}'\ncat > '{self.fake.parent / 'stdin.txt'}'\n"
         if self.ls_fails:
             body += "echo 'daemon down' >&2\nexit 1\n"
         else:
             body += f"cat <<'EOF'\n{json.dumps(self.ls)}\nEOF\n"
         self.fake.write_text(body)
         self.fake.chmod(0o755)
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("PASEO", "CONTEXT_WATCH", "CLAUDE"))}
-        env.update(HOME=str(self.home), PASEO_HOME=str(self.paseo_home), CONTEXT_WATCH_PASEO=str(self.fake))
-        r = subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True, env=env, timeout=30)
-        return r
+        e = {k: v for k, v in os.environ.items() if not k.startswith(("PASEO", "CONTEXT_WATCH", "CLAUDE"))}
+        e.update(HOME=str(self.home), PASEO_HOME=str(self.paseo_home), CONTEXT_WATCH_PASEO=str(self.fake))
+        e.update(env or {})
+        return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True, env=e,
+                              timeout=30, input=input)
 
 
 @pytest.fixture()
@@ -142,7 +143,7 @@ def test_min_pct_hides_the_emptier_agents_and_unknown_ones(box):
 
 def test_unreadable_transcript_prints_question_mark_and_exits_0(box):
     two_agents(box)
-    box.agent(ID_C, "gone", "no-such-session")
+    box.agent(ID_C, "gone", "dead0000-0000-4000-8000-00000000000d")
     box.transcript("cafe0000-0000-4000-8000-00000000000c", [], raw="not json\n\x00\xff garbage\n")
     box.agent("dddddddd-4444-4444-8444-444444444444", "garbled", "cafe0000-0000-4000-8000-00000000000c")
     r = box.run()
@@ -200,3 +201,167 @@ def test_recent_mode_can_be_forced(box):
 def test_nothing_running_prints_nothing_and_exits_0(box):
     r = box.run()
     assert (r.returncode, r.stdout) == (0, "")
+
+
+# --- repair round (adversary BLOCK on 5ff68da, 2026-10-28) ---
+
+EVIL = "x\x1b]52;c;cHduZWQ=\x07\x1b[2J\nFAKE 0k/267k (0%) wall in 267k"
+
+
+def test_agent_title_with_escapes_and_a_newline_prints_as_one_clean_line(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, EVIL, SESS_A)
+    box.transcript(SESS_A, [assistant(1, 100000, 0)])
+    out = box.run().stdout
+    assert out == "aaaaaaaa x FAKE 0k/267k (0%) wall in 267k 100k/267k (37%) wall in 167k\n"
+    assert not any(ord(c) < 32 for c in out[:-1])
+
+
+def test_recent_mode_cwd_with_escapes_prints_clean(box):
+    box.settings(autoCompactWindow=300000)
+    box.ls_fails = True
+    box.transcript(SESS_A, [json.dumps({"cwd": "/tmp/\x1b]0;pwned\x07dir\nFAKE"}), assistant(1, 100000, 0)], age=10)
+    out = box.run().stdout
+    assert out == "5e5a0000 dir FAKE 100k/267k (37%) wall in 167k\n"
+    assert not any(ord(c) < 32 for c in out[:-1])
+
+
+def ceiling_of(box, *args, **kw):
+    return json.loads(box.run("--json", *args, **kw).stdout)[0]["ceiling"]
+
+
+def test_a_200k_model_agent_has_a_167k_ceiling_even_with_a_300k_setting(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "small", SESS_A, provider="claude/claude-haiku-5-5")
+    box.agent(ID_B, "big", SESS_B)
+    box.transcript(SESS_A, [assistant(1, 100000, 0)])
+    box.transcript(SESS_B, [assistant(1, 100000, 0)])
+    got = {r["id"]: r["ceiling"] for r in json.loads(box.run("--json").stdout)}
+    assert got == {ID_A: 167000, ID_B: 267000}
+
+
+def test_per_model_autocompactwindow_beats_the_top_level_one(box):
+    box.settings(autoCompactWindow=300000, modelSettings={"claude-sonnet-5-5": {"autoCompactWindow": 100000}})
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 50000, 0)])
+    assert ceiling_of(box) == 67000
+
+
+def test_auto_window_falls_back_to_the_model_default(box):
+    box.settings(autoCompactWindow="auto", model="opus[1m]")
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 50000, 0)])
+    assert ceiling_of(box) == 967000
+
+
+def test_env_window_overrides_settings(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 50000, 0)])
+    assert ceiling_of(box, env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "150000"}) == 117000
+
+
+def test_recent_mode_uses_the_transcripts_model_for_the_ceiling(box):
+    box.settings(autoCompactWindow=300000)
+    box.ls_fails = True
+    box.transcript(SESS_A, [assistant(1, 50000, 0).replace("claude-sonnet-5-5", "claude-haiku-5-5")], age=10)
+    assert ceiling_of(box) == 167000
+
+
+def test_session_id_that_is_not_a_uuid_is_never_looked_up(box):
+    box.settings(autoCompactWindow=300000)
+    secret = box.home / "outside"
+    secret.mkdir()
+    (secret / "secret.jsonl").write_text(assistant(1, 123456, 0) + "\n")
+    box.agent(ID_A, "x", "../../../outside/secret")
+    (row,) = json.loads(box.run("--json").stdout)
+    assert row["status"] == "no-session" and row["tokens"] is None and row["transcript"] is None
+
+
+def test_agent_id_that_is_not_a_uuid_is_skipped(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent("../../../../evil", "x", SESS_A, state=False)
+    (box.home / "evil.json").write_text(json.dumps({"persistence": {"sessionId": SESS_A}}))
+    box.transcript(SESS_A, [assistant(1, 1000, 0)])
+    assert json.loads(box.run("--json").stdout) == []
+
+
+def test_paseo_ls_includes_background_agents_and_stdin_is_closed(box):
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 1000, 0)])
+    box.run("--json", input="junk\n")
+    assert (box.fake.parent / "argv.txt").read_text().split() == ["ls", "-g", "--background", "--json"]
+    assert (box.fake.parent / "stdin.txt").read_text() == ""
+
+
+@pytest.mark.parametrize("args", [
+    ("--recent-minutes", "nan"), ("--recent-minutes", "inf"), ("--recent-minutes", "-1"),
+    ("--min-pct", "nan"), ("--min-pct", "-5"), ("--min-pct", "inf")])
+def test_nonsense_numbers_are_bad_usage(box, args):
+    r = box.run(*args)
+    assert r.returncode == 2 and r.stdout == ""
+
+
+def test_vanished_transcript_is_not_a_traceback(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "x", SESS_A)
+    d = box.home / ".claude" / "projects" / "-gone"
+    d.mkdir()
+    (d / f"{SESS_A}.jsonl").symlink_to(box.home / "nowhere.jsonl")  # glob lists it, stat fails
+    r = box.run()
+    assert r.returncode == 0 and r.stderr == "" and r.stdout == "aaaaaaaa x ?\n"
+
+
+def test_home_with_glob_magic_still_works(box, tmp_path):
+    weird = tmp_path / "ho[me]"
+    box.home.rename(weird)
+    box.home = weird
+    box.paseo_home = weird / ".paseo"
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 100000, 0)])
+    assert box.run().stdout == "aaaaaaaa x 100k/267k (37%) wall in 167k\n"
+
+
+def test_the_same_agent_under_two_workspaces_resolves_deterministically(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "x", SESS_A, state=False)
+    for ws, sess in (("zzz", SESS_B), ("aaa", SESS_A)):
+        d = box.paseo_home / "agents" / ws
+        d.mkdir(parents=True)
+        (d / f"{ID_A}.json").write_text(json.dumps({"persistence": {"sessionId": sess}}))
+    assert json.loads(box.run("--json").stdout)[0]["session"] == SESS_A
+
+
+def test_nothing_is_written_not_even_bytecode(box, tmp_path):
+    prefix = tmp_path / "pyc"
+    box.run(env={"PYTHONPYCACHEPREFIX": str(prefix), "PYTHONDONTWRITEBYTECODE": ""})
+    ours = ("context_size_nudge", "fleet", "where", "nested_pty")  # the stdlib's own bytecode is not ours
+    assert [p for p in prefix.rglob("*.pyc") if p.name.split(".")[0] in ours] == []
+
+
+def test_headroom_under_1k_is_not_shown_as_0k(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 266799, 0)])
+    assert box.run().stdout == "aaaaaaaa x 267k/267k (100%) wall in <1k\n"
+    box.transcript(SESS_A, [assistant(1, 267300, 0)])
+    assert box.run().stdout == "aaaaaaaa x 267k/267k (100%) wall passed by <1k\n"
+
+
+def test_min_pct_compares_the_unrounded_percentage(box):
+    box.settings(autoCompactWindow=100000)
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 33472, 0)])  # 33473/67000 = 49.96%, displays as 50.0
+    assert box.run("--min-pct", "50").stdout == ""
+    assert box.run("--min-pct", "49.9").stdout != ""
+
+
+def test_source_paseo_failure_prints_nothing_and_says_why_on_stderr(box):
+    box.settings(autoCompactWindow=300000)
+    box.ls_fails = True
+    box.transcript(SESS_A, [assistant(1, 100000, 0)], age=10)  # recent mode would list it
+    r = box.run("--source", "paseo")
+    assert (r.returncode, r.stdout) == (0, "")
+    assert "paseo ls exited 1" in r.stderr
+    assert box.run("--source", "paseo", "--json").stdout == "[]\n"
