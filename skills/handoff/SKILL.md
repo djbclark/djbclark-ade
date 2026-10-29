@@ -429,7 +429,7 @@ session, and `/handoff paseo` when this session is the one being handed on:
   --prompt "/baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md"
 ```
 
-The `wks_` id is `workspaceId` in `~/.paseo/agents/*/<your agent id>.json`. Exit 4 with `"mode":"bypassPermissions","modeApplied":true`
+The `wks_` id is `workspaceId` in `$PASEO_HOME/agents/*/<your agent id>.json` (`~/.paseo` when unset). Exit 4 with `"mode":"bypassPermissions","modeApplied":true`
 is fine for claude (the shield is for auto-accept; this mode is already yolo). Verify as above, and `paseo logs <new id>` shows the
 `/baton` was read. Skip Step 8's autorename for a partial handoff: it would rename the session the operator keeps using.
 

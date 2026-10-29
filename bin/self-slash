@@ -50,8 +50,9 @@
 # handoff must be able to continue on another model without anyone typing): instead of a bare
 # archive, the waiter (1) waits for this agent to be idle, (2) reads its name, mode and cwd
 # (`paseo agent inspect`) and its workspace id (`paseo workspace ls --json`, matched by cwd;
-# SELF_SLASH_WORKSPACE overrides; when several workspaces share the cwd, this agent's own Paseo
-# state file names its workspace), (3) starts
+# SELF_SLASH_WORKSPACE overrides; when several workspaces share the cwd, the workspaceId in this
+# agent's own Paseo state file places the successor if it is one of them, else the single foreground
+# one does, else it is refused), (3) starts
 # the successor with `paseo run "/baton" --provider P/M --thinking T --mode MODE --workspace W
 # --cwd C --title T --no-wait` (defaults: this agent's mode, --thinking high, title
 # "<old name> → <model>"), (4) polls it (SELF_SLASH_SUCCESSOR_SETTLE seconds, default 20) and needs
