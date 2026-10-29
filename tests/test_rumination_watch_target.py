@@ -133,3 +133,132 @@ def test_a_real_relay_failure_is_not_dressed_up_as_anything_else(monkeypatch, tm
     relay.write_text("")
     monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (1, "relay: no session(s) match 'd2a505dd'"))
     assert rw.to_session("one open loop") == "FAILED"
+
+
+# --- "busy" is three things and only one of them is healthy -------------------------------------
+#
+# Until now every refusal read as `skipped`. A seat parked on a question card only djbclark can
+# answer, and a seat wedged with nothing new for 15 minutes, both logged the healthy word while the
+# entity was dark — the watcher would have said "fine" all the way through an outage. `relay.py
+# --why` knows the difference, so the watcher asks.
+
+def fake_relay(tmp_path):
+    """The relay must EXIST, or to_session gives up before it ever asks why (`unreachable`)."""
+    relay = tmp_path / "src/djbclark-ade/skills/session-finder/relay.py"
+    relay.parent.mkdir(parents=True, exist_ok=True)
+    relay.write_text("")
+    return relay
+
+
+def refusal(*, why_json: str | None, send: str = "busy") -> object:
+    """A `run` stand-in: the send is refused, and --why answers WHY_JSON (None = unreadable)."""
+    def fake_run(cmd, timeout=20):
+        if "--why" in cmd:
+            return (1, why_json) if why_json is not None else (1, "Traceback: no such option")
+        return (1, "relay: [x] not sent: that session is busy and cannot take it now")
+    return fake_run
+
+
+def test_a_question_card_is_not_called_healthy(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    relay = tmp_path / "src/djbclark-ade/skills/session-finder/relay.py"
+    relay.parent.mkdir(parents=True)
+    relay.write_text("")
+    monkeypatch.setattr(rw, "run", refusal(why_json=json.dumps(
+        {"state": "card:question", "why": "blocked on AskUserQuestion", "deliverable": False})))
+    assert rw.to_session("one open loop") == "card:question"
+    assert ": card:question" in rw.LOG.read_text()
+
+
+def test_a_seat_mid_turn_stays_healthy_and_is_never_paged(monkeypatch, tmp_path):
+    """`working` is the normal case. It must not accumulate a streak, let alone a message to him."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [{"name": "j", "done_exists": False}],
+                                                "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "run", refusal(why_json=json.dumps(
+        {"state": "working", "why": "working: it takes the text when its turn ends", "deliverable": False})))
+    a = rw.argparse.Namespace(dry_run=False, quiet=True)
+    for _ in range(6):
+        assert rw.to_session("x") == "working"
+        rw._pass(a)
+    assert told == []
+
+
+def test_a_seat_parked_on_a_card_pages_him_once_it_repeats(monkeypatch, tmp_path):
+    """Three passes, not one: a single refusal is a turn boundary. Then he hears about it, once."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 3)
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["a"], "jobs": [], "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "run", refusal(why_json=json.dumps(
+        {"state": "card:permission", "why": "blocked on a permission prompt", "deliverable": False})))
+    a = rw.argparse.Namespace(dry_run=False, quiet=True)
+    rw._pass(a)
+    rw._pass(a)
+    assert told == [], "two passes is a turn boundary, not an outage"
+    rw._pass(a)
+    assert len(told) == 1 and "permission" in told[0]
+    rw._pass(a)
+    assert len(told) == 1, "the cooldown must stop it becoming a 5-minute drumbeat"
+
+
+def test_a_hung_turn_is_paged_too(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 1)
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["a"], "jobs": [], "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "run", refusal(why_json=json.dumps(
+        {"state": "silent", "why": "running, but nothing new for 22 min", "deliverable": False})))
+    rw._pass(rw.argparse.Namespace(dry_run=False, quiet=True))
+    assert len(told) == 1 and "hung" in told[0]
+
+
+def test_an_unreadable_why_pages_nobody(monkeypatch, tmp_path):
+    """A blind probe must never page him: it guesses `skipped`, which is not an outage."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 1)
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["a"], "jobs": [], "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "run", refusal(why_json=None))
+    assert rw.to_session("x") == "skipped"
+    rw._pass(rw.argparse.Namespace(dry_run=False, quiet=True))
+    assert told == []
+
+
+def test_a_delivered_pass_clears_the_streak(monkeypatch, tmp_path):
+    """One good pass means the seat is alive: the count restarts, so an old streak cannot page him."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 2)
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["a"], "jobs": [], "prs": [], "stale": None})
+    stuck = refusal(why_json=json.dumps({"state": "card:question", "why": "blocked", "deliverable": False}))
+    a = rw.argparse.Namespace(dry_run=False, quiet=True)
+    monkeypatch.setattr(rw, "run", stuck)
+    rw._pass(a)                                   # streak 1
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (0, "relay: delivered to d2a505dd"))
+    rw._pass(a)                                   # delivered: streak cleared
+    monkeypatch.setattr(rw, "run", stuck)
+    rw._pass(a)                                   # streak 1 again, not 3
+    assert told == []

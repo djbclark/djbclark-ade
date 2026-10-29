@@ -297,12 +297,44 @@ def owner_session() -> tuple[str, str]:
     return "", (f"no live session for {ROLE!r} (registry/peer_mail gave {first or 'nothing'})")
 
 
+def why_blocked(ident: str) -> tuple[str, str]:
+    """(state, why) for a target that just refused the line: `relay.py --why <id> --json`.
+
+    "Busy" is three different things and only one of them is healthy (refinement of the same djbclark
+    rule the `--why` flag itself came from, 2026-10-29 "be able to tell why a message can't be
+    delivered yet (eg picklist vs tab hung etc)"):
+
+    - `working` — mid-turn. Healthy; the entity is listening to its own work, not dark.
+    - `card:question|permission|plan` — waiting on a HUMAN. The seat is dark by construction, and it
+      stays dark until someone answers. Exactly the silence this watcher exists to prevent.
+    - `silent` — running with nothing new for 15 min: a hung turn.
+
+    Anything unreadable comes back as ("unknown", reason) and the caller keeps its old behaviour, so
+    a broken `--why` can never turn a healthy pass into a false alarm.
+    """
+    relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
+    if not relay.is_file():
+        return "unknown", f"no relay.py at {relay}"
+    rc, out = run(["python3", "-I", str(relay), "--why", ident, "--json"], timeout=90)
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return "unknown", f"unreadable --why (rc {rc}): {out[:160]}"
+    if not isinstance(d, dict) or not d.get("state"):
+        return "unknown", f"no state in --why (rc {rc}): {out[:160]}"
+    return str(d["state"]), str(d.get("why") or "")
+
+
 def to_session(text: str) -> str:
     """One line into the owner session; returns the OUTCOME, not a bare bool.
 
-    `delivered`, `queued`, `skipped` (target busy), `unreachable` (no live session) or `FAILED`. The
-    caller logs it and `cmd_pass` decides what a failure means; a bool could not tell "the seat is
-    gone" from "the seat is working", and that distinction is the whole point of the change.
+    `delivered`, `queued`, `working` (mid-turn, healthy), `card:<kind>` (waiting on a human),
+    `silent` (a hung turn), `unreachable` (no live session) or `FAILED`. The caller logs it and
+    `cmd_pass` decides what a failure means; a bool could not tell "the seat is gone" from "the seat
+    is working", and that distinction is the whole point of the change. The three busy words come
+    from `why_blocked`: a seat parked on an unanswered prompt and a seat that is quietly wedged both
+    used to read as the single healthy word `skipped`, which is the entity going dark while the
+    watcher says everything is fine.
 
     NO `--idle`. It looks right and is wrong: `--idle S` BLOCKS the deferral (relay.py's defer_wanted
     requires `a.idle is None`), so a target that is busy when the wait expires gets a refusal and no
@@ -310,11 +342,9 @@ def to_session(text: str) -> str:
 
     What actually happens without it, proven under a real launchd job: an idle target takes the line
     now (`delivered`); a busy one is REFUSED and cannot be deferred, because deferral needs an
-    identifiable sender and a launchd job has no Paseo id and no fleet `self` row. That is not a
-    failure — a busy agent is listening to its own turn, not dark — so it is `skipped` rather than
-    retried into a void. A session running this by hand (`RW_SESSION` set) does get the queued path,
-    since it has an identity. The outcome is LOGGED either way: a silently mute loudspeaker is the
-    failure this whole script exists to prevent.
+    identifiable sender and a launchd job has no Paseo id and no fleet `self` row. A session running
+    this by hand (`RW_SESSION` set) does get the queued path, since it has an identity. The outcome is
+    LOGGED either way: a silently mute loudspeaker is the failure this whole script exists to prevent.
     """
     ident, why = owner_session()
     if not ident:
@@ -329,8 +359,11 @@ def to_session(text: str) -> str:
         word = "queued" if out.startswith("queued") else "delivered"
     elif "cannot take it now" in out or "is busy" in out:
         # Not a failure to hide: a launchd job has no sender identity, so relay.py will not defer for
-        # us, and a busy target is not a dark one. Say so plainly in the log.
-        word = "skipped"
+        # us. WHICH refusal it is decides whether the seat is dark, so ask (see `why_blocked`).
+        state, detail = why_blocked(ident)
+        word = state if state.startswith("card:") or state in ("working", "silent") else "skipped"
+        if detail:
+            out = f"{word}: {detail}"
     else:
         word = "FAILED"
     log(f"relay to {ident[:8]} (via {why}): {word}" + (f" rc={rc}: {out[:200]}" if rc else ""))
@@ -359,6 +392,52 @@ def should_tell_djbclark(item: str, state: dict, now: float) -> bool:
         return False
     seen[item] = now
     return True
+
+
+# A refused pass is a turn boundary, not an outage: the seat is usually mid-work. Only the two words
+# that mean "this will not end by itself" are darkness, and only after they repeat this many passes.
+SEAT_STUCK_PASSES = int(os.environ.get("RW_STUCK_PASSES", 3))
+
+DARK_MEANING = {
+    "card:question": "a question card is waiting for an answer, so it cannot take text",
+    "card:plan": "a plan card is waiting for approval, so it cannot take text",
+    "card:permission": "a permission prompt is waiting, so it cannot take text",
+    "silent": "it is running with nothing new and is not taking text: a hung turn",
+}
+
+
+def seat_dark(word: str) -> str:
+    """The darkness class of a to_session outcome, or '' when the seat is fine.
+
+    `working` and `skipped`-for-unknown-reason are NOT darkness: one is a seat doing its job, the
+    other is a `--why` that could not be read, and guessing from a blind probe would page him for
+    nothing. `unreachable` is already paged by its own branch in `cmd_pass`.
+    """
+    if word in DARK_MEANING:
+        return word
+    return ""
+
+
+def escalate_dark(word: str, ident: str, state: dict, now: float) -> str:
+    """The message to send him about a dark seat, or "" when there is nothing to say yet.
+
+    A refusal is not automatically darkness: `working` is a healthy seat mid-turn. But a seat parked
+    on a prompt only a human can answer, or wedged with nothing new for 15 min, will not come back on
+    its own — and the watcher is the only thing on this machine that can see it. One message per
+    class per cooldown, and only once the state REPEATS: one dark pass is a turn boundary.
+    """
+    dark = seat_dark(word)
+    if not dark:
+        state["stuck"] = {}          # the channel worked or the seat is healthy: no streak to keep
+        return ""
+    streak = state.setdefault("stuck", {})
+    key = f"{(ident or '?')[:8]}:{dark}"
+    streak[key] = int(streak.get(key, 0)) + 1
+    if streak[key] < SEAT_STUCK_PASSES or not should_tell_djbclark(f"seat {dark}", state, now):
+        return ""
+    return (f"Dann: the {ROLE} seat has been unreachable for {streak[key]} passes in a row "
+            f"({DARK_MEANING.get(dark, dark)}). It is not working on anything you can see. Answer "
+            "the prompt (helm.py) or start a seat; it picks up from its own state, not from scratch.")
 
 
 # --- commands -----------------------------------------------------------------------------------
@@ -445,6 +524,10 @@ def _pass(a: argparse.Namespace) -> int:
         summary = "rumination: " + "; ".join(lines)
         # Already resolved above: a second resolution would repeat the lookup (and its log line).
         spoke_session = to_session(summary) if ident else "unreachable"
+        dark_msg = escalate_dark(spoke_session, ident, state, now)
+        if dark_msg:
+            spoke_djb = to_djbclark(dark_msg) or spoke_djb
+            log(f"seat {spoke_session}: told djbclark={spoke_djb}")
         # Only items needing HIS decision go to the quiet topic, and at most once per cooldown.
         needs_him = []
         if cur["stale"]:
@@ -456,7 +539,15 @@ def _pass(a: argparse.Namespace) -> int:
                 spoke_djb = to_djbclark(f"Dann: {item}") or spoke_djb
         log(f"spoke session={spoke_session or 'none'} djbclark={spoke_djb}: {summary}")
     else:
-        log("quiet (nothing new)")
+        # A QUIET pass still has to notice a wedged seat. Without this probe, darkness is only ever
+        # seen on a pass that had something to say, and a seat that stops working stops producing
+        # changes — so the passes go quiet one after another and the outage reads as "nothing new"
+        # all the way through. One `paseo agent inspect` per 5 minutes is the price of noticing.
+        word = why_blocked(ident)[0] if ident else ""
+        dark_msg = escalate_dark(word, ident, state, now) if word else ""
+        if dark_msg:
+            spoke_djb = to_djbclark(dark_msg) or spoke_djb
+        log("quiet (nothing new)" + (f"; seat {word}" if seat_dark(word) else ""))
 
     save_state(state)
     if lines:
