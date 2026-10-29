@@ -257,7 +257,10 @@ def main(argv: list[str]) -> int:
             if add.returncode != 0:
                 raise RuntimeError(f"git worktree add failed: {add.stderr.strip()[:200]}")
             worktree_added = True
-            doc_out["codex_version"] = (run(["codex", "--version"], timeout=20).stdout.strip().splitlines() or [""])[0][:80]
+            try:
+                doc_out["codex_version"] = (run(["codex", "--version"], timeout=20).stdout.strip().splitlines() or [""])[0][:80]
+            except FileNotFoundError:
+                raise RuntimeError("codex is not installed (no `codex` on PATH)") from None
             doc_out.update(review(wt, root, base, base_sha, out_path, err_path, a.timeout, head))
         except Interrupted as e:
             doc_out["reason"] = str(e)
