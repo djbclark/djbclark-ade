@@ -860,6 +860,7 @@ def test_ci_waiver_r8_revert_command(history):
     history.publish()
     history.git("remote", "add", "origin", str(history.upstream))
     lines = mod["revert_instructions"]("r/p", 1, commit).splitlines()
+    assert "-m1" in shlex.split(lines[4])
     for line in lines[1:5]:
         command = shlex.split(line, comments=True)
         history.git(*command[1:])
