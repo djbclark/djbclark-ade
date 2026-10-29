@@ -44,6 +44,19 @@ commit flow:
   handoff created now. If ambiguous, ask.
 - Not in plan mode.
 
+## `/handoff paseo` routes to a durable Paseo transfer (operator, 2026-10-27)
+
+When the arguments begin with the word `paseo` (`/handoff paseo`, `$handoff paseo`, "handoff to paseo"), this skill still writes the
+owned Tier 2 document and Tier 1 pointer (Steps 1-7, below), then **does not run Step 9's same-session `/new`**: it continues with
+the **paseo-handoff** skill's durable-transfer procedure (existing suitable workspace and a new real tab, live launch settings,
+verified startup, explicit chain pointer, successor-owned peer notices with delivery proof, carried queued/blocked receipts). Plain
+`/handoff` keeps the behaviour below unchanged. In Plan Mode `/handoff paseo` mutates nothing: it says that mode is the blocker,
+keeps the destination, and resumes on the operator's "go" after Default mode returns, without asking again.
+
+The Tier 2 document of a `paseo` handoff carries the **durable peer list** (each peer's id, title, workspace, the relay record ID and
+status of every notice already sent, and the ack token each was asked for) so the successor can adopt it; see paseo-handoff,
+"Peer notices belong to the successor".
+
 ## Step 0 — Run the `loose` sweep silently first (operator rule, 2026-10-08)
 
 Before Step 1, run the `loose` skill's Rule 2 sweep **for your own eyes
