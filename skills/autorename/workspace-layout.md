@@ -20,13 +20,19 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
    [Configured workspaces](#configured-workspaces-and-their-order). A project
    that is not configured gets its own workspace only when it has two or more
    tabs or a tab with several panes (subagents); a lone single-pane tab goes
-   in the configured catch-all (`one-offs`) instead.
+   in the configured catch-all (`one-offs`) instead, except where the
+   [Postscript](#postscript-tabs-that-match-no-configured-hint) says `remote`
+   or `agents`, or where principle 13 says `monitor`.
 2. **Tab = one unit of work, labelled `<topic>-t`; its pane `<topic>-p`;
    the agent in it bare `<topic>`** (the convention in
-   `memory/feedback_herdr_tab_pane_naming_convention.md`). `<topic>` is the
-   session's subject, taken from the session itself (first user message,
-   handoff, sleeper journal entry), never from the old label: labels drift
-   and were found rotated relative to their panes.
+   `memory/feedback_herdr_tab_pane_naming_convention.md`). On the
+   single-session `/autorename` path, `<topic>` is the session's subject,
+   taken from the session itself (first user message, handoff, sleeper
+   journal entry), not from a stale label. A full pass (`/autorename all`)
+   does not follow that. It places by the current tab label (principle 12),
+   keeps every tab label that is not a single digit, and keeps every pane
+   label that already has a name. A single-digit tab is named from its
+   screen, then placed by that new name.
 3. **A plain shell is labelled by its directory**: `<dir>-shell-t` /
    `<dir>-shell-p` (`home-shell-t`, `extrabar-shell-t`). It lives in the
    workspace of the project the directory belongs to; a leftover `shells`
@@ -42,20 +48,47 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
    moved out of, not deleted; `pane move --new-tab` closes the *source* tab for you
    (and a workspace closes itself once its last tab is gone). The one closure
    the pass adds: the default shell tab that `workspace create` makes in a
-   workspace the pass itself just created, when `pane read` shows it untouched
-   (a bare prompt); a shell with any history is relabelled and kept.
-7. **Do not move your own pane.** Moving the pane you run in gives it a new
-   pane id mid-session and can cut your own control channel; leave it where
-   it is and say so in the report.
+   workspace the pass itself just created, and only after at least one real
+   tab is already in it. Close it when a second `pane read` shows it
+   untouched: the shell startup warning plus a prompt that ends in `$`, `%`,
+   or `#`, even when the cwd is a project directory. An empty `pane read`
+   means the read missed; read it again before keeping the tab. A shell with
+   any history stays. Rename its tab only when the label is a single digit.
+7. **Do not move your own pane** during ordinary placement. Moving it gives
+   it a new pane id mid-session. The one exception is putting a new configured
+   workspace above the one you are in. Herdr's order is creation order, so
+   the later workspaces, including yours, have to be recreated. Move your
+   pane once, using an id read immediately before that move, and confirm the
+   old id still resolves to the new pane. Do not move it again in the same
+   pass. Say so in the report.
 8. **There is no reorder command; order is creation order.** Rename in place
    when the order is already right; otherwise follow the ordering method below.
 9. **Helm tabs are placed, not left alone** (operator, 2026-10-09): they go to
    the `helm` workspace like any other topic, moved with `--no-focus`; the agent
    survives the move. Only the `coord` panes (bigteam's) are never touched.
 10. **Paseo** (2026-10-24): one top-level agent per Paseo workspace (`<topic>-pw`). Its tab and each worker's tab are
-   `<name>-pt`, at most 17 characters with the suffix (shortener: `autorename.py paseo_tab_name`). Workers and adversary
-   rounds are sub-agent tabs in the lead's workspace, not new workspaces. Closing a top-level agent's tab archives the
-   agent; only `self-slash --finish` (or a `herdr-tidy` close of its herdr host pane) closes one.
+    `<name>-pt`, at most 17 characters with the suffix (shortener: `autorename.py paseo_tab_name`). Workers and adversary
+    rounds are sub-agent tabs in the lead's workspace, not new workspaces. Closing a top-level agent's tab archives the
+    agent; only `self-slash --finish` (or a `herdr-tidy` close of its herdr host pane) closes one.
+11. **At most 5 tabs in a workspace** (operator, 2026-10-29). The next tab of that
+    same kind goes to `<name>-2`, then `<name>-3`. Count tabs after the moves, not before.
+12. **The tab label is the placement key** (operator, 2026-10-29). Match it against
+    configured names and hints before the session title, cwd, or screen. A hint
+    word has to be its own token in the tab label (`paseo-herdr-generic-t`
+    matches herdr; `paseo-pane-t` does not). Rename a tab only when its label
+    is a single digit. Keep every other tab label. When the session title,
+    cwd, or screen disagrees with the tab label, that is a question, asked
+    after every sure move, not a move.
+13. **`monitor` is first and wins** (operator, 2026-10-29). It is the first
+    name in the config file. A tab goes there when its tab label or pane label
+    contains the token `htop`, `tokscale`, or `aiuse-watch`, or when its
+    foreground command is `htop`, `tokscale`, or the `aiuse watch` subcommand.
+    That match beats every other hint, including `aiuse+ade`. Inside the
+    workspace the tab order is aiuse-watch, then htop, then tokscale. Herdr
+    cannot reorder, so create `monitor` and move the matching tabs in that
+    order. Two tabs in the same group keep their relative order. Drop a
+    competing hint on another workspace (`aiuse watch` on `aiuse+ade`) so the
+    next pass does not pull the same tab back.
 
 ## Configured workspaces and their order
 
@@ -78,7 +111,9 @@ goes; it is never part of the name). Names may contain `+` and `-`.
    the way (`<name>-old`), create the new one, move its tabs in with `pane move
    --new-tab`, and let the old one close when it empties. Create the missing
    workspaces in file order so they land in file order. Panes get new ids on
-   move, so use the id from `move_result` for the renames that follow.
+   move. Read the id you are about to move immediately before that move
+   (section 5); an id from the inventory is stale once any earlier move has
+   run. Use the id from `move_result` for the renames that follow.
    **A kept non-configured workspace is recreated too** whenever any configured
    one is created or recreated: it is older than the new ones, so it jumps
    above them once the `-old` copies close (2026-10-12: `Plektra` landed second,
@@ -100,13 +135,14 @@ herdr agent list > agents.json
 ```
 
 Build one table: pane id, tab id, workspace, current labels, agent kind and
-name, cwd (`herdr pane process-info <pane>`), and for each pane *what it is
+name, cwd (`herdr pane process-info --pane <pane>`), and for each pane *what it is
 about*. Sources for "about", in order: the sleeper journal entry title, the
 live agent's name, the session's first user message
 (`~/.claude/projects/<slug>/<uuid>.jsonl` for Claude; the sleeper record
 holds the session id), the pane's last screen lines (`herdr pane read <pane>
 --source recent-unwrapped --lines 40`, plain text, not JSON), and finally
-the cwd. Do not trust the existing label.
+the cwd. Place by the tab label (principle 12). Use these other sources
+only when that label matches no configured hint.
 
 ### 2. Decide the target layout before touching anything
 
@@ -115,9 +151,10 @@ Read `herdr_place.py config` first and apply the section above.
 Write the whole target table (pane → workspace, tab label, pane label, agent
 name) to a scratch file and check it against the principles: every
 `<topic>` unique within its workspace, nothing over 24 characters, no
-generic workspace names (`herdr_place.py check` in the `autorename` skill
-rejects `shells`, `agents`, `work`, `scratch`, numbers, …), your own pane
-left where it is.
+generic workspace names (`herdr_place.py check` rejects `shells`, `work`,
+`scratch`, numbers, and the other names in `GENERIC`). `agents` and `remote`
+are real destinations, not generic names. Leave your own pane where it is,
+except principle 7.
 
 ### 3. Rename workspaces
 
@@ -128,6 +165,11 @@ herdr workspace rename w24 android
 Rename, never recreate: a new workspace would change every pane id in it.
 
 ### 4. Relabel panes that stay in place
+
+A full pass does not run these renames on a tab whose label is not a single
+digit, and does not rename a pane that already has a label. Fill a blank pane
+label from its tab (`-t` becomes `-p`). The commands below are for a
+single-digit tab, a blank pane label, or the single-session `/autorename` path.
 
 For a live or empty pane, labels are three separate things:
 
@@ -144,10 +186,18 @@ herdr pane move w27:p2Z --new-tab --workspace w23 --label one-offs-shell-t --no-
 ```
 
 The result's `.result.move_result.pane.pane_id` is the pane's **new id**
-(the old one is reported as `previous_pane_id` and stops resolving; the
-`terminal_id` is unchanged). Use the new id for the `pane rename` /
-`agent rename` that follow. The source tab is closed by the move. A live
-agent survives the move; its name is kept.
+(`terminal_id` is unchanged). The old id often keeps working as an alias
+(2026-10-29: `pane get` on the id from before the move returned the new pane).
+Do not reuse an id saved before other moves. An alias can point at a different
+pane, or at nothing, and a pane you skipped is destroyed when its workspace
+empties. Immediately before each move, read the pane id again and record the
+foreground pid (`herdr pane process-info --pane ID`). After the move, confirm
+that pid is on the new pane. At the end, every recorded pid must still be
+alive in some pane. A missing pid is a lost pane: report it and do not start
+a replacement. Pass `--label` the tab's current label. `--no-focus` on every
+move of someone else's pane. Use the new id for a following `pane rename` or
+`agent rename`. The source tab is closed by the move. A live agent survives
+the move; its name is kept.
 
 ### 6. Sleeping panes: wake → move/relabel → sleep again
 
@@ -192,8 +242,10 @@ typed text that must not receive keys, agents that were `blocked`).
 
 1. `herdr pane read` prints plain text; everything else prints JSON.
 2. Labels were **rotated** relative to panes in two workspaces (a tab called
-   `grok-chief-of-staff-t` held the Mac lockup session). Identify by
-   content, relabel from the journal/session, and do not propagate old names.
+   `grok-chief-of-staff-t` held the Mac lockup session). That pass identified
+   panes by content. A later full pass does not. Principle 12 keeps a
+   non-digit tab label and places by it. Content that disagrees with the
+   label is a question, asked after the sure moves.
 3. `herdr pane move` of a legacy sleeping pane without waking it first leaves
    a record the plugin can no longer match (no terminal_id, pane id gone).
 4. A pane with typed-but-unsubmitted text (`sleeper-review-p` had a bare
@@ -201,6 +253,49 @@ typed text that must not receive keys, agents that were `blocked`).
    focus.
 5. `herdr_place.py check --auto` returns `ask: false` once the workspace is
    not generic, so the autorename hook does not fight the new names.
+
+## Pitfalls met on 2026-10-29
+
+Read this before the first move of a full pass.
+
+1. Closing the starter tab of a workspace you just created, before a real tab
+   is in it, deletes the workspace (`workspace_not_found`). Move a real tab in
+   first, then close the starter (principle 6).
+2. The first `pane read` of a new starter can be empty. That is a missed read.
+   Read again. Untouched is the shell startup warning and a prompt ending in
+   `$`, `%`, or `#`.
+3. A host named in a hint belongs in that configured workspace. Do not create
+   `pastebin` when `remote` lists pastebin. The hint word has to be a token in
+   the tab label. A foreground `ssh`, `mosh`, or `et`, or a screen that shows
+   one, does not move a tab whose label does not match. `mac-barnowl-t` stays
+   in `one-offs`. That disagreement is a question after the sure moves, and
+   only when the operator has not already ruled it.
+4. Session title, cwd, and screen do not place a tab. Four tabs were moved
+   into `aiuse+ade` because their sessions mentioned herdr, secretspec, or
+   OpenUsage, and the operator rejected that. `paseo-herdr-generic-t` stays
+   with herdr because the tab label contains `herdr`. `paseo-pane-t` does not.
+5. `pane move --label` is the current tab label. Do not rename a non-digit
+   tab because the screen looks like something else. A new single-digit tab
+   can appear during the pass and push a workspace past 5 tabs. Name it from
+   its screen, place it by that name, and count tabs again before the next
+   question.
+6. Unclear tabs are asked one at a time, and only after every sure move
+   (hint matches, `monitor`, `remote`, `one-offs`). Apply the answer, count
+   the tabs, then ask the next. One combined question, or a question while a
+   sure move is still pending, is wrong. `stop` sends the tabs not yet asked
+   to `agents`, then `agents-2`, `agents-3`.
+7. Moving from a list of pane ids captured before other moves dropped the
+   mosh client on `pastebin.xvm` when its workspace emptied. No mosh client
+   to pastebin remained. Old ids alias, so the stale id never moved that
+   pane. Fresh id and foreground pid before each move; confirm the pid after;
+   diff the pid list at the end. Do not relaunch the lost client.
+8. To put `monitor` first when other configured workspaces already exist,
+   rename those later workspaces to `<name>-old`, create in file order
+   starting with `monitor`, and move into each new workspace before closing
+   its starter. Creating `monitor` while `aiuse+ade` already exists puts
+   `monitor` second. The match itself is principle 13. Another rebuild in
+   the same pass, after a pid has already gone missing, waits for the
+   operator.
 
 ## Geometry inside a tab (from the retired pane-layout notes, 2026-07-28)
 
@@ -212,3 +307,30 @@ typed text that must not receive keys, agents that were `blocked`).
 3. A pane shrunk to a few rows returns only 1-2 lines from `agent read`, even
    at `--lines 150`. If `herdr pane get <id>` shows single-digit
    `viewport_rows`, `herdr pane zoom <id> --on`, read, then `--off`.
+
+## Postscript: tabs that match no configured hint
+
+Operator, 2026-10-29. Do this after the placements that match a hint,
+including principle 13, and before the report. Start it only once those sure
+moves are finished. `~/.config/autorename/workspaces.conf` is the list (it is
+not a toml). `remote` sits just before `one-offs`.
+
+1. **Remote.** A tab whose label names `pastebin`, `vps-primary`, or another
+   remote machine, or contains `ssh`, `mosh`, or `et` as its own token, goes
+   to `remote`. Create `remote` only when at least one tab belongs there.
+   Do not also create a workspace named after the host.
+2. **Obvious groups.** An agent tab that matches no hint still shares a
+   workspace when the tab name, then the session title, cwd, or screen, names
+   one clear project. Two tabs of that project are enough to make the
+   workspace. Keep the tab labels.
+3. **Steps for the ones that are still unclear.** This walk starts only after
+   the sure moves. Walk them with `/steps`: one question per tab, recommended
+   option first, then act, then the next tab. Offer the configured workspace
+   the other info suggests, a new workspace named from the tab, `agents` (or
+   `agents-2` when `agents` already holds 5), and leaving it where it is.
+   `stop` ends the walk. Tabs not yet asked go to `agents`, then `agents-2`,
+   `agents-3`.
+4. **Not an agent and not remote.** A shell or tool whose tab name matches no
+   hint goes to `one-offs`.
+5. Do not move the pane this pass is running in, except principle 7. A
+   workspace that would go past 5 tabs overflows to `<name>-2`.
