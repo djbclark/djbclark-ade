@@ -286,7 +286,10 @@ pull request here is expected to meet these; flag any it misses.
 11. **CI waiver (2026-10-28): the classifier, never an agent's claim, decides.**
     `bin/ci-waiver classify --repo-dir /ABS/REPO --pr N --json` permits only proved `docs-only` paths or a
     `master-merge` of green parents matching Git's machine merge on every other path.
-    Workflow, tests, config and waiver-tool changes cannot qualify; failed checks are never waived.
+    Hard exclusions deny `.git*` components (including workflows), nested `tests/`, `conftest.py`,
+    `test_*.py`, `config/`, `bin/pr-wait`, `bin/ci-waiver`, and files named `pyproject.toml`,
+    `pytest.ini`, `setup.cfg`, `tox.ini`, `uv.lock` or `requirements*.txt` at any depth. Other config
+    changes still need the class proof; there is no blanket config exclusion. Failed checks are never waived.
     An independent adversary on `omp --model anthropic/claude-opus-5-5 --effort high` or
     stronger, never the author, must review the exact head and supply a live adversary APPROVE.
     An agent that can request a waiver may not self-approve it. Add this live marker to the PR body:
@@ -299,13 +302,17 @@ pull request here is expected to meet these; flag any it misses.
     CI then becomes `waived`; Codex and open-finding gates still apply. See
     [docs/ci-waiver.md](docs/ci-waiver.md) for the proof, exclusions and explicit squash message.
 
-    Repair (2026-10-29, round 2): a waiver report requires a `pr-wait` byte-identical
-    to GitHub's master SHA from `branches/master`. It fetches that exact SHA from
-    the explicit GitHub HTTPS URL in an isolated bare Git directory without local,
-    global or inherited remote/URL rewrite config, then executes that SHA's classifier.
-    Replacement objects and graft overrides are disabled; `info/grafts` refuses.
-    H0 needs this PR's master-base run, master-ancestor base SHA when supplied and
-    master's workflow path/blob; base-retarget timeline events refuse. Waiver
+    Repair (2026-10-29, round 3): a waiver report requires a `pr-wait` byte-identical
+    to GitHub's master SHA from `branches/master`, fetched from the explicit GitHub HTTPS URL.
+    The waiter and online classifier use fresh private bare object stores populated only by their
+    GitHub fetches, without checkout objects/config, alternates, templates or inherited `GIT_*`.
+    Replacement objects, grafts and commit graphs are disabled; every fetched SHA is verified.
+    The machine merge runs in the classifier's same private store. Fetch errors deny the waiver.
+    Both classes require a master-ancestor PR base and no base-retarget timeline event. H0 needs
+    this PR's master-base run, a required master-ancestor base SHA and master's workflow path/blob.
+    Allowlisted paths match exactly, case-sensitively without normalization; exclusions alone normalize.
+    Trust remains in GitHub's API, `gh` and the runner's Git binary. Offline base/head mode reads a
+    given repo but cannot be invoked by `pr-wait`. Waiver
     APPROVEs must also be outside quotes, indentation and code. The
     reviewer is not authenticated: agents share a GitHub account. The operator's
     pinned merge yes is the authority; a waiver only changes `pr-wait`'s report.

@@ -8,34 +8,53 @@ A1. The waiver decision is valid only from a `pr-wait` byte-identical to GitHub'
 master snapshot. For every present marker it reads the full SHA from
 `gh api --hostname github.com repos/OWNER/REPO/branches/master`, using the PR's
 repository argument. It fetches exactly that SHA from
-`https://github.com/OWNER/REPO.git` in a temporary bare Git directory, with
-system/global/inherited Git configuration disabled, empty templates, disabled
-hooks and only HTTPS transport allowed. The checkout's `remote.*` and
-`url.*.insteadOf` settings are never loaded by the fetch. Fetched objects go into
-the checkout's object store; no checkout refs are changed. The resolved commit
-must equal the API SHA. Both `bin/pr-wait` and `bin/ci-waiver` are read from that
-same commit; the waiter must match its own bytes, and the classifier executes
-in a private temporary directory removed afterward. Failure is
-`ci-waiver-untrusted-tool`. No PR-owned Python helper is imported. Before the initial
-waiver machinery lands on master, waivers fail closed; this PR cannot waive itself.
-Concurrent local tracking-ref updates cannot select or mix master versions.
-An intentionally rewritten waiter could omit its own self-check: the operator
-must select a trusted master-identical copy before relying on its report.
+`https://github.com/OWNER/REPO.git` into a fresh private bare Git directory,
+with system/global/inherited Git configuration disabled, empty templates,
+disabled hooks and only HTTPS transport allowed. The checkout is never used as
+Git cwd or as an object directory; its remote/URL config, objects, pack indexes,
+commit graphs, alternates and replace refs cannot supply evidence. No checkout
+refs or objects are changed. The resolved commit must equal the API SHA.
+Both `bin/pr-wait` and `bin/ci-waiver` are read from that same commit; the waiter
+must match its own bytes. The classifier runs with `python -I` in the private
+temporary directory. Failure is `ci-waiver-untrusted-tool`. No PR-owned Python
+helper is imported. Before the initial waiver machinery lands on master,
+waivers fail closed; this PR cannot waive itself. Concurrent local tracking-ref
+updates cannot select or mix master versions. An intentionally rewritten waiter
+could omit its own self-check: the operator must select a trusted master-identical
+copy before relying on its report.
 
 For manual inspection use the trusted classifier's
-`classify --repo-dir /ABS/REPO --pr N --repo OWNER/NAME --json`. Every Git command
-pins its cwd to that directory, ignoring inherited Git overrides, replacement
-refs (including `GIT_REPLACE_REF_BASE`) and environment graft files. A repository
-with `info/grafts` is refused. Replacement objects and grafts are also disabled
-when reading the trusted snapshot and in the isolated machine merge.
-`classify --repo-dir /ABS/REPO --base REF --head REF --json` supports offline
-docs-only fixtures; it refuses master-merge without PR history. Output contains
-`class`, `reasons` and the full classified `head`. PR base branch must be master.
+`classify --repo-dir /ABS/REPO --pr N --repo OWNER/NAME --json`. Online PR mode
+ignores `repo-dir`: it creates another fresh private bare store and fetches the
+API's master, base and head SHAs, then the merge parents and any H0 run-base SHA,
+from the explicit GitHub HTTPS URL. Every SHA must be a full commit SHA and each
+fetch must resolve to exactly that SHA, even when history already supplied the
+object. All diffs, ancestry, workflow-blob reads and `merge-tree` use this store.
+There are no alternates or templates. `GIT_*` is stripped before installing
+known isolation settings; replacements and grafts are disabled, as are
+`core.commitGraph`, `gc.writeCommitGraph` and `fetch.writeCommitGraph`. Any fetch
+failure denies classification; it never falls back to checkout evidence.
+
+`classify --repo-dir /ABS/REPO --base REF --head REF --json` is a separate offline
+fixture mode which reads that repository, refuses `info/grafts`, disables
+replacement objects/commit graphs and cannot certify master-merge without PR
+history. `--pr` and `--base/--head` are mutually exclusive; `pr-wait` only invokes
+`--pr` in a private directory, never offline mode. Output contains `class`,
+`reasons` and the full classified `head`. Both online classes require base ref
+master, a base SHA ancestral to current master and no `base_ref_changed` timeline
+event. A stale/non-master API base fails closed before docs-only classification.
+
+Trust remains in GitHub's API responses, `gh`, the runner's Git binary and its
+HTTPS trust environment. A malicious executable shim or compromised GitHub/API
+can corrupt that anchor. This isolates local checkout state; it does not
+authenticate executables or GitHub, or the author-controlled reviewer identity.
 
 A2. `docs-only` requires a nonempty diff containing only `WAIVABLE_PATHS`:
 `CHANGELOG.md` and `docs/handoffs/**`. The diff is from the merge base to the head,
 with rename detection disabled so both sides of a rename are examined. The
-allowlist and workflow `paths-ignore` entries must stay identical.
+allowlist and workflow `paths-ignore` entries must stay identical. Allowlist matching
+is exact and case-sensitive without Unicode/path normalization; `changelog.md`,
+`Docs/Handoffs/` and casefold-equivalent Unicode paths do not qualify.
 
 | Path | Read audit, 2026-10-28 | Why waivable |
 |---|---|---|
@@ -49,19 +68,19 @@ expanding the allowlist or adding a consumer. Other `docs/*.md`, `skills/**` and
 `AGENTS.md` are outside the allowlist. Hard exclusions always deny a waiver:
 `.github/**`, `config/**`, `bin/pr-wait`, `bin/ci-waiver`, every `.git*`
 control component (including nested attributes/modules files), all nested `tests/`,
-`conftest.py`, `test_*.py`, and the repository paths named/executed by `test.yml`
-(including `claude/hooks/handoff-tools/tests/`). Paths are NFC-normalized and
-case-folded; absolute and parent-traversing paths are rejected. Waivable files
-must be ordinary nonexecutable files; symlinks, gitlinks and executable/mode
+`conftest.py`, `test_*.py`, files named `pyproject.toml`, `pytest.ini`, `setup.cfg`,
+`tox.ini`, `uv.lock` or `requirements*.txt` at any depth, and the explicit
+`claude/hooks/handoff-tools/tests/` tree (also covered by nested `tests/`). Only exclusions are NFC-normalized and case-folded (with slash/path normalization); absolute and parent-traversing paths are rejected.
+There is no blanket exclusion for other configuration files: they still need
+the class proof. Waivable files must be ordinary nonexecutable files; symlinks, gitlinks and executable/mode
 changes are rejected. Regular file additions and deletions remain allowed.
 
 A4. `master-merge` requires exactly two parents: former PR head H0 first and
 master commit T second. H0 must occur in this PR's commit list AND have a
 `test.yml` pull-request run associated with this PR whose `pull_requests` entry
-names base ref `master`. If that entry supplies a base SHA, it must be an ancestor
-of current master. A `base_ref_changed` event anywhere in the PR's timeline
-refuses a master-merge waiver. There is no force-push/synchronize timeline
-fallback; a push run alone does not prove PR history. Both parents' runs must
+names base ref `master` and supplies a nonempty base SHA ancestral to current
+master. A `base_ref_changed` event anywhere in the PR's timeline refuses either
+class. There is no force-push/synchronize timeline fallback; a push run alone does not prove PR history. Both parents' runs must
 name exactly `.github/workflows/test.yml`, and that file in each run's `head_sha`
 tree must equal the file at current master. Missing workflow objects fail closed.
 The latest matching `test.yml` run/attempt on exactly H0 must be
@@ -71,9 +90,9 @@ and unrelated bot checks cannot establish greenness. T must be an ancestor of cu
 and have a latest completed successful `test.yml` push run on master, with every
 job successful too. Earlier success cannot hide a failed rerun.
 
-The machine merge uses a temporary bare Git directory with the real object store
-as an alternate. It has no worktree, `info/attributes`, or local merge-driver
-config. System/global/environment Git attributes and configuration are disabled;
+The online machine merge runs in the same private GitHub-fetched bare store,
+without alternates, worktree, `info/attributes` or checkout merge-driver config.
+System/global/environment Git attributes and configuration are disabled;
 `--attr-source=<empty tree>` plus `-c core.attributesFile=/dev/null` ignores committed
 attributes too. Unsupported Git refuses rather than falling back. These tests run
 on both workflow platforms; local evidence is Git 2.56.0 on macOS (2026-10-29),
@@ -85,8 +104,10 @@ files may be hand-resolved.
 A5. Everything else is `none`: examples include `touches-nonwaivable:code.py`,
 `not-a-merge`, `h0-not-green`, `master-not-green`, `hand-edited:code.py`, and
 `shallow-history`. Missing objects, unreadable checks and any Git/GitHub error
-deny a waiver. The standalone classifier never fetches, edits a worktree or cancels a CI run;
-`merge-tree` writes only its temporary object store. Exit 0 means a classification was printed,
+deny a waiver. Online classification fetches only into its private store; offline
+mode uses its given repository and a temporary alternate-backed merge store. Neither
+mode edits a worktree or cancels a CI run. `merge-tree` writes only temporary
+objects. Exit 0 means a classification was printed,
 including `none`; exit 2 means invalid usage. Consumers must check the class.
 
 ## B. Independent review and waiter behavior

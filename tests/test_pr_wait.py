@@ -130,6 +130,14 @@ def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch
     monkeypatch.setattr(mod, "gh", api)
     fetches = []
     def transport(argv, **kwargs):
+        if argv[0] == "git":
+            assert Path(kwargs["cwd"]) != victim
+            assert "GIT_OBJECT_DIRECTORY" not in kwargs["env"]
+            assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in kwargs["env"]
+        elif "classify" in argv:
+            assert "--pr" in argv and "--base" not in argv and "--head" not in argv
+            assert argv[argv.index("--repo-dir") + 1] != str(victim)
+            assert Path(kwargs["cwd"]) != victim
         if argv[0] == "git" and "fetch" in argv and f"https://github.com/{REPO}.git" in argv:
             fetches.append(argv)
             assert argv[-1] == master
@@ -145,7 +153,7 @@ def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch
         return real_run(argv, **kwargs)
     monkeypatch.setattr(mod.subprocess, "run", transport)
     got = mod.classify_ci_waiver(REPO, PR, repo_dir=str(victim))
-    if case in ("grafts", "api-error", "bad-api-sha", "different-waiter"):
+    if case in ("api-error", "bad-api-sha", "different-waiter"):
         assert got["reasons"] == ["ci-waiver-untrusted-tool"]
         assert len(fetches) == (1 if case == "different-waiter" else 0)
     else:
@@ -173,6 +181,7 @@ def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch
     ("untrusted-waiter", "ci-waiver-untrusted-tool"), ("fetch-error", "ci-waiver-untrusted-tool"),
     ("local-evil-classifier", "ci-waiver-mismatch"),
     ("untrusted-master-sha", "ci-waiver-untrusted-tool"),
+    ("r3-classifier-fetch-error", "ci-waiver-mismatch"),
     ("r2-approve-blockquote", "ci-waiver-needs-adversary"),
     ("r2-approve-indent", "ci-waiver-needs-adversary"),
     ("r2-approve-lazyquote", "ci-waiver-needs-adversary"),
@@ -192,7 +201,7 @@ if a==['rev-parse','--show-toplevel']: print(os.getcwd())
 elif a[:1]==['init']: sys.exit(0)
 elif a==['rev-parse','--git-common-dir']: print('.git')
 elif a==['rev-parse','--git-path','objects']: print('.')
-elif a[:1]==['fetch']: sys.exit(1 if os.environ.get('WAIVER_FETCH_FAIL') else 0)
+elif a[:1]==['fetch']: sys.exit(1 if os.environ.get('WAIVER_FETCH_FAIL') or (os.environ.get('WAIVER_FETCH_HEAD_FAIL') and a[-1]=='a'*40) else 0)
 elif a[:1]==['show']:
     name=a[-1].split(':')[-1].split('/')[-1]
     data=(Path(os.environ['WAIVER_TRUST_SOURCE']) / name).read_bytes()
@@ -209,11 +218,14 @@ else: sys.exit(1)
     fake_git.chmod(0o755)
     world.env["WAIVER_TRUST_SOURCE"] = str(PR_WAIT.parent)
     world.route(f"repos/{REPO}/branches/master", ok({"commit": {"sha": OLD}}))
+    world.route(f"repos/{REPO}/issues/{PR}/timeline", ok([]))
     body = waiver_body(head=HEAD[:12] if case == "short-head" else OLD if case == "other-head" else HEAD,
                        cls="master-merge" if case == "class-mismatch" else "docs-only",
                        adversary=case != "no-adversary")
     if case == "fenced":
         body = "```\n" + body + "\n```"
+    elif case == "r3-classifier-fetch-error":
+        world.env["WAIVER_FETCH_HEAD_FAIL"] = "1"
     elif case.startswith("r2-"):
         first, approve = body.split("\n", 1)
         if case == "r2-quoted-block":

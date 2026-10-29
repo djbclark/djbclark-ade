@@ -1,6 +1,7 @@
 """Mechanical CI waivers against real temporary Git histories and a fake gh (no network)."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,7 +16,8 @@ class History:
     def __init__(self, tmp):
         self.repo = tmp / "repo"
         self.repo.mkdir()
-        self.env = {**os.environ, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
+        self.env = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+                    "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
                     "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.test"}
         self.git("init", "-b", "master")
         self.commit({"code.py": "original\n", "CHANGELOG.md": "initial\n",
@@ -29,6 +31,29 @@ class History:
         gh.chmod(0o755)
         self.env.update(PATH=str(shim) + os.pathsep + self.env["PATH"], WAIVER_ROUTES=str(self.routes))
         self.routes.write_text("{}")
+        self.real_git = shutil.which("git")
+        self.upstream = tmp / "github.git"
+        # Replace only the transport destination. Everything after fetch runs in
+        # real Git with an independent upstream object store, never the checkout.
+        self.transport = shim / "git"
+        self.transport.write_text("#!/usr/bin/env python3\nimport os,sys\n"
+            "args=sys.argv[1:]\n"
+            "if os.environ.get('WAIVER_GIT_AUDIT'):\n"
+            " import json\n"
+            " with open(os.environ['WAIVER_GIT_AUDIT'],'a') as f: f.write(json.dumps([args,os.getcwd(),{k:v for k,v in os.environ.items() if k.startswith('GIT_')}])+'\\n')\n"
+            "if '--verify' in args and os.environ.get('WAIVER_BAD_COMMIT') and args[-1]==os.environ['WAIVER_BAD_COMMIT']+'^{commit}': print('f'*40); sys.exit(0)\n"
+            "if 'fetch' in args and 'https://github.com/r/p.git' in args:\n"
+            " args=[os.environ['WAIVER_UPSTREAM'] if a=='https://github.com/r/p.git' else a for a in args]\n"
+            " args=['-c','protocol.file.allow=always',*args]\n"
+            "os.execv(" + repr(self.real_git) + ", [" + repr(self.real_git) + ",*args])\n")
+        self.transport.chmod(0o755)
+        self.env["WAIVER_UPSTREAM"] = str(self.upstream)
+
+    def publish(self):
+        env = {k: v for k, v in self.env.items() if not k.startswith("GIT_")}
+        env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        subprocess.run([self.real_git, "-c", "core.commitGraph=false", "clone", "--bare", "--no-local",
+                        str(self.repo), str(self.upstream)], env=env, check=True, capture_output=True, timeout=60)
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.repo, env=self.env, check=True,
@@ -90,7 +115,11 @@ class History:
             routes = json.loads(self.routes.read_text())
             routes["repos/r/p/pulls/1"] = {"base": {"ref": getattr(self, "base_ref", "master"),
                 "sha": base or self.base}, "head": {"sha": self.git("rev-parse", head)}}
+            routes.setdefault("repos/r/p/branches/master", {"commit": {"sha": self.base}})
+            routes.setdefault("repos/r/p/issues/1/timeline", [])
             self.routes.write_text(json.dumps(routes))
+            if not self.upstream.exists():
+                self.publish()
         args = ["--pr", "1"] if pr else ["--base", base or self.base, "--head", head]
         r = subprocess.run([sys.executable, str(script), "classify", "--repo-dir", str(self.repo),
                             *args, "--repo", "r/p", "--json"],
@@ -176,8 +205,10 @@ def test_ci_waiver_gh_error_and_unreadable_checks(history):
 
 def test_ci_waiver_missing_parent_object(history):
     history.merge()
-    parent_object = history.repo / ".git/objects" / history.h0[:2] / history.h0[2:]
-    parent_object.unlink()
+    history.publish()
+    # Unavailable upstream objects, rather than irrelevant checkout objects.
+    shutil.rmtree(history.upstream / "objects")
+    (history.upstream / "objects").mkdir()
     assert history.classify()["class"] == "none"
 
 
@@ -340,7 +371,8 @@ def test_ci_waiver_normalizes_paths():
 def test_ci_waiver_unsupported_attr_source_refuses(history):
     import shutil
     history.merge()
-    real_git = shutil.which("git")
+    real_git = str(history.transport.with_name("git-transport"))
+    history.transport.rename(real_git)
     shim = Path(history.env["PATH"].split(os.pathsep)[0]) / "git"
     shim.write_text("#!/usr/bin/env python3\nimport os,sys\nif any(a.startswith('--attr-source=') for a in sys.argv[1:]): sys.exit(129)\nos.execv(" + repr(real_git) + ",[" + repr(real_git) + ",*sys.argv[1:]])\n")
     shim.chmod(0o755)
@@ -433,10 +465,10 @@ def test_ci_waiver_r2_master_workflow_evidence(history, case):
         assert "hard-exclusion:nested/.gitcontrol" in got["reasons"]
 
 
-def test_ci_waiver_r2_base_sha_optional(history):
+def test_ci_waiver_r3_base_sha_required(history):
     history.merge()
     edit_routes(history, lambda routes: routes[h0_runs(history)]["workflow_runs"][0]["pull_requests"][0]["base"].pop("sha"))
-    assert history.classify()["class"] == "master-merge"
+    assert history.classify()["class"] == "none"
 
 
 def test_ci_waiver_r2_target_removed_from_master(history):
@@ -451,7 +483,8 @@ def test_ci_waiver_r2_target_removed_from_master(history):
 def test_ci_waiver_r2_isolated_git_environment_and_attr_refusal(history):
     import shutil
     history.merge()
-    real_git = shutil.which("git")
+    real_git = str(history.transport.with_name("git-transport"))
+    history.transport.rename(real_git)
     shim = Path(history.env["PATH"].split(os.pathsep)[0]) / "git"
     audit = history.repo.parent / "git-audit.jsonl"
     shim.write_text("#!/usr/bin/env python3\nimport os,sys,json\n"
@@ -464,10 +497,159 @@ def test_ci_waiver_r2_isolated_git_environment_and_attr_refusal(history):
     got = history.classify()
     assert got["class"] == "none" and got["reasons"][0].startswith("git-error:--attr-source=")
     calls = [json.loads(line) for line in audit.read_text().splitlines()]
-    assert any(env["GIT_DIR"] for args, env in calls)  # includes the isolated merge
+    assert any("merge-tree" in args or "check-attr" in args for args, env in calls)
     for args, env in calls:
         if args == ["rev-parse", "HEAD"]:  # fixture's API head resolution, before the classifier
             continue
         assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
         assert env["GIT_GRAFT_FILE"] == os.devnull
         assert env["GIT_REPLACE_REF_BASE"] is None
+
+
+@pytest.mark.parametrize("parent,reason", [(1, "h0-not-green"), (2, "master-not-green")])
+def test_ci_waiver_r3_empty_jobs_fail_closed(history, parent, reason):
+    history.merge()
+    edit_routes(history, lambda routes: routes.update({
+        f"repos/r/p/actions/runs/{parent}/attempts/1/jobs": {"jobs": []}}))
+    got = history.classify()
+    assert got["class"] == "none" and reason in got["reasons"]
+
+
+@pytest.mark.parametrize("path", ["changelog.md", "CHANGELOG.MD", "Docs/Handoffs/run.py",
+                                   "docſ/handoffs/run.py", "docs//handoffs/run.py"])
+def test_ci_waiver_r3_exact_allowlist(history, path):
+    # Probe matching directly too: case-insensitive Mac filesystems can otherwise
+    # preserve an existing CHANGELOG filename while changing its content.
+    import runpy
+    assert not runpy.run_path(str(SCRIPT))["waivable"](path)
+    if path.casefold() != "changelog.md" and "//" not in path:
+        history.commit({path: "new path"})
+        assert history.classify()["class"] == "none"
+
+
+def test_ci_waiver_r3_allowlist_no_unicode_normalization():
+    import runpy
+    import unicodedata
+    mod = runpy.run_path(str(SCRIPT))
+    # Neither current literal allowlist entry has a composed Unicode character;
+    # use a decomposed Git path and a composed policy entry to detect NFC widening.
+    mod["waivable"].__globals__["WAIVABLE_PATHS"] = ("docs/handoffs/café.md",)
+    assert not mod["waivable"](unicodedata.normalize("NFD", "docs/handoffs/café.md"))
+
+
+@pytest.mark.parametrize("case", ["nonmaster-base", "stale-base", "retargeted"])
+def test_ci_waiver_r3_docs_base_provenance(history, case):
+    history.git("checkout", "-b", "unmerged")
+    unmerged = history.commit({"code.py": "unmerged code"})
+    if case == "nonmaster-base":
+        history.base = unmerged
+    elif case == "stale-base":
+        # API says master, but its stale base SHA still contains unmerged code.
+        history.base = unmerged
+    history.commit({"CHANGELOG.md": "docs"})
+    history.routes.write_text(json.dumps({
+        "repos/r/p/branches/master": {"commit": {"sha": history.git("rev-parse", "master")}},
+        "repos/r/p/issues/1/timeline": [{"event": "base_ref_changed"}] if case == "retargeted" else []}))
+    got = history.classify(pr=True)
+    assert got["class"] == "none"
+    assert ("pr-base-retargeted" if case == "retargeted" else "base-not-on-master") in got["reasons"]
+
+
+@pytest.mark.parametrize("path", ["pyproject.toml", "nested/pytest.ini", "setup.cfg", "tox.ini",
+                                   "uv.lock", "docs/handoffs/conftest.py", "docs/handoffs/requirements-dev.txt"])
+def test_ci_waiver_r3_test_config_excluded(history, path):
+    history.commit({path: "test configuration"})
+    got = history.classify()
+    assert got["class"] == "none" and "hard-exclusion:" + path in got["reasons"]
+
+
+@pytest.mark.parametrize("poison", ["commit-graph", "alternates", "replace", "core-config", "missing-gitdir"])
+def test_ci_waiver_r3_checkout_store_never_read(history, poison):
+    fake = history.commit({"CHANGELOG.md": "notes"})
+    fake_tree = history.git("rev-parse", fake + "^{tree}")
+    history.git("checkout", "-b", "real", history.base)
+    head = history.commit({"code.py": "def f(:", "CHANGELOG.md": "notes"})
+    real_tree = history.git("rev-parse", head + "^{tree}")
+    history.publish()  # freeze GitHub evidence before corrupting the checkout
+    before = history.classify(pr=True, head=head)
+    assert before["class"] == "none" and "touches-nonwaivable:code.py" in before["reasons"]
+    if poison == "commit-graph":
+        history.git("commit-graph", "write", "--reachable")
+        graph = history.repo / ".git/objects/info/commit-graph"
+        data = graph.read_bytes()
+        assert data.count(bytes.fromhex(real_tree)) == 1
+        tmp = graph.with_suffix(".tmp")
+        tmp.write_bytes(data.replace(bytes.fromhex(real_tree), bytes.fromhex(fake_tree)))
+        os.replace(tmp, graph)
+        assert history.git("-c", "core.commitGraph=true", "diff", "--name-only", history.base, head) == "CHANGELOG.md"
+    elif poison == "alternates":
+        # Real head SHA, counterfeit loose object in an alternate store. The
+        # checkout itself can resolve it after its genuine loose object is removed.
+        import zlib
+        evil = history.repo.parent / "evil-objects"
+        dest = evil / head[:2] / head[2:]
+        dest.parent.mkdir(parents=True)
+        body = history.git("cat-file", "commit", head).replace(real_tree, fake_tree).encode()
+        dest.write_bytes(zlib.compress(b"commit " + str(len(body)).encode() + b"\0" + body))
+        (history.repo / ".git/objects" / head[:2] / head[2:]).unlink()
+        (history.repo / ".git/objects/info/alternates").write_text(str(evil) + "\n")
+    elif poison == "replace":
+        history.git("update-ref", "refs/replace/" + head, fake)
+    elif poison == "core-config":
+        history.git("config", "core.repositoryformatversion", "999")
+    else:
+        (history.repo / ".git").rename(history.repo / "checkout-gitdir-hidden")
+    # Bypass fixture head resolution, which intentionally cannot read a broken
+    # checkout. The CLI gets all SHA inputs from its API, not from the checkout.
+    r = subprocess.run([sys.executable, str(SCRIPT), "classify", "--repo-dir", str(history.repo),
+                        "--pr", "1", "--repo", "r/p", "--json"], cwd=history.repo,
+                       env=history.env, capture_output=True, text=True, check=True)
+    assert json.loads(r.stdout) == before
+
+
+def test_ci_waiver_r3_fetch_failure_not_waived(history):
+    history.commit({"CHANGELOG.md": "docs"})
+    history.publish()
+    shutil.rmtree(history.upstream)
+    # A valid local docs diff must not be used as fallback for failed GitHub fetch.
+    history.upstream.mkdir()
+    got = history.classify(pr=True)
+    assert got["class"] == "none" and got["reasons"] == ["git-error:fetch"]
+
+
+def test_ci_waiver_r3_private_fetch_and_merge_audit(history):
+    history.merge()
+    history.env["WAIVER_GIT_AUDIT"] = str(history.repo.parent / "git-calls.jsonl")
+    got = history.classify()
+    assert got["class"] == "master-merge"
+    calls = [json.loads(line) for line in Path(history.env["WAIVER_GIT_AUDIT"]).read_text().splitlines()]
+    calls = [(args, cwd, env) for args, cwd, env in calls if args != ["rev-parse", "HEAD"]]
+    directories = {cwd for args, cwd, env in calls}
+    assert len(directories) == 1 and str(history.repo) not in directories
+    assert any("merge-tree" in args for args, cwd, env in calls)
+    fetches = [args for args, cwd, env in calls if "fetch" in args]
+    assert {args[-1] for args in fetches} >= {history.base, history.h0, history.target, got["head"]}
+    for args in fetches:
+        assert args[-2] == "https://github.com/r/p.git"
+    for args, cwd, env in calls:
+        assert "core.commitGraph=false" in args
+        assert "gc.writeCommitGraph=false" in args and "fetch.writeCommitGraph=false" in args
+        assert "protocol.allow=never" in args and "protocol.https.allow=always" in args
+        assert env["GIT_NO_REPLACE_OBJECTS"] == "1" and env["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env and "GIT_OBJECT_DIRECTORY" not in env
+    assert not Path(next(iter(directories))).exists()  # private store removed
+
+
+def test_ci_waiver_r3_each_fetched_sha_verified(history):
+    head = history.commit({"CHANGELOG.md": "docs"})
+    history.env["WAIVER_BAD_COMMIT"] = head
+    got = history.classify(pr=True)
+    assert got["class"] == "none" and got["reasons"] == ["fetched-commit-mismatch"]
+
+
+def test_ci_waiver_r3_pr_cannot_select_offline_mode(history):
+    r = subprocess.run([sys.executable, str(SCRIPT), "classify", "--repo-dir", str(history.repo),
+                        "--pr", "1", "--base", history.base, "--head", history.base],
+                       env=history.env, capture_output=True, text=True)
+    assert r.returncode == 2 and "use --pr N OR" in r.stderr

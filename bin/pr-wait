@@ -69,14 +69,15 @@ security_status, findings_for_head (and _by_kind), open_findings (unresolved Cod
 not; open_findings_by_kind) and open_findings_outdated (the outdated subset), findings_mismatch (list of
 reasons; per kind the marker and the threads disagree: has_unresolved_findings true with no open thread of
 that kind, false with some, or has_any_findings true with no Codex finding comment of that kind; never
-print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when: at least one CI
-check succeeded and none failed or is pending (skipped and neutral count as passed beside a success,
-never alone), Codex's code review completed on this head, the security review too when the marker carries
+print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when CI has a succeeded check
+and none failed or is pending (skipped and neutral count beside a success, never alone), or a verified
+current-head waiver substitutes for pending/absent CI (failed checks still block); plus Codex's code review completed on this head, the security review too when the marker carries
 it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings as
 a boolean for each review it carries. merge_blockers lists why not: codex-<status>, security-<status>
 (security-failed, security-running, security-other-head), findings-not-collected, marker-unverified,
 security-marker-unverified, no-checks, ci-pending, ci-failed, ci-none-succeeded, open-findings,
-findings-mismatch, codex-skipped. The exit code does not carry it: the caller reads merge_ready.
+findings-mismatch, codex-skipped, ci-waiver-untrusted-tool, ci-waiver-malformed, ci-waiver-mismatch,
+ci-waiver-needs-adversary. The exit code does not carry it: the caller reads merge_ready.
 
 Requesting the review (2026-10-24; operator: "Make pr-wait request the review itself"). The Codex bot
 reviews on PR open and draft-to-ready, NOT on a push: a pushed head needs a comment `@codex review`
@@ -921,32 +922,28 @@ def classify_ci_waiver(repo: str, pr: int, repo_dir: str | None = None) -> dict:
 
     This is an integrity check, not authentication of the PR's claimed reviewer.
     An edited waiter cannot certify itself; the operator uses a trusted copy.
+    repo_dir is retained for callers but never consulted: no checkout Git or objects.
     """
     try:
-        directory = Path(repo_dir or os.getcwd()).resolve(strict=True)
-        def git_bytes(*args, isolated=None, objects=None):
+        def git_bytes(*args, isolated=None):
             env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
             env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-                       GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
+                       GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull,
+                       GIT_ATTR_NOSYSTEM="1")
             if isolated is not None:
                 env["GIT_DIR"] = str(isolated)
-            if objects is not None:
-                env["GIT_OBJECT_DIRECTORY"] = str(objects)
-            r = subprocess.run(["git", *args], cwd=directory, env=env, capture_output=True, timeout=GH_TIMEOUT)
+            r = subprocess.run(["git", "-c", "core.commitGraph=false", "-c", "gc.writeCommitGraph=false",
+                                "-c", "fetch.writeCommitGraph=false", *args], cwd=tmp, env=env,
+                               capture_output=True, timeout=GH_TIMEOUT)
             if r.returncode:
                 raise ValueError("untrusted Git evidence")
             return r.stdout
-        directory = Path(git_bytes("rev-parse", "--show-toplevel").decode().strip()).resolve(strict=True)
-        common = git_bytes("rev-parse", "--git-common-dir").decode().strip()
-        if (directory / common / "info/grafts").exists():
-            raise ValueError("Git grafts present")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
             raise ValueError("invalid GitHub repository")
         master_doc = json.loads(gh("api", "--hostname", "github.com", f"repos/{repo}/branches/master"))
         master = master_doc["commit"]["sha"]
         if not isinstance(master, str) or not HEX40.fullmatch(master):
             raise ValueError("unreadable trusted master")
-        objects = (directory / git_bytes("rev-parse", "--git-path", "objects").decode().strip()).resolve(strict=True)
         with tempfile.TemporaryDirectory(prefix="ci-waiver-trusted-") as tmp:
             isolated = Path(tmp) / "git"
             # Never fetch with checkout config: no remote.*, url.*.insteadOf,
@@ -955,20 +952,20 @@ def classify_ci_waiver(repo: str, pr: int, repo_dir: str | None = None) -> dict:
             git_bytes("-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
                       "-c", "core.hooksPath=" + os.devnull,
                       "fetch", "--no-tags", "--no-write-fetch-head",
-                      f"https://github.com/{repo}.git", master, isolated=isolated, objects=objects)
+                      f"https://github.com/{repo}.git", master, isolated=isolated)
             fetched = git_bytes("rev-parse", "--verify", master + "^{commit}",
-                                isolated=isolated, objects=objects).decode().strip()
+                                isolated=isolated).decode().strip()
             if fetched != master:
                 raise ValueError("fetched master mismatch")
-            trusted_waiter = git_bytes("show", master + ":bin/pr-wait", isolated=isolated, objects=objects)
-            trusted_classifier = git_bytes("show", master + ":bin/ci-waiver", isolated=isolated, objects=objects)
+            trusted_waiter = git_bytes("show", master + ":bin/pr-wait", isolated=isolated)
+            trusted_classifier = git_bytes("show", master + ":bin/ci-waiver", isolated=isolated)
             if trusted_waiter != Path(__file__).resolve().read_bytes():
                 raise ValueError("waiter differs from master")
             path = Path(tmp) / "ci-waiver"
             path.write_bytes(trusted_classifier)
             path.chmod(0o700)
-            r = subprocess.run([sys.executable, "-I", str(path), "classify", "--repo-dir", str(directory),
-                                "--pr", str(pr), "--repo", repo, "--json"], cwd=directory,
+            r = subprocess.run([sys.executable, "-I", str(path), "classify", "--repo-dir", tmp,
+                                "--pr", str(pr), "--repo", repo, "--json"], cwd=tmp,
                                capture_output=True, text=True, timeout=GH_TIMEOUT)
             if r.returncode:
                 raise ValueError("trusted classifier failed")
@@ -1204,8 +1201,9 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     `codex-security-review-finding:v1`). Mismatch (the marker and the threads disagree, so never a clean "0"),
     per kind: the marker says `has_unresolved_findings: true` and no open Codex thread of that kind was
     found, or `false` and some was; or `has_any_findings: true` and no Codex finding comment of that kind
-    exists at all. merge_ready needs: at least one CI check that really succeeded, none failing or pending
-    (skipped and neutral checks count as passed beside it, never alone); Codex's code review completed on
+    exists at all. merge_ready needs: either a succeeded CI check with none failing/pending
+    (skipped/neutral count beside success, never alone), or a verified current-head CI waiver
+    substituting for pending/absent checks (failed checks still block); Codex's code review completed on
     this head; its security review completed on this head too WHEN the marker carries `security_review`
     (a marker without one is not blocked on it: the open threads of both kinds still gate, and the summary
     says `security_status: absent`); zero open Codex threads of either kind (outdated or not); no mismatch;
@@ -1216,7 +1214,9 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`, plus - ONLY when the
     adversary gate is switched on (`--adversary-required` or an `adversary-required` label), or when a
     fetch failed or the marker is malformed - `adversary-missing`, `adversary-stale-or-blocked`,
-    `adversary-fetch-failed` or `adversary-malformed`.
+    `adversary-fetch-failed` or `adversary-malformed`. A waiver also requires the adversary gate
+    and may add `ci-waiver-untrusted-tool`, `ci-waiver-malformed`, `ci-waiver-mismatch` or
+    `ci-waiver-needs-adversary`.
 
     The adversary verdict (added 2026-10-25) is read from a MACHINE-READABLE MARKER in the PR body,
     never from prose: `<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->`.

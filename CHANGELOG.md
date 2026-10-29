@@ -382,7 +382,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Security
 
-- Pinned CI waiver tools to GitHub's API master SHA fetched by explicit HTTPS URL without checkout remote or URL rewrite config, disabled replacement objects and grafts, required master-base workflow evidence, isolated merge attributes, and required unquoted waiver approvals (#118).
+- Pinned CI waiver tools to GitHub's API master SHA, moved online classification and merges into private GitHub-fetched object stores, required nonempty successful jobs and master-base provenance, matched allowlisted paths exactly, excluded test configuration, and required unquoted waiver approvals (#118).
 
 - `firecrawl-router`: the serve-only form refuses a non-loopback `--listen` like `--open` does,
   and the address actually bound is checked before the first request is served (#14).
