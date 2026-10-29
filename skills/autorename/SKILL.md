@@ -52,25 +52,38 @@ The skill receives whatever follows the command. With no argument it titles this
 session and places its tab (steps 1 to 3 below). With **`all`** (synonyms `reorg`,
 `layout`; optionally followed by one workspace name or id to limit the pass to it)
 it does the whole from-first-principles layout pass over herdr instead:
-create, rename and renumber workspaces, relabel tabs and panes, and move tabs and
-panes between workspaces. Only inside herdr (`HERDR_ENV=1`); elsewhere say so and stop.
+create and rename workspaces, and move tabs and panes between them. Rename a
+tab only when its label is a single digit. Keep every other tab label, and
+keep every pane label that already has a name. Only inside herdr
+(`HERDR_ENV=1`); elsewhere say so and stop.
 
 1. Read the operator's special-workspace list (`herdr_place.py config`, file
    `~/.config/autorename/workspaces.conf`: names, hints, top-of-herdr order) and follow
    [workspace-layout.md](workspace-layout.md) end to end: principles, inventory
-   (read-only), decide the target layout, rename workspaces, relabel panes, move panes,
+   (read-only), decide the target layout, rename workspaces, move panes,
    sleeping panes through `relocate-pane.sh`, verify and report.
-2. **Show the plan before touching anything**: one numbered list of every change
-   (`1.` create workspace X, `2.` move tab T from A to X as `<label>-t`, `3.` rename ...).
-   Apply the placements that match a configured hint straight away. A tab that matches
-   nothing follows the [Postscript](workspace-layout.md#postscript-tabs-that-match-no-configured-hint):
-   one `/steps` question per tab, recommended option first, act, then the next tab.
-   The plan never closes a pane or tab (herdr-tidy owns closing; the one exception is the
-   untouched default shell of a workspace the pass just created) and never touches the
+   Principle 13 in that file is the monitor rule: `monitor` is first, and
+   its tab order is aiuse-watch, then htop, then tokscale. That match wins
+   over every other hint.
+2. **Do every sure move before any question.** Show the plan first: one
+   numbered list of every change (`1.` create workspace X, `2.` move tab T
+   from A to X keeping its label, `3.` ...). Apply the hint matches, `monitor`,
+   `remote`, and `one-offs` straight away. Then ask the unclear tabs **one
+   after another**, only after that work is finished: one question, apply the
+   answer, re-count tabs, then the next question. Do not combine them into one
+   question, and do not ask while sure moves are still pending.
+   The plan never closes a pane or tab (herdr-tidy owns closing; the one
+   exception is the untouched default shell of a workspace the pass just
+   created, and only after a real tab is already in it) and never touches the
    `coord` panes. Helm tabs are placed in the `helm` workspace like any other.
    A workspace holds at most 5 tabs.
-3. Title this session and label its own tab last, as steps 1 and 2 below (a full pass
-   moves this tab too, so do not run step 3's placement question).
+   Failures from 2026-10-29 and the rules that block them are in
+   [workspace-layout.md](workspace-layout.md#pitfalls-met-on-2026-10-29). Read
+   that section before the first move.
+3. Do not retitle this session, and do not relabel its tab, when that tab
+   label is not a single digit. Steps 1 and 2 below stay on `/autorename`
+   without `all`. A full pass may move this tab (principle 7) and does not
+   run step 3's placement question.
 4. Report: the final workspace, tab and pane tree as one numbered list, and anything
    left alone with the reason.
 
@@ -310,7 +323,8 @@ chat id, a Grok session id, or a zcode `sess_…` id) and move it with
 so the operator's view doesn't jump; `herdr pane list --workspace <id>` maps
 `agent_session.value` to pane ids.
 
-To re-arrange and rename **many** workspaces, tabs and panes at once (a full
-pass or one workspace; sleeping panes included), follow
-[workspace-layout.md](workspace-layout.md); `relocate-pane.sh` beside it cycles
-one sleeping pane through wake → move/relabel → sleep.
+To re-arrange **many** workspaces, tabs and panes at once (a full pass or one
+workspace; sleeping panes included), follow
+[workspace-layout.md](workspace-layout.md). A full pass renames a tab only
+when its label is a single digit. `relocate-pane.sh` beside it cycles one
+sleeping pane through wake, move, and sleep.
