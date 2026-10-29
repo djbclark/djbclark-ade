@@ -188,7 +188,7 @@ its API (`paseo agent inspect`: status, archived, pending cards BY TOOL, last up
 last thing it did). A pane TUI: the multiplexer's status and the screen itself (`herdr pane read`, classify_screen: a picker, a permission prompt, an open
 slash menu, a turn running; a heuristic that only ever ADDS a reason to wait). States: idle, working, silent (running with nothing new for 15 minutes: a hung
 turn or one long tool call), card:question (a picklist the agent asked: AskUserQuestion), card:permission (a tool awaiting approval), card:plan, card:picker,
-card:unknown, archived, gone, error. When the methods DISAGREE (an `idle` status over a picker on screen; `inspect` listing a card that `permit ls` does not)
+card:unknown, archived, gone, error, refused (a hard stop no route gets round: this very session, a finished one). When the methods DISAGREE (an `idle` status over a picker on screen; `inspect` and `permit ls` each listing a card the other does not)
 both are reported and the BLOCKING reading wins, because typing into a dialog is the harm. The same reason is in every card refusal and queue line, the
 deliverer files its latest on the record (`look`: state, why, when) and logs each change in deferred.log, `--pending` shows it as `[why: ...]` (and `look`
 in --json), and an expired or failed record's notice carries it.
@@ -455,6 +455,10 @@ def paseo_look(info, detail="", listed=None, last=""):
     if last:
         ev.append({"src": "paseo-logs", "says": "last activity", "line": clean_text(last)})
     cards = info.get("PendingPermissions") or []
+    if listed and not cards and not info.get("Archived"):
+        return {"state": "card:unknown", "why": "`paseo permit ls` lists a pending card that `paseo agent inspect` does not (a card may have just appeared): "
+                "treat the agent as blocked" + (f"; the card says: {detail}" if detail else ""),
+                "deliverable": False, "agree": False, "evidence": ev + [{"src": "paseo-permit-ls", "says": "lists a card", **({"line": detail} if detail else {})}]}
     if info.get("Archived"):
         return {"state": "archived", "why": paseo_blocker(info), "deliverable": False, "agree": True, "evidence": ev}
     if cards:
@@ -539,7 +543,7 @@ def diagnose(s):
         return {"state": word, "why": "`paseo agent inspect` cannot answer (is the Paseo daemon restarting?)" if kind == "error"
                 else "`paseo agent inspect` does not know this Paseo agent", "deliverable": False, "agree": True,
                 "evidence": [{"src": "paseo-inspect", "says": word}]}
-    detail, listed = paseo_card_detail(agent) if info.get("PendingPermissions") else ("", None)
+    detail, listed = paseo_card_detail(agent)    # asked whatever inspect says: a card only one of the two lists is a disagreement to report
     tl = paseo_timeline(agent, 3)
     last = next((r.strip() for r in reversed((tl or "").splitlines()) if r.strip()), "")
     return paseo_look(info, detail, listed, last)
@@ -652,15 +656,15 @@ def probe_proof(tx, mark, *probes):
 TIMELINE_TAIL = 80          # curated entries read per look
 TIMELINE_MIN = 10           # a folded text shorter than this proves nothing: `ack x` is as likely to be the agent's own output as a received message
 TIMELINE_PHASE = 6          # seconds a send polls the timeline before it hands the proof to the --ack watch (Paseo shows a steer within ~2-3 s)
-TIMELINE_READ = 10          # timeout of one `paseo logs`
+TIMELINE_READ = 5           # timeout of one `paseo logs` (a healthy one answers in about half a second)
 
 
-def paseo_timeline(agent_id, tail=TIMELINE_TAIL):
+def paseo_timeline(agent_id, tail=TIMELINE_TAIL, timeout=None):
     """The text of `paseo logs AGENT --tail N`, or None when the daemon or CLI cannot answer or printed nothing (the real CLI prints
-    "No activity to display." for an empty timeline, so silence is a broken CLI, not an empty agent)."""
+    "No activity to display." for an empty timeline, so silence is a broken CLI, not an empty agent). TIMEOUT caps the read (default TIMELINE_READ)."""
     if not UUID.fullmatch(agent_id or ""):
         return None
-    rc, out, _err = paseo_run("logs", agent_id, "--tail", str(tail), timeout=TIMELINE_READ)
+    rc, out, _err = paseo_run("logs", agent_id, "--tail", str(tail), timeout=timeout or TIMELINE_READ)
     return out if rc == 0 and out.strip() else None
 
 
@@ -673,11 +677,11 @@ def timeline_probe(text):
     return tl_norm(text)
 
 
-def timeline_messages(agent_id):
+def timeline_messages(agent_id, timeout=None):
     """The messages an agent RECEIVED, from its timeline: [(sender title, folded body)], one per `[Message received] <title>` entry and the line after
     it (a relay text is one line), and one per `[User] <text>` entry (title ""; a sender that is not a Paseo agent). Reasoning, tool output and the
     agent's own replies are other entries and never count. None when the timeline cannot be read."""
-    tl = paseo_timeline(agent_id)
+    tl = paseo_timeline(agent_id, timeout=timeout)
     if tl is None:
         return None
     rows, out = tl.splitlines(), []
@@ -689,9 +693,9 @@ def timeline_messages(agent_id):
     return out
 
 
-def timeline_count(agent_id, probe):
+def timeline_count(agent_id, probe, timeout=None):
     """How many RECEIVED messages of the agent hold PROBE now; None when the timeline cannot be read."""
-    msgs = timeline_messages(agent_id)
+    msgs = timeline_messages(agent_id, timeout)
     return None if msgs is None else sum(1 for _title, body in msgs if probe in body)
 
 
@@ -724,7 +728,7 @@ def timeline_ack(messages, token, who, base=None):
     closes it and the old copy does not; BASE None (never taken, or unreadable) closes nothing. From: a relay header at the very START of the body
     names one of WHO (a peer that is not a Paseo agent writes one), else the entry's own sender title is one of WHO exactly; a name quoted later in
     a body, or a title that merely contains one, establishes nothing. Residual: two Paseo agents can share a title (Codex, PR 124)."""
-    if not isinstance(base, dict):
+    if not isinstance(base, dict) or not isinstance(token, str) or not token:
         return False
     names = {w.lower() for w in who if isinstance(w, str) and w}
     pat = ack_token(token)
@@ -771,19 +775,24 @@ def send_paseo(s, text, wait):
     probe_esc = json.dumps("".join(XML_ESCAPES.get(c, c) for c in text), ensure_ascii=False)[1:-1]
     tx_proof = probe_proof(tx, mark, probe_raw, probe_esc) if tx else None
 
-    def witnessed():
+    t0 = time.time()
+    deadline_tl = t0 + min(wait, TIMELINE_PHASE)    # the timeline is read only inside its own phase, and no read may outlast it
+
+    def witnessed(read_tl=True):
         if tx_proof is not None and tx_proof() == "delivered":
             return "delivered"
-        if tl_ok and (timeline_count(agent, probe_tl) or 0) >= 1:
-            return "delivered"
+        if tl_ok and read_tl:
+            left = deadline_tl - time.time()
+            n = timeline_count(agent, probe_tl, TIMELINE_READ if left > TIMELINE_READ else max(1, int(left) + 1))
+            if (n or 0) >= 1:
+                return "delivered"
         return None
-    t0 = time.time()
     while True:
         waiting_tx = bool(tx and tx.is_file()) and time.time() < t0 + wait
-        waiting_tl = tl_ok and time.time() < t0 + min(wait, TIMELINE_PHASE)
+        waiting_tl = tl_ok and time.time() < deadline_tl
         if not (waiting_tx or waiting_tl):
             break
-        if witnessed():
+        if witnessed(waiting_tl):
             return "delivered"
         time.sleep(1)
     s["proof"] = witnessed if (tx or tl_ok) else None    # route_paseo hands it to the --ack watch: an "accepted" send may still show up
@@ -2927,7 +2936,9 @@ def why_cmd(ident, as_json=False):
         print(f"relay: {'no session(s) match' if not hits else str(len(hits)) + ' sessions match'} {ident!r}", file=sys.stderr)
         return 2
     s = hits[0]
-    d = diagnose(s)
+    stop = hard_stop(s)    # the refusals no route gets round (this very session, a finished one, a Hermes conversation of the caller): an actual send is rejected before any look
+    d = ({"state": "refused", "why": stop, "deliverable": False, "agree": True, "evidence": [{"src": "relay-refusal", "says": "hard stop", "line": clean_text(stop)}]}
+         if stop and not card_why(stop) else diagnose(s))
     if as_json:
         print(json.dumps({"id": s["id"], "name": s.get("name") or "", **d}, ensure_ascii=False))
     else:

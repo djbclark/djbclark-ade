@@ -674,6 +674,23 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual((d["state"], d["agree"]), ("card:question", False))
         self.assertIn("`paseo permit ls` does not", d["why"])
 
+    def test_a_card_only_permit_ls_lists_is_a_disagreement_and_blocks(self) -> None:
+        os.environ.update(FAKE_PENDING="[]", FAKE_PERMITS=self.PERMIT_Q)    # `inspect` has no card, `permit ls` has one: blocked, and the methods disagree
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("card:unknown", False, False))
+        self.assertIn("`paseo agent inspect` does not", d["why"])
+
+    def test_why_reports_a_hard_stop_as_refused_though_the_agent_is_idle(self) -> None:
+        me = sess(self=True)
+        rc, out, err = self.main([me], "--why", SID)
+        self.assertEqual(rc, 1, err)
+        self.assertIn(": refused", out)
+
+    def test_a_malformed_sender_token_never_aborts_a_sweep(self) -> None:
+        msgs = [("peer-long-name", "ack tok1")]
+        for bad in ({"x": 1}, ["a"], None, ""):
+            self.assertFalse(relay.timeline_ack(msgs, bad, ["peer-long-name"], {}))
+
     def test_a_running_agent_that_shows_nothing_new_for_a_long_time_is_silent_not_just_working(self) -> None:
         stamp = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - secs))
         os.environ["FAKE_STATUS"] = "running"
@@ -743,6 +760,7 @@ class RelayPaseo(unittest.TestCase):
         rc, out, _ = self.main([sess()], "--why", SID, "--json")
         self.assertEqual((rc, json.loads(out)["state"]), (1, "card:question"))
         os.environ.pop("FAKE_PENDING")
+        os.environ.pop("FAKE_PERMITS")
         self.assertEqual(self.main([sess()], "--why", SID)[0], 0)    # idle: it can take a text now
         self.assertEqual(self.main([sess()], "--why")[0], 2)
         self.assertEqual(self.main([sess()], "--why", SID, "some text")[0], 2)
