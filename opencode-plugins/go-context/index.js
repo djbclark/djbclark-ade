@@ -145,13 +145,19 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
 
   // A child or dispatched session must never be told to abandon its delegated
   // task and start a fresh session: it cannot take /handoff or /new. Soften the
-  // notice to a report-back wording that carries no lifecycle command.
-  const childHandoffText = (state, limits) => {
+  // notice to a report-back wording that carries no lifecycle command. When the
+  // child status is still unknown (state.child is null — the ceiling was crossed
+  // before the first idle), use a neutral wording that does not assert the
+  // session is a child: it may still turn out to be a primary.
+  const childHandoffText = (state, limits, definite) => {
     const byTokens = typeof state.total === "number" && state.total >= limits.handoff;
     const basis = byTokens
       ? `measured input context ${state.total} tokens (handoff ceiling ${limits.handoff})`
       : `${state.compactions ?? 0} compactions (budget ${policy.handoff_after_compactions})`;
-    return `Go cost check: ${basis}. This is a child or dispatched session: finish and report back to your parent. Never run a lifecycle command or hand off yourself.`;
+    const tail = definite
+      ? "This is a child or dispatched session: finish and report back to your parent. Never run a lifecycle command or hand off yourself."
+      : "If this is a child or dispatched session, finish and report back to your parent; never run a lifecycle command. Otherwise a handoff directive follows at the task boundary.";
+    return `Go cost check: ${basis}. ${tail}`;
   };
 
   async function maybeHandoff(sid, state) {
@@ -211,16 +217,23 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     const warnDue = typeof state.total === "number" && now() - state.sampleAt < 15 * 60 * 1000 && state.total >= limits.warn;
     if (handoffDue || warnDue) {
       // A handoff outranks a blocked/ineffective-compaction state: that is exactly
-      // the session that must hand off rather than loop compactions.
-      const level = handoffDue ? "handoff" : (!storageReadable || !streamAvailable || state.blocked || (state.pending && now() - state.attemptAt > 120000) ? "blocked" : "warn");
+      // the session that must hand off rather than loop compactions. The dedup key
+      // distinguishes the softened wording from the full directive: a primary that
+      // crosses the ceiling before its first idle is first told the neutral wording,
+      // and must still receive the full directive once an idle confirms it is a
+      // primary (child === false). Sharing one key would lock it on the softened text.
+      const childSafe = process.env.ACP_RUN_AGENT === "1" || state.child !== false;
+      const level = handoffDue
+        ? (childSafe ? "handoff-child" : "handoff")
+        : (!storageReadable || !streamAvailable || state.blocked || (state.pending && now() - state.attemptAt > 120000) ? "blocked" : "warn");
       if (state.notice !== level) {
         event.system.push({ type: "text", text: level === "handoff"
-          ? (process.env.ACP_RUN_AGENT === "1" || state.child !== false
-              ? childHandoffText(state, limits)
-              : handoffText(state, limits, Math.max(1, state.handoffTries ?? 0)))
-          : `Go cost check: last measured input context ${state.total} tokens, including cache reads/writes. ` +
-            (level === "blocked" ? "Compaction is ineffective or unconfirmed. Reduce fixed instructions/tools and checkpoint at the next safe task boundary; do not loop compactions. " : "Keep the task brief and delegate separable work. Native compaction is queued automatically when its growth threshold is crossed. ") +
-            "At a completed task, write the owned handoff before a supported new-session/baton cycle. Never clear a parent session. Use ade_compact for manual compaction of this session." });
+          ? handoffText(state, limits, Math.max(1, state.handoffTries ?? 0))
+          : level === "handoff-child"
+            ? childHandoffText(state, limits, process.env.ACP_RUN_AGENT === "1" || state.child === true)
+            : `Go cost check: last measured input context ${state.total} tokens, including cache reads/writes. ` +
+              (level === "blocked" ? "Compaction is ineffective or unconfirmed. Reduce fixed instructions/tools and checkpoint at the next safe task boundary; do not loop compactions. " : "Keep the task brief and delegate separable work. Native compaction is queued automatically when its growth threshold is crossed. ") +
+              "At a completed task, write the owned handoff before a supported new-session/baton cycle. Never clear a parent session. Use ade_compact for manual compaction of this session." });
         state.notice = level;
       }
     }

@@ -305,7 +305,7 @@ test("the handoff wake respects its cooldown and escalates on retry", async () =
   assert.match(f.prompts[1].text, /Overdue \(fired 2 times\)/);
 });
 
-test("the context hook escalates to a handoff directive once the ceiling is crossed", async () => {
+test("the context hook delivers the full directive once an idle has confirmed a primary", async () => {
   const f = await fixture(); await f.context();
   await f.step(112000);
   await f.idle(); // live get confirms a primary (no parentID) → state.child === false
@@ -313,6 +313,27 @@ test("the context hook escalates to a handoff directive once the ceiling is cros
   assert.equal(event.system.length, 1);
   assert.match(event.system[0].text, /Automatic handoff required/);
   assert.match(event.system[0].text, /handoff ceiling 112000/);
+});
+
+test("a primary crossing the ceiling before its first idle is softened, then re-surfaces the full directive after a dropped wake", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  // Request before the first idle: state.child is still null, so the notice is
+  // neutral — it must not assert a child role or carry the lifecycle directive.
+  const softened = await f.context();
+  assert.equal(softened.system.length, 1);
+  assert.doesNotMatch(softened.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(softened.system[0].text, /Automatic handoff required/);
+  // The wake is dropped, but the idle still confirms a primary (child === false).
+  f.ctx.session.prompt = async () => { throw new Error("wake dropped"); };
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "the wake was dropped");
+  // The next request re-surfaces the full directive: the dedup key now
+  // distinguishes the softened wording from the full one.
+  const full = await f.context();
+  assert.equal(full.system.length, 1);
+  assert.match(full.system[0].text, /Automatic handoff required/);
+  assert.match(full.system[0].text, /handoff ceiling 112000/);
 });
 
 test("validHandoffPolicy accepts a valid policy and rejects each malformed field", () => {
@@ -378,6 +399,17 @@ test("a child session's context notice never says to start a fresh session", asy
   assert.match(event.system[0].text, /report back to your parent/);
 });
 
+test("a child session's context notice is softened even before its first idle", async () => {
+  const f = await fixture();
+  f.parents.set("ses_one", "ses_parent");
+  await f.context();
+  await f.step(112000);
+  const event = await f.context(); // no idle: state.child is still null
+  assert.equal(event.system.length, 1);
+  assert.doesNotMatch(event.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
+});
+
 test("the wake refuses a session whose live model no longer matches", async () => {
   const f = await fixture(); await f.context();
   await f.step(112000);
@@ -420,6 +452,18 @@ test("a far-future persisted handoffAt is clamped per record, not a whole-store 
   await f.context();
   await f.step(150000);
   assert.deepEqual(f.calls, ["ses_one"], "one stale timestamp must not disable automatic compaction for the location");
+});
+
+test("a far-future persisted handoffAt is clamped so the handoff wake can still fire after the cooldown", async () => {
+  const seed = { [storageKey]: { ses_one: { model: "deepseek-v4.1-flash", pending: false, sampleAt: 0, attemptAt: 0, total: 150000, handoffAt: 2_000_000, handoffTries: 0, compactions: 0, child: null, notice: "", active: true, blocked: false } } };
+  const f = await fixture(null, seed);
+  await f.context(); // re-admits the record; the clamp sets handoffAt = now()
+  await f.idle(); // within the clamped cooldown → no wake
+  assert.equal(f.prompts.length, 0, "the clamp suppresses the wake for one cooldown");
+  f.advance(f.policy.handoff_cooldown_seconds * 1000);
+  await f.idle(); // cooldown elapsed → the wake fires (it would not without the clamp)
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].text, /Automatic handoff required/);
 });
 
 test("concurrent idle events claim the wake once after the awaited read", async () => {

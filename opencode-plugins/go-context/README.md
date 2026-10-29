@@ -46,7 +46,11 @@ and for a session whose live model no longer matches the recorded Go model, and
 is never sent in a dispatched slice (`ACP_RUN_AGENT=1`). A child or dispatched
 session also never gets the mandatory directive in its context notice: it is
 softened to a "finish and report back to your parent" wording with no "start a
-fresh session" or lifecycle command, until a primary Go session is confirmed.
+fresh session" or lifecycle command. Before the first idle confirms a primary,
+the notice is neutral ("If this is a child or dispatched session, ... Otherwise
+a handoff directive follows at the task boundary"); once an idle confirms a
+primary, the next request re-surfaces the full directive (the notice key
+distinguishes the two wordings), so the backstop survives a dropped wake.
 An ineffective-compaction (blocked) session is exactly the one that must hand
 off rather than loop compactions, so handoff outranks `blocked` in the context
 notice. The directive routes the model through the handoff skill and
