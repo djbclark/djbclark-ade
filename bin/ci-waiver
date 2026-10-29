@@ -49,12 +49,17 @@ def excluded(path):
 class Repository:
     def __init__(self, directory):
         self.directory = Path(directory).resolve(strict=True)
+        common = self.git("rev-parse", "--git-common-dir").stdout.decode().strip()
+        if (self.directory / common / "info/grafts").exists():
+            raise ValueError("git-grafts-present")
 
     def git(self, *args, allowed=(0,), env=None, data=None):
         if env is None:
-            env = {k: v for k, v in os.environ.items() if k not in (
-                "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ATTR_SOURCE")}
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        else:
+            env = dict(env)
+        env.pop("GIT_REPLACE_REF_BASE", None)
+        env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
         r = subprocess.run(["git", *args], cwd=self.directory, env=env, input=data,
                            capture_output=True, timeout=60)
         if r.returncode not in allowed:
@@ -114,7 +119,7 @@ class Repository:
 
 
 def gh(endpoint):
-    r = subprocess.run(["gh", "api", "--paginate", endpoint], capture_output=True, text=True, timeout=120)
+    r = subprocess.run(["gh", "api", "--hostname", "github.com", "--paginate", endpoint], capture_output=True, text=True, timeout=120)
     if r.returncode:
         raise ValueError("gh-error:" + endpoint.split("?")[0])
     decoder, docs, i = json.JSONDecoder(), [], 0
@@ -139,7 +144,7 @@ def items(endpoint, key=None):
     return out
 
 
-def green_run(repo, commit, *, master=False, pr=None, timeline=()):
+def green_run(repo, commit, repository, master_sha, *, master=False, pr=None):
     runs = items(f"repos/{repo}/actions/workflows/test.yml/runs?head_sha={commit}&per_page=100", "workflow_runs")
     matching = [r for r in runs if r.get("head_sha") == commit and
                 (r.get("event") == "push" and r.get("head_branch") == "master" if master
@@ -148,13 +153,21 @@ def green_run(repo, commit, *, master=False, pr=None, timeline=()):
     reason = "master-not-green" if master else "h0-not-green"
     if latest.get("status") != "completed" or latest.get("conclusion") != "success":
         raise ValueError(reason)
+    workflow = ".github/workflows/test.yml"
+    if latest.get("path") != workflow:
+        raise ValueError("workflow-not-master")
+    # These objects must be available locally. Missing workflow blobs fail closed.
+    if repository.git("rev-parse", "--verify", commit + ":" + workflow).stdout != repository.git(
+            "rev-parse", "--verify", master_sha + ":" + workflow).stdout:
+        raise ValueError("workflow-not-master")
     if not master:
-        associated = latest.get("event") == "pull_request" and any(p.get("number") == pr for p in latest.get("pull_requests", []))
-        historic = any(e.get("event") in ("head_ref_force_pushed", "synchronize") and
-                       commit in (e.get("before"), e.get("after"),
-                                  (e.get("before_commit") or {}).get("sha"),
-                                  (e.get("after_commit") or {}).get("sha")) for e in timeline)
-        if not associated and not historic:
+        associated = latest.get("event") == "pull_request" and any(
+            p.get("number") == pr and (p.get("base") or {}).get("ref") == "master"
+            and ("sha" not in p["base"] or not repository.git(
+                "merge-base", "--is-ancestor", repository.sha(p["base"]["sha"]), master_sha,
+                allowed=(0, 1)).returncode)
+            for p in latest.get("pull_requests", []))
+        if not associated:
             raise ValueError("h0-not-pr-head")
     jobs = items(f"repos/{repo}/actions/runs/{int(latest['id'])}/attempts/{int(latest.get('run_attempt', 1))}/jobs?per_page=100", "jobs")
     if not jobs or any(j.get("status") != "completed" or j.get("conclusion") != "success" for j in jobs):
@@ -192,11 +205,13 @@ def classify(base, head, repo, pr, repo_dir):
         if not any(c.get("sha") == h0 for c in commits):
             raise ValueError("h0-not-pr-head")
         timeline = items(f"repos/{repo}/issues/{pr}/timeline?per_page=100")
-        green_run(repo, h0, pr=pr, timeline=timeline)
-        master = gh(f"repos/{repo}/commits/master")[0]["sha"]
+        if any(e.get("event") == "base_ref_changed" for e in timeline):
+            raise ValueError("pr-base-retargeted")
+        master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
+        green_run(repo, h0, r, master, pr=pr)
         if r.git("merge-base", "--is-ancestor", target, r.sha(master), allowed=(0, 1)).returncode:
             raise ValueError("target-not-on-master")
-        green_run(repo, target, master=True)
+        green_run(repo, target, r, master, master=True)
         r.machine_merge(h0, target)
         return {**result, "class": "master-merge", "reasons": ["green-pr-head-machine-merge"]}
     except Exception as e:

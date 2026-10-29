@@ -4,20 +4,30 @@ Summary (2026-10-28; repaired 2026-10-29): trusted master code mechanically clas
 
 ## A. Classification and evidence
 
-A1. The waiver decision is valid only from a `pr-wait` byte-identical to
-`origin/master:bin/pr-wait`. For every present marker it runs `git fetch origin master`,
-compares its own bytes with that blob, and executes `git show origin/master:bin/ci-waiver`
-in a private 0700 temporary directory removed afterward. Failure is
+A1. The waiver decision is valid only from a `pr-wait` byte-identical to GitHub's
+master snapshot. For every present marker it reads the full SHA from
+`gh api --hostname github.com repos/OWNER/REPO/branches/master`, using the PR's
+repository argument. It fetches exactly that SHA from
+`https://github.com/OWNER/REPO.git` in a temporary bare Git directory, with
+system/global/inherited Git configuration disabled, empty templates, disabled
+hooks and only HTTPS transport allowed. The checkout's `remote.*` and
+`url.*.insteadOf` settings are never loaded by the fetch. Fetched objects go into
+the checkout's object store; no checkout refs are changed. The resolved commit
+must equal the API SHA. Both `bin/pr-wait` and `bin/ci-waiver` are read from that
+same commit; the waiter must match its own bytes, and the classifier executes
+in a private temporary directory removed afterward. Failure is
 `ci-waiver-untrusted-tool`. No PR-owned Python helper is imported. Before the initial
 waiver machinery lands on master, waivers fail closed; this PR cannot waive itself.
-Both blobs are read from the same full SHA resolved immediately after the fetch,
-so concurrent updates of the tracking ref cannot mix master versions.
+Concurrent local tracking-ref updates cannot select or mix master versions.
 An intentionally rewritten waiter could omit its own self-check: the operator
 must select a trusted master-identical copy before relying on its report.
 
 For manual inspection use the trusted classifier's
 `classify --repo-dir /ABS/REPO --pr N --repo OWNER/NAME --json`. Every Git command
-pins its cwd to that directory, ignoring inherited Git directory overrides.
+pins its cwd to that directory, ignoring inherited Git overrides, replacement
+refs (including `GIT_REPLACE_REF_BASE`) and environment graft files. A repository
+with `info/grafts` is refused. Replacement objects and grafts are also disabled
+when reading the trusted snapshot and in the isolated machine merge.
 `classify --repo-dir /ABS/REPO --base REF --head REF --json` supports offline
 docs-only fixtures; it refuses master-merge without PR history. Output contains
 `class`, `reasons` and the full classified `head`. PR base branch must be master.
@@ -46,13 +56,18 @@ must be ordinary nonexecutable files; symlinks, gitlinks and executable/mode
 changes are rejected. Regular file additions and deletions remain allowed.
 
 A4. `master-merge` requires exactly two parents: former PR head H0 first and
-master commit T second. H0 must occur in this PR's commit list AND be evidenced
-as a head by a `test.yml` pull-request run associated with this PR, or a GitHub
-force-push/synchronize timeline event naming H0. A push run alone does not prove
-PR history. The latest matching `test.yml` run/attempt on exactly H0 must be
+master commit T second. H0 must occur in this PR's commit list AND have a
+`test.yml` pull-request run associated with this PR whose `pull_requests` entry
+names base ref `master`. If that entry supplies a base SHA, it must be an ancestor
+of current master. A `base_ref_changed` event anywhere in the PR's timeline
+refuses a master-merge waiver. There is no force-push/synchronize timeline
+fallback; a push run alone does not prove PR history. Both parents' runs must
+name exactly `.github/workflows/test.yml`, and that file in each run's `head_sha`
+tree must equal the file at current master. Missing workflow objects fail closed.
+The latest matching `test.yml` run/attempt on exactly H0 must be
 completed/successful, with a nonempty job list whose EVERY job is completed with
 conclusion `success`. Skipped, neutral, pending, workflow-dispatch, commit statuses
-and unrelated bot checks cannot establish greenness. T must be on current master
+and unrelated bot checks cannot establish greenness. T must be an ancestor of current master
 and have a latest completed successful `test.yml` push run on master, with every
 job successful too. Earlier success cannot hide a failed rerun.
 
@@ -70,7 +85,7 @@ files may be hand-resolved.
 A5. Everything else is `none`: examples include `touches-nonwaivable:code.py`,
 `not-a-merge`, `h0-not-green`, `master-not-green`, `hand-edited:code.py`, and
 `shallow-history`. Missing objects, unreadable checks and any Git/GitHub error
-deny a waiver. The tool never fetches, edits a worktree or cancels a CI run;
+deny a waiver. The standalone classifier never fetches, edits a worktree or cancels a CI run;
 `merge-tree` writes only its temporary object store. Exit 0 means a classification was printed,
 including `none`; exit 2 means invalid usage. Consumers must check the class.
 
@@ -96,8 +111,10 @@ markers (replace placeholders; the classifier, not the reviewer, chooses class):
 B2. For each present marker `pr-wait` verifies trusted master code and reclassifies
 the current head. Waiver markers inside fences, inline code (including multiline
 spans), blockquotes/lazy continuations or indented blocks are malformed, not live.
-This stricter rule applies to CI waivers only; the adversary parser's documented
-legacy limits are unchanged. Balanced JSON boundaries and duplicate-key checks
+The same strict live-text reading is required of the adversary APPROVE used by a
+waiver: quoted, indented or multiline-code approvals do not count. The ordinary
+adversary report retains its documented legacy limits, and a same-head BLOCK
+still wins anywhere in the raw body. Balanced JSON boundaries and duplicate-key checks
 are shared; partially masked JSON is malformed. The only keys are `class`, `head`,
 `reviewer`, and optional `author`. Unknown keys, wrong version, invalid class,
 shortened head, empty reviewer or equal reviewer/author are `ci-waiver-malformed`.
@@ -128,6 +145,13 @@ waiver. The classifier still denies workflow/test/waiver machinery changes.
 C2. `push.branches: [master]` remains, and full CI still runs after a master-merge
 whose squash changes nonignored paths. This post-merge backstop, with red runs
 reported by existing fleet notices, is why master-merge waivers are acceptable.
+When T is older than the current master tip, squash-merging combines the topic
+with newer master changes and yields a tree neither H0 nor T tested. The classifier
+proves the parent combination and machine merge, not that final squash tree.
+The operator's exact-head pinned yes accepts this stale-parent semantic-merge
+risk after reading the independent report and the current check results; it does
+not certify the final squash tree as pretested. The post-merge push run is the
+backstop, subject to the path-filter limits below.
 **Design defect in the original wording:** push `paths-ignore` necessarily also
 skips docs-only merges on master, so it cannot run on *every* merged commit.
 The implementation preserves the explicitly requested filters and branch

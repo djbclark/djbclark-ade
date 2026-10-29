@@ -299,10 +299,19 @@ pull request here is expected to meet these; flag any it misses.
     CI then becomes `waived`; Codex and open-finding gates still apply. See
     [docs/ci-waiver.md](docs/ci-waiver.md) for the proof, exclusions and explicit squash message.
 
-    Repair (2026-10-29): a waiver report is valid only from a `pr-wait` byte-identical
-    to fetched master; it executes master's classifier, never the PR's copy. The
+    Repair (2026-10-29, round 2): a waiver report requires a `pr-wait` byte-identical
+    to GitHub's master SHA from `branches/master`. It fetches that exact SHA from
+    the explicit GitHub HTTPS URL in an isolated bare Git directory without local,
+    global or inherited remote/URL rewrite config, then executes that SHA's classifier.
+    Replacement objects and graft overrides are disabled; `info/grafts` refuses.
+    H0 needs this PR's master-base run, master-ancestor base SHA when supplied and
+    master's workflow path/blob; base-retarget timeline events refuse. Waiver
+    APPROVEs must also be outside quotes, indentation and code. The
     reviewer is not authenticated: agents share a GitHub account. The operator's
     pinned merge yes is the authority; a waiver only changes `pr-wait`'s report.
     The merger rechecks `gh pr checks` immediately before `gh pr merge --match-head-commit`.
     Waiver markers in code, blockquotes or indented blocks are malformed; their only
     keys are class/head/reviewer and optional author (reviewer must differ).
+    If T predates master's tip, the squash yields a tree neither parent tested; the
+    operator's pinned yes accepts that semantic-merge risk, with the post-merge
+    push run as backstop, subject to path filters (see docs C2/C5).

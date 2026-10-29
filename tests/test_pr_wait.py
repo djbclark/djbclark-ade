@@ -35,9 +35,10 @@ skip = False
 method, ep = "GET", None
 for a in args[1:]:
     if skip:
-        method, skip = a, False
-    elif a == "-X":
-        skip = True
+        if skip == "-X": method = a
+        skip = False
+    elif a in ("-X", "--hostname"):
+        skip = a
     elif not a.startswith("-") and ep is None:
         ep = a.split("?")[0]
 routes = json.load(open(os.path.join(d, "scenario.json")))["routes"]
@@ -73,6 +74,92 @@ def waiver_body(head=HEAD, cls="docs-only", adversary=True):
     return body
 
 
+@pytest.mark.parametrize("case", ["origin", "rewrites", "replace", "grafts", "api-error", "bad-api-sha", "different-waiter"])
+def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch, case):
+    # Replay spoof.py with real Git objects; substitute only the HTTPS transport
+    # with a local authentic repository so this regression needs no network.
+    mod = load_module()
+    real_run = subprocess.run
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    def git(path, *args):
+        return real_run(["git", "-c", "user.name=fixture", "-c", "user.email=f@test", *args],
+                        cwd=path, env=env, check=True, capture_output=True, text=True).stdout.strip()
+    authentic, evil, victim = (tmp_path / n for n in ("authentic", "evil", "victim"))
+    for path in (authentic, evil, victim):
+        path.mkdir()
+        git(path, "init", "-q", "-b", "master")
+    for path, reason, cls in ((authentic, "authentic-master", "none"), (evil, "attacker", "master-merge")):
+        (path / "bin").mkdir()
+        (path / "bin/pr-wait").write_bytes(PR_WAIT.read_bytes())
+        (path / "bin/ci-waiver").write_text("import json; print(" + repr(json.dumps({
+            "class": cls, "reasons": [reason], "head": HEAD})) + ")\n")
+        git(path, "add", "bin")
+        git(path, "commit", "-qm", "tools")
+    master = git(authentic, "rev-parse", "HEAD")
+    if case == "different-waiter":
+        with (authentic / "bin/pr-wait").open("ab") as f:
+            f.write(b"\n# changed waiter\n")
+        git(authentic, "add", "bin/pr-wait")
+        git(authentic, "commit", "-qm", "different waiter")
+        master = git(authentic, "rev-parse", "HEAD")
+    (victim / "code.py").write_text("def f(:\n")
+    git(victim, "add", "code.py")
+    git(victim, "commit", "-qm", "broken")
+    git(victim, "remote", "add", "origin", str(evil))
+    if case == "rewrites":
+        git(victim, "config", "url." + str(evil) + ".insteadOf", "https://github.com/")
+        git(victim, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        global_config = tmp_path / "global-config"
+        global_config.write_text('[url "' + str(evil) + '"]\n insteadOf = https://github.com/\n')
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "url." + str(evil) + ".insteadOf")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/")
+    elif case == "replace":
+        # The replacement is in the checkout, not the isolated snapshot repo.
+        git(victim, "fetch", str(evil), "master")
+        git(victim, "update-ref", "refs/replace/" + master, git(evil, "rev-parse", "HEAD"))
+    elif case == "grafts":
+        (victim / ".git/info/grafts").write_text(git(victim, "rev-parse", "HEAD") + "\n")
+    def api(*args):
+        assert args == ("api", "--hostname", "github.com", f"repos/{REPO}/branches/master")
+        if case == "api-error":
+            raise mod.GhError("unavailable")
+        return json.dumps({"commit": {"sha": "invalid" if case == "bad-api-sha" else master}})
+    monkeypatch.setattr(mod, "gh", api)
+    fetches = []
+    def transport(argv, **kwargs):
+        if argv[0] == "git" and "fetch" in argv and f"https://github.com/{REPO}.git" in argv:
+            fetches.append(argv)
+            assert argv[-1] == master
+            isolated_env = kwargs["env"]
+            assert Path(isolated_env["GIT_DIR"]) != victim / ".git"
+            for key in ("url." + str(evil) + ".insteadOf", "remote.origin.url"):
+                check = real_run(["git", "config", "--get", key], cwd=kwargs["cwd"],
+                                 env=isolated_env, capture_output=True)
+                assert check.returncode == 1
+            argv = [str(authentic) if a == f"https://github.com/{REPO}.git" else a for a in argv]
+            # Fixture-only file transport; production permits HTTPS exclusively.
+            argv = [argv[0], "-c", "protocol.file.allow=always", *argv[1:]]
+        return real_run(argv, **kwargs)
+    monkeypatch.setattr(mod.subprocess, "run", transport)
+    got = mod.classify_ci_waiver(REPO, PR, repo_dir=str(victim))
+    if case in ("grafts", "api-error", "bad-api-sha", "different-waiter"):
+        assert got["reasons"] == ["ci-waiver-untrusted-tool"]
+        assert len(fetches) == (1 if case == "different-waiter" else 0)
+    else:
+        assert got["reasons"] == ["authentic-master"]
+        assert len(fetches) == 1
+    waiver = mod.ci_waiver_marker(waiver_body(cls="master-merge"))
+    waiver["classification"] = got
+    adv = mod.adversary_from_doc({"body": waiver_body()}, HEAD)
+    waived, blockers = mod.waiver_gate(waiver, HEAD, adv, {"fail": 0, "pending": 3})
+    assert not waived
+    if "ci-waiver-untrusted-tool" in got["reasons"]:
+        assert "ci-waiver-untrusted-tool" in blockers
+
+
 @pytest.mark.parametrize("case,blocker", [
     ("valid", None), ("no-adversary", "ci-waiver-needs-adversary"),
     ("short-head", "ci-waiver-malformed"), ("fenced", "ci-waiver-malformed"),
@@ -86,6 +173,11 @@ def waiver_body(head=HEAD, cls="docs-only", adversary=True):
     ("untrusted-waiter", "ci-waiver-untrusted-tool"), ("fetch-error", "ci-waiver-untrusted-tool"),
     ("local-evil-classifier", "ci-waiver-mismatch"),
     ("untrusted-master-sha", "ci-waiver-untrusted-tool"),
+    ("r2-approve-blockquote", "ci-waiver-needs-adversary"),
+    ("r2-approve-indent", "ci-waiver-needs-adversary"),
+    ("r2-approve-lazyquote", "ci-waiver-needs-adversary"),
+    ("r2-approve-multiline-code", "ci-waiver-needs-adversary"),
+    ("r2-quoted-block", "ci-waiver-needs-adversary"),
 ])
 def test_ci_waiver_waiter_gate(world, case, blocker):
     # A deterministic local git shim lets the REAL classifier prove a docs-only diff;
@@ -95,7 +187,11 @@ def test_ci_waiver_waiter_gate(world, case, blocker):
 import sys,os
 from pathlib import Path
 a=sys.argv[1:]
+while a[:1]==['-c']: a=a[2:]
 if a==['rev-parse','--show-toplevel']: print(os.getcwd())
+elif a[:1]==['init']: sys.exit(0)
+elif a==['rev-parse','--git-common-dir']: print('.git')
+elif a==['rev-parse','--git-path','objects']: print('.')
 elif a[:1]==['fetch']: sys.exit(1 if os.environ.get('WAIVER_FETCH_FAIL') else 0)
 elif a[:1]==['show']:
     name=a[-1].split(':')[-1].split('/')[-1]
@@ -103,7 +199,7 @@ elif a[:1]==['show']:
     if name=='pr-wait' and os.environ.get('WAIVER_BAD_WAITER'): data+=b'\\n# different master\\n'
     sys.stdout.buffer.write(data)
 elif a==['rev-parse','--is-shallow-repository']: print('false')
-elif a[:2]==['rev-parse','--verify'] and 'origin/master' in a[-1] and os.environ.get('WAIVER_BAD_MASTER'): print('invalid')
+elif a[:2]==['rev-parse','--verify'] and a[-1].startswith('b'*40) and os.environ.get('WAIVER_BAD_MASTER'): print('c'*40)
 elif a[0]=='rev-parse': print('a'*40 if a[-1].startswith('a') else 'b'*40)
 elif a[0]=='merge-base': print('b'*40)
 elif a[0]=='diff':
@@ -112,11 +208,22 @@ else: sys.exit(1)
 ''')
     fake_git.chmod(0o755)
     world.env["WAIVER_TRUST_SOURCE"] = str(PR_WAIT.parent)
+    world.route(f"repos/{REPO}/branches/master", ok({"commit": {"sha": OLD}}))
     body = waiver_body(head=HEAD[:12] if case == "short-head" else OLD if case == "other-head" else HEAD,
                        cls="master-merge" if case == "class-mismatch" else "docs-only",
                        adversary=case != "no-adversary")
     if case == "fenced":
         body = "```\n" + body + "\n```"
+    elif case.startswith("r2-"):
+        first, approve = body.split("\n", 1)
+        if case == "r2-quoted-block":
+            body += "\n\n> " + approve.replace('"APPROVE"', '"BLOCK"')
+        else:
+            shape = {"r2-approve-blockquote": "> " + approve,
+                     "r2-approve-indent": "    " + approve,
+                     "r2-approve-lazyquote": "> quote\n" + approve,
+                     "r2-approve-multiline-code": "`\n" + approve + "\n`"}
+            body = first + "\n\n" + shape[case]
     elif case == "bad-version":
         body = body.replace("ci-waiver:v1", "ci-waiver:v2")
     elif case == "partly-code":

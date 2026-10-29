@@ -11,8 +11,6 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- Security: Pinned CI waiver execution to trusted master, required exact PR workflow/job evidence, isolated Git attributes, and tightened paths and marker parsing (#118).
-
 - Added mechanical CI waiver classification, exact-head independent-review markers and docs-only workflow filtering for proved low-risk changes (#118).
 
 - Added `bin/context-watch` (2026-10-28), a read-only per-agent context readout: for each running Claude Code agent (`paseo ls -g --background --json`, else transcripts modified in the last 30 minutes) it prints `<id8> <title> 214k/267k (80%) wall in 53k`, fullest first, from the newest non-sidechain usage block (the nudge hook's `_last_context_tokens`, imported) against each agent's own compaction ceiling (the smaller of its `autoCompactWindow` and its model's window, minus the 33k buffer); `--json`, `--min-pct`, `--source`, `--recent-minutes`; an unreadable size prints `?`; exit 0; not wired into fleet-watch or settings.json; `docs/context-hygiene.md` section 6 (#107).
@@ -383,6 +381,8 @@ agent what changed and what is new. Entries end with the pull request number.
   run" instead of "sent" (2026-10-20).
 
 ### Security
+
+- Pinned CI waiver tools to GitHub's API master SHA fetched by explicit HTTPS URL without checkout remote or URL rewrite config, disabled replacement objects and grafts, required master-base workflow evidence, isolated merge attributes, and required unquoted waiver approvals (#118).
 
 - `firecrawl-router`: the serve-only form refuses a non-loopback `--listen` like `--open` does,
   and the address actually bound is checked before the first request is served (#14).

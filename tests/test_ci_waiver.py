@@ -18,7 +18,8 @@ class History:
         self.env = {**os.environ, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
                     "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.test"}
         self.git("init", "-b", "master")
-        self.commit({"code.py": "original\n", "CHANGELOG.md": "initial\n"})
+        self.commit({"code.py": "original\n", "CHANGELOG.md": "initial\n",
+                     ".github/workflows/test.yml": "name: tests\n"})
         self.base = self.git("rev-parse", "HEAD")
         shim = tmp / "shim"
         shim.mkdir()
@@ -69,13 +70,16 @@ class History:
         self.routes.write_text(json.dumps({
             "repos/r/p/pulls/1/commits": [{"sha": self.h0}],
             "repos/r/p/issues/1/timeline": [],
-            "repos/r/p/commits/master": {"sha": self.target},
+            "repos/r/p/branches/master": {"commit": {"sha": self.target}},
             f"repos/r/p/actions/workflows/test.yml/runs?head_sha={self.h0}&per_page=100": {"workflow_runs": [{
                 "id": 1, "head_sha": self.h0, "event": "pull_request", "status": "completed",
-                "conclusion": h0, "run_number": 1, "run_attempt": 1, "pull_requests": [{"number": 1}]}]},
+                "conclusion": h0, "run_number": 1, "run_attempt": 1,
+                "path": ".github/workflows/test.yml",
+                "pull_requests": [{"number": 1, "base": {"ref": "master", "sha": self.base}}]}]},
             f"repos/r/p/actions/workflows/test.yml/runs?head_sha={self.target}&per_page=100": {"workflow_runs": [{
                 "id": 2, "head_sha": self.target, "head_branch": "master", "event": "push", "status": "completed",
-                "conclusion": master, "run_number": 2, "run_attempt": 1}]},
+                "conclusion": master, "run_number": 2, "run_attempt": 1,
+                "path": ".github/workflows/test.yml"}]},
             "repos/r/p/actions/runs/1/attempts/1/jobs": {"jobs": [{"status": "completed", "conclusion": h0}]},
             "repos/r/p/actions/runs/2/attempts/1/jobs": {"jobs": [{"status": "completed", "conclusion": master}]},
         }))
@@ -351,3 +355,119 @@ def test_ci_waiver_git_dir_environment_ignored(history, tmp_path):
     foreign = History(other)
     history.env["GIT_DIR"] = str(foreign.repo / ".git")
     assert history.classify(pr=False)["class"] == "docs-only"
+
+
+@pytest.mark.parametrize("refbase", ["refs/replace", "refs/alternate-replace"])
+def test_ci_waiver_r2_replace_ref_cannot_hide_code(history, refbase):
+    fake = history.commit({"CHANGELOG.md": "notes\n"})
+    history.git("checkout", "-b", "real", history.base)
+    head = history.commit({"code.py": "def f(:\n", "CHANGELOG.md": "notes\n"})
+    before = history.classify(head=head)
+    assert before["class"] == "none"
+    history.git("update-ref", refbase + "/" + head, fake)
+    history.env.update(GIT_REPLACE_REF_BASE=refbase, GIT_NO_REPLACE_OBJECTS="0")
+    assert history.classify(head=head) == before
+    assert history.classify(head=head, pr=True) == before
+
+
+def test_ci_waiver_r2_grafts_refused(history):
+    history.commit({"CHANGELOG.md": "notes\n"})
+    (history.repo / ".git/info/grafts").write_text(history.git("rev-parse", "HEAD") + "\n")
+    got = history.classify()
+    assert got["class"] == "none" and "git-grafts-present" in got["reasons"]
+
+
+def test_ci_waiver_r2_environment_grafts_ignored(history, tmp_path):
+    history.commit({"CHANGELOG.md": "notes\n"})
+    grafts = tmp_path / "grafts"
+    grafts.write_text(history.git("rev-parse", "HEAD") + "\n")
+    history.env["GIT_GRAFT_FILE"] = str(grafts)
+    assert history.classify()["class"] == "docs-only"
+
+
+@pytest.mark.parametrize("case", ["other-base", "missing-base", "unrelated-base-sha", "retargeted",
+                                  "wrong-workflow", "missing-workflow", "changed-workflow", "push-history",
+                                  "skipped-job", "nonmaster-pr", "control-file", "empty-base-sha"])
+def test_ci_waiver_r2_master_workflow_evidence(history, case):
+    # All jobs are green; only their provenance makes this invalid evidence.
+    history.merge(broken=True)
+    def change(routes):
+        run = routes[h0_runs(history)]["workflow_runs"][0]
+        if case == "other-base":
+            run["pull_requests"][0]["base"]["ref"] = "evil"
+        elif case == "missing-base":
+            del run["pull_requests"][0]["base"]
+        elif case == "unrelated-base-sha":
+            run["pull_requests"][0]["base"]["sha"] = history.h0
+        elif case == "retargeted":
+            routes["repos/r/p/issues/1/timeline"] = [{"event": "base_ref_changed"}]
+        elif case == "wrong-workflow":
+            run["path"] = ".github/workflows/always-green.yml"
+        elif case == "missing-workflow":
+            del run["path"]
+        elif case == "changed-workflow":
+            # A later master changed the workflow after the green H0 run.
+            history.git("checkout", "master")
+            tip = history.commit({".github/workflows/test.yml": "name: stronger tests\n"})
+            history.git("checkout", "topic")
+            routes["repos/r/p/branches/master"] = {"commit": {"sha": tip}}
+        elif case == "push-history":
+            run["event"] = "push"
+            # Unproven timeline shapes must never rescue an unassociated run.
+            routes["repos/r/p/issues/1/timeline"] = [{"event": "synchronize", "after": history.h0}]
+        elif case == "skipped-job":
+            routes["repos/r/p/actions/runs/1/attempts/1/jobs"]["jobs"].append(
+                {"status": "completed", "conclusion": "skipped"})
+        elif case == "nonmaster-pr":
+            history.base_ref = "evil"
+        elif case == "control-file":
+            history.commit({"nested/.gitcontrol": "control\n"})
+            history.git("reset", "--soft", "HEAD~1")
+            history.git("commit", "--amend", "--no-edit")
+        elif case == "empty-base-sha":
+            run["pull_requests"][0]["base"]["sha"] = ""
+    edit_routes(history, change)
+    got = history.classify()
+    assert got["class"] == "none"
+    if case == "control-file":
+        assert "hard-exclusion:nested/.gitcontrol" in got["reasons"]
+
+
+def test_ci_waiver_r2_base_sha_optional(history):
+    history.merge()
+    edit_routes(history, lambda routes: routes[h0_runs(history)]["workflow_runs"][0]["pull_requests"][0]["base"].pop("sha"))
+    assert history.classify()["class"] == "master-merge"
+
+
+def test_ci_waiver_r2_target_removed_from_master(history):
+    history.merge()
+    # T retains its successful master push run, but a rewrite removed it.
+    edit_routes(history, lambda routes: routes.update({
+        "repos/r/p/branches/master": {"commit": {"sha": history.base}}}))
+    got = history.classify()
+    assert got["class"] == "none" and "target-not-on-master" in got["reasons"]
+
+
+def test_ci_waiver_r2_isolated_git_environment_and_attr_refusal(history):
+    import shutil
+    history.merge()
+    real_git = shutil.which("git")
+    shim = Path(history.env["PATH"].split(os.pathsep)[0]) / "git"
+    audit = history.repo.parent / "git-audit.jsonl"
+    shim.write_text("#!/usr/bin/env python3\nimport os,sys,json\n"
+        "with open(" + repr(str(audit)) + ", 'a') as f: f.write(json.dumps([sys.argv[1:], "
+        "{k:os.environ.get(k) for k in ['GIT_NO_REPLACE_OBJECTS','GIT_GRAFT_FILE','GIT_REPLACE_REF_BASE','GIT_DIR']}])+ '\\n')\n"
+        "if any(a.startswith('--attr-source=') for a in sys.argv[1:]): sys.exit(129)\n"
+        "os.execv(" + repr(real_git) + ",[" + repr(real_git) + ",*sys.argv[1:]])\n")
+    shim.chmod(0o755)
+    history.env.update(GIT_NO_REPLACE_OBJECTS="0", GIT_REPLACE_REF_BASE="refs/poison")
+    got = history.classify()
+    assert got["class"] == "none" and got["reasons"][0].startswith("git-error:--attr-source=")
+    calls = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert any(env["GIT_DIR"] for args, env in calls)  # includes the isolated merge
+    for args, env in calls:
+        if args == ["rev-parse", "HEAD"]:  # fixture's API head resolution, before the classifier
+            continue
+        assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
+        assert env["GIT_GRAFT_FILE"] == os.devnull
+        assert env["GIT_REPLACE_REF_BASE"] is None

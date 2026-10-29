@@ -9,7 +9,9 @@ CI waiver (2026-10-28): a live ci-waiver:v1 marker for the classified current he
 plus an independent live adversary APPROVE, satisfies pending/absent CI as `waived`.
 Failed checks still block. See docs/ci-waiver.md; malformed, mismatched or
 unreviewed claims add ci-waiver-malformed/mismatch/needs-adversary blockers.
-Repair (2026-10-29): own bytes must match a fetched master snapshot; its
+Repair (2026-10-29): own bytes must match GitHub's API master SHA, fetched by
+explicit HTTPS URL without local remote/URL config. Replacement objects/grafts
+are disabled; waiver APPROVEs must be outside quotes, indentation and code. The
 self-contained classifier executes in a private temporary directory, pinned
 to the explicit repository directory. Trust failures add ci-waiver-untrusted-tool.
 Reviewer identity is not authenticated; the operator's pinned merge yes remains
@@ -848,12 +850,15 @@ def adversary_from_doc(doc: dict, head: str) -> dict:
     """
     labels = {l.get("name") for l in (doc.get("labels") or []) if isinstance(l, dict)}
     out = adversary_verdict(doc.get("body") or "", head)
+    strict = adversary_verdict(_strict_live_text(doc.get("body") or ""), head)
+    out["waiver_live_approve"] = (strict.get("verdict") == "APPROVE"
+                                  and strict.get("matches_head") and not strict.get("malformed"))
     out["required_by_label"] = "adversary-required" in labels
     return out
 
 
-def ci_waiver_marker(body: str) -> dict:
-    """Read LIVE CI waiver markers using the adversary parser's exact JSON/code boundaries."""
+def _strict_live_text(body: str) -> str:
+    """Mask code, blockquotes and indentation without changing character offsets."""
     text = _strip_code(body)
     # Waivers use stricter quoting rules than legacy adversary markers. Lazy
     # blockquote continuations are conservatively quoted until a blank line.
@@ -879,7 +884,12 @@ def ci_waiver_marker(body: str) -> dict:
         if close:
             chars[run.start():close.end()] = " " * (close.end() - run.start())
             consumed = close.end()
-    text = "".join(chars)
+    return "".join(chars)
+
+
+def ci_waiver_marker(body: str) -> dict:
+    """Read LIVE CI waiver markers using the adversary parser's exact JSON/code boundaries."""
+    text = _strict_live_text(body)
     spans = _marker_spans(text, marker="ci-waiver")
     unclosed, wrongform = _classify_starts(text, marker="ci-waiver")
     raw_spans = _marker_spans(body, marker="ci-waiver")
@@ -907,31 +917,53 @@ def ci_waiver_marker(body: str) -> dict:
 
 
 def classify_ci_waiver(repo: str, pr: int, repo_dir: str | None = None) -> dict:
-    """Fetch master, require this waiter byte-identical, execute its trusted classifier.
+    """Pin GitHub's master SHA, require identical waiter, execute its classifier.
 
     This is an integrity check, not authentication of the PR's claimed reviewer.
     An edited waiter cannot certify itself; the operator uses a trusted copy.
     """
     try:
         directory = Path(repo_dir or os.getcwd()).resolve(strict=True)
-        def git_bytes(*args):
-            env = {k: v for k, v in os.environ.items() if k not in (
-                "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")}
+        def git_bytes(*args, isolated=None, objects=None):
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
+            if isolated is not None:
+                env["GIT_DIR"] = str(isolated)
+            if objects is not None:
+                env["GIT_OBJECT_DIRECTORY"] = str(objects)
             r = subprocess.run(["git", *args], cwd=directory, env=env, capture_output=True, timeout=GH_TIMEOUT)
             if r.returncode:
                 raise ValueError("untrusted Git evidence")
             return r.stdout
         directory = Path(git_bytes("rev-parse", "--show-toplevel").decode().strip()).resolve(strict=True)
-        git_bytes("fetch", "origin", "master")
-        master = git_bytes("rev-parse", "--verify", "origin/master^{commit}").decode().strip()
-        if not HEX40.fullmatch(master):
+        common = git_bytes("rev-parse", "--git-common-dir").decode().strip()
+        if (directory / common / "info/grafts").exists():
+            raise ValueError("Git grafts present")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            raise ValueError("invalid GitHub repository")
+        master_doc = json.loads(gh("api", "--hostname", "github.com", f"repos/{repo}/branches/master"))
+        master = master_doc["commit"]["sha"]
+        if not isinstance(master, str) or not HEX40.fullmatch(master):
             raise ValueError("unreadable trusted master")
-        trusted_waiter = git_bytes("show", master + ":bin/pr-wait")
-        trusted_classifier = git_bytes("show", master + ":bin/ci-waiver")
-        if trusted_waiter != Path(__file__).resolve().read_bytes():
-            raise ValueError("waiter differs from master")
+        objects = (directory / git_bytes("rev-parse", "--git-path", "objects").decode().strip()).resolve(strict=True)
         with tempfile.TemporaryDirectory(prefix="ci-waiver-trusted-") as tmp:
+            isolated = Path(tmp) / "git"
+            # Never fetch with checkout config: no remote.*, url.*.insteadOf,
+            # templates, global/system config, inherited -c config or Git hooks.
+            git_bytes("-c", "init.templateDir=", "init", "--bare", str(isolated))
+            git_bytes("-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                      "-c", "core.hooksPath=" + os.devnull,
+                      "fetch", "--no-tags", "--no-write-fetch-head",
+                      f"https://github.com/{repo}.git", master, isolated=isolated, objects=objects)
+            fetched = git_bytes("rev-parse", "--verify", master + "^{commit}",
+                                isolated=isolated, objects=objects).decode().strip()
+            if fetched != master:
+                raise ValueError("fetched master mismatch")
+            trusted_waiter = git_bytes("show", master + ":bin/pr-wait", isolated=isolated, objects=objects)
+            trusted_classifier = git_bytes("show", master + ":bin/ci-waiver", isolated=isolated, objects=objects)
+            if trusted_waiter != Path(__file__).resolve().read_bytes():
+                raise ValueError("waiter differs from master")
             path = Path(tmp) / "ci-waiver"
             path.write_bytes(trusted_classifier)
             path.chmod(0o700)
@@ -944,7 +976,7 @@ def classify_ci_waiver(repo: str, pr: int, repo_dir: str | None = None) -> dict:
             if not isinstance(doc, dict):
                 raise ValueError("classifier shape")
             return doc
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, GhError):
         return {"class": "none", "reasons": ["ci-waiver-untrusted-tool"], "head": None}
 
 
@@ -965,6 +997,7 @@ def waiver_gate(waiver: dict | None, head: str, adversary: dict | None, counts: 
         blockers.append("ci-waiver-mismatch")
     adv = adversary or {}
     if (adv.get("verdict") != "APPROVE" or not adv.get("matches_head")
+            or not adv.get("waiver_live_approve")
             or adv.get("malformed") or adv.get("fetch_failed") or adv.get("conflict")):
         blockers.append("ci-waiver-needs-adversary")
     return not blockers and not counts["fail"], blockers
