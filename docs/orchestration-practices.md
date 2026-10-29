@@ -118,6 +118,13 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    with the evidence, not to a fourth vendor.³
 3. **Never kill healthy running work** to re-route it: it is already paid
    for.
+4. **Stop dependent mutations on failure (2026-10-25).** A tool result is not
+   a successful command: inspect `exit_code` after every edit, commit and push.
+   In a multi-step tool block, throw or return on a nonzero result before the
+   next mutation; with Python use `subprocess.run(..., check=True)`. A refused
+   edit or failed commit must never be followed by a push or a review brief
+   claiming the edit landed. Match only your own changelog entry, since other
+   agents may also have pending PR-number placeholders.
 
 ## 6. Checks: focused first, full suite before commit
 

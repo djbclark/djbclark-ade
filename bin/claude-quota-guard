@@ -59,7 +59,11 @@ level to at least `watch` with the advice "aiuse data <age> old: collector down?
 <state>.lock, saves
 the state before it pings and records the ping afterwards (a ping cut off by a kill is retried
 next run: at least once).
-Thresholds live in THRESHOLDS; env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) overrides keys.
+Thresholds: THRESHOLDS below is the fail-safe; config/gates.toml's [quota_guard] baseline, the active `bin/gate-profile`
+profile and env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) override keys, in that order (bin/ade_gates.py, docs/gates.md).
+A `conserve` alert gives no more than `conserve_alert_level` (0 ok, 1 watch, 2 tight, 3 critical; baseline 2, so the rules
+above hold): the level is min(that number, the level the alert would otherwise give). A temporary profile may lower it to 1,
+so a projection alert alone stops raising `tight` while the operator is away; it never raises a level above what the alert gives.
 
 Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (default
 ~/.cache/aiuse/snapshots), _STATE (default ~/.local/state/ade/quota-guard.json), _PING
@@ -84,6 +88,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path[:0] = [d for d in (os.path.dirname(os.path.realpath(__file__)),) if d not in sys.path]   # python3 -I has no script dir
+import ade_gates  # noqa: E402
+
 HOME = Path.home()
 LABEL = "com.djbclark.claude-quota-guard"
 INTERVAL_SECONDS = 15 * 60  # aiuse's collector is hourly; the guard only reads its cache
@@ -94,6 +101,7 @@ THRESHOLDS = {
     "critical_weekly": 15.0,    # -> critical
     "critical_five_hour": 10.0,  # 5-hour left below this -> critical
     "watch_fable": 15.0,        # Fable sublimit left below this -> watch (advice already bans Fable)
+    "conserve_alert_level": 2.0,  # level cap for a `conserve` alert (0 ok .. 3 critical); 2 = the alert alone may give tight
     "alert_max_age_s": 21600.0,  # ignore snapshot alerts older than this (aiuse's own rows are fresher)
     "period_tolerance_s": 7200.0,  # two resets_at this close are the same reset period (clock jitter)
     "aiuse_timeout_s": 90.0,
@@ -120,10 +128,37 @@ _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgmen
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 
 
+_FRONTIER1, _JUDGMENT = "Fable 5.1", "Opus 5.5"   # the literal names S3 replaces with role lookups (docs/model-tiers-design.md)
+
+
+def _frontier_advice(frontier: dict, reasons: list, resets_at: str | None, fable_left, watch_frontier) -> str | None:
+    """The `watch` text while the effective gate allows judged frontier use (design C4: the standing baseline since 2026-10-27, or a
+    profile), or None for the closed text. Only a watch caused by the weekly window or the frontier-1 cap qualifies: any other
+    reason (stale data, an alert, a snapshot-only row) and tight/critical keep the closed text. `frontier["name"]`/`["until"]` are
+    set only when a profile is the source; the expiry is shown only then."""
+    if not reasons or any(r not in ("weekly", "fable") for r in reasons):
+        return None
+    who = f" ({frontier['name']} until {frontier['until']})" if frontier.get("name") else ""
+    if "fable" in reasons:
+        left = f"{fable_left:g}" if isinstance(fable_left, (int, float)) else "?"
+        return (f"1. Claude quota watch{who}: the {_FRONTIER1} cap has {left}% left (watch below {watch_frontier:g}%), so no "
+                f"{_FRONTIER1}: use {_JUDGMENT}.\n2. Adversary rounds via {_ADVERSARY}.")
+    n = frontier["calls"]
+    cap = f"at most {n} Agent-tool calls today" if n > 0 else "no Agent-tool call without asking"
+    return (f"1. Claude quota watch{who}: {_JUDGMENT} Agent-tool sub-agents as needed; {_FRONTIER1} only where significantly "
+            f"better than {_JUDGMENT}, with a one-line frontier-reason, {cap}.\n"
+            f"2. Adversary rounds via {_ADVERSARY}.\n3. Route code/bulk slices to other pools.")
+
+
 def _advice(level: str, resets_at: str | None, source: str = "available",
-            stale_age: float | None = None) -> str:
+            stale_age: float | None = None, frontier: dict | None = None, reasons: list | None = None,
+            fable_left=None, watch_frontier: float = 15.0) -> str:
     if level == "ok":
         return ""
+    if frontier and level == "watch" and stale_age is None and source != "snapshot-only":
+        text = _frontier_advice(frontier, reasons or [], resets_at, fable_left, watch_frontier)
+        if text is not None:
+            return text
     items = [
         "Claude quota watch: no Fable or Opus Agent-tool sub-agents.",
         f"Adversary rounds via {_ADVERSARY}.",
@@ -162,21 +197,17 @@ def state_path() -> Path:
     return _path("CLAUDE_QUOTA_GUARD_STATE", HOME / ".local/state/ade/quota-guard.json")
 
 
+def gate_config() -> tuple[dict, dict]:
+    """(thresholds, info): THRESHOLDS < config/gates.toml < the active gate profile < env JSON (bin/ade_gates.py).
+    A bad env JSON is a ConfigError (exit 64)."""
+    try:
+        return ade_gates.load_gates("quota_guard", now(), THRESHOLDS)
+    except ade_gates.GateEnvError as e:
+        raise ConfigError(str(e))
+
+
 def thresholds() -> dict:
-    t = dict(THRESHOLDS)
-    raw = os.environ.get("CLAUDE_QUOTA_GUARD_THRESHOLDS")
-    if raw:
-        try:
-            over = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise ConfigError(f"CLAUDE_QUOTA_GUARD_THRESHOLDS is not JSON: {e}")
-        if not isinstance(over, dict):
-            raise ConfigError("CLAUDE_QUOTA_GUARD_THRESHOLDS must be a JSON object")
-        for k, v in over.items():
-            if k not in t or not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
-                raise ConfigError(f"unknown or non-numeric threshold {k!r}")
-            t[k] = float(v)
-    return t
+    return gate_config()[0]
 
 
 def now() -> datetime:
@@ -444,50 +475,55 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
     level = "ok"
 
-    def raise_to(new: str) -> None:
+    reasons: set[str] = set()   # what fired a level above ok: weekly, five_hour, fable, alert, snapshot-only, exhausted
+
+    def raise_to(new: str, why: str) -> None:
         nonlocal level
+        if LEVELS.index(new) > 0:
+            reasons.add(why)
         if LEVELS.index(new) > LEVELS.index(level):
             level = new
 
     if not windows and not live_only:
         if rc != AIUSE_NOTHING_USABLE:
             raise Unreadable("aiuse has no Claude window (not in `available`, `excluded` or the snapshot)")
-        raise_to("critical")  # aiuse found nothing usable and Claude is not among it: exhausted
+        raise_to("critical", "exhausted")  # aiuse found nothing usable and Claude is not among it: exhausted
     if rc == AIUSE_NOTHING_USABLE:
         # exit 3 is the live verdict that nothing is usable: critical whatever the snapshot shows
         # (its numbers only fill the state fields; the source stays `snapshot`, not `snapshot-only`)
-        raise_to("critical")
+        raise_to("critical", "exhausted")
     blocked = (judge_usable and any(r.get("usable_now") is False for r in rows)) or any(
         w["exhausted"] for w in windows if w["kind"] in ("weekly", "five_hour"))
     if blocked:
-        raise_to("critical")  # exhausted shared window, or a frozen measurement
+        raise_to("critical", "exhausted")  # exhausted shared window, or a frozen measurement
     elif source == "snapshot" and rc != AIUSE_NOTHING_USABLE:
         # Claude is in the raw snapshot but aiuse dropped it from --available (a live 429 or a
         # note the snapshot predates): the snapshot's numbers are not to be trusted to say `ok`.
-        raise_to("watch")
+        raise_to("watch", "snapshot-only")
         source = "snapshot-only"
     if weekly:
         if weekly["left"] < t["watch_weekly"]:
-            raise_to("watch")
+            raise_to("watch", "weekly")
         if weekly["left"] < t["tight_weekly"]:
-            raise_to("tight")
+            raise_to("tight", "weekly")
         if weekly["left"] < t["critical_weekly"]:
-            raise_to("critical")
+            raise_to("critical", "weekly")
     if five and five["left"] < t["critical_five_hour"]:
-        raise_to("critical")
+        raise_to("critical", "five_hour")
     if fable and fable["left"] < t["watch_fable"]:
-        raise_to("watch")
+        raise_to("watch", "fable")
     weekly_labels = {w["label"].strip().lower(): [x for x in windows if x["kind"] == "weekly"
                                                     and x["label"].strip().lower() == w["label"].strip().lower()]
                      for w in windows if w["kind"] == "weekly"}
+    cap = max(0, min(len(LEVELS) - 1, int(t["conserve_alert_level"])))  # what a `conserve` alert may give at most
     for a in alerts:
         matched = weekly_labels.get(str(a.get("window_label") or "").strip().lower(), [])
         projected = bool(matched) and bool(_RUNNING_PROJECTED.search(str(a.get("message") or "")))
         if projected and all(w["pace_early"] for w in matched):
             continue
-        raise_to("watch")
+        raise_to(LEVELS[min(cap, LEVELS.index("watch"))], "alert")
         if projected:
-            raise_to("tight")
+            raise_to(LEVELS[min(cap, LEVELS.index("tight"))], "alert")
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
     candidates = [w for w in (weekly, five) if w]
@@ -520,6 +556,7 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     return {
         "rows_age_s": rows_age,
         "level": level,
+        "reasons": sorted(reasons),
         "weekly_left": weekly_left,
         "five_hour_left": five_left,
         "fable_left": shown_fable["left"] if shown_fable else None,
@@ -641,7 +678,7 @@ def _locked(t: dict):
 
 # -- subcommands -----------------------------------------------------------
 
-def _check_locked(t: dict) -> dict:
+def _check_locked(t: dict, profile: dict | None = None) -> dict:
     try:
         rc, data = read_aiuse()
         snap, snap_age, snap_name = None, None, None
@@ -660,6 +697,7 @@ def _check_locked(t: dict) -> dict:
     except Exception as e:  # malformed aiuse or snapshot types must never read as `watch` (exit 1)
         raise Unreadable(f"unexpected {type(e).__name__} reading aiuse or the snapshot: {e}")
     st = dict(d)
+    st["profile"] = profile   # {"name", "until"} while a gate profile shapes `t`, else None
     st["unreadable_since"] = st["last_unreadable_pinged_at"] = st["last_unreadable_at"] = None  # a good read ends the episode
     # Data age: the oldest of the payload's top-level age, every judged row's own age (a Claude
     # pool can be hours old inside a fresh snapshot: cswap stalls) and the snapshot file's mtime.
@@ -672,7 +710,18 @@ def _check_locked(t: dict) -> dict:
     stale_age = data_age if st["stale"] else None
     if st["stale"] and _rank(st["level"]) < _rank("watch"):
         st["level"] = "watch"  # a dead collector: frozen numbers can never climb, so never say ok
-    st["advice"] = _advice(st["level"], st["resets_at"], st["source"], stale_age)
+    if st["stale"]:
+        st["reasons"] = sorted(set(st.get("reasons") or []) | {"stale"})
+    ft, _ = ade_gates.load_frontier(now())     # judged frontier use (config/gates.toml [frontier]: the standing baseline, or a profile)
+    until = ade_gates.parse_utc((profile or {}).get("until"))
+    judged = ft["frontier1_judged"] >= 1
+    # `name`/`until` name the profile only while one is active; with none the baseline itself allows it and the text says nothing of expiry
+    frontier = {"name": profile.get("name") if profile and until else None, "until": ade_gates.ny(until) if profile and until else None,
+                "calls": int(ft["frontier1_agent_calls_per_day"])} if judged else None
+    st["advice"] = _advice(st["level"], st["resets_at"], st["source"], stale_age, frontier, st["reasons"], st["fable_left"], t["watch_fable"])
+    # what the nudge may announce: judged use is in force only when the same check the Agent-tool hook runs passes on this state
+    st["frontier_allowance"] = {"judged": judged and ade_gates.judged_guard_block(st, ft, now()) is None,
+                                "agent_calls_per_day": int(ft["frontier1_agent_calls_per_day"])}
     prev = load_state()
     due = plan_ping(prev, st, t)
     if st["stale"]:
@@ -717,11 +766,12 @@ def _note_unreadable(err: Exception, t: dict) -> None:
 
 
 def cmd_check(args) -> int:
-    t = thresholds()
+    t, gate_info = gate_config()
+    ade_gates.notify_expired(gate_info, lambda text: send_ping(text, t), now())   # once per expired profile file
     try:
         with _locked(t):
             try:
-                st = _check_locked(t)
+                st = _check_locked(t, ade_gates.profile_brief(gate_info))
             except Unreadable as e:
                 _note_unreadable(e, t)
                 raise
@@ -760,6 +810,13 @@ def _age_phrase(seconds) -> str:
     return "age unknown" if short is None else f"{short} old"
 
 
+def _profile_phrase(profile) -> str:
+    if not isinstance(profile, dict):
+        return ""
+    until = ade_gates.parse_utc(profile.get("until"))
+    return f" [gate profile {profile.get('name')} until {ade_gates.ny(until) if until else '?'}]"
+
+
 def _human(st: dict) -> str:
     stale = " (stale)" if st.get("stale") else ""
     since = _parse_ts(st.get("unreadable_since"))
@@ -767,7 +824,7 @@ def _human(st: dict) -> str:
     return (f"claude-quota-guard: {st.get('level', '?')}{stale}: weekly {_fmt(st.get('weekly_left'))} left, "
             f"5-hour {_fmt(st.get('five_hour_left'))}, fable {_fmt(st.get('fable_left'))}, "
             f"resets {_reset_phrase(st.get('resets_at'))}, data {_age_phrase(st.get('data_age_s'))}, "
-            f"checked {st.get('checked_at', '?')}{unreadable}")
+            f"checked {st.get('checked_at', '?')}{unreadable}{_profile_phrase(st.get('profile'))}")
 
 
 def cmd_status(args) -> int:

@@ -3,7 +3,8 @@
 # Profiles from docs/model-routing.md "Which AI for which work", rewritten
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
-# only through the `frontier` kind, one slice per pool per wave; judgment is
+# only through the `frontier` kind, one slice per pool per wave (two on claude under the standing
+# allowance of 2026-10-27 while the quota guard passes, docs/gates.md); judgment is
 # Opus 5.5 at high first, omp Opus next, and codex gpt-6.1-sol at high as a lower-ranked,
 # eligible pool while its quota is plentiful (operator 2026-10-25); everyday work goes to the
 # OTHER pools, plus codex's everyday
@@ -50,16 +51,15 @@ pace_penalty_judgment_factor = 0.5
 # Case: with the r11-r20 code pools at their headroom floors, code went to Gemini Flash (r40).
 # Nothing in the band has room: no route (keep it queued until a reset, or exclude by hand).
 quality_max_rank_gap = { code = 10, judgment = 10 }
-# Most `frontier` slices one wave puts on a single pool (operator 2026-10-18).
-frontier_per_wave = 1
+# Most `frontier` slices one wave puts on a single pool, and the Fable sublimit below which frontier on claude falls
+# back to Opus, are `frontier1_per_wave`/`frontier2_per_wave` and `frontier1_min_left` in config/gates.toml [frontier]
+# (2026-10-27: a profile may raise them within floors; docs/gates.md).
 # Pools with `plenty_kinds` (codex's everyday kinds, operator 2026-10-25: "if we have lots of codex
 # quota and it is the best of available options we can use it for non-frontier") are eligible for
 # those kinds only while the binding headroom (the tightest window of the pool, 5-hour and weekly
 # alike) is at least this many percent; below it, or with no fresh reading, codex is frontier-only
 # again, so a wave cannot empty the 5-hour window the way four astra slices did on 2026-10-18.
 plenty_min = 50.0
-# Below this much of the Fable sublimit, frontier on claude falls back to Opus.
-fable_min_left = 10.0
 # Curated profiles overlay discovery; anything discovered without one gets
 # default_profile so a newly-added agent is routable rather than invisible.
 default_profile = { bulk = 60, mechanical = 60 }

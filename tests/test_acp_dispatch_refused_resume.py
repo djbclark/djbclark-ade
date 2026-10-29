@@ -102,14 +102,13 @@ class RefusedResume(Base):
         self.assertEqual(rec["exit"], 5)
         self.assertNotIn("refusals", rec)
 
-    def test_fresh_dispatch_over_an_old_record_still_replaces_it(self):
-        _ = self.finished_record()
+    def test_refused_force_dispatch_keeps_the_paid_record(self):
+        before = self.finished_record()
         r = self.dispatch("--force", env={"AIUSE_SNAPSHOT": str(self.empty)})
         self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
         rec = self.record()
-        self.assertEqual(rec["status"], "unavailable")
-        self.assertNotIn("refusals", rec)
-        self.assertNotIn("log", rec)
+        self.assertEqual(rec.pop("refusals")[0]["class"], "headroom")
+        self.assertEqual(rec, before)
 
     def test_resume_of_a_bare_unavailable_record_gives_a_message_not_a_traceback(self):
         _ = self.dispatch(env={"AIUSE_SNAPSHOT": str(self.empty)})        # the clobbered shape

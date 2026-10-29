@@ -2,7 +2,7 @@
 name: watch
 description: >-
   Bring up every watcher session: run `bin/watch` so each domain (CFEngine upstream PRs, Paseo contributions,
-  machine load) has one live registered watcher agent in its own Paseo workspace, starting only missing ones,
+  machine load) has one live registered watcher agent, all in one shared `watch` Paseo workspace and titled `watch <domain> <n>`, starting only missing ones,
   with model, effort and context chosen from quota and recent event load. Idempotent. Use for /watch, "start
   the watchers", "bring up the watchers", "make sure the watchers are running". Not for becoming a watcher
   yourself.
@@ -28,7 +28,8 @@ $W up                     # start what is missing; verify each registration
    `not registered: <reason>`, or `not launched: <reason>`.
 2. Exit 0 all good; 1 a launch did not register (the agent is left running: look at it, `paseo ls`);
    3 no eligible route (say why: the plan prints route_agent's reason).
-3. A live holder is never replaced. `up --force DOMAIN` replaces one only when the operator says so.
+3. A live holder is never replaced. `up --force DOMAIN` replaces one only when the operator says so; the replaced agent is renamed `x …`
+   and left running (never archived), so it stays a tab.
    `up --probe` also sends the channel test line to live Paseo holders (costs each a turn).
 4. `watch down DOMAIN` drops the role (`--relay-off <agent>` / `watcher clear <agent>`: clears only if that
    agent still holds it) and archives the agent `watch` started; an agent it did not start is never touched.
@@ -46,8 +47,20 @@ $W up                     # start what is missing; verify each registration
    shows the kind failing 25% or more of 3+ recent dispatches. Never above `route_agent`'s own effort, never
    above high, never Fable.
 4. Context: standard; the `[1m]` variant only when chain log plus largest brief need over ~120k tokens.
-5. The launched agent is created through `bin/paseo-new-seat` (auto-accept on from the first tool call) in
-   the workspace `watch-<domain>` (found again on re-runs, created once), first prompt the domain's skill.
+5. The launched agent is created through `bin/paseo-new-seat` (auto-accept on from the first tool call; a claude
+   watcher starts in `bypassPermissions` unless `--mode ID` says otherwise, and `--no-auto-accept` or `--mode default|plan`
+   gives one that prompts, labelled `perm=ask` so `bin/paseo-bypass-watch` leaves it alone; a codex watcher gets
+   `--mode full-access`). A watcher reads public upstream replies, so a prompt injection there would run with the operator's
+   permissions and no prompt: that exposure is accepted (operator, 2026-10-28, every agent runs yolo) and the briefs fence
+   outside text as untrusted. A security-sensitive watcher domain should pass `--mode default` instead) in
+   the one shared workspace `watch` (`[defaults] workspace`, found again on re-runs, created once under
+   `workspace_cwd`; Paseo runs every agent in that cwd, so the prompt names the domain's own checkout from `cwd`), first prompt the domain's skill.
+6. Title: `watch <domain> <n>`, `n` the next base-36 number (`0-9a-z`, so `…9`, `…a`, … `…z`, `…10`) per domain: one
+   past every numbered title Paseo still lists (retired and archived included) and past `~/.local/state/watch/<domain>.seq`,
+   so a number is never reused; an unnumbered `watch <domain>` counts as 0. The prompt tells the agent to register under
+   that same name. After the new agent is registered and its channel test passes, every other live `watch <domain> <n>` and
+   the holder it replaced gets `x ` put before its title (`x watch paseo 2`), via `paseo agent update --name`; a launch
+   that does not register retires nothing.
 
 ## Registration is verified
 

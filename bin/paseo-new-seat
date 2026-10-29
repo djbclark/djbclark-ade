@@ -34,7 +34,7 @@ that config, then verifies the shield from the agent's state file.
 
 USAGE
   paseo-new-seat --title "Dann Chat 3" --prompt "..." [--provider cline] [--model M]
-                 [--cwd DIR] [--workspace ID] [--mode ID] [--thinking ID] [--label k=v]... [--json]
+                 [--cwd DIR] [--workspace ID] [--thinking ID] [--mode ID] [--label k=v]... [--json]
                  [--no-auto-accept] [--dry-run]
 
 --mode is the provider's own permission-mode id. Every seat runs yolo (home rule 16, 2026-10-26: a
@@ -44,7 +44,9 @@ seat is already Full Access, and a claude mode id means nothing to it). `--no-au
 default too (a seat that prompts); a security-sensitive claude slice passes `--no-auto-accept` or
 `--mode default`/`plan`.
 
---thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --label tags the
+--thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --mode creates the
+agent in that permission mode and verifies it (codex has no auto_accept feature: its yolo is mode `full-access`,
+so a codex seat without --mode runs in `auto`, Default Permissions, and can stall on a prompt; 2026-10-27); --label tags the
 agent (bin/watch uses watch=<domain>); --json prints one JSON line {id, shortId, autoAccept} instead of the
 two text lines. An empty --model starts the provider's own default model.
 

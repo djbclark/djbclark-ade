@@ -18,7 +18,13 @@ jobs:
   pytest:
     if: ${{ github.event.inputs.context_only != 'true' }}
     runs-on: macos-latest
-    timeout-minutes: 30
+    # 45, not 30: the macOS runner is the slow leg. Four consecutive green runs measured 1446 s,
+    # 1588 s, 1615 s and 1702 s against a 1800 s cap, and on 2026-10-27 the suite crossed it —
+    # run 40533487414 was cancelled with "The job has exceeded the maximum execution time of
+    # 30m0s" while pytest-linux passed in 17m0s and context-policy in 14 s. The cap has to sit
+    # above the suite's real cost plus drift, or a slow runner reports a wall-clock timeout as a
+    # code failure. pytest-linux stays at 30 (1130-1150 s measured): raise it when it needs it.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -37,7 +43,12 @@ jobs:
 
   pytest-linux:
     if: ${{ github.event.inputs.context_only != 'true' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on 2026-10-28 the alias moved to ubuntu-26.04, whose coreutils are
+    # the Rust uutils multicall binaries. The g-prefixed symlinks below then fail ("Requested utility
+    # `gtr` does not match executable name"), 90 tests failed and the job ran into its 30 minute cap
+    # (run 40723793153; the last green run, 40669526660, was on ubuntu-24.04). Move off 24.04 only
+    # when the symlink step and the suite are ported to uutils.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -78,7 +89,7 @@ jobs:
         run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
 
   context-policy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned with pytest-linux above; it passed on 26.04 but should not drift alone
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7

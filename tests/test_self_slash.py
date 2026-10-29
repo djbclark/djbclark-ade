@@ -164,13 +164,14 @@ class SelfSlashPaseoTests(unittest.TestCase):
     def log_text(self) -> str:
         return self.log.read_text() if self.log.exists() else ""
 
-    def wait_log(self, needle: str, timeout: float = 20.0) -> str:
+    def wait_log(self, needle: str, timeout: float = 20.0, count: int = 1) -> str:
+        """Wait until NEEDLE occurs COUNT times in the log (COUNT 2 proves a second worker's own line, not a stale first one)."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            if needle in self.log_text():
+            if self.log_text().count(needle) >= count:
                 return self.log_text()
             time.sleep(0.1)
-        self.fail(f"{needle!r} never reached the log:\n{self.log_text()}\ncalls: {self.paseo_calls()}")
+        self.fail(f"{needle!r} x{count} never reached the log:\n{self.log_text()}\ncalls: {self.paseo_calls()}")
 
     def wait_lock_gone(self, timeout: float = 20.0) -> None:
         end = time.monotonic() + timeout
@@ -224,6 +225,13 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.hold_watch("test-agent")
         r = self.run_ss("--finish", SELF_SLASH_ALLOW_WATCHER="1")
         self.assertEqual(r.returncode, 0, r.stderr)
+        # the override's own worker: a second archive line (the first one is already in the log), and its
+        # exit trap has released the locks, so nothing is still writing under the temp dir at cleanup
+        self.wait_log("finish: archived test-agent", count=2)
+        self.wait_lock_gone()
+        archives = [c for c in self.paseo_calls() if c.startswith("agent archive")]
+        self.assertEqual(archives, ["agent archive -- test-agent"] * 2, self.paseo_calls())
+        self.assertNotIn("refused", self.log_text())
 
     def test_a_watch_holder_can_still_hand_over_through_a_successor(self) -> None:
         self.hold_watch("test-agent")
@@ -634,6 +642,43 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("--workspace vis ", next(c for c in self.paseo_calls() if c.startswith("run ")))
 
+    def test_successor_uses_the_workspace_id_from_its_own_state_file_when_cwd_is_shared(self) -> None:
+        # 2026-10-28: three workspaces shared ~/src/djbclark-ade, the successor was refused and nothing started
+        cwd = self.succ_env()["FAKE_CWD"]
+        two = f'[{{"workspaceId": "a", "cwd": "{cwd}"}}, {{"workspaceId": "b", "cwd": "{cwd}"}}]'
+        state = self.home / ".paseo" / "agents" / "slug"
+        state.mkdir(parents=True)
+        _ = (state / "test-agent.json").write_text('{"workspaceId": "b"}')
+        r = self.run_waiter(FAKE_WS_JSON=two)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--workspace b ", next(c for c in self.paseo_calls() if c.startswith("run ")))
+        # placed by the state file only: the shared workspace is never archived
+        self.assertFalse(any(c.startswith("workspace archive") for c in self.paseo_calls()))
+        # and not because an earlier guard happened to keep it: with --workspace naming a third row elsewhere
+        # the ONLY guard left is `proven`, so the log must show it kept the shared workspace for that reason
+        three = (f'[{{"workspaceId": "a", "cwd": "{cwd}", "isolation": "local"}}, {{"workspaceId": "b", "cwd": "{cwd}", "isolation": "local"}},'
+                 f' {{"workspaceId": "c", "cwd": "{cwd}-elsewhere", "isolation": "local"}}]')
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=three, SELF_SLASH_S_WORKSPACE="c")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(any(c.startswith("workspace archive") for c in self.paseo_calls()))
+        self.assertIn("b kept: several workspaces share this cwd; b is the workspaceId in this agent state file", self.log_text() + r.stdout)
+        # two state files that disagree place nothing (first match must not win by directory order)
+        other = self.home / ".paseo" / "agents" / "slug2"
+        other.mkdir(parents=True)
+        _ = (other / "test-agent.json").write_text('{"workspaceId": "a"}')
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=two)
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("several workspaces", r.stdout)
+        (other / "test-agent.json").unlink()
+        # an id that is in no shared row does not place anything: still refused
+        _ = (state / "test-agent.json").write_text('{"workspaceId": "zzz"}')
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=two)
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("several workspaces", r.stdout)
+
     def test_successor_archive_refusal_exits_8_and_leaves_the_successor(self) -> None:
         r = self.run_waiter(FAKE_ARCHIVE_FAIL="1")
         self.assertEqual(r.returncode, 8, r.stdout + r.stderr)
@@ -661,6 +706,25 @@ class SelfSlashPaseoTests(unittest.TestCase):
         r = self.run_ss("--dry-run", "/new", HERDR_ENV="1", HERDR_PANE_ID="w2F:p34")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("would send to paseo test-agent", r.stdout + r.stderr)
+
+    def test_a_codex_session_is_never_discovered_through_the_cline_hub(self) -> None:
+        # Missing tool-shell host variables must not route Codex to another agent.
+        hub = SCRIPT.parent / "paseo-self"
+        tmp_script = self.home / "self-slash"
+        tmp_script.write_bytes(SCRIPT.read_bytes())
+        tmp_script.chmod(0o755)
+        fake_hub = tmp_script.parent / hub.name
+        marker = self.home / "hub-called"
+        fake_hub.write_text('#!/bin/bash\nprintf called > "$FAKE_HUB_MARKER"\nprintf "stranger-agent\\n"\n')
+        fake_hub.chmod(0o755)
+        env = {k: v for k, v in self.env.items() if k not in ("PASEO_AGENT_ID", "CLAUDECODE")}
+        r = subprocess.run([str(tmp_script), "--dry-run", "/new"], text=True, capture_output=True,
+                           timeout=60, check=False,
+                           env={**env, "CODEX_THREAD_ID": "synthetic-thread", "FAKE_HUB_MARKER": str(marker)})
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("never discovered through the Cline hub", r.stderr)
+        self.assertFalse(marker.exists(), "unrelated Cline discovery must not run")
+        self.assertEqual(self.paseo_calls(), [])
 
     def test_a_claude_session_is_never_discovered_through_the_cline_hub(self) -> None:
         # paseo-self names the newest tool.started in the hub, another Cline agent's when the caller is Claude

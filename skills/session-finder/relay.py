@@ -4,6 +4,8 @@
     relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
                                            [--ack | --no-ack] [--expect-ack ID [--ack-within S]] [--needs-reply | --fyi]
     relay.py --pending [--text] [--json] | --cancel ID | --sweep       (the deferred messages and expected acks, below)
+    relay.py --transfer-expectations OLD_SENDER [--id TOKEN ...] [--json]
+        (settles old acks before transfer; exit 1 with missing for explicit tokens not transferred, even if acked)
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it; a dispatch record is
                                            the exact path of an acp-dispatch job file, e.g. /x/jobs/a.json: route 2 below)
@@ -76,7 +78,9 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                caller; only nested `hermes -z` turns are counted, a fourth is refused; both variables are ignored when
                another agent sits between the relay and RELAY_HOP_PARENT, the pid of the relay that started the turn, such as a
                Claude session started in the turn; covers relays Hermes starts through its terminal tool or a background process, not from its
-               execute_code sandbox, which strips RELAY_*). Hermes's reply goes to a
+               execute_code sandbox, which strips RELAY_*). A relay made inside that turn, or by a native gateway conversation, speaks for THAT
+               conversation, not for the asker whose herdr pane the turn inherits: relay proves it from the full HERMES_SESSION_ID and its process tree
+               (`hermes_caller`), so an `ack ID` it sends closes an --expect-ack aimed at the conversation; it can never open one. Hermes's reply goes to a
                0600 file under RELAY_HERMES_DIR (default ~/.local/state/session-finder/relay-hermes, pruned after 7
                days) and is printed here as untrusted data: control, format and escape characters stripped, at most
                4000 characters (a cut reply's cleaned text is kept in the file, whose path is printed).
@@ -195,10 +199,17 @@ one first-contact `ack ID`). Never put --expect-ack/--needs-reply on an ack whos
 expectation is never itself flagged unless it asks a new question or requests an action.
 `--expect-ack ID` records (state, never a wait) that a reply `ack ID` is expected; the sent text ends "[reply through relay.py to <your id>:
 ack ID]". It is REQUIRED (exit 2, nothing sent) for a text with a `?` outside a URL or with --needs-reply, from a session relay can identify
-(a launchd script has no transcript an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
+(a launchd script has no session an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
 overrides a `?` that is no question. The record (sender, target, age) lives in <deferred dir>/expect/ and shows in `--pending`
 (`--json` rows with "kind": "expect" and "overdue"); `--sweep` resolves it when a user-role line of the SENDER's transcript says `ack ID`
-(its own tool calls and their results never count), and flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
+(its own tool calls and their results never count). A sender with a fleet row but NO readable transcript may use --expect-ack (2026-10-26): its
+record holds `"tx": null`, and relay itself closes it when the TARGET answers through relay.py with a text that BEGINS `ack ID`, sent to the
+session that opened it: both ends come from the fleet's `self` row and the record (id, and session id when both have one), never from the text,
+and a Hermes gateway conversation is the target's end when relay PROVES it (`hermes_caller`: the full HERMES_SESSION_ID equal to one live `hermes-gw` row's session id, and this process below that conversation's own turn process or the gateway process, no other agent between; never RELAY_SENDER, RELAY_HOPS or the 8-character label), compared by the full session id: a Hermes conversation can CLOSE an expectation with `ack ID` but never OPEN one (--expect-ack from it exits 2),
+and it counts only for a send whose delivery watch ran (never `--no-ack`) and that its route PROVED delivered, or handed to a Paseo daemon or an
+ACP or slice inbox that keeps the text (never refused, failed, pulled back, a pane's unproven "queued", queued for a deliverer, run by a deliverer, or one whose delivery watch ran and did not see the text). A sender WITH a
+transcript keeps exactly its old rule: only its own transcript showing the ack closes it. A third party, a quoted header, another or a
+closed ID and a replay change nothing. `--sweep` also flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
 point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json). FIRST CONTACT: the first message
 from a session to a peer appends "[first contact from <id>: reply `ack <id>` through relay.py ...]"; ~/.local/state/relay/links.json
 (RELAY_LINKS_FILE) records each link, `--sweep` marks it acked when the sender's transcript holds `ack <id>` naming the peer (or an
@@ -1175,6 +1186,58 @@ def hermes_native():
     return label if HERMES_SENDER.fullmatch(label) else ""
 
 
+def descends_from(table, pid, anchor):
+    """True when walking up from PID in TABLE (pid -> (ppid, command), `fleet.proc_table`) reaches ANCHOR with no agent other than Hermes on the
+    way. Strict, unlike `turn_is_above` (which counts the top of the tree, right for a hop count, wrong for an identity): the top of the
+    tree, a pid missing from TABLE or 40 steps without ANCHOR is False, and so is a Claude, Codex or other agent session started inside a
+    Hermes turn, which inherits the turn's HERMES_SESSION_ID and must not speak as it."""
+    for _ in range(40):
+        if pid == anchor:
+            return True
+        if pid <= 1 or pid not in table:
+            return False
+        ppid, cmd = table[pid]
+        if any(fleet.PROC_AGENTS.get(os.path.basename(p)) not in (None, "hermes") for p in cmd.split()[:2]):
+            return False
+        pid = ppid
+    return False
+
+
+def hermes_turn_pid(sid):
+    """The pid `route_hermes` wrote into the lock file of conversation SID (the `hermes --resume SID -z` process, which holds the lock for the
+    whole turn, also one left running after the asker's relay returned), else None."""
+    try:
+        pid = hermes_lock_path(sid).read_text().strip()
+    except OSError:
+        return None
+    return int(pid) if pid.isdigit() else None
+
+
+def hermes_gateway_pid():
+    """The pid in `gateway.pid` beside Hermes's state.db (the process every native gateway conversation runs in), else None."""
+    try:
+        return int(json.loads((fleet.HERMES_DB.parent / "gateway.pid").read_text())["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def hermes_caller(listed):
+    """The Hermes gateway row (`hermes-gw`) this process speaks for, or None. Hermes exports HERMES_SESSION_ID to every command of a
+    conversation; it counts only when it equals, in full, the session id of exactly one live gateway row AND this process descends from
+    that conversation's turn process (the pid in its lock file) or from the gateway process, with no other agent between: a variable any
+    shell can set proves nothing alone. NOT trusted for identity: RELAY_SENDER, RELAY_HOPS, RELAY_HOP_PARENT, the 8-character label,
+    HERMES_SESSION_KEY. Never inside a deliverer (SENDER_OVERRIDE). Same-uid residuals (a deliberate forger inside the gateway process, an
+    omp or Paseo-hosted agent inside a turn, a rotated session id) are bounds, documented in docs/queue.md."""
+    sid = (os.environ.get("HERMES_SESSION_ID") or "").strip()
+    if SENDER_OVERRIDE[0] or not sid:
+        return None
+    rows = [x for x in listed if x.get("host") == "hermes-gw" and x.get("sid") == sid]
+    if len(rows) != 1:
+        return None
+    table, anchors = fleet.proc_table(), {hermes_turn_pid(sid), hermes_gateway_pid()} - {None}
+    return rows[0] if any(descends_from(table, os.getppid(), p) for p in anchors) else None
+
+
 def env_sender_label() -> str:
     """A declared sender label from RELAY_SENDER_NAME, or "".
 
@@ -1821,6 +1884,8 @@ def route_hermes(c):
 ROUTES = {"paseo": route_paseo, "dispatch": route_dispatch, "launch": route_launch, "socket": route_socket,
           "pane": route_pane, "hermes": route_hermes}
 
+KEEPING_ROUTES = ("paseo", "launch", "dispatch")    # routes whose proofless "accepted"/"queued" means the Paseo daemon, or an inbox file, holds the text; a pane screen match and a socket frame hold nothing
+
 
 def plan(s):
     """Route names for session S, best first: a Paseo-hosted agent by `paseo send` alone (labelled as a peer's
@@ -2428,6 +2493,7 @@ def defer_send(s, a, text, listed, why):
         print(f"queued: {rid} for [{s['id']}] {s['name']}{'' if fresh else ' (an identical message was already queued)'}: {why}. "
               f"Delivered when it is idle, within {left // 60} min; `relay.py --pending` lists, `relay.py --cancel {rid}` withdraws it")
     word, note = defer_ack(rid, ack_window(a)) if a.ack else (None, "")
+    CTX["accepted"] = word == "delivered"    # a record only queued is not delivered yet: the deliverer runs as no session, so it cannot close an expectation
     if a.json:
         print(json.dumps({"id": s["id"], "name": s["name"], "state": "queued", "queued": True, "record": rid, "expires_in": left,
                           "duplicate_of": None if fresh else rid, "reason": why,
@@ -2560,6 +2626,15 @@ def sender_row(listed):
     return next((x for x in listed if x.get("self")), None)
 
 
+def outcome_result(line):
+    """The route's result word of a deliverer outcome line `relayed to [ID] NAME via VIA: RESULT; it takes ...` (the print at
+    the end of main), or "" for any other shape. Read from the right: NAME is a peer's free-text title and may itself hold
+    `: delivered;`."""
+    if not line.startswith("relayed to [") or "; it takes" not in line:
+        return ""
+    return line.rpartition("; it takes")[0].rpartition(": ")[2]
+
+
 def defer_ack(rid, window):
     """(word, note) of the --ack watch on deferred record RID, for up to WINDOW seconds: its deliverer's outcome line says
     whether the inner send was verified ("delivered") or only taken ("accepted", "queued"). A record still queued when the
@@ -2569,7 +2644,7 @@ def defer_ack(rid, window):
         rec = rec_read(rid) or {}
         st, out = rec.get("state"), rec.get("outcome") or ""
         if st == "delivered":
-            return ("delivered", out) if ": delivered;" in out else ("unverified", f"the deliverer sent it but could not prove it: {out}")
+            return ("delivered", out) if outcome_result(out) == "delivered" else ("unverified", f"the deliverer sent it but could not prove it: {out}")
         if st in ("failed", "expired", "cancelled"):
             return ("unverified" if "unverified" in out else "not delivered", out or st)
         if time.time() >= deadline:
@@ -2621,7 +2696,7 @@ def _num(value, default=0.0):
     """VALUE as a finite float, else DEFAULT: a record is plain JSON a hand edit can break (adversary r1 A10)."""
     try:
         x = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return x if math.isfinite(x) else default
 
@@ -2655,24 +2730,28 @@ EXPECT_RESERVE_TTL = 600    # a reservation whose relay died before it sent or r
 
 
 def expect_reserve(eid, sender):
-    """Claim --expect-ack ID before the send (adversary r1 A6, 2026-10-25): under the expectation lock, False when ID is open or freshly
-    reserved by another relay, else a `reserved` record takes it (an acked, stale or reserved-then-abandoned ID is free). Check and claim are
-    one step, so two concurrent senders of one ID cannot both send. `note_links_and_expect` turns it into the `open` record; a relay that
-    sends nothing calls `expect_release`."""
+    """Claim --expect-ack ID before the send (adversary r1 A6, 2026-10-25): under the expectation lock, False when ID is open, freshly
+    reserved by another relay, or answered early inside a send that has not returned yet (`acked` + `early`, no `sent`: the send still owns
+    the ID, adversary r5 F1, 2026-10-26), else a `reserved` record takes it (an acked, stale or reserved-then-abandoned ID is free). Check and
+    claim are one step, so two concurrent senders of one ID cannot both send. `note_links_and_expect` turns it into the `open` record, or marks
+    an early-acked one `sent`; a relay that sends nothing calls `expect_release`."""
     now = time.time()
     with _flock(defer_dir() / ".expect.lock"):
         old = expect_read(eid)
-        if old and (old.get("state") == "open" or (old.get("state") == "reserved" and now - _num(old.get("created"), now) < EXPECT_RESERVE_TTL)):
-            return False
+        if old:
+            fresh = now - _num(old.get("created"), now) < EXPECT_RESERVE_TTL
+            if old.get("state") == "open" or (fresh and (old.get("state") == "reserved" or (old.get("state") == "acked" and old.get("early") and not old.get("sent")))):
+                return False
         atomic_json(expect_dir() / f"{eid}.json", {"id": eid, "state": "reserved", "sender": sender, "created": now})
     return True
 
 
 def expect_release(eid, sender):
-    """Drop the reservation of ID made by SENDER, when it is still a reservation (the relay sent nothing)."""
+    """Drop the reservation of ID made by SENDER, when it is still a reservation (the relay sent nothing), or an acknowledgment that reservation
+    took early: a send that did not happen is never an `acked`."""
     with _flock(defer_dir() / ".expect.lock"):
         old = expect_read(eid)
-        if old and old.get("state") == "reserved" and old.get("sender") == sender:
+        if old and old.get("sender") == sender and (old.get("state") == "reserved" or (old.get("state") == "acked" and old.get("early"))):
             with contextlib.suppress(OSError):
                 (expect_dir() / f"{eid}.json").unlink()
 
@@ -2723,8 +2802,10 @@ def scan_texts(tx, mark):
 
 
 def ack_token(token):
-    """`ack <TOKEN>` as a reply writes it (case-insensitive, `ack:` or `ack=` too), not inside a longer word or id."""
-    return re.compile(rf"(?<![\w-])ack[ :=]+{re.escape(token)}(?![\w.-])", re.I)
+    """`ack <TOKEN>` as a reply writes it (case-insensitive, `ack:` or `ack=` too), not inside a longer word or id. A sentence-final
+    period closes it (`ack ID.`, 2026-10-27: two real acks were missed) only when whitespace or the end of the text follows it, so
+    `ID.more`, `ID.-x` and `ID..x` stay longer ids."""
+    return re.compile(rf"(?<![\w-])ack[ :=]+{re.escape(token)}(?![\w-])(?!\.(?!\s|$))", re.I)
 
 
 HEADER_RE = re.compile(r'\[relay from (?P<kind>[^\s\]]+) (?P<id>[^\s\]]+)(?: aka (?P<aka>[^()\]]+?))?(?= \(|\])'
@@ -2792,10 +2873,149 @@ def note_links_and_expect():
         data["links"][key] = ln
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
-        expect_write({"id": CTX["expect"], "state": "open", "sender": me["id"], "sender_label": me.get("name") or "", "tx": tx,
-                      "mark": CTX.get("mark", 0), "created": now, "within": CTX.get("within") or EXPECT_WITHIN, "acked": None,
-                      "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
-                             "sid": s.get("sid") or "", "host": s.get("host") or ""}})
+        early = None
+        with _flock(defer_dir() / ".expect.lock"):
+            old = expect_read(CTX["expect"])
+            if old and old.get("state") == "acked" and old.get("early") and old.get("sender") == me["id"]:
+                early = _num(old.get("acked"), now)    # the target answered while this send was still running: never reopen what is closed
+                atomic_json(expect_dir() / f"{CTX['expect']}.json", {**old, "sent": True})    # the send returned: the ID is free again for the next question
+            else:
+                atomic_json(expect_dir() / f"{CTX['expect']}.json", {"id": CTX["expect"], "state": "open", "created": now, "acked": None,
+                                                                     "within": CTX.get("within") or EXPECT_WITHIN, **expect_identity(me, s, CTX.get("mark", 0))})
+        if early is not None:
+            with links_lock():    # the answer that closed it proves the return path too, and the link did not exist yet when it came
+                data = fleet.links_read()
+                ln = fleet.link_get(data["links"], me, s)
+                if isinstance(ln, dict) and not ln.get("acked"):
+                    ln["acked"] = early
+                    atomic_json(fleet.LINKS_FILE, data)
+
+
+def expect_identity(me, s, mark):
+    """The fields of an expectation that name its two ends: the sender (session id, label, transcript, how far the transcript was read) and the
+    target. `expect_stamp` puts them on the reservation, `note_links_and_expect` on the open record."""
+    return {"sender": me["id"], "sender_sid": me.get("sid") or "", "sender_label": me.get("name") or "", "tx": me.get("transcript") or None,
+            "mark": mark, "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
+                                     "sid": s.get("sid") or "", "host": s.get("host") or ""}}
+
+
+def transfer_expectations(old_sender, ids, as_json=False):
+    """Adopt only open expectations of an exactly named, fleet-confirmed finished session.
+
+    Missing/ambiguous rows are not proof of retirement. Use the same `finished` evidence as
+    hard_stop, never a pane, free-text label, prefix, or absence from the fleet. No messages are sent.
+    Existing acks in the old transcript are settled before adoption. The expectation lock also
+    serializes this with ack_sweep and relay-based acks.
+    """
+    listed = fleet.sessions()
+    me = sender_row(listed)
+    old = [s for s in listed if old_sender in (s.get("id"), s.get("sid"), s.get("paseo"))]
+    if (not old_sender or len(old) != 1 or not old[0].get("finished") or not me or not me.get("id") or me.get("finished")
+            or old[0].get("id") == me.get("id") or SENDER_OVERRIDE[0] or hermes_caller(listed) is not None):
+        print("relay: transfer refused: name one finished session by exact id, full session id or Paseo id, from an identifiable successor", file=sys.stderr)
+        return 2
+    if any(not EXPECT_ID.fullmatch(eid) for eid in ids):
+        print("relay: --id must be an expectation token (1-40 letters, digits, `.`, `_`, `-`)", file=sys.stderr)
+        return 2
+    if not me.get("transcript"):
+        with contextlib.suppress(Exception):
+            pane_transcript(me)
+    # Ignore all text already in the successor's transcript, just as a fresh expectation does.
+    tx = me.get("transcript")
+    try:
+        mark = Path(tx).stat().st_size if tx else 0
+    except OSError:
+        print("relay: transfer refused: successor transcript is unreadable", file=sys.stderr)
+        return 2
+    transferred, acked, skipped, now = [], [], [], time.time()
+    with _flock(defer_dir() / ".expect.lock"):
+        for r in expect_all():
+            if (r.get("state") != "open" or r.get("sender") != old[0].get("id")
+                    or (ids and r.get("id") not in ids)):
+                continue
+            # A reused fleet id must not authorize adopting another session's records.
+            if ((old[0].get("sid") or r.get("sender_sid")) and r.get("sender_sid") != old[0].get("sid")
+                    or not r.get("sender_sid") and any(s is not old[0] and s.get("id") == old[0].get("id") for s in listed)):
+                skipped.append(r["id"])
+                continue
+            t = r.get("target") if isinstance(r.get("target"), dict) else {}
+            if t.get("id") == me["id"] or me.get("sid") and t.get("sid") == me["sid"]:
+                skipped.append(r["id"])
+                continue
+            who = peer_words({**t, "sid": t.get("sid") or t.get("sid8")})
+            if r.get("tx") and ack_seen(user_texts(r["tx"], int(_num(r.get("mark")))), r["id"], who):
+                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now})
+                acked.append((r, t))
+                continue
+            identity = expect_identity(me, {"id": "unused"}, mark)
+            identity.pop("target")    # preserve the target byte-for-byte, including legacy fields
+            atomic_json(expect_dir() / f"{r['id']}.json", {**r, **identity,
+                        "transferred_from": {"sender": r.get("sender"), "sender_sid": r.get("sender_sid"),
+                                             "sender_label": r.get("sender_label"), "tx": r.get("tx"), "mark": r.get("mark"),
+                                             "transferred_from": r.get("transferred_from"), "transferred_at": r.get("transferred_at")},
+                        "transferred_at": now})
+            transferred.append(r["id"])
+    for r, t in acked:
+        with links_lock():    # outside .expect.lock: the old answer also proves the old return path
+            data = fleet.links_read()
+            ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})
+            if isinstance(ln, dict) and not ln.get("acked"):
+                ln["acked"] = now
+                atomic_json(fleet.LINKS_FILE, data)
+    missing = sorted(set(ids) - set(transferred))
+    result = {"transferred": transferred, "acked": [r["id"] for r, _ in acked], "skipped": skipped,
+              "missing": missing, "sender": me["id"]}
+    text = f"transferred {len(transferred)} expectations to {me['id']}" + (f": {', '.join(transferred)}" if transferred else "")
+    for key in ("acked", "skipped", "missing"):
+        if result[key]:
+            text += f"; {key}: {json.dumps(result[key])}"
+    print(json.dumps(result) if as_json else text)
+    return 1 if missing else 0
+
+
+def expect_stamp(eid, me, s, mark, within):
+    """Name both ends on the reservation of ID, before the send: a target that answers while the send is still blocking (Hermes returns only
+    after its whole turn) is found by `expect_resolve_by_relay`, which closes a reservation like an open record (2026-10-26, Codex P2, PR 87).
+    Only the reservation `me` made is touched."""
+    with _flock(defer_dir() / ".expect.lock"):
+        old = expect_read(eid)
+        if old and old.get("state") == "reserved" and old.get("sender") == me["id"]:
+            atomic_json(expect_dir() / f"{eid}.json", {**old, "within": within or EXPECT_WITHIN, **expect_identity(me, s, mark)})
+
+
+def expect_resolve_by_relay():
+    """Resolve, from the relay's own send, the open expectations the text just sent answers (2026-10-26): a session with no readable transcript
+    cannot see the reply in one, but every reply goes through relay.py, which knows both ends from the fleet, not from the text. The text
+    must BEGIN with `ack ID`; the caller (fleet's `self` row, CTX["me"], or the Hermes conversation `hermes_caller` proves, CTX["caller"], matched by its full session id) must be the expectation's target and the recipient (CTX["s"]) its sender,
+    each also matching the session id the record stored, so a third party, a new occupant of the pane, a header quoted in a text or a
+    closed or reused ID changes nothing. It resolves ONLY records with no transcript (`tx` null): a transcript-backed record is closed by `ack_sweep` alone, from its own
+    transcript. It counts only when the send's delivery watch ran and this send was proven delivered, or went to a route that keeps a text it cannot prove
+    (CTX["accepted"], KEEPING_ROUTES: never a failed, refused, pulled, `--no-ack`, watched-and-unseen or pane-"queued" one), and never inside a deliverer (SENDER_OVERRIDE), which has no proof. The check and the write share one hold of the expectation lock, so a replayed ack finds it acked."""
+    me, s, text = CTX.get("caller") or CTX.get("me"), CTX.get("s"), CTX.get("text")    # a Hermes caller (`hermes_caller`) has no `me`: it closes, never opens
+    if SENDER_OVERRIDE[0]:    # a deliverer runs under the stored sender's label, not as a session: its inner send has no proof and its text depends on the queue time
+        return 0
+    if not (CTX.get("accepted") and isinstance(me, dict) and isinstance(s, dict) and isinstance(text, str) and isinstance(me.get("id"), str)
+            and isinstance(s.get("id"), str)):
+        return 0
+    lead, now, closed = text.strip().lstrip("[`'\""), time.time(), []
+    same_sid = lambda a, b: not (isinstance(a, str) and isinstance(b, str) and a and b and not (a.startswith(b) or b.startswith(a)))
+    with _flock(defer_dir() / ".expect.lock"):
+        for r in expect_all():
+            t = r.get("target") if isinstance(r.get("target"), dict) else {}
+            reserved = r.get("state") == "reserved" and now - _num(r.get("created"), now) < EXPECT_RESERVE_TTL    # its send is still running: an answer inside it is kept, not lost
+            if ((r.get("state") == "open" or reserved) and not r.get("tx") and r.get("sender") == s["id"] and same_sid(r.get("sender_sid"), s.get("sid"))
+                    and t.get("id") == me["id"] and ack_token(r["id"]).match(lead)
+                    and (bool(me.get("sid")) and t.get("sid") == me["sid"] if me.get("host") == "hermes-gw" else same_sid(t.get("sid") or t.get("sid8"), me.get("sid")))):    # a gateway row: the full sid, exactly (its 8-character forms are a date and a suffix)
+                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, "acked_via": "relay", **({"early": True} if reserved else {})})
+                closed.append((r, t))
+    for r, t in closed:
+        with links_lock():    # an answer to a question proves the return path, as in `ack_sweep`
+            data = fleet.links_read()
+            ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})
+            if isinstance(ln, dict) and not ln.get("acked"):
+                ln["acked"] = now
+                atomic_json(fleet.LINKS_FILE, data)
+    return len(closed)
 
 
 def expect_age(r, now):
@@ -2809,25 +3029,28 @@ def ack_sweep():
     its sender's transcript was read (`mark`), so a sweep reads only what is new (adversary r1 A10, 2026-10-25). A record a hand edit made
     unreadable is skipped or dropped, never an exception. Returns (acked, overdue rows)."""
     acked, overdue, now = 0, [], time.time()
-    for r in expect_all():
-        age, within = expect_age(r, now)
-        if age > EXPECT_KEEP:
-            with contextlib.suppress(OSError):
-                (expect_dir() / f"{r['id']}.json").unlink()
-            continue
-        t = r.get("target") if isinstance(r.get("target"), dict) else {}
-        who = peer_words({**t, "sid": t.get("sid") or t.get("sid8")})    # only the target's own reply closes it (A2)
-        if r.get("state") == "open" and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
-            expect_write({**r, "state": "acked", "acked": now})
-            with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
-                data = fleet.links_read()
-                ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})    # not a new occupant's link (adversary r2 A5)
-                if isinstance(ln, dict) and not ln.get("acked"):
-                    ln["acked"] = now
-                    atomic_json(fleet.LINKS_FILE, data)
-            acked += 1
-        elif r.get("state") == "open" and age > within:
-            overdue.append(r)
+    with _flock(defer_dir() / ".expect.lock"):
+        # Write via atomic_json under this lock; never call expect_write or take .expect.lock
+        # again (PR 87 merge hazard): a second flock in this process blocks forever.
+        for r in expect_all():
+            age, within = expect_age(r, now)
+            if age > EXPECT_KEEP:
+                with contextlib.suppress(OSError):
+                    (expect_dir() / f"{r['id']}.json").unlink()
+                continue
+            t = r.get("target") if isinstance(r.get("target"), dict) else {}
+            who = peer_words({**t, "sid": t.get("sid") or t.get("sid8")})    # only the target's own reply closes it (A2)
+            if r.get("state") == "open" and r.get("tx") and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
+                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now})
+                with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
+                    data = fleet.links_read()
+                    ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})    # not a new occupant's link (adversary r2 A5)
+                    if isinstance(ln, dict) and not ln.get("acked"):
+                        ln["acked"] = now
+                        atomic_json(fleet.LINKS_FILE, data)
+                acked += 1
+            elif r.get("state") == "open" and age > within:
+                overdue.append(r)
     if fleet.LINKS_FILE.is_file():
         with links_lock():
             data = fleet.links_read()
@@ -2860,7 +3083,8 @@ def expect_view(now=None):
             continue
         age, within = expect_age(r, now)
         rows.append({"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"),
-                     "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within})
+                     "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within,
+                     "created": _num(r.get("created"))})
     return rows
 
 
@@ -2877,6 +3101,7 @@ def main(argv=None, sweep=True):
     if CTX.get("sent") and CTX.get("s") is not None:
         try:
             note_links_and_expect()
+            expect_resolve_by_relay()
         except Exception as e:    # noqa: BLE001 - the message is out; the ledger is advisory state
             print(f"relay: could not record the link or expectation: {type(e).__name__}: {e}", file=sys.stderr)
     return rc
@@ -2899,6 +3124,8 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
     ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
+    ap.add_argument("--transfer-expectations", metavar="OLD_SENDER", help="adopt open expectations of one exactly named finished fleet session into this caller; missing/live/ambiguous sender: exit 2")
+    ap.add_argument("--id", action="append", default=[], metavar="TOKEN", help="with --transfer-expectations: select a token (repeatable; default all open tokens of OLD_SENDER); any requested token not transferred: exit 1, missing list (even if settled as acked)")
     ap.add_argument("--text", action="store_true", dest="show_text", help="with --pending: show a 60-character preview of each text (it stays in the record otherwise)")
     ap.add_argument("--detach", action="store_true", help=argparse.SUPPRESS)    # internal: --deliver forks once more, so init adopts the deliverer
     ap.add_argument("--ack", action="store_true", help="after a send that is only accepted or queued, keep watching the target (up to --wait more seconds) "
@@ -2913,6 +3140,14 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--ack-within", type=float, metavar="S", help=f"seconds before an unanswered --expect-ack is OVERDUE (default {EXPECT_WITHIN})")
     a = ap.parse_args(argv)
     t0 = time.time()
+    if a.transfer_expectations is not None:
+        if a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan:
+            print("relay: --transfer-expectations cannot be combined with a send or another command", file=sys.stderr)
+            return 2
+        return transfer_expectations(a.transfer_expectations, a.id, a.json)
+    if a.id:
+        print("relay: --id requires --transfer-expectations", file=sys.stderr)
+        return 2
     if a.deliver:
         if a.detach:
             detach()
@@ -2932,7 +3167,7 @@ def _main(argv=None, sweep=True):
                   f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; tell the operator, never assume it was read")
         return 0
     if a.ident is None or a.text is None:
-        print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep", file=sys.stderr)
+        print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
     if a.defer_for is not None and not (math.isfinite(a.defer_for) and a.defer_for > 0):
         print("relay: --defer-for must be a finite number of seconds > 0", file=sys.stderr)
@@ -2973,6 +3208,11 @@ def _main(argv=None, sweep=True):
             print(json.dumps({"sent": False, "error": "no_sender", "reason": why, "checked_env": list(SENDER_ENV),
                               "exit": NO_SENDER_EXIT}, ensure_ascii=False))
         return NO_SENDER_EXIT
+    caller = None if a.plan else hermes_caller(listed)
+    if caller is not None:    # this process speaks for that Hermes conversation: a `self` mark is its asker's (a relayed turn inherits the asker's pane), not its own
+        listed = [{**x, "self": False} if x.get("self") else x for x in listed]
+        me = None
+    CTX["caller"] = caller
     if not a.plan and not a.ack and not a.no_ack and (os.environ.get(NO_ACK_ENV) or "").strip().lower() not in ("1", "true", "yes", "on") \
             and sender_identified(listed, me):
         a.ack = a.ack_default = True    # L1, the delivery proof, is for every message from an agent session (djbclark, 2026-10-25); a declared job keeps the legacy exit codes
@@ -2992,16 +3232,16 @@ def _main(argv=None, sweep=True):
                   "the peer answers `ack ID`; `--pending` lists it). A `?` that is no question: --fyi", file=sys.stderr)
             return 2
         if a.expect_ack:
-            if me is None or not me.get("transcript"):
-                print("relay: not sent: --expect-ack needs this session's own transcript to watch for the reply, and none is known "
-                      "(a script with no session cannot be answered)", file=sys.stderr)
+            if me is None:
+                print("relay: not sent: --expect-ack needs a session an answer can reach, and this caller has none (a launchd script or "
+                      "RELAY_SENDER_NAME job cannot be answered; a Hermes conversation can close an expectation with `ack ID` but not open one)", file=sys.stderr)
                 return 2
             if not expect_reserve(a.expect_ack, me["id"]):
                 print(f"relay: not sent: an expectation {a.expect_ack!r} is already open (relay.py --pending); pick another ID", file=sys.stderr)
                 return 2
             CTX["reserved"] = (a.expect_ack, me["id"])
         tx_me = Path(me["transcript"]) if me and me.get("transcript") else None
-        CTX.update(me=me, expect=a.expect_ack, within=a.ack_within, terminator=term,
+        CTX.update(me=me, expect=a.expect_ack, within=a.ack_within, terminator=term, text=text,
                    mark=tx_me.stat().st_size if tx_me and tx_me.is_file() else 0)
     if is_record_path(a.ident):
         s, why = fleet.dispatch_target(a.ident)    # the caller named the file: no search, no fleet row needed
@@ -3052,6 +3292,9 @@ def _main(argv=None, sweep=True):
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
     CTX["s"] = s
+    if CTX.get("reserved") and CTX.get("me") is not None:    # name both ends before the send, so an answer inside a blocking send finds the reservation
+        with contextlib.suppress(Exception):
+            expect_stamp(CTX["reserved"][0], CTX["me"], s, CTX.get("mark", 0), CTX.get("within"))
     if me is not None and not a.plan and not NOTICE[0] and not term:    # a terminator asks for nothing, so it carries no footer
         if a.expect_ack:
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
@@ -3096,6 +3339,12 @@ def _main(argv=None, sweep=True):
             if word == "delivered":
                 res = (res[0], res[1], "delivered")
             out.update(result=res[2], ack=word, ack_note=note)
+        # What expect_resolve_by_relay may count (a sender with no transcript only): a send whose delivery watch ran (never `--no-ack`: no watch,
+        # nothing counts) and that was either PROVEN (delivered) or handed, with no proof to take, to a route that KEEPS the text until its
+        # recipient reads it (KEEPING_ROUTES, named by the route that answered, never by a screen match). A pane's proofless "queued" is a screen
+        # heuristic over a header identical for every message of one peer, so it counts for nothing; a proof that was available and did not show
+        # the text counts for nothing too. A false ack is worse than a missing one: it silences the OVERDUE page for a dead return path.
+        CTX["accepted"] = bool(a.ack) and res[0] == "ok" and (res[2] == "delivered" or (c.get("proof") is None and name in KEEPING_ROUTES))
         if res[0] == "ok":
             out["via"] = res[1]
         else:

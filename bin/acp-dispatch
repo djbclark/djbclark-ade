@@ -6,6 +6,7 @@
                  (--kind is required on a fresh dispatch: route_agent.KINDS; resume/reroute
                   inherit it from the record; a pre-change record with no kind still continues)
                  [--role advise|exec]   (frontier only; default advise; other kinds record exec)
+                 [--frontier-reason TEXT]   (fresh --kind frontier only; 10-200 chars; claims the frontier allowance, see below)
                  [--effort LEVEL] [--context SIZE]
                  [--task TASK | --out DIR] [--perm all|read-only|deny] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
@@ -26,6 +27,8 @@
                                                          what became of a finished slice's work,
                                                          for route_agent.py calibrate (merges)
     acp-dispatch reroute RECORD (--agent A --model M | --escalate) [--detach --no-wait]
+                 [-p TEXT | -f FILE] [--perm all|read-only|deny]
+                 (legacy recovery: original task and missing permission intent must be explicit)
                  (--escalate climbs one rung of [escalation] in config/routing.toml,
                   never straight to the top; agent/model from route_agent's top route)
     acp-dispatch auto-resume RECORD --attempt N          (internal) what the scheduled resume
@@ -240,6 +243,15 @@ ACP_OPERATOR_APPROVED=frontier-exec. Estimate history is machine-wide when this 
 other in-flight slices on the same *service* reserve their `estimated_usage_pct` /
 `estimated_usage_windows` (conservative: the whole estimate, even if the snapshot already counts
 part of it). A resume is never refused by that reservation. `class=inflight` is exit 5.
+
+Frontier allowance (2026-10-27, docs/gates.md "Frontier allowance"): a standing baseline since 2026-10-27 (config/gates.toml [frontier]
+sets frontier1_judged / frontier2_judged; no profile needed; closed only when the file is unreadable or a PR closes it),
+`--kind frontier --frontier-reason "ONE LINE, 10-200 chars"` on the claude or codex frontier model records the reason and the grant in
+the dispatch record (`frontier_reason`, `frontier_judged`, `frontier_judged_note`) when the cap floor holds (claude: fresh quota-guard
+state, level ok or watch for the weekly window, Fable cap at least frontier1_min_left; codex: pool reading at least frontier2_min_left)
+and fewer than frontier1_per_wave / frontier2_per_wave frontier slices are in flight on the pool. It never refuses a dispatch the
+closed gate allows; without a reason, or without a grant, the dispatch is exactly the pre-allowance one. Advise-only, the xhigh/max
+approval and the tight/critical stop signal are unchanged.
 
 A detached slice that dies without running finalize (a reboot's SIGTERM, SIGKILL, OOM, power
 loss, launchd unloading it) used to leave `exit: null, finished: null` forever, so every reader
@@ -704,6 +716,56 @@ def is_frontier_model(model: str | None) -> bool:
     return any(tok in low for tok in FRONTIER_MODELS)
 
 
+FRONTIER_POOLS = {"claude": 1, "codex": 2}     # pool -> frontier family (config/gates.toml [frontier] frontier1_* / frontier2_*)
+
+
+def frontier_inflight(busy: list[Path]) -> int:
+    """How many of the in-flight records (already filtered to this pool) are `frontier` slices: the per-wave count."""
+    n = 0
+    for path in busy:
+        try:
+            if json.loads(path.read_text()).get("kind") == "frontier":
+                n += 1
+        except (OSError, ValueError, AttributeError):
+            n += 1      # an unreadable in-flight record counts: the cap fails closed
+    return n
+
+
+def frontier_judged(reason: str | None, service: str | None, model: str | None, remaining: float | None,
+                    busy: list[Path]) -> tuple[dict | None, str | None]:
+    """(judged, note) for a `--kind frontier` dispatch carrying `--frontier-reason` (docs/gates.md "Frontier allowance").
+
+    `judged` is the dict recorded in the dispatch record when the frontier allowance is GRANTED, else None; `note` says why not (a
+    stderr line, and `frontier_judged_note` in the record). Granted needs a reason, a frontier model on the claude or codex pool,
+    the family's `*_judged` key above 0 (the standing gates.toml baseline since 2026-10-27; a profile may only equal it), the cap floor (claude: the quota guard's state is fresh, ok or
+    watch for the weekly window only, `fable_left` at least frontier1_min_left; codex: the pool reading at least
+    frontier2_min_left) and fewer than the family's `*_per_wave` frontier slices already in flight on the pool. Anything else is
+    the closed treatment: the dispatch proceeds as it always did, without the allowance. Never raises."""
+    if reason is None:
+        return None, None
+    if not is_frontier_model(model) or service not in FRONTIER_POOLS:
+        return None, "frontier-reason recorded; the model is not a frontier model on the claude or codex pool"
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ade_gates
+        now = datetime.now(timezone.utc)
+        t, info = ade_gates.load_frontier(now)
+        fam = FRONTIER_POOLS[service]
+        if t[f"frontier{fam}_judged"] < 1:
+            return None, "frontier-reason recorded; no frontier allowance is in force (closed gate: gates.toml unreadable or closed)"
+        block = ade_gates.judged_pool_block(fam, t, now, ade_gates.read_guard_state() if fam == 1 else None, remaining)
+        if block:
+            return None, f"frontier-reason recorded; frontier allowance not granted: {block}"
+        cap, used = int(t[f"frontier{fam}_per_wave"]), frontier_inflight(busy)
+        if used >= cap:
+            return None, f"frontier-reason recorded; frontier allowance not granted: {used} frontier slice(s) already in flight on {service} (cap {cap} per wave)"
+        prof = info.get("profile") or {}
+        return {"family": fam, "profile": prof.get("name"), "until": prof.get("until"), "per_wave": cap,
+                "in_flight": used, "granted_at": ade_gates.iso(now)}, None
+    except Exception as e:  # noqa: BLE001 - an unreadable gate is the closed treatment, never a crash or a grant
+        return None, f"frontier-reason recorded; frontier allowance not granted: gate unreadable ({type(e).__name__})"
+
+
 def approved_tokens() -> set[str]:
     return {x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
 
@@ -1120,15 +1182,22 @@ def git_identity_warning(repo: Path) -> str | None:
             "--unset user.name; and the same for user.email")
 
 
-def keep_record_note_refusal(record: Path, reason: str, cls: str) -> bool:
+def keep_record_note_refusal(record: Path, reason: str, cls: str,
+                             previous: dict | None = None) -> bool:
     """A refused resume must not replace the record of the run it would have continued
     (2026-10-18: three finished codex records lost log, session id, cmd and brief to a headroom
     refusal, and the next resume crashed). Append the refusal to `refusals` under the record's lock;
-    False when there is no readable record to keep."""
+    False when there is no readable launched run to keep (a preflight-only
+    unavailable record is replaced with the latest attempt's intent)."""
     try:
         with record_lock(record):
             rec = json.loads(record.read_text())
             if not isinstance(rec, dict):
+                return False
+            # A preflight-only attempt has no paid run to preserve. A new refusal
+            # must record the latest task and constraints, including for thin records.
+            if (previous is None and rec.get("status") == "unavailable"
+                    and not any(rec.get(k) for k in ("log", "session_id", "cmd"))):
                 return False
             rec.setdefault("refusals", []).append({"at": time.time(), "class": cls, "detail": reason})
             write_record(record, rec)
@@ -1145,15 +1214,24 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
     jobs.mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
     record = jobs / f"{a.name}.json"
-    if previous and keep_record_note_refusal(record, reason, cls):
+    if record.exists() and keep_record_note_refusal(record, reason, cls, previous):
         print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
         return exit_code
+    # A preflight refusal launches no session, but still needs the original task and
+    # launch constraints for a later reroute. Capture the text, not just a mutable path.
+    prompt = read_brief(a.prompt_file) if a.prompt_file else a.prompt
     rec = {"name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
            "task": a.task, "out": str(out), "record": str(record), "report": str(report),
            "done": str(done_path(report)), "status": "unavailable", "unavailable_class": cls,
            "detail": reason, "remaining_percent": remaining, "estimated_usage_pct": estimate,
            "kind": getattr(a, "kind", None), "service": getattr(a, "service", None),
            "role": getattr(a, "role", None),
+           "prompt": prompt, "brief": str(Path(a.prompt_file).resolve()) if a.prompt_file else None,
+           "perm": a.perm or "all", "effort": getattr(a, "effort", None),
+           "context": getattr(a, "context", None), "timeout": a.timeout,
+           "wrapup_grace": a.wrapup_grace, "lead": a.lead,
+           "acp_arg": a.acp_arg or [], "checkpoint": getattr(a, "checkpoint", False),
+           "auto_resume": {"state": "off"} if getattr(a, "no_auto_resume", False) else None,
            "started": time.time(), "finished": time.time(), "exit": exit_code, "pid": None, **(extra or {})}
     write_record(record, rec)
     print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
@@ -1179,7 +1257,7 @@ def _template_re(template: str, **fields: str) -> str:
 
 def footer_items_re() -> str:
     """A regex for the numbered items of the footer TEMPLATE (docs/dispatch-footer.md): each item is its
-    template line, with `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` as one-line wildcards,
+    template line, allowing blank separators between items, with `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` as one-line wildcards,
     so an item that a lead edited or added matches none of them. Each item is judged on its own, so a
     footer that dropped some of the template's items still matches. Matches nothing when the template
     cannot be read: then no footer is provably generated and none is cut. Only the CURRENT template is
@@ -1195,7 +1273,7 @@ def footer_items_re() -> str:
     # lets an item with two placeholders parse two ways, and a crafted tail of such lines backtracked
     # 2^N (20 lines: 3.5 s, doubling per line; PR 22 review).
     slot = {k: r"[^`\n]*" for k in re.findall(r"\{(\w+)\}", template)}
-    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2), **slot) + r"\n" for m in items if m]
+    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2), **slot) + r"\n(?:[ \t]*\n)*" for m in items if m]
     return "(?:" + "|".join(alts) + ")+" if alts else r"(?!)"
 
 
@@ -3954,7 +4032,37 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
 def reroute_record(a: argparse.Namespace) -> int:
     old_path = Path(a.record).expanduser().resolve()
     old = json.loads(old_path.read_text())
-    original = old.get("prompt") or Path(old["brief"]).read_text().split("## Delivery contract", 1)[0]
+    # Validate recovery before consulting routing, touching records or launching anything.
+    try:
+        if a.prompt_file:
+            original = read_brief(a.prompt_file)
+        elif a.prompt is not None:
+            original = a.prompt
+        else:
+            original = old.get("prompt") or (
+                read_brief(old["brief"]) if old.get("brief") else None)
+    except (OSError, UnicodeError, TypeError) as e:
+        die(f"cannot read original brief: {e}; recover with reroute -p TEXT or -f FILE", 2)
+    if not isinstance(original, str) or not original.strip():
+        die("record has no original brief; recover with reroute -p TEXT or -f FILE", 2)
+    perm = old.get("perm")
+    if not perm and old.get("status") != "unavailable":
+        # Completed legacy records may only carry their checked permission in cmd.
+        try:
+            cmd = shlex.split(old.get("cmd") or "")
+        except ValueError as e:
+            die(f"cannot read recorded command permission: {e}", 2)
+        if "--perm" in cmd and cmd.index("--perm") + 1 < len(cmd):
+            perm = cmd[cmd.index("--perm") + 1]
+    if a.perm is not None:
+        if perm and a.perm != perm:
+            die(f"reroute --perm must preserve recorded permission {perm!r}", 2)
+        perm = a.perm
+    if not perm:
+        if old.get("status") == "unavailable":
+            die("unavailable record has no permission intent; recover with explicit "
+                "--perm all|read-only|deny", 2)
+        perm = "all"  # compatibility with completed records predating permission metadata
     checkpoint = Path(old["report"]).read_text() if Path(old["report"]).exists() else "(no checkpoint report)"
     diff_cmd = ["git", "-C", old["dir"], "diff", "--stat"]
     diff = subprocess.run(diff_cmd, check=False, capture_output=True, text=True).stdout.strip() or "(no diff stat)"
@@ -3996,6 +4104,13 @@ def reroute_record(a: argparse.Namespace) -> int:
         kind = nxt
         if nxt == "frontier" and not getattr(a, "role", None):
             role = "advise"    # never inherit exec into frontier without frontier-exec approval
+    # Effort/context belong to one agent/model; another route uses its own
+    # effort (when supplied above) and defaults, never the old model's limits.
+    same_target = a.agent == old.get("agent") and a.model == old.get("model")
+    inherit_options = same_target and not getattr(a, "escalate", False)
+    if inherit_options:
+        effort = old.get("effort")
+    context = old.get("context") if inherit_options else None
     new_svc = resolve_service(a.agent, a.model)
     old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
     if a.est_pct is not None:
@@ -4010,14 +4125,16 @@ def reroute_record(a: argparse.Namespace) -> int:
         est = None
     ns = argparse.Namespace(
         agent=a.agent, model=a.model, name=f"{base}-{n}", dir=old["dir"], task=old.get("task"),
-        out=old["out"], perm=old.get("perm") or "all", timeout=a.timeout or old.get("timeout", DEFAULT_TIMEOUT),
+        out=old["out"], perm=perm, timeout=a.timeout if a.timeout is not None else old.get("timeout", DEFAULT_TIMEOUT),
         wrapup_grace=old.get("wrapup_grace", DEFAULT_WRAPUP_GRACE), lead=old.get("lead", DEFAULT_LEAD),
         prompt=prompt, prompt_file=None, detach=a.detach, no_wait=a.no_wait, wait_timeout=None,
         force=False, dry_run=False, json=False, tee=False, no_model_check=False,
         no_preflight=a.no_preflight, min_headroom=a.min_headroom,
         load_wait=getattr(a, "load_wait", None), no_load_gate=getattr(a, "no_load_gate", False),
         est_pct=est,
-        checkpoint=True, acp_run=a.acp_run, acp_arg=[], effort=effort,
+        checkpoint=True, acp_run=a.acp_run, acp_arg=[],
+        effort=effort, context=context,
+        no_auto_resume=(old.get("auto_resume") or {}).get("state") == "off",
         kind=kind, role=role, from_record=True)
     rc = dispatch(ns)
     new_path = jobs / f"{base}-{n}.json"
@@ -4111,6 +4228,15 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     else:
         role = "exec"  # --role applies only to frontier or classified Go advice
     a.role = role
+    frontier_reason, reason_problem = None, None
+    if kind == "frontier" and not is_resume:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import ade_gates
+        frontier_reason, reason_problem = ade_gates.frontier_reason(getattr(a, "frontier_reason", None))
+        if reason_problem:
+            die(f"--frontier-reason: {reason_problem}")
+    elif getattr(a, "frontier_reason", None) not in (None, ""):
+        die("--frontier-reason applies only to a fresh --kind frontier dispatch")
     if role == "advise" and (a.perm or "all") == "deny" and not is_resume:
         # --perm deny gives claude-agent-acp no tools at all: a review slice told to read files
         # printed its tool calls as text and was recovered as "done" (2026-10-19, two frontier
@@ -4209,6 +4335,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     # Conservative: whole estimate reserved even though the snapshot may already count part of
     # a running slice. Unknown-service agents match by agent name (F7).
     busy = inflight_records(service, record, out, agent=None if service else a.agent)
+    judged, judged_note = frontier_judged(frontier_reason, service, a.model, remaining, busy)
+    if judged:
+        via = f" ({judged['profile']} profile until {judged['until']})" if judged.get("profile") else ""
+        print(f"acp-dispatch: frontier judged use{via}: {frontier_reason}", file=sys.stderr)
+    elif judged_note:
+        print(f"acp-dispatch: {judged_note}", file=sys.stderr)
     reserved, reserved_win = (0.0, {}) if previous else reserved_usage(busy, list(windows))
     fit_remaining = (float(remaining) - reserved) if remaining is not None else None
     # A window the reading could not measure is None (route_agent: a stale row, 2026-10-20 agy at
@@ -4337,6 +4469,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         "session_id": previous.get("session_id") if previous else None, "resume_count": resume_count,
         "prompt": previous["prompt"] if previous else prompt,
         "kind": kind, "service": service, "role": role,
+        "frontier_reason": frontier_reason if not previous else previous.get("frontier_reason"),
+        "frontier_judged": judged if not previous else previous.get("frontier_judged"),
+        "frontier_judged_note": judged_note if not previous else previous.get("frontier_judged_note"),
         "estimated_usage_pct": estimate, "estimated_usage_windows": per_window,
         "estimate_source": estimate_source,
         "snapshot_remaining_before": remaining, "snapshot_reading": reading,
@@ -5047,6 +5182,11 @@ def main(argv: list[str] | None = None) -> int:
                                    "route for the next kind, excluding the failed pool; every "
                                    "gate still runs; refused (exit 2) at the top rung")
             sub.add_argument("--model")
+            prompt = sub.add_mutually_exclusive_group()
+            prompt.add_argument("-p", "--prompt", help="recover the original task text for a legacy record")
+            prompt.add_argument("-f", "--prompt-file", help="recover the original task from this readable brief")
+            sub.add_argument("--perm", choices=("all", "read-only", "deny"),
+                             help="recover missing permission intent; must match any recorded permission")
             sub.add_argument("--kind", choices=_routing_policy.KINDS,
                              help="override the inherited kind (gates still run)")
             sub.add_argument("--role", choices=("advise", "exec"),
@@ -5110,6 +5250,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--role", choices=("advise", "exec"),
                     help="frontier only: advise (default) or exec (needs ACP_OPERATOR_APPROVED=frontier-exec); "
                          "ignored for other kinds")
+    ap.add_argument("--frontier-reason", metavar="TEXT",
+                    help="fresh --kind frontier only: one line, 10-200 characters, why a frontier model is significantly better "
+                         "than judgment here. Recorded (frontier_reason). While the frontier gate allows judged use "
+                         "(config/gates.toml [frontier], a standing baseline since 2026-10-27; docs/gates.md) it grants the allowance when the cap floors and the "
+                         "per-wave cap hold (record frontier_judged; otherwise frontier_judged_note says why not). Missing or empty: "
+                         "no allowance is claimed. Not 10-200 characters or not one line: exit 2")
     ap.add_argument("--name", required=True, help="slice name; names every output file")
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file", help="the brief (a file); the footer is appended to a copy")

@@ -24,6 +24,8 @@ REPO = Path(__file__).resolve().parent.parent
 GUARD = REPO / "bin" / "claude-quota-guard"
 HOOK = REPO / "claude" / "hooks" / "quota_nudge.py"
 
+from test_gates import close_frontier_baseline  # noqa: E402
+
 NOW = datetime(2026, 10, 23, 12, 0, 0, tzinfo=timezone.utc)
 WEEK_RESET = (NOW + timedelta(days=3)).isoformat()
 FIVE_RESET = (NOW + timedelta(hours=3)).isoformat()
@@ -125,6 +127,14 @@ class Rig:
     def pings(self):
         return self.ping_log.read_text().splitlines() if self.ping_log.exists() else []
 
+    def closed_gates(self) -> str:
+        """A gates.toml copy whose [frontier] BASELINE is closed (the pre-2026-10-27 rule): the tests written against a closed baseline
+        keep their meaning; the standing-baseline tests at the end of the file pass the shipped file."""
+        path = self.tmp / "closed-gates.toml"
+        if not path.exists():
+            path.write_text(close_frontier_baseline((REPO / "config" / "gates.toml").read_text()))
+        return str(path)
+
     def env(self, **over):
         env = {"HOME": str(self.home), "PATH": f"{self.fakebin}:/usr/bin:/bin", "TZ": "UTC",
                "CLAUDE_QUOTA_GUARD_AIUSE": str(self.aiuse),
@@ -133,6 +143,7 @@ class Rig:
                "CLAUDE_QUOTA_GUARD_PING": str(self.ping),
                "CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS": str(self.launch_agents),
                "CLAUDE_QUOTA_NUDGE_STATE": str(self.nudges),
+               "GATES_TOML": self.closed_gates(),
                "CLAUDE_QUOTA_GUARD_NOW": self.now.isoformat()}
         env.update(over)
         return env
@@ -575,6 +586,84 @@ def test_pace_early_silences_only_the_projected_alert_not_other_conserve_alerts(
     rig.set_aiuse(aiuse_fixture(weekly=100, weekly_kw={"pace_early": True}))
     rig.set_alerts([alert("pace yourself: weekly use is above even pace")])
     assert rig.guard().returncode == 1
+
+
+# -- conserve_alert_level: the cap a profile may lower (config/gates.toml, docs/gates.md) ------------
+
+def _away_profile(rig) -> dict:
+    """Env for a valid `away` profile (72 h, around rig.now) in a temp file; the real config/gates.toml defines it."""
+    path = rig.tmp / "gate-profile.json"
+    path.write_text(json.dumps({"schema": 1, "profile": "away", "since": "2026-10-23T11:00:00Z",
+                                "until": "2026-10-26T11:00:00Z", "reason": "test", "set_by": "test"}))
+    return {"GATE_PROFILE_STATE": str(path)}
+
+
+@pytest.mark.parametrize("weekly, alerts", [
+    (60, [alert(PROJECTED)]),
+    (35, [alert(PROJECTED)]),
+    (80, [alert("pace yourself")]),
+    (60, [alert(PROJECTED, window_label="Claude Code 5-hour")]),
+    (60, [alert(PROJECTED, window_label="Claude Code weekly \u2014 Fable")]),
+    (14, [alert(PROJECTED)]),
+    (80, []),
+])
+def test_the_baseline_cap_changes_nothing_a_baseline_run_is_what_an_uncapped_run_gives(tmp_path, weekly, alerts):
+    """Baseline conserve_alert_level is 2 and the highest level an alert ever gives is tight, so a run with the real
+    alert fixture must be byte-identical to one whose cap (env 3) can never bind: the behaviour before the key existed."""
+    states = []
+    for i, over in enumerate(({}, {"CLAUDE_QUOTA_GUARD_THRESHOLDS": json.dumps({"conserve_alert_level": 3})})):
+        (tmp_path / f"r{i}").mkdir()
+        rig = Rig(tmp_path / f"r{i}")
+        rig.set_aiuse(aiuse_fixture(weekly=weekly))
+        rig.set_alerts(alerts)
+        assert rig.guard(**over).returncode in (0, 1, 2, 3)
+        states.append(rig.state.read_bytes())
+    assert states[0] == states[1]
+
+
+def test_away_caps_a_projection_alert_at_watch_where_baseline_says_tight(tmp_path):
+    """Weekly 35% left (above both the baseline 30 and the away 15 tight trigger) with the live projection alert."""
+    levels = {}
+    for name, away in (("baseline", False), ("away", True)):
+        (tmp_path / name).mkdir()
+        rig = Rig(tmp_path / name)
+        rig.set_aiuse(aiuse_fixture(weekly=35))
+        rig.set_alerts([alert(PROJECTED)])
+        r = rig.guard(**(_away_profile(rig) if away else {}))
+        levels[name] = (rig.state_json()["level"], r.returncode)
+        if away:
+            assert rig.state_json()["profile"]["name"] == "away"
+    assert levels == {"baseline": ("tight", 2), "away": ("watch", 1)}
+
+
+def test_the_away_profile_still_gives_watch_on_any_conserve_alert_and_keeps_critical(tmp_path):
+    (tmp_path / "a").mkdir()
+    rig = Rig(tmp_path / "a")
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    rig.set_alerts([alert("pace yourself")])
+    assert rig.guard(**_away_profile(rig)).returncode == 1       # the floor is watch: an alert is never silent
+    (tmp_path / "b").mkdir()
+    rig = Rig(tmp_path / "b")
+    rig.set_aiuse(aiuse_fixture(weekly=8))
+    rig.set_alerts([alert(PROJECTED)])
+    assert rig.guard(**_away_profile(rig)).returncode == 3       # weekly 8 < away critical 10: unaffected by the cap
+
+
+@pytest.mark.parametrize("cap, weekly, alerts, level", [
+    (0, 80, [alert(PROJECTED)], "ok"),             # env has no floor: 0 switches the alert rule off
+    (0, 60, [alert("pace yourself")], "ok"),
+    (0, 14, [alert(PROJECTED)], "critical"),       # ... but never the weekly threshold
+    (1, 60, [alert(PROJECTED)], "watch"),
+    (2, 60, [alert(PROJECTED)], "tight"),
+    (3, 60, [alert(PROJECTED)], "tight"),          # a cap above the alert's own level raises nothing
+    (3, 60, [alert("pace yourself")], "watch"),
+])
+def test_env_json_sets_the_conserve_cap_and_it_only_ever_lowers_what_an_alert_gives(tmp_path, cap, weekly, alerts, level):
+    rig = Rig(tmp_path)
+    rig.set_aiuse(aiuse_fixture(weekly=weekly))
+    rig.set_alerts(alerts)
+    rig.guard(CLAUDE_QUOTA_GUARD_THRESHOLDS=json.dumps({"conserve_alert_level": cap}))
+    assert rig.state_json()["level"] == level
 
 
 # -- windows whose label says neither "5-hour" nor "weekly" (L10) -------------------------------
@@ -1632,3 +1721,323 @@ def test_adv2_a_borrowed_twin_that_supplied_the_reported_pace_still_ages(rig, mo
     d = mod.decide(0, {"available": [_weekly_summary_row()]}, snap, [], mod.thresholds(), NOW)
     assert d["pace"] == 12 and d["resets_at"] is None and d["weekly_resets_at"] is None
     assert d["rows_age_s"] == 18000
+
+
+# -- gate profiles (config/gates.toml, bin/ade_gates.py, 2026-10-26) -----------------------------------------------
+
+def _profile(rig, **over):
+    path = rig.tmp / "gate-profile.json"
+    stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    s = {"schema": 1, "profile": "away", "since": stamp(NOW - timedelta(hours=1)), "until": stamp(NOW + timedelta(hours=72)),
+         "reason": "away", "set_by": "test", **over}
+    path.write_text(json.dumps(s))
+    return {"GATE_PROFILE_STATE": str(path)}
+
+
+@pytest.mark.parametrize("weekly, base_level, away_level", [
+    (35, "watch", "ok"),         # watch_weekly 40 -> 20
+    (18, "tight", "watch"),      # tight_weekly 30 -> 15
+    (12, "critical", "tight"),   # critical_weekly 15 -> 10
+    (9, "critical", "critical"),  # the hard stop stays
+])
+def test_away_profile_moves_the_weekly_triggers(rig, weekly, base_level, away_level):
+    rig.set_aiuse(aiuse_fixture(weekly=weekly))
+    rig.guard()
+    assert rig.state_json()["level"] == base_level and rig.state_json()["profile"] is None
+    rig.guard(**_profile(rig))
+    st = rig.state_json()
+    assert st["level"] == away_level
+    assert st["profile"] == {"name": "away", "until": "2026-10-26T12:00:00Z"}
+
+
+def test_profile_shows_in_the_human_line_and_status_json(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(**_profile(rig))
+    assert "[gate profile away until Mon Oct 26 8:00 AM EDT]" in r.stdout
+    assert json.loads(rig.guard("status", "--json").stdout)["profile"]["name"] == "away"
+
+
+def test_env_json_beats_the_profile(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=18))
+    r = rig.guard(CLAUDE_QUOTA_GUARD_THRESHOLDS=json.dumps({"tight_weekly": 30, "watch_weekly": 40}), **_profile(rig))
+    assert r.returncode == 2 and rig.state_json()["level"] == "tight"
+
+
+def test_an_expired_profile_means_baseline_and_one_ping(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    env = _profile(rig, since="2026-10-20T12:00:00Z", until="2026-10-23T11:59:00Z")
+    assert rig.guard(**env).returncode == 1                       # baseline watch
+    assert [p for p in rig.pings() if "expired, baseline restored" in p] == ["djbclark-ade: away profile expired, baseline restored "
+                                                                             "(gates were loosened until Fri Oct 23 7:59 AM EDT)"]
+    rig.guard(**env)
+    assert len([p for p in rig.pings() if "expired" in p]) == 1
+    assert json.loads(Path(env["GATE_PROFILE_STATE"]).read_text())["expired_notified"]
+
+
+def test_a_bad_profile_value_is_baseline_not_a_crash(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(**_profile(rig, profile="no-such-profile"))
+    assert r.returncode == 1 and rig.state_json()["profile"] is None
+
+
+def test_a_missing_gates_toml_falls_back_to_the_code_defaults(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(GATES_TOML="/nonexistent/gates.toml", **_profile(rig))
+    assert r.returncode == 1 and "using the code defaults for quota_guard" in r.stderr
+    # logged once per gate and process: quota_guard's numbers and the frontier allowance's
+    assert r.stderr.count("using the code defaults for quota_guard") == 1 and r.stderr.count("using the code defaults for frontier") == 1
+
+
+def test_the_guard_never_sends_the_daily_nudge(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    assert rig.guard(**_profile(rig)).returncode == 0
+    assert rig.pings() == []
+
+
+def _hook_with_profile(rig, session="s1", **kw):
+    env = _profile(rig, **kw)
+    assert rig.guard(**env).returncode in (0, 1)       # ok or watch: the level is not what these tests are about
+    return rig.hook(session=session, **env)
+
+
+def test_hook_prints_one_gates_line_per_session_per_new_york_day_even_at_ok(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    r = _hook_with_profile(rig)
+    assert r.stdout.strip().startswith("[gates] away profile active until Mon Oct 26 8:00 AM EDT: Fable 5.1 (frontier) is allowed")
+    assert r.stdout.strip().endswith("gate-profile clear restores normal routing.")
+    assert rig.hook(session="s1", **_profile(rig)).stdout == ""            # same session, same day
+    assert "[gates]" in rig.hook(session="s2", **_profile(rig)).stdout     # another session
+    rig.now = NOW + timedelta(hours=16)                                    # 12:00 AM EDT the next day; the guard runs again
+    r = _hook_with_profile(rig, session="s1")
+    assert "[gates] away profile active" in r.stdout
+
+
+def test_hook_gates_line_adds_to_the_level_advice_and_stops_with_the_profile(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=18))                                # watch under away
+    r = _hook_with_profile(rig)
+    assert "[quota-guard watch]" in r.stdout and "[gates] away profile active" in r.stdout
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    assert rig.guard(**_profile(rig, until="2026-10-23T11:59:00Z", since="2026-10-20T12:00:00Z")).returncode == 0
+    assert rig.hook(session="s9", **_profile(rig, until="2026-10-23T11:59:00Z", since="2026-10-20T12:00:00Z")).stdout == ""
+    rig.guard()                                                            # baseline: no profile in the state
+    assert rig.hook(session="s10").stdout == ""
+
+
+def test_hook_names_only_an_ascii_profile_name_in_its_gates_line(rig):
+    """The gates refuse any name outside [a-z0-9_-] now; the hook still filters what the guard state holds (a hand-edited or
+    older state file): Unicode letters and digits were let through by str.isalnum()."""
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    env = _profile(rig)
+    assert rig.guard(**env).returncode == 0
+    for name, shown in (("ａway", "gate"), ("away", "away")):
+        st = rig.state_json()
+        st["profile"]["name"] = name
+        rig.state.write_text(json.dumps(st))
+        out = rig.hook(session=f"s-{shown}", **env).stdout
+        assert out.startswith(f"[gates] {shown} profile active until"), out
+
+
+def test_a_deeply_nested_gates_toml_is_the_code_defaults_not_a_crash(rig):
+    deep = rig.tmp / "deep.toml"
+    deep.write_text("x = " + "[" * 5000 + "]" * 5000 + "\n")
+    rig.set_aiuse(aiuse_fixture(weekly=35))
+    r = rig.guard(GATES_TOML=str(deep), **_profile(rig))
+    assert r.returncode == 1 and "RecursionError" not in r.stderr and "using the code defaults for quota_guard" in r.stderr
+
+
+# -- the frontier allowance under the away profile over a CLOSED baseline, in the advice and the state (2026-10-27, docs/gates.md "Frontier allowance") --
+
+AWAY_WATCH = "Claude quota watch (away until Mon Oct 26 8:00 AM EDT): Opus 5.5 Agent-tool sub-agents as needed; Fable 5.1 only where"
+BASE_WATCH = "Claude quota watch: no Fable or Opus Agent-tool sub-agents."
+
+
+def _levelled(rig, weekly, fable=97.0, profile=True, **kw):
+    rig.set_aiuse(aiuse_fixture(weekly=weekly, fable=fable))
+    rig.guard(**(_profile(rig, **kw) if profile else {}))
+    return rig.state_json()
+
+
+def test_state_records_why_the_level_fired(rig):
+    assert _levelled(rig, 35, profile=False)["reasons"] == ["weekly"]
+    assert _levelled(rig, 80, fable=10, profile=False)["reasons"] == ["fable"]
+    assert _levelled(rig, 35, fable=10, profile=False)["reasons"] == ["fable", "weekly"]
+    assert _levelled(rig, 80, profile=False)["reasons"] == []
+
+
+def test_baseline_advice_is_unchanged_without_a_profile(rig):
+    st = _levelled(rig, 35, profile=False)
+    assert st["advice"].splitlines()[0] == f"1. {BASE_WATCH}"
+    assert st["frontier_allowance"] == {"judged": False, "agent_calls_per_day": 0}
+
+
+def test_away_watch_for_the_weekly_window_allows_fable_with_a_reason(rig):
+    st = _levelled(rig, 18)                                          # watch at away's 20, tight at 15
+    assert st["level"] == "watch" and st["reasons"] == ["weekly"]
+    lines = st["advice"].splitlines()
+    assert lines[0].startswith(f"1. {AWAY_WATCH}")
+    assert "significantly better than Opus 5.5, with a one-line frontier-reason, at most 4 Agent-tool calls today." in lines[0]
+    assert BASE_WATCH not in st["advice"] and "acp-dispatch omp --model anthropic/claude-opus-5-5" in lines[1]
+    assert st["frontier_allowance"] == {"judged": True, "agent_calls_per_day": 4}
+
+
+@pytest.mark.parametrize("weekly, level", [(12, "tight"), (9, "critical")])
+def test_away_tight_and_critical_keep_the_baseline_advice(rig, weekly, level):
+    base = _levelled(rig, weekly, profile=False)
+    st = _levelled(rig, weekly)
+    assert st["level"] == level                                      # away moves where tight starts, not what it means
+    assert st["advice"].splitlines()[0].startswith(f"1. Claude quota {level}: no Fable or Opus Agent-tool sub-agents.")
+    assert st["frontier_allowance"]["judged"] is False
+    if level == "critical":
+        assert st["advice"] == base["advice"]
+
+
+def test_away_frontier1_cap_at_watch_says_use_opus(rig):
+    st = _levelled(rig, 80, fable=10)
+    assert st["level"] == "watch" and st["reasons"] == ["fable"]
+    assert st["advice"].splitlines()[0] == ("1. Claude quota watch (away until Mon Oct 26 8:00 AM EDT): the Fable 5.1 cap has 10% "
+                                            "left (watch below 15%), so no Fable 5.1: use Opus 5.5.")
+    assert st["frontier_allowance"]["judged"] is False
+    assert _levelled(rig, 18, fable=10)["advice"].splitlines()[0].startswith("1. Claude quota watch (away until Mon Oct 26 8:00 AM EDT): the Fable 5.1 cap")
+
+
+def test_away_ok_has_no_advice_but_the_allowance_is_in_force(rig):
+    st = _levelled(rig, 80)
+    assert st["level"] == "ok" and st["advice"] == ""
+    assert st["frontier_allowance"] == {"judged": True, "agent_calls_per_day": 4}
+
+
+def test_away_rows_need_a_reason_the_profile_may_spend_through(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    away = {"name": "away", "until": "Mon Oct 26 8:00 AM EDT", "calls": 4}
+    base = mod._advice("watch", "r", "available", None)
+    assert mod._advice("watch", "r", "available", None, away, ["weekly"], 50.0, 15.0).startswith("1. Claude quota watch (away")
+    for reasons in (["alert"], ["weekly", "alert"], ["snapshot-only"], ["stale"], ["weekly", "stale"], [], None):
+        assert mod._advice("watch", "r", "available", None, away, reasons, 50.0, 15.0) == base, reasons
+    assert mod._advice("watch", "r", "available", 3600.0, away, ["weekly"], 50.0, 15.0).startswith("1. Claude quota watch:")   # stale age
+    assert mod._advice("watch", "r", "snapshot-only", None, away, ["weekly"], 50.0, 15.0).startswith("1. Claude quota watch:")
+    assert "no Agent-tool call without asking" in mod._advice("watch", "r", "available", None, {**away, "calls": 0}, ["weekly"], 50.0, 15.0)
+
+
+def test_an_expired_profile_gives_the_baseline_advice_and_no_allowance(rig):
+    st = _levelled(rig, 35, since="2026-10-20T12:00:00Z", until="2026-10-23T11:59:00Z")
+    assert st["advice"].splitlines()[0] == f"1. {BASE_WATCH}"
+    assert st["frontier_allowance"] == {"judged": False, "agent_calls_per_day": 0}
+
+
+def test_stale_data_under_away_keeps_the_baseline_and_no_allowance(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    rig.set_alerts([], age_s=4 * 3600)
+    rig.guard(**_profile(rig))
+    st = rig.state_json()
+    assert st["stale"] and st["level"] == "watch" and "stale" in st["reasons"]
+    assert st["advice"].splitlines()[0].startswith(f"1. {BASE_WATCH}")
+    assert st["frontier_allowance"]["judged"] is False
+
+
+def test_hook_gates_line_is_the_plain_one_when_the_allowance_is_not_in_force(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=12))                          # tight under away
+    env = _profile(rig)
+    assert rig.guard(**env).returncode == 2
+    r = rig.hook(session="s1", **env)
+    assert "[gates] away profile active until Mon Oct 26 8:00 AM EDT; gate-profile clear restores normal routing" in r.stdout
+    assert "frontier-reason" not in r.stdout
+
+
+# -- the standing baseline (2026-10-27 ruling): no profile needed; every test above runs over a CLOSED baseline (Rig.env) ---------
+
+STANDING_GATES = {"GATES_TOML": str(REPO / "config" / "gates.toml")}
+STANDING_WATCH = ("1. Claude quota watch: Opus 5.5 Agent-tool sub-agents as needed; Fable 5.1 only where significantly better than "
+                  "Opus 5.5, with a one-line frontier-reason, at most 4 Agent-tool calls today.")
+
+
+def _standing(rig, weekly, fable=97.0, **kw):
+    rig.set_aiuse(aiuse_fixture(weekly=weekly, fable=fable))
+    rig.guard(**STANDING_GATES, **kw)
+    return rig.state_json()
+
+
+def test_standing_watch_names_the_allowance_with_no_profile_and_no_expiry(rig):
+    st = _standing(rig, 35)
+    assert st["profile"] is None and st["level"] == "watch" and st["reasons"] == ["weekly"]
+    assert st["advice"].splitlines()[0] == STANDING_WATCH
+    assert "away" not in st["advice"] and BASE_WATCH not in st["advice"]
+    assert st["frontier_allowance"] == {"judged": True, "agent_calls_per_day": 4}
+
+
+def test_standing_ok_has_no_advice_but_the_allowance_is_in_force(rig):
+    st = _standing(rig, 80)
+    assert st["advice"] == "" and st["frontier_allowance"] == {"judged": True, "agent_calls_per_day": 4}
+
+
+@pytest.mark.parametrize("weekly, level", [(25, "tight"), (9, "critical")])
+def test_standing_tight_and_critical_stop_the_allowance(rig, weekly, level):
+    st = _standing(rig, weekly)
+    assert st["level"] == level and st["advice"].splitlines()[0].startswith(f"1. Claude quota {level}: no Fable or Opus Agent-tool sub-agents.")
+    assert st["frontier_allowance"]["judged"] is False
+
+
+def test_standing_frontier1_cap_at_watch_says_use_opus(rig):
+    st = _standing(rig, 80, fable=10)
+    assert st["reasons"] == ["fable"] and st["frontier_allowance"]["judged"] is False
+    assert st["advice"].splitlines()[0] == ("1. Claude quota watch: the Fable 5.1 cap has 10% left (watch below 15%), "
+                                            "so no Fable 5.1: use Opus 5.5.")
+
+
+def test_standing_other_watch_reasons_keep_the_closed_text(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    rig.set_alerts([], age_s=4 * 3600)                               # a dead collector: stale
+    rig.guard(**STANDING_GATES)
+    st = rig.state_json()
+    assert st["stale"] and st["advice"].splitlines()[0].startswith(f"1. {BASE_WATCH}")
+    assert st["frontier_allowance"]["judged"] is False
+
+
+def test_standing_hook_prints_one_frontier_allowance_line_per_session_per_day(rig):
+    st = _standing(rig, 80)
+    assert st["profile"] is None
+    out = rig.hook(session="s1", **STANDING_GATES).stdout
+    assert out.startswith("[gates] frontier allowance: Fable 5.1 (frontier) is allowed where you judge it significantly better than "
+                          "Opus 5.5;") and out.strip().endswith("at most 4 Agent-tool calls today.") and "profile" not in out, out
+    assert rig.hook(session="s1", **STANDING_GATES).stdout == ""                 # same session, same day
+    assert "[gates] frontier allowance" in rig.hook(session="s2", **STANDING_GATES).stdout
+    rig.now = NOW + timedelta(hours=16)                                          # the next New York day; the guard runs again
+    _standing(rig, 80)
+    assert "[gates] frontier allowance" in rig.hook(session="s1", **STANDING_GATES).stdout
+
+
+def test_standing_hook_says_nothing_of_the_allowance_when_the_guard_stops_it(rig):
+    _standing(rig, 25)                                               # tight
+    assert "frontier allowance" not in rig.hook(session="s1", **STANDING_GATES).stdout
+
+
+def test_standing_hook_announces_the_allowance_only_while_the_guard_state_is_fresh_enough_for_the_gate(rig):
+    """The hook and acp-dispatch ask on a guard state over 30 min old (ade_gates.GUARD_STATE_MAX_AGE_S); the daily line must not say
+    "allowed" then, though the hook's own read accepts a state up to 2 h old (adversary 2026-10-27 P3c)."""
+    _standing(rig, 80)
+    rig.now = NOW + timedelta(minutes=60)
+    assert "frontier allowance" not in rig.hook(session="s1", **STANDING_GATES).stdout
+    rig.now = NOW + timedelta(minutes=10)
+    assert "[gates] frontier allowance" in rig.hook(session="s1", **STANDING_GATES).stdout
+
+
+def test_the_nudge_hook_uses_the_gates_own_guard_state_age_limit():
+    import ade_gates
+    spec = importlib.util.spec_from_file_location("quota_nudge_age", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.GUARD_STATE_MAX_AGE_S == ade_gates.GUARD_STATE_MAX_AGE_S
+
+
+def test_a_profile_over_the_standing_baseline_keeps_the_profile_line_and_adds_no_second_one(rig):
+    st = _standing(rig, 80, **_profile(rig))
+    assert st["profile"]["name"] == "away"
+    out = rig.hook(session="s1", **STANDING_GATES, **_profile(rig)).stdout
+    assert out.startswith("[gates] away profile active until Mon Oct 26 8:00 AM EDT: Fable 5.1 (frontier) is allowed") and "frontier allowance:" not in out
+
+
+def test_the_frontier_advice_names_a_profile_only_when_one_is_the_source(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    standing = {"name": None, "until": None, "calls": 4}
+    text = mod._advice("watch", "r", "available", None, standing, ["weekly"], 50.0, 15.0)
+    assert text.startswith("1. Claude quota watch: Opus 5.5") and "(" not in text.splitlines()[0]
+    assert mod._advice("watch", "r", "available", None, standing, ["weekly", "alert"], 50.0, 15.0) == mod._advice("watch", "r")

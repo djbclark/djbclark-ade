@@ -28,7 +28,8 @@ quoting a chain, and update its snapshot if you change one.
 > codex `gpt-6.1-sol` at `high` as an eligible, lower-ranked pool only while every codex
 > window has >= 50% left; codex astra and Fable 5.1
 > (`high`) are reached only through the `frontier` kind, one slice per pool
-> per wave, for work that really needs them (codex's everyday models, `gpt-6.1-sol` and
+> per wave (two on claude under the standing allowance of 2026-10-27 while the quota guard
+> passes, `docs/gates.md`), for work that really needs them (codex's everyday models, `gpt-6.1-sol` and
 > `gpt-6-luna`, also take `judgment`/`code`/`bulk`/`mechanical` while every codex window has
 > >= 50% left, operator 2026-10-25); `acp-dispatch` allows one fresh
 > codex slice in flight machine-wide (replaced the same night by a per-service
@@ -400,12 +401,14 @@ running agent per reset period toward omp API credits. Exit 0/1/2, 10 stale data
 `~/.local/state/ade/fleet-governor.json`; launchd `com.djbclark.claude-fleet-governor` (300 s, `--install`).
 `route_agent.py` reads the state's `level` (under 30 min old): at tight/critical `code`, `bulk`, `research` and
 `mechanical` never go to claude, and `judgment` prefers omp `anthropic/claude-opus-5-5`.
+The governor's and the guard's numbers live in `config/gates.toml` and a temporary profile can loosen them (2026-10-26,
+`bin/gate-profile`, [`docs/gates.md`](gates.md)); the level `route_agent.py` reads is computed from the active profile.
 
 1. **Frontier models only for what really needs them (2026-10-18):** judgment
    is `acp-dispatch claude --model opus --kind judgment --effort high` first
    (2026-10-25: omp Opus next; codex `gpt-6.1-sol --effort high` while every codex window
    has `plenty_min` left, rank 3; never astra or Fable); the
-   `frontier` kind, one slice per pool per wave, reaches codex `gpt-6-astra`
+   `frontier` kind, one slice per pool per wave (two on claude under the standing allowance, 2026-10-27, while the quota guard passes: `docs/gates.md`), reaches codex `gpt-6-astra`
    (`acp-dispatch codex --model gpt-6-astra --kind frontier --effort high`;
    in-flight slices reserve quota, so a second one is refused when the first
    leaves no room) and Fable 5.1 (`fable-deep`, or `acp-dispatch claude
@@ -470,8 +473,21 @@ failed on its tier (no-report or partial, not quota) climbs ONE rung of
 agent/model come from `route_agent`'s top route for the next kind excluding
 the failed pool, and the top rung refuses (exit 2). A quota stop whose reset
 is more than `[dispatch].auto_resume_max_wait_hours` (6) away is rerouted the
-same way instead of waiting for an in-place auto-resume. Scoring is pace- and
-reset-aware: a computed
+same way instead of waiting for an in-place auto-resume.
+As of 2026-10-26, preflight-unavailable records retain the original task text,
+permission mode, effort/context and continuation settings. A refused dispatch
+preserves an existing launched run and appends its refusal, even with `--force`.
+A repeated preflight-only refusal refreshes the record with the latest task and
+permission intent, including when replacing a legacy thin unavailable record.
+Reroute refuses missing or unreadable original context with exit 2 before launch;
+recover a legacy thin record with `reroute RECORD --agent A --model M -f FILE`
+(or `-p TEXT`) and explicit `--perm all|read-only|deny` when an unavailable
+record lacks permission intent. Recovery never changes a recorded permission;
+reroutes inherit it and run the usual permission and routing gates. Effort/context
+are inherited only for the same agent and model; a different target uses its
+defaults, and escalation uses its selected route's effort when supplied.
+
+Scoring is pace- and reset-aware: a computed
 burn-first bonus goes to a pool that would waste quota at its reset, and a pace
 penalty to a pool burning fast. `route_agent.py calibrate` reports done rates,
 and `bin/routing-recalibrate` (monthly, launchd) has Opus re-rank `good_at`

@@ -28,6 +28,7 @@ Each doc carries its own summary.
 | [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20): assets, actors, entry points, ranked threats; read by Codex's security review |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard` and the claim registry (2026-10-24): commands, exit codes 0/2/77, claim lifecycle, refusal rules, override, integration status |
+| [docs/gates.md](docs/gates.md) | `config/gates.toml` and `bin/gate-profile` (2026-10-26): the Claude quota gates' numbers in git, floors, a temporary expiring `away` profile |
 | [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
 | [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
 | [docs/agent-sleep.md](docs/agent-sleep.md) | idle-agent sleep; run `bin/herdr-sleeper list` before calling a pane dead |
@@ -170,12 +171,59 @@ Cursor's Security Agent and Approval Agent checks, and the `adversary`
 sub-agent. A
 pull request here is expected to meet these; flag any it misses.
 
-1. **The PR body quotes the adversary's verdict line** (`APPROVE`, `APPROVE,
-   no findings` or `BLOCK ...`) together with the head SHA it reviewed. Flag
-   the PR if the quote is missing, says BLOCK, or names a SHA other than the
-   PR's current head. Whoever merges uses `gh pr merge --squash
-   --match-head-commit <reviewed sha>`, so the head reviewed is the head
-   merged.
+1. **The PR body carries the adversary's verdict as a MACHINE-READABLE MARKER**, naming the head it
+   reviewed:
+
+   ```
+   <!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<40-hex>"} -->
+   ```
+
+   **Flag the PR if the marker is missing, malformed, says BLOCK, or names a head other than the
+   current one.** `pr-wait`'s report-only default is a property of the *tool*, not of this rule: it
+   blocks on a missing, other-head or BLOCK marker only when it is asked to, with
+   `--adversary-required` or an `adversary-required` label on the PR.
+
+   `pr-wait` reads that marker and reports it as `adversary` / `adversary_warnings`; it does **not**
+   read prose, so **prose verdicts do not count**. The first version parsed English and **two**
+   adversary rounds found false approvals and false misses, including a BLOCK silently deleted by a
+   prose filter, so that parser was deleted rather than patched; a third round, on this marker design,
+   found that a shortened head let a BLOCK be stripped away (fixed in PR 66). Match the `:v1` suffix,
+   as rule 9 does for `codex-review-state:v1` — a non-`:v1` `adversary-verdict:` marker is
+   **malformed**. Five more properties worth knowing:
+
+   1. **An APPROVE must be live, and a BLOCK naming the current head counts wherever it appears** —
+      the raw body included, whether the head is the full 40-hex sha or a 7+ hex prefix of it, with or
+      without a trailing `…`/`...` — so no code-fence or stripping bug can hide one. "Live" means
+      outside the two shapes `pr-wait` blanks: a **fenced block whose fence sits at indent <= 3**, and
+      a **single-line inline span**. Three shapes it does not blank read as live too, so an APPROVE
+      quoted there counts: a 4-space **indented code block**, a **fence inside a blockquote**, and an
+      **inline span broken across a line** (documented limit, `_strip_code`'s C1a/b/c note; it only
+      misfires when a human pastes our own template). The asymmetry is deliberate: documentation
+      cannot approve, and a BLOCK cannot be hidden.
+   2. **The `verdict` value is exactly `APPROVE` or `BLOCK`, in capitals, and an APPROVE's `head` is
+      the full 40-hex sha** (a BLOCK may be shortened, property 1). Anything else is **malformed**, and
+      `malformed` always blocks: `approve`, "APPROVE, no findings", an APPROVE with any shortened sha
+      (a bare `…`/`...` head is the template's placeholder instead, and approves nothing — property 3),
+      a BLOCK whose shortened head is not a prefix of this head. A **full 40-hex sha of another commit
+      is not malformed**: it is a verdict for a different head, reported as other-head and report-only
+      (property 4).
+   3. **An APPROVE inside a fenced block or a single-line inline span, or an APPROVE whose head is the
+      template's `<40-hex>` placeholder, is documentation and is ignored.** That is what lets a PR
+      describe this format without tripping its own gate: nothing in those two blanked shapes can
+      approve, and a placeholder approves nothing. A BLOCK is never skipped this way (property 1), and
+      a **live** BLOCK whose head is the placeholder is `malformed` rather than documentation; a BLOCK
+      in code that does not name this head is documentation too (the accepted limit in `_strip_code`).
+   4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
+      missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
+      report a readable bad one.
+   5. **The marker's JSON is delimited by its own braces, not by the first `<!--`** (2026-10-27): a
+      `note` may quote the format, and a body that documents the marker is not read as a second
+      mistyped one. The marker's JSON must also be written where `pr-wait` reads it live — a marker
+      whose JSON is partly inside a code span is **malformed**, never approved, because masking code
+      cannot "repair" JSON nobody wrote.
+
+   Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
+   is the head merged.
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper; CI runs `pytest` directly.

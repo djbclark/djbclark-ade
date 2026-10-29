@@ -19,7 +19,7 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is needed to run the dry-run half")
 
 
-def dry_run(tmp_path: Path, *extra: str, key: str = "config") -> dict:
+def dry_run(tmp_path: Path, *extra: str) -> dict:
     """Run bin/paseo-new-seat --dry-run with plain node standing in for Paseo's Electron helper."""
     helper = tmp_path / "helper"
     helper.write_text(f'#!/bin/sh\nexec "{NODE}" "$@"\n')
@@ -30,7 +30,7 @@ def dry_run(tmp_path: Path, *extra: str, key: str = "config") -> dict:
          "--workspace", "wks_x", "--dry-run", *extra],
         env=env, capture_output=True, text=True, timeout=60, check=False)
     assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout)[key]
+    return json.loads(proc.stdout)
 
 
 def test_claude_seat_defaults_to_bypass_permissions(tmp_path):
@@ -42,11 +42,11 @@ def test_explicit_mode_wins(tmp_path):
 
 
 def test_other_provider_keeps_its_own_default(tmp_path):
-    assert "modeId" not in dry_run(tmp_path, "--provider", "omp", "--model", "x")
+    assert dry_run(tmp_path, "--provider", "omp", "--model", "x")["modeId"] is None
 
 
 def test_no_auto_accept_keeps_a_claude_seat_prompting(tmp_path):
-    assert "modeId" not in dry_run(tmp_path, "--provider", "claude", "--model", "claude-sonnet-5-5", "--no-auto-accept")
+    assert dry_run(tmp_path, "--provider", "claude", "--model", "claude-sonnet-5-5", "--no-auto-accept")["modeId"] is None
 
 
 def test_a_mode_that_looks_like_a_flag_is_refused(tmp_path):
@@ -62,11 +62,11 @@ def test_a_mode_that_looks_like_a_flag_is_refused(tmp_path):
 
 
 def test_a_deliberate_non_yolo_claude_seat_is_labelled_perm_ask(tmp_path):
-    labels = lambda *x: dry_run(tmp_path, "--provider", "claude", *x, key="labels")  # noqa: E731
+    labels = lambda *x: dry_run(tmp_path, "--provider", "claude", *x)["labels"]  # noqa: E731
     assert labels("--mode", "plan") == {"perm": "ask"}
     assert labels("--no-auto-accept") == {"perm": "ask"}
     assert labels() == {}
 
 
 def test_other_providers_get_no_perm_label(tmp_path):
-    assert dry_run(tmp_path, "--provider", "omp", "--model", "x", key="labels") == {}
+    assert dry_run(tmp_path, "--provider", "omp", "--model", "x")["labels"] == {}

@@ -22,7 +22,7 @@ review and rework. Concretely:
 
 1. **The two frontier models are scarce: only what really needs them**
    (operator 2026-10-18). Claude Fable 5.1 and codex `gpt-6-astra` are reached
-   only through the `frontier` kind, one slice per pool per wave. On
+   only through the `frontier` kind, one slice per pool per wave (two on claude under the standing allowance of 2026-10-27 while the quota guard passes, `docs/gates.md`). On
    2026-10-18 a wave of four astra slices emptied codex's 5-hour window and
    every one stopped. Judgment is Opus 5.5 at `high` first (2026-10-25: omp Opus next, Codex
    `gpt-6.1-sol` at high only while every codex window has `plenty_min` left). `acp-dispatch` runs a
@@ -128,7 +128,7 @@ Classify every pool before assigning anything:
 | **fresh subscription** | monthly/weekly window largely unused | bulk, mechanical, writing, research — use heavily |
 | **tight** | >40% of the binding window burned | one slice at most, or skip |
 | **exhausted** | `remaining_percent` ≈ 0 on ANY window of that pool | skip that pool entirely (the same vendor's other model-family pool may be fine) |
-| **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | only a slice that really needs a frontier model to look it over (a security-relevant or concurrency fix's final review, debugging that defeated real attempts, a whole-corpus read); one per pool per wave, in-flight slices reserve quota (2026-10-18); see *Pool policy* below |
+| **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | only a slice that really needs a frontier model to look it over (a security-relevant or concurrency fix's final review, debugging that defeated real attempts, a whole-corpus read); one per pool per wave, two on claude under the standing allowance while the quota guard passes (2026-10-27, `docs/gates.md`); in-flight slices reserve quota (2026-10-18); see *Pool policy* below |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
 | **reserve** | copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only for kind `github`; a missing or stale reading means do not use. Grok was one until 2026-10-18 (GrokBot moved to its own Cursor pool): now an ordinary subscription pool for `realtime-web`, `research` and `bulk`, behind the burn-first pools |
 | **never** | hermes; the prepaid pools; credits-backed models (not the Max plan's API credits: omp, below) | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes behind an approval gate |
@@ -169,7 +169,14 @@ a fan-out needs from it:
    when omp is unavailable, and the lead passes the Agent tool's `model: "sonnet"`
    override whenever `~/.local/state/ade/quota-guard.json` says `tight` or
    `critical` (`bin/claude-quota-guard`; a `[quota-guard <level>]` line from the
-   UserPromptSubmit hook says the same). The lead session itself runs on Opus 5.5
+   UserPromptSubmit hook says the same). **Whatever route runs it, the brief says the verdict ends
+   with the marker line** `<!-- adversary-verdict:v1 {"verdict":"APPROVE"|"BLOCK","head":"<full
+   40-hex sha>"} -->`, raw (not in a fence), for the lead to paste into the PR body. The omp route
+   reads only a free-form brief; the Agent-tool `adversary` sub-agent loads
+   `claude/agents/adversary.md` (through the `~/.claude/agents/adversary.md` symlink, whose target
+   `bin/ade-update` checks and reports a repair command for, never links itself) as its system prompt —
+   so the marker line belongs in both that file and the brief, and a marker in one alone reaches only
+   one of the two routes (AGENTS.md rule 1, PR 67). The lead session itself runs on Opus 5.5
    high (Sonnet 5.5 at medium when it only drives a pipeline, high only for a judgment turn; `[lead] pipeline_effort`), never Fable
    (`model-routing`, *Routing policy* item 12).
    **`frontier` slices** are the rare few that really need a frontier model
@@ -177,7 +184,7 @@ a fan-out needs from it:
    fix's final review, a whole-corpus read): `acp-dispatch codex --model
    gpt-6-astra --kind frontier --effort high` or `acp-dispatch claude --model
    fable --kind frontier --effort high` (an Agent-tool `fable-deep` call is the
-   in-session form), one per pool per wave. A frontier slice is a read-only
+   in-session form), one per pool per wave (two on claude under the standing allowance, 2026-10-27, while the quota guard passes: `docs/gates.md`). A frontier slice is a read-only
    advisor by default (`--role advise`: its deliverable is the report, and
    `check` says ADVISOR EDITED THE TREE if it edits); `--role exec` needs
    `ACP_OPERATOR_APPROVED=frontier-exec` (2026-10-18). Fable's cap is 50% of the shared Claude weekly and it bills the
