@@ -270,6 +270,10 @@ agent what changed and what is new. Entries end with the pull request number.
   is exit 4, "skill check incomplete"); `bin/ade-update` warns on stderr when it runs from a path other than
   the canonical checkout (#20).
 
+### Removed
+
+- Removed the OpenUsage wiring (2026-10-29): the canonical `opencode-plugins/openusage-telemetry.ts`, its handling in `bin/opencode-plugin-guard` (the guard now manages `rtk` only), the three `claude-hook.sh` blocks in `agents/claude/settings.json.tmpl` and the `--previous-notify` fanout in `agents/codex/config.toml.tmpl`; an OpenUsage app relaunched from a stale `dist/` build is no longer fed by hooks or plugins (#119).
+
 ### Fixed
 
 - `ade_gates.read_guard_state` read a quota guard state file of absurd nesting (under the 64 KiB cap) as a `RecursionError` crash in `route_agent plan` on Python 3.13 and older (3.14 parses the nest, and `acp-dispatch` already treated it as closed); it now reads it as unreadable, the same as bad JSON, and the allowance stays closed (2026-10-27) (#98).
