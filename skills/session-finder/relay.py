@@ -141,7 +141,7 @@ Paseo id, label and hop count come from the record, set at queue time from the s
 identity. A caller with NO identifiable sender (no verified Paseo id, no fleet `self` row: a launchd script) is not deferred:
 exit 1 "not sent: that session is busy and cannot take it now; deferring needs an identifiable sender (it gets a notice if
 the send fails). Retry with --idle S, or --no-defer for the plain refusal" (nobody could be told it failed). It looks at the
-target every 5 s (only the head of a target's queue looks) and, once it is idle, sends through
+target every 5 s while it is not there or cannot be asked, on a backoff ladder while it works or waits on a card (below; only the head of a target's queue looks) and, once it is idle, sends through
 this same path (every gate, lock and proof) the stored text prefixed `[queued Nm ago] ` (omitted under a minute), under
 the stored label (sanitized again; `--deliver` refuses a record whose label sender_name would not give, and a `hermes xxxx`
 label without stored hops). A target that is gone (3 looks in a row), archived, finished, or no longer the same
@@ -2737,6 +2737,7 @@ def deliver(rid):
                     unverified_late(rid, rec, rc, line)
                     return 0
                 last = "the target stayed busy"
+                busy_n = 0    # a fresh busy or card state between look and send: the short steps again
                 time.sleep(DEFER_POLL)
                 continue
             if rc == 0:

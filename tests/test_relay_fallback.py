@@ -3002,7 +3002,10 @@ class TestDeferredSend(Harness):
         self.assertEqual(relay.rec_read(rid)["sender"], "claude bbbbbbbb aka alice (here)")
         self.age(rid, 130)
         self.statuses = ["running", "running", "idle"]
-        self.assertEqual(relay.deliver(rid), 0)
+        slept: list[float] = []
+        with mock.patch.object(relay.time, "sleep", side_effect=slept.append), mock.patch.object(relay.random, "uniform", lambda lo, hi: hi):
+            self.assertEqual(relay.deliver(rid), 0)
+        self.assertEqual(slept, [5, 10])    # two busy looks: the first two steps of the working-target ladder, never a real wait in a test
         self.assertEqual(self.sent, [(AGENT, "[relay from claude bbbbbbbb aka alice (here)] [queued 2m ago] hello there friend")])
         rec = relay.rec_read(rid)
         self.assertEqual(rec["state"], "delivered")
