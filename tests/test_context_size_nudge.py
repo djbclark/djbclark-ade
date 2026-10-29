@@ -133,12 +133,11 @@ def test_posttooluse_json_matches_plain_prompt_messages(box, monkeypatch, self_s
     monkeypatch.setattr(box.hook, "_can_self_slash", lambda: self_slash)
     plain = box(300_000, sid="prompt")
     output = box(300_000, event="PostToolUse", sid="tool")
-    prompt_sentence = "this reminder runs only when a prompt is submitted, not between tool rounds."
-    tool_sentence = "this reminder also runs between tool rounds (at most every 20 s)."
-    assert prompt_sentence in plain
+    sentence = ("this reminder runs when a prompt is submitted and between tool rounds "
+                f"(at most every {box.hook.POST_TOOL_CHECK_SECONDS} s).")
+    assert sentence in plain and "runs only when a prompt is submitted" not in plain
     assert json.loads(output) == {"hookSpecificOutput": {
-        "hookEventName": "PostToolUse", "additionalContext": plain.rstrip("\n").replace(
-            prompt_sentence, tool_sentence)}}
+        "hookEventName": "PostToolUse", "additionalContext": plain.rstrip("\n")}}
     assert plain.startswith("Context is large:")
     assert [r["event"] for r in box.records()] == ["UserPromptSubmit"] * 3 + ["PostToolUse"] * 3
 

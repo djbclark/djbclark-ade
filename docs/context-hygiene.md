@@ -30,20 +30,21 @@ The hard tier (2026-10-28) fires at +140k of growth or 217k total, whichever com
 first: 50k below the ~267k wall where Claude Code auto-compacts (300,000 less its
 33k buffer), so a turn in progress can finish its edit and hand off. The total
 trigger also covers regrowth after a compaction (floor ~104k), where +140k would
-land 23k from the wall. The registered hook runs when a prompt is submitted; its
-text tells the agent how many tool rounds fit before the wall. The supported
-PostToolUse variant says it also runs between tool rounds (at most every 20 s).
+land 23k from the wall. The hook is registered under both `UserPromptSubmit` and
+`PostToolUse` (2026-10-29); its text tells the agent how many tool rounds fit before the
+wall and says it runs on prompt submit and between tool rounds (at most every 20 s).
 A compaction written mid-turn (followed by more tool rounds, so no boundary is the newest record) is
 found by searching every byte appended to the transcript since the previous prompt, as raw bytes in
 1 MB chunks (cap 64 MB, then the last 2 MB); only a `system` `compact_boundary` record counts.
 
 As of 2026-10-29, `claude/hooks/context_size_nudge.py` supports both
 `UserPromptSubmit` (plain-text stdout) and `PostToolUse` (JSON
-`hookSpecificOutput.additionalContext`). PostToolUse checks read the transcript
+`hookSpecificOutput.additionalContext`), and both are registered
+(`agents/claude/settings.json.tmpl` and live `~/.claude/settings.json`, matcher `*`,
+`hook-deadline 2`, timeout 5). PostToolUse checks read the transcript
 at most once every 20 seconds per session; a wall-clock rollback permits a fresh
 check. Unrelated or non-string event names are ignored; an omitted event name
-keeps the UserPromptSubmit default. This support does not register PostToolUse:
-the settings template and live settings remain unchanged, pending operator approval.
+keeps the UserPromptSubmit default.
 Each emitted early, ask, embedded mid-task or boundary note appends a JSON line to
 `~/.claude/state/context-nudge-log.jsonl`, including UTC timestamp, session ID,
 event, level, total tokens, growth and kind. An absolute `CONTEXT_NUDGE_LOG_PATH`

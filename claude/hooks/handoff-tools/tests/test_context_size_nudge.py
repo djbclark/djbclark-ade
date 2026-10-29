@@ -219,7 +219,8 @@ def test_hard_text_says_what_to_do_mid_task_bare(hook, tmp_path):
     assert "finish the current edit" in out
     assert f"{wall - nudge.ASK_TOTAL:,} tokens remain" in out
     assert "before the next tool round beyond" in out
-    assert "only when a prompt is submitted" in out
+    assert "when a prompt is submitted and between tool rounds" in out
+    assert "only when a prompt is submitted" not in out
     assert "at the next natural boundary" not in out
 
 
