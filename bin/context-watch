@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""context-watch: how full is each running Claude Code agent's context, against the REAL compaction ceiling.
+
+    context-watch [--json] [--min-pct N] [--source auto|paseo|recent] [--recent-minutes M]
+
+One line per agent, fullest first:
+
+    <agent id8> <title> 214k/267k (80%) wall in 53k
+
+`wall in` is the headroom left before Claude Code compacts by itself; past it the line says
+`wall passed by 5k`. An agent whose size cannot be read prints `<id8> <title> ?` (no state file, no
+transcript, unreadable transcript) and one whose newest record is a compaction (no request since)
+prints `compacted`. Read-only; exit 0 always (2 only for bad usage). Nothing is written.
+
+Why it exists: `paseo inspect` reports no context fields (getpaseo/paseo#4949, 2026-10-28), and
+Paseo's own context bar divides by a 1M window and ignores autoCompactWindow.
+
+Tokens: the newest non-sidechain assistant usage block of the session transcript
+(~/.claude/projects/*/<session>.jsonl), input + cache_read + cache_creation. The parser is
+claude/hooks/context_size_nudge.py's `_last_context_tokens` (imported from this checkout, never
+copied), so the nudge hook and this readout always agree on the size. Only the last 2 MB of a
+transcript is read (the hook's limit): an agent whose newest usage block is further back than that
+(one turn of huge tool output) prints `?` (status unreadable), though the transcript is fine.
+
+Ceiling, per agent: its compaction window minus the hook's AUTO_COMPACT_BUFFER (33k, imported).
+Window = min(configured, model window). Configured: CLAUDE_CODE_AUTO_COMPACT_WINDOW of THIS process
+(assumed to beat settings; the agent's own env is unknowable here), else `modelSettings[<model>]
+.autoCompactWindow`, else `autoCompactWindow` of ~/.claude/settings.json (300k -> 267k); `"auto"` or
+no value (or one that is not a whole number in 34k..10M) is no configuration. Model window: 1M for `[1m]` ids, 200k for Haiku (Claude Code caps the
+window at the model's), unknown for any other id. The model is the agent's provider string
+(`claude/<model>`), else the transcript's newest assistant record. Neither configured nor known:
+the guess 1M if settings `model` carries `[1m]`, else 200k. Not read: project-level settings,
+`--autocompact`, other models' windows. The nudge hook hard-codes its own 300k window
+(`AUTO_COMPACT_WINDOW`), so the two disagree if settings change it; only the buffer is shared.
+
+Agent text (titles, cwd) and ids are untrusted: text goes through fleet.py's `clean_text` (imported)
+and onto one line; ids must match the uuid pattern before they reach a path or an argv.
+
+Which agents (--source, default auto):
+  paseo   `paseo ls -g --background --json` (CONTEXT_WATCH_PASEO or `paseo` on PATH): every agent whose provider is
+          `claude...`. The listing carries no session id, so the session comes from the agent's state
+          file ~/.paseo/agents/*/<agent id>.json (PASEO_HOME honoured), `persistence.sessionId`, and
+          the transcript is the ~/.claude/projects/*/<sessionId>.jsonl of that id. An agent without a
+          state file prints `?`: the newest transcript of its cwd is never guessed, since several agents
+          share a cwd.
+  recent  every top-level ~/.claude/projects/*/*.jsonl modified in the last --recent-minutes (default
+          30); the id is the session id, the title the transcript's cwd basename. Also covers Claude
+          Code outside Paseo (herdr, Orca, a bare terminal).
+  auto    paseo; recent when `paseo ls` is missing, fails or prints no JSON (a note goes to stderr).
+          A working paseo with no Claude agents prints nothing.
+
+--min-pct N hides agents below N percent full and every `?` / `compacted` line. --json prints a list
+of records (id, short_id, title, cwd, session, transcript, source, status, tokens, ceiling, pct,
+headroom), sorted like the text; status is ok, compacted, no-session, no-transcript or unreadable.
+"""
+import argparse
+import glob
+import importlib.util
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # before the imports by path below: "nothing is written" includes __pycache__
+DEFAULT_MODEL_WINDOW = 200_000
+LONG_MODEL_WINDOW = 1_000_000
+MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unset)
+HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "context_size_nudge.py"
+FLEET = Path(__file__).resolve().parent.parent / "skills" / "session-finder" / "fleet.py"
+_loaded = {}
+
+
+def _import(name, path):
+    if name not in _loaded:
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _loaded[name] = mod
+    return _loaded[name]
+
+
+def _hook():
+    return _import("context_size_nudge", HOOK)
+
+
+def _fleet():
+    return _import("fleet", FLEET)
+
+
+def read_settings():
+    try:
+        data = json.loads((Path.home() / ".claude" / "settings.json").read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _window(value):
+    """A usable window from a setting: a whole number above the buffer and at most MAX_WINDOW (`"auto"`, strings,
+    bools, fractions, junk, absurd sizes: None). A float such as 300000.0 counts when integral."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    ok = (isinstance(value, int) and not isinstance(value, bool)
+          and _hook().AUTO_COMPACT_BUFFER < value <= MAX_WINDOW)
+    return value if ok else None
+
+
+def model_window(model):
+    """The model's own context window when the id says so: 1M for `[1m]`, 200k for Haiku; None when unknown."""
+    name = (model or "").lower()
+    if "[1m]" in name:
+        return LONG_MODEL_WINDOW
+    return DEFAULT_MODEL_WINDOW if "haiku" in name else None
+
+
+def ceiling(settings, model=None):
+    """Tokens at which Claude Code auto-compacts this agent: its window minus the hook's AUTO_COMPACT_BUFFER.
+    Window = min(the configured window, the model's window). Configured: CLAUDE_CODE_AUTO_COMPACT_WINDOW of this
+    process (assumed to beat settings), else settings `modelSettings[<model>].autoCompactWindow`, else
+    `autoCompactWindow`. With neither: the model window, else the guess 1M when settings `model` carries `[1m]`,
+    else 200k. Not knowable here, so not read: the agent's own env, project settings, `--autocompact`, the
+    `modelSettings` key format beyond an exact model id, and the window of any model but Haiku/`[1m]` ids."""
+    configured = None
+    try:
+        configured = _window(int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")))
+    except ValueError:
+        pass
+    per_model = settings.get("modelSettings")
+    per_model = per_model.get(model) if isinstance(per_model, dict) and model else None
+    if configured is None and isinstance(per_model, dict):
+        configured = _window(per_model.get("autoCompactWindow"))
+    if configured is None:
+        configured = _window(settings.get("autoCompactWindow"))
+    known = [w for w in (configured, model_window(model)) if w]
+    if known:
+        window = min(known)
+    else:
+        default_model = settings.get("model")
+        long_model = isinstance(default_model, str) and "[1m]" in default_model.lower()
+        window = LONG_MODEL_WINDOW if long_model else DEFAULT_MODEL_WINDOW
+    return window - _hook().AUTO_COMPACT_BUFFER
+
+
+def projects_dir():
+    return Path.home() / ".claude" / "projects"
+
+
+def find_transcript(session):
+    """The newest ~/.claude/projects/*/<session>.jsonl (`session` already matched the uuid pattern), or None."""
+    best, newest = None, None
+    for path in sorted(glob.glob(os.path.join(glob.escape(str(projects_dir())), "*", f"{session}.jsonl"))):
+        try:
+            mtime = os.stat(path).st_mtime  # may vanish (another session's cleanup) or dangle
+        except OSError:
+            continue
+        if newest is None or mtime > newest:
+            best, newest = path, mtime
+    return best
+
+
+def paseo_home():
+    return Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+
+
+def agent_state(agent_id):
+    """The agent's state record (dict) or {}; the first workspace directory in sorted order holding one."""
+    for path in sorted(glob.glob(os.path.join(glob.escape(str(paseo_home())), "agents", "*",
+                                              f"{glob.escape(agent_id)}.json"))):
+        try:
+            data = json.loads(Path(path).read_text())
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def session_of(state):
+    """The state record's session id, only if it is a uuid (it becomes part of a path)."""
+    for key in ("persistence", "runtimeInfo"):
+        block = state.get(key)
+        sid = block.get("sessionId") if isinstance(block, dict) else None
+        if isinstance(sid, str) and _fleet().PASEO_ID.fullmatch(sid):
+            return sid
+    return None
+
+
+def paseo_agents():
+    """(rows, None) from `paseo ls -g --background --json`, or (None, why) when it cannot be used."""
+    cli = os.environ.get("CONTEXT_WATCH_PASEO") or shutil.which(
+        "paseo", path="/opt/homebrew/bin:" + os.environ.get("PATH", os.defpath))
+    if not cli:
+        return None, "paseo not found"
+    try:
+        r = subprocess.run([cli, "ls", "-g", "--background", "--json"], capture_output=True, text=True,
+                           timeout=20, check=False, stdin=subprocess.DEVNULL)
+    except Exception as e:
+        return None, f"paseo ls failed ({e.__class__.__name__})"
+    if r.returncode != 0:
+        return None, f"paseo ls exited {r.returncode}"
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None, "paseo ls printed no JSON"
+    if not isinstance(data, list):
+        return None, "paseo ls JSON is not a list"
+    return [a for a in data if isinstance(a, dict)], None
+
+
+def read_cwd(path):
+    """`cwd` from the first lines of a transcript, or None."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return None
+    m = re.search(rb'"cwd":\s*"((?:[^"\\]|\\.)*)"', head)
+    if not m:
+        return None
+    try:
+        return json.loads(b'"' + m.group(1) + b'"')
+    except ValueError:
+        return None
+
+
+def measure(row, transcript, settings, model=None):
+    """Fill ceiling/tokens/pct/headroom/status of `row` from `transcript` (None = missing). `model` is the agent's
+    model when its provider string names one, else the model of the transcript's newest assistant record."""
+    hook = _hook()
+    row["transcript"] = transcript
+    row["tokens"] = row["pct"] = row["headroom"] = None
+    if not model and transcript:
+        model = hook._last_assistant_model(transcript)
+    limit = row["ceiling"] = ceiling(settings, model)
+    if transcript is None:
+        row["status"] = row.get("status") or "no-transcript"
+        return row
+    tokens = hook._last_context_tokens(transcript)
+    if tokens == hook.COMPACTED:
+        row["status"] = "compacted"
+    elif isinstance(tokens, int):
+        row.update(status="ok", tokens=tokens, pct=round(100 * tokens / limit, 1), headroom=limit - tokens)
+    else:
+        row["status"] = "unreadable"
+    return row
+
+
+def base_row(agent_id, title, cwd, session, source):
+    return {"id": agent_id, "short_id": agent_id[:8], "title": title, "cwd": cwd, "session": session,
+            "source": source}
+
+
+def paseo_rows(settings, agents):
+    rows = []
+    for a in agents:
+        provider = a.get("provider")
+        agent_id = a.get("id")
+        if (not isinstance(agent_id, str) or not _fleet().PASEO_ID.fullmatch(agent_id)
+                or not isinstance(provider, str) or not provider.startswith("claude")):
+            continue
+        state = agent_state(agent_id)
+        session = session_of(state)
+        title = next((t for t in (a.get("name"), state.get("title")) if isinstance(t, str) and t), "")
+        row = base_row(agent_id, title, state.get("cwd") or a.get("cwd"), session, "paseo")
+        if session is None:
+            row["status"] = "no-session"
+            transcript = None
+        else:
+            transcript = find_transcript(session)
+        rows.append(measure(row, transcript, settings, provider.partition("/")[2]))
+    return rows
+
+
+def recent_rows(settings, minutes):
+    cutoff = time.time() - minutes * 60
+    rows = []
+    for path in glob.glob(os.path.join(glob.escape(str(projects_dir())), "*", "*.jsonl")):
+        session = Path(path).stem
+        if not _fleet().PASEO_ID.fullmatch(session):
+            continue
+        try:
+            if os.stat(path).st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        cwd = read_cwd(path)
+        title = Path(cwd).name if cwd else Path(path).parent.name.rsplit("-", 1)[-1]
+        rows.append(measure(base_row(session, title, cwd, session, "recent"), path, settings))
+    return rows
+
+
+def _plain(text):
+    """Agent- or prompt-controlled text as one plain line: fleet.py's clean_text (escape sequences, control and
+    bidi characters out), then every run of whitespace, newlines included, to one space."""
+    return " ".join(_fleet().clean_text(str(text)).split())
+
+
+def _k(n):
+    try:
+        return f"{n / 1000:.0f}k"
+    except OverflowError:  # an int beyond float range: no rounding needed at that size
+        return f"{n // 1000}k"
+
+
+def _distance(n):
+    return "<1k" if n < 1000 else _k(n)
+
+
+def format_row(row):
+    head = f"{_plain(row['short_id'])} {_plain(row['title'])}".rstrip()
+    if row["status"] == "ok":
+        tokens, limit, left = row["tokens"], row["ceiling"], row["headroom"]
+        wall = f"wall in {_distance(left)}" if left >= 0 else f"wall passed by {_distance(-left)}"
+        return f"{head} {_k(tokens)}/{_k(limit)} ({round(100 * tokens / limit)}%) {wall}"
+    return f"{head} compacted" if row["status"] == "compacted" else f"{head} ?"
+
+
+def nonneg(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}")
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError(f"must be finite and not negative: {text!r}")
+    return value
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="context-watch", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--json", action="store_true", help="print a JSON list of records")
+    ap.add_argument("--min-pct", type=nonneg, default=None, metavar="N",
+                    help="hide agents below N percent full and every unknown size")
+    ap.add_argument("--source", choices=("auto", "paseo", "recent"), default="auto")
+    ap.add_argument("--recent-minutes", type=nonneg, default=30, metavar="M")
+    args = ap.parse_args(argv)
+
+    try:
+        _hook()
+        _fleet()
+    except Exception as e:
+        print(f"context-watch: cannot load {HOOK} or {FLEET}: {e}", file=sys.stderr)
+        return 0
+    settings = read_settings()
+
+    rows = None
+    if args.source in ("auto", "paseo"):
+        agents, why = paseo_agents()
+        if agents is not None:
+            rows = paseo_rows(settings, agents)
+        elif args.source == "paseo":
+            print(f"context-watch: {why}", file=sys.stderr)
+            rows = []
+        else:
+            print(f"context-watch: {why}; using transcripts modified in the last "
+                  f"{args.recent_minutes:g} min", file=sys.stderr)
+    if rows is None:
+        rows = recent_rows(settings, args.recent_minutes)
+
+    if args.min_pct is not None:  # the unrounded share: 49.96% is not "50"
+        rows = [r for r in rows if r["tokens"] is not None and 100 * r["tokens"] / r["ceiling"] >= args.min_pct]
+    rows.sort(key=lambda r: (r["pct"] is None, -(r["pct"] or 0), r["id"]))
+
+    if args.json:
+        print(json.dumps(rows, indent=1))
+    else:
+        for r in rows:
+            print(format_row(r))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
