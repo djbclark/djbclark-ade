@@ -483,6 +483,16 @@ class RelayPaseo(unittest.TestCase):
         self.assertIn("mapping not trusted", err)
         self.assertFalse(self.sends())
 
+    def test_a_pending_card_does_not_hide_an_untrusted_process_mapping(self) -> None:
+        """Codex, PR 112: the card reason came back before the directory check, so a mismatched mapping would have been queued (the
+        record keeps only the Paseo id, never the process that was mapped to it)."""
+        s = sess(pid=4242)
+        relay.where.real_cwd = lambda pid: "/somewhere/else"
+        os.environ.update(FAKE_CWD="/tmp/agent-dir", FAKE_PENDING='[{"id": "p1", "tool": "Bash"}]')
+        rc, out, err = self.main([s], SID, "ping")
+        self.assertEqual((rc, out, self.sends(), len(self.spawned)), (1, "", [], 0))
+        self.assertIn("mapping not trusted", err)
+
     def test_process_cwd_that_matches_the_agents_cwd_is_sent(self) -> None:
         s = sess(pid=4242)
         relay.where.real_cwd = lambda pid: "/tmp/agent-dir"

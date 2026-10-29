@@ -377,6 +377,8 @@ def paseo_gate(s):
     why = paseo_blocker(info)
     if why:
         s["paseo_state"] = info.get("Status") or "unknown"
+        if card_why(why) and paseo_cwd_mismatch(s, info):    # a card is deferrable, an untrusted process mapping is not (the record keeps only the Paseo id)
+            return f"its process directory differs from Paseo agent {agent}'s ({info.get('Cwd')}): mapping not trusted"
         return why
     if paseo_cwd_mismatch(s, info):
         return f"its process directory differs from Paseo agent {agent}'s ({info.get('Cwd')}): mapping not trusted"
