@@ -84,9 +84,11 @@ def zcode_draft(screen: str) -> str | None:
     rows = screen.splitlines()
     plain = lambda r: re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", r).strip()
     # Busy first: mid-turn the same block rows are styled the same way, so "unstyled row above the
-    # block" alone cannot prove idle. zcode's own busy rows are unambiguous — `Activity · N active
-    # tool` (idle-with-tasks says "N in background") and the spinner row `running X… ── [ … ]`.
-    if any(re.search(r"· \d+ active tool|running \S+\S* ?… ── \[", plain(r)) for r in rows):
+    # block" alone cannot prove idle (2026-10-28 22:54: the tail of a tool result sat unstyled right
+    # above Activity during "waiting for model…"). zcode's own busy rows are unambiguous —
+    # `Activity · N active tool` (idle-with-tasks says "N in background") and any spinner timer box
+    # `X… ── [ … ]` (running Bash…, waiting for model…, …).
+    if any(re.search(r"· \d+ active tool|… ── \[", plain(r)) for r in rows):
         return None
     anchors = [i for i, r in enumerate(rows) if plain(r).startswith("Activity")]
     if anchors:
