@@ -141,7 +141,7 @@ Paseo id, label and hop count come from the record, set at queue time from the s
 identity. A caller with NO identifiable sender (no verified Paseo id, no fleet `self` row: a launchd script) is not deferred:
 exit 1 "not sent: that session is busy and cannot take it now; deferring needs an identifiable sender (it gets a notice if
 the send fails). Retry with --idle S, or --no-defer for the plain refusal" (nobody could be told it failed). It looks at the
-target every 5 s (only the head of a target's queue looks) and, once it is idle, sends through
+target every 5 s while it is not there or cannot be asked, on a backoff ladder while it works or waits on a card (below; only the head of a target's queue looks) and, once it is idle, sends through
 this same path (every gate, lock and proof) the stored text prefixed `[queued Nm ago] ` (omitted under a minute), under
 the stored label (sanitized again; `--deliver` refuses a record whose label sender_name would not give, and a `hermes xxxx`
 label without stored hops). A target that is gone (3 looks in a row), archived, finished, or no longer the same
@@ -175,6 +175,9 @@ A target BLOCKED ON A PERMISSION OR QUESTION CARD (a Paseo agent with a pending 
 typed into the card (a send would answer or replace it), and the deliverer looks again at CAPPED EXPONENTIAL INTERVALS WITH FULL JITTER
 (card_backoff: a random wait under a ceiling of 5, 10, 20, 40, 80 s, then 120 s, never under the 5 s poll; the step starts over after a look
 that finds no card), so a card that waits for a human is not inspected every 5 s for hours and many deliverers waiting on one card spread out.
+A WORKING target is looked at on the same ladder with a lower cap (BUSY_BACKOFF_CAP, 30 s; 2026-10-29, load watcher: about nine deliverers each
+spawning `paseo agent inspect` every 5 s at load 39), so a queued text can wait up to ~30 s past the end of a long turn instead of 5 s; a target that is
+not there or could not be asked is still looked at every DEFER_POLL, since those looks count toward DEFER_MISSES / DEFER_ERRORS.
 It sends once the card is answered or gone, as for a working target; a record still blocked at its expiry (default 6 h) is `expired`
 "the target stayed blocked on a permission or question card" and the sender gets the one notice. `--no-defer`, `--plan`, `--idle S` and a
 different `--via` keep the plain card refusal, and a deliverer whose target went back to a card between its look and its send re-queues the
@@ -2265,6 +2268,8 @@ NOTICE = [False]           # set while a failure notice is sent: a busy target m
 # human, so a flat 5 s poll for hours is wasted `paseo agent inspect` calls, and many deliverers waiting on one card spread out.
 CARD_BACKOFF_BASE = DEFER_POLL    # the first ceiling; it doubles with every look that still finds the card
 CARD_BACKOFF_CAP = 120            # seconds: the longest wait between two looks (a card is answered in minutes, never hours)
+BUSY_BACKOFF_CAP = 30             # a working target (2026-10-29, load watcher: ~9 deliverers each spawning `paseo agent inspect` every 5 s at load 39): the same ladder, capped
+                                  # lower, because a turn can end at any moment and a queued text waits for it
 CARD_WHY = ("blocked on a permission or question", "blocked on a question or permission prompt")    # the wording of every card refusal
 
 
@@ -2273,11 +2278,11 @@ def card_why(why):
     return isinstance(why, str) and why.startswith(CARD_WHY)
 
 
-def card_backoff(n, rng=None):
-    """Seconds a deliverer sleeps after its N-th (0-based) consecutive look that found the target still blocked on a card: full
-    jitter under a ceiling that doubles from CARD_BACKOFF_BASE up to CARD_BACKOFF_CAP, never below DEFER_POLL. RNG is resolved at
-    call time (random.uniform), so a test that patches it is honoured."""
-    ceiling = min(CARD_BACKOFF_CAP, CARD_BACKOFF_BASE * 2 ** min(max(n, 0), 16))
+def card_backoff(n, rng=None, cap=None):
+    """Seconds a deliverer sleeps after its N-th (0-based) consecutive look that found the target still blocked on a card (or, with CAP, still
+    working): full jitter under a ceiling that doubles from CARD_BACKOFF_BASE up to CAP (default CARD_BACKOFF_CAP), never below DEFER_POLL.
+    RNG is resolved at call time (random.uniform), so a test that patches it is honoured."""
+    ceiling = min(cap or CARD_BACKOFF_CAP, CARD_BACKOFF_BASE * 2 ** min(max(n, 0), 16))
     return max(DEFER_POLL, min(ceiling, (rng or random.uniform)(0, ceiling)))
 
 
@@ -2674,6 +2679,7 @@ def deliver(rid):
         misses, errors, last = 0, 0, "the target stayed busy"
         looked = None    # the last look key filed on the record (note_look)
         card_n = 0    # consecutive looks that found the target blocked on a card (the backoff step)
+        busy_n = 0    # consecutive looks that found it working (its own, shorter backoff)
         while True:
             rec = rec_read(rid)
             if rec is None or rec.get("state") != "queued":
@@ -2707,7 +2713,11 @@ def deliver(rid):
             card_n = 0
             if poll[0] != "idle":
                 last = poll[1] if poll[0] in ("miss", "error") else (look or {}).get("why") or "the target stayed busy"
-                time.sleep(DEFER_POLL)
+                if poll[0] == "busy":
+                    time.sleep(min(card_backoff(busy_n, cap=BUSY_BACKOFF_CAP), max(1.0, float(rec.get("expires") or 0) - time.time())))
+                    busy_n += 1
+                else:
+                    time.sleep(DEFER_POLL)    # not there / could not ask: counted look by look against DEFER_MISSES / DEFER_ERRORS, so never stretched
                 continue
             if transition(rid, ("queued",), state="sending", sending_since=time.time()) is None:
                 return 0    # cancelled while we looked
@@ -2727,6 +2737,7 @@ def deliver(rid):
                     unverified_late(rid, rec, rc, line)
                     return 0
                 last = "the target stayed busy"
+                busy_n = 0    # a fresh busy or card state between look and send: the short steps again
                 time.sleep(DEFER_POLL)
                 continue
             if rc == 0:
