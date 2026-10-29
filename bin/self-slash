@@ -50,7 +50,9 @@
 # handoff must be able to continue on another model without anyone typing): instead of a bare
 # archive, the waiter (1) waits for this agent to be idle, (2) reads its name, mode and cwd
 # (`paseo agent inspect`) and its workspace id (`paseo workspace ls --json`, matched by cwd;
-# SELF_SLASH_WORKSPACE overrides, needed when several workspaces share the cwd), (3) starts
+# SELF_SLASH_WORKSPACE overrides; when several workspaces share the cwd, the workspaceId in this
+# agent's own Paseo state file places the successor if it is one of them, else the single foreground
+# one does, else it is refused), (3) starts
 # the successor with `paseo run "/baton" --provider P/M --thinking T --mode MODE --workspace W
 # --cwd C --title T --no-wait` (defaults: this agent's mode, --thinking high, title
 # "<old name> → <model>"), (4) polls it (SELF_SLASH_SUCCESSOR_SETTLE seconds, default 20) and needs
@@ -540,7 +542,7 @@ if [ "$dry" = 1 ]; then
     echo "self-slash: dry run, would wait ${delay}s, then (every call with PASEO_AGENT_ID and PASEO_AGENT_CWD unset):"
     echo "  $paseo_cli wait $pane --timeout ${SELF_SLASH_WAIT:-900} --json"
     echo "  $paseo_cli agent inspect $pane --json            (name, mode, cwd)"
-    echo "  $paseo_cli workspace ls --background --json      (this agent's workspace: exactly one row with cwd ${PASEO_AGENT_CWD:-<agent cwd>}, or, when several share it, the workspaceId in this agent's ~/.paseo/agents/*/$pane.json places the successor${SELF_SLASH_WORKSPACE:+; SELF_SLASH_WORKSPACE=$SELF_SLASH_WORKSPACE only places the successor}${s_workspace:+; --workspace $s_workspace: its own row gives the successor cwd})"
+    echo "  $paseo_cli workspace ls --background --json      (this agent's workspace: exactly one row with cwd ${PASEO_AGENT_CWD:-<agent cwd>}, or, when several share it, the workspaceId in this agent's ${PASEO_HOME:-$HOME/.paseo}/agents/*/$pane.json places the successor${SELF_SLASH_WORKSPACE:+; SELF_SLASH_WORKSPACE=$SELF_SLASH_WORKSPACE only places the successor}${s_workspace:+; --workspace $s_workspace: its own row gives the successor cwd})"
     if [ -n "$s_workspace" ]; then dry_cwd="<cwd of that workspace>"; else dry_cwd="${PASEO_AGENT_CWD:-<agent cwd>}"; fi
     if [ -n "$s_mode" ]; then dry_mode=" --mode $s_mode"; else dry_mode=" --mode <agent mode if the same provider; claude: bypassPermissions; else none>"; fi
     echo "  $paseo_cli run \"/baton${s_baton:+ $s_baton}\" --provider $successor --thinking $s_thinking$dry_mode --workspace ${s_workspace:-<id>} --cwd $dry_cwd --title \"$dry_title\" --no-wait --json   (never --new-workspace)"
@@ -1044,11 +1046,11 @@ for f in glob.glob(os.path.join(glob.escape(home), "agents", "*", agent + ".json
 if len(ids) == 1:
     print(ids.pop())' "$1" 2>/dev/null
 }
-# workspace_plan AGENT-CWD: from `paseo workspace ls --background --json` on stdin print one JSON
+# workspace_plan AGENT-CWD OVERRIDE TARGET OWN-WS: from `paseo workspace ls --background --json` on stdin print one JSON
 # object: ws (where the successor goes), cwd (its --cwd: the target workspace's own row when
 # --workspace names one, else "" = this agent's), old_ws (this agent's workspace), proven (1 only
 # for exactly one realpath-cwd match, or an override whose row has this agent's cwd), old_iso,
-# old_cwd, note, err.  An id from the override, the agent's own state file (5th argument) or the
+# old_cwd, note, err.  An id from the override, the agent's own state file (4th argument) or the
 # prefer-foreground tie-break may PLACE the successor but is never an archive target (M1); the cwd of a --workspace target never falls
 # back to this agent's (H1).
 workspace_plan() {
@@ -1096,7 +1098,7 @@ else:
         fg = [r for r in hit if not r.get("background")]
         if own and any(r["workspaceId"] == own for r in hit):
             old = own
-            out["note"] = "several workspaces share this cwd; " + old + " is the workspaceId in this agent state file, so the successor goes there, and it is never archived"
+            out["note"] = "several workspaces share this cwd; " + old + " is the workspaceId in this agent state file, so the successor goes there unless --workspace names another, and it is never archived"
         elif len(fg) == 1:
             old = fg[0]["workspaceId"]
             out["note"] = "several workspaces share this cwd; " + old + " was picked by preference and is never archived"
