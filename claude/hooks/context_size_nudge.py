@@ -46,8 +46,11 @@ History:
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
 Tiers count GROWTH since the floor: the first usage block of the session, or of
-the conversation after its latest compaction (a compact_boundary record, or a
-drop below SHRINK_RATIO of the last size seen). Baselines differ a lot (2026-10-28,
+the conversation after its latest compaction (a compact_boundary record as the newest
+record, a non-sidechain boundary appended since the previous prompt (the transcript's byte
+size is stored per session: an auto-compaction mid-turn is followed by more tool rounds, so
+the boundary is no longer the newest record), or a drop below SHRINK_RATIO of the highest
+size seen since the last reset). Baselines differ a lot (2026-10-28,
 267 sessions: median 71k, range 0-164k; a compacted one ~104k).
 An absolute backstop asks at ASK_TOTAL, 50k+ under the auto-compaction wall.
 
@@ -186,6 +189,46 @@ def _last_context_tokens(transcript_path):
     except Exception:
         return None
     return None
+
+
+def _file_size(transcript_path):
+    try:
+        return Path(transcript_path).stat().st_size
+    except Exception:
+        return None
+
+
+def _compaction_floor_since(transcript_path, since, size):
+    """A compaction between two prompts, from the bytes appended since the last one.
+
+    `since`/`size`: the transcript's byte size at the previous prompt and now. None when no
+    non-sidechain compact_boundary was appended (or either size is unusable); else the first
+    usage after the NEWEST such boundary (the new floor), or COMPACTED when none follows.
+    Reads at most the largest tail window, like _last_context_tokens."""
+    if (not isinstance(since, int) or isinstance(since, bool) or since < 0
+            or not isinstance(size, int) or size <= since):
+        return None
+    start = max(since, size - _TAIL_WINDOWS[-1])
+    try:
+        with Path(transcript_path).open("rb") as f:
+            f.seek(start)
+            data = f.read(size - start)
+    except Exception:
+        return None
+    lines = data.split(b"\n")
+    if start > since:
+        lines = lines[1:]  # the window may begin mid-record
+    newest = None
+    for index, line in enumerate(lines):
+        if _BOUNDARY.search(line) and not _SIDECHAIN.search(line):
+            newest = index
+    if newest is None:
+        return None
+    for line in lines[newest + 1:]:
+        value = _usage_from_line(line)
+        if value is not None:
+            return value
+    return COMPACTED
 
 
 def _last_assistant_model(transcript_path):
@@ -395,10 +438,11 @@ def _boundary_message(total, successor=None):
     )
 
 
-def _midtask_note(total):
+def _midtask_note(total, in_context):
     """What to do when the hard tier lands mid-turn. The hook runs only at prompt submit, so a
     long turn gets no second reminder: say how many tool rounds fit before the wall (2026-10-28:
-    "at the next natural boundary" was never reached in the 14-20k tokens that were left)."""
+    "at the next natural boundary" was never reached in the 14-20k tokens that were left).
+    `in_context` names the caller's way to continue in-context: each message branch has its own."""
     left = max(0, AUTO_COMPACT_WALL - total)
     rounds = (left - HANDOFF_RESERVE) // TOOL_ROUND_TOKENS
     lead = (
@@ -406,7 +450,7 @@ def _midtask_note(total):
         f"{AUTO_COMPACT_WALL:,}; this reminder runs only when a prompt is submitted, "
         "not between tool rounds. If this turn is mid-task: finish the current edit "
         "(never leave one half-written), then run the handoff (or, if the work must "
-        "continue in-context, the /compact path above) "
+        f"continue in-context, {in_context}) "
     )
     if rounds > 0:
         return lead + (
@@ -439,9 +483,13 @@ def _ask_message(total, growth, repeat, successor=None):
             "refuses (a draft on the input line) ask the operator for /new or "
             "/compact."
             + _paseo_finish_note() + _successor_note(successor) + " "
-            + _midtask_note(total) + " "
+            + _midtask_note(total, "the /compact path above") + " "
             + _COST_NOTE
         )
+    # Bare branch (no herdr, Orca or Paseo host; every ACP slice lands here too, since acp-run
+    # scrubs PASEO_AGENT_ID): it has no self-slash path, and says nothing of a handoff being
+    # document-only for a dispatched slice (known limit, round 2 F5: the hook cannot tell a
+    # slice from the top-level session; the handoff skill itself states the rule).
     return (
         f"{lead}: {total:,} tokens (+{growth:,} since the session started or "
         "last compacted). Do not ask: Claude Code compacts this session by "
@@ -454,7 +502,7 @@ def _ask_message(total, growth, repeat, successor=None):
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total) + " "
+        + _midtask_note(total, "keep going and let the auto-compaction take it") + " "
         + _COST_NOTE
     )
 
@@ -510,6 +558,8 @@ def main():
     if not transcript_path:
         return
 
+    # Size first, then the usage: a record appended in between is scanned again next time.
+    size = _file_size(transcript_path)
     total = _last_context_tokens(transcript_path)
     if total is None:
         return
@@ -518,19 +568,32 @@ def main():
     session_state = state.get(session_id)
     if not isinstance(session_state, dict):
         session_state = {}
+    prev_size = session_state.get("size")
+    session_state["size"] = size
 
     if total == COMPACTED:
         # Compacted, no request since: the next measured size is the new floor.
-        session_state.update(baseline=None, level=0, paged=False, last=None)
+        session_state.update(baseline=None, level=0, paged=False, last=None, peak=None)
         state[session_id] = session_state
         _save_state(state)
         return
 
     baseline = session_state.get("baseline")
-    last = session_state.get("last")
-    if isinstance(last, int) and total < last * SHRINK_RATIO:
+    # The highest size seen since the last reset: a run of small dips (each < 25% of the
+    # previous prompt) that sums to a real shrink must still read as one.
+    seen = [v for v in (session_state.get("last"), session_state.get("peak")) if isinstance(v, int)]
+    peak = max(seen) if seen else None
+    floor = _compaction_floor_since(transcript_path, prev_size, size)
+    if floor is not None:
+        # An auto-compaction mid-turn: more tool rounds followed it, so no boundary is the
+        # newest record now and the regrowth may hide it from the shrink test (round 2, F1).
+        baseline = floor if floor != COMPACTED else total
+        session_state.update(level=0, paged=False)
+        peak = None
+    elif peak is not None and total < peak * SHRINK_RATIO:
         baseline = total  # compacted between two prompts: new floor
         session_state["level"] = 0
+        peak = None
     if not isinstance(baseline, int):
         if "level" in session_state:
             baseline = total  # first size after a compaction
@@ -538,12 +601,16 @@ def main():
             baseline = _first_context_tokens(transcript_path) or total
     session_state["baseline"] = baseline
     session_state["last"] = total
+    session_state["peak"] = max(total, peak or 0)
     growth = max(0, total - baseline)
 
     level = _level(total, growth)
     fired = session_state.get("level", 0)
     if not isinstance(fired, int):
         fired = 0
+    # Old or corrupt state (a level this total cannot compute) must not stick (round 2, F4):
+    # growth never exceeds the total, so _level(total, total) is the highest it can reach.
+    fired = min(fired, _level(total, total))
 
     if level > fired:
         if level == 1:

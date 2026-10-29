@@ -157,7 +157,9 @@ Invariants, in force for the whole run:
    auto-compaction wall. In auto mode the second one is the handoff point (the hook's hard
    text: handoff + /new at a finished task, finish the current edit and hand off within its
    stated tool rounds when mid-task) and the compact point only when the work must continue
-   in-context; never earlier (2026-10-10: each compaction costs ~150k+
+   in-context. While any worker is live the run must continue in-context: compact, and hand
+   off only between waves with no worker running (a handoff + `/new` starts a new session id,
+   and live workers' messages go to the old one). Never compact earlier (2026-10-10: each compaction costs ~150k+
    token-equivalents, and compacting at +70k looped every ~25 min). Before compacting: finish the
    STATE.md edit, then `~/src/djbclark-ade/bin/self-slash --delay 10 "/compact
    <focus: read STATE.md first>"`, and **end the turn at once**. Nothing else

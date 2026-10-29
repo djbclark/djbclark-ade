@@ -19,6 +19,10 @@ sys.path.insert(0, str(HOOKS_DIR))
 import context_size_nudge as nudge  # noqa: E402
 
 
+ALT = "the in-context alternative"
+_BOUNDARY_LINE = json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n"
+
+
 def _usage(tokens, **extra):
     record = {"message": {"usage": {
         "input_tokens": 0,
@@ -233,26 +237,44 @@ def test_midtask_note_counts_rounds_from_what_is_left():
     wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
     assert wall == 267_000 and nudge.ASK_TOTAL == 217_000
     # Literal numbers: 217k leaves 50k; (50k - 15k reserve) // 8k per round = 4.
-    at_tier = nudge._midtask_note(217_000)
+    at_tier = nudge._midtask_note(217_000, ALT)
     assert "About 50,000 tokens remain" in at_tier and "beyond 4 more" in at_tier
     # 244k leaves 23k; (23k - 15k) // 8k = 1, the last total with a round to spare.
-    last = nudge._midtask_note(244_000)
+    last = nudge._midtask_note(244_000, ALT)
     assert "About 23,000 tokens remain" in last and "beyond 1 more" in last
-    assert "right after" in nudge._midtask_note(244_001)
+    assert "right after" in nudge._midtask_note(244_001, ALT)
     # Near or past the wall: no rounds left, hand off straight after the edit.
     for total in (wall - nudge.HANDOFF_RESERVE, wall, wall + 5_000):
-        note = nudge._midtask_note(total)
+        note = nudge._midtask_note(total, ALT)
         assert "finish the current edit" in note and "right after" in note
         assert "beyond" not in note
-    assert "About 0 tokens remain" in nudge._midtask_note(wall + 5_000)  # clamped, never negative
+    assert "About 0 tokens remain" in nudge._midtask_note(wall + 5_000, ALT)  # clamped, never negative
 
 
 def test_midtask_note_keeps_the_in_context_path_open():
-    """The same message allows /compact when the work must continue in-context; the note must
-    not say "hand off" unconditionally (adversary F2, PR 108)."""
+    """The same message allows an in-context alternative when the work must continue; the note
+    must not say "hand off" unconditionally (adversary F2, PR 108) and names the caller's path."""
     for total in (nudge.ASK_TOTAL, nudge.AUTO_COMPACT_WALL):
-        note = nudge._midtask_note(total)
-        assert "work must continue in-context" in note and "/compact path above" in note
+        note = nudge._midtask_note(total, "the /compact path above")
+        assert "work must continue in-context" in note and "the /compact path above" in note
+        assert "let the auto-compaction" not in note
+
+
+def test_bare_branch_does_not_point_at_a_compact_path_it_lacks(hook, tmp_path):
+    """The bare message (no herdr/Orca/Paseo, also every ACP slice) has no /compact path:
+    the mid-task note must say to let the auto-compaction take it (adversary round 2, F2)."""
+    out, _ = hook("s-bare-alt", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
+    assert "/compact path above" not in out
+    assert "keep going and let the auto-compaction take it" in out
+
+
+def test_self_slash_branch_points_at_its_own_compact_path(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
+    out, _ = hook("s-slash-alt", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
+    assert "the /compact path above" in out
+    assert "let the auto-compaction take it" not in out
+    assert out.index('self-slash "/compact <focus>"') < out.index("the /compact path above")
 
 
 def test_a_small_dip_does_not_reprint_the_hard_tier(hook, tmp_path):
@@ -268,6 +290,119 @@ def test_a_small_dip_does_not_reprint_the_hard_tier(hook, tmp_path):
     assert [_is_ask(o) for o in outs] == [False] * 4
     assert hook.state()["s-hover"]["level"] == 2
 
+
+
+def test_mid_turn_compaction_between_prompts_rearms_the_hard_tier(hook, tmp_path):
+    """Adversary round 2, F1: an auto-compaction mid-turn is followed by more tool rounds, so at
+    the next prompt the newest record is a usage record and the regrowth (104k -> 180k) stays
+    above 0.75 x the last prompt's size. The hook must still learn of the boundary."""
+    path = _transcript(tmp_path, 71_000, 230_000)
+    out, _ = hook("s-mid", path)
+    assert _is_ask(out)
+    _append(path, _BOUNDARY_LINE + _usage(104_000))  # compacted mid-turn, no prompt in between
+    _append(path, _usage(180_000))
+    out, _ = hook("s-mid", path)
+    assert not _is_ask(out)
+    state = hook.state()["s-mid"]
+    assert state["baseline"] == 104_000 and state["level"] == 1  # floor = first usage after it
+    _append(path, _usage(220_000))
+    out, _ = hook("s-mid", path)
+    assert _is_ask(out)
+    assert hook.state()["s-mid"]["level"] == 2
+
+
+def test_mid_turn_compaction_after_a_growth_tier_fire(hook, tmp_path):
+    """The adversary's fourth probe row: fired at 217k, compaction, 104k, then 170k, 200k, 230k."""
+    path = _transcript(tmp_path, 71_000, 217_000)
+    assert _is_ask(hook("s-mid2", path)[0])
+    _append(path, _BOUNDARY_LINE + _usage(104_000))
+    outs = []
+    for size in (170_000, 200_000, 230_000):
+        _append(path, _usage(size))
+        outs.append(_is_ask(hook("s-mid2", path)[0]))
+    assert outs == [False, False, True]
+
+
+def test_two_compactions_between_prompts_use_the_floor_after_the_last(hook, tmp_path):
+    path = _transcript(tmp_path, 71_000, 230_000)
+    hook("s-mid3", path)
+    _append(path, _BOUNDARY_LINE + _usage(104_000) + _usage(250_000)
+            + _BOUNDARY_LINE + _usage(96_000) + _usage(190_000))
+    hook("s-mid3", path)
+    assert hook.state()["s-mid3"]["baseline"] == 96_000
+
+
+def test_a_sidechain_boundary_is_not_a_compaction(hook, tmp_path):
+    """A sub-agent's compaction (isSidechain) must not reset the main session's tier."""
+    path = _transcript(tmp_path, 71_000, 230_000)
+    assert _is_ask(hook("s-side", path)[0])
+    _append(path, json.dumps({"type": "system", "subtype": "compact_boundary", "isSidechain": True})
+            + "\n" + _usage(104_000, isSidechain=True))
+    _append(path, _usage(228_000))
+    out, _ = hook("s-side", path)
+    assert not _is_ask(out)
+    state = hook.state()["s-side"]
+    assert state["level"] == 2 and state["baseline"] == 71_000
+
+
+def test_a_boundary_before_the_previous_prompt_is_not_found_again(hook, tmp_path):
+    """Only the bytes appended since the previous prompt are scanned: an old boundary earlier in
+    the transcript must not reset the tier at every later prompt."""
+    path = _transcript(tmp_path, 71_000)
+    _append(path, _BOUNDARY_LINE + _usage(104_000) + _usage(230_000))
+    assert _is_ask(hook("s-old-boundary", path)[0])
+    state = hook.state()["s-old-boundary"]
+    _append(path, _usage(228_000))
+    out, _ = hook("s-old-boundary", path)
+    assert out == ""
+    after = hook.state()["s-old-boundary"]
+    assert after["level"] == 2 and after["baseline"] == state["baseline"]
+
+
+def test_state_without_a_stored_size_scans_nothing_and_keeps_working(hook, tmp_path):
+    """State written before the size field existed: no boundary scan, no crash, later prompts store it."""
+    path = _transcript(tmp_path, 71_000, 230_000)
+    hook("s-oldstate", path)
+    state = hook.state()
+    state["s-oldstate"].pop("size")
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    _append(path, _BOUNDARY_LINE + _usage(104_000) + _usage(230_000))
+    out, _ = hook("s-oldstate", path)
+    assert not _is_ask(out)  # level already 2, nothing to scan against
+    assert hook.state()["s-oldstate"]["size"] == path.stat().st_size
+
+
+def test_gradual_rewinds_that_sum_to_a_real_shrink_rearm(hook, tmp_path):
+    """Several dips, each under 25% of the previous prompt, but together far below the peak
+    (adversary round 2, F1 lesser variant): the level must reset and the tiers fire on regrowth."""
+    path = _transcript(tmp_path, 71_000, 220_000)
+    assert _is_ask(hook("s-rewind", path)[0])
+    for size in (170_000, 130_000, 100_000, 76_000):
+        _append(path, _usage(size))
+        out, _ = hook("s-rewind", path)
+        assert not _is_ask(out)
+    assert hook.state()["s-rewind"]["level"] == 0
+    _append(path, _usage(150_000))
+    out, _ = hook("s-rewind", path)
+    assert "Context check" in out  # EARLY again
+    _append(path, _usage(218_000))
+    out, _ = hook("s-rewind", path)
+    assert _is_ask(out)
+
+
+@pytest.mark.parametrize("stored", [5, 9])
+def test_a_stored_level_above_what_the_total_can_compute_is_clamped(hook, tmp_path, stored):
+    """Old or corrupt state (adversary round 2, F4): level 5 at a 218k total (highest tier that
+    total can compute is 2) must not stick for the rest of the session."""
+    path = _transcript(tmp_path, 71_000, 218_000)
+    hook("s-clamp", path)
+    state = hook.state()
+    state["s-clamp"]["level"] = stored
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    _append(path, _usage(219_000))
+    out, _ = hook("s-clamp", path)
+    assert not _is_ask(out)
+    assert hook.state()["s-clamp"]["level"] == 2
 
 
 def _host(monkeypatch, var):
