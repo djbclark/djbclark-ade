@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """context_size_nudge.py — early, escalating context-size prompts.
 
-Registered under UserPromptSubmit. Reads Claude Code hook JSON on stdin, finds
-the session's current context size in its transcript, and when it crosses a
-tier that hasn't fired yet, prints a note (Claude Code surfaces
-UserPromptSubmit stdout to the model as a system-reminder) telling the agent
-what to do and what to recommend to the operator.
+Registered under UserPromptSubmit; also supports PostToolUse, which is not
+registered. Reads Claude Code hook JSON on stdin and checks the transcript's
+context size for a new tier. Prompt-submit notes use plain stdout; tool-event
+notes use JSON additionalContext and check at most every 20 s per session.
+Each note tells the agent what to do and what to recommend to the operator.
 
 History:
 - 2026-10-28: persisted each emitted nudge in a rotating JSONL log, independent
@@ -80,13 +80,22 @@ import re
 import shutil
 import signal
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX hosts still emit best-effort nudges
+    fcntl = None
 
 STATE_PATH = Path.home() / ".claude" / "state" / "context-nudges.json"
 LOG_PATH = Path(os.environ.get("CONTEXT_NUDGE_LOG_PATH") or
                 Path.home() / ".claude" / "state" / "context-nudge-log.jsonl")
+if not LOG_PATH.is_absolute():
+    LOG_PATH = Path.home() / ".claude" / "state" / "context-nudge-log.jsonl"
 LOG_MAX_BYTES = 2 * 1024 * 1024
 POST_TOOL_CHECK_SECONDS = 20
 # Written by the quota guard (another slice, 2026-10-23); may not exist.  Only `level` is read.
@@ -203,6 +212,7 @@ def _last_context_tokens(transcript_path):
         with Path(transcript_path).open("rb") as f:
             size = os.fstat(f.fileno()).st_size
             tried = 0
+            skipped = 0
             rejected = 0
             for window in _TAIL_WINDOWS:
                 chunk_size = min(size, window)
@@ -210,9 +220,11 @@ def _last_context_tokens(transcript_path):
                     break
                 f.seek(size - chunk_size)
                 data = f.read(chunk_size)
-                tried = chunk_size
                 first = data.find(b"\n") + 1 if chunk_size < size else 0
-                end = len(data)
+                # Only scan older complete lines. Include the partial line the
+                # previous window skipped, but never reject its full lines twice.
+                end = chunk_size - tried + skipped
+                tried, skipped = chunk_size, first
                 while end > first:
                     pos = max(data.rfind(b"cache_read_input_tokens", first, end),
                               data.rfind(b'"compact_boundary"', first, end))
@@ -551,17 +563,20 @@ def _boundary_message(total, successor=None):
     )
 
 
-def _midtask_note(total, in_context):
-    """What to do when the hard tier lands mid-turn. The hook runs only at prompt submit, so a
-    long turn gets no second reminder: say how many tool rounds fit before the wall (2026-10-28:
+def _midtask_note(total, in_context, event="UserPromptSubmit"):
+    """Say how many tool rounds fit before the wall, with the delivery event's cadence.
+    PostToolUse can remind between tool rounds; prompt-submit text stays unchanged (2026-10-28:
     "at the next natural boundary" was never reached in the 14-20k tokens that were left).
     `in_context` names the caller's way to continue in-context: each message branch has its own."""
     left = max(0, AUTO_COMPACT_WALL - total)
     rounds = (left - HANDOFF_RESERVE) // TOOL_ROUND_TOKENS
+    cadence = ("this reminder also runs between tool rounds (at most every 20 s). "
+               if event == "PostToolUse" else
+               "this reminder runs only when a prompt is submitted, not between tool rounds. ")
     lead = (
         f"About {left:,} tokens remain before Claude Code compacts this session at "
-        f"{AUTO_COMPACT_WALL:,}; this reminder runs only when a prompt is submitted, "
-        "not between tool rounds. If this turn is mid-task: finish the current edit "
+        f"{AUTO_COMPACT_WALL:,}; " + cadence
+        + "If this turn is mid-task: finish the current edit "
         "(never leave one half-written), then run the handoff "
     )
     alternative = f" (or, if the work must continue in-context, {in_context})."
@@ -574,7 +589,7 @@ def _midtask_note(total, in_context):
     return lead + "right after it, with no further tool rounds" + alternative
 
 
-def _ask_message(total, growth, repeat, successor=None):
+def _ask_message(total, growth, repeat, successor=None, event="UserPromptSubmit"):
     lead = "Context is still growing" if repeat else "Context is large"
     if _can_self_slash():
         # A herdr pane, Orca terminal or Paseo agent can queue its own /new or /compact
@@ -596,7 +611,7 @@ def _ask_message(total, growth, repeat, successor=None):
             "refuses (a draft on the input line) ask the operator for /new or "
             "/compact."
             + _paseo_finish_note() + _successor_note(successor) + " "
-            + _midtask_note(total, "the /compact path above") + " "
+            + _midtask_note(total, "the /compact path above", event) + " "
             + _COST_NOTE
         )
     # Bare branch (no herdr, Orca or Paseo host; every ACP slice lands here too, since acp-run
@@ -615,7 +630,7 @@ def _ask_message(total, growth, repeat, successor=None):
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total, "let the auto-compaction take it") + " "
+        + _midtask_note(total, "let the auto-compaction take it", event) + " "
         + _COST_NOTE
     )
 
@@ -632,13 +647,55 @@ def _load_state():
 
 
 def _save_state(state):
+    tmp = None
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state))
-        tmp.replace(STATE_PATH)
+        fd, name = tempfile.mkstemp(prefix=STATE_PATH.name + ".", suffix=".tmp", dir=STATE_PATH.parent)
+        tmp = Path(name)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(state))
+        os.replace(tmp, STATE_PATH)
     except Exception:
         pass
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+@contextmanager
+def _state_lock():
+    """Serialize the whole read/modify/write; fail open after at most 200 ms.
+
+    Lock a stable sibling inode, since saving replaces the state inode. The
+    hook's two-second alarm also covers acquisition and the protected work.
+    Without fcntl, or on contention/errors, atomic saves still prevent corruption
+    but a concurrent update may be lost.
+    """
+    fd = None
+    try:
+        if fcntl is not None:
+            STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(STATE_PATH.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            deadline = time.monotonic() + 0.2
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.01, remaining))
+    except (OSError, AttributeError):
+        pass
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)  # also releases an acquired flock
 
 
 def _send_ping(message, cwd):
@@ -676,7 +733,7 @@ def _log_nudge(session_id, event, level, total, growth, kind):
                 os.replace(LOG_PATH, Path(str(LOG_PATH) + ".1"))
         except FileNotFoundError:
             pass
-        fd = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             os.write(fd, line)
         finally:
@@ -695,13 +752,18 @@ def main():
         return
 
     session_id = data.get("session_id") or "unknown"
-    event = data.get("hook_event_name") or "UserPromptSubmit"
+    event = data.get("hook_event_name", "UserPromptSubmit")
     if event not in ("UserPromptSubmit", "PostToolUse"):
         return
     transcript_path = data.get("transcript_path") or ""
     if not transcript_path:
         return
 
+    with _state_lock():
+        _check_state(data, event, session_id, transcript_path)
+
+
+def _check_state(data, event, session_id, transcript_path):
     state = _load_state()
     if not isinstance(state, dict):
         state = {}
@@ -779,7 +841,7 @@ def main():
             messages.append((_early_message(total, growth), "early"))
         else:
             messages.append((_ask_message(total, growth, repeat=fired >= 2,
-                                         successor=_session_successor(transcript_path)), "ask"))
+                                         successor=_session_successor(transcript_path), event=event), "ask"))
     # Never lower the stored level on a dip: a compaction or a real shrink already reset it
     # above, and a smaller dip must not let the next climb past the tier reprint the message.
     session_state["level"] = max(level, fired)

@@ -1,10 +1,13 @@
 """Persistent context-nudge telemetry and prompt/tool event contracts."""
+import builtins
 import importlib.util
 import io
 import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -125,11 +128,17 @@ def test_append_is_one_os_write_with_append_flag(box, monkeypatch):
     assert flags and flags[0] & os.O_APPEND
 
 
-def test_posttooluse_json_matches_plain_prompt_messages(box):
+@pytest.mark.parametrize("self_slash", [False, True])
+def test_posttooluse_json_matches_plain_prompt_messages(box, monkeypatch, self_slash):
+    monkeypatch.setattr(box.hook, "_can_self_slash", lambda: self_slash)
     plain = box(300_000, sid="prompt")
     output = box(300_000, event="PostToolUse", sid="tool")
+    prompt_sentence = "this reminder runs only when a prompt is submitted, not between tool rounds."
+    tool_sentence = "this reminder also runs between tool rounds (at most every 20 s)."
+    assert prompt_sentence in plain
     assert json.loads(output) == {"hookSpecificOutput": {
-        "hookEventName": "PostToolUse", "additionalContext": plain.rstrip("\n")}}
+        "hookEventName": "PostToolUse", "additionalContext": plain.rstrip("\n").replace(
+            prompt_sentence, tool_sentence)}}
     assert plain.startswith("Context is large:")
     assert [r["event"] for r in box.records()] == ["UserPromptSubmit"] * 3 + ["PostToolUse"] * 3
 
@@ -243,3 +252,231 @@ def test_posttooluse_tail_cost_bound(box, tmp_path, monkeypatch, capsys, noise, 
     else:
         assert len(validations) == box.hook._TAIL_REJECT_LIMIT
     assert json.loads(box.hook.STATE_PATH.read_text())["noisy"]["last_check"] == box.clock[0]
+
+
+@pytest.mark.parametrize("count", [32, 40])
+def test_widened_tail_does_not_recount_first_window(box, tmp_path, monkeypatch, count):
+    # P1: the newest main usage is just outside 128 KiB, with <64 false hits.
+    transcript = tmp_path / "widened.jsonl"
+    noise = json.dumps({"isSidechain": True, "message": {"usage": {
+        "cache_read_input_tokens": 1}}}) + "\n"
+    padding = json.dumps({"type": "tool_result", "padding": "x" * 132_000}) + "\n"
+    transcript.write_text(json.dumps({"message": {"usage": {
+        "cache_read_input_tokens": 123_000}}}) + "\n" + padding + noise * count)
+    calls = []
+    real_usage = box.hook._usage_from_line
+    monkeypatch.setattr(box.hook, "_usage_from_line", lambda line: calls.append(line) or real_usage(line))
+    assert box.hook._last_context_tokens(transcript) == 123_000
+    assert len(calls) == count + 1 <= 64
+
+
+@pytest.mark.parametrize("event", ["Stop", "PreToolUse", None, 7, False, [], {}])
+def test_unrelated_and_nonstring_events_stay_silent(box, event):
+    assert box(400_000, event=event) == ""
+    assert not box.hook.STATE_PATH.exists()
+    assert not box.hook.LOG_PATH.exists()
+
+
+def test_new_log_is_private(box):
+    previous = os.umask(0)
+    try:
+        box()
+    finally:
+        os.umask(previous)
+    assert box.hook.LOG_PATH.stat().st_mode & 0o777 == 0o600
+
+
+def test_missing_usage_does_not_advance_size(box, monkeypatch):
+    box(60_000)
+    before = json.loads(box.hook.STATE_PATH.read_text())["session-1"]
+    observed = []
+    real_load = box.hook._load_state
+
+    def loaded():
+        state = real_load()
+        observed.append(state)
+        return state
+
+    monkeypatch.setattr(box.hook, "_load_state", loaded)
+    monkeypatch.setattr(box.hook, "_last_context_tokens", lambda _: None)
+    assert box(400_000, event="PostToolUse") == ""
+    # Inspect the in-memory object too: a later save would persist a bad size.
+    assert observed[0]["session-1"]["size"] == before["size"]
+    after = json.loads(box.hook.STATE_PATH.read_text())["session-1"]
+    assert after["size"] == before["size"] and after["level"] == before["level"]
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform has no O_NOFOLLOW")
+def test_log_does_not_follow_symlink(box, tmp_path):
+    target = tmp_path / "target"
+    target.write_text("untouched\n")
+    box.hook.LOG_PATH.symlink_to(target)
+    assert box()
+    assert target.read_text() == "untouched\n"
+
+
+def test_relative_log_override_uses_default(tmp_path):
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps({"message": {"usage": {
+        "cache_read_input_tokens": n}}}) for n in (50_000, 90_000)))
+    result = subprocess.run([sys.executable, str(HOOK)], text=True, capture_output=True,
+                            timeout=5, cwd=tmp_path,
+                            input=json.dumps({"session_id": "relative", "transcript_path": str(transcript)}),
+                            env={**os.environ, "HOME": str(tmp_path),
+                                 "CONTEXT_NUDGE_LOG_PATH": "relative.jsonl"})
+    assert result.returncode == 0 and result.stdout and result.stderr == ""
+    assert not (tmp_path / "relative.jsonl").exists()
+    assert (tmp_path / ".claude/state/context-nudge-log.jsonl").exists()
+
+
+def test_interleaved_runs_preserve_other_session_flags(box, monkeypatch):
+    """A stale B snapshot must not undo A's hard tier, boundary or page."""
+    a_loaded, b_loaded, release_a, a_done = (threading.Event() for _ in range(4))
+    real_load = box.hook._load_state
+    failures = []
+
+    def loaded():
+        state = real_load()
+        if threading.current_thread().name == "writer-a":
+            a_loaded.set()
+            assert release_a.wait(1)
+        else:
+            b_loaded.set()
+            assert a_done.wait(1)
+        return state
+
+    class Input:
+        def read(self):
+            return json.dumps({"session_id": threading.current_thread().name,
+                               "transcript_path": "unused"})
+
+    monkeypatch.setattr(sys, "stdin", Input())
+    monkeypatch.setattr(box.hook, "_load_state", loaded)
+    monkeypatch.setattr(box.hook, "_file_size", lambda _: 100)
+    monkeypatch.setattr(box.hook, "_first_context_tokens", lambda _: 50_000)
+    monkeypatch.setattr(box.hook, "_compaction_floor_since", lambda *args: None)
+    monkeypatch.setattr(box.hook, "_last_context_tokens", lambda _: (
+        400_000 if threading.current_thread().name == "writer-a" else 90_000))
+
+    def run():
+        try:
+            box.hook.main()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            if threading.current_thread().name == "writer-a":
+                a_done.set()
+
+    a = threading.Thread(target=run, name="writer-a")
+    b = threading.Thread(target=run, name="writer-b")
+    a.start()
+    try:
+        assert a_loaded.wait(1)
+        b.start()
+        # With the lock B cannot load until A saves; without it B loads stale.
+        b_loaded.wait(0.05)
+    finally:
+        release_a.set()
+        a.join(2)
+        if b.ident is not None:
+            b.join(2)
+    assert not a.is_alive() and not b.is_alive() and not failures
+    state = json.loads(box.hook.STATE_PATH.read_text())
+    assert state["writer-a"]["level"] == 4
+    assert state["writer-a"]["boundary"] is True
+    assert state["writer-a"]["paged"] is True
+    assert state["writer-b"]["level"] == 1
+
+
+def test_concurrent_state_writers_never_share_temporary_file(box, monkeypatch):
+    """Both files are opened before long then short writes, exposing O_TRUNC races."""
+    opened = threading.Barrier(2)
+    long_written = threading.Event()
+    real_open = io.open
+    failures = []
+
+    class Writer:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def write(self, data):
+            opened.wait(timeout=2)
+            if threading.current_thread().name == "short":
+                assert long_written.wait(2)
+            result = self.stream.write(data)
+            self.stream.flush()
+            if threading.current_thread().name == "long":
+                long_written.set()
+            return result
+
+    def intercepted(file, mode="r", *args, **kwargs):
+        stream = real_open(file, mode, *args, **kwargs)
+        return Writer(stream) if mode == "w" else stream
+
+    monkeypatch.setattr(io, "open", intercepted)
+
+    def save(value):
+        try:
+            box.hook._save_state(value)
+        except BaseException as exc:
+            failures.append(exc)
+
+    long_state, short_state = {"long": "x" * 1000}, {"short": True}
+    threads = [threading.Thread(target=save, args=(value,), name=name)
+               for name, value in (("long", long_state), ("short", short_state))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(3)
+    assert not any(thread.is_alive() for thread in threads) and not failures
+    assert json.loads(box.hook.STATE_PATH.read_text()) in (long_state, short_state)
+
+
+def test_lock_contention_is_nonblocking_and_bounded(box, monkeypatch):
+    clock, flags = [0.0], []
+
+    class BusyLock:
+        LOCK_EX, LOCK_NB = 2, 4
+
+        @staticmethod
+        def flock(fd, operation):
+            flags.append(operation)
+            assert operation & BusyLock.LOCK_NB
+            assert len(flags) <= 22  # also makes a missing timeout fail deterministically
+            raise BlockingIOError()
+
+    monkeypatch.setattr(box.hook, "fcntl", BusyLock, raising=False)
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    assert box(90_000)
+    assert flags
+    assert 0.19 <= clock[0] <= 0.21
+    assert json.loads(box.hook.STATE_PATH.read_text())["session-1"]["level"] == 1
+
+
+def test_missing_fcntl_still_emits_and_saves(box, monkeypatch):
+    monkeypatch.setattr(box.hook, "fcntl", None, raising=False)
+    assert box(90_000)
+    assert json.loads(box.hook.STATE_PATH.read_text())["session-1"]["level"] == 1
+
+
+def test_hook_imports_without_fcntl(monkeypatch):
+    real_import = builtins.__import__
+
+    def without_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("simulated non-POSIX")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_fcntl)
+    spec = importlib.util.spec_from_file_location("nudge_no_fcntl", HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.fcntl is None
