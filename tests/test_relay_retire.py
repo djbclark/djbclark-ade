@@ -16,6 +16,7 @@ import os
 import time
 import unittest
 from typing import Any
+from unittest import mock
 
 import test_relay_fallback as fb  # noqa: E402  # pyright: ignore[reportMissingImports]
 
@@ -113,7 +114,10 @@ class TestRetire(Base):
 
     def test_the_retiring_session_is_recorded_when_a_session_runs_it(self) -> None:
         os.environ.pop("RELAY_SENDER_NAME", None)    # a session, not a declared job: the fleet `self` row names it
-        relay.fleet.sessions = lambda: [{"id": "me123456", "self": True, "name": "c1-closed-port-pt"}]
+        # patch.object, never a bare assignment: `fleet` is shared by every other test module in this pytest process.
+        patcher = mock.patch.object(fleet, "sessions", lambda: [{"id": "me123456", "self": True, "name": "c1-closed-port-pt"}])
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.write(record("q-by-session"))
         self.assertEqual(self.retire("q-by-session", "--reason", "superseded")[0], 0)
         self.assertEqual(self.read("q-by-session")["retired_by"], "me123456")
