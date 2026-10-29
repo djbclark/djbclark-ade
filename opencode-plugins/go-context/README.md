@@ -32,19 +32,24 @@ condition is met:
 
 - the last measured input context meets the model class's **handoff ceiling**
   (112k routine / 80k advisory), or
-- the session has completed `handoff_after_compactions` (2) automatic
-  compactions.
+- the session has completed `handoff_after_compactions` (2) compactions.
 
 When due, the guard wakes the model with
 `ctx.session.prompt({ prompt: { text }, delivery: "steer" })`, escalating the
-wording across retries, and `onContext` echoes the same directive into the next
-request's system messages through its own dedup. The only gate is
-`handoff_cooldown_seconds` (3600): an ineffective-compaction (blocked) session is
-exactly the one that must hand off rather than loop compactions, so
-`state.blocked`/`storageReadable`/`streamAvailable` are deliberately not gates.
-The directive routes the model through the handoff skill and
-`self-slash "/new"`; it never instructs a raw `/new`, `/clear`, `/reset` or
-`--finish --successor`.
+wording across retries, and `onContext` surfaces a handoff-level notice into the
+next request's system messages. The policy is validated once at load: a bad
+`handoff_cooldown_seconds` (below a 300 s floor), `handoff_after_compactions`,
+`handoff_max_wakes` or either `handoff` ceiling fails closed (no automatic
+wake), and a malformed or unreadable persisted record does too. A wake is capped
+at `handoff_max_wakes` (3) per session, is refused for a child (subagent) session
+and for a session whose live model no longer matches the recorded Go model, and
+is never sent in a dispatched slice (`ACP_RUN_AGENT=1`); those sessions get the
+system-message directive only. An ineffective-compaction (blocked) session is
+exactly the one that must hand off rather than loop compactions, so handoff
+outranks `blocked` in the context notice. The directive routes the model through
+the handoff skill and `self-slash "/new"`; it never instructs a raw `/new`,
+`/clear`, `/reset` or `--finish --successor`, and it always carries "Never clear
+a parent session".
 
 ## Install and activate
 

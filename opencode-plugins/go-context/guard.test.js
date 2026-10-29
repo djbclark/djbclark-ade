@@ -1,20 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import plugin, { createGuard, loadPolicy } from "./index.js";
+import { createHash } from "node:crypto";
+import plugin, { createGuard, loadPolicy, validHandoffPolicy } from "./index.js";
 
-async function fixture() {
+const storageKey = "go-context-v1:" +
+  createHash("sha256").update(JSON.stringify(["/repo", undefined])).digest("hex").slice(0, 24);
+
+async function fixture(policyOverride, seed = {}) {
   let tick = 1_000_000;
-  const calls = [], saved = new Map(), models = new Map(), prompts = [];
+  const calls = [], saved = new Map(Object.entries(seed)), models = new Map(), prompts = [], parents = new Map();
   const ctx = {
     location: { directory: "/repo" },
     storage: { get: async (key) => saved.get(key), set: async (key, value) => saved.set(key, structuredClone(value)) },
     session: {
-      get: async ({ sessionID }) => ({ data: { id: sessionID, model: models.get(sessionID) } }),
+      get: async ({ sessionID }) => ({ data: { id: sessionID, model: models.get(sessionID), parentID: parents.get(sessionID) } }),
       compact: async ({ sessionID }) => { calls.push(sessionID); },
       prompt: async ({ sessionID, prompt, delivery }) => { prompts.push({ sessionID, text: prompt?.text, delivery }); },
     },
   };
-  const policy = loadPolicy();
+  const policy = policyOverride ?? loadPolicy();
   const guard = await createGuard(ctx, policy, () => tick);
   const context = async (sid = "ses_one", providerID = "opencode-go", id = "deepseek-v4.1-flash") => {
     const event = { sessionID: sid, model: { id, providerID }, system: [], tools: { ade_compact: {} } };
@@ -35,7 +39,7 @@ async function fixture() {
   const idle = async (sid = "ses_one") => {
     await guard.onEvent({ type: "session.idle", data: { sessionID: sid } });
   };
-  return { ctx, guard, policy, calls, saved, models, prompts, context, step, end, idle,
+  return { ctx, guard, policy, calls, saved, models, prompts, parents, context, step, end, idle,
     get time() { return tick; }, advance: (ms) => { tick += ms; } };
 }
 
@@ -70,8 +74,8 @@ test("a successful completion resets the floor and cooldown, not an acceptance",
 
 test("an irreducible instruction baseline compacts once and cannot loop", async () => {
   const f = await fixture(); await f.context();
-  await f.step(150000); await f.end(); await f.step(145000);
-  f.advance(300000); await f.step(180000);
+  await f.step(50000); await f.step(96000); await f.end(); await f.step(95000);
+  f.advance(300000); await f.step(97000);
   assert.equal(f.calls.length, 1);
   assert.match((await f.context()).system[0].text, /ineffective or unconfirmed/);
 });
@@ -157,7 +161,7 @@ test("unreadable prior state and stopped event streams fail closed", async () =>
   assert.equal(await guard.manual("ses_one"), false);
   assert.equal(f.calls.length, 0);
   const g = await fixture(); await g.context(); await g.step(50000);
-  g.guard.streamStopped(); await g.step(150000);
+  g.guard.streamStopped(); await g.step(100000);
   assert.equal(g.calls.length, 0);
   assert.match((await g.context()).system[0].text, /unconfirmed/);
 });
@@ -271,7 +275,7 @@ test("two compactions exhaust the handoff budget and wake the model on idle", as
   await f.end(); await f.end(); // two native compaction completions
   await f.idle();
   assert.equal(f.prompts.length, 1);
-  assert.match(f.prompts[0].text, /2 automatic compactions/);
+  assert.match(f.prompts[0].text, /2 compactions/);
 });
 
 test("the handoff wake respects its cooldown and escalates on retry", async () => {
@@ -295,4 +299,80 @@ test("the context hook escalates to a handoff directive once the ceiling is cros
   assert.equal(event.system.length, 1);
   assert.match(event.system[0].text, /Automatic handoff required/);
   assert.match(event.system[0].text, /handoff ceiling 112000/);
+});
+
+test("validHandoffPolicy accepts a valid policy and rejects each malformed field", () => {
+  const base = loadPolicy();
+  assert.equal(validHandoffPolicy(base), true);
+  const bad = (patch) => ({ ...base, ...patch });
+  assert.equal(validHandoffPolicy(bad({ handoff_cooldown_seconds: 299 })), false, "cooldown below the 300 s floor");
+  assert.equal(validHandoffPolicy(bad({ handoff_cooldown_seconds: 0 })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_cooldown_seconds: null })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_after_compactions: 0 })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_after_compactions: "2" })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_max_wakes: 0 })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_max_wakes: undefined })), false, "a missing cap fails closed");
+  assert.equal(validHandoffPolicy(bad({ handoff_max_wakes: NaN })), false);
+  assert.equal(validHandoffPolicy(bad({ routine_context: { ...base.routine_context, handoff: -1 } })), false);
+  assert.equal(validHandoffPolicy(bad({ routine_context: { ...base.routine_context, handoff: "x" } })), false);
+  assert.equal(validHandoffPolicy(bad({ advisory_context: { ...base.advisory_context, handoff: -1 } })), false);
+});
+
+test("a malformed handoff policy disables the automatic wake", async () => {
+  const base = loadPolicy();
+  const f = await fixture({ ...base, handoff_cooldown_seconds: 0 });
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a bad cooldown must not open a self-sustaining wake loop");
+});
+
+test("the handoff wake is capped at handoff_max_wakes per session", async () => {
+  const base = loadPolicy();
+  const f = await fixture({ ...base, handoff_max_wakes: 1 });
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  f.advance(3600000); // past handoff_cooldown_seconds
+  await f.idle();
+  assert.equal(f.prompts.length, 1, "the retry cap stops further paid wakes");
+});
+
+test("a child (subagent) session is never woken to hand off", async () => {
+  const f = await fixture();
+  f.parents.set("ses_one", "ses_parent");
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a child session must not be steered to run /handoff or /new");
+});
+
+test("the wake refuses a session whose live model no longer matches", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  f.models.set("ses_one", { id: "gpt-6-luna", providerID: "opencode-go" }); // live model diverges from the recorded one
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a switched-away model must not be woken by a stale Go measurement");
+});
+
+test("a dispatched slice (ACP_RUN_AGENT=1) is never woken", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  process.env.ACP_RUN_AGENT = "1";
+  try {
+    await f.idle();
+  } finally {
+    delete process.env.ACP_RUN_AGENT;
+  }
+  assert.equal(f.prompts.length, 0, "an ACP-launched slice must not be steered into a fresh paid turn");
+});
+
+test("a malformed persisted record (negative handoffTries) fails closed", async () => {
+  const seed = { [storageKey]: { ses_one: { model: "deepseek-v4.1-flash", pending: false, sampleAt: 0, attemptAt: 0, handoffTries: -1 } } };
+  const f = await fixture(null, seed);
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "untrusted prior state must not be re-admitted or acted on");
 });

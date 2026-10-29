@@ -10,5 +10,6 @@
   "minimum_growth_tokens": 32000,
   "compact_cooldown_seconds": 300,
   "handoff_after_compactions": 2,
-  "handoff_cooldown_seconds": 3600
+  "handoff_cooldown_seconds": 3600,
+  "handoff_max_wakes": 3
 }
