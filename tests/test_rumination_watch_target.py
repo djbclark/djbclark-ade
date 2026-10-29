@@ -349,3 +349,21 @@ def test_a_broken_fleet_read_is_not_a_dead_seat(monkeypatch, tmp_path):
     assert len(told) == 1
     assert "cannot READ the fleet" in told[0]
     assert "no live session" not in told[0], "a timeout must not be sold as a dead seat"
+
+
+def test_a_capped_pr_listing_says_at_least(monkeypatch, tmp_path):
+    """`gh` truncates silently, so the old `--limit 20` made "20 open PR(s)" mean "20 or 40".
+
+    A page size reported as a count is precision that was never earned — the same lie as calling
+    `accepted` "delivered". At the cap the phrase has to say "at least".
+    """
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "PR_LIMIT", 3)
+    monkeypatch.setattr(rw, "PR_CAP_MARK", "(at least 3: the listing is capped)")
+    many = [{"number": i, "title": f"t{i}"} for i in range(1, 4)]
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (0, json.dumps(many)))
+    assert rw.pr_phrase(rw.open_prs()) == "at least 3 open PR(s) of yours"
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (0, json.dumps(many[:1])))
+    assert rw.pr_phrase(rw.open_prs()) == "1 open PR(s) of yours"
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (1, "offline"))
+    assert rw.open_prs() == [] and rw.pr_phrase([]) == "0 open PR(s) of yours"

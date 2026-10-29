@@ -153,15 +153,31 @@ def open_jobs(max_age_h: float = 24.0) -> list[dict]:
 
 
 def open_prs() -> list[str]:
-    """Open PRs authored by the operator's own account. Best-effort: offline is not an incident."""
+    """Open PRs authored by the operator's own account. Best-effort: offline is not an incident.
+
+    The limit is a page size, not a fact: `gh` truncates silently, so the old `--limit 20` made the
+    log say "20 open PR(s)" whether there were 20 or 40. A truncated listing that reports itself as
+    a count is the same class of lie as calling `accepted` "delivered" — it reads as precision and
+    is not. At the cap, an extra marker entry says so and `pr_phrase` prints "at least N".
+    """
     rc, out = run(["gh", "search", "prs", "--author", "@me", "--state", "open",
-                   "--json", "number,title", "--limit", "20"], timeout=25)
+                   "--json", "number,title", "--limit", str(PR_LIMIT)], timeout=25)
     if rc != 0:
         return []
     try:
-        return [f"#{p['number']} {p['title']}" for p in json.loads(out)]
+        prs = [f"#{p['number']} {p['title']}" for p in json.loads(out)]
     except (ValueError, KeyError, TypeError):
         return []
+    if len(prs) >= PR_LIMIT:
+        prs.append(PR_CAP_MARK)
+    return prs
+
+
+def pr_phrase(prs: list[str]) -> str:
+    """"at least 100 open PR(s)" when the listing was capped, else a plain count."""
+    capped = bool(prs) and prs[-1] == PR_CAP_MARK
+    n = len(prs) - (1 if capped else 0)
+    return f"{'at least ' if capped else ''}{n} open PR(s) of yours"
 
 
 def chain_staleness() -> str | None:
@@ -419,6 +435,10 @@ SEAT_STUCK_PASSES = int(os.environ.get("RW_STUCK_PASSES", 3))
 # busy for a day cannot grow the state file without bound; the newest lines are the ones that matter.
 PENDING_MAX = int(os.environ.get("RW_PENDING_MAX", 6))
 
+# A page size for `gh search prs`, not a ceiling on reality: at the cap the count is a lower bound.
+PR_LIMIT = int(os.environ.get("RW_PR_LIMIT", 100))
+PR_CAP_MARK = f"(at least {PR_LIMIT}: the listing is capped)"
+
 DARK_MEANING = {
     "card:question": "a question card is waiting for an answer, so it cannot take text",
     "card:plan": "a plan card is waiting for approval, so it cannot take text",
@@ -513,7 +533,7 @@ def _pass(a: argparse.Namespace) -> int:
     if cur["stale"]:
         lines.append(f"stale chain log: {cur['stale']}")
     if cur["prs"] and not before.get("prs"):
-        lines.append(f"{len(cur['prs'])} open PR(s) of yours")
+        lines.append(pr_phrase(cur["prs"]))
 
     # A job whose `done` file exists but whose record is still open is a real, actionable defect.
     stuck = [j["name"] for j in cur["jobs"] if j["done_exists"]]
