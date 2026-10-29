@@ -8,12 +8,14 @@ pane, never seen) end the run. Every id here is plainly fake.
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import datetime
 import importlib.util
 import io
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -35,8 +37,12 @@ _spec = importlib.util.spec_from_file_location("relay", SF / "relay.py")
 assert _spec and _spec.loader
 relay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(relay)
-relay.UNSENT = Path(tempfile.mkdtemp(prefix="relay-fallback-test-")) / "relay-unsent.json"
-relay.DEFER_DIR = Path(tempfile.mkdtemp(prefix="relay-defer-test-")) / "relay" / "deferred"
+_fb_root = tempfile.mkdtemp(prefix="relay-fallback-test-")
+_defer_root = tempfile.mkdtemp(prefix="relay-defer-test-")
+atexit.register(shutil.rmtree, _fb_root, True)    # module-level sandboxes once leaked in $TMPDIR across runs (2026-10-29)
+atexit.register(shutil.rmtree, _defer_root, True)
+relay.UNSENT = Path(_fb_root) / "relay-unsent.json"
+relay.DEFER_DIR = Path(_defer_root) / "relay" / "deferred"
 REAL_SPAWN = relay.spawn_deliverer
 REAL_PROBE = relay.paseo_probe
 # where the paseo CLI, fleet and the herdr plugin look: a deliverer keeps these (none names a session)
@@ -82,6 +88,7 @@ class Harness(unittest.TestCase):
         os.environ["RELAY_SENDER_NAME"] = "harness-job"    # relay refuses a sender it cannot resolve (exit 4): the tests that are not about that run as a declared job
         os.environ["RELAY_NO_ACK"] = "1"    # the route tests assert the route's own result as a session sender; the default delivery watch (2026-10-25) is tested in test_relay_verified.py, which pops this
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)    # one leaked dir per test case otherwise (2026-10-29)
         os.environ["CODEX_HOME"] = str(self.tmp / "codex")
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
         names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
@@ -1785,6 +1792,7 @@ class TestHermesGatewayRows(unittest.TestCase):
         import sqlite3
         import time as t
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-gw-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.db = self.tmp / "state.db"
         con = sqlite3.connect(self.db)
         con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, session_key TEXT, chat_id TEXT, thread_id TEXT, "
