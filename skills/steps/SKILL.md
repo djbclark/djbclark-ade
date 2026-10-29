@@ -217,8 +217,8 @@ The card has no header chip, no per-option description, no `helpText` and no
    options or drop it, and say so in a line. Don't ask a question an earlier
    answer has already settled.
 4. On `stop`, stop. Report what was decided and what is still open.
-5. **If he picks `/compact`** (or the context prompt's compact tier, +200k since
-   the start or last compaction, fires mid-walk with nobody at the keyboard; he
+5. **If he picks `/compact`** (or the context prompt's compact tier, +140k since
+   the start or last compaction or 217k total, fires mid-walk with nobody at the keyboard; he
    pre-approved it standing, 2026-10-09; never compact earlier, it costs more
    than it saves, 2026-10-10), a Claude session in a herdr pane, an
    Orca terminal or a Paseo agent queues it itself: note the remaining queue, run

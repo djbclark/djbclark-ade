@@ -130,6 +130,17 @@ paseo schedule create --cron "*/15 * * * *" "ping main build"
 paseo heartbeat create --cron "*/15 * * * *" "check the build"
 ```
 
-Discover with `paseo --help` and `paseo <cmd> --help`.
+Terminal-only handoff fallback (verified 2026-10-27): first inspect the root CLI command roster (`paseo --help`); the installed CLI may expose no profiles command even though the MCP API has `list_profiles`. If MCP is unavailable, say that profile selection could not be queried and use live provider discovery (`paseo provider ls --json`, then `paseo provider models <provider> --json` as needed), current routing/quota policy, and explicit provider/model/thinking/mode. Do not infer configured profiles from a failed command. Never guess a `paseo profile` command or use a raw socket to bypass the tool surface.
+
+Use an existing workspace explicitly and return promptly:
+
+```text
+paseo run --no-wait --workspace <workspace-id> --provider <provider/model> --thinking <id> --mode <mode> --title "[Handoff] <short task>" --json <self-contained-brief>
+paseo inspect <returned-agent-id> --json
+```
+
+Pass arguments as an argv list when building this command programmatically. `inspect` JSON currently uses capitalized keys such as `Id`, `Provider`, `Model`, `Mode`, `Cwd` and `ParentAgentId`; do not assume the lowercase keys from `paseo ls`. Verify the returned workspace and placement before reporting success. This creates a real Paseo agent, not an ACP slice. Keep default parentage; never call detach to manufacture independence. See **paseo-handoff** for durable chain pointers and verified peer notices.
+
+Discover the root command roster before probing subcommands; obey the machine's rule against `--help` on live-service subcommands.
 
 For product questions, setup, logs, version problems, or troubleshooting, use the **paseo-help** skill.
