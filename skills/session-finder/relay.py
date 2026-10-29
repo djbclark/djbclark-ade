@@ -3,7 +3,8 @@
 
     relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
                                            [--ack | --no-ack] [--expect-ack ID [--ack-within S]] [--needs-reply | --fyi]
-    relay.py --pending [--text] [--json] | --cancel ID | --sweep       (the deferred messages and expected acks, below)
+    relay.py --pending [--text] [--json] | --cancel ID | --sweep | --retire ID --reason TEXT [--evidence TEXT]
+        (the deferred messages and expected acks, below; --retire closes an expectation that will never be answered)
     relay.py --transfer-expectations OLD_SENDER [--id TOKEN ...] [--json]
         (settles old acks before transfer; exit 1 with missing for explicit tokens not transferred, even if acked)
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
@@ -248,7 +249,11 @@ and it counts only for a send whose delivery watch ran (never `--no-ack`) and th
 ACP or slice inbox that keeps the text (never refused, failed, pulled back, a pane's unproven "queued", queued for a deliverer, run by a deliverer, or one whose delivery watch ran and did not see the text). A sender WITH a
 transcript keeps exactly its old rule: only its own transcript showing the ack closes it. A third party, a quoted header, another or a
 closed ID and a replay change nothing. `--sweep` also flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
-point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json); 6 h past due the line ends ASSUMED LOST: the sender re-routes its own work once (peer-relay rule 13). FIRST CONTACT: the first message
+point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json); 6 h past due the line ends ASSUMED LOST: the sender re-routes its own work once (peer-relay rule 13). `--retire ID --reason "..."`
+closes an expectation that will never be answered (both ends dead, answered out of band, superseded by a re-send): state `retired`, with the
+reason, the optional --evidence and the retiring session kept IN the record (a hand-deleted or bare-cancelled one loses why it went away) and
+shown by `--pending`; only an `open` expectation retires (an `acked` one is settled, a `reserved` one is a send that has not happened yet: both
+exit 1), a missing or blank --reason exits 2 always, and retiring an already retired ID exits 0 without touching it. FIRST CONTACT: the first message
 from a session to a peer appends "[first contact from <id>: reply `ack <id>` through relay.py ...]"; ~/.local/state/relay/links.json
 (RELAY_LINKS_FILE) records each link, `--sweep` marks it acked when the sender's transcript holds `ack <id>` naming the peer (or an
 --expect-ack from it resolved), and `fleet.py list` prints `link: acked` or `link: ONE-WAY` under each peer this session messaged.
@@ -2928,6 +2933,12 @@ def pending_cmd(as_json, show_text=False):
               + (f"  [why: {v['look']['why']}]" if v["state"] == "queued" and isinstance(v.get("look"), dict) and v["look"].get("why") else "")
               + (f"  | {v['text_preview']}" if show_text else ""))
     for e in ([] if as_json else expects):
+        if e["state"] == "retired":
+            print(f"retired expect-ack {e['id']}  {target_label({'target': e['target']})}  from {e['sender'] or '?'}  "
+                  f"{e['age_s'] // 60}m old  -- {e.get('reason') or '(no reason recorded)'}"
+                  + (f"  | evidence: {e['evidence']}" if e.get("evidence") else "")
+                  + (f"  | by {e['retired_by']}" if e.get("retired_by") else ""))
+            continue
         print(f"{'OVERDUE ' if e['overdue'] else ''}expect-ack {e['id']}  {e['state']:<6} {target_label({'target': e['target']})}  "
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
               + (f"  -> assumed lost ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never call it read" if e["assumed_lost"]
@@ -2966,7 +2977,8 @@ def cancel_cmd(rid):
     """Withdraw a queued record. The read and the write share one hold of the state lock: a sweep that prunes the record
     in between is a "no deferred message", never an exception."""
     if not DEFER_ID.fullmatch(rid or ""):
-        print(f"relay: no deferred message {rid!r} (relay.py --pending lists them)", file=sys.stderr)
+        print(f"relay: no deferred message {rid!r} (relay.py --pending lists them; an expectation id is closed with "
+              f"--retire ID --reason \"...\", never --cancel)", file=sys.stderr)
         return 1
     with state_lock():
         rec = rec_read(rid)
@@ -2982,6 +2994,62 @@ def cancel_cmd(rid):
         return 1
     defer_log(rec, "cancelled")
     print(f"cancelled: {rid}")
+    return 0
+
+
+def retirement_author(listed=None):
+    """Who retires an expectation: the label a declared job runs under (RELAY_SENDER_NAME), else the fleet `self` row's id (the session that
+    ran the command), else "" for a caller relay cannot identify. Never taken from the text or from the target's row: a retirement is the
+    act of the side that asked or of the operator, and the record must say which."""
+    label = (os.environ.get("RELAY_SENDER_NAME") or "").strip()
+    if label:
+        return label
+    me = sender_row(fleet.sessions() if listed is None else listed)
+    return (me.get("id") or "") if me else ""
+
+
+def retire_cmd(eid, reason, evidence="", as_json=False, by=None):
+    """`--retire ID --reason TEXT`: close an expectation that will never be answered, recording WHY rather than deleting the record or calling
+    it "cancelled". Both ends dead, answered out of band, or superseded by a re-send are the three shapes; a bare cancellation loses the
+    distinction, so a later `--pending` cannot tell a dropped ask from a forgotten one.
+
+    Only an `open` record retires: `acked` is settled and `reserved` is a send that has not returned yet (exit 1, nothing written). A missing,
+    blank or non-string reason is a usage error (exit 2) even when the ID is unknown, and an unknown or malformed ID is exit 1/2. Retiring an
+    already retired ID is a no-op that exits 0 with what the record already says, so a re-run is safe. The check and the write share one hold of
+    the expectation lock, as `ack_sweep` writes, and the record keeps its sender, target and age: `--pending` shows it as retired, never overdue."""
+    if not EXPECT_ID.fullmatch(eid or ""):
+        print(f"relay: no expectation {eid!r} (relay.py --pending lists them)", file=sys.stderr)
+        return 2
+    why = " ".join((reason if isinstance(reason, str) else "").split())
+    if not why:
+        print("relay: --retire needs --reason \"why this expectation will never be answered\" (a bare cancellation is not a reason)", file=sys.stderr)
+        return 2
+    proof = " ".join((evidence if isinstance(evidence, str) else "").split())
+    who, now = by if by is not None else retirement_author(), time.time()
+    with _flock(defer_dir() / ".expect.lock"):
+        # Write via atomic_json under this lock; never call expect_write or take .expect.lock again (a second flock in this process blocks).
+        rec = expect_read(eid)
+        if rec is None:
+            print(f"relay: no expectation {eid!r} (relay.py --pending lists them)", file=sys.stderr)
+            return 1
+        state, again = rec.get("state"), rec.get("state") == "retired"
+        if not again:
+            if state != "open":
+                print(f"relay: {eid} is {state}: only an open expectation can be retired (an acked one is settled, a reserved one is a live "
+                      f"send; `--pending` shows which)", file=sys.stderr)
+                return 1
+            rec = {**rec, "state": "retired", "retired": now, "reason": why, "retired_by": who,
+                   **({"evidence": proof} if proof else {})}
+            atomic_json(expect_dir() / f"{eid}.json", rec)
+    if as_json:
+        print(json.dumps({"id": eid, "state": rec.get("state"), "retired": _num(rec.get("retired")), "reason": rec.get("reason") or "",
+                          "evidence": rec.get("evidence") or "", "retired_by": rec.get("retired_by") or "", "already": again},
+                         ensure_ascii=False))
+        return 0
+    print(("already retired: " if again else "retired: ") + eid
+          + f"  ({rec.get('reason') or why})"
+          + (f"  | evidence: {rec['evidence']}" if rec.get("evidence") else "")
+          + (f"  | by {rec['retired_by']}" if rec.get("retired_by") else ""))
     return 0
 
 
@@ -3549,7 +3617,9 @@ def expect_view(now=None):
         age, within = expect_age(r, now)
         rows.append({"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"),
                      "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within,
-                     "assumed_lost": r.get("state") == "open" and ack_lost(age, within), "created": _num(r.get("created"))})
+                     "assumed_lost": r.get("state") == "open" and ack_lost(age, within), "created": _num(r.get("created")),
+                     **({"reason": r.get("reason") or "", "evidence": r.get("evidence") or "", "retired_by": r.get("retired_by") or "",
+                         "retired": _num(r.get("retired"))} if r.get("state") == "retired" else {})})
     return rows
 
 
@@ -3589,6 +3659,11 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
     ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
+    ap.add_argument("--retire", metavar="ID", help="close an expectation that will never be answered, recording --reason (required) instead of "
+                    "deleting or bare-cancelling the record: state retired, reason and --evidence stay in it and --pending shows them. Only an "
+                    "open expectation retires (acked is settled, reserved is a live send: exit 1); retiring a retired ID is a no-op")
+    ap.add_argument("--reason", metavar="TEXT", help="with --retire: why it will never be answered (required; empty or absent: exit 2)")
+    ap.add_argument("--evidence", metavar="TEXT", help="with --retire: the record ids, delivery outcomes or probe output that support the reason")
     ap.add_argument("--why", action="store_true", help="with IDENT and no text: say why that session cannot be sent text right now (a picklist, a permission "
                     "card, a turn still running, silent for a long time, archived, gone), from two methods compared; --json for the evidence")
     ap.add_argument("--transfer-expectations", metavar="OLD_SENDER", help="adopt open expectations of one exactly named finished fleet session into this caller; missing/live/ambiguous sender: exit 2")
@@ -3608,12 +3683,20 @@ def _main(argv=None, sweep=True):
     a = ap.parse_args(argv)
     t0 = time.time()
     if a.transfer_expectations is not None:
-        if a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan:
+        if a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan or a.retire is not None:
             print("relay: --transfer-expectations cannot be combined with a send or another command", file=sys.stderr)
             return 2
         return transfer_expectations(a.transfer_expectations, a.id, a.json)
     if a.id:
         print("relay: --id requires --transfer-expectations", file=sys.stderr)
+        return 2
+    if a.retire is not None:
+        if a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan:
+            print("relay: --retire cannot be combined with a send or another command", file=sys.stderr)
+            return 2
+        return retire_cmd(a.retire, a.reason, a.evidence or "", a.json)
+    if a.reason is not None or a.evidence is not None:
+        print("relay: --reason and --evidence are used with --retire ID", file=sys.stderr)
         return 2
     if a.deliver:
         if a.detach:
@@ -3641,7 +3724,7 @@ def _main(argv=None, sweep=True):
             return 2
         return why_cmd(a.ident, a.json)
     if a.ident is None or a.text is None:
-        print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
+        print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
     if a.defer_for is not None and not (math.isfinite(a.defer_for) and a.defer_for > 0):
         print("relay: --defer-for must be a finite number of seconds > 0", file=sys.stderr)
