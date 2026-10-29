@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +48,14 @@ case "$1 $2" in
   "agent inspect") id="${@: -1}"; [ "$id" = "$FAKE_KNOWN" ] || { echo "no such agent" >&2; exit 1; }
     echo "{\\"Id\\": \\"${FAKE_ID:-$id}\\", \\"Name\\": \\"fake\\", \\"Provider\\": \\"${FAKE_PROVIDER:-claude}\\", \\"Status\\": \\"${FAKE_STATUS:-idle}\\", \\"Archived\\": ${FAKE_ARCHIVED:-false}, \\"PendingPermissions\\": ${FAKE_PENDING:-[]}, \\"Cwd\\": \\"${FAKE_CWD:-/tmp}\\"}" ;;
   "wait "*) exit "${FAKE_WAIT_RC:-0}" ;;
-  "send "*) echo '{"ok": true}' ;;
+  "logs "*) [ -n "$FAKE_TIMELINE" ] && [ -f "$FAKE_TIMELINE" ] && cat "$FAKE_TIMELINE" ;;
+  "send "*) if [ -n "$FAKE_TIMELINE" ] && [ "${FAKE_TL_APPEND:-1}" = 1 ]; then printf '[Message received] %s\\n%s\\n' "${FAKE_TL_FROM:-some peer}" "${@: -1}" >> "$FAKE_TIMELINE"; fi
+    echo '{"ok": true}' ;;
 esac
 """
+
+
+EMPTY_TIMELINE = "No activity to display."    # what the real `paseo logs` prints for an agent with no timeline items
 
 
 def sess(**kw: Any) -> dict[str, Any]:
@@ -86,8 +92,12 @@ class RelayPaseo(unittest.TestCase):
         self.spawned: list[str] = []
         relay.spawn_deliverer = lambda rid: self.spawned.append(rid) or 4242
 
-    def calls(self) -> list[str]:
+    def raw_calls(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def calls(self) -> list[str]:
+        """The paseo calls a test asserts on: `logs` reads (the timeline witness, 2026-10-29) are bookkeeping, listed by `raw_calls`."""
+        return [c for c in self.raw_calls() if not c.startswith("logs ")]
 
     def envs(self) -> list[str]:
         return self.envlog.read_text().splitlines() if self.envlog.exists() else []
@@ -482,6 +492,89 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("mapping not trusted", err)
         self.assertFalse(self.sends())
+
+    # ---- the Paseo timeline as a second delivery witness, both ways (2026-10-29) --------------------------------------------------------
+
+    def timeline(self, *lines: str) -> Path:
+        path = Path(self.tmp.name) / "timeline"
+        path.write_text("".join(line + "\n" for line in lines))
+        os.environ["FAKE_TIMELINE"] = str(path)
+        return path
+
+    def test_an_agent_with_no_transcript_is_proven_delivered_by_its_paseo_timeline(self) -> None:
+        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
+        self.timeline("[Shell] ls")
+        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, "hello there friend", "--wait", "5")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": delivered;", out)
+        self.assertTrue([c for c in self.raw_calls() if c.startswith("logs ")])
+
+    def test_a_timeline_that_cannot_be_read_leaves_the_send_accepted_not_proven(self) -> None:
+        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")    # no FAKE_TIMELINE: `paseo logs` exits 1
+        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, "hello there friend", "--wait", "1")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": accepted;", out)
+
+    def test_the_same_text_twice_is_two_deliveries_a_copy_already_there_proves_nothing(self) -> None:
+        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
+        self.timeline(EMPTY_TIMELINE)
+        row = sess(agent="codex", transcript=None, status="idle")
+        self.assertIn(": delivered;", self.main([row], SID, "hello there friend", "--wait", "5")[1])
+        os.environ["FAKE_TL_APPEND"] = "0"    # the daemon takes the second copy but the timeline never shows it
+        rc, out, err = self.main([row], SID, "hello there friend", "--wait", "1")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": accepted;", out)    # the first copy is still there: the count did not rise, so it is not proof
+
+    def test_the_timeline_shows_the_text_unescaped_where_the_transcript_keeps_it_xml_escaped(self) -> None:
+        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
+        self.timeline(EMPTY_TIMELINE)
+        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, 'a&b <c> "q" ]x[', "--wait", "5")
+        self.assertEqual((rc, ": delivered;" in out), (0, True), err)
+
+    def test_a_long_text_is_matched_by_its_tail_where_the_ack_id_sits(self) -> None:
+        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
+        self.timeline(EMPTY_TIMELINE)
+        long_text = "word " * 80 + "tail [reply through relay.py to zz: ack T-long]"
+        self.assertGreater(len(long_text), relay.TIMELINE_LONG)
+        self.assertEqual(relay.timeline_probe(long_text), " ".join(long_text.split())[-relay.TIMELINE_PART:])
+        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, long_text, "--wait", "5")
+        self.assertEqual((rc, ": delivered;" in out), (0, True), err)
+
+    def expectation(self, token: str, **kw: Any) -> None:
+        relay.atomic_json(relay.expect_dir() / f"{token}.json", {
+            "id": token, "state": "open", "created": time.time(), "acked": None, "within": 1800, "sender": "cccccccc", "sender_sid": "",
+            "sender_label": "me", "tx": None, "sender_paseo": CALLER, "mark": 0,
+            "target": {"id": "dddddddd", "name": "peer-long-name", "paseo": AGENT, "sid8": "", "sid": "", "host": "paseo"}, **kw})
+
+    def test_a_sender_with_no_transcript_gets_its_ack_from_its_own_paseo_timeline(self) -> None:
+        links = Path(self.tmp.name) / "links.json"
+        with mock.patch.object(relay.fleet, "LINKS_FILE", links):
+            self.expectation("tok1")
+            self.timeline("[Message received] peer-long-name", "ack tok1")
+            acked, overdue = relay.ack_sweep()
+        rec = relay.expect_read("tok1")
+        self.assertEqual((acked, overdue, rec["state"], rec.get("acked_via")), (1, [], "acked", "timeline"))
+
+    def test_an_ack_in_a_timeline_from_someone_else_closes_nothing(self) -> None:
+        links = Path(self.tmp.name) / "links.json"
+        with mock.patch.object(relay.fleet, "LINKS_FILE", links):
+            self.expectation("tok2")
+            self.timeline("[Message received] stranger-agent", "ack tok2")
+            acked, _ = relay.ack_sweep()
+        self.assertEqual((acked, relay.expect_read("tok2")["state"]), (0, "open"))
+
+    def test_a_first_contact_link_is_acked_from_the_senders_timeline_too(self) -> None:
+        links = Path(self.tmp.name) / "links.json"
+        now = time.time()
+        key = relay.fleet.link_key("cccccccc", "dddddddd")
+        relay.atomic_json(links, {"links": {key: {"sender": "cccccccc", "target": "dddddddd", "first_sent": now, "last_sent": now, "sent": 1, "acked": None,
+                                                  "tx": "", "mark": 0, "who": ["peer-long-name"], "sender_paseo": CALLER}}})
+        self.timeline("[Message received] peer-long-name", "ack cccccccc")
+        with mock.patch.object(relay.fleet, "LINKS_FILE", links):
+            acked, _ = relay.ack_sweep()
+            ln = relay.fleet.links_read()["links"][key]
+        self.assertEqual(acked, 1)
+        self.assertTrue(ln["acked"])
 
     def test_a_pending_card_does_not_hide_an_untrusted_process_mapping(self) -> None:
         """Codex, PR 112: the card reason came back before the directory check, so a mismatched mapping would have been queued (the

@@ -195,7 +195,14 @@ proof (the text reached the target's transcript) is mechanical and needs no repl
 or requests action. THE DELIVERY WATCH (default for an agent session, 2026-10-25): a send that is only "accepted" (a socket frame or Paseo send to a
 working session) or "queued" (an enqueue not yet taken, a deferred record) keeps being watched, and the exit says which it is: 0 delivered, 1 not
 delivered (not sent, pulled back out of the queue, a deferred record failed, expired or cancelled), 3 unverified (sent, or still queued, with no
-proof yet: do not resend; a route with no transcript to read, an ACP inbox or a Paseo agent that is not Claude, is unverified at once). The
+proof yet: do not resend; a route with no transcript to read and no other witness, an ACP inbox, is unverified at once). TWO WITNESSES for a Paseo target
+(2026-10-29, djbclark: "use both methods redundantly to ensure bidirectional ack"): its Claude transcript AND its own Paseo timeline (`paseo logs ID --tail 80`,
+which shows every received message as `[Message received] <sender title>` and the text, unescaped); either proves, so a codex, omp, opencode or cline
+Paseo agent, which has no transcript, is now "delivered" instead of "unverified". The count of the text in the timeline must RISE past the one read before the
+send (the same text sent twice is two deliveries); a text over 240 characters is matched by its last 160 (its ack footer); a timeline that cannot be read
+(daemon down, no output) is no witness and the send stays "accepted". The return direction: `--sweep` reads a transcript-less SENDER's own Paseo timeline
+for `ack ID` (and the first-contact `ack <id>`) from the target, once per sender, so an omp or codex session's expectations close without a relay-side
+delivery proof (records written before 2026-10-29 carry no `sender_paseo` and are not read this way). The
 watch is on for every caller relay identifies as a session (a fleet `self` row, a Paseo agent, a Claude session, a Hermes turn) and runs
 IMPLICIT_ACK_WAIT (10) seconds at most beyond the send's own --wait; `--ack` asks for it whoever you are and watches --wait seconds; `--no-ack`
 or RELAY_NO_ACK=1 turns the default off. A DECLARED JOB run by launchd (a label in RELAY_SENDER_NAME and no session in its environment: every launchd
@@ -454,15 +461,66 @@ def probe_proof(tx, mark, *probes):
     return proof
 
 
+# The Paseo timeline as a SECOND witness (2026-10-29, djbclark: "use both methods redundantly to ensure bidirectional ack"). A Paseo agent's own
+# activity log (`paseo logs ID --tail N`, curated text, no timestamps) shows every message it received as `[Message received] <sender title>`
+# and the text on the next line, UNescaped (checked 2026-10-29: `a&b <c> "q"` is shown as typed, though the Claude transcript keeps it
+# XML-escaped). It needs no transcript file, so it proves a delivery to a codex, omp, opencode or cline agent, which the transcript never
+# could ("unverified" for 5 days), and it is a second witness for a Claude one. Either witness alone proves.
+TIMELINE_TAIL = 80          # curated entries read per look
+TIMELINE_LONG = 240         # a text longer than this is matched by its last TIMELINE_PART characters (its footer, which carries the ack id)
+TIMELINE_PART = 160
+
+
+def paseo_timeline(agent_id, tail=TIMELINE_TAIL):
+    """The text of `paseo logs AGENT --tail N`, or None when the daemon or CLI cannot answer or printed nothing (the real CLI prints
+    "No activity to display." for an empty timeline, so silence is a broken CLI, not an empty agent)."""
+    if not UUID.fullmatch(agent_id or ""):
+        return None
+    rc, out, _err = paseo_run("logs", agent_id, "--tail", str(tail), timeout=20)
+    return out if rc == 0 and out.strip() else None
+
+
+def tl_norm(text):
+    return " ".join((text or "").split())
+
+
+def timeline_probe(text):
+    """What to look for in a timeline: the whole text whitespace-folded, or (a long one) its tail, where the ack id sits."""
+    n = tl_norm(text)
+    return n if len(n) <= TIMELINE_LONG else n[-TIMELINE_PART:]
+
+
+def timeline_count(agent_id, probe):
+    """How many times PROBE is in the agent's timeline now; None when the timeline cannot be read. Counted, not tested, so the same text
+    sent twice is two deliveries: a send is proven only when the count rose past the one read before it."""
+    tl = paseo_timeline(agent_id)
+    return None if tl is None else tl_norm(tl).count(probe)
+
+
+def timeline_blocks(agent_id):
+    """The messages in an agent's timeline as one folded string each: `[Message received]`'s header line and the line after it (a relay text is
+    one line). None when the timeline cannot be read."""
+    tl = paseo_timeline(agent_id)
+    if tl is None:
+        return None
+    rows, out = tl.splitlines(), []
+    for i, row in enumerate(rows):
+        if row.startswith("[Message received]"):
+            out.append(tl_norm(row + " " + (rows[i + 1] if i + 1 < len(rows) else "")))
+    return out
+
+
 def send_paseo(s, text, wait):
-    """Send TEXT to Paseo agent S: 'delivered' (seen in its Claude transcript), 'accepted' (the daemon took
-    it; not a verified delivery) or None (send failed; the reason is printed). --behavior steer queues the text
+    """Send TEXT to Paseo agent S: 'delivered' (seen in its Claude transcript OR in its Paseo timeline: either witness proves), 'accepted' (the
+    daemon took it; not a verified delivery) or None (send failed; the reason is printed). --behavior steer queues the text
     for the next tool round on a steer-capable provider; one that cannot steer has its running turn replaced by
     Paseo, so the caller already refused anything that starts a built-in. --no-wait so this returns at once
-    (the transcript poll below is the verification); `--` keeps TEXT, whatever it starts with, out of the options."""
+    (the witness poll below is the verification); `--` keeps TEXT, whatever it starts with, out of the options."""
     agent = s["chan"][1]
     tx = Path(s["transcript"]) if s.get("transcript") else None
     mark = tx.stat().st_size if tx and tx.is_file() else 0
+    probe_tl = timeline_probe(text)
+    before = timeline_count(agent, probe_tl)    # None: `paseo logs` cannot answer, so the timeline is no witness this time
     rc, out, err = paseo_run("send", "--no-wait", "--behavior", "steer", "--json", "--", agent, text)
     s["send_rc"] = rc
     if rc != 0:
@@ -475,15 +533,20 @@ def send_paseo(s, text, wait):
     # line of one message would certify the other (Codex P1, PR 74; adversary round 4 R4-1)
     probe_raw = json.dumps(text, ensure_ascii=False)[1:-1]
     probe_esc = json.dumps("".join(XML_ESCAPES.get(c, c) for c in text), ensure_ascii=False)[1:-1]
+    tx_proof = probe_proof(tx, mark, probe_raw, probe_esc) if tx else None
+
+    def witnessed():
+        if tx_proof is not None and tx_proof() == "delivered":
+            return "delivered"
+        if before is not None and (timeline_count(agent, probe_tl) or 0) > before:
+            return "delivered"
+        return None
     deadline = time.time() + wait
-    while tx and tx.is_file() and time.time() < deadline:
-        with tx.open("rb") as fh:
-            fh.seek(mark)
-            data = fh.read().decode("utf-8", "replace")
-        if probe_raw in data or probe_esc in data:
+    while ((tx and tx.is_file()) or before is not None) and time.time() < deadline:
+        if witnessed():
             return "delivered"
         time.sleep(1)
-    s["proof"] = probe_proof(tx, mark, probe_raw, probe_esc) if tx else None    # route_paseo hands it to the --ack watch: an "accepted" send may still show up
+    s["proof"] = witnessed if (tx or before is not None) else None    # route_paseo hands it to the --ack watch: an "accepted" send may still show up
     return "accepted"
 
 
@@ -2930,9 +2993,9 @@ def note_links_and_expect():
         key = fleet.link_key(me["id"], s["id"])
         ln = fleet.link_get(data["links"], me, s)
         ln = ln if ln else {"sender": me["id"], "target": s["id"], "first_sent": now, "sent": 0, "acked": None,
-                                       "tx": tx, "mark": CTX.get("mark", 0), "who": who}
+                                       "tx": tx, "mark": CTX.get("mark", 0), "who": who, "sender_paseo": me.get("paseo") or ""}
         ln.update(last_sent=now, sent=int(_num(ln.get("sent"))) + 1, target_name=s.get("name") or "", sender_sid=me.get("sid") or ln.get("sender_sid") or "",
-                  target_sid=s.get("sid") or ln.get("target_sid") or "")
+                  target_sid=s.get("sid") or ln.get("target_sid") or "", sender_paseo=me.get("paseo") or ln.get("sender_paseo") or "")
         data["links"][key] = ln
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
@@ -2958,6 +3021,7 @@ def expect_identity(me, s, mark):
     """The fields of an expectation that name its two ends: the sender (session id, label, transcript, how far the transcript was read) and the
     target. `expect_stamp` puts them on the reservation, `note_links_and_expect` on the open record."""
     return {"sender": me["id"], "sender_sid": me.get("sid") or "", "sender_label": me.get("name") or "", "tx": me.get("transcript") or None,
+            "sender_paseo": me.get("paseo") or "",
             "mark": mark, "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
                                      "sid": s.get("sid") or "", "host": s.get("host") or ""}}
 
@@ -3090,8 +3154,15 @@ def ack_sweep():
     """Resolve what replies settled: an open expectation whose sender's transcript holds `ack ID` from its target, a first-contact link whose
     sender's transcript holds `ack <sender id>` naming the peer. Prunes expectations and links idle for EXPECT_KEEP; each link remembers how far
     its sender's transcript was read (`mark`), so a sweep reads only what is new (adversary r1 A10, 2026-10-25). A record a hand edit made
-    unreadable is skipped or dropped, never an exception. Returns (acked, overdue rows)."""
+    unreadable is skipped or dropped, never an exception. A sender with NO transcript (an omp, codex or cline Paseo agent) is read through its own
+    Paseo timeline instead (2026-10-29): the second witness, fetched once per sender before any lock is held. Returns (acked, overdue rows)."""
     acked, overdue, now = 0, [], time.time()
+    d = expect_dir()    # read the records directly, not through expect_all (which a sweep calls only while it holds the lock); a stale read costs one needless or one missed timeline fetch
+    need = {r.get("sender_paseo") for p in (d.glob("*.json") if d.is_dir() else []) if EXPECT_ID.fullmatch(p.stem)
+            for r in [expect_read(p.stem)] if r and r.get("state") == "open" and not r.get("tx")}
+    if fleet.LINKS_FILE.is_file():
+        need |= {ln.get("sender_paseo") for ln in fleet.links_read()["links"].values() if isinstance(ln, dict) and not ln.get("acked") and not ln.get("tx")}
+    timelines = {pid: timeline_blocks(pid) or [] for pid in need if isinstance(pid, str) and UUID.fullmatch(pid)}
     with _flock(defer_dir() / ".expect.lock"):
         # Write via atomic_json under this lock; never call expect_write or take .expect.lock
         # again (PR 87 merge hazard): a second flock in this process blocks forever.
@@ -3103,8 +3174,9 @@ def ack_sweep():
                 continue
             t = r.get("target") if isinstance(r.get("target"), dict) else {}
             who = peer_words({**t, "sid": t.get("sid") or t.get("sid8")})    # only the target's own reply closes it (A2)
-            if r.get("state") == "open" and r.get("tx") and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
-                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now})
+            via_timeline = r.get("state") == "open" and not r.get("tx") and ack_seen(timelines.get(r.get("sender_paseo")) or [], r["id"], who)
+            if r.get("state") == "open" and (via_timeline or (r.get("tx") and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who))):
+                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, **({"acked_via": "timeline"} if via_timeline else {})})
                 with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
                     data = fleet.links_read()
                     ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})    # not a new occupant's link (adversary r2 A5)
@@ -3127,7 +3199,8 @@ def ack_sweep():
                     continue
                 mark = int(_num(ln.get("mark")))
                 texts, end = scan_texts(ln.get("tx"), mark)
-                if ack_seen(texts, ln.get("sender") or "", ln.get("who") or ()):
+                if ack_seen(texts, ln.get("sender") or "", ln.get("who") or ()) or (
+                        not ln.get("tx") and ack_seen(timelines.get(ln.get("sender_paseo")) or [], ln.get("sender") or "", ln.get("who") or ())):
                     ln["acked"], changed = now, True
                     acked += 1
                 elif end != mark:
