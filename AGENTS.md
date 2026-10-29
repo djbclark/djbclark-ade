@@ -286,8 +286,13 @@ pull request here is expected to meet these; flag any it misses.
 11. **CI waiver (2026-10-28; cut to `docs-only` 2026-10-29): the classifier, never an agent's claim, decides.**
     `bin/ci-waiver classify --repo-dir /ABS/REPO --pr N --json` permits only one class, `docs-only`:
     a nonempty diff whose every path matches the exact, case-sensitive `WAIVABLE_PATHS`
-    (`CHANGELOG.md`, `docs/handoffs/**`). **A merge of master is never waived**: it is `none` with reason
-    `master-merge-not-waivable` and keeps ordinary CI. A `master-merge` class was built and removed after
+    (`CHANGELOG.md`, `docs/handoffs/**`). Multiple merge bases are refused as `multiple-merge-bases`;
+    any merge commit in the unique merge base's `ancestor..head` range is refused as
+    `merge-in-pr-history`, before path classification. **A merge of master is never waived**.
+    A candidate also requires a clean `git merge-tree --write-tree base head` result whose
+    nonempty diff against base has only allowlisted, nonexcluded paths and safe file modes;
+    an unsafe or conflicting result is `merge-result-not-docs-only`. A `master-merge` class was built
+    and removed after
     five adversary rounds, each finding a new hole in proving an earlier green run's provenance from
     GitHub's API, which exposes current metadata, not what a run tested (docs/ci-waiver.md, A4).
     Hard exclusions deny `.git*` components (including workflows), nested `tests/`, `conftest.py`,

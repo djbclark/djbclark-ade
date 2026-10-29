@@ -7,8 +7,10 @@
 
 CI waiver (2026-10-28): a live ci-waiver:v1 marker (class "docs-only" only) for the classified
 current head, plus an independent live adversary APPROVE, satisfies pending/absent CI as `waived`.
-Failed checks still block. A merge of master is NOT waivable (docs/ci-waiver.md, "Why not
-master-merge"): it keeps ordinary CI. See docs/ci-waiver.md; malformed, mismatched or
+Failed checks still block. Multiple merge bases or a merge in the unique ancestor..head
+range are NOT waivable, including merges of master. A candidate requires a clean merge-tree
+result against base with a nonempty diff of only waivable paths and safe file modes
+(docs/ci-waiver.md, "Why not master-merge"). See docs/ci-waiver.md; malformed, mismatched or
 unreviewed claims add ci-waiver-malformed/mismatch/needs-adversary blockers.
 Repair (2026-10-29): own bytes must match GitHub's API master SHA, fetched by
 explicit HTTPS URL without local remote/URL config. Replacement objects/grafts

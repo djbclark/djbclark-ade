@@ -51,9 +51,19 @@ can corrupt that anchor. This isolates local checkout state; it does not
 authenticate executables or GitHub, or the author-controlled reviewer identity.
 
 A2. `docs-only` requires a nonempty diff containing only `WAIVABLE_PATHS`:
-`CHANGELOG.md` and `docs/handoffs/**`. The diff is from the merge base to the head,
-with rename detection disabled so both sides of a rename are examined. The
-allowlist and workflow `paths-ignore` entries must stay identical. Allowlist matching
+`CHANGELOG.md` and `docs/handoffs/**`. `git merge-base --all base head` must return
+exactly one ancestor; multiple bases are `multiple-merge-bases`. Before path checks,
+any merge commit in `git rev-list --min-parents=2 ancestor..head` refuses the waiver
+as `merge-in-pr-history`, even below a linear docs-only tip. Merges already shared
+by base and head are outside that range and do not by themselves refuse a waiver.
+The diff is from that unique ancestor to head, with rename detection disabled so
+both sides of a rename are examined. A candidate must also have a clean
+`git merge-tree --write-tree base head` result; its nonempty tree diff against base
+must pass the same allowlist, hard exclusions and file-mode checks. Conflicts or
+an unsafe result are `merge-result-not-docs-only`; Git errors also deny a waiver.
+Online these operations run in the private store; offline they use the fixture repo.
+This checks the supplied API base snapshot, not a later master or GitHub's eventual
+merge tree. The allowlist and workflow `paths-ignore` entries must stay identical. Allowlist matching
 is exact and case-sensitive without Unicode/path normalization; `changelog.md`,
 `Docs/Handoffs/` and casefold-equivalent Unicode paths do not qualify.
 
@@ -103,15 +113,20 @@ classes; it is fixed by the private GitHub-fetched store of A1, which docs-only
 keeps.) The common cause is that GitHub's API exposes current metadata, not an
 immutable record of what a run tested, so the provenance of an earlier green run
 cannot be proven from the API alone and the set of ways to forge it is open-ended.
-A merge of master is therefore classified `none` with reason
-`master-merge-not-waivable` and keeps ordinary CI. A merge whose total diff from
-the PR base is nonempty and entirely `WAIVABLE_PATHS` is still `docs-only`, because
-that diff, not the commit shape, is what A2 judges. The removed code and its tests
+Round 6 then found a criss-cross hole in the docs-only classifier itself: two
+incomparable merge bases let Git's single chosen base show only docs while the
+clean virtual-base merge reverted code and tests. A2 now refuses multiple merge
+bases and any merge in the PR's own `ancestor..head` history before checking paths,
+and separately validates the clean merge-tree result against base. A merge of
+master therefore keeps ordinary CI even when its chosen-base diff contains only
+docs (`merge-in-pr-history`, or `multiple-merge-bases` when applicable).
+The removed master-merge code and its tests
 remain in this PR's history (head `72dad2aa`) if a stronger provenance source,
 such as an immutable run record, ever makes the class worth revisiting.
 
 A5. Everything else is `none`: examples include `touches-nonwaivable:code.py`,
-`master-merge-not-waivable`, `no-changes`, `pr-base-retargeted`,
+`multiple-merge-bases`, `merge-in-pr-history`, `merge-result-not-docs-only`,
+`no-changes`, `pr-base-retargeted`,
 `base-not-on-master` and `shallow-history`. Missing objects, unreadable evidence
 and any Git/GitHub error deny a waiver. Online classification fetches only into
 its private store; offline mode uses its given repository. Neither mode edits a
@@ -174,9 +189,12 @@ waiver. The classifier still denies workflow/test/waiver machinery changes.
 C2. `push.branches: [master]` remains. Push `paths-ignore` necessarily also skips
 docs-only merges on master, so master's push CI does not run on *every* merged
 commit; the filters match the requested allowlist and nothing claims an
-unconditional master run. A docs-only waiver covers only a diff that the workflow
-itself would skip, so the waiver adds no untested code path to master. Fleet
-reporting is unchanged and was not live-verified in this slice.
+unconditional master run. The classifier checks both the unique-ancestor PR diff
+and the clean merge-tree result against the API base snapshot for allowlisted paths,
+hard exclusions and safe file modes. It does not prove GitHub's eventual merged
+commit or workflow filtering decision; the merger must recheck the current head
+and checks immediately before merging. Fleet reporting was not live-verified in
+this slice.
 
 C3. Never use `[skip ci]` to request a waiver: a squash merge can copy commit
 messages into its body, accidentally skipping the master push backstop as well.

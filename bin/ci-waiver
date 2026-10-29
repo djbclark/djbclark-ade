@@ -5,8 +5,10 @@ ci-waiver classify --repo-dir DIR --pr N [--repo OWNER/NAME] [--json]
 ci-waiver classify --repo-dir DIR --base REF --head REF [--repo OWNER/NAME] [--json]
 
 PR mode fetches all evidence into a fresh private GitHub object store; repo-dir
-is used only by offline base/head mode. Only the docs-only class exists: a merge of
-master is never waived (docs/ci-waiver.md, "Why not master-merge").
+is used only by offline base/head mode. Only the docs-only class exists: multiple
+merge bases or a merge in ancestor..head refuse a waiver, including merges of
+master. A clean merge-tree result against base must also have only waivable paths
+and safe file modes (docs/ci-waiver.md, "Why not master-merge").
 Exit 0: classification printed (including fail-closed none); 2: bad usage.
 This file deliberately imports no repository Python code.
 """
@@ -179,20 +181,33 @@ def classify(base, head, repo, pr, repo_dir):
                 timeline = items(f"repos/{repo}/issues/{pr}/timeline?per_page=100")
                 if any(e.get("event") in RETARGET_EVENTS for e in timeline):
                     raise ValueError("pr-base-retargeted")
-            ancestor = r.sha(r.git("merge-base", base, head).stdout.decode().strip())
+            ancestors = r.git("merge-base", "--all", base, head).stdout.decode().split()
+            if len(ancestors) > 1:
+                raise ValueError("multiple-merge-bases")
+            ancestor = r.sha(ancestors[0])
+            if r.git("rev-list", "--min-parents=2", ancestor + ".." + head).stdout.strip():
+                raise ValueError("merge-in-pr-history")
             changed = r.paths(ancestor, head)
             hard = ["hard-exclusion:" + p for p in changed if excluded(p)]
             if hard:
                 return {**result, "reasons": hard}
             r.safe_doc_modes(ancestor, head)
             if changed and all(waivable(p) for p in changed):
+                merged = r.git("merge-tree", "--write-tree", base, head, allowed=(0, 1))
+                if merged.returncode:
+                    raise ValueError("merge-result-not-docs-only")
+                tree = merged.stdout.decode().splitlines()[0]
+                if not re.fullmatch(r"[0-9a-f]{40}", tree):
+                    raise ValueError("merge-result-not-docs-only")
+                merged_paths = r.paths(base, tree)
+                if not merged_paths or any(excluded(p) or not waivable(p) for p in merged_paths):
+                    raise ValueError("merge-result-not-docs-only")
+                try:
+                    r.safe_doc_modes(base, tree)
+                except ValueError:
+                    raise ValueError("merge-result-not-docs-only") from None
                 return {**result, "class": "docs-only", "reasons": ["only-waivable-paths"]}
             reasons = ["touches-nonwaivable:" + p for p in changed if not waivable(p)] or ["no-changes"]
-            parents = r.git("rev-list", "--parents", "-n", "1", head).stdout.decode().split()[1:]
-            if len(parents) > 1:
-                # Five adversary rounds found a new hole every time in proving an earlier
-                # green run for a merge of master; a merge is judged by ordinary CI only.
-                reasons.insert(0, "master-merge-not-waivable")
             return {**result, "reasons": reasons}
     except Exception as e:
         return {**result, "reasons": [str(e)[:240] or type(e).__name__]}

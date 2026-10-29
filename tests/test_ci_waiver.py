@@ -158,8 +158,104 @@ def test_ci_waiver_master_merge_is_not_waivable(history, flag, pr):
     history.merge(docs_conflict=flag == "docs-conflict")
     got = history.classify(pr=pr)
     assert got["class"] == "none"
-    assert got["reasons"][0] == "master-merge-not-waivable"
-    assert "touches-nonwaivable:feature.py" in got["reasons"] and "touches-nonwaivable:master.py" in got["reasons"]
+    assert got["reasons"] == ["merge-in-pr-history"]
+
+
+@pytest.mark.parametrize("pr", [False, True])
+def test_ci_waiver_r6_criss_cross(history, pr):
+    # A and B are incomparable. Master's normal merge keeps both; the evil
+    # merge keeps only A's tree, silently reverting B's code/test additions.
+    history.git("checkout", "-b", "a")
+    a = history.commit({"docs/handoffs/a.md": "A\n"})
+    history.git("checkout", "-b", "b", history.base)
+    b = history.commit({"bin/tool": "tool\n", "tests/test_tool.py": "test\n"})
+    history.git("checkout", "master")
+    history.git("merge", "--no-ff", a, "-m", "A")
+    history.git("merge", "--no-ff", b, "-m", "B")
+    base = history.git("rev-parse", "HEAD")
+    evil = history.git("commit-tree", a + "^{tree}", "-p", a, "-p", b, "-m", "evil merge")
+    history.git("checkout", "-b", "evil", evil)
+    head = history.commit({"docs/handoffs/tip.md": "docs tip\n"})
+    assert set(history.git("merge-base", "--all", base, head).split()) == {a, b}
+    assert history.git("diff", "--name-only", a, head) == "docs/handoffs/tip.md"
+    tree = history.git("merge-tree", "--write-tree", base, head)
+    assert {"bin/tool", "tests/test_tool.py"} <= set(history.git("diff", "--name-only", base, tree).splitlines())
+    history.routes.write_text(json.dumps({"repos/r/p/branches/master": {"commit": {"sha": base}}}))
+    got = history.classify(base=base, pr=pr)
+    assert got["class"] == "none" and got["reasons"] == ["multiple-merge-bases"]
+
+
+@pytest.mark.parametrize("pr", [False, True])
+@pytest.mark.parametrize("tip", [False, True])
+def test_ci_waiver_r6_merge_in_docs_history(history, pr, tip):
+    history.git("checkout", "-b", "docs")
+    history.commit({"docs/handoffs/one.md": "one\n"})
+    history.git("checkout", "-b", "other", history.base)
+    history.commit({"docs/handoffs/two.md": "two\n"})
+    history.git("checkout", "docs")
+    history.git("merge", "--no-ff", "other", "-m", "docs merge")
+    if tip:
+        history.commit({"docs/handoffs/tip.md": "linear docs tip\n"})
+    got = history.classify(pr=pr)
+    assert got["class"] == "none" and got["reasons"] == ["merge-in-pr-history"]
+
+
+@pytest.mark.parametrize("pr", [False, True])
+@pytest.mark.parametrize("conflict", [False, True])
+def test_ci_waiver_r6_linear_merge_result(history, pr, conflict):
+    history.git("checkout", "-b", "docs")
+    history.commit({"CHANGELOG.md": "topic notes\n"})
+    history.git("checkout", "master")
+    base = history.commit({"CHANGELOG.md": "master notes\n"} if conflict else {"code.py": "master code\n"})
+    history.git("checkout", "docs")
+    history.routes.write_text(json.dumps({"repos/r/p/branches/master": {"commit": {"sha": base}}}))
+    got = history.classify(base=base, pr=pr)
+    assert got["class"] == ("none" if conflict else "docs-only")
+    assert got["reasons"] == (["merge-result-not-docs-only"] if conflict else ["only-waivable-paths"])
+
+
+@pytest.mark.parametrize("pr", [False, True])
+def test_ci_waiver_r6_already_applied_docs(history, pr):
+    history.git("checkout", "-b", "docs")
+    history.commit({"CHANGELOG.md": "identical notes\n"})
+    history.git("checkout", "master")
+    base = history.commit({"CHANGELOG.md": "identical notes\n", "code.py": "master code\n"})
+    history.git("checkout", "docs")
+    history.routes.write_text(json.dumps({"repos/r/p/branches/master": {"commit": {"sha": base}}}))
+    got = history.classify(base=base, pr=pr)
+    assert got["class"] == "none" and got["reasons"] == ["merge-result-not-docs-only"]
+
+
+@pytest.mark.parametrize("pr", [False, True])
+def test_ci_waiver_r6_shared_merge_allows_linear_docs(history, pr):
+    history.merge()
+    history.base = history.git("rev-parse", "HEAD")
+    history.commit({"docs/handoffs/linear.md": "docs after shared merge\n"})
+    got = history.classify(pr=pr)
+    assert got["class"] == "docs-only" and got["reasons"] == ["only-waivable-paths"]
+
+
+@pytest.mark.parametrize("unsafe", ["code.py", "docs/handoffs/tests/hidden.py", "executable"])
+def test_ci_waiver_r6_merge_result_policy(history, unsafe):
+    # Fault injection isolates the defense-in-depth result check from the
+    # history guards: the merge engine returns a clean but unsafe result tree.
+    path = "docs/handoffs/run.md" if unsafe == "executable" else unsafe
+    history.commit({path: "unsafe\n"})
+    if unsafe == "executable":
+        (history.repo / path).chmod(0o755)
+        history.git("add", path)
+        history.git("commit", "-m", "executable")
+    tree = history.git("rev-parse", "HEAD^{tree}")
+    # Keep the injected tree reachable in the fetched ancestry, then make the
+    # actual PR's unique-ancestor diff a regular docs-only change.
+    history.git("revert", "--no-edit", "HEAD")
+    history.base = history.git("rev-parse", "HEAD")
+    history.commit({"docs/handoffs/safe.md": "safe\n"})
+    source = history.transport.read_text()
+    history.transport.write_text(source.replace("os.execv(",
+        "if 'merge-tree' in args: print(" + repr(tree) + "); sys.exit(0)\nos.execv("))
+    got = history.classify(pr=True)
+    assert got["class"] == "none" and got["reasons"] == ["merge-result-not-docs-only"]
 
 
 def test_ci_waiver_pr_reads_exact_base_and_head(history):

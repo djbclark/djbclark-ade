@@ -238,6 +238,8 @@ elif a==['rev-parse','--is-shallow-repository']: print('false')
 elif a[:2]==['rev-parse','--verify'] and a[-1].startswith('b'*40) and os.environ.get('WAIVER_BAD_MASTER'): print('c'*40)
 elif a[0]=='rev-parse': print('a'*40 if a[-1].startswith('a') else 'b'*40)
 elif a[0]=='merge-base': print('b'*40)
+elif a[0]=='rev-list': pass
+elif a[0]=='merge-tree': print('c'*40)
 elif a[0]=='diff':
     if '--raw' not in a: sys.stdout.buffer.write(os.environ.get('WAIVER_CHANGED_PATH','CHANGELOG.md').encode()+b'\\0')
 else: sys.exit(1)
