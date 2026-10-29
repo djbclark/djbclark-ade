@@ -252,6 +252,23 @@ class TestExpectAck(Base):
         self.reply_to_me("ack build12")
         self.assertIn("0 resolved", self.run_cli("--sweep")[1])
 
+    def test_a_sentence_final_period_after_the_id_is_still_the_ack(self) -> None:
+        self.go("is the build green?", "--expect-ack", "build1")
+        self.reply_to_me("ack build1.")
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+
+    def test_ack_token_takes_a_final_period_only_before_whitespace_or_the_end(self) -> None:
+        pat = relay.ack_token("build1")
+        for good in ("ack build1", "ack build1.", "Ack: build1. thanks", "ack=build1. ", "ack build1 done."):
+            self.assertTrue(pat.search(good), good)
+        for bad in ("ack build1.more", "ack build1.-x", "ack build1..x", "ack build1-x", "ack build1_x", "ack build12.", "ack build1.2"):
+            self.assertFalse(pat.search(bad), bad)
+
+    def test_a_dotted_longer_id_is_not_the_ack_in_a_sweep(self) -> None:
+        self.go("is the build green?", "--expect-ack", "build1")
+        self.reply_to_me("ack build1.more")
+        self.assertIn("0 resolved", self.run_cli("--sweep")[1])
+
     def test_an_unanswered_expectation_goes_overdue_and_the_sweep_flags_it_for_the_operator(self) -> None:
         self.go("is the build green?", "--expect-ack", "build1", "--ack-within", "60")
         path = relay.expect_dir() / "build1.json"
@@ -296,6 +313,296 @@ class TestExpectAck(Base):
             rc, out = self.run_cli("--pending", "--json")
             self.assertEqual(rc, 0)
             self.assertEqual([r["created"] for r in json.loads(out) if r.get("kind") == "expect"], [0.0])
+
+
+class TestTransferExpectations(Base):
+    """A retired sender explicitly hands its outstanding questions to a real successor."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "build1")[0], 0)
+        self.before = relay.expect_read("build1")
+        self.successor_tx = self.tmp / "successor.jsonl"
+        self.successor_tx.write_text("{}\n")
+        self.successor = sess(id="eeeeeeee", name="successor", sid="eeeeeeee-0000-4000-8000-000000000005",
+                              transcript=str(self.successor_tx), status="working")
+        self.successor["self"] = True
+        self.old = {**self.me, "self": False, "finished": "/handoff"}
+        self.rows = [self.old, self.successor, self.target]
+        relay.fleet.sessions = lambda: self.rows
+
+    def transfer(self, *args: str) -> tuple[int, str]:
+        return self.run_cli("--transfer-expectations", self.old["id"], *args)
+
+    def test_transfer_finished_sender_preserves_question_and_age_and_pending_shows_new_owner(self) -> None:
+        self.assertEqual(self.transfer()[0], 0)
+        r = relay.expect_read("build1")
+        for key in ("id", "state", "target", "created", "within", "acked"):
+            self.assertEqual(r[key], self.before[key], key)
+        self.assertEqual(r["sender"], self.successor["id"])
+        self.assertEqual(r["sender_sid"], self.successor["sid"])
+        self.assertEqual(r["tx"], str(self.successor_tx))
+        self.assertEqual(r["transferred_from"]["sender"], self.old["id"])
+        self.assertEqual(r["transferred_from"]["tx"], str(self.me_tx))
+        self.assertGreater(r["transferred_at"], 0)
+        rows = json.loads(self.run_cli("--pending", "--json")[1])
+        self.assertEqual([x["sender"] for x in rows if x.get("kind") == "expect"], ["successor"])
+        self.assertIn("from successor", self.run_cli("--pending")[1])
+
+    def test_transfer_live_or_blocked_or_unknown_sender_is_refused_without_changes(self) -> None:
+        for finished, status in (("", "working"), ("", "idle"), ("", "blocked")):
+            self.old.update(finished=finished, status=status)
+            self.assertEqual(self.transfer()[0], 2)
+            self.assertEqual(relay.expect_read("build1"), self.before)
+        self.rows.remove(self.old)
+        self.assertEqual(self.transfer()[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
+
+    def test_transfer_unrelated_closed_reserved_and_different_session_records_are_untouched(self) -> None:
+        others = [{**self.before, "id": "other", "sender": "ffffffff"},
+                  {**self.before, "id": "closed", "state": "acked"},
+                  {**self.before, "id": "reserved", "state": "reserved"},
+                  {**self.before, "id": "reused", "sender_sid": "another-session"}]
+        for r in others:
+            relay.expect_write(r)
+        self.assertEqual(self.transfer()[0], 0)
+        for r in others:
+            self.assertEqual(relay.expect_read(r["id"]), r)
+
+    def test_transfer_is_idempotent_including_file_bytes(self) -> None:
+        self.assertEqual(self.transfer()[0], 0)
+        path = relay.expect_dir() / "build1.json"
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        self.assertEqual(self.transfer("--json"), (0, json.dumps({"transferred": [], "acked": [], "skipped": [], "missing": [], "sender": self.successor["id"]}) + "\n"))
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
+    def test_transfer_late_ack_in_successor_resolves_by_sweep_old_transcript_does_not(self) -> None:
+        self.assertEqual(self.transfer()[0], 0)
+        self.reply_to_me("ack build1")
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "open")
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from peer-fb] ack build1"}})
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
+    def test_transfer_ignores_old_successor_text_and_ack_from_wrong_peer(self) -> None:
+        # Successor-side text before the transfer offset is ignored; transfer BEFORE notifying peers.
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from peer-fb] ack build1"}})
+        self.assertEqual(self.transfer()[0], 0)
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from mallory] ack build1"}})
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "open")
+
+    def test_transfer_repeatable_ids_select_only_named_tokens(self) -> None:
+        for eid in ("build2", "build3"):
+            relay.expect_write({**self.before, "id": eid})
+        self.assertEqual(self.transfer("--id", "build1", "--id", "build3")[0], 0)
+        self.assertEqual(relay.expect_read("build2")["sender"], self.old["id"])
+        self.assertEqual(relay.expect_read("build3")["sender"], self.successor["id"])
+
+    def test_transfer_full_session_identity_works_but_prefix_name_and_ambiguity_do_not(self) -> None:
+        for ident in ("", self.old["sid"][:10], self.old["name"]):
+            self.assertEqual(self.run_cli("--transfer-expectations", ident)[0], 2)
+        self.rows.append({**self.old, "id": "duplicate"})
+        self.assertEqual(self.run_cli("--transfer-expectations", self.old["sid"])[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
+        self.rows.pop()
+        self.assertEqual(self.run_cli("--transfer-expectations", self.old["sid"])[0], 0)
+
+    def test_transfer_requires_real_successor_and_refuses_self_or_finished_caller(self) -> None:
+        for changes in ({"self": False}, {"finished": "done"}, {"id": self.old["id"]}):
+            saved = dict(self.successor)
+            self.successor.update(changes)
+            self.assertEqual(self.transfer()[0], 2)
+            self.assertEqual(relay.expect_read("build1"), self.before)
+            self.successor.clear()
+            self.successor.update(saved)
+
+    def test_transfer_null_transcript_record_adopts_successor_transcript(self) -> None:
+        relay.expect_write({**self.before, "tx": None})
+        self.assertEqual(self.transfer()[0], 0)
+        self.assertEqual(relay.expect_read("build1")["tx"], str(self.successor_tx))
+        self.append(self.successor_tx, {"type": "user", "message": {"role": "user", "content": "[relay from peer-fb] ack build1"}})
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
+    def test_transfer_successor_without_transcript_keeps_relay_ack_path(self) -> None:
+        self.successor["transcript"] = None
+        with mock.patch.object(relay, "pane_transcript", return_value=None):
+            self.assertEqual(self.transfer()[0], 0)
+        r = relay.expect_read("build1")
+        self.assertIsNone(r["tx"])
+        relay.CTX.update(me=self.target, s=self.successor, text="ack build1", accepted=True)
+        self.assertEqual(relay.expect_resolve_by_relay(), 1)
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
+    def test_transfer_bad_token_and_mixed_commands_never_change_records(self) -> None:
+        for args in (("--id", "../x"), ("--pending",), ("--sweep",), ("--plan",), ("someone", "text")):
+            self.assertEqual(self.transfer(*args)[0], 2)
+            self.assertEqual(relay.expect_read("build1"), self.before)
+        self.assertEqual(self.run_cli("--id", "build1")[0], 2)
+
+    def test_transfer_unswept_old_ack_settles_record_and_link(self) -> None:
+        self.reply_to_me("ack build1")
+        rc, out = self.transfer("--json")
+        self.assertEqual(rc, 0)
+        result = json.loads(out)
+        self.assertEqual(result["acked"], ["build1"])
+        self.assertEqual(result["transferred"], [])
+        r = relay.expect_read("build1")
+        self.assertEqual(r["state"], "acked")
+        self.assertEqual(r["sender"], self.old["id"])
+        self.assertNotIn("transferred_from", r)
+        link = fleet.link_get(fleet.links_read()["links"], self.old, self.target)
+        self.assertEqual(link["acked"], r["acked"])
+        self.run_cli("--sweep")
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
+    def test_transfer_unswept_old_ack_requires_target_and_record_offset(self) -> None:
+        self.reply_to_me("ack build1")
+        mark = self.me_tx.stat().st_size
+        relay.expect_write({**self.before, "mark": mark})
+        self.reply_to_me("[relay from mallory] ack build1", tagged=False)
+        self.assertEqual(json.loads(self.transfer("--json")[1])["transferred"], ["build1"])
+
+    def test_transfer_empty_sender_sid_cannot_adopt_live_occupants_record(self) -> None:
+        self.rows.append({**self.old, "finished": "", "sid": "", "status": "working", "name": "live-occupant"})
+        legacy = {**self.before, "id": "legacy", "sender_sid": ""}
+        relay.expect_write(legacy)
+        rc, out = self.run_cli("--transfer-expectations", self.old["sid"], "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out)["skipped"], ["legacy"])
+        self.assertEqual(relay.expect_read("legacy"), legacy)
+
+    def test_transfer_known_old_sid_requires_nonempty_stored_sid(self) -> None:
+        relay.expect_write({**self.before, "sender_sid": ""})
+        result = json.loads(self.transfer("--json")[1])
+        self.assertEqual(result["skipped"], ["build1"])
+        self.assertEqual(relay.expect_read("build1")["sender"], self.old["id"])
+
+    def test_transfer_sidless_old_requires_unique_fleet_id(self) -> None:
+        self.old["sid"] = ""
+        legacy = {**self.before, "sender_sid": ""}
+        relay.expect_write(legacy)
+        self.old["paseo"] = "retired-paseo-id"
+        self.rows.append({**self.old, "sid": "new-session", "finished": "", "paseo": "other-paseo-id"})
+        rc, out = self.run_cli("--transfer-expectations", "retired-paseo-id", "--json")
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out)["skipped"], ["build1"])
+        self.assertEqual(relay.expect_read("build1"), legacy)
+        self.rows.pop()
+        self.assertEqual(self.transfer()[0], 0)
+        self.assertEqual(relay.expect_read("build1")["sender"], self.successor["id"])
+
+    def test_transfer_target_cannot_adopt_its_own_question(self) -> None:
+        for target in ({**self.before["target"], "id": self.successor["id"]},
+                       {**self.before["target"], "sid": self.successor["sid"]}):
+            record = {**self.before, "target": target}
+            relay.expect_write(record)
+            rc, out = self.transfer("--id", "build1", "--json")
+            self.assertEqual(rc, 1)
+            self.assertEqual(json.loads(out)["skipped"], ["build1"])
+            self.assertEqual(json.loads(out)["missing"], ["build1"])
+            self.assertEqual(relay.expect_read("build1"), record)
+        self.target["self"], self.successor["self"] = True, False
+        relay.expect_write(self.before)
+        self.assertEqual(json.loads(self.transfer("--json")[1])["skipped"], ["build1"])
+        self.assertEqual(relay.expect_read("build1"), self.before)
+
+    def test_transfer_missing_requested_tokens_exit_one_and_zero_has_no_colon(self) -> None:
+        for eid, updates in (("closed", {"state": "acked"}), ("reserved", {"state": "reserved"}),
+                             ("foreign", {"sender": "someone-else"}), ("skipped", {"sender_sid": "other-session"})):
+            relay.expect_write({**self.before, "id": eid, **updates})
+        for eid in ("nosuch", "closed", "reserved", "foreign", "skipped"):
+            rc, out = self.transfer("--id", eid, "--json")
+            self.assertEqual(rc, 1)
+            self.assertEqual(json.loads(out)["missing"], [eid])
+        rc, out = self.transfer("--id", "nosuch")
+        self.assertEqual(rc, 1)
+        self.assertIn('missing: ["nosuch"]', out)
+        self.assertNotIn(self.successor["id"] + ":", out)
+        self.assertEqual(self.transfer()[0], 0)
+        rc, out = self.transfer()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, f'transferred 0 expectations to {self.successor["id"]}; skipped: ["skipped"]\n')
+        (relay.expect_dir() / "skipped.json").unlink()
+        self.assertEqual(self.transfer()[1], f"transferred 0 expectations to {self.successor['id']}\n")
+
+    def test_transfer_partial_requested_tokens_report_missing_and_acked(self) -> None:
+        self.reply_to_me("ack build1")
+        relay.expect_write({**self.before, "id": "build2"})
+        rc, out = self.transfer("--id", "build1", "--id", "build2", "--id", "absent", "--json")
+        self.assertEqual(rc, 1)
+        result = json.loads(out)
+        self.assertEqual(result["transferred"], ["build2"])
+        self.assertEqual(result["acked"], ["build1"])
+        self.assertEqual(result["missing"], ["absent", "build1"])
+
+    def test_transfer_text_reports_settled_ack(self) -> None:
+        self.reply_to_me("ack build1")
+        self.assertIn('acked: ["build1"]', self.transfer()[1])
+
+    def test_transfer_refuses_sender_override_and_hermes_caller(self) -> None:
+        for override, caller in (("stored-label", None), (None, {"id": "hermes-caller"})):
+            with mock.patch.object(relay, "SENDER_OVERRIDE", [override]), mock.patch.object(relay, "hermes_caller", return_value=caller):
+                self.assertEqual(self.transfer()[0], 2)
+            self.assertEqual(relay.expect_read("build1"), self.before)
+
+    def test_transfer_refuses_empty_successor_id(self) -> None:
+        self.successor["id"] = ""
+        self.assertEqual(self.transfer()[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
+
+    def test_transfer_same_pane_distinct_session_refused_even_by_full_sid(self) -> None:
+        self.successor["id"] = self.old["id"]
+        self.assertNotEqual(self.old["sid"], self.successor["sid"])
+        self.assertEqual(self.run_cli("--transfer-expectations", self.old["sid"])[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
+
+    def test_transfer_interleave_sweep_cannot_ack_then_be_reopened(self) -> None:
+        original = relay.expect_all
+        attempted = []
+
+        def interleave():
+            stale = original()
+            # A second descriptor models a sweep's writer between transfer's read and write.
+            with relay._flock(relay.defer_dir() / ".expect.lock", wait=False) as held:
+                attempted.append(held)
+                if held:
+                    relay.atomic_json(relay.expect_dir() / "build1.json", {**self.before, "state": "acked", "acked": time.time()})
+                else:
+                    # The concurrent writer cannot run; an ack already in the old transcript is settled by transfer.
+                    self.reply_to_me("ack build1")
+            return stale
+
+        with mock.patch.object(relay, "expect_all", side_effect=interleave):
+            self.assertEqual(self.transfer()[0], 0)
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+        self.assertEqual(attempted, [False])
+
+    def test_transfer_sweep_read_and_write_hold_expectation_lock(self) -> None:
+        self.reply_to_me("ack build1")
+        original = relay.expect_all
+        attempted = []
+
+        def interleave():
+            stale = original()
+            with relay._flock(relay.defer_dir() / ".expect.lock", wait=False) as held:
+                attempted.append(held)
+                if held:
+                    # A transfer racing an unlocked sweep would lose its new owner to the stale ack write.
+                    relay.atomic_json(relay.expect_dir() / "build1.json", {**self.before, "sender": self.successor["id"]})
+            return stale
+
+        with mock.patch.object(relay, "expect_all", side_effect=interleave):
+            relay.ack_sweep()
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+        self.assertEqual(attempted, [False])
+
+    def test_transfer_unreadable_successor_transcript_changes_nothing(self) -> None:
+        self.successor["transcript"] = str(self.tmp / "missing.jsonl")
+        self.assertEqual(self.transfer()[0], 2)
+        self.assertEqual(relay.expect_read("build1"), self.before)
 
 
 class TestExpectWithoutTranscript(Base):
