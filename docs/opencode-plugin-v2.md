@@ -44,6 +44,11 @@ fails the plugin).
 
 ## The two plugins that broke on 2026-10-11
 
+**Update 2026-10-29:** OpenUsage was uninstalled (djbclark), so the canonical
+`openusage-telemetry.ts`, the guard's `openusage` handling and plugin-entry strip, and the
+OpenUsage hooks in the Claude and Codex templates are gone. Only `rtk.ts` is guarded now;
+the `openusage-telemetry.ts` row below is history.
+
 | Plugin | Cause | Local fix |
 |---|---|---|
 | `rtk.ts` (auto-discovered) | v1 shape: `export const RtkOpenCodePlugin: Plugin = async …` — no default object at all | Rewritten to `export default { id: "rtk", server: RtkOpenCodePlugin, setup }`; automatic rewriting disabled in both entrypoints on 2026-10-25 (see below) |

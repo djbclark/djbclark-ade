@@ -59,9 +59,6 @@ def guard(tmp_path):
     canonical = tmp_path / "canonical"
     canonical.mkdir()
     shutil.copyfile(SAFE, canonical / "rtk.ts")
-    telemetry = 'export default { id: "openusage-telemetry", setup() {} }\n'
-    (canonical / "openusage-telemetry.ts").write_text(telemetry)
-    (plugins / "openusage-telemetry.ts").write_text(telemetry)
     bins = tmp_path / "bin"
     bins.mkdir()
     for name in ["grep", "date", "head"]:
@@ -73,7 +70,7 @@ def guard(tmp_path):
     (bins / "rtk").chmod(0o755)
     state = home / ".local/state/opencode-plugin-guard"
     state.mkdir(parents=True)
-    for old in ["obsolete", "upstream-v2-rtk", "upstream-v2-openusage"]:
+    for old in ["obsolete", "upstream-v2-rtk"]:
         (state / old).touch()
     env = {**os.environ, "HOME": str(home), "PATH": str(bins) + os.pathsep + os.environ["PATH"],
            "OPENCODE_CONFIG_DIR": str(config), "OPENCODE_PLUGIN_GUARD_CANONICAL": str(canonical)}

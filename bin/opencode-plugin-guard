@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# opencode-plugin-guard — keep the two tool-managed OpenCode plugins at the v2
+# opencode-plugin-guard — keep the tool-managed OpenCode plugin (rtk) at the v2
 # module shape that OpenCode 2 requires.
 #
-# Why: openusage and rtk each write their plugin file from an embedded template
-# that is still the v1 shape (a bare exported function), which OpenCode 2
-# rejects at load. `openusage integrations upgrade opencode` and
-# `rtk init -g --opencode` therefore silently revert a working plugin. The
-# canonical copies here are the patched files; this guard restores them only
-# when the v2 shape is missing, or migrates the exact known unsafe RTK shim.
+# Why: rtk writes its plugin file from an embedded template that is still the
+# v1 shape (a bare exported function), which OpenCode 2 rejects at load.
+# `rtk init -g --opencode` therefore silently reverts a working plugin. The
+# canonical copy here is the patched file; this guard restores it only when
+# the v2 shape is missing, or migrates the exact known unsafe RTK shim.
 #
 #   opencode-plugin-guard --check   report only, change nothing
 #   opencode-plugin-guard           restore what is missing (default)
@@ -131,47 +130,11 @@ handle() {
   rc=1
 }
 
-# openusage's installer re-adds a `plugin: ["file://…openusage-telemetry.ts"]`
-# entry, which only produces a "configured plugin path must be a directory"
-# warning (the plugins/ dir is auto-discovered). Strip it.
-strip_plugin_entry() {
-  local cfg=""
-  for candidate in "$CONFIG_DIR/opencode.json" "$CONFIG_DIR/opencode.jsonc"; do
-    [ -f "$candidate" ] && cfg="$candidate" && break
-  done
-  [ -n "$cfg" ] || return 0
-  ggrep -q 'openusage-telemetry.ts' "$cfg" || return 0
-  log "  opencode.json still lists openusage-telemetry.ts as a plugin entry"
-  if [ "$CHECK" = 1 ]; then
-    log "    would strip it (backup first)"
-    rc=1
-    return
-  fi
-  cp "$cfg" "$cfg.bak-$(gdate -u +%Y%m%dT%H%M%SZ)"
-  python3 - "$cfg" <<'PY'
-import json, sys
-p = sys.argv[1]
-d = json.load(open(p))
-plugins = d.get("plugin")
-if isinstance(plugins, list):
-    kept = [x for x in plugins if not (isinstance(x, str) and "openusage-telemetry.ts" in x)]
-    if kept:
-        d["plugin"] = kept
-    else:
-        d.pop("plugin", None)
-json.dump(d, open(p, "w"), indent=2)
-open(p, "a").write("\n")
-print("    stripped the redundant plugin entry")
-PY
-}
-
 log "opencode-plugin-guard $( [ "$CHECK" = 1 ] && echo '(check)' || echo '(enforce)') — $(gdate -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # An old obsolescence sentinel is not evidence of permission safety. Always
 # inspect the managed files; never execute `rtk hook opencode` as a probe.
 handle rtk "$LIVE_DIR/rtk.ts" "$CANONICAL_DIR/rtk.ts"
-handle openusage "$LIVE_DIR/openusage-telemetry.ts" "$CANONICAL_DIR/openusage-telemetry.ts"
-strip_plugin_entry
 
 # Retirement requires an explicit review of the upstream permission contract,
 # not a default export, a stale drift marker or a successful subcommand.

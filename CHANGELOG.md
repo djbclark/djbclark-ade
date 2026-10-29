@@ -284,6 +284,10 @@ agent what changed and what is new. Entries end with the pull request number.
   is exit 4, "skill check incomplete"); `bin/ade-update` warns on stderr when it runs from a path other than
   the canonical checkout (#20).
 
+### Removed
+
+- Removed the OpenUsage wiring (2026-10-29): the canonical `opencode-plugins/openusage-telemetry.ts`, its handling in `bin/opencode-plugin-guard` (the guard now manages `rtk` only), the three `claude-hook.sh` blocks in `agents/claude/settings.json.tmpl` and the `--previous-notify` fanout in `agents/codex/config.toml.tmpl`; an OpenUsage app relaunched from a stale `dist/` build is no longer fed by hooks or plugins (#119).
+
 ### Fixed
 
 - `bin/paseo-new-seat` (2026-10-29): a claude seat created with the shield on no longer prints "auto_accept: NOT verified - the shield may be grey" and exits 4 once its mode is verified. Claude never publishes an `auto_accept` feature (its yolo is the permission mode), so its empty feature list is now "not offered" rather than "unverified"; other providers with an empty list still report unverified (#122).
