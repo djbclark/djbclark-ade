@@ -820,6 +820,25 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertNotIn("planplan", r.stdout)
         self.assertNotIn("<agent mode", r.stdout)
 
+    def test_a_mode_the_claude_provider_does_not_have_is_refused_before_anything_starts(self) -> None:
+        # 2026-10-23: `--mode full` (an omp mode) reached `paseo run` and came back AGENT_CREATE_FAILED
+        for flags in ((), ("--dry-run",)):
+            r = self.run_ss(*flags, *self.SUCCESSOR, "--mode", "full", **self.succ_env())
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("--mode full is not a mode of the claude provider", r.stderr)
+            for valid in ("plan", "default", "acceptEdits", "auto", "bypassPermissions"):
+                self.assertIn(valid, r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+        self.assertFalse(self.log.exists())
+
+    def test_every_claude_mode_and_other_providers_modes_pass_validation(self) -> None:
+        for mode in ("plan", "default", "acceptEdits", "auto", "bypassPermissions"):
+            r = self.run_ss("--dry-run", *self.SUCCESSOR, "--mode", mode, **self.succ_env())
+            self.assertEqual(r.returncode, 0, mode + r.stdout + r.stderr)
+        # a provider whose modes are not known here is left to Paseo
+        r = self.run_ss("--dry-run", "--finish", "--successor", "omp/some-model", "--mode", "full", **self.succ_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_successor_takes_the_lifecycle_lock(self) -> None:
         self.lockdir.mkdir(parents=True)
         holder = subprocess.Popen(["sleep", "60"])

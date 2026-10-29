@@ -123,6 +123,11 @@
 # pane's agent_status is "working": a command sent mid-turn is swallowed, never run
 # (seen 2026-10-09: a /rename sent while the session worked left no trace).
 # A stale $HERDR_PANE_ID (pane moved between workspaces) is resolved via `herdr pane get`.
+# Prompt wait (2026-10-28): the waiter looks for the empty prompt in the last 12 rows, then in the last
+# SELF_SLASH_READ_LINES (default 60), and while the pane is visibly busy (spinner on screen or herdr status
+# working) keeps waiting up to SELF_SLASH_WAIT; a quiet pane with no prompt gives up after ~45 s (exit 5).
+# Nothing is ever typed without an empty prompt on screen.  --successor --mode for claude must be one of
+# plan, default, acceptEdits, auto, bypassPermissions (exit 2 otherwise, nothing started).
 # Refuses (exit 7) a /compact while another command is queued for the same pane.
 # Refuses (exit 7) a /compact, /new, /clear or /reset within SELF_SLASH_COMPACT_GAP
 # (default 1800 s) of any of those four sent there (2026-10-18: the context hook now
@@ -194,8 +199,9 @@ finish_flag=$finish
                   path to an existing file, else exit 2); --mode defaults to this agent's mode for the same provider (an
                   empty mode passes none), bypassPermissions for a claude successor from another provider, else the
                   provider's own default; without --mode, an inspect of this agent that lacks a Provider or a Mode
-                  value exits 11 and starts nothing)
-       exit codes: 2 usage, 3 no host or unknown baton syntax, 4 draft in the input box, 5 no prompt, 6 session still working,
+                  value exits 11 and starts nothing; for a claude successor --mode is one of plan, default, acceptEdits,
+                  auto, bypassPermissions, else exit 2 before anything starts)
+       exit codes: 2 usage, 3 no host or unknown baton syntax, 4 draft in the input box, 5 no prompt (a busy pane is waited for up to SELF_SLASH_WAIT), 6 session still working,
        7 refused (gap check or lifecycle already queued), 8 archive refused or Codex submission unconfirmed (identity, target change or no rollout receipt), 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
        11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable),
@@ -234,6 +240,14 @@ if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s
 lc=abcdefghijklmnopqrstuvwxyz; uc=ABCDEFGHIJKLMNOPQRSTUVWXYZ; dg=0123456789
 case "$successor" in ""|["$uc$lc$dg"]*) ;; *) echo "self-slash: --successor takes PROVIDER or PROVIDER/MODEL (got: $successor)" >&2; exit 2;; esac
 case "$successor$s_thinking$s_mode$s_workspace" in *[!"$uc$lc$dg"._/:-]*) echo "self-slash: --successor, --thinking, --mode and --workspace take plain ids (letters, digits, . _ / : -)" >&2; exit 2;; esac
+# A claude successor takes only claude's own modes: `paseo run --mode full` (an omp mode) died with
+# AGENT_CREATE_FAILED after this session had waited (2026-10-23), and the herdr path hands --mode to
+# `claude --permission-mode`.  Refuse now, before any wait or launch.  Ids from the Paseo claude provider
+# (its UI list, 2026-10-28); another provider's modes are not known here and stay Paseo's to judge.
+if [ -n "$s_mode" ] && [ "${successor%%/*}" = claude ]; then
+  case "$s_mode" in plan|default|acceptEdits|auto|bypassPermissions) ;;
+    *) echo "self-slash: --mode $s_mode is not a mode of the claude provider (valid: plan, default, acceptEdits, auto, bypassPermissions); nothing was started" >&2; exit 2;; esac
+fi
 # --finish ends the session, so a follow-up would be typed into whatever is left (a shell prompt).
 if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then echo "self-slash: --finish takes no --then (got: $then)" >&2; exit 2; fi
 # Lifecycle actions end the session or throw its context away.
@@ -578,31 +592,58 @@ fi
 # 2026-10-09 17:00: a waiter sat for minutes on a ghost suggestion.  Verified
 # 17:03: the suggestion ("did the compact fire this time?") arrived as plain dim
 # (ESC[2m, no RGB grey), was classified EMPTY, and the /compact was sent over it.
+# The prompt is searched in the last 12 rows first (the usual place, and the fewest stale rows); only when
+# that shows none, in the last SELF_SLASH_READ_LINES (default 60), so a multi-row status area, hook output or
+# a queued-message list under the input box no longer hides it (2026-10-23/24: four "gave up" in herdr panes).
+# A prompt row is still the LAST marker row of whichever window answered: text on it is never typed over.
 classify_prompt() {
+  local n out
   if [ "$host" = paseo ]; then
     # No terminal input line: the GUI composer's draft is untouched by a CLI send.
     echo EMPTY
-  elif [ "$host" = herdr ]; then
-    # The rules (dim, grey, reverse video, known hints) live in prompt_line.py, shared with relay.py.
-    herdr agent read "$pane" --source visible --lines 12 --format ansi 2>/dev/null \
-      | python3 "$prompt_line" "$marker" 2>>"$log"
-  else
-    screen=$(read_screen)
-    if ! printf "%s\n" "$screen" | ggrep -qE "^[[:space:]]*❯"; then echo NOPROMPT; return; fi
-    prompt=$(printf "%s\n" "$screen" | ggrep -E "^[[:space:]]*❯" | gtail -1 | gsed -E "s/^[[:space:]]*❯[[:space:]]*//")
-    case "$prompt" in "Try \""*|"Try “"*|"Press up to edit queued messages"*) prompt="";; esac
-    echo "${prompt:-EMPTY}"
+    return
   fi
+  for n in 12 "${SELF_SLASH_READ_LINES:-60}"; do
+    if [ "$host" = herdr ]; then
+      # The rules (dim, grey, reverse video, known hints) live in prompt_line.py, shared with relay.py.
+      out=$(herdr agent read "$pane" --source visible --lines "$n" --format ansi 2>/dev/null \
+        | python3 "$prompt_line" "$marker" 2>>"$log")
+    else
+      screen=$(read_screen "$n")
+      if ! printf "%s\n" "$screen" | ggrep -qE "^[[:space:]]*❯"; then out=NOPROMPT; else
+        out=$(printf "%s\n" "$screen" | ggrep -E "^[[:space:]]*❯" | gtail -1 | gsed -E "s/^[[:space:]]*❯[[:space:]]*//")
+        case "$out" in "Try \""*|"Try “"*|"Press up to edit queued messages"*) out="";; esac
+        out="${out:-EMPTY}"
+      fi
+    fi
+    [ "$out" = NOPROMPT ] || break
+  done
+  printf '%s\n' "$out"
 }
+# read_screen N: the last N visible rows.
 read_screen() {
   if [ "$host" = herdr ]; then
-    herdr agent read "$pane" --source visible --lines 12 2>/dev/null
+    herdr agent read "$pane" --source visible --lines "${1:-12}" 2>/dev/null
   else
-    orca terminal read --terminal "$pane" --screen --limit 12 --json 2>/dev/null | python3 -c '
+    orca terminal read --terminal "$pane" --screen --limit "${1:-12}" --json 2>/dev/null | python3 -c '
 import json, sys
 t = json.load(sys.stdin).get("result", {}).get("terminal", {})
 print("\n".join(t.get("tail") or []))'
   fi
+}
+# pane_busy: a turn is visibly running (herdr's own status is working, or the main-turn spinner / "esc to
+# interrupt" / cursor's "ctrl+c to stop" is on screen).  A pane with no prompt that is busy is waited for up to
+# SELF_SLASH_WAIT; one that is idle and shows no prompt gives up after the short idle budget.
+pane_busy() {
+  if [ "$host" = herdr ]; then
+    st=$(herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+pane = sys.argv[1]
+for p in json.load(sys.stdin).get("result", {}).get("panes", []):
+    if p.get("pane_id") == pane: print(p.get("agent_status", "")); break' "$pane" 2>/dev/null)
+    [ "$st" != working ] || return 0
+  fi
+  read_screen 60 | ggrep -qE '…[[:space:]]*\([0-9]+[smh]|esc to interrupt|ctrl\+c to stop'
 }
 # Codex identity and receipt (2026-10-25).  `ident PANE`: `herdr agent get` must succeed and name provider codex, this pane,
 # an idle or done status and a well-formed session record; prints "<session id>\t<rollout size>" (either may be empty/0 right
@@ -1207,10 +1248,18 @@ if [ "$finish" = 1 ] && [ "$host" = herdr ] && [ -n "$successor" ]; then
   exit "$rc"
 fi
 wait_idle
-noprompt=0; sendfail=0; drafted=0; last_prompt=""; same=0
+noprompt=0; sendfail=0; drafted=0; last_prompt=""; same=0; busy_wait=0
 while :; do
   prompt=$(classify_prompt)
   if [ "$prompt" = NOPROMPT ]; then
+    # A pane that is visibly busy (spinner on screen, or herdr says working) is not "no prompt": its prompt
+    # comes back when the turn ends, so wait for it, bounded by SELF_SLASH_WAIT; only a quiet pane that shows
+    # no prompt gives up after 9 polls (~45 s).  Nothing is ever sent without an empty prompt on screen.
+    if pane_busy; then
+      [ "$busy_wait" -lt "${SELF_SLASH_WAIT:-900}" ] || break
+      [ "$busy_wait" != 0 ] || echo "$(gdate '+%F %T') $host $pane: no input prompt on screen and the pane is busy, waiting for it (up to ${SELF_SLASH_WAIT:-900}s)"
+      busy_wait=$((busy_wait+5)); sleep 5; continue
+    fi
     noprompt=$((noprompt+1)); [ "$noprompt" -le 9 ] || break
     echo "$(gdate '+%F %T') $host $pane: no input prompt on screen yet (attempt $noprompt), waiting"; sleep 5; continue
   fi
@@ -1248,4 +1297,4 @@ while :; do
   sendfail=$((sendfail+1)); [ "$sendfail" -le 6 ] || break
   echo "$(gdate '+%F %T') $host $pane: send failed (attempt $sendfail)"; sleep 5
 done
-echo "$(gdate '+%F %T') $host $pane: gave up, no empty input prompt seen"; exit 5
+echo "$(gdate '+%F %T') $host $pane: gave up, no empty input prompt seen (marker '$marker', tui '${tui:-unknown}', ${noprompt} quiet polls, ${busy_wait}s busy)"; exit 5
