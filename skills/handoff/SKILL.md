@@ -369,7 +369,7 @@ verified live yet (2026-10-25: nothing may start a session unattended): the firs
 code: if the successor does not start or is a subagent (exit 11) it archives nothing and logs
 `successor: ...` to `~/.local/state/self-slash.log`; this session just stays idle and usable (a
 successor that was created is left running, not stopped), so when the operator writes again, read the
-log first. "several workspaces share this cwd" needs `SELF_SLASH_WORKSPACE=<id>` (`paseo workspace ls`).
+log first. "several workspaces share this cwd" is resolved from this agent's own Paseo state file (`workspaceId`, 2026-10-28); if it still appears, pass `SELF_SLASH_WORKSPACE=<id>` (`paseo workspace ls`).
 The waiter polls the successor for up to 20 s and archives this agent only if it has a new id, is
 top-level, runs the model asked and is idle, running or initializing.
 
@@ -406,6 +406,30 @@ CLI), do not retry or loop: tell the operator the handoff is written and stop. I
 nothing (only self-slash's mapping to `/clear` works), so say instead: once this agent is idle,
 send `/clear`, then `/baton` (or run `~/src/djbclark-ade/bin/self-slash "/new"` again after the
 gap or lock clears, which does both).
+
+**Verify the successor started, every time (djbclark, 2026-10-28).** `self-slash` printing "queued" and exiting 0 proves nothing:
+its waiter runs detached and a refusal (exit 11) is only in the log. On 2026-10-28 a handoff to a new tab reported "queued" and no
+tab ever opened ("several workspaces share this cwd"). After any `self-slash` that should start a new agent, and after any
+"hand this off to a new tab" request, wait about 30 s and then check, and report what you saw, never "should start":
+
+1. `tail -5 ~/.local/state/self-slash.log` shows no `successor: ... NOT archived` line for this agent;
+2. `paseo agent ls -g --json` lists the new agent (title, status idle or running) and `paseo agent inspect <new id> --json` shows
+   `ParentAgentId` null (`ls` does not carry it); say its title and workspace name to the operator;
+3. if either check fails, say so at once, with the log line, and start the successor by hand (below) or ask which route; do not claim a handoff.
+
+**Partial handoff: the operator keeps this session** ("hand X off to a new tab", "I still use this agent for other things"). The
+`--finish --successor` form archives this agent when it works, so do not use it. Write the handoff (Steps 1-7, scoped to the slice and
+written to its own chain), then start a separate top-level agent in this agent's workspace and leave this one running:
+
+```bash
+~/src/djbclark-ade/bin/paseo-new-seat --title "<short title>" --provider claude --model claude-sonnet-5-5 --thinking medium \
+  --mode bypassPermissions --cwd <this agent's cwd> --workspace <wks_ id> --json \
+  --prompt "/baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md"
+```
+
+The `wks_` id is `workspaceId` in `~/.paseo/agents/*/<your agent id>.json`. Exit 4 with `"mode":"bypassPermissions","modeApplied":true`
+is fine for claude (the shield is for auto-accept; this mode is already yolo). Verify as above, and `paseo logs <new id>` shows the
+`/baton` was read. Skip Step 8's autorename for a partial handoff: it would rename the session the operator keeps using.
 
 **Document only:** skip this step when a skill that clears the session itself runs the handoff, when
 the operator says "doc only" or otherwise asks for the document without a restart, or when you are a
