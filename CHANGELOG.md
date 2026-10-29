@@ -273,6 +273,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `claude/hooks/context_size_nudge.py` read a zero-usage transcript record (the `<synthetic>` stub Claude Code writes for a session or weekly limit notice) as a context size of 0, which counted as a shrink and made the next prompt's whole context look like growth, so the nudge asked early or twice in a row; a zero total is now not a reading (2026-10-28) (#114).
 - The Linux CI job runs on ubuntu-26.04 (uutils coreutils) again and `ubuntu-latest` is unpinned: the g-prefixed GNU tool shims are now `exec` wrapper scripts instead of symlinks (a uutils multicall binary refuses to run under another name), and `test_r11_f3_proc_args` varies the exec path's length through the directory, not the link name, and no longer passes an empty argv[0] to `posix_spawn` (Python 3.14 rejects it) (2026-10-28) (#105).
 - `ade_gates.read_guard_state` read a quota guard state file of absurd nesting (under the 64 KiB cap) as a `RecursionError` crash in `route_agent plan` on Python 3.13 and older (3.14 parses the nest, and `acp-dispatch` already treated it as closed); it now reads it as unreadable, the same as bad JSON, and the allowance stays closed (2026-10-27) (#98).
 - `relay.py` reads `ack ID.` (a sentence-final period) as the ack when whitespace or the end of the text follows it, so two real acks are no longer missed; `ID.more`, `ID.-x` and `ID..x` stay longer ids (#101).

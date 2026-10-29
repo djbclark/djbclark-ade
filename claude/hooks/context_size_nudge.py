@@ -161,7 +161,11 @@ def _usage_from_line(line):
              ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
     if not any(isinstance(p, int) for p in parts):
         return None
-    return sum(p for p in parts if isinstance(p, int))
+    total = sum(p for p in parts if isinstance(p, int))
+    # A zero-usage record is an API-error stub (model "<synthetic>", e.g. a session or
+    # weekly limit notice), never a context reading: counted, it reads as a shrink to 0
+    # and the next prompt's whole context looks like growth (adversary 108 r4 F2).
+    return total if total > 0 else None
 
 
 def _is_boundary_line(line):
