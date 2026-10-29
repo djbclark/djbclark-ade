@@ -37,6 +37,13 @@ USAGE
                  [--cwd DIR] [--workspace ID] [--thinking ID] [--mode ID] [--label k=v]... [--json]
                  [--no-auto-accept] [--dry-run]
 
+--mode is the provider's own permission-mode id. Every seat runs yolo (home rule 16, 2026-10-26: a
+claude seat opened without a mode started in `default` and prompted), so a claude seat gets
+`bypassPermissions` unless --mode says otherwise; any other provider keeps its own default (an omp
+seat is already Full Access, and a claude mode id means nothing to it). `--no-auto-accept` drops that
+default too (a seat that prompts); a security-sensitive claude slice passes `--no-auto-accept` or
+`--mode default`/`plan`.
+
 --thinking is the provider's thinking option id (`paseo provider models <p> --thinking`); --mode creates the
 agent in that permission mode and verifies it (codex has no auto_accept feature: its yolo is mode `full-access`,
 so a codex seat without --mode runs in `auto`, Default Permissions, and can stall on a prompt; 2026-10-27); --label tags the
@@ -68,6 +75,11 @@ def usage() -> int:
     return 2
 
 
+def default_mode(provider: str) -> str:
+    """The yolo mode for a provider whose default mode prompts; "" leaves the provider's own default."""
+    return "bypassPermissions" if provider == "claude" else ""
+
+
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="paseo-new-seat", add_help=False)
     p.add_argument("--title", required=True)
@@ -79,8 +91,9 @@ def main(argv: list[str]) -> int:
     p.add_argument("--allow-new-workspace", action="store_true",
                    help="permit creating a NEW workspace (refused by default: the implicit path "
                         "littered four empty `main` workspaces on 2026-10-25)")
+    p.add_argument("--mode", default="", help="the provider's permission-mode id (claude defaults to "
+                                              "bypassPermissions)")
     p.add_argument("--thinking", default="")
-    p.add_argument("--mode", default="")
     p.add_argument("--label", action="append", default=[])
     p.add_argument("--json", action="store_true")
     p.add_argument("--no-auto-accept", action="store_true")
@@ -100,10 +113,18 @@ def main(argv: list[str]) -> int:
         args += ["--prompt", a.prompt]
     if a.workspace:
         args += ["--workspace", a.workspace]
+    if a.mode.startswith("-"):  # the node half reads flags by name, so a value like that would switch one on
+        print(f"paseo-new-seat: --mode {a.mode!r} is not a mode id", file=sys.stderr)
+        return 2
+    # --no-auto-accept asks for a seat that prompts: the yolo default must not undo it
+    mode = a.mode or ("" if a.no_auto_accept else default_mode(a.provider))
+    if mode:
+        args += ["--mode", mode]
+    if a.provider == "claude" and mode != "bypassPermissions":
+        # a deliberate non-yolo seat: bin/paseo-bypass-watch must not flip it afterwards
+        args += ["--label", "perm=ask"]
     if a.thinking:
         args += ["--thinking", a.thinking]
-    if a.mode:
-        args += ["--mode", a.mode]
     for lab in a.label:
         args += ["--label", lab]
     if a.json:
