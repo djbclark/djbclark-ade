@@ -41,7 +41,9 @@ with `--expect-ack`:
    starting with `/` or `!`, and (with `--no-defer`, `--plan`, `--idle`, another `--via`, or no identifiable sender) one blocked on a
    question or permission prompt (a Paseo agent with a pending permission card included). Otherwise a card-blocked target is
    queued (item 3) and delivered once the card is answered, the deliverer backing off between looks (5 s up to 2 min, jittered);
-   a text is never typed into the card. A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
+   a text is never typed into the card. `relay.py --why <ident>` says why a session cannot take a text right now (a picklist, a permission card,
+   a turn still running, silent 15+ minutes, archived, gone) from two methods compared; `--pending` shows it per queued record. A send to a Paseo agent that
+   has no Claude transcript (codex, omp, opencode, cline) is now proven by its Paseo timeline too: "delivered", no longer "unverified". A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
    not made at once, because Paseo replaces its running turn when the provider declines a steer: relay queues it (item 3).
    `relay.py <ident> "x" --steer` sends a codex/omp/opencode/pi one anyway, `--idle S` waits for idle first and blocks
    (it wins over queueing), `--no-defer` refuses (exit 1) instead of queueing, `--defer-for S` sets how long a queued

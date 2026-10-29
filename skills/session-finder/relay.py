@@ -182,6 +182,16 @@ record. A caller with no identifiable sender is still refused (with the card rea
 Warp's orchestration (a BLOCKED run state, durable per-agent inboxes, events instead of polling), Claude Code's mailbox (a message is
 queued until a safe boundary; queued is not read), A2A's input-required task state, Azure Service Bus deferral (set the message aside,
 keep it in the store, deliver later), AWS "Exponential Backoff And Jitter" (Brooker, 2015).
+WHY IT CANNOT BE DELIVERED YET (2026-10-29, djbclark: "be able to tell why a message can't be delivered yet (eg picklist vs tab hung etc)"). `relay.py --why
+IDENT [--json]` names the obstacle by TWO methods compared (diagnose), exit 0 when it can take a text now, 1 when something is in the way. A Paseo agent:
+its API (`paseo agent inspect`: status, archived, pending cards BY TOOL, last update), its card text (`paseo permit ls`) and its timeline (`paseo logs`: the
+last thing it did). A pane TUI: the multiplexer's status and the screen itself (`herdr pane read`, classify_screen: a picker, a permission prompt, an open
+slash menu, a turn running; a heuristic that only ever ADDS a reason to wait). States: idle, working, silent (running with nothing new for 15 minutes: a hung
+turn or one long tool call), card:question (a picklist the agent asked: AskUserQuestion), card:permission (a tool awaiting approval), card:plan, card:picker,
+card:unknown, archived, gone, error. When the methods DISAGREE (an `idle` status over a picker on screen; `inspect` listing a card that `permit ls` does not)
+both are reported and the BLOCKING reading wins, because typing into a dialog is the harm. The same reason is in every card refusal and queue line, the
+deliverer files its latest on the record (`look`: state, why, when) and logs each change in deferred.log, `--pending` shows it as `[why: ...]` (and `look`
+in --json), and an expired or failed record's notice carries it.
 Residual: PASEO_AGENT_ID, like HERDR_PANE_ID and CLAUDE_CODE_SESSION_ID, is an environment value a same-user process can
 forge, and a record is plain JSON in a 0700 directory of the same user: relay cannot stop such a process from naming
 another agent as the sender or from writing a record itself. The bounds can be starved: 100 records in all, so a same-user
@@ -358,10 +368,160 @@ def paseo_blocker(info):
     if info.get("Archived"):
         return "its Paseo agent is archived (a send would unarchive it and start a turn)"
     if info.get("PendingPermissions"):
-        return "blocked on a permission or question: typed text would answer it (helm / the Paseo UI answers it)"
+        return (f"blocked on a permission or question ({card_summary(info['PendingPermissions'])}): typed text would answer it "
+                "(helm / the Paseo UI answers it)")
     if state not in ("idle", "running"):
         return f"its Paseo agent is {state}, not idle or running"
     return None
+
+
+# ---- why a message cannot be delivered yet (2026-10-29, djbclark: "be able to tell why a message can't be delivered yet (eg picklist vs tab hung
+# etc)") ----
+# A refusal, a wait and `--why` say WHICH obstacle it is, read by two independent methods and compared. A Paseo agent: its API (`paseo agent
+# inspect`: status, archived, pending cards by tool, last update) and its card list (`paseo permit ls`: the card's own text) and its timeline
+# (`paseo logs`: the last thing it did). A pane TUI: the multiplexer's status and the screen itself (`herdr pane read`), classified. The methods can
+# disagree (an `idle` status over a picker on screen): both are reported and the BLOCKING one wins, because typing into a dialog is the harm.
+HUNG_AFTER = 900    # seconds a "running" Paseo agent may show nothing new before it is called silent (a hung turn, or one long tool call)
+QUESTION_TOOL = re.compile(r"question|elicit|picker|choose|select", re.I)
+PLAN_TOOL = re.compile(r"plan", re.I)
+
+
+def card_kind(tool):
+    """"question" (a picklist the agent asked: AskUserQuestion), "plan" (ExitPlanMode) or "permission" (a tool awaiting approval) from a Paseo
+    pending card's tool name."""
+    t = tool if isinstance(tool, str) else ""
+    return "question" if QUESTION_TOOL.search(t) else "plan" if PLAN_TOOL.search(t) else "permission"
+
+
+def card_summary(cards):
+    """`a QUESTION (AskUserQuestion)`, `a PERMISSION (Bash) and a PLAN (ExitPlanMode)`: the pending cards of a Paseo agent by kind and tool."""
+    items = [c for c in (cards if isinstance(cards, list) else []) if isinstance(c, dict)]
+    if not items:
+        return "a pending card"
+    parts = [f"a {card_kind(c.get('tool')).upper()} ({fleet.clip(str(c.get('tool') or '?'), 40)})" for c in items[:3]]
+    return ", ".join(parts) + (f" and {len(items) - 3} more" if len(items) > 3 else "")
+
+
+def silent_seconds(info):
+    """Seconds since a Paseo agent's `UpdatedAt` (ISO 8601), or None when it is missing or unreadable."""
+    raw = info.get("UpdatedAt")
+    try:
+        when = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0, int(time.time() - when.timestamp()))
+
+
+def paseo_card_detail(agent_id):
+    """(description of the first pending card of AGENT_ID from `paseo permit ls --json`, whether that list names the agent at all). The card's own
+    text, a second method beside `inspect`, which names only the tool."""
+    rc, out, _err = paseo_run("permit", "ls", "--json", timeout=20)
+    if rc != 0:
+        return "", False
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return "", False
+    rows = data.get("data") if isinstance(data, dict) else data
+    mine = [r for r in (rows if isinstance(rows, list) else []) if isinstance(r, dict) and r.get("agentId") == agent_id]
+    return (fleet.clip(str(mine[0].get("description") or mine[0].get("name") or ""), 100) if mine else ""), bool(mine)
+
+
+def paseo_look(info, detail="", listed=None, last=""):
+    """The diagnosis of a Paseo agent from its `inspect` INFO: {"state", "why", "deliverable", "agree", "evidence"}. DETAIL is the card text from
+    `permit ls`, LISTED whether that list names the agent (None: not asked), LAST the last line of its timeline. state is idle, working, silent
+    (running with nothing new for HUNG_AFTER), card:question|permission|plan, archived, or the agent's own state word."""
+    state = info.get("Status") or "unknown"
+    silent = silent_seconds(info)
+    ev = [{"src": "paseo-inspect", "says": state + (" archived" if info.get("Archived") else ""), **({"silent_s": silent} if silent is not None else {})}]
+    if last:
+        ev.append({"src": "paseo-logs", "says": "last activity", "line": fleet.clip(last, 100)})
+    cards = info.get("PendingPermissions") or []
+    if info.get("Archived"):
+        return {"state": "archived", "why": paseo_blocker(info), "deliverable": False, "agree": True, "evidence": ev}
+    if cards:
+        kinds = [card_kind(c.get("tool")) for c in cards if isinstance(c, dict)] or ["permission"]
+        ev.append({"src": "paseo-permit-ls", "says": (detail or "listed, no text") if listed else "does not list it", **({"line": detail} if detail else {})})
+        why = paseo_blocker(info) + (f"; the card says: {detail}" if detail else "")
+        agree = listed is not False
+        if not agree:
+            why += " [`paseo agent inspect` lists a card that `paseo permit ls` does not: it may have just been answered]"
+        return {"state": "card:" + kinds[0], "why": why, "deliverable": False, "agree": agree, "evidence": ev}
+    if state == "idle":
+        return {"state": "idle", "why": "idle", "deliverable": True, "agree": True, "evidence": ev}
+    if state == "running":
+        if silent is not None and silent > HUNG_AFTER:
+            return {"state": "silent", "why": f"running, but nothing new for {silent // 60} min: a hung turn or one long tool call "
+                    "(the text is queued for its next idle)", "deliverable": False, "agree": True, "evidence": ev}
+        return {"state": "working", "why": "working: it takes the text when its turn ends", "deliverable": False, "agree": True, "evidence": ev}
+    return {"state": state, "why": f"its Paseo agent is {state}, not idle or running", "deliverable": False, "agree": True, "evidence": ev}
+
+
+SCREEN_KINDS = (    # (kind, pattern) in priority order: the first that matches the last rows of a screen names it
+    ("picker", re.compile(r"enter to select|(?:↑/↓|↑↓|up/down|arrow keys)[^\n]{0,60}(?:enter|return)[^\n]{0,30}select|\bto select\b[^\n]{0,40}esc", re.I)),
+    ("permission", re.compile(r"do you want to (?:proceed|allow|run|make this|create|edit)|would you like to (?:run|make|allow|proceed)|allow (?:this|once|always)"
+                              r"|\[y/n\]|\(y/n\)|yes, (?:and )?(?:don'?t|do not) ask again|approve this", re.I)),
+    ("slash_menu", re.compile(r"(?:^\s*/[a-z][\w-]*\s{2,}\S[^\n]*\n){3}", re.I | re.M)),
+    ("busy", re.compile(r"esc to interrupt|ctrl\+c to interrupt|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]", re.I)),
+)
+
+
+def classify_screen(text):
+    """(kind, the matching line) of a pane's screen TEXT: picker (a list to choose from), permission (an approval prompt), slash_menu (an open
+    command menu), busy (a turn running) or ("unknown", ""). A heuristic over the last 30 rows, never proof of idleness: callers use it
+    only to ADD a reason to wait, and report it beside the multiplexer's own status."""
+    rows = [r for r in (text or "").splitlines() if r.strip()][-30:]
+    tail = "\n".join(rows) + "\n"
+    for kind, pat in SCREEN_KINDS:
+        m = pat.search(tail)
+        if m:
+            line = next((r.strip() for r in rows if m.group(0).splitlines()[0].strip() and m.group(0).splitlines()[0].strip() in r), m.group(0).splitlines()[0].strip())
+            return kind, fleet.clip(line, 100)
+    return "unknown", ""
+
+
+def pane_look(s):
+    """The diagnosis of a pane TUI S: the multiplexer's status beside what its screen shows (classify_screen). A blocking screen (picker,
+    permission, open slash menu) or a `blocked` status makes it a card; the two disagreeing is reported, and the blocking side wins."""
+    status = s.get("status") or "unknown"
+    chan = s.get("chan")
+    shot = screen(tuple(chan)) if chan and chan[0] in ("herdr", "orca", "tmux") else ""
+    kind, line = classify_screen(shot)
+    ev = [{"src": "multiplexer-status", "says": status}]
+    if chan and chan[0] in ("herdr", "orca", "tmux"):
+        ev.append({"src": "screen", "says": kind, **({"line": line} if line else {})})
+    blocking, claims = kind in ("picker", "permission", "slash_menu"), status == "blocked"
+    if blocking or claims:
+        agree = blocking == claims or not ev[1:]
+        shown = kind if blocking else "an unclassified dialog"
+        why = f"blocked on a question or permission prompt ({shown}{': ' + line if line else ''}): a message would land in or behind that dialog (helm.py answer)"
+        if not agree:
+            why += (f" [the status says {status} but the screen shows a {kind}]" if blocking else f" [the status says blocked but the screen shows {kind}]")
+        return {"state": "card:" + (kind if blocking else "unknown"), "why": why, "deliverable": False, "agree": agree, "evidence": ev}
+    if status == "idle" and kind == "busy":
+        return {"state": "working", "why": "its status says idle but the screen shows a turn running: waiting for it to end", "deliverable": False,
+                "agree": False, "evidence": ev}
+    if status == "idle":
+        return {"state": "idle", "why": "idle", "deliverable": True, "agree": True, "evidence": ev}
+    return {"state": status, "why": f"{status}: it takes the text when its turn ends", "deliverable": False, "agree": True, "evidence": ev}
+
+
+def diagnose(s):
+    """Why session S cannot be sent text right now, by two methods compared (see the section comment). {"state", "why", "deliverable",
+    "agree", "evidence": [{"src", "says", ...}]}; state "gone" or "error" when its Paseo agent cannot be asked."""
+    agent = s["chan"][1] if (s.get("chan") or (None,))[0] == "paseo" else s.get("paseo") or ""
+    if not agent:
+        return pane_look(s)
+    info, kind = paseo_probe(agent)
+    if info is None:
+        word = "error" if kind == "error" else "gone"
+        return {"state": word, "why": "`paseo agent inspect` cannot answer (is the Paseo daemon restarting?)" if kind == "error"
+                else "`paseo agent inspect` does not know this Paseo agent", "deliverable": False, "agree": True,
+                "evidence": [{"src": "paseo-inspect", "says": word}]}
+    detail, listed = paseo_card_detail(agent) if info.get("PendingPermissions") else ("", None)
+    tl = paseo_timeline(agent, 3)
+    last = next((r.strip() for r in reversed((tl or "").splitlines()) if r.strip()), "")
+    return paseo_look(info, detail, listed, last)
 
 
 def paseo_cwd_mismatch(s, info):
@@ -2135,6 +2295,14 @@ def target_label(rec):
     return f"[{t.get('id') or '?'}] {t.get('name') or '-'}"
 
 
+def note_look(rid, rec, look):
+    """File the deliverer's latest diagnosis (state, why, agreement, when) on queued record RID, and log the change: `--pending` shows it, so the
+    sender can tell a picklist from a hung tab without opening the pane."""
+    filed = {"state": look.get("state"), "why": fleet.clip(look.get("why") or "", 300), "agree": look.get("agree", True), "at": time.time()}
+    if transition(rid, ("queued",), look=filed) is not None:
+        defer_log(rec, "look", f"{filed['state']}: {filed['why']}")
+
+
 def sender_key(rec):
     """Who queued a record: its sender's id (a Paseo agent id or a fleet id), else its label."""
     return rec.get("sender_ident") or rec.get("sender") or ""
@@ -2318,12 +2486,14 @@ def target_poll(rec):
     """('idle',), ('busy',), ('miss', why) (the target is not there), ('error', why) (it could not be asked: a daemon
     restart) or ('fail', why) for the record's target."""
     t = rec.get("target") or {}
+    target_poll.look = None    # the diagnosis of this look (paseo_look / pane_look), filed on the record by the deliverer
     if t.get("paseo"):    # the Paseo agent id is the identity: inspect must name exactly that agent
         info, kind = paseo_probe(t["paseo"])
         if info is None:
             if kind == "error":
                 return ("error", f"`paseo agent inspect` could not answer for Paseo agent {t['paseo']} (is the Paseo daemon restarting?)")
             return ("miss", f"`paseo agent inspect` does not confirm Paseo agent {t['paseo']}")
+        target_poll.look = paseo_look(info)
         if info.get("PendingPermissions") and not info.get("Archived"):
             return ("card", paseo_blocker(info))    # a card is waiting: typed text would answer it; it is answered or goes away, so wait (backing off)
         why = paseo_blocker(info)
@@ -2345,6 +2515,8 @@ def target_poll(rec):
         if seen == "changed":
             return ("fail", "target changed: another session now holds that pane")
     why = hard_stop(s)
+    if card_why(why) or s.get("status") != "idle":
+        target_poll.look = pane_look(s)    # the screen beside the status: a picker, a permission prompt, a turn still running
     if card_why(why):
         return ("card", why)    # a pane TUI asking: wait for the answer, never type into the dialog
     if why:
@@ -2410,6 +2582,7 @@ def deliver(rid):
             os.environ["RELAY_HOPS"] = str(hops)
             os.environ.pop("RELAY_HOP_PARENT", None)
         misses, errors, last = 0, 0, "the target stayed busy"
+        looked, detail_done, card_detail = None, False, ""    # the last (state, why) filed on the record; whether the card's own text was fetched, and it
         card_n = 0    # consecutive looks that found the target blocked on a card (the backoff step)
         while True:
             rec = rec_read(rid)
@@ -2430,15 +2603,24 @@ def deliver(rid):
             if poll[0] == "fail" or misses >= DEFER_MISSES or errors >= DEFER_ERRORS:
                 finish(rid, "failed", poll[1], allowed=("queued",))
                 return 0
+            look = getattr(target_poll, "look", None)
+            if look and look.get("state", "").startswith("card:") and not detail_done and (rec.get("target") or {}).get("paseo"):
+                detail_done = True    # the card's own text (`paseo permit ls`): once per deliverer, not once per look
+                card_detail = paseo_card_detail(rec["target"]["paseo"])[0]
+            if look and look.get("state", "").startswith("card:") and card_detail:
+                look = {**look, "why": look["why"] + f"; the card says: {card_detail}", "detail": card_detail}
+            if look and look.get("state") != "idle" and (look.get("state"), look.get("why")) != looked:    # an idle look is about to be sent: nothing to explain
+                looked = (look.get("state"), look.get("why"))
+                note_look(rid, rec, look)
             if poll[0] == "card":
-                last = "the target stayed blocked on a permission or question card"
+                last = (look or {}).get("why") or "the target stayed blocked on a permission or question card"
                 wait = min(card_backoff(card_n), max(1.0, float(rec.get("expires") or 0) - time.time()))
                 card_n += 1
                 time.sleep(wait)
                 continue
             card_n = 0
             if poll[0] != "idle":
-                last = poll[1] if poll[0] in ("miss", "error") else "the target stayed busy"
+                last = poll[1] if poll[0] in ("miss", "error") else (look or {}).get("why") or "the target stayed busy"
                 time.sleep(DEFER_POLL)
                 continue
             if transition(rid, ("queued",), state="sending", sending_since=time.time()) is None:
@@ -2635,7 +2817,8 @@ def pending_cmd(as_json, show_text=False):
     now = time.time()
     view = [{"id": r["id"], "state": r.get("state"), "target": r.get("target"), "sender": r.get("sender"),
              "age_s": int(now - float(r.get("created") or now)), "expires_in": int(float(r.get("expires") or now) - now),
-             "outcome": r.get("outcome") or "", **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
+             "outcome": r.get("outcome") or "", **({"look": r["look"]} if isinstance(r.get("look"), dict) else {}),
+             **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
             for r in rows]
     expects = expect_view()    # rows with "kind": "expect" (the message rows have no `kind`): --json lists both
     if as_json:
@@ -2644,12 +2827,39 @@ def pending_cmd(as_json, show_text=False):
         print("no deferred messages")
     for v in ([] if as_json else view):
         print(f"{v['id']}  {v['state']:<9} {target_label({'target': v['target']})}  from {v['sender'] or '?'}  {v['age_s'] // 60}m old"
-              + (f"  {v['outcome']}" if v["outcome"] else "") + (f"  | {v['text_preview']}" if show_text else ""))
+              + (f"  {v['outcome']}" if v["outcome"] else "")
+              + (f"  [why: {v['look']['why']}]" if v["state"] == "queued" and isinstance(v.get("look"), dict) and v["look"].get("why") else "")
+              + (f"  | {v['text_preview']}" if show_text else ""))
     for e in ([] if as_json else expects):
         print(f"{'OVERDUE ' if e['overdue'] else ''}expect-ack {e['id']}  {e['state']:<6} {target_label({'target': e['target']})}  "
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
               + ("  -> escalate to the operator: no ack" if e["overdue"] else ""))
     return 0
+
+
+def why_cmd(ident, as_json=False):
+    """`relay.py --why IDENT`: why that session cannot be sent text right now, from two methods compared (diagnose). Exit 0 when it can take a
+    text now, 1 when something is in the way (the reason is printed), 2 for a usage problem."""
+    listed = fleet.sessions()
+    hits = find(ident, listed)
+    if not hits and not UUID.fullmatch(ident):
+        hits = find_herdr_agent(ident, listed)
+    if not hits and UUID.fullmatch(ident):
+        hits = [s for s in [paseo_session(ident)] if s]
+    if len(hits) != 1:
+        print(f"relay: {'no session(s) match' if not hits else str(len(hits)) + ' sessions match'} {ident!r}", file=sys.stderr)
+        return 2
+    s = hits[0]
+    d = diagnose(s)
+    if as_json:
+        print(json.dumps({"id": s["id"], "name": s.get("name") or "", **d}, ensure_ascii=False))
+    else:
+        print(f"[{s['id']}] {s.get('name') or '-'}: {d['state']}" + ("" if d["agree"] else "  (the methods DISAGREE)"))
+        print(f"  {d['why']}")
+        for e in d["evidence"]:
+            print(f"  - {e['src']}: {e['says']}" + (f" [{e['silent_s']}s since its last update]" if e.get("silent_s") is not None else "")
+                  + (f"  | {e['line']}" if e.get("line") else ""))
+    return 0 if d["deliverable"] else 1
 
 
 def cancel_cmd(rid):
@@ -3260,6 +3470,8 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
     ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
+    ap.add_argument("--why", action="store_true", help="with IDENT and no text: say why that session cannot be sent text right now (a picklist, a permission "
+                    "card, a turn still running, silent for a long time, archived, gone), from two methods compared; --json for the evidence")
     ap.add_argument("--transfer-expectations", metavar="OLD_SENDER", help="adopt open expectations of one exactly named finished fleet session into this caller; missing/live/ambiguous sender: exit 2")
     ap.add_argument("--id", action="append", default=[], metavar="TOKEN", help="with --transfer-expectations: select a token (repeatable; default all open tokens of OLD_SENDER); any requested token not transferred: exit 1, missing list (even if settled as acked)")
     ap.add_argument("--text", action="store_true", dest="show_text", help="with --pending: show a 60-character preview of each text (it stays in the record otherwise)")
@@ -3302,6 +3514,11 @@ def _main(argv=None, sweep=True):
             print(f"OVERDUE ack {r['id']}: {tg.get('name') or tg.get('id')} has not answered "
                   f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; tell the operator, never assume it was read")
         return 0
+    if a.why:
+        if a.ident is None or a.text is not None:
+            print("relay: usage: relay.py --why <id> [--json]", file=sys.stderr)
+            return 2
+        return why_cmd(a.ident, a.json)
     if a.ident is None or a.text is None:
         print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2

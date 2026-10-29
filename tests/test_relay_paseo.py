@@ -46,7 +46,8 @@ echo "$*" >> "$FAKE_LOG"
 echo "$1 ${PASEO_AGENT_ID:-NOID}" >> "$FAKE_ENVLOG"
 case "$1 $2" in
   "agent inspect") id="${@: -1}"; [ "$id" = "$FAKE_KNOWN" ] || { echo "no such agent" >&2; exit 1; }
-    echo "{\\"Id\\": \\"${FAKE_ID:-$id}\\", \\"Name\\": \\"fake\\", \\"Provider\\": \\"${FAKE_PROVIDER:-claude}\\", \\"Status\\": \\"${FAKE_STATUS:-idle}\\", \\"Archived\\": ${FAKE_ARCHIVED:-false}, \\"PendingPermissions\\": ${FAKE_PENDING:-[]}, \\"Cwd\\": \\"${FAKE_CWD:-/tmp}\\"}" ;;
+    echo "{\\"Id\\": \\"${FAKE_ID:-$id}\\", \\"Name\\": \\"fake\\", \\"Provider\\": \\"${FAKE_PROVIDER:-claude}\\", \\"Status\\": \\"${FAKE_STATUS:-idle}\\", \\"Archived\\": ${FAKE_ARCHIVED:-false}, \\"PendingPermissions\\": ${FAKE_PENDING:-[]}, \\"Cwd\\": \\"${FAKE_CWD:-/tmp}\\", \\"UpdatedAt\\": \\"${FAKE_UPDATED:-}\\"}" ;;
+  "permit ls") echo "${FAKE_PERMITS:-[]}" ;;
   "wait "*) exit "${FAKE_WAIT_RC:-0}" ;;
   "logs "*) [ -n "$FAKE_TIMELINE" ] && [ -f "$FAKE_TIMELINE" ] && cat "$FAKE_TIMELINE" ;;
   "send "*) if [ -n "$FAKE_TIMELINE" ] && [ "${FAKE_TL_APPEND:-1}" = 1 ]; then printf '[Message received] %s\\n%s\\n' "${FAKE_TL_FROM:-some peer}" "${@: -1}" >> "$FAKE_TIMELINE"; fi
@@ -575,6 +576,95 @@ class RelayPaseo(unittest.TestCase):
             ln = relay.fleet.links_read()["links"][key]
         self.assertEqual(acked, 1)
         self.assertTrue(ln["acked"])
+
+    # ---- why a message cannot be delivered yet: two methods compared (2026-10-29) --------------------------------------------------------
+
+    QUESTION = '[{"id": "p1", "tool": "AskUserQuestion"}]'
+    PERMIT_Q = json.dumps([{"id": "p1", "agentId": AGENT, "name": "AskUserQuestion", "description": "Which branch should I use?"}])
+
+    def test_a_card_is_named_by_its_kind_a_question_is_not_a_permission(self) -> None:
+        self.assertIn("a QUESTION (AskUserQuestion)", relay.paseo_blocker({"Status": "idle", "PendingPermissions": [{"id": "p1", "tool": "AskUserQuestion"}]}) or "")
+        self.assertIn("a PERMISSION (Bash)", relay.paseo_blocker({"Status": "idle", "PendingPermissions": [{"id": "p2", "tool": "Bash"}]}) or "")
+        self.assertIn("a PLAN (ExitPlanMode)", relay.paseo_blocker({"Status": "idle", "PendingPermissions": [{"id": "p3", "tool": "ExitPlanMode"}]}) or "")
+        why = relay.paseo_blocker({"Status": "idle", "PendingPermissions": [{"id": "p1", "tool": "Bash"}, {"id": "p2", "tool": "Edit"}] * 3}) or ""
+        self.assertIn("and 3 more", why)
+        self.assertTrue(relay.card_why(why))    # every card reason keeps the prefix split_card and the deliverer key on
+
+    def test_diagnose_reads_the_api_the_card_text_and_the_timeline_and_they_agree(self) -> None:
+        os.environ.update(FAKE_PENDING=self.QUESTION, FAKE_PERMITS=self.PERMIT_Q)
+        self.timeline("[Shell] ls", "I need to know which branch you want.")
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("card:question", False, True))
+        self.assertIn("Which branch should I use?", d["why"])
+        self.assertEqual([e["src"] for e in d["evidence"]], ["paseo-inspect", "paseo-logs", "paseo-permit-ls"])
+        self.assertEqual(d["evidence"][1]["line"], "I need to know which branch you want.")
+
+    def test_diagnose_reports_when_inspect_and_the_card_list_disagree(self) -> None:
+        os.environ.update(FAKE_PENDING=self.QUESTION, FAKE_PERMITS="[]")    # inspect says a card, `permit ls` has none: just answered, or stale
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["agree"]), ("card:question", False))
+        self.assertIn("`paseo permit ls` does not", d["why"])
+
+    def test_a_running_agent_that_shows_nothing_new_for_a_long_time_is_silent_not_just_working(self) -> None:
+        stamp = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - secs))
+        os.environ["FAKE_STATUS"] = "running"
+        os.environ["FAKE_UPDATED"] = stamp(40 * 60)
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["deliverable"]), ("silent", False))
+        self.assertIn("40 min", d["why"])
+        os.environ["FAKE_UPDATED"] = stamp(30)
+        self.assertEqual(relay.diagnose(sess())["state"], "working")
+
+    def test_an_idle_agent_is_deliverable_an_unknown_one_is_gone_and_a_daemon_that_cannot_answer_is_an_error(self) -> None:
+        self.assertEqual((relay.diagnose(sess())["state"], relay.diagnose(sess())["deliverable"]), ("idle", True))
+        with mock.patch.object(relay, "paseo_probe", lambda agent: (None, "notfound")):
+            d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["deliverable"]), ("gone", False))
+        os.environ["FAKE_KNOWN"] = "someone-else"    # the fake exits 1 with no AGENT_NOT_FOUND code: a daemon that cannot answer
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["deliverable"]), ("error", False))
+
+    def test_the_screen_classifier_names_a_picker_a_permission_a_slash_menu_and_a_running_turn(self) -> None:
+        picker = "  Choose a model\n  1. sonnet\n  2. opus\n                ↑/↓ navigate, Enter to select, Ctrl+C to exit"
+        self.assertEqual(relay.classify_screen(picker)[0], "picker")
+        self.assertEqual(relay.classify_screen("Bash command\n  rm -rf x\nDo you want to proceed?\n❯ 1. Yes\n  2. No")[0], "permission")
+        self.assertEqual(relay.classify_screen("Run it? [y/N]")[0], "permission")
+        self.assertEqual(relay.classify_screen("  /help     show help\n  /clear    clear the screen\n  /model    switch model\n")[0], "slash_menu")
+        self.assertEqual(relay.classify_screen("✻ Thinking… (12s · esc to interrupt)")[0], "busy")
+        self.assertEqual(relay.classify_screen("❯ \n  ? for shortcuts")[0], "unknown")
+        self.assertEqual(relay.classify_screen("you can select a model with /model later, and enter works")[0], "unknown")    # prose is not a dialog
+
+    def test_a_pane_whose_status_says_idle_over_a_picker_is_blocked_and_the_disagreement_is_reported(self) -> None:
+        picker = "  1. sonnet\n  2. opus\n  ↑/↓ navigate, Enter to select, Esc to cancel"
+        pane = {"id": "w2N:pZ", "status": "idle", "chan": ("herdr", "w2N:pZ")}
+        with mock.patch.object(relay, "screen", lambda chan, lines=20: picker):
+            d = relay.pane_look(pane)
+            self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("card:picker", False, False))
+            self.assertIn("the status says idle but the screen shows a picker", d["why"])
+            self.assertTrue(relay.card_why(d["why"]))
+            self.assertEqual(relay.pane_look({**pane, "status": "blocked"})["agree"], True)
+        with mock.patch.object(relay, "screen", lambda chan, lines=20: "❯ \n  ? for shortcuts"):
+            self.assertEqual(relay.pane_look(pane)["state"], "idle")
+            d = relay.pane_look({**pane, "status": "blocked"})    # blocked status, nothing on screen: still a card, and the disagreement says so
+            self.assertEqual((d["state"], d["agree"]), ("card:unknown", False))
+        with mock.patch.object(relay, "screen", lambda chan, lines=20: "✻ Thinking… (esc to interrupt)"):
+            d = relay.pane_look(pane)
+            self.assertEqual((d["state"], d["agree"]), ("working", False))
+
+    def test_why_prints_the_state_the_reason_and_the_evidence_and_exits_1_while_something_is_in_the_way(self) -> None:
+        os.environ.update(FAKE_PENDING=self.QUESTION, FAKE_PERMITS=self.PERMIT_Q)
+        self.timeline("[Shell] ls")
+        rc, out, err = self.main([sess()], "--why", SID)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("card:question", out)
+        self.assertIn("Which branch should I use?", out)
+        self.assertIn("paseo-permit-ls", out)
+        rc, out, _ = self.main([sess()], "--why", SID, "--json")
+        self.assertEqual((rc, json.loads(out)["state"]), (1, "card:question"))
+        os.environ.pop("FAKE_PENDING")
+        self.assertEqual(self.main([sess()], "--why", SID)[0], 0)    # idle: it can take a text now
+        self.assertEqual(self.main([sess()], "--why")[0], 2)
+        self.assertEqual(self.main([sess()], "--why", SID, "some text")[0], 2)
 
     def test_a_pending_card_does_not_hide_an_untrusted_process_mapping(self) -> None:
         """Codex, PR 112: the card reason came back before the directory check, so a mismatched mapping would have been queued (the
