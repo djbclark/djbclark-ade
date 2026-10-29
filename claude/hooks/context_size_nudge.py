@@ -8,6 +8,9 @@ UserPromptSubmit stdout to the model as a system-reminder) telling the agent
 what to do and what to recommend to the operator.
 
 History:
+- 2026-10-28: persisted each emitted nudge in a rotating JSONL log, independent
+  of compaction resets; added PostToolUse JSON output and a 20 s per-session
+  transcript-check limit. Settings registration remains operator-gated.
 - 2026-08-03: built after a session grew to 670k+ tokens unnoticed.
 - 2026-08-23: reworded to "never suggest a wrap-up" (continuous operation).
 - 2026-10-05: fail-fast tail read + 2 s internal deadline (load 223 killed it).
@@ -77,9 +80,15 @@ import re
 import shutil
 import signal
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 STATE_PATH = Path.home() / ".claude" / "state" / "context-nudges.json"
+LOG_PATH = Path(os.environ.get("CONTEXT_NUDGE_LOG_PATH") or
+                Path.home() / ".claude" / "state" / "context-nudge-log.jsonl")
+LOG_MAX_BYTES = 2 * 1024 * 1024
+POST_TOOL_CHECK_SECONDS = 20
 # Written by the quota guard (another slice, 2026-10-23); may not exist.  Only `level` is read.
 QUOTA_GUARD_PATH = Path.home() / ".local" / "state" / "ade" / "quota-guard.json"
 # djbclark, 2026-10-23: lead sessions run on Opus 5.5 high (Sonnet 5.5 when quota is tight),
@@ -134,6 +143,7 @@ DEADLINE_SECONDS = 2
 # Tail-read windows, smallest first. Newest usage block is almost always in the
 # first window; the last one matches the original 2 MB scan.
 _TAIL_WINDOWS = (128 * 1024, 2 * 1024 * 1024)
+_TAIL_REJECT_LIMIT = 64
 _HEAD_WINDOW = 512 * 1024
 
 
@@ -183,11 +193,17 @@ def _last_context_tokens(transcript_path):
 
     Reads a small window off the end of the file and scans it newest line
     first, returning at the first hit; only widens the window (up to 2 MB)
-    when the small one had none. A huge transcript is never read forward."""
+    when the small one had none. A huge transcript is never read forward.
+    Search raw needles backwards, skipping unrelated lines without parsing;
+    reject at most 64 candidate records across both windows (PostToolUse's
+    frequent checks must stay comfortably inside the two-second deadline).
+    Exhaustion returns no measurement rather than an older, misleading one.
+    """
     try:
         with Path(transcript_path).open("rb") as f:
             size = os.fstat(f.fileno()).st_size
             tried = 0
+            rejected = 0
             for window in _TAIL_WINDOWS:
                 chunk_size = min(size, window)
                 if chunk_size <= tried:
@@ -195,15 +211,26 @@ def _last_context_tokens(transcript_path):
                 f.seek(size - chunk_size)
                 data = f.read(chunk_size)
                 tried = chunk_size
-                lines = data.split(b"\n")
-                if chunk_size < size:
-                    lines = lines[1:]  # first line may be cut mid-record
-                for line in reversed(lines):
+                first = data.find(b"\n") + 1 if chunk_size < size else 0
+                end = len(data)
+                while end > first:
+                    pos = max(data.rfind(b"cache_read_input_tokens", first, end),
+                              data.rfind(b'"compact_boundary"', first, end))
+                    if pos < 0:
+                        break
+                    start = data.rfind(b"\n", first, pos) + 1
+                    start = max(first, start)
+                    stop = data.find(b"\n", pos, end)
+                    line = data[start:stop if stop >= 0 else end]
+                    end = start
                     if _is_boundary_line(line):
                         return COMPACTED  # no request since the compaction yet
                     value = _usage_from_line(line)
                     if value is not None:
                         return value
+                    rejected += 1
+                    if rejected >= _TAIL_REJECT_LIMIT:
+                        return None
                 if chunk_size >= size:
                     break
     except Exception:
@@ -630,6 +657,34 @@ def _send_ping(message, cwd):
         pass
 
 
+def _log_nudge(session_id, event, level, total, growth, kind):
+    """Best-effort bounded history, one O_APPEND write per emitted note.
+
+    Rotation atomically replaces the single backup. Concurrent sessions may
+    cross the approximate size cap before rotating; no blocking lock or fsync
+    is used on the prompt path. Compaction never touches this log.
+    """
+    try:
+        line = (json.dumps({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id, "event": event, "level": level,
+            "total": total, "growth": growth, "kind": kind,
+        }) + "\n").encode("utf-8")
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if LOG_PATH.stat().st_size + len(line) > LOG_MAX_BYTES:
+                os.replace(LOG_PATH, Path(str(LOG_PATH) + ".1"))
+        except FileNotFoundError:
+            pass
+        fd = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -640,22 +695,39 @@ def main():
         return
 
     session_id = data.get("session_id") or "unknown"
+    event = data.get("hook_event_name") or "UserPromptSubmit"
+    if event not in ("UserPromptSubmit", "PostToolUse"):
+        return
     transcript_path = data.get("transcript_path") or ""
     if not transcript_path:
         return
 
-    # Size first, then the usage: a record appended in between is scanned again next time.
-    size = _file_size(transcript_path)
-    total = _last_context_tokens(transcript_path)
-    if total is None:
-        return
-
     state = _load_state()
+    if not isinstance(state, dict):
+        state = {}
     session_state = state.get(session_id)
     if not isinstance(session_state, dict):
         session_state = {}
+
+    if event == "PostToolUse":
+        now = time.time()
+        last_check = session_state.get("last_check")
+        # Wall time persists across hook processes/reboots. A clock rollback
+        # must not suppress checks until the old clock catches up.
+        if isinstance(last_check, (int, float)) and 0 <= now - last_check < POST_TOOL_CHECK_SECONDS:
+            return
+        session_state["last_check"] = now
+        state[session_id] = session_state
+        _save_state(state)  # throttle even an empty/unreadable transcript
+
+    # Size first: records appended during the usage read are scanned next time.
+    size = _file_size(transcript_path)
+    total = _last_context_tokens(transcript_path)
     prev_size = session_state.get("size")
-    session_state["size"] = size
+    if total is not None:
+        session_state["size"] = size
+    if total is None:
+        return
 
     if total == COMPACTED:
         # Compacted, no request since: the next measured size is the new floor.
@@ -701,12 +773,13 @@ def main():
     peak_total = session_state["peak"]
     fired = min(fired, _level(peak_total, peak_total))
 
+    messages = []
     if level > fired:
         if level == 1:
-            print(_early_message(total, growth), flush=True)
+            messages.append((_early_message(total, growth), "early"))
         else:
-            print(_ask_message(total, growth, repeat=fired >= 2,
-                               successor=_session_successor(transcript_path)), flush=True)
+            messages.append((_ask_message(total, growth, repeat=fired >= 2,
+                                         successor=_session_successor(transcript_path)), "ask"))
     # Never lower the stored level on a dip: a compaction or a real shrink already reset it
     # above, and a smaller dip must not let the next climb past the tier reprint the message.
     session_state["level"] = max(level, fired)
@@ -714,7 +787,21 @@ def main():
     # Once per session id, not per compaction: a /new starts a new id.
     if total >= BOUNDARY_TOTAL and not session_state.get("boundary"):
         session_state["boundary"] = True
-        print(_boundary_message(total, successor=_session_successor(transcript_path)), flush=True)
+        messages.append((_boundary_message(total, successor=_session_successor(transcript_path)), "boundary"))
+
+    if messages:
+        message = "\n".join(text for text, _ in messages)
+        if event == "PostToolUse":
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PostToolUse", "additionalContext": message,
+            }}), flush=True)
+        else:
+            print(message, flush=True)
+        for _, kind in messages:
+            _log_nudge(session_id, event, level, total, growth, kind)
+            if kind == "ask":
+                # PR 108 embeds the mid-task note in every hard-tier message.
+                _log_nudge(session_id, event, level, total, growth, "midtask")
 
     if growth >= PAGE_GROWTH or total >= PAGE_TOTAL:
         if not session_state.get("paged"):
