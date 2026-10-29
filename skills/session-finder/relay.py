@@ -783,7 +783,7 @@ def send_paseo(s, text, wait):
             return "delivered"
         if tl_ok and read_tl:
             left = deadline_tl - time.time()
-            n = timeline_count(agent, probe_tl, TIMELINE_READ if left > TIMELINE_READ else max(1, int(left) + 1))
+            n = timeline_count(agent, probe_tl, TIMELINE_READ if left <= 0 or left > TIMELINE_READ else max(1, int(left) + 1))    # left <= 0: the --ack watch calls this, which has its own budget
             if (n or 0) >= 1:
                 return "delivered"
         return None
