@@ -289,6 +289,9 @@ print(p.get("pane_id", ""), p.get("agent") or "")' 2>/dev/null)
   if [ -z "$tui" ] && herdr pane process-info --pane "$pane" 2>/dev/null | grep -qE '"argv0": *"zcode-cli"|"cmdline": *"[^"]*/bin/zcode"'; then
     tui=zcode
   fi
+  if [ -z "$tui" ] && herdr pane process-info --pane "$pane" 2>/dev/null | grep -qE '"argv0": *"agy"|"cmdline": *"[^"]*/agy'; then
+    tui=agy
+  fi
 elif [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && command -v orca >/dev/null 2>&1; then
   host=orca; pane="$ORCA_TERMINAL_HANDLE"; tui=""
   if [ "${CURSOR_AGENT:-}" = "1" ]; then
@@ -409,11 +412,11 @@ s_thinking="${s_thinking:-high}"
 # herdr names the TUI in the pane's `agent` field; an unregistered pane is probed via process-info
 # (zcode, 2026-10-28). Prompt detection knows Codex (›), Claude Code (❯), cursor-agent (→), omp
 # (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
-# and gave up) and zcode (❯ default, pane-level read/send; /exit not /quit). Another TUI cannot be read, so
+# and gave up), zcode (❯ default, pane-level read/send; /exit not /quit), and agy (>, 2026-10-28). Another TUI cannot be read, so
 # say so now: the waiter would only log "gave up" after ~50 s.
-case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; zcode) marker="ZCODE";; *) marker="❯";; esac
-if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "$tui" != zcode ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
-  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp, codex and zcode, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
+case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; zcode) marker="ZCODE";; agy) marker=">";; *) marker="❯";; esac
+if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "$tui" != zcode ] && [ "$tui" != agy ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp, codex, zcode and agy, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
 fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
@@ -866,8 +869,8 @@ for p in json.load(sys.stdin).get("result", {}).get("panes", []):
     # the spinner line above the input box ("✻ Cultivating… (1m 4s · ↓ 2.8k
     # tokens)", or "esc to interrupt"); no such line means the turn has ended and
     # the command will run, so treat that as idle.  cursor-agent's marker is
-    # "ctrl+c to stop" at the right of its input box.
-    if ! herdr agent read "$pane" --source visible --lines 60 2>/dev/null | ggrep -qE '…[[:space:]]*\([0-9]+[smh]|esc to interrupt|ctrl\+c to stop'; then
+    # "ctrl+c to stop" at the right of its input box.  agy's marker is "esc to cancel".
+    if ! herdr agent read "$pane" --source visible --lines 60 2>/dev/null | ggrep -qE '…[[:space:]]*\([0-9]+[smh]|esc to interrupt|ctrl\+c to stop|esc to cancel'; then
       [ "$said" = 2 ] || { echo "$(gdate '+%F %T') $host $pane: status working but no main-turn spinner on screen (background sub-agent only); treating as idle"; said=2; }
       return 0
     fi

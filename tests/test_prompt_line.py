@@ -46,6 +46,14 @@ class PromptLineTest(unittest.TestCase):
         self.assertEqual(prompt_line.classify(f"{box_bottom}\n{draft}", prompt_line.OMP_MARK), "hello draft")
         self.assertIsNone(prompt_line.classify(box_bottom, prompt_line.OMP_MARK))
 
+    def test_agy_input_row(self) -> None:
+        # agy uses `>` as its prompt marker (2026-10-28).
+        empty = f"{E}0m{E}38;5;12m>{E}0m"
+        draft = f"{E}0m{E}38;5;12m>{E}0m hello draft"
+        self.assertEqual(prompt_line.classify(empty, ">"), "")
+        self.assertEqual(prompt_line.classify(draft, ">"), "hello draft")
+        self.assertIsNone(prompt_line.classify("no prompt here", ">"))
+
 
 BG = f"{E}48;2;65;69;76m"
 OFF = f"{E}0m"
