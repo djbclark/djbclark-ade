@@ -295,6 +295,7 @@ class TestExpectAck(Base):
         self.assertIn("ASSUMED LOST", self.run_cli("--sweep")[1])
         self.assertTrue(self.expect_rows()[0]["assumed_lost"])
         self.assertEqual(self.expect_rows()[0]["state"], "open")    # never recorded as acked, delivered or read
+        self.assertEqual(relay.expect_age({"created": 0, "within": -1e9}, 100)[1], relay.EXPECT_WITHIN)    # a negative hand edit is the default
 
     def expect_rows(self) -> list[dict[str, Any]]:
         return [r for r in json.loads(self.run_cli("--pending", "--json")[1]) if r.get("kind") == "expect"]
