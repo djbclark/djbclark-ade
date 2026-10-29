@@ -177,6 +177,16 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/.claude/hooks/context_size_nudge.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {

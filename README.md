@@ -88,6 +88,7 @@ their old paths are symlinks into this checkout).
 | [`bigteam`](skills/bigteam/SKILL.md) | Run a prompt as a multi-vendor fan-out: probe every quota pool, slice into file-scoped assignments, dispatch, integrate. |
 | [`model-routing`](skills/model-routing/SKILL.md) | Which vendor × model × effort for which work; reading `aiuse` pools. |
 | [`fallback-chains`](skills/fallback-chains/SKILL.md) | Every failure chain on this machine, and the not-started plan to make them one system. |
+| [`aws-rules`](skills/aws-rules/SKILL.md) | AWS Agent Toolkit rules and this machine's AWS setup facts (profile, Region, `aws-mcp`); on demand, never in `AGENTS.md`. |
 | [`effort-routing`](skills/effort-routing/SKILL.md) | Match this session's own reasoning effort to the stretch of work in front of it. |
 | [`session-finder`](skills/session-finder/SKILL.md) | Which session is or ever was on a topic (live or ended, handoff chains, memory; `/session-finder-all` searches everything), where it lives, and how the work continues (`fleet.py`, which lists every Paseo agent of any provider too; `relay.py`, which takes a Paseo id prefix and queues a send from an identifiable caller to a busy non-steerable agent for delivery when it is idle, `queued: <id>`, exit 0; `launch.py`). |
 | [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`); `/helm-all` adds ended sessions that still hold open work, panes `herdr-tidy` closed and sleeping panes that are gone. |
@@ -110,6 +111,7 @@ their old paths are symlinks into this checkout).
 | [`dialogue`](skills/dialogue/SKILL.md) | Multi-model dialogue that produces one artifact with a final-word model; `dialogue.py` runs pinned routes, checks footers and gates the final word. |
 | [`book-to-kb`](skills/book-to-kb/SKILL.md) | Add a book to the local `~/kb` knowledge base so any session can query it cheaply. |
 | [`gmail-search`](skills/gmail-search/SKILL.md) | Local full-text search of the whole mailbox in ~100 ms; read-only. |
+| [`barnowl`](skills/barnowl/SKILL.md) | BarnOwl and Zephyr from plain English (`/barnowl`, `/g`, or the shell command `g list my subs`). |
 | [`graft`](skills/graft/SKILL.md) | Use the graft code graph before grepping or reading source. |
 | [`todo`](skills/todo/SKILL.md) | Optional do-whenever tasks, kept as Basic Memory notes. |
 | [`terminus-kira`](skills/terminus-kira/SKILL.md) | Delegate a task to a sandboxed coding agent in an Apple Container VM. |

@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """context_size_nudge.py — early, escalating context-size prompts.
 
-Registered under UserPromptSubmit; also supports PostToolUse, which is not
-registered. Reads Claude Code hook JSON on stdin and checks the transcript's
-context size for a new tier. Prompt-submit notes use plain stdout; tool-event
-notes use JSON additionalContext and check at most every 20 s per session.
+Registered under UserPromptSubmit and PostToolUse. Reads Claude Code hook JSON
+on stdin and checks the transcript's context size for a new tier. Prompt-submit
+notes use plain stdout; tool-event notes use JSON additionalContext and check
+at most every POST_TOOL_CHECK_SECONDS per session.
 Each note tells the agent what to do and what to recommend to the operator.
 
 History:
 - 2026-10-28: persisted each emitted nudge in a rotating JSONL log, independent
   of compaction resets; added PostToolUse JSON output and a 20 s per-session
   transcript-check limit. Settings registration remains operator-gated.
+- 2026-10-29: PostToolUse is in agents/claude/settings.json.tmpl (the live settings get the
+  entry by hand once this code is on the shared checkout); PostToolUse calls from a
+  sub-agent (agent_id set) are ignored; the mid-task note has one cadence sentence for
+  both events (the prompt-only text became false once PostToolUse ran), built from
+  POST_TOOL_CHECK_SECONDS instead of a hard-coded 20 s.
 - 2026-08-03: built after a session grew to 670k+ tokens unnoticed.
 - 2026-08-23: reworded to "never suggest a wrap-up" (continuous operation).
 - 2026-10-05: fail-fast tail read + 2 s internal deadline (load 223 killed it).
@@ -568,16 +573,16 @@ def _boundary_message(total, successor=None):
     )
 
 
-def _midtask_note(total, in_context, event="UserPromptSubmit"):
-    """Say how many tool rounds fit before the wall, with the delivery event's cadence.
-    PostToolUse can remind between tool rounds; prompt-submit text stays unchanged (2026-10-28:
-    "at the next natural boundary" was never reached in the 14-20k tokens that were left).
+def _midtask_note(total, in_context):
+    """Say how many tool rounds fit before the wall.
+    The hook runs on prompt submit and between tool rounds (PostToolUse, rate-limited), so the
+    cadence sentence is the same for both events (2026-10-28: "at the next natural boundary"
+    was never reached in the 14-20k tokens that were left).
     `in_context` names the caller's way to continue in-context: each message branch has its own."""
     left = max(0, AUTO_COMPACT_WALL - total)
     rounds = (left - HANDOFF_RESERVE) // TOOL_ROUND_TOKENS
-    cadence = ("this reminder also runs between tool rounds (at most every 20 s). "
-               if event == "PostToolUse" else
-               "this reminder runs only when a prompt is submitted, not between tool rounds. ")
+    cadence = (f"this reminder runs when a prompt is submitted and between tool rounds "
+               f"(at most every {POST_TOOL_CHECK_SECONDS} s). ")
     lead = (
         f"About {left:,} tokens remain before Claude Code compacts this session at "
         f"{AUTO_COMPACT_WALL:,}; " + cadence
@@ -594,7 +599,7 @@ def _midtask_note(total, in_context, event="UserPromptSubmit"):
     return lead + "right after it, with no further tool rounds" + alternative
 
 
-def _ask_message(total, growth, repeat, successor=None, event="UserPromptSubmit"):
+def _ask_message(total, growth, repeat, successor=None):
     lead = "Context is still growing" if repeat else "Context is large"
     if _can_self_slash():
         # A herdr pane, Orca terminal or Paseo agent can queue its own /new or /compact
@@ -616,7 +621,7 @@ def _ask_message(total, growth, repeat, successor=None, event="UserPromptSubmit"
             "refuses (a draft on the input line) ask the operator for /new or "
             "/compact."
             + _paseo_finish_note() + _successor_note(successor) + " "
-            + _midtask_note(total, "the /compact path above", event) + " "
+            + _midtask_note(total, "the /compact path above") + " "
             + _COST_NOTE
         )
     # Bare branch (no herdr, Orca or Paseo host; every ACP slice lands here too, since acp-run
@@ -635,7 +640,7 @@ def _ask_message(total, growth, repeat, successor=None, event="UserPromptSubmit"
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total, "let the auto-compaction take it", event) + " "
+        + _midtask_note(total, "let the auto-compaction take it") + " "
         + _COST_NOTE
     )
 
@@ -779,6 +784,12 @@ def main():
     event = data.get("hook_event_name", "UserPromptSubmit")
     if event not in ("UserPromptSubmit", "PostToolUse"):
         return
+    # A sub-agent's tool calls fire the same PostToolUse hooks with the PARENT's session_id and
+    # transcript_path plus an agent_id (absent on the main thread). Its additionalContext would
+    # reach the sub-agent, and stamping the parent's level, boundary and throttle would spend the
+    # top-level session's one-shot notes there (PR 127 adversary r1, B1): leave it to the main thread.
+    if event == "PostToolUse" and data.get("agent_id"):
+        return
     transcript_path = data.get("transcript_path") or ""
     if not transcript_path:
         return
@@ -865,7 +876,7 @@ def _check_state(data, event, session_id, transcript_path):
             messages.append((_early_message(total, growth), "early"))
         else:
             messages.append((_ask_message(total, growth, repeat=fired >= 2,
-                                         successor=_session_successor(transcript_path), event=event), "ask"))
+                                         successor=_session_successor(transcript_path)), "ask"))
     # Never lower the stored level on a dip: a compaction or a real shrink already reset it
     # above, and a smaller dip must not let the next climb past the tier reprint the message.
     session_state["level"] = max(level, fired)
