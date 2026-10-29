@@ -297,8 +297,12 @@ def owner_session() -> tuple[str, str]:
     return "", (f"no live session for {ROLE!r} (registry/peer_mail gave {first or 'nothing'})")
 
 
-def to_session(text: str) -> bool:
-    """One line into the owner session, via the session-finder relay (best route, self-falling).
+def to_session(text: str) -> str:
+    """One line into the owner session; returns the OUTCOME, not a bare bool.
+
+    `delivered`, `queued`, `skipped` (target busy), `unreachable` (no live session) or `FAILED`. The
+    caller logs it and `cmd_pass` decides what a failure means; a bool could not tell "the seat is
+    gone" from "the seat is working", and that distinction is the whole point of the change.
 
     NO `--idle`. It looks right and is wrong: `--idle S` BLOCKS the deferral (relay.py's defer_wanted
     requires `a.idle is None`), so a target that is busy when the wait expires gets a refusal and no
@@ -307,30 +311,30 @@ def to_session(text: str) -> bool:
     What actually happens without it, proven under a real launchd job: an idle target takes the line
     now (`delivered`); a busy one is REFUSED and cannot be deferred, because deferral needs an
     identifiable sender and a launchd job has no Paseo id and no fleet `self` row. That is not a
-    failure — a busy agent is listening to its own turn, not dark — so it is logged as `skipped`
-    rather than retried into a void. A session running this by hand (`RW_SESSION` set) does get the
-    queued path, since it has an identity. The outcome is LOGGED either way: a silently mute
-    loudspeaker is the failure this whole script exists to prevent.
+    failure — a busy agent is listening to its own turn, not dark — so it is `skipped` rather than
+    retried into a void. A session running this by hand (`RW_SESSION` set) does get the queued path,
+    since it has an identity. The outcome is LOGGED either way: a silently mute loudspeaker is the
+    failure this whole script exists to prevent.
     """
     ident, why = owner_session()
     if not ident:
         log(f"cannot speak to session: {why}")
-        return False
+        return "unreachable"
     relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
     if not relay.is_file():
         log(f"cannot speak to session: no relay.py at {relay}")
-        return False
+        return "unreachable"
     rc, out = run(["python3", "-I", str(relay), ident, text, "--no-ack"], timeout=320)
     if rc == 0:
         word = "queued" if out.startswith("queued") else "delivered"
     elif "cannot take it now" in out or "is busy" in out:
         # Not a failure to hide: a launchd job has no sender identity, so relay.py will not defer for
         # us, and a busy target is not a dark one. Say so plainly in the log.
-        word = "skipped (target busy; a launchd job cannot defer)"
+        word = "skipped"
     else:
         word = "FAILED"
     log(f"relay to {ident[:8]} (via {why}): {word}" + (f" rc={rc}: {out[:200]}" if rc else ""))
-    return rc == 0
+    return word
 
 
 def to_djbclark(text: str) -> bool:
@@ -423,9 +427,24 @@ def _pass(a: argparse.Namespace) -> int:
     state["last"] = cur
     state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     spoke_session = spoke_djb = False
+
+    # The ONE failure a human has to hear about: no live session for this role means the seat is
+    # GONE, not busy. Every other line here is for the seat; this one is for him, and it is checked
+    # even on a quiet pass — because if the seat died, the survey it reads stops changing too, and
+    # the pass then stays quiet forever. That is exactly how the entity went dark for hours at a
+    # time with a watcher running the whole while.
+    ident, why = owner_session()
+    if not ident and should_tell_djbclark("no live session", state, now):
+        spoke_djb = to_djbclark(
+            f"Dann: no live session for {ROLE!r} ({why}). Nothing is listening; the rumination "
+            "watcher has nowhere to speak. A new seat (or the registry row) fixes it."
+        ) or spoke_djb
+        log(f"no live session: {why} (told djbclark={spoke_djb})")
+
     if lines:
         summary = "rumination: " + "; ".join(lines)
-        spoke_session = to_session(summary)
+        # Already resolved above: a second resolution would repeat the lookup (and its log line).
+        spoke_session = to_session(summary) if ident else "unreachable"
         # Only items needing HIS decision go to the quiet topic, and at most once per cooldown.
         needs_him = []
         if cur["stale"]:
@@ -435,7 +454,7 @@ def _pass(a: argparse.Namespace) -> int:
         for item in needs_him:
             if should_tell_djbclark(item, state, now):
                 spoke_djb = to_djbclark(f"Dann: {item}") or spoke_djb
-        log(f"spoke session={spoke_session} djbclark={spoke_djb}: {summary}")
+        log(f"spoke session={spoke_session or 'none'} djbclark={spoke_djb}: {summary}")
     else:
         log("quiet (nothing new)")
 
@@ -463,15 +482,15 @@ def cmd_status(a: argparse.Namespace) -> int:
 def cmd_test(a: argparse.Namespace) -> int:
     """Prove BOTH channels work: a watcher that cannot be heard is worse than no watcher."""
     ident, src = owner_session()
-    ok_s = to_session("rumination: channel test from the watcher (no action needed).")
+    outcome = to_session("rumination: channel test from the watcher (no action needed).")
     ok_d = to_djbclark("Dann: quiet-channel test from the rumination watcher (no action needed).")
     if ident:
         print(f"session target: {ident[:8]} (resolved via {src})")
     else:
         print(f"session target: UNRESOLVED - {src}")
-    print(f"session relay:  {'ok' if ok_s else 'FAILED'}")
+    print(f"session relay:  {outcome}")
     print(f"djbclark topic: {'ok' if ok_d else 'FAILED (is inbox-target dann resolvable?)'}")
-    return 0 if (ok_s or ok_d) else 1
+    return 0 if (outcome in ("delivered", "queued") or ok_d) else 1
 
 
 def cmd_autoaccept(a: argparse.Namespace) -> int:

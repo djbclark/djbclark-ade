@@ -75,9 +75,30 @@ def test_nothing_live_is_an_honest_failure_not_a_silent_one(monkeypatch, tmp_pat
     assert "no live session" in rw.owner_session()[1]
     called = []
     monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: called.append(cmd) or (0, ""))
-    assert rw.to_session("one open loop") is False
+    assert rw.to_session("one open loop") == "unreachable"
     assert called == []                                  # no relay attempt into a void
     assert "cannot speak to session" in rw.LOG.read_text()
+
+
+def test_a_dead_seat_wakes_the_operator_even_on_a_quiet_pass(monkeypatch, tmp_path):
+    """A seat that is GONE is the one thing worth a message to djbclark: nothing else will ever speak.
+
+    It is checked on a quiet pass too, because a dead seat stops producing changes — the pass would
+    then stay silent forever, which is the outage this watcher exists to prevent.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": "0000dead-0000-4000-8000-000000000000"}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {})
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [], "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (1, ""))   # peer_mail resolves nothing
+    a = rw.argparse.Namespace(dry_run=False, quiet=True)
+    assert rw._pass(a) == 0                              # quiet: nothing new to say to the session
+    assert len(told) == 1 and "no live session" in told[0]
+    # the cooldown stops it becoming a 5-minute drumbeat
+    assert rw._pass(a) == 0
+    assert len(told) == 1
 
 
 def test_an_archived_agent_is_not_usable(monkeypatch, tmp_path):
@@ -88,3 +109,27 @@ def test_an_archived_agent_is_not_usable(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
     assert rw.usable(LIVE) is True
     assert rw.usable("0000dead") is False                # not listed at all
+
+
+def test_a_busy_target_is_reported_as_skipped_not_failed(monkeypatch, tmp_path):
+    """A busy seat is not a dark one, and the log must not call it a failure (nor hide it)."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    relay = tmp_path / "src/djbclark-ade/skills/session-finder/relay.py"
+    relay.parent.mkdir(parents=True)
+    relay.write_text("")
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
+        1, "relay: [x] not sent: that session is busy and cannot take it now; deferring needs an "
+           "identifiable sender (it gets a notice if the send fails)."))
+    assert rw.to_session("one open loop") == "skipped"
+    assert ": skipped" in rw.LOG.read_text()
+
+
+def test_a_real_relay_failure_is_not_dressed_up_as_anything_else(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    relay = tmp_path / "src/djbclark-ade/skills/session-finder/relay.py"
+    relay.parent.mkdir(parents=True)
+    relay.write_text("")
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (1, "relay: no session(s) match 'd2a505dd'"))
+    assert rw.to_session("one open loop") == "FAILED"
