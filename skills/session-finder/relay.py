@@ -214,7 +214,7 @@ expectation is never itself flagged unless it asks a new question or requests an
 ack ID]". It is REQUIRED (exit 2, nothing sent) for a text with a `?` outside a URL or with --needs-reply, from a session relay can identify
 (a launchd script has no session an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
 overrides a `?` that is no question. The record (sender, target, age) lives in <deferred dir>/expect/ and shows in `--pending`
-(`--json` rows with "kind": "expect" and "overdue"); `--sweep` resolves it when a user-role line of the SENDER's transcript says `ack ID`
+(`--json` rows with "kind": "expect", "overdue" and "assumed_lost"); `--sweep` resolves it when a user-role line of the SENDER's transcript says `ack ID`
 (its own tool calls and their results never count). A sender with a fleet row but NO readable transcript may use --expect-ack (2026-10-26): its
 record holds `"tx": null`, and relay itself closes it when the TARGET answers through relay.py with a text that BEGINS `ack ID`, sent to the
 session that opened it: both ends come from the fleet's `self` row and the record (id, and session id when both have one), never from the text,
@@ -223,7 +223,7 @@ and it counts only for a send whose delivery watch ran (never `--no-ack`) and th
 ACP or slice inbox that keeps the text (never refused, failed, pulled back, a pane's unproven "queued", queued for a deliverer, run by a deliverer, or one whose delivery watch ran and did not see the text). A sender WITH a
 transcript keeps exactly its old rule: only its own transcript showing the ack closes it. A third party, a quoted header, another or a
 closed ID and a replay change nothing. `--sweep` also flags one past --ack-within (default 1800 s) as `OVERDUE ack ID: ...`: the hook
-point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json). FIRST CONTACT: the first message
+point for escalating to the operator (a caller of --sweep greps those lines, or reads --pending --json); 6 h past due the line ends ASSUMED LOST: the sender re-routes its own work once (peer-relay rule 13). FIRST CONTACT: the first message
 from a session to a peer appends "[first contact from <id>: reply `ack <id>` through relay.py ...]"; ~/.local/state/relay/links.json
 (RELAY_LINKS_FILE) records each link, `--sweep` marks it acked when the sender's transcript holds `ack <id>` naming the peer (or an
 --expect-ack from it resolved), and `fleet.py list` prints `link: acked` or `link: ONE-WAY` under each peer this session messaged.
@@ -2585,7 +2585,8 @@ def pending_cmd(as_json, show_text=False):
     for e in ([] if as_json else expects):
         print(f"{'OVERDUE ' if e['overdue'] else ''}expect-ack {e['id']}  {e['state']:<6} {target_label({'target': e['target']})}  "
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
-              + ("  -> escalate to the operator: no ack" if e["overdue"] else ""))
+              + (f"  -> assumed lost ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never call it read" if e["assumed_lost"]
+                 else "  -> escalate to the operator: no ack" if e["overdue"] else ""))
     return 0
 
 
@@ -3083,7 +3084,8 @@ def expect_resolve_by_relay():
 
 def expect_age(r, now):
     """(age in seconds, seconds allowed) of expectation R: a hand-edited field that is no number counts as just created and the default window."""
-    return now - _num(r.get("created"), now), _num(r.get("within"), EXPECT_WITHIN) or EXPECT_WITHIN
+    w = _num(r.get("within"), EXPECT_WITHIN)
+    return now - _num(r.get("created"), now), w if w > 0 else EXPECT_WITHIN
 
 
 def ack_sweep():
@@ -3137,6 +3139,14 @@ def ack_sweep():
     return acked, overdue
 
 
+REROUTE_AFTER_S = 6 * 3600    # operator, 2026-10-28: an ack overdue this long is assumed never to come; re-route the work, do not wait
+
+
+def ack_lost(age, within):
+    """True once an open expectation is REROUTE_AFTER_S past its due time: assume no reply and re-route (never "delivered" or "read")."""
+    return age - within > REROUTE_AFTER_S
+
+
 def expect_view(now=None):
     """The expectations as --pending rows: kind "expect", sender, target, age, and `overdue` once past their time."""
     now = now or time.time()
@@ -3147,7 +3157,7 @@ def expect_view(now=None):
         age, within = expect_age(r, now)
         rows.append({"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"),
                      "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within,
-                     "created": _num(r.get("created"))})
+                     "assumed_lost": r.get("state") == "open" and ack_lost(age, within), "created": _num(r.get("created"))})
     return rows
 
 
@@ -3227,7 +3237,9 @@ def _main(argv=None, sweep=True):
         for r in overdue:    # the escalation hook: a caller that pages the operator greps these lines (or --pending --json: "overdue": true)
             tg = r.get("target") if isinstance(r.get("target"), dict) else {}
             print(f"OVERDUE ack {r['id']}: {tg.get('name') or tg.get('id')} has not answered "
-                  f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; tell the operator, never assume it was read")
+                  f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; "
+                  + (f"ASSUMED LOST ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never assume it was read" if ack_lost(*expect_age(r, time.time()))
+                     else "tell the operator, never assume it was read"))
         return 0
     if a.ident is None or a.text is None:
         print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
