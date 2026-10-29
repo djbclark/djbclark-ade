@@ -158,4 +158,8 @@ if __name__ == "__main__":
     r = classify(screen, mark)
     print("NOPROMPT" if r is None else (r or "EMPTY"))
     if r is not None:  # the raw line, for bin/self-slash's log
-        print("RAW " + repr([ln for ln in screen.splitlines() if mark in ln][-1][:220]), file=sys.stderr)
+        matching = [ln for ln in screen.splitlines() if mark in ln]
+        if matching:
+            print("RAW " + repr(matching[-1][:220]), file=sys.stderr)
+        else:
+            print(f"RAW (no mark in screen: {r or 'EMPTY'!r})", file=sys.stderr)

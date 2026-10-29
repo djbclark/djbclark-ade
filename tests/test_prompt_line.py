@@ -105,5 +105,20 @@ class CodexComposerRegionTest(unittest.TestCase):
         self.assertEqual(self.classify(shaded("scrolled-off tail of a draft", "›")), "scrolled-off tail of a draft")
 
 
+class CliMainTest(unittest.TestCase):
+    def test_cli_handles_mark_not_in_screen_without_index_error(self) -> None:
+        import subprocess
+        # zcode or custom classifiers may return a non-None classification even if mark is not in screen lines
+        res = subprocess.run(
+            [sys.executable, str(Path(prompt_line.__file__).resolve()), prompt_line.ZCODE_MARK],
+            input="─" * 40 + "\n" + "─" * 40 + "\n",
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(res.stdout.strip(), "EMPTY")
+        self.assertIn("RAW (no mark in screen", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
