@@ -167,8 +167,20 @@ worded "unverified ... do not resend". Every event is also appended to ~/.local/
 `--sweep` (also run at the start of every relay, and cheap: it only changes states and starts detached deliverers, never
 sends or waits) re-starts a queued record whose deliverer is gone (a reboot), expires old ones and prunes week-old final
 records. `--pending` lists the records (no text unless `--text`), `--cancel ID` withdraws a queued one. Not deferred,
-still refused (exit 1): archived, pending permission at queue time, wrong directory, no route, text starting with `/` or `!`; `--idle S`
+still refused (exit 1): archived, wrong directory, no route, text starting with `/` or `!`; `--idle S`
 keeps its blocking meaning and wins; `--steer` is unchanged; `--no-defer` restores the refusal; `--plan` queues nothing.
+A target BLOCKED ON A PERMISSION OR QUESTION CARD (a Paseo agent with a pending permission, a pane TUI showing a dialog; 2026-10-28, djbclark:
+"a backoff-retry scheme when we can't relay a message due to that") is deferred the same way, never refused: the text is queued, never
+typed into the card (a send would answer or replace it), and the deliverer looks again at CAPPED EXPONENTIAL INTERVALS WITH FULL JITTER
+(card_backoff: a random wait under a ceiling of 5, 10, 20, 40, 80 s, then 120 s, never under the 5 s poll; the step starts over after a look
+that finds no card), so a card that waits for a human is not inspected every 5 s for hours and many deliverers waiting on one card spread out.
+It sends once the card is answered or gone, as for a working target; a record still blocked at its expiry (default 6 h) is `expired`
+"the target stayed blocked on a permission or question card" and the sender gets the one notice. `--no-defer`, `--plan`, `--idle S` and a
+different `--via` keep the plain card refusal, and a deliverer whose target went back to a card between its look and its send re-queues the
+record. A caller with no identifiable sender is still refused (with the card reason: nobody could be told it failed). Prior art (2026-10-28):
+Warp's orchestration (a BLOCKED run state, durable per-agent inboxes, events instead of polling), Claude Code's mailbox (a message is
+queued until a safe boundary; queued is not read), A2A's input-required task state, Azure Service Bus deferral (set the message aside,
+keep it in the store, deliver later), AWS "Exponential Backoff And Jitter" (Brooker, 2015).
 Residual: PASEO_AGENT_ID, like HERDR_PANE_ID and CLAUDE_CODE_SESSION_ID, is an environment value a same-user process can
 forge, and a record is plain JSON in a 0700 directory of the same user: relay cannot stop such a process from naming
 another agent as the sender or from writing a record itself. The bounds can be starved: 100 records in all, so a same-user
@@ -239,6 +251,7 @@ import io
 import json
 import math
 import os
+import random
 import re
 import shutil
 import signal
@@ -1930,6 +1943,27 @@ LABEL_OK = re.compile(rf"[\u2026A-Za-z0-9._:() -]{{1,{LABEL_MAX}}}")    # what s
 BUSY = {"hit": False}      # main sets it when it refuses because the target is busy (the deliverer then keeps waiting)
 SENDER_OVERRIDE = [None]   # the label a deliverer sends under (the one stored in the record)
 NOTICE = [False]           # set while a failure notice is sent: a busy target may take it as a `kind: notice` record (defer_send)
+# A target blocked on a permission or question card (2026-10-28, djbclark: "a backoff-retry scheme when we can't relay a message due to
+# that"): the text is queued like a busy target's, never typed into the card, and the deliverer looks again at capped exponential
+# intervals with full jitter (Marc Brooker, AWS Architecture Blog, "Exponential Backoff And Jitter", 2015): a card waits for a
+# human, so a flat 5 s poll for hours is wasted `paseo agent inspect` calls, and many deliverers waiting on one card spread out.
+CARD_BACKOFF_BASE = DEFER_POLL    # the first ceiling; it doubles with every look that still finds the card
+CARD_BACKOFF_CAP = 120            # seconds: the longest wait between two looks (a card is answered in minutes, never hours)
+CARD_WHY = ("blocked on a permission or question", "blocked on a question or permission prompt")    # the wording of every card refusal
+
+
+def card_why(why):
+    """True when WHY, a refusal reason, says only that the target waits on a permission or question card."""
+    return isinstance(why, str) and why.startswith(CARD_WHY)
+
+
+def card_backoff(n, rng=random.uniform):
+    """Seconds a deliverer sleeps after its N-th (0-based) consecutive look that found the target still blocked on a card: full
+    jitter under a ceiling that doubles from CARD_BACKOFF_BASE up to CARD_BACKOFF_CAP, never below DEFER_POLL."""
+    ceiling = min(CARD_BACKOFF_CAP, CARD_BACKOFF_BASE * 2 ** min(max(n, 0), 16))
+    return max(DEFER_POLL, min(ceiling, rng(0, ceiling)))
+
+
 # What identifies the session a relay runs in. A deliverer is built a new environment: it keeps none of these (a sweep
 # can start one from ANY agent's process, and fleet would mark that agent's own row `self`), and the sender's Paseo id
 # comes from its record alone. RELAY_HOPS and the other two are set from the record's stored hop count instead.
@@ -2224,7 +2258,7 @@ def target_poll(rec):
                 return ("error", f"`paseo agent inspect` could not answer for Paseo agent {t['paseo']} (is the Paseo daemon restarting?)")
             return ("miss", f"`paseo agent inspect` does not confirm Paseo agent {t['paseo']}")
         if info.get("PendingPermissions") and not info.get("Archived"):
-            return ("busy",)    # a card is waiting: typed text would answer it; it is answered or goes away, so wait
+            return ("card", paseo_blocker(info))    # a card is waiting: typed text would answer it; it is answered or goes away, so wait (backing off)
         why = paseo_blocker(info)
         if why:
             return ("fail", why)
@@ -2244,6 +2278,8 @@ def target_poll(rec):
         if seen == "changed":
             return ("fail", "target changed: another session now holds that pane")
     why = hard_stop(s)
+    if card_why(why):
+        return ("card", why)    # a pane TUI asking: wait for the answer, never type into the dialog
     if why:
         return ("fail", why)
     return ("idle",) if s.get("status") == "idle" else ("busy",)
@@ -2307,6 +2343,7 @@ def deliver(rid):
             os.environ["RELAY_HOPS"] = str(hops)
             os.environ.pop("RELAY_HOP_PARENT", None)
         misses, errors, last = 0, 0, "the target stayed busy"
+        card_n = 0    # consecutive looks that found the target blocked on a card (the backoff step)
         while True:
             rec = rec_read(rid)
             if rec is None or rec.get("state") != "queued":
@@ -2326,6 +2363,13 @@ def deliver(rid):
             if poll[0] == "fail" or misses >= DEFER_MISSES or errors >= DEFER_ERRORS:
                 finish(rid, "failed", poll[1], allowed=("queued",))
                 return 0
+            if poll[0] == "card":
+                last = "the target stayed blocked on a permission or question card"
+                wait = min(card_backoff(card_n), max(1.0, float(rec.get("expires") or 0) - time.time()))
+                card_n += 1
+                time.sleep(wait)
+                continue
+            card_n = 0
             if poll[0] != "idle":
                 last = poll[1] if poll[0] in ("miss", "error") else "the target stayed busy"
                 time.sleep(DEFER_POLL)
@@ -2365,6 +2409,18 @@ def defer_wanted(a, text, route):
     route is the one asked for, and the text would not be refused anyway (a built-in or shell line)."""
     return (not a.no_defer and not a.plan and a.idle is None and a.via in (None, route)
             and not is_slash(text) and not text.lstrip(SLASH_STRIP).startswith("!"))
+
+
+def split_card(why, a, text, route, card=None):
+    """(card, why). A refusal that only says "blocked on a permission or question card" is no refusal when the send may be
+    deferred (defer_wanted): the card reason comes back apart and why is None, so main queues the text (defer_send) and the
+    deliverer sends it once the card is answered. Any other reason, or a send that may not be deferred (--no-defer, --plan,
+    --idle, another --via), stays a refusal. BUSY is set either way: the deliverer's own send is --no-defer, and a target
+    that went back to waiting on a card between its look and its send puts the record back in the queue instead of failing it."""
+    if not card_why(why):
+        return card, why
+    BUSY["hit"] = True
+    return (card or why, None) if defer_wanted(a, text, route) else (card, why)
 
 
 def pane_busy(s, routes):
@@ -2442,7 +2498,8 @@ def defer_send(s, a, text, listed, why):
         if hermes_forged(label, hops):
             label = "unknown"    # a session merely NAMED like a Hermes relay is not one: the deliverer would refuse the label (and now refuses `unknown` too: exit 4)
         if not ident:
-            print(f"relay: [{s['id']}] not sent: that session is busy and cannot take it now; deferring needs an identifiable sender "
+            print(f"relay: [{s['id']}] not sent: " + (f"{why}; deferring" if card_why(why) else "that session is busy and cannot take it now; deferring")
+                  + " needs an identifiable sender "
                   "(it gets a notice if the send fails). Retry with --idle S, or --no-defer for the plain refusal", file=sys.stderr)
             return 1
     agent = s["chan"][1] if (s.get("chan") or (None,))[0] == "paseo" else s.get("paseo") or ""
@@ -2491,7 +2548,8 @@ def defer_send(s, a, text, listed, why):
     CTX["sent"] = True    # queued (or collapsed into an identical queued one): the link and expectation records are written by main
     if not a.json:
         print(f"queued: {rid} for [{s['id']}] {s['name']}{'' if fresh else ' (an identical message was already queued)'}: {why}. "
-              f"Delivered when it is idle, within {left // 60} min; `relay.py --pending` lists, `relay.py --cancel {rid}` withdraws it")
+              f"Delivered {'once its card is answered (looked at again after 5 s, then at growing intervals up to 2 min)' if card_why(why) else 'when it is idle'}, "
+              f"within {left // 60} min; `relay.py --pending` lists, `relay.py --cancel {rid}` withdraws it")
     word, note = defer_ack(rid, ack_window(a)) if a.ack else (None, "")
     CTX["accepted"] = word == "delivered"    # a record only queued is not delivered yet: the deliverer runs as no session, so it cannot close an expectation
     if a.json:
@@ -3270,7 +3328,10 @@ def _main(argv=None, sweep=True):
         print(f"relay: [{s['id']}] not sent: text starting with '/' would run a built-in; peers do not run another "
               "session's built-ins", file=sys.stderr)
         return 2
+    route = "paseo" if is_paseo else "pane"
+    card = None    # a card-blocked target that may be deferred: not a refusal, queued below (split_card)
     why = hard_stop(s)    # on the fleet's own snapshot, before the Paseo gate overwrites its status
+    card, why = split_card(why, a, text, route, card)
     if why:
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
@@ -3279,6 +3340,7 @@ def _main(argv=None, sweep=True):
         # may send to an agent Paseo cannot confirm, one that is archived or asking, or whose process mapping
         # is untrusted (adversary, 2026-10-23)
         why = paseo_gate(s)
+        card, why = split_card(why, a, text, route, card)
         if not why and a.idle and s["status"] != "idle":
             if not paseo_idle(s, a.idle):
                 print(f"relay: [{s['id']}] not sent: its Paseo agent is still running after {a.idle:g}s", file=sys.stderr)
@@ -3288,6 +3350,7 @@ def _main(argv=None, sweep=True):
             print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
             return 1
     why = hard_stop(s)
+    card, why = split_card(why, a, text, route, card)
     if why:
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
@@ -3300,6 +3363,8 @@ def _main(argv=None, sweep=True):
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
         elif fleet.link_get(fleet.links_read()["links"], me, s) is None:
             text += f" [first contact from {me['id']}: reply `ack {me['id']}` through relay.py to prove this link both ways]"
+    if card:    # blocked on a card and deferrable: queued now, delivered once the card is answered; typed text would answer it
+        return defer_send(s, a, text, listed, card)
     why = is_paseo and paseo_steer_refusal(s, a.steer)
     if why:
         BUSY["hit"] = True

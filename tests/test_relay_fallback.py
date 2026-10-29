@@ -3761,6 +3761,119 @@ class TestDeferredSend(Harness):
         relay.deliver(rid)
         self.assertEqual(relay.rec_read(rid)["state"], "failed")
 
+    # ---- a target blocked on a permission or question card: queued, backing off (2026-10-28) ------------------------------------
+
+    CARD = "blocked on a permission or question: typed text would answer it (helm / the Paseo UI answers it)"
+
+    def card_target(self, cards: list[bool]) -> list[float]:
+        """Serve the Paseo target as idle, with a card while CARDS (consumed one per look) says True; returns the sleep log."""
+        self.cur = "idle"
+        looks = iter(cards)
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": False, "Cwd": "/x",
+                                         "PendingPermissions": [{"id": "p1"}] if next(looks, False) else []}
+        slept: list[float] = []
+        patcher = mock.patch.object(relay.time, "sleep", side_effect=slept.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return slept
+
+    def test_a_card_blocked_paseo_target_is_queued_not_refused_and_nothing_is_typed(self) -> None:
+        relay.paseo_gate = lambda s: self.CARD
+        rc, out, err = self.go()
+        self.assertEqual((rc, self.sent), (0, []), err)
+        rec = relay.rec_all()[0]
+        self.assertEqual((rec["state"], rec["target"]["paseo"]), ("queued", AGENT))
+        self.assertIn("once its card is answered", out)
+        self.assertIn(self.CARD, out)
+
+    def test_a_card_is_still_refused_when_deferring_is_not_wanted_and_the_deliverer_is_told_it_was_busy(self) -> None:
+        relay.paseo_gate = lambda s: self.CARD
+        for argv in (("--no-defer",), ("--plan",), ("--idle", "1"), ("--via", "pane")):
+            relay.BUSY["hit"] = False
+            rc, _, err = self.go(*argv)
+            self.assertEqual((rc, relay.rec_all(), self.sent), (1, [], []), argv)
+            self.assertIn("blocked on a permission or question", err, argv)
+            self.assertTrue(relay.BUSY["hit"], argv)    # the deliverer (--no-defer) then re-queues the record instead of failing it
+
+    def test_a_card_blocked_target_without_an_identifiable_sender_is_refused_with_the_card_reason(self) -> None:
+        os.environ.pop("PASEO_AGENT_ID", None)
+        relay.paseo_gate = lambda s: self.CARD
+        rc, _, err = self.go()
+        self.assertEqual((rc, relay.rec_all()), (1, []))
+        self.assertIn("blocked on a permission or question", err)
+        self.assertIn("deferring needs an identifiable sender", err)
+
+    def test_a_pane_tui_asking_a_question_is_queued_and_polled_as_a_card(self) -> None:
+        tui = self.proc(51921, "omp", "omp", "--auto-approve")
+        state = self.pane(real_omp_row(status="blocked"), [tui])
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 0)
+        rid = relay.rec_all()[-1]["id"]
+        self.assertEqual((relay.rec_read(rid)["state"], self.calls), ("queued", []))
+        self.assertEqual(relay.target_poll(relay.rec_read(rid))[0], "card")
+        state["row"] = real_omp_row(status="idle")
+        self.assertEqual(relay.target_poll(relay.rec_read(rid)), ("idle",))
+        relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], self.calls), ("delivered", ["type"]))
+
+    def test_a_paseo_card_is_a_card_poll_but_an_archived_agent_with_one_is_still_a_failure(self) -> None:
+        rec = {"target": {"id": AGENT[:8], "paseo": AGENT}}
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": False, "PendingPermissions": [{"id": "p1"}]}
+        poll = relay.target_poll(rec)
+        self.assertEqual(poll[0], "card")
+        self.assertTrue(relay.card_why(poll[1]), poll)
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": True, "PendingPermissions": [{"id": "p1"}]}
+        self.assertEqual(relay.target_poll(rec)[0], "fail")
+
+    def test_the_backoff_doubles_from_the_poll_interval_to_a_cap_with_full_jitter_and_a_floor(self) -> None:
+        top = [relay.card_backoff(n, rng=lambda lo, hi: hi) for n in range(9)]
+        self.assertEqual(top, [5, 10, 20, 40, 80, 120, 120, 120, 120])
+        self.assertEqual({relay.card_backoff(n, rng=lambda lo, hi: lo) for n in range(9)}, {relay.DEFER_POLL})    # never below one poll
+        self.assertEqual(relay.card_backoff(10**9, rng=lambda lo, hi: hi), 120)    # a huge count cannot overflow
+        draws = {relay.card_backoff(5) for _ in range(200)}
+        self.assertTrue(all(relay.DEFER_POLL <= d <= 120 for d in draws))
+        self.assertGreater(len(draws), 20)    # real jitter, not a constant
+
+    def test_a_deliverer_backs_off_while_the_card_stays_then_sends_once_it_is_answered(self) -> None:
+        rid = self.queue()
+        slept = self.card_target([True, True, True, True, False, False, False])
+        with mock.patch.object(relay.random, "uniform", lambda lo, hi: hi):
+            relay.deliver(rid)
+        self.assertEqual(slept, [5, 10, 20, 40])
+        self.assertEqual((relay.rec_read(rid)["state"], len(self.messages())), ("delivered", 1))
+
+    def test_the_backoff_starts_over_after_a_look_that_finds_no_card(self) -> None:
+        rid = self.queue()
+        looks = iter([(True, "idle"), (True, "idle"), (False, "running"), (True, "idle"), (False, "idle")])
+        relay.paseo_inspect = lambda a: (lambda card, status: {"Id": a, "Status": status, "Archived": False, "Cwd": "/x",
+                                                                  "PendingPermissions": [{"id": "p1"}] if card else []})(*next(looks, (False, "idle")))
+        self.cur = "idle"    # what main's own gate sees when the deliverer finally sends
+        slept: list[float] = []
+        with mock.patch.object(relay.time, "sleep", side_effect=slept.append), mock.patch.object(relay.random, "uniform", lambda lo, hi: hi):
+            relay.deliver(rid)
+        self.assertEqual(slept, [5, 10, relay.DEFER_POLL, 5])    # card, card, busy (a flat poll), card again: the step is back to the first
+        self.assertEqual(relay.rec_read(rid)["state"], "delivered")
+
+    def test_a_card_wait_never_sleeps_past_the_expiry_and_the_expired_record_says_why(self) -> None:
+        rid = self.queue()
+        self.patch_rec(rid, expires=time.time() + 3)
+        looks = iter([True] * 5)
+        self.cur = "idle"
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": False, "Cwd": "/x",
+                                         "PendingPermissions": [{"id": "p1"}] if next(looks, False) else []}
+        slept: list[float] = []
+
+        def sleeper(secs: float) -> None:
+            slept.append(secs)
+            self.patch_rec(rid, expires=time.time() - 1)    # the clock reaches the expiry during the wait
+        with mock.patch.object(relay.time, "sleep", side_effect=sleeper), mock.patch.object(relay.random, "uniform", lambda lo, hi: hi):
+            relay.deliver(rid)
+        self.assertEqual(len(slept), 1)
+        self.assertLessEqual(slept[0], 3.0)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], self.messages()), ("expired", []))
+        self.assertIn("blocked on a permission or question card", rec["outcome"])
+
     def test_a_paseo_probe_tells_not_found_from_a_daemon_that_cannot_answer(self) -> None:
         def probe(rc: int, out: str) -> str:
             with mock.patch.object(relay, "paseo_run", return_value=(rc, out, "")):
