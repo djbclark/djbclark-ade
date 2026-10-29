@@ -3,7 +3,13 @@ name: Tests
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - 'docs/handoffs/**'
   pull_request:
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - 'docs/handoffs/**'
   workflow_dispatch:
     inputs:
       context_only:

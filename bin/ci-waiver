@@ -1,0 +1,141 @@
+#!/usr/bin/env -S python3 -I
+"""Mechanically classify a CI waiver. See docs/ci-waiver.md.
+
+ci-waiver classify --pr N [--repo OWNER/NAME] [--json]
+ci-waiver classify --base REF --head REF [--repo OWNER/NAME] [--json]
+
+Exit 0: classification printed (including fail-closed `none`); 2: invalid usage.
+No marker, author assertion, or commit message can grant a waiver.
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+WAIVABLE_PATHS = ("CHANGELOG.md", "docs/handoffs/**")
+DEFAULT_REPO = "djbclark/djbclark-ade"
+
+
+def waivable(path: str) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in WAIVABLE_PATHS)
+
+
+def excluded(path: str) -> bool:
+    return (path.startswith((".github/", "tests/", "config/"))
+            or path in ("bin/pr-wait", "bin/ci-waiver"))
+
+
+def git(*args: str, allowed: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
+    r = subprocess.run(["git", *args], capture_output=True, timeout=60)
+    if r.returncode not in allowed:
+        raise ValueError("git-error:" + args[0])
+    return r
+
+
+def sha(ref: str) -> str:
+    value = git("rev-parse", "--verify", "--end-of-options", ref + "^{commit}").stdout.decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise ValueError("unreadable-commit")
+    return value
+
+
+def paths(a: str, b: str) -> list[str]:
+    # No rename detection: BOTH the old and new paths must pass the policy.
+    return [p.decode("utf-8", "surrogateescape") for p in
+            git("diff", "--no-renames", "--name-only", "-z", a, b, "--").stdout.split(b"\0") if p]
+
+
+def waiter():
+    loader = SourceFileLoader("ci_waiver_waiter", str(Path(__file__).resolve().with_name("pr-wait")))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def classify(base: str | None, head: str | None, repo: str, pr: int | None = None) -> dict:
+    result = {"class": "none", "reasons": [], "head": None}
+    try:
+        if git("rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
+            raise ValueError("shallow-history")
+        w = waiter()
+        if pr is not None:
+            doc = w.pr_doc(repo, pr)
+            base, head = doc["base"]["sha"], doc["head"]["sha"]
+        if not base or not head:
+            raise ValueError("missing-base-or-head")
+        base, head = sha(base), sha(head)
+        result["head"] = head
+        ancestor = sha(git("merge-base", base, head).stdout.decode().strip())
+        changed = paths(ancestor, head)
+        hard = ["hard-exclusion:" + p for p in changed if excluded(p)]
+        if hard:
+            result["reasons"] = hard
+            return result
+        if changed and all(waivable(p) for p in changed):
+            return {**result, "class": "docs-only", "reasons": ["only-waivable-paths"]}
+        nonwaivable = ["touches-nonwaivable:" + p for p in changed if not waivable(p)]
+        parents = git("rev-list", "--parents", "-n", "1", head).stdout.decode().split()[1:]
+        if len(parents) != 2:
+            return {**result, "reasons": nonwaivable + ["not-a-merge"]}
+        h0, target = map(sha, parents)
+        counts = w.ci_counts(w.fetch_checks(repo, h0))
+        if not counts["success"] or counts["fail"] or counts["pending"]:
+            raise ValueError("h0-not-green")
+        master = json.loads(w.gh("api", f"repos/{repo}/commits/master"))["sha"]
+        if git("merge-base", "--is-ancestor", target, sha(master), allowed=(0, 1)).returncode:
+            raise ValueError("target-not-on-master")
+        runs = w.api_items(f"repos/{repo}/actions/workflows/test.yml/runs?event=push&branch=master&head_sha={target}&per_page=100", "workflow_runs")
+        matching = [r for r in runs if r.get("head_sha") == target and r.get("event") == "push"
+                    and r.get("head_branch") == "master"]
+        # The latest attempt wins: an earlier success cannot hide a failed rerun.
+        latest = max(matching, key=lambda r: (int(r["run_number"]), int(r.get("run_attempt", 1)))) if matching else {}
+        if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+            raise ValueError("master-not-green")
+        merged = git("merge-tree", "--write-tree", "--name-only", "-z", h0, target, allowed=(0, 1))
+        fields = merged.stdout.split(b"\0")
+        tree = fields[0].decode()
+        if not re.fullmatch(r"[0-9a-f]{40}", tree):
+            raise ValueError("unreadable-machine-merge")
+        if merged.returncode:
+            for p in fields[1:]:
+                if not p:
+                    break
+                path = p.decode("utf-8", "surrogateescape")
+                if not waivable(path):
+                    raise ValueError("hand-edited:" + path)
+        edits = ["hand-edited:" + p for p in paths(tree, head) if not waivable(p)]
+        if edits:
+            return {**result, "reasons": edits}
+        return {**result, "class": "master-merge", "reasons": ["green-parents-machine-merge"]}
+    except Exception as e:
+        # All external data and local repository failures deny the waiver.
+        return {**result, "reasons": [str(e)[:240] or type(e).__name__]}
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+    c = sub.add_parser("classify", help="print class, reasons and exact classified head; errors fail closed")
+    c.add_argument("--pr", type=int)
+    c.add_argument("--repo", default=DEFAULT_REPO)
+    c.add_argument("--base")
+    c.add_argument("--head")
+    c.add_argument("--json", action="store_true")
+    a = p.parse_args()
+    if (a.pr is None and not (a.base and a.head)) or (a.pr is not None and (a.base or a.head)):
+        p.error("use --pr N OR both --base REF --head REF")
+    result = classify(a.base, a.head, a.repo, a.pr)
+    print(json.dumps(result) if a.json else f"{result['class']}: {', '.join(result['reasons'])} (head {result['head']})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

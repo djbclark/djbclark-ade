@@ -66,6 +66,69 @@ def fail(err: str = "gh: connection reset", rc: int = 1) -> dict:
     return {"out": "", "err": err, "rc": rc}
 
 
+def waiver_body(head=HEAD, cls="docs-only", adversary=True):
+    body = '<!-- ci-waiver:v1 ' + json.dumps({"class": cls, "head": head, "reviewer": "independent-opus"}) + ' -->'
+    if adversary:
+        body += '\n<!-- adversary-verdict:v1 ' + json.dumps({"verdict": "APPROVE", "head": HEAD}) + ' -->'
+    return body
+
+
+@pytest.mark.parametrize("case,blocker", [
+    ("valid", None), ("no-adversary", "ci-waiver-needs-adversary"),
+    ("short-head", "ci-waiver-malformed"), ("fenced", "ci-pending"),
+    ("class-mismatch", "ci-waiver-mismatch"), ("other-head", "ci-waiver-mismatch"),
+    ("failed", "ci-failed"), ("no-checks", None), ("bad-version", "ci-waiver-malformed"),
+    ("partly-code", "ci-waiver-malformed"), ("nested-note", None), ("symlink", None),
+])
+def test_ci_waiver_waiter_gate(world, case, blocker):
+    # A deterministic local git shim lets the REAL classifier prove a docs-only diff;
+    # the waiter and classifier still read the PR independently through fake gh.
+    fake_git = world.dir / "git"
+    fake_git.write_text('''#!/usr/bin/env python3
+import sys
+a=sys.argv[1:]
+if a==['rev-parse','--is-shallow-repository']: print('false')
+elif a[0]=='rev-parse': print('a'*40 if a[-1].startswith('a') else 'b'*40)
+elif a[0]=='merge-base': print('b'*40)
+elif a[0]=='diff': sys.stdout.buffer.write(b'CHANGELOG.md\\0')
+else: sys.exit(1)
+''')
+    fake_git.chmod(0o755)
+    body = waiver_body(head=HEAD[:12] if case == "short-head" else OLD if case == "other-head" else HEAD,
+                       cls="master-merge" if case == "class-mismatch" else "docs-only",
+                       adversary=case != "no-adversary")
+    if case == "fenced":
+        body = "```\n" + body + "\n```"
+    elif case == "bad-version":
+        body = body.replace("ci-waiver:v1", "ci-waiver:v2")
+    elif case == "partly-code":
+        body = body.replace('"class":', '`junk` "class":')
+    elif case == "nested-note":
+        marker = {"class": "docs-only", "head": HEAD, "reviewer": "opus", "note": '<!-- ci-waiver:v1 {"head":"text"} -->'}
+        body = '<!-- ci-waiver:v1 ' + json.dumps(marker) + ' -->\n' + waiver_body().split('\n')[1]
+    world.route(f"repos/{REPO}/pulls/{PR}", ok({"head": {"sha": HEAD}, "base": {"sha": OLD}, "body": body}))
+    runs = [] if case == "no-checks" else [run_obj("test", "in_progress", None)]
+    if case == "failed":
+        runs.append(run_obj("lint", conclusion="failure"))
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs", checks_page(*runs))
+    if case == "symlink":
+        link = world.dir / "pr-wait-link"
+        link.symlink_to(PR_WAIT)
+        argv = world.argv("--timeout", "1", "--no-request", "--json")
+        argv[2] = str(link)
+        r = subprocess.run(argv, env=world.env, capture_output=True, text=True, timeout=30)
+    else:
+        r = world.run("--timeout", "1", "--no-request", "--json")
+    assert r.returncode == (0 if blocker is None else 1), r.stderr
+    result = world.file("summary")
+    assert result["merge_ready"] is (blocker is None), result
+    if blocker:
+        assert blocker in result["merge_blockers"]
+    else:
+        assert result["ci"]["state"] == result["ci_state"] == "waived"
+        assert result["adversary_required"] is True
+
+
 def run_obj(name: str, status: str = "completed", conclusion: str | None = "success") -> dict:
     return {"name": name, "status": status, "conclusion": conclusion}
 

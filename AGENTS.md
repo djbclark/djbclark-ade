@@ -21,6 +21,7 @@ Each doc carries its own summary.
 
 | Doc | For |
 |---|---|
+| [docs/ci-waiver.md](docs/ci-waiver.md) | Mechanical CI waiver classes, path-safety proof, independent review and current-head markers (2026-10-28) |
 | [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
 | [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow since 2026-10-11) |
@@ -282,3 +283,18 @@ pull request here is expected to meet these; flag any it misses.
     tense, ending with the PR number; `Added`, `Changed`, `Fixed`, `Removed` or `Security`.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.
+11. **CI waiver (2026-10-28): the classifier, never an agent's claim, decides.**
+    `bin/ci-waiver classify --pr N --json` permits only proved `docs-only` paths or a
+    `master-merge` of green parents matching Git's machine merge on every other path.
+    Workflow, tests, config and waiver-tool changes cannot qualify; failed checks are never waived.
+    An independent adversary on `omp --model anthropic/claude-opus-5-5 --effort high` or
+    stronger, never the author, must review the exact head and supply a live adversary APPROVE.
+    An agent that can request a waiver may not self-approve it. Add this live marker to the PR body:
+
+    ```
+    <!-- ci-waiver:v1 {"class":"docs-only"|"master-merge","head":"<40-hex>","reviewer":"<agent id>"} -->
+    ```
+
+    The class and full head must match the classifier; malformed markers block. Pending or absent
+    CI then becomes `waived`; Codex and open-finding gates still apply. See
+    [docs/ci-waiver.md](docs/ci-waiver.md) for the proof, exclusions and explicit squash message.
