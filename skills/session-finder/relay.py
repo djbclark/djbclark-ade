@@ -107,7 +107,8 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
 
 Text starting with `/` or `!` is never typed into a pane (a built-in or a shell command there); only a socket
 frame carries it, as a plain message. Never falls back (exit 1 with the reason, or 2): this session; a finished one (`/handoff` or `/quit`: start a
-/baton session instead); one blocked on a question or permission (`helm.py answer`); a Paseo agent Paseo cannot
+/baton session instead); one blocked on a question or permission only when the send cannot be deferred (--no-defer, --plan, --idle,
+another --via, or no identifiable sender: otherwise it is queued and delivered once the card is answered, see CARD below; `helm.py answer`); a Paseo agent Paseo cannot
 confirm; text starting with `/` to a Paseo agent (exit 2: peers do not run another session's built-ins; the pane
 route skips such text too, and a socket frame carries it as a plain message). Never
 falls back after a send it cannot rule out (exit 1, "unverified"): text typed into a pane but not seen or whose
@@ -1957,11 +1958,12 @@ def card_why(why):
     return isinstance(why, str) and why.startswith(CARD_WHY)
 
 
-def card_backoff(n, rng=random.uniform):
+def card_backoff(n, rng=None):
     """Seconds a deliverer sleeps after its N-th (0-based) consecutive look that found the target still blocked on a card: full
-    jitter under a ceiling that doubles from CARD_BACKOFF_BASE up to CARD_BACKOFF_CAP, never below DEFER_POLL."""
+    jitter under a ceiling that doubles from CARD_BACKOFF_BASE up to CARD_BACKOFF_CAP, never below DEFER_POLL. RNG is resolved at
+    call time (random.uniform), so a test that patches it is honoured."""
     ceiling = min(CARD_BACKOFF_CAP, CARD_BACKOFF_BASE * 2 ** min(max(n, 0), 16))
-    return max(DEFER_POLL, min(ceiling, rng(0, ceiling)))
+    return max(DEFER_POLL, min(ceiling, (rng or random.uniform)(0, ceiling)))
 
 
 # What identifies the session a relay runs in. A deliverer is built a new environment: it keeps none of these (a sweep
@@ -2500,7 +2502,8 @@ def defer_send(s, a, text, listed, why):
         if not ident:
             print(f"relay: [{s['id']}] not sent: " + (f"{why}; deferring" if card_why(why) else "that session is busy and cannot take it now; deferring")
                   + " needs an identifiable sender "
-                  "(it gets a notice if the send fails). Retry with --idle S, or --no-defer for the plain refusal", file=sys.stderr)
+                  "(it gets a notice if the send fails). " + ("Answer the card, or use --no-defer for the plain refusal" if card_why(why)
+                                                              else "Retry with --idle S, or --no-defer for the plain refusal"), file=sys.stderr)
             return 1
     agent = s["chan"][1] if (s.get("chan") or (None,))[0] == "paseo" else s.get("paseo") or ""
     tok = {"agent": s.get("agent") or "", "sid": s.get("sid") or "", "transcript": s.get("transcript") or "",

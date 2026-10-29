@@ -782,7 +782,7 @@ class TestHardStops(Harness):
     def test_finished_blocked_and_self_never_try_a_route(self) -> None:
         relay.claude_socket = lambda s: "/tmp/x.sock"
         for kw in ({"finished": "/handoff"}, {"status": "blocked"}, {"self": True}):
-            rc, _, err = self.run_main(sess(**kw))
+            rc, _, err = self.run_main(sess(**kw), "--no-defer")    # a card-blocked row is queued now unless deferring is off: this test is about the hard stop
             self.assertEqual((rc, self.calls), (1, []), kw)
             self.assertIn("not sent", err)
 
@@ -791,7 +791,7 @@ class TestHardStops(Harness):
         for why in ("blocked on a permission or question", "`paseo agent inspect` does not confirm Paseo agent",
                     "its process directory differs from Paseo agent"):
             relay.paseo_gate = lambda s, why=why: why
-            for via in ((), ("--via", "socket")):
+            for via in (("--no-defer",), ("--no-defer", "--via", "socket")):
                 rc, _, err = self.run_main(pasess(), *via)
                 self.assertEqual((rc, self.calls), (1, []), (why, via))
                 self.assertIn(why, err)
@@ -823,7 +823,7 @@ class TestHardStops(Harness):
         def gate(s: dict[str, Any]) -> None:
             s["status"] = "working"
         relay.paseo_gate = gate
-        rc, _, err = self.run_main(pasess(status="blocked"))
+        rc, _, err = self.run_main(pasess(status="blocked"), "--no-defer")
         self.assertEqual((rc, self.calls), (1, []))
         self.assertIn("blocked", err)
 
@@ -3788,12 +3788,22 @@ class TestDeferredSend(Harness):
 
     def test_a_card_is_still_refused_when_deferring_is_not_wanted_and_the_deliverer_is_told_it_was_busy(self) -> None:
         relay.paseo_gate = lambda s: self.CARD
-        for argv in (("--no-defer",), ("--plan",), ("--idle", "1"), ("--via", "pane")):
+        for argv in (("--no-defer",), ("--idle", "1"), ("--via", "pane")):    # --plan skips the Paseo gate altogether: it never reaches a card
             relay.BUSY["hit"] = False
             rc, _, err = self.go(*argv)
             self.assertEqual((rc, relay.rec_all(), self.sent), (1, [], []), argv)
             self.assertIn("blocked on a permission or question", err, argv)
             self.assertTrue(relay.BUSY["hit"], argv)    # the deliverer (--no-defer) then re-queues the record instead of failing it
+
+    def test_a_deliverer_whose_send_meets_the_card_again_puts_the_record_back_in_the_queue(self) -> None:
+        rid = self.queue()
+        self.cur = "idle"
+        relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": False, "Cwd": "/x", "PendingPermissions": []}    # the look sees no card
+        relay.paseo_gate = lambda s: self.CARD    # ... but main's own gate, a moment later, does: the card came back
+        with self.sleeps(0), self.assertRaises(Stalled):
+            relay.deliver(rid)    # re-queued, then it waits one poll (Stalled is the sleep it would take)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], self.sent), ("queued", []))
 
     def test_a_card_blocked_target_without_an_identifiable_sender_is_refused_with_the_card_reason(self) -> None:
         os.environ.pop("PASEO_AGENT_ID", None)
