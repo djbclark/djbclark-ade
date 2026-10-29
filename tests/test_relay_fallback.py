@@ -2823,6 +2823,9 @@ class TestDeferredSend(Harness):
             info = relay.paseo_inspect(agent)
             return info, "ok" if info else "notfound"
         relay.paseo_probe = probe
+        self.card_texts = [("", None)]    # `paseo permit ls` is a live CLI call: the harness answers it (text, whether the list names the agent)
+        relay.paseo_card_detail = lambda agent: self.card_texts[0]
+        relay.timeline_base = lambda me: None    # the sender's own timeline (`paseo logs`) is a live CLI call too: tests/test_relay_paseo.py covers it
         relay.paseo_gate = lambda s: s.update(status="working" if (s.get("paseo") == AGENT and self.cur != "idle") or s.get("paseo") == OTHER else "idle")
 
         def send(s: dict[str, Any], text: str, wait: float) -> str:
@@ -3795,6 +3798,34 @@ class TestDeferredSend(Harness):
             self.assertIn("blocked on a permission or question", err, argv)
             self.assertTrue(relay.BUSY["hit"], argv)    # the deliverer (--no-defer) then re-queues the record instead of failing it
 
+    def test_the_deliverer_files_why_it_waits_on_the_record_and_pending_shows_it(self) -> None:
+        rid = self.queue()
+        self.card_texts = [("Which branch should I use?", True)]
+        slept = self.card_target([True, True, False, False])
+        relay.paseo_inspect = lambda a, _i=iter([True, True, False]): {"Id": a, "Status": "idle", "Archived": False, "Cwd": "/x", "UpdatedAt": "",
+                                                                      "PendingPermissions": [{"id": "p1", "tool": "AskUserQuestion"}] if next(_i, False) else []}
+        with mock.patch.object(relay.random, "uniform", lambda lo, hi: hi):
+            relay.deliver(rid)
+        self.assertEqual(slept[:2], [5, 10])
+        rec = relay.rec_read(rid)
+        self.assertEqual(rec["state"], "delivered")
+        self.assertEqual(rec["look"]["state"], "card:question")    # the last diagnosis filed while it waited
+        self.assertIn("a QUESTION (AskUserQuestion)", rec["look"]["why"])
+        self.assertNotIn("Which branch", rec["look"]["why"])    # the card's own text is the agent's tool input: `--why` only, never a record, a log or a notice
+        self.assertNotIn("Which branch", self.log())
+        self.assertEqual(self.log().count(" look target="), 1)    # logged once per change, not once per look
+        self.cur = "running"    # busy again (the first message was delivered), so the next one is queued
+        rid2 = self.queue("second")
+        self.patch_rec(rid2, look={"state": "card:question", "why": "blocked on a permission or question (a QUESTION (AskUserQuestion))", "agree": True, "at": time.time()})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            relay.pending_cmd(False)
+        self.assertIn("[why: blocked on a permission or question (a QUESTION (AskUserQuestion))]", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            relay.pending_cmd(True)
+        self.assertEqual({r["id"]: r.get("look", {}).get("state") for r in json.loads(out.getvalue())}[rid2], "card:question")
+
     def test_a_deliverer_whose_send_meets_the_card_again_puts_the_record_back_in_the_queue(self) -> None:
         rid = self.queue()
         self.cur = "idle"
@@ -3896,7 +3927,7 @@ class TestDeferredSend(Harness):
         self.assertLessEqual(slept[0], 3.0)
         rec = relay.rec_read(rid)
         self.assertEqual((rec["state"], self.messages()), ("expired", []))
-        self.assertIn("blocked on a permission or question card", rec["outcome"])
+        self.assertIn("blocked on a permission or question", rec["outcome"])
 
     def test_a_paseo_probe_tells_not_found_from_a_daemon_that_cannot_answer(self) -> None:
         def probe(rc: int, out: str) -> str:
