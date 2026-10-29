@@ -132,8 +132,10 @@ async function work() {
     if (f) return f.value === true;
     // The provider published other features but not this one (omp: only fast_mode; its default
     // mode is already Full Access): nothing to switch on, so not a failure. An empty list may just
-    // be a provider that has not loaded its features yet, so that stays unverified.
-    return feats.length > 0 ? "n/a" : undefined;
+    // be a provider that has not loaded its features yet, so that stays unverified. Claude is the
+    // exception: it never publishes auto_accept (its yolo is the permission mode, which modeOk()
+    // checks), and its list is often empty for good (23 of 36 state files, 2026-10-29).
+    return feats.length > 0 || provider === "claude" ? "n/a" : undefined;
   };
   const modeOk = () => !mode || readState()?.lastModeId === mode;
   let on = readFeature();
