@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       macos:
-        description: Also run the suite on the macOS runner (off by default; on request only)
+        description: Also run the suite on the macOS runner (off by default; on request only; ignored when context_only is set)
         type: boolean
         default: false
 
