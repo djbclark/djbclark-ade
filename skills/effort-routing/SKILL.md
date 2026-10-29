@@ -106,7 +106,7 @@ it. Verified against
 - **`/clear` costs nothing; `/compact` is itself a large request**, because
   it reads the conversation it summarises. When you want a fresh start rather
   than continuity, clear — do not compact out of habit. Since 2026-10-15
-  compaction is automatic: `autoCompactWindow` is 400000 in
+  compaction is automatic: `autoCompactWindow` is 300000 in
   `~/.claude/settings.json` (every model, every host; the PreCompact hook
   writes the Tier 1 checkpoint first), and `context_size_nudge.py` tells a
   herdr or Orca session to compact itself earlier at a natural boundary via

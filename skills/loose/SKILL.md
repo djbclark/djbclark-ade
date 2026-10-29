@@ -247,7 +247,7 @@ read the final results". If the handoff was chosen and it was run document-only,
 offer the finish prompt again once it is written.
 
 `/compact` works the same way, but only when the context prompt's compact tier
-fires (+200k since the start or last compaction) or he picked it, never just
+fires (+140k since the start or last compaction, or 217k total) or he picked it, never just
 because context looks large: each compaction costs ~150k+ token-equivalents
 (`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session in a herdr pane or an
 Orca terminal (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
