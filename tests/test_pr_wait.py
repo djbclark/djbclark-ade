@@ -317,6 +317,8 @@ else: sys.exit(1)
     else:
         assert result["ci"]["state"] == result["ci_state"] == "waived"
         assert result["adversary_required"] is True
+        assert result["ci_waiver"]["classification"]["master"] == OLD
+        assert result["ci_waiver"]["classification"]["merge_tree"] == "c" * 40
 
 
 def run_obj(name: str, status: str = "completed", conclusion: str | None = "success") -> dict:

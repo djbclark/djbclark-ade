@@ -4,12 +4,19 @@
 ci-waiver classify --repo-dir DIR --pr N [--repo OWNER/NAME] [--json]
 ci-waiver classify --repo-dir DIR --base REF --head REF [--repo OWNER/NAME] [--json]
 
-PR mode fetches all evidence into a fresh private GitHub object store; repo-dir
-is used only by offline base/head mode. Only the docs-only class exists: multiple
-merge bases or a merge in ancestor..head refuse a waiver, including merges of
-master. A clean merge-tree result against base must also have only waivable paths
-and safe file modes (docs/ci-waiver.md, "Why not master-merge").
-Exit 0: classification printed (including fail-closed none); 2: bad usage.
+ci-waiver merge PR --head SHA [--repo OWNER/NAME]
+
+PR mode uses a fresh private GitHub store and proves both API base and current
+master; JSON names master and merge_tree. Master-side renames, deletions or mode
+changes on PR paths refuse. Multiple merge bases and PR-history merges refuse.
+Offline base/head mode retains its explicit base. Only docs-only is waivable.
+The operator-authorized merge wrapper requires trusted master's review gates,
+reclassifies and rechecks checks before a head-pinned squash. It verifies the
+actual squash parent, paths, modes and exact tree AFTER merging. This narrows and
+detects the master race; it cannot prevent it without branch protection/queue.
+Mismatch exits 1 with REVERT instructions; nothing automatically reverts/pushes.
+Exit 0: classification printed (including none), or merge verified; 1: merge
+refused/verification failed; 2: bad usage. See docs/ci-waiver.md.
 This file deliberately imports no repository Python code.
 """
 from __future__ import annotations
@@ -20,6 +27,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -102,6 +110,21 @@ class Repository:
                     raise ValueError("unsafe-doc-mode:" + path)
 
 
+    def master_touched_pr_paths(self, base, master, paths):
+        fields = self.git("diff", "--raw", "--no-abbrev", "--find-renames", "-z", base, master, "--").stdout.split(b"\0")
+        touched, i = set(paths), 0
+        while i < len(fields) - 1:
+            header = fields[i].split()
+            old, new, status = header[0], header[1], header[-1]
+            count = 2 if status.startswith((b"R", b"C")) else 1
+            names = {p.decode("utf-8", "surrogateescape") for p in fields[i + 1:i + 1 + count]}
+            if names & touched and (status.startswith(b"R") or new == b"000000"
+                                    or old != b":000000" and new != b"000000" and old[1:] != new):
+                return True
+            i += count + 1
+        return False
+
+
 class GitHubRepository(Repository):
     """Only objects fetched by this invocation; never opens the checkout's gitdir."""
 
@@ -158,8 +181,40 @@ def items(endpoint, key=None):
     return out
 
 
+def classify_pair(r, base, head, result):
+    """Prove the PR history and prospective merge against this exact base."""
+    ancestors = r.git("merge-base", "--all", base, head).stdout.decode().split()
+    if len(ancestors) > 1:
+        raise ValueError("multiple-merge-bases")
+    ancestor = r.sha(ancestors[0])
+    if r.git("rev-list", "--min-parents=2", ancestor + ".." + head).stdout.strip():
+        raise ValueError("merge-in-pr-history")
+    changed = r.paths(ancestor, head)
+    hard = ["hard-exclusion:" + p for p in changed if excluded(p)]
+    if hard:
+        return {**result, "reasons": hard}
+    r.safe_doc_modes(ancestor, head)
+    if changed and all(waivable(p) for p in changed):
+        merged = r.git("merge-tree", "--write-tree", base, head, allowed=(0, 1))
+        if merged.returncode:
+            raise ValueError("merge-result-not-docs-only")
+        tree = merged.stdout.decode().splitlines()[0]
+        if not re.fullmatch(r"[0-9a-f]{40}", tree):
+            raise ValueError("merge-result-not-docs-only")
+        merged_paths = r.paths(base, tree)
+        if not merged_paths or any(excluded(p) or not waivable(p) for p in merged_paths):
+            raise ValueError("merge-result-not-docs-only")
+        try:
+            r.safe_doc_modes(base, tree)
+        except ValueError:
+            raise ValueError("merge-result-not-docs-only") from None
+        return {**result, "class": "docs-only", "reasons": ["only-waivable-paths"], "merge_tree": tree}
+    reasons = ["touches-nonwaivable:" + p for p in changed if not waivable(p)] or ["no-changes"]
+    return {**result, "reasons": reasons}
+
+
 def classify(base, head, repo, pr, repo_dir):
-    result = {"class": "none", "reasons": [], "head": None}
+    result = {"class": "none", "reasons": [], "head": None, "master": None}
     try:
         with contextlib.ExitStack() as stack:
             if pr is not None:
@@ -169,6 +224,7 @@ def classify(base, head, repo, pr, repo_dir):
                 base, head = doc["base"]["sha"], doc["head"]["sha"]
                 r = GitHubRepository(stack.enter_context(tempfile.TemporaryDirectory(prefix="ci-waiver-objects-")), repo)
                 master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
+                result["master"] = master
             else:
                 r = Repository(repo_dir)
             if r.git("rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
@@ -181,41 +237,153 @@ def classify(base, head, repo, pr, repo_dir):
                 timeline = items(f"repos/{repo}/issues/{pr}/timeline?per_page=100")
                 if any(e.get("event") in RETARGET_EVENTS for e in timeline):
                     raise ValueError("pr-base-retargeted")
-            ancestors = r.git("merge-base", "--all", base, head).stdout.decode().split()
-            if len(ancestors) > 1:
-                raise ValueError("multiple-merge-bases")
-            ancestor = r.sha(ancestors[0])
-            if r.git("rev-list", "--min-parents=2", ancestor + ".." + head).stdout.strip():
-                raise ValueError("merge-in-pr-history")
-            changed = r.paths(ancestor, head)
-            hard = ["hard-exclusion:" + p for p in changed if excluded(p)]
-            if hard:
-                return {**result, "reasons": hard}
-            r.safe_doc_modes(ancestor, head)
-            if changed and all(waivable(p) for p in changed):
-                merged = r.git("merge-tree", "--write-tree", base, head, allowed=(0, 1))
-                if merged.returncode:
-                    raise ValueError("merge-result-not-docs-only")
-                tree = merged.stdout.decode().splitlines()[0]
-                if not re.fullmatch(r"[0-9a-f]{40}", tree):
-                    raise ValueError("merge-result-not-docs-only")
-                merged_paths = r.paths(base, tree)
-                if not merged_paths or any(excluded(p) or not waivable(p) for p in merged_paths):
-                    raise ValueError("merge-result-not-docs-only")
-                try:
-                    r.safe_doc_modes(base, tree)
-                except ValueError:
-                    raise ValueError("merge-result-not-docs-only") from None
-                return {**result, "class": "docs-only", "reasons": ["only-waivable-paths"]}
-            reasons = ["touches-nonwaivable:" + p for p in changed if not waivable(p)] or ["no-changes"]
-            return {**result, "reasons": reasons}
+            if pr is not None:
+                # Compare both rename endpoints and mode changes, including
+                # renames into a PR-changed path.
+                touched = r.paths(base, head)
+                if r.master_touched_pr_paths(base, master, touched):
+                    raise ValueError("master-touched-pr-paths")
+                original = classify_pair(r, base, head, result)
+                if original["class"] != "docs-only":
+                    return original
+                return classify_pair(r, master, head, result)
+            return classify_pair(r, base, head, result)
     except Exception as e:
         return {**result, "reasons": [str(e)[:240] or type(e).__name__]}
 
 
+
+def review_gate(r, master, repo, pr, head, directory):
+    """Execute only the trusted master's waiter, without posting review requests."""
+    own = r.git("show", master + ":bin/ci-waiver").stdout
+    if own != Path(__file__).resolve().read_bytes():
+        raise ValueError("merge-tool-differs-from-master")
+    waiter = Path(directory) / "pr-wait"
+    waiter.write_bytes(r.git("show", master + ":bin/pr-wait").stdout)
+    completed = subprocess.run([sys.executable, "-I", str(waiter), str(pr), "--repo", repo,
+                                "--head", head, "--no-request", "--timeout", "0", "--ci-grace", "0",
+                                "--out", str(Path(directory) / "gate"), "--json"],
+                               cwd=directory, capture_output=True, text=True, timeout=300)
+    if completed.returncode:
+        raise ValueError("merge-review-gate-failed")
+    report = json.loads(completed.stdout)
+    waiver = report.get("ci_waiver") or {}
+    markers = waiver.get("markers") or []
+    if (report.get("head") != head or report.get("merge_ready") is not True
+            or waiver.get("malformed") or not markers
+            or any(m.get("head") != head or m.get("class") != "docs-only" for m in markers)
+            or (waiver.get("classification") or {}).get("class") != "docs-only"):
+        raise ValueError("merge-review-gate-refused")
+
+
+def recheck_checks(repo, pr, head):
+    """gh pr checks, with an API confirmation for its nonzero no-checks case."""
+    check = subprocess.run(["gh", "pr", "checks", str(pr), "--repo", "https://github.com/" + repo,
+                            "--json", "bucket"], capture_output=True, text=True, timeout=120)
+    if check.returncode in (0, 8):
+        checks = json.loads(check.stdout)
+        if not isinstance(checks, list) or any(c.get("bucket") not in ("pass", "pending", "skipping") for c in checks):
+            raise ValueError("merge-checks-refused")
+    elif check.returncode == 1:
+        # gh returns 1 when the PR has no checks. Never interpret another API or
+        # transport failure as absence; independently require two empty lists.
+        runs = items(f"repos/{repo}/commits/{head}/check-runs?per_page=100", "check_runs")
+        statuses = items(f"repos/{repo}/commits/{head}/statuses?per_page=100")
+        if runs or statuses:
+            raise ValueError("merge-checks-unreadable")
+    else:
+        raise ValueError("merge-checks-unreadable")
+
+
+def verify_squash(r, squash, proof):
+    """Verify the actual commit, not the PR's stale base or a moving branch ref."""
+    squash = r.sha(squash)
+    parents = r.git("rev-list", "--parents", "-n", "1", squash).stdout.decode().split()
+    if len(parents) != 2 or parents[1] != proof["master"]:
+        raise ValueError("squash-parent-differs-from-proved-master")
+    parent = parents[1]
+    paths = r.paths(parent, squash)
+    if not paths or any(excluded(p) or not waivable(p) for p in paths):
+        raise ValueError("squash-paths-not-docs-only")
+    r.safe_doc_modes(parent, squash)
+    tree = r.git("rev-parse", squash + "^{tree}").stdout.decode().strip()
+    if tree != proof["merge_tree"]:
+        raise ValueError("squash-tree-differs-from-proof")
+
+
+def revert_instructions(repo, pr, squash):
+    # Never mutate here. Quote every operand in the human-run recovery commands.
+    branch = "revert-waiver-" + squash[:12]
+    return (f"REVERT: {squash}\n"
+            + shlex.join(["git", "switch", "-c", branch, squash]) + "\n"
+            + shlex.join(["git", "revert", "--no-edit", "--mainline", "1", squash]) + "\n"
+            + shlex.join(["git", "push", "origin", "HEAD:refs/heads/" + branch]) + "\n"
+            + shlex.join(["gh", "pr", "create", "--repo", "https://github.com/" + repo,
+                          "--base", "master", "--head", branch, "--title", "Revert unsafe CI-waiver merge",
+                          "--body", f"Revert {squash}: post-merge verification failed for PR {pr}."]))
+
+
+def merge_pr(repo, pr, head):
+    """An operator-authorized merge only: narrow the race, then detect its result."""
+    attempted, squash = False, None
+    try:
+        if not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise ValueError("merge-head-must-be-full-sha")
+        with tempfile.TemporaryDirectory(prefix="ci-waiver-merge-") as directory:
+            r = GitHubRepository(directory, repo)
+            master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
+            review_gate(r, master, repo, pr, head, directory)
+            # Fresh classification after the review fetches. Name the exact tree
+            # and master this invocation proved; never reuse a waiter snapshot.
+            proof = classify(None, None, repo, pr, None)
+            if (proof.get("class") != "docs-only" or proof.get("head") != head
+                    or not re.fullmatch(r"[0-9a-f]{40}", proof.get("master") or "")
+                    or not re.fullmatch(r"[0-9a-f]{40}", proof.get("merge_tree") or "")):
+                raise ValueError("merge-precheck-refused:" + ",".join(proof.get("reasons", [])))
+            proved_master = r.sha(proof["master"])
+            if r.git("show", proved_master + ":bin/ci-waiver").stdout != Path(__file__).resolve().read_bytes():
+                raise ValueError("merge-tool-differs-from-master")
+            recheck_checks(repo, pr, head)
+            attempted = True
+            merged = subprocess.run(["gh", "pr", "merge", str(pr), "--repo", "https://github.com/" + repo,
+                                     "--squash", "--match-head-commit", head,
+                                     "--subject", f"Merge reviewed docs-only PR {pr}",
+                                     "--body", f"Reviewed head {head}; verified CI-waiver docs-only merge."],
+                                    capture_output=True, text=True, timeout=120)
+            # Even an error can follow a successful network write. Query once;
+            # never retry the mutation, nor assume success from exit code alone.
+            doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+            candidate = doc.get("merge_commit_sha")
+            if doc.get("merged") is not True or not isinstance(candidate, str) or not re.fullmatch(r"[0-9a-f]{40}", candidate):
+                raise ValueError("merge-outcome-unverified")
+            squash = candidate
+            if doc["head"]["sha"] != head or doc["base"]["ref"] != "master":
+                raise ValueError("merged-pr-identity-mismatch")
+            verify_squash(r, squash, proof)
+            if merged.returncode:
+                raise ValueError("merge-command-failed-after-verified-merge")
+            print(json.dumps({"merged": squash, "head": head, "master": proof["master"],
+                              "merge_tree": proof["merge_tree"], "verified": True}))
+            return 0
+    except Exception as e:
+        print("CI-WAIVER MERGE FAILED: " + (str(e)[:240] or type(e).__name__), file=sys.stderr)
+        if squash:
+            print(revert_instructions(repo, pr, squash), file=sys.stderr)
+        elif attempted:
+            print("VERIFY FAILED: merge may have happened; do not retry. Inspect "
+                  + shlex.join(["gh", "pr", "view", str(pr), "--repo", "https://github.com/" + repo,
+                                "--json", "mergedAt,mergeCommit,headRefOid,baseRefName"]), file=sys.stderr)
+        return 1
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    c = p.add_subparsers(dest="command", required=True).add_parser("classify")
+    sub = p.add_subparsers(dest="command", required=True)
+    m = sub.add_parser("merge", help="operator-authorized merge with fresh proof and post-merge verification")
+    m.add_argument("pr", type=int)
+    m.add_argument("--head", required=True)
+    m.add_argument("--repo", default=DEFAULT_REPO)
+    c = sub.add_parser("classify")
     c.add_argument("--repo-dir", required=True)
     c.add_argument("--pr", type=int)
     c.add_argument("--repo", default=DEFAULT_REPO)
@@ -223,6 +391,10 @@ def main():
     c.add_argument("--head")
     c.add_argument("--json", action="store_true")
     a = p.parse_args()
+    if a.command == "merge":
+        if a.pr < 1:
+            p.error("PR must be positive")
+        return merge_pr(a.repo, a.pr, a.head)
     if (a.pr is None and not (a.base and a.head)) or (a.pr is not None and (a.base or a.head)):
         p.error("use --pr N OR both --base REF --head REF")
     result = classify(a.base, a.head, a.repo, a.pr, a.repo_dir)

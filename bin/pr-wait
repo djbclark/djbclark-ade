@@ -9,14 +9,18 @@ CI waiver (2026-10-28): a live ci-waiver:v1 marker (class "docs-only" only) for 
 current head, plus an independent live adversary APPROVE, satisfies pending/absent CI as `waived`.
 Failed checks still block. Multiple merge bases or a merge in the unique ancestor..head
 range are NOT waivable, including merges of master. A candidate requires a clean merge-tree
-result against base with a nonempty diff of only waivable paths and safe file modes
-(docs/ci-waiver.md, "Why not master-merge"). See docs/ci-waiver.md; malformed, mismatched or
+result against both API base and current master with only waivable paths and safe modes.
+ci_waiver.classification reports master/merge_tree and refuses master-side renames, deletions or mode
+changes on PR paths. Authorized mergers use ci-waiver merge PR --head SHA: it reclassifies,
+then verifies the actual squash parent/tree/paths/modes AFTER merging, with REVERT instructions
+on mismatch. This narrows and detects the master race; it cannot prevent it without branch
+protection or a merge queue (docs/ci-waiver.md). See docs/ci-waiver.md; malformed, mismatched or
 unreviewed claims add ci-waiver-malformed/mismatch/needs-adversary blockers.
 Repair (2026-10-29): own bytes must match GitHub's API master SHA, fetched by
 explicit HTTPS URL without local remote/URL config. Replacement objects/grafts
 are disabled; waiver APPROVEs must be outside quotes, indentation and code. The
-self-contained classifier executes in a private temporary directory, pinned
-to the explicit repository directory. Trust failures add ci-waiver-untrusted-tool.
+self-contained classifier executes in a fresh private GitHub object store; online
+repo-dir is ignored. Trust failures add ci-waiver-untrusted-tool.
 Reviewer identity is not authenticated; the operator's pinned merge yes remains
 the authority, with gh pr checks rechecked immediately before merging.
 

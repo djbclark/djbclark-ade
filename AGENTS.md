@@ -290,6 +290,10 @@ pull request here is expected to meet these; flag any it misses.
     (`CHANGELOG.md`, `docs/handoffs/**`). Multiple merge bases are refused as `multiple-merge-bases`;
     any merge commit in the unique merge base's `ancestor..head` range is refused as
     `merge-in-pr-history`, before path classification. **A merge of master is never waived**.
+    Online, every history/path/mode/merge-tree check runs against both API base and fetched current
+    master; output reports `master` and successful `merge_tree` (carried in pr-wait classification).
+    Master-side renames (either endpoint), deletions or mode changes on base-to-head paths refuse
+    as `master-touched-pr-paths`; this blunt endpoint check may deny benign changes too.
     A candidate also requires a clean `git merge-tree --write-tree base head` result whose
     nonempty diff against base has only allowlisted, nonexcluded paths and safe file modes;
     an unsafe or conflicting result is `merge-result-not-docs-only`. A `master-merge` class was built
@@ -329,6 +333,13 @@ pull request here is expected to meet these; flag any it misses.
     APPROVEs must also be outside quotes, indentation and code. The
     reviewer is not authenticated: agents share a GitHub account. The operator's
     pinned merge yes is the authority; a waiver only changes `pr-wait`'s report.
-    The merger rechecks `gh pr checks` immediately before `gh pr merge --match-head-commit`.
+    Authorized mergers use trusted-master `bin/ci-waiver merge PR --head SHA`: it requires the
+    existing waiter gates, reclassifies against freshly fetched master and rechecks `gh pr checks`
+    before a head-pinned squash. It then verifies the actual squash has one parent equal to proved
+    master, a safe waivable first-parent diff and exactly the proved tree. Failure exits 1; a known
+    squash SHA gets loud `REVERT` and exact manual recovery commands (never an automatic revert).
+    The head pin prevents a different head; without branch protection or a merge queue, the wrapper
+    only narrows and detects the master race AFTER merge, never prevents it. See docs/ci-waiver.md C3
+    for unknown merge outcomes and recovery.
     Waiver markers in code, blockquotes or indented blocks are malformed; their only
     keys are class/head/reviewer and optional author (reviewer must differ).

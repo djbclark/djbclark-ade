@@ -38,12 +38,17 @@ failure denies classification; it never falls back to checkout evidence.
 fixture mode which reads that repository, refuses `info/grafts` and disables
 replacement objects/commit graphs. `--pr` and `--base/--head` are mutually
 exclusive; `pr-wait` only invokes `--pr` in a private directory, never offline
-mode. Output contains `class`, `reasons` and the full classified `head`. Online
+mode. Output contains `class`, `reasons`, the full classified `head` and `master`
+(the fetched current master SHA online, null offline); a successful proof also
+contains `merge_tree`, the prospective tree against that master or explicit offline base.
+`pr-wait` carries these unchanged in `ci_waiver.classification`. Online
 classification requires base ref master, a base SHA ancestral to current master
 and none of the timeline events `base_ref_changed`, `base_ref_deleted` or
 `automatic_base_change_succeeded` (GitHub records a retarget under any of them;
 other or future event names are not recognized). The timeline is read through all
-pages. A stale/non-master API base fails closed before classification.
+pages. A non-master base ref or off-master base SHA fails closed. A stale ancestor
+base is accepted, but all classification checks run against both it and fetched
+current master; either failure refuses the waiver.
 
 Trust remains in GitHub's API responses, `gh`, the runner's Git binary and its
 HTTPS trust environment. A malicious executable shim or compromised GitHub/API
@@ -51,7 +56,9 @@ can corrupt that anchor. This isolates local checkout state; it does not
 authenticate executables or GitHub, or the author-controlled reviewer identity.
 
 A2. `docs-only` requires a nonempty diff containing only `WAIVABLE_PATHS`:
-`CHANGELOG.md` and `docs/handoffs/**`. `git merge-base --all base head` must return
+`CHANGELOG.md` and `docs/handoffs/**`. Online, run the following checks for both
+the API base and fetched current master; offline, use only the explicit base.
+`git merge-base --all base head` must return
 exactly one ancestor; multiple bases are `multiple-merge-bases`. Before path checks,
 any merge commit in `git rev-list --min-parents=2 ancestor..head` refuses the waiver
 as `merge-in-pr-history`, even below a linear docs-only tip. Merges already shared
@@ -62,8 +69,13 @@ both sides of a rename are examined. A candidate must also have a clean
 must pass the same allowlist, hard exclusions and file-mode checks. Conflicts or
 an unsafe result are `merge-result-not-docs-only`; Git errors also deny a waiver.
 Online these operations run in the private store; offline they use the fixture repo.
-This checks the supplied API base snapshot, not a later master or GitHub's eventual
-merge tree. The allowlist and workflow `paths-ignore` entries must stay identical. Allowlist matching
+Before these proofs, online mode also refuses `master-touched-pr-paths` when
+any path in the API base-to-head diff was renamed (either endpoint), deleted or
+had its mode changed on API base..master. This is deliberately blunt: even a
+benign docs-to-docs rename or chmod denies the waiver. Ordinary content changes
+on master still undergo the clean merge-tree proof. This is an endpoint diff,
+not an audit of intermediate changes later undone on master. The allowlist and
+workflow `paths-ignore` entries must stay identical. Allowlist matching
 is exact and case-sensitive without Unicode/path normalization; `changelog.md`,
 `Docs/Handoffs/` and casefold-equivalent Unicode paths do not qualify.
 
@@ -117,7 +129,7 @@ Round 6 then found a criss-cross hole in the docs-only classifier itself: two
 incomparable merge bases let Git's single chosen base show only docs while the
 clean virtual-base merge reverted code and tests. A2 now refuses multiple merge
 bases and any merge in the PR's own `ancestor..head` history before checking paths,
-and separately validates the clean merge-tree result against base. A merge of
+and separately validates the clean merge-tree result against API base and current master. A merge of
 master therefore keeps ordinary CI even when its chosen-base diff contains only
 docs (`merge-in-pr-history`, or `multiple-merge-bases` when applicable).
 The removed master-merge code and its tests
@@ -126,7 +138,7 @@ such as an immutable run record, ever makes the class worth revisiting.
 
 A5. Everything else is `none`: examples include `touches-nonwaivable:code.py`,
 `multiple-merge-bases`, `merge-in-pr-history`, `merge-result-not-docs-only`,
-`no-changes`, `pr-base-retargeted`,
+`master-touched-pr-paths`, `no-changes`, `pr-base-retargeted`,
 `base-not-on-master` and `shallow-history`. Missing objects, unreadable evidence
 and any Git/GitHub error deny a waiver. Online classification fetches only into
 its private store; offline mode uses its given repository. Neither mode edits a
@@ -189,28 +201,64 @@ waiver. The classifier still denies workflow/test/waiver machinery changes.
 C2. `push.branches: [master]` remains. Push `paths-ignore` necessarily also skips
 docs-only merges on master, so master's push CI does not run on *every* merged
 commit; the filters match the requested allowlist and nothing claims an
-unconditional master run. The classifier checks both the unique-ancestor PR diff
-and the clean merge-tree result against the API base snapshot for allowlisted paths,
-hard exclusions and safe file modes. It does not prove GitHub's eventual merged
-commit or workflow filtering decision; the merger must recheck the current head
-and checks immediately before merging. Fleet reporting was not live-verified in
-this slice.
+unconditional master run. The classifier checks the unique-ancestor PR diff and clean merge-tree result
+against both API base and fetched current master for allowlisted paths, hard
+exclusions and safe modes. It reports the master SHA it proved; this alone
+cannot prove GitHub's eventual squash commit or workflow filtering decision.
+The merge wrapper below verifies the actual commit after merge. Fleet reporting
+was not live-verified in this slice.
 
 C3. Never use `[skip ci]` to request a waiver: a squash merge can copy commit
 messages into its body, accidentally skipping the master push backstop as well.
 Use the marker instead. GitHub documents [commit-message skip behavior](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs).
-The authorized merger supplies an explicit clean subject/body, after reading
-the review gates and rechecking checks immediately beforehand:
+The authorized merger uses a trusted master-identical copy of the wrapper,
+after the operator's yes pinned to the reviewed full head:
 
 ```sh
-gh pr checks N
-gh pr merge N --squash --match-head-commit REVIEWED_FULL_SHA --subject 'Describe the reviewed change' --body 'Describe the reviewed change and validation.'
+bin/ci-waiver merge N --head REVIEWED_FULL_SHA --repo OWNER/NAME
 ```
+
+The wrapper first fetches master into a private store, requires its own bytes to
+match `bin/ci-waiver` there, and executes that master's `bin/pr-wait` with
+`--no-request`, `--timeout 0`, `--ci-grace 0` and the pinned head. This is a single
+poll of existing review state; it posts no review request. It requires a successful
+waiter exit, `merge_ready: true` and a valid current-head docs-only marker and
+classification. Existing Codex, open-finding, independent adversary and failed-check
+gates still apply. It then re-runs classification against freshly fetched master,
+requires docs-only and the same head, and checks its bytes against that master too.
+It rechecks `gh pr checks` immediately before the write (pending/absent may be
+waived; a failed/cancelled/unknown check refuses). A `gh pr checks` exit 1 is accepted
+only when separate exact-head check-runs and status API lists are both empty.
+It calls `gh pr merge --squash --match-head-commit SHA`, with an explicit clean
+subject/body to avoid copying `[skip ci]` from PR text.
+
+`--match-head-commit` prevents a different head being merged; it pins no base.
+**Without branch protection or a merge queue, nothing prevents master moving
+between this proof and GitHub's merge. The wrapper narrows that window and detects
+the result after merge; it cannot prevent the race.** It reads the merged PR's
+squash SHA, fetches that exact commit into its private store, requires exactly one
+parent equal to the proved master, checks its nonempty first-parent diff for
+allowlist/exclusions/safe modes and requires its tree to equal `merge_tree` exactly.
+Even a benign intervening master commit is refused by the parent comparison.
+
+A mismatch or verification failure after learning the squash SHA exits 1 and prints
+`REVERT: <squash sha>` plus exact `git switch`, `git revert --no-edit --mainline 1`, `git push` and
+`gh pr create` recovery commands. The explicit first-parent mainline also handles an unexpected merge commit.
+They are instructions only: **the wrapper never
+reverts or pushes a revert automatically**. The printed recovery branch starts at
+the squash commit; use a clean claimed workspace and reconcile any later master
+changes before merging its revert PR. A write error is never retried: the wrapper
+still checks the PR once for a completed merge. If the merge SHA cannot be learned
+(or the write times out), it exits 1 with `VERIFY FAILED`, an explicit warning that
+merge may have happened and the exact `gh pr view` inspection command; it cannot
+safely name a revert SHA. Exit 0 for `merge` means the actual squash was verified,
+not that subsequent master pushes or workflow filtering were proved. Classifier
+exit 0 continues to mean only that it printed a classification, including `none`.
 
 C4. This implementation PR cannot waive itself: it changes hard-excluded paths.
 The lead obtains the independent adversary verdict before opening the PR,
 replaces the changelog's `(#NNN)` placeholder, and verifies the hosted
-Linux/macOS runs before merging.
+Linux runs before merging (macOS only when requested by name).
 
 C5. GitHub documents a [300-file path-filter limit](https://docs.github.com/en/enterprise-server@3.19/actions/reference/workflows-and-actions/workflow-syntax#git-diff-comparisons).
 Code outside the first 300 matches can therefore
