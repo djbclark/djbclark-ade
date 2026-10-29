@@ -346,7 +346,9 @@ command below:
 Use `claude/claude-sonnet-5-5` when the guard says `tight`, or when the operator asked for Sonnet or for
 pipeline-driving; for pipeline-driving pass `--thinking medium` (`[lead] pipeline_effort`, djbclark 2026-10-23). `--title` defaults to "<old name> → <model>"; `--mode` defaults to this agent's mode only
 for a successor on the SAME provider (an omp agent's `full` is not a claude mode: the first live run,
-2026-10-23, was refused), else `bypassPermissions` for claude and the provider's default otherwise. Run it
+2026-10-23, was refused), else `bypassPermissions` for claude and the provider's default otherwise. For a `claude/MODEL` successor `--mode` must be a
+permission mode of the installed claude CLI (`plan`, `default`, `acceptEdits`, `auto`, `bypassPermissions`, `manual`,
+`dontAsk` when the CLI cannot be asked); anything else exits 2 before anything starts (2026-10-28, PR 110). Run it
 **once** and end the turn, as above. After the turn it waits for this agent to be idle, starts a NEW
 top-level agent in the same workspace (`paseo run "/baton" ...`), checks that it is top-level and runs
 the model asked, and only then archives this agent (never `--force`). The successor's first prompt is
