@@ -484,6 +484,9 @@ the system prompt, turn an `echo hi`-style shell reply into text, and stop a too
 one already run this turn (re-asking Scout without tools for the answer). Before the proxy, Scout
 answered "say hi" with five shell calls and repeated `ls /tmp | head -3` until timeout.
 `GOOSE_SCOUT_BACKEND=bedrock` restores the direct route.
+**Off since 2026-10-28** (`~/.config/goose-scout/DISABLED`, memory pressure); since 2026-10-29
+its Bedrock API key is also deactivated, so even removing the marker gives 403 until Bedrock is
+re-enabled (djbclark-ade issue 141).
 
 Session modes: `auto` (yolo, YOLO_SET), `approve`, `smart_approve`, `chat`. DENY_SET uses
 `approve`: `chat` set over ACP still ran the shell tool (tripwire, 2026-10-23); with `approve`
