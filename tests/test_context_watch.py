@@ -1,6 +1,7 @@
 """bin/context-watch (2026-10-28): per running Claude Code agent, tokens used vs the real compaction ceiling.
 Every test runs the real script as a subprocess against a scratch HOME, a scratch PASEO_HOME and a fake
 `paseo` on CONTEXT_WATCH_PASEO; the host's real transcripts, settings and daemon are never read."""
+import glob
 import json
 import os
 import subprocess
@@ -270,20 +271,86 @@ def test_recent_mode_uses_the_transcripts_model_for_the_ceiling(box):
 
 def test_session_id_that_is_not_a_uuid_is_never_looked_up(box):
     box.settings(autoCompactWindow=300000)
-    secret = box.home / "outside"
+    secret = box.home / ".claude" / "outside"
     secret.mkdir()
-    (secret / "secret.jsonl").write_text(assistant(1, 123456, 0) + "\n")
-    box.agent(ID_A, "x", "../../../outside/secret")
+    (secret / f"{SESS_B}.jsonl").write_text(assistant(1, 123456, 0) + "\n")
+    box.transcript(SESS_A, [assistant(1, 1, 0)])  # a project dir for projects/*/ to match
+    # projects/*/../../outside/<uuid>.jsonl is the planted file; the id holds a valid uuid but is not one.
+    box.agent(ID_A, "x", f"../../outside/{SESS_B}")
     (row,) = json.loads(box.run("--json").stdout)
     assert row["status"] == "no-session" and row["tokens"] is None and row["transcript"] is None
 
 
 def test_agent_id_that_is_not_a_uuid_is_skipped(box):
     box.settings(autoCompactWindow=300000)
-    box.agent("../../../../evil", "x", SESS_A, state=False)
-    (box.home / "evil.json").write_text(json.dumps({"persistence": {"sessionId": SESS_A}}))
+    box.agent(ID_B, "real", SESS_B)  # makes agents/<workspace>/ so the glob has a directory to climb from
+    box.agent("../../evil", "x", SESS_A, state=False)
+    planted = box.paseo_home / "evil.json"  # agents/*/../../evil.json
+    planted.write_text(json.dumps({"persistence": {"sessionId": SESS_A}}))
+    assert glob.glob(f"{glob.escape(str(box.paseo_home))}/agents/*/../../evil.json"), "planted file unreachable"
     box.transcript(SESS_A, [assistant(1, 1000, 0)])
-    assert json.loads(box.run("--json").stdout) == []
+    box.transcript(SESS_B, [assistant(1, 1000, 0)])
+    assert [r["id"] for r in json.loads(box.run("--json").stdout)] == [ID_B]
+
+
+def test_agent_id_containing_a_uuid_is_still_not_a_uuid(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_B, "real", SESS_B)
+    (box.paseo_home / "x").mkdir()
+    (box.paseo_home / "x" / f"{ID_A}.json").write_text(json.dumps({"persistence": {"sessionId": SESS_A}}))
+    (box.paseo_home / "agents" / "Users-x-src-proj" / ID_C).mkdir()  # lets agents/*/<ID_C>/../<ID_A>.json resolve
+    (box.paseo_home / "agents" / "Users-x-src-proj" / f"{ID_A}.json").write_text(
+        json.dumps({"persistence": {"sessionId": SESS_A}}))
+    box.agent(f"../../x/{ID_A}", "up", SESS_A, state=False)  # reaches paseo_home/x/<ID_A>.json
+    box.agent(f"{ID_C}/../{ID_A}", "dotdot", SESS_A, state=False)  # reaches agents/<ws>/<ID_A>.json
+    box.transcript(SESS_A, [assistant(1, 1000, 0)])
+    box.transcript(SESS_B, [assistant(1, 1000, 0)])
+    assert [r["id"] for r in json.loads(box.run("--json").stdout)] == [ID_B]
+
+
+def test_recent_mode_lists_only_transcripts_named_exactly_by_a_uuid(box):
+    box.settings(autoCompactWindow=300000)
+    box.ls_fails = True
+    box.transcript(SESS_A, [assistant(1, 1000, 0)], age=10)
+    box.transcript(f"agent-{SESS_B}", [assistant(1, 1000, 0)], age=10)
+    assert [r["id"] for r in json.loads(box.run("--json").stdout)] == [SESS_A]
+
+
+def test_1m_model_without_a_configured_window_has_a_967k_ceiling(box):
+    box.agent(ID_A, "x", SESS_A, provider="claude/claude-opus-5-5[1m]")  # no settings.json, no env
+    box.transcript(SESS_A, [assistant(1, 50000, 0)])
+    assert ceiling_of(box) == 967000
+
+
+def test_a_huge_configured_window_is_ignored_not_a_traceback(box):
+    box.settings(autoCompactWindow=10**400)
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 50000, 0)])
+    r = box.run()
+    assert (r.returncode, r.stdout) == (0, "aaaaaaaa x 50k/167k (30%) wall in 117k\n"), r.stderr
+    r = box.run(env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "9" * 400})
+    assert (r.returncode, r.stdout) == (0, "aaaaaaaa x 50k/167k (30%) wall in 117k\n"), r.stderr
+
+
+def test_a_window_just_over_the_cap_is_ignored_and_one_at_the_cap_is_kept(box):
+    box.agent(ID_A, "x", SESS_A)  # sonnet: no model window of its own
+    box.transcript(SESS_A, [assistant(1, 50000, 0)])
+    assert ceiling_of(box, env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "10000001"}) == 167000  # unset: 200k guess
+    assert ceiling_of(box, env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "10000000"}) == 9_967_000
+
+
+def test_an_integral_float_window_is_accepted(box):
+    box.settings(autoCompactWindow=300000.0)
+    box.agent(ID_A, "x", SESS_A)
+    box.transcript(SESS_A, [assistant(1, 50000, 0)])
+    assert ceiling_of(box) == 267000
+
+
+def test_a_non_string_paseo_name_prints_as_clean_text(box):
+    box.settings(autoCompactWindow=300000)
+    box.agent(ID_A, ["a\x1b[2J"], SESS_A)
+    box.transcript(SESS_A, [assistant(1, 100000, 0)])
+    assert box.run().stdout == "aaaaaaaa 100k/267k (37%) wall in 167k\n"
 
 
 def test_paseo_ls_includes_background_agents_and_stdin_is_closed(box):

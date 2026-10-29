@@ -26,7 +26,7 @@ Ceiling, per agent: its compaction window minus the hook's AUTO_COMPACT_BUFFER (
 Window = min(configured, model window). Configured: CLAUDE_CODE_AUTO_COMPACT_WINDOW of THIS process
 (assumed to beat settings; the agent's own env is unknowable here), else `modelSettings[<model>]
 .autoCompactWindow`, else `autoCompactWindow` of ~/.claude/settings.json (300k -> 267k); `"auto"` or
-no value is no configuration. Model window: 1M for `[1m]` ids, 200k for Haiku (Claude Code caps the
+no value (or one that is not a whole number in 34k..10M) is no configuration. Model window: 1M for `[1m]` ids, 200k for Haiku (Claude Code caps the
 window at the model's), unknown for any other id. The model is the agent's provider string
 (`claude/<model>`), else the transcript's newest assistant record. Neither configured nor known:
 the guess 1M if settings `model` carries `[1m]`, else 200k. Not read: project-level settings,
@@ -69,6 +69,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # before the imports by path below: "nothing is written" includes __pycache__
 DEFAULT_MODEL_WINDOW = 200_000
 LONG_MODEL_WINDOW = 1_000_000
+MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unset)
 HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "context_size_nudge.py"
 FLEET = Path(__file__).resolve().parent.parent / "skills" / "session-finder" / "fleet.py"
 _loaded = {}
@@ -100,8 +101,12 @@ def read_settings():
 
 
 def _window(value):
-    """A usable window from a setting: an int above the buffer (`"auto"`, strings, bools, junk: None)."""
-    ok = isinstance(value, int) and not isinstance(value, bool) and value > _hook().AUTO_COMPACT_BUFFER
+    """A usable window from a setting: a whole number above the buffer and at most MAX_WINDOW (`"auto"`, strings,
+    bools, fractions, junk, absurd sizes: None). A float such as 300000.0 counts when integral."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    ok = (isinstance(value, int) and not isinstance(value, bool)
+          and _hook().AUTO_COMPACT_BUFFER < value <= MAX_WINDOW)
     return value if ok else None
 
 
@@ -260,7 +265,7 @@ def paseo_rows(settings, agents):
             continue
         state = agent_state(agent_id)
         session = session_of(state)
-        title = a.get("name") or state.get("title") or ""
+        title = next((t for t in (a.get("name"), state.get("title")) if isinstance(t, str) and t), "")
         row = base_row(agent_id, title, state.get("cwd") or a.get("cwd"), session, "paseo")
         if session is None:
             row["status"] = "no-session"
@@ -296,7 +301,10 @@ def _plain(text):
 
 
 def _k(n):
-    return f"{n / 1000:.0f}k"
+    try:
+        return f"{n / 1000:.0f}k"
+    except OverflowError:  # an int beyond float range: no rounding needed at that size
+        return f"{n // 1000}k"
 
 
 def _distance(n):
