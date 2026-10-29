@@ -67,13 +67,16 @@ PRIORITIES = ("P0", "P1", "P2", "P3")
 FINDING_RE = re.compile(r"^- \[(P[0-3])\]\s+(\S.*)$")
 # anything that looks like a finding but is not exactly the line above: if one is seen the parse is wrong, never "no findings"
 FINDING_SHAPED_RE = re.compile(r"(?i)\[\s*P\s*\d\s*\]|^\W*P\d\b|\*\*\s*P\d")
-ABORT = r"(?:unable|not able|could ?n[o']t|can ?n[o']t|(?:didn'?t|did not) (?:finish|complete|manage)|fail\w*|abort\w*|stopp\w*|cut short|ran out|exhaust\w*|incomplete|partial\w*|too large|not reviewed|denied|blocked|inaccessible)"
-SUBJECT = r"(?:review\w*|complet\w*|finish\w*|proceed|inspect\w*|read|access\w*|context|budget|diff|command\w*|sandbox|patch)"
-REFUSAL_RE = re.compile(rf"(?i)\b{ABORT}\b[^.\n]{{0,60}}\b{SUBJECT}\b|\b{SUBJECT}\b[^.\n]{{0,60}}\b{ABORT}\b|not logged in|codex login")
+# Wording of a review that did NOT happen. Narrow on purpose (round 8): it only fires on inability to review/inspect/read/finish, or on an abort, a size or
+# context limit, a denied or blocked sandbox. "I could not run tests" and "the patch fixes the failed command" are ordinary summaries of a finished review.
+INABILITY = r"(?:unable|not able|could ?n[o']t|can ?n[o']t|failed|(?:didn'?t|did not) (?:finish|complete))"
+UNDONE = r"(?:review\w*|complet\w*|finish\w*|inspect\w*|access\w*|read(?!-)|load\w*)"
+REFUSAL_RE = re.compile(rf"(?i)\b{INABILITY}\s+(?:to\s+)?(?:\w+\s+){{0,2}}{UNDONE}\b|\b(?:abort\w*|ran out|exhausted|incomplete|partial review|too large|not reviewed|"
+                        r"inaccessible|stopped early|cut short|nothing was reviewed|denied access|blocked (?:every|all))\b|not logged in|codex login")
 GENERATED = (".cursor/hooks.json", ".claude/settings.json")
 SECRET_ENV_RE = re.compile(r"(?i)(token|secret|passw|credential|api_?key)|^(GH|GITHUB)_")
 KEEP_ENV_RE = re.compile(r"^(CODEX_|OPENAI_)")
-GH_TIMEOUT = 90
+GH_TIMEOUT = int(os.environ.get("LOCAL_REVIEW_GH_TIMEOUT") or 90)    # seconds for the one `gh api` call (overridable so a test need not wait 90)
 GIT_TIMEOUT = 300
 EXIT_CLEAN, EXIT_FINDINGS, EXIT_USAGE, EXIT_FAILED, EXIT_DUP = 0, 1, 2, 3, 4
 
@@ -467,5 +470,7 @@ def finish(doc: dict, result_path: Path, t0: float, as_json: bool, usage_error: 
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
+    except subprocess.TimeoutExpired as e:    # a preflight git or gh call: nothing was reviewed, which is a failure, never the "findings" exit 1
+        sys.exit(die(f"{' '.join(map(str, e.cmd[:3]))} timed out before the review started", EXIT_FAILED))
     except FileNotFoundError as e:    # git or gh missing before there is any result to file
         sys.exit(die(f"{e.filename or 'a required program'} not found", EXIT_USAGE))

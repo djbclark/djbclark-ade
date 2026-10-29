@@ -69,6 +69,7 @@ Full review comments:
   asks) say "Which files should I focus on?" ;;
   no_issues) say "I did not find any actionable issues in the patch. Nothing in the diff needs changing." ;;
   aborted_with_hook) echo '{"changed": true}' > "$PWD/.cursor/hooks.json"; say "$(printf -- 'Review aborted: the context window was exhausted.\n- [P2] Hooks point at the worktree — %s/.cursor/hooks.json:7-7' "$PWD")" ;;
+  tests_unrunnable) say "I found no actionable issues in this patch. I could not run tests in the read-only sandbox. The patch also fixes the failed command." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -285,6 +286,17 @@ def test_a_differently_cased_repo_names_one_identity_for_the_file_the_lock_and_t
                        check=False, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     assert world.doc()["repo"] == "owner/name" and not list(world.state.glob("*Owner*"))
+
+
+def test_a_finished_review_that_mentions_tests_it_could_not_run_or_a_failed_command_is_clean(world: World) -> None:
+    """Codex P2 on PR 130 (round 8): test limitations and failures the patch fixes are ordinary summaries, not refusals."""
+    assert world.run(mode="tests_unrunnable").returncode == 0
+
+
+def test_a_preflight_timeout_is_failed_not_the_findings_exit(world: World) -> None:
+    (world.tmp / "bin" / "gh").write_text("#!/bin/bash\nsleep 30\n")
+    r = world.run(env={"LOCAL_REVIEW_GH_TIMEOUT": "1"}, timeout=60)
+    assert r.returncode == 3 and "timed out before the review started" in r.stderr and "Traceback" not in r.stderr, (r.returncode, r.stderr)
 
 
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
