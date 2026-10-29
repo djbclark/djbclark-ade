@@ -326,23 +326,26 @@ is already a real agent with a transcript the operator can open.
 
 **A `claude-fleet-governor` steer names its own successor** (`--finish --successor omp/anthropic/claude-sonnet-5-5`):
 run that command instead of this step, once; the rest of this section is for a session no governor has steered.
-The quota guard's `critical` advice (`[quota-guard critical]`, 2026-10-29) is the same exemption: a Claude Code
-lead of any model, Sonnet included, follows the advice's own line, never plain `self-slash "/new"` (that stays
-on the exhausted subscription): on Paseo, while `aiuse --available --json` lists omp, the omp successor above; on
-herdr or Orca (`self-slash` refuses an omp successor there) the handoff, then omp started by hand in a new pane or
-tab; omp not listed, codex, grok or agy the same way.
+
+**Quota guard `critical` (2026-10-29): leave the subscription, whatever model you run.** When
+`~/.local/state/ade/quota-guard.json` exists and its `level` is `critical` (read it with `.get`; a missing
+or unreadable file means no), a Claude Code lead of any model, Sonnet and Opus included, never runs plain
+`self-slash "/new"` (that stays on the exhausted subscription) and never a Claude successor. On Paseo, while
+`aiuse --available --json` lists omp, run the guard advice's own command (the omp successor with
+`--thinking high`); on herdr or Orca (`self-slash` refuses an omp successor there) write the handoff, then
+start omp by hand in a new pane or tab. With omp not listed, a codex or grok successor the same way (agy is
+not a Paseo provider: `acp-run agy` slices are never handoff hops). The `[quota-guard critical]` line is
+printed once per session and compaction can drop it, so the state file, not the line, is what you test.
 
 **Successor on another model (Paseo and herdr; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
 Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 medium when pipeline-driving).** Use this
 form **instead of** `self-slash "/new"` when (a) this session's model is Fable (any `claude-fable-*`,
 `[1m]` suffix or not; check the model line in your own context, or `paseo agent inspect <your id>`
-shows `Model`), (b) `~/.local/state/ade/quota-guard.json` exists and its `level` is `tight` or `critical`
-(read it with `.get`; a missing or unreadable file means no), or (c) the operator asked for a model
-change. **Never a same-model or upward successor:** a guard moves a session only down, from a model
-known to be above the target (`tight`: Fable or Opus becomes Sonnet; `critical`: Fable becomes Opus).
-If the guard says `tight` and this session runs on Sonnet or Haiku, or `critical` and it runs on Opus,
-Sonnet or Haiku, or you cannot tell which model you run, run plain `self-slash "/new"` instead of the
-command below:
+shows `Model`), (b) the state file's `level` is `tight` (`critical` is the paragraph above), or (c) the
+operator asked for a model change. **Never a same-model or upward successor:** a `tight` guard moves a
+session only down, from a model known to be above the target (Fable or Opus becomes Sonnet). If the guard
+says `tight` and this session runs on Sonnet or Haiku, or you cannot tell which model you run, run plain
+`self-slash "/new"` instead of the command below:
 
 ```bash
 ~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-opus-5-5 --thinking high

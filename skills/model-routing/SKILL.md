@@ -132,7 +132,7 @@ skill's snapshot in the same turn.
   starts no new Claude Code subscription work until the reset (Agent-tool sub-agents of a Claude Code
   session included) and hands off, to an omp successor on Paseo or an omp started by hand on herdr and
   Orca, while `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares
-  the Claude weekly rate window, so every weekly window exhausted gates it: then codex, grok or agy).
+  the Claude weekly rate window, so every weekly window exhausted gates it: then a codex or grok successor).
   `critical` never stops a session on codex, grok, agy, zai or opencode, nor one on omp while aiuse lists
   it (2026-10-29: idle omp sessions had read the old "hand off, stop" line as applying to them).
 

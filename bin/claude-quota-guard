@@ -191,8 +191,8 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
         items[3] = ("A Claude Code lead (provider claude, subscription) hands off now and continues off the "
                     "subscription. While `aiuse --available --json` lists omp: on Paseo an omp successor, "
                     f"{_SELF_SLASH_OMP}; on herdr or Orca write the handoff, then start omp by hand in a new "
-                    "pane or tab (self-slash refuses an omp successor there). Without omp listed: codex, grok "
-                    "or agy the same way.")
+                    "pane or tab (self-slash refuses an omp successor there). Without omp listed: a codex or "
+                    "grok successor the same way (agy is reached only by `acp-run agy` slices, never as a successor).")
         items.append("No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session "
                      f"included) until the reset at {resets_at or 'unknown'}. This is not a stop order: a "
                      "session on codex, grok, agy, zai or opencode is unaffected and keeps working; one on "
