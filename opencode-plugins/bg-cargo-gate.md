@@ -9,6 +9,13 @@ direct Cargo compile/test commands, including release builds, aliases, toolchain
 selection, the wrappers covered by its regression cases, and quoted executable paths. Its denial tells the
 agent to use the full `~/ops/site-private/bin/bg` path. If bg refuses or waits,
 use the repository's CI route or resolve that refusal; never retry the build bare.
+In a CI-designated repo, bg intentionally refuses bare Cargo compilation, including
+`cargo build --release`. Its local release carve-out covers release orchestrators
+(`just release*` or `release.py`) whose build/test gate is already CI and whose
+remaining work is local publishing/install verification. Do not infer permission
+to compile locally from that carve-out or from approval to rebuild a package.
+Use the recorded CI route or obtain a specific operator-approved policy change.
+
 The plugin does not rewrite command text or turn native ask/deny rules into allows.
 Help/version/metadata queries and already wrapped commands retain native rules.
 

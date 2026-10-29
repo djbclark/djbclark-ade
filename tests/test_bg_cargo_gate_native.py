@@ -20,14 +20,13 @@ def test_native_cargo_permission_gate(tmp_path):
     config = tmp_path / "config"
     plugins = config / "plugins"
     plugins.mkdir(parents=True)
-    shutil.copyfile(ROOT / "opencode-plugins/bg-cargo-gate.js", plugins / "gate.mjs")
-    # Only canary.js auto-loads; it installs the exact production module above.
+    source = Path(os.environ.get("ADE_BG_CARGO_CANARY_SOURCE", ROOT / "opencode-plugins/bg-cargo-gate.js"))
+    shutil.copyfile(source, plugins / "ade-bg-cargo-gate.js")
+    # Native discovery must load the production module; the RPC never installs it.
     (plugins / "canary.js").write_text(r'''
-import gate from "./gate.mjs";
 export default {
   id:"ade.bg-canary",
   async setup(ctx) {
-    const disposeGate=await gate.setup(ctx);
     const rpc=await ctx.rpc.register({id:"ade.bg-canary",events:{},methods:{run:{
       input:{type:"object",properties:{},additionalProperties:false},
       output:{type:"object",properties:{ok:{type:"boolean"},checks:{type:"array",items:{type:"object",additionalProperties:true}}},required:["ok","checks"],additionalProperties:false}
@@ -58,7 +57,7 @@ export default {
         return {ok:checks.every(c=>c.allowed===c.expected),checks};
       } finally {await ctx.session.remove({sessionID:session.id});}
     }});
-    return async()=>{await rpc.dispose();await disposeGate();};
+    return async()=>{await rpc.dispose();};
   }
 };
 ''')

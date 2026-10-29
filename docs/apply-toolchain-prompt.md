@@ -430,6 +430,20 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 | `forgejo` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/forgejo` here is a compatibility symlink). Uses a Forgejo instance (default `forgejo.mit.edu`) with the token held in `sudo-secretspec` as `DJBCLARK_<HOST>_TOKEN`: `scripts/setup-token` declares the secret (optional), opens the token page and verifies it; `forgejo-api` makes one `/api/v1` call (mutations need `--yes`); `tea-forgejo` runs `tea` with the secret on its env login. Needs `fj` and `tea` from §1.2, and a token only the user can create in the browser, so offer it only where the user works with a Forgejo server. The default host `forgejo.mit.edu` (and the SIPB runner below) need an MIT account (Athena/Touchstone login), so skip those for a user without one. For the SIPB `ubuntu` CI runner it also records the `LD_PRELOAD` loopback shim (port 0 and `shutdown()`) Gradle needs there (libkrun#818) and the per-job resource limits (16 vCPU, 62.8 GiB, virtiofs disk with a 32 GiB tmpfs). |
 | `jevlike` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/jevlike`; `skills/jevlike` here is a compatibility symlink). Uses djbclark's two live Jev-like System One microVMs (Kev-0.8B at djbclark-kev.sipb.cloud, Laya at djbclark-laya.sipb.cloud) as cheap probabilistic judges: its `scripts/jevlike ask noul|choice|score` helper reruns itself under `sudo-secretspec run` with `JEVLIKE_API_KEY`, retries restarts with backoff, and returns `decide: yes|no|escalate` (act only at p>=0.9 or p<=0.1). Needs a key only the user holds, so offer it only where the user has access to those servers. Added 2026-10-20 |
 
+**For OpenCode on this machine: Cargo builds through bg** (added 2026-10-28).
+Install the reviewed [`opencode-plugins/bg-cargo-gate.js`](https://github.com/djbclark/djbclark-ade/blob/master/opencode-plugins/bg-cargo-gate.js)
+atomically as `~/.config/opencode/plugins/ade-bg-cargo-gate.js` (respect
+`OPENCODE_CONFIG_DIR`). Preserve a different existing file for review; do not
+replace unrelated plugins or edit their config. This native V2 permission hook
+blocks direct Cargo compile/test commands, including `--release`, and tells the
+agent to use the full `~/ops/site-private/bin/bg` path. A bg refusal means use
+the repo's CI route or resolve the refusal, never retry bare Cargo. Native
+permission resources are unchanged and existing deny/ask rules are preserved.
+Follow the [installation and proof guide](https://github.com/djbclark/djbclark-ade/blob/master/opencode-plugins/bg-cargo-gate.md);
+verify loader records and the isolated native permission proof before claiming
+activation. Do not restart busy servers. This is an accidental-bypass guard,
+not a sandbox for arbitrary scripts or command substitutions.
+
 **For OpenCode Go users: native context guard** (added 2026-10-25).
 Install the reviewed `opencode-plugins/go-context/` directory from
 [djbclark-ade](https://github.com/djbclark/djbclark-ade), following its
