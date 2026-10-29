@@ -67,6 +67,7 @@ Full review comments:
   wrong_sandbox|wrong_base|wrong_workdir) say "The patch looks correct." ;;
   aborted) say "Review aborted: the context window was exhausted before I could finish." ;;
   asks) say "Which files should I focus on?" ;;
+  no_issues) say "I did not find any actionable issues in the patch. Nothing in the diff needs changing." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -272,6 +273,11 @@ def test_a_base_branch_that_moves_during_the_review_does_not_change_what_was_rev
     assert d["result"] == "clean" and f"--base {d['base_sha']}" in world.codex_log.read_text()
 
 
+def test_an_ordinary_no_issues_summary_is_a_clean_review_not_a_refusal(world: World) -> None:
+    """Codex P2 on PR 130 (round 6): "I did not find any actionable issues in the patch" matched the refusal wording."""
+    assert world.run(mode="no_issues").returncode == 0
+
+
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
     assert world.run(mode="could_not_find").returncode == 0
 
@@ -396,6 +402,14 @@ def test_bad_usage_exits_2(world: World, argv: list[str], needle: str) -> None:
     r = subprocess.run([sys.executable, "-I", str(LOCAL_REVIEW), str(PR), *(["--repo", REPO] if "--repo" not in argv else []), *argv],
                        cwd=world.work, env=world.env, check=False, capture_output=True, text=True, timeout=30)
     assert r.returncode == 2 and needle in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("repo", ["owner/nam", "wner/name", "owner/name-backup"])
+def test_the_whole_origin_identity_is_compared_never_a_substring(world: World, repo: str) -> None:
+    """Codex P2 on PR 130 (round 6): `owner/name` once matched an origin of `owner/name-backup`."""
+    r = subprocess.run([sys.executable, "-I", str(LOCAL_REVIEW), str(PR), "--repo", repo], cwd=world.work, env=world.env,
+                       check=False, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 2 and "not" in r.stderr and repo in r.stderr
 
 
 def test_a_checkout_of_another_repository_is_refused(world: World) -> None:

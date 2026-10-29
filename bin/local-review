@@ -67,7 +67,7 @@ PRIORITIES = ("P0", "P1", "P2", "P3")
 FINDING_RE = re.compile(r"^- \[(P[0-3])\]\s+(\S.*)$")
 # anything that looks like a finding but is not exactly the line above: if one is seen the parse is wrong, never "no findings"
 FINDING_SHAPED_RE = re.compile(r"(?i)\[\s*P\s*\d\s*\]|^\W*P\d\b|\*\*\s*P\d")
-ABORT = r"(?:unable|not able|could ?n[o']t|can ?n[o']t|didn'?t|did not|fail\w*|abort\w*|stopp\w*|cut short|ran out|exhaust\w*|incomplete|partial\w*|too large|not reviewed|denied|blocked|inaccessible)"
+ABORT = r"(?:unable|not able|could ?n[o']t|can ?n[o']t|(?:didn'?t|did not) (?:finish|complete|manage)|fail\w*|abort\w*|stopp\w*|cut short|ran out|exhaust\w*|incomplete|partial\w*|too large|not reviewed|denied|blocked|inaccessible)"
 SUBJECT = r"(?:review\w*|complet\w*|finish\w*|proceed|inspect\w*|read|access\w*|context|budget|diff|command\w*|sandbox|patch)"
 REFUSAL_RE = re.compile(rf"(?i)\b{ABORT}\b[^.\n]{{0,60}}\b{SUBJECT}\b|\b{SUBJECT}\b[^.\n]{{0,60}}\b{ABORT}\b|not logged in|codex login")
 GENERATED = (".cursor/hooks.json", ".claude/settings.json")
@@ -204,7 +204,7 @@ def main(argv: list[str]) -> int:
         return die("run it from a checkout of the repository", EXIT_USAGE)
     root = top.stdout.strip()
     origin = run(["git", "remote", "get-url", "origin"], cwd=root).stdout.strip()
-    if a.repo.lower() not in origin.lower().removesuffix(".git").replace(":", "/"):
+    if "/".join(re.split(r"[/:]", origin.removesuffix(".git").rstrip("/"))[-2:]).lower() != a.repo.lower():    # the whole owner/name, never a substring
         return die(f"origin of {root} is {origin!r}, not {a.repo}", EXIT_USAGE)
 
     gh = run(["gh", "api", f"repos/{a.repo}/pulls/{a.pr}"], timeout=GH_TIMEOUT)
