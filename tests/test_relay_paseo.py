@@ -377,14 +377,20 @@ class RelayPaseo(unittest.TestCase):
             self.assertIn("archived", err)
         self.assertFalse(self.sends())
 
-    def test_paseo_agent_with_a_pending_permission_is_refused(self) -> None:
+    def test_paseo_agent_with_a_pending_permission_is_refused_when_deferring_is_off(self) -> None:
         os.environ["FAKE_PENDING"] = '[{"id": "p1", "tool": "Bash"}]'
         for listed, ident in (([], AGENT), ([sess()], SID)):
-            rc, _out, err = self.main(listed, ident, "ping")
+            rc, _out, err = self.main(listed, ident, "ping", "--no-defer")
             self.assertEqual(rc, 1)
             self.assertIn("permission or question", err)
             self.assertIn("helm", err)
         self.assertFalse(self.sends())
+
+    def test_paseo_agent_with_a_pending_permission_is_queued_not_typed_into_the_card(self) -> None:
+        os.environ["FAKE_PENDING"] = '[{"id": "p1", "tool": "Bash"}]'
+        rc, out, err = self.main([], AGENT, "ping")
+        self.assertEqual((rc, out.startswith("queued: "), self.sends(), len(self.spawned)), (0, True, [], 1), err)
+        self.assertIn("once its card is answered", out)
 
     def test_inspect_naming_another_agent_is_refused(self) -> None:
         os.environ["FAKE_ID"] = "eeeeeeee-0000-4000-8000-000000000005"
