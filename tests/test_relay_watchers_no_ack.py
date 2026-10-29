@@ -35,8 +35,12 @@ def test_rumination_watch_relay_argv_has_no_ack(monkeypatch, tmp_path):
     relay.parent.mkdir(parents=True)
     relay.write_text("")
     monkeypatch.setattr(rw, "HOME", tmp_path)
+    monkeypatch.setattr(rw, "STATE_DIR", tmp_path / "state")   # never write the operator's log
+    monkeypatch.setattr(rw, "LOG", tmp_path / "state" / "rumination.log")
     monkeypatch.setenv("RW_SESSION", "sess-1")
     argvs = []
     monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: argvs.append(cmd) or (0, ""))
     assert rw.to_session("one open loop") is True
     assert argvs[0][3:5] == ["sess-1", "one open loop"] and "--no-ack" in argvs[0]
+    # no --idle: it blocks relay.py's deferral, so a busy target would drop the line instead of queueing it
+    assert "--idle" not in argvs[0]

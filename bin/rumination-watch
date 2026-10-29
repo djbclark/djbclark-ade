@@ -37,6 +37,7 @@ The exit code is the interface for launchd and for a session that runs it by han
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -44,6 +45,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Iterator
 
 HOME = Path(os.environ.get("HOME", "/Users/djbclark"))
 STATE_DIR = Path(os.environ.get("RW_STATE_DIR", HOME / ".local/state/rumination-watch"))
@@ -202,19 +204,132 @@ def survey() -> dict:
 # --- speaking -----------------------------------------------------------------------------------
 
 
-def to_session(text: str) -> bool:
-    """One line into the current session, via the session-finder relay (best route, self-falling).
+def live_sessions() -> dict[str, dict]:
+    """Every session `fleet.py` currently knows, keyed by 8-char paseo id.
 
-    `--idle` so a busy cline agent is not interrupted mid-turn: the whole point is to be
-    non-disruptive. relay.py also defers by default since PR 57, so this is belt and braces.
+    Cached for the life of the process: one pass resolves one target, and fleet.py costs ~3 s.
+    An unreadable fleet is an EMPTY map, which makes every candidate fail verification rather
+    than passing unchecked — the safe direction for a watcher that must not shout into the void.
     """
-    ident = os.environ.get("RW_SESSION") or os.environ.get("PASEO_AGENT_ID") or ""
+    global _LIVE_CACHE
+    if _LIVE_CACHE is not None:
+        return _LIVE_CACHE
+    out: dict[str, dict] = {}
+    fleet = HOME / "src/djbclark-ade/skills/session-finder/fleet.py"
+    if fleet.is_file():
+        rc, text = run(["python3", "-I", str(fleet), "--json"], timeout=90)
+        try:
+            rows = json.loads(text) if rc == 0 else []
+        except ValueError:
+            rows = []
+        for row in rows if isinstance(rows, list) else []:
+            pid = str(row.get("paseo") or "")
+            if pid:
+                out[pid[:8]] = row
+    _LIVE_CACHE = out
+    return out
+
+
+_LIVE_CACHE: dict[str, dict] | None = None
+
+
+def usable(ident: str) -> bool:
+    """Would relay.py find this id? True when fleet lists it and it is neither over nor archived."""
+    row = live_sessions().get(ident[:8])
+    if not row:
+        return False
+    return not row.get("ended") and not row.get("archived")
+
+
+def owner_candidates() -> Iterator[tuple[str, str]]:
+    """(source, agent id) pairs for the live session that owns ROLE, best first.
+
+    A launchd job has no session identity — the plist says so in as many words — so resolving on
+    `RW_SESSION`/`PASEO_AGENT_ID` alone made this watcher permanently mute: 870 consecutive
+    passes logged `session=False` and not one line ever reached the entity. The target has to be
+    *looked up at run time*, in the same places the rest of the toolchain looks it up:
+
+      1. `RW_SESSION` / `PASEO_AGENT_ID` — an explicit override, and what a session running this
+         by hand already means; used as given, no verification needed (it IS us).
+      2. The comm registry's row for ROLE (`agents/comm/registry.json` -> `paseo`), which the
+         owning seat keeps current; this is authoritative between the agent and its siblings.
+      3. `peer_mail.py resolve --as ROLE --json` -> `live_paseo_ids`, the same record read
+         through the peer-comms tool, which prunes ids it can no longer reach.
+    """
+    seen: set[str] = set()
+    for src in ("RW_SESSION", "PASEO_AGENT_ID"):
+        val = (os.environ.get(src) or "").strip()
+        if val:
+            seen.add(val[:8])
+            yield (src, val)
+    try:
+        reg = json.loads((REPO / "agents/comm/registry.json").read_text())
+    except (OSError, ValueError):
+        reg = {}
+    row = reg.get(ROLE) if isinstance(reg, dict) else None
+    paseo = str((row or {}).get("paseo") or "") if isinstance(row, dict) else ""
+    if paseo and paseo[:8] not in seen:
+        seen.add(paseo[:8])
+        yield ("registry", paseo)
+    mail = REPO / "projects/hiwymi/spec/composite-individual/tools/peer-comms/peer_mail.py"
+    if mail.is_file():
+        rc, out = run(["python3", "-I", str(mail), "resolve", "--as", ROLE, "--json"], timeout=60)
+        try:
+            ids = json.loads(out).get("live_paseo_ids") or [] if rc == 0 else []
+        except (ValueError, AttributeError):
+            ids = []
+        for ident in ids if isinstance(ids, list) else []:
+            ident = str(ident)
+            if ident[:8] not in seen:
+                seen.add(ident[:8])
+                yield ("peer_mail", ident)
+
+
+def owner_session() -> tuple[str, str]:
+    """(agent id, source) for this role, or ("", reason) when nothing live resolves."""
+    first = ""
+    for src, ident in owner_candidates():
+        if src in ("RW_SESSION", "PASEO_AGENT_ID"):
+            return ident, src
+        first = first or f"{src}={ident[:8]}"
+        if usable(ident):
+            return ident, src
+    return "", (f"no live session for {ROLE!r} (registry/peer_mail gave {first or 'nothing'})")
+
+
+def to_session(text: str) -> bool:
+    """One line into the owner session, via the session-finder relay (best route, self-falling).
+
+    NO `--idle`. It looks right and is wrong: `--idle S` BLOCKS the deferral (relay.py's defer_wanted
+    requires `a.idle is None`), so a target that is busy when the wait expires gets a refusal and no
+    queue record — the line is dropped and the pass burns its interval waiting to drop it.
+
+    What actually happens without it, proven under a real launchd job: an idle target takes the line
+    now (`delivered`); a busy one is REFUSED and cannot be deferred, because deferral needs an
+    identifiable sender and a launchd job has no Paseo id and no fleet `self` row. That is not a
+    failure — a busy agent is listening to its own turn, not dark — so it is logged as `skipped`
+    rather than retried into a void. A session running this by hand (`RW_SESSION` set) does get the
+    queued path, since it has an identity. The outcome is LOGGED either way: a silently mute
+    loudspeaker is the failure this whole script exists to prevent.
+    """
+    ident, why = owner_session()
     if not ident:
+        log(f"cannot speak to session: {why}")
         return False
     relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
     if not relay.is_file():
+        log(f"cannot speak to session: no relay.py at {relay}")
         return False
-    rc, _ = run(["python3", "-I", str(relay), ident, text, "--idle", "300", "--no-ack"], timeout=320)
+    rc, out = run(["python3", "-I", str(relay), ident, text, "--no-ack"], timeout=320)
+    if rc == 0:
+        word = "queued" if out.startswith("queued") else "delivered"
+    elif "cannot take it now" in out or "is busy" in out:
+        # Not a failure to hide: a launchd job has no sender identity, so relay.py will not defer for
+        # us, and a busy target is not a dark one. Say so plainly in the log.
+        word = "skipped (target busy; a launchd job cannot defer)"
+    else:
+        word = "FAILED"
+    log(f"relay to {ident[:8]} (via {why}): {word}" + (f" rc={rc}: {out[:200]}" if rc else ""))
     return rc == 0
 
 
@@ -246,7 +361,33 @@ def should_tell_djbclark(item: str, state: dict, now: float) -> bool:
 
 
 def cmd_pass(a: argparse.Namespace) -> int:
-    """One rumination pass: survey, compare to the last state, speak only on change."""
+    """One rumination pass: survey, compare to the last state, speak only on change.
+
+    launchd fires every 300 s and does NOT prevent overlap, so a pass that waits on a slow relay
+    could re-read the same `last` state and announce the same line twice. One pass at a time: a
+    second pass that arrives mid-pass is skipped, not queued behind it.
+    """
+    if not a.dry_run:
+        lock = STATE_DIR / ".pass.lock"
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        holder = open(lock, "a+")
+        try:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            holder.close()
+            log("pass skipped: the previous pass is still running")
+            return 0
+    else:
+        holder = None
+    try:
+        return _pass(a)
+    finally:
+        if holder is not None:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+
+
+def _pass(a: argparse.Namespace) -> int:
     now = time.time()
     state = load_state()
     before = state.get("last", {})
@@ -321,9 +462,14 @@ def cmd_status(a: argparse.Namespace) -> int:
 
 def cmd_test(a: argparse.Namespace) -> int:
     """Prove BOTH channels work: a watcher that cannot be heard is worse than no watcher."""
+    ident, src = owner_session()
     ok_s = to_session("rumination: channel test from the watcher (no action needed).")
     ok_d = to_djbclark("Dann: quiet-channel test from the rumination watcher (no action needed).")
-    print(f"session relay:  {'ok' if ok_s else 'FAILED (set RW_SESSION or PASEO_AGENT_ID)'}")
+    if ident:
+        print(f"session target: {ident[:8]} (resolved via {src})")
+    else:
+        print(f"session target: UNRESOLVED - {src}")
+    print(f"session relay:  {'ok' if ok_s else 'FAILED'}")
     print(f"djbclark topic: {'ok' if ok_d else 'FAILED (is inbox-target dann resolvable?)'}")
     return 0 if (ok_s or ok_d) else 1
 

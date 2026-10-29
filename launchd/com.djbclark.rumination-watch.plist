@@ -6,7 +6,8 @@
      the `dann` quiet Telegram topic only when something needs djbclark's decision, at most once per
      6 h per item. That is the "voice in the head" djbclark asked for (2026-10-24) with the two
      constraints he set: nearly free (no model, silent unless changed) and not disruptive (never
-     interrupts a turn; relay.py defers to a busy agent).
+     interrupts a turn: it speaks to an IDLE session; a busy one is skipped, not interrupted,
+     because relay.py will not defer for a job with no sender identity).
 
      5 minutes, not 20 s like load-watch: the things it watches change on human timescales, and a
      session that is mid-thought does not need to hear about the same open loop every 20 s.
@@ -29,7 +30,12 @@
     <key>RW_OWNER</key><string>dann</string>
     <!-- A launchd job has no session identity, so relay.py could only label its messages
          "[relay from unknown]" — indistinguishable from load-watch or fleet-watch. This is the
-         declared sender name (2026-10-24). -->
+         declared sender name (2026-10-24).
+         It is the LABEL only. The TARGET is resolved at run time by bin/rumination-watch from the
+         comm registry's row for RW_OWNER (`agents/comm/registry.json` -> paseo), checked against
+         fleet.py and falling back to `peer_mail.py resolve --as <role>`; do NOT set RW_SESSION
+         here, a pinned id would go stale the moment that seat is replaced and the watcher would go
+         mute again exactly like it did for its first 870 passes (2026-10-29). -->
     <key>RELAY_SENDER_NAME</key><string>rumination</string>
   </dict>
   <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
