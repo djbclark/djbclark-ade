@@ -1,61 +1,84 @@
 #!/usr/bin/env -S python3 -I
-"""paseo-bypass-watch: put every freshly created Paseo Claude agent into bypassPermissions. No model.
+"""paseo-bypass-watch: put freshly created Paseo Claude agents that start in `default` into bypassPermissions. No model.
 
   paseo-bypass-watch [--once | --loop SECONDS] [--dry-run] [--state PATH] [--max-age SECONDS] [--json]
 
 Why (djbclark, home rule 16: every agent runs yolo): Paseo has no default-mode setting and no
 create-time hook, so a Claude seat opened from the Paseo UI or by a hand-typed `paseo agent run`
 starts in `default` ("Always Ask") and prompts. `bin/paseo-new-seat` covers seats we open ourselves;
-this watcher covers the rest by setting the mode right after creation.
+this watcher covers the rest by setting the mode shortly after creation.
+
+Latency, honestly: the flip lands roughly 6-15 s after creation (each paseo call starts an Electron
+helper, ~3 s), and `agent mode` does not answer a permission prompt that is already pending. A seat
+opened with an initial prompt can therefore still stall once, until someone answers that prompt.
+Prefer `--loop 10` or longer: a pass costs about one `agent ls` plus ~8 s per new agent.
 
 One pass:
+  0. `$PASEO_CLI agent ls --label perm=ask --json` (read-only): every id returned is exempt. The CLI
+     prints no labels on `ls` or `inspect`, so this filter is the only source. If the call fails or
+     its output is unusable the WHOLE pass is aborted before any agent is touched (`--once` exits 1,
+     `--loop` logs and goes on): never read as an empty set.
   1. `$PASEO_CLI agent ls --json` (read-only). Items carry id, name, provider ("claude/<model>"),
-     status and a relative `created` string; no mode, archived flag, ISO time or labels.
-  2. For each agent whose provider is claude, whose status is not `closed`, and whose id is not in
-     the state file, `$PASEO_CLI agent inspect ID --json` supplies Archived, Mode, CreatedAt (ISO)
-     and, when the CLI prints them, labels.
-  3. An agent that is not archived, not in bypassPermissions, younger than --max-age (default 120 s)
-     and without the label `perm=ask` gets `$PASEO_CLI agent mode ID bypassPermissions`, a re-fetch
-     and a check, and one stdout line `set ID name`; its id is then recorded as handled.
-  4. Any other unseen claude agent (too old, already bypass, archived, closed, perm=ask) is only
-     recorded. Handled means never touched again: a mode the operator picks later (plan, say) sticks.
+     status and a relative `created` string; no mode, archived flag or ISO time.
+  2. For each agent whose provider is claude, whose status is not `closed`, whose id is not exempt
+     and not in the state file, `$PASEO_CLI agent inspect ID --json` supplies Archived, Mode and
+     CreatedAt (ISO).
+  3. An agent that is not archived, whose Mode is exactly `default` and which is younger than
+     --max-age (default 120 s) gets `$PASEO_CLI agent mode ID bypassPermissions`, a re-fetch and a
+     check, and one stdout line `set ID name`; its id is then recorded as handled.
+  4. Any other unseen claude agent (too old, archived, closed, exempt, or in ANY mode but `default`:
+     plan, acceptEdits, dontAsk, bypassPermissions...) is only recorded. Handled means never touched
+     again: a mode the operator picks later (plan, say) sticks.
   5. A failing `agent mode` (or a re-fetch that still shows another mode) is logged to stderr and
-     not recorded; it is retried on the next pass, 5 attempts in all, then recorded as failed.
+     not recorded; it is retried on the next pass, 5 attempts in all, then recorded as failed. Each
+     retry inspects again and acts only while Mode is still `default`, whatever the age.
   Agents of any other provider are never touched and never recorded.
 
-State: JSON at --state (default ~/.local/state/paseo-bypass-watch.json), replaced atomically:
+One pass at a time: a pass holds flock(LOCK_EX|LOCK_NB) on `<state>.lock` from loading the state
+to saving it. If the lock is busy the pass does nothing (`--once` prints one line and exits 0,
+`--loop` skips that pass). --dry-run takes no lock.
+
+State: JSON at --state (default ~/.local/state/paseo-bypass-watch.json), fsynced and replaced atomically:
 {"version": 1, "handled": {ID: {"result": "set|recorded|failed", "at": ISO}}, "attempts": {ID: N}}.
+A state file of the wrong shape or type is an error (exit 1), never a reason to re-touch everything.
 --dry-run prints `would set ID name` and changes nothing (no mode call, no state write).
 --json prints one JSON object per pass: {"set": [...], "recorded": [...], "failed": [...],
 "would_set": [...], "errors": [...]}.
 
---once (default) does one pass: exit 0 (also when nothing to do), 1 on an unexpected error
-(daemon down, unreadable state). --loop N passes every N seconds until SIGTERM/SIGINT, then exits 0;
-a failing pass is logged and the loop goes on. Exit 2 on usage errors.
+--once (default) does one pass: exit 0 (also when nothing to do or the lock is busy), 1 on an
+unexpected error (daemon down, unreadable state or exempt list). --loop N (finite, at least 1; N
+is required) passes every N seconds until SIGTERM/SIGINT, then exits 0; a failing pass is logged
+and the loop goes on. --max-age must be finite and greater than 0. Exit 2 on usage errors.
 
 Env: PASEO_CLI (default /Applications/Paseo.app/Contents/Resources/bin/paseo), HOME.
 
 Running it under launchd (the operator's decision; this script installs nothing): a LaunchAgent
-with ProgramArguments [`/path/to/bin/paseo-bypass-watch`, `--loop`, `5`], RunAtLoad and KeepAlive
+with ProgramArguments [`/path/to/bin/paseo-bypass-watch`, `--loop`, `10`], RunAtLoad and KeepAlive
 true; SIGTERM from `launchctl bootout` ends it cleanly.
 """
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import math
 import os
 import signal
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_CLI = "/Applications/Paseo.app/Contents/Resources/bin/paseo"
 TARGET_MODE = "bypassPermissions"
+ACT_ON_MODE = "default"
 MAX_ATTEMPTS = 5
 CALL_TIMEOUT = 60
+MIN_LOOP = 1.0
 SKIP_LABEL = ("perm", "ask")
+LOCK_BUSY_MSG = "another pass holds the state lock; nothing done"
 
 STOP = threading.Event()
 
@@ -114,23 +137,14 @@ def provider_of(agent: dict) -> str:
     return str(pick(agent, "provider") or "").split("/", 1)[0]
 
 
-def has_skip_label(*sources: dict) -> bool:
-    """True when any source carries label perm=ask (dict, list of "k=v" strings or {key,value}s)."""
+def exempt_ids() -> set[str]:
+    """Ids of agents carrying the label perm=ask. The CLI prints no labels, so ask its filter; any
+    failure or odd shape raises (fail closed: never read a failed call as an empty set)."""
     key, val = SKIP_LABEL
-    for src in sources:
-        labels = pick(src, "labels", "label")
-        if isinstance(labels, dict):
-            if str(labels.get(key)) == val:
-                return True
-        elif isinstance(labels, list):
-            for item in labels:
-                if isinstance(item, str) and item == f"{key}={val}":
-                    return True
-                if isinstance(item, dict) and str(item.get("key")) == key and str(item.get("value")) == val:
-                    return True
-        elif isinstance(labels, str) and f"{key}={val}" in labels.replace(",", " ").split():
-            return True
-    return False
+    data = paseo_json("agent", "ls", "--label", f"{key}={val}", "--json")
+    if not isinstance(data, list) or not all(isinstance(a, dict) and a.get("id") for a in data):
+        raise RuntimeError(f"paseo agent ls --label {key}={val} --json: expected an array of agents with ids")
+    return {str(a["id"]) for a in data}
 
 
 def age_seconds(created: object, now: datetime) -> float | None:
@@ -154,20 +168,47 @@ def load_state(path: Path) -> dict:
     except FileNotFoundError:
         return {"version": 1, "handled": {}, "attempts": {}}
     data = json.loads(text)  # a corrupt state file is an error, never a silent re-touch of everything
-    if not isinstance(data, dict) or not isinstance(data.get("handled", {}), dict):
+    if not isinstance(data, dict):
         raise RuntimeError(f"state file {path} has an unexpected shape")
     data.setdefault("version", 1)
     data.setdefault("handled", {})
     data.setdefault("attempts", {})
+    handled, attempts = data["handled"], data["attempts"]
+    if (
+        not isinstance(handled, dict)
+        or not all(isinstance(v, dict) for v in handled.values())
+        or not isinstance(attempts, dict)
+        or not all(type(v) is int for v in attempts.values())
+    ):
+        raise RuntimeError(f"state file {path} has an unexpected shape")
     return data
 
 
 def save_state(path: Path, state: dict) -> None:
-    """Temp file beside, then os.replace: a half-written file would re-touch every agent."""
+    """Temp file beside, fsync, then os.replace: a half-written or empty file would re-touch every agent."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
+    with open(tmp, "w") as f:
+        f.write(json.dumps(state, indent=1, sort_keys=True))
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+@contextmanager
+def pass_lock(state_path: Path):
+    """Exclusive non-blocking flock on a sibling `<state>.lock`; yields False when another pass holds it."""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(state_path.with_name(state_path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)  # closing the descriptor releases the lock
 
 
 def record(state: dict, agent_id: str, result: str, now: datetime) -> None:
@@ -179,16 +220,18 @@ def record(state: dict, agent_id: str, result: str, now: datetime) -> None:
 
 
 def one_pass(state: dict, max_age: float, dry_run: bool) -> dict:
-    """Mutates `state`; returns the pass report. Raises RuntimeError when the agent list fails."""
+    """Mutates `state`; returns the pass report. Raises RuntimeError, before touching any agent, when
+    the exempt list or the agent list cannot be read."""
     now = datetime.now(timezone.utc)
     report: dict[str, list] = {"set": [], "recorded": [], "failed": [], "would_set": [], "errors": []}
     handled, attempts = state["handled"], state["attempts"]
+    exempt = exempt_ids()  # fails closed: an unreadable exempt list aborts the whole pass
     for agent in list_agents():
         agent_id = str(agent["id"])
         name = str(pick(agent, "name") or "")
         if provider_of(agent) != "claude" or agent_id in handled:
             continue
-        if str(pick(agent, "status") or "") == "closed":
+        if agent_id in exempt or str(pick(agent, "status") or "") == "closed":
             if not dry_run:
                 record(state, agent_id, "recorded", now)
             report["recorded"].append(agent_id)
@@ -199,13 +242,11 @@ def one_pass(state: dict, max_age: float, dry_run: bool) -> dict:
             report["errors"].append(str(e))
             eprint(str(e))
             continue
-        mode = pick(info, "mode")
         age = age_seconds(pick(info, "createdAt", "created"), now)
         retrying = agent_id in attempts  # the set decision was taken on an earlier pass
         skip = (
             pick(info, "archived") is True
-            or mode == TARGET_MODE
-            or has_skip_label(agent, info)
+            or pick(info, "mode") != ACT_ON_MODE  # plan, acceptEdits, dontAsk, bypass...: a deliberate choice; retries re-check it too
             or (not retrying and (age is None or age >= max_age))
         )
         if skip:
@@ -237,32 +278,37 @@ def one_pass(state: dict, max_age: float, dry_run: bool) -> dict:
     return report
 
 
-def run_pass(state_path: Path, max_age: float, dry_run: bool, as_json: bool) -> None:
-    state = load_state(state_path)
-    try:
-        report = one_pass(state, max_age, dry_run)
-    finally:
-        if not dry_run:
-            save_state(state_path, state)  # keep the attempt counts and records made before an error
+def run_pass(state_path: Path, max_age: float, dry_run: bool, as_json: bool) -> bool:
+    """One locked pass: load state, act, save. False (and nothing done) when another pass holds the lock."""
+    with nullcontext(True) if dry_run else pass_lock(state_path) as got:  # dry-run writes nothing, so it needs no lock
+        if not got:
+            return False
+        state = load_state(state_path)
+        try:
+            report = one_pass(state, max_age, dry_run)
+        finally:
+            if not dry_run:
+                save_state(state_path, state)  # keep the attempt counts and records made before an error
     if as_json:
         print(json.dumps(report, sort_keys=True), flush=True)
+    return True
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="paseo-bypass-watch", description="Set new Paseo Claude agents to bypassPermissions.")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="one pass, then exit (default)")
-    mode.add_argument("--loop", nargs="?", const=5.0, type=float, metavar="SECONDS", help="repeat every SECONDS (default 5)")
+    mode.add_argument("--loop", type=float, metavar="SECONDS", help=f"repeat every SECONDS (at least {MIN_LOOP:g}; 10 or more is kind to the Paseo CLI)")
     p.add_argument("--dry-run", action="store_true", help="print what would be set; set and write nothing")
     default_state = Path(os.environ.get("HOME", str(Path.home()))) / ".local/state/paseo-bypass-watch.json"
     p.add_argument("--state", type=Path, default=default_state, help=f"state file (default {default_state})")
     p.add_argument("--max-age", type=float, default=120.0, help="only set agents created less than this many seconds ago (default 120)")
     p.add_argument("--json", action="store_true", help="print one JSON report per pass")
     a = p.parse_args(argv)
-    if a.loop is not None and a.loop <= 0:
-        p.error("--loop SECONDS must be positive")
-    if a.max_age < 0:
-        p.error("--max-age must not be negative")
+    if a.loop is not None and (not math.isfinite(a.loop) or a.loop < MIN_LOOP):
+        p.error(f"--loop SECONDS must be a finite number of at least {MIN_LOOP:g}")
+    if not math.isfinite(a.max_age) or a.max_age <= 0:
+        p.error("--max-age must be a finite number of seconds greater than 0")
     return a
 
 
@@ -270,19 +316,26 @@ def main(argv: list[str]) -> int:
     a = parse_args(argv)
     if a.loop is None:
         try:
-            run_pass(a.state, a.max_age, a.dry_run, a.json)
+            ran = run_pass(a.state, a.max_age, a.dry_run, a.json)
         except (RuntimeError, OSError, ValueError) as e:
             eprint(f"error: {e}")
             return 1
+        if not ran:
+            eprint(LOCK_BUSY_MSG)
         return 0
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: STOP.set())
     while not STOP.is_set():
         try:
-            run_pass(a.state, a.max_age, a.dry_run, a.json)
+            if not run_pass(a.state, a.max_age, a.dry_run, a.json):
+                eprint(LOCK_BUSY_MSG)
         except Exception as e:  # noqa: BLE001 - one failing pass must not end the loop
             eprint(f"pass failed: {e}")
-        STOP.wait(a.loop)
+        try:
+            STOP.wait(a.loop)
+        except (ValueError, OverflowError) as e:  # an interval the platform cannot wait for
+            eprint(f"cannot wait {a.loop} s ({e}); waiting {MIN_LOOP:g} s instead")
+            STOP.wait(MIN_LOOP)
     return 0
 
 
