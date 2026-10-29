@@ -141,7 +141,7 @@ Paseo id, label and hop count come from the record, set at queue time from the s
 identity. A caller with NO identifiable sender (no verified Paseo id, no fleet `self` row: a launchd script) is not deferred:
 exit 1 "not sent: that session is busy and cannot take it now; deferring needs an identifiable sender (it gets a notice if
 the send fails). Retry with --idle S, or --no-defer for the plain refusal" (nobody could be told it failed). It looks at the
-target every 5 s (only the head of a target's queue looks) and, once it is idle, sends through
+target every 5 s while it is not there or cannot be asked, on a backoff ladder while it works or waits on a card (below; only the head of a target's queue looks) and, once it is idle, sends through
 this same path (every gate, lock and proof) the stored text prefixed `[queued Nm ago] ` (omitted under a minute), under
 the stored label (sanitized again; `--deliver` refuses a record whose label sender_name would not give, and a `hermes xxxx`
 label without stored hops). A target that is gone (3 looks in a row), archived, finished, or no longer the same
@@ -175,6 +175,9 @@ A target BLOCKED ON A PERMISSION OR QUESTION CARD (a Paseo agent with a pending 
 typed into the card (a send would answer or replace it), and the deliverer looks again at CAPPED EXPONENTIAL INTERVALS WITH FULL JITTER
 (card_backoff: a random wait under a ceiling of 5, 10, 20, 40, 80 s, then 120 s, never under the 5 s poll; the step starts over after a look
 that finds no card), so a card that waits for a human is not inspected every 5 s for hours and many deliverers waiting on one card spread out.
+A WORKING target is looked at on the same ladder with a lower cap (BUSY_BACKOFF_CAP, 30 s; 2026-10-29, load watcher: about nine deliverers each
+spawning `paseo agent inspect` every 5 s at load 39), so a queued text can wait up to ~30 s past the end of a long turn instead of 5 s; a target that is
+not there or could not be asked is still looked at every DEFER_POLL, since those looks count toward DEFER_MISSES / DEFER_ERRORS.
 It sends once the card is answered or gone, as for a working target; a record still blocked at its expiry (default 6 h) is `expired`
 "the target stayed blocked on a permission or question card" and the sender gets the one notice. `--no-defer`, `--plan`, `--idle S` and a
 different `--via` keep the plain card refusal, and a deliverer whose target went back to a card between its look and its send re-queues the
@@ -182,6 +185,16 @@ record. A caller with no identifiable sender is still refused (with the card rea
 Warp's orchestration (a BLOCKED run state, durable per-agent inboxes, events instead of polling), Claude Code's mailbox (a message is
 queued until a safe boundary; queued is not read), A2A's input-required task state, Azure Service Bus deferral (set the message aside,
 keep it in the store, deliver later), AWS "Exponential Backoff And Jitter" (Brooker, 2015).
+WHY IT CANNOT BE DELIVERED YET (2026-10-29, djbclark: "be able to tell why a message can't be delivered yet (eg picklist vs tab hung etc)"). `relay.py --why
+IDENT [--json]` names the obstacle by TWO methods compared (diagnose), exit 0 when it can take a text now, 1 when something is in the way. A Paseo agent:
+its API (`paseo agent inspect`: status, archived, pending cards BY TOOL, last update), its card text (`paseo permit ls`) and its timeline (`paseo logs`: the
+last thing it did). A pane TUI: the multiplexer's status and the screen itself (`herdr pane read`, classify_screen: a picker, a permission prompt, an open
+slash menu, a turn running; a heuristic that only ever ADDS a reason to wait). States: idle, working, silent (running with nothing new for 15 minutes: a hung
+turn or one long tool call), card:question (a picklist the agent asked: AskUserQuestion), card:permission (a tool awaiting approval), card:plan, card:picker,
+card:unknown, archived, gone, error, refused (a hard stop no route gets round: this very session, a finished one). When the methods DISAGREE (an `idle` status over a picker on screen; `inspect` and `permit ls` each listing a card the other does not)
+both are reported and the BLOCKING reading wins, because typing into a dialog is the harm. The same reason is in every card refusal and queue line, the
+deliverer files its latest on the record (`look`: state, why, when) and logs each change in deferred.log, `--pending` shows it as `[why: ...]` (and `look`
+in --json), and an expired or failed record's notice carries it.
 Residual: PASEO_AGENT_ID, like HERDR_PANE_ID and CLAUDE_CODE_SESSION_ID, is an environment value a same-user process can
 forge, and a record is plain JSON in a 0700 directory of the same user: relay cannot stop such a process from naming
 another agent as the sender or from writing a record itself. The bounds can be starved: 100 records in all, so a same-user
@@ -195,7 +208,19 @@ proof (the text reached the target's transcript) is mechanical and needs no repl
 or requests action. THE DELIVERY WATCH (default for an agent session, 2026-10-25): a send that is only "accepted" (a socket frame or Paseo send to a
 working session) or "queued" (an enqueue not yet taken, a deferred record) keeps being watched, and the exit says which it is: 0 delivered, 1 not
 delivered (not sent, pulled back out of the queue, a deferred record failed, expired or cancelled), 3 unverified (sent, or still queued, with no
-proof yet: do not resend; a route with no transcript to read, an ACP inbox or a Paseo agent that is not Claude, is unverified at once). The
+proof yet: do not resend; a route with no transcript to read and no other witness, an ACP inbox, is unverified at once). TWO WITNESSES for a Paseo target
+(2026-10-29, djbclark: "use both methods redundantly to ensure bidirectional ack"): its Claude transcript AND its own Paseo timeline (`paseo logs ID --tail 80`,
+which shows every received message as `[Message received] <sender title>` and the text, unescaped); either proves, so a codex, omp, opencode or cline
+Paseo agent, which has no transcript, is now "delivered" instead of "unverified". Only a RECEIVED message counts (a `[Message received]` entry and its text;
+the agent's reasoning, tool output and replies never do), and the text must NOT have been in the timeline before the send (a copy already there cannot be told
+from one that scrolled out of the 80-entry window: the send stays "accepted"), must be at least 10 characters, and is polled 6 s at most before the --ack watch
+takes over; a caller that wants no proof (--no-ack, a launchd job) gets the instant "accepted" it always had and no timeline read; the WHOLE text is matched (a tail
+shared by two long texts would let one certify the other); a received message is `[Message received] <sender>` + text (a send from a Paseo agent) or `[User] <text>` (any other
+sender); the text is rendered, not typed, so an agent that prints such a line itself could forge one (the transcript witness has the same boundary); a timeline that cannot be read (daemon down, no output) is no witness. The return direction: `--sweep` reads a
+transcript-less SENDER's own Paseo timeline, once per sender, for `ack ID` (and the first-contact `ack <id>`) from the target: the entry's own sender title
+(or a relay header at the very START of its text) must name the target, a name quoted later in a text is nothing, and an ack already in the timeline when the
+question was sent (`tl_base`, taken before the send) cannot answer it, so a reused ID or an old `ack <id>` closes nothing; expectations and links written
+before 2026-10-29 carry no `sender_paseo` and are not read this way. The
 watch is on for every caller relay identifies as a session (a fleet `self` row, a Paseo agent, a Claude session, a Hermes turn) and runs
 IMPLICIT_ACK_WAIT (10) seconds at most beyond the send's own --wait; `--ack` asks for it whoever you are and watches --wait seconds; `--no-ack`
 or RELAY_NO_ACK=1 turns the default off. A DECLARED JOB run by launchd (a label in RELAY_SENDER_NAME and no session in its environment: every launchd
@@ -351,10 +376,180 @@ def paseo_blocker(info):
     if info.get("Archived"):
         return "its Paseo agent is archived (a send would unarchive it and start a turn)"
     if info.get("PendingPermissions"):
-        return "blocked on a permission or question: typed text would answer it (helm / the Paseo UI answers it)"
+        return (f"blocked on a permission or question ({card_summary(info['PendingPermissions'])}): typed text would answer it "
+                "(helm / the Paseo UI answers it)")
     if state not in ("idle", "running"):
         return f"its Paseo agent is {state}, not idle or running"
     return None
+
+
+# ---- why a message cannot be delivered yet (2026-10-29, djbclark: "be able to tell why a message can't be delivered yet (eg picklist vs tab hung
+# etc)") ----
+# A refusal, a wait and `--why` say WHICH obstacle it is, read by two independent methods and compared. A Paseo agent: its API (`paseo agent
+# inspect`: status, archived, pending cards by tool, last update) and its card list (`paseo permit ls`: the card's own text) and its timeline
+# (`paseo logs`: the last thing it did). A pane TUI: the multiplexer's status and the screen itself (`herdr pane read`), classified. The methods can
+# disagree (an `idle` status over a picker on screen): both are reported and the BLOCKING one wins, because typing into a dialog is the harm.
+HUNG_AFTER = 900    # seconds a "running" Paseo agent may show nothing new before it is called silent (a hung turn, or one long tool call)
+QUESTION_TOOL = re.compile(r"question|elicit|picker|choose|select|\bask\b", re.I)    # AskUserQuestion, omp's `ask`
+PLAN_TOOL = re.compile(r"plan", re.I)
+
+
+def card_kind(tool):
+    """"question" (a picklist the agent asked: AskUserQuestion), "plan" (ExitPlanMode) or "permission" (a tool awaiting approval) from a Paseo
+    pending card's tool name."""
+    t = tool if isinstance(tool, str) else ""
+    return "question" if QUESTION_TOOL.search(t) else "plan" if PLAN_TOOL.search(t) else "permission"
+
+
+def card_summary(cards):
+    """`a QUESTION (AskUserQuestion)`, `a PERMISSION (Bash) and a PLAN (ExitPlanMode)`: the pending cards of a Paseo agent by kind and tool."""
+    items = [c for c in (cards if isinstance(cards, list) else []) if isinstance(c, dict)]
+    if not items:
+        return "a pending card"
+    parts = [f"a {card_kind(c.get('tool')).upper()} ({fleet.clip(str(c.get('tool') or '?'), 40)})" for c in items[:3]]
+    return ", ".join(parts) + (f" and {len(items) - 3} more" if len(items) > 3 else "")
+
+
+def silent_seconds(info):
+    """Seconds since a Paseo agent's `UpdatedAt` (ISO 8601), or None when it is missing or unreadable."""
+    raw = info.get("UpdatedAt")
+    try:
+        when = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0, int(time.time() - when.timestamp()))
+
+
+CONTROL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[\]P^_X][^\x07\x1b]*(?:\x07|\x1b\\)?|[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def clean_text(text, n=100):
+    """TEXT an agent or a screen produced, made safe to print: control characters and terminal escape sequences removed (an operator's terminal
+    must never run what a tool printed), whitespace folded, clipped to N."""
+    return fleet.clip(" ".join(CONTROL.sub(" ", str(text or "")).split()), n)
+
+
+def paseo_card_detail(agent_id):
+    """(the card's own text for the first pending card of AGENT_ID from `paseo permit ls --json`, whether that list names the agent at all). A second
+    method beside `inspect`, which names only the tool. Shown by `--why` only, never filed on a record or logged: it is the agent's own tool input
+    (a Bash command can carry a token). A description of `-` or nothing is no text; the tool name stands in."""
+    rc, out, _err = paseo_run("permit", "ls", "--json", timeout=TIMELINE_READ)
+    if rc != 0:
+        return "", False
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return "", False
+    rows = data.get("data") if isinstance(data, dict) else data
+    mine = [r for r in (rows if isinstance(rows, list) else []) if isinstance(r, dict) and r.get("agentId") == agent_id]
+    if not mine:
+        return "", False
+    text = clean_text(mine[0].get("description"))
+    return (text if text not in ("", "-") else clean_text(mine[0].get("name"))), True
+
+
+def paseo_look(info, detail="", listed=None, last=""):
+    """The diagnosis of a Paseo agent from its `inspect` INFO: {"state", "why", "deliverable", "agree", "evidence"}. DETAIL is the card text from
+    `permit ls`, LISTED whether that list names the agent (None: not asked), LAST the last line of its timeline. state is idle, working, silent
+    (running with nothing new for HUNG_AFTER), card:question|permission|plan, archived, or the agent's own state word."""
+    state = info.get("Status") or "unknown"
+    silent = silent_seconds(info)
+    ev = [{"src": "paseo-inspect", "says": state + (" archived" if info.get("Archived") else ""), **({"silent_s": silent} if silent is not None else {})}]
+    if last:
+        ev.append({"src": "paseo-logs", "says": "last activity", "line": clean_text(last)})
+    cards = info.get("PendingPermissions") or []
+    if listed and not cards and not info.get("Archived"):
+        return {"state": "card:unknown", "why": "`paseo permit ls` lists a pending card that `paseo agent inspect` does not (a card may have just appeared): "
+                "treat the agent as blocked" + (f"; the card says: {detail}" if detail else ""),
+                "deliverable": False, "agree": False, "evidence": ev + [{"src": "paseo-permit-ls", "says": "lists a card", **({"line": detail} if detail else {})}]}
+    if info.get("Archived"):
+        return {"state": "archived", "why": paseo_blocker(info), "deliverable": False, "agree": True, "evidence": ev}
+    if cards:
+        kinds = [card_kind(c.get("tool")) for c in cards if isinstance(c, dict)] or ["permission"]
+        ev.append({"src": "paseo-permit-ls", "says": (detail or "listed, no text") if listed else "does not list it", **({"line": detail} if detail else {})})
+        why = paseo_blocker(info) + (f"; the card says: {detail}" if detail else "")
+        agree = listed is not False
+        if not agree:
+            why += " [`paseo agent inspect` lists a card that `paseo permit ls` does not: it may have just been answered]"
+        return {"state": "card:" + kinds[0], "why": why, "deliverable": False, "agree": agree, "evidence": ev}
+    if state == "idle":
+        return {"state": "idle", "why": "idle", "deliverable": True, "agree": True, "evidence": ev}
+    if state == "running":
+        if silent is not None and silent > HUNG_AFTER:
+            return {"state": "silent", "why": f"running, but nothing new for {silent // 60} min: a hung turn or one long tool call "
+                    "(the text is queued for its next idle)", "deliverable": False, "agree": True, "evidence": ev}
+        return {"state": "working", "why": "working: it takes the text when its turn ends", "deliverable": False, "agree": True, "evidence": ev}
+    return {"state": state, "why": f"its Paseo agent is {state}, not idle or running", "deliverable": False, "agree": True, "evidence": ev}
+
+
+SCREEN_ROWS = 8    # a dialog is at the bottom of the screen: only the last rows can name one (a line the agent printed higher up is history)
+SCREEN_KINDS = (    # (kind, pattern) in priority order over the last SCREEN_ROWS rows: dialog chrome, not words that merely appear in prose
+    ("picker", re.compile(r"↑/↓[^\n]{0,50}enter to select|enter to select[^\n]{0,50}(?:esc|ctrl\+c)[^\n]{0,20}(?:cancel|exit)"
+                          r"|(?:^[ \t]*[❯›>▶●]?[ \t]*\d+[.)][ \t]+\S[^\n]*\n){2,}[^\n]*(?:esc|enter)[^\n]*(?:cancel|select|go back)", re.I | re.M)),
+    ("permission", re.compile(r"(?:do you want to|would you like to)[^\n]*\?[ \t│┃|]*\n(?:[^\n]*\n){0,3}[ \t│┃|]*[❯›>▶●]?[ \t]*1[.)][ \t]+yes"
+                              r"|\[(?:y/n|Y/n|y/N)\][ \t]*$|\((?:y/n|Y/n|y/N)\)[ \t]*$|^[ \t]*[❯›>▶●]?[ \t]*\d+[.)][ \t]+yes, (?:and )?(?:don'?t|do not) ask again", re.I | re.M)),
+    ("slash_menu", re.compile(r"(?:^[ \t]*/[a-z][\w-]*[ \t]{2,}\S[^\n]*\n){3}\Z", re.I | re.M)),
+    ("busy", re.compile(r"esc to interrupt|ctrl\+c to interrupt|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]", re.I)),
+)
+
+
+def classify_screen(text):
+    """(kind, the matching line) of a pane's screen TEXT: picker (a numbered list or a select hint), permission (an approval prompt with its options),
+    slash_menu (an open command menu at the very bottom), busy (a turn running) or ("unknown", ""). A heuristic over the last SCREEN_ROWS rows,
+    anchored to dialog chrome, never proof of idleness: callers use it only to ADD a reason to wait, and report it beside the multiplexer's own
+    status."""
+    rows = [CONTROL.sub(" ", r).rstrip() for r in (text or "").splitlines() if r.strip()][-SCREEN_ROWS:]
+    tail = "\n".join(rows) + "\n"
+    for kind, pat in SCREEN_KINDS:
+        m = pat.search(tail)
+        if m:
+            first = next((x.strip() for x in m.group(0).splitlines() if x.strip()), "")
+            return kind, clean_text(next((r for r in rows if first and first in r.strip()), first))
+    return "unknown", ""
+
+
+def pane_look(s):
+    """The diagnosis of a pane TUI S: the multiplexer's status beside what its screen shows (classify_screen). A blocking screen (picker,
+    permission, open slash menu) or a `blocked` status makes it a card; the two disagreeing is reported, and the blocking side wins."""
+    status = s.get("status") or "unknown"
+    chan = s.get("chan")
+    shot = screen(tuple(chan)) if chan and chan[0] in ("herdr", "orca", "tmux") else ""
+    kind, line = classify_screen(shot)
+    ev = [{"src": "multiplexer-status", "says": status}]
+    if chan and chan[0] in ("herdr", "orca", "tmux"):
+        ev.append({"src": "screen", "says": kind, **({"line": line} if line else {})})
+    blocking, claims = kind in ("picker", "permission", "slash_menu"), status == "blocked"
+    if blocking or claims:
+        agree = blocking == claims or not ev[1:]
+        shown = kind if blocking else "an unclassified dialog"
+        why = f"blocked on a question or permission prompt ({shown}): a message would land in or behind that dialog (helm.py answer)"    # the screen row stays in `--why`'s evidence: it can hold a command or a token
+        if not agree:
+            why += (f" [the status says {status} but the screen shows a {kind}]" if blocking else f" [the status says blocked but the screen shows {kind}]")
+        return {"state": "card:" + (kind if blocking else "unknown"), "why": why, "deliverable": False, "agree": agree, "evidence": ev}
+    if status == "idle" and kind == "busy":
+        return {"state": "working", "why": "its status says idle but the screen shows a turn running: waiting for it to end", "deliverable": False,
+                "agree": False, "evidence": ev}
+    if status == "idle":
+        return {"state": "idle", "why": "idle", "deliverable": True, "agree": True, "evidence": ev}
+    return {"state": status, "why": f"{status}: it takes the text when its turn ends", "deliverable": False, "agree": True, "evidence": ev}
+
+
+def diagnose(s):
+    """Why session S cannot be sent text right now, by two methods compared (see the section comment). {"state", "why", "deliverable",
+    "agree", "evidence": [{"src", "says", ...}]}; state "gone" or "error" when its Paseo agent cannot be asked."""
+    agent = s["chan"][1] if (s.get("chan") or (None,))[0] == "paseo" else s.get("paseo") or ""
+    if not agent:
+        return pane_look(s)
+    info, kind = paseo_probe(agent)
+    if info is None:
+        word = "error" if kind == "error" else "gone"
+        return {"state": word, "why": "`paseo agent inspect` cannot answer (is the Paseo daemon restarting?)" if kind == "error"
+                else "`paseo agent inspect` does not know this Paseo agent", "deliverable": False, "agree": True,
+                "evidence": [{"src": "paseo-inspect", "says": word}]}
+    detail, listed = paseo_card_detail(agent)    # asked whatever inspect says: a card only one of the two lists is a disagreement to report
+    tl = paseo_timeline(agent, 3)
+    last = next((r.strip() for r in reversed((tl or "").splitlines()) if r.strip()), "")
+    return paseo_look(info, detail, listed, last)
 
 
 def paseo_cwd_mismatch(s, info):
@@ -454,15 +649,121 @@ def probe_proof(tx, mark, *probes):
     return proof
 
 
+# The Paseo timeline as a SECOND witness (2026-10-29, djbclark: "use both methods redundantly to ensure bidirectional ack"). A Paseo agent's own
+# activity log (`paseo logs ID --tail N`, curated text, no timestamps) shows every message it received as `[Message received] <sender title>`
+# and the text on the next line (a send from a Paseo agent), or as `[User] <text>` (a send from anything else: a pane, a launchd job, a deliverer;
+# checked live 2026-10-29), UNescaped (`a&b <c> "q"` is shown as typed, though the Claude transcript keeps it XML-escaped). It needs no transcript
+# file, so it proves a delivery to a codex, omp, opencode or cline agent, which the transcript never could ("unverified" for 5 days), and it is a
+# second witness for a Claude one. Either witness alone proves. Residual, within the trust boundary the transcript witness has too: the text is
+# rendered, not typed, so an agent that prints a line `[Message received] x` itself can forge an entry (no typed event is available from the CLI).
+TIMELINE_TAIL = 80          # curated entries read per look
+TIMELINE_MIN = 10           # a folded text shorter than this proves nothing: `ack x` is as likely to be the agent's own output as a received message
+TIMELINE_PHASE = 6          # seconds a send polls the timeline before it hands the proof to the --ack watch (Paseo shows a steer within ~2-3 s)
+TIMELINE_READ = 5           # timeout of one `paseo logs` (a healthy one answers in about half a second)
+
+
+def paseo_timeline(agent_id, tail=TIMELINE_TAIL, timeout=None):
+    """The text of `paseo logs AGENT --tail N`, or None when the daemon or CLI cannot answer or printed nothing (the real CLI prints
+    "No activity to display." for an empty timeline, so silence is a broken CLI, not an empty agent). TIMEOUT caps the read (default TIMELINE_READ)."""
+    if not UUID.fullmatch(agent_id or ""):
+        return None
+    rc, out, _err = paseo_run("logs", agent_id, "--tail", str(tail), timeout=timeout or TIMELINE_READ)
+    return out if rc == 0 and out.strip() else None
+
+
+def tl_norm(text):
+    return " ".join((text or "").split())
+
+
+def timeline_probe(text):
+    """What to look for in a timeline: the WHOLE text, whitespace-folded (a tail shared by two long texts would let one certify the other)."""
+    return tl_norm(text)
+
+
+def timeline_messages(agent_id, timeout=None):
+    """The messages an agent RECEIVED, from its timeline: [(sender title, folded body)], one per `[Message received] <title>` entry and the line after
+    it (a relay text is one line), and one per `[User] <text>` entry (title ""; a sender that is not a Paseo agent). Reasoning, tool output and the
+    agent's own replies are other entries and never count. None when the timeline cannot be read."""
+    tl = paseo_timeline(agent_id, timeout=timeout)
+    if tl is None:
+        return None
+    rows, out = tl.splitlines(), []
+    for i, row in enumerate(rows):
+        if row.startswith("[Message received]"):
+            out.append((tl_norm(row[len("[Message received]"):]), tl_norm(rows[i + 1] if i + 1 < len(rows) else "")))
+        elif row.startswith("[User] "):
+            out.append(("", tl_norm(row[len("[User] "):])))
+    return out
+
+
+def timeline_count(agent_id, probe, timeout=None):
+    """How many RECEIVED messages of the agent hold PROBE now; None when the timeline cannot be read."""
+    msgs = timeline_messages(agent_id, timeout)
+    return None if msgs is None else sum(1 for _title, body in msgs if probe in body)
+
+
+def timeline_key(title, body):
+    """A short key of one received message: its sender title and folded body."""
+    return hashlib.sha256(f"{title}\x00{body}".encode()).hexdigest()[:16]
+
+
+def timeline_base(me):
+    """{key: count} of the messages a transcript-less Paseo SENDER (fleet row ME) had received before it sent, taken before the send (hashes, not
+    the text: a record never holds another agent's words). An `ack` already there cannot answer a question not yet asked (a reused ID, the same
+    `ack <id>` from an earlier contact). None for a sender with a transcript or no Paseo id, and for a timeline that could not be read: with no
+    baseline the timeline closes nothing (timeline_ack), the safe direction."""
+    pid = me.get("paseo") if isinstance(me, dict) else None
+    if me is None or me.get("transcript") or not (isinstance(pid, str) and UUID.fullmatch(pid)):
+        return None
+    msgs = timeline_messages(pid)
+    if msgs is None:
+        return None
+    counts: dict[str, int] = {}
+    for title, body in msgs:
+        k = timeline_key(title, body)
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def timeline_ack(messages, token, who, base=None):
+    """True when MESSAGES (timeline_messages of the sender) hold a NEW `ack TOKEN` from one of WHO. New: the count of that exact message (sender
+    title and body) now exceeds its count in BASE, what was there before the question was sent, so a repeat of an identical ack after the question
+    closes it and the old copy does not; BASE None (never taken, or unreadable) closes nothing. From: a relay header at the very START of the body
+    names one of WHO (a peer that is not a Paseo agent writes one), else the entry's own sender title is one of WHO exactly; a name quoted later in
+    a body, or a title that merely contains one, establishes nothing. Residual: two Paseo agents can share a title (Codex, PR 124)."""
+    if not isinstance(base, dict) or not isinstance(token, str) or not token:
+        return False
+    names = {w.lower() for w in who if isinstance(w, str) and w}
+    pat = ack_token(token)
+    seen: dict[str, int] = {}
+    for title, body in messages or []:
+        if not pat.search(body):
+            continue
+        m = HEADER_RE.match(body)
+        ok = ((m["id"] or m["id2"]).lower() in names or (m["aka"] or m["aka2"] or "").strip().lower() in names) if m else title.lower() in names
+        if not ok:
+            continue
+        k = timeline_key(title, body)
+        seen[k] = seen.get(k, 0) + 1
+        if seen[k] > _num(base.get(k)):
+            return True
+    return False
+
+
 def send_paseo(s, text, wait):
-    """Send TEXT to Paseo agent S: 'delivered' (seen in its Claude transcript), 'accepted' (the daemon took
-    it; not a verified delivery) or None (send failed; the reason is printed). --behavior steer queues the text
+    """Send TEXT to Paseo agent S: 'delivered' (seen in its Claude transcript OR as a RECEIVED message in its Paseo timeline: either witness proves),
+    'accepted' (the daemon took it; not a verified delivery) or None (send failed; the reason is printed). --behavior steer queues the text
     for the next tool round on a steer-capable provider; one that cannot steer has its running turn replaced by
     Paseo, so the caller already refused anything that starts a built-in. --no-wait so this returns at once
-    (the transcript poll below is the verification); `--` keeps TEXT, whatever it starts with, out of the options."""
+    (the witness poll below is the verification); `--` keeps TEXT, whatever it starts with, out of the options.
+    The timeline is a witness only when the text was NOT in it before the send (a copy already there cannot be told from a scrolled one), is at
+    least TIMELINE_MIN characters, and the caller wants a proof (s["timeline_wanted"], default yes); it is polled TIMELINE_PHASE seconds at most."""
     agent = s["chan"][1]
     tx = Path(s["transcript"]) if s.get("transcript") else None
     mark = tx.stat().st_size if tx and tx.is_file() else 0
+    probe_tl = timeline_probe(text)
+    before = timeline_count(agent, probe_tl) if (s.pop("timeline_wanted", True) and len(probe_tl) >= TIMELINE_MIN) else None
+    tl_ok = before == 0    # None: unreadable, short or not wanted; 1+: a copy is already there. Either way the timeline is no witness this time
     rc, out, err = paseo_run("send", "--no-wait", "--behavior", "steer", "--json", "--", agent, text)
     s["send_rc"] = rc
     if rc != 0:
@@ -475,15 +776,29 @@ def send_paseo(s, text, wait):
     # line of one message would certify the other (Codex P1, PR 74; adversary round 4 R4-1)
     probe_raw = json.dumps(text, ensure_ascii=False)[1:-1]
     probe_esc = json.dumps("".join(XML_ESCAPES.get(c, c) for c in text), ensure_ascii=False)[1:-1]
-    deadline = time.time() + wait
-    while tx and tx.is_file() and time.time() < deadline:
-        with tx.open("rb") as fh:
-            fh.seek(mark)
-            data = fh.read().decode("utf-8", "replace")
-        if probe_raw in data or probe_esc in data:
+    tx_proof = probe_proof(tx, mark, probe_raw, probe_esc) if tx else None
+
+    t0 = time.time()
+    deadline_tl = t0 + min(wait, TIMELINE_PHASE)    # the timeline is read only inside its own phase, and no read may outlast it
+
+    def witnessed(read_tl=True):
+        if tx_proof is not None and tx_proof() == "delivered":
+            return "delivered"
+        if tl_ok and read_tl:
+            left = deadline_tl - time.time()
+            n = timeline_count(agent, probe_tl, TIMELINE_READ if left <= 0 or left > TIMELINE_READ else max(1, int(left) + 1))    # left <= 0: the --ack watch calls this, which has its own budget
+            if (n or 0) >= 1:
+                return "delivered"
+        return None
+    while True:
+        waiting_tx = bool(tx and tx.is_file()) and time.time() < t0 + wait
+        waiting_tl = tl_ok and time.time() < deadline_tl
+        if not (waiting_tx or waiting_tl):
+            break
+        if witnessed(waiting_tl):
             return "delivered"
         time.sleep(1)
-    s["proof"] = probe_proof(tx, mark, probe_raw, probe_esc) if tx else None    # route_paseo hands it to the --ack watch: an "accepted" send may still show up
+    s["proof"] = witnessed if (tx or tl_ok) else None    # route_paseo hands it to the --ack watch: an "accepted" send may still show up
     return "accepted"
 
 
@@ -1326,6 +1641,7 @@ def route_paseo(c):
     reached the daemon, so it ends the run rather than risk a second copy over another route."""
     s = c["s"]
     text = c["text_sent"] = sender_tag(c["listed"]) + c["text"]
+    s["timeline_wanted"] = bool(c["a"].ack) or bool(SENDER_OVERRIDE[0])    # a caller that wants no proof (--no-ack, a launchd job) gets the instant "accepted" it always had
     seen = send_paseo(s, text, c["a"].wait)
     c["proof"] = s.pop("proof", None)
     if not seen:
@@ -1952,6 +2268,8 @@ NOTICE = [False]           # set while a failure notice is sent: a busy target m
 # human, so a flat 5 s poll for hours is wasted `paseo agent inspect` calls, and many deliverers waiting on one card spread out.
 CARD_BACKOFF_BASE = DEFER_POLL    # the first ceiling; it doubles with every look that still finds the card
 CARD_BACKOFF_CAP = 120            # seconds: the longest wait between two looks (a card is answered in minutes, never hours)
+BUSY_BACKOFF_CAP = 30             # a working target (2026-10-29, load watcher: ~9 deliverers each spawning `paseo agent inspect` every 5 s at load 39): the same ladder, capped
+                                  # lower, because a turn can end at any moment and a queued text waits for it
 CARD_WHY = ("blocked on a permission or question", "blocked on a question or permission prompt")    # the wording of every card refusal
 
 
@@ -1960,11 +2278,11 @@ def card_why(why):
     return isinstance(why, str) and why.startswith(CARD_WHY)
 
 
-def card_backoff(n, rng=None):
-    """Seconds a deliverer sleeps after its N-th (0-based) consecutive look that found the target still blocked on a card: full
-    jitter under a ceiling that doubles from CARD_BACKOFF_BASE up to CARD_BACKOFF_CAP, never below DEFER_POLL. RNG is resolved at
-    call time (random.uniform), so a test that patches it is honoured."""
-    ceiling = min(CARD_BACKOFF_CAP, CARD_BACKOFF_BASE * 2 ** min(max(n, 0), 16))
+def card_backoff(n, rng=None, cap=None):
+    """Seconds a deliverer sleeps after its N-th (0-based) consecutive look that found the target still blocked on a card (or, with CAP, still
+    working): full jitter under a ceiling that doubles from CARD_BACKOFF_BASE up to CAP (default CARD_BACKOFF_CAP), never below DEFER_POLL.
+    RNG is resolved at call time (random.uniform), so a test that patches it is honoured."""
+    ceiling = min(cap or CARD_BACKOFF_CAP, CARD_BACKOFF_BASE * 2 ** min(max(n, 0), 16))
     return max(DEFER_POLL, min(ceiling, (rng or random.uniform)(0, ceiling)))
 
 
@@ -2070,6 +2388,14 @@ def target_key(rec):
 def target_label(rec):
     t = rec.get("target") or {}
     return f"[{t.get('id') or '?'}] {t.get('name') or '-'}"
+
+
+def note_look(rid, rec, look):
+    """File the deliverer's latest diagnosis (state, why, agreement, when) on queued record RID, and log the change: `--pending` shows it, so the
+    sender can tell a picklist from a hung tab without opening the pane."""
+    filed = {"state": look.get("state"), "why": (look.get("why") or "")[:300], "agree": look.get("agree", True), "at": time.time()}
+    if transition(rid, ("queued",), look=filed) is not None:
+        defer_log(rec, "look", f"{filed['state']}: {filed['why']}")
 
 
 def sender_key(rec):
@@ -2255,12 +2581,14 @@ def target_poll(rec):
     """('idle',), ('busy',), ('miss', why) (the target is not there), ('error', why) (it could not be asked: a daemon
     restart) or ('fail', why) for the record's target."""
     t = rec.get("target") or {}
+    target_poll.look = None    # the diagnosis of this look (paseo_look / pane_look), filed on the record by the deliverer
     if t.get("paseo"):    # the Paseo agent id is the identity: inspect must name exactly that agent
         info, kind = paseo_probe(t["paseo"])
         if info is None:
             if kind == "error":
                 return ("error", f"`paseo agent inspect` could not answer for Paseo agent {t['paseo']} (is the Paseo daemon restarting?)")
             return ("miss", f"`paseo agent inspect` does not confirm Paseo agent {t['paseo']}")
+        target_poll.look = paseo_look(info)
         if info.get("PendingPermissions") and not info.get("Archived"):
             return ("card", paseo_blocker(info))    # a card is waiting: typed text would answer it; it is answered or goes away, so wait (backing off)
         why = paseo_blocker(info)
@@ -2282,6 +2610,8 @@ def target_poll(rec):
         if seen == "changed":
             return ("fail", "target changed: another session now holds that pane")
     why = hard_stop(s)
+    if card_why(why) or s.get("status") != "idle":
+        target_poll.look = pane_look(s)    # the screen beside the status: a picker, a permission prompt, a turn still running
     if card_why(why):
         return ("card", why)    # a pane TUI asking: wait for the answer, never type into the dialog
     if why:
@@ -2347,7 +2677,9 @@ def deliver(rid):
             os.environ["RELAY_HOPS"] = str(hops)
             os.environ.pop("RELAY_HOP_PARENT", None)
         misses, errors, last = 0, 0, "the target stayed busy"
+        looked = None    # the last look key filed on the record (note_look)
         card_n = 0    # consecutive looks that found the target blocked on a card (the backoff step)
+        busy_n = 0    # consecutive looks that found it working (its own, shorter backoff)
         while True:
             rec = rec_read(rid)
             if rec is None or rec.get("state") != "queued":
@@ -2367,16 +2699,25 @@ def deliver(rid):
             if poll[0] == "fail" or misses >= DEFER_MISSES or errors >= DEFER_ERRORS:
                 finish(rid, "failed", poll[1], allowed=("queued",))
                 return 0
+            look = getattr(target_poll, "look", None)
+            key = (look.get("state"), look.get("why") if str(look.get("state")).startswith("card:") else "") if look else None    # `silent`'s minutes change every minute: only a card's wording keys
+            if look and look.get("state") != "idle" and key != looked:    # an idle look is about to be sent: nothing to explain
+                looked = key
+                note_look(rid, rec, look)    # kind and tool only: the card's own text (a tool input) stays in `--why`, never on a record, in a log or in a notice
             if poll[0] == "card":
-                last = "the target stayed blocked on a permission or question card"
+                last = (look or {}).get("why") or "the target stayed blocked on a permission or question card"
                 wait = min(card_backoff(card_n), max(1.0, float(rec.get("expires") or 0) - time.time()))
                 card_n += 1
                 time.sleep(wait)
                 continue
             card_n = 0
             if poll[0] != "idle":
-                last = poll[1] if poll[0] in ("miss", "error") else "the target stayed busy"
-                time.sleep(DEFER_POLL)
+                last = poll[1] if poll[0] in ("miss", "error") else (look or {}).get("why") or "the target stayed busy"
+                if poll[0] == "busy":
+                    time.sleep(min(card_backoff(busy_n, cap=BUSY_BACKOFF_CAP), max(1.0, float(rec.get("expires") or 0) - time.time())))
+                    busy_n += 1
+                else:
+                    time.sleep(DEFER_POLL)    # not there / could not ask: counted look by look against DEFER_MISSES / DEFER_ERRORS, so never stretched
                 continue
             if transition(rid, ("queued",), state="sending", sending_since=time.time()) is None:
                 return 0    # cancelled while we looked
@@ -2396,6 +2737,7 @@ def deliver(rid):
                     unverified_late(rid, rec, rc, line)
                     return 0
                 last = "the target stayed busy"
+                busy_n = 0    # a fresh busy or card state between look and send: the short steps again
                 time.sleep(DEFER_POLL)
                 continue
             if rc == 0:
@@ -2572,7 +2914,8 @@ def pending_cmd(as_json, show_text=False):
     now = time.time()
     view = [{"id": r["id"], "state": r.get("state"), "target": r.get("target"), "sender": r.get("sender"),
              "age_s": int(now - float(r.get("created") or now)), "expires_in": int(float(r.get("expires") or now) - now),
-             "outcome": r.get("outcome") or "", **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
+             "outcome": r.get("outcome") or "", **({"look": r["look"]} if isinstance(r.get("look"), dict) else {}),
+             **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
             for r in rows]
     expects = expect_view()    # rows with "kind": "expect" (the message rows have no `kind`): --json lists both
     if as_json:
@@ -2581,13 +2924,42 @@ def pending_cmd(as_json, show_text=False):
         print("no deferred messages")
     for v in ([] if as_json else view):
         print(f"{v['id']}  {v['state']:<9} {target_label({'target': v['target']})}  from {v['sender'] or '?'}  {v['age_s'] // 60}m old"
-              + (f"  {v['outcome']}" if v["outcome"] else "") + (f"  | {v['text_preview']}" if show_text else ""))
+              + (f"  {v['outcome']}" if v["outcome"] else "")
+              + (f"  [why: {v['look']['why']}]" if v["state"] == "queued" and isinstance(v.get("look"), dict) and v["look"].get("why") else "")
+              + (f"  | {v['text_preview']}" if show_text else ""))
     for e in ([] if as_json else expects):
         print(f"{'OVERDUE ' if e['overdue'] else ''}expect-ack {e['id']}  {e['state']:<6} {target_label({'target': e['target']})}  "
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
               + (f"  -> assumed lost ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never call it read" if e["assumed_lost"]
                  else "  -> escalate to the operator: no ack" if e["overdue"] else ""))
     return 0
+
+
+def why_cmd(ident, as_json=False):
+    """`relay.py --why IDENT`: why that session cannot be sent text right now, from two methods compared (diagnose). Exit 0 when it can take a
+    text now, 1 when something is in the way (the reason is printed), 2 for a usage problem."""
+    listed = fleet.sessions()
+    hits = find(ident, listed)
+    if not hits and not UUID.fullmatch(ident):
+        hits = find_herdr_agent(ident, listed)
+    if not hits and UUID.fullmatch(ident):
+        hits = [s for s in [paseo_session(ident)] if s]
+    if len(hits) != 1:
+        print(f"relay: {'no session(s) match' if not hits else str(len(hits)) + ' sessions match'} {ident!r}", file=sys.stderr)
+        return 2
+    s = hits[0]
+    stop = hard_stop(s)    # the refusals no route gets round (this very session, a finished one, a Hermes conversation of the caller): an actual send is rejected before any look
+    d = ({"state": "refused", "why": stop, "deliverable": False, "agree": True, "evidence": [{"src": "relay-refusal", "says": "hard stop", "line": clean_text(stop)}]}
+         if stop and not card_why(stop) else diagnose(s))
+    if as_json:
+        print(json.dumps({"id": s["id"], "name": s.get("name") or "", **d}, ensure_ascii=False))
+    else:
+        print(f"[{s['id']}] {s.get('name') or '-'}: {d['state']}" + ("" if d["agree"] else "  (the methods DISAGREE)"))
+        print(f"  {d['why']}")
+        for e in d["evidence"]:
+            print(f"  - {e['src']}: {e['says']}" + (f" [{e['silent_s']}s since its last update]" if e.get("silent_s") is not None else "")
+                  + (f"  | {e['line']}" if e.get("line") else ""))
+    return 0 if d["deliverable"] else 1
 
 
 def cancel_cmd(rid):
@@ -2777,6 +3149,15 @@ def expect_read(eid):
     return r if isinstance(r, dict) and r.get("id") == eid else None
 
 
+def expect_snapshot():
+    """The expectation records read WITHOUT the expectation lock: for a caller that only decides what to fetch (the sweep's timeline prefetch). Every
+    authoritative read and write still happens under the lock (`expect_all` inside it)."""
+    d = expect_dir()
+    if not d.is_dir():
+        return []
+    return [r for p in d.glob("*.json") if EXPECT_ID.fullmatch(p.stem) for r in [expect_read(p.stem)] if r]
+
+
 def expect_all():
     d = expect_dir()
     if not d.is_dir():
@@ -2931,9 +3312,9 @@ def note_links_and_expect():
         key = fleet.link_key(me["id"], s["id"])
         ln = fleet.link_get(data["links"], me, s)
         ln = ln if ln else {"sender": me["id"], "target": s["id"], "first_sent": now, "sent": 0, "acked": None,
-                                       "tx": tx, "mark": CTX.get("mark", 0), "who": who}
+                                       "tx": tx, "mark": CTX.get("mark", 0), "who": who, "sender_paseo": me.get("paseo") or "", "tl_base": CTX.get("tl_base")}
         ln.update(last_sent=now, sent=int(_num(ln.get("sent"))) + 1, target_name=s.get("name") or "", sender_sid=me.get("sid") or ln.get("sender_sid") or "",
-                  target_sid=s.get("sid") or ln.get("target_sid") or "")
+                  target_sid=s.get("sid") or ln.get("target_sid") or "", sender_paseo=me.get("paseo") or ln.get("sender_paseo") or "")
         data["links"][key] = ln
         atomic_json(fleet.LINKS_FILE, data)
     if CTX.get("expect"):
@@ -2945,7 +3326,7 @@ def note_links_and_expect():
                 atomic_json(expect_dir() / f"{CTX['expect']}.json", {**old, "sent": True})    # the send returned: the ID is free again for the next question
             else:
                 atomic_json(expect_dir() / f"{CTX['expect']}.json", {"id": CTX["expect"], "state": "open", "created": now, "acked": None,
-                                                                     "within": CTX.get("within") or EXPECT_WITHIN, **expect_identity(me, s, CTX.get("mark", 0))})
+                                                                     "within": CTX.get("within") or EXPECT_WITHIN, **expect_identity(me, s, CTX.get("mark", 0), CTX.get("tl_base"))})
         if early is not None:
             with links_lock():    # the answer that closed it proves the return path too, and the link did not exist yet when it came
                 data = fleet.links_read()
@@ -2955,10 +3336,11 @@ def note_links_and_expect():
                     atomic_json(fleet.LINKS_FILE, data)
 
 
-def expect_identity(me, s, mark):
+def expect_identity(me, s, mark, tl_base=None):
     """The fields of an expectation that name its two ends: the sender (session id, label, transcript, how far the transcript was read) and the
     target. `expect_stamp` puts them on the reservation, `note_links_and_expect` on the open record."""
     return {"sender": me["id"], "sender_sid": me.get("sid") or "", "sender_label": me.get("name") or "", "tx": me.get("transcript") or None,
+            "sender_paseo": me.get("paseo") or "", "tl_base": tl_base,
             "mark": mark, "target": {"id": s["id"], "name": s.get("name") or "", "paseo": s.get("paseo") or "", "sid8": (s.get("sid") or "")[:8],
                                      "sid": s.get("sid") or "", "host": s.get("host") or ""}}
 
@@ -2992,6 +3374,7 @@ def transfer_expectations(old_sender, ids, as_json=False):
         print("relay: transfer refused: successor transcript is unreadable", file=sys.stderr)
         return 2
     transferred, acked, skipped, now = [], [], [], time.time()
+    tl_base = timeline_base(me)    # the successor's own timeline, read before the lock: an ack already in it cannot settle an adopted question
     with _flock(defer_dir() / ".expect.lock"):
         for r in expect_all():
             if (r.get("state") != "open" or r.get("sender") != old[0].get("id")
@@ -3011,7 +3394,7 @@ def transfer_expectations(old_sender, ids, as_json=False):
                 atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now})
                 acked.append((r, t))
                 continue
-            identity = expect_identity(me, {"id": "unused"}, mark)
+            identity = expect_identity(me, {"id": "unused"}, mark, tl_base)
             identity.pop("target")    # preserve the target byte-for-byte, including legacy fields
             atomic_json(expect_dir() / f"{r['id']}.json", {**r, **identity,
                         "transferred_from": {"sender": r.get("sender"), "sender_sid": r.get("sender_sid"),
@@ -3092,8 +3475,15 @@ def ack_sweep():
     """Resolve what replies settled: an open expectation whose sender's transcript holds `ack ID` from its target, a first-contact link whose
     sender's transcript holds `ack <sender id>` naming the peer. Prunes expectations and links idle for EXPECT_KEEP; each link remembers how far
     its sender's transcript was read (`mark`), so a sweep reads only what is new (adversary r1 A10, 2026-10-25). A record a hand edit made
-    unreadable is skipped or dropped, never an exception. Returns (acked, overdue rows)."""
+    unreadable is skipped or dropped, never an exception. A sender with NO transcript (an omp, codex or cline Paseo agent) is read through its own
+    Paseo timeline instead (2026-10-29): the second witness, fetched once per sender before any lock is held. Returns (acked, overdue rows)."""
     acked, overdue, now = 0, [], time.time()
+    snapshot = expect_snapshot()    # records read without the lock (a sweep calls expect_all only while it holds it); a stale read costs one needless or one missed timeline fetch
+    pids = lambda v: v if isinstance(v, str) and UUID.fullmatch(v) else None    # a hand-edited sender_paseo is skipped, never an exception
+    need = {pids(r.get("sender_paseo")) for r in snapshot if r.get("state") == "open" and not r.get("tx")}
+    if fleet.LINKS_FILE.is_file():
+        need |= {pids(ln.get("sender_paseo")) for ln in fleet.links_read()["links"].values() if isinstance(ln, dict) and not ln.get("acked") and not ln.get("tx")}
+    timelines = {pid: timeline_messages(pid) or [] for pid in need if pid}
     with _flock(defer_dir() / ".expect.lock"):
         # Write via atomic_json under this lock; never call expect_write or take .expect.lock
         # again (PR 87 merge hazard): a second flock in this process blocks forever.
@@ -3105,8 +3495,9 @@ def ack_sweep():
                 continue
             t = r.get("target") if isinstance(r.get("target"), dict) else {}
             who = peer_words({**t, "sid": t.get("sid") or t.get("sid8")})    # only the target's own reply closes it (A2)
-            if r.get("state") == "open" and r.get("tx") and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who):
-                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now})
+            via_timeline = r.get("state") == "open" and not r.get("tx") and timeline_ack(timelines.get(pids(r.get("sender_paseo"))), r["id"], who, r.get("tl_base"))
+            if r.get("state") == "open" and (via_timeline or (r.get("tx") and ack_seen(user_texts(r.get("tx"), int(_num(r.get("mark")))), r["id"], who))):
+                atomic_json(expect_dir() / f"{r['id']}.json", {**r, "state": "acked", "acked": now, **({"acked_via": "timeline"} if via_timeline else {})})
                 with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
                     data = fleet.links_read()
                     ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})    # not a new occupant's link (adversary r2 A5)
@@ -3129,7 +3520,8 @@ def ack_sweep():
                     continue
                 mark = int(_num(ln.get("mark")))
                 texts, end = scan_texts(ln.get("tx"), mark)
-                if ack_seen(texts, ln.get("sender") or "", ln.get("who") or ()):
+                if ack_seen(texts, ln.get("sender") or "", ln.get("who") or ()) or (
+                        not ln.get("tx") and timeline_ack(timelines.get(pids(ln.get("sender_paseo"))), ln.get("sender") or "", ln.get("who") or (), ln.get("tl_base"))):
                     ln["acked"], changed = now, True
                     acked += 1
                 elif end != mark:
@@ -3197,6 +3589,8 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
     ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
+    ap.add_argument("--why", action="store_true", help="with IDENT and no text: say why that session cannot be sent text right now (a picklist, a permission "
+                    "card, a turn still running, silent for a long time, archived, gone), from two methods compared; --json for the evidence")
     ap.add_argument("--transfer-expectations", metavar="OLD_SENDER", help="adopt open expectations of one exactly named finished fleet session into this caller; missing/live/ambiguous sender: exit 2")
     ap.add_argument("--id", action="append", default=[], metavar="TOKEN", help="with --transfer-expectations: select a token (repeatable; default all open tokens of OLD_SENDER); any requested token not transferred: exit 1, missing list (even if settled as acked)")
     ap.add_argument("--text", action="store_true", dest="show_text", help="with --pending: show a 60-character preview of each text (it stays in the record otherwise)")
@@ -3241,6 +3635,11 @@ def _main(argv=None, sweep=True):
                   + (f"ASSUMED LOST ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never assume it was read" if ack_lost(*expect_age(r, time.time()))
                      else "tell the operator, never assume it was read"))
         return 0
+    if a.why:
+        if a.ident is None or a.text is not None:
+            print("relay: usage: relay.py --why <id> [--json]", file=sys.stderr)
+            return 2
+        return why_cmd(a.ident, a.json)
     if a.ident is None or a.text is None:
         print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
@@ -3378,8 +3777,10 @@ def _main(argv=None, sweep=True):
     if me is not None and not a.plan and not NOTICE[0] and not term:    # a terminator asks for nothing, so it carries no footer
         if a.expect_ack:
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
+            CTX["tl_base"] = timeline_base(me)    # what a transcript-less sender had received before it asked: an old `ack` cannot answer this
         elif fleet.link_get(fleet.links_read()["links"], me, s) is None:
             text += f" [first contact from {me['id']}: reply `ack {me['id']}` through relay.py to prove this link both ways]"
+            CTX["tl_base"] = timeline_base(me)
     if card:    # blocked on a card and deferrable: queued now, delivered once the card is answered; typed text would answer it
         if not (is_paseo or plan(s)):    # a record nobody could send (no route at all) would only fail later: refuse now, as the route check below does
             print(f"relay: [{s['id']}] not sent: {card}; and it has no route", file=sys.stderr)

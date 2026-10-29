@@ -117,7 +117,14 @@ with none of session id, transcript or an unambiguous TUI process is not deferre
 processes herdr cannot read is an error, and 3 in a row (about 10-15 s) fail the message. A Paseo daemon that cannot answer fails a queued message only
 after 3 consecutive errors 5 s apart, counted apart from "not found"; a pending permission or question card is waited for with
 capped exponential backoff and full jitter (5 s up to 2 min between looks, never typed into; a target that is only blocked on a card is
-queued at once, 2026-10-28, instead of refused). A record
+queued at once, 2026-10-28, instead of refused). **Why it waits (2026-10-29): `relay.py --why IDENT [--json]`** says which obstacle it is, from two
+methods compared: a Paseo agent by `paseo agent inspect` (status, pending cards by tool: a QUESTION is a picklist, a PERMISSION a tool awaiting approval)
+plus `paseo permit ls` (the card's text) plus `paseo logs` (its last activity), a pane by the multiplexer status plus the screen itself; states idle,
+working, silent (running, nothing new for 15 min: hung or one long tool call), card:question|permission|plan|picker|unknown, archived, gone, error, refused (a
+hard stop: the caller's own session, a finished one); a
+disagreement between the methods is reported and the blocking reading wins. `--pending` shows each queued record's latest reason as `[why: ...]`. **Two
+witnesses for delivery (2026-10-29):** a Paseo target's transcript AND its own timeline (`paseo logs`), either proves, so codex, omp, opencode and cline
+Paseo agents are "delivered", not "unverified"; `--sweep` reads a transcript-less sender's own timeline for `ack ID`. A record
 `sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
 the notice say "unverified", never "delivered". `--idle S`
 still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at

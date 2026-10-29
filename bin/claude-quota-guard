@@ -124,6 +124,12 @@ class ConfigError(Exception):
 
 _SELF_SLASH = ("`~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-sonnet-5-5 "
                "--thinking high`")
+# At `critical` the Claude Code subscription is the exhausted pool. omp is off its dollar pool (API
+# credits: skills/model-routing/SKILL.md, claude-fleet-governor) but shares the Claude weekly rate
+# window, so aiuse gates it when every weekly window is exhausted (adversary r1 on PR 126, A1): omp
+# is a successor and keeps working only while `aiuse --available --json` still lists it.
+_SELF_SLASH_OMP = ("`~/src/djbclark-ade/bin/self-slash --finish --successor omp/anthropic/claude-sonnet-5-5 "
+                   "--thinking high`")
 _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`"
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 
@@ -177,8 +183,21 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
         # window is exhausted: the main critical case.
         items[1] = (f"Adversary rounds via {_ADVERSARY}, only while `aiuse --available --json` "
                     "still lists omp (it is rate-gated when every Claude weekly window is exhausted).")
-        items.append(f"No new Claude work of any kind until the reset at {resets_at or 'unknown'}; "
-                     "finish the running turn, hand off, stop.")
+        # Only the Claude Code subscription pool is exhausted. Work does not stop: a codex, grok, agy,
+        # zai or opencode session never spends it, an omp one keeps working while aiuse lists omp, and a
+        # Claude Code lead moves on (2026-10-29: idle omp sessions read "hand off, stop" as applying to
+        # them). self-slash takes an omp successor on Paseo only; herdr takes claude/MODEL and Orca none
+        # (bin/self-slash), so those hosts start omp by hand.
+        items[3] = ("A Claude Code lead (provider claude, subscription) hands off now and continues off the "
+                    "subscription. While `aiuse --available --json` lists omp: on Paseo an omp successor, "
+                    f"{_SELF_SLASH_OMP}; on herdr or Orca write the handoff, then start omp by hand in a new "
+                    "pane or tab (self-slash refuses an omp successor there). Without omp listed: a codex or "
+                    "grok successor the same way (agy is reached only by `acp-run agy` slices, never as a successor).")
+        items.append("No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session "
+                     f"included) until the reset at {resets_at or 'unknown'}. This is not a stop order: a "
+                     "session on codex, grok, agy, zai or opencode is unaffected and keeps working; one on "
+                     "omp keeps working only while `aiuse --available --json` still lists it (omp is off the "
+                     "subscription's dollar pool but shares the Claude weekly rate window).")
     if source == "snapshot-only":
         items.append("aiuse dropped Claude from --available: a live 429 or a note; "
                      "re-check `aiuse --available --json`.")

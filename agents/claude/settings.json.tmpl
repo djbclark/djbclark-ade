@@ -181,17 +181,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{ .home }}/.config/openusage/hooks/claude-hook.sh",
-            "timeout": 30,
-            "async": true
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
             "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/.claude/hooks/context_size_nudge.py",
             "timeout": 5
           }
@@ -448,16 +437,6 @@
     ],
     "Stop": [
       {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{ .home }}/.config/openusage/hooks/claude-hook.sh",
-            "timeout": 30
-          }
-        ]
-      },
-      {
         "hooks": [
           {
             "type": "command",
@@ -513,16 +492,6 @@
       }
     ],
     "SubagentStop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{ .home }}/.config/openusage/hooks/claude-hook.sh",
-            "timeout": 30
-          }
-        ]
-      },
       {
         "hooks": [
           {

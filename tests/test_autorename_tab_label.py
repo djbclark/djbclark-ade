@@ -29,6 +29,13 @@ def test_hand_made_label_is_kept():
     assert not hp.replaceable("my notes", 1)
 
 
+def test_agents_fallback_workspace_is_not_generic():
+    # 2026-10-29: uncovered agent tabs land in `agents`, then `agents-2`.
+    assert hp.generic_reason("agents") is None
+    assert hp.generic_reason("agents-2") is None
+    assert hp.generic_reason("remote") is None
+
+
 # A Codex pane title is returned in the Herdr CLI response envelope. Missing titles
 # must stay absent: converting JSON null to "None" otherwise labels a tab none-t.
 import json
