@@ -280,6 +280,22 @@ class TestExpectAck(Base):
         self.assertIn("OVERDUE ack build1", out)
         self.assertTrue([r for r in json.loads(self.run_cli("--pending", "--json")[1]) if r.get("kind") == "expect"][0]["overdue"])
 
+    def test_an_expectation_six_hours_past_due_is_assumed_lost_and_to_be_rerouted(self) -> None:
+        self.assertFalse(relay.ack_lost(60 + 6 * 3600, 60))
+        self.assertTrue(relay.ack_lost(60 + 6 * 3600 + 1, 60))
+        self.go("is the build green?", "--expect-ack", "build1", "--ack-within", "60")
+        path = relay.expect_dir() / "build1.json"
+        rec = json.loads(path.read_text())
+        rec["created"] -= 3600
+        path.write_text(json.dumps(rec))
+        self.assertIn("tell the operator", self.run_cli("--sweep")[1])
+        self.assertFalse(self.expect_rows()[0]["assumed_lost"])
+        rec["created"] -= 6 * 3600
+        path.write_text(json.dumps(rec))
+        self.assertIn("ASSUMED LOST", self.run_cli("--sweep")[1])
+        self.assertTrue(self.expect_rows()[0]["assumed_lost"])
+        self.assertEqual(self.expect_rows()[0]["state"], "open")    # never recorded as acked, delivered or read
+
     def expect_rows(self) -> list[dict[str, Any]]:
         return [r for r in json.loads(self.run_cli("--pending", "--json")[1]) if r.get("kind") == "expect"]
 

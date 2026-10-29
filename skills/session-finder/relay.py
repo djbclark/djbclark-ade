@@ -2585,7 +2585,8 @@ def pending_cmd(as_json, show_text=False):
     for e in ([] if as_json else expects):
         print(f"{'OVERDUE ' if e['overdue'] else ''}expect-ack {e['id']}  {e['state']:<6} {target_label({'target': e['target']})}  "
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
-              + ("  -> escalate to the operator: no ack" if e["overdue"] else ""))
+              + ("  -> assumed lost (6h past due): re-route the work, never call it read" if e["assumed_lost"]
+                 else "  -> escalate to the operator: no ack" if e["overdue"] else ""))
     return 0
 
 
@@ -3137,6 +3138,14 @@ def ack_sweep():
     return acked, overdue
 
 
+REROUTE_AFTER_S = 6 * 3600    # operator, 2026-10-28: an ack overdue this long is assumed never to come; re-route the work, do not wait
+
+
+def ack_lost(age, within):
+    """True once an open expectation is REROUTE_AFTER_S past its due time: assume no reply and re-route (never "delivered" or "read")."""
+    return age - within > REROUTE_AFTER_S
+
+
 def expect_view(now=None):
     """The expectations as --pending rows: kind "expect", sender, target, age, and `overdue` once past their time."""
     now = now or time.time()
@@ -3147,7 +3156,7 @@ def expect_view(now=None):
         age, within = expect_age(r, now)
         rows.append({"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"),
                      "target": r.get("target"), "age_s": int(age), "within_s": int(within), "overdue": r.get("state") == "open" and age > within,
-                     "created": _num(r.get("created"))})
+                     "assumed_lost": r.get("state") == "open" and ack_lost(age, within), "created": _num(r.get("created"))})
     return rows
 
 
@@ -3227,7 +3236,9 @@ def _main(argv=None, sweep=True):
         for r in overdue:    # the escalation hook: a caller that pages the operator greps these lines (or --pending --json: "overdue": true)
             tg = r.get("target") if isinstance(r.get("target"), dict) else {}
             print(f"OVERDUE ack {r['id']}: {tg.get('name') or tg.get('id')} has not answered "
-                  f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; tell the operator, never assume it was read")
+                  f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; "
+                  + ("ASSUMED LOST (6h past due): re-route the work, never assume it was read" if ack_lost(*expect_age(r, time.time()))
+                     else "tell the operator, never assume it was read"))
         return 0
     if a.ident is None or a.text is None:
         print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
