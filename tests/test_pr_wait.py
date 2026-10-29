@@ -2252,3 +2252,81 @@ def test_d1_an_escaped_nested_marker_is_still_not_a_second_verdict() -> None:
     assert r["verdict"] == "APPROVE" and r["matches_head"], r
     assert not r["conflict"] and not r["malformed"], r
     assert passes(body)
+
+
+# ---- --local-codex: the review `bin/local-review` filed for this head stands in for the GitHub bot's ----------------------------
+
+
+def local_doc(**kw: object) -> dict:
+    doc: dict = {"schema": 1, "repo": REPO, "pr": PR, "head": HEAD, "base_ref": "master", "result": "clean", "reason": "",
+                 "exit_code": 0, "final_message": True, "counts": {"P0": 0, "P1": 0, "P2": 0, "P3": 0}, "findings": []}
+    doc.update(kw)
+    return doc
+
+
+def put_local(world: World, doc: object, head: str = HEAD, raw: str | None = None) -> None:
+    d = world.state.parent / "local-review"
+    d.mkdir(exist_ok=True)
+    world.env["LOCAL_REVIEW_STATE_DIR"] = str(d)
+    (d / f"{REPO.replace('/', '__')}-pr{PR}-{head}.json").write_text(raw if raw is not None else json.dumps(doc))
+
+
+def local_run(world: World) -> dict:
+    world.route(f"repos/{REPO}/issues/{PR}/comments", fail("the GitHub bot must not be asked under --local-codex"))
+    r = world.run("--local-codex", "--json")
+    assert r.returncode == 0, r.stderr
+    assert world.calls(f"issues/{PR}/comments") == 0 and world.posts() == 0
+    return json.loads(r.stdout)
+
+
+def test_a_clean_local_review_of_this_head_is_merge_ready_without_asking_the_bot(world: World) -> None:
+    put_local(world, local_doc())
+    s = local_run(world)
+    assert s["merge_ready"] is True and s["merge_blockers"] == [], s
+    assert s["local_codex"]["status"] == "clean" and s["codex"] == {"status": "skipped"}
+
+
+def test_no_local_review_for_this_head_is_a_named_blocker_not_codex_skipped(world: World) -> None:
+    put_local(world, local_doc(head=OLD), head=OLD)    # a review of another head is never read for this one
+    s = local_run(world)
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["local-codex-missing"], s
+    assert "bin/local-review" in s["local_codex"]["reason"]
+
+
+def test_findings_and_a_failed_run_block_with_their_own_names(world: World) -> None:
+    put_local(world, local_doc(result="findings", counts={"P0": 0, "P1": 1, "P2": 2, "P3": 0},
+                               findings=[{"priority": "P1", "title": "x", "path": "a:1"}]))
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-findings"] and s["local_codex"]["counts_text"] == "P1 1, P2 2", s
+    put_local(world, local_doc(result="failed", reason="codex did not finish in 1500 s", exit_code=None, final_message=False))
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-failed"] and "1500" in s["local_codex"]["reason"], s
+
+
+@pytest.mark.parametrize("doc,raw", [
+    (None, "{not json"),
+    (None, '{"schema": 1, "schema": 1}'),    # a duplicate key: another reading of the same file
+    (local_doc(head=OLD), None),    # right name, another head inside
+    (local_doc(pr=PR + 1), None),
+    (local_doc(repo="someone/else"), None),
+    (local_doc(schema=2), None),
+    (local_doc(exit_code=1), None),    # a clean that says codex exited 1
+    (local_doc(final_message=False), None),    # a clean with no final message
+    (local_doc(counts={"P0": 0, "P1": 1, "P2": 0, "P3": 0}), None),    # a clean that counts a finding
+    (local_doc(findings=[{"priority": "P1", "title": "x", "path": ""}]), None),
+    (local_doc(counts={"P0": 0, "P1": 0, "P2": 0}), None),    # three counts
+    (local_doc(counts={"P0": 0, "P1": True, "P2": 0, "P3": 0}), None),    # a bool is not a count
+    (local_doc(result="findings"), None),    # findings with none listed
+    (local_doc(result="approved"), None),
+    ([], None),
+])
+def test_an_inconsistent_or_foreign_local_result_is_unreadable_and_blocks(world: World, doc: object, raw: str | None) -> None:
+    put_local(world, doc, raw=raw)
+    s = local_run(world)
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["local-codex-unreadable"], s
+
+
+def test_local_codex_still_honours_ci_and_open_threads(world: World) -> None:
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs", checks_page(run_obj("test", conclusion="failure")))
+    assert local_run(world)["merge_blockers"] == ["ci-failed"]

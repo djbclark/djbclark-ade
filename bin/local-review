@@ -1,0 +1,360 @@
+#!/usr/bin/env -S python3 -I
+"""local-review: run Codex's code review LOCALLY on the exact head of a PR and file the result for `pr-wait --local-codex`.
+
+  local-review PR [--repo OWNER/NAME] [--head SHA] [--base REF] [--timeout S] [--json]
+
+Why (2026-10-29, operator: "could we just switch to making codex reviews run locally in general"): the GitHub Codex review of PRs 112 and 124 sat
+"Running" until the waiter gave up (openai/codex#55890), while `codex review --base origin/master` run by hand finished in 2.3-5.7 minutes at about 0.3% of
+the weekly Codex quota and found real P1/P2 bugs on every run. This makes that run a step with a recorded, head-bound result, so a merge no longer waits on a
+bot that may never answer.
+
+What it does, from a checkout of the repo (any worktree; it only READS it):
+  1. asks `gh api repos/R/pulls/N` for the PR's head and base (`--head SHA` pins a head, which must still be one the PR has; `--base REF` overrides),
+     then fetches the base and `refs/pull/N/head` so both commits are present locally;
+  2. adds a CLEAN, DETACHED worktree at exactly that head under the state dir (nothing of yours is touched or reviewed: no dirty file, no other branch);
+  3. runs `codex review --base origin/<base>` there, stdout and stderr kept as <stem>.out and <stem>.err, killed (whole process group) after --timeout
+     seconds (default 1500);
+  4. reads the findings from Codex's FINAL message (`- [P0..P3] title - path:lines`), removes the worktree and files
+     $LOCAL_REVIEW_STATE_DIR (default ~/.local/state/local-review)/<owner>__<name>-pr<N>-<head>.json, atomically, 0600 in a 0700 directory.
+The result document (schema 1): repo, pr, head, base_ref, base_sha, result (clean | findings | failed), reason (failed only), exit_code, final_message
+(bool), counts {P0..P3}, findings [{priority, title, path}] (titles only: the finding text stays in <stem>.out), ignored_generated, dirty_after, codex
+version, started/finished, elapsed_s, and the sha256 of the output files.
+
+Rules (each one a way a local review could lie, so each is pinned by a test):
+  1. FAIL CLOSED. `clean` needs exit 0, a non-empty final message and zero parsed findings. Codex not installed, a timeout, a non-zero exit, no final message,
+     a head that moved under the worktree, and a final message that lists findings the parser could not read (a format change) are all `failed`, never `clean`.
+  2. THE HEAD IS THE KEY. The file name and its `head` field are the full 40-hex head that was reviewed; `pr-wait` reads only that name and re-checks the field,
+     so a review of an older head is never read for a newer one. Pushing a fix means running this again (the review is the cost, a few minutes).
+  3. GENERATED FILES ARE NOT THE PR. The graft hook rewrites tracked `.cursor/hooks.json` and `.claude/settings.json` in any worktree it runs in; a finding
+     located in a file that is dirty in the review worktree afterwards is recorded under `ignored_generated`, not counted.
+  4. NOTHING IS POSTED. No comment, no review, no label: the result is a local file only a same-user process can write. Quote the summary line in the PR body.
+  5. ONE RUN PER HEAD AT A TIME: a lock file holding the pid (stale when the pid is dead); a second run exits 4.
+
+Exit: 0 clean, 1 findings, 2 usage / no such PR / not in a checkout of that repo, 3 failed (see `reason` in the file and on stderr), 4 another run for the
+same head is alive.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+DEFAULT_REPO = "djbclark/djbclark-ade"
+SCHEMA = 1
+PRIORITIES = ("P0", "P1", "P2", "P3")
+FINDING_RE = re.compile(r"^- \[(P[0-3])\]\s+(\S.*)$")
+FINDING_SHAPED_RE = re.compile(r"^\s*[-*]\s*\[P\d")    # anything that looks like a finding: if one is not parsed, the parse is wrong
+GENERATED = (".cursor/hooks.json", ".claude/settings.json")
+GH_TIMEOUT = 90
+GIT_TIMEOUT = 300
+EXIT_CLEAN, EXIT_FINDINGS, EXIT_USAGE, EXIT_FAILED, EXIT_DUP = 0, 1, 2, 3, 4
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("LOCAL_REVIEW_STATE_DIR") or Path.home() / ".local/state/local-review")
+
+
+def run(argv: list[str], *, cwd: str | None = None, timeout: int = GIT_TIMEOUT) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_findings(message: str) -> tuple[list[dict], bool]:
+    """([{priority, title, path}], parsed_everything). A line that looks like a finding but does not match makes `parsed_everything` False."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    parsed_everything = True
+    for line in message.splitlines():
+        m = FINDING_RE.match(line)
+        if not m:
+            if FINDING_SHAPED_RE.match(line):
+                parsed_everything = False
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        title, path = m.group(2), ""
+        if " \u2014 " in title:    # `title \u2014 path:lines`, the last separator
+            title, _, path = title.rpartition(" \u2014 ")
+        out.append({"priority": m.group(1), "title": title.strip(), "path": path.strip()})
+    return out, parsed_everything
+
+
+def final_message(out_text: str, err_text: str) -> str:
+    """Codex prints its final review on stdout; when stdout is empty it is the text after the last `codex` line of the transcript on stderr."""
+    if out_text.strip():
+        return out_text
+    parts = re.split(r"(?m)^codex$", err_text)
+    return parts[-1] if len(parts) > 1 else ""
+
+
+def path_of(finding_path: str) -> str:
+    """The file of a `path:lines` location, relative to the repo root where it can be told."""
+    p = finding_path.split(":", 1)[0] if finding_path else ""
+    return p
+
+
+def is_generated(finding_path: str, dirty: set[str], root: str) -> bool:
+    p = path_of(finding_path)
+    if not p:
+        return False
+    rel = os.path.relpath(p, root) if os.path.isabs(p) else p
+    return rel in GENERATED and rel in dirty
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_private(path: Path, text: str) -> None:
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def take_lock(path: Path) -> bool:
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                pid = int(path.read_text().strip())
+            except (OSError, ValueError):
+                pid = 0
+            if pid and pid_alive(pid):
+                return False
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    return False
+
+
+def die(msg: str, code: int) -> int:
+    print(f"local-review: {msg}", file=sys.stderr)
+    return code
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="local-review", description="Run Codex's code review locally on the exact head of a PR "
+                                "and file the result for `pr-wait --local-codex`. Exit: 0 clean, 1 findings, 2 usage, 3 failed, 4 duplicate.")
+    p.add_argument("pr", type=int, help="pull request number")
+    p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
+    p.add_argument("--head", help="the full head SHA to review (default: the PR's current head)")
+    p.add_argument("--base", help="the base branch to review against (default: the PR's base)")
+    p.add_argument("--timeout", type=int, default=1500, help="seconds before codex is killed (default 1500)")
+    p.add_argument("--json", action="store_true", help="print the result document as one JSON line")
+    return p
+
+
+def main(argv: list[str]) -> int:
+    a = build_parser().parse_args(argv)
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo):
+        return die(f"--repo must be OWNER/NAME, got '{a.repo}'", EXIT_USAGE)
+    if a.pr < 1 or a.timeout < 1:
+        return die("PR and --timeout must be positive", EXIT_USAGE)
+    if a.head is not None and not re.fullmatch(r"[0-9a-f]{40}", a.head):
+        return die(f"--head must be a full lowercase 40-hex SHA, got '{a.head}'", EXIT_USAGE)
+    if a.base is not None and not re.fullmatch(r"[\w./-]+", a.base):
+        return die(f"--base must be a branch name, got '{a.base}'", EXIT_USAGE)
+
+    top = run(["git", "rev-parse", "--show-toplevel"])
+    if top.returncode != 0:
+        return die("run it from a checkout of the repository", EXIT_USAGE)
+    root = top.stdout.strip()
+    origin = run(["git", "remote", "get-url", "origin"], cwd=root).stdout.strip()
+    if a.repo.lower() not in origin.lower().removesuffix(".git").replace(":", "/"):
+        return die(f"origin of {root} is {origin!r}, not {a.repo}", EXIT_USAGE)
+
+    gh = run(["gh", "api", f"repos/{a.repo}/pulls/{a.pr}"], timeout=GH_TIMEOUT)
+    if gh.returncode != 0:
+        return die(f"gh api pulls/{a.pr} failed: {gh.stderr.strip()[:200]}", EXIT_USAGE)
+    try:
+        doc = json.loads(gh.stdout)
+        pr_head, pr_base = doc["head"]["sha"], doc["base"]["ref"]
+    except (ValueError, KeyError, TypeError):
+        return die("unexpected pulls document", EXIT_USAGE)
+    head = a.head or pr_head
+    base = a.base or pr_base
+    if not re.fullmatch(r"[0-9a-f]{40}", head or ""):
+        return die(f"the PR head is not a full SHA: {head!r}", EXIT_USAGE)
+    if a.head and a.head != pr_head:
+        print(f"local-review: note: {a.head[:12]} is not the PR's current head {pr_head[:12]}; the result names {a.head[:12]}", file=sys.stderr)
+
+    sd = state_dir()
+    sd.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(sd, 0o700)
+    stem = f"{a.repo.replace('/', '__')}-pr{a.pr}-{head}"
+    result_path, out_path, err_path = sd / f"{stem}.json", sd / f"{stem}.out", sd / f"{stem}.err"
+    lock = sd / f"lock-{stem}"
+    if not take_lock(lock):
+        return die(f"another local-review for {head[:12]} is running (see {lock})", EXIT_DUP)
+
+    started, t0 = now_iso(), time.monotonic()
+    wt = sd / "wt" / f"{stem[-12:]}-{os.getpid()}"
+    worktree_added = False
+    doc_out: dict = {"schema": SCHEMA, "repo": a.repo, "pr": a.pr, "head": head, "base_ref": base, "base_sha": "", "result": "failed",
+                     "reason": "", "exit_code": None, "final_message": False,
+                     "counts": {k: 0 for k in PRIORITIES}, "findings": [], "ignored_generated": [], "dirty_after": [],
+                     "codex_version": "", "started": started, "finished": "", "elapsed_s": 0.0, "out_sha256": "", "err_sha256": ""}
+    try:
+        try:
+            fetch = run(["git", "fetch", "-q", "origin", base, f"refs/pull/{a.pr}/head"], cwd=root)
+            if fetch.returncode != 0:
+                doc_out["reason"] = f"git fetch failed: {fetch.stderr.strip()[:200]}"
+                return finish(doc_out, result_path, t0, a.json)
+            if run(["git", "cat-file", "-e", f"{head}^{{commit}}"], cwd=root).returncode != 0:
+                doc_out["reason"] = f"commit {head[:12]} is not in the repository after fetching the PR"
+                return finish(doc_out, result_path, t0, a.json)
+            base_sha = run(["git", "rev-parse", f"origin/{base}"], cwd=root).stdout.strip()
+            doc_out["base_sha"] = base_sha if re.fullmatch(r"[0-9a-f]{40}", base_sha) else ""
+            if not doc_out["base_sha"]:
+                doc_out["reason"] = f"origin/{base} does not resolve"
+                return finish(doc_out, result_path, t0, a.json)
+            wt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            add = run(["git", "worktree", "add", "--detach", str(wt), head], cwd=root)
+            if add.returncode != 0:
+                doc_out["reason"] = f"git worktree add failed: {add.stderr.strip()[:200]}"
+                return finish(doc_out, result_path, t0, a.json)
+            worktree_added = True
+            try:
+                doc_out["codex_version"] = (run(["codex", "--version"], timeout=20).stdout.strip().splitlines() or [""])[0][:80]
+            except (OSError, subprocess.SubprocessError):
+                pass
+            doc_out.update(review(wt, base, out_path, err_path, a.timeout, head, doc_out))
+        except FileNotFoundError as e:
+            doc_out["reason"] = f"{e.filename or 'a required program'} not found"
+        except subprocess.TimeoutExpired as e:
+            doc_out["reason"] = f"{' '.join(map(str, e.cmd[:3]))} timed out"
+    finally:
+        if worktree_added:
+            rm = run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
+            if rm.returncode != 0:
+                shutil.rmtree(wt, ignore_errors=True)
+                run(["git", "worktree", "prune"], cwd=root)
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+    return finish(doc_out, result_path, t0, a.json)
+
+
+def review(wt: Path, base: str, out_path: Path, err_path: Path, timeout: int, head: str, prior: dict) -> dict:
+    """Run codex in the worktree and return the fields to merge into the result document."""
+    res: dict = {}
+    with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
+        try:
+            proc = subprocess.Popen(["codex", "review", "--base", f"origin/{base}"], cwd=str(wt), stdout=out_f, stderr=err_f,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+        except FileNotFoundError:
+            return {"reason": "codex is not installed (no `codex` on PATH)"}
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            with_group_kill(proc)
+            return {"reason": f"codex did not finish in {timeout} s", "exit_code": None}
+    res["exit_code"] = code
+    res["out_sha256"], res["err_sha256"] = sha256_file(out_path), sha256_file(err_path)
+    status = run(["git", "status", "--porcelain"], cwd=str(wt))
+    dirty = sorted({ln[3:].strip().strip('"') for ln in status.stdout.splitlines() if len(ln) > 3})
+    res["dirty_after"] = dirty
+    now_head = run(["git", "rev-parse", "HEAD"], cwd=str(wt)).stdout.strip()
+    if now_head != head:
+        res["reason"] = f"the worktree head moved from {head[:12]} to {now_head[:12]} during the review"
+        return res
+    if code != 0:
+        res["reason"] = f"codex exited {code}"
+        return res
+    msg = final_message(out_path.read_text(errors="replace"), err_path.read_text(errors="replace"))
+    res["final_message"] = bool(msg.strip())
+    if not res["final_message"]:
+        res["reason"] = "codex printed no final message"
+        return res
+    findings, parsed_all = parse_findings(msg)
+    if not parsed_all:
+        res["reason"] = "the final message holds finding-shaped lines this parser cannot read (a format change?)"
+        return res
+    dirty_set = set(dirty)
+    kept, ignored = [], []
+    for f in findings:
+        (ignored if is_generated(f["path"], dirty_set, str(wt)) else kept).append(f)
+    res["findings"], res["ignored_generated"] = kept, ignored
+    res["counts"] = {k: sum(1 for f in kept if f["priority"] == k) for k in PRIORITIES}
+    res["result"] = "findings" if kept else "clean"
+    res["reason"] = ""
+    return res
+
+
+def with_group_kill(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=10)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def finish(doc: dict, result_path: Path, t0: float, as_json: bool) -> int:
+    doc["finished"] = now_iso()
+    doc["elapsed_s"] = round(time.monotonic() - t0, 1)
+    if doc["result"] != "failed":
+        doc["reason"] = ""
+    write_private(result_path, json.dumps(doc, indent=1) + "\n")
+    c = doc["counts"]
+    if doc["result"] == "clean":
+        code, text = EXIT_CLEAN, "clean"
+    elif doc["result"] == "findings":
+        code = EXIT_FINDINGS
+        text = "findings (" + ", ".join(f"{k} {c[k]}" for k in PRIORITIES if c[k]) + ")"
+    else:
+        code, text = EXIT_FAILED, f"FAILED: {doc['reason']}"
+    if as_json:
+        print(json.dumps(doc, separators=(",", ":")))
+    else:
+        print(f"local-review PR {doc['pr']} at {doc['head'][:12]}: {text}; {doc['elapsed_s']} s; {result_path}")
+        for f in doc["findings"]:
+            print(f"  {f['priority']} {f['title']}" + (f" \u2014 {f['path']}" if f["path"] else ""))
+        if doc["ignored_generated"]:
+            print(f"  (ignored {len(doc['ignored_generated'])} finding(s) in generated hook files: {', '.join(GENERATED)})")
+    if code == EXIT_FAILED:
+        print(f"local-review: failed: {doc['reason']}", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except FileNotFoundError as e:    # git or gh missing before there is any result to file
+        sys.exit(die(f"{e.filename or 'a required program'} not found", EXIT_USAGE))
