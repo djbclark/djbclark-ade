@@ -13,7 +13,7 @@ and touches nothing else of yours):
   1. asks `gh api repos/R/pulls/N` for the PR's head and base (`--head SHA` pins a head, which must be the PR's current head or one of its ancestors), then
      fetches the base and `refs/pull/N/head` so both commits are present locally;
   2. adds a CLEAN, DETACHED worktree at exactly that head under the state dir (nothing of yours is reviewed: no dirty file, no other branch);
-  3. runs `codex review --base origin/<base>` there with a read-only sandbox and a scrubbed environment (no token, secret or password variable, no GH_/GITHUB_
+  3. runs `codex review --base <base_sha>` there (the base branch's tip, resolved once after the fetch and pinned by SHA, so a moving origin/<base> cannot change what is reviewed) with a read-only sandbox and a scrubbed environment (no token, secret or password variable, no GH_/GITHUB_
      variable), stdout and stderr kept as <stem>.out and <stem>.err, the whole process group killed after --timeout seconds (default 1500) and again when codex
      exits, so nothing survives it;
   4. reads the findings from Codex's FINAL message (`- [P0..P3] title - path:lines`), removes the worktree and files
@@ -26,8 +26,8 @@ leaves no older `clean` behind.
 Rules (each one a way a local review could lie, so each is pinned by a test):
   1. FAIL CLOSED. `clean` needs exit 0, a final message on stdout that EQUALS (whitespace folded) the last `codex` block of the stderr transcript, POSITIVE evidence
      that codex looked at the repository (an `exec` block in that transcript; a refusal blacklist alone misses wordings), no message that reads as a refusal,
-     `origin/<base>` still at the recorded base_sha, and zero parsed findings. Codex not installed, a timeout, a non-zero
-     exit, no final message, a stdout that is not the transcript's final message, a head that moved under the worktree, a base that moved, and any line that looks
+     and zero parsed findings. Codex not installed, a timeout, a non-zero
+     exit, no final message, a stdout that is not the transcript's final message, a head that moved under the worktree, and any line that looks
      like a finding but is not exactly `- [P0..P3] ...` (a format change: `**[P1]**`, `[P1]`, `P1:`, a bullet `*`) are all `failed`, never `clean`.
   2. THE HEAD IS THE KEY. The file name and its `head` field are the full 40-hex head that was reviewed; `pr-wait` reads only that name and re-checks the field,
      the PR and the base, so a review of an older head or another base is never read. Pushing a fix means running this again (the review is the cost).
@@ -292,7 +292,7 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
     proc = None
     with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
         try:
-            proc = subprocess.Popen(["codex", "review", "-c", 'sandbox_mode="read-only"', "--base", f"origin/{base}"], cwd=str(wt), stdout=out_f,
+            proc = subprocess.Popen(["codex", "review", "-c", 'sandbox_mode="read-only"', "--base", base_sha], cwd=str(wt), stdout=out_f,
                                     stderr=err_f, stdin=subprocess.DEVNULL, start_new_session=True, env=codex_env())
         except FileNotFoundError:
             return {"reason": "codex is not installed (no `codex` on PATH)"}
@@ -310,9 +310,6 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
     now_head = run(["git", "rev-parse", "HEAD"], cwd=str(wt)).stdout.strip()
     if now_head != head:
         res["reason"] = f"the worktree head moved from {head[:12]} to {now_head[:12]} during the review"
-        return res
-    if run(["git", "rev-parse", f"origin/{base}"], cwd=root).stdout.strip() != base_sha:
-        res["reason"] = f"origin/{base} moved during the review, so the diff reviewed is not against {base_sha[:12]}"
         return res
     if code != 0:
         res["reason"] = f"codex exited {code}"

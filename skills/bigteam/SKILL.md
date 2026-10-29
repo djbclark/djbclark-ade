@@ -816,7 +816,7 @@ count. With no server push stamp (no CI app) it leans toward posting; the cap of
 `@codex review` by hand while a `pr-wait` is alive.
 
 **The Codex review can be run locally (2026-10-29):** `bin/local-review PR` (from any checkout of the repo; it only reads it) runs `codex review --base
-origin/<base>` in a clean detached worktree at the PR's exact head, kills it after `--timeout` (default 1500 s), and files
+<base sha>` in a clean detached worktree at the PR's exact head, kills it after `--timeout` (default 1500 s), and files
 `~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (counts by P0-P3, findings' titles; the full text stays in the `.out` beside it). Exit 0 clean, 1
 findings, 2 usage, 3 failed (codex missing, timeout, non-zero exit, no final message, a head that moved, or an unparseable final message: never "clean"), 4 a run
 for that head is alive. Then `bin/pr-wait PR --local-codex` replaces the bot's marker with that file (implies `--no-codex`): `merge_ready` needs `clean` on this

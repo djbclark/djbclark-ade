@@ -166,7 +166,7 @@ def test_a_clean_review_files_a_head_named_result_and_leaves_nothing_behind(worl
     assert len(world.worktrees()) == 1, world.worktrees()    # the review worktree is gone
     assert (world.state.stat().st_mode & 0o777, world.stem().with_suffix(".json").stat().st_mode & 0o777) == (0o700, 0o600)
     log = world.codex_log.read_text().splitlines()
-    assert log[1] == 'review -c sandbox_mode="read-only" --base origin/master'
+    assert log[1] == f'review -c sandbox_mode="read-only" --base {d["base_sha"]}'    # pinned by SHA, not by a branch that can move
     assert log[0] != str(world.work) and "wt" in log[0]    # reviewed in its own clean worktree, never in the caller's
     assert len(log) == 2    # `git status --porcelain` printed nothing: the worktree was clean when codex started
 
@@ -241,7 +241,6 @@ def test_a_finding_on_a_hook_file_the_pr_itself_edits_is_never_ignored(world: Wo
     ("shaped_bare", "cannot read"),
     ("unparseable", "cannot read"),
     ("moves", "head moved"),
-    ("base_moves", "origin/master moved"),
 ])
 def test_every_way_a_run_can_fail_is_failed_never_clean(world: World, mode: str, reason: str) -> None:
     r = world.run(mode=mode)
@@ -249,6 +248,13 @@ def test_every_way_a_run_can_fail_is_failed_never_clean(world: World, mode: str,
     d = world.doc()
     assert d["result"] == "failed" and reason in d["reason"] and d["counts"] == {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
     assert len(world.worktrees()) == 1    # cleaned up even when it failed
+
+
+def test_a_base_branch_that_moves_during_the_review_does_not_change_what_was_reviewed(world: World) -> None:
+    r = world.run(mode="base_moves")
+    assert r.returncode == 0, r.stderr
+    d = world.doc()
+    assert d["result"] == "clean" and f"--base {d['base_sha']}" in world.codex_log.read_text()
 
 
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:

@@ -284,7 +284,7 @@ pull request here is expected to meet these; flag any it misses.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.
 11. **Codex's review may be the LOCAL one** (2026-10-29, djbclark: "could we just switch to making codex reviews run locally in general"; GitHub's
-    Codex review hung on PRs 112 and 124, openai/codex#55890). `bin/local-review PR` runs `codex review --base origin/<base>` in a clean detached
+    Codex review hung on PRs 112 and 124, openai/codex#55890). `bin/local-review PR` runs `codex review --base <base sha>` in a clean detached
     worktree at the exact head and files `~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (exit 0 clean, 1 findings, 3 failed); `bin/pr-wait PR
     --local-codex` then reads that file instead of waiting on the bot (implies `--no-codex`) and makes `merge_ready` need `clean` on THIS head, else the blocker
     is `local-codex-missing`, `-findings`, `-failed` or `-unreadable`, never `codex-skipped`. A push needs a new run: the head is the key, so another head's review
