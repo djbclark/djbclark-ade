@@ -46,6 +46,8 @@ export default {
         await check("cargo install ripgrep --version 14.1.0",false);
         await check("if cargo build --release; then echo ok; fi",false);
         await check("rtk test cargo test",false);
+        await check("rtk bypass cargo build --release",false);
+        await check("rtk run -c 'cargo build --release'",false);
         await check("$HOME/ops/site-private/bin/bg cargo build --release",true);
         await check("~/ops/site-private/bin/bg cargo test",true);
         await check("cargo --version",true);
@@ -75,5 +77,5 @@ export default {
     response = json.loads(result.stdout)
     data = response["output"]
     assert data.get("ok"), data
-    assert len(data["checks"]) == 10
+    assert len(data["checks"]) == 12
     assert "--release is not an exemption" in data["checks"][0]["message"]

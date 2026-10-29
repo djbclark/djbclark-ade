@@ -45,6 +45,11 @@ const deny = [
   "xargs -d '\\n' cargo build", "xargs -a list cargo build", "xargs -J % cargo build %",
   "/usr/bin/time -o t.log cargo build", "exec -a x cargo build", "env -P /usr/bin cargo build",
   "(( n << shift ))\ncargo build", 'git commit -m "a\nsee <<EOF x"\ncargo build',
+  "rtk bypass cargo build --release", "rtk summary cargo test",
+  "rtk run -c 'cargo build --release'", "rtk run --command 'cargo test'",
+  "rtk run --shell bash -c 'cargo build'", "rtk run --command='cargo build'",
+  "rtk summary --shell bash 'cargo build'", "rtk err --shell bash 'cargo check'",
+  "rtk test --shell bash 'cargo test'",
 ];
 const allow = [
   "~/ops/site-private/bin/bg cargo build -p sudo-secretspec-cli --release",
@@ -59,6 +64,8 @@ const allow = [
   "timeout 600 ~/ops/site-private/bin/bg cargo build", "cat <<EOF\ncargo build\nEOF",
   "rtk cargo --version", "rtk test ~/ops/site-private/bin/bg cargo test",
   "cargo clippy --version", "cargo nextest --version", "cargo llvm-cov --version",
+  "rtk run -c '~/ops/site-private/bin/bg cargo build'", "cat <<\\EOF\ncargo build\nEOF",
+  "rtk summary --shell bash '~/ops/site-private/bin/bg cargo check'",
 ];
 for (const cmd of deny) assert.equal(requiresBg(cmd), true, cmd);
 for (const cmd of allow) assert.equal(requiresBg(cmd), false, cmd);

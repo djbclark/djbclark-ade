@@ -28,7 +28,7 @@ function heredocs(line, state) {
     if (!arithmetic && line.slice(i, i + 2) === "((") { arithmetic++; i++; continue; }
     if (arithmetic) { if (line.slice(i, i + 2) === "))") { arithmetic--; i++; } continue; }
     if (c !== "<" || line[i - 1] === "<" || line[i + 2] === "<") continue;
-    const m = line.slice(i).match(/^<<(-?)\s*(['"]?)([A-Za-z_][\w-]*)\2(?=\s|;|$)/);
+    const m = line.slice(i).match(/^<<(-?)\s*\\?(['"]?)([A-Za-z_][\w-]*)\2(?=\s|;|$)/);
     if (m) { result.push({delimiter: m[3], tabs: m[1] === "-"}); i += m[0].length - 1; }
   }
   Object.assign(state, {quote, arithmetic}); return result;
@@ -81,7 +81,26 @@ export function requiresBg(command, depth = 0) {
       if (name === "command" && ["-v", "-V"].includes(args[0])) { args.length = 0; break; }
       if (name === "rtk") {
         while (args[0]?.startsWith("-")) args.shift();
-        if (["test", "err", "run", "proxy"].includes(args[0])) args.shift();
+        const runner = ["test", "err", "run", "proxy", "bypass", "summary"].includes(args[0]) ? args.shift() : null;
+        let shellMode = false;
+        if (runner) {
+          while (args[0]?.startsWith("-")) {
+            const option = args.shift();
+            if (["-c", "--command"].includes(option) || option.startsWith("--command=") || /^-c./.test(option)) {
+              const text = option.startsWith("--command=") ? option.slice(10) : /^-c./.test(option) ? option.slice(2) : args.shift();
+              if (requiresBg(text, depth + 1)) return true;
+              args.length = 0; break;
+            }
+            if (option === "--shell" || option.startsWith("--shell=")) {
+              if (option === "--shell") args.shift();
+              shellMode = true;
+            }
+          }
+          if (shellMode && runner !== "run" && args.length) {
+            if (requiresBg(args[0], depth + 1)) return true;
+            args.length = 0;
+          }
+        }
       }
       while (args[0]?.startsWith("-")) {
         const option = args.shift();
