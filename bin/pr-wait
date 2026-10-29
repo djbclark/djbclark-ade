@@ -35,7 +35,7 @@ Local Codex review (2026-10-29, operator: "switch to making codex reviews run lo
 `--local-codex` (implies --no-codex: the bot is neither waited for nor asked) makes Codex's reading the one `bin/local-review PR` filed for THIS
 head, at $LOCAL_REVIEW_STATE_DIR (default ~/.local/state/local-review)/<owner>__<name>-pr<N>-<head>.json. It FAILS CLOSED: `merge_ready` needs status
 `clean` (exit 0, a final message, zero P0-P3 findings), else the blocker is `local-codex-<status>`: `missing` (never run for this head),
-`findings`, `failed` (codex did not finish), `unreadable` (bad JSON, another repo/PR/head, an inconsistent clean). The unresolved GitHub review threads of
+`findings`, `failed` (codex did not finish or did not produce a verifiable review), `unreadable` (bad JSON, another repo/PR/head, an inconsistent clean). The unresolved GitHub review threads of
 earlier bot reviews still gate (`open-findings`), and the summary carries `local_codex`.
 
 Findings for the head are the PR's inline comments (`pulls/N/comments`) that carry
@@ -1179,7 +1179,7 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
 
 # ---- local Codex review ---------------------------------------------------------------------------
 
-# `bin/local-review PR` runs `codex review --base origin/<base>` in a clean worktree at the EXACT head and files its result at
+# `bin/local-review PR` runs `codex review --base <base sha>` in a clean worktree at the EXACT head and files its result at
 # $LOCAL_REVIEW_STATE_DIR (default ~/.local/state/local-review)/<owner>__<name>-pr<N>-<head>.json, 0600 in a 0700 directory. With
 # `--local-codex` that file stands in for the GitHub bot's marker (the bot's review hung on PRs 112 and 124, openai/codex#55890). Only a
 # same-user process can write it, which is more than the public PR comments the bot's marker rides on, and the head is part of the NAME

@@ -33,6 +33,12 @@ FAKE_CODEX = r"""#!/bin/bash
 if [ "$1" = "--version" ]; then echo "codex-cli 0.0-test"; exit 0; fi
 { echo "$PWD"; echo "$@"; git -C "$PWD" status --porcelain; } > "$FAKE_CODEX_LOG"
 env | cut -d= -f1 | sort > "$FAKE_CODEX_ENV"
+# the header the real codex prints (checked on real runs, 2026-10-29): workdir, sandbox, then the review request
+base="${@: -1}"; sandbox=danger-full-access; case "$*" in *'sandbox_mode="read-only"'*) sandbox=read-only ;; esac
+[ "$FAKE_CODEX_MODE" = wrong_sandbox ] && sandbox=danger-full-access
+[ "$FAKE_CODEX_MODE" = wrong_base ] && base=0000000000000000000000000000000000000000
+[ "$FAKE_CODEX_MODE" = wrong_workdir ] && PWD_SHOWN=/somewhere/else || PWD_SHOWN=$(pwd -P)
+{ echo "workdir: $PWD_SHOWN"; echo "sandbox: $sandbox"; echo user; echo "changes against '$base'"; } >&2
 say() { echo "transcript noise" >&2; echo exec >&2; { echo codex; printf '%s\n' "$1"; } >&2; printf '%s\n' "$1"; }
 case "$FAKE_CODEX_MODE" in
   clean) say "The patch looks correct." ;;
@@ -58,6 +64,9 @@ Full review comments:
   stdout_only) echo "All good." ;;
   mismatch) echo "transcript noise" >&2; { echo codex; echo "the real review"; } >&2; echo "All good." ;;
   refusal) say "Unable to review the diff because the repository could not be read." ;;
+  wrong_sandbox|wrong_base|wrong_workdir) say "The patch looks correct." ;;
+  aborted) say "Review aborted: the context window was exhausted before I could finish." ;;
+  asks) say "Which files should I focus on?" ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -237,7 +246,12 @@ def test_a_finding_on_a_hook_file_the_pr_itself_edits_is_never_ignored(world: Wo
     ("mismatch", "not the transcript's final message"),
     ("refusal", "reads as a refusal"),
     ("cant_review", "not a verdict"),    # a wording the refusal list does not know
-    ("noexec", "not a verdict"),    # a message with no sign in the transcript that the repository was looked at
+    ("noexec", "not a verdict"),
+    ("aborted", "not a verdict"),    # the wording the adversary found filing clean when an exec block existed
+    ("asks", "not a verdict"),    # a question is not a verdict
+    ("wrong_sandbox", "does not show the review this run asked for"),    # a config that overrode the read-only sandbox
+    ("wrong_base", "does not show the review this run asked for"),
+    ("wrong_workdir", "does not show the review this run asked for"),    # a message with no sign in the transcript that the repository was looked at
     ("shaped", "cannot read"),    # **[P1]** is a finding in a shape the parser does not know: never "no findings"
     ("shaped_bare", "cannot read"),
     ("unparseable", "cannot read"),

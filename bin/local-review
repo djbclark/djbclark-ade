@@ -25,7 +25,7 @@ leaves no older `clean` behind.
 
 Rules (each one a way a local review could lie, so each is pinned by a test):
   1. FAIL CLOSED. `clean` needs exit 0, a final message on stdout that EQUALS (whitespace folded) the last `codex` block of the stderr transcript, POSITIVE evidence
-     that codex looked at the repository (an `exec` block in that transcript; a refusal blacklist alone misses wordings), no message that reads as a refusal,
+     that this run was reviewed as asked (the transcript's `workdir:`, `sandbox: read-only` and `changes against '<base_sha>'` lines, and an `exec` block; a refusal blacklist alone misses wordings), no message that reads as a refusal,
      and zero parsed findings. Codex not installed, a timeout, a non-zero
      exit, no final message, a stdout that is not the transcript's final message, a head that moved under the worktree, and any line that looks
      like a finding but is not exactly `- [P0..P3] ...` (a format change: `**[P1]**`, `[P1]`, `P1:`, a bullet `*`) are all `failed`, never `clean`.
@@ -35,9 +35,9 @@ Rules (each one a way a local review could lie, so each is pinned by a test):
      located in such a file that is dirty in the review worktree afterwards AND that the PR itself does not change is recorded under `ignored_generated`, not
      counted. A finding on a hook file the PR edits always counts.
   4. NOTHING IS POSTED. No comment, no review, no label: the result is a local file only a same-user process can write. Quote the summary line in the PR body.
-  5. ONE RUN PER HEAD AT A TIME: an flock on a lock file, released when the process dies (no stale lock) and only AFTER the result is published, so another run's
+  5. ONE RUN PER HEAD AT A TIME: a flock on a lock file, released when the process dies (no stale lock) and only AFTER the result is published, so another run's
      `in progress` record is never overwritten by an older verdict; a second run exits 4.
-  6. THE REVIEWED TREE IS UNTRUSTED INPUT. Codex runs as you, in a worktree of the PR, with a read-only sandbox and none of your tokens; a diff or an AGENTS.md in
+  6. THE REVIEWED TREE IS UNTRUSTED INPUT. Codex runs as you, in a worktree of the PR, with a read-only sandbox, no network and no token in its environment (the files in your home stay readable by the model); a diff or an AGENTS.md in
      the PR can still try to talk the model into "no issues", as it can the GitHub bot. Do not review a PR from someone you do not trust with it.
      Residual: a tool process that is reparented to init between two 2-second looks AND works outside the worktree escapes (no cgroups on macOS).
 
@@ -67,7 +67,9 @@ PRIORITIES = ("P0", "P1", "P2", "P3")
 FINDING_RE = re.compile(r"^- \[(P[0-3])\]\s+(\S.*)$")
 # anything that looks like a finding but is not exactly the line above: if one is seen the parse is wrong, never "no findings"
 FINDING_SHAPED_RE = re.compile(r"(?i)\[\s*P\s*\d\s*\]|^\W*P\d\b|\*\*\s*P\d")
-REFUSAL_RE = re.compile(r"(?i)\b(unable to|could not|couldn'?t|cannot|can'?t|failed to|did not manage to|not able to)\b[^.\n]{0,40}\b(review|complete|access|run|inspect|read|load|find the)\b|inaccessible|not logged in|codex login")
+ABORT = r"(?:unable|not able|could ?n[o']t|can ?n[o']t|didn'?t|did not|fail\w*|abort\w*|stopp\w*|cut short|ran out|exhaust\w*|incomplete|partial\w*|too large|not reviewed|denied|blocked|inaccessible)"
+SUBJECT = r"(?:review\w*|complet\w*|finish\w*|proceed|inspect\w*|read|access\w*|context|budget|diff|command\w*|sandbox|patch)"
+REFUSAL_RE = re.compile(rf"(?i)\b{ABORT}\b[^.\n]{{0,60}}\b{SUBJECT}\b|\b{SUBJECT}\b[^.\n]{{0,60}}\b{ABORT}\b|not logged in|codex login")
 GENERATED = (".cursor/hooks.json", ".claude/settings.json")
 SECRET_ENV_RE = re.compile(r"(?i)(token|secret|passw|credential|api_?key)|^(GH|GITHUB)_")
 KEEP_ENV_RE = re.compile(r"^(CODEX_|OPENAI_)")
@@ -270,8 +272,8 @@ def main(argv: list[str]) -> int:
             except FileNotFoundError:
                 raise RuntimeError("codex is not installed (no `codex` on PATH)") from None
             doc_out.update(review(wt, root, base, base_sha, out_path, err_path, a.timeout, head))
-        except Interrupted as e:
-            doc_out["reason"] = str(e)
+        except (Interrupted, KeyboardInterrupt) as e:
+            doc_out["reason"] = str(e) or "interrupted"
         except FileNotFoundError as e:
             doc_out["reason"] = f"{e.filename or 'a required program'} not found"
         except subprocess.TimeoutExpired as e:
@@ -286,6 +288,8 @@ def main(argv: list[str]) -> int:
             if rm.returncode != 0:
                 shutil.rmtree(wt, ignore_errors=True)
                 run(["git", "worktree", "prune"], cwd=root)
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, signal.SIG_IGN)    # the review is over: nothing may cut the cleanup and the publish short
     try:
         return finish(doc_out, result_path, t0, a.json)
     finally:
@@ -339,12 +343,22 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
     if not parsed_all:
         res["reason"] = "the final message holds finding-shaped lines this parser cannot read (a format change?)"
         return res
-    if not findings and (REFUSAL_RE.search(msg) or not re.search(r"(?m)^exec$", err_path.read_text(errors="replace"))):
+    transcript = err_path.read_text(errors="replace")
+    bound = (any(re.search(rf"(?m)^workdir: {re.escape(w)}$", transcript) for w in {str(wt), str(wt.resolve())}) and re.search(r"(?m)^sandbox: read-only$", transcript)
+             and re.search(rf"(?m)^user\nchanges against '{base_sha}'$", transcript))
+    if not bound:
+        res["reason"] = "the transcript does not show the review this run asked for (workdir, a read-only sandbox, a diff against the pinned base)"
+        return res
+    if not findings and (REFUSAL_RE.search(msg) or msg.rstrip().endswith("?") or not re.search(r"(?m)^exec$", transcript)):
         # No findings is a verdict only when the transcript shows codex actually looked at the repository (an `exec` block) and the message is no
         # refusal; a refusal blacklist alone misses wordings (Codex, PR 130 dogfood run)
         res["reason"] = "no findings, but the final message reads as a refusal or the transcript shows no repository inspection: not a verdict"
         return res
-    pr_files = set(run(["git", "diff", "--name-only", f"{base_sha}...{head}"], cwd=root).stdout.splitlines())
+    diff = run(["git", "diff", "--name-only", f"{base_sha}...{head}"], cwd=root)
+    if diff.returncode != 0:
+        res["reason"] = f"cannot list the files the PR changes: {diff.stderr.strip()[:150]}"
+        return res
+    pr_files = set(diff.stdout.splitlines())
     dirty_set = set(dirty)
     kept, ignored = [], []
     for f in findings:
@@ -393,6 +407,11 @@ def kill_group(proc: subprocess.Popen, wt: Path, tracked: dict[int, str]) -> Non
     """SIGKILL everything of codex's: its process group, every descendant seen while it ran or now (TRACKED: tool commands run in sessions of their
     own, and are reparented once codex exits, so only a snapshot taken while it was alive finds one that works outside the worktree) and any process
     still working inside the review worktree; reap the parent."""
+    if proc.returncode is None:    # an unreaped leader: its group is still ours (a reaped pid may already belong to someone else)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
     victims: set[int] = set()
     try:
         for pid, started in {**tracked, **descendants(proc.pid)}.items():
@@ -401,10 +420,6 @@ def kill_group(proc: subprocess.Popen, wt: Path, tracked: dict[int, str]) -> Non
         victims |= in_worktree(wt)
     except (OSError, subprocess.SubprocessError):
         pass    # no ps / lsof: the group kill below is what remains
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
     for pid in victims:
         try:
             os.kill(pid, signal.SIGKILL)
