@@ -37,7 +37,7 @@ def box(tmp_path, monkeypatch, capsys):
         if not transcript.exists():
             transcript.write_text(usage(50_000))
         with transcript.open("a") as stream:
-            stream.write(json.dumps({"subtype": "compact_boundary"}) + "\n"
+            stream.write(json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n"
                          if compact else usage(total))
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
             "session_id": sid, "hook_event_name": event,
@@ -54,7 +54,7 @@ def box(tmp_path, monkeypatch, capsys):
 
 @pytest.mark.parametrize("total,kinds,level", [
     (90_000, ["early"], 1), (125_000, ["early", "boundary"], 1),
-    (300_000, ["ask", "boundary"], 2), (400_000, ["ask", "boundary"], 3),
+    (300_000, ["ask", "midtask", "boundary"], 3), (400_000, ["ask", "midtask", "boundary"], 4),
     (120_000, ["boundary"], 0),
 ])
 def test_emitted_nudges_are_logged(box, total, kinds, level):
@@ -131,7 +131,7 @@ def test_posttooluse_json_matches_plain_prompt_messages(box):
     assert json.loads(output) == {"hookSpecificOutput": {
         "hookEventName": "PostToolUse", "additionalContext": plain.rstrip("\n")}}
     assert plain.startswith("Context is large:")
-    assert [r["event"] for r in box.records()] == ["UserPromptSubmit"] * 2 + ["PostToolUse"] * 2
+    assert [r["event"] for r in box.records()] == ["UserPromptSubmit"] * 3 + ["PostToolUse"] * 3
 
 
 def test_posttooluse_rate_limit_skips_tail_and_is_session_scoped(box, monkeypatch):
@@ -197,3 +197,49 @@ def test_invalid_json_exits_zero(tmp_path):
     result = subprocess.run([sys.executable, str(HOOK)], input="{", text=True,
                             capture_output=True, timeout=5, env={**os.environ, "HOME": str(tmp_path)})
     assert result.returncode == 0 and result.stdout == result.stderr == ""
+
+
+@pytest.mark.parametrize("noise,count,expected", [
+    ('{"type":"tool_result"}\n', 30_000, 90_000),
+    ('{"type":"tool_result"}\n', 150_000, None),
+    ('{"cache_read_input_tokens":0}\n', 10_000, None),
+    ('{"type":"tool_use","subtype":"compact_boundary"}\n', 10_000, None),
+])
+def test_posttooluse_tail_cost_bound(box, tmp_path, monkeypatch, capsys, noise, count, expected):
+    """Bound candidate validation, even with a tail full of false needle hits.
+
+    Exercise the actual tool-event path. No timing assertion: count validations
+    deterministically, including a widened window and a usage beyond the byte cap.
+    """
+    transcript = tmp_path / "noisy.jsonl"
+    transcript.write_text(json.dumps({"message": {"usage": {
+        "cache_read_input_tokens": 90_000}}}) + "\n" + noise * count)
+    validations, measurements = [], []
+    real_usage = box.hook._usage_from_line
+    real_tail = box.hook._last_context_tokens
+
+    def usage(line):
+        validations.append(line)
+        return real_usage(line)
+
+    def tail(path):
+        value = real_tail(path)
+        measurements.append(value)
+        return value
+
+    monkeypatch.setattr(box.hook, "_usage_from_line", usage)
+    monkeypatch.setattr(box.hook, "_last_context_tokens", tail)
+    monkeypatch.setattr(box.hook, "_first_context_tokens", lambda _: 50_000)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
+        "session_id": "noisy", "hook_event_name": "PostToolUse",
+        "transcript_path": str(transcript),
+    })))
+    box.hook.main()
+    capsys.readouterr()
+    assert measurements == [expected]
+    assert len(validations) <= box.hook._TAIL_REJECT_LIMIT
+    if "tool_result" in noise:
+        assert len(validations) == (1 if expected else 0)
+    else:
+        assert len(validations) == box.hook._TAIL_REJECT_LIMIT
+    assert json.loads(box.hook.STATE_PATH.read_text())["noisy"]["last_check"] == box.clock[0]

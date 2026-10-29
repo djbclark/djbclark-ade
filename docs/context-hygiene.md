@@ -42,13 +42,16 @@ As of 2026-10-28, `claude/hooks/context_size_nudge.py` supports both
 at most once every 20 seconds per session; a wall-clock rollback permits a fresh
 check. This support does not register the event: the settings template and live
 settings remain unchanged, pending operator approval of a PostToolUse entry.
-Each emitted early, ask or boundary note appends a JSON line to
+Each emitted early, ask, embedded mid-task or boundary note appends a JSON line to
 `~/.claude/state/context-nudge-log.jsonl`, including UTC timestamp, session ID,
 event, level, total tokens, growth and kind. `CONTEXT_NUDGE_LOG_PATH` overrides
 the log path. Compaction resets the nudge state but preserves this history;
 at about 2 MiB the log rotates to a single `.1` backup. This records emission,
 not whether the model acted on the note. Logging errors are ignored, and the
-hook retains its two-second deadline.
+hook retains its two-second deadline. As of 2026-10-29, the usage tail reader
+skips lines without usage/boundary needles and rejects at most 64 candidate
+records across its 128 KiB and 2 MiB windows. Exhausting that budget returns no
+measurement (no nudge) rather than an older usage block; a later check retries.
 
 Claude's existing `autoCompactWindow` stays at 300,000. Measurements that motivated
 its growth and cooldown guards showed substantial summary/cache-write overhead;
