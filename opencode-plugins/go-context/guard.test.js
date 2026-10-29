@@ -1,19 +1,37 @@
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import plugin, { createGuard, loadPolicy } from "./index.js";
+import { createHash } from "node:crypto";
+import plugin, { createGuard, loadPolicy, validHandoffPolicy } from "./index.js";
 
-async function fixture() {
+const storageKey = "go-context-v1:" +
+  createHash("sha256").update(JSON.stringify(["/repo", undefined])).digest("hex").slice(0, 24);
+
+// The suite must pass both on a bare machine and inside an acp-dispatched slice,
+// where ACP_RUN_AGENT=1 is inherited. Isolate the env per test so the four
+// positive wake tests are not silenced by the ambient dispatch marker.
+let savedACP;
+beforeEach(() => {
+  savedACP = process.env.ACP_RUN_AGENT;
+  delete process.env.ACP_RUN_AGENT;
+});
+afterEach(() => {
+  if (savedACP === undefined) delete process.env.ACP_RUN_AGENT;
+  else process.env.ACP_RUN_AGENT = savedACP;
+});
+
+async function fixture(policyOverride, seed = {}) {
   let tick = 1_000_000;
-  const calls = [], saved = new Map(), models = new Map();
+  const calls = [], saved = new Map(Object.entries(seed)), models = new Map(), prompts = [], parents = new Map();
   const ctx = {
     location: { directory: "/repo" },
     storage: { get: async (key) => saved.get(key), set: async (key, value) => saved.set(key, structuredClone(value)) },
     session: {
-      get: async ({ sessionID }) => ({ data: { id: sessionID, model: models.get(sessionID) } }),
+      get: async ({ sessionID }) => ({ data: { id: sessionID, model: models.get(sessionID), parentID: parents.get(sessionID) } }),
       compact: async ({ sessionID }) => { calls.push(sessionID); },
+      prompt: async ({ sessionID, prompt, delivery }) => { prompts.push({ sessionID, text: prompt?.text, delivery }); },
     },
   };
-  const policy = loadPolicy();
+  const policy = policyOverride ?? loadPolicy();
   const guard = await createGuard(ctx, policy, () => tick);
   const context = async (sid = "ses_one", providerID = "opencode-go", id = "deepseek-v4.1-flash") => {
     const event = { sessionID: sid, model: { id, providerID }, system: [], tools: { ade_compact: {} } };
@@ -31,7 +49,10 @@ async function fixture() {
     tick += 1000;
     await guard.onEvent({ type: "session.compaction.ended", created: tick, data: { sessionID: sid } });
   };
-  return { ctx, guard, policy, calls, saved, models, context, step, end,
+  const idle = async (sid = "ses_one") => {
+    await guard.onEvent({ type: "session.idle", data: { sessionID: sid } });
+  };
+  return { ctx, guard, policy, calls, saved, models, prompts, parents, context, step, end, idle,
     get time() { return tick; }, advance: (ms) => { tick += ms; } };
 }
 
@@ -66,8 +87,8 @@ test("a successful completion resets the floor and cooldown, not an acceptance",
 
 test("an irreducible instruction baseline compacts once and cannot loop", async () => {
   const f = await fixture(); await f.context();
-  await f.step(150000); await f.end(); await f.step(145000);
-  f.advance(300000); await f.step(180000);
+  await f.step(50000); await f.step(96000); await f.end(); await f.step(95000);
+  f.advance(300000); await f.step(97000);
   assert.equal(f.calls.length, 1);
   assert.match((await f.context()).system[0].text, /ineffective or unconfirmed/);
 });
@@ -153,7 +174,7 @@ test("unreadable prior state and stopped event streams fail closed", async () =>
   assert.equal(await guard.manual("ses_one"), false);
   assert.equal(f.calls.length, 0);
   const g = await fixture(); await g.context(); await g.step(50000);
-  g.guard.streamStopped(); await g.step(150000);
+  g.guard.streamStopped(); await g.step(100000);
   assert.equal(g.calls.length, 0);
   assert.match((await g.context()).system[0].text, /unconfirmed/);
 });
@@ -229,3 +250,244 @@ for (const change of ["context", "selection", "provider-roundtrip", "manual"]) {
     assert.equal(await reloaded.manual("ses_one"), false, "protection persists after reload");
   });
 }
+
+test("session.idle at or above the handoff ceiling wakes the model once", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000); // routine handoff ceiling
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  assert.equal(f.prompts[0].sessionID, "ses_one");
+  assert.equal(f.prompts[0].delivery, "steer");
+  assert.match(f.prompts[0].text, /Automatic handoff required/);
+  assert.match(f.prompts[0].text, /handoff ceiling 112000/);
+});
+
+test("session.idle below the handoff ceiling and compaction budget is a no-op", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(100000); // below the 112000 routine ceiling
+  await f.idle();
+  assert.equal(f.prompts.length, 0);
+});
+
+test("session.idle is ignored for a non-Go session", async () => {
+  const f = await fixture(); await f.context("ses_one", "anthropic", "claude-sonnet");
+  await f.idle();
+  assert.equal(f.prompts.length, 0);
+});
+
+test("session.idle does not wake a session that switched away from Go", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000); // crosses the routine handoff ceiling as a Go session
+  await f.context("ses_one", "anthropic", "claude-sonnet"); // switch away
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a non-Go session must not be woken by a stale Go measurement");
+});
+
+test("two compactions exhaust the handoff budget and wake the model on idle", async () => {
+  const f = await fixture(); await f.context();
+  await f.end(); await f.end(); // two native compaction completions
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].text, /2 compactions/);
+});
+
+test("the handoff wake respects its cooldown and escalates on retry", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].text, /At this task boundary/);
+  await f.idle(); // within cooldown → no second wake
+  assert.equal(f.prompts.length, 1);
+  f.advance(3600000); // handoff_cooldown_seconds
+  await f.idle(); // cooldown elapsed → escalate
+  assert.equal(f.prompts.length, 2);
+  assert.match(f.prompts[1].text, /Overdue \(fired 2 times\)/);
+});
+
+test("the context hook delivers the full directive once an idle has confirmed a primary", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  await f.idle(); // live get confirms a primary (no parentID) → state.child === false
+  const event = await f.context();
+  assert.equal(event.system.length, 1);
+  assert.match(event.system[0].text, /Automatic handoff required/);
+  assert.match(event.system[0].text, /handoff ceiling 112000/);
+});
+
+test("a primary crossing the ceiling before its first idle is softened, then re-surfaces the full directive after a dropped wake", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  // Request before the first idle: state.child is still null, so the notice is
+  // neutral — it must not assert a child role or carry the lifecycle directive.
+  const softened = await f.context();
+  assert.equal(softened.system.length, 1);
+  assert.doesNotMatch(softened.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(softened.system[0].text, /Automatic handoff required/);
+  assert.doesNotMatch(softened.system[0].text, /This is a child/);
+  assert.match(softened.system[0].text, /If this is a child/);
+  // The wake is dropped, but the idle still confirms a primary (child === false).
+  f.ctx.session.prompt = async () => { throw new Error("wake dropped"); };
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "the wake was dropped");
+  // The next request re-surfaces the full directive: the dedup key now
+  // distinguishes the softened wording from the full one.
+  const full = await f.context();
+  assert.equal(full.system.length, 1);
+  assert.match(full.system[0].text, /Automatic handoff required/);
+  assert.match(full.system[0].text, /handoff ceiling 112000/);
+});
+
+test("validHandoffPolicy accepts a valid policy and rejects each malformed field", () => {
+  const base = loadPolicy();
+  assert.equal(validHandoffPolicy(base), true);
+  const bad = (patch) => ({ ...base, ...patch });
+  assert.equal(validHandoffPolicy(bad({ handoff_cooldown_seconds: 299 })), false, "cooldown below the 300 s floor");
+  assert.equal(validHandoffPolicy(bad({ handoff_cooldown_seconds: 0 })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_cooldown_seconds: null })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_after_compactions: 0 })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_after_compactions: "2" })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_max_wakes: 0 })), false);
+  assert.equal(validHandoffPolicy(bad({ handoff_max_wakes: undefined })), false, "a missing cap fails closed");
+  assert.equal(validHandoffPolicy(bad({ handoff_max_wakes: NaN })), false);
+  assert.equal(validHandoffPolicy(bad({ routine_context: { ...base.routine_context, handoff: -1 } })), false);
+  assert.equal(validHandoffPolicy(bad({ routine_context: { ...base.routine_context, handoff: "x" } })), false);
+  assert.equal(validHandoffPolicy(bad({ routine_context: { ...base.routine_context, handoff: 0 } })), false, "a zero ceiling fails closed");
+  assert.equal(validHandoffPolicy(bad({ advisory_context: { ...base.advisory_context, handoff: -1 } })), false);
+  assert.equal(validHandoffPolicy(bad({ advisory_context: { ...base.advisory_context, handoff: 0 } })), false, "a zero ceiling fails closed");
+});
+
+test("a malformed handoff policy disables the automatic wake", async () => {
+  const base = loadPolicy();
+  const f = await fixture({ ...base, handoff_cooldown_seconds: 0 });
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a bad cooldown must not open a self-sustaining wake loop");
+});
+
+test("the handoff wake is capped at handoff_max_wakes per session", async () => {
+  const base = loadPolicy();
+  const f = await fixture({ ...base, handoff_max_wakes: 1 });
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  f.advance(3600000); // past handoff_cooldown_seconds
+  await f.idle();
+  assert.equal(f.prompts.length, 1, "the retry cap stops further paid wakes");
+});
+
+test("a child (subagent) session is never woken to hand off", async () => {
+  const f = await fixture();
+  f.parents.set("ses_one", "ses_parent");
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a child session must not be steered to run /handoff or /new");
+});
+
+test("a child session's context notice never says to start a fresh session", async () => {
+  const f = await fixture();
+  f.parents.set("ses_one", "ses_parent");
+  await f.context();
+  await f.step(112000);
+  await f.idle(); // wake refused, but caches state.child === true
+  assert.equal(f.prompts.length, 0);
+  const event = await f.context();
+  assert.equal(event.system.length, 1);
+  assert.doesNotMatch(event.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
+  assert.match(event.system[0].text, /report back to your parent/);
+  assert.match(event.system[0].text, /This is a child or dispatched session/);
+});
+
+test("a child session's context notice is softened even before its first idle", async () => {
+  const f = await fixture();
+  f.parents.set("ses_one", "ses_parent");
+  await f.context();
+  await f.step(112000);
+  const event = await f.context(); // no idle: state.child is still null
+  assert.equal(event.system.length, 1);
+  assert.doesNotMatch(event.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
+});
+
+test("the wake refuses a session whose live model no longer matches", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  f.models.set("ses_one", { id: "gpt-6-luna", providerID: "opencode-go" }); // live model diverges from the recorded one
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a switched-away model must not be woken by a stale Go measurement");
+});
+
+test("a dispatched slice (ACP_RUN_AGENT=1) is never woken", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  process.env.ACP_RUN_AGENT = "1"; // afterEach restores the ambient value
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "an ACP-launched slice must not be steered into a fresh paid turn");
+});
+
+test("a dispatched slice's context notice never says to start a fresh session", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  process.env.ACP_RUN_AGENT = "1"; // afterEach restores the ambient value
+  const event = await f.context();
+  assert.equal(event.system.length, 1);
+  assert.doesNotMatch(event.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
+  assert.match(event.system[0].text, /report back to your parent/);
+  assert.match(event.system[0].text, /This is a child or dispatched session/);
+});
+
+test("a dispatched slice stays child-safe even when its record says primary (child: false)", async () => {
+  const seed = { [storageKey]: { ses_one: { model: "deepseek-v4.1-flash", pending: false, sampleAt: 0, attemptAt: 0, handoffTries: 0, child: false } } };
+  const f = await fixture(null, seed);
+  await f.context();
+  await f.step(112000);
+  process.env.ACP_RUN_AGENT = "1"; // afterEach restores the ambient value
+  const event = await f.context();
+  assert.equal(event.system.length, 1);
+  assert.doesNotMatch(event.system[0].text, /start a fresh session/);
+  assert.doesNotMatch(event.system[0].text, /Automatic handoff required/);
+  assert.match(event.system[0].text, /This is a child or dispatched session/);
+});
+
+test("a malformed persisted record (negative handoffTries) fails closed", async () => {
+  const seed = { [storageKey]: { ses_one: { model: "deepseek-v4.1-flash", pending: false, sampleAt: 0, attemptAt: 0, handoffTries: -1 } } };
+  const f = await fixture(null, seed);
+  await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "untrusted prior state must not be re-admitted or acted on");
+});
+
+test("a far-future persisted handoffAt is clamped per record, not a whole-store rejection", async () => {
+  const seed = { [storageKey]: { ses_one: { model: "deepseek-v4.1-flash", pending: false, sampleAt: 0, attemptAt: 0, handoffAt: 2_000_000, handoffTries: 0, compactions: 0, child: null, notice: "", active: true, blocked: false } } };
+  const f = await fixture(null, seed);
+  await f.context();
+  await f.step(150000);
+  assert.deepEqual(f.calls, ["ses_one"], "one stale timestamp must not disable automatic compaction for the location");
+});
+
+test("a far-future persisted handoffAt is clamped so the handoff wake can still fire after the cooldown", async () => {
+  const seed = { [storageKey]: { ses_one: { model: "deepseek-v4.1-flash", pending: false, sampleAt: 0, attemptAt: 0, total: 150000, handoffAt: 2_000_000, handoffTries: 0, compactions: 0, child: null, notice: "", active: true, blocked: false } } };
+  const f = await fixture(null, seed);
+  await f.context(); // re-admits the record; the clamp sets handoffAt = now()
+  await f.idle(); // within the clamped cooldown → no wake
+  assert.equal(f.prompts.length, 0, "the clamp suppresses the wake for one cooldown");
+  f.advance(f.policy.handoff_cooldown_seconds * 1000);
+  await f.idle(); // cooldown elapsed → the wake fires (it would not without the clamp)
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].text, /Automatic handoff required/);
+});
+
+test("concurrent idle events claim the wake once after the awaited read", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  const originalGet = f.ctx.session.get;
+  f.ctx.session.get = async (arg) => { await new Promise((r) => setTimeout(r, 20)); return originalGet(arg); };
+  await Promise.all([f.idle(), f.idle()]);
+  assert.equal(f.prompts.length, 1, "the cap/cooldown re-check after the live read prevents a double wake");
+});

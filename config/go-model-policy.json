@@ -5,8 +5,11 @@
   "advisory_kinds": ["judgment", "research", "frontier"],
   "advisory_timeout_seconds": 600,
   "advisory_context_tokens": 64000,
-  "routine_context": {"warn": 64000, "compact": 96000, "hard": 128000},
-  "advisory_context": {"warn": 32000, "compact": 64000, "hard": 96000},
+  "routine_context": {"warn": 64000, "compact": 96000, "handoff": 112000, "hard": 128000},
+  "advisory_context": {"warn": 32000, "compact": 64000, "handoff": 80000, "hard": 96000},
   "minimum_growth_tokens": 32000,
-  "compact_cooldown_seconds": 300
+  "compact_cooldown_seconds": 300,
+  "handoff_after_compactions": 2,
+  "handoff_cooldown_seconds": 3600,
+  "handoff_max_wakes": 3
 }
