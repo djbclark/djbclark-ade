@@ -59,6 +59,9 @@ Full review comments:
   mismatch) echo "transcript noise" >&2; { echo codex; echo "the real review"; } >&2; echo "All good." ;;
   refusal) say "Unable to review the diff because the repository could not be read." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
+  cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
+  noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
+  detached) python3 -c "import os,subprocess;p=subprocess.Popen(['sleep','300'],start_new_session=True,cwd=os.getcwd());open(os.environ['FAKE_PID_FILE'],'w').write(str(p.pid))"; say "The patch looks correct." ;;
   shaped) say "- **[P1]** A bold priority — $PWD/a.py:1-1" ;;
   shaped_bare) say "[P1] A bare priority" ;;
   unparseable) say "- [P7] An invented priority" ;;
@@ -231,7 +234,9 @@ def test_a_finding_on_a_hook_file_the_pr_itself_edits_is_never_ignored(world: Wo
     ("nomessage", "no final message"),
     ("stdout_only", "no `codex` message block"),    # a banner on stdout with a transcript that holds no review
     ("mismatch", "not the transcript's final message"),
-    ("refusal", "refusal or an error"),
+    ("refusal", "reads as a refusal"),
+    ("cant_review", "not a verdict"),    # a wording the refusal list does not know
+    ("noexec", "not a verdict"),    # a message with no sign in the transcript that the repository was looked at
     ("shaped", "cannot read"),    # **[P1]** is a finding in a shape the parser does not know: never "no findings"
     ("shaped_bare", "cannot read"),
     ("unparseable", "cannot read"),
@@ -263,6 +268,13 @@ def test_a_child_that_outlives_a_codex_that_exited_is_killed_too(world: World) -
     assert world.run(mode="orphan").returncode == 0
     time.sleep(0.3)
     assert not alive(int(world.pid_file.read_text())), "codex's background child survived the run"
+
+
+def test_a_tool_command_in_a_session_of_its_own_is_killed_too(world: World) -> None:
+    """Codex P2 on PR 130: real tool commands run in their own sessions and process groups, so killing codex's group alone leaves them."""
+    assert world.run(mode="detached").returncode == 0
+    time.sleep(0.5)
+    assert not alive(int(world.pid_file.read_text())), "a detached tool process of codex survived the run"
 
 
 def test_a_run_that_is_terminated_files_failed_removes_its_worktree_and_kills_codex(world: World) -> None:
