@@ -47,7 +47,12 @@ $W up                     # start what is missing; verify each registration
    shows the kind failing 25% or more of 3+ recent dispatches. Never above `route_agent`'s own effort, never
    above high, never Fable.
 4. Context: standard; the `[1m]` variant only when chain log plus largest brief need over ~120k tokens.
-5. The launched agent is created through `bin/paseo-new-seat` (auto-accept on from the first tool call) in
+5. The launched agent is created through `bin/paseo-new-seat` (auto-accept on from the first tool call; a claude
+   watcher starts in `bypassPermissions` unless `--mode ID` says otherwise, and `--no-auto-accept` or `--mode default|plan`
+   gives one that prompts, labelled `perm=ask` so `bin/paseo-bypass-watch` leaves it alone; a codex watcher gets
+   `--mode full-access`). A watcher reads public upstream replies, so a prompt injection there would run with the operator's
+   permissions and no prompt: that exposure is accepted (operator, 2026-10-28, every agent runs yolo) and the briefs fence
+   outside text as untrusted. `bin/watch` has no per-domain switch for a prompting watcher yet; `paseo-new-seat --mode default` by hand is the only way) in
    the one shared workspace `watch` (`[defaults] workspace`, found again on re-runs, created once under
    `workspace_cwd`; Paseo runs every agent in that cwd, so the prompt names the domain's own checkout from `cwd`), first prompt the domain's skill.
 6. Title: `watch <domain> <n>`, `n` the next base-36 number (`0-9a-z`, so `…9`, `…a`, … `…z`, `…10`) per domain: one
