@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 
@@ -39,13 +40,17 @@ def test_rumination_watch_relay_argv_has_no_ack(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "LOG", tmp_path / "state" / "rumination.log")
     monkeypatch.setenv("RW_SESSION", "sess-1")
     argvs = []
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: argvs.append(cmd) or
-                        (0, "relayed to [sess-1] n via paseo: delivered; it takes the message now"))
-    assert rw.to_session("one open loop") == "delivered"   # relay.py's own word on exit 0
+    # `--json` since 2026-10-29: the outcome word comes from relay.py's machine report, not its prose
+    # (a reworded "do not resend" was retried forever). The prose branch below still reads the
+    # status line, for an older relay.py that prints no report.
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: argvs.append(cmd) or
+                        (0, json.dumps({"id": "sess-1", "result": "delivered", "via": "paseo"}), ""))
+    assert rw.to_session("one open loop") == "delivered"   # relay.py's own word in its report
     assert argvs[0][3:5] == ["sess-1", "one open loop"] and "--no-ack" in argvs[0]
+    assert "--json" in argvs[0], "the machine report is what the outcome word is read from"
     # no --idle: it blocks relay.py's deferral, so a busy target would drop the line instead of queueing it
     assert "--idle" not in argvs[0]
     # An exit 0 with no word this code recognises is `sent`, never `delivered`: the log must not
     # claim the strongest word for a shape nobody has proof of.
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (0, ""))
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (0, "", ""))
     assert rw.to_session("one open loop") == "sent"

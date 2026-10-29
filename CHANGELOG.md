@@ -294,6 +294,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Removed
 
+- `bin/rumination-watch autoaccept` (2026-10-29): dead since the tool it wrapped moved to `bin/paseo-set-model autoaccept`, so a subcommand that looked live but mutated `~/.paseo/agents/*.json` by hand was deleted rather than kept beside the daemon-supported one (#134).
 - Removed the OpenUsage wiring (2026-10-29): the canonical `opencode-plugins/openusage-telemetry.ts`, its handling in `bin/opencode-plugin-guard` (the guard now manages `rtk` only), the three `claude-hook.sh` blocks in `agents/claude/settings.json.tmpl` and the `--previous-notify` fanout in `agents/codex/config.toml.tmpl`; an OpenUsage app relaunched from a stale `dist/` build is no longer fed by hooks or plugins (#119).
 
 ### Fixed
@@ -315,9 +316,14 @@ agent what changed and what is new. Entries end with the pull request number.
   now kept in `state["pending"]`, prepended to the next pass and retried, cleared only by a real
   send (`delivered` / `accepted` / `queued`, or an unrecognised rc 0 shape read as `sent`), and
   bounded by `RW_PENDING_MAX` (clamped to at least 1, newest lines kept, every eviction logged). The
-  logged word is relay.py's own: `accepted` is no longer reported as `delivered`, and the word is
-  read from relay's status line only, so a peer's untrusted reply preview containing ": queued"
-  cannot rename the outcome (#134).
+  logged word is relay.py's own: `accepted` is no longer reported as `delivered`. Since 2026-10-29 it
+  is read from relay.py's `--json` report (`--json` is passed on the send) rather than its prose —
+  a reworded "do not resend" would have been retried forever and a reworded refusal never explained
+  — with the status line kept only as the fallback for an older relay.py that prints no report, and
+  the prose a peer's untrusted reply preview can carry is never consulted for the outcome. `_pass`
+  says plainly that delivery is AT-LEAST-ONCE on purpose: a crash between the send and the state
+  write re-sends a line, because journaling first would instead lose one, and a duplicate is visible
+  in the log while a lost line is invisible (#134).
 - `bin/rumination-watch` reported a `gh` page size as a count: `--limit 100` printed "100 open
   PR(s)" whether there were 100 or 200. At the cap it now says "at least N", and a FAILED `gh` read
   is "PR count unknown (gh unreadable)" rather than a confident 0 — the same class of unearned
@@ -334,6 +340,22 @@ agent what changed and what is new. Entries end with the pull request number.
   resets the darkness streak (only a proven send or `working` does), because a flaky route used to
   hide a parked seat. The knobs are clamped (`RW_PENDING_MAX=0` used to keep everything), and a
   hand-edited state file of the wrong shape no longer kills the pass (#134).
+- `bin/rumination-watch` three round-two honesty bugs (2026-10-29). A failed page to djbclark used to
+  start a six-hour cooldown anyway: the `told` stamp was written inside `should_tell_djbclark`,
+  BEFORE `to_djbclark()` ran, so one failed `hermes send` — or an `inbox-target` that could not
+  resolve — silenced that page for the whole cooldown with nothing retrying it, on the one channel
+  whose job is saying the entity is dark. The stamp is now a separate `djb_page_sent` called only
+  after a send that actually returned True, at all four page sites (no live session, a dark seat, an
+  item that needs his decision, an unverified send), so a failed page is retried on the next
+  5-minute pass. A healthy `idle` seat resets the darkness streak: `idle` is `deliverable: true` in
+  relay.py and is what a quiet healthy pass sees every 5 minutes, and leaving it out let three card
+  episodes spread over a day page him "unable to take text for 3 passes in a row" — false in both
+  clauses. The hand-edit guards cover VALUES as well as shapes: a `told` timestamp written as a word
+  or a `stuck` count written as a string killed the pass at `float()` / `int()`, and such an entry is
+  now dropped while the rest of the state is kept. Two more glued-stream reads are split the same
+  way the JSON ones were: `inbox-target` warns on stderr and still exits 0, so a warning glued onto
+  the target paged a destination that does not exist, and a git notice on stderr became part of
+  `git rev-parse HEAD` and reported the chain log as permanently stale (#134).
 
 - The quota guard's `critical` advice (2026-10-29) is scoped to the Claude Code subscription pool: "No new Claude work of any kind until the reset ... hand off, stop" read as a stop order by idle omp sessions, so it now says "No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session included) until the reset", states that it is not a stop order for codex, grok, agy, zai and opencode sessions, and that an omp session keeps working only while `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares the Claude weekly rate window, which aiuse gates when every weekly window is exhausted); a Claude Code lead is sent to an omp successor on Paseo (`self-slash --finish --successor omp/anthropic/claude-sonnet-5-5`), told to start omp by hand on herdr and Orca (where `self-slash` refuses an omp successor), or to a codex or grok successor when omp is not listed (agy is not a Paseo provider), instead of another Claude Sonnet session; `skills/handoff` Step 9 keys the same exemption on the state file's `level` being `critical` and drops its old `critical` branches (a Fable lead to Opus, an Opus or Sonnet lead to plain `/new`) (#126).
 - `bin/paseo-new-seat` (2026-10-29): a claude seat created with the shield on no longer prints "auto_accept: NOT verified - the shield may be grey" and exits 4 once its mode is verified. Claude never publishes an `auto_accept` feature (its yolo is the permission mode), so its empty feature list is now "not offered" rather than "unverified"; other providers with an empty list still report unverified (#122).

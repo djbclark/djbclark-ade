@@ -126,14 +126,15 @@ def test_a_busy_target_is_reported_as_skipped_not_failed(monkeypatch, tmp_path):
     fake_relay(tmp_path)
     asked = []
 
-    def fake_why(cmd, timeout=20):
-        asked.append(cmd)
-        return 1, json.dumps({"state": "error", "why": "the pane is gone", "deliverable": False}), ""
+    def fake_split(cmd, timeout=20):
+        if "--why" in cmd:
+            asked.append(cmd)
+            return 1, json.dumps({"state": "error", "why": "the pane is gone",
+                                  "deliverable": False}), ""
+        return 1, "", ("relay: [x] not sent: that session is busy and cannot take it now; deferring "
+                      "needs an identifiable sender (it gets a notice if the send fails).")
 
-    monkeypatch.setattr(rw, "run_split", fake_why)
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
-        1, "relay: [x] not sent: that session is busy and cannot take it now; deferring needs an "
-           "identifiable sender (it gets a notice if the send fails)."))
+    monkeypatch.setattr(rw, "run_split", fake_split)
     assert rw.to_session("one open loop") == "skipped"
     assert asked, "the whole point of the change: ask WHY before calling a refusal healthy"
     assert ": skipped" in rw.LOG.read_text()
@@ -145,7 +146,10 @@ def test_a_real_relay_failure_is_not_dressed_up_as_anything_else(monkeypatch, tm
     relay = tmp_path / "src/djbclark-ade/skills/session-finder/relay.py"
     relay.parent.mkdir(parents=True)
     relay.write_text("")
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (1, "relay: no session(s) match 'd2a505dd'"))
+    # No JSON report, no refusal wording, and --why cannot read the target: the send failed for a
+    # reason this code cannot name, so it says exactly that rather than inventing a seat state.
+    monkeypatch.setattr(rw, "run_split",
+                        lambda cmd, timeout=20: (1, "", "relay: no session(s) match 'd2a505dd'"))
     assert rw.to_session("one open loop") == "FAILED"
 
 
@@ -166,19 +170,20 @@ def fake_relay(tmp_path):
 
 def refusal(monkeypatch, rw, *, why_json: str | None,
             send: tuple[int, str] = (1, "relay: [x] not sent: that session is busy and cannot take "
-                                        "it now")):
-    """Install a relay stand-in: the send returns SEND, and `--why` answers WHY_JSON (None = blind).
+                                        "it now"),
+            send_stdout: str = ""):
+    """Install a relay stand-in: the send returns SEND (rc, prose), and `--why` answers WHY_JSON.
 
-    Two patch points, because the two reads are deliberately different: the send's output is a
-    human-readable line (`run`), and `--why` is parsed as JSON from stdout alone (`run_split`).
+    The send goes through `run_split` now, because it asks relay.py for its `--json` report; a
+    refusal is rc != 0 with NO JSON on stdout and its prose on stderr, which is exactly what this
+    stand-in reproduces. `send_stdout` is for the machine-report shapes.
     """
     def fake_split(cmd, timeout=20):
         if "--why" in cmd:
             return ((1, why_json, "") if why_json is not None
                     else (1, "", "Traceback: no such option"))
-        return send[0], "", send[1]
+        return send[0], send_stdout, send[1]
 
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: send)
     monkeypatch.setattr(rw, "run_split", fake_split)
 
 
@@ -280,7 +285,13 @@ def test_a_delivered_pass_clears_the_streak(monkeypatch, tmp_path):
     a = rw.argparse.Namespace(dry_run=False, quiet=True)
     refusal(monkeypatch, rw, why_json=why)
     rw._pass(a)                                   # streak 1
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (0, "relay: delivered to d2a505dd"))
+
+    def delivered(cmd, timeout=20):
+        if "--why" in cmd:
+            return 1, why, ""
+        return 0, json.dumps({"id": LIVE, "result": "delivered", "via": "paseo"}), ""
+
+    monkeypatch.setattr(rw, "run_split", delivered)
     rw._pass(a)                                   # delivered: streak cleared
     refusal(monkeypatch, rw, why_json=why)
     rw._pass(a)                                   # streak 1 again, not 3
@@ -349,11 +360,12 @@ def test_the_pending_list_cannot_grow_without_bound(monkeypatch, tmp_path):
 
 
 def test_a_send_that_may_have_arrived_is_not_sent_again(monkeypatch, tmp_path):
-    """relay.py's rc==1 unverified shapes say "do not resend"; `FAILED` + retry spoke twice.
+    """relay.py's unverified shapes say "do not resend"; `FAILED` + retry spoke twice.
 
     `paseo send` failing on an unknown reason, a queue entry pulled back out of the box, a recalled
     copy: relay took (or may have taken) the text and could not prove it. It is a different fact
-    from "not sent", and the watcher used to retry it every 5 minutes against that contract.
+    from "not sent", and the watcher used to retry it every 5 minutes against that contract. This
+    exercise uses the PROSE fallback (no JSON report), which must still settle it.
     """
     rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
     monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
@@ -362,10 +374,9 @@ def test_a_send_that_may_have_arrived_is_not_sent_again(monkeypatch, tmp_path):
     told = []
     monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
     monkeypatch.setattr(rw, "survey", lambda: {"mail": ["from eve"], "jobs": [], "prs": [], "stale": None})
-    # relay.py:1650, verbatim.
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
-        1, "relay: [d2a505dd] `paseo send` failed (rc=1); it may have reached the daemon, so no "
-           "other route was tried"))
+    refusal(monkeypatch, rw, why_json=json.dumps({"state": "idle", "why": "idle", "deliverable": True}),
+            send=(1, "relay: [d2a505dd] `paseo send` failed (rc=1); it may have reached the daemon, "
+                    "so no other route was tried"))
     assert rw.to_session("x") == "unverified"
 
     sent = []
@@ -410,11 +421,32 @@ def test_a_flaky_send_does_not_wipe_a_darkness_streak(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 2)
     monkeypatch.setattr(rw, "should_tell_djbclark", lambda item, state, now: True)
     state: dict = {}
-    assert rw.escalate_dark("card:question", LIVE, state, time.time()) == ""
-    assert rw.escalate_dark("unverified", LIVE, state, time.time()) == ""
-    assert rw.escalate_dark("FAILED", LIVE, state, time.time()) == ""
-    assert rw.escalate_dark("skipped", LIVE, state, time.time()) == ""
-    assert "question card" in rw.escalate_dark("card:question", LIVE, state, time.time())
+    assert rw.escalate_dark("card:question", LIVE, state, time.time()) == ("", "")
+    assert rw.escalate_dark("unverified", LIVE, state, time.time()) == ("", "")
+    assert rw.escalate_dark("FAILED", LIVE, state, time.time()) == ("", "")
+    assert rw.escalate_dark("skipped", LIVE, state, time.time()) == ("", "")
+    item, msg = rw.escalate_dark("card:question", LIVE, state, time.time())
+    assert item == "seat card:question" and "question card" in msg
+
+
+def test_a_healthy_idle_seat_resets_the_darkness_streak(monkeypatch, tmp_path):
+    """`idle` is `deliverable: true` in relay.py — a quiet healthy pass, not "no change".
+
+    It used to be in neither set, so a streak counted dark passes that were not consecutive: three
+    card episodes spread over a day, with idle passes between them, paged him "unable to take text
+    for 3 passes in a row" — false in both clauses.
+    """
+    rw = load(monkeypatch, tmp_path)
+    assert "idle" in rw.HEALTHY_WORDS
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 2)
+    monkeypatch.setattr(rw, "should_tell_djbclark", lambda item, state, now: True)
+    state: dict = {}
+    rw.escalate_dark("card:question", LIVE, state, time.time())     # streak 1
+    rw.escalate_dark("idle", LIVE, state, time.time())              # healthy: reset
+    assert rw.escalate_dark("card:question", LIVE, state, time.time()) == ("", ""), \
+        "streak 1 again, not 2: two NON-consecutive dark passes must not page"
+    item, msg = rw.escalate_dark("card:question", LIVE, state, time.time())
+    assert item and "2 passes in a row" in msg
 
 
 def test_a_zero_or_bogus_cap_is_clamped(monkeypatch, tmp_path):
@@ -442,6 +474,20 @@ def test_a_hand_edited_state_file_does_not_kill_the_pass(monkeypatch, tmp_path):
     assert state["pending"] == [] and state["last"] == {} and state["stuck"] == {}
 
 
+def test_a_hand_edited_state_VALUE_does_not_kill_the_pass_either(monkeypatch, tmp_path):
+    """Shapes were guarded, values were not: `float(last)` / `int(count)` died on a hand edit."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    rw.STATE.parent.mkdir(parents=True)
+    rw.STATE.write_text(json.dumps({"told": {"seat card:question": "yesterday"},
+                                    "stuck": {f"{LIVE[:8]}:card:question": "three"}}))
+    state = rw.load_state()
+    assert state["told"] == {} and state["stuck"] == {}, "the unreadable entries are dropped"
+    assert rw.should_tell_djbclark("seat card:question", state, time.time()) is True
+    assert rw.escalate_dark("card:question", LIVE, state, time.time()) == ("", ""), \
+        "a dropped count starts the streak over instead of raising"
+
+
 def test_an_untrusted_reply_cannot_rename_the_outcome(monkeypatch, tmp_path):
     """The reply preview is untrusted text; a reply containing ": queued" is not our send's word."""
     rw = load(monkeypatch, tmp_path)
@@ -458,16 +504,78 @@ def test_relay_accepted_is_not_reported_as_delivered(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
     fake_relay(tmp_path)
     # Verbatim relay.py shapes, from its own print at relay.py:3858/3865 — the words sit after
-    # "via <route>: ", so a startswith() test sees none of them.
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
-        0, "relayed to [d2a505dd] Dann 7 via paseo: accepted; it takes the message when its turn ends"))
+    # "via <route>: ", so a startswith() test sees none of them. No JSON report: the prose fallback.
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (
+        0, "relayed to [d2a505dd] Dann 7 via paseo: accepted; it takes the message when its turn "
+           "ends", ""))
     assert rw.to_session("x") == "accepted"
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
-        0, "relayed to [d2a505dd] Dann 7 via paseo: queued; it takes the message when its turn ends"))
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (
+        0, "relayed to [d2a505dd] Dann 7 via paseo: queued; it takes the message when its turn "
+           "ends", ""))
     assert rw.to_session("x") == "queued"
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (
-        0, "relayed to [d2a505dd] Dann 7 via paseo: delivered; it takes the message when its turn ends"))
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (
+        0, "relayed to [d2a505dd] Dann 7 via paseo: delivered; it takes the message when its turn "
+           "ends", ""))
     assert rw.to_session("x") == "delivered"
+
+
+def test_the_send_reads_relays_json_report_not_its_prose(monkeypatch, tmp_path):
+    """The machine contract: relay.py `--json` prints `result`, and `state: queued` for a deferral.
+
+    The prose shapes this used to match are a string contract with a tool that moves; a reworded
+    "do not resend" would be retried forever and a reworded refusal would never be explained.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    asked = []
+
+    sends = []
+
+    def split(cmd, timeout=20):
+        if "--why" in cmd:
+            asked.append(cmd)
+            return 1, "", "no --why for this one"
+        sends.append(cmd)
+        return 0, json.dumps({"id": LIVE, "result": "accepted", "via": "paseo"}), ""
+
+    monkeypatch.setattr(rw, "run_split", split)
+    assert rw.to_session("x") == "accepted"
+    assert "--json" in sends[0], "the send has to ask for the machine report"
+
+    # An unverified report is settled WITHOUT asking why: a seat that happens to be `working` when
+    # the send was unverified must not have the line handed to it again.
+    def unverified(cmd, timeout=20):
+        if "--why" in cmd:
+            asked.append(cmd)
+            return 1, json.dumps({"state": "working", "why": "working", "deliverable": False}), ""
+        return 1, json.dumps({"id": LIVE, "result": "unverified", "reason": "do not resend"}), ""
+
+    asked.clear()
+    monkeypatch.setattr(rw, "run_split", unverified)
+    assert rw.to_session("x") == "unverified"
+    assert asked == [], "an unverified report is already an answer"
+
+    # A deferral's report has no `result`: it is a queue record.
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (
+        0, json.dumps({"id": LIVE, "state": "queued", "queued": True, "record": "r1"}), ""))
+    assert rw.to_session("x") == "queued"
+
+
+def test_the_relay_send_contract_this_reads_still_exists(monkeypatch, tmp_path):
+    """CI cannot see drift in another tool's output, so it reads that tool's own source.
+
+    `to_session` now depends on three strings in `skills/session-finder/relay.py`: the `--json` flag
+    on the send, the `result` field, and the deferred `state: queued` shape. Rename one upstream and
+    this fails here instead of silently resending lines into a live seat.
+    """
+    relay = BIN.parent / "skills/session-finder/relay.py"
+    if not relay.is_file():
+        return                                # a source tarball without the sibling skill
+    src = relay.read_text()
+    assert '"--json"' in src, "relay.py must still offer --json on the send"
+    assert '"result": res[2]' in src, "the send report must still carry `result`"
+    assert '"state": "queued"' in src, "a deferral must still be identifiable by `state`"
 
 
 def fleet_read(monkeypatch, rw, tmp_path, *, rc: int, stdout: str, stderr: str = "") -> None:
@@ -479,8 +587,45 @@ def fleet_read(monkeypatch, rw, tmp_path, *, rc: int, stdout: str, stderr: str =
     mail.parent.mkdir(parents=True, exist_ok=True)
     mail.write_text("")
     monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (rc, stdout, stderr))
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (rc, (stdout + stderr).strip()))
     monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+
+
+def test_run_split_really_keeps_the_two_streams_apart(tmp_path):
+    """The separation lives in five lines, and every other test monkeypatches them away.
+
+    So this one runs a real child process that writes to BOTH streams: a caller that glued them (the
+    bug behind "a broken read is not a dead seat") would see a body no parser can read.
+    """
+    import sys
+
+    rw = load_no_patch(tmp_path)
+    rc, out, err = rw.run_split([sys.executable, "-c",
+                                 "import sys; print('{\"body\": 1}'); print('warning: noise', "
+                                 "file=sys.stderr)"])
+    assert rc == 0
+    assert out == '{"body": 1}' and json.loads(out) == {"body": 1}
+    assert err == "warning: noise", "stderr must not be glued onto the JSON body"
+    # and the convenience wrapper, for log-only callers, still shows both
+    rc, both = rw.run([sys.executable, "-c",
+                       "import sys; print('body'); print('err', file=sys.stderr)"])
+    assert rc == 0 and "body" in both and "err" in both
+
+
+def load_no_patch(tmp_path):
+    """`load` without the HOME/REPO monkeypatching, for a test that runs the real module I/O."""
+    loader = importlib.machinery.SourceFileLoader("rumination_watch_io", str(BIN / "rumination-watch"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    rw = importlib.util.module_from_spec(spec)
+    loader.exec_module(rw)
+    return rw
+
+
+def test_a_fleet_warning_on_stderr_does_not_spoil_a_good_body(monkeypatch, tmp_path):
+    """The successful `list --json` path warns on stderr (fleet.py:1593): the body is still good."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    fleet_read(monkeypatch, rw, tmp_path, rc=0, stdout=json.dumps([{"paseo": LIVE}]),
+               stderr="warning: cross-session messaging override differs from settings")
+    assert rw.owner_session() == (LIVE, "registry")
 
 
 def test_a_broken_fleet_read_is_not_a_dead_seat(monkeypatch, tmp_path):
@@ -549,3 +694,53 @@ def test_an_unreadable_pr_listing_is_unknown_not_zero(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (0, "not json", ""))
     assert rw.open_prs() is None
     assert rw.pr_phrase([]) == "0 open PR(s) of yours", "a real empty listing still reads as zero"
+
+
+# --- the page itself: a failed send must not silence the next one --------------------------------
+
+def test_a_page_that_fails_is_retried_not_silenced_for_six_hours(monkeypatch, tmp_path):
+    """The cooldown used to be stamped BEFORE the send, so one hermes blip was a 6 h blackout.
+
+    That is the worst possible item to lose: the "no live session" page is the watcher's only
+    human channel, and nothing else would ever retry it.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": "0000dead-0000-4000-8000-000000000000"}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {})
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [], "prs": [], "stale": None})
+    attempts = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: attempts.append(text) or (len(attempts) > 1))
+    a = quiet_pass(rw)
+    assert rw._pass(a) == 0
+    assert len(attempts) == 1, "the send was attempted"
+    assert rw.load_state()["told"] == {}, "a FAILED page must not start the cooldown"
+    assert rw._pass(a) == 0
+    assert len(attempts) == 2, "so the next pass tries again"
+    # and now that he has it, the cooldown holds
+    assert rw._pass(a) == 0
+    assert len(attempts) == 2
+    assert "no live session" in rw.load_state()["told"]
+
+
+def test_a_quiet_pass_still_notices_a_wedged_seat(monkeypatch, tmp_path):
+    """The probe branch had no test at all, and it is where a dark seat is actually caught.
+
+    Nothing changed, so the pass has no line for the seat — the only observation of the seat is
+    `--why`. Two card passes, then he hears about it.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 2)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [], "prs": [], "stale": None})
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (
+        1, json.dumps({"state": "card:permission", "why": "blocked", "deliverable": False}), ""))
+    a = quiet_pass(rw)
+    assert rw._pass(a) == 0
+    assert told == [], "one dark pass is a turn boundary"
+    assert rw._pass(a) == 0
+    assert len(told) == 1 and "permission" in told[0], "a quiet pass must still notice a wedged seat"
+    assert "seat card:permission" in rw.LOG.read_text()

@@ -30,8 +30,9 @@ TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
 - **To djbclark, via the `dann` quiet topic** (`inbox-target dann`), **only** when something needs
   HIS decision. Rate-limited by a per-item cooldown, because the point of a quiet channel is quiet.
 
-Exit codes: 0 nothing to say (the normal case); 10 something to say (it was said); 2 usage/error.
-The exit code is the interface for launchd and for a session that runs it by hand.
+Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
+not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
+usage/error. The exit code is the interface for launchd and for a session that runs it by hand.
 """
 
 from __future__ import annotations
@@ -86,11 +87,25 @@ def load_state() -> dict:
     # silently, for as long as the file stayed wrong); a string `pending` was iterated character by
     # character. Neither is reachable except by hand — which is exactly when a watcher must not die.
     for key in ("last", "told", "stuck"):
-        if not isinstance(data.get(key, {}), dict):
+        if not isinstance(data.get(key), dict):
             data[key] = {}
     if not isinstance(data.get("pending", []), list):
         data["pending"] = []
+    # Shapes are not values. A hand edit that leaves `told` a string timestamp or a `stuck` count a
+    # word used to kill the pass at `float(last)` / `int(...)` — the same hand-edit threat the shape
+    # guards above are for, one level down. Drop only the unreadable entries; keep the rest.
+    data["told"] = {k: v for k, v in data["told"].items() if _is_num(v)}
+    data["stuck"] = {k: v for k, v in data["stuck"].items() if _is_num(v)}
     return data
+
+
+def _is_num(value: object) -> bool:
+    """A number we can do arithmetic with. JSON can hand us a string, a list or null here."""
+    try:
+        float(value)                      # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return True
 
 
 def save_state(data: dict) -> None:
@@ -228,7 +243,10 @@ def chain_staleness() -> str | None:
     m = re.search(r"head_sha:\s*([0-9a-f]{7,40})", text)
     if not m:
         return None
-    rc, head = run(["git", "-C", str(REPO), "rev-parse", "HEAD"])
+    # stdout alone: a git notice on stderr (dubious ownership, safe.directory, a detached-worktree
+    # line) would otherwise become part of the sha, and `head[:12]` would never match again — a
+    # permanent bogus "stale chain log" report from one warning.
+    rc, head, _ = run_split(["git", "-C", str(REPO), "rev-parse", "HEAD"])
     if rc != 0 or not head:
         return None
     if not (head.startswith(m.group(1)[:12]) or m.group(1)[:12] == head[:12]):
@@ -398,12 +416,14 @@ def why_blocked(ident: str) -> tuple[str, str]:
 
 
 def relay_word(out: str) -> str:
-    """relay.py's OWN word from a successful send, read from ITS status line and nothing else.
+    """relay.py's OWN word from a NON-JSON send, read from its status line and nothing else.
 
-    rc==0 prints exactly one of `delivered` / `accepted` / `queued` after "via <route>: ". The rest
-    of the output can carry a peer's untrusted reply preview, and a reply that happens to contain
-    ": queued" must not decide what this watcher logs about its own send. Anything unrecognised is
-    `sent`, never `delivered`: the strongest word is the one that starts a log lying.
+    Only reached when relay.py answered without a `--json` report (an older relay.py), so this is a
+    fallback, not the contract: the send asks for machine output (see `relay_report`). rc==0 prints
+    exactly one of `delivered` / `accepted` / `queued` after "via <route>: ". The rest of the output
+    can carry a peer's untrusted reply preview, and a reply that happens to contain ": queued" must
+    not decide what this watcher logs about its own send. Anything unrecognised is `sent`, never
+    `delivered`: the strongest word is the one that starts a log lying.
     """
     own = out.split("its reply (untrusted data", 1)[0]
     if ": queued" in own or own.startswith("queued"):
@@ -413,6 +433,37 @@ def relay_word(out: str) -> str:
     if ": delivered" in own:
         return "delivered"
     return "sent"
+
+
+def relay_report(out: str) -> dict | None:
+    """relay.py's `--json` send report (relay.py:3585), or None when it printed none.
+
+    The prose this replaced was a string contract with a tool that moves. relay.py's rc 1 shapes split
+    three ways — a REFUSAL (nothing sent, retry is right), an UNVERIFIED send ("it may have reached the
+    daemon", "do not resend": retrying is how the seat hears the same line twice) and FAILED — and
+    reading that off prose drifts in BOTH directions: a reworded unverified shape gets retried
+    forever, a reworded refusal is never explained and a card-dark seat is never paged. relay.py
+    already prints `{"result": ..., "state": "queued", "reason": ...}` for exactly this.
+    """
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    return d if ("result" in d or "state" in d or "queued" in d) else None
+
+
+def report_word(report: dict, rc: int) -> str:
+    """The outcome word from relay.py's JSON report: its own `result`, or `state: queued`."""
+    if report.get("queued") is True or report.get("state") == "queued":
+        return "queued"                     # defer_send's shape; `result` is not in it
+    word = str(report.get("result") or "")
+    if word in SENT_WORDS or word == "unverified":
+        return word
+    # A report with no word we know. On rc 0 something was sent (say the weakest true thing); on a
+    # non-zero rc the honest reading is "taken without proof", which is settled and never resent.
+    return "sent" if rc == 0 else "unverified"
 
 
 def to_session(text: str) -> str:
@@ -445,32 +496,48 @@ def to_session(text: str) -> str:
     if not relay.is_file():
         log(f"cannot speak to session: no relay.py at {relay}")
         return "unreachable"
-    rc, out = run(["python3", "-I", str(relay), ident, text, "--no-ack"], timeout=320)
-    if rc == 0:
+    rc, out, err = run_split(["python3", "-I", str(relay), ident, text, "--no-ack", "--json"],
+                             timeout=320)
+    report = relay_report(out)
+    if report is not None:
+        word = report_word(report, rc)
+    elif rc == 0:
+        # An older relay.py that does not answer `--json`: its status line is all there is.
         word = relay_word(out)
-    elif "not sent" in out or "cannot take it now" in out:
-        # Not a failure to hide: a launchd job has no sender identity, so relay.py will not defer for
-        # us. WHICH refusal it is decides whether the seat is dark, so ask (see `why_blocked`).
-        state, detail = why_blocked(ident)
-        word = state if state.startswith("card:") or state in ("working", "silent") else "skipped"
-        if detail:
-            out = f"{word}: {detail}"
-    elif any(marker in out.lower() for marker in MAYBE_SENT):
-        # relay.py took it (or may have) without proof, and says not to resend. This is NOT `FAILED`:
-        # retrying it is how the seat is handed the same line twice, every 5 minutes.
+    elif any(marker in (out + "\n" + err).lower() for marker in MAYBE_SENT):
+        # No machine report, but relay.py's own "it may have arrived / do not resend" line: settled,
+        # never retried. Checked BEFORE asking why, because a seat that is `working` when the line
+        # arrives unverified must not be handed it again.
         word = "unverified"
     else:
-        word = "FAILED"
+        # rc 1 with no report: relay.py refused, and WHICH refusal it is decides whether the seat is
+        # dark — so ask, never match prose. A refusal that is really a card or a hung turn is an
+        # outage; a reworded refusal must not blind the pager (`skipped` is only the fallback).
+        state, detail = why_blocked(ident) if rc == 1 else ("unknown", f"relay rc {rc}")
+        if state.startswith("card:") or state in ("working", "silent"):
+            word = state
+        elif "not sent" in (out + "\n" + err) or "cannot take it now" in (out + "\n" + err):
+            word = "skipped"
+        else:
+            word = "FAILED"
+        if detail:
+            out = f"{word}: {detail}"
     log(f"relay to {ident[:8]} (via {why}): {word}" + (f" rc={rc}: {out[:200]}" if rc else ""))
     return word
 
 
 def to_djbclark(text: str) -> bool:
-    """The quiet topic. Resolved through the registry, never a hard-coded thread id."""
+    """The quiet topic. Resolved through the registry, never a hard-coded thread id.
+
+    stdout ALONE for the route: `inbox-target` warns on stderr and still exits 0 ("unknown name ->
+    INBOX_DEFAULT + stderr warning"), and this is the paging channel — a warning glued onto the
+    target would send to a destination that does not exist, on the one path whose failure means
+    djbclark never hears that the seat is dark.
+    """
     target = ""
     reg = HOME / "ops/site-djbclark/bin/inbox-target"
     if reg.is_file():
-        rc, out = run([str(reg), "dann"], timeout=15)
+        rc, out, _ = run_split([str(reg), "dann"], timeout=15)
         target = out if rc == 0 else ""
     target = target or os.environ.get("RW_DJB_TARGET", "")
     if not target:
@@ -480,13 +547,27 @@ def to_djbclark(text: str) -> bool:
 
 
 def should_tell_djbclark(item: str, state: dict, now: float) -> bool:
-    """Anti-noise: the same item reaches him at most once per DJB_COOLDOWN_S."""
-    seen = state.setdefault("told", {})
-    last = seen.get(item)
-    if last and now - float(last) < DJB_COOLDOWN_S:
-        return False
-    seen[item] = now
-    return True
+    """Anti-noise: is this item past its cooldown? A CHECK — this stamps nothing.
+
+    The stamp used to be written HERE, before `to_djbclark()` ran, so one failed `hermes send` (or an
+    unresolvable `inbox-target`) silenced that page for the whole cooldown with nothing retrying it:
+    the one channel whose job is telling him the entity is dark could lose exactly that page to a
+    transient blip. `told` now records a page he ACTUALLY received — see `djb_page_sent`, which every
+    page site calls only on a successful send.
+    """
+    told = state.get("told")
+    if not isinstance(told, dict):
+        told = state["told"] = {}
+    last = told.get(item)
+    return not (last and now - float(last) < DJB_COOLDOWN_S)
+
+
+def djb_page_sent(item: str, state: dict, now: float) -> None:
+    """He received it: start the cooldown. Called ONLY when `to_djbclark` returned True."""
+    told = state.get("told")
+    if not isinstance(told, dict):
+        told = state["told"] = {}
+    told[item] = now
 
 
 # A refused pass is a turn boundary, not an outage: the seat is usually mid-work. Only the words
@@ -528,11 +609,18 @@ DARK_MEANING = {
     "silent": "it is running with nothing new and is not taking text: a hung turn",
 }
 
+# relay.py `--why` states that report the seat as able to take text RIGHT NOW (`deliverable: true`).
+# A quiet pass reads one of these every 5 minutes on a seat that is simply idle — a healthy
+# observation, which must end a darkness streak. Leaving `idle` out let three card episodes spread
+# over a day, with healthy idle passes between them, page him "unable to take text for 3 passes in a
+# row": both clauses false, in exactly the dishonesty class this watcher exists to remove.
+DELIVERABLE_WHY = frozenset({"idle"})
+
 # The words that PROVE the channel worked or the seat is healthy — the only ones that reset a
 # darkness streak. A FAILED, `skipped` or unverified send says nothing about the seat, and letting it
 # reset the count is how a genuinely dark seat hides behind a flaky route (or one 5-minute `paseo
 # send` blip wipes out the four passes that were about to page him).
-HEALTHY_WORDS = frozenset({"delivered", "accepted", "queued", "sent", "working"})
+HEALTHY_WORDS = frozenset({"delivered", "accepted", "queued", "sent", "working"}) | DELIVERABLE_WHY
 
 # A send that reached (or may have reached) the seat: the pending line is settled, not retried.
 SENT_WORDS = frozenset({"delivered", "accepted", "queued", "sent"})
@@ -563,29 +651,34 @@ def seat_dark(word: str) -> str:
     return ""
 
 
-def escalate_dark(word: str, ident: str, state: dict, now: float) -> str:
-    """The message to send him about a dark seat, or "" when there is nothing to say yet.
+def escalate_dark(word: str, ident: str, state: dict, now: float) -> tuple[str, str]:
+    """(item, message) for a dark seat, or ("", "") when there is nothing to say yet.
 
     A refusal is not automatically darkness: `working` is a healthy seat mid-turn. But a seat parked
     on a prompt only a human can answer, or wedged with nothing new for 15 min, will not come back on
     its own — and the watcher is the only thing on this machine that can see it. One message per
     class per cooldown, and only once the state REPEATS: one dark pass is a turn boundary.
+
+    The ITEM comes back with the message so the caller can stamp the cooldown only after a send that
+    actually reached him (`djb_page_sent`): stamping here, before the send, is how one failed hermes
+    call silenced the dark-seat page for six hours.
     """
     dark = seat_dark(word)
     if not dark:
         if word in HEALTHY_WORDS:
             state["stuck"] = {}      # the channel worked or the seat is healthy: no streak to keep
-        return ""
+        return "", ""
     streak = state.setdefault("stuck", {})
     if not isinstance(streak, dict):
         streak = state["stuck"] = {}
     key = f"{(ident or '?')[:8]}:{dark}"
     streak[key] = int(streak.get(key, 0)) + 1
-    if streak[key] < SEAT_STUCK_PASSES or not should_tell_djbclark(f"seat {dark}", state, now):
-        return ""
-    return (f"Dann: the {ROLE} seat has been unable to take text for {streak[key]} passes in a row "
-            f"({DARK_MEANING.get(dark, dark)}). It is not working on anything you can see. Answer "
-            "the prompt (helm.py) or start a seat; it picks up from its own state, not from scratch.")
+    item = f"seat {dark}"
+    if streak[key] < SEAT_STUCK_PASSES or not should_tell_djbclark(item, state, now):
+        return "", ""
+    return item, (f"Dann: the {ROLE} seat has been unable to take text for {streak[key]} passes in a row "
+                  f"({DARK_MEANING.get(dark, dark)}). It is not working on anything you can see. Answer "
+                  "the prompt (helm.py) or start a seat; it picks up from its own state, not from scratch.")
 
 
 # --- commands -----------------------------------------------------------------------------------
@@ -619,6 +712,16 @@ def cmd_pass(a: argparse.Namespace) -> int:
 
 
 def _pass(a: argparse.Namespace) -> int:
+    """One pass: survey, compare to the last state, speak only on change (the lock is in `cmd_pass`).
+
+    Delivery is AT-LEAST-ONCE, on purpose. `state["pending"]` is written after the send, so a crash
+    between the send and `save_state` (a window that spans the escalate and hermes sends, potentially
+    minutes) leaves the PREVIOUS state on disk and the next pass re-derives and re-sends the same
+    lines. Journaling the intent first would turn that into at-most-once — a seat that stays dark
+    because a journal says "sent" and nobody sent it — which is the worse failure for the watcher
+    whose whole job is a voice. A duplicate is bounded by the pending cap and visible in the log; a
+    lost line is invisible.
+    """
     now = time.time()
     state = load_state()
     before = state.get("last", {})
@@ -674,7 +777,11 @@ def _pass(a: argparse.Namespace) -> int:
                 f"Dann: no live session for {ROLE!r} ({why}). Nothing is listening; the rumination "
                 "watcher has nowhere to speak. A new seat (or the registry row) fixes it."
             )
-        spoke_djb = to_djbclark(said) or spoke_djb
+        if to_djbclark(said):
+            # The cooldown starts only now: a failed page must be retried on the next pass, not
+            # silenced for six hours by the failure itself.
+            djb_page_sent("no live session", state, now)
+            spoke_djb = True
         log(f"no live session: {why} (told djbclark={spoke_djb})")
 
     # A line aimed at a seat that refused it has NOT been delivered, and `state["last"] = cur` above
@@ -694,11 +801,15 @@ def _pass(a: argparse.Namespace) -> int:
 
     if lines:
         summary = "rumination: " + "; ".join(lines)
-        # Already resolved above: a second resolution would repeat the lookup (and its log line).
+        # `to_session` resolves the owner again (registry read + peer_mail resolve, up to 60 s): the
+        # pass may have taken a while since the resolution above, and this is the line that has to
+        # arrive, so the target is re-checked rather than trusted from a minute ago.
         spoke_session = to_session(summary) if ident else "unreachable"
-        dark_msg = escalate_dark(spoke_session, ident, state, now)
+        dark_item, dark_msg = escalate_dark(spoke_session, ident, state, now)
         if dark_msg:
-            spoke_djb = to_djbclark(dark_msg) or spoke_djb
+            if to_djbclark(dark_msg):
+                djb_page_sent(dark_item, state, now)
+                spoke_djb = True
             log(f"seat {spoke_session}: told djbclark={spoke_djb}")
         # Only items needing HIS decision go to the quiet topic, and at most once per cooldown.
         needs_him = []
@@ -707,8 +818,9 @@ def _pass(a: argparse.Namespace) -> int:
         if stuck:
             needs_him.append(f"{len(stuck)} job(s) finished but not closed")
         for item in needs_him:
-            if should_tell_djbclark(item, state, now):
-                spoke_djb = to_djbclark(f"Dann: {item}") or spoke_djb
+            if should_tell_djbclark(item, state, now) and to_djbclark(f"Dann: {item}"):
+                djb_page_sent(item, state, now)
+                spoke_djb = True
         if spoke_session in SENT_WORDS:
             state["pending"] = []
         elif spoke_session == "unverified":
@@ -716,11 +828,12 @@ def _pass(a: argparse.Namespace) -> int:
             # hears the line twice, so the line is dropped ON PURPOSE — and he is told, because an
             # admitted loss beats a duplicate nobody can take back.
             state["pending"] = []
-            if should_tell_djbclark("unverified send", state, now):
-                spoke_djb = to_djbclark(
+            if should_tell_djbclark("unverified send", state, now) and to_djbclark(
                     f"Dann: a rumination line to the {ROLE} seat could not be PROVEN delivered "
                     "(relay.py: it may have arrived). It will not be retried, so it may have been "
-                    "lost; the watcher's log has relay.py's own reason.") or spoke_djb
+                    "lost; the watcher's log has relay.py's own reason."):
+                djb_page_sent("unverified send", state, now)
+                spoke_djb = True
         else:
             # Still owed to the seat: the next pass prepends these and tries again.
             if len(lines) > PENDING_MAX:
@@ -734,11 +847,14 @@ def _pass(a: argparse.Namespace) -> int:
         # seen on a pass that had something to say, and a seat that stops working stops producing
         # changes — so the passes go quiet one after another and the outage reads as "nothing new"
         # all the way through. One `paseo agent inspect` per 5 minutes is the price of noticing.
+        # The word here is a `--why` state, so a healthy `idle` must reset the streak (C2): otherwise
+        # the streak counts dark passes that were not consecutive and the page says "in a row".
         word = why_blocked(ident)[0] if ident else ""
-        dark_msg = escalate_dark(word, ident, state, now) if word else ""
-        if dark_msg:
-            spoke_djb = to_djbclark(dark_msg) or spoke_djb
-        log("quiet (nothing new)" + (f"; seat {word}" if seat_dark(word) else ""))
+        dark_item, dark_msg = escalate_dark(word, ident, state, now) if word else ("", "")
+        if dark_msg and to_djbclark(dark_msg):
+            djb_page_sent(dark_item, state, now)
+            spoke_djb = True
+        log("quiet (nothing new)" + (f"; seat {word}" if word else ""))
 
     save_state(state)
     if lines:
@@ -773,74 +889,6 @@ def cmd_test(a: argparse.Namespace) -> int:
     print(f"session relay:  {outcome}")
     print(f"djbclark topic: {'ok' if ok_d else 'FAILED (is inbox-target dann resolvable?)'}")
     return 0 if (outcome in SENT_WORDS or ok_d) else 1
-
-
-def cmd_autoaccept(a: argparse.Namespace) -> int:
-    """Ensure a Paseo agent has auto_accept on (djbclark, 2026-10-24).
-
-    `auto_accept` is a per-agent FEATURE FLAG, not a CLI option: `paseo agent run --help` and
-    `paseo agent update --help` both lack it, so there is no supported way to set it when creating a
-    tab. It lives in the agent's own state file as a `features[]` entry with
-    `{"id": "auto_accept", "value": true}` plus a mirrored `config.featureValues.auto_accept`.
-
-    djbclark: "If possible you should always open other agents that are part of you with the paseo
-    'Auto accept permission prompts' enabled." So a freshly created sibling tab must end up with it
-    on, and asking the operator to click a toggle is not a mechanism.
-
-    This edits the agent's state file directly, which is why it is conservative:
-    - it writes ATOMICALLY (temp file + os.replace), so a concurrent daemon read never sees half a
-      file, and
-    - it only ever sets `value: true` on an existing auto_accept feature, or appends the feature
-      entry when the provider declares features but lacks it. It never invents features for a
-      provider that has none (claude agents carry no `features` list at all, so touching them would
-      be a guess), and it never writes anything else.
-    - a daemon restart or the next agent update may re-read it; if the toggle does not stick, the
-      UI route is still the fallback, and this reports honestly instead of pretending.
-
-    Exit 0 already on / set; 1 could not set; 2 usage. Idempotent.
-    """
-    ident = a.agent
-    state = PASEO / "agents"
-    matches = list(state.glob(f"*/{ident}*.json"))
-    if not matches:
-        # allow a full id with no prefix match
-        matches = [p for p in state.glob("*/*.json") if p.stem.startswith(ident)]
-    if not matches:
-        print(f"autoaccept: no agent state file for {ident!r} under {state}", file=sys.stderr)
-        return 1
-    path = matches[0]
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
-        print(f"autoaccept: cannot read {path}: {exc}", file=sys.stderr)
-        return 1
-    feats = data.get("features")
-    if feats is None:
-        print(f"autoaccept: {path.stem[:8]} ({data.get('provider')}) declares no features "
-              f"list; auto_accept does not apply to this provider, nothing written")
-        return 0
-    changed = False
-    entry = next((f for f in feats if isinstance(f, dict) and f.get("id") == "auto_accept"), None)
-    if entry is None:
-        print(f"autoaccept: {path.stem[:8]} has features but no auto_accept entry; leaving it alone "
-              f"rather than inventing a flag for this provider")
-        return 1
-    if entry.get("value") is not True:
-        entry["value"] = True
-        changed = True
-    cfg = data.setdefault("config", {})
-    fv = cfg.setdefault("featureValues", {})
-    if fv.get("auto_accept") is not True:
-        fv["auto_accept"] = True
-        changed = True
-    if not changed:
-        print(f"autoaccept: {path.stem[:8]} already on")
-        return 0
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    os.replace(tmp, path)
-    print(f"autoaccept: {path.stem[:8]} ({data.get('title') or data.get('provider')}) -> on")
-    return 0
 
 
 def cmd_install(a: argparse.Namespace) -> int:
