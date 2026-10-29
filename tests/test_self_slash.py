@@ -820,24 +820,58 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertNotIn("planplan", r.stdout)
         self.assertNotIn("<agent mode", r.stdout)
 
-    def test_a_mode_the_claude_provider_does_not_have_is_refused_before_anything_starts(self) -> None:
+    def fake_claude(self, body: str) -> str:
+        """A `claude` that logs its argv to <tmp>/claude-argv and then runs BODY; returns its path."""
+        path = Path(self._tmp.name) / "fake-claude"
+        _ = path.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{self._tmp.name}/claude-argv"\n{body}\n')
+        path.chmod(0o755)
+        return str(path)
+
+    def claude_argv(self) -> list[str]:
+        f = Path(self._tmp.name) / "claude-argv"
+        return f.read_text().splitlines() if f.exists() else []
+
+    MODE_PROBE = 'case "$2" in plan|manual|dontAsk|futuremode) exit 0;; *) echo "argument \'$2\' is invalid" >&2; exit 1;; esac'
+
+    def test_a_mode_the_installed_claude_cli_rejects_is_refused_before_anything_starts(self) -> None:
         # 2026-10-23: `--mode full` (an omp mode) reached `paseo run` and came back AGENT_CREATE_FAILED
+        claude = self.fake_claude(self.MODE_PROBE)
         for flags in ((), ("--dry-run",)):
-            r = self.run_ss(*flags, *self.SUCCESSOR, "--mode", "full", **self.succ_env())
+            r = self.run_ss(*flags, *self.SUCCESSOR, "--mode", "full", **self.succ_env(SELF_SLASH_CLAUDE_BIN=claude))
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-            self.assertIn("--mode full is not a mode of the claude provider", r.stderr)
-            for valid in ("plan", "default", "acceptEdits", "auto", "bypassPermissions"):
-                self.assertIn(valid, r.stderr)
+            self.assertIn("--mode full is not a permission mode of the installed claude CLI", r.stderr)
         self.assertEqual(self.paseo_calls(), [])
         self.assertFalse(self.log.exists())
 
-    def test_every_claude_mode_and_other_providers_modes_pass_validation(self) -> None:
-        for mode in ("plan", "default", "acceptEdits", "auto", "bypassPermissions"):
-            r = self.run_ss("--dry-run", *self.SUCCESSOR, "--mode", mode, **self.succ_env())
+    def test_the_claude_modes_come_from_the_installed_cli_not_from_a_list(self) -> None:
+        # manual and dontAsk were valid for claude 2.1.310 and absent from the first static list; a mode no list
+        # here knows passes when the installed CLI accepts it
+        claude = self.fake_claude(self.MODE_PROBE)
+        for mode in ("plan", "manual", "dontAsk", "futuremode"):
+            r = self.run_ss("--dry-run", *self.SUCCESSOR, "--mode", mode, **self.succ_env(SELF_SLASH_CLAUDE_BIN=claude))
             self.assertEqual(r.returncode, 0, mode + r.stdout + r.stderr)
-        # a provider whose modes are not known here is left to Paseo
-        r = self.run_ss("--dry-run", "--finish", "--successor", "omp/some-model", "--mode", "full", **self.succ_env())
+        self.assertEqual(self.claude_argv()[:2], ["--permission-mode plan --version", "--permission-mode manual --version"])
+        # a provider whose modes are not known here is left to Paseo, and claude is never asked about them
+        before = len(self.claude_argv())
+        r = self.run_ss("--dry-run", "--finish", "--successor", "omp/some-model", "--mode", "full",
+                        **self.succ_env(SELF_SLASH_CLAUDE_BIN=claude))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.claude_argv()), before)
+
+    def test_without_a_working_claude_cli_a_static_list_of_the_known_modes_applies(self) -> None:
+        hung = self.fake_claude("sleep 30")
+        missing = str(Path(self._tmp.name) / "no-such-claude")
+        for label, env in (("not installed", {"SELF_SLASH_CLAUDE_BIN": missing}),
+                           ("probe hangs", {"SELF_SLASH_CLAUDE_BIN": hung, "SELF_SLASH_PROBE_TIMEOUT": "1"})):
+            for mode in ("plan", "default", "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk"):
+                r = self.run_ss("--dry-run", *self.SUCCESSOR, "--mode", mode, **self.succ_env(**env))
+                self.assertEqual(r.returncode, 0, label + mode + r.stdout + r.stderr)
+            r = self.run_ss("--dry-run", *self.SUCCESSOR, "--mode", "full", **self.succ_env(**env))
+            self.assertEqual(r.returncode, 2, label + r.stdout + r.stderr)
+            self.assertIn("--mode full is not a permission mode of the claude CLI", r.stderr)
+            self.assertIn("static list", r.stderr)
+            for valid in ("plan", "default", "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk"):
+                self.assertIn(valid, r.stderr)
 
     def test_successor_takes_the_lifecycle_lock(self) -> None:
         self.lockdir.mkdir(parents=True)

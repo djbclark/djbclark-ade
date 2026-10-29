@@ -97,5 +97,35 @@ class CodexComposerRegionTest(unittest.TestCase):
         self.assertEqual(self.classify(shaded("scrolled-off tail of a draft", "›")), "scrolled-off tail of a draft")
 
 
+class WideWindowTest(unittest.TestCase):
+    """classify_wide: a marker row found only beyond the bottom rows counts only inside Claude's input box."""
+    RULE = f"{E}2m{'─' * 50}{E}0m"
+
+    def test_a_marker_row_enclosed_by_rules_is_the_prompt(self) -> None:
+        screen = f"out\n{self.RULE}\n❯\xa0{E}2mTry \"x\"{E}0m\n{self.RULE}\n  status\n"
+        self.assertEqual(prompt_line.classify_wide(screen), "")
+        typed = f"out\n{self.RULE}\n❯\xa0{E}0mhalf a sentence\n{self.RULE}\n  status\n"
+        self.assertEqual(prompt_line.classify_wide(typed), "half a sentence")
+
+    def test_a_marker_row_without_both_rules_is_not(self) -> None:
+        for screen in (f"out\n❯ \nstatus\n", f"{self.RULE}\n❯ \nstatus\n", f"out\n❯ \n{self.RULE}\n",
+                       f"{self.RULE}\nout\n❯ \n{self.RULE}\n"):
+            self.assertIsNone(prompt_line.classify_wide(screen), screen)
+
+    def test_a_marker_that_is_not_at_the_line_start_is_not(self) -> None:
+        self.assertIsNone(prompt_line.classify_wide(f"{self.RULE}\nsaw ❯ in prose\n{self.RULE}\n"))
+        self.assertIsNone(prompt_line.classify_wide(f"{self.RULE}\n❯ ◯ agent · 12m\n{self.RULE}\n".replace("❯ ◯", "x ❯ ◯")))
+
+    def test_the_last_marker_row_decides(self) -> None:
+        old = f"{self.RULE}\n❯ \n{self.RULE}\n"
+        self.assertIsNone(prompt_line.classify_wide(old + "❯ 1. Mark all (Recommended)\nmore\n"))
+        self.assertEqual(prompt_line.classify_wide(f"{self.RULE}\n❯ typed\n{self.RULE}\n" + old), "")
+
+    def test_other_markers_have_no_wide_window_but_codex_keeps_its_composer_rules(self) -> None:
+        self.assertIsNone(prompt_line.classify_wide("→ \n", "→"))
+        self.assertIsNone(prompt_line.classify_wide("╰─ \n", prompt_line.OMP_MARK))
+        self.assertEqual(prompt_line.classify_wide(shaded("› ", ""), "›"), "")
+
+
 if __name__ == "__main__":
     unittest.main()
