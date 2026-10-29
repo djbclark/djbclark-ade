@@ -9,6 +9,11 @@ CI waiver (2026-10-28): a live ci-waiver:v1 marker for the classified current he
 plus an independent live adversary APPROVE, satisfies pending/absent CI as `waived`.
 Failed checks still block. See docs/ci-waiver.md; malformed, mismatched or
 unreviewed claims add ci-waiver-malformed/mismatch/needs-adversary blockers.
+Repair (2026-10-29): own bytes must match a fetched master snapshot; its
+self-contained classifier executes in a private temporary directory, pinned
+to the explicit repository directory. Trust failures add ci-waiver-untrusted-tool.
+Reviewer identity is not authenticated; the operator's pinned merge yes remains
+the authority, with gh pr checks rechecked immediately before merging.
 
 Why (2026-10-23): three waiters per head (CI, Codex, adversary) were two thirds of the
 notification turns of a 579-turn lead transcript, and the load watcher found eight duplicate
@@ -151,6 +156,7 @@ import signal
 import subprocess
 import sys
 import time
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -849,9 +855,38 @@ def adversary_from_doc(doc: dict, head: str) -> dict:
 def ci_waiver_marker(body: str) -> dict:
     """Read LIVE CI waiver markers using the adversary parser's exact JSON/code boundaries."""
     text = _strip_code(body)
+    # Waivers use stricter quoting rules than legacy adversary markers. Lazy
+    # blockquote continuations are conservatively quoted until a blank line.
+    offset, quote = 0, False
+    chars = list(text)
+    for line in body.splitlines(keepends=True):
+        if not line.strip():
+            quote = False
+        lead = line[:len(line) - len(line.lstrip(" \t"))]
+        quote = quote or line.lstrip().startswith(">")
+        if quote or len(lead.expandtabs(4)) >= 4:
+            chars[offset:offset + len(line)] = " " * len(line)
+        offset += len(line)
+    text = "".join(chars)
+    # Equal-length backtick runs may span lines (CommonMark code spans).
+    runs = list(re.finditer(r"`+", text))
+    consumed = -1
+    chars = list(text)
+    for i, run in enumerate(runs):
+        if run.start() < consumed:
+            continue
+        close = next((r for r in runs[i + 1:] if len(r.group()) == len(run.group())), None)
+        if close:
+            chars[run.start():close.end()] = " " * (close.end() - run.start())
+            consumed = close.end()
+    text = "".join(chars)
     spans = _marker_spans(text, marker="ci-waiver")
     unclosed, wrongform = _classify_starts(text, marker="ci-waiver")
-    out = {"present": bool(spans or unclosed or wrongform), "malformed": bool(unclosed or wrongform), "markers": []}
+    raw_spans = _marker_spans(body, marker="ci-waiver")
+    raw_bad = _classify_starts(body, marker="ci-waiver")
+    quoted = any(s not in {x[0] for x in spans} for s, _b, _e in raw_spans)
+    out = {"present": bool(raw_spans or any(raw_bad)),
+           "malformed": bool(unclosed or wrongform or any(raw_bad) or quoted), "markers": []}
     for _start, begin, end in spans:
         try:
             raw = text[begin:end]
@@ -860,7 +895,10 @@ def ci_waiver_marker(body: str) -> dict:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
             if (not isinstance(doc, dict) or doc.get("class") not in ("docs-only", "master-merge")
                     or not isinstance(doc.get("head"), str) or not HEX40.fullmatch(doc["head"])
-                    or not isinstance(doc.get("reviewer"), str) or not doc["reviewer"].strip()):
+                    or not isinstance(doc.get("reviewer"), str) or not doc["reviewer"].strip()
+                    or set(doc) - {"class", "head", "reviewer", "author"}
+                    or ("author" in doc and (not isinstance(doc["author"], str) or not doc["author"].strip()
+                        or doc["author"].strip().casefold() == doc["reviewer"].strip().casefold()))):
                 raise ValueError("invalid waiver fields")
             out["markers"].append(doc)
         except ValueError:
@@ -868,29 +906,57 @@ def ci_waiver_marker(body: str) -> dict:
     return out
 
 
-def classify_ci_waiver(repo: str, pr: int) -> dict:
-    """Use the mechanical classifier; never infer a class from an author's marker."""
+def classify_ci_waiver(repo: str, pr: int, repo_dir: str | None = None) -> dict:
+    """Fetch master, require this waiter byte-identical, execute its trusted classifier.
+
+    This is an integrity check, not authentication of the PR's claimed reviewer.
+    An edited waiter cannot certify itself; the operator uses a trusted copy.
+    """
     try:
-        r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().with_name("ci-waiver")),
-                            "classify", "--pr", str(pr), "--repo", repo, "--json"],
-                           capture_output=True, text=True, timeout=GH_TIMEOUT)
-        if r.returncode:
-            raise ValueError("classifier failed")
-        doc = json.loads(r.stdout)
-        if not isinstance(doc, dict):
-            raise ValueError("classifier shape")
-        return doc
+        directory = Path(repo_dir or os.getcwd()).resolve(strict=True)
+        def git_bytes(*args):
+            env = {k: v for k, v in os.environ.items() if k not in (
+                "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")}
+            r = subprocess.run(["git", *args], cwd=directory, env=env, capture_output=True, timeout=GH_TIMEOUT)
+            if r.returncode:
+                raise ValueError("untrusted Git evidence")
+            return r.stdout
+        directory = Path(git_bytes("rev-parse", "--show-toplevel").decode().strip()).resolve(strict=True)
+        git_bytes("fetch", "origin", "master")
+        master = git_bytes("rev-parse", "--verify", "origin/master^{commit}").decode().strip()
+        if not HEX40.fullmatch(master):
+            raise ValueError("unreadable trusted master")
+        trusted_waiter = git_bytes("show", master + ":bin/pr-wait")
+        trusted_classifier = git_bytes("show", master + ":bin/ci-waiver")
+        if trusted_waiter != Path(__file__).resolve().read_bytes():
+            raise ValueError("waiter differs from master")
+        with tempfile.TemporaryDirectory(prefix="ci-waiver-trusted-") as tmp:
+            path = Path(tmp) / "ci-waiver"
+            path.write_bytes(trusted_classifier)
+            path.chmod(0o700)
+            r = subprocess.run([sys.executable, "-I", str(path), "classify", "--repo-dir", str(directory),
+                                "--pr", str(pr), "--repo", repo, "--json"], cwd=directory,
+                               capture_output=True, text=True, timeout=GH_TIMEOUT)
+            if r.returncode:
+                raise ValueError("trusted classifier failed")
+            doc = json.loads(r.stdout)
+            if not isinstance(doc, dict):
+                raise ValueError("classifier shape")
+            return doc
     except (OSError, subprocess.SubprocessError, ValueError):
-        return {"class": "none", "reasons": ["classifier-error"], "head": None}
+        return {"class": "none", "reasons": ["ci-waiver-untrusted-tool"], "head": None}
 
 
 def waiver_gate(waiver: dict | None, head: str, adversary: dict | None, counts: dict) -> tuple[bool, list[str]]:
     """A waiver implies a current live adversary APPROVE; a failed check always wins."""
     if not waiver or not waiver.get("present"):
         return False, []
+    classified = waiver.get("classification") or {}
+    if "ci-waiver-untrusted-tool" in classified.get("reasons", []):
+        return False, ["ci-waiver-untrusted-tool"] + (["ci-waiver-malformed"] if waiver.get("malformed") else [])
     if waiver.get("malformed"):
         return False, ["ci-waiver-malformed"]
-    classified = waiver.get("classification") or {}
     markers = waiver.get("markers") or []
     blockers = []
     if (classified.get("class") not in ("docs-only", "master-merge")
@@ -1928,7 +1994,7 @@ def main(argv: list[str]) -> int:
         if cur is not None:
             s["adversary"] = adversary_from_doc(doc, head)
             waiver = ci_waiver_marker(doc.get("body") or "")
-            if waiver["present"] and not waiver["malformed"]:
+            if waiver["present"]:
                 waiver["classification"] = classify_ci_waiver(a.repo, a.pr)
             checks = attempt(fetch_checks, a.repo, head)
             if checks is not None:

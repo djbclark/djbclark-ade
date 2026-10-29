@@ -284,7 +284,7 @@ pull request here is expected to meet these; flag any it misses.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.
 11. **CI waiver (2026-10-28): the classifier, never an agent's claim, decides.**
-    `bin/ci-waiver classify --pr N --json` permits only proved `docs-only` paths or a
+    `bin/ci-waiver classify --repo-dir /ABS/REPO --pr N --json` permits only proved `docs-only` paths or a
     `master-merge` of green parents matching Git's machine merge on every other path.
     Workflow, tests, config and waiver-tool changes cannot qualify; failed checks are never waived.
     An independent adversary on `omp --model anthropic/claude-opus-5-5 --effort high` or
@@ -298,3 +298,11 @@ pull request here is expected to meet these; flag any it misses.
     The class and full head must match the classifier; malformed markers block. Pending or absent
     CI then becomes `waived`; Codex and open-finding gates still apply. See
     [docs/ci-waiver.md](docs/ci-waiver.md) for the proof, exclusions and explicit squash message.
+
+    Repair (2026-10-29): a waiver report is valid only from a `pr-wait` byte-identical
+    to fetched master; it executes master's classifier, never the PR's copy. The
+    reviewer is not authenticated: agents share a GitHub account. The operator's
+    pinned merge yes is the authority; a waiver only changes `pr-wait`'s report.
+    The merger rechecks `gh pr checks` immediately before `gh pr merge --match-head-commit`.
+    Waiver markers in code, blockquotes or indented blocks are malformed; their only
+    keys are class/head/reviewer and optional author (reviewer must differ).

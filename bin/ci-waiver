@@ -1,129 +1,212 @@
 #!/usr/bin/env -S python3 -I
-"""Mechanically classify a CI waiver. See docs/ci-waiver.md.
+"""Mechanically classify CI waivers using trusted master's policy; see docs/ci-waiver.md.
 
-ci-waiver classify --pr N [--repo OWNER/NAME] [--json]
-ci-waiver classify --base REF --head REF [--repo OWNER/NAME] [--json]
+ci-waiver classify --repo-dir DIR --pr N [--repo OWNER/NAME] [--json]
+ci-waiver classify --repo-dir DIR --base REF --head REF [--repo OWNER/NAME] [--json]
 
-Exit 0: classification printed (including fail-closed `none`); 2: invalid usage.
-No marker, author assertion, or commit message can grant a waiver.
+Offline base/head mode can prove docs-only; master-merge requires PR history.
+Exit 0: classification printed (including fail-closed none); 2: bad usage.
+This file deliberately imports no repository Python code.
 """
 from __future__ import annotations
-
 import argparse
 import fnmatch
-import importlib.util
 import json
+import os
+import posixpath
 import re
 import subprocess
 import sys
-from importlib.machinery import SourceFileLoader
+import tempfile
+import unicodedata
 from pathlib import Path
 
 WAIVABLE_PATHS = ("CHANGELOG.md", "docs/handoffs/**")
 DEFAULT_REPO = "djbclark/djbclark-ade"
+WORKFLOW_PATHS = ("tests", "claude/hooks/handoff-tools/tests")
 
 
-def waivable(path: str) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in WAIVABLE_PATHS)
+def normalized(path):
+    path = unicodedata.normalize("NFC", path.replace("\\", "/")).casefold()
+    if path.startswith("/") or ".." in path.split("/") or re.match(r"^[a-z]:", path):
+        raise ValueError("unsafe-path:" + path)
+    return posixpath.normpath(path)
 
 
-def excluded(path: str) -> bool:
-    return (path.startswith((".github/", "tests/", "config/"))
-            or path in ("bin/pr-wait", "bin/ci-waiver"))
+def waivable(path):
+    return any(fnmatch.fnmatchcase(normalized(path), normalized(p)) for p in WAIVABLE_PATHS)
 
 
-def git(*args: str, allowed: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
-    r = subprocess.run(["git", *args], capture_output=True, timeout=60)
-    if r.returncode not in allowed:
-        raise ValueError("git-error:" + args[0])
-    return r
+def excluded(path):
+    p = normalized(path)
+    parts = p.split("/")
+    return (any(part.startswith(".git") for part in parts) or "tests" in parts
+            or parts[-1] == "conftest.py" or fnmatch.fnmatchcase(parts[-1], "test_*.py")
+            or p.startswith("config/") or p in ("config", "bin/pr-wait", "bin/ci-waiver")
+            or any(p == q or p.startswith(q + "/") for q in WORKFLOW_PATHS))
 
 
-def sha(ref: str) -> str:
-    value = git("rev-parse", "--verify", "--end-of-options", ref + "^{commit}").stdout.decode().strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", value):
-        raise ValueError("unreadable-commit")
-    return value
+class Repository:
+    def __init__(self, directory):
+        self.directory = Path(directory).resolve(strict=True)
+
+    def git(self, *args, allowed=(0,), env=None, data=None):
+        if env is None:
+            env = {k: v for k, v in os.environ.items() if k not in (
+                "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ATTR_SOURCE")}
+        r = subprocess.run(["git", *args], cwd=self.directory, env=env, input=data,
+                           capture_output=True, timeout=60)
+        if r.returncode not in allowed:
+            raise ValueError("git-error:" + args[0])
+        return r
+
+    def sha(self, ref):
+        value = self.git("rev-parse", "--verify", "--end-of-options", ref + "^{commit}").stdout.decode().strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            raise ValueError("unreadable-commit")
+        return value
+
+    def paths(self, a, b, env=None):
+        return [p.decode("utf-8", "surrogateescape") for p in
+                self.git("diff", "--no-renames", "--name-only", "-z", a, b, "--", env=env).stdout.split(b"\0") if p]
+
+    def safe_doc_modes(self, a, b):
+        fields = self.git("diff", "--raw", "--no-abbrev", "--no-renames", "-z", a, b, "--").stdout.split(b"\0")
+        for i in range(0, len(fields) - 1, 2):
+            path = fields[i + 1].decode("utf-8", "surrogateescape")
+            if waivable(path):
+                old, new = fields[i].split()[:2]
+                if old not in (b":000000", b":100644") or new not in (b"000000", b"100644"):
+                    raise ValueError("unsafe-doc-mode:" + path)
+
+    def machine_merge(self, h0, target):
+        # Isolated bare gitdir: no worktree, info/attributes or local drivers.
+        # Empty attr-source plus disabled global/system/environment attributes
+        # prevents committed or ambient attributes from changing the merge.
+        objects = self.git("rev-parse", "--git-path", "objects").stdout.decode().strip()
+        objects = str((self.directory / objects).resolve())
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1")
+        with tempfile.TemporaryDirectory(prefix="ci-waiver-merge-") as tmp:
+            self.git("init", "--bare", tmp, env=env)
+            env.update(GIT_DIR=tmp, GIT_ALTERNATE_OBJECT_DIRECTORIES=objects)
+            empty = self.git("hash-object", "-w", "-t", "tree", "--stdin", env=env, data=b"").stdout.decode().strip()
+            args = ("--attr-source=" + empty, "-c", "core.attributesFile=" + os.devnull)
+            # Unsupported attr-source refuses; never fall back to ambient attributes.
+            self.git(*args, "check-attr", "merge", "--", "code.py", env=env)
+            merged = self.git(*args, "merge-tree", "--write-tree", "--name-only", "-z", h0, target,
+                              env=env, allowed=(0, 1))
+            fields = merged.stdout.split(b"\0")
+            tree = fields[0].decode()
+            if not re.fullmatch(r"[0-9a-f]{40}", tree):
+                raise ValueError("unreadable-machine-merge")
+            if merged.returncode:
+                for p in fields[1:]:
+                    if not p:
+                        break
+                    path = p.decode("utf-8", "surrogateescape")
+                    if not waivable(path):
+                        raise ValueError("hand-edited:" + path)
+            edits = ["hand-edited:" + p for p in self.paths(tree, self.head, env=env) if not waivable(p)]
+            if edits:
+                raise ValueError(edits[0])
 
 
-def paths(a: str, b: str) -> list[str]:
-    # No rename detection: BOTH the old and new paths must pass the policy.
-    return [p.decode("utf-8", "surrogateescape") for p in
-            git("diff", "--no-renames", "--name-only", "-z", a, b, "--").stdout.split(b"\0") if p]
+def gh(endpoint):
+    r = subprocess.run(["gh", "api", "--paginate", endpoint], capture_output=True, text=True, timeout=120)
+    if r.returncode:
+        raise ValueError("gh-error:" + endpoint.split("?")[0])
+    decoder, docs, i = json.JSONDecoder(), [], 0
+    while i < len(r.stdout):
+        if r.stdout[i].isspace():
+            i += 1
+            continue
+        doc, i = decoder.raw_decode(r.stdout, i)
+        docs.append(doc)
+    if not docs:
+        raise ValueError("empty-gh-response")
+    return docs
 
 
-def waiter():
-    loader = SourceFileLoader("ci_waiver_waiter", str(Path(__file__).resolve().with_name("pr-wait")))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+def items(endpoint, key=None):
+    out = []
+    for doc in gh(endpoint):
+        part = doc[key] if key else doc
+        if not isinstance(part, list) or any(not isinstance(x, dict) for x in part):
+            raise ValueError("unreadable-list")
+        out.extend(part)
+    return out
 
 
-def classify(base: str | None, head: str | None, repo: str, pr: int | None = None) -> dict:
+def green_run(repo, commit, *, master=False, pr=None, timeline=()):
+    runs = items(f"repos/{repo}/actions/workflows/test.yml/runs?head_sha={commit}&per_page=100", "workflow_runs")
+    matching = [r for r in runs if r.get("head_sha") == commit and
+                (r.get("event") == "push" and r.get("head_branch") == "master" if master
+                 else r.get("event") in ("pull_request", "push"))]
+    latest = max(matching, key=lambda r: (int(r["run_number"]), int(r.get("run_attempt", 1)))) if matching else {}
+    reason = "master-not-green" if master else "h0-not-green"
+    if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+        raise ValueError(reason)
+    if not master:
+        associated = latest.get("event") == "pull_request" and any(p.get("number") == pr for p in latest.get("pull_requests", []))
+        historic = any(e.get("event") in ("head_ref_force_pushed", "synchronize") and
+                       commit in (e.get("before"), e.get("after"),
+                                  (e.get("before_commit") or {}).get("sha"),
+                                  (e.get("after_commit") or {}).get("sha")) for e in timeline)
+        if not associated and not historic:
+            raise ValueError("h0-not-pr-head")
+    jobs = items(f"repos/{repo}/actions/runs/{int(latest['id'])}/attempts/{int(latest.get('run_attempt', 1))}/jobs?per_page=100", "jobs")
+    if not jobs or any(j.get("status") != "completed" or j.get("conclusion") != "success" for j in jobs):
+        raise ValueError(reason)
+
+
+def classify(base, head, repo, pr, repo_dir):
     result = {"class": "none", "reasons": [], "head": None}
     try:
-        if git("rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
+        r = Repository(repo_dir)
+        if r.git("rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
             raise ValueError("shallow-history")
-        w = waiter()
         if pr is not None:
-            doc = w.pr_doc(repo, pr)
+            doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+            if doc["base"]["ref"] != "master":
+                raise ValueError("base-not-master")
             base, head = doc["base"]["sha"], doc["head"]["sha"]
-        if not base or not head:
-            raise ValueError("missing-base-or-head")
-        base, head = sha(base), sha(head)
-        result["head"] = head
-        ancestor = sha(git("merge-base", base, head).stdout.decode().strip())
-        changed = paths(ancestor, head)
+        base, head = r.sha(base), r.sha(head)
+        result["head"] = r.head = head
+        ancestor = r.sha(r.git("merge-base", base, head).stdout.decode().strip())
+        changed = r.paths(ancestor, head)
         hard = ["hard-exclusion:" + p for p in changed if excluded(p)]
         if hard:
-            result["reasons"] = hard
-            return result
+            return {**result, "reasons": hard}
+        r.safe_doc_modes(ancestor, head)
         if changed and all(waivable(p) for p in changed):
             return {**result, "class": "docs-only", "reasons": ["only-waivable-paths"]}
-        nonwaivable = ["touches-nonwaivable:" + p for p in changed if not waivable(p)]
-        parents = git("rev-list", "--parents", "-n", "1", head).stdout.decode().split()[1:]
+        parents = r.git("rev-list", "--parents", "-n", "1", head).stdout.decode().split()[1:]
         if len(parents) != 2:
-            return {**result, "reasons": nonwaivable + ["not-a-merge"]}
-        h0, target = map(sha, parents)
-        counts = w.ci_counts(w.fetch_checks(repo, h0))
-        if not counts["success"] or counts["fail"] or counts["pending"]:
-            raise ValueError("h0-not-green")
-        master = json.loads(w.gh("api", f"repos/{repo}/commits/master"))["sha"]
-        if git("merge-base", "--is-ancestor", target, sha(master), allowed=(0, 1)).returncode:
+            return {**result, "reasons": ["touches-nonwaivable:" + p for p in changed if not waivable(p)] + ["not-a-merge"]}
+        if pr is None:
+            raise ValueError("pr-history-required")
+        h0, target = map(r.sha, parents)
+        commits = items(f"repos/{repo}/pulls/{pr}/commits?per_page=100")
+        if not any(c.get("sha") == h0 for c in commits):
+            raise ValueError("h0-not-pr-head")
+        timeline = items(f"repos/{repo}/issues/{pr}/timeline?per_page=100")
+        green_run(repo, h0, pr=pr, timeline=timeline)
+        master = gh(f"repos/{repo}/commits/master")[0]["sha"]
+        if r.git("merge-base", "--is-ancestor", target, r.sha(master), allowed=(0, 1)).returncode:
             raise ValueError("target-not-on-master")
-        runs = w.api_items(f"repos/{repo}/actions/workflows/test.yml/runs?event=push&branch=master&head_sha={target}&per_page=100", "workflow_runs")
-        matching = [r for r in runs if r.get("head_sha") == target and r.get("event") == "push"
-                    and r.get("head_branch") == "master"]
-        # The latest attempt wins: an earlier success cannot hide a failed rerun.
-        latest = max(matching, key=lambda r: (int(r["run_number"]), int(r.get("run_attempt", 1)))) if matching else {}
-        if latest.get("status") != "completed" or latest.get("conclusion") != "success":
-            raise ValueError("master-not-green")
-        merged = git("merge-tree", "--write-tree", "--name-only", "-z", h0, target, allowed=(0, 1))
-        fields = merged.stdout.split(b"\0")
-        tree = fields[0].decode()
-        if not re.fullmatch(r"[0-9a-f]{40}", tree):
-            raise ValueError("unreadable-machine-merge")
-        if merged.returncode:
-            for p in fields[1:]:
-                if not p:
-                    break
-                path = p.decode("utf-8", "surrogateescape")
-                if not waivable(path):
-                    raise ValueError("hand-edited:" + path)
-        edits = ["hand-edited:" + p for p in paths(tree, head) if not waivable(p)]
-        if edits:
-            return {**result, "reasons": edits}
-        return {**result, "class": "master-merge", "reasons": ["green-parents-machine-merge"]}
+        green_run(repo, target, master=True)
+        r.machine_merge(h0, target)
+        return {**result, "class": "master-merge", "reasons": ["green-pr-head-machine-merge"]}
     except Exception as e:
-        # All external data and local repository failures deny the waiver.
         return {**result, "reasons": [str(e)[:240] or type(e).__name__]}
 
 
-def main() -> int:
+def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="command", required=True)
-    c = sub.add_parser("classify", help="print class, reasons and exact classified head; errors fail closed")
+    c = p.add_subparsers(dest="command", required=True).add_parser("classify")
+    c.add_argument("--repo-dir", required=True)
     c.add_argument("--pr", type=int)
     c.add_argument("--repo", default=DEFAULT_REPO)
     c.add_argument("--base")
@@ -132,7 +215,7 @@ def main() -> int:
     a = p.parse_args()
     if (a.pr is None and not (a.base and a.head)) or (a.pr is not None and (a.base or a.head)):
         p.error("use --pr N OR both --base REF --head REF")
-    result = classify(a.base, a.head, a.repo, a.pr)
+    result = classify(a.base, a.head, a.repo, a.pr, a.repo_dir)
     print(json.dumps(result) if a.json else f"{result['class']}: {', '.join(result['reasons'])} (head {result['head']})")
     return 0
 
