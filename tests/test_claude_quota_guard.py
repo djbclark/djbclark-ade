@@ -213,8 +213,17 @@ def test_advice_grows_with_level(rig):
     rig.set_aiuse(aiuse_fixture(weekly=5))
     assert rig.guard().returncode == 3
     crit = rig.state_json()["advice"]
-    assert "--finish --successor" in crit
-    assert f"No new Claude work of any kind until the reset at {WEEK_RESET_N}" in crit
+    assert f"No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session included) until the reset at {WEEK_RESET_N}" in crit
+    # Critical advice must not read as a stop order for sessions on other pools (2026-10-29: idle
+    # omp sessions stopped on "hand off, stop"), but omp shares the Claude weekly rate window, so
+    # it is only unaffected while aiuse still lists it (adversary r1 on PR 126, A1).
+    assert "not a stop order" in crit and "codex, grok, agy, zai or opencode is unaffected" in crit
+    assert "omp keeps working only while `aiuse --available --json` still lists it" in crit
+    assert "--finish --successor omp/anthropic/claude-sonnet-5-5 --thinking high" in crit
+    assert "--finish --successor claude/claude-sonnet-5-5" not in crit
+    assert "hand off, stop" not in crit and "of any kind" not in crit
+    # herdr and Orca refuse an omp successor (bin/self-slash): the text must say what to do there.
+    assert "on herdr or Orca write the handoff, then start omp by hand" in crit
 
 
 def test_five_hour_critical_names_the_five_hour_reset(rig):
@@ -542,9 +551,9 @@ def test_hostile_resets_at_reaches_neither_state_advice_nor_hook(rig, bad):
     assert rig.guard().returncode == 3
     st = rig.state_json()
     assert st["resets_at"] is None and st["weekly_resets_at"] is None
-    assert "until the reset at unknown;" in st["advice"]
+    assert "until the reset at unknown." in st["advice"]
     out = rig.hook().stdout
-    assert "until the reset at unknown;" in out
+    assert "until the reset at unknown." in out
     assert "SYSTEM" not in out and "system-reminder" not in out and "'x'" not in out
     assert "resets unknown;" in rig.pings()[0]
 
@@ -909,7 +918,7 @@ def test_n6_only_the_critical_advice_qualifies_the_omp_adversary_route(rig):
     crit = rig.state_json()["advice"]
     assert qualifier in crit
     assert "acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high" in crit
-    assert "No new Claude work of any kind" in crit
+    assert "No new Claude Code subscription work" in crit
 
 
 def test_a_ping_cut_off_by_a_kill_is_retried_next_run_at_least_once(rig):
@@ -1020,7 +1029,7 @@ def test_p1_aiuse_exit_3_is_critical_whatever_a_healthy_snapshot_shows(rig, stdo
     st = rig.state_json()
     assert st["level"] == "critical" and st["source"] == "snapshot"
     assert st["weekly_left"] == 90 and st["weekly_resets_at"] == WEEK_RESET_N
-    assert "No new Claude work of any kind" in st["advice"]
+    assert "No new Claude Code subscription work" in st["advice"]
     assert "aiuse dropped Claude" not in st["advice"]
     assert rig.pings() == [
         f"djbclark-ade: Claude quota critical: weekly 90% left, resets {WEEK_PHRASE}; "
@@ -1489,7 +1498,7 @@ def test_c2_exit_3_with_a_non_object_payload_is_critical_not_unreadable(rig, std
     assert rig.guard().returncode == 3
     st = rig.state_json()
     assert st["level"] == "critical" and st["source"] == "none"
-    assert "No new Claude work of any kind" in st["advice"] and len(rig.pings()) == 1
+    assert "No new Claude Code subscription work" in st["advice"] and len(rig.pings()) == 1
     assert st["unreadable_since"] is None
 
 
