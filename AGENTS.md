@@ -239,7 +239,7 @@ pull request here is expected to meet these; flag any it misses.
    `shlex.quote` or `shlex.join`.
 5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare
    `sed`) have a Linux path or use the GNU `g*` tool; CI runs `pytest` on
-   both.
+   Linux, and on macOS only on request (a manual `Tests` dispatch with the `macos` input, 2026-10-29).
 6. **Records and state files change atomically** (temp file beside, then
    `os.replace`), and every new record field is read with `.get` so older
    records still load.
