@@ -37,9 +37,11 @@ with `--expect-ack`:
    Run it with a terminal timeout of at least 150 s, or in the background and read the reply file it names: a
    tool timeout that kills the whole process tree also kills the relayed turn mid-way, and your retry would run it
    twice. If a line says "WAS sent" and the final line says "not sent: Hermes does not know session", the final line wins.
-4. **It refuses on purpose:** this very session, a finished session (`/handoff`, `/quit`), and one blocked on a
-   question or permission prompt (a Paseo agent with a pending permission card included), an archived Paseo agent, a text
-   starting with `/` or `!`. A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
+4. **It refuses on purpose:** this very session, a finished session (`/handoff`, `/quit`), an archived Paseo agent, a text
+   starting with `/` or `!`, and (with `--no-defer`, `--plan`, `--idle`, another `--via`, or no identifiable sender) one blocked on a
+   question or permission prompt (a Paseo agent with a pending permission card included). Otherwise a card-blocked target is
+   queued (item 3) and delivered once the card is answered, the deliverer backing off between looks (5 s up to 2 min, jittered);
+   a text is never typed into the card. A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
    not made at once, because Paseo replaces its running turn when the provider declines a steer: relay queues it (item 3).
    `relay.py <ident> "x" --steer` sends a codex/omp/opencode/pi one anyway, `--idle S` waits for idle first and blocks
    (it wins over queueing), `--no-defer` refuses (exit 1) instead of queueing, `--defer-for S` sets how long a queued
