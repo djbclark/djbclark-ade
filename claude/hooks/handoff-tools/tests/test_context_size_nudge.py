@@ -265,7 +265,8 @@ def test_bare_branch_does_not_point_at_a_compact_path_it_lacks(hook, tmp_path):
     the mid-task note must say to let the auto-compaction take it (adversary round 2, F2)."""
     out, _ = hook("s-bare-alt", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
     assert "/compact path above" not in out
-    assert "keep going and let the auto-compaction take it" in out
+    assert "(or, if the work must continue in-context, let the auto-compaction take it)" in out
+    assert "keep going and let" not in out
 
 
 def test_self_slash_branch_points_at_its_own_compact_path(hook, tmp_path, monkeypatch):
@@ -357,6 +358,136 @@ def test_a_boundary_before_the_previous_prompt_is_not_found_again(hook, tmp_path
     assert out == ""
     after = hook.state()["s-old-boundary"]
     assert after["level"] == 2 and after["baseline"] == state["baseline"]
+
+
+_BIG_TOOL = json.dumps({"type": "user", "message": {"content": [
+    {"type": "tool_result", "content": "x" * 600_000}]}}) + "\n"
+# A structured tool_use input holds a raw JSON object: the needle text appears unescaped.
+_FAKE_BOUNDARY = json.dumps({"type": "assistant", "isSidechain": False, "message": {"content": [
+    {"type": "tool_use", "name": "mcp__x__y", "input": {"subtype": "compact_boundary"}}]}},
+    separators=(",", ":")) + "\n"
+
+
+def _pad(n):
+    return json.dumps({"type": "progress", "x": "z" * n}) + "\n"
+
+
+def _floor(path, since):
+    return nudge._compaction_floor_since(path, since, path.stat().st_size)
+
+
+def test_a_boundary_more_than_2mb_before_the_next_prompt_is_found(hook, tmp_path):
+    """Adversary round 3, F1: a heavy turn (images, big tool results) writes >2 MB after a
+    mid-turn compaction; the old 2 MB window never saw the boundary and the hard tier stayed
+    stuck (real session a0c69a11 missed three climbs)."""
+    path = _transcript(tmp_path, 71_000, 225_000)
+    assert _is_ask(hook("s-big", path)[0])
+    after = _BIG_TOOL * 4
+    assert len(after) > 2 * 1024 * 1024
+    _append(path, _usage(267_000) + _BOUNDARY_LINE + _usage(104_000) + after)
+    _append(path, _usage(180_000))
+    out, _ = hook("s-big", path)
+    assert not _is_ask(out)
+    state = hook.state()["s-big"]
+    assert state["baseline"] == 104_000 and state["level"] == 1
+    _append(path, _usage(220_000))
+    assert _is_ask(hook("s-big", path)[0])
+
+
+def test_a_boundary_straddling_a_chunk_edge_is_found(tmp_path, monkeypatch):
+    """The raw-bytes search reads chunks that overlap by the needle's length: no boundary hides
+    on an edge, wherever the edge falls."""
+    monkeypatch.setattr(nudge, "_SCAN_CHUNK", 4096)
+    straddled = 0
+    for pad in range(3800, 4200, 2):
+        path = _transcript(tmp_path, 71_000, name=f"edge{pad}.jsonl")
+        since = path.stat().st_size
+        _append(path, _pad(9000) + _BOUNDARY_LINE + _pad(pad) + _usage(104_000))
+        size = path.stat().st_size
+        needle_at = path.read_bytes().index(b'"subtype"')
+        if 0 < (size - needle_at) % 4096 < 29:
+            straddled += 1
+        assert _floor(path, since) == 104_000, pad
+    assert straddled >= 3  # the sweep really put an edge inside the needle
+
+
+def test_a_boundary_record_cut_at_the_previous_prompt_is_found_once_complete(hook, tmp_path):
+    """Adversary round 3, F4: the record was mid-write when the previous prompt took its size
+    snapshot, with its needle already written (and far enough back that a few bytes of margin
+    would not reach it)."""
+    record = json.dumps({"type": "system", "subtype": "compact_boundary", "content": "c" * 600})
+    cut = record.index("compact_boundary") + 300
+    path = _transcript(tmp_path, 71_000, 225_000)
+    _append(path, record[:cut])  # no newline: the writer is mid-record
+    assert _is_ask(hook("s-cut", path)[0])
+    _append(path, record[cut:] + "\n" + _usage(104_000) + _usage(180_000))
+    out, _ = hook("s-cut", path)
+    assert not _is_ask(out)
+    assert hook.state()["s-cut"]["baseline"] == 104_000
+
+
+def test_the_scan_cap_falls_back_to_the_tail_window(tmp_path, monkeypatch):
+    """Past _SCAN_CAP appended bytes only the largest tail window is searched (a safety bound)."""
+    monkeypatch.setattr(nudge, "_SCAN_CAP", 3 * 1024 * 1024)
+    head = _transcript(tmp_path, 71_000, name="cap-head.jsonl")
+    since = head.stat().st_size
+    base = head.read_text()
+
+    in_tail = tmp_path / "cap-in-tail.jsonl"
+    in_tail.write_text(base + _BIG_TOOL * 5 + _BOUNDARY_LINE + _usage(104_000) + _BIG_TOOL)
+    assert in_tail.stat().st_size - since > nudge._SCAN_CAP
+    assert _floor(in_tail, since) == 104_000
+
+    outside = tmp_path / "cap-outside.jsonl"
+    outside.write_text(base + _BOUNDARY_LINE + _usage(104_000) + _BIG_TOOL * 6)
+    assert outside.stat().st_size - since > nudge._SCAN_CAP
+    assert _floor(outside, since) is None  # beyond the cap AND beyond the tail window
+    monkeypatch.setattr(nudge, "_SCAN_CAP", 8 * 1024 * 1024)
+    assert _floor(outside, since) == 104_000  # within the cap: the whole region is searched
+
+
+def test_a_boundary_named_in_a_tool_input_is_not_a_compaction(hook, tmp_path):
+    """Adversary round 3, F3: a structured tool_use input is raw JSON, so its text matches the
+    needle; only a real `system` record counts, in the scan and in the newest-record read."""
+    path = _transcript(tmp_path, 71_000, 230_000)
+    assert _is_ask(hook("s-fake", path)[0])
+    _append(path, _FAKE_BOUNDARY + _usage(232_000))
+    out, _ = hook("s-fake", path)
+    assert not _is_ask(out)
+    state = hook.state()["s-fake"]
+    assert state["level"] == 2 and state["baseline"] == 71_000
+
+    low = _transcript(tmp_path, 71_000, 150_000, name="low.jsonl")
+    assert "Context check" in hook("s-fake-low", low)[0]
+    _append(low, _FAKE_BOUNDARY + _usage(152_000))
+    hook("s-fake-low", low)
+    assert hook.state()["s-fake-low"]["baseline"] == 71_000
+
+    newest = _transcript(tmp_path, 71_000, 230_000, name="newest.jsonl")
+    _append(newest, _FAKE_BOUNDARY)
+    assert nudge._last_context_tokens(newest) == 230_000
+    _append(newest, _BOUNDARY_LINE)
+    assert nudge._last_context_tokens(newest) == nudge.COMPACTED
+    for record in ({"type": "user", "subtype": "compact_boundary"},
+                   {"type": "system", "subtype": "compact_boundary", "isSidechain": True},
+                   {"type": "system", "subtype": "other"}):
+        assert not nudge._is_boundary_line(json.dumps(record).encode())
+    assert nudge._is_boundary_line(json.dumps({"type": "system", "subtype": "compact_boundary"}).encode())
+
+
+def test_a_dip_below_the_total_tier_keeps_the_fired_level_with_a_low_floor(hook, tmp_path):
+    """Adversary round 3, F2: floor 20k, level 2 fired at 160k (growth 140k). A dip to 125k is
+    inside the 25% band but below the total tiers; clamping the stored level against the dipped
+    total lowered it to 1 and the next climb printed the hard message again."""
+    (tmp_path / "state.json").write_text(json.dumps({"s-lowfloor": {"level": 0, "baseline": 20_000}}))
+    path = _transcript(tmp_path, 160_000)
+    assert _is_ask(hook("s-lowfloor", path)[0])
+    outs = []
+    for size in (125_000, 161_000, 126_000, 162_000):
+        _append(path, _usage(size))
+        outs.append(_is_ask(hook("s-lowfloor", path)[0]))
+    assert outs == [False] * 4
+    assert hook.state()["s-lowfloor"]["level"] == 2
 
 
 def test_state_without_a_stored_size_scans_nothing_and_keeps_working(hook, tmp_path):

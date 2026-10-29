@@ -32,6 +32,9 @@ first: 50k below the ~267k wall where Claude Code auto-compacts (300,000 less it
 trigger also covers regrowth after a compaction (floor ~104k), where +140k would
 land 23k from the wall. The hook runs only when a prompt is submitted, so its text
 tells the agent how many tool rounds fit before the wall.
+A compaction written mid-turn (followed by more tool rounds, so no boundary is the newest record) is
+found by searching every byte appended to the transcript since the previous prompt, as raw bytes in
+1 MB chunks (cap 64 MB, then the last 2 MB); only a `system` `compact_boundary` record counts.
 
 Claude's existing `autoCompactWindow` stays at 300,000. Measurements that motivated
 its growth and cooldown guards showed substantial summary/cache-write overhead;

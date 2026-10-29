@@ -118,7 +118,13 @@ SHRINK_RATIO = 0.75     # a size below this share of the last one = compacted
 COMPACTED = "compacted"  # _last_context_tokens: boundary newer than any usage
 # Unescaped quotes only: the same text inside a tool result is JSON-escaped.
 _BOUNDARY = re.compile(rb'"subtype":\s*"compact_boundary"')
-_SIDECHAIN = re.compile(rb'"isSidechain":\s*true')
+# The boundary search over the appended bytes (_compaction_floor_since): raw-bytes chunks that
+# overlap by more than the longest match (the needle is 28 bytes plus whatever whitespace),
+# starting a little before the previous prompt's size, never more than the cap in total.
+_SCAN_CHUNK = 1024 * 1024
+_SCAN_OVERLAP = 128
+_SCAN_BACK = 64 * 1024
+_SCAN_CAP = 64 * 1024 * 1024
 
 PING_BIN = Path.home() / ".local" / "bin" / "hermes-ping"
 
@@ -158,6 +164,20 @@ def _usage_from_line(line):
     return sum(p for p in parts if isinstance(p, int))
 
 
+def _is_boundary_line(line):
+    """True for a real main-session compaction record: a `system` record of subtype
+    compact_boundary. The raw-bytes match alone also hits a structured tool_use input that
+    holds the same JSON (round 3, F3), so a hit is parsed."""
+    if not _BOUNDARY.search(line):
+        return False
+    try:
+        obj = json.loads(line)
+    except Exception:
+        return False
+    return (isinstance(obj, dict) and obj.get("type") == "system"
+            and obj.get("subtype") == "compact_boundary" and not obj.get("isSidechain"))
+
+
 def _last_context_tokens(transcript_path):
     """Best-effort: the newest usage block's context size.
 
@@ -179,7 +199,7 @@ def _last_context_tokens(transcript_path):
                 if chunk_size < size:
                     lines = lines[1:]  # first line may be cut mid-record
                 for line in reversed(lines):
-                    if _BOUNDARY.search(line) and not _SIDECHAIN.search(line):
+                    if _is_boundary_line(line):
                         return COMPACTED  # no request since the compaction yet
                     value = _usage_from_line(line)
                     if value is not None:
@@ -198,37 +218,103 @@ def _file_size(transcript_path):
         return None
 
 
+def _line_span(f, pos, size):
+    """Byte offsets (start, end) of the line holding `pos`; `end` is past its newline (or the
+    file size when the writer has not finished it). Looks at most _SCAN_CAP bytes either way."""
+    start = pos
+    lo = max(0, pos - _SCAN_CAP)
+    while start > lo:
+        step = min(_SCAN_CHUNK, start - lo)
+        f.seek(start - step)
+        index = f.read(step).rfind(b"\n")
+        if index >= 0:
+            start = start - step + index + 1
+            break
+        start -= step
+    end = pos
+    hi = min(size, pos + _SCAN_CAP)
+    while end < hi:
+        f.seek(end)
+        buf = f.read(min(_SCAN_CHUNK, hi - end))
+        if not buf:
+            break
+        index = buf.find(b"\n")
+        if index >= 0:
+            return start, end + index + 1
+        end += len(buf)
+    return start, end
+
+
+def _usage_after(f, pos, size):
+    """The first usage record in [pos, size), read in chunks; None when there is none."""
+    pieces = []
+    while pos < size:
+        f.seek(pos)
+        buf = f.read(min(_SCAN_CHUNK, size - pos))
+        if not buf:
+            break
+        pos += len(buf)
+        parts = buf.split(b"\n")
+        pieces.append(parts[0])
+        if len(parts) == 1:
+            continue
+        lines = [b"".join(pieces)] + parts[1:-1]
+        pieces = [parts[-1]]
+        for line in lines:
+            value = _usage_from_line(line)
+            if value is not None:
+                return value
+    return _usage_from_line(b"".join(pieces))
+
+
 def _compaction_floor_since(transcript_path, since, size):
     """A compaction between two prompts, from the bytes appended since the last one.
 
     `since`/`size`: the transcript's byte size at the previous prompt and now. None when no
     non-sidechain compact_boundary was appended (or either size is unusable); else the first
     usage after the NEWEST such boundary (the new floor), or COMPACTED when none follows.
-    Reads at most the largest tail window, like _last_context_tokens."""
+
+    The whole appended region is searched as raw bytes, newest chunk first (a heavy turn writes
+    megabytes after a mid-turn compaction: round 3, F1); a line is split and parsed only around
+    a hit. The search starts _SCAN_BACK bytes before `since` so a record that was still being
+    written at the previous prompt is found once complete; a hit whose line ended by `since`
+    is an old boundary and ends the search. Past _SCAN_CAP appended bytes only the largest
+    tail window is searched."""
     if (not isinstance(since, int) or isinstance(since, bool) or since < 0
             or not isinstance(size, int) or size <= since):
         return None
-    start = max(since, size - _TAIL_WINDOWS[-1])
+    if size - since > _SCAN_CAP:
+        start = max(since, size - _TAIL_WINDOWS[-1])
+    else:
+        start = max(0, since - _SCAN_BACK)
     try:
         with Path(transcript_path).open("rb") as f:
-            f.seek(start)
-            data = f.read(size - start)
+            after = None  # offset just past the newest real boundary's line
+            rejected = size  # matches at or after this offset sit on a line already rejected
+            hi = size
+            while hi > start and after is None:
+                lo = max(start, hi - _SCAN_CHUNK)
+                f.seek(lo)
+                data = f.read(min(size, hi + _SCAN_OVERLAP) - lo)
+                for match in reversed(list(_BOUNDARY.finditer(data))):
+                    pos = lo + match.start()
+                    if pos >= hi or pos >= rejected:
+                        continue  # a newer chunk's, or on a line already rejected
+                    line_start, line_end = _line_span(f, pos, size)
+                    if line_end <= since:
+                        return None  # complete before the previous prompt: so is all that is older
+                    f.seek(line_start)
+                    if _is_boundary_line(f.read(line_end - line_start)):
+                        after = line_end
+                        break
+                    rejected = line_start
+                hi = lo
+            if after is None:
+                return None
+            value = _usage_after(f, after, size)
     except Exception:
         return None
-    lines = data.split(b"\n")
-    if start > since:
-        lines = lines[1:]  # the window may begin mid-record
-    newest = None
-    for index, line in enumerate(lines):
-        if _BOUNDARY.search(line) and not _SIDECHAIN.search(line):
-            newest = index
-    if newest is None:
-        return None
-    for line in lines[newest + 1:]:
-        value = _usage_from_line(line)
-        if value is not None:
-            return value
-    return COMPACTED
+    return COMPACTED if value is None else value
 
 
 def _last_assistant_model(transcript_path):
@@ -449,16 +535,16 @@ def _midtask_note(total, in_context):
         f"About {left:,} tokens remain before Claude Code compacts this session at "
         f"{AUTO_COMPACT_WALL:,}; this reminder runs only when a prompt is submitted, "
         "not between tool rounds. If this turn is mid-task: finish the current edit "
-        "(never leave one half-written), then run the handoff (or, if the work must "
-        f"continue in-context, {in_context}) "
+        "(never leave one half-written), then run the handoff "
     )
+    alternative = f" (or, if the work must continue in-context, {in_context})."
     if rounds > 0:
         return lead + (
             f"before the next tool round beyond {rounds} more "
             f"(about {TOOL_ROUND_TOKENS // 1000}k tokens each; a large file or log read "
-            "counts double)."
+            "counts double)" + alternative
         )
-    return lead + "right after it, with no further tool rounds."
+    return lead + "right after it, with no further tool rounds" + alternative
 
 
 def _ask_message(total, growth, repeat, successor=None):
@@ -502,7 +588,7 @@ def _ask_message(total, growth, repeat, successor=None):
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total, "keep going and let the auto-compaction take it") + " "
+        + _midtask_note(total, "let the auto-compaction take it") + " "
         + _COST_NOTE
     )
 
@@ -608,9 +694,12 @@ def main():
     fired = session_state.get("level", 0)
     if not isinstance(fired, int):
         fired = 0
-    # Old or corrupt state (a level this total cannot compute) must not stick (round 2, F4):
-    # growth never exceeds the total, so _level(total, total) is the highest it can reach.
-    fired = min(fired, _level(total, total))
+    # Old or corrupt state (a level the session cannot have reached) must not stick (round 2,
+    # F4): clamp to what the stored peak computes (peak resets together with the level). The
+    # dipped total is no bound: a floor-20k session fired level 2 at 160k, dips to 125k, and
+    # must not print it again at 161k (round 3, F2).
+    peak_total = session_state["peak"]
+    fired = min(fired, _level(peak_total, peak_total))
 
     if level > fired:
         if level == 1:
