@@ -98,7 +98,10 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
 Verify against the processes themselves, not against memory or the brief's guess (standing order 4).
 
 Diagnostic safeguards (2026-10-28): match an executable path and parent PID, never a substring of the
-whole command line: your own shell/Python diagnostic embeds the searched text. Before sampling or
+whole command line: your own shell/Python diagnostic embeds the searched text. Parse the executable
+and actual argv tokens, exclude the diagnostic process and its shell, and never count a shell merely
+because its embedded script contains `relay.py --deliver` or a CLI path (2026-10-29). `graft grep` takes
+a regular expression: escape literal parentheses or search a short identifier without them. Before sampling or
 signalling, recheck the target's identity; after `sample`, check the report's Process and PID too
 (a short-lived helper can exit or its PID can be reused even when `sample` exits 0). Discard a report
 for another process. Capture broad command output first and print bounded relevant rows; do not
