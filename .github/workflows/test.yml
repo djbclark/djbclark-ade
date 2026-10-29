@@ -10,13 +10,20 @@ on:
         description: Run only the focused context and Go cost checks
         type: boolean
         default: false
+      macos:
+        description: Also run the suite on the macOS runner (off by default; on request only; ignored when context_only is set)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   pytest:
-    if: ${{ github.event.inputs.context_only != 'true' }}
+    # On request only (operator, 2026-10-29: "Nothing needs to use macos unless specifically
+    # requested"): a manual dispatch with the `macos` input. Pull requests and pushes run the
+    # Linux leg, so a slow macOS runner queue never blocks a merge.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.macos == 'true' && github.event.inputs.context_only != 'true' }}
     runs-on: macos-latest
     # 45, not 30: the macOS runner is the slow leg. Four consecutive green runs measured 1446 s,
     # 1588 s, 1615 s and 1702 s against a 1800 s cap, and on 2026-10-27 the suite crossed it —

@@ -137,7 +137,7 @@ Local focused tests use the full `bg` path. Record the explicit decision first:
 
 ```bash
 ~/src/djbclark-ade/bin/load-watch ci decide /absolute/worktree local "Small offline focused checks; full matrix on GitHub"
-~/ops/site-private/bin/bg python3 -m pytest tests/test_opencode_self_compact.py
+~/ops/site-private/bin/bg bin/pytest tests/test_opencode_self_compact.py
 # Hook suites share a module basename: run separately to avoid import collisions.
 # The legacy suite simulates top-level self-slash hosts with --dry-run only;
 # remove an inherited ACP_RUN_AGENT for that test process.

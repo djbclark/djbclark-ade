@@ -26,7 +26,9 @@ up       per domain, in this order:
               exit 1, the agent is left running for inspection
          Every agent lives in ONE shared Paseo workspace (config [defaults] workspace, "watch") and is titled
          `watch <domain> <n>`, n the next per-domain base-36 number (0-9a-z); once the new agent is registered,
-         the superseded ones (and the holder it replaced) are renamed `x <old title>`.
+         the superseded ones (and the holder it replaced) are renamed `x <old title>`, and every idle `x` one is then
+         archived (so is any other idle agent titled `x ...`), except a `--force`-replaced holder, whose id is kept in
+         ~/.local/state/watch/kept.json and which is never archived (a retired one with a turn in flight is left and archived on a later `up`; 2026-10-28)
          `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
          line to a live Paseo holder (default: a holder that Paseo lists as alive counts, because the test line
          costs the holder a model turn each tick)
@@ -541,6 +543,51 @@ def next_tag(domain: str, pv: Paseo) -> str:
     return to_b36(top + 1)
 
 
+def kept_path() -> Path:
+    return STATE / "kept.json"
+
+
+def load_kept() -> set[str] | None:
+    """Full agent ids of holders a `--force` replaced: renamed `x ...` but never archived by either sweep.
+    A missing file is the empty set; one that cannot be read or parsed is None, and the callers fail closed."""
+    try:
+        d = json.loads(kept_path().read_text())
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError):
+        return None
+    return {str(i) for i in d} if isinstance(d, list) else None
+
+
+def keep_id(rid: str) -> bool:
+    """Record `rid` under an flock (read, merge, atomic replace), so two `--force` runs cannot lose each other's id.
+    False when the file is unreadable: it is never overwritten, because that would forget every kept id."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "kept.lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        cur = load_kept()
+        if cur is None:
+            return False
+        tmp = kept_path().with_name(f"kept.json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(sorted(cur | {rid}), indent=1) + "\n")
+        os.replace(tmp, kept_path())
+    return True
+
+
+def archive_if_idle(pv: Paseo, rid: str, name: str) -> str:
+    """Archive one retired agent, re-reading its status first: the sweep's snapshot may be minutes old, and the
+    operator may have woken or re-titled the agent since."""
+    pv.agents(refresh=True)
+    cur = pv.agent(rid)
+    if cur is None:
+        return f"{rid[:8]} {name!r} not listed (gone, or the daemon could not be asked); nothing archived"
+    if (cur.get("name") or "") != name or cur.get("status") != "idle":
+        return f"{rid[:8]} {name!r} left running (status {cur.get('status')!r}); archived once idle"
+    rc, out, err = run([PASEO, "agent", "archive", rid], 60)
+    return (f"{rid[:8]} {name!r} archived" if rc == 0
+            else f"{rid[:8]} {name!r} NOT archived: {(err or out).strip()[:120]}")
+
+
 def retire_superseded(domain: str, pv: Paseo, new_aid: str, replaced: Holder | None) -> list[str]:
     """Once the new watcher is registered and tested: every other live `watch <domain> <n>` agent, and the holder it
     replaced, gets `x ` put before its title. Returns one line per rename."""
@@ -554,9 +601,37 @@ def retire_superseded(domain: str, pv: Paseo, new_aid: str, replaced: Holder | N
         is_replaced = bool(replaced and replaced.target and len(replaced.target) >= 7 and rid.startswith(replaced.target))
         if a.get("id") == new_aid or name.startswith("x ") or not (is_replaced or (m and not m.group(1))):
             continue
+        if is_replaced and not keep_id(rid):   # before the rename, so no sweep can see the new title without the guard
+            done.append(f"{rid[:8]} {name!r} NOT renamed: kept.json is unreadable, so it could not be protected")
+            continue
         rc, out, err = run([PASEO, "agent", "update", str(a["id"]), "--name", f"x {name}"], 30)
         done.append(f"{str(a['id'])[:8]} {name!r} -> {'x ' + name!r}" if rc == 0
                     else f"{str(a['id'])[:8]} {name!r} NOT renamed: {(err or out).strip()[:120]}")
+    return done
+
+
+def archive_retired(domain: str, pv: Paseo, holder_target: str | None) -> list[str]:
+    """Archive every IDLE retired `x watch <domain> [<n>]` agent. The new watcher registered before anything was
+    retired, so the role, the Tier 1 chain log and the channel registration are already its own; what the old agent
+    still holds is only its idle context. A retired agent with a turn in flight is left alone (no work thrown
+    away) and swept on a later `watch up`. The agent that holds the role right now, and a holder a `--force`
+    replaced (kept.json), are never archived."""
+    pv.agents(refresh=True)
+    pat = title_re(domain)
+    kept = load_kept()
+    if kept is None:
+        return ["kept.json is unreadable; nothing archived"]
+    done = []
+    for a in pv.agents() or []:
+        name = a.get("name") or ""
+        m = pat.match(name)
+        rid = str(a.get("id") or "")
+        if not (m and m.group(1)) or rid in kept or (holder_target and len(holder_target) >= 7 and rid.startswith(holder_target)):
+            continue
+        if a.get("status") != "idle":
+            done.append(f"{rid[:8]} {name!r} left running (status {a.get('status')!r}); archived once idle")
+            continue
+        done.append(archive_if_idle(pv, rid, name))
     return done
 
 
@@ -647,6 +722,8 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
             log(domain, f"replaced holder {replaces.target[:8]} ({replaces.name}); it was told by the new registration")
         for line in retire_superseded(domain, pv, aid, replaces):
             log(domain, f"retired: {line}")
+        for line in archive_retired(domain, pv, aid):
+            log(domain, f"archive: {line}")
         return 0, f"registered: {why}"
     rec.update(state="unregistered", reason=why, checked_at=now_s())
     save_rec(domain, rec)
@@ -760,6 +837,9 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
         h, hnote = query_holder(row)
         if hnote:
             log(domain, f"holder query error: {hnote}", dry)
+        if not dry and not hnote:
+            for line in archive_retired(domain, pv, h.target if h else None):
+                log(domain, f"archive: {line}")
         replaces = None
         if h:
             alive, why = holder_alive(row, h, pv, args.probe, send=not dry)
@@ -808,10 +888,34 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
             lock.close()
 
 
+def archive_other_retired(pv: Paseo) -> list[str]:
+    """Any other agent whose title starts with `x ` (djbclark's retired-seat convention, 2026-10-28) is archived once
+    idle; a busy one waits for a later run. `x watch ...` titles belong to archive_retired, which knows the holders.
+    A holder a `--force` replaced (kept.json) is never archived, whatever its title."""
+    pv.agents(refresh=True)
+    kept = load_kept()
+    if kept is None:
+        return ["kept.json is unreadable; nothing archived"]
+    done = []
+    for a in pv.agents() or []:
+        name = a.get("name") or ""
+        rid = str(a.get("id") or "")
+        if not name.startswith("x ") or name.startswith("x watch ") or not rid or rid in kept:
+            continue
+        if a.get("status") != "idle":
+            done.append(f"{rid[:8]} {name!r} left running (status {a.get('status')!r}); archived once idle")
+            continue
+        done.append(archive_if_idle(pv, rid, name))
+    return done
+
+
 def cmd_up(args) -> int:
     dflt, reg = load_registry()
     pv = Paseo()
     worst = 0
+    if not getattr(args, "dry_run", False):
+        for line in archive_other_retired(pv):
+            log("retired", f"archive: {line}")
     for dom in domains_from(args, reg):
         rc = up_one(dom, reg[dom], dflt, pv, args)
         worst = rc if rc and (worst == 0 or rc == 1) else worst
