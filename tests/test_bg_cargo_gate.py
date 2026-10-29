@@ -40,7 +40,13 @@ const allow = [
 for (const cmd of deny) assert.equal(requiresBg(cmd), true, cmd);
 for (const cmd of allow) assert.equal(requiresBg(cmd), false, cmd);
 const hooks = []; let disposed = 0;
-await plugin.setup({permission:{hook:async (name,fn)=>{hooks.push([name,fn]);return {dispose(){disposed++;}}}}).then(async dispose=>{
+const context = {permission: {
+  async hook(name, fn) {
+    hooks.push([name, fn]);
+    return {dispose() {disposed++;}};
+  }
+}};
+const dispose = await plugin.setup(context);
   assert.equal(hooks[0][0], "evaluate");
   for (const effect of ["allow", "ask"]) {
     for (const cmd of deny) {
@@ -56,8 +62,7 @@ await plugin.setup({permission:{hook:async (name,fn)=>{hooks.push([name,fn]);ret
     }
   }
   const read={action:"read",resources:["cargo build"],effect:"allow"};hooks[0][1](read);assert.equal(read.effect,"allow");
-  await dispose();assert.equal(disposed,1);
-});
+await dispose();assert.equal(disposed,1);
 '''
     result = subprocess.run(
         [node, "--input-type=module", "-e", script, str(source)],
