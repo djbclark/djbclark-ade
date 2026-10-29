@@ -2330,3 +2330,59 @@ def test_local_codex_still_honours_ci_and_open_threads(world: World) -> None:
     put_local(world, local_doc())
     world.route(f"repos/{REPO}/commits/{HEAD}/check-runs", checks_page(run_obj("test", conclusion="failure")))
     assert local_run(world)["merge_blockers"] == ["ci-failed"]
+
+
+def test_a_clean_local_review_does_not_hide_an_open_bot_thread_of_an_earlier_head(world: World) -> None:
+    """Codex P1 and the adversary's P1 on PR 130: `--local-codex` once skipped the review-thread collection, so `open-findings` never fired."""
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([old_finding()]))
+    world.route("graphql", gql(thread(50)))
+    s = local_run(world)
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["open-findings"], s
+    assert s["open_findings"] == 1 and s["local_codex"]["status"] == "clean"
+
+
+def test_local_codex_without_collected_threads_is_never_merge_ready(world: World) -> None:
+    put_local(world, local_doc())
+    world.route("graphql", fail("graphql is down"))
+    r = world.run("--local-codex", "--json", "--timeout", "3")
+    s = json.loads(r.stdout)
+    assert s["merge_ready"] is False and "findings-not-collected" in s["merge_blockers"], s
+
+
+def test_a_review_against_another_base_than_the_prs_is_unreadable(world: World) -> None:
+    put_local(world, local_doc(base_ref="release"))
+    world.route(f"repos/{REPO}/pulls/{PR}", ok({"head": {"sha": HEAD}, "base": {"ref": "master"}}))
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-unreadable"] and "master" in s["local_codex"]["reason"], s
+    put_local(world, local_doc(base_ref="master"))
+    assert local_run(world)["merge_ready"] is True
+
+
+def test_local_codex_and_no_codex_are_alternatives(world: World) -> None:
+    r = world.run("--local-codex", "--no-codex")
+    assert r.returncode == 2 and "alternatives" in r.stderr
+
+
+@pytest.mark.parametrize("kind", ["symlink", "group_writable", "other_writable", "oversized"])
+def test_a_local_result_that_is_not_the_writers_plain_private_file_is_unreadable(world: World, kind: str) -> None:
+    put_local(world, local_doc())
+    f = world.state.parent / "local-review" / f"{REPO.replace('/', '__')}-pr{PR}-{HEAD}.json"
+    if kind == "symlink":
+        real = f.with_name("real.json")
+        f.rename(real)
+        f.symlink_to(real)
+    elif kind == "oversized":
+        f.write_text(json.dumps(local_doc(reason="x" * (1 << 20))))
+    else:
+        f.chmod(0o664 if kind == "group_writable" else 0o606)
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-unreadable"], s
+
+
+@pytest.mark.parametrize("field,value", [("pr", True), ("schema", 1.0), ("exit_code", False)])
+def test_bool_and_float_values_are_not_the_integers_the_result_must_hold(world: World, field: str, value: object) -> None:
+    doc = local_doc()
+    doc[field] = value
+    put_local(world, doc)
+    assert local_run(world)["merge_blockers"] == ["local-codex-unreadable"]

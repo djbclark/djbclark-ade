@@ -1,11 +1,15 @@
 """bin/local-review: Codex's review run locally on the exact head of a PR, against a fake `codex` and `gh` on PATH and a real git repository."""
 
+import fcntl
 import importlib.util
 import json
 import os
+import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -23,32 +27,45 @@ if [ "$1" = api ] && [ "$2" = "repos/owner/name/pulls/7" ]; then cat "$FAKE_PR_J
 echo "fake gh: unexpected $*" >&2; exit 1
 """
 
-# FAKE_CODEX_MODE picks what `codex review --base X` does in its working directory
+# FAKE_CODEX_MODE picks what `codex review ...` does in its working directory. `say MSG` prints MSG on stdout and, as the real codex does, the same
+# message after a `codex` line on stderr (after some transcript noise).
 FAKE_CODEX = r"""#!/bin/bash
 if [ "$1" = "--version" ]; then echo "codex-cli 0.0-test"; exit 0; fi
-echo "$PWD" > "$FAKE_CODEX_LOG"
-echo "$@" >> "$FAKE_CODEX_LOG"
-git -C "$PWD" status --porcelain >> "$FAKE_CODEX_LOG"
+{ echo "$PWD"; echo "$@"; git -C "$PWD" status --porcelain; } > "$FAKE_CODEX_LOG"
+env | cut -d= -f1 | sort > "$FAKE_CODEX_ENV"
+say() { echo "transcript noise" >&2; echo exec >&2; { echo codex; printf '%s\n' "$1"; } >&2; printf '%s\n' "$1"; }
 case "$FAKE_CODEX_MODE" in
-  clean) echo "The patch looks correct."; echo "codex" >&2; echo "transcript noise" >&2 ;;
-  findings)
-    echo "The change has two problems."; echo; echo "Full review comments:"; echo
-    echo "- [P1] Fail open on a missing marker — $PWD/bin/x.py:10-12"; echo "  detail text"; echo
-    echo "- [P2] Wrong exit code — $PWD/bin/y.py:3-3"; echo "- [Positive observations]" ;;
-  duplicates) printf -- '- [P2] Same thing — %s/a.py:1-1\n- [P2] Same thing — %s/a.py:1-1\n' "$PWD" "$PWD" ;;
+  clean) say "The patch looks correct." ;;
+  findings) say "The change has two problems.
+
+Full review comments:
+
+- [P1] Fail open on a missing marker — $PWD/bin/x.py:10-12
+  detail text
+
+- [P2] Wrong exit code — $PWD/bin/y.py:3-3
+- [Positive observations]" ;;
+  duplicates) say "$(printf -- '- [P2] Same thing — %s/a.py:1-1\n- [P2] Same thing — %s/a.py:1-1' "$PWD" "$PWD")" ;;
   generated)
     echo '{"changed": true}' > "$PWD/.cursor/hooks.json"
-    printf -- '- [P2] Hooks point at the worktree — %s/.cursor/hooks.json:7-7\n' "$PWD" ;;
+    say "- [P2] Hooks point at the worktree — $PWD/.cursor/hooks.json:7-7" ;;
   generated_and_real)
     echo '{"changed": true}' > "$PWD/.cursor/hooks.json"
-    printf -- '- [P2] Hooks point at the worktree — %s/.cursor/hooks.json:7-7\n- [P3] Real nit — %s/bin/x.py:1-1\n' "$PWD" "$PWD" ;;
-  hook_clean) printf -- '- [P2] Hook content is wrong — %s/.cursor/hooks.json:1-1\n' "$PWD" ;;
+    say "$(printf -- '- [P2] Hooks point at the worktree — %s/.cursor/hooks.json:7-7\n- [P3] Real nit — %s/bin/x.py:1-1' "$PWD" "$PWD")" ;;
+  hook_clean) say "- [P2] Hook content is wrong — $PWD/.cursor/hooks.json:1-1" ;;
   exit1) echo "boom" >&2; exit 1 ;;
   nomessage) echo "only a transcript" >&2 ;;
-  stderr_final) echo "noise"; echo "codex" >&2; echo "All good." >&2 ;;
-  unparseable) echo "- [P7] An invented priority"; echo "* [P1] star bullet" ;;
-  hang) trap '' TERM; sleep 30 ;;
-  moves) git -C "$PWD" -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved; echo "fine" ;;
+  stdout_only) echo "All good." ;;
+  mismatch) echo "transcript noise" >&2; { echo codex; echo "the real review"; } >&2; echo "All good." ;;
+  refusal) say "Unable to review the diff because the repository could not be read." ;;
+  could_not_find) say "I could not find any bugs in this change." ;;
+  shaped) say "- **[P1]** A bold priority — $PWD/a.py:1-1" ;;
+  shaped_bare) say "[P1] A bare priority" ;;
+  unparseable) say "- [P7] An invented priority" ;;
+  hang) echo $$ > "$FAKE_PID_FILE"; sleep 300 & echo $! >> "$FAKE_PID_FILE"; trap '' TERM; wait ;;
+  orphan) sleep 300 & echo $! > "$FAKE_PID_FILE"; say "The patch looks correct." ;;
+  moves) git -C "$PWD" -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved; say "fine" ;;
+  base_moves) git -C "$PWD" update-ref refs/remotes/origin/master "$(git -C "$PWD" rev-parse HEAD)"; say "fine" ;;
 esac
 """
 
@@ -56,6 +73,14 @@ esac
 def sh(*argv: str, cwd: Path | None = None, env: dict | None = None) -> str:
     r = subprocess.run(argv, cwd=cwd, env=env, check=True, capture_output=True, text=True)
     return r.stdout.strip()
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 class World:
@@ -90,14 +115,17 @@ class World:
             p.write_text(body)
             p.chmod(p.stat().st_mode | stat.S_IXUSR)
         self.state = tmp / "state"
-        self.codex_log = tmp / "codex.log"
+        self.codex_log, self.codex_env, self.pid_file = tmp / "codex.log", tmp / "codex.env", tmp / "codex.pid"
         self.env = {**git_env, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "LOCAL_REVIEW_STATE_DIR": str(self.state),
-                    "FAKE_PR_JSON": str(self.pr_json), "FAKE_CODEX_LOG": str(self.codex_log), "FAKE_CODEX_MODE": "clean"}
+                    "FAKE_PR_JSON": str(self.pr_json), "FAKE_CODEX_LOG": str(self.codex_log), "FAKE_CODEX_ENV": str(self.codex_env),
+                    "FAKE_PID_FILE": str(self.pid_file), "FAKE_CODEX_MODE": "clean"}
 
-    def run(self, *extra: str, mode: str | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-        env = {**self.env, **({"FAKE_CODEX_MODE": mode} if mode else {})}
-        return subprocess.run([sys.executable, "-I", str(LOCAL_REVIEW), str(PR), "--repo", REPO, *extra],
-                              cwd=self.work, env=env, check=False, capture_output=True, text=True, timeout=timeout)
+    def argv(self, *extra: str) -> list[str]:
+        return [sys.executable, "-I", str(LOCAL_REVIEW), str(PR), "--repo", REPO, *extra]
+
+    def run(self, *extra: str, mode: str | None = None, timeout: int = 60, env: dict | None = None) -> subprocess.CompletedProcess[str]:
+        e = {**self.env, **(env or {}), **({"FAKE_CODEX_MODE": mode} if mode else {})}
+        return subprocess.run(self.argv(*extra), cwd=self.work, env=e, check=False, capture_output=True, text=True, timeout=timeout)
 
     def stem(self, head: str | None = None) -> Path:
         return self.state / f"owner__name-pr{PR}-{head or self.head}"
@@ -107,6 +135,15 @@ class World:
 
     def worktrees(self) -> list[str]:
         return [ln for ln in sh("git", "worktree", "list", cwd=self.work, env=self.env).splitlines() if ln]
+
+    def push_pr_commit(self, **files: str) -> str:
+        for name, text in files.items():
+            (self.work / name.replace("__", "/")).write_text(text)
+        sh("git", "commit", "-q", "-am", "pr change", cwd=self.work, env=self.env)
+        head = sh("git", "rev-parse", "HEAD", cwd=self.work, env=self.env)
+        sh("git", "push", "-q", "origin", f"{head}:refs/pull/{PR}/head", cwd=self.work, env=self.env)
+        self.pr_json.write_text(json.dumps({"head": {"sha": head}, "base": {"ref": "master"}}))
+        return head
 
 
 @pytest.fixture
@@ -121,12 +158,12 @@ def test_a_clean_review_files_a_head_named_result_and_leaves_nothing_behind(worl
     assert (d["result"], d["head"], d["pr"], d["repo"], d["exit_code"], d["final_message"]) == ("clean", world.head, PR, REPO, 0, True)
     assert d["counts"] == {"P0": 0, "P1": 0, "P2": 0, "P3": 0} and d["findings"] == [] and d["reason"] == ""
     assert d["base_ref"] == "master" and len(d["base_sha"]) == 40 and d["codex_version"] == "codex-cli 0.0-test"
+    assert len(d["out_sha256"]) == 64 and len(d["err_sha256"]) == 64
     assert f"at {world.head[:12]}: clean" in r.stdout
     assert len(world.worktrees()) == 1, world.worktrees()    # the review worktree is gone
-    assert not list(world.state.glob("lock-*"))
     assert (world.state.stat().st_mode & 0o777, world.stem().with_suffix(".json").stat().st_mode & 0o777) == (0o700, 0o600)
     log = world.codex_log.read_text().splitlines()
-    assert log[1] == "review --base origin/master"
+    assert log[1] == 'review -c sandbox_mode="read-only" --base origin/master'
     assert log[0] != str(world.work) and "wt" in log[0]    # reviewed in its own clean worktree, never in the caller's
     assert len(log) == 2    # `git status --porcelain` printed nothing: the worktree was clean when codex started
 
@@ -137,6 +174,15 @@ def test_the_reviewed_tree_is_exactly_the_head_not_what_the_caller_has_checked_o
     r = world.run()
     assert r.returncode == 0 and world.doc()["head"] == world.head
     assert len(world.codex_log.read_text().splitlines()) == 2    # clean: the caller's dirt never reached the review
+
+
+def test_codex_runs_read_only_with_no_token_secret_or_gh_variable_but_keeps_its_own(world: World) -> None:
+    secrets = {"GH_TOKEN": "x", "GITHUB_TOKEN": "x", "GH_ENTERPRISE_FOO": "x", "MY_SECRET": "x", "DB_PASSWORD": "x", "SOME_API_KEY": "x", "AWS_SECRET_ACCESS_KEY": "x"}
+    keep = {"OPENAI_API_KEY": "x", "CODEX_HOME": "/tmp/h", "HOME": os.environ["HOME"], "PATH": world.env["PATH"]}
+    assert world.run(env={**secrets, **keep}).returncode == 0
+    names = set(world.codex_env.read_text().split())
+    assert not names & set(secrets), names & set(secrets)
+    assert {"OPENAI_API_KEY", "CODEX_HOME", "HOME", "PATH"} <= names
 
 
 def test_findings_are_listed_by_priority_and_exit_1(world: World) -> None:
@@ -165,67 +211,126 @@ def test_a_finding_in_a_file_the_review_worktree_dirtied_is_generated_not_the_pr
 
 
 def test_a_hook_file_finding_is_real_when_the_review_did_not_dirty_the_file(world: World) -> None:
-    """Rule 3 ignores a finding only in a file the review worktree dirtied: one on a hook file that is clean is a finding of the PR."""
     r = world.run(mode="hook_clean")
     assert r.returncode == 1, r.stderr
     d = world.doc()
     assert d["dirty_after"] == [] and d["ignored_generated"] == [] and d["counts"]["P2"] == 1
 
 
+def test_a_finding_on_a_hook_file_the_pr_itself_edits_is_never_ignored(world: World) -> None:
+    """Codex P1 and the adversary's P2 on PR 130: dirtying the file must not be a way to hide a finding about the PR's own change to it."""
+    head = world.push_pr_commit(**{".cursor__hooks.json": '{"a": 2}\n'})
+    r = world.run(mode="generated")
+    assert r.returncode == 1, r.stderr
+    d = world.doc(head)
+    assert d["dirty_after"] == [".cursor/hooks.json"] and d["ignored_generated"] == [] and d["counts"]["P2"] == 1
+
+
 @pytest.mark.parametrize("mode,reason", [
     ("exit1", "codex exited 1"),
     ("nomessage", "no final message"),
+    ("stdout_only", "no `codex` message block"),    # a banner on stdout with a transcript that holds no review
+    ("mismatch", "not the transcript's final message"),
+    ("refusal", "refusal or an error"),
+    ("shaped", "cannot read"),    # **[P1]** is a finding in a shape the parser does not know: never "no findings"
+    ("shaped_bare", "cannot read"),
     ("unparseable", "cannot read"),
     ("moves", "head moved"),
+    ("base_moves", "origin/master moved"),
 ])
 def test_every_way_a_run_can_fail_is_failed_never_clean(world: World, mode: str, reason: str) -> None:
     r = world.run(mode=mode)
     assert r.returncode == 3, (r.stdout, r.stderr)
     d = world.doc()
     assert d["result"] == "failed" and reason in d["reason"] and d["counts"] == {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
-    assert len(world.worktrees()) == 1 and not list(world.state.glob("lock-*"))    # cleaned up even when it failed
+    assert len(world.worktrees()) == 1    # cleaned up even when it failed
+
+
+def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
+    assert world.run(mode="could_not_find").returncode == 0
 
 
 def test_a_hung_codex_is_killed_with_its_group_and_the_run_is_failed(world: World) -> None:
     r = world.run("--timeout", "1", mode="hang", timeout=40)
     assert r.returncode == 3 and "did not finish in 1 s" in world.doc()["reason"]
+    pids = [int(p) for p in world.pid_file.read_text().split()]
+    time.sleep(0.3)
+    assert not any(alive(p) for p in pids), pids    # the TERM-ignoring parent AND its sleeping child are gone
     assert len(world.worktrees()) == 1
 
 
-def test_the_final_message_may_be_on_stderr_after_the_last_codex_line(world: World) -> None:
-    assert world.run(mode="stderr_final").returncode == 0
-    assert world.doc()["final_message"] is True
+def test_a_child_that_outlives_a_codex_that_exited_is_killed_too(world: World) -> None:
+    assert world.run(mode="orphan").returncode == 0
+    time.sleep(0.3)
+    assert not alive(int(world.pid_file.read_text())), "codex's background child survived the run"
 
 
-def test_no_codex_on_path_is_failed(world: World) -> None:
-    env = {**world.env, "PATH": f"{world.tmp / 'bin'}{os.pathsep}/opt/homebrew/bin{os.pathsep}/usr/bin{os.pathsep}/bin"}    # git yes, the real codex (~/.local/bin) no
-    (world.tmp / "bin" / "codex").unlink()
-    r = subprocess.run([sys.executable, "-I", str(LOCAL_REVIEW), str(PR), "--repo", REPO], cwd=world.work, env=env,
-                       check=False, capture_output=True, text=True, timeout=60)
+def test_a_run_that_is_terminated_files_failed_removes_its_worktree_and_kills_codex(world: World) -> None:
+    """The result is `failed: in progress` from the moment the lock is taken, and an older clean for this head cannot outlive a dying run."""
+    old = world.run()    # a clean result for this very head first
+    assert old.returncode == 0 and world.doc()["result"] == "clean"
+    env = {**world.env, "FAKE_CODEX_MODE": "hang"}
+    p = subprocess.Popen(world.argv("--timeout", "100"), cwd=world.work, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(100):
+            if world.pid_file.exists() and len(world.pid_file.read_text().split()) == 2:
+                break
+            time.sleep(0.1)
+        d = world.doc()
+        assert d["result"] == "failed" and "in progress" in d["reason"], d    # the clean from the first run is already gone
+        p.send_signal(signal.SIGTERM)
+        out, err = p.communicate(timeout=30)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert p.returncode == 3, (out, err)
+    assert "interrupted by signal" in world.doc()["reason"] and len(world.worktrees()) == 1
+    time.sleep(0.3)
+    assert not any(alive(int(x)) for x in world.pid_file.read_text().split())
+
+
+def test_no_codex_on_path_is_failed_and_never_runs_a_real_one(world: World) -> None:
+    safe = world.tmp / "safe"
+    safe.mkdir()
+    for tool in ("git", "gh", "python3"):    # gh is the fake
+        src = world.tmp / "bin" / tool if tool == "gh" else Path(shutil.which(tool) or "")
+        (safe / tool).symlink_to(src)
+    env = {**world.env, "PATH": f"{safe}{os.pathsep}/usr/bin{os.pathsep}/bin"}
+    assert shutil.which("codex", path=env["PATH"]) is None    # the precondition: no codex of any kind is reachable
+    r = subprocess.run(world.argv(), cwd=world.work, env=env, check=False, capture_output=True, text=True, timeout=60)
     assert r.returncode == 3 and "not installed" in world.doc()["reason"], r.stderr
 
 
-def test_a_second_run_for_the_same_head_is_refused_and_a_stale_lock_is_taken_over(world: World) -> None:
+def test_a_second_run_for_the_same_head_is_refused_while_the_lock_is_held_and_never_stale_after(world: World) -> None:
     world.state.mkdir(mode=0o700)
     lock = world.state / f"lock-owner__name-pr{PR}-{world.head}"
-    lock.write_text(str(os.getpid()))    # alive: this very test process
-    r = world.run()
-    assert r.returncode == 4 and "is running" in r.stderr and lock.read_text() == str(os.getpid())
-    lock.write_text("2147483646")    # no such process
-    assert world.run().returncode == 0 and not lock.exists()
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        r = world.run()
+        assert r.returncode == 4 and "is running" in r.stderr
+        assert not world.stem().with_suffix(".json").exists()    # the refused run touched no result
+    finally:
+        os.close(fd)
+    lock.write_text("2147483646")    # a leftover file naming a dead pid: only the flock counts, so it is no obstacle
+    assert world.run().returncode == 0
 
 
 def test_the_result_names_the_head_that_was_asked_for_not_the_prs_newer_one(world: World) -> None:
     old = world.head
-    (world.work / "bin" / "x.py").write_text("print(3)\n")
-    sh("git", "commit", "-q", "-am", "newer", cwd=world.work, env=world.env)
-    new = sh("git", "rev-parse", "HEAD", cwd=world.work, env=world.env)
-    sh("git", "push", "-q", "origin", f"{new}:refs/pull/{PR}/head", cwd=world.work, env=world.env)
-    world.pr_json.write_text(json.dumps({"head": {"sha": new}, "base": {"ref": "master"}}))
+    new = world.push_pr_commit(**{"bin__x.py": "print(3)\n"})
     r = world.run("--head", old)
     assert r.returncode == 0 and "is not the PR's current head" in r.stderr
     assert world.doc(old)["head"] == old and not world.stem(new).with_suffix(".json").exists()
     assert world.run().returncode == 0 and world.doc(new)["head"] == new    # the default is the PR's current head
+
+
+def test_a_head_that_is_not_the_prs_head_or_an_ancestor_of_it_is_refused(world: World) -> None:
+    empty = sh("git", "hash-object", "-t", "tree", "/dev/null", cwd=world.work, env=world.env)
+    stray = sh("git", "commit-tree", empty, "-m", "unrelated", cwd=world.work, env=world.env)
+    r = world.run("--head", stray)
+    assert r.returncode == 2 and "neither the PR's head" in r.stderr
+    assert not world.stem(stray).with_suffix(".json").exists()    # no result for a head that was never in scope
 
 
 def test_a_head_the_repository_does_not_have_is_failed(world: World) -> None:
@@ -235,7 +340,6 @@ def test_a_head_the_repository_does_not_have_is_failed(world: World) -> None:
 
 @pytest.mark.parametrize("argv,needle", [
     (["--head", "abc"], "full lowercase 40-hex"),
-    (["--base", "bad branch"], "must be a branch name"),
     (["--timeout", "0"], "must be positive"),
     (["--repo", "nonsense"], "OWNER/NAME"),
 ])
@@ -251,6 +355,13 @@ def test_a_checkout_of_another_repository_is_refused(world: World) -> None:
     assert r.returncode == 2 and "not someone/else" in r.stderr
 
 
+def test_an_unusable_state_directory_is_failed_not_a_traceback(world: World) -> None:
+    blocker = world.tmp / "afile"
+    blocker.write_text("x")
+    r = world.run(env={"LOCAL_REVIEW_STATE_DIR": str(blocker / "sub")})
+    assert r.returncode == 3 and "cannot use the state directory" in r.stderr and "Traceback" not in r.stderr
+
+
 def test_a_result_it_files_is_what_pr_wait_reads_as_clean_and_a_findings_one_blocks(world: World) -> None:
     ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
     mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
@@ -259,7 +370,8 @@ def test_a_result_it_files_is_what_pr_wait_reads_as_clean_and_a_findings_one_blo
     os.environ["LOCAL_REVIEW_STATE_DIR"] = str(world.state)
     try:
         assert world.run().returncode == 0
-        assert mod.local_codex_read(REPO, PR, world.head)["status"] == "clean"
+        assert mod.local_codex_read(REPO, PR, world.head, "master")["status"] == "clean"
+        assert mod.local_codex_read(REPO, PR, world.head, "main")["status"] == "unreadable"    # another base than the PR's own
         assert world.run(mode="findings").returncode == 1
         got = mod.local_codex_read(REPO, PR, world.head)
         assert (got["status"], got["counts_text"]) == ("findings", "P1 1, P2 1")
