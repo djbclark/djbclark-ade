@@ -283,6 +283,12 @@ print(p.get("pane_id", ""), p.get("agent") or "")' 2>/dev/null)
   if [ -n "$cur" ] && [ "$cur" != "$pane" ]; then
     echo "self-slash: HERDR_PANE_ID=$pane is stale (pane moved); using $cur" >&2; pane="$cur"
   fi
+  # An unregistered pane (herdr's agent kinds have no zcode, 2026-10-28) still names its TUI through
+  # the pane's foreground processes: argv0 zcode-cli / a cmdline running bin/zcode means zcode, whose
+  # slash surface ends with /exit, not /quit (README: `/copy`, `/cls`, `/exit`).
+  if [ -z "$tui" ] && herdr pane process-info --pane "$pane" 2>/dev/null | grep -qE '"argv0": *"zcode-cli"|"cmdline": *"[^"]*/bin/zcode"'; then
+    tui=zcode
+  fi
 elif [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && command -v orca >/dev/null 2>&1; then
   host=orca; pane="$ORCA_TERMINAL_HANDLE"; tui=""
   if [ "${CURSOR_AGENT:-}" = "1" ]; then
@@ -375,6 +381,10 @@ if [ "$host" = paseo ]; then
       finish=1;;
   esac
 fi
+if [ "$host" = herdr ] && [ "$tui" = zcode ]; then
+  # zcode ends with /exit; /quit would reach it as an unknown command (README: `/copy`, `/cls`, `/exit`).
+  case "$text" in /quit|"/quit "*) text="/exit${text#/quit}";; esac
+fi
 # ... and a follow-up /quit or /exit would be sent as plain text, or end the fresh session.
 if [ "$host" = paseo ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   case "$then" in /quit|/exit|"/quit "*|"/exit "*) echo "self-slash: --then $then is not a Paseo command; use --finish after the turn instead" >&2; exit 2;; esac
@@ -396,14 +406,14 @@ if [ -n "$s_baton" ]; then
   [ -f "$s_baton" ] || { echo "self-slash: --baton is not an existing regular file: $s_baton" >&2; exit 2; }
 fi
 s_thinking="${s_thinking:-high}"
-# herdr names the TUI in the pane's `agent` field. Prompt detection knows Codex (›), Claude Code (❯), cursor-agent (→) and omp
+# herdr names the TUI in the pane's `agent` field; an unregistered pane is probed via process-info
+# (zcode, 2026-10-28). Prompt detection knows Codex (›), Claude Code (❯), cursor-agent (→), omp
 # (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
-# and gave up) — plus any TUI herdr does not track as an agent at all (zcode, 2026-10-28), which reads and sends
-# through pane-level commands with the ❯ default. An unregistered pane has no `agent` field, so $tui is empty and
-# the marker is the ❯ default; if that TUI's input line uses another glyph the waiter gives up as before.
+# and gave up) and zcode (❯ default, pane-level read/send; /exit not /quit). Another TUI cannot be read, so
+# say so now: the waiter would only log "gave up" after ~50 s.
 case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; *) marker="❯";; esac
-if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
-  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp and codex, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
+if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "$tui" != zcode ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp, codex and zcode, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
 fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
