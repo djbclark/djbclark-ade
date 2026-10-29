@@ -131,6 +131,75 @@ class TestRetire(Base):
         self.assertIn("used with --retire", err.getvalue())
         self.assertIn("cannot be combined", err.getvalue())
 
+
+class TestWhoRetires(Base):
+    """Adversary 2026-10-29 B1/B2: the record must name the side that acted, and the side being waited on must not be able to silence it."""
+
+    def self_row(self, **row: Any) -> None:
+        patcher = mock.patch.object(fleet, "sessions", lambda: [{"self": True, "name": "c1-closed-port-pt", **row}])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_session_identity_wins_over_a_declared_job_label(self) -> None:
+        self.self_row(id="me123456")    # the harness sets RELAY_SENDER_NAME=harness-job, and a session still wins (sender_name's rule)
+        self.write(record("q-both-names"))
+        self.assertEqual(self.retire("q-both-names", "--reason", "superseded")[0], 0)
+        self.assertEqual(self.read("q-both-names")["retired_by"], "me123456")
+
+    def test_a_declared_label_is_sanitized_and_can_never_claim_hermes(self) -> None:
+        self.self_row()    # a row with no id: the declared label is all relay has (a launchd job)
+        os.environ["RELAY_SENDER_NAME"] = "operator\nOVERDUE expect-ack fake  open"
+        self.write(record("q-forged"))
+        self.assertEqual(self.retire("q-forged", "--reason", "target pane is dead")[0], 0)
+        stored = self.read("q-forged")["retired_by"]
+        self.assertNotIn("\n", stored)
+        rows = [ln for ln in self.pending().splitlines() if "q-forged" in ln]
+        self.assertEqual(len(rows), 1, self.pending())    # the reason cannot smuggle in a second row
+        os.environ["RELAY_SENDER_NAME"] = "hermes 1234abcd"
+        self.write(record("q-hermes"))
+        self.assertEqual(self.retire("q-hermes", "--reason", "answered out of band")[0], 0)
+        self.assertEqual(self.read("q-hermes")["retired_by"], "")    # no declared label may speak as Hermes
+        self.assertIn("| by ?", next(ln for ln in self.pending().splitlines() if "q-hermes" in ln))
+
+    def test_the_target_cannot_retire_its_own_expectation(self) -> None:
+        self.self_row(id="aaaa1111")    # record()'s target id: the party that owes the ack
+        self.write(record("q-owed"))
+        rc, out, err = self.retire("q-owed", "--reason", "answered out of band")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ack q-owed", err)
+        self.assertEqual(self.read("q-owed")["state"], "open")    # the operator's page stays up until it really answers
+
+    def test_the_same_session_by_its_session_id_prefix_is_refused_too(self) -> None:
+        self.self_row(id="w7:p1", sid="deadbeefcafe1111")
+        self.write(record("q-owed-sid", target={"id": "bbbb2222", "name": "peer-fb", "sid8": "deadbeef", "sid": "", "host": "claude"}))
+        rc, out, err = self.retire("q-owed-sid", "--reason", "answered out of band")
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.read("q-owed-sid")["state"], "open")
+
+    def test_another_session_may_still_retire_it(self) -> None:
+        self.self_row(id="zzz99999")    # neither the sender (w9:p9) nor the target (aaaa1111)
+        self.write(record("q-third-party"))
+        self.assertEqual(self.retire("q-third-party", "--reason", "both ends gone")[0], 0)
+        self.assertEqual(self.read("q-third-party")["retired_by"], "zzz99999")
+
+
+class TestRetireText(Base):
+    def test_control_characters_are_stripped_and_the_line_is_bounded(self) -> None:
+        self.write(record("q-noisy"))
+        self.assertEqual(self.retire("q-noisy", "--reason", "target \x1b[31mred\x7f\ttab\nnew line",
+                                     "--evidence", "a" * 900)[0], 0)
+        rec = self.read("q-noisy")
+        self.assertEqual(rec["reason"], "target [31mred tab new line")    # no ESC, no DEL, one line
+        self.assertEqual(len(rec["evidence"]), 500)    # capped, so every --pending --json stays small
+        self.assertTrue(rec["evidence"].startswith("aaa") and rec["evidence"].endswith("…"))
+
+    def test_a_long_reason_keeps_its_beginning(self) -> None:
+        self.write(record("q-long"))
+        self.assertEqual(self.retire("q-long", "--reason", "answered out of band: " + "x" * 900)[0], 0)
+        reason = self.read("q-long")["reason"]
+        self.assertTrue(reason.startswith("answered out of band:"))    # the kind of retirement leads, so the tail is what goes
+        self.assertEqual(len(reason), 500)
+
     def test_json_reports_what_the_record_says(self) -> None:
         self.write(record("q-json"))
         out = io.StringIO()

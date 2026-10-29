@@ -2937,7 +2937,7 @@ def pending_cmd(as_json, show_text=False):
             print(f"retired expect-ack {e['id']}  {target_label({'target': e['target']})}  from {e['sender'] or '?'}  "
                   f"{e['age_s'] // 60}m old  -- {e.get('reason') or '(no reason recorded)'}"
                   + (f"  | evidence: {e['evidence']}" if e.get("evidence") else "")
-                  + (f"  | by {e['retired_by']}" if e.get("retired_by") else ""))
+                  + f"  | by {e.get('retired_by') or '?'}")
             continue
         print(f"{'OVERDUE ' if e['overdue'] else ''}expect-ack {e['id']}  {e['state']:<6} {target_label({'target': e['target']})}  "
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
@@ -2998,14 +2998,44 @@ def cancel_cmd(rid):
 
 
 def retirement_author(listed=None):
-    """Who retires an expectation: the label a declared job runs under (RELAY_SENDER_NAME), else the fleet `self` row's id (the session that
-    ran the command), else "" for a caller relay cannot identify. Never taken from the text or from the target's row: a retirement is the
-    act of the side that asked or of the operator, and the record must say which."""
-    label = (os.environ.get("RELAY_SENDER_NAME") or "").strip()
-    if label:
-        return label
+    """Who retires an expectation: the fleet `self` row's id (the session that ran the command), else the label a declared job runs under
+    (RELAY_SENDER_NAME, through env_sender_label, so it is sanitized and can never be Hermes), else "" for a caller relay cannot identify.
+    Never taken from the text or from the target's row: a retirement is the act of the side that asked or of the operator, and the record
+    must say which.
+
+    A real session identity wins over a declared label, as in `sender_name` (1496): a job cannot make a record say it retired something a
+    live session retired, and the label is a line that reaches `--pending` text, so it is sanitized rather than stored raw (adversary 2026-10-29
+    B1: a raw RELAY_SENDER_NAME stored a newline and `--pending` printed a forged second row)."""
     me = sender_row(fleet.sessions() if listed is None else listed)
-    return (me.get("id") or "") if me else ""
+    if me and me.get("id"):
+        return me["id"]
+    label = env_sender_label()
+    return "" if label == "unknown" else label
+
+
+def same_session(me, target):
+    """True when fleet row ME and an expectation's TARGET are one session: the same fleet id, the same Paseo agent, or the same session id
+    (full, or the 8-character prefix a record stores as `sid8`). A NAME is not identity, because two Paseo agents can share a title (PR 124),
+    so a name is never compared."""
+    t = target if isinstance(target, dict) else {}
+    me = me if isinstance(me, dict) else {}
+    if not me or not t:
+        return False
+    if me.get("id") and me.get("id") == t.get("id"):
+        return True
+    if me.get("paseo") and me.get("paseo") == t.get("paseo"):
+        return True
+    sid = me.get("sid") if isinstance(me.get("sid"), str) else ""
+    return bool(sid) and any(isinstance(o, str) and o and (sid == o or sid[:8] == o) for o in (t.get("sid"), t.get("sid8")))
+
+
+def retire_text(value, limit=500):
+    """A --reason or --evidence as one safe line: C0 controls and DEL become a space (a newline in a reason would forge a second row in
+    `--pending` text, adversary 2026-10-29 B3, while deleting them outright would glue two words together), whitespace folded, at most LIMIT
+    characters — kept from the START, because the kind of retirement (`answered:`, `never delivered:`, `superseded:`) leads and it is the
+    tail that may go."""
+    text = " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", value if isinstance(value, str) else "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def retire_cmd(eid, reason, evidence="", as_json=False, by=None):
@@ -3016,16 +3046,23 @@ def retire_cmd(eid, reason, evidence="", as_json=False, by=None):
     Only an `open` record retires: `acked` is settled and `reserved` is a send that has not returned yet (exit 1, nothing written). A missing,
     blank or non-string reason is a usage error (exit 2) even when the ID is unknown, and an unknown or malformed ID is exit 1/2. Retiring an
     already retired ID is a no-op that exits 0 with what the record already says, so a re-run is safe. The check and the write share one hold of
-    the expectation lock, as `ack_sweep` writes, and the record keeps its sender, target and age: `--pending` shows it as retired, never overdue."""
+    the expectation lock, as `ack_sweep` writes, and the record keeps its sender, target and age: `--pending` shows it as retired, never overdue.
+
+    The target may NOT retire its own expectation (exit 1, nothing written): that is the party the ack is owed to, and fleet-watch pages only
+    open overdue rows, so letting it retire would silence the escalation without ever replying — the exact bypass the ack-through-relay rule
+    exists to close (adversary 2026-10-29 B2). It closes an expectation with `ack ID`; the sender, another session, or the operator in a bare
+    terminal (no `self` row) still may. Reusing a retired ID with --expect-ack takes the ID back and the retirement is gone (an acked ID has
+    always been reusable), so a re-send takes a NEW id."""
     if not EXPECT_ID.fullmatch(eid or ""):
         print(f"relay: no expectation {eid!r} (relay.py --pending lists them)", file=sys.stderr)
         return 2
-    why = " ".join((reason if isinstance(reason, str) else "").split())
+    why = retire_text(reason)
     if not why:
         print("relay: --retire needs --reason \"why this expectation will never be answered\" (a bare cancellation is not a reason)", file=sys.stderr)
         return 2
-    proof = " ".join((evidence if isinstance(evidence, str) else "").split())
-    who, now = by if by is not None else retirement_author(), time.time()
+    proof = retire_text(evidence)
+    listed = None if by is not None else fleet.sessions()    # fetched once, before the lock: never held across it
+    who, now = by if by is not None else retirement_author(listed), time.time()
     with _flock(defer_dir() / ".expect.lock"):
         # Write via atomic_json under this lock; never call expect_write or take .expect.lock again (a second flock in this process blocks).
         rec = expect_read(eid)
@@ -3038,7 +3075,11 @@ def retire_cmd(eid, reason, evidence="", as_json=False, by=None):
                 print(f"relay: {eid} is {state}: only an open expectation can be retired (an acked one is settled, a reserved one is a live "
                       f"send; `--pending` shows which)", file=sys.stderr)
                 return 1
-            rec = {**rec, "state": "retired", "retired": now, "reason": why, "retired_by": who,
+            if not by and same_session(sender_row(listed or []), rec.get("target")):
+                print(f"relay: {eid} is yours to answer, not to retire: you are its target, and `relay.py --pending` pages an open expectation "
+                      f"to the operator; reply `ack {eid}` instead (the sender, another session, or the operator can retire it)", file=sys.stderr)
+                return 1
+            rec = {**rec, "state": "retired", "retired": now, "reason": why, "retired_by": retire_text(who, 80),
                    **({"evidence": proof} if proof else {})}
             atomic_json(expect_dir() / f"{eid}.json", rec)
     if as_json:
@@ -3049,7 +3090,7 @@ def retire_cmd(eid, reason, evidence="", as_json=False, by=None):
     print(("already retired: " if again else "retired: ") + eid
           + f"  ({rec.get('reason') or why})"
           + (f"  | evidence: {rec['evidence']}" if rec.get("evidence") else "")
-          + (f"  | by {rec['retired_by']}" if rec.get("retired_by") else ""))
+          + f"  | by {rec.get('retired_by') or '?'}")
     return 0
 
 
