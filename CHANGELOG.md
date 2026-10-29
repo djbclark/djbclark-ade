@@ -11,7 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- Added mechanical CI waiver classification, exact-head independent-review markers and docs-only workflow filtering for proved low-risk changes (#NNN).
+- Added mechanical CI waiver classification, exact-head independent-review markers and docs-only workflow filtering for proved low-risk changes (#118).
 
 - Added `bin/context-watch` (2026-10-28), a read-only per-agent context readout: for each running Claude Code agent (`paseo ls -g --background --json`, else transcripts modified in the last 30 minutes) it prints `<id8> <title> 214k/267k (80%) wall in 53k`, fullest first, from the newest non-sidechain usage block (the nudge hook's `_last_context_tokens`, imported) against each agent's own compaction ceiling (the smaller of its `autoCompactWindow` and its model's window, minus the 33k buffer); `--json`, `--min-pct`, `--source`, `--recent-minutes`; an unreadable size prints `?`; exit 0; not wired into fleet-watch or settings.json; `docs/context-hygiene.md` section 6 (#107).
 - Added `relay.py --transfer-expectations OLD_SENDER [--id TOKEN ...]` to settle unswept old-transcript acks before adopting a finished sender's open ack expectations into the successor identity and transcript, preserving their status and age; reported skipped tokens and exited 1 with `missing` for requested tokens not transferred (#101).
