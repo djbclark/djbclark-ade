@@ -43,12 +43,7 @@ jobs:
 
   pytest-linux:
     if: ${{ github.event.inputs.context_only != 'true' }}
-    # Pinned, not ubuntu-latest: on 2026-10-28 the alias moved to ubuntu-26.04, whose coreutils are
-    # the Rust uutils multicall binaries. The g-prefixed symlinks below then fail ("Requested utility
-    # `gtr` does not match executable name"), 90 tests failed and the job ran into its 30 minute cap
-    # (run 40723793153; the last green run, 40669526660, was on ubuntu-24.04). Move off 24.04 only
-    # when the symlink step and the suite are ported to uutils.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
 
     steps:
@@ -60,8 +55,10 @@ jobs:
 
       # On Linux the GNU tools are native under their plain names, but the repo's scripts
       # and the tests' fake agents call the g-prefixed names the Mac needs. Make one
-      # g-prefixed symlink per tool that exists, in a directory put on PATH.
-      - name: Create the g-prefixed GNU tool symlinks
+      # g-prefixed wrapper script per tool that exists, in a directory put on PATH. A wrapper,
+      # not a symlink: ubuntu-26.04's coreutils are Rust uutils multicall binaries that refuse
+      # to run under another name ("Requested utility `gtr` does not match executable name").
+      - name: Create the g-prefixed GNU tool wrappers
         run: |
           set -eu
           # Ubuntu's default awk is mawk; the scripts want real GNU awk.
@@ -80,7 +77,8 @@ jobs:
             if [ "$tool" = awk ] && command -v gawk >/dev/null 2>&1; then
               continue  # gawk is already a real GNU awk under its own name
             fi
-            ln -sf "$target" "$bindir/g$tool"
+            printf '#!/bin/sh\nexec %s "$@"\n' "$target" > "$bindir/g$tool"
+            chmod +x "$bindir/g$tool"
             echo "g$tool -> $target"
           done
           echo "$bindir" >> "$GITHUB_PATH"
@@ -89,7 +87,7 @@ jobs:
         run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
 
   context-policy:
-    runs-on: ubuntu-24.04  # pinned with pytest-linux above; it passed on 26.04 but should not drift alone
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
