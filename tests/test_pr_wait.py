@@ -2386,3 +2386,11 @@ def test_bool_and_float_values_are_not_the_integers_the_result_must_hold(world: 
     doc[field] = value
     put_local(world, doc)
     assert local_run(world)["merge_blockers"] == ["local-codex-unreadable"]
+
+
+def test_a_local_result_that_is_not_utf8_is_unreadable_not_a_crash(world: World) -> None:
+    """Codex P2 on PR 130: `UnicodeDecodeError` escaped `local_codex_read` and aborted the waiter."""
+    put_local(world, None)
+    f = world.state.parent / "local-review" / f"{REPO.replace('/', '__')}-pr{PR}-{HEAD}.json"
+    f.write_bytes(b'{"schema": 1, "x": "\xff\xfe"}')
+    assert local_run(world)["merge_blockers"] == ["local-codex-unreadable"]

@@ -61,6 +61,7 @@ Full review comments:
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
+  detached_tmp) python3 -c "import subprocess,os,time;p=subprocess.Popen(['sleep','300'],start_new_session=True,cwd='/tmp');open(os.environ['FAKE_PID_FILE'],'w').write(str(p.pid));time.sleep(4)" & sleep 3; say "The patch looks correct." ;;
   detached) python3 -c "import os,subprocess;p=subprocess.Popen(['sleep','300'],start_new_session=True,cwd=os.getcwd());open(os.environ['FAKE_PID_FILE'],'w').write(str(p.pid))"; say "The patch looks correct." ;;
   shaped) say "- **[P1]** A bold priority — $PWD/a.py:1-1" ;;
   shaped_bare) say "[P1] A bare priority" ;;
@@ -281,6 +282,22 @@ def test_a_tool_command_in_a_session_of_its_own_is_killed_too(world: World) -> N
     assert world.run(mode="detached").returncode == 0
     time.sleep(0.5)
     assert not alive(int(world.pid_file.read_text())), "a detached tool process of codex survived the run"
+
+
+def test_a_detached_tool_working_outside_the_worktree_is_found_while_codex_is_alive_and_killed(world: World) -> None:
+    """Codex P2 on PR 130 (second run): once codex exits its tool is reparented and, working in /tmp, invisible to a worktree scan."""
+    assert world.run(mode="detached_tmp").returncode == 0
+    time.sleep(0.5)
+    assert not alive(int(world.pid_file.read_text())), "a detached tool working in /tmp survived the run"
+
+
+def test_the_base_is_resolved_from_its_own_fetch_not_from_a_tracking_ref(world: World) -> None:
+    """Codex P2 on PR 130: a single-branch clone has no origin/<base> to read, or a stale one."""
+    sh("git", "update-ref", "-d", "refs/remotes/origin/master", cwd=world.work, env=world.env)
+    sh("git", "config", "--unset-all", "remote.origin.fetch", cwd=world.work, env=world.env)
+    r = world.run()
+    assert r.returncode == 0, r.stderr
+    assert world.doc()["base_sha"] == sh("git", "rev-parse", "master", cwd=world.work, env=world.env)    # the remote's master tip
 
 
 def test_a_run_that_is_terminated_files_failed_removes_its_worktree_and_kills_codex(world: World) -> None:

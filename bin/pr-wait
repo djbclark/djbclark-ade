@@ -1212,7 +1212,7 @@ def local_codex_read(repo: str, pr: int, head: str, base_ref: str | None = None)
         return out
     try:
         raw = path.read_text()
-    except OSError as e:
+    except (OSError, ValueError) as e:    # ValueError: bytes that are not UTF-8
         out["reason"] = f"cannot read {path.name}: {e}"
         return out
     try:
