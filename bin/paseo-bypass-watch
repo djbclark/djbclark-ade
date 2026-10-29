@@ -14,21 +14,31 @@ opened with an initial prompt can therefore still stall once, until someone answ
 Prefer `--loop 10` or longer: a pass costs about one `agent ls` plus ~8 s per new agent.
 
 One pass:
-  0. `$PASEO_CLI agent ls --label perm=ask --json` (read-only): every id returned is exempt. The CLI
-     prints no labels on `ls` or `inspect`, so this filter is the only source. If the call fails or
-     its output is unusable the WHOLE pass is aborted before any agent is touched (`--once` exits 1,
-     `--loop` logs and goes on): never read as an empty set.
-  1. `$PASEO_CLI agent ls --json` (read-only). Items carry id, name, provider ("claude/<model>"),
-     status and a relative `created` string; no mode, archived flag or ISO time.
+  0. `$PASEO_CLI agent ls --json` (read-only). Items carry id, name, provider ("claude/<model>"),
+     status and a relative `created` string; no mode, archived flag or ISO time. This call comes
+     FIRST, deliberately: labels are written at create time, so an agent already in this list carried
+     its labels before the label query below. Reading the exemption first would let a perm=ask seat
+     created between the two calls (one CLI start-up, ~3 s) be missing from the exemption set.
+  1. `$PASEO_CLI agent ls --label perm=ask --json` (read-only): every id returned is exempt. The CLI
+     prints no labels on `ls` or `inspect`, so this filter is the only source. It is read on every
+     pass, never cached. If either list call fails or its output is unusable the WHOLE pass is
+     aborted before any inspect or mode call (`--once` exits 1, `--loop` logs and goes on): a failed
+     exemption read is never taken as an empty set.
+     Scope: both calls use the CLI's default `ls` scope, `active`, so a seat outside an active
+     project or in a background workspace is never listed and therefore never flipped.
   2. For each agent whose provider is claude, whose status is not `closed`, whose id is not exempt
      and not in the state file, `$PASEO_CLI agent inspect ID --json` supplies Archived, Mode and
      CreatedAt (ISO).
   3. An agent that is not archived, whose Mode is exactly `default` and which is younger than
      --max-age (default 120 s) gets `$PASEO_CLI agent mode ID bypassPermissions`, a re-fetch and a
      check, and one stdout line `set ID name`; its id is then recorded as handled.
-  4. Any other unseen claude agent (too old, archived, closed, exempt, or in ANY mode but `default`:
-     plan, acceptEdits, dontAsk, bypassPermissions...) is only recorded. Handled means never touched
-     again: a mode the operator picks later (plan, say) sticks.
+  4. Any other unseen claude agent (too old, archived, closed, exempt, or in ANY mode but `default`)
+     is only recorded. The claude modes in this Paseo build are plan, default, acceptEdits, auto,
+     bypassPermissions; the watcher acts on `default` only, so a seat in `auto` (the classifier mode;
+     the UI may preselect it) is recorded untouched. Handled means never touched again: a mode the
+     operator picks later (plan, say) sticks if it is picked after the watcher has acted, or more
+     than a few seconds (about one CLI start-up, ~3 s) before it acts. There is no compare-and-set:
+     a `plan` picked inside that window is overwritten and the seat is recorded `set`.
   5. A failing `agent mode` (or a re-fetch that still shows another mode) is logged to stderr and
      not recorded; it is retried on the next pass, 5 attempts in all, then recorded as failed. Each
      retry inspects again and acts only while Mode is still `default`, whatever the age.
@@ -221,12 +231,15 @@ def record(state: dict, agent_id: str, result: str, now: datetime) -> None:
 
 def one_pass(state: dict, max_age: float, dry_run: bool) -> dict:
     """Mutates `state`; returns the pass report. Raises RuntimeError, before touching any agent, when
-    the exempt list or the agent list cannot be read."""
+    the agent list or the exempt list cannot be read. The order is deliberate: labels are written at
+    create time, so an agent already in the list carried its labels before the label query; a seat
+    created between the two calls must not be missing from the exemption set."""
     now = datetime.now(timezone.utc)
     report: dict[str, list] = {"set": [], "recorded": [], "failed": [], "would_set": [], "errors": []}
     handled, attempts = state["handled"], state["attempts"]
-    exempt = exempt_ids()  # fails closed: an unreadable exempt list aborts the whole pass
-    for agent in list_agents():
+    agents = list_agents()
+    exempt = exempt_ids()  # after the list, never before; fails closed: an unreadable list aborts the whole pass
+    for agent in agents:
         agent_id = str(agent["id"])
         name = str(pick(agent, "name") or "")
         if provider_of(agent) != "claude" or agent_id in handled:
@@ -246,7 +259,7 @@ def one_pass(state: dict, max_age: float, dry_run: bool) -> dict:
         retrying = agent_id in attempts  # the set decision was taken on an earlier pass
         skip = (
             pick(info, "archived") is True
-            or pick(info, "mode") != ACT_ON_MODE  # plan, acceptEdits, dontAsk, bypass...: a deliberate choice; retries re-check it too
+            or pick(info, "mode") != ACT_ON_MODE  # plan, acceptEdits, auto, bypass...: a deliberate choice; retries re-check it too
             or (not retrying and (age is None or age >= max_age))
         )
         if skip:

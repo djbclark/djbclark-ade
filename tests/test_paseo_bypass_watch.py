@@ -198,7 +198,7 @@ def test_loop_with_a_failing_label_filter_never_touches_and_keeps_going(w: World
     assert w.mode_calls() == []
 
 
-@pytest.mark.parametrize("mode", ["plan", "acceptEdits", "dontAsk", "someFutureMode"])
+@pytest.mark.parametrize("mode", ["plan", "acceptEdits", "auto", "someFutureMode"])
 def test_only_default_mode_is_acted_on(w: World, mode: str):
     w.set_agents({"aaa-1": agent("deliberate", mode=mode)})
     assert w.run().returncode == 0
@@ -261,6 +261,113 @@ def test_loop_skips_a_pass_while_the_lock_is_busy(w: World):
             p.send_signal(signal.SIGTERM)
             p.wait(timeout=30)
     assert w.mode_calls() == []
+
+
+# A seat created right after the `--label` query answered (adversary round 2, A1). The wrapper makes
+# that happen inside the stub's own call sequence.
+RACE_WRAP = textwrap.dedent(
+    """\
+    #!{python}
+    import json, os, subprocess, sys
+    r = subprocess.run([{inner!r}, *sys.argv[1:]])
+    if "--label" in sys.argv:  # the seat is created right after the exempt query answered
+        p = os.environ["FIXTURE"]
+        fx = json.load(open(p))
+        for i, v in fx.pop("pending", {{}}).items():
+            fx["agents"][i] = v["agent"]
+            fx.setdefault("labels", {{}})[i] = v["labels"]
+        json.dump(fx, open(p, "w"))
+    sys.exit(r.returncode)
+    """
+)
+
+
+def test_perm_ask_seat_created_right_after_the_label_query_keeps_its_mode(w: World):
+    # The agent list must be read BEFORE the exemption list: a seat that appears after the label query
+    # answered is then simply not in this pass's list. Swapped, it would be listed but missing from the
+    # exemption set, inspected as a young `default` seat and flipped.
+    inner = w.tmp / "paseo-inner"
+    w.stub.rename(inner)
+    w.stub.write_text(RACE_WRAP.format(python=sys.executable, inner=str(inner)))
+    w.stub.chmod(0o755)
+    w.set_agents({}, pending={"ask-1": {"agent": agent("careful seat"), "labels": {"perm": "ask"}}})
+    r = w.run()
+    assert r.returncode == 0, r.stderr
+    assert w.mode_of("ask-1") == "default", "perm=ask seat was flipped to bypassPermissions"
+    assert w.mode_calls() == []
+    r = w.run()  # next pass: the seat is listed and now exempt
+    assert r.returncode == 0, r.stderr
+    assert w.mode_of("ask-1") == "default"
+    assert w.mode_calls() == []
+    assert w.handled()["ask-1"]["result"] == "recorded"
+
+
+def test_loop_reads_the_exemption_on_every_pass(w: World):
+    # A perm=ask default seat appears between pass 1 and pass 2; a control seat beside it proves pass 2
+    # acts. An exemption cached for the process lifetime would flip the perm=ask seat.
+    w.set_agents({})
+    p = subprocess.Popen(w.argv("--loop", "1"), env=w.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline and w.calls.read_text().count("--label perm=ask") < 1:
+            assert p.poll() is None, p.stderr.read()
+            time.sleep(0.05)
+        assert w.calls.read_text().count("--label perm=ask") >= 1, "pass 1 never ran"
+        time.sleep(0.3)  # pass 1 is over (nothing to inspect); pass 2 starts about 1 s after it began
+        tmp = w.tmp / "fixture.tmp"
+        tmp.write_text(json.dumps({
+            "agents": {"ask-1": agent("careful seat"), "ctl-1": agent("control seat")},
+            "labels": {"ask-1": {"perm": "ask"}},
+        }))
+        os.replace(tmp, w.fixture)
+        deadline = time.time() + 30
+        while time.time() < deadline and not w.mode_calls():
+            assert p.poll() is None, p.stderr.read()
+            time.sleep(0.05)
+        time.sleep(0.5)
+        assert p.poll() is None
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=30) == 0
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+    assert w.mode_calls() == ["agent mode ctl-1 bypassPermissions"]
+    assert w.mode_of("ask-1") == "default"
+
+
+def test_state_is_loaded_while_the_lock_is_held(tmp_path: Path, monkeypatch):
+    # Loading before locking lets two passes read the same state and lose one's records.
+    loader = importlib.machinery.SourceFileLoader("paseo_bypass_watch_lock_under_test", str(SCRIPT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    state_path = tmp_path / "s" / "state.json"
+    lock_path = state_path.with_name(state_path.name + ".lock")
+    seen: list[bool] = []
+    real_load = mod.load_state
+
+    def load_checking_the_lock(path):
+        lock_path.parent.mkdir(parents=True, exist_ok=True)  # load-before-lock gets here with no directory yet
+        probe = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                seen.append(False)  # we got it: the pass was not holding it
+            except BlockingIOError:
+                seen.append(True)
+        finally:
+            os.close(probe)
+        return real_load(path)
+
+    monkeypatch.setattr(mod, "load_state", load_checking_the_lock)
+    monkeypatch.setattr(mod, "one_pass", lambda state, max_age, dry_run: {"set": []})
+    assert mod.run_pass(state_path, 120.0, False, False) is True
+    assert seen == [True]
+    probe = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released after the pass
+    finally:
+        os.close(probe)
 
 
 def test_archived_agent_is_untouched(w: World):
