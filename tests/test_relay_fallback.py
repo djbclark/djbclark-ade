@@ -3826,6 +3826,20 @@ class TestDeferredSend(Harness):
         relay.deliver(rid)
         self.assertEqual((relay.rec_read(rid)["state"], self.calls), ("delivered", ["type"]))
 
+    def test_a_card_blocked_pane_is_not_queued_with_a_via_it_could_not_keep_or_with_no_route(self) -> None:
+        """The record keeps no --via and its deliverer takes the first route, so `--via pane` must keep the plain refusal (Codex, PR 112);
+        a target with no route at all would only fail later."""
+        tui = self.proc(51921, "omp", "omp", "--auto-approve")
+        self.pane(real_omp_row(status="blocked"), [tui])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2", "--via", "pane"]), 1)
+        self.assertEqual((relay.rec_all(), self.spawned), ([], []))
+        self.assertIn("blocked on a question or permission prompt", err.getvalue())
+        with mock.patch.object(relay, "plan", lambda s: []), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(relay.main(["w2N:pZ", "hello there friend", "--wait", "2"]), 1)
+        self.assertEqual((relay.rec_all(), self.spawned), ([], []))
+        self.assertIn("has no route", err.getvalue())
+
     def test_a_paseo_card_is_a_card_poll_but_an_archived_agent_with_one_is_still_a_failure(self) -> None:
         rec = {"target": {"id": AGENT[:8], "paseo": AGENT}}
         relay.paseo_inspect = lambda a: {"Id": a, "Status": "idle", "Archived": False, "PendingPermissions": [{"id": "p1"}]}

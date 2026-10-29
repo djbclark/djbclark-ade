@@ -3331,7 +3331,7 @@ def _main(argv=None, sweep=True):
         print(f"relay: [{s['id']}] not sent: text starting with '/' would run a built-in; peers do not run another "
               "session's built-ins", file=sys.stderr)
         return 2
-    route = "paseo" if is_paseo else "pane"
+    route = "paseo" if is_paseo else None    # a non-Paseo target is deferred only without --via: the record keeps no --via, and the deliverer picks the first route
     card = None    # a card-blocked target that may be deferred: not a refusal, queued below (split_card)
     why = hard_stop(s)    # on the fleet's own snapshot, before the Paseo gate overwrites its status
     card, why = split_card(why, a, text, route, card)
@@ -3367,6 +3367,9 @@ def _main(argv=None, sweep=True):
         elif fleet.link_get(fleet.links_read()["links"], me, s) is None:
             text += f" [first contact from {me['id']}: reply `ack {me['id']}` through relay.py to prove this link both ways]"
     if card:    # blocked on a card and deferrable: queued now, delivered once the card is answered; typed text would answer it
+        if not (is_paseo or plan(s)):    # a record nobody could send (no route at all) would only fail later: refuse now, as the route check below does
+            print(f"relay: [{s['id']}] not sent: {card}; and it has no route", file=sys.stderr)
+            return 1
         return defer_send(s, a, text, listed, card)
     why = is_paseo and paseo_steer_refusal(s, a.steer)
     if why:
