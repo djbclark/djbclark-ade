@@ -251,9 +251,12 @@ def main(argv: list[str]) -> int:
                 return finish(doc_out, result_path, t0, a.json, usage_error=f"--head {head[:12]} is neither the PR's head {pr_head[:12]} nor one of its ancestors")
             if head != pr_head:
                 print(f"local-review: note: {head[:12]} is not the PR's current head {pr_head[:12]}; the result names {head[:12]}", file=sys.stderr)
-            # the base branch's tip, read from FETCH_HEAD of its own fetch: no dependence on a tracking ref (a single-branch clone has none for it)
-            bfetch = run(["git", "fetch", "-q", "origin", f"refs/heads/{base}"], cwd=root)
-            base_sha = run(["git", "rev-parse", "--verify", "FETCH_HEAD^{commit}"], cwd=root).stdout.strip() if bfetch.returncode == 0 else ""
+            # the base branch's tip, fetched into a ref of our own and read from it: FETCH_HEAD is shared state another `git fetch` in the same repository
+            # overwrites, and a single-branch clone has no origin/<base> to read
+            ref = f"refs/local-review/base-{os.getpid()}"
+            bfetch = run(["git", "fetch", "-q", "origin", f"+refs/heads/{base}:{ref}"], cwd=root)
+            base_sha = run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root).stdout.strip() if bfetch.returncode == 0 else ""
+            run(["git", "update-ref", "-d", ref], cwd=root)    # the commit stays in the object store; the ref was only a pin for the read
             if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
                 raise RuntimeError(f"cannot fetch the base branch {base}: {bfetch.stderr.strip()[:200]}")
             doc_out["base_sha"] = base_sha
