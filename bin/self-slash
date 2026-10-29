@@ -50,7 +50,9 @@
 # handoff must be able to continue on another model without anyone typing): instead of a bare
 # archive, the waiter (1) waits for this agent to be idle, (2) reads its name, mode and cwd
 # (`paseo agent inspect`) and its workspace id (`paseo workspace ls --json`, matched by cwd;
-# SELF_SLASH_WORKSPACE overrides, needed when several workspaces share the cwd), (3) starts
+# SELF_SLASH_WORKSPACE overrides; when several workspaces share the cwd, the workspaceId in this
+# agent's own Paseo state file places the successor if it is one of them, else the single foreground
+# one does, else it is refused), (3) starts
 # the successor with `paseo run "/baton" --provider P/M --thinking T --mode MODE --workspace W
 # --cwd C --title T --no-wait` (defaults: this agent's mode, --thinking high, title
 # "<old name> → <model>"), (4) polls it (SELF_SLASH_SUCCESSOR_SETTLE seconds, default 20) and needs
@@ -283,6 +285,12 @@ print(p.get("pane_id", ""), p.get("agent") or "")' 2>/dev/null)
   if [ -n "$cur" ] && [ "$cur" != "$pane" ]; then
     echo "self-slash: HERDR_PANE_ID=$pane is stale (pane moved); using $cur" >&2; pane="$cur"
   fi
+  # An unregistered pane (herdr's agent kinds have no zcode, 2026-10-28) still names its TUI through
+  # the pane's foreground processes: argv0 zcode-cli / a cmdline running bin/zcode means zcode, whose
+  # slash surface ends with /exit, not /quit (README: `/copy`, `/cls`, `/exit`).
+  if [ -z "$tui" ] && herdr pane process-info --pane "$pane" 2>/dev/null | grep -qE '"argv0": *"zcode-cli"|"cmdline": *"[^"]*/bin/zcode"'; then
+    tui=zcode
+  fi
 elif [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && command -v orca >/dev/null 2>&1; then
   host=orca; pane="$ORCA_TERMINAL_HANDLE"; tui=""
   if [ "${CURSOR_AGENT:-}" = "1" ]; then
@@ -375,6 +383,10 @@ if [ "$host" = paseo ]; then
       finish=1;;
   esac
 fi
+if [ "$host" = herdr ] && [ "$tui" = zcode ]; then
+  # zcode ends with /exit; /quit would reach it as an unknown command (README: `/copy`, `/cls`, `/exit`).
+  case "$text" in /quit|"/quit "*) text="/exit${text#/quit}";; esac
+fi
 # ... and a follow-up /quit or /exit would be sent as plain text, or end the fresh session.
 if [ "$host" = paseo ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   case "$then" in /quit|/exit|"/quit "*|"/exit "*) echo "self-slash: --then $then is not a Paseo command; use --finish after the turn instead" >&2; exit 2;; esac
@@ -396,12 +408,14 @@ if [ -n "$s_baton" ]; then
   [ -f "$s_baton" ] || { echo "self-slash: --baton is not an existing regular file: $s_baton" >&2; exit 2; }
 fi
 s_thinking="${s_thinking:-high}"
-# herdr names the TUI in the pane's `agent` field. Prompt detection knows Codex (›), Claude Code (❯), cursor-agent (→) and omp
+# herdr names the TUI in the pane's `agent` field; an unregistered pane is probed via process-info
+# (zcode, 2026-10-28). Prompt detection knows Codex (›), Claude Code (❯), cursor-agent (→), omp
 # (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
-# and gave up).  Another TUI cannot be read, so say so now: the waiter would only log "gave up" after ~50 s.
-case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; *) marker="❯";; esac
-if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
-  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp and codex, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
+# and gave up) and zcode (❯ default, pane-level read/send; /exit not /quit). Another TUI cannot be read, so
+# say so now: the waiter would only log "gave up" after ~50 s.
+case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; zcode) marker="ZCODE";; *) marker="❯";; esac
+if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "$tui" != zcode ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp, codex and zcode, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
 fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
@@ -485,7 +499,7 @@ if [ "$dry" = 1 ]; then
     echo "self-slash: dry run, would wait ${delay}s, then (every call with PASEO_AGENT_ID and PASEO_AGENT_CWD unset):"
     echo "  $paseo_cli wait $pane --timeout ${SELF_SLASH_WAIT:-900} --json"
     echo "  $paseo_cli agent inspect $pane --json            (name, mode, cwd)"
-    echo "  $paseo_cli workspace ls --background --json      (this agent's workspace: exactly one row with cwd ${PASEO_AGENT_CWD:-<agent cwd>}, or, when several share it, the workspaceId in this agent's ~/.paseo/agents/*/$pane.json places the successor${SELF_SLASH_WORKSPACE:+; SELF_SLASH_WORKSPACE=$SELF_SLASH_WORKSPACE only places the successor}${s_workspace:+; --workspace $s_workspace: its own row gives the successor cwd})"
+    echo "  $paseo_cli workspace ls --background --json      (this agent's workspace: exactly one row with cwd ${PASEO_AGENT_CWD:-<agent cwd>}, or, when several share it, the workspaceId in this agent's ${PASEO_HOME:-$HOME/.paseo}/agents/*/$pane.json places the successor${SELF_SLASH_WORKSPACE:+; SELF_SLASH_WORKSPACE=$SELF_SLASH_WORKSPACE only places the successor}${s_workspace:+; --workspace $s_workspace: its own row gives the successor cwd})"
     if [ -n "$s_workspace" ]; then dry_cwd="<cwd of that workspace>"; else dry_cwd="${PASEO_AGENT_CWD:-<agent cwd>}"; fi
     if [ -n "$s_mode" ]; then dry_mode=" --mode $s_mode"; else dry_mode=" --mode <agent mode if the same provider; claude: bypassPermissions; else none>"; fi
     echo "  $paseo_cli run \"/baton${s_baton:+ $s_baton}\" --provider $successor --thinking $s_thinking$dry_mode --workspace ${s_workspace:-<id>} --cwd $dry_cwd --title \"$dry_title\" --no-wait --json   (never --new-workspace)"
@@ -584,8 +598,13 @@ classify_prompt() {
     echo EMPTY
   elif [ "$host" = herdr ]; then
     # The rules (dim, grey, reverse video, known hints) live in prompt_line.py, shared with relay.py.
-    herdr agent read "$pane" --source visible --lines 12 --format ansi 2>/dev/null \
-      | python3 "$prompt_line" "$marker" 2>>"$log"
+    # Registered agents read via `agent read`; a pane herdr does not track as an agent — zcode is not
+    # among herdr's agent kinds, and on 2026-10-28 every waiter poll for a zcode pane said "no input
+    # prompt on screen yet" while `agent read` was failing agent_not_found — falls back to `pane read`,
+    # which takes the same arguments and needs no agent registration.
+    screen=$(herdr agent read "$pane" --source visible --lines 12 --format ansi 2>/dev/null) \
+      || screen=$(herdr pane read "$pane" --source visible --lines 12 --format ansi 2>/dev/null)
+    printf "%s" "$screen" | python3 "$prompt_line" "$marker" 2>>"$log"
   else
     screen=$(read_screen)
     if ! printf "%s\n" "$screen" | ggrep -qE "^[[:space:]]*❯"; then echo NOPROMPT; return; fi
@@ -745,7 +764,7 @@ send_text() {
     # autocomplete row ("→ /quit   Exit", seen 2026-10-10), so match the text as a prefix.
     for _ in 1 2 3; do
       sleep 2
-      case "$(classify_prompt)" in "$text"*) herdr agent send-keys "$pane" enter >/dev/null ;; *) return 0 ;; esac
+      case "$(classify_prompt)" in "$text"*) herdr agent send-keys "$pane" enter >/dev/null 2>&1 || herdr pane send-keys "$pane" enter >/dev/null 2>&1 || true ;; *) return 0 ;; esac
     done
     sleep 2
     case "$(classify_prompt)" in "$text"*)
@@ -937,11 +956,11 @@ for f in glob.glob(os.path.join(glob.escape(home), "agents", "*", agent + ".json
 if len(ids) == 1:
     print(ids.pop())' "$1" 2>/dev/null
 }
-# workspace_plan AGENT-CWD: from `paseo workspace ls --background --json` on stdin print one JSON
+# workspace_plan AGENT-CWD OVERRIDE TARGET OWN-WS: from `paseo workspace ls --background --json` on stdin print one JSON
 # object: ws (where the successor goes), cwd (its --cwd: the target workspace's own row when
 # --workspace names one, else "" = this agent's), old_ws (this agent's workspace), proven (1 only
 # for exactly one realpath-cwd match, or an override whose row has this agent's cwd), old_iso,
-# old_cwd, note, err.  An id from the override, the agent's own state file (5th argument) or the
+# old_cwd, note, err.  An id from the override, the agent's own state file (4th argument) or the
 # prefer-foreground tie-break may PLACE the successor but is never an archive target (M1); the cwd of a --workspace target never falls
 # back to this agent's (H1).
 workspace_plan() {
@@ -989,7 +1008,7 @@ else:
         fg = [r for r in hit if not r.get("background")]
         if own and any(r["workspaceId"] == own for r in hit):
             old = own
-            out["note"] = "several workspaces share this cwd; " + old + " is the workspaceId in this agent state file, so the successor goes there, and it is never archived"
+            out["note"] = "several workspaces share this cwd; " + old + " is the workspaceId in this agent state file, so the successor goes there unless --workspace names another, and it is never archived"
         elif len(fg) == 1:
             old = fg[0]["workspaceId"]
             out["note"] = "several workspaces share this cwd; " + old + " was picked by preference and is never archived"

@@ -878,7 +878,10 @@ forgejo.mit.edu/djbclark/paseo-nix (CI-built package plus `services.paseo`). Ski
 `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin` (vendored in
 `djbclark-ade/skills/`, link them with `bin/skill-everywhere`; the advisor/committee/handoff triggers
 are narrowed to explicit Paseo requests, see `skills/paseo/UPSTREAM.md`). Fleet setup:
-site-djbclark `docs/paseo.md`.
+site-djbclark `docs/paseo.md`. Terminal front end for one Paseo agent (log view, prompt box,
+steer/interrupt, permission confirm; runs in a Herdr pane; added 2026-10-28, djbclark):
+`uv tool install git+https://github.com/djbclark/paseo-pane` (github.com/djbclark/paseo-pane),
+then `paseo-pane [agent-id]`. It only wraps the `paseo` CLI, so quitting never touches the agent.
 
 **SiYuan notes (machine-specific; added 2026-10-12, djbclark).** Only where the
 SiYuan desktop app (https://b3log.org/siyuan/) is installed and the repo's work

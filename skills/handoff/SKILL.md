@@ -419,7 +419,9 @@ tab ever opened ("several workspaces share this cwd"). After any `self-slash` th
 
 **Partial handoff: the operator keeps this session** ("hand X off to a new tab", "I still use this agent for other things"). The
 `--finish --successor` form archives this agent when it works, so do not use it. Write the handoff (Steps 1-7, scoped to the slice and
-written to its own chain), then start a separate top-level agent in this agent's workspace and leave this one running:
+written to its own chain), then start a separate top-level agent in this agent's workspace and leave this one running. This is not
+`/handoff paseo` (the durable transfer of the whole session, which ends this one): use this recipe only when the operator keeps this
+session, and `/handoff paseo` when this session is the one being handed on:
 
 ```bash
 ~/src/djbclark-ade/bin/paseo-new-seat --title "<short title>" --provider claude --model claude-sonnet-5-5 --thinking medium \
@@ -427,7 +429,7 @@ written to its own chain), then start a separate top-level agent in this agent's
   --prompt "/baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md"
 ```
 
-The `wks_` id is `workspaceId` in `~/.paseo/agents/*/<your agent id>.json`. Exit 4 with `"mode":"bypassPermissions","modeApplied":true`
+The `wks_` id is `workspaceId` in `$PASEO_HOME/agents/*/<your agent id>.json` (`~/.paseo` when unset). Exit 4 with `"mode":"bypassPermissions","modeApplied":true`
 is fine for claude (the shield is for auto-accept; this mode is already yolo). Verify as above, and `paseo logs <new id>` shows the
 `/baton` was read. Skip Step 8's autorename for a partial handoff: it would rename the session the operator keeps using.
 
