@@ -11,9 +11,10 @@ History:
 - 2026-10-28: persisted each emitted nudge in a rotating JSONL log, independent
   of compaction resets; added PostToolUse JSON output and a 20 s per-session
   transcript-check limit. Settings registration remains operator-gated.
-- 2026-10-29: registered PostToolUse in agents/claude/settings.json.tmpl and the
-  live settings; the mid-task note now has one cadence sentence for both events
-  (the prompt-only text became false once PostToolUse ran), built from
+- 2026-10-29: PostToolUse is in agents/claude/settings.json.tmpl (the live settings get the
+  entry by hand once this code is on the shared checkout); PostToolUse calls from a
+  sub-agent (agent_id set) are ignored; the mid-task note has one cadence sentence for
+  both events (the prompt-only text became false once PostToolUse ran), built from
   POST_TOOL_CHECK_SECONDS instead of a hard-coded 20 s.
 - 2026-08-03: built after a session grew to 670k+ tokens unnoticed.
 - 2026-08-23: reworded to "never suggest a wrap-up" (continuous operation).
@@ -782,6 +783,12 @@ def main():
     session_id = data.get("session_id") or "unknown"
     event = data.get("hook_event_name", "UserPromptSubmit")
     if event not in ("UserPromptSubmit", "PostToolUse"):
+        return
+    # A sub-agent's tool calls fire the same PostToolUse hooks with the PARENT's session_id and
+    # transcript_path plus an agent_id (absent on the main thread). Its additionalContext would
+    # reach the sub-agent, and stamping the parent's level, boundary and throttle would spend the
+    # top-level session's one-shot notes there (PR 127 adversary r1, B1): leave it to the main thread.
+    if event == "PostToolUse" and data.get("agent_id"):
         return
     transcript_path = data.get("transcript_path") or ""
     if not transcript_path:
