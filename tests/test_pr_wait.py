@@ -2272,10 +2272,9 @@ def put_local(world: World, doc: object, head: str = HEAD, raw: str | None = Non
 
 
 def local_run(world: World) -> dict:
-    world.route(f"repos/{REPO}/issues/{PR}/comments", fail("the GitHub bot must not be asked under --local-codex"))
     r = world.run("--local-codex", "--json")
     assert r.returncode == 0, r.stderr
-    assert world.calls(f"issues/{PR}/comments") == 0 and world.posts() == 0
+    assert world.posts() == 0    # the bot's review is never requested; its comments are only READ
     return json.loads(r.stdout)
 
 
@@ -2338,7 +2337,7 @@ def test_a_clean_local_review_does_not_hide_an_open_bot_thread_of_an_earlier_hea
     world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([old_finding()]))
     world.route("graphql", gql(thread(50)))
     s = local_run(world)
-    assert s["merge_ready"] is False and s["merge_blockers"] == ["open-findings"], s
+    assert s["merge_ready"] is False and "open-findings" in s["merge_blockers"], s    # (and a mismatch with the happy marker, which says none are open)
     assert s["open_findings"] == 1 and s["local_codex"]["status"] == "clean"
 
 
@@ -2394,3 +2393,19 @@ def test_a_local_result_that_is_not_utf8_is_unreadable_not_a_crash(world: World)
     f = world.state.parent / "local-review" / f"{REPO.replace('/', '__')}-pr{PR}-{HEAD}.json"
     f.write_bytes(b'{"schema": 1, "x": "\xff\xfe"}')
     assert local_run(world)["merge_blockers"] == ["local-codex-unreadable"]
+
+
+def test_local_codex_keeps_the_bot_markers_consistency_check(world: World) -> None:
+    """Codex P1 on PR 130 (round 10): a marker that says unresolved findings exist, with no thread to show for it, is a mismatch even under --local-codex."""
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", unresolved=True, any_findings=True)]))
+    s = local_run(world)
+    assert s["merge_ready"] is False and "findings-mismatch" in s["merge_blockers"], s
+    assert world.posts() == 0
+
+
+def test_local_codex_retries_while_the_bot_comments_cannot_be_read(world: World) -> None:
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/issues/{PR}/comments", fail("gh: boom"))
+    r = world.run("--local-codex", "--json", "--timeout", "3")
+    assert r.returncode != 0 or json.loads(r.stdout)["merge_ready"] is False

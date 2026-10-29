@@ -1981,6 +1981,14 @@ def main(argv: list[str]) -> int:
                         s["running_seen"] = True
                         s["codex_clock"] = time.monotonic()
                     request_step(match)
+            elif a.local_codex:
+                # The bot is neither waited for nor asked, but a marker it already left for this head is still READ: with it `assess()` keeps its
+                # marker/thread consistency checks (a marker that reports unresolved findings no thread shows is a mismatch, never a clean 0; Codex, round 10)
+                comments = attempt(api_items, issue_comments)
+                if comments is None:
+                    s["codex_done"] = False    # unknown, so retried: never "no marker"
+                else:
+                    s["codex_match"], s["codex_newest"] = codex_state_for(comments, head)
             # finish only when both hold on this same poll
             if s["ci_done"] and s["codex_done"] and collect_findings():
                 return finish("done", EXIT_DONE)
