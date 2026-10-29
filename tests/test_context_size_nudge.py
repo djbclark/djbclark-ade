@@ -36,16 +36,16 @@ def box(tmp_path, monkeypatch, capsys):
         return json.dumps({"message": {"usage": {"input_tokens": total,
                            "cache_read_input_tokens": 0}}}) + "\n"
 
-    def run(total=90_000, event="UserPromptSubmit", sid="session-1", compact=False):
+    def run(total=90_000, event="UserPromptSubmit", sid="session-1", compact=False, agent_id=None):
         if not transcript.exists():
             transcript.write_text(usage(50_000))
         with transcript.open("a") as stream:
             stream.write(json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n"
                          if compact else usage(total))
-        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
-            "session_id": sid, "hook_event_name": event,
-            "transcript_path": str(transcript),
-        })))
+        payload = {"session_id": sid, "hook_event_name": event, "transcript_path": str(transcript)}
+        if agent_id is not None:
+            payload["agent_id"] = agent_id
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
         hook.main()
         return capsys.readouterr().out
 
@@ -133,14 +133,27 @@ def test_posttooluse_json_matches_plain_prompt_messages(box, monkeypatch, self_s
     monkeypatch.setattr(box.hook, "_can_self_slash", lambda: self_slash)
     plain = box(300_000, sid="prompt")
     output = box(300_000, event="PostToolUse", sid="tool")
-    prompt_sentence = "this reminder runs only when a prompt is submitted, not between tool rounds."
-    tool_sentence = "this reminder also runs between tool rounds (at most every 20 s)."
-    assert prompt_sentence in plain
+    sentence = ("this reminder runs when a prompt is submitted and between tool rounds "
+                f"(at most every {box.hook.POST_TOOL_CHECK_SECONDS} s).")
+    assert sentence in plain and "runs only when a prompt is submitted" not in plain
     assert json.loads(output) == {"hookSpecificOutput": {
-        "hookEventName": "PostToolUse", "additionalContext": plain.rstrip("\n").replace(
-            prompt_sentence, tool_sentence)}}
+        "hookEventName": "PostToolUse", "additionalContext": plain.rstrip("\n")}}
     assert plain.startswith("Context is large:")
     assert [r["event"] for r in box.records()] == ["UserPromptSubmit"] * 3 + ["PostToolUse"] * 3
+
+
+def test_subagent_posttooluse_leaves_the_parents_one_shot_notes_alone(box):
+    """A sub-agent's tool call carries the parent's session_id and transcript. It must emit nothing
+    and must not stamp level, boundary or the throttle, so the main thread still gets its notes."""
+    assert box(300_000, event="PostToolUse", sid="parent", agent_id="sub-1") == ""
+    assert box.hook.LOG_PATH.exists() is False
+    assert not box.hook.STATE_PATH.exists() or "parent" not in json.loads(box.hook.STATE_PATH.read_text())
+    # The very next main-thread event (no agent_id) fires immediately: no throttle slot was spent.
+    output = box(300_000, event="PostToolUse", sid="parent")
+    assert "Context is large:" in json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    assert [r["kind"] for r in box.records()] == ["ask", "midtask", "boundary"]
+    # An empty agent_id is the main thread, not a sub-agent.
+    assert box(300_000, event="PostToolUse", sid="other", agent_id="") != ""
 
 
 def test_posttooluse_rate_limit_skips_tail_and_is_session_scoped(box, monkeypatch):
