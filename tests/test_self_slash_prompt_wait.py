@@ -56,6 +56,9 @@ else:
 
 # A clock that only the fake `sleep` and the fake herdr move (FAKE_CALL_COST seconds per herdr call), so the
 # waiter's wall-clock budget is testable without waiting.  `gdate +%s` reads it; any other gdate call is real.
+# SELF_SLASH_PATH_AS_IS keeps bin/self-slash from putting /opt/homebrew/bin (a real gdate) ahead of these fakes, which
+# it does on a Mac only: without it the fake clock drove the budget on Linux and the real clock on macOS, and a test
+# that needed more fake seconds than SELF_SLASH_WAIT passed on the Mac and failed in CI.
 FAKE_SLEEP = r'''#!/usr/bin/env python3
 import os, sys, time
 from pathlib import Path
@@ -96,7 +99,7 @@ class PromptWaitTests(unittest.TestCase):
                     if not k.startswith(('HERDR_', 'ORCA_', 'PASEO_', 'SELF_SLASH_', 'ACP_RUN_AGENT', 'FAKE_'))}
         self.env.update(HOME=str(self.home), PATH=f'{bindir}:{os.environ["PATH"]}', HERDR_ENV='1',
                         HERDR_PANE_ID='fake:p1', FAKE_CALLS=str(self.calls), FAKE_CLOCK=str(base / 'clock'),
-                        REAL_GDATE=shutil.which('gdate') or 'gdate', SELF_SLASH_WAIT='300',
+                        REAL_GDATE=shutil.which('gdate') or 'gdate', SELF_SLASH_WAIT='300', SELF_SLASH_PATH_AS_IS='1',
                         FAKE_SCREEN_AFTER=screen('transcript', PROMPT, 'status'))
 
     def run_waiter(self, **extra: str) -> subprocess.CompletedProcess[str]:
@@ -189,7 +192,7 @@ class PromptWaitTests(unittest.TestCase):
         # herdr's own status: wait_idle lets a working pane with no spinner through (a background sub-agent), but a
         # pane with NO prompt on screen and a working status is not ready either
         r = self.run_waiter(FAKE_SCREEN=screen('transcript', PROMPT), FAKE_BUSY_SCREEN=screen('output', 'more output'),
-                            FAKE_BUSY_READS='80', FAKE_STATUS='working')
+                            FAKE_BUSY_READS='80', FAKE_STATUS='working', SELF_SLASH_WAIT='600')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.typed(), [['pane', 'run', 'fake:p1', '/context']])
 
@@ -221,6 +224,15 @@ class PromptWaitTests(unittest.TestCase):
         self.assertEqual(self.typed(), [])
         self.assertNotIn('is busy', self.out(r))
         self.assertLess(self.reads(), 60)
+
+    def test_a_spinner_more_than_12_rows_up_does_not_make_an_unreadable_status_pane_busy(self) -> None:
+        # herdr cannot say what the pane does, so the spinner row decides, but only in the last 12 rows: a spinner row
+        # quoted in scrollback 20 rows up is stale text (pane_busy's read_screen 12)
+        rows = [SPINNER] + [f'diff line {i}' for i in range(20)]
+        r = self.run_waiter(FAKE_SCREEN=screen(*rows), FAKE_STATUS='unknown')
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertNotIn('is busy', self.out(r))
+        self.assertEqual(self.typed(), [])
 
     def test_an_idle_pane_with_spinner_text_in_its_last_rows_is_not_busy_either(self) -> None:
         r = self.run_waiter(FAKE_SCREEN=screen('diff', 'esc to interrupt', SPINNER))

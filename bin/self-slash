@@ -157,7 +157,9 @@
 # Preserve the tool caller's OpenCode selection. GNU tools for host controllers
 # may live in Homebrew, but its opencode can be a different install.
 self_slash_caller_path="$PATH"
-export PATH="/opt/homebrew/bin:$PATH"
+# SELF_SLASH_PATH_AS_IS=1 leaves PATH as the caller built it (tests put a fake gdate/sleep first; Homebrew's real gdate
+# would shadow the fake clock on a Mac only, 2026-10-28, PR 110 Linux CI).
+[ "${SELF_SLASH_PATH_AS_IS:-}" = 1 ] || export PATH="/opt/homebrew/bin:$PATH"
 set -u
 # An inherited BASHOPTS=nocasematch (bash >= 4.1 applies it at startup) would make every `case`
 # guard below case-blind, so "Claude" would pass the plain-id check (adversary pr35 round 2, L1).
