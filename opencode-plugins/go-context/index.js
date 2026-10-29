@@ -47,7 +47,8 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
         states.delete(victim[0]);
       }
       state = { model: model.id, baseline: null, total: null, sampleAt: 0,
-        attemptAt: 0, pending: false, blocked: false, failures: 0, notice: "" };
+        attemptAt: 0, pending: false, blocked: false, failures: 0, notice: "",
+        compactions: 0, handoffAt: 0, handoffTries: 0 };
       states.set(sid, state);
     } else if (state.model !== model.id || state.active === false) {
       // Model measurements may change; admission belongs to the conversation.
@@ -97,6 +98,37 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     }
   }
 
+  const handoffText = (state, limits, tries) => {
+    const byTokens = typeof state.total === "number" && state.total >= limits.handoff;
+    const basis = byTokens
+      ? `measured input context ${state.total} tokens (handoff ceiling ${limits.handoff})`
+      : `${state.compactions ?? 0} automatic compactions (budget ${policy.handoff_after_compactions})`;
+    const action = tries <= 1
+      ? "At this task boundary, run the handoff skill and start a fresh session; do not continue this task in the current session."
+      : `Overdue (fired ${tries} times): stop current work, write the owned handoff document, and start a fresh session through the handoff skill now.`;
+    return `Automatic handoff required: ${basis}. ${action}`;
+  };
+
+  async function maybeHandoff(sid, state) {
+    const limits = profile(state);
+    const due = (typeof state.total === "number" && state.total >= limits.handoff) ||
+      (state.compactions ?? 0) >= policy.handoff_after_compactions;
+    if (!due) return;
+    const cooldown = policy.handoff_cooldown_seconds * 1000;
+    if (state.handoffAt && now() - state.handoffAt < cooldown) return;
+    state.handoffAt = now();
+    state.handoffTries = (state.handoffTries ?? 0) + 1;
+    await save().catch(() => {});
+    // The directive wakes the model into a fresh step; onContext escalates the
+    // same wording into event.system via its own dedup if the model ignores it.
+    try {
+      await ctx.session.prompt(
+        { sessionID: sid, prompt: { text: handoffText(state, limits, state.handoffTries) }, delivery: "steer" },
+        { signal: AbortSignal.timeout(10000) },
+      );
+    } catch { /* the wake may fail; onContext still escalates the directive */ }
+  }
+
   async function onContext(event) {
     if (event.model?.providerID !== "opencode-go") {
       const prior = states.get(event.sessionID);
@@ -108,12 +140,17 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     const state = remember(event.sessionID, event.model);
     if (!state) return;
     const limits = profile(state);
-    if (typeof state.total === "number" && now() - state.sampleAt < 15 * 60 * 1000 && state.total >= limits.warn) {
-      const level = !storageReadable || !streamAvailable || state.blocked || (state.pending && now() - state.attemptAt > 120000) ? "blocked" : "warn";
+    const handoffDue = (typeof state.total === "number" && state.total >= limits.handoff) ||
+      (state.compactions ?? 0) >= policy.handoff_after_compactions;
+    const warnDue = typeof state.total === "number" && now() - state.sampleAt < 15 * 60 * 1000 && state.total >= limits.warn;
+    if (handoffDue || warnDue) {
+      const level = !storageReadable || !streamAvailable || state.blocked || (state.pending && now() - state.attemptAt > 120000) ? "blocked" : (handoffDue ? "handoff" : "warn");
       if (state.notice !== level) {
-        event.system.push({ type: "text", text: `Go cost check: last measured input context ${state.total} tokens, including cache reads/writes. ` +
-          (level === "blocked" ? "Compaction is ineffective or unconfirmed. Reduce fixed instructions/tools and checkpoint at the next safe task boundary; do not loop compactions. " : "Keep the task brief and delegate separable work. Native compaction is queued automatically when its growth threshold is crossed. ") +
-          "At a completed task, write the owned handoff before a supported new-session/baton cycle. Never clear a parent session. Use ade_compact for manual compaction of this session." });
+        event.system.push({ type: "text", text: level === "handoff"
+          ? handoffText(state, limits, Math.max(1, state.handoffTries ?? 0))
+          : `Go cost check: last measured input context ${state.total} tokens, including cache reads/writes. ` +
+            (level === "blocked" ? "Compaction is ineffective or unconfirmed. Reduce fixed instructions/tools and checkpoint at the next safe task boundary; do not loop compactions. " : "Keep the task brief and delegate separable work. Native compaction is queued automatically when its growth threshold is crossed. ") +
+            "At a completed task, write the owned handoff before a supported new-session/baton cycle. Never clear a parent session. Use ade_compact for manual compaction of this session." });
         state.notice = level;
       }
     }
@@ -125,6 +162,12 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     if (!SID.test(sid ?? "") || !states.has(sid)) return;
     if (event.location?.directory && ctx.location?.directory && event.location.directory !== ctx.location.directory) return;
     const state = states.get(sid);
+    // session.idle is the task-boundary signal. It may carry no `created`, so it
+    // must be handled before the staleness guard below.
+    if (event.type === "session.idle") {
+      if (state.active !== false) await maybeHandoff(sid, state);
+      return;
+    }
     const stamp = event.created;
     if (typeof stamp !== "number" || !Number.isFinite(stamp) || now() - stamp > 120000 || stamp > now() + 60000) return;
     if (event.type === "session.model.selected") {
@@ -141,6 +184,7 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
       state.notice = "";
       state.total = null;
       state.sampleAt = stamp;
+      state.compactions = (state.compactions ?? 0) + 1;
       await save().catch(() => {});
       return;
     }

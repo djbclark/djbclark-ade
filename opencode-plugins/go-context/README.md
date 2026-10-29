@@ -5,10 +5,10 @@ session context/tool hooks, primary step events and safe-point compaction API.
 It has no V1 adapter or runtime npm dependency. Its policy comes from
 `../../config/go-model-policy.json`, resolved against the real plugin path.
 
-| Model class | Warn | Compact after 32k growth | Hard trigger |
-| --- | ---: | ---: | ---: |
-| Routine Go | 64k | 96k | 128k |
-| Costly or unclassified Go | 32k | 64k | 96k |
+| Model class | Warn | Compact after 32k growth | Handoff ceiling | Hard trigger |
+| --- | ---: | ---: | ---: | ---: |
+| Routine Go | 64k | 96k | 112k | 128k |
+| Costly or unclassified Go | 32k | 64k | 80k | 96k |
 
 These are conservative **local policy starting points**, not vendor defaults or
 measured optimal thresholds. Count each fresh primary request's input plus cache
@@ -22,6 +22,29 @@ session guesses are used. Model and provider changes preserve session-level
 pending, cooldown, failure and ineffective-compaction state; only model
 measurements are reset. Non-Go periods disable automatic writes without
 erasing the conversation's admission history.
+
+## Automatic handoff trigger
+
+At a **task boundary** (the native `session.idle` event, which carries no
+`created` timestamp and is handled before the staleness guard), the guard
+escalates an over-long session into a mandatory handoff directive when either
+condition is met:
+
+- the last measured input context meets the model class's **handoff ceiling**
+  (112k routine / 80k advisory), or
+- the session has completed `handoff_after_compactions` (2) automatic
+  compactions.
+
+When due, the guard wakes the model with
+`ctx.session.prompt({ prompt: { text }, delivery: "steer" })`, escalating the
+wording across retries, and `onContext` echoes the same directive into the next
+request's system messages through its own dedup. The only gate is
+`handoff_cooldown_seconds` (3600): an ineffective-compaction (blocked) session is
+exactly the one that must hand off rather than loop compactions, so
+`state.blocked`/`storageReadable`/`streamAvailable` are deliberately not gates.
+The directive routes the model through the handoff skill and
+`self-slash "/new"`; it never instructs a raw `/new`, `/clear`, `/reset` or
+`--finish --successor`.
 
 ## Install and activate
 

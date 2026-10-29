@@ -4,13 +4,14 @@ import plugin, { createGuard, loadPolicy } from "./index.js";
 
 async function fixture() {
   let tick = 1_000_000;
-  const calls = [], saved = new Map(), models = new Map();
+  const calls = [], saved = new Map(), models = new Map(), prompts = [];
   const ctx = {
     location: { directory: "/repo" },
     storage: { get: async (key) => saved.get(key), set: async (key, value) => saved.set(key, structuredClone(value)) },
     session: {
       get: async ({ sessionID }) => ({ data: { id: sessionID, model: models.get(sessionID) } }),
       compact: async ({ sessionID }) => { calls.push(sessionID); },
+      prompt: async ({ sessionID, prompt, delivery }) => { prompts.push({ sessionID, text: prompt?.text, delivery }); },
     },
   };
   const policy = loadPolicy();
@@ -31,7 +32,10 @@ async function fixture() {
     tick += 1000;
     await guard.onEvent({ type: "session.compaction.ended", created: tick, data: { sessionID: sid } });
   };
-  return { ctx, guard, policy, calls, saved, models, context, step, end,
+  const idle = async (sid = "ses_one") => {
+    await guard.onEvent({ type: "session.idle", data: { sessionID: sid } });
+  };
+  return { ctx, guard, policy, calls, saved, models, prompts, context, step, end, idle,
     get time() { return tick; }, advance: (ms) => { tick += ms; } };
 }
 
@@ -229,3 +233,66 @@ for (const change of ["context", "selection", "provider-roundtrip", "manual"]) {
     assert.equal(await reloaded.manual("ses_one"), false, "protection persists after reload");
   });
 }
+
+test("session.idle at or above the handoff ceiling wakes the model once", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000); // routine handoff ceiling
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  assert.equal(f.prompts[0].sessionID, "ses_one");
+  assert.equal(f.prompts[0].delivery, "steer");
+  assert.match(f.prompts[0].text, /Automatic handoff required/);
+  assert.match(f.prompts[0].text, /handoff ceiling 112000/);
+});
+
+test("session.idle below the handoff ceiling and compaction budget is a no-op", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(100000); // below the 112000 routine ceiling
+  await f.idle();
+  assert.equal(f.prompts.length, 0);
+});
+
+test("session.idle is ignored for a non-Go session", async () => {
+  const f = await fixture(); await f.context("ses_one", "anthropic", "claude-sonnet");
+  await f.idle();
+  assert.equal(f.prompts.length, 0);
+});
+
+test("session.idle does not wake a session that switched away from Go", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000); // crosses the routine handoff ceiling as a Go session
+  await f.context("ses_one", "anthropic", "claude-sonnet"); // switch away
+  await f.idle();
+  assert.equal(f.prompts.length, 0, "a non-Go session must not be woken by a stale Go measurement");
+});
+
+test("two compactions exhaust the handoff budget and wake the model on idle", async () => {
+  const f = await fixture(); await f.context();
+  await f.end(); await f.end(); // two native compaction completions
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].text, /2 automatic compactions/);
+});
+
+test("the handoff wake respects its cooldown and escalates on retry", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  await f.idle();
+  assert.equal(f.prompts.length, 1);
+  assert.match(f.prompts[0].text, /At this task boundary/);
+  await f.idle(); // within cooldown → no second wake
+  assert.equal(f.prompts.length, 1);
+  f.advance(3600000); // handoff_cooldown_seconds
+  await f.idle(); // cooldown elapsed → escalate
+  assert.equal(f.prompts.length, 2);
+  assert.match(f.prompts[1].text, /Overdue \(fired 2 times\)/);
+});
+
+test("the context hook escalates to a handoff directive once the ceiling is crossed", async () => {
+  const f = await fixture(); await f.context();
+  await f.step(112000);
+  const event = await f.context();
+  assert.equal(event.system.length, 1);
+  assert.match(event.system[0].text, /Automatic handoff required/);
+  assert.match(event.system[0].text, /handoff ceiling 112000/);
+});
