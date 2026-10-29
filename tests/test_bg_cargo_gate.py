@@ -38,6 +38,13 @@ const deny = [
   "cargo miri test", "cargo llvm-cov", "cargo package", "cargo publish",
   "grep -q x <<< y\ncargo build --release", 'echo "see <<EOF"\ncargo build',
   "echo $((1<<4))\ncargo build", "/tmp/bg cargo build",
+  "if cargo build --release; then echo ok; fi", "if ! cargo test; then exit 1; fi",
+  "while cargo test; do sleep 1; done", "until cargo build; do sleep 5; done",
+  "if true; then :; elif cargo build; then :; fi",
+  "rtk test cargo test", "rtk err cargo build --release", "rtk run cargo build", "rtk proxy cargo build",
+  "xargs -d '\\n' cargo build", "xargs -a list cargo build", "xargs -J % cargo build %",
+  "/usr/bin/time -o t.log cargo build", "exec -a x cargo build", "env -P /usr/bin cargo build",
+  "(( n << shift ))\ncargo build", 'git commit -m "a\nsee <<EOF x"\ncargo build',
 ];
 const allow = [
   "~/ops/site-private/bin/bg cargo build -p sudo-secretspec-cli --release",
@@ -50,6 +57,8 @@ const allow = [
   "$HOME/ops/site-private/bin/bg cargo build --release",
   '"$HOME/ops/site-private/bin/bg" cargo test', "${HOME}/ops/site-private/bin/bg cargo build",
   "timeout 600 ~/ops/site-private/bin/bg cargo build", "cat <<EOF\ncargo build\nEOF",
+  "rtk cargo --version", "rtk test ~/ops/site-private/bin/bg cargo test",
+  "cargo clippy --version", "cargo nextest --version", "cargo llvm-cov --version",
 ];
 for (const cmd of deny) assert.equal(requiresBg(cmd), true, cmd);
 for (const cmd of allow) assert.equal(requiresBg(cmd), false, cmd);
