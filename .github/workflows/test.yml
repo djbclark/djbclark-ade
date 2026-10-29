@@ -53,7 +53,8 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.3.2
 
-      # On Linux the GNU tools are native under their plain names, but the repo's scripts
+      # On Linux the tools exist under their plain names (GNU sed, grep, find and gawk; on
+      # ubuntu-26.04 the coreutils are Rust uutils, not GNU), but the repo's scripts
       # and the tests' fake agents call the g-prefixed names the Mac needs. Make one
       # g-prefixed wrapper script per tool that exists, in a directory put on PATH. A wrapper,
       # not a symlink: ubuntu-26.04's coreutils are Rust uutils multicall binaries that refuse
@@ -77,6 +78,10 @@ jobs:
             if [ "$tool" = awk ] && command -v gawk >/dev/null 2>&1; then
               continue  # gawk is already a real GNU awk under its own name
             fi
+            # The path is written unquoted into the wrapper: refuse anything a shell would split or expand.
+            case "$target" in
+              /*[!A-Za-z0-9/._+-]*) echo "refusing $tool target with unsafe characters: $target" >&2; exit 1 ;;
+            esac
             printf '#!/bin/sh\nexec %s "$@"\n' "$target" > "$bindir/g$tool"
             chmod +x "$bindir/g$tool"
             echo "g$tool -> $target"
