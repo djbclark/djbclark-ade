@@ -26,6 +26,12 @@ The Claude hook warns after 32,000 tokens of growth and recommends a handoff at
 the next completed-task boundary from 120,000 total input tokens. It still
 accounts for growth from the post-compaction floor and suppresses repeated
 warnings within a tier. These warnings do not interrupt a turn or clear context.
+The hard tier (2026-10-28) fires at +140k of growth or 217k total, whichever comes
+first: 50k below the ~267k wall where Claude Code auto-compacts (300,000 less its
+33k buffer), so a turn in progress can finish its edit and hand off. The total
+trigger also covers regrowth after a compaction (floor ~104k), where +140k would
+land 23k from the wall. The hook runs only when a prompt is submitted, so its text
+tells the agent how many tool rounds fit before the wall.
 
 Claude's existing `autoCompactWindow` stays at 300,000. Measurements that motivated
 its growth and cooldown guards showed substantial summary/cache-write overhead;

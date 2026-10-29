@@ -75,10 +75,15 @@ def hook(monkeypatch, tmp_path, capsys):
 
 
 def test_constants_match_the_300k_window():
-    assert nudge.AUTO_COMPACT_WINDOW == nudge.ASK_TOTAL == 300_000
+    wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
+    assert nudge.AUTO_COMPACT_WINDOW == 300_000 and wall == 267_000
     assert nudge.PAGE_TOTAL == 400_000
     assert nudge.BOUNDARY_TOTAL == 120_000
-    assert nudge.EARLY_GROWTH == 32_000 < nudge.ASK_GROWTH == 200_000
+    # The hard tier fires with 50k+ tokens of headroom before the native wall (2026-10-28).
+    assert nudge.ASK_TOTAL == wall - nudge.ASK_HEADROOM == 217_000
+    assert nudge.ASK_HEADROOM >= 50_000
+    assert nudge.EARLY_GROWTH == 32_000 < nudge.ASK_GROWTH == 140_000
+    assert nudge.ASK_GROWTH < nudge.ASK_TOTAL < wall
 
 
 def test_below_early_tier_stays_silent(hook, tmp_path):
@@ -135,9 +140,106 @@ def test_ask_message_at_plus_200k_bare(hook, tmp_path):
     assert pings == []
 
 
-def test_ask_message_at_300k_total(hook, tmp_path):
-    out, _ = hook("s-total", _transcript(tmp_path, 250_000, nudge.ASK_TOTAL))
+def test_ask_message_at_ask_total(hook, tmp_path):
+    out, _ = hook("s-total", _transcript(tmp_path, 150_000, nudge.ASK_TOTAL))
     assert "Context is large" in out
+
+
+def _is_ask(out):
+    return "Context is large" in out or "Context is still growing" in out
+
+
+def test_growth_tier_boundary(hook, tmp_path):
+    """Low floor: the growth tier decides (46k + 140k = 186k, below ASK_TOTAL)."""
+    out, _ = hook("s-g-1", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH - 1))
+    assert not _is_ask(out) and "Context check" in out  # still the early tier
+    out, _ = hook("s-g-0", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "Context is large" in out
+
+
+def test_total_tier_boundary_with_a_high_floor(hook, tmp_path):
+    """Floor 100k (post-compaction size): growth stays below ASK_GROWTH, the total tier fires."""
+    assert nudge.ASK_TOTAL - 100_000 < nudge.ASK_GROWTH
+    out, _ = hook("s-t-1", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL - 1))
+    assert not _is_ask(out)
+    out, _ = hook("s-t-0", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
+    assert "Context is large" in out
+
+
+@pytest.mark.parametrize("floor", [35_000, 50_000, 71_000, 90_000, 104_000, 130_000, 164_000])
+def test_hard_tier_leaves_50k_headroom_for_every_floor(floor):
+    """The 267k wall case: whatever the floor (measured 0..164k, median 71k), the first size that
+    reaches the hard tier is at least 50k below the wall (before: 200k growth = 271k at the median
+    floor, past the wall, and ASK_TOTAL 300k could never fire)."""
+    wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
+    first = next(t for t in range(floor, wall + 1, 1_000) if nudge._level(t, t - floor) >= 2)
+    assert first <= wall - 50_000 or first == floor  # a floor already past the tier asks at once
+
+
+def test_hard_tier_fires_again_after_compaction_before_the_wall(hook, tmp_path):
+    """Compaction drops the floor to ~104k and resets the level; regrowth must reach the hard tier
+    (growth 140k would be 244k, only 23k from the wall) by total, 50k+ before it."""
+    wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
+    path = _transcript(tmp_path, 71_000, nudge.ASK_TOTAL)
+    out, _ = hook("s-regrow", path)
+    assert "Context is large" in out
+    _append(path, json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n")
+    hook("s-regrow", path)
+    _append(path, _usage(104_000))
+    out, _ = hook("s-regrow", path)
+    assert not _is_ask(out)
+    _append(path, _usage(nudge.ASK_TOTAL - 1))
+    out, _ = hook("s-regrow", path)
+    assert not _is_ask(out)
+    _append(path, _usage(nudge.ASK_TOTAL))
+    out, _ = hook("s-regrow", path)
+    assert "Context is large" in out
+    assert nudge.ASK_TOTAL <= wall - 50_000
+    assert hook.state()["s-regrow"]["level"] == 2
+
+
+def test_shrink_without_boundary_record_rearms_the_hard_tier(hook, tmp_path):
+    path = _transcript(tmp_path, 71_000, nudge.ASK_TOTAL)
+    hook("s-rearm", path)
+    _append(path, _usage(104_000))  # < 0.75 x last: a new floor, level reset
+    hook("s-rearm", path)
+    _append(path, _usage(nudge.ASK_TOTAL))
+    out, _ = hook("s-rearm", path)
+    assert "Context is large" in out
+
+
+def test_hard_text_says_what_to_do_mid_task_bare(hook, tmp_path):
+    out, _ = hook("s-mid-bare", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
+    wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
+    assert "mid-task" in out
+    assert "finish the current edit" in out
+    assert f"{wall - nudge.ASK_TOTAL:,} tokens remain" in out
+    assert "before the next tool round beyond" in out
+    assert "only when a prompt is submitted" in out
+    assert "at the next natural boundary" not in out
+
+
+def test_hard_text_says_what_to_do_mid_task_self_slash(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
+    out, _ = hook("s-mid-herdr", _transcript(tmp_path, 100_000, nudge.ASK_TOTAL))
+    assert "Context is large" in out and "self-slash" in out
+    assert "finish the current edit" in out
+    assert "before the next tool round beyond" in out
+    assert "at the next natural boundary" not in out
+
+
+def test_midtask_note_counts_rounds_from_what_is_left():
+    wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
+    at_tier = nudge._midtask_note(nudge.ASK_TOTAL)
+    rounds = (nudge.ASK_HEADROOM - nudge.HANDOFF_RESERVE) // nudge.TOOL_ROUND_TOKENS
+    assert rounds >= 3
+    assert f"beyond {rounds} more" in at_tier
+    # Near or past the wall: no rounds left, hand off straight after the edit.
+    for total in (wall - nudge.HANDOFF_RESERVE, wall, wall + 5_000):
+        note = nudge._midtask_note(total)
+        assert "finish the current edit" in note and "right after" in note
+        assert "beyond" not in note
 
 
 def _host(monkeypatch, var):

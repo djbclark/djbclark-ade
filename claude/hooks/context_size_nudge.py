@@ -34,20 +34,29 @@ History:
   choice is now the `handoff` skill + /new, and /compact only when the work
   must continue in-context. A once-per-session note at BOUNDARY_TOTAL says so
   early. Never compact at <=200k (simulated +0.9% at 200k, +17.1% at 150k).
+- 2026-10-28 (context audit, 38 sessions peaking 200-270k, 72 auto compactions at ~267k):
+  the hard tier fired too late or never. floor + ASK_GROWTH 200k was 235-271k (median
+  floor 71k: past the wall), ASK_TOTAL 300k sat above it, and after a compaction (floor
+  ~104k) the growth tier was unreachable again, so sessions compacted repeatedly with no
+  hard nudge (one 25 times). Now ASK_TOTAL = wall - 50k = 217k (also the post-compaction
+  trigger, at +113k), ASK_GROWTH 140k for low floors, and the hard text says what to do
+  mid-turn (finish the edit, hand off within N tool rounds) since the hook runs only at
+  prompt submit.
 
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
 Tiers count GROWTH since the floor: the first usage block of the session, or of
 the conversation after its latest compaction (a compact_boundary record, or a
-drop below SHRINK_RATIO of the last size seen). Baselines differ a lot: a
-session started in ~ carries ~90k before any work, and a compacted one ~100k.
-An absolute backstop still asks at ASK_TOTAL.
+drop below SHRINK_RATIO of the last size seen). Baselines differ a lot (2026-10-28,
+267 sessions: median 71k, range 0-164k; a compacted one ~104k).
+An absolute backstop asks at ASK_TOTAL, 50k+ under the auto-compaction wall.
 
 Levels: 1 = early (delegate from now on; no compaction yet);
 2+ = handoff + /new at a finished task, /compact only to continue in-context
-(self-slash in herdr/Orca; elsewhere auto-compaction), at the next natural
-boundary, again every REPEAT_EVERY of further growth. A compaction resets the
-floor and the level, so the tiers fire again only after the same growth.
+(self-slash in herdr/Orca; elsewhere auto-compaction), or, mid-turn, finish the
+current edit and hand off within a few tool rounds (_midtask_note); again every
+REPEAT_EVERY of further growth. A compaction resets the floor and the level, so
+the hard tier fires again at ASK_TOTAL (by total, not by growth) after regrowth.
 Separately, once per session at BOUNDARY_TOTAL: prefer handoff + /new over
 /compact at the next task completion.
 
@@ -78,15 +87,25 @@ SUCCESSOR_SONNET = "claude/claude-sonnet-5-5"
 # Compaction is not free (see History, 2026-10-10): only compact once the
 # context has grown enough above the post-compaction floor to pay it back.
 EARLY_GROWTH = 32_000   # 2026-10-25: delegate earlier; this alone never compacts
-ASK_GROWTH = 200_000    # level 2: compact / ask the operator
-ASK_TOTAL = 300_000     # level 2 regardless of floor
 # ~/.claude/settings.json "autoCompactWindow" (set 2026-10-15, 300k since
 # 2026-10-18): Claude Code compacts by itself near this size, on every host, so
-# outside herdr/Orca the level-2 note no longer asks the operator. Keep
-# ASK_TOTAL and this equal. The real trigger is the window less the
-# "Autocompact buffer" /context shows (~33k): ~267k.
+# outside herdr/Orca the level-2 note no longer asks the operator. The real
+# trigger is the window less the "Autocompact buffer" /context shows (~33k):
+# AUTO_COMPACT_WALL = 267k (measured 2026-10-23..28: 72 auto compactions,
+# preTokens 266k-285k, median ~268k).
 AUTO_COMPACT_WINDOW = 300_000
 AUTO_COMPACT_BUFFER = 33_000
+AUTO_COMPACT_WALL = AUTO_COMPACT_WINDOW - AUTO_COMPACT_BUFFER
+# Level 2 (the hard tier) must fire with headroom before that wall: the hook runs only at
+# prompt submit, and the agent still needs several tool rounds plus the handoff itself.
+# 2026-10-28: ASK_GROWTH 200k fired at floor+200k = 235-271k (median floor 71k: past the
+# wall, never), leaving 0-20k, and ASK_TOTAL 300k sat above the wall and never fired.
+ASK_HEADROOM = 50_000
+ASK_TOTAL = AUTO_COMPACT_WALL - ASK_HEADROOM  # 217k: level 2 regardless of floor; after a
+# compaction (floor ~104k) this is what fires, at +113k, since floor + ASK_GROWTH would be 244k
+ASK_GROWTH = 140_000    # level 2 for a low floor (35-77k): sooner than ASK_TOTAL, always < it
+TOOL_ROUND_TOKENS = 8_000    # a tool round costs 3-8k; a big file or log read costs more
+HANDOFF_RESERVE = 15_000     # what the handoff skill itself needs before the wall
 BOUNDARY_TOTAL = 120_000  # 2026-10-25: earlier handoff at completed task boundaries
 REPEAT_EVERY = 100_000  # level 3, 4, ...: again per this much more
 PAGE_GROWTH = 300_000   # Hermes ping (once per climb), whichever comes first
@@ -375,6 +394,27 @@ def _boundary_message(total, successor=None):
     )
 
 
+def _midtask_note(total):
+    """What to do when the hard tier lands mid-turn. The hook runs only at prompt submit, so a
+    long turn gets no second reminder: say how many tool rounds fit before the wall (2026-10-28:
+    "at the next natural boundary" was never reached in the 14-20k tokens that were left)."""
+    left = max(0, AUTO_COMPACT_WALL - total)
+    rounds = (left - HANDOFF_RESERVE) // TOOL_ROUND_TOKENS
+    lead = (
+        f"About {left:,} tokens remain before Claude Code compacts this session at "
+        f"{AUTO_COMPACT_WALL:,}; this reminder runs only when a prompt is submitted, "
+        "not between tool rounds. If this turn is mid-task: finish the current edit "
+        "(never leave one half-written), "
+    )
+    if rounds > 0:
+        return lead + (
+            f"then run the handoff before the next tool round beyond {rounds} more "
+            f"(about {TOOL_ROUND_TOKENS // 1000}k tokens each; a large file or log read "
+            "counts double)."
+        )
+    return lead + "then run the handoff right after it, with no further tool rounds."
+
+
 def _ask_message(total, growth, repeat, successor=None):
     lead = "Context is still growing" if repeat else "Context is large"
     if _can_self_slash():
@@ -383,9 +423,9 @@ def _ask_message(total, growth, repeat, successor=None):
         return (
             f"{lead}: {total:,} tokens (+{growth:,} since the session started "
             "or last compacted). Handle it yourself, without asking (operator "
-            "2026-10-15): at the next natural boundary (a task done, never "
-            "mid-edit or with a sub-agent result unread), first choice when the "
-            "current task is finished, same topic or not: run the `handoff` "
+            "2026-10-15): first choice when the current task is finished (a "
+            "task done, never mid-edit or with a sub-agent result unread), same "
+            "topic or not: run the `handoff` "
             "skill (it writes the Tier 2 document; its Step 9 runs "
             + _step9_text(successor)
             + ", so do not run /new yourself as well) and end the turn "
@@ -397,6 +437,7 @@ def _ask_message(total, growth, repeat, successor=None):
             "refuses (a draft on the input line) ask the operator for /new or "
             "/compact."
             + _paseo_finish_note() + _successor_note(successor) + " "
+            + _midtask_note(total) + " "
             + _COST_NOTE
         )
     return (
@@ -411,6 +452,7 @@ def _ask_message(total, growth, repeat, successor=None):
         "document) and tell the operator /new is ready (a fresh session "
         "re-writes ~46k); keep going in-context only when the work must "
         "continue. "
+        + _midtask_note(total) + " "
         + _COST_NOTE
     )
 
