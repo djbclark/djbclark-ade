@@ -52,7 +52,7 @@ $W up                     # start what is missing; verify each registration
    gives one that prompts, labelled `perm=ask` so `bin/paseo-bypass-watch` leaves it alone; a codex watcher gets
    `--mode full-access`). A watcher reads public upstream replies, so a prompt injection there would run with the operator's
    permissions and no prompt: that exposure is accepted (operator, 2026-10-28, every agent runs yolo) and the briefs fence
-   outside text as untrusted. A security-sensitive watcher domain should pass `--mode default` instead) in
+   outside text as untrusted. `bin/watch` has no per-domain switch for a prompting watcher yet; `paseo-new-seat --mode default` by hand is the only way) in
    the one shared workspace `watch` (`[defaults] workspace`, found again on re-runs, created once under
    `workspace_cwd`; Paseo runs every agent in that cwd, so the prompt names the domain's own checkout from `cwd`), first prompt the domain's skill.
 6. Title: `watch <domain> <n>`, `n` the next base-36 number (`0-9a-z`, so `…9`, `…a`, … `…z`, `…10`) per domain: one
