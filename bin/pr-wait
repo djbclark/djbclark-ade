@@ -5,9 +5,10 @@
              [--interval S] [--codex-stuck S] [--ci-grace S] [--no-codex] [--no-request]
              [--rerequest-after S] [--json]
 
-CI waiver (2026-10-28): a live ci-waiver:v1 marker for the classified current head,
-plus an independent live adversary APPROVE, satisfies pending/absent CI as `waived`.
-Failed checks still block. See docs/ci-waiver.md; malformed, mismatched or
+CI waiver (2026-10-28): a live ci-waiver:v1 marker (class "docs-only" only) for the classified
+current head, plus an independent live adversary APPROVE, satisfies pending/absent CI as `waived`.
+Failed checks still block. A merge of master is NOT waivable (docs/ci-waiver.md, "Why not
+master-merge"): it keeps ordinary CI. See docs/ci-waiver.md; malformed, mismatched or
 unreviewed claims add ci-waiver-malformed/mismatch/needs-adversary blockers.
 Repair (2026-10-29): own bytes must match GitHub's API master SHA, fetched by
 explicit HTTPS URL without local remote/URL config. Replacement objects/grafts
@@ -904,7 +905,7 @@ def ci_waiver_marker(body: str) -> dict:
             if raw != body[begin:end]:
                 raise ValueError("JSON partly in code")
             doc = json.loads(raw, object_pairs_hook=_strict_object)
-            if (not isinstance(doc, dict) or doc.get("class") not in ("docs-only", "master-merge")
+            if (not isinstance(doc, dict) or doc.get("class") != "docs-only"
                     or not isinstance(doc.get("head"), str) or not HEX40.fullmatch(doc["head"])
                     or not isinstance(doc.get("reviewer"), str) or not doc["reviewer"].strip()
                     or set(doc) - {"class", "head", "reviewer", "author"}
@@ -988,7 +989,7 @@ def waiver_gate(waiver: dict | None, head: str, adversary: dict | None, counts: 
         return False, ["ci-waiver-malformed"]
     markers = waiver.get("markers") or []
     blockers = []
-    if (classified.get("class") not in ("docs-only", "master-merge")
+    if (classified.get("class") != "docs-only"
             or classified.get("head") != head or not markers
             or any(m["head"] != head or m["class"] != classified["class"] for m in markers)):
         blockers.append("ci-waiver-mismatch")

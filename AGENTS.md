@@ -283,43 +283,40 @@ pull request here is expected to meet these; flag any it misses.
     tense, ending with the PR number; `Added`, `Changed`, `Fixed`, `Removed` or `Security`.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.
-11. **CI waiver (2026-10-28): the classifier, never an agent's claim, decides.**
-    `bin/ci-waiver classify --repo-dir /ABS/REPO --pr N --json` permits only proved `docs-only` paths or a
-    `master-merge` of green parents matching Git's machine merge on every other path.
+11. **CI waiver (2026-10-28; cut to `docs-only` 2026-10-29): the classifier, never an agent's claim, decides.**
+    `bin/ci-waiver classify --repo-dir /ABS/REPO --pr N --json` permits only one class, `docs-only`:
+    a nonempty diff whose every path matches the exact, case-sensitive `WAIVABLE_PATHS`
+    (`CHANGELOG.md`, `docs/handoffs/**`). **A merge of master is never waived**: it is `none` with reason
+    `master-merge-not-waivable` and keeps ordinary CI. A `master-merge` class was built and removed after
+    five adversary rounds, each finding a new hole in proving an earlier green run's provenance from
+    GitHub's API, which exposes current metadata, not what a run tested (docs/ci-waiver.md, A4).
     Hard exclusions deny `.git*` components (including workflows), nested `tests/`, `conftest.py`,
     `test_*.py`, `config/`, `bin/pr-wait`, `bin/ci-waiver`, and files named `pyproject.toml`,
     `pytest.ini`, `.pytest.ini`, `pytest.toml`, `.pytest.toml`, `setup.cfg`, `tox.ini`, `uv.lock`,
     `uv.toml` or `requirements*.txt` at any depth, plus root `pytest.py`, `pytest/`, `_pytest/`.
-    This open-ended denylist additionally fences the whole PR diff; every difference from the
-    machine merge must positively match `WAIVABLE_PATHS`. Other config changes still need the
-    class proof; there is no blanket config exclusion. Failed checks are never waived.
+    This open-ended denylist additionally fences the whole PR diff; every changed path must also
+    positively match `WAIVABLE_PATHS`. Symlinks, gitlinks, executable/mode changes are refused.
+    Failed checks are never waived.
     An independent adversary on `omp --model anthropic/claude-opus-5-5 --effort high` or
     stronger, never the author, must review the exact head and supply a live adversary APPROVE.
     An agent that can request a waiver may not self-approve it. Add this live marker to the PR body:
 
     ```
-    <!-- ci-waiver:v1 {"class":"docs-only"|"master-merge","head":"<40-hex>","reviewer":"<agent id>"} -->
+    <!-- ci-waiver:v1 {"class":"docs-only","head":"<40-hex>","reviewer":"<agent id>"} -->
     ```
 
-    The class and full head must match the classifier; malformed markers block. Pending or absent
-    CI then becomes `waived`; Codex and open-finding gates still apply. See
+    The class and full head must match the classifier; malformed markers (any other class included)
+    block. Pending or absent CI then becomes `waived`; Codex and open-finding gates still apply. See
     [docs/ci-waiver.md](docs/ci-waiver.md) for the proof, exclusions and explicit squash message.
 
-    Repair (2026-10-29, round 3): a waiver report requires a `pr-wait` byte-identical
+    A waiver report requires a `pr-wait` byte-identical
     to GitHub's master SHA from `branches/master`, fetched from the explicit GitHub HTTPS URL.
     The waiter and online classifier use fresh private bare object stores populated only by their
     GitHub fetches, without checkout objects/config, alternates, templates or inherited `GIT_*`.
     Replacement objects, grafts and commit graphs are disabled; every fetched SHA is verified.
-    The machine merge runs in the classifier's same private store. Fetch errors deny the waiver.
-    Both classes require a master-ancestor PR base and no base-retarget timeline event. H0's run
-    must name H0, event pull_request, this repository (no fork) and this PR's head ref. All pages of
-    the all-state head-ref PR list must return only this PR, targeting master with matching head
-    metadata; any other open/closed PR refuses master-merge. Under GitHub's complete history,
-    uniqueness plus no retarget excludes runs borrowed from another PR against another base.
-    Run pull_requests is current association metadata: its sole entry must name this PR and a
-    master-ancestor base SHA, but that SHA is not claimed to be the tested base. Workflow path/blob
-    checks compare H0/T head trees with master, not the historical merge-ref workflow. No unique
-    never-retargeted master PR history means no master-merge waiver (round 4, 2026-10-29).
+    Fetch errors deny the waiver. The PR base must be a master ancestor, and a `base_ref_changed`,
+    `base_ref_deleted` or `automatic_base_change_succeeded` timeline event (GitHub's retarget
+    records; other or future names are not recognized) refuses the waiver.
     Allowlisted paths match exactly, case-sensitively without normalization; exclusions alone normalize.
     Trust remains in GitHub's API, `gh` and the runner's Git binary. Offline base/head mode reads a
     given repo but cannot be invoked by `pr-wait`. Waiver
@@ -329,6 +326,3 @@ pull request here is expected to meet these; flag any it misses.
     The merger rechecks `gh pr checks` immediately before `gh pr merge --match-head-commit`.
     Waiver markers in code, blockquotes or indented blocks are malformed; their only
     keys are class/head/reviewer and optional author (reviewer must differ).
-    If T predates master's tip, the squash yields a tree neither parent tested; the
-    operator's pinned yes accepts that semantic-merge risk, with the post-merge
-    push run as backstop, subject to path filters (see docs C2/C5).

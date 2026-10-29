@@ -5,7 +5,8 @@ ci-waiver classify --repo-dir DIR --pr N [--repo OWNER/NAME] [--json]
 ci-waiver classify --repo-dir DIR --base REF --head REF [--repo OWNER/NAME] [--json]
 
 PR mode fetches all evidence into a fresh private GitHub object store; repo-dir
-is used only by offline base/head mode. Offline mode can prove docs-only only.
+is used only by offline base/head mode. Only the docs-only class exists: a merge of
+master is never waived (docs/ci-waiver.md, "Why not master-merge").
 Exit 0: classification printed (including fail-closed none); 2: bad usage.
 This file deliberately imports no repository Python code.
 """
@@ -22,11 +23,13 @@ import sys
 import tempfile
 import unicodedata
 from pathlib import Path
-from urllib.parse import quote
 
 WAIVABLE_PATHS = ("CHANGELOG.md", "docs/handoffs/**")
 DEFAULT_REPO = "djbclark/djbclark-ade"
 WORKFLOW_PATHS = ("tests", "claude/hooks/handoff-tools/tests")
+# GitHub records a PR retarget as any of these (automatic retarget of a stacked PR after
+# its base branch is deleted is base_ref_deleted + automatic_base_change_succeeded).
+RETARGET_EVENTS = ("base_ref_changed", "base_ref_deleted", "automatic_base_change_succeeded")
 
 
 def normalized(path):
@@ -54,14 +57,13 @@ def excluded(path):
 
 
 class Repository:
-    private = False
     def __init__(self, directory):
         self.directory = Path(directory).resolve(strict=True)
         common = self.git("rev-parse", "--git-common-dir").stdout.decode().strip()
         if (self.directory / common / "info/grafts").exists():
             raise ValueError("git-grafts-present")
 
-    def git(self, *args, allowed=(0,), env=None, data=None):
+    def git(self, *args, allowed=(0,), env=None):
         if env is None:
             env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         else:
@@ -69,7 +71,7 @@ class Repository:
         env.pop("GIT_REPLACE_REF_BASE", None)
         env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
         r = subprocess.run(["git", "-c", "core.commitGraph=false", "-c", "gc.writeCommitGraph=false",
-                            "-c", "fetch.writeCommitGraph=false", *args], cwd=self.directory, env=env, input=data,
+                            "-c", "fetch.writeCommitGraph=false", *args], cwd=self.directory, env=env,
                            capture_output=True, timeout=60)
         if r.returncode not in allowed:
             operation = list(args)
@@ -84,9 +86,9 @@ class Repository:
             raise ValueError("unreadable-commit")
         return value
 
-    def paths(self, a, b, env=None):
+    def paths(self, a, b):
         return [p.decode("utf-8", "surrogateescape") for p in
-                self.git("diff", "--no-renames", "--name-only", "-z", a, b, "--", env=env).stdout.split(b"\0") if p]
+                self.git("diff", "--no-renames", "--name-only", "-z", a, b, "--").stdout.split(b"\0") if p]
 
     def safe_doc_modes(self, a, b):
         fields = self.git("diff", "--raw", "--no-abbrev", "--no-renames", "-z", a, b, "--").stdout.split(b"\0")
@@ -97,48 +99,9 @@ class Repository:
                 if old not in (b":000000", b":100644") or new not in (b"000000", b"100644"):
                     raise ValueError("unsafe-doc-mode:" + path)
 
-    def machine_merge(self, h0, target):
-        if self.private:
-            # Online classification never leaves the tool-populated object store.
-            return self._machine_merge(h0, target)
-        # Isolated bare gitdir: no worktree, info/attributes or local drivers.
-        # Empty attr-source plus disabled global/system/environment attributes
-        # prevents committed or ambient attributes from changing the merge.
-        objects = self.git("rev-parse", "--git-path", "objects").stdout.decode().strip()
-        objects = str((self.directory / objects).resolve())
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1")
-        with tempfile.TemporaryDirectory(prefix="ci-waiver-merge-") as tmp:
-            self.git("init", "--bare", tmp, env=env)
-            env.update(GIT_DIR=tmp, GIT_ALTERNATE_OBJECT_DIRECTORIES=objects)
-            self._machine_merge(h0, target, env=env)
-
-    def _machine_merge(self, h0, target, env=None):
-        empty = self.git("hash-object", "-w", "-t", "tree", "--stdin", env=env, data=b"").stdout.decode().strip()
-        args = ("--attr-source=" + empty, "-c", "core.attributesFile=" + os.devnull)
-        # Unsupported attr-source refuses; never fall back to ambient attributes.
-        self.git(*args, "check-attr", "merge", "--", "code.py", env=env)
-        merged = self.git(*args, "merge-tree", "--write-tree", "--name-only", "-z", h0, target,
-                          env=env, allowed=(0, 1))
-        fields = merged.stdout.split(b"\0")
-        tree = fields[0].decode()
-        if not re.fullmatch(r"[0-9a-f]{40}", tree):
-            raise ValueError("unreadable-machine-merge")
-        if merged.returncode:
-            for p in fields[1:]:
-                if not p:
-                    break
-                path = p.decode("utf-8", "surrogateescape")
-                if not waivable(path):
-                    raise ValueError("hand-edited:" + path)
-        edits = ["hand-edited:" + p for p in self.paths(tree, self.head, env=env) if not waivable(p)]
-        if edits:
-            raise ValueError(edits[0])
-
 
 class GitHubRepository(Repository):
     """Only objects fetched by this invocation; never opens the checkout's gitdir."""
-    private = True
 
     def __init__(self, directory, repo):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -193,52 +156,6 @@ def items(endpoint, key=None):
     return out
 
 
-def green_run(repo, commit, repository, master_sha, *, master=False, pr=None, pr_head=None):
-    runs = items(f"repos/{repo}/actions/workflows/test.yml/runs?head_sha={commit}&per_page=100", "workflow_runs")
-    matching = [r for r in runs if r.get("head_sha") == commit and
-                (r.get("event") == "push" and r.get("head_branch") == "master" if master
-                 else r.get("event") in ("pull_request", "push"))]
-    latest = max(matching, key=lambda r: (int(r["run_number"]), int(r.get("run_attempt", 1)))) if matching else {}
-    reason = "master-not-green" if master else "h0-not-green"
-    if latest.get("status") != "completed" or latest.get("conclusion") != "success":
-        raise ValueError(reason)
-    workflow = ".github/workflows/test.yml"
-    if latest.get("path") != workflow:
-        raise ValueError("workflow-not-master")
-    # These objects were fetched into the private store. Missing blobs fail closed.
-    if repository.git("rev-parse", "--verify", commit + ":" + workflow).stdout != repository.git(
-            "rev-parse", "--verify", master_sha + ":" + workflow).stdout:
-        raise ValueError("workflow-not-master")
-    if not master:
-        # Run associations are CURRENT PR metadata, not the triggering event.
-        # Independently rule out borrowed runs, including from closed PRs.
-        pr_head = pr_head or {}
-        branch = pr_head.get("ref")
-        if (not isinstance(branch, str) or not branch
-                or (pr_head.get("repo") or {}).get("full_name") != repo
-                or (latest.get("head_repository") or {}).get("full_name") != repo
-                or latest.get("head_branch") != branch):
-            raise ValueError("h0-head-provenance")
-        owner = repo.split("/")[0]
-        prior = items(f"repos/{repo}/pulls?head={quote(owner + ':' + branch, safe='')}&state=all&per_page=100")
-        if (len(prior) != 1 or prior[0].get("number") != pr
-                or (prior[0].get("base") or {}).get("ref") != "master"
-                or (prior[0].get("head") or {}) != pr_head):
-            raise ValueError("h0-ambiguous-pr-history")
-        associated_prs = latest.get("pull_requests", [])
-        associated = latest.get("event") == "pull_request" and len(associated_prs) == 1 and any(
-            p.get("number") == pr and (p.get("base") or {}).get("ref") == "master"
-            and bool((p.get("base") or {}).get("sha")) and not repository.git(
-                "merge-base", "--is-ancestor", repository.sha(p["base"]["sha"]), master_sha,
-                allowed=(0, 1)).returncode
-            for p in associated_prs)
-        if not associated:
-            raise ValueError("h0-not-pr-head")
-    jobs = items(f"repos/{repo}/actions/runs/{int(latest['id'])}/attempts/{int(latest.get('run_attempt', 1))}/jobs?per_page=100", "jobs")
-    if not jobs or any(j.get("status") != "completed" or j.get("conclusion") != "success" for j in jobs):
-        raise ValueError(reason)
-
-
 def classify(base, head, repo, pr, repo_dir):
     result = {"class": "none", "reasons": [], "head": None}
     try:
@@ -255,12 +172,12 @@ def classify(base, head, repo, pr, repo_dir):
             if r.git("rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
                 raise ValueError("shallow-history")
             base, head = r.sha(base), r.sha(head)
-            result["head"] = r.head = head
+            result["head"] = head
             if pr is not None:
                 if r.git("merge-base", "--is-ancestor", base, master, allowed=(0, 1)).returncode:
                     raise ValueError("base-not-on-master")
                 timeline = items(f"repos/{repo}/issues/{pr}/timeline?per_page=100")
-                if any(e.get("event") == "base_ref_changed" for e in timeline):
+                if any(e.get("event") in RETARGET_EVENTS for e in timeline):
                     raise ValueError("pr-base-retargeted")
             ancestor = r.sha(r.git("merge-base", base, head).stdout.decode().strip())
             changed = r.paths(ancestor, head)
@@ -270,21 +187,13 @@ def classify(base, head, repo, pr, repo_dir):
             r.safe_doc_modes(ancestor, head)
             if changed and all(waivable(p) for p in changed):
                 return {**result, "class": "docs-only", "reasons": ["only-waivable-paths"]}
+            reasons = ["touches-nonwaivable:" + p for p in changed if not waivable(p)] or ["no-changes"]
             parents = r.git("rev-list", "--parents", "-n", "1", head).stdout.decode().split()[1:]
-            if len(parents) != 2:
-                return {**result, "reasons": ["touches-nonwaivable:" + p for p in changed if not waivable(p)] + ["not-a-merge"]}
-            if pr is None:
-                raise ValueError("pr-history-required")
-            h0, target = map(r.sha, parents)
-            commits = items(f"repos/{repo}/pulls/{pr}/commits?per_page=100")
-            if not any(c.get("sha") == h0 for c in commits):
-                raise ValueError("h0-not-pr-head")
-            green_run(repo, h0, r, master, pr=pr, pr_head=doc["head"])
-            if r.git("merge-base", "--is-ancestor", target, r.sha(master), allowed=(0, 1)).returncode:
-                raise ValueError("target-not-on-master")
-            green_run(repo, target, r, master, master=True)
-            r.machine_merge(h0, target)
-            return {**result, "class": "master-merge", "reasons": ["green-pr-head-machine-merge"]}
+            if len(parents) > 1:
+                # Five adversary rounds found a new hole every time in proving an earlier
+                # green run for a merge of master; a merge is judged by ordinary CI only.
+                reasons.insert(0, "master-merge-not-waivable")
+            return {**result, "reasons": reasons}
     except Exception as e:
         return {**result, "reasons": [str(e)[:240] or type(e).__name__]}
 

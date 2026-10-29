@@ -72,47 +72,19 @@ class History:
         self.git("commit", "-m", "fixture")
         return self.git("rev-parse", "HEAD")
 
-    def merge(self, conflict=False, edit=False, docs_conflict=False, broken=False):
+    def merge(self, docs_conflict=False):
         self.git("checkout", "-b", "topic")
-        self.h0 = self.commit({"feature.py": "feature\n", **({"code.py": "def f(:\n raise SystemExit\n"} if broken else {}), **({"code.py": "topic\n"} if conflict else {}),
-                               **({"CHANGELOG.md": "topic\n"} if docs_conflict else {})})
+        self.h0 = self.commit({"feature.py": "feature\n", **({"CHANGELOG.md": "topic\n"} if docs_conflict else {})})
         self.git("checkout", "master")
-        self.target = self.commit({"master.py": "master\n", **({"code.py": "master\n"} if conflict else {}),
-                                   **({"CHANGELOG.md": "master\n"} if docs_conflict else {})})
+        self.target = self.commit({"master.py": "master\n", **({"CHANGELOG.md": "master\n"} if docs_conflict else {})})
         self.git("checkout", "topic")
         r = subprocess.run(["git", "merge", "--no-ff", "--no-commit", "master"], cwd=self.repo,
                            env=self.env, capture_output=True)
-        assert r.returncode == (1 if conflict or docs_conflict else 0), r.stderr
-        if conflict:
-            (self.repo / "code.py").write_text("hand resolution\n")
-            self.git("add", "code.py")
+        assert r.returncode == (1 if docs_conflict else 0), r.stderr
         if docs_conflict:
             (self.repo / "CHANGELOG.md").write_text("human combined notes\n")
             self.git("add", "CHANGELOG.md")
-        if edit:
-            (self.repo / "code.py").write_text("sneaked in edit\n")
-            self.git("add", "code.py")
         self.git("commit", "-m", "merge")
-        self.green()
-
-    def green(self, h0="success", master="success"):
-        self.routes.write_text(json.dumps({
-            "repos/r/p/pulls/1/commits": [{"sha": self.h0}],
-            "repos/r/p/issues/1/timeline": [],
-            "repos/r/p/branches/master": {"commit": {"sha": self.target}},
-            f"repos/r/p/actions/workflows/test.yml/runs?head_sha={self.h0}&per_page=100": {"workflow_runs": [{
-                "id": 1, "head_sha": self.h0, "event": "pull_request", "status": "completed",
-                "conclusion": h0, "run_number": 1, "run_attempt": 1,
-                "head_branch": "topic", "head_repository": {"full_name": "r/p"},
-                "path": ".github/workflows/test.yml",
-                "pull_requests": [{"number": 1, "base": {"ref": "master", "sha": self.base}}]}]},
-            f"repos/r/p/actions/workflows/test.yml/runs?head_sha={self.target}&per_page=100": {"workflow_runs": [{
-                "id": 2, "head_sha": self.target, "head_branch": "master", "event": "push", "status": "completed",
-                "conclusion": master, "run_number": 2, "run_attempt": 1,
-                "path": ".github/workflows/test.yml"}]},
-            "repos/r/p/actions/runs/1/attempts/1/jobs": {"jobs": [{"status": "completed", "conclusion": h0}]},
-            "repos/r/p/actions/runs/2/attempts/1/jobs": {"jobs": [{"status": "completed", "conclusion": master}]},
-        }))
 
     def classify(self, base=None, head="HEAD", pr=None, script=SCRIPT, cwd=None):
         pr = hasattr(self, "h0") if pr is None else pr
@@ -121,7 +93,6 @@ class History:
             routes["repos/r/p/pulls/1"] = {"number": 1, "base": {"ref": getattr(self, "base_ref", "master"),
                 "sha": base or self.base}, "head": {"sha": self.git("rev-parse", head),
                     "ref": "topic", "repo": {"full_name": "r/p"}}}
-            routes.setdefault("repos/r/p/pulls?head=r%3Atopic&state=all&per_page=100", [routes["repos/r/p/pulls/1"]])
             routes.setdefault("repos/r/p/branches/master", {"commit": {"sha": self.base}})
             routes.setdefault("repos/r/p/issues/1/timeline", [])
             self.routes.write_text(json.dumps(routes))
@@ -153,41 +124,23 @@ def test_ci_waiver_nonallowlist(history, path):
     assert "touches-nonwaivable:" + path in got["reasons"]
 
 
-def test_ci_waiver_clean_master_merge(history):
-    history.merge()
-    assert history.classify()["class"] == "master-merge"
+def test_ci_waiver_non_merge_code_change_has_no_merge_reason(history):
+    history.commit({"code.py": "changed\n"})
+    assert history.classify()["reasons"] == ["touches-nonwaivable:code.py"]
 
 
-@pytest.mark.parametrize("kwargs", [{"conflict": True}, {"edit": True}])
-def test_ci_waiver_hand_edited_merge(history, kwargs):
-    history.merge(**kwargs)
+def test_ci_waiver_empty_diff_is_not_docs_only(history):
+    got = history.classify(base=history.base, head="HEAD")
+    assert got["class"] == "none" and got["reasons"] == ["no-changes"]
+
+
+def test_ci_waiver_rename_examines_both_sides(history):
+    # Without --no-renames only the docs-looking destination would be listed.
+    (history.repo / "docs/handoffs").mkdir(parents=True)
+    history.git("mv", "code.py", "docs/handoffs/code.py")
+    history.git("commit", "-m", "rename")
     got = history.classify()
-    assert got["class"] == "none"
-    assert "hand-edited:code.py" in got["reasons"]
-
-
-def test_ci_waiver_only_docs_conflict(history):
-    history.merge(docs_conflict=True)
-    assert history.classify()["class"] == "master-merge"
-
-
-@pytest.mark.parametrize("h0,master,reason", [("failure", "success", "h0-not-green"),
-                                              ("success", "failure", "master-not-green")])
-def test_ci_waiver_red_parent(history, h0, master, reason):
-    history.merge()
-    history.green(h0=h0, master=master)
-    got = history.classify()
-    assert got["class"] == "none" and reason in got["reasons"]
-
-
-@pytest.mark.parametrize("path", [".github/workflows/test.yml", "tests/test_x.py", "bin/pr-wait", "bin/ci-waiver", "config/x.toml"])
-def test_ci_waiver_hard_exclusions_even_merge(history, path):
-    history.merge()
-    history.commit({path: "excluded\n"})
-    history.git("reset", "--soft", "HEAD~1")
-    history.git("commit", "--amend", "--no-edit")
-    got = history.classify()
-    assert got["class"] == "none" and "hard-exclusion:" + path in got["reasons"]
+    assert got["class"] == "none" and got["reasons"] == ["touches-nonwaivable:code.py"]
 
 
 def test_ci_waiver_shallow_and_missing_parent(history):
@@ -199,24 +152,14 @@ def test_ci_waiver_shallow_and_missing_parent(history):
     assert history.classify(head="f" * 40)["class"] == "none"
 
 
-def test_ci_waiver_gh_error_and_unreadable_checks(history):
-    history.merge()
-    history.routes.write_text("{}")
-    assert history.classify()["class"] == "none"
-    history.green()
-    routes = json.loads(history.routes.read_text())
-    routes[f"repos/r/p/actions/workflows/test.yml/runs?head_sha={history.h0}&per_page=100"] = {"workflow_runs": "bad"}
-    history.routes.write_text(json.dumps(routes))
-    assert history.classify()["class"] == "none"
-
-
-def test_ci_waiver_missing_parent_object(history):
-    history.merge()
-    history.publish()
-    # Unavailable upstream objects, rather than irrelevant checkout objects.
-    shutil.rmtree(history.upstream / "objects")
-    (history.upstream / "objects").mkdir()
-    assert history.classify()["class"] == "none"
+@pytest.mark.parametrize("flag", ["conflict-free", "docs-conflict"])
+@pytest.mark.parametrize("pr", [True, False])
+def test_ci_waiver_master_merge_is_not_waivable(history, flag, pr):
+    history.merge(docs_conflict=flag == "docs-conflict")
+    got = history.classify(pr=pr)
+    assert got["class"] == "none"
+    assert got["reasons"][0] == "master-merge-not-waivable"
+    assert "touches-nonwaivable:feature.py" in got["reasons"] and "touches-nonwaivable:master.py" in got["reasons"]
 
 
 def test_ci_waiver_pr_reads_exact_base_and_head(history):
@@ -244,92 +187,10 @@ def test_ci_waiver_workflow_paths_equal_allowlist():
     assert workflow["on"]["push"]["branches"] == ["master"]
 
 
-def edit_routes(history, change):
-    routes = json.loads(history.routes.read_text())
-    change(routes)
-    history.routes.write_text(json.dumps(routes))
-
-
-def h0_runs(history):
-    return f"repos/r/p/actions/workflows/test.yml/runs?head_sha={history.h0}&per_page=100"
-
-
-@pytest.mark.parametrize("exploit", ["e1", "e1b", "e1c", "pending", "pending-stale-success", "skipped", "neutral", "no-pr", "not-former-head"])
-def test_ci_waiver_h0_evidence(history, exploit):
-    history.merge(broken=True)
-    def change(routes):
-        run = routes[h0_runs(history)]["workflow_runs"][0]
-        if exploit == "e1":
-            run["event"] = "workflow_dispatch"
-        elif exploit in ("e1b", "e1c"):
-            routes[h0_runs(history)]["workflow_runs"] = []
-            routes[f"repos/r/p/commits/{history.h0}/status"] = {"statuses": [{"state": "success"}]}
-            routes[f"repos/r/p/commits/{history.h0}/check-runs"] = {"check_runs": [{"status": "completed", "conclusion": "success"}]}
-        elif exploit in ("pending", "pending-stale-success"):
-            routes["repos/r/p/actions/runs/1/attempts/1/jobs"]["jobs"].append({"status": "in_progress", "conclusion": "success" if exploit == "pending-stale-success" else None})
-        elif exploit in ("skipped", "neutral"):
-            routes["repos/r/p/actions/runs/1/attempts/1/jobs"]["jobs"].append({"status": "completed", "conclusion": exploit})
-        elif exploit == "no-pr":
-            routes["repos/r/p/pulls/1/commits"] = []
-        elif exploit == "not-former-head":
-            run["pull_requests"] = [{"number": 99}]
-    edit_routes(history, change)
-    assert history.classify()["class"] == "none"
-
-
-@pytest.mark.parametrize("parent", ["h0", "target"])
-def test_ci_waiver_latest_failed_rerun(history, parent):
-    history.merge()
-    commit = getattr(history, parent)
-    def change(routes):
-        runs = routes[f"repos/r/p/actions/workflows/test.yml/runs?head_sha={commit}&per_page=100"]["workflow_runs"]
-        runs.append({**runs[0], "run_attempt": 2, "conclusion": "failure"})
-    edit_routes(history, change)
-    assert history.classify()["class"] == "none"
-
-
-def test_ci_waiver_conflict_marker_blob(history):
-    history.merge(conflict=True)
-    r = subprocess.run(["git", "-c", "merge.conflictStyle=merge", "merge-tree", "--write-tree", history.h0, history.target],
-                       cwd=history.repo, env=history.env, capture_output=True, text=True)
-    assert r.returncode == 1
-    tree = r.stdout.splitlines()[0]
-    blob = history.git("show", tree + ":code.py") + "\n"
-    (history.repo / "code.py").write_text(blob)
-    history.git("add", "code.py")
-    history.git("commit", "--amend", "--no-edit")
-    got = history.classify()
-    assert got["class"] == "none" and "hand-edited:code.py" in got["reasons"]
-
-
-@pytest.mark.parametrize("origin", ["committed", "worktree", "info", "global"])
-def test_ci_waiver_e4_attributes_neutralized(history, origin):
-    attr = "code.py merge=union\n"
-    if origin == "committed":
-        history.base = history.commit({".gitattributes": attr})
-    history.git("checkout", "-b", "topic")
-    history.h0 = history.commit({"code.py": "def f(:\n return 2\n"})
-    history.git("checkout", "master")
-    history.target = history.commit({"code.py": "def f():\n return 3\n"})
-    history.git("checkout", "topic")
-    if origin == "worktree":
-        (history.repo / ".gitattributes").write_text(attr)
-    elif origin == "info":
-        (history.repo / ".git/info/attributes").write_text(attr)
-    elif origin == "global":
-        p = history.repo.parent / "global-attributes"
-        p.write_text(attr)
-        n = int(history.env.get("GIT_CONFIG_COUNT", "0"))
-        history.env.update({"GIT_CONFIG_COUNT": str(n + 1), f"GIT_CONFIG_KEY_{n}": "core.attributesFile", f"GIT_CONFIG_VALUE_{n}": str(p)})
-    history.git("merge", "--no-ff", "master", "-m", "union")
-    history.green()
-    got = history.classify()
-    assert got["class"] == "none" and "hand-edited:code.py" in got["reasons"]
-
-
 @pytest.mark.parametrize("path", ["Tests/conftest.py", "Bin/PR-WAIT", "bin/CI-WAIVER", "nested/TESTS/x.py",
     "nested/Conftest.py", "nested/Test_x.py", "claude/hooks/handoff-tools/tests/test_context_size_nudge.py",
-    ".gitattributes", "nested/.gitattributes", ".gitmodules", ".gitignore", "nested/.gitcontrol"])
+    ".gitattributes", "nested/.gitattributes", ".gitmodules", ".gitignore", "nested/.gitcontrol",
+    ".github/workflows/test.yml", "tests/test_x.py", "bin/pr-wait", "bin/ci-waiver", "config/x.toml"])
 def test_ci_waiver_expanded_exclusions(history, path):
     history.commit({path: "excluded\n"})
     got = history.classify()
@@ -375,18 +236,6 @@ def test_ci_waiver_normalizes_paths():
     assert mod["excluded"]("BIN//PR-WAIT")
 
 
-def test_ci_waiver_unsupported_attr_source_refuses(history):
-    import shutil
-    history.merge()
-    real_git = str(history.transport.with_name("git-transport"))
-    history.transport.rename(real_git)
-    shim = Path(history.env["PATH"].split(os.pathsep)[0]) / "git"
-    shim.write_text("#!/usr/bin/env python3\nimport os,sys\nif any(a.startswith('--attr-source=') for a in sys.argv[1:]): sys.exit(129)\nos.execv(" + repr(real_git) + ",[" + repr(real_git) + ",*sys.argv[1:]])\n")
-    shim.chmod(0o755)
-    got = history.classify()
-    assert got["class"] == "none" and got["reasons"][0].startswith("git-error:--attr-source=")
-
-
 def test_ci_waiver_git_dir_environment_ignored(history, tmp_path):
     history.commit({"CHANGELOG.md": "notes\n"})
     other = tmp_path / "other"
@@ -424,104 +273,6 @@ def test_ci_waiver_r2_environment_grafts_ignored(history, tmp_path):
     assert history.classify()["class"] == "docs-only"
 
 
-@pytest.mark.parametrize("case", ["other-base", "missing-base", "unrelated-base-sha", "retargeted",
-                                  "wrong-workflow", "missing-workflow", "changed-workflow", "push-history",
-                                  "skipped-job", "nonmaster-pr", "control-file", "empty-base-sha"])
-def test_ci_waiver_r2_master_workflow_evidence(history, case):
-    # All jobs are green; only their provenance makes this invalid evidence.
-    history.merge(broken=True)
-    def change(routes):
-        run = routes[h0_runs(history)]["workflow_runs"][0]
-        if case == "other-base":
-            run["pull_requests"][0]["base"]["ref"] = "evil"
-        elif case == "missing-base":
-            del run["pull_requests"][0]["base"]
-        elif case == "unrelated-base-sha":
-            run["pull_requests"][0]["base"]["sha"] = history.h0
-        elif case == "retargeted":
-            routes["repos/r/p/issues/1/timeline"] = [{"event": "base_ref_changed"}]
-        elif case == "wrong-workflow":
-            run["path"] = ".github/workflows/always-green.yml"
-        elif case == "missing-workflow":
-            del run["path"]
-        elif case == "changed-workflow":
-            # A later master changed the workflow after the green H0 run.
-            history.git("checkout", "master")
-            tip = history.commit({".github/workflows/test.yml": "name: stronger tests\n"})
-            history.git("checkout", "topic")
-            routes["repos/r/p/branches/master"] = {"commit": {"sha": tip}}
-        elif case == "push-history":
-            run["event"] = "push"
-            # Unproven timeline shapes must never rescue an unassociated run.
-            routes["repos/r/p/issues/1/timeline"] = [{"event": "synchronize", "after": history.h0}]
-        elif case == "skipped-job":
-            routes["repos/r/p/actions/runs/1/attempts/1/jobs"]["jobs"].append(
-                {"status": "completed", "conclusion": "skipped"})
-        elif case == "nonmaster-pr":
-            history.base_ref = "evil"
-        elif case == "control-file":
-            history.commit({"nested/.gitcontrol": "control\n"})
-            history.git("reset", "--soft", "HEAD~1")
-            history.git("commit", "--amend", "--no-edit")
-        elif case == "empty-base-sha":
-            run["pull_requests"][0]["base"]["sha"] = ""
-    edit_routes(history, change)
-    got = history.classify()
-    assert got["class"] == "none"
-    if case == "control-file":
-        assert "hard-exclusion:nested/.gitcontrol" in got["reasons"]
-
-
-def test_ci_waiver_r3_base_sha_required(history):
-    history.merge()
-    edit_routes(history, lambda routes: routes[h0_runs(history)]["workflow_runs"][0]["pull_requests"][0]["base"].pop("sha"))
-    assert history.classify()["class"] == "none"
-
-
-def test_ci_waiver_r2_target_removed_from_master(history):
-    history.merge()
-    # T retains its successful master push run, but a rewrite removed it.
-    edit_routes(history, lambda routes: routes.update({
-        "repos/r/p/branches/master": {"commit": {"sha": history.base}}}))
-    got = history.classify()
-    assert got["class"] == "none" and "target-not-on-master" in got["reasons"]
-
-
-def test_ci_waiver_r2_isolated_git_environment_and_attr_refusal(history):
-    import shutil
-    history.merge()
-    real_git = str(history.transport.with_name("git-transport"))
-    history.transport.rename(real_git)
-    shim = Path(history.env["PATH"].split(os.pathsep)[0]) / "git"
-    audit = history.repo.parent / "git-audit.jsonl"
-    shim.write_text("#!/usr/bin/env python3\nimport os,sys,json\n"
-        "with open(" + repr(str(audit)) + ", 'a') as f: f.write(json.dumps([sys.argv[1:], "
-        "{k:os.environ.get(k) for k in ['GIT_NO_REPLACE_OBJECTS','GIT_GRAFT_FILE','GIT_REPLACE_REF_BASE','GIT_DIR']}])+ '\\n')\n"
-        "if any(a.startswith('--attr-source=') for a in sys.argv[1:]): sys.exit(129)\n"
-        "os.execv(" + repr(real_git) + ",[" + repr(real_git) + ",*sys.argv[1:]])\n")
-    shim.chmod(0o755)
-    history.env.update(GIT_NO_REPLACE_OBJECTS="0", GIT_REPLACE_REF_BASE="refs/poison")
-    got = history.classify()
-    assert got["class"] == "none" and got["reasons"][0].startswith("git-error:--attr-source=")
-    calls = [json.loads(line) for line in audit.read_text().splitlines()]
-    assert any("merge-tree" in args or "check-attr" in args for args, env in calls)
-    for args, env in calls:
-        if args == ["rev-parse", "HEAD"]:  # fixture's API head resolution, before the classifier
-            continue
-        assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
-        assert env["GIT_GRAFT_FILE"] == os.devnull
-        assert env["GIT_REPLACE_REF_BASE"] is None
-
-
-@pytest.mark.parametrize("parent,reason", [(1, "h0-not-green"), (2, "master-not-green")])
-def test_ci_waiver_r3_empty_jobs_fail_closed(history, parent, reason):
-    history.merge()
-    edit_routes(history, lambda routes: routes.update({
-        f"repos/r/p/actions/runs/{parent}/attempts/1/jobs": {"jobs": []}}))
-    got = history.classify()
-    assert got["class"] == "none" and reason in got["reasons"]
-
-
 @pytest.mark.parametrize("path", ["changelog.md", "CHANGELOG.MD", "Docs/Handoffs/run.py",
                                    "docſ/handoffs/run.py", "docs//handoffs/run.py"])
 def test_ci_waiver_r3_exact_allowlist(history, path):
@@ -544,22 +295,47 @@ def test_ci_waiver_r3_allowlist_no_unicode_normalization():
     assert not mod["waivable"](unicodedata.normalize("NFD", "docs/handoffs/café.md"))
 
 
-@pytest.mark.parametrize("case", ["nonmaster-base", "stale-base", "retargeted"])
+RETARGET_TIMELINES = {
+    "base_ref_changed": [{"event": "base_ref_changed"}],
+    "base_ref_deleted": [{"event": "base_ref_deleted"}],
+    "automatic_base_change_succeeded": [{"event": "automatic_base_change_succeeded"}],
+    # GitHub's own stacked-PR retarget records both, after other events, on a later page.
+    "paged-automatic-retarget": {"__pages__": [[{"event": "labeled"}], [
+        {"event": "base_ref_deleted"}, {"event": "automatic_base_change_succeeded"}]]},
+}
+
+
+@pytest.mark.parametrize("case", ["nonmaster-base", "stale-base", *RETARGET_TIMELINES])
 def test_ci_waiver_r3_docs_base_provenance(history, case):
     history.git("checkout", "-b", "unmerged")
     unmerged = history.commit({"code.py": "unmerged code"})
-    if case == "nonmaster-base":
-        history.base = unmerged
-    elif case == "stale-base":
-        # API says master, but its stale base SHA still contains unmerged code.
+    if case in ("nonmaster-base", "stale-base"):
+        # API says master, but its (stale or foreign) base SHA still contains unmerged code.
         history.base = unmerged
     history.commit({"CHANGELOG.md": "docs"})
     history.routes.write_text(json.dumps({
         "repos/r/p/branches/master": {"commit": {"sha": history.git("rev-parse", "master")}},
-        "repos/r/p/issues/1/timeline": [{"event": "base_ref_changed"}] if case == "retargeted" else []}))
+        "repos/r/p/issues/1/timeline": RETARGET_TIMELINES.get(case, [])}))
     got = history.classify(pr=True)
     assert got["class"] == "none"
-    assert ("pr-base-retargeted" if case == "retargeted" else "base-not-on-master") in got["reasons"]
+    assert got["reasons"] == ["pr-base-retargeted" if case in RETARGET_TIMELINES else "base-not-on-master"]
+
+
+def test_ci_waiver_unrelated_timeline_events_do_not_refuse(history):
+    history.commit({"CHANGELOG.md": "docs"})
+    history.routes.write_text(json.dumps({"repos/r/p/issues/1/timeline": {"__pages__": [
+        [{"event": "labeled"}, {"event": "head_ref_force_pushed"}],
+        [{"event": "automatic_base_change_failed"}]]}}))
+    assert history.classify(pr=True)["class"] == "docs-only"
+
+
+@pytest.mark.parametrize("route", ["repos/r/p/issues/1/timeline", "repos/r/p/branches/master"])
+@pytest.mark.parametrize("answer", [None, "bad", {"events": []}])
+def test_ci_waiver_unreadable_github_evidence_fails_closed(history, route, answer):
+    history.commit({"CHANGELOG.md": "docs"})
+    history.routes.write_text(json.dumps({route: answer}))
+    got = history.classify(pr=True)
+    assert got["class"] == "none" and got["reasons"] != ["only-waivable-paths"]
 
 
 @pytest.mark.parametrize("path", ["pyproject.toml", "nested/pytest.ini", "setup.cfg", "tox.ini",
@@ -624,18 +400,17 @@ def test_ci_waiver_r3_fetch_failure_not_waived(history):
     assert got["class"] == "none" and got["reasons"] == ["git-error:fetch"]
 
 
-def test_ci_waiver_r3_private_fetch_and_merge_audit(history):
-    history.merge()
+def test_ci_waiver_r3_private_fetch_audit(history):
+    history.commit({"CHANGELOG.md": "docs\n"})
     history.env["WAIVER_GIT_AUDIT"] = str(history.repo.parent / "git-calls.jsonl")
-    got = history.classify()
-    assert got["class"] == "master-merge"
+    got = history.classify(pr=True)
+    assert got["class"] == "docs-only"
     calls = [json.loads(line) for line in Path(history.env["WAIVER_GIT_AUDIT"]).read_text().splitlines()]
     calls = [(args, cwd, env) for args, cwd, env in calls if args != ["rev-parse", "HEAD"]]
     directories = {cwd for args, cwd, env in calls}
     assert len(directories) == 1 and str(history.repo) not in directories
-    assert any("merge-tree" in args for args, cwd, env in calls)
     fetches = [args for args, cwd, env in calls if "fetch" in args]
-    assert {args[-1] for args in fetches} >= {history.base, history.h0, history.target, got["head"]}
+    assert {args[-1] for args in fetches} == {history.base, got["head"]}
     for args in fetches:
         assert args[-2] == "https://github.com/r/p.git"
     for args, cwd, env in calls:
@@ -660,71 +435,6 @@ def test_ci_waiver_r3_pr_cannot_select_offline_mode(history):
                         "--pr", "1", "--base", history.base, "--head", history.base],
                        env=history.env, capture_output=True, text=True)
     assert r.returncode == 2 and "use --pr N OR" in r.stderr
-
-
-@pytest.mark.parametrize("case,reason", [
-    ("second-run-pr", "h0-not-pr-head"),
-    ("other-number", "h0-not-pr-head"),
-    ("closed-earlier-pr", "h0-ambiguous-pr-history"),
-    ("closed-master-pr", "h0-ambiguous-pr-history"),
-    ("fork-run", "h0-head-provenance"),
-    ("other-branch", "h0-head-provenance"),
-    ("missing-branch", "h0-head-provenance"),
-    ("missing-repository", "h0-head-provenance"),
-    ("no-history", "h0-ambiguous-pr-history"),
-    ("other-history-number", "h0-ambiguous-pr-history"),
-    ("history-base-evil", "h0-ambiguous-pr-history"),
-    ("history-head-moved", "h0-ambiguous-pr-history"),
-])
-def test_ci_waiver_r4_h0_provenance(history, case, reason):
-    history.merge(broken=True)
-    # Establish all other guards pass; the negative case changes one fact only.
-    assert history.classify()["class"] == "master-merge"
-    def change(routes):
-        run = routes[h0_runs(history)]["workflow_runs"][0]
-        endpoint = "repos/r/p/pulls?head=r%3Atopic&state=all&per_page=100"
-        own = routes[endpoint][0]
-        if case == "second-run-pr":
-            run["pull_requests"].append({"number": 99, "base": {"ref": "evil", "sha": history.base}})
-        elif case == "other-number":
-            # N14: keep a fully valid master base, changing ONLY PR number.
-            run["pull_requests"][0]["number"] = 99
-        elif case in ("closed-earlier-pr", "closed-master-pr"):
-            other = {**own, "number": 99, "state": "closed",
-                     "base": {"ref": "evil" if case == "closed-earlier-pr" else "master", "sha": history.base}}
-            # A closed PR on page TWO is not visible in run.pull_requests.
-            routes[endpoint] = {"__pages__": [[own], [other]]}
-        elif case == "fork-run":
-            run["head_repository"]["full_name"] = "attacker/p"
-        elif case == "other-branch":
-            run["head_branch"] = "different"
-        elif case == "missing-branch":
-            del run["head_branch"]
-        elif case == "missing-repository":
-            del run["head_repository"]
-        elif case == "no-history":
-            routes[endpoint] = []
-        elif case == "other-history-number":
-            own["number"] = 99
-        elif case == "history-base-evil":
-            own["base"]["ref"] = "evil"
-        elif case == "history-head-moved":
-            own["head"]["sha"] = history.h0
-    edit_routes(history, change)
-    got = history.classify()
-    assert got["class"] == "none" and got["reasons"] == [reason]
-
-
-def test_ci_waiver_r4_history_query_all_states_paginated(history):
-    history.merge()
-    audit = history.repo.parent / "gh-calls.jsonl"
-    history.env["WAIVER_GH_AUDIT"] = str(audit)
-    assert history.classify()["class"] == "master-merge"
-    calls = [json.loads(line) for line in audit.read_text().splitlines()]
-    calls = [args for args in calls if "pulls?" in args[-1]]
-    assert len(calls) == 1
-    assert "--paginate" in calls[0]
-    assert calls[0][-1] == "repos/r/p/pulls?head=r%3Atopic&state=all&per_page=100"
 
 
 def test_ci_waiver_r4_private_store_strips_inherited_git_environment(history):
@@ -761,14 +471,3 @@ def test_ci_waiver_r4_test_execution_exclusions(history, path):
     history.commit({path: "configuration or shadow package\n"})
     got = history.classify()
     assert got["class"] == "none" and "hard-exclusion:" + path in got["reasons"]
-
-
-def test_ci_waiver_r4_nonexcluded_hand_edit_still_denied(history):
-    history.merge()
-    # A name missing from an open-ended denylist is still not allowlisted.
-    history.commit({"unlisted-test-control.cfg": "pass without testing\n"})
-    history.git("reset", "--soft", "HEAD~1")
-    history.git("commit", "--amend", "--no-edit")
-    got = history.classify()
-    assert got["class"] == "none"
-    assert got["reasons"] == ["hand-edited:unlisted-test-control.cfg"]

@@ -788,7 +788,8 @@ report file or the `---<name> exit=` line.
 for it (`completed` and `failed` both terminal), then prints one line and writes `PREFIX-{checks,codex,findings,open-findings,summary}.json`
 (2026-10-23; separate CI, Codex and adversary waiters were two thirds of one lead's notification turns). **Read
 `merge_ready` in the summary, not the exit code:** it is true only when CI has a succeeded check and none failed or is pending
-(skipped and neutral count beside a success, never alone), or a verified current-head CI waiver substitutes
+(skipped and neutral count beside a success, never alone), or a verified current-head `docs-only` CI waiver (a merge of
+master is never waived) substitutes
 for pending/absent CI (failed checks still block); and Codex's code review completed on
 this head and its security review too when the marker carries `security_review`, no unresolved Codex review
 thread of either kind is left (an earlier head's finding stays open until its thread is resolved: PR 32,

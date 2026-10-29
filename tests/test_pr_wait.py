@@ -89,6 +89,18 @@ def test_ci_waiver_r4_classified_head_race(classified_head):
         False, ["ci-waiver-mismatch"])
 
 
+def test_ci_waiver_master_merge_is_not_a_waiver_class():
+    mod = load_module()
+    # A marker naming the removed class is malformed, never merely mismatched.
+    marker = mod.ci_waiver_marker(waiver_body(cls="master-merge"))
+    assert marker["malformed"] and not marker["markers"]
+    # A classifier answering with the removed class never satisfies a docs-only marker.
+    marker = mod.ci_waiver_marker(waiver_body())
+    marker["classification"] = {"class": "master-merge", "head": HEAD, "reasons": []}
+    adv = mod.adversary_from_doc({"body": waiver_body()}, HEAD)
+    assert mod.waiver_gate(marker, HEAD, adv, {"fail": 0, "pending": 3}) == (False, ["ci-waiver-mismatch"])
+
+
 @pytest.mark.parametrize("case", ["origin", "rewrites", "replace", "grafts", "api-error", "bad-api-sha", "different-waiter"])
 def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch, case):
     # Replay spoof.py with real Git objects; substitute only the HTTPS transport
@@ -104,7 +116,7 @@ def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch
     for path in (authentic, evil, victim):
         path.mkdir()
         git(path, "init", "-q", "-b", "master")
-    for path, reason, cls in ((authentic, "authentic-master", "none"), (evil, "attacker", "master-merge")):
+    for path, reason, cls in ((authentic, "authentic-master", "none"), (evil, "attacker", "docs-only")):
         (path / "bin").mkdir()
         (path / "bin/pr-wait").write_bytes(PR_WAIT.read_bytes())
         (path / "bin/ci-waiver").write_text("import json; print(" + repr(json.dumps({
@@ -174,7 +186,7 @@ def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch
     else:
         assert got["reasons"] == ["authentic-master"]
         assert len(fetches) == 1
-    waiver = mod.ci_waiver_marker(waiver_body(cls="master-merge"))
+    waiver = mod.ci_waiver_marker(waiver_body())
     waiver["classification"] = got
     adv = mod.adversary_from_doc({"body": waiver_body()}, HEAD)
     waived, blockers = mod.waiver_gate(waiver, HEAD, adv, {"fail": 0, "pending": 3})
@@ -186,7 +198,7 @@ def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch
 @pytest.mark.parametrize("case,blocker", [
     ("valid", None), ("no-adversary", "ci-waiver-needs-adversary"),
     ("short-head", "ci-waiver-malformed"), ("fenced", "ci-waiver-malformed"),
-    ("class-mismatch", "ci-waiver-mismatch"), ("other-head", "ci-waiver-mismatch"),
+    ("master-merge-marker", "ci-waiver-malformed"), ("other-head", "ci-waiver-mismatch"),
     ("failed", "ci-failed"), ("no-checks", None), ("bad-version", "ci-waiver-malformed"),
     ("partly-code", "ci-waiver-malformed"), ("nested-note", "ci-waiver-malformed"), ("symlink", None),
     ("blockquote", "ci-waiver-malformed"), ("indent", "ci-waiver-malformed"),
@@ -235,7 +247,7 @@ else: sys.exit(1)
     world.route(f"repos/{REPO}/branches/master", ok({"commit": {"sha": OLD}}))
     world.route(f"repos/{REPO}/issues/{PR}/timeline", ok([]))
     body = waiver_body(head=HEAD[:12] if case == "short-head" else OLD if case == "other-head" else HEAD,
-                       cls="master-merge" if case == "class-mismatch" else "docs-only",
+                       cls="master-merge" if case == "master-merge-marker" else "docs-only",
                        adversary=case != "no-adversary")
     if case == "fenced":
         body = "```\n" + body + "\n```"
