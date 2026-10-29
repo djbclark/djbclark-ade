@@ -20,6 +20,10 @@ class History:
                     "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
                     "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.test"}
         self.git("init", "-b", "master")
+        if decider := os.environ.get("WAIVER_CI_DECIDER"):
+            subprocess.run([decider, "ci", "decide", str(self.repo), "local",
+                            "Isolated local Git history for CI-waiver regression/mutation; not hosted CI"],
+                           env=self.env, check=True, capture_output=True, text=True, timeout=15)
         self.commit({"code.py": "original\n", "CHANGELOG.md": "initial\n",
                      ".github/workflows/test.yml": "name: tests\n"})
         self.base = self.git("rev-parse", "HEAD")
@@ -27,7 +31,7 @@ class History:
         shim.mkdir()
         self.routes = tmp / "routes.json"
         gh = shim / "gh"
-        gh.write_text("#!/usr/bin/env python3\nimport os,sys,json\nroutes=json.load(open(os.environ['WAIVER_ROUTES'])); r=routes.get(sys.argv[-1],routes.get(sys.argv[-1].split('?')[0]))\nif r is None: sys.exit(1)\nprint(json.dumps(r))\n")
+        gh.write_text("#!/usr/bin/env python3\nimport os,sys,json\nroutes=json.load(open(os.environ['WAIVER_ROUTES'])); r=routes.get(sys.argv[-1],routes.get(sys.argv[-1].split('?')[0]))\nif r is None: sys.exit(1)\nif os.environ.get('WAIVER_GH_AUDIT'):\n with open(os.environ['WAIVER_GH_AUDIT'],'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\nif isinstance(r,dict) and '__pages__' in r:\n for p in r['__pages__']: print(json.dumps(p))\nelse: print(json.dumps(r))\n")
         gh.chmod(0o755)
         self.env.update(PATH=str(shim) + os.pathsep + self.env["PATH"], WAIVER_ROUTES=str(self.routes))
         self.routes.write_text("{}")
@@ -99,6 +103,7 @@ class History:
             f"repos/r/p/actions/workflows/test.yml/runs?head_sha={self.h0}&per_page=100": {"workflow_runs": [{
                 "id": 1, "head_sha": self.h0, "event": "pull_request", "status": "completed",
                 "conclusion": h0, "run_number": 1, "run_attempt": 1,
+                "head_branch": "topic", "head_repository": {"full_name": "r/p"},
                 "path": ".github/workflows/test.yml",
                 "pull_requests": [{"number": 1, "base": {"ref": "master", "sha": self.base}}]}]},
             f"repos/r/p/actions/workflows/test.yml/runs?head_sha={self.target}&per_page=100": {"workflow_runs": [{
@@ -113,8 +118,10 @@ class History:
         pr = hasattr(self, "h0") if pr is None else pr
         if pr:
             routes = json.loads(self.routes.read_text())
-            routes["repos/r/p/pulls/1"] = {"base": {"ref": getattr(self, "base_ref", "master"),
-                "sha": base or self.base}, "head": {"sha": self.git("rev-parse", head)}}
+            routes["repos/r/p/pulls/1"] = {"number": 1, "base": {"ref": getattr(self, "base_ref", "master"),
+                "sha": base or self.base}, "head": {"sha": self.git("rev-parse", head),
+                    "ref": "topic", "repo": {"full_name": "r/p"}}}
+            routes.setdefault("repos/r/p/pulls?head=r%3Atopic&state=all&per_page=100", [routes["repos/r/p/pulls/1"]])
             routes.setdefault("repos/r/p/branches/master", {"commit": {"sha": self.base}})
             routes.setdefault("repos/r/p/issues/1/timeline", [])
             self.routes.write_text(json.dumps(routes))
@@ -653,3 +660,115 @@ def test_ci_waiver_r3_pr_cannot_select_offline_mode(history):
                         "--pr", "1", "--base", history.base, "--head", history.base],
                        env=history.env, capture_output=True, text=True)
     assert r.returncode == 2 and "use --pr N OR" in r.stderr
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("second-run-pr", "h0-not-pr-head"),
+    ("other-number", "h0-not-pr-head"),
+    ("closed-earlier-pr", "h0-ambiguous-pr-history"),
+    ("closed-master-pr", "h0-ambiguous-pr-history"),
+    ("fork-run", "h0-head-provenance"),
+    ("other-branch", "h0-head-provenance"),
+    ("missing-branch", "h0-head-provenance"),
+    ("missing-repository", "h0-head-provenance"),
+    ("no-history", "h0-ambiguous-pr-history"),
+    ("other-history-number", "h0-ambiguous-pr-history"),
+    ("history-base-evil", "h0-ambiguous-pr-history"),
+    ("history-head-moved", "h0-ambiguous-pr-history"),
+])
+def test_ci_waiver_r4_h0_provenance(history, case, reason):
+    history.merge(broken=True)
+    # Establish all other guards pass; the negative case changes one fact only.
+    assert history.classify()["class"] == "master-merge"
+    def change(routes):
+        run = routes[h0_runs(history)]["workflow_runs"][0]
+        endpoint = "repos/r/p/pulls?head=r%3Atopic&state=all&per_page=100"
+        own = routes[endpoint][0]
+        if case == "second-run-pr":
+            run["pull_requests"].append({"number": 99, "base": {"ref": "evil", "sha": history.base}})
+        elif case == "other-number":
+            # N14: keep a fully valid master base, changing ONLY PR number.
+            run["pull_requests"][0]["number"] = 99
+        elif case in ("closed-earlier-pr", "closed-master-pr"):
+            other = {**own, "number": 99, "state": "closed",
+                     "base": {"ref": "evil" if case == "closed-earlier-pr" else "master", "sha": history.base}}
+            # A closed PR on page TWO is not visible in run.pull_requests.
+            routes[endpoint] = {"__pages__": [[own], [other]]}
+        elif case == "fork-run":
+            run["head_repository"]["full_name"] = "attacker/p"
+        elif case == "other-branch":
+            run["head_branch"] = "different"
+        elif case == "missing-branch":
+            del run["head_branch"]
+        elif case == "missing-repository":
+            del run["head_repository"]
+        elif case == "no-history":
+            routes[endpoint] = []
+        elif case == "other-history-number":
+            own["number"] = 99
+        elif case == "history-base-evil":
+            own["base"]["ref"] = "evil"
+        elif case == "history-head-moved":
+            own["head"]["sha"] = history.h0
+    edit_routes(history, change)
+    got = history.classify()
+    assert got["class"] == "none" and got["reasons"] == [reason]
+
+
+def test_ci_waiver_r4_history_query_all_states_paginated(history):
+    history.merge()
+    audit = history.repo.parent / "gh-calls.jsonl"
+    history.env["WAIVER_GH_AUDIT"] = str(audit)
+    assert history.classify()["class"] == "master-merge"
+    calls = [json.loads(line) for line in audit.read_text().splitlines()]
+    calls = [args for args in calls if "pulls?" in args[-1]]
+    assert len(calls) == 1
+    assert "--paginate" in calls[0]
+    assert calls[0][-1] == "repos/r/p/pulls?head=r%3Atopic&state=all&per_page=100"
+
+
+def test_ci_waiver_r4_private_store_strips_inherited_git_environment(history):
+    history.commit({"CHANGELOG.md": "docs\n"})
+    assert history.classify(pr=True)["class"] == "docs-only"  # publish independent upstream
+    history.git("config", "core.repositoryformatversion", "999")
+    audit = history.repo.parent / "poison-env-audit.jsonl"
+    env = {**history.env, "WAIVER_GIT_AUDIT": str(audit),
+           "GIT_DIR": str(history.repo / ".git"),
+           "GIT_OBJECT_DIRECTORY": str(history.repo / ".git/objects"),
+           "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(history.repo / ".git/objects"),
+           "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.repositoryformatversion",
+           "GIT_CONFIG_VALUE_0": "999"}
+    # Invoke the actual CLI; fixture Git commands must not consume the poison.
+    r = subprocess.run([sys.executable, str(SCRIPT), "classify", "--repo-dir", str(history.repo),
+                        "--pr", "1", "--repo", "r/p", "--json"],
+                       env=env, check=True, capture_output=True, text=True)
+    assert json.loads(r.stdout)["class"] == "docs-only"
+    calls = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert calls
+    for args, cwd, child_env in calls:
+        assert cwd != str(history.repo)
+        assert not {"GIT_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} & child_env.keys()
+
+
+@pytest.mark.parametrize("path", [
+    ".pytest.ini", "pytest.toml", ".pytest.toml", "uv.toml",
+    "docs/handoffs/.pytest.ini", "docs/handoffs/pytest.toml",
+    "docs/handoffs/.pytest.toml", "docs/handoffs/uv.toml",
+    "pytest.py", "pytest/__main__.py", "_pytest/config/__init__.py",
+])
+def test_ci_waiver_r4_test_execution_exclusions(history, path):
+    history.commit({path: "configuration or shadow package\n"})
+    got = history.classify()
+    assert got["class"] == "none" and "hard-exclusion:" + path in got["reasons"]
+
+
+def test_ci_waiver_r4_nonexcluded_hand_edit_still_denied(history):
+    history.merge()
+    # A name missing from an open-ended denylist is still not allowlisted.
+    history.commit({"unlisted-test-control.cfg": "pass without testing\n"})
+    history.git("reset", "--soft", "HEAD~1")
+    history.git("commit", "--amend", "--no-edit")
+    got = history.classify()
+    assert got["class"] == "none"
+    assert got["reasons"] == ["hand-edited:unlisted-test-control.cfg"]

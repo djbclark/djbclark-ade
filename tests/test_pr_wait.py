@@ -74,6 +74,21 @@ def waiver_body(head=HEAD, cls="docs-only", adversary=True):
     return body
 
 
+@pytest.mark.parametrize("classified_head", [OLD, NEW, None])
+def test_ci_waiver_r4_classified_head_race(classified_head):
+    mod = load_module()
+    body = waiver_body()
+    marker = mod.ci_waiver_marker(body)
+    marker["classification"] = {"class": "docs-only", "head": HEAD, "reasons": []}
+    adv = mod.adversary_from_doc({"body": body}, HEAD)
+    assert mod.waiver_gate(marker, HEAD, adv, {"fail": 0, "pending": 3}) == (True, [])
+    # The PR document/markers/APPROVE still name HEAD, but the independent
+    # classifier observed another head (or omitted it). No other guard changes.
+    marker["classification"]["head"] = classified_head
+    assert mod.waiver_gate(marker, HEAD, adv, {"fail": 0, "pending": 3}) == (
+        False, ["ci-waiver-mismatch"])
+
+
 @pytest.mark.parametrize("case", ["origin", "rewrites", "replace", "grafts", "api-error", "bad-api-sha", "different-waiter"])
 def test_ci_waiver_r2_master_snapshot_ignores_local_remote(tmp_path, monkeypatch, case):
     # Replay spoof.py with real Git objects; substitute only the HTTPS transport

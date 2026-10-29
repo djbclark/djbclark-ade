@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unicodedata
 from pathlib import Path
+from urllib.parse import quote
 
 WAIVABLE_PATHS = ("CHANGELOG.md", "docs/handoffs/**")
 DEFAULT_REPO = "djbclark/djbclark-ade"
@@ -43,7 +44,9 @@ def excluded(path):
     p = normalized(path)
     parts = p.split("/")
     return (any(part.startswith(".git") for part in parts) or "tests" in parts
-            or parts[-1] in ("conftest.py", "pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini", "uv.lock")
+            or parts[-1] in ("conftest.py", "pyproject.toml", "pytest.ini", ".pytest.ini",
+                             "pytest.toml", ".pytest.toml", "setup.cfg", "tox.ini", "uv.lock", "uv.toml")
+            or parts[0] in ("pytest.py", "pytest", "_pytest")
             or fnmatch.fnmatchcase(parts[-1], "requirements*.txt")
             or fnmatch.fnmatchcase(parts[-1], "test_*.py")
             or p.startswith("config/") or p in ("config", "bin/pr-wait", "bin/ci-waiver")
@@ -190,7 +193,7 @@ def items(endpoint, key=None):
     return out
 
 
-def green_run(repo, commit, repository, master_sha, *, master=False, pr=None):
+def green_run(repo, commit, repository, master_sha, *, master=False, pr=None, pr_head=None):
     runs = items(f"repos/{repo}/actions/workflows/test.yml/runs?head_sha={commit}&per_page=100", "workflow_runs")
     matching = [r for r in runs if r.get("head_sha") == commit and
                 (r.get("event") == "push" and r.get("head_branch") == "master" if master
@@ -207,12 +210,28 @@ def green_run(repo, commit, repository, master_sha, *, master=False, pr=None):
             "rev-parse", "--verify", master_sha + ":" + workflow).stdout:
         raise ValueError("workflow-not-master")
     if not master:
-        associated = latest.get("event") == "pull_request" and any(
+        # Run associations are CURRENT PR metadata, not the triggering event.
+        # Independently rule out borrowed runs, including from closed PRs.
+        pr_head = pr_head or {}
+        branch = pr_head.get("ref")
+        if (not isinstance(branch, str) or not branch
+                or (pr_head.get("repo") or {}).get("full_name") != repo
+                or (latest.get("head_repository") or {}).get("full_name") != repo
+                or latest.get("head_branch") != branch):
+            raise ValueError("h0-head-provenance")
+        owner = repo.split("/")[0]
+        prior = items(f"repos/{repo}/pulls?head={quote(owner + ':' + branch, safe='')}&state=all&per_page=100")
+        if (len(prior) != 1 or prior[0].get("number") != pr
+                or (prior[0].get("base") or {}).get("ref") != "master"
+                or (prior[0].get("head") or {}) != pr_head):
+            raise ValueError("h0-ambiguous-pr-history")
+        associated_prs = latest.get("pull_requests", [])
+        associated = latest.get("event") == "pull_request" and len(associated_prs) == 1 and any(
             p.get("number") == pr and (p.get("base") or {}).get("ref") == "master"
             and bool((p.get("base") or {}).get("sha")) and not repository.git(
                 "merge-base", "--is-ancestor", repository.sha(p["base"]["sha"]), master_sha,
                 allowed=(0, 1)).returncode
-            for p in latest.get("pull_requests", []))
+            for p in associated_prs)
         if not associated:
             raise ValueError("h0-not-pr-head")
     jobs = items(f"repos/{repo}/actions/runs/{int(latest['id'])}/attempts/{int(latest.get('run_attempt', 1))}/jobs?per_page=100", "jobs")
@@ -260,7 +279,7 @@ def classify(base, head, repo, pr, repo_dir):
             commits = items(f"repos/{repo}/pulls/{pr}/commits?per_page=100")
             if not any(c.get("sha") == h0 for c in commits):
                 raise ValueError("h0-not-pr-head")
-            green_run(repo, h0, r, master, pr=pr)
+            green_run(repo, h0, r, master, pr=pr, pr_head=doc["head"])
             if r.git("merge-base", "--is-ancestor", target, r.sha(master), allowed=(0, 1)).returncode:
                 raise ValueError("target-not-on-master")
             green_run(repo, target, r, master, master=True)

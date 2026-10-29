@@ -288,8 +288,11 @@ pull request here is expected to meet these; flag any it misses.
     `master-merge` of green parents matching Git's machine merge on every other path.
     Hard exclusions deny `.git*` components (including workflows), nested `tests/`, `conftest.py`,
     `test_*.py`, `config/`, `bin/pr-wait`, `bin/ci-waiver`, and files named `pyproject.toml`,
-    `pytest.ini`, `setup.cfg`, `tox.ini`, `uv.lock` or `requirements*.txt` at any depth. Other config
-    changes still need the class proof; there is no blanket config exclusion. Failed checks are never waived.
+    `pytest.ini`, `.pytest.ini`, `pytest.toml`, `.pytest.toml`, `setup.cfg`, `tox.ini`, `uv.lock`,
+    `uv.toml` or `requirements*.txt` at any depth, plus root `pytest.py`, `pytest/`, `_pytest/`.
+    This open-ended denylist additionally fences the whole PR diff; every difference from the
+    machine merge must positively match `WAIVABLE_PATHS`. Other config changes still need the
+    class proof; there is no blanket config exclusion. Failed checks are never waived.
     An independent adversary on `omp --model anthropic/claude-opus-5-5 --effort high` or
     stronger, never the author, must review the exact head and supply a live adversary APPROVE.
     An agent that can request a waiver may not self-approve it. Add this live marker to the PR body:
@@ -308,8 +311,15 @@ pull request here is expected to meet these; flag any it misses.
     GitHub fetches, without checkout objects/config, alternates, templates or inherited `GIT_*`.
     Replacement objects, grafts and commit graphs are disabled; every fetched SHA is verified.
     The machine merge runs in the classifier's same private store. Fetch errors deny the waiver.
-    Both classes require a master-ancestor PR base and no base-retarget timeline event. H0 needs
-    this PR's master-base run, a required master-ancestor base SHA and master's workflow path/blob.
+    Both classes require a master-ancestor PR base and no base-retarget timeline event. H0's run
+    must name H0, event pull_request, this repository (no fork) and this PR's head ref. All pages of
+    the all-state head-ref PR list must return only this PR, targeting master with matching head
+    metadata; any other open/closed PR refuses master-merge. Under GitHub's complete history,
+    uniqueness plus no retarget excludes runs borrowed from another PR against another base.
+    Run pull_requests is current association metadata: its sole entry must name this PR and a
+    master-ancestor base SHA, but that SHA is not claimed to be the tested base. Workflow path/blob
+    checks compare H0/T head trees with master, not the historical merge-ref workflow. No unique
+    never-retargeted master PR history means no master-merge waiver (round 4, 2026-10-29).
     Allowlisted paths match exactly, case-sensitively without normalization; exclusions alone normalize.
     Trust remains in GitHub's API, `gh` and the runner's Git binary. Offline base/head mode reads a
     given repo but cannot be invoked by `pr-wait`. Waiver

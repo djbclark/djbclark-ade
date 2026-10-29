@@ -68,19 +68,49 @@ expanding the allowlist or adding a consumer. Other `docs/*.md`, `skills/**` and
 `AGENTS.md` are outside the allowlist. Hard exclusions always deny a waiver:
 `.github/**`, `config/**`, `bin/pr-wait`, `bin/ci-waiver`, every `.git*`
 control component (including nested attributes/modules files), all nested `tests/`,
-`conftest.py`, `test_*.py`, files named `pyproject.toml`, `pytest.ini`, `setup.cfg`,
-`tox.ini`, `uv.lock` or `requirements*.txt` at any depth, and the explicit
+`conftest.py`, `test_*.py`, files named `pyproject.toml`, `pytest.ini`, `.pytest.ini`,
+`pytest.toml`, `.pytest.toml`, `setup.cfg`, `tox.ini`, `uv.lock`, `uv.toml` or
+`requirements*.txt` at any depth; root `pytest.py`, `pytest/`, `_pytest/`; and the explicit
 `claude/hooks/handoff-tools/tests/` tree (also covered by nested `tests/`). Only exclusions are NFC-normalized and case-folded (with slash/path normalization); absolute and parent-traversing paths are rejected.
-There is no blanket exclusion for other configuration files: they still need
-the class proof. Waivable files must be ordinary nonexecutable files; symlinks, gitlinks and executable/mode
+This open-ended denylist is an additional fence over the entire PR diff, not
+the master-merge safety proof. Both docs-only changes and hand-resolved paths
+must pass the positive `WAIVABLE_PATHS` rule; an omitted configuration name cannot
+authorize a hand edit in a master merge. An otherwise nonexcluded path inherited
+byte-for-byte from the machine merge may qualify, subject to the parent evidence.
+There is no blanket configuration exclusion. Waivable files must be ordinary nonexecutable files; symlinks, gitlinks and executable/mode
 changes are rejected. Regular file additions and deletions remain allowed.
 
 A4. `master-merge` requires exactly two parents: former PR head H0 first and
-master commit T second. H0 must occur in this PR's commit list AND have a
-`test.yml` pull-request run associated with this PR whose `pull_requests` entry
-names base ref `master` and supplies a nonempty base SHA ancestral to current
-master. A `base_ref_changed` event anywhere in the PR's timeline refuses either
-class. There is no force-push/synchronize timeline fallback; a push run alone does not prove PR history. Both parents' runs must
+master commit T second. H0 must occur in this PR's commit list. The run must name
+exactly H0 as `head_sha`, event `pull_request`, the same `head_branch` as the PR's
+head ref, and `head_repository.full_name` equal to this repository; the PR head
+repository must match too (fork heads are refused). Independently, the classifier
+enumerates **all pages** of
+`GET /repos/R/pulls?head=OWNER:BRANCH&state=all`, without a base filter. Exactly
+one PR may be returned, numbered N, with base ref master and head metadata equal
+to the separately fetched PR N. Any other PR, open or closed and even if also
+targeting master, refuses the waiver. A `base_ref_changed` event anywhere in N's
+fully paginated timeline refuses either class. Missing or unreadable evidence
+fails closed. This uniqueness plus no-retarget check excludes a green run
+borrowed from another PR against an attacker-controlled base, under the trusted
+API's complete PR-history responses. It is deliberately restrictive for reused
+head refs.
+
+The run's `pull_requests` must additionally contain exactly one entry, numbered
+N, with base ref master and a nonempty base SHA ancestral to current master.
+These are **current association consistency checks**, not triggering-event
+evidence: GitHub recomputes the entries from current PRs by head branch. That
+base SHA is not claimed to be the base tested by the run. Provenance instead
+depends on the independent all-state uniqueness and no-retarget evidence above.
+The API does not provide an immutable triggering payload here; if its history
+cannot establish a unique, never-retargeted master PR, master-merge fails closed.
+
+GitHub [documents PR runs as using the PR merge ref](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request),
+and [documents the list endpoint's all-state head filter](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests).
+The workflow-blob comparison below checks the **head trees**, not the actual
+historical merge-ref workflow blob, and does not certify an exact tested base SHA
+or reconstruct the tested merge tree. There is no force-push/synchronize timeline
+fallback; a push run alone does not prove PR history. Both parents' runs must
 name exactly `.github/workflows/test.yml`, and that file in each run's `head_sha`
 tree must equal the file at current master. Missing workflow objects fail closed.
 The latest matching `test.yml` run/attempt on exactly H0 must be
@@ -96,8 +126,9 @@ System/global/environment Git attributes and configuration are disabled;
 `--attr-source=<empty tree>` plus `-c core.attributesFile=/dev/null` ignores committed
 attributes too. Unsupported Git refuses rather than falling back. These tests run
 on both workflow platforms; local evidence is Git 2.56.0 on macOS (2026-10-29),
-while Linux execution must be checked in CI. Every nonwaivable path must match the
-machine tree, including modes/deletions. Nonwaivable conflicts are rejected even
+while Linux execution must be checked in CI. Every path differing from the machine
+tree must be positively allowlisted by `WAIVABLE_PATHS`; all other paths must be
+byte-identical, including modes/deletions. Nonwaivable conflicts are rejected even
 when the head committed the exact conflict-marker blob. Only allowlisted text
 files may be hand-resolved.
 
