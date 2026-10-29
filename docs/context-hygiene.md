@@ -62,7 +62,10 @@ saves use unique temporary files in the same directory and atomic replacement.
 On POSIX, a sibling lock serializes the full read/modify/write; acquisition uses
 non-blocking flock attempts for at most 200 ms. If the lock is busy, unavailable
 or unsupported, the hook proceeds without it: saves remain atomic, but a concurrent
-update may be lost. The two-second alarm still covers the entire hook.
+update may be lost. Lock opens also reject symlinks where O_NOFOLLOW is available.
+While holding the lock, each check inspects at most 128 directory entries and
+removes matching `context-nudges.json.*.tmp` files older than a day; fresh files,
+symlinks and directories are preserved. The two-second alarm still covers the entire hook.
 
 Claude's existing `autoCompactWindow` stays at 300,000. Measurements that motivated
 its growth and cooldown guards showed substantial summary/cache-write overhead;

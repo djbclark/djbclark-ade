@@ -84,6 +84,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 
 try:
@@ -665,6 +666,23 @@ def _save_state(state):
                 pass
 
 
+def _sweep_state_temps():
+    """Reap day-old interrupted saves; inspect at most 128 entries under the lock."""
+    cutoff = time.time() - 24 * 60 * 60
+    try:
+        with os.scandir(STATE_PATH.parent) as entries:
+            for entry in islice(entries, 128):
+                if not (entry.name.startswith(STATE_PATH.name + ".") and entry.name.endswith(".tmp")):
+                    continue
+                try:
+                    if entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                        os.unlink(entry.path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 @contextmanager
 def _state_lock():
     """Serialize the whole read/modify/write; fail open after at most 200 ms.
@@ -678,11 +696,13 @@ def _state_lock():
     try:
         if fcntl is not None:
             STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(STATE_PATH.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            fd = os.open(STATE_PATH.with_suffix(".lock"),
+                         os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
             deadline = time.monotonic() + 0.2
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _sweep_state_temps()
                     break
                 except BlockingIOError:
                     remaining = deadline - time.monotonic()

@@ -254,6 +254,24 @@ def test_posttooluse_tail_cost_bound(box, tmp_path, monkeypatch, capsys, noise, 
     assert json.loads(box.hook.STATE_PATH.read_text())["noisy"]["last_check"] == box.clock[0]
 
 
+@pytest.mark.parametrize("padding", [200_000, 131_000])
+@pytest.mark.parametrize("count", range(41))
+def test_newest_usage_straddles_tail_boundary(box, tmp_path, padding, count):
+    older = json.dumps({"message": {"usage": {"cache_read_input_tokens": 50_000}}}) + "\n"
+    newest = json.dumps({"padding": "x" * padding,
+                         "message": {"usage": {"cache_read_input_tokens": 222_000}}}) + "\n"
+    noise = json.dumps({"isSidechain": True, "message": {"usage": {
+        "cache_read_input_tokens": 1}}}) + "\n"
+    data = (older + newest + noise * count).encode()
+    boundary = len(data) - 128 * 1024
+    # The first window skips this partial record, including its usage needle.
+    assert len(older) < boundary < len(older) + len(newest)
+    assert data.index(b"cache_read_input_tokens", boundary) < len(older) + len(newest)
+    transcript = tmp_path / "straddling.jsonl"
+    transcript.write_bytes(data)
+    assert box.hook._last_context_tokens(transcript) == 222_000
+
+
 @pytest.mark.parametrize("count", [32, 40])
 def test_widened_tail_does_not_recount_first_window(box, tmp_path, monkeypatch, count):
     # P1: the newest main usage is just outside 128 KiB, with <64 false hits.
@@ -439,6 +457,116 @@ def test_concurrent_state_writers_never_share_temporary_file(box, monkeypatch):
     assert json.loads(box.hook.STATE_PATH.read_text()) in (long_state, short_state)
 
 
+@pytest.mark.skipif(not getattr(os, "O_NOFOLLOW", 0), reason="O_NOFOLLOW unavailable")
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_state_lock_does_not_follow_symlink(box, tmp_path, target_exists):
+    target = tmp_path / "lock-target"
+    if target_exists:
+        target.write_bytes(b"untouched")
+    box.hook.STATE_PATH.with_suffix(".lock").symlink_to(target)
+    assert box(90_000)  # rejected lock still permits a nudge and an atomic save
+    assert json.loads(box.hook.STATE_PATH.read_text())["session-1"]["level"] == 1
+    if target_exists:
+        assert target.read_bytes() == b"untouched"
+    else:
+        assert not target.exists()
+
+
+def test_state_temp_sweep_runs_under_lock(box, tmp_path, monkeypatch):
+    if box.hook.fcntl is None:
+        pytest.skip("flock unavailable")
+    monkeypatch.setattr(box.hook, "STATE_PATH", tmp_path / "context-nudges.json")
+    old = tmp_path / "context-nudges.json.old.tmp"
+    fresh = tmp_path / "context-nudges.json.fresh.tmp"
+    threshold = tmp_path / "context-nudges.json.threshold.tmp"
+    unrelated = tmp_path / "other.json.old.tmp"
+    directory = tmp_path / "context-nudges.json.directory.tmp"
+    link = tmp_path / "context-nudges.json.link.tmp"
+    for path in (old, fresh, threshold, unrelated):
+        path.write_bytes(b"keep unless orphaned")
+        age = 86_401 if path != fresh else 60
+        if path == threshold:
+            age = 86_400
+        os.utime(path, (box.clock[0] - age, box.clock[0] - age))
+    directory.mkdir()
+    link.symlink_to(unrelated)
+    real_sweep = box.hook._sweep_state_temps
+    calls = []
+
+    def sweep():
+        # An independently opened fd cannot acquire the flock during cleanup.
+        with box.hook.STATE_PATH.with_suffix(".lock").open("rb") as stream:
+            with pytest.raises(BlockingIOError):
+                box.hook.fcntl.flock(stream.fileno(), box.hook.fcntl.LOCK_EX | box.hook.fcntl.LOCK_NB)
+        calls.append(True)
+        real_sweep()
+
+    monkeypatch.setattr(box.hook, "_sweep_state_temps", sweep)
+    with box.hook._state_lock():
+        assert not old.exists()
+    assert calls == [True]
+    assert all(path.exists() for path in (fresh, threshold, unrelated, directory))
+    assert link.is_symlink()
+
+
+def test_state_temp_sweep_is_bounded(box, monkeypatch):
+    inspected = []
+
+    class Entries:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def __iter__(self):
+            for index in range(200):
+                inspected.append(index)
+                yield type("Entry", (), {"name": "unrelated"})()
+
+    monkeypatch.setattr(os, "scandir", lambda _: Entries())
+    with box.hook._state_lock():
+        pass
+    assert len(inspected) == 128
+
+
+def test_state_temp_sweep_failure_is_ignored(box, tmp_path, monkeypatch):
+    old = tmp_path / "state.json.old.tmp"
+    old.write_bytes(b"orphan")
+    os.utime(old, (box.clock[0] - 86_401, box.clock[0] - 86_401))
+    real_unlink = os.unlink
+    attempts = []
+
+    def unlink(path, *args, **kwargs):
+        if Path(path) == old:
+            attempts.append(path)
+            raise PermissionError("cannot remove orphan")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    assert box(90_000)
+    assert attempts and old.read_bytes() == b"orphan"
+    assert json.loads(box.hook.STATE_PATH.read_text())["session-1"]["level"] == 1
+
+
+def test_failed_state_replace_unlinks_temporary_file(box, tmp_path, monkeypatch):
+    box.hook.STATE_PATH.write_text('{"previous": true}')
+    attempts = []
+
+    def replace(source, target):
+        attempts.append(Path(source))
+        assert Path(source).is_file()
+        assert Path(target) == box.hook.STATE_PATH
+        raise OSError("simulated failed replace")
+
+    monkeypatch.setattr(os, "replace", replace)
+    box.hook._save_state({"new": True})
+    assert len(attempts) == 1
+    assert not attempts[0].exists()
+    assert not list(tmp_path.glob("state.json.*.tmp"))
+    assert json.loads(box.hook.STATE_PATH.read_text()) == {"previous": True}
+
+
 def test_lock_contention_is_nonblocking_and_bounded(box, monkeypatch):
     clock, flags = [0.0], []
 
@@ -453,6 +581,7 @@ def test_lock_contention_is_nonblocking_and_bounded(box, monkeypatch):
             raise BlockingIOError()
 
     monkeypatch.setattr(box.hook, "fcntl", BusyLock, raising=False)
+    monkeypatch.setattr(box.hook, "_sweep_state_temps", lambda: pytest.fail("sweep without lock"))
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     assert box(90_000)
