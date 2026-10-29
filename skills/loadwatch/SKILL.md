@@ -97,6 +97,18 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
 
 Verify against the processes themselves, not against memory or the brief's guess (standing order 4).
 
+Diagnostic safeguards (2026-10-28): match an executable path and parent PID, never a substring of the
+whole command line: your own shell/Python diagnostic embeds the searched text. Before sampling or
+signalling, recheck the target's identity; after `sample`, check the report's Process and PID too
+(a short-lived helper can exit or its PID can be reused even when `sample` exits 0). Discard a report
+for another process. Capture broad command output first and print bounded relevant rows; do not
+truncate away the evidence you need.
+
+Peer questions/action requests use `relay.py TARGET TEXT --expect-ack UNIQUE_ID`; asking for an ack
+only inside TEXT does not register it and the relay refuses the send. Verify the returned delivery
+state and named ack before claiming the peer was reached.
+
+
 1. **Who uses the CPU:** `ps -axo pid,ppid,%cpu,state,command -r | ghead -20`. Map each heavy process to a
    session: `~/src/djbclark-ade/skills/session-finder/fleet.py list`, and `fleet.py show <id>`.
 2. **Load without CPU:** processes in state `U` (stuck in disk or network wait, unkillable: the AFS case on
