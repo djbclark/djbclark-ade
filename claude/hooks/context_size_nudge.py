@@ -58,7 +58,8 @@ current edit and hand off within a few tool rounds (_midtask_note); again every
 REPEAT_EVERY of further growth. A compaction resets the floor and the level, so
 the hard tier fires again at ASK_TOTAL (by total, not by growth) after regrowth.
 Separately, once per session at BOUNDARY_TOTAL: prefer handoff + /new over
-/compact at the next task completion.
+/compact at the next task completion. With the wall at 267k, REPEAT_EVERY (level 3+) and the
+PAGE_* tiers are mostly unreachable before the wall (level 3 needs a floor under ~27k).
 
 MUST always exit 0 -- never fail or delay a prompt. Python 3 stdlib only.
 Fail-fast: reads only a head window (baseline, once per session) and a tail
@@ -404,15 +405,16 @@ def _midtask_note(total):
         f"About {left:,} tokens remain before Claude Code compacts this session at "
         f"{AUTO_COMPACT_WALL:,}; this reminder runs only when a prompt is submitted, "
         "not between tool rounds. If this turn is mid-task: finish the current edit "
-        "(never leave one half-written), "
+        "(never leave one half-written), then run the handoff (or, if the work must "
+        "continue in-context, the /compact path above) "
     )
     if rounds > 0:
         return lead + (
-            f"then run the handoff before the next tool round beyond {rounds} more "
+            f"before the next tool round beyond {rounds} more "
             f"(about {TOOL_ROUND_TOKENS // 1000}k tokens each; a large file or log read "
             "counts double)."
         )
-    return lead + "then run the handoff right after it, with no further tool rounds."
+    return lead + "right after it, with no further tool rounds."
 
 
 def _ask_message(total, growth, repeat, successor=None):
@@ -443,7 +445,7 @@ def _ask_message(total, growth, repeat, successor=None):
     return (
         f"{lead}: {total:,} tokens (+{growth:,} since the session started or "
         "last compacted). Do not ask: Claude Code compacts this session by "
-        f"itself at about {AUTO_COMPACT_WINDOW - AUTO_COMPACT_BUFFER:,} tokens "
+        f"itself at about {AUTO_COMPACT_WALL:,} tokens "
         f"(autoCompactWindow {AUTO_COMPACT_WINDOW:,} in ~/.claude/settings.json "
         "less its buffer; the PreCompact hook writes the Tier 1 checkpoint "
         "first). Until then start no new heavy work inline: send it through "
@@ -549,7 +551,9 @@ def main():
         else:
             print(_ask_message(total, growth, repeat=fired >= 2,
                                successor=_session_successor(transcript_path)), flush=True)
-    session_state["level"] = level
+    # Never lower the stored level on a dip: a compaction or a real shrink already reset it
+    # above, and a smaller dip must not let the next climb past the tier reprint the message.
+    session_state["level"] = max(level, fired)
 
     # Once per session id, not per compaction: a /new starts a new id.
     if total >= BOUNDARY_TOTAL and not session_state.get("boundary"):

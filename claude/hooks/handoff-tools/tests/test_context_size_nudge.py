@@ -231,15 +231,43 @@ def test_hard_text_says_what_to_do_mid_task_self_slash(hook, tmp_path, monkeypat
 
 def test_midtask_note_counts_rounds_from_what_is_left():
     wall = nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER
-    at_tier = nudge._midtask_note(nudge.ASK_TOTAL)
-    rounds = (nudge.ASK_HEADROOM - nudge.HANDOFF_RESERVE) // nudge.TOOL_ROUND_TOKENS
-    assert rounds >= 3
-    assert f"beyond {rounds} more" in at_tier
+    assert wall == 267_000 and nudge.ASK_TOTAL == 217_000
+    # Literal numbers: 217k leaves 50k; (50k - 15k reserve) // 8k per round = 4.
+    at_tier = nudge._midtask_note(217_000)
+    assert "About 50,000 tokens remain" in at_tier and "beyond 4 more" in at_tier
+    # 244k leaves 23k; (23k - 15k) // 8k = 1, the last total with a round to spare.
+    last = nudge._midtask_note(244_000)
+    assert "About 23,000 tokens remain" in last and "beyond 1 more" in last
+    assert "right after" in nudge._midtask_note(244_001)
     # Near or past the wall: no rounds left, hand off straight after the edit.
     for total in (wall - nudge.HANDOFF_RESERVE, wall, wall + 5_000):
         note = nudge._midtask_note(total)
         assert "finish the current edit" in note and "right after" in note
         assert "beyond" not in note
+    assert "About 0 tokens remain" in nudge._midtask_note(wall + 5_000)  # clamped, never negative
+
+
+def test_midtask_note_keeps_the_in_context_path_open():
+    """The same message allows /compact when the work must continue in-context; the note must
+    not say "hand off" unconditionally (adversary F2, PR 108)."""
+    for total in (nudge.ASK_TOTAL, nudge.AUTO_COMPACT_WALL):
+        note = nudge._midtask_note(total)
+        assert "work must continue in-context" in note and "/compact path above" in note
+
+
+def test_a_small_dip_does_not_reprint_the_hard_tier(hook, tmp_path):
+    """A session hovering around the hard tier (floor 71k; /rewind or dropped tool output dips
+    it by <25%) printed the full message on every climb back past 217k (adversary F1)."""
+    path = _transcript(tmp_path, 71_000, 217_000)
+    out, _ = hook("s-hover", path)
+    assert out.count("Context is large") == 1
+    outs = []
+    for size in (205_000, 218_000, 206_000, 219_000):
+        _append(path, _usage(size))
+        outs.append(hook("s-hover", path)[0])
+    assert [_is_ask(o) for o in outs] == [False] * 4
+    assert hook.state()["s-hover"]["level"] == 2
+
 
 
 def _host(monkeypatch, var):
