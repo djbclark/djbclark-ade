@@ -419,7 +419,9 @@ tab ever opened ("several workspaces share this cwd"). After any `self-slash` th
 
 **Partial handoff: the operator keeps this session** ("hand X off to a new tab", "I still use this agent for other things"). The
 `--finish --successor` form archives this agent when it works, so do not use it. Write the handoff (Steps 1-7, scoped to the slice and
-written to its own chain), then start a separate top-level agent in this agent's workspace and leave this one running:
+written to its own chain), then start a separate top-level agent in this agent's workspace and leave this one running. This is not
+`/handoff paseo` (the durable transfer of the whole session, which ends this one): use this recipe only when the operator keeps this
+session, and `/handoff paseo` when this session is the one being handed on:
 
 ```bash
 ~/src/djbclark-ade/bin/paseo-new-seat --title "<short title>" --provider claude --model claude-sonnet-5-5 --thinking medium \
