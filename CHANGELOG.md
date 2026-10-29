@@ -309,6 +309,31 @@ agent what changed and what is new. Entries end with the pull request number.
   a seat that stops working stops producing changes, so without that the passes go quiet one after
   another and an outage reads as "nothing new" all the way through — and an unreadable `--why` pages
   nobody rather than guessing. `spoke session=` now carries the word (#134).
+- `bin/rumination-watch` lost a line whenever the seat refused it: `state["last"] = cur` had already
+  consumed the change, so the announcement was gone for good — and mail tends to arrive exactly
+  while the seat is busy, so this was the everyday collision, not an edge case. A refused line is
+  now kept in `state["pending"]`, prepended to the next pass and retried, cleared only by a real
+  send (`delivered` / `accepted` / `queued`, or an unrecognised rc 0 shape read as `sent`), and
+  bounded by `RW_PENDING_MAX` (clamped to at least 1, newest lines kept, every eviction logged). The
+  logged word is relay.py's own: `accepted` is no longer reported as `delivered`, and the word is
+  read from relay's status line only, so a peer's untrusted reply preview containing ": queued"
+  cannot rename the outcome (#134).
+- `bin/rumination-watch` reported a `gh` page size as a count: `--limit 100` printed "100 open
+  PR(s)" whether there were 100 or 200. At the cap it now says "at least N", and a FAILED `gh` read
+  is "PR count unknown (gh unreadable)" rather than a confident 0 — the same class of unearned
+  precision as calling `accepted` "delivered" (#134).
+- `bin/rumination-watch` read both subprocess streams as one string, and `fleet.py` prints a warning
+  on STDERR on its successful `list --json` path: a healthy read could parse as an empty fleet and
+  page "Nothing is listening" — a false dead-seat page on a machine whose seat was running. JSON
+  reads (`fleet.py`, `peer_mail.py resolve`, `gh`, `relay.py --why`) now use stdout alone, and an
+  rc 0 body that is not a fleet is a broken READ, not an empty one. Three more honesty bugs from the
+  same review round: relay.py's rc 1 "it may have reached the daemon" / "do not resend" shapes are
+  `unverified` (settled, never retried, and djbclark is told the line may have been lost) instead of
+  `FAILED` and resent every 5 minutes; `card:picker` and `card:unknown` are darkness like the other
+  cards, so a seat parked on a picker is paged; and a FAILED, unverified or `skipped` pass no longer
+  resets the darkness streak (only a proven send or `working` does), because a flaky route used to
+  hide a parked seat. The knobs are clamped (`RW_PENDING_MAX=0` used to keep everything), and a
+  hand-edited state file of the wrong shape no longer kills the pass (#134).
 
 - The quota guard's `critical` advice (2026-10-29) is scoped to the Claude Code subscription pool: "No new Claude work of any kind until the reset ... hand off, stop" read as a stop order by idle omp sessions, so it now says "No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session included) until the reset", states that it is not a stop order for codex, grok, agy, zai and opencode sessions, and that an omp session keeps working only while `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares the Claude weekly rate window, which aiuse gates when every weekly window is exhausted); a Claude Code lead is sent to an omp successor on Paseo (`self-slash --finish --successor omp/anthropic/claude-sonnet-5-5`), told to start omp by hand on herdr and Orca (where `self-slash` refuses an omp successor), or to a codex or grok successor when omp is not listed (agy is not a Paseo provider), instead of another Claude Sonnet session; `skills/handoff` Step 9 keys the same exemption on the state file's `level` being `critical` and drops its old `critical` branches (a Fable lead to Opus, an Opus or Sonnet lead to plain `/new`) (#126).
 - `bin/paseo-new-seat` (2026-10-29): a claude seat created with the shield on no longer prints "auto_accept: NOT verified - the shield may be grey" and exits 4 once its mode is verified. Claude never publishes an `auto_accept` feature (its yolo is the permission mode), so its empty feature list is now "not offered" rather than "unverified"; other providers with an empty list still report unverified (#122).

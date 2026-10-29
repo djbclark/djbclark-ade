@@ -39,8 +39,13 @@ def test_rumination_watch_relay_argv_has_no_ack(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "LOG", tmp_path / "state" / "rumination.log")
     monkeypatch.setenv("RW_SESSION", "sess-1")
     argvs = []
-    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: argvs.append(cmd) or (0, ""))
-    assert rw.to_session("one open loop") == "delivered"   # exit 0, not a queue line
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: argvs.append(cmd) or
+                        (0, "relayed to [sess-1] n via paseo: delivered; it takes the message now"))
+    assert rw.to_session("one open loop") == "delivered"   # relay.py's own word on exit 0
     assert argvs[0][3:5] == ["sess-1", "one open loop"] and "--no-ack" in argvs[0]
     # no --idle: it blocks relay.py's deferral, so a busy target would drop the line instead of queueing it
     assert "--idle" not in argvs[0]
+    # An exit 0 with no word this code recognises is `sent`, never `delivered`: the log must not
+    # claim the strongest word for a shape nobody has proof of.
+    monkeypatch.setattr(rw, "run", lambda cmd, timeout=20: (0, ""))
+    assert rw.to_session("one open loop") == "sent"
