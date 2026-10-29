@@ -5,10 +5,10 @@ session context/tool hooks, primary step events and safe-point compaction API.
 It has no V1 adapter or runtime npm dependency. Its policy comes from
 `../../config/go-model-policy.json`, resolved against the real plugin path.
 
-| Model class | Warn | Compact after 32k growth | Hard trigger |
-| --- | ---: | ---: | ---: |
-| Routine Go | 64k | 96k | 128k |
-| Costly or unclassified Go | 32k | 64k | 96k |
+| Model class | Warn | Compact after 32k growth | Handoff ceiling | Hard trigger |
+| --- | ---: | ---: | ---: | ---: |
+| Routine Go | 64k | 96k | 112k | 128k |
+| Costly or unclassified Go | 32k | 64k | 80k | 96k |
 
 These are conservative **local policy starting points**, not vendor defaults or
 measured optimal thresholds. Count each fresh primary request's input plus cache
@@ -22,6 +22,40 @@ session guesses are used. Model and provider changes preserve session-level
 pending, cooldown, failure and ineffective-compaction state; only model
 measurements are reset. Non-Go periods disable automatic writes without
 erasing the conversation's admission history.
+
+## Automatic handoff trigger
+
+At a **task boundary** (the native `session.idle` event, which carries no
+`created` timestamp and is handled before the staleness guard), the guard
+escalates an over-long session into a mandatory handoff directive when either
+condition is met:
+
+- the last measured input context meets the model class's **handoff ceiling**
+  (112k routine / 80k advisory), or
+- the session has completed `handoff_after_compactions` (2) compactions.
+
+When due, the guard wakes the model with
+`ctx.session.prompt({ prompt: { text }, delivery: "steer" })`, escalating the
+wording across retries, and `onContext` surfaces a handoff-level notice into the
+next request's system messages. The policy is validated once at load: a bad
+`handoff_cooldown_seconds` (below a 300 s floor), `handoff_after_compactions`,
+`handoff_max_wakes` or either `handoff` ceiling fails closed (no automatic
+wake), and a malformed or unreadable persisted record does too. A wake is capped
+at `handoff_max_wakes` (3) per session, is refused for a child (subagent) session
+and for a session whose live model no longer matches the recorded Go model, and
+is never sent in a dispatched slice (`ACP_RUN_AGENT=1`). A child or dispatched
+session also never gets the mandatory directive in its context notice: it is
+softened to a "finish and report back to your parent" wording with no "start a
+fresh session" or lifecycle command. Before the first idle confirms a primary,
+the notice is neutral ("If this is a child or dispatched session, ... Otherwise
+a handoff directive follows at the task boundary"); once an idle confirms a
+primary, the next request re-surfaces the full directive (the notice key
+distinguishes the two wordings), so the backstop survives a dropped wake.
+An ineffective-compaction (blocked) session is exactly the one that must hand
+off rather than loop compactions, so handoff outranks `blocked` in the context
+notice. The directive routes the model through the handoff skill and
+`self-slash "/new"`; it never instructs a raw `/new`, `/clear`, `/reset` or
+`--finish --successor`, and it always carries "Never clear a parent session".
 
 ## Install and activate
 

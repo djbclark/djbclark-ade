@@ -115,14 +115,16 @@ nor transcript, the TUI's pid, taken at queue time as the one foreground process
 pane's foreground pids; a TUI restarted onto the same session id is still the target). At queue time a herdr pane
 with none of session id, transcript or an unambiguous TUI process is not deferred (exit 1); at poll time a pane whose
 processes herdr cannot read is an error, and 3 in a row (about 10-15 s) fail the message. A Paseo daemon that cannot answer fails a queued message only
-after 3 consecutive errors 5 s apart, counted apart from "not found"; a pending permission card is waited for. A record
+after 3 consecutive errors 5 s apart, counted apart from "not found"; a pending permission or question card is waited for with
+capped exponential backoff and full jitter (5 s up to 2 min between looks, never typed into; a target that is only blocked on a card is
+queued at once, 2026-10-28, instead of refused). A record
 `sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
 the notice say "unverified", never "delivered". `--idle S`
 still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at
 most 24 h); `relay.py --pending [--text] [--json]` lists (the text only with `--text`), `--cancel ID` withdraws a queued
 one, `--sweep` re-arms records whose deliverer died (it also runs, cheaply, at the start of every relay: it only changes
 states and starts detached deliverers). A non-Claude pane TUI that is working is deferred the same way. Archived,
-permission-blocked (at queue time), wrong-directory and no-route refusals are never deferred. Residual: `PASEO_AGENT_ID` is an
+wrong-directory and no-route refusals are never deferred. Residual: `PASEO_AGENT_ID` is an
 environment value a same-user process can forge, as `HERDR_PANE_ID` is, and the bounds can be starved (100 records in all:
 a same-user process that mints sender keys fills the queue, never silently; one sender can fill one target's 20; a stuck
 deliverer holds its own record's notice until a later sweep). claude, codex, omp, opencode and pi
