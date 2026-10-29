@@ -78,9 +78,10 @@ jobs:
             if [ "$tool" = awk ] && command -v gawk >/dev/null 2>&1; then
               continue  # gawk is already a real GNU awk under its own name
             fi
-            # The path is written unquoted into the wrapper: refuse anything a shell would split or expand.
+            # The path is written unquoted into the wrapper: refuse anything a shell would split or expand,
+            # including a non-absolute result (a relative PATH entry, a function or a builtin).
             case "$target" in
-              /*[!A-Za-z0-9/._+-]*) echo "refusing $tool target with unsafe characters: $target" >&2; exit 1 ;;
+              [!/]*|*[!A-Za-z0-9/._+-]*) echo "refusing $tool target that is not a plain absolute path: $target" >&2; exit 1 ;;
             esac
             printf '#!/bin/sh\nexec %s "$@"\n' "$target" > "$bindir/g$tool"
             chmod +x "$bindir/g$tool"
