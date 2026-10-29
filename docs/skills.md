@@ -83,6 +83,7 @@ skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
 | `report` | Formats a long Markdown deliverable for Marked 2: numbered superscript citations, linked evidence table, descriptive file names, short paragraphs, render check by window capture. | `/report`; before the first `open -a "Marked 2"` of a research report, spec or review. Scripts: `skills/report/scripts/{reformat_citations,cite_sup}.py`. |
 | `book-to-kb` | Adds a book (EPUB, PDF, DOCX, ...) to the local knowledge base at `~/kb` so any session can query it cheaply. | Give it a book path; query later with `book-kb query '<regex>' <slug>`. |
 | `gmail-search` | Searches the local full-text index of the whole mailbox in about 100 ms; read-only. | "search my email", "find that message from X". |
+| `barnowl` | Runs BarnOwl and Zephyr from plain English against the live tmux session `barnowl` (`scripts/bo`). `/g` is the short slash command; the shell command is `bin/g`. | `/barnowl`, `/g`, `g list my subs`; "list my subscriptions". |
 | `tell-chief-of-staff` | Sends a message to the operator's cloud Grok Bot "Chief of Staff" via its inbound webhook, and explains how Chief of Staff can call back into Claude (ask_claude MCP tool). Webhook URL/key live in Keychain. | "tell grok", "tell Chief of Staff", "hand this to grokbot". |
 | `graft` | Tells an agent to use the graft code graph before grepping or reading source. | Loads on its own in any graft-indexed repo. |
 | `todo` | Tracks optional do-whenever tasks as Basic Memory notes. | "what could I work on"; "add to my todo". |
