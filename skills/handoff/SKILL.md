@@ -326,6 +326,11 @@ is already a real agent with a transcript the operator can open.
 
 **A `claude-fleet-governor` steer names its own successor** (`--finish --successor omp/anthropic/claude-sonnet-5-5`):
 run that command instead of this step, once; the rest of this section is for a session no governor has steered.
+The quota guard's `critical` advice (`[quota-guard critical]`, 2026-10-29) is the same exemption: a Claude Code
+lead of any model, Sonnet included, follows the advice's own line, never plain `self-slash "/new"` (that stays
+on the exhausted subscription): on Paseo, while `aiuse --available --json` lists omp, the omp successor above; on
+herdr or Orca (`self-slash` refuses an omp successor there) the handoff, then omp started by hand in a new pane or
+tab; omp not listed, codex, grok or agy the same way.
 
 **Successor on another model (Paseo and herdr; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
 Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 medium when pipeline-driving).** Use this

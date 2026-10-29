@@ -213,14 +213,17 @@ def test_advice_grows_with_level(rig):
     rig.set_aiuse(aiuse_fixture(weekly=5))
     assert rig.guard().returncode == 3
     crit = rig.state_json()["advice"]
-    assert f"No new Claude Code subscription work until the reset at {WEEK_RESET_N}" in crit
+    assert f"No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session included) until the reset at {WEEK_RESET_N}" in crit
     # Critical advice must not read as a stop order for sessions on other pools (2026-10-29: idle
-    # omp sessions stopped on "hand off, stop"), and the lead's successor is omp, not another
-    # subscription session.
-    assert "not a stop order" in crit and "omp, codex, grok, agy, zai or opencode" in crit
+    # omp sessions stopped on "hand off, stop"), but omp shares the Claude weekly rate window, so
+    # it is only unaffected while aiuse still lists it (adversary r1 on PR 126, A1).
+    assert "not a stop order" in crit and "codex, grok, agy, zai or opencode is unaffected" in crit
+    assert "omp keeps working only while `aiuse --available --json` still lists it" in crit
     assert "--finish --successor omp/anthropic/claude-sonnet-5-5 --thinking high" in crit
     assert "--finish --successor claude/claude-sonnet-5-5" not in crit
     assert "hand off, stop" not in crit and "of any kind" not in crit
+    # herdr and Orca refuse an omp successor (bin/self-slash): the text must say what to do there.
+    assert "on herdr or Orca write the handoff, then start omp by hand" in crit
 
 
 def test_five_hour_critical_names_the_five_hour_reset(rig):
