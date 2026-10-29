@@ -197,7 +197,11 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Control (procedure only).** AGENTS.md, Code review section (PR 9, merged 2026-10-20), rule
   1 requires the PR body to carry the adversary verdict as a machine-readable marker naming the head
   reviewed (`<!-- adversary-verdict:v1 {...} -->`, since 2026-10-25), and whoever merges to use
-  `gh pr merge --squash --match-head-commit <reviewed sha>`. `bin/pr-wait` reads that marker as of
+  `gh pr merge --squash --match-head-commit <reviewed sha>` for ordinary PRs. When `ci_state`
+  is `waived`, ONLY `bin/ci-waiver merge PR --head SHA` is allowed, never `gh pr merge`
+  (2026-10-29). Its merge commit preserves the proved tree and parents; a non-force push rejects
+  a lost master race before landing. Wrapper-only is procedural, not enforced: bypasses retain
+  the race. `bin/pr-wait` reads that marker as of
   2026-10-27 (PR 66) and reports it; it does not read prose. The adversary runs on request before a PR is
   opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent. Codex's code review ("Codex Review")
   ran after an `@codex review` comment on PR 10, and Codex's Security Review ran with it, labelled

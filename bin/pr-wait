@@ -11,10 +11,13 @@ Failed checks still block. Multiple merge bases or a merge in the unique ancesto
 range are NOT waivable, including merges of master. A candidate requires a clean merge-tree
 result against both API base and current master with only waivable paths and safe modes.
 ci_waiver.classification reports master/merge_tree and refuses master-side renames, deletions or mode
-changes on PR paths. Authorized mergers use ci-waiver merge PR --head SHA: it reclassifies,
-then verifies the actual squash parent/tree/paths/modes AFTER merging, with REVERT instructions
-on mismatch. This narrows and detects the master race; it cannot prevent it without branch
-protection or a merge queue (docs/ci-waiver.md). See docs/ci-waiver.md; malformed, mismatched or
+changes on PR paths. When ci_state is waived, merge ONLY with trusted-master
+bin/ci-waiver merge PR --head SHA, never gh pr merge. It creates a merge commit (not squash)
+with proved tree/parents and pushes once without force: a lost master race is rejected before
+landing. Nothing enforces wrapper-only; bypasses retain the race. Ordinary PRs keep
+gh pr merge --squash --match-head-commit SHA. Post-push identity/commit checks and read-only
+ci-waiver verify PR --sha SHA handle recovery; only proved landed mismatches print REVERT.
+See docs/ci-waiver.md; malformed, mismatched or
 unreviewed claims add ci-waiver-malformed/mismatch/needs-adversary blockers.
 Repair (2026-10-29): own bytes must match GitHub's API master SHA, fetched by
 explicit HTTPS URL without local remote/URL config. Replacement objects/grafts
@@ -162,6 +165,7 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -1784,6 +1788,8 @@ def main(argv: list[str]) -> int:
                    **judged, "codex_requested": rq["own"], "codex_request_note": request_note(s["codex_match"], result),
                    "since": s["since"], "since_source": s["since_source"], "errors": errors[-3:],
                    "elapsed_s": round(time.monotonic() - start, 1), "out": out}
+        if ci_state == "waived":
+            summary["merge_command"] = shlex.join(["bin/ci-waiver", "merge", str(a.pr), "--head", head, "--repo", a.repo])
         write_atomic(f"{out}-checks.json", checks)
         write_atomic(f"{out}-codex.json", None if a.no_codex else (s["codex_match"] or s["codex_newest"] or {}))
         write_atomic(f"{out}-findings.json", None if s["review"] is None else s["review"]["for_head"])
@@ -1830,6 +1836,8 @@ def main(argv: list[str]) -> int:
                                  f" - {adv.get('detail')}")
             parts.append("merge_ready: " + ("yes" if judged["merge_ready"]
                                             else "no (" + ", ".join(judged["merge_blockers"]) + ")"))
+            if ci_state == "waived":
+                parts.append("merge ONLY with " + summary["merge_command"])
             if new_head:
                 parts.append(f"new head {new_head[:12]}")
             if errors and code in (EXIT_TIMEOUT, EXIT_GH):

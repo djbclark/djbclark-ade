@@ -800,6 +800,13 @@ with the threads per kind (`findings-mismatch` otherwise; never read it as a cle
 `findings-not-collected`, `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
 `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`, and `ci-waiver-*`
 (`untrusted-tool`, `malformed`, `mismatch`, `needs-adversary`). See [CI waiver](../../docs/ci-waiver.md).
+When `ci_state` is `waived`, merge ONLY via trusted-master `bin/ci-waiver merge PR --head SHA`,
+never `gh pr merge`. It lands a merge commit, not a squash, so it can push the exact proved tree
+fast-forward only and make the reviewed head reachable for GitHub. A lost master race is rejected
+before landing; re-run after `merge-race-lost`. Nothing enforces wrapper-only; bypasses retain the
+race. Uncertain outcomes require inspect/re-verify, never another push; use
+`bin/ci-waiver verify PR --sha SHA`. Ordinary PRs retain
+`gh pr merge --squash --match-head-commit SHA` (2026-10-29).
 `PREFIX-open-findings.json` lists the open threads of any head, outdated or not, each with `kind` (`code` or `security`). Exit 0 done, 1
 timeout, 2 bad usage, no such PR or the lock guard busy, 3 Codex stuck, 4 a waiter for that head is already alive (the line names its pid and prefix: read its files, do
 not start another), 5 the head moved (wait on the new head), 6 timed out while `gh` failed. After a push, start one for

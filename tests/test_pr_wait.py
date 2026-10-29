@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-PR_WAIT = Path(__file__).resolve().parent.parent / "bin" / "pr-wait"
+PR_WAIT = Path(os.environ.get("PR_WAIT_TEST_SCRIPT", Path(__file__).resolve().parent.parent / "bin" / "pr-wait"))
 REPO = "djbclark/djbclark-ade"
 PR = 7
 HEAD = "a" * 40
@@ -316,6 +316,11 @@ else: sys.exit(1)
         assert blocker in result["merge_blockers"]
     else:
         assert result["ci"]["state"] == result["ci_state"] == "waived"
+        assert result["merge_command"] == f"bin/ci-waiver merge {PR} --head {HEAD} --repo {REPO}"
+        assert "gh pr merge" not in result["merge_command"]
+        if case == "valid":
+            human = world.run("--timeout", "1", "--no-request")
+            assert human.returncode == 0 and "merge ONLY with " + result["merge_command"] in human.stdout
         assert result["adversary_required"] is True
         assert result["ci_waiver"]["classification"]["master"] == OLD
         assert result["ci_waiver"]["classification"]["merge_tree"] == "c" * 40

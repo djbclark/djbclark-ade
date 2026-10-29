@@ -5,16 +5,19 @@ ci-waiver classify --repo-dir DIR --pr N [--repo OWNER/NAME] [--json]
 ci-waiver classify --repo-dir DIR --base REF --head REF [--repo OWNER/NAME] [--json]
 
 ci-waiver merge PR --head SHA [--repo OWNER/NAME]
+ci-waiver verify PR --sha SHA [--repo OWNER/NAME]
 
 PR mode uses a fresh private GitHub store and proves both API base and current
 master; JSON names master and merge_tree. Master-side renames, deletions or mode
 changes on PR paths refuse. Multiple merge bases and PR-history merges refuse.
 Offline base/head mode retains its explicit base. Only docs-only is waivable.
 The operator-authorized merge wrapper requires trusted master's review gates,
-reclassifies and rechecks checks before a head-pinned squash. It verifies the
-actual squash parent, paths, modes and exact tree AFTER merging. This narrows and
-detects the master race; it cannot prevent it without branch protection/queue.
-Mismatch exits 1 with REVERT instructions; nothing automatically reverts/pushes.
+reclassifies and rechecks checks, creates a merge commit with the proved tree and
+parents [proved master, reviewed head], then pushes fast-forward only. A lost
+master race is rejected before anything lands. Waived PRs MUST use this wrapper;
+nothing enforces that rule for callers who bypass it. Ordinary PRs use squash.
+verify rechecks a landed merge without writing. Only proved landed mismatches
+print REVERT; unknown outcomes print inspect/re-verify hints, never retry a push.
 Exit 0: classification printed (including none), or merge verified; 1: merge
 refused/verification failed; 2: bad usage. See docs/ci-waiver.md.
 This file deliberately imports no repository Python code.
@@ -31,6 +34,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from pathlib import Path
 
@@ -139,6 +143,7 @@ class GitHubRepository(Repository):
     def git(self, *args, **kwargs):
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1")
+        env.update({k: v for k, v in kwargs.pop("env", {}).items() if k in IDENTITY_ENV})
         # No inherited GIT_DIR, object directories, alternates, templates or config.
         kwargs["env"] = env
         return super().git("-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
@@ -295,37 +300,121 @@ def recheck_checks(repo, pr, head):
         raise ValueError("merge-checks-unreadable")
 
 
-def verify_squash(r, squash, proof):
-    """Verify the actual commit, not the PR's stale base or a moving branch ref."""
-    squash = r.sha(squash)
-    parents = r.git("rev-list", "--parents", "-n", "1", squash).stdout.decode().split()
-    if len(parents) != 2 or parents[1] != proof["master"]:
-        raise ValueError("squash-parent-differs-from-proved-master")
-    parent = parents[1]
-    paths = r.paths(parent, squash)
+class LandedMismatch(ValueError):
+    """A proved commit mismatch; transport/identity errors are not mismatches."""
+
+
+def verify_merge(r, commit, proof):
+    """Check parents, first-parent paths/modes and the exact proved merge tree."""
+    commit = r.sha(commit)
+    parents = r.git("rev-list", "--parents", "-n", "1", commit).stdout.decode().split()[1:]
+    paths = r.paths(parents[0], commit) if parents else []
+    if parents != [proof["master"], proof["head"]]:
+        raise LandedMismatch("merge-parents-differ-from-proof; first-parent paths=" + json.dumps(paths))
     if not paths or any(excluded(p) or not waivable(p) for p in paths):
-        raise ValueError("squash-paths-not-docs-only")
-    r.safe_doc_modes(parent, squash)
-    tree = r.git("rev-parse", squash + "^{tree}").stdout.decode().strip()
+        raise LandedMismatch("merge-paths-not-docs-only; first-parent paths=" + json.dumps(paths))
+    try:
+        r.safe_doc_modes(parents[0], commit)
+    except ValueError as e:
+        if str(e).startswith("unsafe-doc-mode:"):
+            raise LandedMismatch(str(e)) from e
+        raise
+    tree = r.git("rev-parse", commit + "^{tree}").stdout.decode().strip()
     if tree != proof["merge_tree"]:
-        raise ValueError("squash-tree-differs-from-proof")
+        raise LandedMismatch("merge-tree-differs-from-proof")
 
 
-def revert_instructions(repo, pr, squash):
-    # Never mutate here. Quote every operand in the human-run recovery commands.
-    branch = "revert-waiver-" + squash[:12]
-    return (f"REVERT: {squash}\n"
-            + shlex.join(["git", "switch", "-c", branch, squash]) + "\n"
-            + shlex.join(["git", "revert", "--no-edit", "--mainline", "1", squash]) + "\n"
+def revert_instructions(repo, pr, commit):
+    # Never mutate here. Start at current master, never at another branch's commit.
+    branch = "revert-waiver-" + commit[:12]
+    return (f"REVERT: {commit}\n"
+            + shlex.join(["git", "fetch", "origin", "master"]) + "\n"
+            + shlex.join(["git", "merge-base", "--is-ancestor", commit, "origin/master"])
+            + "  # STOP if nonzero: commit is not on master\n"
+            + shlex.join(["git", "switch", "-c", branch, "origin/master"]) + "\n"
+            + shlex.join(["git", "revert", "-m1", commit]) + "\n"
             + shlex.join(["git", "push", "origin", "HEAD:refs/heads/" + branch]) + "\n"
             + shlex.join(["gh", "pr", "create", "--repo", "https://github.com/" + repo,
                           "--base", "master", "--head", branch, "--title", "Revert unsafe CI-waiver merge",
-                          "--body", f"Revert {squash}: post-merge verification failed for PR {pr}."]))
+                          "--body", f"Revert {commit}: verification failed for PR {pr}."]))
+
+
+IDENTITY_ENV = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+                "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
+
+
+def commit_identity():
+    # Resolve exactly as a normal git commit in the caller's checkout, then carry
+    # only identity into the isolated store (no inherited object/config variables).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k in IDENTITY_ENV}
+    identity = {}
+    for role in ("AUTHOR", "COMMITTER"):
+        result = subprocess.run(["git", "var", "GIT_" + role + "_IDENT"], env=env,
+                                capture_output=True, text=True, timeout=60)
+        match = re.fullmatch(r"(.+) <([^<>]+)> (\d+ [+-]\d{4})\n?", result.stdout)
+        if result.returncode or not match:
+            raise ValueError("merge-identity-unavailable")
+        identity.update(zip(("GIT_" + role + "_" + field for field in ("NAME", "EMAIL", "DATE")), match.groups()))
+    return identity
+
+
+def inspect_hint(repo, pr, commit):
+    return ("VERIFY FAILED: inspect only; do not retry the push. "
+            + shlex.join(["gh", "pr", "view", str(pr), "--repo", "https://github.com/" + repo,
+                          "--json", "mergedAt,mergeCommit,headRefOid,baseRefName"])
+            + "\nRe-verify: " + shlex.join(["bin/ci-waiver", "verify", str(pr), "--sha", commit, "--repo", repo]))
+
+
+def merged_identity(doc, head, commit):
+    if doc.get("head", {}).get("sha") != head or doc.get("base", {}).get("ref") != "master":
+        raise ValueError("merged-pr-identity-mismatch")
+    return doc.get("merged") is True and doc.get("merge_commit_sha") == commit
+
+
+def on_master(r, repo, commit):
+    master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
+    return r.git("merge-base", "--is-ancestor", commit, master, allowed=(0, 1)).returncode == 0
+
+
+def verify_pr(repo, pr, commit):
+    """Read-only recovery: reconstruct the proof from the landed parents."""
+    landed = False
+    try:
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ValueError("verify-sha-must-be-full-sha")
+        with tempfile.TemporaryDirectory(prefix="ci-waiver-verify-") as directory:
+            r = GitHubRepository(directory, repo)
+            doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+            head = doc.get("head", {}).get("sha")
+            if not merged_identity(doc, head, commit):
+                raise ValueError("merge-outcome-unverified")
+            r.sha(commit)
+            if not on_master(r, repo, commit):
+                raise ValueError("merge-not-on-master")
+            landed = True
+            parents = r.git("rev-list", "--parents", "-n", "1", commit).stdout.decode().split()[1:]
+            if len(parents) != 2 or parents[1] != head:
+                paths = r.paths(parents[0], commit) if parents else []
+                raise LandedMismatch("merge-parents-differ-from-proof; first-parent paths=" + json.dumps(paths))
+            proof = classify_pair(r, parents[0], head, {"class": "none", "reasons": []})
+            if proof.get("class") != "docs-only":
+                raise LandedMismatch("landed-merge-not-docs-only:" + ",".join(proof.get("reasons", [])))
+            proof.update(master=parents[0], head=head)
+            verify_merge(r, commit, proof)
+            print(json.dumps({"merged": commit, "verified": True, "head": head, "master": parents[0]}))
+            return 0
+    except Exception as e:
+        print("CI-WAIVER VERIFY FAILED: " + str(e), file=sys.stderr)
+        if landed and isinstance(e, LandedMismatch):
+            print(revert_instructions(repo, pr, commit), file=sys.stderr)
+        else:
+            print(inspect_hint(repo, pr, commit), file=sys.stderr)
+        return 1
 
 
 def merge_pr(repo, pr, head):
-    """An operator-authorized merge only: narrow the race, then detect its result."""
-    attempted, squash = False, None
+    """Prove the tree, create it, then push once without forcing master."""
+    attempted, commit, landed = False, None, False
     try:
         if not re.fullmatch(r"[0-9a-f]{40}", head):
             raise ValueError("merge-head-must-be-full-sha")
@@ -333,8 +422,6 @@ def merge_pr(repo, pr, head):
             r = GitHubRepository(directory, repo)
             master = r.sha(gh(f"repos/{repo}/branches/master")[0]["commit"]["sha"])
             review_gate(r, master, repo, pr, head, directory)
-            # Fresh classification after the review fetches. Name the exact tree
-            # and master this invocation proved; never reuse a waiter snapshot.
             proof = classify(None, None, repo, pr, None)
             if (proof.get("class") != "docs-only" or proof.get("head") != head
                     or not re.fullmatch(r"[0-9a-f]{40}", proof.get("master") or "")
@@ -343,46 +430,69 @@ def merge_pr(repo, pr, head):
             proved_master = r.sha(proof["master"])
             if r.git("show", proved_master + ":bin/ci-waiver").stdout != Path(__file__).resolve().read_bytes():
                 raise ValueError("merge-tool-differs-from-master")
+            r.sha(head)
+            # Recreate the tree in THIS private store; the classifier's temporary
+            # store is gone, and an unreferenced merge-tree object cannot be fetched.
+            local_proof = classify_pair(r, proved_master, head, {"class": "none", "reasons": []})
+            if local_proof.get("class") != "docs-only" or local_proof.get("merge_tree") != proof["merge_tree"]:
+                raise ValueError("merge-local-proof-differs")
             recheck_checks(repo, pr, head)
-            attempted = True
-            merged = subprocess.run(["gh", "pr", "merge", str(pr), "--repo", "https://github.com/" + repo,
-                                     "--squash", "--match-head-commit", head,
-                                     "--subject", f"Merge reviewed docs-only PR {pr}",
-                                     "--body", f"Reviewed head {head}; verified CI-waiver docs-only merge."],
-                                    capture_output=True, text=True, timeout=120)
-            # Even an error can follow a successful network write. Query once;
-            # never retry the mutation, nor assume success from exit code alone.
+            commit = r.git("commit-tree", proof["merge_tree"], "-p", proved_master, "-p", head,
+                           "-m", f"Merge reviewed docs-only PR {pr}", "-m", f"Reviewed head {head}",
+                           env=commit_identity()).stdout.decode().strip()
+            if not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise ValueError("merge-commit-unreadable")
             doc = gh(f"repos/{repo}/pulls/{pr}")[0]
-            candidate = doc.get("merge_commit_sha")
-            if doc.get("merged") is not True or not isinstance(candidate, str) or not re.fullmatch(r"[0-9a-f]{40}", candidate):
+            if (doc.get("head", {}).get("sha") != head or doc.get("base", {}).get("ref") != "master"
+                    or doc.get("state") != "open" or doc.get("merged") is True):
+                raise ValueError("merge-pr-identity-changed-before-push")
+            attempted = True
+            pushed = r.git("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+                           "push", "https://github.com/" + repo + ".git", commit + ":refs/heads/master",
+                           allowed=(0, 1))
+            if pushed.returncode:
+                # Only an explicit server/ref rejection proves nothing landed.
+                if b"[remote rejected]" in pushed.stderr or (b"[rejected]" in pushed.stderr and
+                        (b"non-fast-forward" in pushed.stderr or b"fetch first" in pushed.stderr)):
+                    attempted = False
+                    raise ValueError("merge-race-lost: push rejected; nothing merged; re-run")
+                raise ValueError("merge-push-outcome-unverified")
+            # GitHub can take a moment to mark the PR merged. Never push twice.
+            for attempt in range(5):
+                doc = gh(f"repos/{repo}/pulls/{pr}")[0]
+                if merged_identity(doc, head, commit):
+                    break
+                if attempt < 4:
+                    time.sleep(1)
+            else:
                 raise ValueError("merge-outcome-unverified")
-            squash = candidate
-            if doc["head"]["sha"] != head or doc["base"]["ref"] != "master":
-                raise ValueError("merged-pr-identity-mismatch")
-            verify_squash(r, squash, proof)
-            if merged.returncode:
-                raise ValueError("merge-command-failed-after-verified-merge")
-            print(json.dumps({"merged": squash, "head": head, "master": proof["master"],
+            if not on_master(r, repo, commit):
+                raise ValueError("merge-not-on-master")
+            landed = True
+            verify_merge(r, commit, proof)
+            print(json.dumps({"merged": commit, "head": head, "master": proof["master"],
                               "merge_tree": proof["merge_tree"], "verified": True}))
             return 0
     except Exception as e:
-        print("CI-WAIVER MERGE FAILED: " + (str(e)[:240] or type(e).__name__), file=sys.stderr)
-        if squash:
-            print(revert_instructions(repo, pr, squash), file=sys.stderr)
+        print("CI-WAIVER MERGE FAILED: " + str(e), file=sys.stderr)
+        if landed and isinstance(e, LandedMismatch):
+            print(revert_instructions(repo, pr, commit), file=sys.stderr)
         elif attempted:
-            print("VERIFY FAILED: merge may have happened; do not retry. Inspect "
-                  + shlex.join(["gh", "pr", "view", str(pr), "--repo", "https://github.com/" + repo,
-                                "--json", "mergedAt,mergeCommit,headRefOid,baseRefName"]), file=sys.stderr)
+            print(inspect_hint(repo, pr, commit), file=sys.stderr)
         return 1
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
-    m = sub.add_parser("merge", help="operator-authorized merge with fresh proof and post-merge verification")
+    m = sub.add_parser("merge", help="operator-authorized fast-forward-only push of a proved merge commit")
     m.add_argument("pr", type=int)
     m.add_argument("--head", required=True)
     m.add_argument("--repo", default=DEFAULT_REPO)
+    v = sub.add_parser("verify", help="read-only verification of an existing landed merge")
+    v.add_argument("pr", type=int)
+    v.add_argument("--sha", required=True)
+    v.add_argument("--repo", default=DEFAULT_REPO)
     c = sub.add_parser("classify")
     c.add_argument("--repo-dir", required=True)
     c.add_argument("--pr", type=int)
@@ -391,10 +501,10 @@ def main():
     c.add_argument("--head")
     c.add_argument("--json", action="store_true")
     a = p.parse_args()
-    if a.command == "merge":
+    if a.command in ("merge", "verify"):
         if a.pr < 1:
             p.error("PR must be positive")
-        return merge_pr(a.repo, a.pr, a.head)
+        return merge_pr(a.repo, a.pr, a.head) if a.command == "merge" else verify_pr(a.repo, a.pr, a.sha)
     if (a.pr is None and not (a.base and a.head)) or (a.pr is not None and (a.base or a.head)):
         p.error("use --pr N OR both --base REF --head REF")
     result = classify(a.base, a.head, a.repo, a.pr, a.repo_dir)

@@ -204,56 +204,76 @@ commit; the filters match the requested allowlist and nothing claims an
 unconditional master run. The classifier checks the unique-ancestor PR diff and clean merge-tree result
 against both API base and fetched current master for allowlisted paths, hard
 exclusions and safe modes. It reports the master SHA it proved; this alone
-cannot prove GitHub's eventual squash commit or workflow filtering decision.
+cannot prove a bypassing caller's eventual merge or workflow filtering decision.
 The merge wrapper below verifies the actual commit after merge. Fleet reporting
 was not live-verified in this slice.
 
 C3. Never use `[skip ci]` to request a waiver: a squash merge can copy commit
 messages into its body, accidentally skipping the master push backstop as well.
 Use the marker instead. GitHub documents [commit-message skip behavior](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs).
-The authorized merger uses a trusted master-identical copy of the wrapper,
-after the operator's yes pinned to the reviewed full head:
+For `ci_state: waived`, the authorized merger MUST use ONLY a trusted master-identical
+wrapper after the operator's yes pinned to the reviewed full head (2026-10-29):
 
 ```sh
 bin/ci-waiver merge N --head REVIEWED_FULL_SHA --repo OWNER/NAME
 ```
 
-The wrapper first fetches master into a private store, requires its own bytes to
-match `bin/ci-waiver` there, and executes that master's `bin/pr-wait` with
-`--no-request`, `--timeout 0`, `--ci-grace 0` and the pinned head. This is a single
-poll of existing review state; it posts no review request. It requires a successful
-waiter exit, `merge_ready: true` and a valid current-head docs-only marker and
-classification. Existing Codex, open-finding, independent adversary and failed-check
-gates still apply. It then re-runs classification against freshly fetched master,
+Never use `gh pr merge` for a waived PR. Ordinary PRs keep
+`gh pr merge --squash --match-head-commit SHA`. This wrapper-only rule is procedural:
+**nothing enforces it; bypassing the wrapper does not prevent the master race.**
+
+The wrapper fetches master into a private store, requires its own bytes to match
+`bin/ci-waiver` there, and executes that master's `bin/pr-wait` with `--no-request`,
+`--timeout 0`, `--ci-grace 0` and the pinned head. This single poll posts no review
+request. It requires a successful waiter exit, `merge_ready: true` and a valid
+current-head docs-only marker and classification. Codex, open-finding, independent
+adversary and failed-check gates still apply. It reclassifies against fresh master,
 requires docs-only and the same head, and checks its bytes against that master too.
-It rechecks `gh pr checks` immediately before the write (pending/absent may be
-waived; a failed/cancelled/unknown check refuses). A `gh pr checks` exit 1 is accepted
-only when separate exact-head check-runs and status API lists are both empty.
-It calls `gh pr merge --squash --match-head-commit SHA`, with an explicit clean
-subject/body to avoid copying `[skip ci]` from PR text.
+It recreates the merge-tree in its own private store and requires the same proof.
+It rechecks `gh pr checks` before writing (pending/absent may be waived; failed,
+cancelled or unknown checks refuse). Exit 1 is accepted only with separately empty
+exact-head check-runs and status API lists.
 
-`--match-head-commit` prevents a different head being merged; it pins no base.
-**Without branch protection or a merge queue, nothing prevents master moving
-between this proof and GitHub's merge. The wrapper narrows that window and detects
-the result after merge; it cannot prevent the race.** It reads the merged PR's
-squash SHA, fetches that exact commit into its private store, requires exactly one
-parent equal to the proved master, checks its nonempty first-parent diff for
-allowlist/exclusions/safe modes and requires its tree to equal `merge_tree` exactly.
-Even a benign intervening master commit is refused by the parent comparison.
+It creates `git commit-tree MERGE_TREE -p PROVED_MASTER -p REVIEWED_HEAD` with the
+caller's Git author/committer identity and message `Merge reviewed docs-only PR N`
+plus `Reviewed head SHA`, avoiding PR text and `[skip ci]`. **Waived PRs land as
+merge commits, not squashes**: the exact proved tree is pushed directly and the
+second parent makes the reviewed head reachable so GitHub marks the PR merged.
+Immediately before pushing it requires the API PR to remain open, unmerged, on
+master and at the reviewed head. It pushes once to the explicit GitHub HTTPS URL
+as `COMMIT:refs/heads/master`, with no force or force-with-lease, authenticating
+through `gh auth git-credential` (no token in argv).
 
-A mismatch or verification failure after learning the squash SHA exits 1 and prints
-`REVERT: <squash sha>` plus exact `git switch`, `git revert --no-edit --mainline 1`, `git push` and
-`gh pr create` recovery commands. The explicit first-parent mainline also handles an unexpected merge commit.
-They are instructions only: **the wrapper never
-reverts or pushes a revert automatically**. The printed recovery branch starts at
-the squash commit; use a clean claimed workspace and reconcile any later master
-changes before merging its revert PR. A write error is never retried: the wrapper
-still checks the PR once for a completed merge. If the merge SHA cannot be learned
-(or the write times out), it exits 1 with `VERIFY FAILED`, an explicit warning that
-merge may have happened and the exact `gh pr view` inspection command; it cannot
-safely name a revert SHA. Exit 0 for `merge` means the actual squash was verified,
-not that subsequent master pushes or workflow filtering were proved. Classifier
-exit 0 continues to mean only that it printed a classification, including `none`.
+**The fast-forward-only push PREVENTS the master race on the wrapper path.** If
+master advances incompatibly after proof, Git rejects the push; nothing lands and
+`merge-race-lost` tells the operator to re-run. A benign intervening master advance
+is rejected by the push too; the post-push parent check does not reject a benign
+race after landing. It is a verification formality, requiring parents exactly
+`[proved master, reviewed head]`, the proved tree and a nonempty safe allowlisted
+first-parent diff. Parent mismatches report actual first-parent paths.
+
+After a successful push, GitHub's API must report `merged: true` with exactly the
+created commit and unchanged head/base. The wrapper queries at most five times,
+one second apart, to allow marking delay; it NEVER pushes again. An identity
+mismatch, unknown write result, marking delay beyond the bound or transient fetch
+failure exits 1 with inspect-only `gh pr view` and read-only recovery commands:
+
+```sh
+bin/ci-waiver verify N --sha LANDED_FULL_SHA --repo OWNER/NAME
+```
+
+`verify` checks PR merge identity and master ancestry, reconstructs the docs-only
+proof from the landed parents, and checks the actual commit. It does not merge,
+push or request reviews. Only a **proved mismatch of a commit on master** prints
+`REVERT: SHA`. Retargets do not print a revert recipe. Recovery fetches master,
+requires `git merge-base --is-ancestor SHA origin/master` (STOP if nonzero), starts
+`git switch -c BRANCH origin/master`, then runs `git revert -m1 SHA`; the printed
+push and revert PR commands require manual execution in a clean claimed workspace.
+The wrapper never reverts or pushes a revert automatically. A write error gets a
+re-verify hint, never REVERT merely because a command failed. Exit 0 for merge or
+verify means the actual merge was verified, not that later master pushes or
+workflow filtering were proved. Classifier exit 0 only means it printed a
+classification, including `none`.
 
 C4. This implementation PR cannot waive itself: it changes hard-excluded paths.
 The lead obtains the independent adversary verdict before opening the PR,

@@ -223,8 +223,10 @@ pull request here is expected to meet these; flag any it misses.
       whose JSON is partly inside a code span is **malformed**, never approved, because masking code
       cannot "repair" JSON nobody wrote.
 
-   Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
-   is the head merged.
+   When `ci_state` is `waived`, merge ONLY with trusted-master `bin/ci-waiver merge PR --head SHA`,
+   never `gh pr merge`. This lands a merge commit so the proved tree can be pushed fast-forward only
+   and GitHub can recognize the reviewed head as merged. Ordinary PRs use
+   `gh pr merge --squash --match-head-commit <reviewed sha>`. Wrapper-only is procedural, not enforced.
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper and `bin/pytest`
@@ -333,13 +335,19 @@ pull request here is expected to meet these; flag any it misses.
     APPROVEs must also be outside quotes, indentation and code. The
     reviewer is not authenticated: agents share a GitHub account. The operator's
     pinned merge yes is the authority; a waiver only changes `pr-wait`'s report.
-    Authorized mergers use trusted-master `bin/ci-waiver merge PR --head SHA`: it requires the
-    existing waiter gates, reclassifies against freshly fetched master and rechecks `gh pr checks`
-    before a head-pinned squash. It then verifies the actual squash has one parent equal to proved
-    master, a safe waivable first-parent diff and exactly the proved tree. Failure exits 1; a known
-    squash SHA gets loud `REVERT` and exact manual recovery commands (never an automatic revert).
-    The head pin prevents a different head; without branch protection or a merge queue, the wrapper
-    only narrows and detects the master race AFTER merge, never prevents it. See docs/ci-waiver.md C3
-    for unknown merge outcomes and recovery.
+    A PR whose `ci_state` is `waived` MUST be merged ONLY with trusted-master
+    `bin/ci-waiver merge PR --head SHA`, never `gh pr merge`. The wrapper requires the existing
+    waiter gates, reclassifies against fresh master and rechecks `gh pr checks`. It creates a merge
+    commit (not a squash) with parents [proved master, reviewed head] and exactly the proved tree,
+    checks the API head immediately before pushing and after, and pushes master once without force.
+    A non-fast-forward rejects a lost master race before anything lands; re-run after rejection.
+    GitHub marking is checked up to five times; uncertainty is inspect/re-verify only, never a second
+    push. The post-push check verifies parents, tree and safe waivable first-parent paths/modes;
+    parent mismatch reports those paths. `bin/ci-waiver verify PR --sha SHA` rechecks an existing
+    landed merge without writing. Only a proved mismatch on master prints `REVERT` instructions:
+    fetch master, prove SHA ancestry (STOP on failure), branch from origin/master, `git revert -m1 SHA`.
+    Retargets and transient failures get inspect/re-verify hints, never a recipe pulling another branch
+    into master. The wrapper PREVENTS the master race on its path; nothing enforces wrapper-only or
+    protects bypassing callers. Ordinary PRs retain head-pinned squash. See docs/ci-waiver.md C3.
     Waiver markers in code, blockquotes or indented blocks are malformed; their only
     keys are class/head/reviewer and optional author (reviewer must differ).
