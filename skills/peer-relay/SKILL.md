@@ -41,7 +41,9 @@ with `--expect-ack`:
    starting with `/` or `!`, and (with `--no-defer`, `--plan`, `--idle`, another `--via`, or no identifiable sender) one blocked on a
    question or permission prompt (a Paseo agent with a pending permission card included). Otherwise a card-blocked target is
    queued (item 3) and delivered once the card is answered, the deliverer backing off between looks (5 s up to 2 min, jittered);
-   a text is never typed into the card. A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
+   a text is never typed into the card. `relay.py --why <ident>` says why a session cannot take a text right now (a picklist, a permission card,
+   a turn still running, silent 15+ minutes, archived, gone) from two methods compared; `--pending` shows it per queued record. A send to a Paseo agent that
+   has no Claude transcript (codex, omp, opencode, cline) is now proven by its Paseo timeline too: "delivered", no longer "unverified". A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
    not made at once, because Paseo replaces its running turn when the provider declines a steer: relay queues it (item 3).
    `relay.py <ident> "x" --steer` sends a codex/omp/opencode/pi one anyway, `--idle S` waits for idle first and blocks
    (it wins over queueing), `--no-defer` refuses (exit 1) instead of queueing, `--defer-for S` sets how long a queued
@@ -106,6 +108,8 @@ with `--expect-ack`:
     the transfer offset is not counted. `--pending` shows the new owner and `--sweep` watches its transcript. Transfer sends
     nothing, preserves target/status/age, and never marks a queued notice delivered. Full contract: `session-finder/SKILL.md`,
     "Handoff transfer".
+
+13. **An ack 6 hours past due is assumed lost** (operator, 2026-10-28): `relay.py --sweep` prints `ASSUMED LOST` and `--pending --json` carries `"assumed_lost": true`. **Only for an expectation you opened** (its `sender` is you): re-route that work once to another owner or route, or do it in a claimed workspace, without asking the operator, and note the new owner or new `--expect-ack` ID in your own state so a successor does not re-route again. Another sender's row is theirs: leave it. The row stays `open` and is never called delivered, read or acked, and its state is never hand-edited. Earlier than 6 hours past due the sweep still says to tell the operator.
 
 Canonical copy: `~/src/djbclark-ade/skills/peer-relay/SKILL.md`. Hermes installs or links it into
 `~/.hermes/skills/` itself; the repo does not write that tree.

@@ -177,17 +177,6 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{ .home }}/.config/openusage/hooks/claude-hook.sh",
-            "timeout": 30,
-            "async": true
-          }
-        ]
-      },
-      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {
@@ -438,16 +427,6 @@
     ],
     "Stop": [
       {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{ .home }}/.config/openusage/hooks/claude-hook.sh",
-            "timeout": 30
-          }
-        ]
-      },
-      {
         "hooks": [
           {
             "type": "command",
@@ -503,16 +482,6 @@
       }
     ],
     "SubagentStop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{ .home }}/.config/openusage/hooks/claude-hook.sh",
-            "timeout": 30
-          }
-        ]
-      },
       {
         "hooks": [
           {

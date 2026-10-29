@@ -232,4 +232,6 @@ and the hooks alike. Other environment: `ADE_REAL_GIT` (skip the PATH search), `
 `ADE_STATE_DIR`.
 
 The shim and the hooks are plain bash 3.2 (macOS `/bin/bash`): no `case` inside `$( )`, no associative arrays; a test runs
-`/bin/bash -n` on them.
+`/bin/bash -n` on them. Since 2026-10-29 macOS CI runs only on a manual `Tests` dispatch with `macos: true`, and Ubuntu's
+`/bin/bash` is bash 5, so that test passes vacuously against bash 3.2 syntax there: a bash 3.2 regression is caught only by a
+`macos: true` dispatch or a local run on the Mac.

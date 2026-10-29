@@ -227,7 +227,8 @@ pull request here is expected to meet these; flag any it misses.
    is the head merged.
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
-   operator's `bg` wrapper; CI runs `pytest` directly.
+   operator's `bg` wrapper and `bin/pytest`
+   (`bg bin/pytest -q tests/test_x.py`: the bare `python3` has no pytest); CI runs `pytest` directly.
 3. **Secrets only via `sudo-secretspec run`**: a key never appears in argv, a
    log, a tracked file or a test fixture. The one place a key is written is a
    third-party tool's own credential store (`bin/zcode-key-auth`); presence
@@ -239,7 +240,7 @@ pull request here is expected to meet these; flag any it misses.
    `shlex.quote` or `shlex.join`.
 5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare
    `sed`) have a Linux path or use the GNU `g*` tool; CI runs `pytest` on
-   both.
+   Linux, and on macOS only on request (a manual `Tests` dispatch with the `macos` input, 2026-10-29).
 6. **Records and state files change atomically** (temp file beside, then
    `os.replace`), and every new record field is read with `.get` so older
    records still load.

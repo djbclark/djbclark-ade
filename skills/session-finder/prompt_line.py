@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """prompt_line — the operator's own text on a TUI's input line, read from ANSI screen output. No model.
 
-    prompt_line.py MARK < screen.ansi      prints the operator's draft from the input region, EMPTY, or NOPROMPT
+    prompt_line.py [--wide] MARK < screen.ansi   prints the operator's draft from the input region, EMPTY, or NOPROMPT
+                                                 (--wide: the window is taller than the input area, see classify_wide)
 
 Claude Code paints its hint text and its suggested next prompt (ghost text, accepted with Tab, replaced by
 anything typed) in grey (38;2;153;153;153, the ❯'s own colour) or dim (ESC[2m); the operator's typed text is
@@ -152,10 +153,38 @@ def classify(screen: str, mark: str = "❯") -> str | None:
     return operator_text(omp_after(after) if mark == OMP_MARK else after)
 
 
+SGR = re.compile(r"\x1b\[[0-9;]*m")
+RULE_ROW = re.compile(r"^\s*─{3,}")
+LINE_START_MARK = re.compile(r"^\s*❯(?:\s|$)")
+
+
+def classify_wide(screen: str, mark: str = "❯") -> str | None:
+    """classify() for a window taller than the live input area (bin/self-slash's second, wide read).
+
+    Far above the bottom a marker row is as likely stale as live: a pane screen quoted in a transcript, an answer
+    option (`❯ 1. Mark all …`), a dead frame above a shell prompt. Typing into the wrong one is not recoverable, so
+    Claude's marker counts here only as the LAST marker row at the start of a line with Claude's input-box rules
+    (`───` rows) directly above and below it. Codex's shaded composer already proves its own boundary. Another
+    marker has no wide window (None)."""
+    if mark == "›":
+        return classify(screen, mark)
+    if mark != "❯":
+        return None
+    rows = [SGR.sub("", ln) for ln in screen.splitlines()]
+    marks = [i for i, ln in enumerate(rows) if mark in ln]
+    if not marks or not LINE_START_MARK.match(rows[marks[-1]]):
+        return None
+    i = marks[-1]
+    if i == 0 or i + 1 >= len(rows) or not RULE_ROW.match(rows[i - 1]) or not RULE_ROW.match(rows[i + 1]):
+        return None
+    return classify(screen, mark)
+
+
 if __name__ == "__main__":
-    mark = sys.argv[1] if len(sys.argv) > 1 else "❯"
+    args = [a for a in sys.argv[1:] if a != "--wide"]
+    mark = args[0] if args else "❯"
     screen = sys.stdin.read()
-    r = classify(screen, mark)
+    r = (classify_wide if "--wide" in sys.argv[1:] else classify)(screen, mark)
     print("NOPROMPT" if r is None else (r or "EMPTY"))
     if r is not None:  # the raw line, for bin/self-slash's log
         print("RAW " + repr([ln for ln in screen.splitlines() if mark in ln][-1][:220]), file=sys.stderr)

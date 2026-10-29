@@ -12,8 +12,6 @@ service_tier = "default"
 notify = [
     "{{ .home }}/ops/site-private/.codex-runtime/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
     "turn-ended",
-    "--previous-notify",
-    '["{{ .home_escaped }}\/.config\/openusage\/hooks\/codex-notify-fanout.sh"]',
 ]
 
 [marketplaces.openai-bundled]
