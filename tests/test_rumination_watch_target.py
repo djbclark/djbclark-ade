@@ -392,6 +392,85 @@ def test_a_send_that_may_have_arrived_is_not_sent_again(monkeypatch, tmp_path):
     assert any("could not be PROVEN delivered" in t for t in told), "a possibly lost line is his to hear"
 
 
+def test_a_failed_disclosure_of_an_unverified_send_is_tried_again(monkeypatch, tmp_path):
+    """The line is settled, but the ADMISSION that it may be lost must not be lost too.
+
+    One failed `hermes send` at the moment of an unverified send used to consume the trigger: the
+    line was dropped on purpose and he was never told it might have vanished — the double failure
+    that ends in silence. The disclosure is carried until a send actually returns True.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["from eve"], "jobs": [], "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "to_session", lambda text: "unverified")
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("unknown", ""))
+    calls = []
+    told = []
+
+    def djb(text):
+        calls.append(text)
+        if len(calls) == 1:
+            return False                       # hermes blipped on the ONE attempt
+        told.append(text)
+        return True
+
+    monkeypatch.setattr(rw, "to_djbclark", djb)
+    rw._pass(quiet_pass(rw))
+    assert len(calls) == 1, "he was tried once"
+    assert "could not be PROVEN delivered" in rw.load_state()["undisclosed"], "the admission is kept"
+
+    # The next pass has NOTHING new (the line is gone on purpose): only the carried admission speaks.
+    rw._pass(quiet_pass(rw))
+    assert len(calls) == 2
+    assert told and "could not be PROVEN delivered" in told[0]
+    state = rw.load_state()
+    assert "undisclosed" not in state, "delivered once is enough"
+    assert "unverified send" in state["told"], "and the cooldown starts only after the real send"
+
+    rw._pass(quiet_pass(rw))
+    assert len(calls) == 2, "no third attempt: the disclosure is not a drumbeat"
+
+
+def test_a_failed_needs_him_page_is_retried_next_pass(monkeypatch, tmp_path):
+    """The same stamp-after-send rule at the `needs_him` site, which had no such test.
+
+    A stale chain log is a line HE must act on. Stamping the cooldown before the send (or on a
+    failure) silences it for six hours with nothing retrying it.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "to_session", lambda text: "delivered")
+    mail = iter([["from eve"], ["from eve", "from eve again"], ["a third", "from eve", "again"]])
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": next(mail), "jobs": [], "prs": [],
+                                              "stale": "Tier 1 log records 1234, repo is at abcd"})
+    calls = []
+    told = []
+
+    def djb(text):
+        calls.append(text)
+        if len([c for c in calls if "stale chain log" in c]) == 1:
+            return False                       # the first attempt for that item fails
+        told.append(text)
+        return True
+
+    monkeypatch.setattr(rw, "to_djbclark", djb)
+    rw._pass(quiet_pass(rw))
+    assert any("stale chain log" in c for c in calls)
+    assert not any("stale chain log" in t for t in told), "the failed page reached nobody"
+
+    rw._pass(quiet_pass(rw))
+    assert any("stale chain log" in t for t in told), "a failed page must be retried, not silenced"
+    assert "stale chain log" in rw.load_state()["told"], "and only a real send starts the cooldown"
+
+    before = len([c for c in calls if "stale chain log" in c])
+    rw._pass(quiet_pass(rw))
+    assert len([c for c in calls if "stale chain log" in c]) == before, "the cooldown still applies"
+
+
 def test_a_picker_card_and_an_unknown_card_are_dark(monkeypatch, tmp_path):
     """Every `card:*` is a human waiting. `picker` and `unknown` used to log as ordinary status."""
     rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
@@ -411,6 +490,88 @@ def test_a_picker_card_and_an_unknown_card_are_dark(monkeypatch, tmp_path):
     assert len(told) == 1 and "picker" in told[0]
 
 
+def test_a_card_kind_this_table_has_never_heard_of_is_still_dark(monkeypatch, tmp_path):
+    """`card:slash_menu` (relay.py `pane_look`) was missing, exactly as `picker` once was.
+
+    Membership-only was the bug, not the key: relay.py gained a card kind after `DARK_MEANING` was
+    written, and every unlisted kind logged as ordinary status, reset the streak, and was never
+    paged — dark, reported as fine. The prefix is the rule now; the table is only the wording.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    assert rw.seat_dark("card:slash_menu") == "card:slash_menu"
+    assert rw.seat_dark("card:invented_tomorrow") == "card:invented_tomorrow"
+    assert rw.seat_dark("working") == "" and rw.seat_dark("idle") == "" and rw.seat_dark("") == ""
+
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 1)
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["a"], "jobs": [], "prs": [], "stale": None})
+    refusal(monkeypatch, rw, why_json=json.dumps(
+        {"state": "card:slash_menu", "why": "the command menu is open", "deliverable": False}))
+    rw._pass(quiet_pass(rw))
+    assert len(told) == 1, "a slash menu is darkness, not ordinary status"
+    assert "menu" in told[0].lower()
+
+
+def test_alternating_darkness_classes_still_add_up(monkeypatch, tmp_path):
+    """A per-class streak counted to one forever: a seat flipping question → silent stayed mute.
+
+    A permission prompt whose turn times out and re-prompts is exactly this pattern, so the count is
+    CONSECUTIVE darkness and does not care which class it was. The page item is class-independent
+    too, or a flipping class re-arms the six-hour cooldown and pages him every three passes.
+    """
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 3)
+    monkeypatch.setattr(rw, "should_tell_djbclark", lambda item, state, now: True)
+    state: dict = {}
+    assert rw.escalate_dark("card:question", LIVE, state, time.time()) == ("", "")
+    assert rw.escalate_dark("silent", LIVE, state, time.time()) == ("", "")
+    item, msg = rw.escalate_dark("card:question", LIVE, state, time.time())
+    assert item == "seat dark", "one item, whatever class it happened to be"
+    assert "3 passes in a row" in msg and "latest:" in msg, "the count, and the LATEST class only"
+    assert state["stuck"] == {"n": 3} and state["stuck_class"] == "card:question"
+    # and a healthy word clears both
+    assert rw.escalate_dark("idle", LIVE, state, time.time()) == ("", "")
+    assert state["stuck"] == {} and "stuck_class" not in state
+
+
+def test_a_card_refusal_with_an_unreadable_why_is_dark_not_skipped(monkeypatch, tmp_path):
+    """relay's own refusal words say "blocked on a card" while `--why` cannot name the kind.
+
+    The old fallback filed every "not sent" refusal as the healthy `skipped`, so a card-dark seat
+    behind a broken `--why` read as fine. It is knowably a card, not which one: `card:unknown`.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    refusal(monkeypatch, rw, why_json=None,
+            send=(1, "relay: [x] not sent: blocked on a permission or question card; deferring "
+                     "needs an identifiable sender"))
+    assert rw.to_session("x") == "card:unknown"
+    assert rw.seat_dark("card:unknown") == "card:unknown"
+
+
+def test_the_card_detail_relay_shows_once_never_reaches_the_log(monkeypatch, tmp_path):
+    """relay.py's `--why` `why` field can carry `paseo_card_detail`: the agent's own tool input.
+
+    relay.py documents that field as "shown by `--why` only, never filed on a record or logged" — a
+    permission prompt can be a command with a token in it. The outcome word is all this log needs.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    refusal(monkeypatch, rw, why_json=json.dumps(
+        {"state": "card:permission", "why": "a permission card is open: curl -H 'Authorization: "
+                                            "Bearer sk-LEAKED'", "deliverable": False}))
+    assert rw.to_session("x") == "card:permission"
+    log = rw.LOG.read_text()
+    assert "sk-LEAKED" not in log, "the card's tool input is not this log's business"
+    assert "card:permission" in log, "but the outcome still is"
+
+
 def test_a_flaky_send_does_not_wipe_a_darkness_streak(monkeypatch, tmp_path):
     """Only proof the channel worked / the seat is healthy resets the count.
 
@@ -426,7 +587,7 @@ def test_a_flaky_send_does_not_wipe_a_darkness_streak(monkeypatch, tmp_path):
     assert rw.escalate_dark("FAILED", LIVE, state, time.time()) == ("", "")
     assert rw.escalate_dark("skipped", LIVE, state, time.time()) == ("", "")
     item, msg = rw.escalate_dark("card:question", LIVE, state, time.time())
-    assert item == "seat card:question" and "question card" in msg
+    assert item == "seat dark" and "question card" in msg
 
 
 def test_a_healthy_idle_seat_resets_the_darkness_streak(monkeypatch, tmp_path):
@@ -574,8 +735,34 @@ def test_the_relay_send_contract_this_reads_still_exists(monkeypatch, tmp_path):
         return                                # a source tarball without the sibling skill
     src = relay.read_text()
     assert '"--json"' in src, "relay.py must still offer --json on the send"
+    assert 'add_argument("--json", action="store_true")' in src, (
+        "and on the SEND PARSER specifically: `'\"--json\"' in src` also matches relay.py's own "
+        "inner paseo_run argvs, so renaming the parser flag (argparse exit 2 on every watcher send) "
+        "left this green")
     assert '"result": res[2]' in src, "the send report must still carry `result`"
     assert '"state": "queued"' in src, "a deferral must still be identifiable by `state`"
+
+
+def test_the_send_argv_pins_its_flags_and_is_what_the_send_uses(monkeypatch, tmp_path):
+    """A flag pin that reads another file, or an unused helper, proves nothing about our own argv.
+
+    relay.py's source contains `"--json"` in four internal `paseo_run` calls, so a source-wide match
+    cannot see the *send's* flag renamed — every watcher send would die at argparse rc 2, be logged
+    FAILED, retried forever, and the seat would stay mute with nobody paged.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    relay = fake_relay(tmp_path)
+    argv = rw.send_argv(relay, LIVE, "hello")
+    assert "--json" in argv, "without the machine report a delivery cannot be told from a refusal"
+    assert "--no-ack" in argv, "a launchd sender has no identity for relay's ack dance"
+    assert argv[1] == "-I" and argv[-1] == "--json"
+
+    seen = []
+    monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: seen.append(cmd) or (
+        0, json.dumps({"id": LIVE, "result": "delivered"}), ""))
+    assert rw.to_session("hello") == "delivered"
+    assert seen[0] == argv, "the pin must cover the argv `to_session` actually passes"
 
 
 def fleet_read(monkeypatch, rw, tmp_path, *, rc: int, stdout: str, stderr: str = "") -> None:

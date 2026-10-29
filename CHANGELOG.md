@@ -356,6 +356,30 @@ agent what changed and what is new. Entries end with the pull request number.
   way the JSON ones were: `inbox-target` warns on stderr and still exits 0, so a warning glued onto
   the target paged a destination that does not exist, and a git notice on stderr became part of
   `git rev-parse HEAD` and reported the chain log as permanently stale (#134).
+- `bin/rumination-watch` round three: the darkness rules, the send contract and the disclosure
+  retry (2026-10-29). A `card:*` this table has not learned is darkness: membership-only made
+  `card:slash_menu` (relay.py's `pane_look` gained it after `DARK_MEANING` was written) log as
+  ordinary status, reset the streak and stay mute — the same bug as `card:picker`, in a different
+  key — so the PREFIX is now the rule and `DARK_MEANING` is only the wording. The streak counts
+  CONSECUTIVE darkness, not one tally per class: a seat alternating `card:question` and `silent`
+  (a permission prompt whose turn times out, then re-prompts) counted to one under each key
+  forever and was never paged, though it had been unable to take text the whole time; the class is
+  kept beside the count only to word the message, and the page item is class-independent so a
+  flipping class cannot re-arm the six-hour cooldown and page him every three passes. A refusal
+  whose prose says "blocked on a card" and whose `--why` cannot name the kind is now
+  `card:unknown`, not the healthy `skipped` it used to be filed as, and `why_blocked`'s `detail` is
+  no longer logged: for a card it is relay.py's `paseo_card_detail`, the agent's own tool input,
+  which relay.py documents as shown by `--why` only and "never filed on a record or logged" — a
+  permission prompt can carry a command with a token in it. The send's argv is built by
+  `send_argv` and pinned by a test (`--no-ack --json`, and the pinned argv is the one `to_session`
+  passes): a source-wide `"--json"` match in relay.py also matched four of its own internal
+  `paseo_run` calls, so renaming the SEND parser's flag — argparse exit 2 on every watcher send,
+  logged FAILED and retried forever with nobody paged — would have left the contract test green.
+  And an unverified send's ADMISSION that the line may be lost is now carried in
+  `state["undisclosed"]` and retried until a send actually returns True, instead of being
+  attempted once: the line is still dropped on purpose (relay.py says "do not resend"), but one
+  failed `hermes send` at that moment used to consume the trigger and the double failure ended in
+  silence (#134).
 
 - The quota guard's `critical` advice (2026-10-29) is scoped to the Claude Code subscription pool: "No new Claude work of any kind until the reset ... hand off, stop" read as a stop order by idle omp sessions, so it now says "No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session included) until the reset", states that it is not a stop order for codex, grok, agy, zai and opencode sessions, and that an omp session keeps working only while `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares the Claude weekly rate window, which aiuse gates when every weekly window is exhausted); a Claude Code lead is sent to an omp successor on Paseo (`self-slash --finish --successor omp/anthropic/claude-sonnet-5-5`), told to start omp by hand on herdr and Orca (where `self-slash` refuses an omp successor), or to a codex or grok successor when omp is not listed (agy is not a Paseo provider), instead of another Claude Sonnet session; `skills/handoff` Step 9 keys the same exemption on the state file's `level` being `critical` and drops its old `critical` branches (a Fable lead to Opus, an Opus or Sonnet lead to plain `/new`) (#126).
 - `bin/paseo-new-seat` (2026-10-29): a claude seat created with the shield on no longer prints "auto_accept: NOT verified - the shield may be grey" and exits 4 once its mode is verified. Claude never publishes an `auto_accept` feature (its yolo is the permission mode), so its empty feature list is now "not offered" rather than "unverified"; other providers with an empty list still report unverified (#122).
