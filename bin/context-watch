@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""context-watch: how full is each running Claude Code agent's context, against the REAL compaction ceiling.
+
+    context-watch [--json] [--min-pct N] [--source auto|paseo|recent] [--recent-minutes M]
+
+One line per agent, fullest first:
+
+    <agent id8> <title> 214k/267k (80%) wall in 53k
+
+`wall in` is the headroom left before Claude Code compacts by itself; past it the line says
+`wall passed by 5k`. An agent whose size cannot be read prints `<id8> <title> ?` (no state file, no
+transcript, unreadable transcript) and one whose newest record is a compaction (no request since)
+prints `compacted`. Read-only; exit 0 always (2 only for bad usage). Nothing is written.
+
+Why it exists: `paseo inspect` reports no context fields (getpaseo/paseo#4949, 2026-10-28), and
+Paseo's own context bar divides by a 1M window and ignores autoCompactWindow.
+
+Tokens: the newest non-sidechain assistant usage block of the session transcript
+(~/.claude/projects/*/<session>.jsonl), input + cache_read + cache_creation. The parser is
+claude/hooks/context_size_nudge.py's `_last_context_tokens` (imported from this checkout, never
+copied), so the nudge hook and this readout always agree.
+
+Ceiling: `autoCompactWindow` from ~/.claude/settings.json minus the 33k autocompact buffer (300k ->
+267k). Without that setting, the model window: 1M when settings `model` carries `[1m]`, else 200k.
+(Project-level settings and CLAUDE_CODE_AUTO_COMPACT_WINDOW are not read.)
+
+Which agents (--source, default auto):
+  paseo   `paseo ls --json` (CONTEXT_WATCH_PASEO or `paseo` on PATH): every agent whose provider is
+          `claude...`. The listing carries no session id, so the session comes from the agent's state
+          file ~/.paseo/agents/*/<agent id>.json (PASEO_HOME honoured), `persistence.sessionId`, and
+          the transcript is the ~/.claude/projects/*/<sessionId>.jsonl of that id. An agent without a
+          state file prints `?`: the newest transcript of its cwd is never guessed, since several agents
+          share a cwd.
+  recent  every top-level ~/.claude/projects/*/*.jsonl modified in the last --recent-minutes (default
+          30); the id is the session id, the title the transcript's cwd basename. Also covers Claude
+          Code outside Paseo (herdr, Orca, a bare terminal).
+  auto    paseo; recent when `paseo ls` is missing, fails or prints no JSON (a note goes to stderr).
+          A working paseo with no Claude agents prints nothing.
+
+--min-pct N hides agents below N percent full and every `?` / `compacted` line. --json prints a list
+of records (id, short_id, title, cwd, session, transcript, source, status, tokens, ceiling, pct,
+headroom), sorted like the text; status is ok, compacted, no-session, no-transcript or unreadable.
+"""
+import argparse
+import glob
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+AUTO_COMPACT_BUFFER = 33_000
+DEFAULT_MODEL_WINDOW = 200_000
+LONG_MODEL_WINDOW = 1_000_000
+HOOK = Path(__file__).resolve().parent.parent / "claude" / "hooks" / "context_size_nudge.py"
+
+
+def _load_hook():
+    spec = importlib.util.spec_from_file_location("context_size_nudge", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def read_settings():
+    try:
+        data = json.loads((Path.home() / ".claude" / "settings.json").read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def ceiling(settings):
+    window = settings.get("autoCompactWindow")
+    if not isinstance(window, int) or isinstance(window, bool) or window <= AUTO_COMPACT_BUFFER:
+        model = settings.get("model")
+        long_model = isinstance(model, str) and "[1m]" in model.lower()
+        window = LONG_MODEL_WINDOW if long_model else DEFAULT_MODEL_WINDOW
+    return window - AUTO_COMPACT_BUFFER
+
+
+def projects_dir():
+    return Path.home() / ".claude" / "projects"
+
+
+def find_transcript(session):
+    hits = glob.glob(str(projects_dir() / "*" / f"{glob.escape(session)}.jsonl"))
+    return max(hits, key=lambda p: os.stat(p).st_mtime) if hits else None
+
+
+def paseo_home():
+    return Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+
+
+def agent_state(agent_id):
+    """The agent's state record (dict) or {}."""
+    for path in glob.glob(str(paseo_home() / "agents" / "*" / f"{glob.escape(agent_id)}.json")):
+        try:
+            data = json.loads(Path(path).read_text())
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def session_of(state):
+    for key in ("persistence", "runtimeInfo"):
+        block = state.get(key)
+        sid = block.get("sessionId") if isinstance(block, dict) else None
+        if isinstance(sid, str) and sid:
+            return sid
+    return None
+
+
+def paseo_agents():
+    """(rows, None) from `paseo ls --json`, or (None, why) when it cannot be used."""
+    cli = os.environ.get("CONTEXT_WATCH_PASEO") or shutil.which(
+        "paseo", path="/opt/homebrew/bin:" + os.environ.get("PATH", os.defpath))
+    if not cli:
+        return None, "paseo not found"
+    try:
+        r = subprocess.run([cli, "ls", "--json"], capture_output=True, text=True, timeout=20, check=False)
+    except Exception as e:
+        return None, f"paseo ls failed ({e.__class__.__name__})"
+    if r.returncode != 0:
+        return None, f"paseo ls exited {r.returncode}"
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None, "paseo ls printed no JSON"
+    if not isinstance(data, list):
+        return None, "paseo ls JSON is not a list"
+    return [a for a in data if isinstance(a, dict)], None
+
+
+def read_cwd(path):
+    """`cwd` from the first lines of a transcript, or None."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return None
+    m = re.search(rb'"cwd":\s*"((?:[^"\\]|\\.)*)"', head)
+    if not m:
+        return None
+    try:
+        return json.loads(b'"' + m.group(1) + b'"')
+    except ValueError:
+        return None
+
+
+def measure(hook, row, transcript, limit):
+    """Fill tokens/ceiling/pct/headroom/status of `row` from `transcript` (None = missing)."""
+    row["transcript"] = transcript
+    row["tokens"] = row["pct"] = row["headroom"] = None
+    row["ceiling"] = limit
+    if transcript is None:
+        row["status"] = row.get("status") or "no-transcript"
+        return row
+    tokens = hook._last_context_tokens(transcript)
+    if tokens == hook.COMPACTED:
+        row["status"] = "compacted"
+    elif isinstance(tokens, int):
+        row.update(status="ok", tokens=tokens, pct=round(100 * tokens / limit, 1), headroom=limit - tokens)
+    else:
+        row["status"] = "unreadable"
+    return row
+
+
+def base_row(agent_id, title, cwd, session, source):
+    return {"id": agent_id, "short_id": agent_id[:8], "title": title, "cwd": cwd, "session": session,
+            "source": source}
+
+
+def paseo_rows(hook, limit, agents):
+    rows = []
+    for a in agents:
+        provider = a.get("provider")
+        agent_id = a.get("id")
+        if not isinstance(agent_id, str) or not isinstance(provider, str) or not provider.startswith("claude"):
+            continue
+        state = agent_state(agent_id)
+        session = session_of(state)
+        title = a.get("name") or state.get("title") or ""
+        row = base_row(agent_id, title, state.get("cwd") or a.get("cwd"), session, "paseo")
+        if session is None:
+            row["status"] = "no-session"
+            transcript = None
+        else:
+            transcript = find_transcript(session)
+        rows.append(measure(hook, row, transcript, limit))
+    return rows
+
+
+def recent_rows(hook, limit, minutes):
+    cutoff = time.time() - minutes * 60
+    rows = []
+    for path in glob.glob(str(projects_dir() / "*" / "*.jsonl")):
+        try:
+            if os.stat(path).st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        session = Path(path).stem
+        cwd = read_cwd(path)
+        title = Path(cwd).name if cwd else Path(path).parent.name.rsplit("-", 1)[-1]
+        rows.append(measure(hook, base_row(session, title, cwd, session, "recent"), path, limit))
+    return rows
+
+
+def _k(n):
+    return f"{n / 1000:.0f}k"
+
+
+def format_row(row):
+    head = f"{row['short_id']} {row['title']}".rstrip()
+    if row["status"] == "ok":
+        tokens, limit, left = row["tokens"], row["ceiling"], row["headroom"]
+        wall = f"wall in {_k(left)}" if left >= 0 else f"wall passed by {_k(-left)}"
+        return f"{head} {_k(tokens)}/{_k(limit)} ({round(100 * tokens / limit)}%) {wall}"
+    return f"{head} compacted" if row["status"] == "compacted" else f"{head} ?"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="context-watch", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--json", action="store_true", help="print a JSON list of records")
+    ap.add_argument("--min-pct", type=float, default=None, metavar="N",
+                    help="hide agents below N percent full and every unknown size")
+    ap.add_argument("--source", choices=("auto", "paseo", "recent"), default="auto")
+    ap.add_argument("--recent-minutes", type=float, default=30, metavar="M")
+    args = ap.parse_args(argv)
+
+    try:
+        hook = _load_hook()
+    except Exception as e:
+        print(f"context-watch: cannot load {HOOK}: {e}", file=sys.stderr)
+        return 0
+    limit = ceiling(read_settings())
+
+    rows = None
+    if args.source in ("auto", "paseo"):
+        agents, why = paseo_agents()
+        if agents is not None:
+            rows = paseo_rows(hook, limit, agents)
+        elif args.source == "paseo":
+            print(f"context-watch: {why}", file=sys.stderr)
+            rows = []
+        else:
+            print(f"context-watch: {why}; using transcripts modified in the last "
+                  f"{args.recent_minutes:g} min", file=sys.stderr)
+    if rows is None:
+        rows = recent_rows(hook, limit, args.recent_minutes)
+
+    if args.min_pct is not None:
+        rows = [r for r in rows if r["pct"] is not None and r["pct"] >= args.min_pct]
+    rows.sort(key=lambda r: (r["pct"] is None, -(r["pct"] or 0), r["id"]))
+
+    if args.json:
+        print(json.dumps(rows, indent=1))
+    else:
+        for r in rows:
+            print(format_row(r))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

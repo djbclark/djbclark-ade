@@ -110,3 +110,37 @@ Local focused tests use the full `bg` path. Record the explicit decision first:
 3. [OpenCode V2 plugins](https://opencode.ai/v2/docs/plugins): native server
    hooks and plugin discovery. Check the installed SDK against these docs;
    similar V1 names do not establish a V2 hook contract.
+
+## 6. Live readout: `bin/context-watch` (2026-10-28)
+
+`bin/context-watch` prints, for each running Claude Code agent, its context size against the
+compaction ceiling that actually triggers, fullest first:
+
+```
+d3df4a46 sudo-secretspec secrets-collect low findings 241k/267k (90%) wall in 26k
+c7fbc11d ade-ops-pt 153k/267k (57%) wall in 114k
+```
+
+It exists because `paseo inspect` carries no context fields and Paseo's own bar divides by a 1M
+window and ignores `autoCompactWindow` (upstream getpaseo/paseo#4949, open 2026-10-28). Flags:
+`--json` (list of records for scripts), `--min-pct N` (hide emptier agents and unknown sizes),
+`--source auto|paseo|recent`, `--recent-minutes M`. Read-only, exit 0 always (2 for bad usage). It is
+not wired into `fleet-watch` or `settings.json`.
+
+1. **Tokens.** The newest non-sidechain assistant usage block of the session transcript,
+   `input + cache_read + cache_creation`: `_last_context_tokens` of
+   `claude/hooks/context_size_nudge.py`, imported from the same checkout, so the nudge hook and this
+   readout read one number. A transcript whose newest record is a `compact_boundary` prints
+   `compacted` (no request since); an unreadable one prints `?`.
+2. **Ceiling.** `autoCompactWindow` from `~/.claude/settings.json` (300,000 today) minus the 33,000
+   autocompact buffer: 267,000. With no such setting, the model window (1M when `model` carries
+   `[1m]`, else 200k) minus 33,000. Project settings are not read.
+3. **Which agents.** `paseo ls --json` supplies the agent ids and titles for every `claude...`
+   provider; it carries no session id, so the session is `persistence.sessionId` in
+   `~/.paseo/agents/*/<agent id>.json` and the transcript is `~/.claude/projects/*/<sessionId>.jsonl`.
+   An agent with no state file prints `?`: the newest transcript of its cwd is not guessed because
+   several agents share a cwd. If `paseo` is missing, fails or prints no JSON, the fallback lists
+   top-level transcripts modified in the last 30 minutes (id = session id, title = cwd basename),
+   which also covers Claude Code in herdr, Orca or a bare terminal. `--source recent` forces it.
+4. **Tests.** `tests/test_context_watch.py` runs the script against a scratch HOME, `PASEO_HOME`
+   and a fake `paseo` (`CONTEXT_WATCH_PASEO`).
