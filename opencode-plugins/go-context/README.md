@@ -43,13 +43,15 @@ next request's system messages. The policy is validated once at load: a bad
 wake), and a malformed or unreadable persisted record does too. A wake is capped
 at `handoff_max_wakes` (3) per session, is refused for a child (subagent) session
 and for a session whose live model no longer matches the recorded Go model, and
-is never sent in a dispatched slice (`ACP_RUN_AGENT=1`); those sessions get the
-system-message directive only. An ineffective-compaction (blocked) session is
-exactly the one that must hand off rather than loop compactions, so handoff
-outranks `blocked` in the context notice. The directive routes the model through
-the handoff skill and `self-slash "/new"`; it never instructs a raw `/new`,
-`/clear`, `/reset` or `--finish --successor`, and it always carries "Never clear
-a parent session".
+is never sent in a dispatched slice (`ACP_RUN_AGENT=1`). A child or dispatched
+session also never gets the mandatory directive in its context notice: it is
+softened to a "finish and report back to your parent" wording with no "start a
+fresh session" or lifecycle command, until a primary Go session is confirmed.
+An ineffective-compaction (blocked) session is exactly the one that must hand
+off rather than loop compactions, so handoff outranks `blocked` in the context
+notice. The directive routes the model through the handoff skill and
+`self-slash "/new"`; it never instructs a raw `/new`, `/clear`, `/reset` or
+`--finish --successor`, and it always carries "Never clear a parent session".
 
 ## Install and activate
 

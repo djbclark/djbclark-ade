@@ -21,25 +21,25 @@ export const validHandoffPolicy = (policy) => {
   return n(policy?.handoff_cooldown_seconds) && policy.handoff_cooldown_seconds >= 300 &&
     n(policy?.handoff_after_compactions) && policy.handoff_after_compactions >= 1 &&
     n(policy?.handoff_max_wakes) && policy.handoff_max_wakes >= 1 &&
-    n(policy?.routine_context?.handoff) && policy.routine_context.handoff >= 0 &&
-    n(policy?.advisory_context?.handoff) && policy.advisory_context.handoff >= 0;
+    n(policy?.routine_context?.handoff) && policy.routine_context.handoff > 0 &&
+    n(policy?.advisory_context?.handoff) && policy.advisory_context.handoff > 0;
 };
 
 // A persisted record is trusted only when every field the guard later reads has a
 // sane shape. A malformed record (e.g. a negative `handoffTries` that would skip
-// the retry cap, a string `compactions` that concatenates, or a far-future
-// `handoffAt` that suppresses the wake forever) fails the whole load closed
-// rather than half-admitting it.
-const validPersistedState = (state, now = Date.now) => {
+// the retry cap, or a string `compactions` that concatenates) fails the whole load
+// closed rather than half-admitting it. A far-future `handoffAt` is not a shape
+// failure: createGuard clamps it to now at load so one stale record cannot switch
+// off the whole guard after a backward clock step.
+const validPersistedState = (state) => {
   if (!state || typeof state !== "object" || Array.isArray(state)) return false;
   if (typeof state.model !== "string" || typeof state.pending !== "boolean") return false;
   const req = [state.sampleAt, state.attemptAt];
   const opt = [state.baseline, state.total, state.failures, state.compactions,
     state.handoffTries, state.before, state.compactedAt];
-  const flags = [state.blocked, state.active, state.afterCompaction];
-  const future = now() + 60000; // no persisted timestamp may sit in the future
+  const flags = [state.blocked, state.active, state.afterCompaction, state.child];
   const handoffAtOk = state.handoffAt == null ||
-    (Number.isFinite(state.handoffAt) && state.handoffAt >= 0 && state.handoffAt <= future);
+    (Number.isFinite(state.handoffAt) && state.handoffAt >= 0);
   return req.every((v) => Number.isFinite(v) && v >= 0) &&
     opt.every((v) => v == null || (Number.isFinite(v) && v >= 0)) &&
     flags.every((v) => v == null || typeof v === "boolean") &&
@@ -58,7 +58,10 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     const saved = await ctx.storage.get(storageKey);
     if (saved != null && (typeof saved !== "object" || Array.isArray(saved))) throw new Error("invalid state");
     for (const [sid, state] of Object.entries(saved ?? {}).slice(-MAX_SESSIONS)) {
-      if (!SID.test(sid) || !validPersistedState(state, now)) throw new Error("invalid state");
+      if (!SID.test(sid) || !validPersistedState(state)) throw new Error("invalid state");
+      // A backward clock step (NTP correction after sleep) can leave a far-future
+      // handoffAt; clamp it to now so one stale record cannot disable the guard.
+      if (typeof state.handoffAt === "number" && state.handoffAt > now() + 60000) state.handoffAt = now();
       states.set(sid, state);
     }
   } catch { storageReadable = false; }
@@ -79,7 +82,7 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
       }
       state = { model: model.id, baseline: null, total: null, sampleAt: 0,
         attemptAt: 0, pending: false, blocked: false, failures: 0, notice: "",
-        compactions: 0, handoffAt: 0, handoffTries: 0 };
+        compactions: 0, handoffAt: 0, handoffTries: 0, child: null };
       states.set(sid, state);
     } else if (state.model !== model.id || state.active === false) {
       // Model measurements may change; admission belongs to the conversation.
@@ -140,6 +143,17 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     return `Automatic handoff required: ${basis}. ${action} Never clear a parent session.`;
   };
 
+  // A child or dispatched session must never be told to abandon its delegated
+  // task and start a fresh session: it cannot take /handoff or /new. Soften the
+  // notice to a report-back wording that carries no lifecycle command.
+  const childHandoffText = (state, limits) => {
+    const byTokens = typeof state.total === "number" && state.total >= limits.handoff;
+    const basis = byTokens
+      ? `measured input context ${state.total} tokens (handoff ceiling ${limits.handoff})`
+      : `${state.compactions ?? 0} compactions (budget ${policy.handoff_after_compactions})`;
+    return `Go cost check: ${basis}. This is a child or dispatched session: finish and report back to your parent. Never run a lifecycle command or hand off yourself.`;
+  };
+
   async function maybeHandoff(sid, state) {
     if (!handoffEnabled || !storageReadable) return; // a malformed policy or unreadable prior state disables the wake (fail closed)
     if (process.env.ACP_RUN_AGENT === "1") return; // a dispatched slice cannot take /handoff or /new
@@ -152,12 +166,21 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     if (state.handoffAt && now() - state.handoffAt < cooldown) return;
     // A child session, a switched-away model or a vanished session must never be
     // woken to run a lifecycle: re-read live and require this exact Go model with
-    // no parent, so a cached `active` flag cannot leak a wake into a fork.
+    // no parent, so a cached `active` flag cannot leak a wake into a fork. Cache
+    // `state.child` from the same read so onContext can soften the directive for
+    // a child until a primary is confirmed.
+    let current;
     try {
       const response = await ctx.session.get({ sessionID: sid }, { signal: AbortSignal.timeout(10000) });
-      const current = response?.data ?? response;
-      if (current?.id !== sid || current.model?.providerID !== "opencode-go" || current.model.id !== state.model || current.parentID) return;
+      current = response?.data ?? response;
     } catch { return; }
+    if (!current || current.id !== sid || current.model?.providerID !== "opencode-go" || current.model.id !== state.model) return;
+    state.child = Boolean(current.parentID);
+    if (state.child) return;
+    // Re-check the cap and cooldown after the awaited read, as request() does:
+    // another idle may have claimed while this one was awaiting the live lookup.
+    if ((state.handoffTries ?? 0) >= policy.handoff_max_wakes) return;
+    if (state.handoffAt && now() - state.handoffAt < cooldown) return;
     state.handoffAt = now();
     state.handoffTries = (state.handoffTries ?? 0) + 1;
     await save().catch(() => {});
@@ -169,7 +192,7 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
         { sessionID: sid, prompt: { text: handoffText(state, limits, state.handoffTries) }, delivery: "steer" },
         { signal: AbortSignal.timeout(10000) },
       );
-    } catch { /* the wake may fail; onContext still escalates the directive */ }
+    } catch { /* the wake may fail; onContext still surfaces the directive */ }
   }
 
   async function onContext(event) {
@@ -192,7 +215,9 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
       const level = handoffDue ? "handoff" : (!storageReadable || !streamAvailable || state.blocked || (state.pending && now() - state.attemptAt > 120000) ? "blocked" : "warn");
       if (state.notice !== level) {
         event.system.push({ type: "text", text: level === "handoff"
-          ? handoffText(state, limits, Math.max(1, state.handoffTries ?? 0))
+          ? (process.env.ACP_RUN_AGENT === "1" || state.child !== false
+              ? childHandoffText(state, limits)
+              : handoffText(state, limits, Math.max(1, state.handoffTries ?? 0)))
           : `Go cost check: last measured input context ${state.total} tokens, including cache reads/writes. ` +
             (level === "blocked" ? "Compaction is ineffective or unconfirmed. Reduce fixed instructions/tools and checkpoint at the next safe task boundary; do not loop compactions. " : "Keep the task brief and delegate separable work. Native compaction is queued automatically when its growth threshold is crossed. ") +
             "At a completed task, write the owned handoff before a supported new-session/baton cycle. Never clear a parent session. Use ade_compact for manual compaction of this session." });
