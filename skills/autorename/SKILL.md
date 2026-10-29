@@ -62,11 +62,13 @@ panes between workspaces. Only inside herdr (`HERDR_ENV=1`); elsewhere say so an
    sleeping panes through `relocate-pane.sh`, verify and report.
 2. **Show the plan before touching anything**: one numbered list of every change
    (`1.` create workspace X, `2.` move tab T from A to X as `<label>-t`, `3.` rename ...).
-   Apply it straight away unless a placement is genuinely ambiguous; then ask **one**
-   AskUserQuestion covering all the ambiguous ones, recommended option first. The plan
-   never closes a pane or tab (herdr-tidy owns closing; the one exception is the
+   Apply the placements that match a configured hint straight away. A tab that matches
+   nothing follows the [Postscript](workspace-layout.md#postscript-tabs-that-match-no-configured-hint):
+   one `/steps` question per tab, recommended option first, act, then the next tab.
+   The plan never closes a pane or tab (herdr-tidy owns closing; the one exception is the
    untouched default shell of a workspace the pass just created) and never touches the
    `coord` panes. Helm tabs are placed in the `helm` workspace like any other.
+   A workspace holds at most 5 tabs.
 3. Title this session and label its own tab last, as steps 1 and 2 below (a full pass
    moves this tab too, so do not run step 3's placement question).
 4. Report: the final workspace, tab and pane tree as one numbered list, and anything

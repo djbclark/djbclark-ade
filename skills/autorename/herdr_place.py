@@ -39,7 +39,9 @@ from typing import Any
 GENERIC = {
     "", "~", "home", "shell", "shells", "src", "source", "tmp", "temp", "misc",
     "scratch", "default", "main", "untitled", "unnamed", "new", "workspace",
-    "bash", "zsh", "fish", "terminal", "term", "agents", "work",
+    "bash", "zsh", "fish", "terminal", "term", "work",
+    # `agents` / `agents-2` are the fallback for uncovered agent tabs
+    # (operator, 2026-10-29), not a catch-all to move out of.
 }
 
 

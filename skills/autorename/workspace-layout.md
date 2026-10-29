@@ -20,13 +20,17 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
    [Configured workspaces](#configured-workspaces-and-their-order). A project
    that is not configured gets its own workspace only when it has two or more
    tabs or a tab with several panes (subagents); a lone single-pane tab goes
-   in the configured catch-all (`one-offs`) instead.
+   in the configured catch-all (`one-offs`) instead, except where the
+   [Postscript](#postscript-tabs-that-match-no-configured-hint) says `remote`
+   or `agents`.
 2. **Tab = one unit of work, labelled `<topic>-t`; its pane `<topic>-p`;
    the agent in it bare `<topic>`** (the convention in
    `memory/feedback_herdr_tab_pane_naming_convention.md`). `<topic>` is the
    session's subject, taken from the session itself (first user message,
    handoff, sleeper journal entry), never from the old label: labels drift
-   and were found rotated relative to their panes.
+   and were found rotated relative to their panes. A full pass still places
+   by the current tab label (principle 12) and renames a tab only when that
+   label is a single digit.
 3. **A plain shell is labelled by its directory**: `<dir>-shell-t` /
    `<dir>-shell-p` (`home-shell-t`, `extrabar-shell-t`). It lives in the
    workspace of the project the directory belongs to; a leftover `shells`
@@ -53,9 +57,14 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
    the `helm` workspace like any other topic, moved with `--no-focus`; the agent
    survives the move. Only the `coord` panes (bigteam's) are never touched.
 10. **Paseo** (2026-10-24): one top-level agent per Paseo workspace (`<topic>-pw`). Its tab and each worker's tab are
-   `<name>-pt`, at most 17 characters with the suffix (shortener: `autorename.py paseo_tab_name`). Workers and adversary
-   rounds are sub-agent tabs in the lead's workspace, not new workspaces. Closing a top-level agent's tab archives the
-   agent; only `self-slash --finish` (or a `herdr-tidy` close of its herdr host pane) closes one.
+    `<name>-pt`, at most 17 characters with the suffix (shortener: `autorename.py paseo_tab_name`). Workers and adversary
+    rounds are sub-agent tabs in the lead's workspace, not new workspaces. Closing a top-level agent's tab archives the
+    agent; only `self-slash --finish` (or a `herdr-tidy` close of its herdr host pane) closes one.
+11. **At most 5 tabs in a workspace** (operator, 2026-10-29). The next tab of that
+    same kind goes to `<name>-2`, then `<name>-3`. Count tabs after the moves, not before.
+12. **The tab label is the placement key** (operator, 2026-10-29). Match it against
+    configured names and hints before the session title, cwd, or screen. Rename a
+    tab only when its label is a single digit. Keep every other tab label.
 
 ## Configured workspaces and their order
 
@@ -106,7 +115,8 @@ live agent's name, the session's first user message
 (`~/.claude/projects/<slug>/<uuid>.jsonl` for Claude; the sleeper record
 holds the session id), the pane's last screen lines (`herdr pane read <pane>
 --source recent-unwrapped --lines 40`, plain text, not JSON), and finally
-the cwd. Do not trust the existing label.
+the cwd. Place by the tab label (principle 12). Use these other sources
+only when that label matches no configured hint.
 
 ### 2. Decide the target layout before touching anything
 
@@ -115,9 +125,9 @@ Read `herdr_place.py config` first and apply the section above.
 Write the whole target table (pane → workspace, tab label, pane label, agent
 name) to a scratch file and check it against the principles: every
 `<topic>` unique within its workspace, nothing over 24 characters, no
-generic workspace names (`herdr_place.py check` in the `autorename` skill
-rejects `shells`, `agents`, `work`, `scratch`, numbers, …), your own pane
-left where it is.
+generic workspace names (`herdr_place.py check` rejects `shells`, `work`,
+`scratch`, numbers, and the other names in `GENERIC`). `agents` and `remote`
+are real destinations, not generic names. Leave your own pane where it is.
 
 ### 3. Rename workspaces
 
@@ -212,3 +222,27 @@ typed text that must not receive keys, agents that were `blocked`).
 3. A pane shrunk to a few rows returns only 1-2 lines from `agent read`, even
    at `--lines 150`. If `herdr pane get <id>` shows single-digit
    `viewport_rows`, `herdr pane zoom <id> --on`, read, then `--off`.
+
+## Postscript: tabs that match no configured hint
+
+Operator, 2026-10-29. Do this after the placements that match a hint, and
+before the report. `~/.config/autorename/workspaces.conf` is the list (it is
+not a toml). `remote` sits just before `one-offs`.
+
+1. **Remote.** A tab whose name is `pastebin`, `vps-primary`, or another
+   remote machine, or whose screen or title shows ssh or mosh, goes to
+   `remote`. Create `remote` only when at least one tab belongs there.
+2. **Obvious groups.** An agent tab that matches no hint still shares a
+   workspace when the tab name, then the session title, cwd, or screen, names
+   one clear project. Two tabs of that project are enough to make the
+   workspace. Keep the tab labels.
+3. **Steps for the ones that are still unclear.** Walk them with `/steps`:
+   one question per tab, recommended option first, then act, then the next
+   tab. Offer the configured workspace the other info suggests, a new
+   workspace named from the tab, `agents` (or `agents-2` when `agents` already
+   holds 5), and leaving it where it is. `stop` ends the walk. Tabs not yet
+   asked go to `agents`, then `agents-2`, `agents-3`.
+4. **Not an agent and not remote.** A shell or tool whose tab name matches no
+   hint goes to `one-offs`.
+5. Do not move the pane this pass is running in. A workspace that would go
+   past 5 tabs overflows to `<name>-2`.
