@@ -171,7 +171,9 @@ PROBE = textwrap.dedent("""\
             os.environ.update(old)
         env = seen["env"]
         return {"rc": rc, "cmd": seen["cmd"],
-                "herdr": sorted(k for k in env if k.startswith("HERDR_")),
+                # Only the four pane ids the scrub is about: a test run inside herdr also carries HERDR_BIN_PATH and
+                # HERDR_SOCKET_PATH, service routing that acp-run leaves alone (agents/README.md).
+                "herdr": sorted(k for k in ("HERDR_PANE_ID", "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID") if k in env),
                 # Only the names the scrub is about: a Paseo-hosted test run also carries PASEO_CLI and
                 # PASEO_HOME, which acp-run rightly leaves alone (adversary round 2, 2026-10-20).
                 "host_vars": sorted(k for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE",
