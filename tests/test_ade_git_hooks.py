@@ -777,9 +777,13 @@ def test_r11_f2_an_origin_question_that_fails_only_for_the_hook_does_not_switch_
 @pytest.mark.parametrize("n", range(1, 9))                  # the exec path's length mod 8 decides the kernel's padding
 @pytest.mark.parametrize("argv0", ["", "x"])
 def test_r11_f3_proc_args_returns_the_exact_argv_whatever_the_first_word_is_and_the_exec_paths_length(tmp_path, argv0, n):
-    link = tmp_path / ("s" * n)
+    # Vary the path length through the directory name and keep the link named "sleep": a uutils
+    # multicall binary (ubuntu-26.04) refuses to run under any other name. umask= keeps Python 3.14
+    # off posix_spawn, which rejects an empty argv[0] (the "" case) before the kernel sees it.
+    link = tmp_path / ("s" * n) / "sleep"
+    link.parent.mkdir()
     link.symlink_to(shutil.which("sleep"))
-    p = subprocess.Popen([argv0, "30"], executable=str(link))
+    p = subprocess.Popen([argv0, "30"], executable=str(link), umask=0o022)
     try:
         got = None
         for _ in range(100):
