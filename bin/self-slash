@@ -411,7 +411,7 @@ s_thinking="${s_thinking:-high}"
 # (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
 # and gave up) and zcode (❯ default, pane-level read/send; /exit not /quit). Another TUI cannot be read, so
 # say so now: the waiter would only log "gave up" after ~50 s.
-case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; *) marker="❯";; esac
+case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; zcode) marker="ZCODE";; *) marker="❯";; esac
 if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "$tui" != zcode ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp, codex and zcode, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
 fi

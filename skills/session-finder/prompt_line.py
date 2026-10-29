@@ -15,7 +15,7 @@ import sys
 
 HINTS = ("Try \"", "Try “", "Press up to edit queued messages", "Plan, search, build anything",
          "Add a follow-up")
-GREYS = (["2", "153", "153", "153"], ["5", "245"], ["5", "8"])
+GREYS = (["2", "153", "153", "153"], ["5", "245"], ["5", "8"], ["5", "247"])
 
 
 def operator_text(after: str) -> str:
@@ -71,8 +71,48 @@ def omp_after(after: str) -> str:
     return re.sub(r"\s*─╯(?:\x1b\[[0-9;]*m)*\s*$", "", after)
 
 
+ZCODE_MARK = "ZCODE"
+
+
+def zcode_draft(screen: str) -> str | None:
+    """zcode has no prompt glyph (2026-10-28: the draft renders as a plain unstyled row, and a ❯ only
+    ever appears in transcript text that mentions one). The input region is the run of rows directly
+    above the bottom block: the last `Activity …` header row when background tasks are listed, else
+    the upper of the two full-width ── rules. Walk up over blanks; unstyled rows are the draft,
+    a styled row (placeholder hint, cursor block, transcript text) ends it. Empty input therefore
+    classifies EMPTY whichever way zcode renders it, and a missing anchor fails closed as NOPROMPT."""
+    rows = screen.splitlines()
+    plain = lambda r: re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", r).strip()
+    # Busy first: mid-turn the same block rows are styled the same way, so "unstyled row above the
+    # block" alone cannot prove idle. zcode's own busy rows are unambiguous — `Activity · N active
+    # tool` (idle-with-tasks says "N in background") and the spinner row `running X… ── [ … ]`.
+    if any(re.search(r"· \d+ active tool|running \S+\S* ?… ── \[", plain(r)) for r in rows):
+        return None
+    anchors = [i for i, r in enumerate(rows) if plain(r).startswith("Activity")]
+    if anchors:
+        end = anchors[-1]
+    else:
+        rules = [i for i, r in enumerate(rows) if re.match(r"^─{20,}$", plain(r))]
+        if len(rules) < 2:
+            return None
+        end = rules[-2]
+    text: list[str] = []
+    i = end - 1
+    while i >= 0:
+        if not plain(rows[i]):
+            i -= 1
+            continue
+        if "\x1b[" in rows[i]:
+            break  # styled: placeholder, cursor or transcript; the draft is unstyled
+        text.insert(0, operator_text(rows[i]))
+        i -= 1
+    return "\n".join(t for t in text if t).strip()
+
+
 def classify(screen: str, mark: str = "❯") -> str | None:
     """Operator text from the input region; None if its boundary is unproven, "" if empty."""
+    if mark == ZCODE_MARK:
+        return zcode_draft(screen)
     if mark == "›":
         # Codex's shaded composer can hold a leading empty line, a real multiline draft, and continuation rows that
         # themselves start with `›` (typed text). The composer is the contiguous run of rows sharing the marker row's
