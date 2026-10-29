@@ -19,7 +19,7 @@ d = os.environ["STUB_DIR"]; f = d + "/paseo.json"
 s = json.load(open(f)) if os.path.exists(f) else {"agents": [], "ws": []}
 a = sys.argv[1:]
 def save(): json.dump(s, open(f, "w"))
-if a[:3] == ["agent", "ls", "-g"]: print(json.dumps(s["agents"]))
+if a[:3] == ["agent", "ls", "-g"]: print(json.dumps(s["agents"] if "-a" in a else [x for x in s["agents"] if not x.get("archived")]))
 elif a[:2] == ["provider", "ls"]: print(json.dumps([{"provider": "omp", "status": "available"}, {"provider": "opencode", "status": "unavailable"}]))
 elif a[:2] == ["provider", "models"]: print(json.dumps([{"id": "anthropic/claude-sonnet-5-5", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
                                                       {"id": "anthropic/claude-sonnet-5-5[1m]", "thinkingOptionIds": ["low", "medium", "high"]}]))
@@ -33,7 +33,9 @@ elif a[:2] == ["agent", "update"]:
         if x["id"] == a[2]: x["name"] = a[a.index("--name") + 1]
     save()
 elif a[:2] == ["agent", "archive"]:
-    s["agents"] = [x for x in s["agents"] if x["id"] != a[-1]]; save()
+    for x in s["agents"]:
+        if x["id"] == a[-1]: x["archived"] = True
+    save()
 else: sys.exit(9)
 '''
 
@@ -139,7 +141,7 @@ def watch(env, *args, wait=True, extra=None):
 
 def agents(env):
     f = Path(env["_tmp"]) / "paseo.json"
-    return json.loads(f.read_text())["agents"] if f.exists() else []
+    return [a for a in json.loads(f.read_text())["agents"] if not a.get("archived")] if f.exists() else []
 
 
 def seat_calls(env):
@@ -311,7 +313,7 @@ def test_each_new_watcher_gets_the_next_base36_number_and_the_old_one_is_retired
     rc, out = watch(env, "up", "--force")
     assert rc == 0 and "retired:" in out, out
     t = titles(env)
-    assert t[first] == "x watch alpha 1", (out, t)   # --force retires the old tab (renamed, still listed), never archives it
+    assert t[first] == "x watch alpha 1", (out, t)   # --force renames the replaced holder and never archives it
     assert "watch alpha 2" in t.values()
     # past 9 the number goes a, b, ... z, 10: a stale seq file at 9 makes the next launch `a`
     (Path(env["_tmp"]) / "state" / "alpha.seq").write_text("9\n")
@@ -328,8 +330,26 @@ def test_replacing_a_holder_not_started_by_watch_renames_it_and_leaves_it_runnin
     rc, out = watch(env, "up", "--force")
     assert rc == 0, out
     t = titles(env)
-    assert t[old] == "x watch alpha"
-    assert sorted(v for k, v in t.items() if k != old) == ["watch alpha 1"]
+    assert t[old] == "x watch alpha"   # renamed, kept as a tab, never archived
+    assert sorted(t.values()) == ["watch alpha 1", "x watch alpha"]
+
+
+def test_a_retired_watcher_with_a_turn_in_flight_is_kept_and_archived_once_idle(env):
+    holder = add_agent(env, name="watch alpha 2")
+    set_role(env, holder)
+    old = add_agent(env, name="watch alpha 1", status="running")   # an older generation, not the role holder
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0, out
+    assert titles(env)[old] == "x watch alpha 1" and "left running" in out, (out, titles(env))
+    f = Path(env["_tmp"]) / "paseo.json"
+    s = json.loads(f.read_text())
+    for a in s["agents"]:
+        if a["id"] == old:
+            a["status"] = "idle"
+    f.write_text(json.dumps(s))
+    rc, out = watch(env, "up")
+    assert rc == 0 and old not in titles(env), (out, titles(env))
+    assert titles(env)[holder] == "x watch alpha 2"   # the force-replaced holder is never archived
 
 
 def test_a_launch_that_never_registers_retires_nothing(env):
@@ -380,3 +400,61 @@ def test_one_million_context_only_when_the_briefs_need_it(env):
     (chain / "SESSION_LOG.md").write_text("x" * 600_000)
     rc, out = watch(env, "up", "--dry-run")
     assert "claude-sonnet-5-5[1m]" in out and "context 1m" in out, out
+
+
+def test_any_idle_x_titled_agent_is_archived_and_a_busy_one_waits(env):
+    idle = add_agent(env, name="x Dann 5")
+    busy = add_agent(env, name="x Dann 6", status="running")
+    plain = add_agent(env, name="Dann 7")
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    t = titles(env)
+    assert idle not in t and t[busy] == "x Dann 6" and t[plain] == "Dann 7", (out, t)
+
+
+def test_a_force_replaced_non_watch_holder_survives_the_other_sweep(env):
+    old = add_agent(env, name="Dann main")
+    set_role(env, old)
+    rc, out = watch(env, "up", "--force")
+    assert rc == 0, out
+    assert titles(env)[old] == "x Dann main", (out, titles(env))
+    rc, out = watch(env, "up")
+    assert rc == 0 and titles(env)[old] == "x Dann main", (out, titles(env))
+
+
+def test_an_unreadable_kept_file_archives_nothing_and_is_not_overwritten(env):
+    idle = add_agent(env, name="x Dann 5")
+    kept = Path(env["_tmp"]) / "state" / "kept.json"
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    kept.write_text("{not json")
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    assert idle in titles(env) and "unreadable" in out, (out, titles(env))
+    holder = add_agent(env, name="watch alpha 1")
+    set_role(env, holder)
+    rc, out = watch(env, "up", "--force")
+    assert titles(env)[holder] == "watch alpha 1", (out, titles(env))   # not renamed: it could not be protected
+    assert kept.read_text() == "{not json"
+
+
+def test_kept_ids_accumulate_across_force_replacements(env):
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    (first,) = titles(env)
+    for _ in range(2):
+        rc, out = watch(env, "up", "--force")
+        assert rc == 0, out
+    kept = json.loads((Path(env["_tmp"]) / "state" / "kept.json").read_text())
+    assert first in kept and len(kept) == 2, kept
+
+
+def test_concurrent_keep_id_calls_lose_no_id(env):
+    state = Path(env["_tmp"]) / "state"
+    code = ("import sys, importlib.machinery as m, importlib.util as u\n"
+            "l = m.SourceFileLoader('watch_mod', sys.argv[1]); sp = u.spec_from_loader('watch_mod', l)\n"
+            "mod = u.module_from_spec(sp); l.exec_module(mod)\n"
+            "assert mod.keep_id(sys.argv[2])\n")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(WATCH), f"id-{i}"], env={**os.environ, "WATCH_STATE": str(state)})
+             for i in range(32)]
+    assert [p.wait() for p in procs] == [0] * 32
+    assert sorted(json.loads((state / "kept.json").read_text())) == sorted(f"id-{i}" for i in range(32))
