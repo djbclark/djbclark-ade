@@ -124,6 +124,10 @@ class ConfigError(Exception):
 
 _SELF_SLASH = ("`~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-sonnet-5-5 "
                "--thinking high`")
+# At `critical` the Claude Code subscription is the exhausted pool, so the successor goes to omp
+# (Claude API credits, off the subscription: skills/model-routing/SKILL.md, claude-fleet-governor).
+_SELF_SLASH_OMP = ("`~/src/djbclark-ade/bin/self-slash --finish --successor omp/anthropic/claude-sonnet-5-5 "
+                   "--thinking high`")
 _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`"
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 
@@ -177,8 +181,15 @@ def _advice(level: str, resets_at: str | None, source: str = "available",
         # window is exhausted: the main critical case.
         items[1] = (f"Adversary rounds via {_ADVERSARY}, only while `aiuse --available --json` "
                     "still lists omp (it is rate-gated when every Claude weekly window is exhausted).")
-        items.append(f"No new Claude work of any kind until the reset at {resets_at or 'unknown'}; "
-                     "finish the running turn, hand off, stop.")
+        # Only the Claude Code subscription pool is exhausted. Work does not stop: an omp, codex,
+        # grok, agy, zai or opencode session never spends it, and a Claude Code lead moves to an omp
+        # successor (2026-10-29: idle omp sessions read "hand off, stop" as applying to them).
+        items[3] = (f"A Claude Code lead (provider claude, subscription) hands off now and continues in an omp "
+                    f"successor, API credits off the subscription: {_SELF_SLASH_OMP}; codex, grok or agy if omp "
+                    "is unavailable.")
+        items.append(f"No new Claude Code subscription work until the reset at {resets_at or 'unknown'}. This is "
+                     "not a stop order: a session already on omp, codex, grok, agy, zai or opencode is unaffected "
+                     "and keeps working; only a Claude Code session hands off, as above.")
     if source == "snapshot-only":
         items.append("aiuse dropped Claude from --available: a live 429 or a note; "
                      "re-check `aiuse --available --json`.")

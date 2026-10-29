@@ -129,7 +129,10 @@ skill's snapshot in the same turn.
   one-off hiccup or a stopped guard prints nothing); its once-per-session memory is updated
   under a flock. A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
-  starts no new Claude work until the reset.
+  starts no new Claude Code subscription work until the reset, hands off to an omp successor
+  (API credits, off the subscription) and keeps working there. `critical` never stops a
+  session already on omp, codex, grok, agy, zai or opencode (2026-10-29: idle omp sessions had
+  read the old "hand off, stop" line as applying to them).
 
 ## OpenCode Go cost guard (2026-10-25)
 
