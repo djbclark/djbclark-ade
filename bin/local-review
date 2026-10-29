@@ -194,6 +194,7 @@ def main(argv: list[str]) -> int:
     a = build_parser().parse_args(argv)
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo):
         return die(f"--repo must be OWNER/NAME, got '{a.repo}'", EXIT_USAGE)
+    a.repo = a.repo.lower()    # one identity for the file name, the lock, the stored field and the reader (GitHub names are case-insensitive)
     if a.pr < 1 or a.timeout < 1:
         return die("PR and --timeout must be positive", EXIT_USAGE)
     if a.head is not None and not re.fullmatch(r"[0-9a-f]{40}", a.head):
@@ -349,11 +350,6 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
     if not bound:
         res["reason"] = "the transcript does not show the review this run asked for (workdir, a read-only sandbox, a diff against the pinned base)"
         return res
-    if not findings and (REFUSAL_RE.search(msg) or msg.rstrip().endswith("?") or not re.search(r"(?m)^exec$", transcript)):
-        # No findings is a verdict only when the transcript shows codex actually looked at the repository (an `exec` block) and the message is no
-        # refusal; a refusal blacklist alone misses wordings (Codex, PR 130 dogfood run)
-        res["reason"] = "no findings, but the final message reads as a refusal or the transcript shows no repository inspection: not a verdict"
-        return res
     diff = run(["git", "diff", "--name-only", f"{base_sha}...{head}"], cwd=root)
     if diff.returncode != 0:
         res["reason"] = f"cannot list the files the PR changes: {diff.stderr.strip()[:150]}"
@@ -363,6 +359,11 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
     kept, ignored = [], []
     for f in findings:
         (ignored if is_generated(f["path"], dirty_set, pr_files, str(wt)) else kept).append(f)
+    if not kept and (REFUSAL_RE.search(msg) or msg.rstrip().endswith("?") or not re.search(r"(?m)^exec$", transcript)):
+        # Nothing left to report is a verdict only when the transcript shows codex looked at the repository (an `exec` block) and the message is no
+        # refusal. Judged AFTER the generated-file filter: an incomplete review that mentions one ignored hook finding is still incomplete (Codex, round 7)
+        res["reason"] = "no findings, but the final message reads as a refusal or the transcript shows no repository inspection: not a verdict"
+        return res
     res["findings"], res["ignored_generated"] = kept, ignored
     res["counts"] = {k: sum(1 for f in kept if f["priority"] == k) for k in PRIORITIES}
     res["result"] = "findings" if kept else "clean"

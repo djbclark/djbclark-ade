@@ -1196,6 +1196,7 @@ def local_review_dir() -> Path:
 def local_codex_read(repo: str, pr: int, head: str, base_ref: str | None = None) -> dict:
     """{"status": clean|findings|failed|missing|unreadable, "counts_text", "reason", "path"} for the local review of PR at HEAD. BASE_REF, when
     the PR's own base is known, must be the base the review used (a retargeted PR keeps no old verdict)."""
+    repo = repo.lower()    # bin/local-review lower-cases the repository in the name and in the document
     path = local_review_dir() / f"{repo.replace('/', '__')}-pr{pr}-{head}.json"
     out: dict = {"status": "unreadable", "counts_text": "", "reason": "", "path": str(path)}
     try:

@@ -68,6 +68,7 @@ Full review comments:
   aborted) say "Review aborted: the context window was exhausted before I could finish." ;;
   asks) say "Which files should I focus on?" ;;
   no_issues) say "I did not find any actionable issues in the patch. Nothing in the diff needs changing." ;;
+  aborted_with_hook) echo '{"changed": true}' > "$PWD/.cursor/hooks.json"; say "$(printf -- 'Review aborted: the context window was exhausted.\n- [P2] Hooks point at the worktree — %s/.cursor/hooks.json:7-7' "$PWD")" ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -249,7 +250,8 @@ def test_a_finding_on_a_hook_file_the_pr_itself_edits_is_never_ignored(world: Wo
     ("cant_review", "not a verdict"),    # a wording the refusal list does not know
     ("noexec", "not a verdict"),
     ("aborted", "not a verdict"),    # the wording the adversary found filing clean when an exec block existed
-    ("asks", "not a verdict"),    # a question is not a verdict
+    ("asks", "not a verdict"),
+    ("aborted_with_hook", "not a verdict"),    # one ignored generated-file finding must not turn an incomplete review into clean    # a question is not a verdict
     ("wrong_sandbox", "does not show the review this run asked for"),    # a config that overrode the read-only sandbox
     ("wrong_base", "does not show the review this run asked for"),
     ("wrong_workdir", "does not show the review this run asked for"),    # a message with no sign in the transcript that the repository was looked at
@@ -276,6 +278,13 @@ def test_a_base_branch_that_moves_during_the_review_does_not_change_what_was_rev
 def test_an_ordinary_no_issues_summary_is_a_clean_review_not_a_refusal(world: World) -> None:
     """Codex P2 on PR 130 (round 6): "I did not find any actionable issues in the patch" matched the refusal wording."""
     assert world.run(mode="no_issues").returncode == 0
+
+
+def test_a_differently_cased_repo_names_one_identity_for_the_file_the_lock_and_the_reader(world: World) -> None:
+    r = subprocess.run([sys.executable, "-I", str(LOCAL_REVIEW), str(PR), "--repo", "Owner/Name"], cwd=world.work, env=world.env,
+                       check=False, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert world.doc()["repo"] == "owner/name" and not list(world.state.glob("*Owner*"))
 
 
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
