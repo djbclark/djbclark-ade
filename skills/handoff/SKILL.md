@@ -336,16 +336,20 @@ or unreadable file means no), a Claude Code lead of any model, Sonnet and Opus i
 start omp by hand in a new pane or tab. With omp not listed, a codex or grok successor the same way (agy is
 reached only by `acp-run agy` slices, home rule 29, never as a successor; `acp-run` sessions are never handoff
 hops). **At `critical` this paragraph replaces every Claude path in the rest of Step 9:** the Fable branch
-(a) below, the "verify the successor" by-hand fallback and the partial-handoff recipe's `paseo-new-seat
---provider claude`, the `/clear` then `/baton` or `self-slash "/new"` retry after a refusal, and the Orca
-"relaunch `claude --model <m>`" line; each becomes "rerun or start the guard advice's command (omp, else
-codex or grok)", never claude. Only (c), an operator-asked model change, still decides for itself. The
-`[quota-guard critical]` line is printed once per session and compaction can drop it, so the state file, not
-the line, is what you test.
+(a) below, the "verify the successor" by-hand fallback (a governor-steered session still runs that verify step,
+with these providers), the partial-handoff recipe's `paseo-new-seat --provider claude`, the `/clear` then
+`/baton` or `self-slash "/new"` retry after a refusal, and the Orca "relaunch `claude --model <m>`" line. A
+refusal retry or a by-hand start reruns the guard advice's command (omp, else codex or grok), never claude. The
+partial-handoff recipe is the exception to "the guard advice's command": it keeps `paseo-new-seat` (the
+`--finish --successor` form archives the session it keeps) with `--provider omp --model
+anthropic/claude-sonnet-5-5 --thinking high` and no `--mode` (omp has its own default; a claude mode id means
+nothing to it), else codex with `--mode full-access`, or grok. Only (c), an operator-asked model change, still
+decides for itself at any level. The `[quota-guard critical]` line is printed once per session and compaction
+can drop it, so the state file, not the line, is what you test.
 
 **Successor on another model (Paseo and herdr; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
 Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 medium when pipeline-driving).** Use this
-form **instead of** `self-slash "/new"` when, below `critical`, (a) this session's model is Fable (any `claude-fable-*`,
+form **instead of** `self-slash "/new"` when (a) this session's model is Fable and the level is below `critical` (any `claude-fable-*`,
 `[1m]` suffix or not; check the model line in your own context, or `paseo agent inspect <your id>`
 shows `Model`), (b) the state file's `level` is `tight` (`critical` is the paragraph above), or (c) the
 operator asked for a model change. **Never a same-model or upward successor:** a `tight` guard moves a
