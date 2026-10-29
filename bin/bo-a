@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# bo-a: idempotently bring up everything continuous BarnOwl needs, then attach.
+#
+#   zhm        the Zephyr host manager (systemd unit zhm; sudo if it is down)
+#   tickets    a private Kerberos cache for the tmux session, seeded from the
+#              ticket you forwarded (or a kinit it prompts for), plus a window
+#              that renews it and asks for kinit before it lapses
+#   tmux       session "barnowl", prefix C-b:
+#                0 barnowl   the client (the session `bo` and `g` drive)
+#                1 tickets   the renewer
+#
+# Re-run it any time: a dead window is restarted, a missing one recreated, a
+# healthy one left alone, and a fresh forwarded ticket replaces a weaker one.
+set -uo pipefail
+
+session=${BO_SESSION:-barnowl}
+state=${BO_A_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/bo-a}
+cache=$state/krb5cc            # private ccache; survives the ssh login that forwarded it
+interval=${BO_A_INTERVAL:-300} # seconds between renewer checks
+self=$(readlink -f "${BASH_SOURCE[0]}")
+
+log() { printf 'bo-a: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage: bo-a [--no-attach]
+
+Start or repair the tmux session "barnowl" (zhm, Kerberos tickets, the
+BarnOwl window, the ticket-renewer window), then attach to it.
+
+  --no-attach   do everything except attach (also implied without a terminal)
+  -h, --help    this text
+
+env: BO_SESSION (default barnowl), BO_A_STATE, BO_A_INTERVAL (renewer seconds)
+EOF
+}
+
+# ---- Kerberos ------------------------------------------------------------
+
+# tgt_info CCACHE -> "EXPIRES RENEW_UNTIL" as epoch seconds; "0 0" if no TGT.
+tgt_info() {
+  local out d t rd rt exp=0 renew=0
+  out=$(LC_ALL=C klist -c "$1" 2>/dev/null) || { echo "0 0"; return; }
+  read -r d t < <(awk '/krbtgt\//{print $3, $4; exit}' <<<"$out")
+  [[ -n ${d:-} ]] && exp=$(date -d "$d $t" +%s 2>/dev/null || echo 0)
+  read -r rd rt < <(awk '/krbtgt\//{f=1; next} f && /renew until/{gsub(/,/, "", $4); print $3, $4; exit}' <<<"$out")
+  [[ -n ${rd:-} ]] && renew=$(date -d "$rd $rt" +%s 2>/dev/null || echo 0)
+  echo "$exp $renew"
+}
+
+hhmm() { date -d "@$1" '+%a %H:%M'; }
+
+principal_hint() {
+  local c p
+  for c in "$cache" "${src_cache:-}" "/tmp/krb5cc_$(id -u)"; do
+    [[ -n $c && -f $c ]] || continue
+    p=$(LC_ALL=C klist -c "$c" 2>/dev/null | sed -n 's/^Default principal: //p')
+    [[ -n $p ]] && { echo "$p"; return; }
+  done
+}
+
+# Copy the ticket cache you are logged in with into the private one when it
+# outlives what the private one holds. Only FILE: caches can be copied.
+sync_cache() {
+  local c best="" best_exp exp renew
+  read -r best_exp _ < <(tgt_info "$cache")
+  local -a seen=()
+  for c in "${src_cache:-}" "$(cat "$state/source" 2>/dev/null)" "/tmp/krb5cc_$(id -u)"; do
+    [[ -n $c && -f $c && $c != "$cache" ]] || continue
+    [[ " ${seen[*]:-} " == *" $c "* ]] && continue
+    seen+=("$c")
+    read -r exp renew < <(tgt_info "$c")
+    if (( exp > best_exp && exp > $(date +%s) )); then best=$c; best_exp=$exp; fi
+  done
+  [[ -n $best ]] || return 0
+  install -m 600 "$best" "$cache.new.$$" && mv -f "$cache.new.$$" "$cache" \
+    && log "tickets: took $best (expires $(hhmm "$best_exp"))"
+}
+
+login() {
+  local princ
+  princ=$(principal_hint)
+  [[ -t 0 ]] || { log "tickets are missing or expiring and there is no terminal to prompt on"; return 1; }
+  # MIT's maximum: 1 day per ticket, renewable for 7 (kchen's owl-screen uses the same)
+  kinit -c "$cache" -l1d -r7d ${princ:+"$princ"} && afs_token
+}
+
+# BarnOwl's own Kerberos module and owl-screen both run aklog after a renew.
+afs_token() {
+  command -v aklog >/dev/null && aklog 2>/dev/null
+  return 0
+}
+
+# What the caller is logged in with, recorded for the renewer window (whose
+# own environment points at the private cache).
+find_source() {
+  local name=${KRB5CCNAME:-}
+  [[ -n $name ]] || name=$(LC_ALL=C klist 2>/dev/null | sed -n 's/^Ticket cache: //p')
+  case $name in
+    FILE:*) src_cache=${name#FILE:} ;;
+    /*)     src_cache=$name ;;
+    "")     src_cache="" ;;
+    *)      log "your ticket cache is $name; only FILE: caches can be copied, so use kinit when asked"; src_cache="" ;;
+  esac
+  [[ -n $src_cache && $src_cache != "$cache" ]] && printf '%s\n' "$src_cache" >"$state/source"
+}
+
+ensure_tickets() {
+  local exp renew left
+  sync_cache
+  read -r exp renew < <(tgt_info "$cache")
+  left=$(( exp - $(date +%s) ))
+  if (( left < 600 )); then
+    (( exp > 0 )) && log "tickets expire $(hhmm "$exp"); run kinit now"
+    (( exp == 0 )) && log "no usable Kerberos tickets; run kinit now"
+    login || die "no tickets; BarnOwl cannot start"
+    read -r exp renew < <(tgt_info "$cache")
+  fi
+  log "tickets: valid until $(hhmm "$exp"), renewable until $(hhmm "$renew")"
+}
+
+# zwrite exits 1 until BarnOwl is subscribed, so retry like cont-renew-notify
+# (7 tries, 15 s apart). Run in the background; silent if it never lands.
+notify_expiry() {
+  local n idx
+  command -v zwrite >/dev/null || return 0
+  idx=$(tmux display-message -p '#I' 2>/dev/null || echo 2)
+  for n in 1 2 3 4 5 6 7; do
+    printf 'Kerberos tickets end %s and cannot be renewed past that.\nRun kinit -l1d -r7d in tmux window "tickets" (C-b %s), or forward fresh tickets and run bo-a.\n' \
+      "$(hhmm "$1")" "$idx" | zwrite -n "$USER" >/dev/null 2>&1 && return 0
+    sleep 15
+  done
+  return 0
+}
+
+# The window that keeps tickets alive. Runs inside tmux with KRB5CCNAME=$cache.
+tickets_loop() {
+  local exp renew left horizon end notified=0 last=0 reply
+  mkdir -p "$state"
+  while :; do
+    sync_cache
+    read -r exp renew < <(tgt_info "$cache")
+    left=$(( exp - $(date +%s) ))
+    if (( left < 3600 && renew > exp + 300 )); then
+      if kinit -R -c "$cache" 2>/dev/null; then
+        afs_token
+        read -r exp renew < <(tgt_info "$cache")
+        left=$(( exp - $(date +%s) ))
+        printf '%s renewed; valid until %s, renewable until %s\n' "$(date +%T)" "$(hhmm "$exp")" "$(hhmm "$renew")"
+      fi
+    fi
+    if (( exp != last )); then
+      printf '%s tickets valid until %s, renewable until %s\n' "$(date +%T)" "$(hhmm "$exp")" "$(hhmm "$renew")"
+      last=$exp
+    fi
+    # Like SIPB's cont-renew-notify: zephyr yourself once per renewal horizon
+    # when less than a day is left, so BarnOwl shows it. Best effort.
+    end=$(( renew > exp ? renew : exp ))
+    horizon=$(( end - $(date +%s) ))
+    if (( horizon < 86400 && end != notified )); then
+      notified=$end
+      notify_expiry "$end" &
+    fi
+    # No renewal left to take and the end is near: ask before it lapses.
+    if (( horizon < 3600 )); then
+      printf '\a%s tickets %s and cannot be renewed any further.\n' "$(date +%T)" \
+        "$( (( left > 0 )) && echo "end $(hhmm "$exp")" || echo "have expired")"
+      printf 'Forward a fresh ticket and run bo-a, or kinit here now? [Y/n] '
+      if read -r -t "$interval" reply; then
+        [[ ${reply:-y} =~ ^[Yy] ]] && login
+      else
+        echo
+      fi
+    else
+      sleep "$interval"
+    fi
+  done
+}
+
+# ---- zhm -----------------------------------------------------------------
+
+ensure_zhm() {
+  systemctl is-active --quiet zhm && return 0
+  log "zhm is not running; starting it (sudo)"
+  sudo systemctl start zhm || die "could not start zhm"
+  local i
+  for i in 1 2 3 4 5; do systemctl is-active --quiet zhm && return 0; sleep 1; done
+  die "zhm did not come up: systemctl status zhm"
+}
+
+# ---- tmux ----------------------------------------------------------------
+
+t() { tmux "$@"; }
+
+have_window() { t list-windows -t "$session:" -F '#{window_name}' 2>/dev/null | grep -Fxq -- "$1"; }
+window_dead() { t list-panes -t "$session:=$1" -F '#{pane_dead}' 2>/dev/null | grep -q 1; }
+
+# ensure_window NAME CMD...: create it, or respawn it if its process exited.
+ensure_window() {
+  local name=$1; shift
+  local -a env=(-e "KRB5CCNAME=FILE:$cache" -e "BO_A_STATE=$state" -e "BO_SESSION=$session")
+  if ! have_window "$name"; then
+    if [[ $name == barnowl ]]; then
+      # barnowl is the first window (tmux base-index) when that index is free
+      local base; base=$(t show-options -gqv base-index); base=${base:-0}
+      t new-window -d -t "$session:$base" -n "$name" -c "$HOME" "${env[@]}" "$@" 2>/dev/null \
+        || t new-window -d -b -t "$session:{start}" -n "$name" -c "$HOME" "${env[@]}" "$@" \
+        || die "could not create window $name"
+    else
+      t new-window -d -t "$session:" -n "$name" -c "$HOME" "${env[@]}" "$@" \
+        || die "could not create window $name"
+    fi
+    log "window $name: started"
+  elif window_dead "$name"; then
+    t respawn-window -k -t "$session:=$name" -c "$HOME" "${env[@]}" "$@" \
+      || die "could not restart window $name"
+    log "window $name: had exited, restarted"
+  else
+    log "window $name: running"
+  fi
+  t set-option -w -t "$session:=$name" remain-on-exit on
+}
+
+ensure_session() {
+  local cmd_env=(-e "KRB5CCNAME=FILE:$cache" -e "BO_A_STATE=$state" -e "BO_SESSION=$session")
+  if ! t has-session -t "=$session" 2>/dev/null; then
+    t new-session -d -s "$session" -n barnowl -c "$HOME" "${cmd_env[@]}" barnowl \; \
+      set-option -w -t "$session:=barnowl" remain-on-exit on \
+      || die "could not create tmux session $session"
+    log "session $session: created, window barnowl started"
+  fi
+  t set-environment -t "$session" KRB5CCNAME "FILE:$cache"
+  t set-option -t "$session" prefix C-b
+  t set-option -t "$session" prefix2 None
+  t set-option -t "$session" history-limit 50000
+  ensure_window barnowl barnowl
+  ensure_window tickets "$self" --tickets
+  t select-window -t "$session:=barnowl"
+}
+
+warn_strays() {
+  local pids pid
+  pids=$(t list-panes -s -t "$session" -F '#{pane_pid}' 2>/dev/null)
+  for pid in $(pgrep -u "$(id -u)" -x barnowl); do
+    grep -Fxq "$pid" <<<"$pids" || log "another barnowl (pid $pid) runs outside the session; two clients duplicate every zephyr. Quit it."
+  done
+}
+
+# ---- main ----------------------------------------------------------------
+
+attach=1
+case ${1:-} in
+  --tickets) mkdir -p "$state"; tickets_loop; exit ;;
+  --no-attach) attach=0 ;;
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+for cmd in tmux barnowl klist kinit systemctl; do
+  command -v "$cmd" >/dev/null || die "$cmd not found"
+done
+mkdir -p "$state" && chmod 700 "$state"
+
+find_source
+ensure_zhm
+ensure_tickets
+ensure_session
+warn_strays
+
+if (( ! attach )) || [[ ! -t 0 || ! -t 1 ]]; then
+  log "session $session is ready (attach: tmux attach -t $session)"
+elif [[ -n ${TMUX:-} ]]; then
+  exec tmux switch-client -t "=$session"
+else
+  exec tmux attach-session -t "=$session"
+fi
