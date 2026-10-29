@@ -2825,6 +2825,7 @@ class TestDeferredSend(Harness):
         relay.paseo_probe = probe
         self.card_texts = [("", None)]    # `paseo permit ls` is a live CLI call: the harness answers it (text, whether the list names the agent)
         relay.paseo_card_detail = lambda agent: self.card_texts[0]
+        relay.timeline_base = lambda me: None    # the sender's own timeline (`paseo logs`) is a live CLI call too: tests/test_relay_paseo.py covers it
         relay.paseo_gate = lambda s: s.update(status="working" if (s.get("paseo") == AGENT and self.cur != "idle") or s.get("paseo") == OTHER else "idle")
 
         def send(s: dict[str, Any], text: str, wait: float) -> str:
@@ -3810,7 +3811,8 @@ class TestDeferredSend(Harness):
         self.assertEqual(rec["state"], "delivered")
         self.assertEqual(rec["look"]["state"], "card:question")    # the last diagnosis filed while it waited
         self.assertIn("a QUESTION (AskUserQuestion)", rec["look"]["why"])
-        self.assertIn("the card says: Which branch should I use?", rec["look"]["why"])
+        self.assertNotIn("Which branch", rec["look"]["why"])    # the card's own text is the agent's tool input: `--why` only, never a record, a log or a notice
+        self.assertNotIn("Which branch", self.log())
         self.assertEqual(self.log().count(" look target="), 1)    # logged once per change, not once per look
         self.cur = "running"    # busy again (the first message was delivered), so the next one is queued
         rid2 = self.queue("second")

@@ -50,7 +50,7 @@ case "$1 $2" in
   "permit ls") echo "${FAKE_PERMITS:-[]}" ;;
   "wait "*) exit "${FAKE_WAIT_RC:-0}" ;;
   "logs "*) [ -n "$FAKE_TIMELINE" ] && [ -f "$FAKE_TIMELINE" ] && cat "$FAKE_TIMELINE" ;;
-  "send "*) if [ -n "$FAKE_TIMELINE" ] && [ "${FAKE_TL_APPEND:-1}" = 1 ]; then printf '[Message received] %s\\n%s\\n' "${FAKE_TL_FROM:-some peer}" "${@: -1}" >> "$FAKE_TIMELINE"; fi
+  "send "*) if [ -n "$FAKE_TIMELINE" ] && [ "${FAKE_TL_APPEND:-1}" = 1 ]; then if [ "${FAKE_TL_KIND:-message}" = message ]; then printf '[Message received] %s\\n%s\\n' "${FAKE_TL_FROM:-some peer}" "${@: -1}" >> "$FAKE_TIMELINE"; else printf '[Thought] %s\\n' "${@: -1}" >> "$FAKE_TIMELINE"; fi; fi
     echo '{"ok": true}' ;;
 esac
 """
@@ -502,43 +502,64 @@ class RelayPaseo(unittest.TestCase):
         os.environ["FAKE_TIMELINE"] = str(path)
         return path
 
-    def test_an_agent_with_no_transcript_is_proven_delivered_by_its_paseo_timeline(self) -> None:
+    def codex(self) -> dict[str, Any]:
         os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
-        self.timeline("[Shell] ls")
-        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, "hello there friend", "--wait", "5")
+        return sess(agent="codex", transcript=None, status="idle")
+
+    def logs_calls(self) -> list[str]:
+        return [c for c in self.raw_calls() if c.startswith("logs ")]
+
+    def test_an_agent_with_no_transcript_is_proven_delivered_by_its_paseo_timeline(self) -> None:
+        self.timeline(EMPTY_TIMELINE)
+        rc, out, err = self.main([self.codex()], SID, "hello there friend", "--wait", "5", "--ack")
         self.assertEqual(rc, 0, err)
         self.assertIn(": delivered;", out)
-        self.assertTrue([c for c in self.raw_calls() if c.startswith("logs ")])
+        self.assertTrue(self.logs_calls())
+
+    def test_a_caller_that_wants_no_proof_gets_the_instant_accepted_and_no_timeline_read(self) -> None:
+        self.timeline(EMPTY_TIMELINE)    # RELAY_NO_ACK=1 in this class: no --ack, so no witness is needed
+        rc, out, err = self.main([self.codex()], SID, "hello there friend", "--wait", "5")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(": accepted;", out)
+        self.assertEqual(self.logs_calls(), [])
 
     def test_a_timeline_that_cannot_be_read_leaves_the_send_accepted_not_proven(self) -> None:
-        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")    # no FAKE_TIMELINE: `paseo logs` exits 1
-        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, "hello there friend", "--wait", "1")
-        self.assertEqual(rc, 0, err)
+        rc, out, err = self.main([self.codex()], SID, "hello there friend", "--wait", "1", "--ack")    # no FAKE_TIMELINE: `paseo logs` exits 1
+        self.assertEqual(rc, 3, err)    # unverified: sent, no witness
+        self.assertIn(": accepted;", out)
+
+    def test_only_a_received_message_counts_not_the_agents_own_reasoning_or_output(self) -> None:
+        self.timeline(EMPTY_TIMELINE)
+        os.environ["FAKE_TL_KIND"] = "thought"    # the daemon takes the send, and the agent's timeline shows the text only inside its own reasoning
+        rc, out, err = self.main([self.codex()], SID, "ack task42 please", "--wait", "2", "--ack")
+        self.assertEqual(rc, 3, err)
         self.assertIn(": accepted;", out)
 
     def test_the_same_text_twice_is_two_deliveries_a_copy_already_there_proves_nothing(self) -> None:
-        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
         self.timeline(EMPTY_TIMELINE)
-        row = sess(agent="codex", transcript=None, status="idle")
-        self.assertIn(": delivered;", self.main([row], SID, "hello there friend", "--wait", "5")[1])
+        row = self.codex()
+        self.assertIn(": delivered;", self.main([row], SID, "hello there friend", "--wait", "5", "--ack")[1])
         os.environ["FAKE_TL_APPEND"] = "0"    # the daemon takes the second copy but the timeline never shows it
-        rc, out, err = self.main([row], SID, "hello there friend", "--wait", "1")
-        self.assertEqual(rc, 0, err)
-        self.assertIn(": accepted;", out)    # the first copy is still there: the count did not rise, so it is not proof
+        rc, out, err = self.main([row], SID, "hello there friend", "--wait", "1", "--ack")
+        self.assertEqual(rc, 3, err)
+        self.assertIn(": accepted;", out)    # a copy is already there: a rolling window cannot tell a new one from a scrolled one, so no witness
+
+    def test_a_text_too_short_to_be_a_witness_is_never_proven_by_the_timeline(self) -> None:
+        self.timeline(EMPTY_TIMELINE)
+        rc, out, err = self.main([self.codex()], SID, "ack x1", "--wait", "1", "--ack")    # the fake DID append it as a received message
+        self.assertEqual((rc, ": accepted;" in out), (3, True), err)
 
     def test_the_timeline_shows_the_text_unescaped_where_the_transcript_keeps_it_xml_escaped(self) -> None:
-        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
         self.timeline(EMPTY_TIMELINE)
-        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, 'a&b <c> "q" ]x[', "--wait", "5")
+        rc, out, err = self.main([self.codex()], SID, 'a&b <c> "q" ]x[', "--wait", "5", "--ack")
         self.assertEqual((rc, ": delivered;" in out), (0, True), err)
 
     def test_a_long_text_is_matched_by_its_tail_where_the_ack_id_sits(self) -> None:
-        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="idle")
         self.timeline(EMPTY_TIMELINE)
         long_text = "word " * 80 + "tail [reply through relay.py to zz: ack T-long]"
         self.assertGreater(len(long_text), relay.TIMELINE_LONG)
         self.assertEqual(relay.timeline_probe(long_text), " ".join(long_text.split())[-relay.TIMELINE_PART:])
-        rc, out, err = self.main([sess(agent="codex", transcript=None, status="idle")], SID, long_text, "--wait", "5")
+        rc, out, err = self.main([self.codex()], SID, long_text, "--wait", "5", "--ack")
         self.assertEqual((rc, ": delivered;" in out), (0, True), err)
 
     def expectation(self, token: str, **kw: Any) -> None:
@@ -547,22 +568,39 @@ class RelayPaseo(unittest.TestCase):
             "sender_label": "me", "tx": None, "sender_paseo": CALLER, "mark": 0,
             "target": {"id": "dddddddd", "name": "peer-long-name", "paseo": AGENT, "sid8": "", "sid": "", "host": "paseo"}, **kw})
 
+    def sweep(self, token: str, *timeline: str, **kw: Any) -> tuple[int, str]:
+        """Open expectation TOKEN (fields KW), show TIMELINE to its transcript-less sender, sweep: (acked count, resulting state)."""
+        with mock.patch.object(relay.fleet, "LINKS_FILE", Path(self.tmp.name) / "links.json"):
+            self.expectation(token, **kw)
+            self.timeline(*timeline)
+            acked, _ = relay.ack_sweep()
+        return acked, relay.expect_read(token)["state"]
+
     def test_a_sender_with_no_transcript_gets_its_ack_from_its_own_paseo_timeline(self) -> None:
-        links = Path(self.tmp.name) / "links.json"
-        with mock.patch.object(relay.fleet, "LINKS_FILE", links):
-            self.expectation("tok1")
-            self.timeline("[Message received] peer-long-name", "ack tok1")
-            acked, overdue = relay.ack_sweep()
-        rec = relay.expect_read("tok1")
-        self.assertEqual((acked, overdue, rec["state"], rec.get("acked_via")), (1, [], "acked", "timeline"))
+        self.assertEqual(self.sweep("tok1", "[Message received] peer-long-name", "ack tok1"), (1, "acked"))
+        self.assertEqual(relay.expect_read("tok1").get("acked_via"), "timeline")
 
     def test_an_ack_in_a_timeline_from_someone_else_closes_nothing(self) -> None:
-        links = Path(self.tmp.name) / "links.json"
-        with mock.patch.object(relay.fleet, "LINKS_FILE", links):
-            self.expectation("tok2")
-            self.timeline("[Message received] stranger-agent", "ack tok2")
-            acked, _ = relay.ack_sweep()
-        self.assertEqual((acked, relay.expect_read("tok2")["state"]), (0, "open"))
+        self.assertEqual(self.sweep("tok2", "[Message received] stranger-agent", "ack tok2"), (0, "open"))
+
+    def test_the_sender_is_the_entrys_own_title_not_a_name_quoted_in_the_body_or_a_longer_title(self) -> None:
+        self.assertEqual(self.sweep("tok4", "[Message received] unrelated-agent", "Forwarding peer-long-name says ack tok4"), (0, "open"))
+        self.assertEqual(self.sweep("tok7", "[Message received] peer-long-name-impostor", "ack tok7"), (0, "open"))
+        self.assertEqual(self.sweep("tok6", "[Message received] stranger", "x [relay from claude peer-long-name (d)] ack tok6"), (0, "open"))    # a header not at the start is a quote
+        self.assertEqual(self.sweep("tok5", "[Message received] anything", "[relay from claude peer-long-name (d)] ack tok5"), (1, "acked"))    # a non-Paseo peer's own header names it
+
+    def test_an_ack_that_was_already_in_the_timeline_before_the_question_cannot_answer_it(self) -> None:
+        self.assertEqual(self.sweep("tok3", "[Message received] peer-long-name", "ack tok3", tl_base=["ack tok3"]), (0, "open"))    # a reused ID: the old reply
+        self.assertEqual(self.sweep("tok8", "[Message received] peer-long-name", "ack tok8 done", tl_base=["ack tok8"]), (1, "acked"))    # a new one differs
+
+    def test_a_hand_edited_sender_paseo_is_skipped_never_an_exception(self) -> None:
+        self.assertEqual(self.sweep("tok9", "[Message received] peer-long-name", "ack tok9", sender_paseo=["x"]), (0, "open"))
+
+    def test_a_transcript_less_senders_baseline_is_what_it_had_received_before_it_asked(self) -> None:
+        self.timeline("[Message received] peer-long-name", "ack old1", "[Shell] ls")
+        self.assertEqual(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}), ["ack old1"])
+        self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": "/x.jsonl"}))    # a transcript has its own mark
+        self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": "", "transcript": None}))
 
     def test_a_first_contact_link_is_acked_from_the_senders_timeline_too(self) -> None:
         links = Path(self.tmp.name) / "links.json"
@@ -589,6 +627,15 @@ class RelayPaseo(unittest.TestCase):
         why = relay.paseo_blocker({"Status": "idle", "PendingPermissions": [{"id": "p1", "tool": "Bash"}, {"id": "p2", "tool": "Edit"}] * 3}) or ""
         self.assertIn("and 3 more", why)
         self.assertTrue(relay.card_why(why))    # every card reason keeps the prefix split_card and the deliverer key on
+        self.assertEqual(relay.card_kind("OMP ask"), "question")    # omp's picklist tool, as `paseo permit ls` showed it live (2026-10-29)
+        self.assertEqual(relay.card_kind("Bash"), "permission")
+
+    def test_a_dash_description_is_no_text_and_the_tool_name_stands_in_and_the_text_is_sanitized(self) -> None:
+        os.environ["FAKE_PERMITS"] = json.dumps([{"id": "p1", "agentId": AGENT, "name": "OMP ask", "description": "-"}])
+        self.assertEqual(relay.paseo_card_detail(AGENT), ("OMP ask", True))
+        os.environ["FAKE_PERMITS"] = json.dumps([{"id": "p1", "agentId": AGENT, "name": "Bash", "description": "rm \x1b[31m-rf\x1b[0m /tmp/x\x07\x00 now"}])
+        self.assertEqual(relay.paseo_card_detail(AGENT), ("rm -rf /tmp/x now", True))    # no escape sequence reaches an operator's terminal
+        self.assertEqual(relay.clean_text("a\x1b]0;title\x07b\x9bc"), "a b c")
 
     def test_diagnose_reads_the_api_the_card_text_and_the_timeline_and_they_agree(self) -> None:
         os.environ.update(FAKE_PENDING=self.QUESTION, FAKE_PERMITS=self.PERMIT_Q)
@@ -627,12 +674,20 @@ class RelayPaseo(unittest.TestCase):
     def test_the_screen_classifier_names_a_picker_a_permission_a_slash_menu_and_a_running_turn(self) -> None:
         picker = "  Choose a model\n  1. sonnet\n  2. opus\n                ↑/↓ navigate, Enter to select, Ctrl+C to exit"
         self.assertEqual(relay.classify_screen(picker)[0], "picker")
+        self.assertEqual(relay.classify_screen("  1. sonnet\n  2. opus\n  Esc to cancel")[0], "picker")
         self.assertEqual(relay.classify_screen("Bash command\n  rm -rf x\nDo you want to proceed?\n❯ 1. Yes\n  2. No")[0], "permission")
         self.assertEqual(relay.classify_screen("Run it? [y/N]")[0], "permission")
         self.assertEqual(relay.classify_screen("  /help     show help\n  /clear    clear the screen\n  /model    switch model\n")[0], "slash_menu")
         self.assertEqual(relay.classify_screen("✻ Thinking… (12s · esc to interrupt)")[0], "busy")
         self.assertEqual(relay.classify_screen("❯ \n  ? for shortcuts")[0], "unknown")
-        self.assertEqual(relay.classify_screen("you can select a model with /model later, and enter works")[0], "unknown")    # prose is not a dialog
+        for prose in ("you can select a model with /model later, and enter works",
+                      "I will select the one and press enter to proceed; to select one then esc",    # reviewer's false positives (PR 124)
+                      "allow this request ok",
+                      "Do you want to proceed with X?",    # a question in the agent's own prose, no dialog options under it
+                      "  /a  one\n  /b  two\n  /c  three\nthen the agent kept typing a long reply here\nand more\nand more\nand more\nand more\nand more"):
+            self.assertEqual(relay.classify_screen(prose)[0], "unknown", prose)
+        self.assertEqual(relay.classify_screen("Do you want to proceed?\n❯ 1. Yes\n  2. No\n" + "agent output line\n" * 12)[0], "unknown")    # a dialog is at the bottom, not history
+        self.assertEqual(relay.classify_screen("x" * 50000 + "\n" + "  /a  b\n" * 4000)[0], "slash_menu")    # hostile text is read in linear time (the test would hang otherwise)
 
     def test_a_pane_whose_status_says_idle_over_a_picker_is_blocked_and_the_disagreement_is_reported(self) -> None:
         picker = "  1. sonnet\n  2. opus\n  ↑/↓ navigate, Enter to select, Esc to cancel"
