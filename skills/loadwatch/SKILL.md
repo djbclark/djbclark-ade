@@ -102,7 +102,10 @@ whole command line: your own shell/Python diagnostic embeds the searched text. B
 signalling, recheck the target's identity; after `sample`, check the report's Process and PID too
 (a short-lived helper can exit or its PID can be reused even when `sample` exits 0). Discard a report
 for another process. Capture broad command output first and print bounded relevant rows; do not
-truncate away the evidence you need.
+truncate away the evidence you need. Inspect installed API signatures and return models before remote writes;
+for example, Deco `get_table()` returns a table object with `.reservations`, not a list. A tool
+result containing a running session ID is not command completion: wait for its exit status before
+any dependent check, stage, commit or push.
 
 Peer questions/action requests use `relay.py TARGET TEXT --expect-ack UNIQUE_ID`; asking for an ack
 only inside TEXT does not register it and the relay refuses the send. Verify the returned delivery
