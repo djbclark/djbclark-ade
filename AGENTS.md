@@ -290,4 +290,5 @@ pull request here is expected to meet these; flag any it misses.
     is `local-codex-missing`, `-findings`, `-failed` or `-unreadable`, never `codex-skipped`. A push needs a new run: the head is the key, so another head's review
     is never read. Any finding of any priority blocks (fix the code, run it again); a clean local result plus CI plus the adversary verdict is a
     merge-ready PR without the bot, and the PR body quotes the summary line (head SHA and counts). Item 9 still governs the GitHub bot's own review and its open
-    threads, which `pr-wait --local-codex` still counts as `open-findings`.
+    threads, which `pr-wait --local-codex` still counts as `open-findings`. `bin/local-review` refuses (exit 2) a PR whose author is neither the repository owner
+    nor the authenticated gh user unless `--allow-untrusted`: the PR's own diff and AGENTS.md can steer the reviewing model (Codex Security Review, PR 130).

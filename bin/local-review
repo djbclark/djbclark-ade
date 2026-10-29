@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """local-review: run Codex's code review LOCALLY on the exact head of a PR and file the result for `pr-wait --local-codex`.
 
-  local-review PR [--repo OWNER/NAME] [--head SHA] [--timeout S] [--json]
+  local-review PR [--repo OWNER/NAME] [--head SHA] [--timeout S] [--allow-untrusted] [--json]
 
 Why (2026-10-29, operator: "could we just switch to making codex reviews run locally in general"): the GitHub Codex review of PRs 112 and 124 sat
 "Running" until the waiter gave up (openai/codex#55890), while `codex review --base origin/master` run by hand finished in 2.3-11 minutes (the machine's load)
@@ -40,8 +40,8 @@ Rules (each one a way a local review could lie, so each is pinned by a test):
   6. THE VERDICT TEXT IS PROSE. Whether a no-findings message is a completed review is decided by the structural bindings of rule 1 (transcript header, `exec`, equal
      channels) plus a refusal wording list scoped to the review itself; no list is complete, so an unusual refusal worded around it after a bound transcript with an
      `exec` block can still read clean. A false `failed` costs a rerun; read the `.out` of a clean result when a merge matters.
-  7. THE REVIEWED TREE IS UNTRUSTED INPUT. Codex runs as you, in a worktree of the PR, with a read-only sandbox, no network and no token in its environment (the files in your home stay readable by the model); a diff or an AGENTS.md in
-     the PR can still try to talk the model into "no issues", as it can the GitHub bot. Do not review a PR from someone you do not trust with it.
+  7. THE REVIEWED TREE IS UNTRUSTED INPUT, SO THE AUTHOR MUST BE TRUSTED (Codex Security Review on PR 130). Codex runs as you, in a worktree of the PR, with a read-only sandbox, no network and no token in its environment (the files in your home stay readable by the model); a diff or an AGENTS.md in
+     the PR can still try to talk the model into "no issues", as it can the GitHub bot. A PR whose author is neither the repository owner nor the authenticated gh user is refused (exit 2) unless --allow-untrusted.
      Residual: a tool process that is reparented to init between two 2-second looks AND works outside the worktree escapes (no cgroups on macOS).
 
 Exit: 0 clean, 1 findings, 2 usage / no such PR / not in a checkout of that repo, 3 failed (see `reason` in the file and on stderr), 4 another run for the
@@ -183,6 +183,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("pr", type=int, help="pull request number")
     p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
     p.add_argument("--head", help="the full head SHA to review (default: the PR's current head)")
+    p.add_argument("--allow-untrusted", action="store_true", help="review a PR whose author is neither the repository owner nor the authenticated gh user "
+                   "(its diff and AGENTS.md can steer the reviewing model)")
     p.add_argument("--timeout", type=int, default=1500, help="seconds before codex is killed (default 1500)")
     p.add_argument("--json", action="store_true", help="print the result document as one JSON line")
     return p
@@ -227,6 +229,20 @@ def main(argv: list[str]) -> int:
         pr_head, base = doc["head"]["sha"], doc["base"]["ref"]
     except (ValueError, KeyError, TypeError):
         return die("unexpected pulls document", EXIT_USAGE)
+    author = ((doc.get("user") or {}).get("login") or "") if isinstance(doc, dict) else ""
+    trusted = {a.repo.split("/")[0].lower()}
+    me = run(["gh", "api", "user"], timeout=GH_TIMEOUT)
+    if me.returncode == 0:
+        try:
+            trusted.add(str(json.loads(me.stdout).get("login") or "").lower())
+        except (ValueError, AttributeError):
+            pass
+    trusted.discard("")
+    if author.lower() not in trusted and not a.allow_untrusted:
+        # The reviewed tree is the PR's: its AGENTS.md and diff can talk the model into "no issues" (Codex Security Review on PR 130). A merge gate
+        # built on that reading is only as good as the author, so a stranger's PR is refused unless the operator says otherwise.
+        return die(f"the PR's author {author or '(unknown)'!r} is neither the repository owner nor the authenticated gh user: its diff and AGENTS.md can steer the "
+                   "reviewing model; --allow-untrusted reviews it anyway", EXIT_USAGE)
     head = a.head or pr_head
     if not re.fullmatch(r"[0-9a-f]{40}", head or "") or not re.fullmatch(r"[\w./-]+", base or ""):
         return die(f"the PR's head or base is not usable: {head!r} / {base!r}", EXIT_USAGE)
@@ -244,7 +260,7 @@ def main(argv: list[str]) -> int:
         return die(f"another local-review for {head[:12]} is running (see {sd / f'lock-{stem}'})", EXIT_DUP)
 
     started, t0 = now_iso(), time.monotonic()
-    doc_out: dict = {"schema": SCHEMA, "repo": a.repo, "pr": a.pr, "head": head, "base_ref": base, "base_sha": "", "result": "failed",
+    doc_out: dict = {"schema": SCHEMA, "repo": a.repo, "pr": a.pr, "head": head, "author": author, "base_ref": base, "base_sha": "", "result": "failed",
                      "reason": "in progress (a run that died leaves this)", "exit_code": None, "final_message": False,
                      "counts": {k: 0 for k in PRIORITIES}, "findings": [], "ignored_generated": [], "dirty_after": [],
                      "codex_version": "", "started": started, "finished": "", "elapsed_s": 0.0, "out_sha256": "", "err_sha256": ""}
@@ -321,19 +337,17 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
         tracked: dict[int, str] = {}
         deadline = time.monotonic() + timeout
         try:
-            while True:    # poll, so the descendants are SEEN while codex is alive (they are reparented, and untraceable, once it exits)
+            while not exited(proc):    # poll, so the descendants are SEEN while codex is alive (they are reparented, and untraceable, once it exits)
+                if time.monotonic() >= deadline:
+                    return {"reason": f"codex did not finish in {timeout} s", "exit_code": None}
                 try:
-                    code = proc.wait(timeout=max(0.1, min(2.0, deadline - time.monotonic())))
-                    break
-                except subprocess.TimeoutExpired:
-                    if time.monotonic() >= deadline:
-                        return {"reason": f"codex did not finish in {timeout} s", "exit_code": None}
-                    try:
-                        tracked.update(descendants(proc.pid))
-                    except (OSError, subprocess.SubprocessError):
-                        pass
+                    tracked.update(descendants(proc.pid))
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                time.sleep(min(1.0, max(0.05, deadline - time.monotonic())))
         finally:
             kill_group(proc, wt, tracked)    # on every exit of the wait, including an interrupt: nothing of codex's survives it
+    code = proc.returncode
     res["exit_code"] = code
     res["out_sha256"], res["err_sha256"] = sha256_file(out_path), sha256_file(err_path)
     status = run(["git", "status", "--porcelain"], cwd=str(wt))
@@ -381,6 +395,14 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
     return res
 
 
+def exited(proc: subprocess.Popen) -> bool:
+    """True once codex has exited, WITHOUT reaping it where the OS allows (waitid + WNOWAIT): an unreaped leader keeps its process group, so a child
+    launched just before the exit is still killed by the group kill even where neither lsof nor a snapshot finds it (Codex, GitHub review of PR 130)."""
+    if hasattr(os, "waitid"):
+        return os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    return proc.poll() is not None
+
+
 def descendants(pid: int) -> dict[int, str]:
     """{pid: start time} of every live descendant of PID (a tool command codex ran in its own session is not in codex's process group), from one `ps`
     snapshot. The start time lets a later kill skip a pid that was reused by an unrelated process."""
@@ -405,13 +427,25 @@ def alive_with_start(pid: int, started: str) -> bool:
 
 
 def in_worktree(wt: Path) -> set[int]:
-    """Pids whose working directory is inside WT (what is left of a tool that was reparented to init once its parent died)."""
-    out, pid, root = set(), 0, str(wt.resolve())
-    for line in run(["lsof", "-a", "-d", "cwd", "-Fpn"], timeout=60).stdout.splitlines():
-        if line.startswith("p") and line[1:].isdigit():
-            pid = int(line[1:])
-        elif line.startswith("n") and (line[1:] == root or line[1:].startswith(root + os.sep)) and pid != os.getpid():
-            out.add(pid)
+    """Pids whose working directory is inside WT (what is left of a tool that was reparented to init once its parent died): lsof, or /proc where there
+    is no lsof (Linux)."""
+    root, out = str(wt.resolve()), set()
+    inside = lambda path: path == root or path.startswith(root + os.sep)
+    if shutil.which("lsof"):
+        pid = 0
+        for line in run(["lsof", "-a", "-d", "cwd", "-Fpn"], timeout=60).stdout.splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line.startswith("n") and inside(line[1:]) and pid != os.getpid():
+                out.add(pid)
+        return out
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
+            try:
+                if inside(os.readlink(entry / "cwd")):
+                    out.add(int(entry.name))
+            except OSError:
+                pass
     return out
 
 

@@ -24,6 +24,7 @@ PR = 7
 FAKE_GH = """#!/bin/bash
 # only `gh api repos/owner/name/pulls/7` is served; FAKE_PR_JSON holds the document
 if [ "$1" = api ] && [ "$2" = "repos/owner/name/pulls/7" ]; then cat "$FAKE_PR_JSON"; exit 0; fi
+if [ "$1" = api ] && [ "$2" = user ]; then echo '{"login": "operator"}'; exit 0; fi
 echo "fake gh: unexpected $*" >&2; exit 1
 """
 
@@ -72,6 +73,7 @@ Full review comments:
   tests_unrunnable) say "I found no actionable issues in this patch. I could not run tests in the read-only sandbox. The patch also fixes the failed command." ;;
   wasnt_able) say "I wasn't able to review the patch because the repository is unavailable." ;;
   incomplete_records) say "The patch correctly handles incomplete records and rejects inaccessible paths, and I found no actionable issues." ;;
+  late_child) { sleep 300 & echo $! > "$FAKE_PID_FILE"; }; say "The patch looks correct." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -125,7 +127,7 @@ class World:
         self.head = sh("git", "rev-parse", "HEAD", cwd=self.work, env=git_env)
         sh("git", "push", "-q", "origin", f"{self.head}:refs/pull/{PR}/head", cwd=self.work, env=git_env)
         self.pr_json = tmp / "pr.json"
-        self.pr_json.write_text(json.dumps({"head": {"sha": self.head}, "base": {"ref": "master"}}))
+        self.pr_json.write_text(json.dumps({"head": {"sha": self.head}, "base": {"ref": "master"}, "user": {"login": "owner"}}))
         bindir = tmp / "bin"
         bindir.mkdir()
         for name, body in (("gh", FAKE_GH), ("codex", FAKE_CODEX)):
@@ -160,7 +162,7 @@ class World:
         sh("git", "commit", "-q", "-am", "pr change", cwd=self.work, env=self.env)
         head = sh("git", "rev-parse", "HEAD", cwd=self.work, env=self.env)
         sh("git", "push", "-q", "origin", f"{head}:refs/pull/{PR}/head", cwd=self.work, env=self.env)
-        self.pr_json.write_text(json.dumps({"head": {"sha": head}, "base": {"ref": "master"}}))
+        self.pr_json.write_text(json.dumps({"head": {"sha": head}, "base": {"ref": "master"}, "user": {"login": "owner"}}))
         return head
 
 
@@ -305,6 +307,24 @@ def test_a_preflight_timeout_is_failed_not_the_findings_exit(world: World) -> No
 def test_a_summary_that_merely_discusses_incomplete_records_or_inaccessible_paths_is_clean(world: World) -> None:
     """Codex P2 on PR 130 (round 9): the refusal vocabulary is scoped to the review itself, not matched anywhere in the message."""
     assert world.run(mode="incomplete_records").returncode == 0
+
+
+@pytest.mark.parametrize("login,ok", [("owner", True), ("Owner", True), ("operator", True), ("mallory", False), ("", False)])
+def test_only_the_owner_or_the_authenticated_user_may_have_their_pr_reviewed_by_default(world: World, login: str, ok: bool) -> None:
+    """Codex Security Review on PR 130: the PR's own AGENTS.md and diff can steer the reviewing model, so a stranger's PR needs --allow-untrusted."""
+    world.pr_json.write_text(json.dumps({"head": {"sha": world.head}, "base": {"ref": "master"}, "user": {"login": login}}))
+    r = world.run()
+    assert (r.returncode == 0) is ok, r.stderr
+    if not ok:
+        assert r.returncode == 2 and "author" in r.stderr and not world.stem().with_suffix(".json").exists()
+        assert world.run("--allow-untrusted").returncode == 0 and world.doc()["author"] == login
+
+
+def test_a_child_started_just_before_codex_exits_is_killed_without_lsof_or_a_snapshot(world: World) -> None:
+    """Codex P1 (GitHub review of PR 130): the leader must not be reaped before the group kill, or a late child survives where lsof is missing."""
+    assert world.run(mode="late_child").returncode == 0
+    time.sleep(0.5)
+    assert not alive(int(world.pid_file.read_text())), "a child started right before codex exited survived"
 
 
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
