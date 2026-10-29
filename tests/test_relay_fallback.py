@@ -3906,8 +3906,22 @@ class TestDeferredSend(Harness):
         slept: list[float] = []
         with mock.patch.object(relay.time, "sleep", side_effect=slept.append), mock.patch.object(relay.random, "uniform", lambda lo, hi: hi):
             relay.deliver(rid)
-        self.assertEqual(slept, [5, 10, relay.DEFER_POLL, 5])    # card, card, busy (a flat poll), card again: the step is back to the first
+        self.assertEqual(slept, [5, 10, 5, 5])    # card, card, busy (its own ladder: the first step), card again: the card step is back to the first
         self.assertEqual(relay.rec_read(rid)["state"], "delivered")
+
+    def test_a_working_target_is_looked_at_on_a_capped_ladder_not_every_five_seconds(self) -> None:
+        """Load watcher, 2026-10-29: ~9 deliverers at load 39 each spawned `paseo agent inspect` every 5 s while their targets worked."""
+        rid = self.queue()
+        looks = iter([(False, "running")] * 6)
+        relay.paseo_inspect = lambda a: (lambda card, status: {"Id": a, "Status": status, "Archived": False, "Cwd": "/x",
+                                                                  "PendingPermissions": [{"id": "p1"}] if card else []})(*next(looks, (False, "idle")))
+        self.cur = "idle"
+        slept: list[float] = []
+        with mock.patch.object(relay.time, "sleep", side_effect=slept.append), mock.patch.object(relay.random, "uniform", lambda lo, hi: hi):
+            relay.deliver(rid)
+        self.assertEqual(slept, [5, 10, 20, 30, 30, 30])    # doubles from one poll to BUSY_BACKOFF_CAP, then holds
+        self.assertEqual(relay.rec_read(rid)["state"], "delivered")
+        self.assertEqual(relay.BUSY_BACKOFF_CAP < relay.CARD_BACKOFF_CAP, True)    # a turn ends at any moment; a card waits for a human
 
     def test_a_card_wait_never_sleeps_past_the_expiry_and_the_expired_record_says_why(self) -> None:
         rid = self.queue()
