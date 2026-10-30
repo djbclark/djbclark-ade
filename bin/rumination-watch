@@ -24,6 +24,15 @@ WHAT IT WATCHES (each an "open loop")
 - **Open PRs** authored by the operator's account (via `gh`; best-effort, offline is not an incident).
 - **Chain staleness**: the Tier 1 log's `head_sha` vs the repo's real HEAD.
 
+AND IT DEPLOYS ITSELF (issue #143)
+----------------------------------
+The launchd job executes this file FROM the shared djbclark-ade checkout, so a merge into that repo
+reaches the job only when the checkout moves — it did not, and the two fixes for "the voice is never
+heard" sat merged and unrun for hours while `last pass` looked healthy. Each pass therefore
+fast-forwards its own checkout to `origin/<branch>` (fast-forward only, clean tracked tree only, never
+while another git operation is in progress) and logs `deploy updated <old> -> <new>`; a refusal is
+logged once per cooldown with its reason. `RW_NO_DEPLOY=1` turns it off.
+
 TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
 -------------------------------------------------
 - **To the session** (a one-line relay): "here is work you left open" — actionable by the agent.
@@ -64,9 +73,45 @@ BIGTEAM = HOME / ".local/state/bigteam"
 # debugging the watcher itself, wrong for the launchd job.
 OWNER = os.environ.get("RW_OWNER", ROLE)
 
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """An int knob, CLAMPED. `RW_PENDING_MAX=0` used to keep everything (`lines[-0:]` is the whole
+    list) and `RW_PR_LIMIT=0` made the cap marker fire on an empty listing ("at least 0 open PR(s)"):
+    both fail in the dishonest direction. A non-number falls back to the default instead of dying at
+    import time, which is how a mistyped env var takes the watcher down for good.
+
+    Defined here, above every knob, because the knobs are exactly the lines that used to call `int()`
+    unguarded: `RW_COOLDOWN_S=6h` or `RW_DEPLOY_TIMEOUT_S=1m` raised at import and killed the WHOLE
+    watcher — pass, `status` and voice — so one typo in one environment variable was a permanent,
+    silent outage of the thing that exists to prevent outages.
+    """
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
 # How often the same item may be re-announced to djbclark (seconds). A quiet channel that repeats
 # itself is not quiet; this is the anti-noise budget djbclark asked for.
-DJB_COOLDOWN_S = int(os.environ.get("RW_COOLDOWN_S", 6 * 3600))
+DJB_COOLDOWN_S = _env_int("RW_COOLDOWN_S", 6 * 3600)
+
+# The checkout THIS FILE runs from, which is not REPO: launchd executes this script as a tracked file
+# in the djbclark-ade shared checkout, while REPO is techno-euphora (whose chain log it reads). A
+# merge into djbclark-ade does not reach a launchd job until someone pulls, and nobody did: on
+# 2026-10-29 the checkout sat five commits behind master and the job ran pre-#131 code for two days,
+# logging `session=False` 870 times while the entity heard nothing (issue #143). So the pass brings
+# ITS OWN checkout forward, and says so in the log when it cannot.
+SELF_REPO = Path(os.environ.get("RW_SELF_REPO") or Path(__file__).resolve().parents[1])
+DEPLOY_OFF = os.environ.get("RW_NO_DEPLOY", "") not in ("", "0", "false", "no")
+# A refusal that repeats every 300 s is noise; the word is logged once and again after this long.
+DEPLOY_COOLDOWN_S = _env_int("RW_DEPLOY_COOLDOWN_S", 6 * 3600)
+DEPLOY_TIMEOUT_S = _env_int("RW_DEPLOY_TIMEOUT_S", 60)
+# What makes a fast-forward unsafe. A tree with only UNTRACKED files is safe (git will not touch
+# them); a merge, rebase, cherry-pick or bisect in progress is not, and neither is a detached HEAD.
+GIT_BUSY = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "rebase-merge",
+            "rebase-apply", "sequencer")
 
 
 def log(msg: str) -> None:
@@ -135,6 +180,184 @@ def run(cmd: list[str], timeout: int = 20) -> tuple[int, str]:
     """Both streams for logging callers. argv list, never a shell string: no quoting problems here."""
     rc, out, err = run_split(cmd, timeout)
     return rc, (out + ("\n" if out and err else "") + err).strip()
+
+
+# --- deploying itself ----------------------------------------------------------------------------
+
+
+def _git(args: list[str], timeout: int = 20) -> tuple[int, str, str]:
+    """git against SELF_REPO, with `-C` so nothing depends on the process's working directory."""
+    return run_split(["git", "-C", str(SELF_REPO), *args], timeout=timeout)
+
+
+def running_sha() -> str:
+    """The commit this job is EXECUTING, which is the only sha that says what is live."""
+    rc, out, _ = _git(["rev-parse", "--short=10", "HEAD"])
+    return out if rc == 0 and out else "unknown"
+
+
+def _deploy_say(state: dict, word: str, msg: str, now: float) -> None:
+    """Log a deploy outcome, but say a repeated refusal ONCE per cooldown.
+
+    Every pass is 300 s apart, so an unfixable "skipped: dirty" would otherwise write the same line
+    288 times a day — the same noise budget `DJB_COOLDOWN_S` exists for. A successful update gets a
+    word that carries the new sha, so it is never suppressed.
+    """
+    seen = state.get("deploy")
+    seen = seen if isinstance(seen, dict) else {}
+    if (seen.get("word") == word and _is_num(seen.get("at"))
+            and now - float(seen["at"]) < DEPLOY_COOLDOWN_S):
+        return
+    state["deploy"] = {"word": word, "at": now}
+    log(msg)
+
+
+def deploy_update(state: dict, now: float) -> str:
+    """Fast-forward the checkout this script runs FROM to its upstream, once per pass (issue #143).
+
+    A merge into djbclark-ade does not reach a launchd job: the plist runs a tracked file in the
+    shared checkout, so the job keeps executing whatever that checkout last pulled. On 2026-10-29 it
+    was five commits behind, and the two fixes for "the entity never hears the watcher" sat merged
+    and unrun for hours. "Merge and the next tick picks it up" was simply false.
+
+    Fast-forward ONLY, and only when nothing else is going on in that checkout:
+
+    - it is the SHARED checkout, so another session may hold staged work there; a fast-forward that
+      rewrote a tracked file under it would be destroying someone's uncommitted work. Untracked
+      files are fine — git does not touch them.
+    - a merge/rebase/cherry-pick/bisect in progress, or a detached HEAD, means someone is mid-something
+      and the checkout is not ours to move.
+    - `merge-base --is-ancestor` before `--ff-only`, so local commits (a session that committed here
+      and did not push) are reported instead of being merged into or reset away. Nothing here ever
+      creates a merge commit, resets, stashes or checks anything out.
+
+    ONE step stays manual, once: the job that existed before this code has no deploy step of its own,
+    so the shared checkout needs a single `git pull --ff-only` by hand before this can start
+    maintaining itself. After that it is self-sustaining, which is the whole point of it.
+
+    A failure is not fatal: this runs inside the pass whose real job is to speak, and a watcher that
+    cannot update itself must still be able to say so.
+
+    Returns a short word for the caller's log/`status`: "" when there was nothing to do.
+    """
+    if DEPLOY_OFF:
+        return ""
+    if not (SELF_REPO / ".git").exists():
+        _deploy_say(state, "not-a-repo",
+                    f"deploy skipped: {SELF_REPO} is not a git checkout", now)
+        return "skipped: not-a-repo"
+    for marker in GIT_BUSY:
+        # `--git-path` is the only correct place to look. In a LINKED worktree `.git` is a FILE, so
+        # `SELF_REPO/.git/<marker>` was always false there and the check silently passed; the real
+        # location is the per-worktree dir (`<common>/worktrees/<name>/`), which is exactly what
+        # `--git-path` reports. It answers absolute in a worktree and relative in a plain checkout.
+        # A failure to answer is not fatal: `git merge --ff-only` refuses on an operation in progress
+        # on its own, so the marker probe is the early, logged word, not the only guard.
+        rc, where, _ = _git(["rev-parse", "--git-path", marker])
+        if rc != 0 or not where:
+            continue
+        path = Path(where)
+        if not path.is_absolute():
+            path = SELF_REPO / path
+        if path.exists():
+            _deploy_say(state, f"busy:{marker}",
+                        f"deploy skipped: {marker} exists at {path} "
+                        "(a git operation is in progress there)", now)
+            return f"skipped: {marker} in progress"
+    rc, dirty, err = _git(["status", "--porcelain", "--untracked-files=no"])
+    if rc != 0:
+        _deploy_say(state, "status-failed",
+                    f"deploy skipped: git status in {SELF_REPO} failed: {(err or 'no output')[:200]}",
+                    now)
+        return "skipped: status failed"
+    if dirty:
+        # Count, never contents: this checkout may hold another session's uncommitted work and the
+        # log is a shared file.
+        n = len(dirty.splitlines())
+        _deploy_say(state, "dirty",
+                    f"deploy skipped: {SELF_REPO} has {n} uncommitted path(s); a fast-forward there "
+                    "could overwrite someone's work", now)
+        return "skipped: checkout has uncommitted changes"
+    rc, branch, err = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    if rc != 0 or not branch:
+        _deploy_say(state, "no-branch",
+                    f"deploy skipped: cannot read the branch of {SELF_REPO}: "
+                    f"{(err or 'no output')[:200]}", now)
+        return "skipped: no branch"
+    if branch == "HEAD":
+        _deploy_say(state, "detached",
+                    f"deploy skipped: {SELF_REPO} has a detached HEAD; not moving it", now)
+        return "skipped: detached HEAD"
+    rc, old, err = _git(["rev-parse", "HEAD"])
+    if rc != 0 or not old:
+        _deploy_say(state, "no-head",
+                    f"deploy skipped: cannot read HEAD of {SELF_REPO}: "
+                    f"{(err or 'no output')[:200]}", now)
+        return "skipped: no HEAD"
+    # An explicit refspec, not a bare `fetch origin <branch>` + `FETCH_HEAD`: FETCH_HEAD is shared by
+    # every session in this checkout, so another session's fetch could rewrite it between our fetch
+    # and our read, and an abbreviated ref name can also be shadowed by a same-named TAG on origin.
+    # Naming both sides leaves nothing to interpret.
+    remote_ref = f"refs/remotes/origin/{branch}"
+    refspec = f"+refs/heads/{branch}:{remote_ref}"
+    rc, _, err = _git(["fetch", "--quiet", "origin", refspec], timeout=DEPLOY_TIMEOUT_S)
+    if rc != 0:
+        # Network, auth or a missing remote: the checkout keeps running what it has, and the log
+        # says why it is not moving rather than leaving the staleness unexplained.
+        _deploy_say(state, "fetch-failed",
+                    f"deploy skipped: git fetch origin {refspec} failed: "
+                    f"{(err or 'no output')[:200]}", now)
+        return "skipped: fetch failed"
+    rc, new, err = _git(["rev-parse", remote_ref])
+    if rc != 0 or not new:
+        _deploy_say(state, "no-remote-ref",
+                    f"deploy skipped: cannot read {remote_ref} after fetching {branch}: "
+                    f"{(err or 'no output')[:200]}", now)
+        return "skipped: no remote ref"
+    if new == old:
+        # The common case: already current. Restarting the cooldown here would re-log an unrelated
+        # refusal that followed an actual update, so the state is left alone.
+        return ""
+    rc, _, err = _git(["merge-base", "--is-ancestor", old, new])
+    if rc != 0:
+        _deploy_say(state, "diverged",
+                    f"deploy skipped: {branch} at {old[:10]} has commits origin/{branch} lacks "
+                    f"(origin is {new[:10]}); not merging, not resetting", now)
+        return "skipped: local commits not on origin"
+    # The fetch above can take DEPLOY_TIMEOUT_S, and this checkout is SHARED: a session that checks a
+    # different branch out during it would make the merge below fast-forward THAT branch — one this
+    # function never validated. Not hypothetical on 2026-10-29: the checkout sat on master while the
+    # job pointed at a PR branch, so a switch during the fetch would have moved local master onto the
+    # PR head, and the next promoter's `merge --ff-only master` would have refused. The pass flock
+    # excludes other passes, never other writers, so the only honest guard is to re-read what we are
+    # about to move. This leaves the same microsecond window any human `git pull` has, and no more.
+    rc, still, err = _git(["rev-parse", "HEAD"])
+    rc_branch, still_branch, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    if rc != 0 or rc_branch != 0 or still != old or still_branch != branch:
+        _deploy_say(state, "changed-during-fetch",
+                    f"deploy skipped: {SELF_REPO} changed during the fetch "
+                    f"({branch}@{old[:10]} -> {still_branch or '?'}@{(still or '?')[:10]}); another "
+                    "session is using this checkout, so the fast-forward is not ours to make", now)
+        return "skipped: checkout changed during the fetch"
+    # `--no-overwrite-ignore` is not decoration: `git merge` UPDATES ignored files by default, so a
+    # revision that starts tracking a path this checkout already holds as an ignored local file would
+    # silently overwrite it — the status check above sees a clean tree precisely BECAUSE the file is
+    # ignored. Ordinary untracked files are untouched by `git merge`; ignored ones are not.
+    rc, _, err = _git(["merge", "--ff-only", "--quiet", "--no-overwrite-ignore", new],
+                      timeout=DEPLOY_TIMEOUT_S)
+    if rc != 0:
+        # Either lost the race with a session that touched the checkout between the status check and
+        # now, or the revision would overwrite an ignored local file; both are refusals, and git's
+        # own message names the path.
+        _deploy_say(state, "merge-failed",
+                    f"deploy skipped: fast-forward {old[:10]} -> {new[:10]} failed: "
+                    f"{(err or 'no output')[:200]}", now)
+        return "skipped: fast-forward failed"
+    moved = running_sha()
+    _deploy_say(state, f"updated:{moved}",
+                f"deploy updated {old[:10]} -> {moved} ({branch}); this pass still runs the old code, "
+                "the next one runs the new", now)
+    return f"updated {old[:10]} -> {moved}"
 
 
 # --- the open loops ----------------------------------------------------------------------------
@@ -589,21 +812,6 @@ def djb_page_sent(item: str, state: dict, now: float) -> None:
 
 # A refused pass is a turn boundary, not an outage: the seat is usually mid-work. Only the words
 # that mean "this will not end by itself" are darkness, and only after they repeat this many passes.
-def _env_int(name: str, default: int, minimum: int = 1) -> int:
-    """An int knob, CLAMPED. `RW_PENDING_MAX=0` used to keep everything (`lines[-0:]` is the whole
-    list) and `RW_PR_LIMIT=0` made the cap marker fire on an empty listing ("at least 0 open PR(s)"):
-    both fail in the dishonest direction. A non-number falls back to the default instead of dying at
-    import time, which is how a mistyped env var takes the watcher down for good.
-    """
-    raw = os.environ.get(name, "")
-    if not raw:
-        return default
-    try:
-        return max(minimum, int(raw))
-    except ValueError:
-        return default
-
-
 SEAT_STUCK_PASSES = _env_int("RW_STUCK_PASSES", 3)
 
 # A line the seat refused is kept and retried, not dropped (see `_pass`). Cap so a seat that stays
@@ -795,6 +1003,12 @@ def _pass(a: argparse.Namespace) -> int:
     """
     now = time.time()
     state = load_state()
+    # FIRST, because everything below is code that may be a merge behind (issue #143): a fix merged
+    # into djbclark-ade reaches this job only when this checkout moves. It logs its own outcome (and
+    # honours the cooldown for a repeated refusal), so the return value is not logged again here. A
+    # dry run never moves anyone's checkout.
+    if not a.dry_run:
+        deploy_update(state, now)
     before = state.get("last", {})
     cur = survey()
 
@@ -969,6 +1183,13 @@ def cmd_status(a: argparse.Namespace) -> int:
     print(f"jobs:  {len(cur['jobs'])} open" + (f" ({stuck} finished-but-open)" if stuck else ""))
     print(f"prs:   {pr_phrase(cur['prs'])}")
     print(f"stale: {cur['stale'] or 'no'}")
+    # WHICH COMMIT IS LIVE, not just when it last passed: the job was 5 commits behind master for a
+    # day while `last pass` looked perfectly healthy (issue 143).
+    rc, branch, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    deploy = state.get("deploy") if isinstance(state.get("deploy"), dict) else {}
+    word = deploy.get("word") if isinstance(deploy.get("word"), str) else ""
+    print(f"code:  {running_sha()} on {branch if rc == 0 and branch else '?'} in {SELF_REPO}"
+          + (f" (last deploy: {word})" if word else ""))
     print(f"last pass: {state.get('last_run') or 'never'}")
     return 0
 
@@ -1021,7 +1242,20 @@ def cmd_uninstall(a: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="rumination-watch", description=__doc__.split("\n")[0])
+    # `pass` writes to the checkout it runs from, not only to state, and AGENTS.md rule 8 requires a
+    # changed behaviour to appear in the tool's usage text (Codex review on #148). The description is
+    # the docstring's first line only, so before this epilog `--help` said nothing about the deploy.
+    p = argparse.ArgumentParser(
+        prog="rumination-watch",
+        description=__doc__.split("\n")[0],
+        epilog=(
+            "`pass` first fast-forwards THIS checkout to origin/<branch>, so a merged fix reaches the "
+            "launchd job without a hand pull: fast-forward only, never a merge commit, reset or stash, "
+            "and it refuses rather than forcing on a dirty tracked tree, a detached HEAD, a git "
+            "operation in progress, or local commits origin lacks. RW_NO_DEPLOY=1 turns it off, "
+            "--dry-run never touches the checkout, and `status` prints the last deploy."
+        ),
+    )
     sub = p.add_subparsers(dest="command", required=True)
     pa = sub.add_parser("pass", help="one rumination pass (the launchd entry point)")
     pa.add_argument("--dry-run", action="store_true", help="survey and report; send nothing")
