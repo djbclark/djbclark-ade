@@ -90,7 +90,7 @@ this plan wins where they disagree about the future, they win about today. Sourc
       recorded in D1) or excludes every agent G1 has not marked "branch pushed and report read"; workers lose
       `archive_agent` (B3). G1's "not archived until pushed" is a convention: the operator, the UI and
       `paseo-telegram` can still archive, which is why point 2 exists.
-   4. D1.3 proves all of it.
+   4. D1.3 proves the teardown and the rescue; D2's gate proves G2's refusal.
 5. **Native first, plugin only for a hook.** A script that calls the `paseo` CLI, SDK or MCP is native (A3a)
    and lives in djbclark-ade. A plugin is written only when a daemon lifecycle hook, a UI surface or a
    composer command is needed, because plugins are trusted, unsandboxed and sit in the create/turn path of
@@ -182,16 +182,16 @@ ops-promotion pilot passes.
       cow pasture clean and pushed, or its owner named; bigteam inboxes drained.
 1. **Contracts and safety net.** Each probe is a repeatable script under `tests/paseo-acceptance/` with an
    **expected outcome and a named consequence if it fails**; D2 starts only when every consequence is
-   resolved.
+   resolved. D1 probes native Paseo behaviour and the non-plugin pieces it builds (the B4 teardown, the B9
+   watchdog, the dead-man check); anything that needs a G plugin is checked in D2's gate.
    1. Steer while running, per C2 provider. Expected: steer queues. If not: that provider is "queue only"
       in G3.
    2. A parent answers a question card's *option*, not only allow/deny, via `respond_to_permission`.
       Expected: works. If not: B3 and G4 are redesigned (cards go to the operator).
    3. Archive an agent whose isolated worktree workspace is dirty and has an unpushed commit (isolated
       daemon). Expected: the B4 local rescue (bundle, stash commit, untracked tar) exists before the worktree
-      goes, also when the push fails; the pushed `rescue/` branch carries tracked changes only. Also: a
-      `worktree` create in a repo without a committed `paseo.json` teardown is refused by G2. Record whether a
-      failing teardown stops Paseo removing the worktree, and `session-janitor`'s current mode. If anything
+      goes, also when the push fails; the pushed `rescue/` branch carries tracked changes only. Record whether
+      a failing teardown stops Paseo removing the worktree, and `session-janitor`'s current mode. If anything
       is lost: no slice moves into Paseo workspaces until it is not.
    4. Archive a parent with a running child. Expected: the child survives. If not: successors stay
       top-level (C1) permanently.
@@ -227,7 +227,8 @@ ops-promotion pilot passes.
    daemon restart; G4 ignores an agent G1 never recorded (also one labelled after create) and escalates
    compound commands (`;`, `&&`, `|`, `$(`, a newline, `sh -c`); a non-owner Telegram message is refused; a
    forged agent id in an RPC input is refused; the tool catalogs of a UI-created and a Telegram-created
-   agent lack the B3 tools.
+   agent lack the B3 tools; a `worktree` create in a repo without a committed `paseo.json` teardown is
+   refused (B4, G2).
 3. **Canary.** One real workflow end to end on Paseo only: work → review → CI → report, including a forced
    quota stop that resumes and a daemon restart that loses nothing (isolated daemon, or a drained window
    with djbclark's yes), and the one-task pilot on vps-primary with its report retrieved on the Mac.
