@@ -4033,11 +4033,26 @@ def credential_url_key(key: str) -> bool:
     path segment (`url.https://example.org/@scope/.insteadOf`) stays a path and travels. A base with no
     `://` at all (`url.git@example.org:.insteadOf`) is a path on a host named `git`, not userinfo, and
     travels.
+
+    A `credential.` subsection may also be a PARTIAL url with no scheme, which git matches through
+    `match_partial_url`, so `credential.user:token@host.helper` is a real subsection and carries the same
+    token in its name even though git ignores the password slot when matching (adversary round 7, PR 156).
+    A colon before the `@` is what marks it token-shaped, so a port (`credential.https://host:8443.helper`)
+    still travels. Refresh the `://` rule above for the rest: a username-only userinfo is refused with it
+    too (`url.ssh://git@github.com/.insteadOf`, `credential.https://alice@github.com.helper`), because a
+    username cannot be told apart from a token without decoding it, and `~/.gitconfig` is the documented
+    home for those.
     """
     rest = key
     while "://" in rest:
         _, _, rest = rest.partition("://")
         if "@" in rest.lstrip("/").split("/", 1)[0]:
+            return True
+    section, _, tail = key.partition(".")
+    if section.lower() == "credential":
+        subsection = tail.rpartition(".")[0] or tail
+        user = subsection.partition("@")[0]
+        if "@" in subsection and ":" in user:
             return True
     return False
 

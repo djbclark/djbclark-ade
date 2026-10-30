@@ -214,7 +214,10 @@ class TestGitIdentityGuard(unittest.TestCase):
                     # an upper-case scheme, and a nested URL in a path: refused as a fail-closed
                     # extra, because the token is in the name either way
                     "url.HTTPS://user:s3cr3t@example.org/.insteadOf",
-                    "url.https://example.org/r?u=https://user:s3cr3t@h/.insteadOf"):
+                    "url.https://example.org/r?u=https://user:s3cr3t@h/.insteadOf",
+                    # a PARTIAL credential url has no scheme but is a real subsection git matches
+                    # (`match_partial_url`), so the token in the name is the same exposure
+                    "credential.user:s3cr3t@example.org.helper"):
             with self.subTest(key=key):
                 env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
                        "GIT_CONFIG_VALUE_0": "https://example.org/"}
@@ -227,8 +230,10 @@ class TestGitIdentityGuard(unittest.TestCase):
     def test_keys_without_userinfo_still_travel(self):
         guard = load_guard(self.tmp / "guard.sh")
         # scp-like bases have no `://`, a `@` outside a URL is not userinfo, a `@` in the first path
-        # segment is a path, and the other URL-scoped families travel when they carry no userinfo
-        env = {**self.env, "GIT_CONFIG_COUNT": "5",
+        # segment is a path, and the other URL-scoped families travel when they carry no userinfo.
+        # The last one is a `credential.` subsection with a port and no userinfo: the partial-url rule
+        # keys on a colon BEFORE the `@`, so a port must not make a real config unlaunchable
+        env = {**self.env, "GIT_CONFIG_COUNT": "6",
                "GIT_CONFIG_KEY_0": "url.git@example.org:.insteadOf",
                "GIT_CONFIG_VALUE_0": "https://mirror.example.org/",
                "GIT_CONFIG_KEY_1": "url.https://example.org/.insteadOf",
@@ -238,14 +243,17 @@ class TestGitIdentityGuard(unittest.TestCase):
                "GIT_CONFIG_KEY_3": "http.https://example.org/.sslVerify",
                "GIT_CONFIG_VALUE_3": "true",
                "GIT_CONFIG_KEY_4": "credential.https://example.org.helper",
-               "GIT_CONFIG_VALUE_4": "!true"}
+               "GIT_CONFIG_VALUE_4": "!true",
+               "GIT_CONFIG_KEY_5": "credential.https://example.org:8443.helper",
+               "GIT_CONFIG_VALUE_5": "!true"}
         guard(env)
         for name, want in (("url.git@example.org:.insteadOf", "https://mirror.example.org/"),
                            ("url.https://example.org/.insteadOf", "https://mirror2.example.org/"),
                            ("url.https://example.org/@scope/.insteadOf",
                             "https://mirror3.example.org/"),
                            ("http.https://example.org/.sslVerify", "true"),
-                           ("credential.https://example.org.helper", "!true")):
+                           ("credential.https://example.org.helper", "!true"),
+                           ("credential.https://example.org:8443.helper", "!true")):
             r = self.git(self.real, "config", "--get", name, env=env)
             self.assertEqual(r.stdout.strip(), want, r.stderr)
 
