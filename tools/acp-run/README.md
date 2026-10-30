@@ -695,7 +695,11 @@ using Git's single-quoted format. Configuration order stays: inherited counted
 entries, ACP's guard entries, then existing `GIT_CONFIG_PARAMETERS` text. Nested
 launches normalize inherited tuples too, without adding the guard twice. An invalid
 count or a missing key/value refuses the launch with exit 2 and a variable-name-only
-diagnostic; the incomplete tuple is never cleared as a fallback. The workspace Git
+diagnostic; the incomplete tuple is never cleared as a fallback. A counted key whose
+`url.*` base embeds userinfo (`url.https://user:token@host/.insteadOf`) refuses too, by
+index only, never by value: the name-based exclusion used to keep such a token out of
+an agent's tool environment, and the quoted transport would hand it over. Use a
+credential helper or `~/.gitconfig` for those. The workspace Git
 guard recognizes only the exact ACP hook event and expected guard path in this
 environment transport, while retaining compatibility with older counted launches.
 

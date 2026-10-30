@@ -26,7 +26,8 @@ def load_guard(guard_path: Path):
     tree = ast.parse(SCRIPT.read_text())
     keep = []
     for n in tree.body:
-        if isinstance(n, ast.FunctionDef) and n.name in {"git_identity_guard", "git_config_parameters"}:
+        if isinstance(n, ast.FunctionDef) and n.name in {"git_identity_guard", "git_config_parameters",
+                                                         "credential_url_key"}:
             keep.append(n)
         elif isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "GIT_IDENTITY_GUARD_SH" for t in n.targets):
             keep.append(n)
@@ -194,6 +195,33 @@ class TestGitIdentityGuard(unittest.TestCase):
                     guard(env)
                 self.assertNotIn("private-value", str(raised.exception))
                 self.assertEqual(env, before)
+
+    def test_counted_key_with_an_embedded_credential_is_refused_by_index_only(self):
+        guard = load_guard(self.tmp / "guard.sh")
+        for key in ("url.https://user:s3cr3t@example.org/.insteadOf",
+                    "url.ssh://deploy:s3cr3t@example.org/.pushInsteadOf"):
+            with self.subTest(key=key):
+                env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
+                       "GIT_CONFIG_VALUE_0": "https://example.org/"}
+                before = dict(env)
+                with self.assertRaisesRegex(ValueError, "GIT_CONFIG_KEY_0 embeds a credential") as raised:
+                    guard(env)
+                self.assertNotIn("s3cr3t", str(raised.exception))
+                self.assertEqual(env, before)
+
+    def test_keys_without_userinfo_still_travel(self):
+        guard = load_guard(self.tmp / "guard.sh")
+        # scp-like bases have no `://`, and a `@` outside a url.* key is not userinfo
+        env = {**self.env, "GIT_CONFIG_COUNT": "2",
+               "GIT_CONFIG_KEY_0": "url.git@example.org:.insteadOf",
+               "GIT_CONFIG_VALUE_0": "https://mirror.example.org/",
+               "GIT_CONFIG_KEY_1": "url.https://example.org/.insteadOf",
+               "GIT_CONFIG_VALUE_1": "https://mirror2.example.org/"}
+        guard(env)
+        for name, want in (("url.git@example.org:.insteadOf", "https://mirror.example.org/"),
+                           ("url.https://example.org/.insteadOf", "https://mirror2.example.org/")):
+            r = self.git(self.real, "config", "--get", name, env=env)
+            self.assertEqual(r.stdout.strip(), want, r.stderr)
 
     def test_launch_refuses_incomplete_config_without_starting_an_agent(self):
         guard = load_guard(self.tmp / "guard.sh")

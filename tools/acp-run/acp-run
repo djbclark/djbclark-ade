@@ -4010,12 +4010,29 @@ exit 0
 """
 
 
+def credential_url_key(key: str) -> bool:
+    """Whether a config key embeds userinfo in a url.* base, e.g. url.https://user:token@host/.insteadOf.
+
+    Codex's shell_environment_policy drops variable NAMES containing KEY, SECRET or TOKEN, so a token
+    inside a counted GIT_CONFIG_KEY_<n> used to be invisible to an agent's tool commands; moving the
+    group into one GIT_CONFIG_PARAMETERS value hands it over (codex security review, PR 156,
+    2026-10-30). This is about KEYS only: a credential in a counted VALUE was already readable, because
+    the name filter never covered GIT_CONFIG_VALUE_<n>, so refusing those would be a different change.
+    """
+    if not key.startswith("url."):
+        return False
+    _, sep, rest = key[len("url."):].partition("://")
+    return bool(sep) and "@" in rest.split("/", 1)[0]
+
+
 def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) -> None:
     """Move complete counted config into Git's quoted transport, which survives KEY-name filtering.
 
     Git reads COUNT entries before PARAMETERS. Insert new guard pairs between those layers, as
     the old counted injection did. Validate the entire counted group before changing `env`.
     This is Git's single-quoted format, not shell execution (shlex.quote can emit unquoted tokens).
+    A counted key that carries a credential is refused, in the caller's words and never by value:
+    the message names the index only, because the key itself is the secret.
     """
     raw = env.get("GIT_CONFIG_COUNT")
     count = 0
@@ -4039,6 +4056,10 @@ def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) ->
                 raise ValueError(f"missing {name}: incomplete counted configuration")
         if not env[f"GIT_CONFIG_KEY_{i}"]:
             raise ValueError(f"invalid GIT_CONFIG_KEY_{i}: empty config key")
+        if credential_url_key(env[f"GIT_CONFIG_KEY_{i}"]):
+            raise ValueError(
+                f"GIT_CONFIG_KEY_{i} embeds a credential in a url.* key, which this transport would make "
+                "readable to the agent; use a credential helper or ~/.gitconfig instead")
         counted.append((env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]))
     quote = lambda value: "'" + value.replace("'", "'\\''") + "'"
     tokens = [quote(key) + "=" + quote(value) for key, value in [*counted, *pairs]]
