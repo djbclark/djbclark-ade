@@ -80,7 +80,7 @@ REFUSAL_RE = re.compile(
     rf"|\b(?:review|analysis|inspection)\b[^.\n]{{0,25}}\b{STATE}\b"    # "the review was incomplete"; never a bare "incomplete records"
     rf"|\b(?:repository|repo|checkout|worktree|diff|patch)\b[^.\n]{{0,15}}\b(?:inaccessible|unavailable)\b"    # "the repository is unavailable"
     r"|\b(?:stopped early|cut short|ran out of (?:context|budget|tokens)|nothing was reviewed|not reviewed|partial review|too large to review|"
-    r"context window (?:was )?exhausted|denied access|blocked (?:every|all))\b|\baborted\b|not logged in|codex login")
+    r"context window (?:was )?exhausted|denied access|blocked (?:every|all))\b|not logged in|codex login")
 GENERATED = (".cursor/hooks.json", ".claude/settings.json")
 SECRET_ENV_RE = re.compile(r"(?i)(token|secret|passw|credential|api_?key)|^(GH|GITHUB)_")
 KEEP_ENV_RE = re.compile(r"^(CODEX_|OPENAI_)")
@@ -297,10 +297,10 @@ def main(argv: list[str]) -> int:
                 raise RuntimeError(f"cannot fetch the base branch {base}: {bfetch.stderr.strip()[:200]}")
             doc_out["base_sha"] = base_sha
             wt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            worktree_added = True    # BEFORE the add: an interrupt in the middle of a checkout still gets its half-made worktree removed and pruned
             add = run(["git", "worktree", "add", "--detach", str(wt), head], cwd=root)
             if add.returncode != 0:
                 raise RuntimeError(f"git worktree add failed: {add.stderr.strip()[:200]}")
-            worktree_added = True
             try:
                 doc_out["codex_version"] = (run(["codex", "--version"], timeout=20).stdout.strip().splitlines() or [""])[0][:80]
             except FileNotFoundError:

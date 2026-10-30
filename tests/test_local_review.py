@@ -74,6 +74,7 @@ Full review comments:
   wasnt_able) say "I wasn't able to review the patch because the repository is unavailable." ;;
   incomplete_records) say "The patch correctly handles incomplete records and rejects inaccessible paths, and I found no actionable issues." ;;
   late_child) { (cd /tmp && sleep 300 & echo $! > "$FAKE_PID_FILE"); }; say "The patch looks correct." ;;
+  aborted_requests) say "The patch cleanly handles aborted requests and I found no actionable issues." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -349,6 +350,11 @@ def test_cleanup_masks_termination_signals_so_nothing_cuts_it_short(world: World
     finally:
         for s, h in saved.items():
             signal.signal(s, h)
+
+
+def test_a_summary_about_aborted_requests_is_clean_but_an_aborted_review_is_not(world: World) -> None:
+    """Codex P2 on PR 130 (round 13): a bare `aborted` anywhere in the message is not a refusal; "Review aborted" still is (parametrized above)."""
+    assert world.run(mode="aborted_requests").returncode == 0
 
 
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
