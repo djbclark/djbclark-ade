@@ -89,12 +89,17 @@ def sec_review(unresolved: bool | None = False, any_findings: bool | None = Fals
 
 
 def codex_comment(sha: str, status: str, updated: str = "2026-10-23T10:00:00Z", unresolved: bool | None = False,
-                  any_findings: bool | None = False, security: dict | None = ..., **who: object) -> dict:  # type: ignore[assignment]
+                  any_findings: bool | None = False, security: dict | None = ..., explicit_null: bool = False,
+                  **who: object) -> dict:  # type: ignore[assignment]
     cr: dict = {"commit_sha": sha, "status": status}
-    if unresolved is not None:
-        cr["has_unresolved_findings"] = unresolved
-    if any_findings is not None:
-        cr["has_any_findings"] = any_findings
+    if explicit_null:
+        cr["has_unresolved_findings"] = None
+        cr["has_any_findings"] = None
+    else:
+        if unresolved is not None:
+            cr["has_unresolved_findings"] = unresolved
+        if any_findings is not None:
+            cr["has_any_findings"] = any_findings
     state: dict = {"code_review": cr}
     if security is ...:
         security = sec_review(sha=sha)
@@ -685,6 +690,53 @@ def test_marker_without_the_unresolved_flag_is_unverified(world: World) -> None:
     assert world.run().returncode == 0
     summary = world.file("summary")
     assert summary["merge_ready"] is False and summary["merge_blockers"] == ["marker-unverified"]
+
+
+def null_review(sha: str = HEAD, status: str = "completed") -> dict:
+    """Codex's own "this review found nothing of its kind" shape: the keys PRESENT, the values null.
+
+    Observed on every clean head (PR 132 and 134, 2026-10-29): the security review pairs
+    `has_any_findings: null` / `has_unresolved_findings: null` with `status: completed`.
+    """
+    return {"commit_sha": sha, "status": status, "has_any_findings": None, "has_unresolved_findings": None}
+
+
+def test_an_explicit_null_findings_flag_beside_no_evidence_is_a_clean_review(world: World) -> None:
+    """Before 2026-10-29 this was `security-marker-unverified` on EVERY clean security review.
+
+    `null` is not a missing key: Codex is saying the review found nothing of that kind, and with no
+    finding comment and no open thread of that kind the evidence agrees. Reading it as "no statement"
+    made merge_ready unreachable for the commonest Pull Request on the repo.
+    """
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", explicit_null=True, security=null_review())]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = world.file("summary")
+    assert summary["merge_ready"] is True and summary["merge_blockers"] == []
+    assert summary["has_unresolved_findings"] is None and summary["security_status"] == "completed"
+    assert summary["security_has_unresolved_findings"] is None
+
+
+def test_an_explicit_null_beside_an_open_security_thread_still_fails_closed(world: World) -> None:
+    """The null is believed only where the independent evidence agrees; an open thread contradicts it."""
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(60)]))
+    world.route("graphql", gql(thread(60)))
+    world.run()
+    summary = world.file("summary")
+    assert summary["merge_ready"] is False
+    assert "security-marker-unverified" in summary["merge_blockers"]
+    assert "open-findings" in summary["merge_blockers"]
+
+
+def test_a_findings_flag_that_is_neither_boolean_nor_null_is_still_unverified(world: World) -> None:
+    # a marker we do not understand is not a clean review, and must not be read as one
+    sec = {"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": "false"}
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=sec)]))
+    assert world.run().returncode == 0
+    assert world.file("summary")["merge_blockers"] == ["security-marker-unverified"]
 
 
 def test_codex_failed_or_ci_failing_or_skipped_is_not_merge_ready(world: World) -> None:

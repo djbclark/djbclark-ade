@@ -60,8 +60,10 @@ that kind, false with some, or has_any_findings true with no Codex finding comme
 print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when: at least one CI
 check succeeded and none failed or is pending (skipped and neutral count as passed beside a success,
 never alone), Codex's code review completed on this head, the security review too when the marker carries
-it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings as
-a boolean for each review it carries. merge_blockers lists why not: codex-<status>, security-<status>
+it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings
+for each review it carries: a boolean, or an explicit null beside no finding comment and no open thread
+of that kind (Codex's "this review found none", see `unresolved_stated`; a missing key is not a
+statement and blocks as marker-unverified). merge_blockers lists why not: codex-<status>, security-<status>
 (security-failed, security-running, security-other-head), findings-not-collected, marker-unverified,
 security-marker-unverified, no-checks, ci-pending, ci-failed, ci-none-succeeded, open-findings,
 findings-mismatch, codex-skipped. The exit code does not carry it: the caller reads merge_ready.
@@ -1029,6 +1031,35 @@ def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict
             "finding_comments": {k: sum(1 for kind, _ in findings.values() if kind == k) for k in KINDS}}
 
 
+def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
+    """Whether this review's marker STATES its unresolved-findings answer, with evidence behind it.
+
+    Codex writes `has_unresolved_findings: true|false` when the review records findings, and an explicit
+    JSON `null` when that review reported none of its kind — its security review emits the null pair on
+    every clean head (PR 132 and 134, 2026-10-29). Read as "no statement", as it was until 2026-10-29,
+    `security-marker-unverified` blocked EVERY pull request whose security review found nothing, which
+    is the common case: the waiter could never report merge_ready, so the gate had to be talked around
+    by hand or the word lost its meaning.
+
+    A null is a statement only beside the independent evidence: no Codex finding comment of that kind
+    and no open Codex thread of that kind. A MISSING key, or a value that is neither boolean nor null,
+    is still not a statement — that is a marker we do not understand, not a clean review — and the
+    contradiction case (null beside an open thread) already fails closed in `assess`'s mismatch check.
+    """
+    if "has_unresolved_findings" not in r:
+        return False
+    v = r["has_unresolved_findings"]
+    if isinstance(v, bool):
+        return True
+    if v is not None:
+        return False
+    if review is None:
+        return False
+    if review["finding_comments"][kind]:
+        return False
+    return not any(t["kind"] == kind for t in review["open"])
+
+
 def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, sr: dict | None,
            head: str, review: dict | None, adversary: dict | None = None,
            adversary_required: bool = False) -> dict:
@@ -1044,7 +1075,9 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     this head; its security review completed on this head too WHEN the marker carries `security_review`
     (a marker without one is not blocked on it: the open threads of both kinds still gate, and the summary
     says `security_status: absent`); zero open Codex threads of either kind (outdated or not); no mismatch;
-    and a marker that states has_unresolved_findings as a boolean for each review it carries.
+    and a marker that states has_unresolved_findings for each review it carries - a boolean, or an explicit
+    null beside no finding comment and no open thread of that kind (`unresolved_stated`; a missing key is
+    not a statement).
     merge_blockers names why not: `codex-<status>` (code review not completed on the head), `security-<status>`
     (`security-failed`, `security-running`, `security-other-head`), `findings-not-collected`,
     `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
@@ -1102,9 +1135,9 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
         if review is None:
             blockers.append("findings-not-collected")
         else:
-            if not isinstance(cr.get("has_unresolved_findings"), bool):
+            if not unresolved_stated(cr, "code", review):
                 blockers.append("marker-unverified")
-            if sr is not None and not isinstance(sr.get("has_unresolved_findings"), bool):
+            if sr is not None and not unresolved_stated(sr, "security", review):
                 blockers.append("security-marker-unverified")
     if ci_state == "no-checks":
         blockers.append("no-checks")
