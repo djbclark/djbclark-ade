@@ -741,6 +741,10 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
          through the peer-comms tool, which prunes ids it can no longer reach.
     """
     seen: set[str] = set()
+    if AUTO_SEAT and (candidate := auto_seat_candidate(load_state())):
+        # Do not depend on the new seat rewriting the peer registry before the next pass.
+        seen.add(candidate[:8])
+        yield ("auto-seat", candidate)
     for src in ("RW_SESSION", "PASEO_AGENT_ID"):
         val = (os.environ.get(src) or "").strip()
         if val:
@@ -1035,6 +1039,20 @@ AUTO_SEAT_S = _env_int("RW_AUTO_SEAT_S", 3600)
 AUTO_SEAT_PROVIDER = os.environ.get("RW_AUTO_SEAT_PROVIDER", "")
 
 
+def auto_seat_candidate(state: dict) -> str:
+    """The most recent run's id, including an unconfirmed one. This is NOT a cooldown stamp.
+
+    Reuse the existing `told` bookkeeping map (numeric values, sanitized by load_state), with a
+    separate namespace from pages/refusals. Keep it after confirmation so a stale peer registry
+    cannot cause a second seat after cooldown. A failed confirmation is a failed READ of this id,
+    never permission to spawn again; a later probe must prove THIS candidate gone first.
+    """
+    prefix = f"auto-seat candidate:{ROLE}:"
+    candidates = [(float(at), key[len(prefix):]) for key, at in state.get("told", {}).items()
+                  if key.startswith(prefix) and key[len(prefix):] and _is_num(at)]
+    return max(candidates, default=(0, ""))[1]
+
+
 def auto_seat(word: str, state: dict, now: float) -> str:
     """Start only a PROVEN ABSENT seat; return the confirmed id, otherwise ''.
 
@@ -1082,7 +1100,7 @@ def auto_seat(word: str, state: dict, now: float) -> str:
         f"Resume the existing individual as role {ROLE} in repo {REPO.resolve()}.\n"
         + (f"Tier 1 pointer file: {pointer}\n" if exists else
            f"No Tier 1 pointer file exists ({pointer or 'none'}); resume from the repo's state.\n")
-        + "Read that file's ## Current State and - Next steps: and continue at the first unstarted step.\n"
+        + "When available, read that file's ## Current State and - Next steps: and continue at the first unstarted step.\n"
         "Do not page djbclark; if the work needs his decision, put it in the report.\n"
         f"This seat was started automatically after the previous one disappeared at "
         f"{time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(now))} (trigger: {word}); "
@@ -1104,6 +1122,15 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     new_id = result.get("agentId") if isinstance(result, dict) else None
     if not isinstance(new_id, str) or not new_id.strip():
         return refuse("paseo run returned no agentId")
+    # The daemon may have created a seat even if the following inspect fails. Retain its id BEFORE
+    # that read, without stamping seated; the next pass must diagnose it instead of duplicating it.
+    told = state.setdefault("told", {})
+    prefix = f"auto-seat candidate:{ROLE}:"
+    for key in list(told):
+        if key.startswith(prefix):
+            del told[key]
+    told[prefix + new_id] = now
+    save_state(state)
     remaining = min(20, deadline - time.monotonic())
     if remaining <= 0:
         return refuse("start confirmation timed out")
@@ -1386,10 +1413,12 @@ def _pass(a: argparse.Namespace) -> int:
     # fleet alone is not proof: ask relay's inspect-backed diagnosis, and never spawn on a blind read.
     auto_gone = False
     if AUTO_SEAT:
-        target = ident
+        candidate = auto_seat_candidate(state)
+        target = candidate or ident
         if not target and not _LIVE_ERR:
             target = next((candidate for _, candidate in owner_candidates()), "")
-        word = seat_word() if ident else (why_blocked(target)[0] if target else "unknown")
+        word = (why_blocked(candidate)[0] if candidate else seat_word() if ident
+                else why_blocked(target)[0] if target else "unknown")
         started = auto_seat(word, state, now)
         auto_gone = word == "gone"
         if auto_gone and (started or should_tell_djbclark("no live session", state, now)):

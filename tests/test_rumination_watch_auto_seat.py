@@ -204,3 +204,36 @@ def test_15_dry_run_never_starts(monkeypatch, tmp_path):
     rw = load(monkeypatch, tmp_path)
     rw._pass(rw.argparse.Namespace(dry_run=True, quiet=True))
     assert rw.calls == [] and not rw.STATE.exists()
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_16_retained_candidate_prevents_duplicates_even_after_cooldown(monkeypatch, tmp_path, confirmed):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = confirmed
+    run_pass(rw)
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle" if ident == NEW else "gone", "test"))
+    run_pass(rw)
+    assert len(rw.calls) == 2
+    assert rw.auto_seat_candidate(rw.load_state()) == NEW
+    if not confirmed:
+        assert not rw.load_state().get("seated")
+
+
+def test_17_saved_candidate_is_considered_by_real_owner_resolution(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    run_pass(rw)
+    monkeypatch.delenv("RW_SESSION", raising=False)
+    monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
+    assert next(rw.owner_candidates()) == ("auto-seat", NEW)
+
+
+@pytest.mark.parametrize("stamp", [NOW, NOW + 10**9, 1e300])
+def test_18_status_bounds_future_stamps_without_crashing(monkeypatch, tmp_path, capsys, stamp):
+    rw = load(monkeypatch, tmp_path)
+    rw.STATE_DIR.mkdir()
+    rw.STATE.write_text(json.dumps({"seated": {rw.ROLE: stamp}}))
+    monkeypatch.setattr(rw, "_git", lambda *args: (0, "j-auto-seat", ""))
+    monkeypatch.setattr(rw, "running_sha", lambda: "fixture")
+    assert rw.cmd_status(rw.argparse.Namespace()) == 0
+    assert "auto-seat: on (1 role(s) started, last " in capsys.readouterr().out
