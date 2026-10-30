@@ -17,6 +17,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from urllib.parse import unquote
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools/acp-run/acp-run"
 OPERATOR = "operator@example.org"
@@ -34,7 +35,8 @@ def load_guard(guard_path: Path):
                                               for t in n.targets):
             keep.append(n)
     tree.body = keep
-    ns = {"os": os, "re": re, "subprocess": subprocess, "Path": Path, "GIT_IDENTITY_GUARD": guard_path}
+    ns = {"os": os, "re": re, "unquote": unquote, "subprocess": subprocess, "Path": Path,
+          "GIT_IDENTITY_GUARD": guard_path}
     exec(compile(tree, str(SCRIPT), "exec"), ns)  # noqa: S102 - only repository code
     return ns["git_identity_guard"]
 
@@ -255,7 +257,21 @@ class TestGitIdentityGuard(unittest.TestCase):
                     # (`token_urlsafe(16)`, the default), and this machine runs that proxy: a floor
                     # of 32 let it travel, so the `sk-` floor is 20 (adversary round 11, F1)
                     "remote.sk-AbcD3fGhIjKlMnOpQrStUv.url",
-                    "url.https://example.org/sk-AbcD3fGhIjKlMnOpQrStUv/.insteadOf"):
+                    "url.https://example.org/sk-AbcD3fGhIjKlMnOpQrStUv/.insteadOf",
+                    # ... and the SAME token written with PERCENT ESCAPES. `git config
+                    # --get-urlmatch http.sslVerify <url>` answers a `ghp%5F...` subsection for both
+                    # `ghp%5F...` and `ghp_...`, so git treats the spellings as one subsection, and
+                    # an agent reading the converted key can decode it too: the exposure is the name
+                    # (codex security review, PR 156, 2026-10-30)
+                    "http.https://host/ghp%5Fabcdefghijklmnopqrstuvwx.sslVerify",
+                    "remote.sk%2DAbcD3fGhIjKlMnOpQrStUv.url",
+                    "url.https://example.org/ghp%5Fabcdefghijklmnopqrstuvwx/.insteadOf",
+                    # double-encoded: decoding repeats until the text stops changing
+                    "remote.ghp%255Fabcdefghijklmnopqrstuvwx.url",
+                    # escapes that spell the POSITION separators the checks look for
+                    "url.https%3A%2F%2Fuser%3As3cr3t%40example.org/.insteadOf",
+                    "credential.user%3As3cr3t%2540example.org.helper",
+                    "url.https://example.org/r%3Ftoken=TOK3N.insteadOf"):
             with self.subTest(key=key):
                 env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
                        "GIT_CONFIG_VALUE_0": "https://example.org/"}
@@ -302,7 +318,12 @@ class TestGitIdentityGuard(unittest.TestCase):
                  ("url.https://asiapacificmirror.example.org/.insteadOf", "https://mirror4.example.org/"),
                  # a prefix is matched in the case its issuer uses, so an uppercased one is not a
                  # shape this refuses; a real token never uppercases its prefix
-                 ("remote.GHP_FAKE0123456789abcdef.url", "https://example.org/upper")]
+                 ("remote.GHP_FAKE0123456789abcdef.url", "https://example.org/upper"),
+                 # percent escapes that spell no credential still travel: decoding must not turn an
+                 # ordinary encoded name into a refusal
+                 ("remote.example%2Dorg.url", "https://example.org/encoded-hyphen"),
+                 ("url.https://example.org/%7Euser/repo.insteadOf", "https://mirror5.example.org/"),
+                 ("remote.ghp_mirror%5F01.url", "https://example.org/encoded-floor")]
         env = {**self.env, "GIT_CONFIG_COUNT": str(len(pairs))}
         for i, (key, value) in enumerate(pairs):
             env[f"GIT_CONFIG_KEY_{i}"] = key

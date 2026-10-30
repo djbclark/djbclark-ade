@@ -748,6 +748,19 @@ sitting in a path segment cannot be told apart from path data
 (`url.https://example.org/@scope/.insteadOf` must travel), so it still travels: that is
 this check's documented limit.
 
+Both of those checks also run on every **percent-decoded** spelling of the key, not only the
+text as written, because the exposure is the name and not the setting's meaning: an agent
+reads the converted key and can decode it. Measured with `git config --get-urlmatch
+http.sslVerify <url>` on git 2.56.0, a setting written under
+`http.https://host/ghp%5Fabc....sslVerify` answers for both `https://host/ghp_abc...` and
+`https://host/ghp%5Fabc...`, so git treats the spellings as one subsection too (codex
+security review, 2026-10-30). Decoding repeats until the text stops changing — each step
+strictly shortens, so it terminates — which covers a double encoding (`ghp%255F...`);
+escapes that are not valid escapes are left alone, so a `%` in ordinary path data travels.
+The cost is a key that only spells a credential once decoded, such as
+`credential.user%40host.helper` or `url.https%3A%2F%2Fuser%3Atoken%40host/x.insteadOf`:
+that refuses too, which is the intended trade, and both stay usable in `~/.gitconfig`.
+
 A port has no `@`, so `credential.https://host:8443.helper`, the plain
 `credential.example.org.helper`, an ordinary `remote.origin.url` and a name that only
 resembles a prefix (`remote.sk-1.url`) still travel. Use a credential helper or

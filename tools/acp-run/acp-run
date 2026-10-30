@@ -219,6 +219,7 @@ import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote
 
 # zcode-acp-server sends its turn-state notification as "$/zcode/turnState". The
 # ACP Python library only knows "_" as the extension prefix and raises
@@ -4095,24 +4096,47 @@ def credential_in_key(key: str) -> bool:
     because a username cannot be told apart from a token without decoding it. A port has no `@`, so
     `credential.https://host:8443.helper` still travels, and so does a schemeless subsection without
     userinfo (`credential.example.org.helper`).
+
+    ENCODING: both checks also run on every percent-DECODED spelling of the key, not just the text as
+    written, because the exposure is the name and not the setting's meaning: an agent reads the
+    converted key and can decode it, so `http.https://host/ghp%5F<20+>.sslVerify` spells the same
+    secret as `ghp_`. Measured with `git config --get-urlmatch http.sslVerify <url>` on 2.56.0: a
+    setting written under `http.https://host/ghp%5Fabc....sslVerify` answers for BOTH
+    `https://host/ghp_abc...` and `https://host/ghp%5Fabc...`, so git treats the two as one subsection
+    too (codex security review, PR 156, 2026-10-30). Decoding repeats until the text stops changing -
+    each step strictly shortens, so it terminates - which covers double encoding (`ghp%255F...`).
+    Escapes that are not valid escapes are left alone, so a `%` in ordinary path data travels. This
+    refuses a key that only spells a credential once decoded (`credential.user%40host.helper`,
+    `url.https%3A%2F%2Fuser%3Atoken%40host/x.insteadOf`); that is the intended trade, and both stay
+    usable in `~/.gitconfig`.
     """
-    if TOKEN_SHAPE.search(key):
-        return True
-    tails = []
-    rest = key
-    while "://" in rest:
-        _, _, rest = rest.partition("://")
-        tails.append(rest)
-        if "@" in rest.lstrip("/").split("/", 1)[0]:
+    def refuses(spelling: str) -> bool:
+        if TOKEN_SHAPE.search(spelling):
             return True
-    if any("?" in tail or "#" in tail for tail in tails):
-        return True
-    section, _, tail = key.partition(".")
-    if section.lower() == "credential":
-        subsection = tail.rpartition(".")[0] or tail
-        if "://" not in subsection and ("@" in subsection.split("/", 1)[0]
-                                       or "?" in subsection or "#" in subsection):
+        tails = []
+        rest = spelling
+        while "://" in rest:
+            _, _, rest = rest.partition("://")
+            tails.append(rest)
+            if "@" in rest.lstrip("/").split("/", 1)[0]:
+                return True
+        if any("?" in tail or "#" in tail for tail in tails):
             return True
+        section, _, tail = spelling.partition(".")
+        if section.lower() == "credential":
+            subsection = tail.rpartition(".")[0] or tail
+            if "://" not in subsection and ("@" in subsection.split("/", 1)[0]
+                                           or "?" in subsection or "#" in subsection):
+                return True
+        return False
+
+    if refuses(key):
+        return True
+    written, decoded = key, unquote(key)
+    while decoded != written:
+        if refuses(decoded):
+            return True
+        written, decoded = decoded, unquote(decoded)
     return False
 
 
