@@ -75,6 +75,8 @@ Full review comments:
   incomplete_records) say "The patch correctly handles incomplete records and rejects inaccessible paths, and I found no actionable issues." ;;
   late_child) { (cd /tmp && sleep 300 & echo $! > "$FAKE_PID_FILE"); }; say "The patch looks correct." ;;
   aborted_requests) say "The patch cleanly handles aborted requests and I found no actionable issues." ;;
+  cant_review_plain) say "I can't review this patch because the repository is unavailable." ;;
+  curly) say "I couldn’t review the patch because the repository is unavailable." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -257,6 +259,8 @@ def test_a_finding_on_a_hook_file_the_pr_itself_edits_is_never_ignored(world: Wo
     ("noexec", "not a verdict"),
     ("aborted", "not a verdict"),    # the wording the adversary found filing clean when an exec block existed
     ("asks", "not a verdict"),
+    ("cant_review_plain", "not a verdict"),    # Codex P1 on PR 130 (round 14): `can't` was not in the inability list
+    ("curly", "not a verdict"),    # a typographic apostrophe
     ("wasnt_able", "not a verdict"),    # Codex P1 on PR 130 (round 9)
     ("aborted_with_hook", "not a verdict"),    # one ignored generated-file finding must not turn an incomplete review into clean    # a question is not a verdict
     ("wrong_sandbox", "does not show the review this run asked for"),    # a config that overrode the read-only sandbox

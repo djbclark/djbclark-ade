@@ -72,7 +72,7 @@ FINDING_RE = re.compile(r"^- \[(P[0-3])\]\s+(\S.*)$")
 FINDING_SHAPED_RE = re.compile(r"(?i)\[\s*P\s*\d\s*\]|^\W*P\d\b|\*\*\s*P\d")
 # Wording of a review that did NOT happen. Narrow on purpose (round 8): it only fires on inability to review/inspect/read/finish, or on an abort, a size or
 # context limit, a denied or blocked sandbox. "I could not run tests" and "the patch fixes the failed command" are ordinary summaries of a finished review.
-INABILITY = r"(?:unable|not able|(?:wasn|weren)'?t able|could ?n[o']t|can ?n[o']t|failed|(?:didn'?t|did not) (?:finish|complete))"
+INABILITY = r"(?:unable|not able|(?:wasn|weren)'?t able|could ?n[o']t|can(?:not| not|'t)|failed|(?:didn'?t|did not) (?:finish|complete))"
 UNDONE = r"(?:review\w*|complet\w*|finish\w*|inspect\w*|access\w*|read(?!-)|load\w*)"
 STATE = r"(?:aborted|incomplete|partial|blocked|failed|stopped|cut short|unavailable|inaccessible)"
 REFUSAL_RE = re.compile(
@@ -389,7 +389,7 @@ def review(wt: Path, root: str, base: str, base_sha: str, out_path: Path, err_pa
     kept, ignored = [], []
     for f in findings:
         (ignored if is_generated(f["path"], dirty_set, pr_files, str(wt)) else kept).append(f)
-    if not kept and (REFUSAL_RE.search(msg) or msg.rstrip().endswith("?") or not re.search(r"(?m)^exec$", transcript)):
+    if not kept and (REFUSAL_RE.search(msg.replace("\u2019", "'")) or msg.rstrip().endswith("?") or not re.search(r"(?m)^exec$", transcript)):
         # Nothing left to report is a verdict only when the transcript shows codex looked at the repository (an `exec` block) and the message is no
         # refusal. Judged AFTER the generated-file filter: an incomplete review that mentions one ignored hook finding is still incomplete (Codex, round 7)
         res["reason"] = "no findings, but the final message reads as a refusal or the transcript shows no repository inspection: not a verdict"
