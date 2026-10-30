@@ -81,9 +81,31 @@ entity is dark, now with a working credential. Re-prompt it:
 ```
 
 Find the id from the fleet (`skills/session-finder/fleet.py`), the registry row, or the tab the
-session is in — give `relay.py` an **id**, never a name. A session stopped on an error is idle, so
-the relay delivers immediately. This applies to your own seat too: after rotating for yourself,
-continue in place rather than opening a new tab.
+session is in — give `relay.py` an **id**, never a name. This applies to your own seat too: after
+rotating for yourself, continue in place rather than opening a new tab.
+
+**Read the exit, do not assume the send.** A session stopped on an error is *usually* idle, but
+"it is idle, so it went in" is the assumption that leaves the entity dark with a working credential
+— which is the whole failure this skill exists to end. From an agent session relay's delivery watch
+is on by default and its exit code is the verdict:
+
+| exit | word | what it means for the resume |
+| --- | --- | --- |
+| 0 | `delivered` | the text is in the target's transcript (or its Paseo timeline): the turn was re-prompted |
+| 1 | not delivered | nothing arrived (bad id, an ended session, a refusal): fix the id and retry |
+| 3 | `unverified` | sent or still queued with no proof yet — **do not resend**; open the tab and look |
+| 2 / 4 | usage / no sender | the send never happened; nothing is pending, nothing to wait for |
+
+`accepted` and `queued` are settlements, not proof: relay keeps watching, but you must not report a
+resume you have not seen. When the send ends `unverified`, read the seat before believing it —
+`relay.py <id> --why` names what it is doing right now (`idle`, `working`, `silent`,
+`card:<kind>`), and a `silent` or `card:` answer means the resume did not land and a human is
+needed. Say so through `hermes-ping` rather than moving on, and tell djbclark which account was
+exhausted and which credential now serves it.
+
+First contact with a stopped session is where a **named ack** earns its place: put the ask in the
+text and pass `--expect-ack <label>`, so the resume is closed by the session's own words and
+`--pending` pages you if it never answers.
 
 ## When no account has headroom
 
