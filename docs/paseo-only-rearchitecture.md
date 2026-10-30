@@ -303,8 +303,10 @@ ops-promotion pilot passes.
    `skills/helm/helm.py:56-57`, `skills/herdr-tidy/tidy.py:35`). It skips what D7 handles: `docs/history/`,
    `docs/handoffs/`, `site-private/memory/handoffs/`, `CHANGELOG.md`, `graft/`, `skills/session-finder/`, test
    code that loads or fixtures it (`tests/test_relay_*`, `tests/test_fleet_*`, the relay and fleet fixtures in
-   `tests/conftest.py`, the relay case in `tests/test_codex_shell_env_policy.py`), and this plan. A hit in
-   code, config, a launchd plist, a hook or the NixOS config **blocks** the
+   `tests/conftest.py`, the relay case in `tests/test_codex_shell_env_policy.py`), this plan, and the code of
+   tools an earlier phase already disabled after a committed drain record (D4: helm, herdr-tidy,
+   herdr-sleeper), which D7 deletes; the search verifies each is still disabled and blocks if one is not. A
+   hit in code, config, a launchd plist, a hook or the NixOS config **blocks** the
    gate. A hit in a live instruction file (AGENTS.md, `home-agents.mdc`, memory notes, other skills, docs)
    goes onto a triage list that D7's rewrite must empty. **Gate:** a load incident reaches its watcher as a
    Paseo prompt; no blocking hit remains; the triage list is committed.
