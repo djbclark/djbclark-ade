@@ -23,6 +23,7 @@ WHAT IT WATCHES (each an "open loop")
 - **Stuck jobs**: a job whose `done` path exists but whose record is still open.
 - **Open PRs** authored by the operator's account (via `gh`; best-effort, offline is not an incident).
 - **Chain staleness**: the Tier 1 log's `head_sha` vs the repo's real HEAD.
+- **Next move**: the seat is `idle` (relay.py `--why`) and the Tier 1 log declares next steps. See below.
 
 AND IT DEPLOYS ITSELF (issue #143)
 ----------------------------------
@@ -33,11 +34,47 @@ fast-forwards its own checkout to `origin/<branch>` (fast-forward only, clean tr
 while another git operation is in progress) and logs `deploy updated <old> -> <new>`; a refusal is
 logged once per cooldown with its reason. `RW_NO_DEPLOY=1` turns it off.
 
+IT SPEAKS WHEN THE SEAT IS IDLE WITH DECLARED WORK (2026-10-30)
+----------------------------------------------------------------
+Everything above fires on a CHANGE, so an idle seat with a full `- Next steps:` list was told
+nothing for as long as nothing else moved: 216 consecutive quiet passes, 18.1 hours (2026-10-26 00:30
+to 18:37) with a healthy watcher and a seat nobody had started. `seat_dark("idle")` is "" on purpose
+(an idle seat is healthy), so `escalate_dark` cannot see it either. So one keyed, state-like item,
+`next move: N declared step(s) still open ...`, goes to the SEAT when ALL hold: the seat's `--why`
+probe (one per pass, cached by `seat_word`; the send paths add one more after an unproven send) says
+`idle` (never `working`, `silent`, `card:*`, `unreachable` or unreadable: those are busy, or already
+covered by the darkness page), the Tier 1 log (the same file `chain_staleness` reads, via
+`resolve_pointer`) has N >= 1 OPEN steps under `- Next steps:`, and the last nudge settled more than
+RW_IDLE_NUDGE_S ago. A bullet that says there is nothing to do (`- None`, `NOTHING IS PENDING ...`,
+`- No further work`) is not a step and is not counted: otherwise the natural way for a seat to say "I
+am done" would keep nudging it every cooldown forever, with no ack that could stop it. The line
+carries the COUNT and never a step's text: several chains write to one pointer, and naming a step
+would send this seat to do another seat's slice. It goes to the seat, not djbclark: it is not his
+decision. The one exception is the tool's standing rule for ANY line — if its send comes back
+`unverified`, the disclosure that an admitted loss happened still goes to him. Knobs:
+`RW_IDLE_NUDGE=0` turns it off; `RW_IDLE_NUDGE_S` is the cooldown (default 10800, 3 h), stamped only
+by a send that settled.
+
 TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
 -------------------------------------------------
 - **To the session** (a one-line relay): "here is work you left open" — actionable by the agent.
 - **To djbclark, via the `dann` quiet topic** (`inbox-target dann`), **only** when something needs
   HIS decision. Rate-limited by a per-item cooldown, because the point of a quiet channel is quiet.
+
+OPT-IN ABSENT-SEAT START (djbclark's ruling, 2026-10-30, option 3)
+---------------------------------------------------------------
+RW_AUTO_SEAT=1 may start a fresh seat ONLY on a proven `gone` diagnosis, narrowing the "including
+after a hard error" ruling. Off by default until field-tested; RW_AUTO_SEAT_PROVIDER must be set
+explicitly (no model or thinking flags). If relay cannot diagnose a UUID-shaped id, one extra
+`paseo agent inspect --json -- <id>` probe (up to 20 s, no model) must confirm AGENT_NOT_FOUND;
+errors, timeouts, unreadable bodies and unknown shapes never prove absence. See the decision table
+in `auto_seat`. A `refused`/`unknown` seat does not auto-start and still pages the human when no owner
+resolves. A `silent` hung seat is NOT replaced, so the individual can stay dark until the human acts.
+RW_AUTO_SEAT_S (default 3600 s): at most one attempt per role per window, confirmed or not. A failed
+start with no id becomes eligible again only after the window; returned ids are retained for diagnosis.
+Every invocation outcome is logged; only pre-invocation refusals are suppressed once per window.
+The prompt names the absolute Tier 1 file, never step text. The darkness page still goes out and
+names any automatically started id.
 
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
 not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
@@ -165,7 +202,7 @@ def load_state() -> dict:
     # A list where a mapping belongs used to raise AttributeError mid-pass (the whole watcher down,
     # silently, for as long as the file stayed wrong); a string `pending` was iterated character by
     # character. Neither is reachable except by hand — which is exactly when a watcher must not die.
-    for key in ("last", "told", "stuck"):
+    for key in ("last", "told", "stuck", "nudged", "seated"):
         if not isinstance(data.get(key), dict):
             data[key] = {}
     # `pending` entries are `{"key", "text", "queued_at"}` since 2026-10-30 (see `_pass`); before that
@@ -184,16 +221,22 @@ def load_state() -> dict:
     # guards above are for, one level down. Drop only the unreadable entries; keep the rest.
     data["told"] = {k: v for k, v in data["told"].items() if _is_num(v)}
     data["stuck"] = {k: v for k, v in data["stuck"].items() if _is_num(v)}
+    data["nudged"] = {k: v for k, v in data["nudged"].items() if _is_num(v)}
+    data["seated"] = {k: v for k, v in data["seated"].items() if _is_num(v)}
     return data
 
 
 def _is_num(value: object) -> bool:
-    """A number we can do arithmetic with. JSON can hand us a string, a list or null here."""
+    """A number we can do arithmetic with. JSON can hand us a string, a list or null here.
+
+    Non-finite counts as unreadable (`"1e999"` parses to `inf`): a stamp of `inf` would silence the
+    item it guards FOREVER, and no later pass can heal it, because the pass that never fires never
+    re-stamps. Dropping it is the only self-healing answer.
+    """
     try:
-        float(value)                      # type: ignore[arg-type]
+        return math.isfinite(float(value))          # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
         return False
-    return True
 
 
 def save_state(data: dict) -> None:
@@ -490,6 +533,88 @@ def pr_phrase(prs: list[str] | None) -> str:
     return f"{'at least ' if capped else ''}{n} open PR(s) of yours"
 
 
+def resolve_pointer() -> Path | None:
+    """The file that IS the Tier 1 log for REPO, or None when the pointer itself is unreadable.
+
+    Reads `HOME/.local/state/handoffs/<REPO.name>/main/SESSION_LOG.md` and follows a
+    `redirect: <path>` line to the canonical log. The ONE place that decides which file is the
+    pointer: `chain_staleness` (the recorded head) and `declared_next_steps` (the open steps) both
+    read through it, so they cannot disagree about which log they are talking about. The returned
+    path may not exist (a dangling redirect): the caller's own read says so.
+    """
+    root = HOME / ".local/state/handoffs"
+    pointer = root / REPO.name / "main" / "SESSION_LOG.md"
+    try:
+        text = pointer.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if m := re.search(r"^redirect:\s*(\S+)", text, re.M):
+        return root / m.group(1)
+    return pointer
+
+
+_NEXT_STEPS = re.compile(r"^- Next steps:\s*$")
+# Every way a pointer writes a step: `- `, `* `, `+ `, and numbered `1. ` / `1) `. The numbered form
+# was excluded at first and that was a MISS of real open work (`graft-pr519-gitignore` lists its two
+# remaining steps as `1. `/`2. `), which is the direction that costs the entity: a chain with work
+# left says nothing. The count is still structural, never a reading of the words.
+_BULLET = re.compile(r"^(\s+)(?:[-*+]|\d+[.)])\s+(.*)$")
+# ...except a bullet that says there is NOTHING to do. `- Next steps:` + `  - None` is how a seat
+# writes "I am done", and counting it would nudge that seat every cooldown forever with no ack that
+# could end it: 12 of 135 real chains said it (2 of them live repo-keyed pointers) when this was
+# found. The list is deliberately narrow (the words that mean "no work"), never a guess at intent.
+_NOTHING_STEP = re.compile(
+    r"^(?:none|nothing|n/?a|no\s+(?:further|more|action|open|pending|remaining|mandatory|merge|"
+    r"steps?|work))\b", re.I)
+_EMPHASIS = "*`_~ "
+
+
+def _step_text(raw: str) -> str:
+    """A bullet's text with the markdown emphasis a pointer wraps around it removed."""
+    return raw.strip().strip(_EMPHASIS)
+
+
+def declared_next_steps() -> int:
+    """How many OPEN next steps the Tier 1 log declares, or 0. The COUNT only, never their text.
+
+    Finds the line `- Next steps:` (column 0, nothing after the colon: how the pointer files write
+    it inside `## Current State`) and counts the indented bullets that follow it. The block ends at
+    the first blank line or the first unindented line (a new top-level bullet such as
+    `- Substrate question answered: ...`, or the next `## ` heading). Two shapes continue a block
+    without being a step: a wrapped line of text (indented, no bullet) and a bullet nested deeper
+    than the first one. Only bullets at the first bullet's own indentation count, and a bullet whose
+    text says there is nothing to do (`- None`, `NOTHING IS PENDING ...`) counts nothing: "done" is
+    not a step, and a false 1 here nags the seat forever.
+
+    A missing pointer, an unreadable file, no such section or an empty one is 0: the caller treats
+    that as "nothing declared", never as an error and never as a guess.
+    """
+    path = resolve_pointer()
+    if path is None:
+        return 0
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return 0
+    start = next((i for i, ln in enumerate(lines) if _NEXT_STEPS.match(ln)), None)
+    if start is None:
+        return 0
+    count = 0
+    indent: str | None = None
+    for ln in lines[start + 1:]:
+        if not ln.strip() or not ln[0].isspace():
+            break
+        m = _BULLET.match(ln)
+        if not m or (indent is not None and m.group(1) != indent):
+            continue          # wrapped text, or a deeper bullet: part of the block, not a step
+        indent = m.group(1)
+        text = _step_text(m.group(2))
+        if not text or _NOTHING_STEP.match(text) or text[:3].lower() == "[x]":
+            continue          # "nothing to do", an empty bullet, or a ticked-off checklist row
+        count += 1
+    return count
+
+
 def chain_staleness() -> str | None:
     """The Tier 1 log's recorded head vs the repo's real HEAD. A string when they disagree.
 
@@ -498,16 +623,13 @@ def chain_staleness() -> str | None:
     or a peer seat committing) is the normal case, not staleness. This is the same check the
     `session-handoff` skill documents, done mechanically so nobody has to remember it.
     """
-    pointer = HOME / ".local/state/handoffs" / REPO.name / "main" / "SESSION_LOG.md"
+    pointer = resolve_pointer()
+    if pointer is None:
+        return None
     try:
         text = pointer.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
-    if m := re.search(r"^redirect:\s*(\S+)", text, re.M):
-        try:
-            text = (HOME / ".local/state/handoffs" / m.group(1)).read_text()
-        except OSError:
-            return None
     m = re.search(r"head_sha:\s*([0-9a-f]{7,40})", text)
     if not m:
         return None
@@ -622,6 +744,7 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
          owning seat keeps current; this is authoritative between the agent and its siblings.
       3. `peer_mail.py resolve --as ROLE --json` -> `live_paseo_ids`, the same record read
          through the peer-comms tool, which prunes ids it can no longer reach.
+      4. A saved auto-seat candidate, as a fallback while the registry catches up.
     """
     seen: set[str] = set()
     for src in ("RW_SESSION", "PASEO_AGENT_ID"):
@@ -651,6 +774,9 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
             if ident[:8] not in seen:
                 seen.add(ident[:8])
                 yield ("peer_mail", ident)
+    if AUTO_SEAT and (candidate := auto_seat_candidate(load_state())) and candidate[:8] not in seen:
+        # Do not depend on the new seat rewriting the peer registry before the next pass.
+        yield ("auto-seat", candidate)
 
 
 def owner_session() -> tuple[str, str]:
@@ -680,19 +806,36 @@ def why_blocked(ident: str) -> tuple[str, str]:
       stays dark until someone answers. Exactly the silence this watcher exists to prevent.
     - `silent` — running with nothing new for 15 min: a hung turn.
 
-    Anything unreadable comes back as ("unknown", reason) and the caller keeps its old behaviour, so
-    a broken `--why` can never turn a healthy pass into a false alarm.
+    With auto-seat enabled, a missing diagnosis for a UUID gets one direct inspect (up to 20 s).
+    Only an explicit AGENT_NOT_FOUND proves absence; a blind read remains `unknown`.
     """
+    uuid = re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", ident)
+
+    def unknown(reason: str) -> tuple[str, str]:
+        if AUTO_SEAT and uuid:
+            rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", ident],
+                                     timeout=20)
+            try:
+                info = json.loads(out or err)
+            except ValueError:
+                info = None
+            error = info.get("error") if isinstance(info, dict) else None
+            if rc in (0, 1) and isinstance(error, dict) and error.get("code") == "AGENT_NOT_FOUND":
+                return "gone", "direct inspect confirmed AGENT_NOT_FOUND"
+        return "unknown", reason
+
     relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
     if not relay.is_file():
-        return "unknown", f"no relay.py at {relay}"
+        return unknown(f"no relay.py at {relay}")
     rc, out, err = run_split(["python3", "-I", str(relay), "--why", ident, "--json"], timeout=90)
     try:
         d = json.loads(out)
     except ValueError:
-        return "unknown", f"unreadable --why (rc {rc}): {(err or out)[:160]}"
-    if not isinstance(d, dict) or not d.get("state"):
-        return "unknown", f"no state in --why (rc {rc}): {out[:160]}"
+        return unknown(f"unreadable --why (rc {rc}): {(err or out)[:160]}")
+    if rc not in (0, 1) or not isinstance(d, dict) or not d.get("state") or d.get("state") == "unknown":
+        return unknown(f"no diagnosis in --why (rc {rc}): {out[:160]}")
+    if d["state"] == "gone" and not uuid:
+        return "unknown", "absence not proven for a non-UUID id"
     return str(d["state"]), str(d.get("why") or "")
 
 
@@ -868,6 +1011,31 @@ def djb_page_sent(item: str, state: dict, now: float) -> None:
     told[item] = now
 
 
+def nudge_due(ident: str, state: dict, now: float) -> bool:
+    """May the idle-with-work nudge be considered this pass? Switch on, a seat to speak to, cooldown over.
+
+    The window is `0 <= age < NUDGE_S`, not `age < NUDGE_S`: a stamp in the FUTURE (a hand edit, or a
+    clock that ran ahead when the stamp was written and was corrected later) must expire rather than
+    hold the cooldown open for as long as it takes the clock to catch up — the one shape that could
+    silence the line that keeps this entity alive, permanently.
+    """
+    if not NUDGE_ON or not ident:
+        return False
+    nudged = state.get("nudged")
+    last = nudged.get(KEY_NEXT) if isinstance(nudged, dict) else None
+    return not (last is not None and 0 <= now - float(last) < NUDGE_S)
+
+
+def nudge_sent(state: dict, now: float) -> None:
+    """The nudge reached the seat: start the cooldown. Called ONLY after a send that settled, never
+    before it (the `djb_page_sent` lesson: stamping first lets one transient failure silence the
+    nudge for the whole cooldown)."""
+    nudged = state.get("nudged")
+    if not isinstance(nudged, dict):
+        nudged = state["nudged"] = {}
+    nudged[KEY_NEXT] = now
+
+
 # A refused pass is a turn boundary, not an outage: the seat is usually mid-work. Only the words
 # that mean "this will not end by itself" are darkness, and only after they repeat this many passes.
 SEAT_STUCK_PASSES = _env_int("RW_STUCK_PASSES", 3)
@@ -879,6 +1047,184 @@ PENDING_MAX = _env_int("RW_PENDING_MAX", 6)
 # time when this pass no longer recomputes the condition.
 KEY_STALE = "stale chain log"
 KEY_STUCK = "job(s) finished but not closed"
+KEY_NEXT = "next move"
+
+# The idle-with-work nudge (see `_pass`). Its own cooldown, in its own `state["nudged"]` map: it is a
+# line to the SEAT, so it shares nothing with the per-item budget of the pages to djbclark.
+# RW_IDLE_NUDGE=0 turns it off.
+NUDGE_ON = os.environ.get("RW_IDLE_NUDGE", "1").strip().lower() not in ("0", "false", "no", "off")
+NUDGE_S = _env_int("RW_IDLE_NUDGE_S", 3 * 3600)
+
+# A mechanism that starts agents is opt-in until it has run in the field.
+AUTO_SEAT = _env_int("RW_AUTO_SEAT", 0, minimum=0)
+AUTO_SEAT_S = _env_int("RW_AUTO_SEAT_S", 3600)
+AUTO_SEAT_PROVIDER = os.environ.get("RW_AUTO_SEAT_PROVIDER", "")
+
+
+def auto_seat_candidate(state: dict) -> str:
+    """The most recent run's id, including an unconfirmed one. This is NOT a cooldown stamp.
+
+    Reuse the existing `told` bookkeeping map (numeric values, sanitized by load_state), with a
+    separate namespace from pages/refusals. Keep it after confirmation so a stale peer registry
+    cannot cause a second seat after cooldown. A failed confirmation is a failed READ of this id,
+    never permission to spawn again; a later probe must prove THIS candidate gone first.
+    """
+    prefix = f"auto-seat candidate:{ROLE}:"
+    candidates = [(float(at), key[len(prefix):]) for key, at in state.get("told", {}).items()
+                  if key.startswith(prefix) and key[len(prefix):] and _is_num(at)]
+    return max(candidates, default=(0, ""))[1]
+
+
+def auto_seat(word: str, state: dict, now: float) -> str:
+    """Start only a PROVEN ABSENT seat; return the confirmed id, otherwise ''.
+
+    Diagnosis       Start?  Reason
+    gone            yes     Inspect-confirmed absent (UUID id, not a blind read).
+    error           no      Inspect could not answer: broken READ, daemon/socket may be down.
+    refused         no      Finished/archived session or non-idle/running Paseo state.
+    unknown         no      No diagnosis; absence not proven.
+    silent/working  no      A seat EXISTS; a second one would duplicate the individual.
+    card:*          NEVER   His to answer; spawning leaves the card AND adds another seat.
+    idle            no      Healthy; the declared-next-step nudge covers it.
+
+    `refused`/`unknown` never auto-start; when no owner resolves, they still page the human.
+
+    We are narrowing djbclark's 2026-10-30 "including after a hard error" ruling for one case:
+    `error` means a broken READ, not a dead seat, and `paseo run` will fail in that same state.
+    He can overrule it. `silent` also refuses because the hung seat still exists.
+    """
+    if not AUTO_SEAT:
+        return ""
+
+    def refuse(reason: str, message: str = "") -> str:
+        # Same shape as _deploy_say, independent of the successful-start cooldown. ONE refusal
+        # per role/window even if the reason changes. Only pre-invocation refusals use this.
+        key = f"auto-seat refusal:{ROLE}"
+        told = state.setdefault("told", {})
+        stamp = told.get(key)
+        if not (_is_num(stamp) and 0 <= now - float(stamp) < AUTO_SEAT_S):
+            told[key] = now
+            log(message or f"auto-seat: not started ({reason})")
+        return ""
+
+    told = state.setdefault("told", {})
+    unresolved_key = f"auto-seat unresolved:{ROLE}"
+    if unresolved_key in told:
+        # Observed 2026-10-30: `paseo ls --json --background` returned rc 0 and a plain
+        # JSON array of non-archived agents with id, shortId, name, status, cwd (lowercase).
+        # No --all (archived agents) or --cwd (unsupported). Listing may ONLY adopt/clear;
+        # it never proves absence for a start, even when the attempt window has expired.
+        rc, out, err = run_split(["paseo", "ls", "--json", "--background"], timeout=20)
+        reason = f"listing rc={rc}"
+        rows = None
+        if rc == 0:
+            try:
+                rows = json.loads(out)
+                reason = "listing is not an agent array"
+            except ValueError:
+                reason = "unreadable listing JSON"
+        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+            matches = [row for row in rows if row.get("name") == f"{ROLE} (auto-seat)"]
+            reason = f"{len(matches)} matching agents"
+            recovered = matches[0].get("id") if len(matches) == 1 else ""
+            if len(matches) <= 1 and (not matches or isinstance(recovered, str) and recovered.strip()):
+                if matches:
+                    told[f"auto-seat candidate:{ROLE}:{recovered}"] = now
+                del told[unresolved_key]
+                save_state(state)
+                log(f"auto-seat: recovered lost id {recovered}" if matches else
+                    "auto-seat: unresolved cleared (no live auto-seat agent)")
+                return ""  # Diagnose a recovered candidate, or prove absence, on the NEXT pass.
+            if len(matches) == 1:
+                reason = "matching agent has no usable id"
+        return refuse("unresolved start", f"auto-seat: unresolved start not reconciled ({reason})")
+
+    if word != "gone":
+        return refuse(f"{word or 'unreadable'}: absence not proven")
+    seated = state.setdefault("seated", {})
+    last = seated.get(ROLE)
+    # Future stamps are IGNORED: a hand edit or clock correction must not silence starts forever.
+    if _is_num(last) and 0 <= now - float(last) < AUTO_SEAT_S:
+        return refuse("cooldown")
+    attempt_key = f"auto-seat attempt:{ROLE}"
+    told = state.setdefault("told", {})
+    last_attempt = told.get(attempt_key)
+    if _is_num(last_attempt) and 0 <= now - float(last_attempt) < AUTO_SEAT_S:
+        return refuse("attempt window")
+    if not AUTO_SEAT_PROVIDER.strip():
+        return refuse("RW_AUTO_SEAT_PROVIDER unset")
+    pointer = resolve_pointer()
+    pointer = pointer.resolve() if pointer is not None else None
+    exists = pointer is not None and pointer.is_file()
+    if not exists:
+        log("auto-seat: no pointer")
+    prompt = (
+        f"Resume the existing individual as role {ROLE} in repo {REPO.resolve()}.\n"
+        + (f"Tier 1 pointer file: {pointer}\n" if exists else
+           f"No Tier 1 pointer file exists ({pointer or 'none'}); resume from the repo's state.\n")
+        + "When available, read that file's ## Current State and - Next steps: and continue at the first unstarted step.\n"
+        "Do not page djbclark; if the work needs his decision, put it in the report.\n"
+        f"This seat was started automatically after the previous one disappeared at "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(now))} (trigger: {word}); "
+        "it stopped answering.\n"
+    )
+    # addRunOptions in the installed Paseo bundle supplies provider/no-wait/cwd/title;
+    # addJsonAndDaemonHostOptions supplies --json, agentRunSchema.idField supplies agentId.
+    # No model/thinking/default-provider: the provider is operator configuration, forwarded as-is.
+    argv = ["paseo", "run", "--provider", AUTO_SEAT_PROVIDER, "--no-wait", "--json",
+            "--cwd", str(REPO.resolve()), "--title", f"{ROLE} (auto-seat)", "--", prompt]
+    deadline = time.monotonic() + 120
+    # An invoked start can have created an agent even when its response is lost. Persist the
+    # attempt before invoking it; no outcome may permit another invocation inside this window.
+    told[attempt_key] = now
+    told[unresolved_key] = now
+    save_state(state)
+    rc, out, err = run_split(argv, timeout=100)
+    try:
+        result = json.loads(out)
+    except ValueError:
+        result = None
+    new_id = result.get("agentId") if isinstance(result, dict) else None
+    new_id = new_id.strip() if isinstance(new_id, str) else ""
+    outcome = ("failed" if rc != 0 else "unreadable JSON" if result is None else
+               "no agentId" if not new_id else "id returned")
+    log(f"auto-seat: attempted paseo run rc={rc}; stderr={err[:160]!r}; "
+        f"id={new_id or 'none'}; {outcome}")
+    if not new_id:
+        return ""
+    # The daemon may have created a seat even if the following inspect fails. Retain its id BEFORE
+    # that read, without stamping seated; the next pass must diagnose it instead of duplicating it.
+    prefix = f"auto-seat candidate:{ROLE}:"
+    for key in list(told):
+        if key.startswith(prefix):
+            del told[key]
+    told[prefix + new_id] = now
+    save_state(state)
+    if rc != 0:
+        return ""
+    remaining = min(20, deadline - time.monotonic())
+    if remaining <= 0:
+        log(f"auto-seat: confirmation failed id={new_id}; rc=not-invoked; deadline exhausted")
+        return ""
+    rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", new_id],
+                           timeout=remaining)
+    try:
+        info = json.loads(out) if rc == 0 else None
+        # Inspect serializes structured agent data; CLI versions may wrap it in a list.
+        info = info[0] if isinstance(info, list) and info else info
+    except ValueError:
+        info = None
+    if not (isinstance(info, dict) and info.get("Id") == new_id
+            and info.get("Archived") is False
+            and info.get("Status") in ("idle", "running", "initializing")):
+        log(f"auto-seat: confirmation failed id={new_id}; rc={rc}; stderr={err[:160]!r}; "
+            "new agent could not be confirmed addressable")
+        return ""
+    seated[ROLE] = now                         # ONLY after inspect confirmed it, like djb_page_sent
+    del told[unresolved_key]
+    save_state(state)                          # persist before a potentially slow paging operation
+    log(f"auto-seat: started {new_id} (was {word}) — {pointer if exists else 'none'}")
+    return new_id
 
 # A page size for `gh search prs`, not a ceiling on reality: at the cap the count is a lower bound.
 PR_LIMIT = _env_int("RW_PR_LIMIT", 100)
@@ -1074,6 +1420,17 @@ def _pass(a: argparse.Namespace) -> int:
     before = state.get("last", {})
     cur = survey()
 
+    # Resolved BEFORE the items, because the idle-nudge below needs the seat. ONE `--why` probe per
+    # pass: whichever of the nudge gate and the quiet branch asks first pays for it, the other reads
+    # the cached answer.
+    ident, why = owner_session()
+    probe: list[tuple[str, str]] = []
+
+    def seat_word() -> str:
+        if ident and not probe:
+            probe.append(why_blocked(ident))
+        return probe[0][0] if probe else ""
+
     changed = [k for k, v in cur.items() if v != before.get(k)]
 
     # What is genuinely NEW drives the session line; a re-observation must stay silent.
@@ -1085,8 +1442,8 @@ def _pass(a: argparse.Namespace) -> int:
     # Each item is (key, text). The key is OPT-IN and marks the lines whose condition this pass
     # recomputes from scratch every time, so a queued copy can be checked against it at retry time
     # (see the carry block below). Event items are deliberately KEYLESS: new mail, new jobs and the
-    # new-PR announcement are diffs against `state["last"]`, which has already been advanced; once the
-    # mail is consumed the pass cannot recompute "this was unread", so keying them would silently drop
+    # new-PR announcement are diffs against `state["last"]`, advanced with the pending queue below;
+    # after that advance the pass cannot recompute "this was unread", so keying them would silently drop
     # a real announcement the seat never heard. They keep the plain at-least-once retry.
     items: list[tuple[str | None, str]] = []
     if new_mail:
@@ -1108,15 +1465,64 @@ def _pass(a: argparse.Namespace) -> int:
     stuck = [j["name"] for j in cur["jobs"] if j["done_exists"]]
     if stuck:
         items.append((KEY_STUCK, f"job(s) finished but not closed: {', '.join(stuck[:3])}"))
+
+    # The one state-like line about WORK instead of about plumbing: the seat is idle and the Tier 1
+    # log declares next steps nobody has started. It is recomputed every pass and keyed, so the
+    # carry block below retires a queued copy exactly as it does `stale chain log`: no special case.
+    # The count is read first (a file) and the probe made only when there is something to say.
+    nudge_n = declared_next_steps() if nudge_due(ident, state, now) else 0
+    if nudge_n and seat_word() == "idle":
+        items.append((KEY_NEXT, f"next move: {nudge_n} declared step(s) still open in the Tier 1 "
+                                "log and this seat is idle"))
     lines = [text for _, text in items]
 
     if a.dry_run:
         print(json.dumps({"changed": changed, "lines": lines, "survey": cur}, indent=1))
         return 10 if lines else 0
 
-    state["last"] = cur
     state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     spoke_session = spoke_djb = False
+
+    # Only the opt-in path probes a candidate that owner_session rejected as non-live. An empty
+    # fleet alone is not proof: ask relay's inspect-backed diagnosis, and never spawn on a blind read.
+    auto_gone = False
+    if AUTO_SEAT:
+        candidate = auto_seat_candidate(state)
+        target = candidate or ident
+        if not target and not _LIVE_ERR:
+            target = next((candidate for _, candidate in owner_candidates()), "")
+        # A registered successor may have replaced our saved candidate. Prove the resolved owner
+        # gone BEFORE falling back to the candidate; never spawn over a different existing owner.
+        word = seat_word() if ident else "unknown"
+        if candidate and candidate != ident and (not ident or word == "gone"):
+            target = candidate
+            word = why_blocked(candidate)[0]
+            if word in ("idle", "working", "silent") or word.startswith("card:"):
+                ident = candidate
+                probe[:] = [(word, "auto-seat candidate")]
+        elif candidate and candidate != ident and (word in ("idle", "working", "silent")
+                                                   or word.startswith("card:")):
+            # A live successor is authoritative. Retire the stale candidate so it cannot shadow
+            # future registry changes; this is bookkeeping, never a successful-start stamp.
+            prefix = f"auto-seat candidate:{ROLE}:"
+            state["told"] = {k: v for k, v in state.get("told", {}).items()
+                             if not k.startswith(prefix)}
+        elif not ident and target:
+            word = why_blocked(target)[0]
+        # A gone candidate cannot establish that no registered successor exists when fleet reads
+        # are broken. Keep live candidate diagnostics above, but refuse spawning while blind.
+        if _LIVE_ERR and word == "gone":
+            word = "unknown"
+        started = auto_seat(word, state, now)
+        auto_gone = word == "gone"
+        if auto_gone and (started or should_tell_djbclark("no live session", state, now)):
+            said = (f"Dann: no live session for {ROLE!r} (gone). The previous seat stopped answering.")
+            if started:
+                said += (f" A seat was started automatically at "
+                         f"{time.strftime('%H:%M', time.localtime(now))}: {started}.")
+            if to_djbclark(said):
+                djb_page_sent("no live session", state, now)
+                spoke_djb = True
 
     # An unverified send consumes the line on purpose (relay's own text says "do not resend"), so the
     # only thing left is telling him it may have been lost. That admission used to be attempted ONCE,
@@ -1136,8 +1542,7 @@ def _pass(a: argparse.Namespace) -> int:
     # even on a quiet pass — because if the seat died, the survey it reads stops changing too, and
     # the pass then stays quiet forever. That is exactly how the entity went dark for hours at a
     # time with a watcher running the whole while.
-    ident, why = owner_session()
-    if not ident and should_tell_djbclark("no live session", state, now):
+    if not ident and not auto_gone and should_tell_djbclark("no live session", state, now):
         if _LIVE_ERR:
             said = (
                 f"Dann: the rumination watcher cannot READ the fleet ({_LIVE_ERR}), so it stopped "
@@ -1157,8 +1562,8 @@ def _pass(a: argparse.Namespace) -> int:
             spoke_djb = True
         log(f"no live session: {why} (told djbclark={spoke_djb})")
 
-    # A line aimed at a seat that refused it has NOT been delivered, and `state["last"] = cur` above
-    # has already consumed the change, so without this the announcement is lost for good. Mail
+    # A line aimed at a seat that refused it has NOT been delivered. Advance `state["last"]` only
+    # alongside its pending queue below, so recovery saves cannot consume an unqueued change. Mail
     # arrives BECAUSE the seat is busy mid-turn, so this is the common collision, not the edge case.
     # Kept at the front, retried next pass, cleared only by a real send.
     #
@@ -1199,6 +1604,7 @@ def _pass(a: argparse.Namespace) -> int:
     queue = front + fresh
     lines = [e["text"] for e in queue]
     # A quiet pass (nothing survived, nothing new) must also persist the cleared queue.
+    state["last"] = cur
     state["pending"] = queue[-PENDING_MAX:]
     known_ages = [x for x in retry_ages if x is not None]
     retry_note = ""
@@ -1211,6 +1617,12 @@ def _pass(a: argparse.Namespace) -> int:
         # pass may have taken a while since the resolution above, and this is the line that has to
         # arrive, so the target is re-checked rather than trusted from a minute ago.
         spoke_session = to_session(summary) if ident else "unreachable"
+        # Stamped only now, by a send that SETTLED: a refused or failed one leaves the nudge due, and
+        # the keyed pending entry retries it. `unverified` counts: relay says "do not resend", and
+        # resending every pass is exactly the duplicate it warns about.
+        if any(k == KEY_NEXT for k, _ in items) and (spoke_session in SENT_WORDS
+                                                      or spoke_session == "unverified"):
+            nudge_sent(state, now)
         # A settled-but-unverified send is NOT a health observation (see UNPROVEN_SEND): the line is
         # done (`SENT_WORDS` settles `pending` below) but the seat has told us nothing, so ask it. The
         # send word stays in the log line; the probe's word is what counts the streak.
@@ -1267,7 +1679,7 @@ def _pass(a: argparse.Namespace) -> int:
         # all the way through. One `paseo agent inspect` per 5 minutes is the price of noticing.
         # The word here is a `--why` state, so a healthy `idle` must reset the streak (C2): otherwise
         # the streak counts dark passes that were not consecutive and the page says "in a row".
-        word = why_blocked(ident)[0] if ident else ""
+        word = seat_word()
         dark_item, dark_msg = escalate_dark(word, ident, state, now) if word else ("", "")
         if dark_msg and to_djbclark(dark_msg):
             djb_page_sent(dark_item, state, now)
@@ -1299,6 +1711,10 @@ def cmd_status(a: argparse.Namespace) -> int:
     print(f"code:  {running_sha()} on {branch if rc == 0 and branch else '?'} in {SELF_REPO}"
           + (f" (last deploy: {word})" if word else ""))
     print(f"last pass: {state.get('last_run') or 'never'}")
+    seated = state.get("seated", {})
+    latest = max((float(v) for v in seated.values() if 0 <= float(v) <= time.time()), default=None)
+    last = time.strftime('%Y-%m-%d %H:%M', time.localtime(latest)) if latest is not None else 'never'
+    print("auto-seat: " + (f"on ({len(seated)} role(s) started, last {last})" if AUTO_SEAT else "off"))
     return 0
 
 
@@ -1361,7 +1777,18 @@ def main(argv: list[str] | None = None) -> int:
             "launchd job without a hand pull: fast-forward only, never a merge commit, reset or stash, "
             "and it refuses rather than forcing on a dirty tracked tree, a detached HEAD, a git "
             "operation in progress, or local commits origin lacks. RW_NO_DEPLOY=1 turns it off, "
-            "--dry-run never touches the checkout, and `status` prints the last deploy."
+            "--dry-run never touches the checkout, and `status` prints the last deploy. "
+            "An idle seat whose Tier 1 log declares next steps gets one `next move: N declared "
+            "step(s) still open` line per RW_IDLE_NUDGE_S (default 10800 s); RW_IDLE_NUDGE=0 "
+            "turns it off. RW_AUTO_SEAT=1 opts into absent-seat starts (OFF by default until "
+            "field-tested), authorised by djbclark's 2026-10-30 option-3 ruling. Only a proven "
+            "gone diagnosis starts a seat; error/unreadable reads, silent/working/idle seats and "
+            "card:* NEVER do. RW_AUTO_SEAT_PROVIDER must be set; no model/thinking flags are passed. "
+            "RW_AUTO_SEAT_S (default 3600 s) allows at most one attempt per role per window, confirmed "
+            "or not; a start whose id was lost refuses further starts until an authoritative Paseo "
+            "listing reconciles it. Nothing retries on the next pass; refusal logs are limited to "
+            "one per cooldown. The darkness page still "
+            "goes out and names a newly started seat."
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)

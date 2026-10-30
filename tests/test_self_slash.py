@@ -65,6 +65,9 @@ FAKE_PASEO = textwrap.dedent("""\
           printf '{"Id": "test-agent", "Name": "%s", "Status": "idle", "Mode": "%s", "Provider": "%s", "Cwd": "%s", "ParentAgentId": null}\\n' \\
             "${FAKE_NAME-Lead}" "${FAKE_OLD_MODE-bypassPermissions}" "${FAKE_OLD_PROVIDER-claude}" "$FAKE_CWD"
         fi;;
+      "agent open")
+        if [ -n "$FAKE_OPEN_FAIL" ]; then echo "Paseo desktop app not found." >&2; exit 1; fi
+        echo '{"agentId": "'"$3"'", "status": "opened"}';;
       "agent archive")
         if [ -n "$FAKE_ARCHIVE_FAIL" ]; then
           echo "Agent is running. Use --force to archive a running agent (it will interrupt the active run), or stop it first with: paseo agent stop." >&2
@@ -473,8 +476,10 @@ class SelfSlashPaseoTests(unittest.TestCase):
         cwd2 = str(Path(self._tmp.name) / "work2")
         Path(cwd).mkdir(exist_ok=True)
         Path(cwd2).mkdir(exist_ok=True)
+        # SELF_SLASH_DESKTOP_PROC "." matches any running process: the real Paseo.app is never probed (a Linux runner, or a Mac with the app closed,
+        # would otherwise decide these tests); the tests of the probe itself pass their own pattern
         return {"FAKE_CWD": cwd, "FAKE_CWD2": cwd2, "PASEO_AGENT_CWD": cwd,
-                "SELF_SLASH_SUCCESSOR_SETTLE": "0", **extra}
+                "SELF_SLASH_SUCCESSOR_SETTLE": "0", "SELF_SLASH_DESKTOP_PROC": ".", "SELF_SLASH_OPEN_WAIT": "2", **extra}
 
     def run_waiter(self, *args: str, interp: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
         """The waiter itself, in the foreground, as the parent spawns it (its exit code is observable).
@@ -499,11 +504,50 @@ class SelfSlashPaseoTests(unittest.TestCase):
             f"run /baton --provider claude/claude-opus-5-5 --thinking high --mode bypassPermissions "
             f"--workspace ws-1 --cwd {cwd} --title Lead → opus-5-5 --no-wait --json",
             "agent inspect new-agent-1 --json",
+            "agent open new-agent-1 --json",    # the successor gets its tab BEFORE the old agent goes
             "agent archive",
         ])
         self.assertEqual([c for c in calls if c.startswith("agent archive")], ["agent archive -- test-agent"])
         self.assertFalse(any("--force" in c for c in calls), calls)
         self.wait_lock_gone()
+
+    def test_a_successor_that_cannot_be_opened_in_the_desktop_keeps_this_agent(self) -> None:
+        """2026-10-30: a lead started by `paseo run` had no tab, its card went unseen for 13 hours and the old lead was already archived."""
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env(FAKE_OPEN_FAIL="1"))
+        self.assertEqual(r.returncode, 0, r.stderr)    # the waiter is detached: its outcome is in the log (exit 11 there)
+        self.wait_log("could not be opened in Paseo Desktop")
+        self.wait_log("NOT archived")
+        self.wait_lock_gone()
+        calls = self.paseo_calls()
+        self.assertIn("agent open new-agent-1 --json", calls)
+        self.assertFalse([c for c in calls if c.startswith("agent archive")], calls)    # nothing archived: this agent has a tab, the successor does not
+
+    def test_a_successor_sent_to_a_desktop_that_is_not_running_keeps_this_agent(self) -> None:
+        """Codex (local review of PR 159): `agent open` returns once the app is launched; with no Desktop process the deep link was dropped."""
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env(SELF_SLASH_DESKTOP_PROC="no-such-desktop-process-xyz", SELF_SLASH_OPEN_WAIT="1"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("no Desktop process matching")
+        self.wait_lock_gone()
+        calls = self.paseo_calls()
+        self.assertIn("agent open new-agent-1 --json", calls)
+        self.assertFalse([c for c in calls if c.startswith("agent archive")], calls)
+
+    def test_a_running_desktop_process_lets_the_archive_go_ahead(self) -> None:
+        marker = "selfslash-test-desktop-marker-7731"
+        desktop = subprocess.Popen(["bash", "-c", "sleep 60; :", marker])    # a command line that holds the marker, standing in for the app (the `; :` stops bash exec-ing sleep and losing it)
+        self.addCleanup(desktop.kill)
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env(SELF_SLASH_DESKTOP_PROC=marker, SELF_SLASH_OPEN_WAIT="5"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        self.wait_log("opened in Paseo Desktop")
+
+    def test_no_open_is_an_explicit_override_for_a_host_with_no_desktop(self) -> None:
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env(FAKE_OPEN_FAIL="1", SELF_SLASH_NO_OPEN="1"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        calls = self.paseo_calls()
+        self.assertFalse([c for c in calls if c.startswith("agent open")], calls)
+        self.wait_log("NOT opened in Paseo Desktop (SELF_SLASH_NO_OPEN=1)")
 
     def test_successor_calls_run_without_the_callers_agent_id(self) -> None:
         # with PASEO_AGENT_ID set, `paseo run` hands the caller id to the daemon and the new
