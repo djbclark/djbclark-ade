@@ -240,11 +240,14 @@ class TestGitIdentityGuard(unittest.TestCase):
                     "credential.example.org#TOK3N.helper",
                     # a KNOWN TOKEN SHAPE is refused wherever it appears in the key, because the name
                     # filter hid the token whether or not git resolves the key: an arbitrary
-                    # subsection, a URL path, and a case the shape list matches case-insensitively
-                    "remote.ghp_FAKE0123456789.url",
-                    "url.https://example.org/ghp_FAKE0123456789/.insteadOf",
-                    "remote.GLPAT-FAKE0123456789.url",
+                    # subsection and a URL path, each body at or above its length floor
+                    "remote.ghp_FAKE0123456789abcdef.url",
+                    "url.https://example.org/ghp_FAKE0123456789abcdef/.insteadOf",
+                    "remote.glpat-FAKE0123456789AB.url",
                     "remote.xoxb-FAKE0123456789.url",
+                    "remote.sk-FAKE0123456789abcdefghijklmnopqrst.url",
+                    "remote.pypi-FAKE0123456789abcdefghijklmnop.url",
+                    "remote.AKIAFAKE0123456789.url",
                     "remote.eyJhbGciOiJIUzI1NiJ9.FAKEpayload.url"):
             with self.subTest(key=key):
                 env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
@@ -274,7 +277,22 @@ class TestGitIdentityGuard(unittest.TestCase):
                  ("remote.origin.url", "https://example.org/x"),
                  ("remote.sk-1.url", "https://example.org/one"),
                  ("remote.ghp.url", "https://example.org/short"),
-                 ("includeif.hasconfig:remote.*.url:https://example.org/**.path", "~/.gitconfig-work")]
+                 ("includeif.hasconfig:remote.*.url:https://example.org/**.path", "~/.gitconfig-work"),
+                 # a name that only looks like a token: `sk-` inside `task-`/`flask-`/`disk-`, `ASIA`
+                 # inside `asia...`, and bodies below their floor. Every one of these was REFUSED by
+                 # an earlier head, whose IGNORECASE regex had no word boundary (adversary round 10)
+                 ("branch.task-scheduler-refactoring.remote", "origin"),
+                 ("remote.task-management-service.url", "https://example.org/task"),
+                 ("includeif.gitdir:~/src/flask-sqlalchemy-extension/.path", "~/.gitconfig-flask"),
+                 ("remote.pypi-mirror-internal-eu.url", "https://example.org/pypi"),
+                 ("remote.ghp_mirror01.url", "https://example.org/mirror"),
+                 ("remote.hf_transformersfork.url", "https://example.org/hf"),
+                 ("remote.sk-learn-upstream-fork.url", "https://example.org/sklearn"),
+                 ("remote.sk-learn.url", "https://example.org/sklearn-short"),
+                 ("url.https://asiapacificmirror.example.org/.insteadOf", "https://mirror4.example.org/"),
+                 # a prefix is matched in the case its issuer uses, so an uppercased one is not a
+                 # shape this refuses; a real token never uppercases its prefix
+                 ("remote.GHP_FAKE0123456789abcdef.url", "https://example.org/upper")]
         env = {**self.env, "GIT_CONFIG_COUNT": str(len(pairs))}
         for i, (key, value) in enumerate(pairs):
             env[f"GIT_CONFIG_KEY_{i}"] = key

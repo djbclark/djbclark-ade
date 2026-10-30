@@ -4015,21 +4015,24 @@ exit 0
 # agent's tools; the quoted transport below hands every key and value over, so a token that was
 # merely hidden becomes readable (codex security review, PR 156, 2026-10-30). These are the shapes
 # worth refusing WHEREVER they appear in a key, including a subsection git never treats as a URL
-# (`remote.<token>.url`), because the exposure is the name and not the setting's meaning. Matched
-# case-insensitively and with a length floor each, so a short ordinary name (`sk-1`, `xox`) travels.
+# (`remote.<token>.url`), because the exposure is the name and not the setting's meaning. Three
+# limits keep it off ordinary configuration: no match starts mid-word (adversary round 10 measured
+# `re.IGNORECASE` and no boundary refusing `task-`, `flask-`, `disk-` and `asiapacific`, 2026-10-30),
+# each prefix is matched in the case its issuer uses, and each body has a floor just under the real
+# length, so a short ordinary name (`sk-1`, `ghp_mirror01`) travels.
 TOKEN_SHAPE = re.compile(
-    r"gh[pousr]_[A-Za-z0-9]{8,}"                     # GitHub PAT, OAuth, user, server, refresh token
-    r"|github_pat_[A-Za-z0-9_]{8,}"                  # GitHub fine-grained PAT
-    r"|glpat-[A-Za-z0-9_-]{8,}"                      # GitLab PAT
-    r"|xox[abposr]-[A-Za-z0-9-]{8,}"                 # Slack bot, user, app, refresh token
-    r"|sk-(?:ant-)?[A-Za-z0-9_-]{16,}"               # OpenAI and Anthropic style API key
-    r"|hf_[A-Za-z0-9]{16,}"                          # Hugging Face token
-    r"|npm_[A-Za-z0-9]{16,}"                         # npm automation token
-    r"|pypi-[A-Za-z0-9_-]{16,}"                      # PyPI upload token
-    r"|AIza[A-Za-z0-9_-]{16,}"                       # Google API key
+    r"(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{20,}" # GitHub PAT, OAuth, user, server, refresh token
+    r"|github_pat_[A-Za-z0-9_]{20,}"                 # GitHub fine-grained PAT
+    r"|glpat-[A-Za-z0-9_-]{16,}"                     # GitLab PAT
+    r"|xox[abposr]-[A-Za-z0-9-]{12,}"                # Slack bot, user, app, refresh token
+    r"|sk-(?:ant-)?[A-Za-z0-9_-]{32,}"               # OpenAI and Anthropic style API key
+    r"|hf_[A-Za-z0-9]{20,}"                          # Hugging Face token
+    r"|npm_[A-Za-z0-9]{20,}"                         # npm automation token
+    r"|pypi-[A-Za-z0-9_-]{30,}"                      # PyPI upload token
+    r"|AIza[A-Za-z0-9_-]{20,}"                       # Google API key
     r"|(?:AKIA|ASIA)[A-Z0-9]{12,}"                   # AWS access key id
-    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",     # JWT
-    re.IGNORECASE)
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"      # JWT
+    r")")
 
 
 def credential_in_key(key: str) -> bool:
@@ -4055,15 +4058,22 @@ def credential_in_key(key: str) -> bool:
     `http.https://example.org/repo?access_token=TOK3N.sslVerify`, `git config --get-urlmatch
     http.sslVerify 'https://example.org/repo?access_token=TOK3N'` answers `true` while the same URL
     without the query answers nothing, and a loopback `git ls-remote` to that URL sent the token in its
-    request target. No ordinary config key contains either character; the one exception is an
-    `includeIf.hasconfig:` glob pattern with a `?` wildcard, which cannot travel through a counted
-    config (fail closed, with a message that names the variable only).
+    request target. A query is legitimate in a real remote (`https://dev.azure.com/o/p/_git/r?path=/src`,
+    a cgit web url `?h=main`), so such a key refuses too: that is the intended trade, and it stays
+    usable in `~/.gitconfig`. The one exception to "refuses" is an `includeIf.hasconfig:` glob pattern
+    with a `?` wildcard, which cannot travel through a counted config at all (fail closed, with a
+    message that names the variable only).
 
     SHAPE: a known token shape is refused wherever it appears in the key, in a subsection
     (`remote.<token>.url`) and in a path segment (`url.https://example.org/<token>/.insteadOf`) alike,
-    because the name filter hid the token whether or not git resolves the key. A secret of a shape
-    this list does not know, sitting in a path segment, cannot be told apart from path data
-    (`@scope`), so it travels - that is this check's documented limit.
+    because the name filter hid the token whether or not git resolves the key. Three limits keep that
+    off ordinary configuration: a match never starts mid-word, each prefix is matched in the case its
+    issuer uses, and each body has a length floor just under the real length. Refusing a name that
+    merely resembles a prefix (`remote.sk-learn-upstream-fork.url`, `remote.ghp_mirror01.url`) would
+    break a launch for nothing, and `re.IGNORECASE` with no boundary did exactly that before
+    (adversary round 10, 2026-10-30). A secret of a shape this list does not know, sitting in a path
+    segment, cannot be told apart from path data (`@scope`), so it travels - that is this check's
+    documented limit.
 
     A `credential.` subsection may also be a PARTIAL url with no scheme, and `credential.` is the one
     family where git really resolves that form: measured with `git credential fill` and a helper

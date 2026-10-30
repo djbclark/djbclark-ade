@@ -713,9 +713,11 @@ a credential position git matches exactly, with no `@` needed — with
 `http.https://example.org/repo?access_token=TOK3N.sslVerify` configured,
 `git config --get-urlmatch http.sslVerify 'https://example.org/repo?access_token=TOK3N'`
 answers `true` while the same URL without the query answers nothing, and a loopback
-`git ls-remote` sent the token in its request target (2026-10-30). No ordinary key contains
-either character; the one exception is an `includeIf.hasconfig:` glob pattern with a `?`
-wildcard, which cannot travel through a counted config. A `credential.` subsection that is
+`git ls-remote` sent the token in its request target (2026-10-30). A query is legitimate in a
+real remote (`https://dev.azure.com/o/p/_git/r?path=/src`, a cgit web url `?h=main`), so such a
+key refuses too: that is the intended trade, and it stays usable in `~/.gitconfig`. The one
+exception is an `includeIf.hasconfig:` glob pattern with a `?` wildcard, which cannot travel
+through a counted config. A `credential.` subsection that is
 a PARTIAL url with no scheme is the one form git resolves as well — measured with
 `git credential fill`, a helper under `credential.example.org.helper` runs for
 `url=https://example.org/x`, and one under `credential.<userinfo>@example.org.helper` runs
@@ -728,8 +730,15 @@ By token shape: a name matching a known token pattern (`ghp_`, `github_pat_`, `g
 `xox?-`, `sk-`, `hf_`, `npm_`, `pypi-`, `AIza`, `AKIA`/`ASIA`, an `eyJ` JWT header, each
 with a length floor) refuses wherever it appears in the key, in a subsection
 (`remote.<token>.url`) and in a URL path alike — the name filter hid the token whether or
-not git resolves the key, so the exposure is the NAME, not the setting's meaning. A secret
-of an unknown shape sitting in a path segment cannot be told apart from path data
+not git resolves the key, so the exposure is the NAME, not the setting's meaning. Three
+limits keep that off ordinary names: a match never starts mid-word, each prefix is matched
+in the case its issuer uses, and each floor sits just under the real token length. Refusing
+a name that merely resembles a prefix (`remote.sk-learn-upstream-fork.url`,
+`remote.ghp_mirror01.url`, `remote.pypi-mirror-internal-eu.url`) would break a launch for
+nothing, and an earlier head refused exactly those (adversary round 10, 2026-10-30). Only
+KEYS are checked: a credential in a counted VALUE (`GIT_CONFIG_VALUE_n`) never went through
+the name filter, so refusing one would be a different change. A secret of an unknown shape
+sitting in a path segment cannot be told apart from path data
 (`url.https://example.org/@scope/.insteadOf` must travel), so it still travels: that is
 this check's documented limit.
 
