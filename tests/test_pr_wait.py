@@ -731,6 +731,42 @@ def test_an_explicit_null_beside_an_open_security_thread_still_fails_closed(worl
     assert "open-findings" in summary["merge_blockers"]
 
 
+def test_an_explicit_null_beside_a_FIXED_earlier_security_finding_is_a_clean_review(world: World) -> None:
+    """PR 156 (2026-10-30): the null describes THIS review of THIS head, so an earlier head's finding,
+    fixed and resolved, cannot contradict it.
+
+    Codex's security review of the fixed head reported none (the null pair), and its P2 on the earlier
+    head stayed in the PR as four historical comments. Counting EVERY finding comment of ANY head as
+    evidence against the null made merge_ready unreachable for any pull request where Codex had ever
+    found something and the fix was accepted — which is exactly the round of fixes that produces a
+    clean head. The code review's `has_unresolved_findings: false` never had this problem; only the null
+    pair did.
+    """
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(60)]))
+    world.route("graphql", gql(thread(60, resolved=True)))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = world.file("summary")
+    assert summary["merge_ready"] is True, summary["merge_blockers"]
+    assert summary["merge_blockers"] == [] and summary["open_findings"] == 0
+
+
+def test_an_explicit_null_beside_a_finding_ON_THIS_HEAD_still_fails_closed(world: World) -> None:
+    """The narrower rule, so the null did not simply lose its evidence check: a security finding left on
+    THIS head contradicts "this review found nothing", even when someone resolved its thread without a
+    fix — a resolution is not a fix, and only a new head can be clean."""
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(61, original_commit_id=HEAD)]))
+    world.route("graphql", gql(thread(61, resolved=True, oid=HEAD)))
+    world.run()
+    summary = world.file("summary")
+    assert summary["merge_ready"] is False
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
 def test_a_findings_flag_that_is_neither_boolean_nor_null_is_still_unverified(world: World) -> None:
     # a marker we do not understand is not a clean review, and must not be read as one
     sec = {"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": "false"}

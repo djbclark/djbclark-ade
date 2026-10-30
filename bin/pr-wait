@@ -68,8 +68,8 @@ print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true o
 check succeeded and none failed or is pending (skipped and neutral count as passed beside a success,
 never alone), Codex's code review completed on this head, the security review too when the marker carries
 it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings
-for each review it carries: a boolean, or an explicit null beside no finding comment and no open thread
-of that kind (Codex's "this review found none", see `unresolved_stated`; a missing key is not a
+for each review it carries: a boolean, or an explicit null beside no finding comment on THIS head and no
+open thread of that kind (Codex's "this review found none", see `unresolved_stated`; a missing key is not a
 statement and blocks as marker-unverified). merge_blockers lists why not: codex-<status>, security-<status>
 (security-failed, security-running, security-other-head), findings-not-collected, marker-unverified,
 security-marker-unverified, no-checks, ci-pending, ci-failed, ci-none-succeeded, open-findings,
@@ -1002,7 +1002,9 @@ def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict
 
     `open` is every unresolved Codex review thread of ANY head (outdated or not) in which ANY comment is a
     Codex finding (REST: Codex bot, a finding mark; GraphQL: author the Codex app, same databaseId).
-    `finding_comments` counts all Codex finding comments per kind, for the marker cross-check."""
+    `finding_comments` counts all Codex finding comments per kind, EVERY head, for the marker cross-check
+    (`has_any_findings=true` beside none of them); it is deliberately not evidence against an explicit null
+    on this head — `unresolved_stated` reads `for_head` for that, so a fixed finding cannot block its fix."""
     t0 = parse_ts(since) if since else None
     reviews = api_items(f"repos/{repo}/pulls/{pr}/reviews?per_page=100")
     head_reviews = {r.get("id") for r in reviews if r.get("commit_id") == head}
@@ -1049,10 +1051,21 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
     is the common case: the waiter could never report merge_ready, so the gate had to be talked around
     by hand or the word lost its meaning.
 
-    A null is a statement only beside the independent evidence: no Codex finding comment of that kind
-    and no open Codex thread of that kind. A MISSING key, or a value that is neither boolean nor null,
-    is still not a statement — that is a marker we do not understand, not a clean review — and the
-    contradiction case (null beside an open thread) already fails closed in `assess`'s mismatch check.
+    A null is a statement only beside the independent evidence: no Codex finding comment **for this head**
+    of that kind and no open Codex thread of that kind. A MISSING key, or a value that is neither boolean
+    nor null, is still not a statement — that is a marker we do not understand, not a clean review — and
+    the contradiction case (null beside an open thread) already fails closed in `assess`'s mismatch check.
+
+    ONLY THIS HEAD'S FINDINGS COUNT AS CONTRADICTION (2026-10-30, PR 156). The null describes THIS
+    review of THIS head, so a finding comment of the same kind on an EARLIER head cannot contradict it —
+    and after a round of fixes that is the normal state: the finding was fixed on a new head and its
+    thread resolved, and Codex's review of that head found nothing. Counting every comment of every head
+    (`finding_comments`, all-time) therefore made merge_ready UNREACHABLE for any pull request in which
+    Codex had ever reported a security finding and the fix was accepted: PR 156 fixed the security P2 on
+    `a5c44a11`, four historical security comments stayed in the PR, and the clean security review on the
+    fixed head read as unverified. An unresolved one is still caught twice, by the open-thread check here
+    and by the mismatch check; a finding on this head whose thread someone resolved WITHOUT a fix stays
+    a contradiction, which is the case `finding_comments` was there to catch.
     """
     if "has_unresolved_findings" not in r:
         return False
@@ -1063,7 +1076,7 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
         return False
     if review is None:
         return False
-    if review["finding_comments"][kind]:
+    if any(f["kind"] == kind for f in review["for_head"]):
         return False
     return not any(t["kind"] == kind for t in review["open"])
 
@@ -1084,8 +1097,9 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     (a marker without one is not blocked on it: the open threads of both kinds still gate, and the summary
     says `security_status: absent`); zero open Codex threads of either kind (outdated or not); no mismatch;
     and a marker that states has_unresolved_findings for each review it carries - a boolean, or an explicit
-    null beside no finding comment and no open thread of that kind (`unresolved_stated`; a missing key is
-    not a statement).
+    null beside no finding comment ON THIS HEAD and no open thread of that kind (`unresolved_stated`; a
+    missing key is not a statement). A finding on an EARLIER head does not contradict the null: its fix is
+    what produced this head.
     merge_blockers names why not: `codex-<status>` (code review not completed on the head), `security-<status>`
     (`security-failed`, `security-running`, `security-other-head`), `findings-not-collected`,
     `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
