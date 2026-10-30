@@ -124,6 +124,9 @@ def test_2_gone_starts_once_with_file_not_slice_and_stamps_after_inspect(monkeyp
     assert len(argv[-1].splitlines()) < 15
     assert timeout <= 120 and rw.calls[1][1] <= 20
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+    # The confirmed start is the ONE path that owes the new seat a tab (adversary N7: the calls
+    # list cannot see this, so a mutant that opens in the WRONG branch survived).
+    assert rw.opened == [NEW]
 
 
 def test_3_error_is_a_broken_read_not_an_absent_seat(monkeypatch, tmp_path):
@@ -186,6 +189,7 @@ def test_8_unconfirmed_start_does_not_stamp(monkeypatch, tmp_path):
     run_pass(rw)
     assert len(rw.calls) == 2
     assert not rw.load_state().get("seated")
+    assert rw.opened == []          # unconfirmed: no seat to give a tab to (adversary N7)
     assert f"auto-seat: confirmation failed id={NEW}; rc=1; stderr='not found'" in rw.LOG.read_text()
 
 
@@ -695,6 +699,12 @@ def tab_world(monkeypatch, tmp_path, open_rc=0, open_err="", no_open=None):
         if argv[:3] == ["paseo", "agent", "inspect"]:
             return 0, json.dumps({"Id": NEW, "Archived": False, "Status": "running"}), ""
         if argv[:3] == ["paseo", "agent", "open"]:
+            # N3: the seat must already be saved and the unresolved marker gone BEFORE the open
+            # runs. A kill during the open then leaves a seated, diagnosable id, never a seat that
+            # the next pass cannot find.
+            disk = rw.load_state()
+            assert disk["seated"] == {rw.ROLE: NOW}
+            assert f"auto-seat unresolved:{rw.ROLE}" not in disk["told"]
             return open_rc, "", open_err
         raise AssertionError(f"unexpected call {argv}")
 
@@ -709,30 +719,86 @@ def test_39_confirmed_start_opens_the_tab_in_paseo_desktop(monkeypatch, tmp_path
     assert [argv for argv, _ in opened] == [["paseo", "agent", "open", NEW, "--json"]]
     assert opened[0][1] <= 20
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
-    assert f"auto-seat: opened {NEW} in Paseo Desktop" in rw.LOG.read_text()
+    # N1: `agent open` exits as soon as the app is launched, so the line must not claim a tab was
+    # OBSERVED - only that the deep link was sent.
+    assert f"auto-seat: sent {NEW} to Paseo Desktop (a tab is not confirmable from here)" in rw.LOG.read_text()
+    assert "opened" not in rw.LOG.read_text()
     assert len(rw.pages) == 1 and NEW in rw.pages[0]
 
 
-def test_40_a_failed_open_keeps_the_seat_and_says_how_to_open_it(monkeypatch, tmp_path):
+def test_40_a_failed_open_keeps_the_seat_and_tells_djbclark(monkeypatch, tmp_path):
     rw = tab_world(monkeypatch, tmp_path, open_rc=3, open_err="no Desktop process")
     run_pass(rw)
     text = rw.LOG.read_text()
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
     assert "NOT opened in Paseo Desktop (rc=3: no Desktop process); it is reachable by relay" in text
     assert f"run paseo agent open {NEW}" in text
+    # N2: the failure must reach the human, not just the pass log - a card on an unopened seat is
+    # exactly the darkness this feature exists to end.
     assert len(rw.pages) == 1 and NEW in rw.pages[0]
-    # A failed tab must never turn into a SECOND seat on the next pass.
+    assert "it is reachable by relay but has no tab: run paseo agent open new-seat" in rw.pages[0]
+    # A failed tab must never turn into a SECOND seat or a second open on the next pass.
     run_pass(rw)
     assert sum(is_start(argv) for argv, _ in rw.calls) == 1
+    assert [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]] == [
+        ["paseo", "agent", "open", NEW, "--json"]]
+    assert len(rw.pages) == 1
 
 
-def test_41_no_open_switch_skips_the_attempt_and_still_seats(monkeypatch, tmp_path):
-    rw = tab_world(monkeypatch, tmp_path, no_open="1")
+@pytest.mark.parametrize("word", ["1", "true", "yes", "on"])
+def test_41_no_open_switch_skips_the_attempt_and_still_seats(monkeypatch, tmp_path, word):
+    rw = tab_world(monkeypatch, tmp_path, no_open=word)
     run_pass(rw)
     assert [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]] == []
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
     assert f"NOT opened (RW_AUTO_SEAT_NO_OPEN=1): run paseo agent open {NEW}" in rw.LOG.read_text()
     assert len(rw.pages) == 1 and NEW in rw.pages[0]
+
+
+@pytest.mark.parametrize("value,skipped", [("0", False), ("false", False), ("off", False),
+                                           ("", False)])
+def test_41b_other_switch_values_still_attempt_the_open(monkeypatch, tmp_path, value, skipped):
+    """The switch is a word list like `RW_IDLE_NUDGE`'s: anything else attempts (and fails safe)."""
+    rw = tab_world(monkeypatch, tmp_path, no_open=value)
+    run_pass(rw)
+    attempted = [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]]
+    assert attempted == ([] if skipped else [["paseo", "agent", "open", NEW, "--json"]])
+    assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+
+
+def adopted_world(monkeypatch, tmp_path, open_failure=""):
+    """An id whose start never confirmed, adopted from the listing, then diagnosed live next pass."""
+    rw = lost_id(monkeypatch, tmp_path)
+    rw.opened.clear()
+    rw.pages.clear()                               # pass 1's "no live session" page is done with
+    rw.open_failure = open_failure
+    rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE)
+    run_pass(rw)                                   # pass 1: adopt the lost id, diagnose later
+    assert rw.opened == []                         # adoption is not a start: it owes no tab yet
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    return rw
+
+
+def test_43_an_adopted_candidate_gets_its_tab_on_the_first_live_pass(monkeypatch, tmp_path):
+    """Codex P2 / adversary N4: a seat that reached "live" by RECOVERY was never opened."""
+    rw = adopted_world(monkeypatch, tmp_path)
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert rw.load_state()["told"][f"auto-seat tab:{NEW}"] == NOW + rw.AUTO_SEAT_S + 1
+    assert rw.pages == []                          # the open succeeded: nothing to tell
+
+
+def test_44_a_failed_open_on_an_adopted_candidate_pages_and_is_not_retried(monkeypatch, tmp_path):
+    reason = f"NOT opened in Paseo Desktop (rc=3: no Desktop process); it is reachable by relay but has no tab: run paseo agent open {NEW}"
+    rw = adopted_world(monkeypatch, tmp_path, open_failure=reason)
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert len(rw.pages) == 1
+    assert "has no Paseo Desktop tab" in rw.pages[0] and "run paseo agent open new-seat" in rw.pages[0]
+    # One attempt per id: a retry every pass would hammer a headless host and re-page him forever.
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert len(rw.pages) == 1
 
 
 def test_42_a_callers_agent_id_never_reaches_the_started_seat(monkeypatch, tmp_path):

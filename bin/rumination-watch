@@ -78,8 +78,11 @@ names any automatically started id. The start runs as `env -u PASEO_AGENT_ID` (a
 PASEO_AGENT_ID makes the new seat that agent's SUBAGENT; `bin/self-slash` clears it for the same
 reason) and, once `paseo agent inspect` confirms the seat, opens its tab with `paseo agent open`:
 a `paseo run` agent has NO tab, and an invisible seat hitting a `card:*` (which §J never answers)
-is the same darkness one level down (djbclark's ruling, 2026-10-30). A failed open is logged and
-never fails the start; RW_AUTO_SEAT_NO_OPEN=1 skips the attempt on a host with no desktop.
+is the same darkness one level down (djbclark's ruling, 2026-10-30). A failed open is logged,
+carried into the page to djbclark and never fails the start; a seat that comes alive only by
+recovery (its start's confirmation was lost, or its id came from the Paseo listing) gets ONE
+attempt per id on the first pass that diagnoses it live, and pages him if that fails;
+RW_AUTO_SEAT_NO_OPEN (1/true/yes/on) skips the attempt on a host with no desktop.
 
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
 not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
@@ -1092,10 +1095,12 @@ def open_desktop_tab(agent_id: str) -> str:
     start, because there is no old agent to fall back to and the seat is reachable either way.
 
     `agent open` returns as soon as the app is launched with the deep link and cannot confirm a tab
-    appeared (#159), so "" means "the CLI accepted it". RW_AUTO_SEAT_NO_OPEN=1 skips the attempt on
-    a host with no desktop and still returns a line naming the hand-run fix.
+    appeared (#159), so "" means only "the CLI accepted it" and callers must not log that a tab
+    EXISTS (adversary N1, 2026-10-30: a launchd pass with the app not running can send a deep link
+    that is dropped). RW_AUTO_SEAT_NO_OPEN=1 skips the attempt on a host with no desktop and still
+    returns a line naming the hand-run fix; it takes the same words as this file's other switches.
     """
-    if os.environ.get("RW_AUTO_SEAT_NO_OPEN", "").strip() == "1":
+    if os.environ.get("RW_AUTO_SEAT_NO_OPEN", "").strip().lower() in ("1", "true", "yes", "on"):
         return f"NOT opened (RW_AUTO_SEAT_NO_OPEN=1): run paseo agent open {agent_id}"
     rc, out, err = run_split(["paseo", "agent", "open", agent_id, "--json"], timeout=20)
     if rc == 0:
@@ -1105,8 +1110,38 @@ def open_desktop_tab(agent_id: str) -> str:
             f"it is reachable by relay but has no tab: run paseo agent open {agent_id}")
 
 
-def auto_seat(word: str, state: dict, now: float) -> str:
+def tab_once(agent_id: str, state: dict, now: float) -> str:
+    """Open an ADOPTED auto-seat agent's tab ONCE; "" when nothing is owed or the open succeeded.
+
+    A start can create the seat and then lose its own confirmation (a dropped response, or a
+    transient inspect error), and `auto_seat` returns before its open; the recovery path then
+    adopts that agent from `paseo ls` on a later pass and calls it healthy. Nothing ever gave it a
+    tab, so it is exactly as invisible as an unopened fresh seat — Codex's P2 and the adversary's
+    N4 on 2026-10-30 found the same hole independently. One attempt per id, whatever the outcome,
+    so a host with no desktop cannot re-run this every pass.
+
+    The attempt is stamped AFTER the open, like the seat itself, so a kill DURING the open leaves
+    it unrecorded and the next pass retries (`agent open` is idempotent; a never-opened seat is not
+    recoverable). It is NOT a start stamp: it never opens a cooldown or counts as a seat.
+    """
+    key = f"auto-seat tab:{agent_id}"
+    told = state.setdefault("told", {})
+    if key in told:
+        return ""
+    reason = open_desktop_tab(agent_id)
+    told[key] = now
+    save_state(state)
+    log(f"auto-seat: adopted {agent_id}: " + (reason or
+        "sent it to Paseo Desktop (a tab is not confirmable from here)"))
+    return reason
+
+
+def auto_seat(word: str, state: dict, now: float, note: dict | None = None) -> str:
     """Start only a PROVEN ABSENT seat; return the confirmed id, otherwise ''.
+
+    `note`, when given, receives `note["tab"]` with the reason the started seat could NOT be given
+    a Paseo Desktop tab, so the caller can put it in the page to djbclark: he is the one person who
+    must see a `card:*`, and a seat he cannot see is the darkness this file exists to end.
 
     Diagnosis       Start?  Reason
     gone            yes     Inspect-confirmed absent (UUID id, not a blind read).
@@ -1263,7 +1298,15 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     # The seat exists, is reachable and is NOT visible to the human until it has a tab. Logged
     # AFTER the state that records it: a kill during the open must leave a seated, diagnosable id.
     tab = open_desktop_tab(new_id)
-    log(f"auto-seat: {'opened ' + new_id + ' in Paseo Desktop' if not tab else tab}")
+    # Attempted, whatever the outcome: `tab_once` must not re-send this id when the recovery path
+    # adopts it later. Saved after the open so a kill DURING it leaves the attempt unrecorded and
+    # the adoption retries it — `agent open` is idempotent, a never-opened seat is not recoverable.
+    told[f"auto-seat tab:{new_id}"] = now
+    save_state(state)
+    log(f"auto-seat: " + (tab or
+        f"sent {new_id} to Paseo Desktop (a tab is not confirmable from here)"))
+    if tab and note is not None:
+        note["tab"] = tab
     return new_id
 
 # A page size for `gh search prs`, not a ceiling on reality: at the cap the count is a lower bound.
@@ -1528,6 +1571,7 @@ def _pass(a: argparse.Namespace) -> int:
     auto_gone = False
     if AUTO_SEAT:
         candidate = auto_seat_candidate(state)
+        tab_note: dict = {}                 # `auto_seat` fills note["tab"] when it could not open one
         target = candidate or ident
         if not target and not _LIVE_ERR:
             target = next((candidate for _, candidate in owner_candidates()), "")
@@ -1540,6 +1584,16 @@ def _pass(a: argparse.Namespace) -> int:
             if word in ("idle", "working", "silent") or word.startswith("card:"):
                 ident = candidate
                 probe[:] = [(word, "auto-seat candidate")]
+                # This seat was ADOPTED, not confirmed by `auto_seat`, so nothing ever tried to
+                # give it a tab; it is exactly as invisible as an unopened fresh one, and a card
+                # on it is the case this whole feature exists for (Codex P2 / adversary N4).
+                missing_tab = tab_once(candidate, state, now)
+                if missing_tab and should_tell_djbclark("auto-seat tab", state, now):
+                    if to_djbclark(f"Dann: {ROLE!r}'s auto-started seat {candidate} has no Paseo "
+                                   f"Desktop tab, so a question card on it would be unseen. "
+                                   f"{missing_tab}"):
+                        djb_page_sent("auto-seat tab", state, now)
+                        spoke_djb = True
         elif candidate and candidate != ident and (word in ("idle", "working", "silent")
                                                    or word.startswith("card:")):
             # A live successor is authoritative. Retire the stale candidate so it cannot shadow
@@ -1553,13 +1607,15 @@ def _pass(a: argparse.Namespace) -> int:
         # are broken. Keep live candidate diagnostics above, but refuse spawning while blind.
         if _LIVE_ERR and word == "gone":
             word = "unknown"
-        started = auto_seat(word, state, now)
+        started = auto_seat(word, state, now, tab_note)
         auto_gone = word == "gone"
         if auto_gone and (started or should_tell_djbclark("no live session", state, now)):
             said = (f"Dann: no live session for {ROLE!r} (gone). The previous seat stopped answering.")
             if started:
                 said += (f" A seat was started automatically at "
                          f"{time.strftime('%H:%M', time.localtime(now))}: {started}.")
+                if tab_note.get("tab"):
+                    said += f" {tab_note['tab']}"
             if to_djbclark(said):
                 djb_page_sent("no live session", state, now)
                 spoke_djb = True
@@ -1829,7 +1885,8 @@ def main(argv: list[str] | None = None) -> int:
             "listing reconciles it. Nothing retries on the next pass; refusal logs are limited to "
             "one per cooldown. The start runs `env -u PASEO_AGENT_ID` and, once confirmed, opens "
             "the seat's Paseo Desktop tab (`paseo agent open`): a `paseo run` agent has none, a "
-            "failed open is logged and never fails the start, and RW_AUTO_SEAT_NO_OPEN=1 skips it. "
+            "failed open is logged, paged to djbclark and never fails the start, and one attempt is "
+            "also made for a seat adopted by recovery; RW_AUTO_SEAT_NO_OPEN (1/true/yes/on) skips it. "
             "The darkness page still "
             "goes out and names a newly started seat."
         ),
