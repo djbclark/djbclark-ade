@@ -29,6 +29,12 @@ GUARD = ROOT / "bin" / "ade-git-guard"
     "'ade.runs'='a'\\''b'\\''c'",
     # a valueless entry followed by another setting is TWO entries, not a value for the first
     "'ade.flag'= 'ade.after'='v'",
+    # a closing quote continues the string through `\` + an escapable character + a reopening quote: sq_quote's own
+    # csh spelling of an exclamation mark, which `'x!'` would read as a history expansion in csh
+    "'ade.bang'='x'\\!'' 'ade.after'='v'",
+    "'ade.both'='a'\\''b'\\!'c'",
+    # trailing whitespace after the last entry is fine
+    "'ade.tail'='v' \t",
 ])
 def test_parameter_key_value_quoting_matches_git(tmp_path, state, parameters):
     env = base_env(state, GIT_CONFIG_PARAMETERS=parameters)
@@ -49,6 +55,9 @@ def test_parameter_key_value_quoting_matches_git(tmp_path, state, parameters):
     "'ade.unquoted'=v",            # values are single-quoted
     "'ade.trail'='x'\\'",          # an escape with no reopening quote
     "'=no-key'",                   # an old-style entry with an empty key
+    " 'ade.a'='1'",                # git skips NO leading whitespace before the first entry
+    " ",                           # ...so a whitespace-only transport is bogus, not empty
+    "'ade.slash'='x'\\\\''",       # `\` is not one of the two characters need_bs_quote escapes
 ])
 def test_a_parameter_transport_git_refuses_is_dropped_rather_than_guessed(tmp_path, state, parameters):
     """git refuses the whole run on a bogus format, so the guard classifies nothing from it."""

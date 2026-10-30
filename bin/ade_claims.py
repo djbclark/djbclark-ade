@@ -760,11 +760,17 @@ def _env_count_config(env: dict[str, str]) -> list[tuple[str, str]]:
 _GIT_SPACE = frozenset(" \t\n\v\f\r")     # C isspace() in the C locale, which is what git's parser uses
 
 
+def _need_bs_quote(c: str) -> bool:
+    """Git's need_bs_quote: the two characters sq_quote escapes outside the single quotes for csh safety."""
+    return c in "'!"
+
+
 def _sq_dequote(src: str, i: int) -> Optional[tuple[str, int]]:
     """Git's sq_dequote_step (quote.c): the single-quoted string starting at `src[i]`, and the index just past it.
-    A closing quote followed by `\\'` and then a reopening quote continues the SAME string — that is how git's own
-    sq_quote writes `it's` as `'it'\\''s'`. Any other character after a closing quote is a bogus format (None), as is
-    a string that ends inside the quotes; measured against git 2.56, `''`, `\\\\` and a trailing escape are all bogus."""
+    A closing quote followed by `\\` + a character that NEEDS backslash quoting, then a reopening quote, continues the
+    SAME string — that is how git's own sq_quote writes `it's` as `'it'\\''s'` and an exclamation as `'x'\\!'` (csh).
+    Any other character after a closing quote is a bogus format (None), as is a string that ends inside the quotes;
+    measured against git 2.56, `''`, `\\\\` and a trailing escape are all bogus."""
     if i >= len(src) or src[i] != "'":
         return None
     out: list[str] = []
@@ -780,10 +786,10 @@ def _sq_dequote(src: str, i: int) -> Optional[tuple[str, int]]:
         i += 1
         if i >= len(src):
             return "".join(out), i
-        # Only the `\'` + reopening-quote form continues the same string; `''`, `\\` and a bare
+        # Only `\` + an escapable character + a reopening quote continues the same string; `''`, `\\` and a bare
         # trailing escape are all git's bogus format (measured: `'x''y'`, `'x'\\''y'`, `'x'\'`).
-        if src[i] == "\\" and i + 2 < len(src) and src[i + 1] == "'" and src[i + 2] == "'":
-            out.append("'")
+        if (src[i] == "\\" and i + 2 < len(src) and _need_bs_quote(src[i + 1]) and src[i + 2] == "'"):
+            out.append(src[i + 1])
             i += 3
             continue
         return "".join(out), i
@@ -802,26 +808,14 @@ def _parse_config_parameters(params: str) -> Optional[list[tuple[str, str]]]:
     2026-10-30; filed as djbclark-ade#158 M2). It cannot hide config from the guard — git runs nothing in that case."""
     out: list[tuple[str, str]] = []
     i, n = 0, len(params)
-    while True:
-        while i < n and params[i] in _GIT_SPACE:
-            i += 1
-        if i >= n:
-            return out
+    # git's loop is `while (cur && *cur)` and it skips NO whitespace before the first entry: an empty transport is
+    # fine, a whitespace-only one is bogus (measured: `" "`, `"\t"` and `" 'a.b'='v'"` are all rc 128).
+    while i < n:
         step = _sq_dequote(params, i)
         if step is None:
             return None
         key, i = step
-        if i < n and params[i] == "=":
-            # new-style `'key'='value'`: the quoted key is literal (a `=` in it belongs to the name/subsection)
-            i += 1
-            if i < n and params[i] not in _GIT_SPACE:
-                step = _sq_dequote(params, i)
-                if step is None:
-                    return None
-                value, i = step
-            else:
-                value = "true"                      # implicit bool: `'key'=`
-        else:
+        if i >= n or params[i] in _GIT_SPACE:
             # old-style `'key=value'`: git hands the dequoted string to git_config_parse_parameter, which splits it
             # at the FIRST `=` and keeps every later one in the value (`'ade.old=value=with=equals'`)
             key, sep, value = key.partition("=")
@@ -829,9 +823,26 @@ def _parse_config_parameters(params: str) -> Optional[list[tuple[str, str]]]:
                 value = "true"
             if not key:
                 return None                          # git: "bogus config parameter" for an empty key
-        if i < n and params[i] not in _GIT_SPACE:      # entries are separated by whitespace: `'a'='1''b'='2'` is bogus
+        elif params[i] == "=":
+            # new-style `'key'='value'`: the quoted key is literal (a `=` in it belongs to the name/subsection)
+            i += 1
+            if i < n and params[i] == "'":
+                step = _sq_dequote(params, i)
+                if step is None:
+                    return None
+                value, i = step
+            elif i >= n or params[i] in _GIT_SPACE:
+                value = "true"                       # implicit bool: `'key'=`
+            else:
+                return None
+        else:
+            return None
+        if i < n and params[i] not in _GIT_SPACE:      # a quoted value must be followed by whitespace or the end
             return None
         out.append((_ckey(key), value))
+        while i < n and params[i] in _GIT_SPACE:
+            i += 1
+    return out
 
 
 def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
