@@ -125,7 +125,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 
 | Capability today | Footprint | Disposition | Replacement (section G for plugins) |
 |---|---|---|---|
-| `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | RETIRE in D4 | `send_agent_prompt` with B2's states; G3 for delivery and deferred send |
+| `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | non-Paseo routes RETIRE in D4; relay.py and fleet.py in D6, once no watcher calls them | `send_agent_prompt` with B2's states; G3 for delivery and deferred send |
 | herdr as a harness (`bin/herdr-*`, herdr docs and skills, `-t/-p` naming, panes hosting agents, pane typing) | 139 files | RETIRE | Paseo workspaces; naming `-pw` only |
 | `herdr4paseo` (A8.1) | own project | KEEP, edge case | one A8 bridges doc and skill |
 | `paseo4herdr` (A8.2), plugin `herdr-harness` (installed, disabled) | own project | KEEP, edge case | same doc and skill |
@@ -235,9 +235,10 @@ ops-promotion pilot passes.
    **Gate:** no paid job or artifact depended on a retiring tool; outcome records written.
 4. **Seat and communication cutover.** Every launch is `paseo run`/`create_agent`; `relay.py` routes only
    `--via paseo` (strangler); a `paseo-peers` skill (B2 states, G3 as the sanctioned path, named acks per
-   standing order 10) replaces `peer-relay`. After the drain gate: relay's other routes, helm, herdr-tidy,
-   herdr-sleeper and session-finder are disabled. **Gate:** `paseo ls -g` shows every live seat; G3 shows
-   `delivered` for a cross-workspace send; the drain record is committed.
+   standing order 10) replaces `peer-relay`. After the drain gate: relay's non-Paseo routes, helm,
+   herdr-tidy and herdr-sleeper are disabled. `relay.py` and `fleet.py` themselves stay enabled
+   (`--via paseo` only) because D6's watchers still call them. **Gate:** `paseo ls -g` shows every live seat;
+   G3 shows `delivered` for a cross-workspace send; the drain record is committed.
 5. **Dispatch, then lifecycle.** `acp-dispatch`/`acp-run` replaced by G1 on Paseo subagents (records kept
    readable until calibration reads G1's); `/bigteam` and the dispatch footer rewritten; after the drain gate,
    `acp-dispatch` is disabled; then `self-slash` successors (C1). `acp-run` retires only when zcode and crush
@@ -245,8 +246,11 @@ ops-promotion pilot passes.
    slices with deadline, report file and one forced quota stop; a successor survives its parent's archive with
    the chain pointer intact.
 6. **Watchers and notifiers.** `fleet-watch`, `load-watch` delivery, quota-guard steers and the watch roles
-   on `paseo send`; Paseo schedules for judgment jobs only (F2). **Gate:** a load incident reaches its
-   watcher as a Paseo prompt.
+   on `paseo send`; Paseo schedules for judgment jobs only (F2). Then, after the drain gate and a search
+   showing no caller of `relay.py` or `fleet.py` left outside `docs/history/` (the watchers above,
+   `fleet-watch upstream --relay-to`, `paseowatch`, `cfenginewatch`, `tell-chief-of-staff`, the quota guard),
+   `session-finder` is disabled. **Gate:** a load incident reaches its watcher as a Paseo prompt; that search
+   is empty.
 7. **Deletion and docs.** Delete what earlier phases disabled; README, both AGENTS.md, ops AGENTS.md, memory
    pointers, skills index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/`. The
    end-state check is a **new** CI step in djbclark-ade (the `context-policy` job runs only pytest today)
@@ -342,9 +346,13 @@ and C8).
    `paseo run --output-schema`, `paseo wait --timeout` (waits, does not cancel). Interface:
    `jobs.submit(taskId, host, workspace, profile, reportPath, deadline, grace)`, `jobs.get`, and, for the
    job's owner only (as agent tools), `jobs.finish`, `jobs.extend(taskId, seconds)`; `jobs.reconcile` (astra C1, Fable 3.1).
-2. **`ade-gate` (plugin)**: `agent.create.before` runs the `aiuse` and `load-watch ci decide` checks
-   (cached about 60 s, inside the hook's 30 s ceiling) and enforces B9's workspace cap.
+2. **`ade-gate` (plugin)**: `agent.create.before` runs `aiuse` (cached about 60 s) and
+   `bin/load-watch admit --json` with no wait (the admission predicate `acp-dispatch` already uses; exit 75
+   means too hot, so the gate refuses with the load named and the launcher retries outside the hook, which
+   has a 30 s ceiling), and enforces B9's workspace cap.
    1. **Fails closed**: an `aiuse` error, stale evidence or a hook timeout refuses the launch with the reason.
+      The one exception copies `acp-dispatch`'s rule: a missing or crashed `load-watch` lets the launch
+      through with the error recorded in the ledger (a gate that cannot read the load must not stop all work).
       The override is an expiring entry written through `bin/gate-profile` (`config/gates.toml`), so a broken
       `aiuse` cannot stop recovery work for long. Agents are told never to write it; G2 logs every launch
       that used an override and sends `hermes-ping` for it. It is **not a boundary**: `gate-profile` has no
