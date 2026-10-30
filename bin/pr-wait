@@ -1002,9 +1002,12 @@ def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict
 
     `open` is every unresolved Codex review thread of ANY head (outdated or not) in which ANY comment is a
     Codex finding (REST: Codex bot, a finding mark; GraphQL: author the Codex app, same databaseId).
+    `for_head_all` is this head's findings with `--since` NOT applied (the null evidence must not depend on a
+    window a caller chose to hide history with); `for_head` is the same list filtered by `--since`, which is
+    what the summary counts.
     `finding_comments` counts all Codex finding comments per kind, EVERY head, for the marker cross-check
     (`has_any_findings=true` beside none of them); it is deliberately not evidence against an explicit null
-    on this head — `unresolved_stated` reads `for_head` for that, so a fixed finding cannot block its fix."""
+    on this head — `unresolved_stated` reads `for_head_all` for that, so a fixed finding cannot block its fix."""
     t0 = parse_ts(since) if since else None
     reviews = api_items(f"repos/{repo}/pulls/{pr}/reviews?per_page=100")
     head_reviews = {r.get("id") for r in reviews if r.get("commit_id") == head}
@@ -1013,16 +1016,18 @@ def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict
         kind = finding_kind(c.get("body") or "")
         if kind and is_codex_user(c):
             findings[c.get("id")] = (kind, c)
-    for_head = []
+    for_head, for_head_all = [], []
     for kind, c in findings.values():
         if c.get("original_commit_id") != head and c.get("pull_request_review_id") not in head_reviews:
             continue
+        entry = {"id": c.get("id"), "kind": kind, "path": c.get("path"),
+                 "line": c.get("line") or c.get("original_line"),
+                 "created_at": c.get("created_at"), "original_commit_id": c.get("original_commit_id"),
+                 "body": (c.get("body") or "")[:600]}
+        for_head_all.append(entry)
         if t0 is not None and not (c.get("created_at") and parse_ts(c["created_at"]) >= t0):
             continue
-        for_head.append({"id": c.get("id"), "kind": kind, "path": c.get("path"),
-                         "line": c.get("line") or c.get("original_line"),
-                         "created_at": c.get("created_at"), "original_commit_id": c.get("original_commit_id"),
-                         "body": (c.get("body") or "")[:600]})
+        for_head.append(entry)
     open_threads = []
     for t in fetch_threads(repo, pr):
         if t["isResolved"]:
@@ -1037,7 +1042,7 @@ def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict
                              "original_commit_id": hit["original_commit_id"] or c.get("original_commit_id"),
                              "isOutdated": t["isOutdated"],
                              "title": (body.splitlines() or [""])[0][:200]})
-    return {"for_head": for_head, "open": open_threads,
+    return {"for_head": for_head, "for_head_all": for_head_all, "open": open_threads,
             "finding_comments": {k: sum(1 for kind, _ in findings.values() if kind == k) for k in KINDS}}
 
 
@@ -1076,7 +1081,7 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
         return False
     if review is None:
         return False
-    if any(f["kind"] == kind for f in review["for_head"]):
+    if any(f["kind"] == kind for f in review["for_head_all"]):
         return False
     return not any(t["kind"] == kind for t in review["open"])
 

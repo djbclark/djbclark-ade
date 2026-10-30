@@ -767,6 +767,25 @@ def test_an_explicit_null_beside_a_finding_ON_THIS_HEAD_still_fails_closed(world
     assert summary["merge_blockers"] == ["security-marker-unverified"]
 
 
+def test_a_since_window_cannot_hide_a_finding_on_this_head_from_the_null_check(world: World) -> None:
+    """`--since` narrows what the SUMMARY counts, never the evidence behind a null.
+
+    A resolved finding on this head is exactly what the null contradicts, and `--since` is a caller's
+    choice about history on an old PR: letting it shrink the evidence too would make `--since` a way to
+    wave a finding through, which is the one thing a null must not be.
+    """
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments",
+                ok([sec_finding(62, original_commit_id=HEAD, created_at="2026-10-01T00:00:00Z")]))
+    world.route("graphql", gql(thread(62, resolved=True, oid=HEAD)))
+    assert world.run("--since", "2026-10-23T00:00:00+00:00").returncode == 0
+    summary = world.file("summary")
+    assert summary["findings_for_head"] == 0  # the window did what it says
+    assert summary["merge_ready"] is False
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
 def test_a_findings_flag_that_is_neither_boolean_nor_null_is_still_unverified(world: World) -> None:
     # a marker we do not understand is not a clean review, and must not be read as one
     sec = {"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": "false"}
