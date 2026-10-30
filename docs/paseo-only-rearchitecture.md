@@ -29,7 +29,9 @@ this plan wins where they disagree about the future, they win about today. Sourc
 6. **Fan-out during the migration:** Paseo-native subagents (`paseo run` / `create_agent`) and the
    `/paseo-handoff`, `/paseo-advisor`, `/paseo-committee` skills; not `/bigteam` until D5 rewrites it.
    Exception until D5: `acp-dispatch` stays the dispatcher for frontier consults and adversary reviews,
-   because its quota gates are the only ones that exist today (H4).
+   because its quota gates are the only ones that exist today (H4). Until D1.3 and D2's gate have both
+   passed, fan-out uses `isolation: local` workspaces only, and task worktrees come from `git worktree add`
+   (order 9); D0 rule 3.
 7. **Fable and codex astra take part in the re-architecting** (djbclark, 2026-10-29); this overrides the
    routing-policy line that reserves them for `frontier` consults. Both consulted on v0 (section I).
 8. **Herdr bridges and attach clients stay, for edge cases** (djbclark, 2026-10-30): two projects, each
@@ -86,10 +88,12 @@ this plan wins where they disagree about the future, they win about today. Sourc
       outside the worktree (`~/.local/state/ade/rescue/<repo>/<branch>-<date>/`). Only then does it push a
       `rescue/<branch>-<date>` branch with **tracked changes only**, and only to a private remote; untracked
       files never leave the machine. A failed push still leaves the local rescue.
-   3. No slice is created with `autoArchive`; the janitor stays in preview mode (its current mode is
-      recorded in D1) or excludes every agent G1 has not marked "branch pushed and report read"; workers lose
-      `archive_agent` (B3). G1's "not archived until pushed" is a convention: the operator, the UI and
-      `paseo-telegram` can still archive, which is why point 2 exists.
+   3. No slice is created with `autoArchive`; workers lose `archive_agent` (B3). `session-janitor`
+      (running) had automatic child archiving on (`archiveChildren:true`, `archiveAfterHours:6`; read
+      2026-10-30) and djbclark turned it off the same day (`archiveChildren:false`; it had never archived
+      anything). It stays off until D1.3 and D2's gate pass, and after that excludes every agent G1 has not
+      marked "branch pushed and report read". G1's "not archived until pushed" is a convention: the operator,
+      the UI and `paseo-telegram` can still archive, which is why point 2 exists.
    4. D1.3 proves the teardown and the rescue; D2's gate proves G2's refusal.
 5. **Native first, plugin only for a hook.** A script that calls the `paseo` CLI, SDK or MCP is native (A3a)
    and lives in djbclark-ade. A plugin is written only when a daemon lifecycle hook, a UI surface or a
@@ -113,7 +117,8 @@ this plan wins where they disagree about the future, they win about today. Sourc
    Keep active workspaces bounded (about 15, enforced by G2's create check), never register giant trees as
    workspaces, and create slice workspaces in the background (Fable 5.2).
 10. **Destructive tests never touch the live daemon.** Every probe that restarts, hangs or kills a daemon
-   runs against an isolated test daemon: its own `PASEO_HOME` and a Unix socket, or a TCP port claimed in
+   runs against an isolated test daemon: its own fresh `PASEO_HOME` (never a copy of the live one, so it
+   cannot inherit the live server id) and a Unix socket, or a TCP port claimed in
    `site-djbclark/registry/ports.yml` first, or a scratch user on vps-primary. The live Mac daemon is touched
    only in a drained window (`paseo ls` shows no running agent, G1 reconciled) with djbclark's yes.
 
@@ -138,11 +143,12 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `/bigteam`, job records under `~/.local/state/bigteam` | 73 files | REWRITE in D5 | `paseo run` fan-out on G1 |
 | `self-slash`, `/new`-`/baton` lifecycle, successor launch, `paseo-new-seat`, `paseo-bypass-watch` | — | SIMPLIFY in D5 | successor created **top-level** from the CLI without `PASEO_AGENT_ID` until D1 proves archive-parent behaviour (an agent-scoped `create_agent` makes the successor a child of the retiring agent, Fable 2.4); keep `/baton` and Tier 1/Tier 2 |
 | `helm`, `/helm-all` | — | REPLACE | `paseo permit ls` / `respond_to_permission` for live seats; `paseo ls -a` and Tier 1 pointers for ended sessions |
-| `herdr-tidy`, `herdr-sleeper`, `agent-sleep`, `autorename` herdr half | — | RETIRE after the D0.2 drain (sleepers hold Claude session UUIDs per pane: `bin/herdr-sleeper list` must be empty or each resumed as a Paseo agent) | `session-janitor` (running; preview mode or G1-excluded, B4), `archive_agent`; Paseo titles |
+| `herdr-tidy`, `herdr-sleeper`, `agent-sleep`, `autorename` herdr half | — | RETIRE after the D0.2 drain (sleepers hold Claude session UUIDs per pane: `bin/herdr-sleeper list` must be empty or each resumed as a Paseo agent) | `session-janitor` (running; child archiving off, then G1-excluded, B4), `archive_agent`; Paseo titles |
 | `watch` roles, `fleet-watch` (in `~/ops/site-private/bin`, not this repo), `paseowatch`/`cfenginewatch` (`fleet-watch upstream --relay-to` uses relay.py), `tell-chief-of-staff` | — | REWRITE in D6 | `paseo send` from the launchd script; schedules only where a run needs judgment (F2) |
 | `load-watch`, `session-load-watch`, `rumination-watch`, `bg`, gates, `wait-file` | — | KEEP (launchd, F2); drop pane typing | deliver via `paseo send` |
 | `claude-quota-guard`, `context-watch`, `context_size_nudge` (provider hooks) | — | KEEP | they run inside the provider; G2 enforces the same gates for launches that bypass the hook |
 | `pr-wait`, `ade-git-guard`, `git-commit-own`, `local-review`, graft, `aiuse`, `web-get`, `failover.py`; `ci-waiver` once parked PR 118 lands (not on master) | — | KEEP (harness-neutral) | n/a |
+| Running Paseo plugins not covered elsewhere (`paseo plugin ls`, 2026-10-30): `better-paseo` (chat timeline and agent board; its approve/deny and archive buttons act only on the operator's click), `herald` (speaks when an agent waits; it denies tool requests only from its own `autoArchive` summary helpers, created in the waiting agent's existing workspace), `reopen-archived` (reopens archived workspaces with their agent), `skills` (skills browser), `forges` (no description; no permission, archive or prompt calls in its source) | — | KEEP | none answers another agent's card or archives on its own. A source search found no `agent.open.before` tool attachment except one in `better-paseo`, which D2's catalog check covers |
 | `cow-workspaces` | — | RETIRE | Paseo worktree workspaces plus `fresh-worktrees` (running) and setup hooks; the claim stays (B4) |
 | `adversary` and other provider sub-agents | — | KEEP (provider-native) | or as a Paseo subagent in D5 |
 | Hermes: `hermes-ping`; Hermes as a seat | 163 files | KEEP `hermes-ping` as a notification channel (F1); RETIRE Hermes-as-harness; Hermes stays a Paseo provider | Paseo push for agent events |
@@ -171,7 +177,7 @@ Each phase is a PR with an adversary verdict and CHANGELOG lines. No phase edits
 `~/ops` edits (D6, D7), which follow AGENTS.md order 9's transitional `~/ops` exception until the
 ops-promotion pilot passes.
 
-0. **Consult and research**: done 2026-10-30 (this v1). Two rules bind every later phase:
+0. **Consult and research**: done 2026-10-30 (this v1). Three rules bind every later phase:
    1. **B10**: destructive probes run only on an isolated test daemon or in a drained, approved window.
    2. **Drain gate** (before any "disable" of B8): a script under `tests/paseo-acceptance/drain/` records,
       for the tool being disabled, that it holds nothing: `bin/herdr-sleeper list` empty or each sleeper
@@ -180,6 +186,9 @@ ops-promotion pilot passes.
       `acp-dispatch` enabled until then, or imported as a Paseo agent with its session id; never a fresh
       dispatch); `relay.py --pending` empty or each expectation retired with a reason; every Orca worktree and
       cow pasture clean and pushed, or its owner named; bigteam inboxes drained.
+   3. **No Paseo worktree fan-out before the preserve point exists**: until D1.3 and D2's gate have both
+      passed, Paseo workspaces created for work use `isolation: local`, task worktrees come from
+      `git worktree add` (order 9), and `session-janitor` child archiving stays off (B4.3).
 1. **Contracts and safety net.** Each probe is a repeatable script under `tests/paseo-acceptance/` with an
    **expected outcome and a named consequence if it fails**; D2 starts only when every consequence is
    resolved. D1 probes native Paseo behaviour and the non-plugin pieces it builds (the B4 teardown, the B9
@@ -206,29 +215,38 @@ ops-promotion pilot passes.
       user with their own `PASEO_HOME` and no access to the host's deploy or service secrets; provider and
       Telegram credentials in the host's secrets mechanism (sops/agenix or `sudo-secretspec`); the
       upgrade 0.13.0 → 0.14 lands only as the pushed `master` head through `deploy-vps-primary` (home rule
-      36). Expected: an unauthenticated request from another tailnet node is refused.
+      36). Expected: an unauthenticated request from another tailnet node is refused; `ps` shows the daemon
+      and the pilot agents running as that dedicated user (the NixOS service's user changes, or a second
+      instance runs as it); that user cannot read the host's deploy keys or other services' secrets.
    9. The dead-man check on vps-primary **holds no Mac credential and never calls the Mac daemon**; the Mac
       daemon stays bound to `127.0.0.1`. Each run, the Mac's B9 watchdog writes a heartbeat to vps-primary
       that carries its own result (`/api/health` and the timed real RPC), so a wedged daemon on an awake Mac
       still pages from vps-primary. A sleep/wake hook (IOKit power notification through `sleepwatcher` or an
       equivalent launchd agent) writes `sleeping since T` before sleep and clears it on wake. The Mac writes
-      both through a dedicated ssh key restricted on vps-primary (`restrict,command="…write-heartbeat"`) that
-      can only replace those two files. The check pages when the heartbeat is stale with no sleep marker,
-      when the heartbeat reports a failing daemon, and when a sleep marker is older than a configurable
-      threshold (default 72 hours, so a weekend away does not page). A marker followed by silence counts as
-      asleep until that threshold. Expected: sleep (no page), daemon killed while awake (page), network cut
-      while awake (page); from vps-primary an authenticated Paseo call to the Mac is impossible, and the key
-      cannot run anything else.
+      both through a dedicated ssh key installed for a dedicated unprivileged user on vps-primary
+      (`restrict,from="<Mac tailnet IP>",command="…write-heartbeat"`). The forced command ignores
+      `SSH_ORIGINAL_COMMAND`, reads at most 4 KB of JSON from stdin, validates its fields and replaces only
+      those two files atomically. A sleep marker counts only while it is newer than the last heartbeat, and
+      every heartbeat write clears an older marker, so a wake hook that failed cannot silence the check. The
+      check pages when the heartbeat is stale with no current sleep marker, when the heartbeat reports a
+      failing daemon, and when a current sleep marker is older than a configurable threshold (default 72 hours,
+      so a weekend away does not page). The paging credential (`hermes-ping` on vps-primary) lives in D1.8's
+      secrets mechanism. Expected: sleep (no page), daemon killed while awake (page), network cut while awake
+      (page), wake hook failed and then a network cut while awake (page); from vps-primary an authenticated
+      Paseo call to the Mac is impossible, and the key cannot run anything else.
 2. **Minimum plugins and adopted plugins** (section G): G2, G3, G1, G4; `usage-auto-resume` coverage for omp,
    opencode, cline and grok (G5); the Telegram plugin's 0.14 test (F1). **Gate**, on the isolated daemon,
-   asserting that the live daemon's state files under `~/.local/state/ade/<serverId>/` are byte-identical
-   before and after: three concurrent launches against one pool admit at most what the ledger allows; an
-   `aiuse` failure follows G2's fail mode; a reroute is visible to the launcher; a held G3 send survives a
-   daemon restart; G4 ignores an agent G1 never recorded (also one labelled after create) and escalates
-   compound commands (`;`, `&&`, `|`, `$(`, a newline, `sh -c`); a non-owner Telegram message is refused; a
-   forged agent id in an RPC input is refused; the tool catalogs of a UI-created and a Telegram-created
-   agent lack the B3 tools; a `worktree` create in a repo without a committed `paseo.json` teardown is
-   refused (B4, G2).
+   asserting that the live daemon's state under `~/.local/state/ade/<serverId>/` is unchanged (or absent
+   before and still absent, while the live daemon runs no G plugin): three concurrent launches against one
+   pool admit at most what the ledger allows; an `aiuse` failure follows G2's fail mode; a reroute is
+   visible to the launcher; a held G3 send survives a daemon restart; G4 ignores an agent G1 never recorded
+   (also one labelled after create) and a job submitted without `permit: true`, and escalates compound
+   commands (`;`, `&&`, `|`, `$(`, a newline, `sh -c`) and command-taking options (`git -c`, `find -exec`,
+   `xargs`, `env VAR=… cmd`); a `jobs.submit` naming an existing agent id is refused; a non-owner Telegram
+   message is refused; a forged agent id in an RPC input is refused; the tool catalogs of a UI-created and a
+   Telegram-created agent lack the B3 tools, including tools any running plugin attaches in
+   `agent.open.before`; a `worktree` create in a repo without a committed `paseo.json` teardown is refused
+   (B4, G2).
 3. **Canary.** One real workflow end to end on Paseo only: work → review → CI → report, including a forced
    quota stop that resumes and a daemon restart that loses nothing (isolated daemon, or a drained window
    with djbclark's yes), and the one-task pilot on vps-primary with its report retrieved on the Mac.
@@ -249,8 +267,10 @@ ops-promotion pilot passes.
    on `paseo send`; Paseo schedules for judgment jobs only (F2). Then, after the drain gate and a search
    showing no caller of `relay.py` or `fleet.py` left outside `docs/history/` (the watchers above,
    `fleet-watch upstream --relay-to`, `paseowatch`, `cfenginewatch`, `tell-chief-of-staff`, the quota guard),
-   `session-finder` is disabled. **Gate:** a load incident reaches its watcher as a Paseo prompt; that search
-   is empty.
+   `session-finder` is disabled. The search covers djbclark-ade, `~/ops/*/bin` and `~/ops/*/roles`,
+   `~/Library/LaunchAgents`, the provider hook configs (`~/.claude/settings.json`, `~/.codex`, `~/.omp`) and
+   vps-primary's NixOS config; a hit anywhere blocks the gate. **Gate:** a load incident reaches its watcher
+   as a Paseo prompt; that search is empty.
 7. **Deletion and docs.** Delete what earlier phases disabled; README, both AGENTS.md, ops AGENTS.md, memory
    pointers, skills index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/`. The
    end-state check is a **new** CI step in djbclark-ade (the `context-policy` job runs only pytest today)
@@ -281,10 +301,12 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
 6. `relay.py` sender identification (found by 495e0645, 2026-10-30; not in `docs/queue.md`): a Paseo-hosted
    agent that neither carries `PASEO_AGENT_ID` nor has an ancestor that does (`fleet.py:627-631,647`; seen
    with an Antigravity agent) resolves to a channel-less `pid*` row (`fleet.py:878`), so its `--expect-ack`
-   is recorded with no proof path (`relay.py:752` returns before any header is read) and never closes, and
+   is recorded with no proof path (`timeline_base`, `relay.py:731-732`, returns None for a sender with no
+   Paseo id, so `timeline_ack` returns at `:749-750` before the header match at `:757`) and never closes, and
    nothing warns at send time. Queued acks themselves close correctly (the header precedes the `[queued …]`
-   prefix, pinned by `tests/test_relay_fallback.py:3009`). It matters until D4 retires `relay.py`, because
-   D0.2's drain gate relies on acks closing expectations; until then such records are retired with a reason.
+   prefix; `tests/test_relay_fallback.py:3009` pins that delivered format). It matters until D6 disables
+   `session-finder`, because D0.2's drain gate relies on acks closing expectations; until then such records
+   are retired with a reason.
 
 ## F. Decisions (djbclark, 2026-10-30, after the consults and research)
 
@@ -328,15 +350,17 @@ All hook names are Paseo 0.14's (`agent.create.before`, `agent.open.before`, `ag
 
 **State.** Every plugin keeps its state outside worktrees under `~/.local/state/ade/<serverId>/<plugin>/`,
 keyed by the daemon's server id, so an isolated test daemon (B10) never reads or writes the live daemon's
-ledgers. State is written atomically (temp file and rename), and every `reconcile()` acts only on records
-carrying its own server id.
+ledgers. The plugin reads its server id from the daemon at start (D2 names the SDK call; the running
+`session-janitor` already stores one) and **refuses to start** if it cannot, rather than fall back to a
+shared key. State is written atomically (temp file and rename), and every `reconcile()` acts only on
+records carrying its own server id.
 
-**Authorization.** A plugin RPC handler gets no authenticated caller (its input is self-asserted), so
-agent-facing operations (`jobs.finish`, `jobs.extend`, `ack.register`) are **plugin agent tools** attached in
-`agent.open.before`, authorized by the daemon-supplied `context.agent.id` against the record's owner. RPCs
-serve only the operator's UI. This stops mistakes and impersonation over the tool surface, **not** a same-uid
-agent with a shell that edits the state files directly; like B3, it is not a boundary (adversary r1 C9, r2 C3
-and C8).
+**Authorization.** A plugin RPC handler gets no authenticated caller (its input is self-asserted), so every
+agent-facing operation (`jobs.submit`, `jobs.get`, `jobs.finish`, `jobs.extend`, `ack.register`) is a **plugin
+agent tool** attached in `agent.open.before` and authorized by the daemon-supplied `context.agent.id`. RPCs
+serve only the operator's UI, which records the owner as `operator`. This stops mistakes and impersonation
+over the tool surface, **not** a same-uid agent with a shell that edits the state files directly; like B3, it
+is not a boundary (adversary r1 C9, r2 C3 and C8, r3 N2).
 
 1. **`ade-jobs` (plugin, hooks needed)**: durable task ids, deadline and grace, a wrap-up steer at
    T-minus-grace, interrupt at T recorded as exit 124 (cancellation confirmed, and the agent's child
@@ -344,8 +368,10 @@ and C8).
    existing format, `reconcile()` after a daemon restart that never relaunches blindly. A job's agent is
    never archived until the job records "branch pushed and report read" (B4). Native parts:
    `paseo run --output-schema`, `paseo wait --timeout` (waits, does not cancel). Interface:
-   `jobs.submit(taskId, host, workspace, profile, reportPath, deadline, grace)`, `jobs.get`, and, for the
-   job's owner only (as agent tools), `jobs.finish`, `jobs.extend(taskId, seconds)`; `jobs.reconcile` (astra C1, Fable 3.1).
+   `jobs.submit(taskId, host, workspace, profile, reportPath, deadline, grace, permit)` **creates the worker
+   itself** and never accepts an existing agent id; it records `owner = context.agent.id` (the caller) and
+   the worker's id, provider and mode. `jobs.get` for the owner; `jobs.finish` for the worker;
+   `jobs.extend(taskId, seconds)` for the owner; `jobs.reconcile` (astra C1, Fable 3.1, adversary r3 N2).
 2. **`ade-gate` (plugin)**: `agent.create.before` runs `aiuse` (cached about 60 s) and
    `bin/load-watch admit --json` with no wait (the admission predicate `acp-dispatch` already uses; exit 75
    means too hot, so the gate refuses with the load named and the launcher retries outside the hook, which
@@ -356,7 +382,9 @@ and C8).
       The override is an expiring entry written through `bin/gate-profile` (`config/gates.toml`), so a broken
       `aiuse` cannot stop recovery work for long. Agents are told never to write it; G2 logs every launch
       that used an override and sends `hermes-ping` for it. It is **not a boundary**: `gate-profile` has no
-      human-presence check, and any agent running as the operator's user could write the entry.
+      human-presence check, and any agent running as the operator's user could write the entry, or simply
+      run `paseo plugin disable ade-gate`; the watchdog alert (G2.5) detects a disabled gate, it does not
+      prevent it.
    2. **Reservations** are a locked ledger under `~/.local/state/ade/<serverId>/gate/`, decremented on every
       create, so launches inside one cache window cannot all pass.
    3. **Refuse by default; reroute only when the launch carries the label `ade.reroute=ok`**, and then only
@@ -377,15 +405,17 @@ and C8).
    non-steer agents in a **durable** queue until idle and deduplicates finish callbacks
    (`messages.send/ack/reconcile`; astra C4, Fable 3.5 and 3.8). Native sends bypass it (B2).
 4. **`ade-permit` (plugin)**: **opt-in and fail-closed.**
-   1. It trusts **its own record, not a label**: it acts only on agent ids G1 recorded at `jobs.submit`,
-      with the provider and the bypass/full mode recorded then (G1 refuses to record an agent launched in a
-      restrictive mode such as Always Ask, Write Approval or Plan, or with a deny brief). Labels and modes
-      can be changed after create (`update_agent`, `set_agent_mode`), so on every `agent.permission.before`
-      it re-reads the agent's current mode through the SDK and does nothing unless it still matches the
-      record. The operator's own sessions are never recorded.
+   1. It trusts **its own record, not a label**: it acts only on workers G1 created through a `jobs.submit`
+      with `permit: true` (the opt-in act), recording the provider and the bypass/full mode then; G1 refuses
+      `permit: true` for a restrictive mode such as Always Ask, Write Approval or Plan, or a deny brief. Labels
+      and modes can be changed after create (`update_agent`, `set_agent_mode`), so on every
+      `agent.permission.before` it re-reads the agent's current mode through the SDK and does nothing unless it
+      still matches the record. The operator's own sessions are never recorded.
    2. On `agent.permission.before` (a notification) it answers with `respondToPermission` only when the
       request, **tokenized with a shell parser**, matches an entry of the reviewed allow-list
-      (`config/permit-allow.toml`) exactly as a whole argv, or an entry plus a declared argument shape. It
+      (`config/permit-allow.toml`) exactly as a whole argv, or an entry plus a declared argument shape. An
+      argument shape may not admit `-c`, `-exec`/`--exec`, config overrides, `-C <path>` into another repo, or
+      any option that takes a command (`git -c core.sshCommand=…`, `find -exec`, `xargs`, `env VAR=… cmd`). It
       escalates any request containing `;`, `&`, `|`, a backtick, `$(`, `>`, `<` or a newline, and any
       `sh -c`, `bash -c`, `python -c` or `eval` wrapper. Everything else, including every question card and
       every outward or hard-to-reverse action, goes to the parent or the operator.
