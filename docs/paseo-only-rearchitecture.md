@@ -17,8 +17,8 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
    (b) an existing Paseo plugin; (c) a Paseo plugin we write; (d) only then keep it in djbclark-ade.
 4. **End state:** no mention of any harness other than Paseo anywhere in djbclark-ade, `~/AGENTS.md`
    (`site-djbclark/cursor/home-agents.mdc`), the ops `AGENTS.md` files, skills, docs or memory pointers,
-   except ONE history document that is not normally read (`docs/history-multi-harness.md`, to be written
-   from the retired material) and, during the migration, this plan.
+   except the history that is not normally read (the `docs/history/` directory, F5, to be written from the
+   retired material) and, during the migration, this plan.
 5. **Basis:** the research in `Open-Source AI Agent Harnesses Compared.pdf` (Paseo Desktop upload
    `upload_d70305b6-6865-461c-83df-aab4fb305afb`, 2026-10-29): Paseo scores 92.2/100 on non-blocking
    inter-TUI communication once ClinePass and OpenCode Go support without code is a hard requirement
@@ -92,9 +92,9 @@ excluding `graft/` and `docs/handoffs/`)
 4. **Watchers and notices**: `fleet-watch`, `load-watch` pane typing, quota guard steers become Paseo
    prompts/heartbeats/schedules; Hermes decision applied.
 5. **Docs and instruction files**: README, AGENTS.md (both), ops AGENTS.md, memory pointers, skills
-   index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history-multi-harness.md` from the
+   index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/` from the
    retired material; `rg -i 'herdr|orca|tmux|superset|tuicommander|relay\.py|acp-run|acp-dispatch'`
-   outside that one doc returns nothing (CI check, `context-policy` job).
+   outside that directory returns nothing (CI check, `context-policy` job).
 6. **Plugins**: whatever D0 decided we must write (candidates: dispatch-with-timeout-and-report,
    quota-aware launch gate, Telegram notifier if Paseo's push is insufficient), each its own repo or
    `paseo-plugins/`, upstreamed where general (home rule 38).
@@ -110,11 +110,20 @@ excluding `graft/` and `docs/handoffs/`)
 
 ## F. Open questions for djbclark (successor asks with numbered options, one per card)
 
-1. Hermes: keep `hermes-ping` as a notifier, or rely on Paseo mobile notifications only?
-2. Unattended runs (nightly `skillopt-night`, `reap`, `load-watch`): Paseo schedules, or keep launchd for
-   non-agent jobs?
-3. Remote Linux workers (vps-primary, Hyades): a second `paseo` daemon there now, or later?
-4. OpenCode plugins and the OpenCode V2 Go sessions: keep as provider-side plugins, or drop?
-5. The history document's name and location.
-6. Lead model for the migration (this draft proposes omp Opus 5.5 high for judgment phases, Sonnet 5.5
-   for pipeline phases; Fable and astra as consults per A7).
+Answers so far (djbclark, 2026-10-30, after the codex astra consult; the Fable consult is pending):
+
+1. Hermes: keep `hermes-ping` as the out-of-band alert, with Paseo mobile for agent events; a Telegram Paseo
+   plugin is possible. OPEN: djbclark asked for a web search of Paseo-native practice first, then a discussion.
+2. Unattended runs: probably Paseo schedules for agent jobs and launchd for non-model monitors. OPEN: same
+   search, plus a launchd-versus-Paseo-schedules pros and cons discussion.
+3. Remote Linux workers: probably a second daemon piloted now on one isolated task, on Hyades. OPEN: which
+   Hyades placement. Not on pastebin.xvm.mit.edu (too little memory).
+4. **DECIDED**: keep OpenCode plugins that act inside the provider session; drop anything that acts as an
+   alternate harness.
+5. **DECIDED**: a `docs/history/` directory rather than one file; the end-state grep exempts only that directory.
+6. **DECIDED**: omp Opus 5.5 high leads the judgment phases, Sonnet 5.5 the mechanical ones, Fable and codex
+   astra consult; every launch stays subject to the live quota gates.
+7. **DECIDED**: adopt the astra phase order: contracts, then the minimum jobs/admission/message-receipt
+   support, then a canary workflow, then the communication cutover, then lifecycle and dispatch, then watchers
+   and notifiers, then deletion. Old tools stay until their replacements pass live acceptance gates. Section D is
+   rewritten to this order in plan v1.
