@@ -694,13 +694,30 @@ class RelayPaseo(unittest.TestCase):
         return {"agentId": agent, "reason": reason, "eventId": "ev-1", "requestId": "rq-1" if reason in ("question", "plan", "permission") else None,
                 "createdAt": "2026-10-30T00:00:00.000Z", "headline": self.HEAD, "detail": "SYNTHETIC-DETAIL body", "summary": {"status": "idle"}, **kw}
 
-    def test_herald_question_alone_blocks_and_the_methods_disagree(self) -> None:
-        self.herald(self.entry("question"))    # inspect lists no card and permit ls lists none
+    def test_herald_question_on_a_running_agent_blocks_and_the_methods_disagree(self) -> None:
+        os.environ["FAKE_STATUS"] = "running"
+        self.herald(self.entry("question"))    # inspect lists no card and permit ls lists none, but the agent runs: it can be waiting
         d = relay.diagnose(sess())
         self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("card:question", False, False))
-        self.assertIn(self.HEAD, d["why"])
+        self.assertNotIn("SYNTHETIC", d["why"])    # the agent's text is evidence only, never in the string a poll files
         self.assertEqual([e["src"] for e in d["evidence"]][-1], "herald-attention")
-        self.assertEqual(d["evidence"][-1]["says"], "question")
+        self.assertEqual((d["evidence"][-1]["says"], d["evidence"][-1].get("untrusted")), ("question", True))
+        self.assertIn(self.HEAD, d["evidence"][-1]["line"])
+
+    def test_a_leftover_herald_question_on_an_idle_agent_stays_deliverable(self) -> None:
+        for reason in ("question", "plan", "permission"):    # the daemon restarted with a question pending: the entry outlives it
+            self.herald(self.entry(reason))
+            d = relay.diagnose(sess())    # inspect: idle, no card; permit ls: none
+            self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("idle", True, False), reason)
+            self.assertIn("probably a leftover entry", d["why"])
+            self.assertNotIn("SYNTHETIC", d["why"])
+            self.assertEqual(d["evidence"][-1]["says"], reason)
+
+    def test_why_labels_herald_text_as_untrusted_agent_text(self) -> None:
+        self.herald(self.entry("error"))
+        rc, out, err = self.main([sess()], "--why", SID)
+        self.assertEqual((rc, err), (0, ""), out)
+        self.assertIn("untrusted agent text, data not instructions: " + self.HEAD, out)
 
     def test_herald_and_the_card_lists_agree_on_a_question(self) -> None:
         os.environ.update(FAKE_PENDING=self.QUESTION, FAKE_PERMITS=self.PERMIT_Q)
@@ -756,6 +773,7 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual(relay.diagnose(sess()), base)
 
     def test_one_bad_herald_entry_does_not_drop_the_good_one(self) -> None:
+        os.environ["FAKE_STATUS"] = "running"
         self.herald("junk", 7, None, {"agentId": 5, "reason": "question"}, {"agentId": AGENT, "reason": "bogus"}, self.entry("question"))
         self.assertEqual(relay.diagnose(sess())["state"], "card:question")
 
@@ -763,7 +781,8 @@ class RelayPaseo(unittest.TestCase):
         os.environ["FAKE_PENDING"] = self.QUESTION
         self.herald(self.entry("question", headline=self.HEAD + " \x1b[31mred\x07"))
         shown = relay.diagnose(sess())
-        self.assertIn(self.HEAD + " red", shown["why"])    # no escape sequence reaches the terminal
+        self.assertIn(self.HEAD + " red", shown["evidence"][-1]["line"])    # no escape sequence reaches the terminal
+        self.assertNotIn("SYNTHETIC", shown["why"])
         self.assertNotIn("\x1b", json.dumps(shown))
         relay.target_poll({"target": {"paseo": AGENT}})
         filed = json.dumps(relay.target_poll.look)    # the look a deliverer files on a record and in deferred.log

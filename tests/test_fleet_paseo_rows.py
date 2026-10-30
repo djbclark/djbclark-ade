@@ -7,6 +7,7 @@ plainly fake.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -413,9 +414,19 @@ def test_a_herald_question_blocks_a_running_row_and_keeps_only_a_small_payload(p
 
 
 @pytest.mark.parametrize("reason", ["question", "plan", "permission"])
-def test_each_input_reason_blocks_an_idle_agent_too(paseo, reason):
+def test_a_leftover_herald_input_entry_on_an_idle_agent_blocks_nothing(paseo, reason):
+    """Herald keeps entries across a daemon restart or a lost permission_resolved: Paseo says WHO waits, Herald only WHY."""
     write_herald(paseo, attn(CLINE, reason))
-    assert {r["paseo"]: r for r in rows()}[CLINE]["status"] == "blocked"
+    r = {r["paseo"]: r for r in rows()}[CLINE]    # `paseo ls`: idle, and `permit ls` lists no card
+    assert (r["status"], r["herald"]["reason"], "herald_waits" in r) == ("idle", reason, False)
+    assert helm.classify(r, {})["kind"] not in ("question", "plan", "permission", "error")
+
+
+@pytest.mark.parametrize("reason", ["question", "plan", "permission"])
+def test_a_herald_input_entry_blocks_a_running_agent_without_a_card(paseo, reason):
+    write_herald(paseo, attn(OMP, reason))
+    r = {r["paseo"]: r for r in rows()}[OMP]
+    assert (r["status"], r["herald_waits"]) == ("blocked", True)
 
 
 @pytest.mark.parametrize("reason", ["finished", "canceled", "error"])
@@ -457,13 +468,11 @@ def test_an_archived_row_ignores_a_leftover_herald_entry(paseo):
     assert (old["status"], "herald" not in old) == ("ended", True)
 
 
-def test_a_claude_row_that_already_has_its_sid_gets_the_herald_status(paseo, monkeypatch, tmp_path):
-    """The blind spot: `_claude_sessions` builds a Paseo-hosted Claude row with a sid, which `_paseo_rows` never sees."""
-    write_herald(paseo, attn(CLAUDE, "question"))
+def claude_row_on_paseo(monkeypatch, tmp_path, registry_status="busy"):
     sid = "5" * 8 + "-1111-4000-8000-" + "0" * 12
     reg = tmp_path / "claude"
-    (reg / "sessions").mkdir(parents=True)
-    (reg / "sessions" / "a.json").write_text(json.dumps({"pid": 4242, "sessionId": sid, "cwd": "/x/y", "status": "busy"}))
+    (reg / "sessions").mkdir(parents=True, exist_ok=True)
+    (reg / "sessions" / "a.json").write_text(json.dumps({"pid": 4242, "sessionId": sid, "cwd": "/x/y", "status": registry_status}))
     monkeypatch.setattr(fleet, "CLAUDE", reg)
     monkeypatch.setattr(fleet, "alive", lambda pid: True)
     monkeypatch.setattr(fleet, "transcript", lambda s: None)
@@ -471,8 +480,34 @@ def test_a_claude_row_that_already_has_its_sid_gets_the_herald_status(paseo, mon
     monkeypatch.setattr(fleet, "_where", type("W", (), {"lookup": staticmethod(lambda pid, start: {"paseo_agent": CLAUDE}),
                                                          "env_of": staticmethod(lambda pid: {})}))
     [s] = fleet._claude_sessions({}, set(), set())
+    return sid, s
+
+
+def test_a_claude_row_that_already_has_its_sid_gets_the_herald_status(paseo, monkeypatch, tmp_path):
+    """The blind spot: `_claude_sessions` builds a Paseo-hosted Claude row with a sid, which `_paseo_rows` never sees."""
+    write_herald(paseo, attn(CLAUDE, "question"))
+    sid, s = claude_row_on_paseo(monkeypatch, tmp_path)
     assert (s["host"], s["sid"], s["paseo"], s["status"]) == ("paseo", sid, CLAUDE, "blocked")
     assert s["herald"]["reason"] == "question" and "SYNTHETIC" not in json.dumps(s)
+
+
+def test_a_leftover_herald_question_on_an_idle_claude_row_blocks_nothing(paseo, monkeypatch, tmp_path):
+    write_herald(paseo, attn(CLAUDE, "question"))
+    _sid, s = claude_row_on_paseo(monkeypatch, tmp_path, registry_status="idle")
+    assert (s["status"], s["herald"]["reason"], "herald_waits" in s) == ("idle", "question", False)
+
+
+def test_a_claude_row_waiting_on_herald_with_a_dev_server_child_stays_a_blocked_helm_item(paseo, monkeypatch, tmp_path):
+    """mark_busy turns a blocked row with children into busy-background, which hid the item: a Herald wait stays blocked."""
+    write_herald(paseo, attn(CLAUDE, "permission"))
+    _sid, s = claude_row_on_paseo(monkeypatch, tmp_path)
+    monkeypatch.setattr(fleet, "background_work", lambda pid, table: ["99 npm run build"])
+    fleet.mark_busy(s, {})
+    assert (s["status"], s["busy"]) == ("blocked", ["99 npm run build"])
+    assert helm.classify(s, {})["kind"] == "permission"
+    other = fleet._rec(id="x", agent="claude", status="blocked", pid=1)    # a transcript-blocked row keeps its old behaviour
+    fleet.mark_busy(other, {})
+    assert other["status"] == "busy-background"
 
 
 def test_helm_names_a_claude_paseo_question_from_herald_without_the_transcript(paseo):
@@ -487,7 +522,8 @@ def test_helm_names_a_claude_paseo_question_from_herald_without_the_transcript(p
 
 @pytest.mark.parametrize("reason,kind", [("question", "question"), ("plan", "plan"), ("permission", "permission"), ("error", "error")])
 def test_helm_gives_each_herald_reason_its_own_kind(paseo, reason, kind):
-    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="idle", cwd="/x/y")
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36,
+                   status="idle" if reason == "error" else "working", cwd="/x/y")
     write_herald(paseo, attn(CLAUDE, reason))
     fleet.herald_overlay([s])
     it = helm.classify(s, {})
@@ -495,7 +531,7 @@ def test_helm_gives_each_herald_reason_its_own_kind(paseo, reason, kind):
 
 
 def test_a_new_herald_event_reopens_a_skipped_item(paseo):
-    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="idle", cwd="/x/y")
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
     write_herald(paseo, attn(CLAUDE, "question"))
     fleet.herald_overlay([s])
     st = {"skipped": helm.classify(s, {})["fp"]}
@@ -542,3 +578,75 @@ def test_helm_brief_carries_a_herald_wait(paseo, monkeypatch, capsys):
     helm.cmd_brief(None, {})
     out = capsys.readouterr().out.strip()
     assert out.startswith("1:") and OMP[:8] in out
+
+
+# ---- repair of the adversary's BLOCK on head 8c69637c (2026-10-30) ----
+
+def test_deeply_nested_json_is_an_empty_list_not_a_crash(paseo):
+    write_herald(paseo, raw="[" * 200000 + "]" * 200000)    # well under HERALD_MAX_BYTES: json.loads raises RecursionError
+    assert fleet.herald_entries() == {}
+    assert [r["status"] for r in rows()] == ["idle", "working", "working"]
+
+
+def test_a_fifo_at_the_herald_path_does_not_hang(paseo):
+    paseo.herald.parent.mkdir(parents=True)
+    os.mkfifo(paseo.herald)
+    assert fleet.herald_entries() == {}    # O_NONBLOCK open, then fstat: not a regular file
+
+
+def test_a_device_symlink_at_the_herald_path_is_not_read(paseo):
+    paseo.herald.parent.mkdir(parents=True)
+    paseo.herald.symlink_to("/dev/zero")    # size 0, reads forever
+    assert fleet.herald_entries() == {}
+
+
+def test_the_herald_read_is_capped_whatever_stat_says(paseo, monkeypatch):
+    write_herald(paseo, attn(OMP, "question"))
+    monkeypatch.setattr(fleet, "HERALD_MAX_BYTES", 10)
+    assert fleet._herald_read() is None
+    monkeypatch.setattr(fleet, "HERALD_MAX_BYTES", 10_000)
+    assert fleet._herald_read()[0]["agentId"] == OMP
+
+
+def test_one_scan_reads_the_herald_file_once_for_every_row(paseo, monkeypatch):
+    write_herald(paseo, attn(OMP, "question"))
+    reads = []
+    real = fleet._herald_read
+    monkeypatch.setattr(fleet, "_herald_read", lambda: reads.append(1) or real())
+    many = [fleet._rec(id=f"r{i}", agent="claude", host="paseo", chan=("paseo", OMP), paseo=OMP, status="working") for i in range(3)]
+    fleet.herald_overlay(many)
+    assert len(reads) == 1 and all(s["status"] == "blocked" for s in many)
+    reads.clear()
+    fleet.herald_overlay(many, fleet.herald_entries())    # entries passed in: the overlay reads nothing itself
+    assert len(reads) == 1    # only the herald_entries() call above
+
+
+def test_sessions_reads_the_herald_file_once_and_shares_it(paseo, monkeypatch):
+    seen = []
+    shared = {}
+    monkeypatch.setattr(fleet, "herald_entries", lambda detail=False: shared)
+    monkeypatch.setattr(fleet, "ancestors", lambda: set())
+    monkeypatch.setattr(fleet, "ancestor_pane", lambda anc: None)
+    monkeypatch.setattr(fleet, "herdr_json", lambda *a, **k: {})
+    monkeypatch.setattr(fleet, "_launched", lambda used: [])
+    monkeypatch.setattr(fleet, "_claude_sessions", lambda *a, **k: seen.append(a[-1]) or [])
+    monkeypatch.setattr(fleet, "_other_herdr", lambda agents, used: [])
+    monkeypatch.setattr(fleet, "_pane_only", lambda panes, used: ([], []))
+    monkeypatch.setattr(fleet, "_proc_scan", lambda *a, **k: [])
+    monkeypatch.setattr(fleet, "_hermes_gateway", lambda: [])
+    monkeypatch.setattr(fleet, "_paseo_rows", lambda have, anc, archived=False, herald=None: seen.append(herald) or [])
+    monkeypatch.setattr(fleet, "proc_table", lambda: {})
+    fleet.sessions()
+    assert len(seen) == 2 and seen[0] is shared and seen[1] is shared
+
+
+def test_helm_answer_on_a_herald_question_refuses_cleanly(paseo, monkeypatch, capsys):
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, "question"))
+    fleet.herald_overlay([s])
+    it = helm.classify(s, {})
+    assert (it["kind"], "questions" in it) == ("question", False)
+    monkeypatch.setattr(helm, "find", lambda ident, state: (s, it))
+    with pytest.raises(SystemExit) as e:
+        helm.cmd_answer(type("A", (), {"id": "deadbeef", "fp": None, "text": None, "choice": [1]}), {})
+    assert "Paseo agent" in str(e.value) and "nothing sent" in str(e.value) and "KeyError" not in repr(e.value)

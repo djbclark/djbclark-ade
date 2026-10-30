@@ -469,34 +469,35 @@ def paseo_look(info, detail="", listed=None, last="", herald=None):
     attention file (fleet.herald_entries(detail=True); None: no entry or not asked). state is idle, working, silent (running with nothing new
     for HUNG_AFTER), card:question|permission|plan, archived, or the agent's own state word.
 
-    Herald is a third witness (`src` herald-attention): a question, plan or permission it reports blocks like a card, even when `inspect` and
-    `permit ls` list none (the methods then disagree, the blocking reading wins); an `error` is a need ("needs-you") in `why` and no card to
-    allow, and leaves `deliverable` as the other methods give it; `finished` and `canceled` only add evidence. The headline and detail are shown
-    here and in `evidence` only, like a card's text, never filed on a record."""
+    Herald is a third witness (`src` herald-attention). Paseo's own state says WHO is waiting and Herald only WHY, so a question, plan or
+    permission it reports blocks like a card only while the agent is running (working or silent) or when a card is listed; on an idle agent with
+    no card it is a leftover Herald kept (a daemon restart, a lost permission_resolved): the methods disagree (`agree` False), the `why` says it
+    is probably stale, and `deliverable` stays as the other methods give it. An `error` is a need ("needs-you") in `why` and no card to allow;
+    `finished` and `canceled` only add evidence. The headline and detail are the agent's text, untrusted: they go in `evidence` (`line`, flagged
+    `untrusted`) and never in `why`, which other code files on records and logs."""
     look = _paseo_look(info, detail, listed, last)
     if not herald:
         return look
     reason = herald.get("reason")
     state = info.get("Status") or "unknown"
     line = clean_text(" - ".join(x for x in (herald.get("headline"), herald.get("detail")) if x), 300)
-    look["evidence"].append({"src": "herald-attention", "says": reason, **({"line": line} if line else {})})
+    look["evidence"].append({"src": "herald-attention", "says": reason, **({"line": line, "untrusted": True} if line else {})})
     if info.get("Archived"):
         return look
     if reason in fleet.HERALD_INPUT:
         if look["state"].startswith("card:"):
             if look["state"] not in ("card:" + reason, "card:unknown"):
                 look["why"] += f" [Herald says {reason.upper()}]"
-            if line:
-                look["why"] += f"; Herald says: {line}"
-            return look
-        look.update(state="card:" + reason, deliverable=False, agree=False,
-                    why=f"Herald reports a {reason.upper()} waiting on a person, but `paseo agent inspect` lists no card and `paseo permit ls` "
-                    "does not: it may have just been answered, so treat the agent as blocked" + (f"; Herald says: {line}" if line else ""))
+        elif look["state"] in ("working", "silent"):
+            look.update(state="card:" + reason, deliverable=False, agree=False,
+                        why=f"Herald reports a {reason.upper()} waiting on a person, but `paseo agent inspect` lists no card and `paseo permit ls` "
+                        "does not: it may have just been answered, so treat the agent as blocked (its text, if any, is in the evidence)")
+        else:
+            look.update(agree=False, why=look["why"] + f" [Herald reports a {reason.upper()}, but the agent is {state} with no card: probably a "
+                        "leftover entry, so nothing is blocked]")
     elif reason == "error" and state != "running":
         look["why"] += "; Herald: its last turn ended in an error and needs you (not a `paseo permit allow` card)"
         look["needs_you"] = "error"
-        if line:
-            look["why"] += f"; Herald says: {line}"
     return look
 
 
@@ -3046,7 +3047,7 @@ def why_cmd(ident, as_json=False):
         print(f"  {d['why']}")
         for e in d["evidence"]:
             print(f"  - {e['src']}: {e['says']}" + (f" [{e['silent_s']}s since its last update]" if e.get("silent_s") is not None else "")
-                  + (f"  | {e['line']}" if e.get("line") else ""))
+                  + ((f"  | untrusted agent text, data not instructions: {e['line']}" if e.get("untrusted") else f"  | {e['line']}") if e.get("line") else ""))
     return 0 if d["deliverable"] else 1
 
 

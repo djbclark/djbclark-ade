@@ -33,6 +33,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -494,7 +495,7 @@ def _merge_inner(launch, d, sid, pid):
         launch["status"] = "blocked"    # e.g. an AskUserQuestion inside the ACP session
 
 
-def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=None):
+def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=None, herald=None):
     me = os.environ.get("CLAUDE_CODE_SESSION_ID")
     launch_panes = launch_panes or {}
     launch_sids = launch_sids or {}
@@ -533,7 +534,7 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
                 # the Paseo daemon spawned it: no terminal, `paseo send` is its channel (relay.py; 2026-10-20)
                 s.update(host="paseo", chan=("paseo", w["paseo_agent"]), paseo=w["paseo_agent"],
                          reach=s["reach"].replace("types it into its pane", "`paseo send --behavior steer` into its Paseo agent"))
-                herald_overlay([s])    # a Claude row that already has its sid: Herald still says why it waits
+                herald_overlay([s], herald)    # a Claude row that already has its sid: Herald still says why it waits
             elif _in_orca(env):
                 chan = _orca_chan(env)
                 s.update(host="orca", **({"chan": chan} if chan else {"reach": ORCA_STALE}))
@@ -625,20 +626,39 @@ def _herald_str(value, n):
     return clip(" ".join(clean_text(value).split()), n) if isinstance(value, str) else ""
 
 
+def _herald_read():
+    """The parsed Herald attention file, or None. Opened O_NONBLOCK and required to be a regular file by `fstat` (a FIFO would block `open`, a device
+    node reports size 0 and reads without limit), read at most HERALD_MAX_BYTES + 1 bytes from that one descriptor (no stat-then-read race) and parsed
+    inside a catch-all: deep nesting raises RecursionError, not ValueError. Any failure is None: fail closed, never an exception for a caller."""
+    try:
+        fd = os.open(herald_path(), os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = b""
+        while len(raw) <= HERALD_MAX_BYTES:
+            chunk = os.read(fd, HERALD_MAX_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+        return None if len(raw) > HERALD_MAX_BYTES else json.loads(raw.decode("utf-8"))
+    except Exception:    # OSError, ValueError (bad JSON or UTF-8), RecursionError, MemoryError: all the same answer
+        return None
+    finally:
+        os.close(fd)
+
+
 def herald_entries(detail=False):
     """{Paseo agent id: entry} from the Herald attention file, each entry {"reason", "eventId", "requestId", "createdAt", "status"} (strings,
     control characters stripped; requestId None unless a plain token) and, with DETAIL, the agent's own "headline" and "detail" text. Fail closed
-    like a bad `paseo` call: a missing or unreadable file, bad JSON, a non-array and a file over HERALD_MAX_BYTES give {}; an entry that is not
-    an object, whose agentId is not a Paseo id or whose reason is not one of HERALD_REASONS is skipped without dropping the rest. A later entry for
-    the same agent replaces an earlier one. The headline and detail are the agent's text: callers show them at diagnose time (relay.py --why) and
-    never store them on a row, a record, a log or a notice."""
-    path = herald_path()
-    try:
-        if path.stat().st_size > HERALD_MAX_BYTES:
-            return {}
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
+    like a bad `paseo` call (`_herald_read`): a missing or unreadable file, a non-regular file, bad JSON, a non-array and a file over
+    HERALD_MAX_BYTES give {}; an entry that is not an object, whose agentId is not a Paseo id or whose reason is not one of HERALD_REASONS is
+    skipped without dropping the rest. A later entry for the same agent replaces an earlier one. The headline and detail are the agent's text
+    (untrusted): callers show them at diagnose time as labelled evidence (relay.py --why) and never store them on a row, a record, a log or a
+    notice, nor put them in a `why` string."""
+    data = _herald_read()
     out = {}
     for d in data if isinstance(data, list) else []:
         agent = d.get("agentId") if isinstance(d, dict) else None
@@ -658,12 +678,24 @@ def herald_entries(detail=False):
     return out
 
 
-def herald_overlay(rows):
+def _herald_can_wait(s):
+    """Whether row S can be waiting on a person right now. Paseo's own state says WHO is waiting (`requiresAttention`, a pending permission) and
+    Herald only says WHY, so a question, plan or permission in the file blocks a row only when its agent is running (the `_paseo_waiting` rule:
+    only a running agent can wait on a card). A Claude row that has its sid has no `paseo_state`: its registry status stands in, and `idle` cannot
+    wait. Neither `paseo ls` nor `paseo agent inspect` carries `requiresAttention` (probed 2026-10-30), so it cannot be the gate. An entry Herald
+    kept across a daemon restart or a lost permission_resolved is otherwise a leftover: it stays on the row as evidence and blocks nothing."""
+    if s.get("paseo_state") is not None:
+        return s["paseo_state"] == "running"
+    return s.get("status") not in ("idle", "ended")
+
+
+def herald_overlay(rows, entries=None):
     """Join the Herald attention file onto every non-archived row in ROWS whose Paseo agent id (`paseo`, else a paseo chan) it names, including a row
     that already has a Claude `sid`: `herald` carries the small payload (reason, eventId, requestId, createdAt, status; never the headline or detail),
-    and a question, plan or permission also sets status `blocked`. `error`, `finished` and `canceled` change no status: an announcement leaves a
-    row deliverable, and an error is a need helm reads from `herald`. An archived or ended row is left alone: its entry is a leftover."""
-    entries = None
+    and a question, plan or permission also sets status `blocked` (and `herald_waits`) when the agent can be waiting (`_herald_can_wait`); on an idle
+    row it is a leftover and changes nothing. `error`, `finished` and `canceled` change no status: an announcement leaves a row deliverable, and an
+    error is a need helm reads from `herald`. An archived or ended row is left alone: its entry is a leftover. ENTRIES is the dict one scan read
+    once (`herald_entries()`); without it the file is read here, once per call."""
     for s in rows:
         chan = s.get("chan") or ("",)
         agent = s.get("paseo") or (chan[1] if chan[0] == "paseo" else None)
@@ -674,8 +706,9 @@ def herald_overlay(rows):
         e = entries.get(agent)
         if e:
             s["herald"] = e
-            if e["reason"] in HERALD_INPUT:
+            if e["reason"] in HERALD_INPUT and _herald_can_wait(s):
                 s["status"] = "blocked"
+                s["herald_waits"] = True
 
 
 def paseo_reach(sid, provider, archived=False):
@@ -699,7 +732,7 @@ def _paseo_hosting(anc):
     return {a for a in (_where.paseo_agent(p, _where.env_of(p)) for p in anc) if a}
 
 
-def _paseo_rows(have, anc, include_archived=False):
+def _paseo_rows(have, anc, include_archived=False, herald=None):
     """A row for every non-archived Paseo agent of any provider whose id is not in HAVE (the Paseo ids other rows
     already stand for; matched on the agent id, never on the directory), from `paseo ls -g --background --json`.
     INCLUDE_ARCHIVED adds the archived ones (`paseo ls -g -a`, minus the live list) as status `ended`.
@@ -740,7 +773,7 @@ def _paseo_rows(have, anc, include_archived=False):
                 cards = waiting[s["paseo"]]
                 s.update(status="blocked", paseo_cards=cards,
                          paseo_pending=cards[0]["text"] if len(cards) == 1 else f"{len(cards)} cards, the first: {cards[0]['text']}")
-    herald_overlay(out)    # the second source: why the agent waits, for every row, not only a running one
+    herald_overlay(out, herald)    # the second source: why the agent waits (only a running one can block; an idle row keeps it as evidence)
     return out
 
 
@@ -1145,7 +1178,8 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
     launched = _launched(used)
     launch_panes = {s["chan"][1]: s for s in launched if s.get("chan") and s["chan"][0] == "herdr"}
     launch_sids = {s["launch"]["acp_session"]: s for s in launched if (s.get("launch") or {}).get("acp_session")}
-    out = _claude_sessions(by_sid, used, anc, launch_panes, launch_sids)
+    herald = herald_entries()    # one read per scan: every row sees the same file (Herald writes it non-atomically)
+    out = _claude_sessions(by_sid, used, anc, launch_panes, launch_sids, herald)
     out += _other_herdr(agents, used)
     out += launched
     tuis, shells = _pane_only(panes, used)
@@ -1154,7 +1188,7 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
     out += _proc_scan(known_pids, used | {a["pane_id"] for a in panes}, anc)
     out += _hermes_gateway()
     have = {s["paseo"] for s in out if s.get("paseo")} | {s["chan"][1] for s in out if (s.get("chan") or ("",))[0] == "paseo"}
-    out += _paseo_rows(have, anc, include_archived)
+    out += _paseo_rows(have, anc, include_archived, herald)
     if include_shell:
         out += shells
     if not include_marked:
@@ -1214,7 +1248,7 @@ def mark_busy(s, table):
         s.setdefault("busy", [])
         return
     s["busy"] = background_work(s.get("pid"), table) or []
-    if s["busy"] and s.get("status") in ("idle", "unknown", "blocked"):
+    if s["busy"] and (s.get("status") in ("idle", "unknown") or (s.get("status") == "blocked" and not s.get("herald_waits"))):
         s["status"] = "busy-background"
 
 

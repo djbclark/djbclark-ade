@@ -660,6 +660,8 @@ def cmd_answer(a, state):
         sys.exit(ANSWERED if status == "answered" else CHANGED)
     if it["kind"] != "question":
         sys.exit(f"helm: {it['id']} has no pending question (it is {it['kind']}); nothing sent")
+    if it.get("paseo"):    # a Herald question on a Paseo agent: no `questions`, no terminal to press keys in
+        sys.exit(f"helm: {it['id']} is a Paseo agent: answer in the Paseo UI (`relay.py --why {it['id']}` shows its text); nothing sent")
     if not s.get("chan"):
         sys.exit(f"helm: no channel to {it['id']}; answer in the pane ({it['focus'] or it['where']})")
     qs = it["questions"]
