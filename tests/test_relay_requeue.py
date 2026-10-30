@@ -11,6 +11,11 @@ could answer.
 The failure this pins (2026-10-29): a queued question to Dann 7 was refused at re-send with "this message asks
 for a reply or action, so it needs --expect-ack ID" and never arrived; the same path would have appended a
 footer naming the sender itself and written a duplicate link. Every id here is fake.
+
+Two boundaries the adversary round found and this pins: `--requeued` is internal (an ordinary session is refused,
+because taken from one it would send a question with no footer, no link and no expectation), and the stored
+`shape.expect` is validated before it can become an argument (a record is a JSON file; a value like `--pending`
+would otherwise run the queue listing, exit 0, and be marked delivered).
 """
 from __future__ import annotations
 
@@ -74,6 +79,11 @@ class Base(fb.Harness):
             rc = relay.main([to, text, "--wait", "1", *argv])
         return rc, out.getvalue(), err.getvalue()
 
+    def resend(self, text: str, *argv: str) -> tuple[int, str]:
+        """A run as the DELIVERER runs one: inside `as_caller(...)`, where SENDER_OVERRIDE is set. (rc, last line)."""
+        self.rows()
+        return relay.run_captured(["peer-fb", text, "--wait", "1", *argv], relay.sender_label(self.me))
+
     def record(self, text: str = "", **kw: Any) -> dict[str, Any]:
         """A queued record as a deliverer finds it: `shape` only when KW has it (a record from before 2026-10-29 has none)."""
         rec = {"id": "20261029-200457-aaaaaa", "text": text or f"{QUESTION} [reply through relay.py to bbbbbbbb: ack build1]",
@@ -125,8 +135,7 @@ class TestTheDelivererResendsWhatWasQueued(Base):
         rc, argv = self.deliver(rec["id"], pane)    # the same row it was queued against, now idle
         self.assertEqual(rc, 0)
         self.assertEqual(len(argv), 1, argv)
-        self.assertIn("--requeued", argv[0])
-        self.assertIn("build1", argv[0])    # the expectation the queueing run reserved: never re-reserved here
+        self.assertIn("--requeued=build1", argv[0])    # the expectation the queueing run reserved: never re-reserved here, and bound with `=` so a value can never read as an option
         self.assertIn("--no-defer", argv[0])
         self.assertIn("--no-ack", argv[0])
         self.assertEqual(self.sent_texts, [rec["text"]])    # not one character added: no second footer, no `?` refusal
@@ -167,25 +176,51 @@ class TestTheQueueTimeRuleStillHolds(Base):
         self.assertIn("asks for a reply or action", err)
         self.assertEqual((self.sent_texts, relay.rec_all()), ([], []))
 
+    def test_an_ordinary_session_cannot_requeue(self) -> None:
+        """`--requeued` is the deliverer's own flag: taken from a session it would be a way to send a question with no
+        footer, no link and no expectation, which is exactly what the reply gate exists to prevent."""
+        rc, _, err = self.go(QUESTION, "--needs-reply", "--requeued", "build1")
+        self.assertEqual(rc, 2, err)
+        self.assertIn("--requeued is internal", err)
+        self.assertEqual((self.sent_texts, relay.rec_all()), ([], []))
+
     def test_a_requeued_send_is_not_judged_and_gets_no_new_footer(self) -> None:
         rec = self.record()
-        rc, _, err = self.go(rec["text"], "--requeued", "build1")
-        self.assertEqual(rc, 0, err)
+        rc, line = self.resend(rec["text"], "--requeued=build1")    # the deliverer's own run, inside as_caller(...)
+        self.assertEqual(rc, 0, line)
         self.assertEqual(self.sent_texts, [rec["text"]])
         self.assertIsNone(relay.expect_read("build1"))    # nothing reserved again
         self.assertEqual(self.links(), {})                 # and no link written by a re-send
 
     def test_requeued_and_expect_ack_are_exclusive(self) -> None:
-        rc, _, err = self.go(QUESTION, "--requeued", "build1", "--expect-ack", "build1")
-        self.assertEqual(rc, 2)
-        self.assertIn("exclusive", err)
+        rc, line = self.resend(QUESTION, "--requeued=build1", "--expect-ack", "build1")
+        self.assertEqual(rc, 2, line)
+        self.assertIn("exclusive", line)
         self.assertEqual(self.sent_texts, [])
 
     def test_a_malformed_requeued_id_is_refused(self) -> None:
-        rc, _, err = self.go(QUESTION, "--requeued", "not an id")
-        self.assertEqual(rc, 2)
-        self.assertIn("--requeued EXPECT_ID", err)
+        rc, line = self.resend(QUESTION, "--requeued", "not an id")
+        self.assertEqual(rc, 2, line)
+        self.assertIn("--requeued EXPECT_ID", line)
         self.assertEqual(self.sent_texts, [])
+
+
+class TestAMalformedStoredShapeIsNeverSent(Base):
+    def test_a_tampered_shape_expect_fails_the_record_and_sends_nothing(self) -> None:
+        """A record is a plain JSON file: its stored value reaches the inner run's argv, so a value that parses as an
+        OPTION (not an id) must fail the record rather than run `--pending` and report it delivered."""
+        for bad in ("--pending", "--cancel=20261029-200457-aaaaaa", "-x", "not an id"):
+            with self.subTest(bad=bad):
+                rec = self.record(shape={"expect": bad, "fyi": False, "needs_reply": False})
+                rc, argv = self.deliver(rec["id"])
+                self.assertEqual(rc, 0)
+                self.assertFalse([a for a in argv if any("--requeued" in x for x in a)], argv)    # no re-send was built
+                self.assertFalse([a for a in argv if rec["text"] in a], argv)
+                self.assertEqual(self.sent_texts, [])
+                got = relay.rec_read(rec["id"])
+                self.assertEqual(got["state"], "failed")
+                self.assertIn("shape.expect is malformed", got["outcome"])
+                self.assertEqual(self.links(), {})
 
 
 class TestTheShapeIsStoredAtQueueTime(Base):

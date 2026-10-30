@@ -145,11 +145,14 @@ the send fails). Retry with --idle S, or --no-defer for the plain refusal" (nobo
 target every 5 s while it is not there or cannot be asked, on a backoff ladder while it works or waits on a card (below; only the head of a target's queue looks) and, once it is idle, sends through
 this same path (every gate, lock and proof) the stored text prefixed `[queued Nm ago] ` (omitted under a minute), under
 the stored label (sanitized again; `--deliver` refuses a record whose label sender_name would not give, and a `hermes xxxx`
-label without stored hops). The re-send is NOT a new message: it passes `--requeued [EXPECT_ID]` (the expectation the
-queueing run reserved, when it reserved one), so the inner run neither re-checks the `?` reply rule nor appends a footer
+label without stored hops). The re-send is NOT a new message: it passes `--requeued [EXPECT_ID]` (internal: an ordinary send
+is refused) with the expectation the queueing run reserved, when it reserved one, so the inner run neither re-checks the `?`
+reply rule nor appends a footer
 (the stored text already carries it, and the sender's own Paseo id in the deliverer's env is only `paseo send`'s
 attribution, never a `self` row), and it writes no second link or expectation. The queueing run stores that shape in the
-record's `"shape"` (expect, fyi, needs_reply); a record queued before 2026-10-29 has none, so the deliverer passes the bare flag.
+record's `"shape"` (expect, fyi, needs_reply); a record queued before 2026-10-29 has none, so the deliverer passes the bare flag,
+and a record whose stored value is malformed is failed instead of being sent (it is a plain JSON file: the value is
+checked before it can become an argument).
 A target that is gone (3 looks in a row), archived, finished, or no longer the same
 session (a pane id reused: its agent, session id, transcript differs, or, for a target with neither session id nor transcript, the
 queue-time pid of its TUI is no longer among the pane's foreground pids: tool children come and go, so it is membership, never a
@@ -2270,6 +2273,7 @@ DEFER_PER_TARGET, DEFER_PER_SENDER, DEFER_TOTAL = 20, 20, 100    # queued or sen
 DEFER_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 DEFER_FINAL = ("delivered", "failed", "expired", "cancelled")
 UNVERIFIED_WHY = "unverified, do not resend; check its pane"
+MALFORMED_SHAPE_WHY = "the record's stored shape.expect is malformed, so it was not re-sent: requeue the message"
 LABEL_OK = re.compile(rf"[\u2026A-Za-z0-9._:() -]{{1,{LABEL_MAX}}}")    # what sender_name can produce (the ellipsis is fleet.clip's)
 BUSY = {"hit": False}      # main sets it when it refuses because the target is busy (the deliverer then keeps waiting)
 SENDER_OVERRIDE = [None]   # the label a deliverer sends under (the one stored in the record)
@@ -2646,6 +2650,18 @@ def earlier_unfinished(rec):
     return False
 
 
+def stored_expect(rec):
+    """(EXPECT_ID, True) for the expectation a record's queueing run reserved, ("", False) when it reserved none, and
+    ("", True) when the stored `shape` is malformed. A record is a plain JSON file on disk, so this value is checked
+    before it can become an argument of the inner run (EXPECT_ID also forbids a leading `-`, so it can never read as an
+    option of its own: `--requeued --pending` would list the queue, exit 0, and the record would be marked delivered)."""
+    shape = rec.get("shape") if isinstance(rec.get("shape"), dict) else {}
+    eid = shape.get("expect") or ""
+    if eid and not (isinstance(eid, str) and EXPECT_ID.fullmatch(eid)):
+        return "", True
+    return (eid or ""), False
+
+
 def unverified_late(rid, rec, rc, line):
     """A send that returned after its record was failed "unverified" (the 15-minute rule, with this deliverer still alive):
     the record, the log and the notice say the same thing. Nothing is resent; the notice is claimed once, so it is never doubled."""
@@ -2676,6 +2692,13 @@ def deliver(rid):
             return 0
         if not label_ok(rec.get("sender"), rec_hops(rec)):    # a record is plain JSON: never send under a label sender_name would not give
             finish(rid, "failed", "refused: the stored sender label is not one relay produces", allowed=("queued",), notify=None)
+            return 0
+        # Checked here too, not only where the argument is built: a record whose stored shape cannot be handed to the inner
+        # run can never be sent, and it is the head of its target's queue (earlier_unfinished), so it must fail at once
+        # rather than hold every later message to that target until it expires.
+        if stored_expect(rec)[1]:
+            defer_log(rec, "error", "the record's stored shape.expect is malformed: not re-sent")
+            finish(rid, "failed", MALFORMED_SHAPE_WHY, allowed=("queued",))
             return 0
         if transition(rid, ("queued",), pid=os.getpid(), ppid=os.getppid()) is None:
             return 0
@@ -2739,9 +2762,14 @@ def deliver(rid):
             try:
                 # "--no-ack" is defence in depth: as_caller(...) sets SENDER_OVERRIDE, so sender_identified is already False; no test fails without the flag.
                 # "--requeued" says this is a re-send of text the queueing run already shaped: it neither re-runs the reply rule nor appends
-                # a footer, and the ID it carries is the expectation that run reserved (absent: it reserved none).
-                shape = rec.get("shape") if isinstance(rec.get("shape"), dict) else {}
-                requeued = ["--requeued"] + ([shape["expect"]] if shape.get("expect") else [])
+                # a footer, and the ID it carries is the expectation that run reserved (absent: it reserved none). The stored value is checked
+                # again here, on the record as it is read now, and `=` binds it so a tampered one can never be read as an option of its own.
+                eid, bad_shape = stored_expect(rec)
+                if bad_shape:
+                    defer_log(rec, "error", "the record's stored shape.expect is malformed: not re-sent")
+                    finish(rid, "failed", MALFORMED_SHAPE_WHY, allowed=("sending",))
+                    return 0
+                requeued = [f"--requeued={eid}" if eid else "--requeued"]
                 rc, line = run_captured([t.get("paseo") or t.get("id") or "", (f"[queued {mins}m ago] " if mins >= 1 else "") + rec.get("text", ""),
                                          "--no-defer", "--no-ack", *requeued], rec.get("sender") or "unknown")
             except (Exception, SystemExit) as e:    # the send may have happened: never `sending` with nothing running, never resent
@@ -3714,9 +3742,10 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--defer-for", type=float, metavar="S", help="how long a queued message may wait for its target (default 6 h, at most 24 h)")
     ap.add_argument("--deliver", metavar="ID", help="(internal) deliver the queued record ID when its target is idle")
     ap.add_argument("--requeued", metavar="EXPECT_ID", nargs="?", const="", default=None,
-                    help="(internal) the deliverer's re-send of a queued record: its text already carries the footer the queueing run appended, so "
-                    "none is appended again, and EXPECT_ID (the shape it was queued under) was already reserved then, so nothing is reserved: the "
-                    "reply gate passes as it did at queue time. Absent: an ordinary send")
+                    help="(internal, deliverer only) the re-send of a queued record: its text already carries the footer the queueing run appended, "
+                    "so none is appended again, and EXPECT_ID (the expectation that run reserved, from the record's shape) was already reserved, so "
+                    "nothing is reserved: the reply gate passes as it did at queue time. Refused (exit 2) for an ordinary send, which takes "
+                    "--expect-ack, --fyi or --needs-reply. Absent: an ordinary send")
     ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
     ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
@@ -3829,6 +3858,11 @@ def _main(argv=None, sweep=True):
     requeued = a.requeued
     CTX["requeued"] = requeued is not None    # main() keeps no second link and no expectation for a re-send: the queueing run wrote them
     if requeued is not None:
+        if not SENDER_OVERRIDE[0]:    # internal: a deliverer's own re-send, never a new message from a session
+            print("relay: --requeued is internal: it marks the deliverer's re-send of a message already queued (its text carries the footer "
+                  "and its ID the expectation that run reserved), so an ordinary send is refused. A new message takes --expect-ack ID, "
+                  "--fyi or --needs-reply", file=sys.stderr)
+            return 2
         if a.expect_ack is not None:
             print("relay: --requeued and --expect-ack are exclusive: a re-send reserves nothing", file=sys.stderr)
             return 2
