@@ -4010,54 +4010,93 @@ exit 0
 """
 
 
-def credential_url_key(key: str) -> bool:
-    """Whether a config key embeds userinfo in a URL, e.g. url.https://user:token@host/.insteadOf.
+# Token shapes a counted GIT_CONFIG KEY may carry. Codex's shell_environment_policy drops variable
+# NAMES containing KEY, SECRET or TOKEN, which is why a whole counted group was invisible to an
+# agent's tools; the quoted transport below hands every key and value over, so a token that was
+# merely hidden becomes readable (codex security review, PR 156, 2026-10-30). These are the shapes
+# worth refusing WHEREVER they appear in a key, including a subsection git never treats as a URL
+# (`remote.<token>.url`), because the exposure is the name and not the setting's meaning. Matched
+# case-insensitively and with a length floor each, so a short ordinary name (`sk-1`, `xox`) travels.
+TOKEN_SHAPE = re.compile(
+    r"gh[pousr]_[A-Za-z0-9]{8,}"                     # GitHub PAT, OAuth, user, server, refresh token
+    r"|github_pat_[A-Za-z0-9_]{8,}"                  # GitHub fine-grained PAT
+    r"|glpat-[A-Za-z0-9_-]{8,}"                      # GitLab PAT
+    r"|xox[abposr]-[A-Za-z0-9-]{8,}"                 # Slack bot, user, app, refresh token
+    r"|sk-(?:ant-)?[A-Za-z0-9_-]{16,}"               # OpenAI and Anthropic style API key
+    r"|hf_[A-Za-z0-9]{16,}"                          # Hugging Face token
+    r"|npm_[A-Za-z0-9]{16,}"                         # npm automation token
+    r"|pypi-[A-Za-z0-9_-]{16,}"                      # PyPI upload token
+    r"|AIza[A-Za-z0-9_-]{16,}"                       # Google API key
+    r"|(?:AKIA|ASIA)[A-Z0-9]{12,}"                   # AWS access key id
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",     # JWT
+    re.IGNORECASE)
 
-    Codex's shell_environment_policy drops variable NAMES containing KEY, SECRET or TOKEN, so a token
-    inside a counted GIT_CONFIG_KEY_<n> used to be invisible to an agent's tool commands; moving the
-    group into one GIT_CONFIG_PARAMETERS value hands it over (codex security review, PR 156,
-    2026-10-30). This is about KEYS only: a credential in a counted VALUE was already readable, because
-    the name filter never covered GIT_CONFIG_VALUE_<n>, so refusing those would be a different change.
 
-    EVERY URL-scoped family counts, not just `url.*`: git resolves `http.<url>.*` and
+def credential_in_key(key: str) -> bool:
+    """Whether a counted config key embeds a credential, by URL POSITION or by token SHAPE.
+
+    This is about KEYS only: a credential in a counted VALUE was already readable, because the name
+    filter never covered GIT_CONFIG_VALUE_<n>, so refusing those would be a different change.
+
+    POSITION: `url.*` is not the only URL-scoped family - git resolves `http.<url>.*` and
     `credential.<url>.*` for the matching URL too (measured with `git config --get-urlmatch
     http.sslVerify https://user:token@host/x`, which answers the setting configured under that
-    userinfo-bearing subsection and answers nothing for another host), and the exposure is about the
-    NAME rather than the key's meaning - any token in any key name was hidden by the filter and the
-    quoted transport would hand it over. So the test is the shape, wherever it appears: every `://` in
-    the key is followed by an authority that must not carry `@`. That also covers a section's case
-    (`URL.`, `HTTP.`) and the scheme's (`HTTPS://`), because neither is matched.
-
-    The authority starts after any run of slashes: `https:///user:token@host` is an empty authority to
-    the URL parser but libcurl still sends that userinfo, so it is refused, while a `@` in the first
-    path segment (`url.https://example.org/@scope/.insteadOf`) stays a path and travels. A base with no
-    `://` at all (`url.git@example.org:.insteadOf`) is a path on a host named `git`, not userinfo, and
+    userinfo-bearing subsection and answers nothing for another host) - so every `://` in a key must
+    be followed by an authority that does not carry `@`. That covers a section's case (`URL.`,
+    `HTTP.`) and the scheme's (`HTTPS://`), because neither is matched. The authority starts after any
+    run of slashes: `https:///user:token@host` is an empty authority to the URL parser but libcurl
+    still sends that userinfo, so it is refused, while a `@` in the first path segment
+    (`url.https://example.org/@scope/.insteadOf`) stays a path and travels. A base with no `://` at
+    all (`url.git@example.org:.insteadOf`) is a path on a host named `git`, not userinfo, and
     travels.
+
+    POSITION, query and fragment: a `?` or `#` after a `://` is refused as well, because git matches
+    those exactly and a token in them needs no `@`. Measured: with a key of
+    `http.https://example.org/repo?access_token=TOK3N.sslVerify`, `git config --get-urlmatch
+    http.sslVerify 'https://example.org/repo?access_token=TOK3N'` answers `true` while the same URL
+    without the query answers nothing, and a loopback `git ls-remote` to that URL sent the token in its
+    request target. No ordinary config key contains either character; the one exception is an
+    `includeIf.hasconfig:` glob pattern with a `?` wildcard, which cannot travel through a counted
+    config (fail closed, with a message that names the variable only).
+
+    SHAPE: a known token shape is refused wherever it appears in the key, in a subsection
+    (`remote.<token>.url`) and in a path segment (`url.https://example.org/<token>/.insteadOf`) alike,
+    because the name filter hid the token whether or not git resolves the key. A secret of a shape
+    this list does not know, sitting in a path segment, cannot be told apart from path data
+    (`@scope`), so it travels - that is this check's documented limit.
 
     A `credential.` subsection may also be a PARTIAL url with no scheme, and `credential.` is the one
     family where git really resolves that form: measured with `git credential fill` and a helper
     configured under `credential.<partial>.helper`, `credential.example.org.helper` runs the helper for
     `url=https://example.org/x`, and `credential.<userinfo>@example.org.helper` runs it for
-    `url=https://userinfo@example.org/x` (the ordinary case of a remote URL with an embedded token) -
+    `url=https://<userinfo>@example.org/x` (the ordinary case of a remote URL with an embedded token) -
     while the same shape under `http.` never matches (`git config --get-urlmatch http.sslVerify
     https://user:token@host/x` answers nothing for `http.user:token@host.sslVerify`). So a schemeless
     `credential.` subsection is refused whenever its authority carries `@` at all, including the
     username slot: a GitHub PAT is used as a username (`https://ghp_...@github.com/...`), and git
-    url-decodes `%3A`, so `credential.user%3Atoken@host.helper` is the same `user:token` as the
-    refused colon spelling (adversary round 8, PR 156). No colon is required, because a username
-    cannot be told apart from a token without decoding it. A port has no `@`, so
+    url-decodes `%3A`, so `credential.user%3Atoken@host.helper` matches a request whose username is
+    literally `user:token` (adversary round 9 measured that form match on git 2.56.0; the colon
+    spelling matched neither spelling there, and both are refused anyway). No colon is required,
+    because a username cannot be told apart from a token without decoding it. A port has no `@`, so
     `credential.https://host:8443.helper` still travels, and so does a schemeless subsection without
     userinfo (`credential.example.org.helper`).
     """
+    if TOKEN_SHAPE.search(key):
+        return True
+    tails = []
     rest = key
     while "://" in rest:
         _, _, rest = rest.partition("://")
+        tails.append(rest)
         if "@" in rest.lstrip("/").split("/", 1)[0]:
             return True
+    if any("?" in tail or "#" in tail for tail in tails):
+        return True
     section, _, tail = key.partition(".")
     if section.lower() == "credential":
         subsection = tail.rpartition(".")[0] or tail
-        if "://" not in subsection and "@" in subsection.split("/", 1)[0]:
+        if "://" not in subsection and ("@" in subsection.split("/", 1)[0]
+                                       or "?" in subsection or "#" in subsection):
             return True
     return False
 
@@ -4093,10 +4132,10 @@ def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) ->
                 raise ValueError(f"missing {name}: incomplete counted configuration")
         if not env[f"GIT_CONFIG_KEY_{i}"]:
             raise ValueError(f"invalid GIT_CONFIG_KEY_{i}: empty config key")
-        if credential_url_key(env[f"GIT_CONFIG_KEY_{i}"]):
+        if credential_in_key(env[f"GIT_CONFIG_KEY_{i}"]):
             raise ValueError(
-                f"GIT_CONFIG_KEY_{i} embeds a credential in a URL, which this transport would make "
-                "readable to the agent; use a credential helper or ~/.gitconfig instead")
+                f"GIT_CONFIG_KEY_{i} embeds a credential, which this transport would make readable "
+                "to the agent; use a credential helper or ~/.gitconfig instead")
         counted.append((env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]))
     quote = lambda value: "'" + value.replace("'", "'\\''") + "'"
     tokens = [quote(key) + "=" + quote(value) for key, value in [*counted, *pairs]]

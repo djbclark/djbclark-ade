@@ -696,26 +696,49 @@ entries, ACP's guard entries, then existing `GIT_CONFIG_PARAMETERS` text. Nested
 launches normalize inherited tuples too, without adding the guard twice. An invalid
 count or a missing key/value refuses the launch with exit 2 and a variable-name-only
 diagnostic; the incomplete tuple is never cleared as a fallback. A counted key that embeds
-userinfo in a URL refuses too, by index only, never by value: the name-based exclusion used
+a credential refuses too, by index only, never by value: the name-based exclusion used
 to keep such a token out of an agent's tool environment, and the quoted transport would hand
-it over. Every URL-scoped family counts, not just `url.*` — git resolves `http.<url>.*` and
-`credential.<url>.*` for the matching URL as well (`git config --get-urlmatch http.sslVerify
-https://user:token@host/x` answers the setting configured under that subsection, and answers
-nothing for another host) — so the test is the shape: every `://` in the key must be followed
-by an authority without `@`, whatever the section (`url.`, `HTTP.`) or scheme (`HTTPS://`)
-case, and past any run of slashes (`https:///user:token@host` sends that userinfo although
-its authority is empty), and username-only userinfo refuses with it (`url.ssh://git@github.com/.insteadOf`),
-because a username cannot be told apart from a token without decoding it. A `credential.`
-subsection that is a PARTIAL url with no scheme is the one form git resolves as well — measured
-with `git credential fill`, a helper under `credential.example.org.helper` runs for
-`url=https://example.org/x`, and one under `credential.<userinfo>@example.org.helper` runs for
-`url=https://<userinfo>@example.org/x` — so such a subsection refuses whenever its authority
-carries `@` at all: no colon is required, because a GitHub PAT is used as a username and git
-url-decodes `%3A`. A port has no `@`, so `credential.https://host:8443.helper` and the plain
-`credential.example.org.helper` still travel. Use a credential helper or `~/.gitconfig` for
-those. The workspace Git
-guard recognizes only the exact ACP hook event and expected guard path in this
-environment transport, while retaining compatibility with older counted launches.
+it over. It refuses in two ways.
+
+By URL position: every URL-scoped family counts, not just `url.*` — git resolves
+`http.<url>.*` and `credential.<url>.*` for the matching URL as well (`git config
+--get-urlmatch http.sslVerify https://user:token@host/x` answers the setting configured
+under that subsection, and answers nothing for another host) — so every `://` in the key
+must be followed by an authority without `@`, whatever the section (`url.`, `HTTP.`) or
+scheme (`HTTPS://`) case, and past any run of slashes (`https:///user:token@host` sends
+that userinfo although its authority is empty), and username-only userinfo refuses with it
+(`url.ssh://git@github.com/.insteadOf`), because a username cannot be told apart from a
+token without decoding it. A `?` or `#` after a `://` refuses too: a query or a fragment is
+a credential position git matches exactly, with no `@` needed — with
+`http.https://example.org/repo?access_token=TOK3N.sslVerify` configured,
+`git config --get-urlmatch http.sslVerify 'https://example.org/repo?access_token=TOK3N'`
+answers `true` while the same URL without the query answers nothing, and a loopback
+`git ls-remote` sent the token in its request target (2026-10-30). No ordinary key contains
+either character; the one exception is an `includeIf.hasconfig:` glob pattern with a `?`
+wildcard, which cannot travel through a counted config. A `credential.` subsection that is
+a PARTIAL url with no scheme is the one form git resolves as well — measured with
+`git credential fill`, a helper under `credential.example.org.helper` runs for
+`url=https://example.org/x`, and one under `credential.<userinfo>@example.org.helper` runs
+for `url=https://<userinfo>@example.org/x` — so such a subsection refuses whenever its
+authority carries `@` at all, or a `?`/`#`: no colon is required, because a GitHub PAT is
+used as a username and git url-decodes `%3A`, so `credential.user%3Atoken@host.helper`
+matches a request whose username is literally `user:token`.
+
+By token shape: a name matching a known token pattern (`ghp_`, `github_pat_`, `glpat-`,
+`xox?-`, `sk-`, `hf_`, `npm_`, `pypi-`, `AIza`, `AKIA`/`ASIA`, an `eyJ` JWT header, each
+with a length floor) refuses wherever it appears in the key, in a subsection
+(`remote.<token>.url`) and in a URL path alike — the name filter hid the token whether or
+not git resolves the key, so the exposure is the NAME, not the setting's meaning. A secret
+of an unknown shape sitting in a path segment cannot be told apart from path data
+(`url.https://example.org/@scope/.insteadOf` must travel), so it still travels: that is
+this check's documented limit.
+
+A port has no `@`, so `credential.https://host:8443.helper`, the plain
+`credential.example.org.helper`, an ordinary `remote.origin.url` and a name that only
+resembles a prefix (`remote.sk-1.url`) still travel. Use a credential helper or
+`~/.gitconfig` for the rest. The workspace Git guard recognizes only the exact ACP
+hook event and expected guard path in this environment transport, while retaining
+compatibility with older counted launches.
 
 ## Exit codes
 

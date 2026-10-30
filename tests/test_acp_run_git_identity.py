@@ -5,6 +5,7 @@ import ast
 import asyncio
 import io
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -27,12 +28,13 @@ def load_guard(guard_path: Path):
     keep = []
     for n in tree.body:
         if isinstance(n, ast.FunctionDef) and n.name in {"git_identity_guard", "git_config_parameters",
-                                                         "credential_url_key"}:
+                                                         "credential_in_key"}:
             keep.append(n)
-        elif isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "GIT_IDENTITY_GUARD_SH" for t in n.targets):
+        elif isinstance(n, ast.Assign) and any(getattr(t, "id", "") in {"GIT_IDENTITY_GUARD_SH", "TOKEN_SHAPE"}
+                                              for t in n.targets):
             keep.append(n)
     tree.body = keep
-    ns = {"os": os, "subprocess": subprocess, "Path": Path, "GIT_IDENTITY_GUARD": guard_path}
+    ns = {"os": os, "re": re, "subprocess": subprocess, "Path": Path, "GIT_IDENTITY_GUARD": guard_path}
     exec(compile(tree, str(SCRIPT), "exec"), ns)  # noqa: S102 - only repository code
     return ns["git_identity_guard"]
 
@@ -224,7 +226,26 @@ class TestGitIdentityGuard(unittest.TestCase):
                     "credential.alice@example.org.helper",
                     "credential.ghp_FAKE0123456789@example.org.helper",
                     "credential.user%3As3cr3t@example.org.helper",
-                    "CREDENTIAL.user:s3cr3t@example.org.helper"):
+                    "CREDENTIAL.user:s3cr3t@example.org.helper",
+                    # a query or a fragment in a URL subsection is a credential position git matches
+                    # exactly, with no `@` needed: `git config --get-urlmatch http.sslVerify
+                    # 'https://example.org/repo?access_token=TOK3N'` answers the setting below, and a
+                    # loopback `git ls-remote` sent the token (codex security review, PR 156)
+                    "http.https://example.org/repo?access_token=TOK3N.sslVerify",
+                    "url.https://example.org/r?token=TOK3N.insteadOf",
+                    "https.https://example.org/repo#fragment.sslVerify",
+                    "url.https://example.org/r#TOK3N.insteadOf",
+                    # ... and the same with no scheme, on the one family git matches a partial url in
+                    "credential.example.org?access_token=TOK3N.helper",
+                    "credential.example.org#TOK3N.helper",
+                    # a KNOWN TOKEN SHAPE is refused wherever it appears in the key, because the name
+                    # filter hid the token whether or not git resolves the key: an arbitrary
+                    # subsection, a URL path, and a case the shape list matches case-insensitively
+                    "remote.ghp_FAKE0123456789.url",
+                    "url.https://example.org/ghp_FAKE0123456789/.insteadOf",
+                    "remote.GLPAT-FAKE0123456789.url",
+                    "remote.xoxb-FAKE0123456789.url",
+                    "remote.eyJhbGciOiJIUzI1NiJ9.FAKEpayload.url"):
             with self.subTest(key=key):
                 env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
                        "GIT_CONFIG_VALUE_0": "https://example.org/"}
@@ -232,39 +253,35 @@ class TestGitIdentityGuard(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "GIT_CONFIG_KEY_0 embeds a credential") as raised:
                     guard(env)
                 self.assertNotIn("s3cr3t", str(raised.exception))
+                self.assertNotIn(key, str(raised.exception))   # the message never carries the key
                 self.assertEqual(env, before)
 
-    def test_keys_without_userinfo_still_travel(self):
+    def test_keys_without_a_credential_still_travel(self):
         guard = load_guard(self.tmp / "guard.sh")
         # scp-like bases have no `://`, a `@` outside a URL is not userinfo, a `@` in the first path
         # segment is a path, and the other URL-scoped families travel when they carry no userinfo.
-        # The last two are `credential.` subsections with no userinfo: a port must not make a real
-        # config unlaunchable, and a schemeless partial url is the ordinary case git matches
-        env = {**self.env, "GIT_CONFIG_COUNT": "7",
-               "GIT_CONFIG_KEY_0": "url.git@example.org:.insteadOf",
-               "GIT_CONFIG_VALUE_0": "https://mirror.example.org/",
-               "GIT_CONFIG_KEY_1": "url.https://example.org/.insteadOf",
-               "GIT_CONFIG_VALUE_1": "https://mirror2.example.org/",
-               "GIT_CONFIG_KEY_2": "url.https://example.org/@scope/.insteadOf",
-               "GIT_CONFIG_VALUE_2": "https://mirror3.example.org/",
-               "GIT_CONFIG_KEY_3": "http.https://example.org/.sslVerify",
-               "GIT_CONFIG_VALUE_3": "true",
-               "GIT_CONFIG_KEY_4": "credential.https://example.org.helper",
-               "GIT_CONFIG_VALUE_4": "!true",
-               "GIT_CONFIG_KEY_5": "credential.https://example.org:8443.helper",
-               "GIT_CONFIG_VALUE_5": "!true",
-               "GIT_CONFIG_KEY_6": "credential.example.org.helper",
-               "GIT_CONFIG_VALUE_6": "!true"}
+        # A `credential.` subsection with no userinfo is ordinary config: a port must not make a real
+        # config unlaunchable, and a schemeless partial url is the case git matches. An ordinary
+        # remote key travels, an `includeIf.hasconfig:` glob travels when it holds no `?` wildcard,
+        # and so do names that merely resemble a token prefix without reaching its length floor.
+        pairs = [("url.git@example.org:.insteadOf", "https://mirror.example.org/"),
+                 ("url.https://example.org/.insteadOf", "https://mirror2.example.org/"),
+                 ("url.https://example.org/@scope/.insteadOf", "https://mirror3.example.org/"),
+                 ("http.https://example.org/.sslVerify", "true"),
+                 ("credential.https://example.org.helper", "!true"),
+                 ("credential.https://example.org:8443.helper", "!true"),
+                 ("credential.example.org.helper", "!true"),
+                 ("remote.origin.url", "https://example.org/x"),
+                 ("remote.sk-1.url", "https://example.org/one"),
+                 ("remote.ghp.url", "https://example.org/short"),
+                 ("includeif.hasconfig:remote.*.url:https://example.org/**.path", "~/.gitconfig-work")]
+        env = {**self.env, "GIT_CONFIG_COUNT": str(len(pairs))}
+        for i, (key, value) in enumerate(pairs):
+            env[f"GIT_CONFIG_KEY_{i}"] = key
+            env[f"GIT_CONFIG_VALUE_{i}"] = value
         guard(env)
-        for name, want in (("url.git@example.org:.insteadOf", "https://mirror.example.org/"),
-                           ("url.https://example.org/.insteadOf", "https://mirror2.example.org/"),
-                           ("url.https://example.org/@scope/.insteadOf",
-                            "https://mirror3.example.org/"),
-                           ("http.https://example.org/.sslVerify", "true"),
-                           ("credential.https://example.org.helper", "!true"),
-                           ("credential.https://example.org:8443.helper", "!true"),
-                           ("credential.example.org.helper", "!true")):
-            r = self.git(self.real, "config", "--get", name, env=env)
+        for key, want in pairs:
+            r = self.git(self.real, "config", "--get", key, env=env)
             self.assertEqual(r.stdout.strip(), want, r.stderr)
 
     def test_launch_refuses_incomplete_config_without_starting_an_agent(self):
