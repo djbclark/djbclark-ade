@@ -520,6 +520,25 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertIn("agent open new-agent-1 --json", calls)
         self.assertFalse([c for c in calls if c.startswith("agent archive")], calls)    # nothing archived: this agent has a tab, the successor does not
 
+    def test_a_successor_sent_to_a_desktop_that_is_not_running_keeps_this_agent(self) -> None:
+        """Codex (local review of PR 159): `agent open` returns once the app is launched; with no Desktop process the deep link was dropped."""
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env(SELF_SLASH_DESKTOP_PROC="no-such-desktop-process-xyz", SELF_SLASH_OPEN_WAIT="1"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("no Desktop process matching")
+        self.wait_lock_gone()
+        calls = self.paseo_calls()
+        self.assertIn("agent open new-agent-1 --json", calls)
+        self.assertFalse([c for c in calls if c.startswith("agent archive")], calls)
+
+    def test_a_running_desktop_process_lets_the_archive_go_ahead(self) -> None:
+        marker = "selfslash-test-desktop-marker-7731"
+        desktop = subprocess.Popen(["bash", "-c", "sleep 60; :", marker])    # a command line that holds the marker, standing in for the app (the `; :` stops bash exec-ing sleep and losing it)
+        self.addCleanup(desktop.kill)
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env(SELF_SLASH_DESKTOP_PROC=marker, SELF_SLASH_OPEN_WAIT="5"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        self.wait_log("opened in Paseo Desktop")
+
     def test_no_open_is_an_explicit_override_for_a_host_with_no_desktop(self) -> None:
         r = self.run_ss(*self.SUCCESSOR, **self.succ_env(FAKE_OPEN_FAIL="1", SELF_SLASH_NO_OPEN="1"))
         self.assertEqual(r.returncode, 0, r.stderr)

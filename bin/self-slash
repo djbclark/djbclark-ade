@@ -58,8 +58,8 @@
 # "<old name> → <model>"), (4) polls it (SELF_SLASH_SUCCESSOR_SETTLE seconds, default 20) and needs
 # a new id (never this agent's), ParentAgentId null, the model asked and status idle, running or
 # initializing, every key present (a renamed key is not read as null),
-# opens it in Paseo Desktop (`paseo agent open <new id>`: a `paseo run` agent has no tab until then; a failure archives nothing, SELF_SLASH_NO_OPEN=1
-# skips it on a host with no desktop; 2026-10-30), and only then (5) archives this agent as --finish does.  The run uses `env -u PASEO_AGENT_ID`:
+# opens it in Paseo Desktop (`paseo agent open <new id>`: a `paseo run` agent has no tab until then; a failure, or no running Desktop process afterwards (SELF_SLASH_DESKTOP_PROC pattern, SELF_SLASH_OPEN_WAIT seconds, default 20; macOS by default),
+# archives nothing, SELF_SLASH_NO_OPEN=1 skips it on a host with no desktop; `agent open` cannot confirm a tab, so the handoff skill's check stays; 2026-10-30), and only then (5) archives this agent as --finish does.  The run uses `env -u PASEO_AGENT_ID`:
 # paseo run passes the caller's agent id to the daemon whenever PASEO_AGENT_ID is set, even with
 # --workspace, and the daemon then makes the new agent a SUBAGENT (Paseo 0.12.0 CLI source, read
 # 2026-10-23).  Any failure in 2-5 exits 11 and archives nothing: this session stays usable and
@@ -1231,7 +1231,21 @@ successor_paseo() {
   else
     pcli_split agent open "$newid" --json
     [ "$pcli_rc" = 0 ] || successor_fail "successor $newid is running but could not be opened in Paseo Desktop (rc=$pcli_rc: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-200)), so it has no tab; run paseo agent open $newid yourself, or SELF_SLASH_NO_OPEN=1 on a host with no desktop (left running)"
-    echo "$(gdate '+%F %T') $host $pane: successor: $newid opened in Paseo Desktop"
+    # `agent open` returns as soon as the app is LAUNCHED with the deep link; it cannot say a tab appeared (adversary and local Codex review of PR 159).
+    # The one check available from here: the Desktop process is running (a deep link sent to an app that never started is dropped).
+    desk_pat="${SELF_SLASH_DESKTOP_PROC:-}"
+    [ -n "$desk_pat" ] || { [ "$(uname -s)" != Darwin ] || desk_pat='/Paseo.app/Contents/MacOS/Paseo$'; }
+    if [ -n "$desk_pat" ]; then
+      case "${SELF_SLASH_OPEN_WAIT-20}" in ""|*[!0-9]*) successor_fail "SELF_SLASH_OPEN_WAIT must be whole seconds (got: ${SELF_SLASH_OPEN_WAIT-}); successor $newid left running";; esac
+      dend=$(( $(gdate +%s) + ${SELF_SLASH_OPEN_WAIT-20} )); dseen=0
+      while :; do
+        if pgrep -f -- "$desk_pat" >/dev/null 2>&1; then dseen=1; break; fi
+        [ "$(gdate +%s)" -lt "$dend" ] || break
+        sleep 1
+      done
+      [ "$dseen" = 1 ] || successor_fail "successor $newid was sent to Paseo Desktop but no Desktop process matching $(clean "$desk_pat") is running, so its tab cannot exist; run paseo agent open $newid yourself (left running)"
+    fi
+    echo "$(gdate '+%F %T') $host $pane: successor: $newid opened in Paseo Desktop (a tab is not confirmable from here: look for it)"
   fi
   out=$(pcli agent archive -- "$pane" 2>&1); rc=$?
   if [ "$rc" != 0 ]; then
