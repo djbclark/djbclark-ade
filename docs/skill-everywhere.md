@@ -2,7 +2,7 @@
 
 README for [`skill-everywhere`](../bin/skill-everywhere) (canonical script in
 this repository; compatibility command `~/ops/site-private/bin/skill-everywhere`). It makes a local skill available to
-every agent TUI on this machine (Claude Code, Codex, omp, Copilot, Cursor, opencode,
+every agent TUI on this machine (Claude Code, Codex, goose, omp, Copilot, Cursor, opencode,
 zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes) by
 symlinking it into each one's skills dir (Grok Bot, on its own Linux box, gets
 a rendered copy instead; see its row in section 2), and this page says how to prove each
@@ -66,6 +66,7 @@ one of the two roots.
 |---|---|
 | Claude Code (`claude`) | `~/.claude/skills` |
 | Codex (`codex`) | `~/.agents/skills` |
+| goose (`goose`) | `~/.agents/skills` (its global skills dir; shared with Codex, linked once). Verified 2026-10-29 with `goose skills list`. It also falls back to `~/.claude/skills`, so a machine with Claude installed can list a skill twice; goose dedups by name. |
 | Copilot (`copilot`) | `~/.copilot/skills` |
 | opencode (`opencode`) | `~/.config/opencode/skills` |
 | Qwen Code (`qwen`) | `~/.qwen/skills` |

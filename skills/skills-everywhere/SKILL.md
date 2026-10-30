@@ -13,7 +13,8 @@ Links a skill into every agent TUI. Content lives in exactly one place —
 `~/ops/site-private/skills/<name>/` for private ones (only `1password`) —
 and every TUI gets a **direct symlink** to it; no hub, no chains (collapsed
 2026-10-14). Clients covered (the `targets` table in the script): Claude
-Code, Codex, omp (oh-my-pi, `~/.omp/agent/skills`), Copilot, Cursor,
+Code, Codex, goose (`~/.agents/skills`, shared with Codex), omp (oh-my-pi,
+`~/.omp/agent/skills`), Copilot, Cursor,
 opencode, zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes,
 plus Grok Bot (`grokbot`, a rendered copy `ade-<name>` in
 `~/agent-data/workflows/` on its Linux box, 2026-10-23):

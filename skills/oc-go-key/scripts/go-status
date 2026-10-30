@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""go-status — which OpenCode Go account is serving this Mac, and has anything failed lately?
+
+Read-only. No secrets printed: `oc-go-key list` shows labels and emails, never key material.
+
+WHAT IT IS FOR
+  A Go quota wall does not look like a crash. The turn stops with
+  `[System Error] Go usage limit exceeded` (Go plan) or `Insufficient account funds`
+  (Console credit balance on an `opencode/` prefix), the tab goes quiet, and the entity is
+  dark until someone notices. This prints the state in one screen so that noticing is cheap.
+
+EXIT
+  0  no failure in the recent window
+  2  a quota/auth failure is recent: the active account is likely dead — rotate
+  4  cannot read the state at all (no servers, no log)
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+OC_GO_KEY = HOME / ".local/bin/oc-go-key"
+LOG = HOME / ".local/share/opencode/log/opencode.log"
+
+# Ordered offer, cheapest-to-lose first is the OPERATOR's call, not this script's: it only lists
+# them. `dclark` is a vault key; the other two are Console logins.
+LABELS = [
+    ("dclark", "dclark@dclark.us", "vault key OPENCODE_GO_API_KEY_DCLARKUS"),
+    ("djbclark", "djbclark@gmail.com", "Console login (OAuth)"),
+    ("t-e", "technoeuphora@gmail.com", "Console login (OAuth)"),
+]
+
+# (name, pattern in the log). Both are AI.Error.QuotaExceeded under the hood; the TEXT differs by
+# which bill was refused, and that decides whether rotating the credential helps at all:
+# a Go wall is per account, a credit wall is per account too, but `opencode/` NEVER draws Go quota.
+FAILURES = [
+    ("go-limit", r"Go usage limit exceeded"),
+    ("no-funds", r"Insufficient account funds"),
+    ("go-429", r"GoUsageLimitError"),
+    ("region", r"requires Global regions"),
+    ("auth", r"api_key_expired|invalid api[ _-]?key|\b401\b"),
+]
+
+
+def run(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, str(e)
+
+
+def recent_log_bytes(n: int = 24_000_000) -> str:
+    """The tail, not the whole file: opencode.log reaches tens of MB and grows all day."""
+    try:
+        size = LOG.stat().st_size
+        with open(LOG, "rb") as fh:
+            if size > n:
+                fh.seek(size - n)
+                fh.readline()                     # drop the half line
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+TS = re.compile(r"timestamp=(\S+)")
+
+
+def scan(text: str, hours: float) -> list[tuple[dt.datetime, str, str]]:
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+    hits = []
+    for line in text.splitlines():
+        # Only the log RECORD, never the shell command it recorded: the log also stores the commands
+        # sessions run, so a session that greps for these very strings (or runs this script) would
+        # otherwise log a fake outage. Caught for real on the first run, 2026-10-29.
+        core = line.split(" command=")[0]
+        if "level=ERROR" not in core or "AI.Error" not in core:
+            continue
+        m = TS.search(line)
+        if not m:
+            continue
+        try:
+            when = dt.datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when < cutoff:
+            continue
+        for name, pat in FAILURES:
+            if re.search(pat, core):
+                hits.append((when, name, core[:300]))
+                break
+    return sorted(hits)
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description="OpenCode Go account state and recent failures")
+    ap.add_argument("--hours", type=float, default=6.0, help="failure window (default 6 h)")
+    ap.add_argument("--recent", type=float, default=0.5,
+                    help="'is it broken right now' window (default 30 min)")
+    a = ap.parse_args(argv)
+
+    if not OC_GO_KEY.is_file():
+        print(f"go-status: no oc-go-key at {OC_GO_KEY}", file=sys.stderr)
+        return 4
+    rc, listing = run([str(OC_GO_KEY), "list"], timeout=90)
+    if rc != 0:
+        print(f"go-status: oc-go-key list failed (rc {rc}): {listing[:200]}", file=sys.stderr)
+        return 4
+
+    print("== servers and credentials ==")
+    print(listing)
+
+    text = recent_log_bytes()
+    if not text:
+        print(f"go-status: cannot read {LOG}", file=sys.stderr)
+        return 4
+
+    hits = scan(text, a.hours)
+    print(f"== failures in the last {a.hours:g} h ==")
+    if not hits:
+        print(f"  none (log tail from {LOG.name})")
+    else:
+        for when, name, line in hits[-12:]:
+            stamp = when.astimezone().strftime("%H:%M:%S")
+            print(f"  {stamp} {name:9} {line.split('cause=')[-1][:110]}")
+        counts: dict[str, int] = {}
+        for _, name, _ in hits:
+            counts[name] = counts.get(name, 0) + 1
+        print("  counts: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+    print("== accounts ==")
+    for label, who, kind in LABELS:
+        mark = " (listed above)" if f"'{label}'" in listing else " (no credential on this Mac)"
+        print(f"  {label:9} {who:26} {kind}{mark}")
+
+    fresh = [h for h in hits if (dt.datetime.now(dt.timezone.utc) - h[0]).total_seconds()
+             <= a.recent * 3600]
+    if fresh:
+        kinds = sorted({name for _, name, _ in fresh})
+        print(f"\nBROKEN NOW: {', '.join(kinds)} in the last {a.recent:g} h.")
+        if "region" in kinds:
+            print("  `requires Global regions` is not a quota wall: that account's workspace needs")
+            print("  Settings > Privacy > Regions = Global (dclark, 2026-10-29).")
+        if "auth" in kinds:
+            print("  An expired key will not be fixed by rotating: re-store it (sudo-secretspec).")
+        print("  Rotate:  oc-go-key use <label>      then resume the stopped turn (below).")
+        print("  A reload alone does NOT re-prompt: the aborted turn needs the resume step in the")
+        print("  oc-go-key skill, or it stays dark with a working key.")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
