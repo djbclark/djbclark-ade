@@ -67,9 +67,13 @@ RW_AUTO_SEAT=1 may start a fresh seat ONLY on a proven `gone` diagnosis, narrowi
 after a hard error" ruling. Off by default until field-tested; RW_AUTO_SEAT_PROVIDER must be set
 explicitly (no model or thinking flags). If relay cannot diagnose a UUID-shaped id, one extra
 `paseo agent inspect --json -- <id>` probe (up to 20 s, no model) must confirm AGENT_NOT_FOUND;
-errors, timeouts, unreadable bodies and unknown shapes never prove absence. See the decision table
-in `auto_seat`. A `refused`/`unknown` seat does not auto-start and still pages the human when no owner
-resolves. A `silent` hung seat is NOT replaced, so the individual can stay dark until the human acts.
+errors, timeouts, unreadable bodies and unknown shapes never prove absence. The same probe answers
+for a `refused` id and may prove it absent too, when the agent record says the seat is CLOSED or
+ARCHIVED: a finished seat leaves its record behind instead of vanishing (13 of the 25 agents on
+this Mac were `closed` on 2026-10-30), so waiting for the id to disappear waits forever. See the
+decision table in `auto_seat`. A card, a live-but-unsendable seat, an `error` and an `unknown` seat
+do not auto-start and still page the human when no owner resolves. A `silent` hung seat is NOT
+replaced, so the individual can stay dark until the human acts.
 RW_AUTO_SEAT_S (default 3600 s): at most one attempt per role per window, confirmed or not. A failed
 start with no id becomes eligible again only after the window; returned ids are retained for diagnosis.
 Every invocation outcome is logged; only pre-invocation refusals are suppressed once per window.
@@ -734,11 +738,30 @@ _LIVE_ERR = ""            # why the fleet read failed, "" when it succeeded (fee
 
 
 def usable(ident: str) -> bool:
-    """Would relay.py find this id? True when fleet lists it and it is neither over nor archived."""
+    """Would relay.py find this id? True when fleet lists it and it is neither over nor archived.
+
+    A `closed` row IS usable: Paseo keeps the record and `ensureAgentLoaded` resumes it on the next
+    send, so a message still reaches it. `is_closed` is the separate question of whether it is a
+    seat that is still WORKING this role — see `owner_session`.
+    """
     row = live_sessions().get(ident[:8])
     if not row:
         return False
     return not row.get("ended") and not row.get("archived")
+
+
+def is_closed(ident: str) -> bool:
+    """True when fleet's row for this id says Paseo has STOPPED the agent (`paseo_state` closed).
+
+    `fleet.py` sets `ended` only for archived agents and maps only `running`/`idle` into a friendly
+    status, so a closed seat arrives as `paseo_state="closed"` (and `status="closed"`); it is not
+    ended, not archived, and `usable()` therefore says yes.
+    """
+    row = live_sessions().get(ident[:8]) or {}
+    for key in ("paseo_state", "status"):
+        if str(row.get(key) or "").strip().lower() == "closed":
+            return True
+    return False
 
 
 def owner_candidates() -> Iterator[tuple[str, str]]:
@@ -791,14 +814,33 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
 
 
 def owner_session() -> tuple[str, str]:
-    """(agent id, source) for this role, or ("", reason) when nothing live resolves."""
+    """(agent id, source) for this role, or ("", reason) when nothing live resolves.
+
+    A non-closed candidate ALWAYS wins over a closed one, even when the closed one is listed first.
+    `owner_candidates` puts the comm registry ahead of peer-mail, and the registry row is written by
+    the seat itself, so a seat that stops leaves a `closed` but still `usable()` id at the head of
+    the list. Returning it would do two separate kinds of damage: the live successor named further
+    down the list is never written to (the role goes quiet while the watcher pages a stopped seat),
+    and with the switch on the closed id is exactly what the absence probe calls `gone`, so the
+    watcher would LICENSE A DUPLICATE START over a successor that is answering (adv-seat D3, and
+    the Codex finding on #164). So the closed candidate is only a FALLBACK, used when nothing else
+    resolves — which is the ordinary case of a finished session and the one auto-seat exists for.
+    """
     first = ""
+    fallback = ("", "")
     for src, ident in owner_candidates():
         if src in ("RW_SESSION", "PASEO_AGENT_ID"):
             return ident, src
         first = first or f"{src}={ident[:8]}"
-        if usable(ident):
-            return ident, src
+        if not usable(ident):
+            continue
+        if is_closed(ident):
+            if not fallback[1]:
+                fallback = (src, ident)
+            continue
+        return ident, src
+    if fallback[1]:
+        return fallback[1], fallback[0]
     if _LIVE_ERR:
         return "", (f"cannot check which session is live: {_LIVE_ERR} — this is a broken READ, not "
                     f"a dead seat ({ROLE!r} registry/peer_mail said {first or 'nothing'})")
@@ -817,23 +859,49 @@ def why_blocked(ident: str) -> tuple[str, str]:
       stays dark until someone answers. Exactly the silence this watcher exists to prevent.
     - `silent` — running with nothing new for 15 min: a hung turn.
 
-    With auto-seat enabled, a missing diagnosis for a UUID gets one direct inspect (up to 20 s).
-    Only an explicit AGENT_NOT_FOUND proves absence; a blind read remains `unknown`.
+    With auto-seat enabled, a UUID that relay.py cannot call live — no diagnosis at all, or a
+    refusal — gets ONE direct `paseo agent inspect` (up to 20 s), and only a fact read off that
+    record proves absence. Anything else stays `unknown` or `refused`, and neither starts a seat.
+
+    **Why CLOSED counts as absent** (2026-10-30). A seat does not usually vanish; it stops, and
+    Paseo keeps the record. Measured on this Mac the same day: 13 of 25 agents were `closed`, 6
+    `idle`, 5 `running`, 1 `error`. So a start that waits for the id to disappear waits forever —
+    the entity would page djbclark and stay dark. relay.py calls a closed agent `refused`, which
+    is right for SENDING (a send into it is pointless) and wrong as a liveness verdict, so the
+    verdict is read here from the agent record itself. `archived` is the same situation with the
+    door shut: a send would unarchive it and start a turn.
     """
     uuid = re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", ident)
 
+    def proved_absent() -> tuple[str, str] | None:
+        """("gone", why) when `paseo agent inspect` PROVES this seat cannot answer, else None.
+
+        Only a UUID is trusted (a short or hand-edited id proves nothing), only with the switch
+        on, and only three readings count: the agent is unknown to Paseo, archived, or closed.
+        A reply naming a DIFFERENT agent is not a reading of this one.
+        """
+        if not (AUTO_SEAT and uuid):
+            return None
+        rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", ident], timeout=20)
+        try:
+            info = json.loads(out or err)
+        except ValueError:
+            info = None
+        if not isinstance(info, dict):
+            return None
+        error = info.get("error")
+        if rc in (0, 1) and isinstance(error, dict) and error.get("code") == "AGENT_NOT_FOUND":
+            return "gone", "direct inspect confirmed AGENT_NOT_FOUND"
+        if rc == 0 and info.get("Id") == ident:
+            if info.get("Archived") is True:
+                return "gone", "direct inspect says the seat is archived"
+            if str(info.get("Status") or "") == "closed":
+                return "gone", (f"direct inspect says the seat is closed (it stopped at "
+                                f"{info.get('UpdatedAt') or 'an unrecorded time'})")
+        return None
+
     def unknown(reason: str) -> tuple[str, str]:
-        if AUTO_SEAT and uuid:
-            rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", ident],
-                                     timeout=20)
-            try:
-                info = json.loads(out or err)
-            except ValueError:
-                info = None
-            error = info.get("error") if isinstance(info, dict) else None
-            if rc in (0, 1) and isinstance(error, dict) and error.get("code") == "AGENT_NOT_FOUND":
-                return "gone", "direct inspect confirmed AGENT_NOT_FOUND"
-        return "unknown", reason
+        return proved_absent() or ("unknown", reason)
 
     relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
     if not relay.is_file():
@@ -845,9 +913,19 @@ def why_blocked(ident: str) -> tuple[str, str]:
         return unknown(f"unreadable --why (rc {rc}): {(err or out)[:160]}")
     if rc not in (0, 1) or not isinstance(d, dict) or not d.get("state") or d.get("state") == "unknown":
         return unknown(f"no diagnosis in --why (rc {rc}): {out[:160]}")
-    if d["state"] == "gone" and not uuid:
-        return "unknown", "absence not proven for a non-UUID id"
-    return str(d["state"]), str(d.get("why") or "")
+    state = str(d["state"])
+    if state == "gone":
+        if not uuid:
+            return "unknown", "absence not proven for a non-UUID id"
+        return "gone", str(d.get("why") or "")
+    # relay.py's refusal is about SENDING, and the three ways it stops are not the same fact: a
+    # closed or archived seat is absent (startable), a card is djbclark's to answer, a broken read
+    # is not a dead seat. Ask the agent record which one it is.
+    if state in ("refused", "archived", "error"):
+        proof = proved_absent()
+        if proof:
+            return proof
+    return state, str(d.get("why") or "")
 
 
 def relay_word(out: str) -> str:
@@ -1157,9 +1235,12 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None) -> s
     must see a `card:*`, and a seat he cannot see is the darkness this file exists to end.
 
     Diagnosis       Start?  Reason
-    gone            yes     Inspect-confirmed absent (UUID id, not a blind read).
+    gone            yes     Proven absent (UUID id, not a blind read): AGENT_NOT_FOUND, or the
+                            agent record says closed/archived. `why_blocked` maps all three here.
     error           no      Inspect could not answer: broken READ, daemon/socket may be down.
-    refused         no      Finished/archived session or non-idle/running Paseo state.
+    refused         no      A hard stop that is not absence: a `card:*` or this session. It DOES
+                            start when the agent record itself proves the seat closed/archived,
+                            which `why_blocked` turns into `gone` before this is reached.
     unknown         no      No diagnosis; absence not proven.
     silent/working  no      A seat EXISTS; a second one would duplicate the individual.
     card:*          NEVER   His to answer; spawning leaves the card AND adds another seat.
@@ -1242,9 +1323,9 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None) -> s
            f"No Tier 1 pointer file exists ({pointer or 'none'}); resume from the repo's state.\n")
         + "When available, read that file's ## Current State and - Next steps: and continue at the first unstarted step.\n"
         "Do not page djbclark; if the work needs his decision, put it in the report.\n"
-        f"This seat was started automatically after the previous one disappeared at "
+        f"This seat was started automatically because the previous seat was provably absent at "
         f"{time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(now))} (trigger: {word}); "
-        "it stopped answering.\n"
+        "it had stopped answering.\n"
     )
     # addRunOptions in the installed Paseo bundle supplies provider/no-wait/cwd/title;
     # addJsonAndDaemonHostOptions supplies --json, agentRunSchema.idField supplies agentId.
