@@ -81,7 +81,8 @@ a `paseo run` agent has NO tab, and an invisible seat hitting a `card:*` (which 
 is the same darkness one level down (djbclark's ruling, 2026-10-30). A failed open is logged,
 carried into the page to djbclark and never fails the start; a seat that comes alive only by
 recovery (its start's confirmation was lost, or its id came from the Paseo listing) gets ONE
-attempt per id on the first pass that diagnoses it live, and pages him if that fails;
+attempt per id on the first pass that diagnoses it live, and pages him if that fails; a page
+no send accepted is CARRIED (`undisclosed_tab`) and retried, never dropped for good;
 RW_AUTO_SEAT_NO_OPEN (1/true/yes/on) skips the attempt on a host with no desktop.
 
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
@@ -1097,17 +1098,27 @@ def open_desktop_tab(agent_id: str) -> str:
     `agent open` returns as soon as the app is launched with the deep link and cannot confirm a tab
     appeared (#159), so "" means only "the CLI accepted it" and callers must not log that a tab
     EXISTS (adversary N1, 2026-10-30: a launchd pass with the app not running can send a deep link
-    that is dropped). RW_AUTO_SEAT_NO_OPEN=1 skips the attempt on a host with no desktop and still
-    returns a line naming the hand-run fix; it takes the same words as this file's other switches.
+    that is dropped). RW_AUTO_SEAT_NO_OPEN (`1`/`true`/`yes`/`on`, case-insensitive) skips the
+    attempt on a host with no desktop and still returns a line naming the hand-run fix. This
+    file's other switches each invented their own rule (`RW_IDLE_NUDGE` treats anything but
+    0/false/no/off as on, `RW_NO_DEPLOY` treats `off` as on), so this one is an explicit
+    allowlist rather than a claim to match them (adversary D5, 2026-10-30).
     """
-    if os.environ.get("RW_AUTO_SEAT_NO_OPEN", "").strip().lower() in ("1", "true", "yes", "on"):
-        return f"NOT opened (RW_AUTO_SEAT_NO_OPEN=1): run paseo agent open {agent_id}"
+    switch = os.environ.get("RW_AUTO_SEAT_NO_OPEN", "").strip()
+    if switch.lower() in ("1", "true", "yes", "on"):
+        return f"NOT opened (RW_AUTO_SEAT_NO_OPEN={switch}): run paseo agent open {agent_id}"
     rc, out, err = run_split(["paseo", "agent", "open", agent_id, "--json"], timeout=20)
     if rc == 0:
         return ""
     detail = " ".join((err or out).split())
     return (f"NOT opened in Paseo Desktop (rc={rc}{': ' + detail[:160] if detail else ''}); "
             f"it is reachable by relay but has no tab: run paseo agent open {agent_id}")
+
+
+def tab_page(agent_id: str, reason: str) -> str:
+    """The page for a seat that is alive and reachable but has no Paseo Desktop tab."""
+    return (f"Dann: {ROLE!r}'s auto-started seat {agent_id} has no Paseo "
+            f"Desktop tab, so a question card on it would be unseen. {reason}")
 
 
 def tab_once(agent_id: str, state: dict, now: float) -> str:
@@ -1584,16 +1595,6 @@ def _pass(a: argparse.Namespace) -> int:
             if word in ("idle", "working", "silent") or word.startswith("card:"):
                 ident = candidate
                 probe[:] = [(word, "auto-seat candidate")]
-                # This seat was ADOPTED, not confirmed by `auto_seat`, so nothing ever tried to
-                # give it a tab; it is exactly as invisible as an unopened fresh one, and a card
-                # on it is the case this whole feature exists for (Codex P2 / adversary N4).
-                missing_tab = tab_once(candidate, state, now)
-                if missing_tab and should_tell_djbclark("auto-seat tab", state, now):
-                    if to_djbclark(f"Dann: {ROLE!r}'s auto-started seat {candidate} has no Paseo "
-                                   f"Desktop tab, so a question card on it would be unseen. "
-                                   f"{missing_tab}"):
-                        djb_page_sent("auto-seat tab", state, now)
-                        spoke_djb = True
         elif candidate and candidate != ident and (word in ("idle", "working", "silent")
                                                    or word.startswith("card:")):
             # A live successor is authoritative. Retire the stale candidate so it cannot shadow
@@ -1607,6 +1608,28 @@ def _pass(a: argparse.Namespace) -> int:
         # are broken. Keep live candidate diagnostics above, but refuse spawning while blind.
         if _LIVE_ERR and word == "gone":
             word = "unknown"
+        # A seat this pass can SPEAK to but that `auto_seat` did not just confirm was ADOPTED:
+        # the listing handed it back, or its start's confirmation was lost. Nothing has tried
+        # to give it a tab, so it is as invisible as an unopened fresh one, and a card on it is
+        # the case this whole feature exists for (Codex P2 / adversary N4). The test is "the
+        # resolved owner IS the candidate", not "the adoption branch ran": once fleet lists the
+        # new id, `owner_candidates` yields it and `owner_session` returns it as `ident`, so the
+        # branch is skipped - and that fleet-listed case is the COMMON one, which is exactly
+        # the hole adversary D1 (2026-10-30) found in the branch-only site.
+        if candidate and ident[:8] == candidate[:8] and (
+                word in ("idle", "working", "silent") or word.startswith("card:")):
+            missing_tab = tab_once(candidate, state, now)
+            if missing_tab:
+                tab_msg = tab_page(candidate, missing_tab)
+                if should_tell_djbclark("auto-seat tab", state, now) and to_djbclark(tab_msg):
+                    djb_page_sent("auto-seat tab", state, now)
+                    spoke_djb = True
+                else:
+                    # `should_tell_djbclark`'s docstring: a token page must never die of one
+                    # failed send. `tab_once` gives the reason ONCE, so a cooldown-gated or
+                    # failed page is CARRIED instead of dropped (adversary D2, 2026-10-30).
+                    # One slot, like `undisclosed`: a newer reason replaces an older one.
+                    state["undisclosed_tab"] = tab_msg
         started = auto_seat(word, state, now, tab_note)
         auto_gone = word == "gone"
         if auto_gone and (started or should_tell_djbclark("no live session", state, now)):
@@ -1619,6 +1642,11 @@ def _pass(a: argparse.Namespace) -> int:
             if to_djbclark(said):
                 djb_page_sent("no live session", state, now)
                 spoke_djb = True
+            elif tab_note.get("tab"):
+                # The gone page retries itself (its cooldown only starts on a send), but the
+                # tab reason is not in it next pass - `started` is empty by then - so carry
+                # that half alone (adversary D2).
+                state["undisclosed_tab"] = tab_page(started or candidate, tab_note["tab"])
 
     # An unverified send consumes the line on purpose (relay's own text says "do not resend"), so the
     # only thing left is telling him it may have been lost. That admission used to be attempted ONCE,
@@ -1632,6 +1660,18 @@ def _pass(a: argparse.Namespace) -> int:
             state.pop("undisclosed", None)
             spoke_djb = True
         log(f"unverified-send disclosure retried: told djbclark={spoke_djb}")
+
+    # The same at-least-once rule for a seat that is alive and has no tab: a page that could
+    # not be sent is retried until one returns True, and it waits out the page cooldown rather
+    # than jumping it (anti-noise still applies, the reason is only never DROPPED).
+    undisclosed_tab = state.get("undisclosed_tab")
+    if isinstance(undisclosed_tab, str) and undisclosed_tab:
+        if should_tell_djbclark("auto-seat tab", state, now):
+            if to_djbclark(undisclosed_tab):
+                djb_page_sent("auto-seat tab", state, now)
+                state.pop("undisclosed_tab", None)
+                spoke_djb = True
+            log(f"auto-seat tab page retried: told djbclark={spoke_djb}")
 
     # The ONE failure a human has to hear about: no live session for this role means the seat is
     # GONE, not busy. Every other line here is for the seat; this one is for him, and it is checked

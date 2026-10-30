@@ -73,6 +73,10 @@ def load(monkeypatch, tmp_path, switch="1"):
     rw.open_failure = ""
 
     def open_tab(agent_id):
+        # The tab attempt is stamped AFTER the open on BOTH paths, so a kill during the open leaves
+        # it unrecorded and the next pass retries an idempotent `agent open` (adversary D4: moving
+        # `tab_once`'s stamp above its own open survived every test).
+        assert f"auto-seat tab:{agent_id}" not in rw.load_state().get("told", {})
         rw.opened.append(agent_id)
         return rw.open_failure
 
@@ -737,7 +741,12 @@ def test_40_a_failed_open_keeps_the_seat_and_tells_djbclark(monkeypatch, tmp_pat
     # exactly the darkness this feature exists to end.
     assert len(rw.pages) == 1 and NEW in rw.pages[0]
     assert "it is reachable by relay but has no tab: run paseo agent open new-seat" in rw.pages[0]
-    # A failed tab must never turn into a SECOND seat or a second open on the next pass.
+    # A failed tab must never turn into a SECOND seat or a second open on the next pass - including
+    # when fleet lists the seat, so `owner_session` resolves it as the owner (adversary D3: with the
+    # candidate still diagnosed "gone" the adoption branch was never entered, so dropping the
+    # fresh start's own tab stamp survived this test).
+    monkeypatch.setattr(rw, "owner_session", lambda: (NEW, "auto-seat"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
     run_pass(rw)
     assert sum(is_start(argv) for argv, _ in rw.calls) == 1
     assert [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]] == [
@@ -751,18 +760,18 @@ def test_41_no_open_switch_skips_the_attempt_and_still_seats(monkeypatch, tmp_pa
     run_pass(rw)
     assert [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]] == []
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
-    assert f"NOT opened (RW_AUTO_SEAT_NO_OPEN=1): run paseo agent open {NEW}" in rw.LOG.read_text()
+    # The reason names the value that was actually set (adversary D5): it reaches djbclark.
+    assert f"NOT opened (RW_AUTO_SEAT_NO_OPEN={word}): run paseo agent open {NEW}" in rw.LOG.read_text()
     assert len(rw.pages) == 1 and NEW in rw.pages[0]
 
 
-@pytest.mark.parametrize("value,skipped", [("0", False), ("false", False), ("off", False),
-                                           ("", False)])
-def test_41b_other_switch_values_still_attempt_the_open(monkeypatch, tmp_path, value, skipped):
-    """The switch is a word list like `RW_IDLE_NUDGE`'s: anything else attempts (and fails safe)."""
+@pytest.mark.parametrize("value", ["0", "false", "off", "no", ""])
+def test_41b_other_switch_values_still_attempt_the_open(monkeypatch, tmp_path, value):
+    """An explicit allowlist: any other value still attempts the open, so a typo cannot silence it."""
     rw = tab_world(monkeypatch, tmp_path, no_open=value)
     run_pass(rw)
     attempted = [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]]
-    assert attempted == ([] if skipped else [["paseo", "agent", "open", NEW, "--json"]])
+    assert attempted == [["paseo", "agent", "open", NEW, "--json"]]
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
 
 
@@ -828,3 +837,62 @@ else:
     run_pass(rw)
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
     assert seen.read_text() == "None"  # repr(None): the child never inherited the caller's seat id
+
+
+def test_45_a_seat_fleet_already_lists_still_gets_its_one_tab(monkeypatch, tmp_path):
+    """Adversary D1: once fleet lists the new id, `owner_session` returns it as `ident`, so the
+    ADOPTION branch is skipped - and that fleet-listed case is the COMMON one."""
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False                       # the start's confirmation was lost, so it never opened
+    run_pass(rw)
+    assert rw.opened == []
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    monkeypatch.setattr(rw, "owner_session", rw.real_owner_session)
+    monkeypatch.setattr(rw, "live_sessions", lambda: {NEW[:8]: {"ended": False, "archived": False}})
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    rw.pages.clear()
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert rw.load_state()["told"][f"auto-seat tab:{NEW}"] == NOW + rw.AUTO_SEAT_S + 1
+    assert rw.pages == []                    # it opened: nothing to tell him
+    run_pass(rw)
+    assert rw.opened == [NEW]                # one attempt per id, ever
+
+
+def _tab_reason():
+    return (f"NOT opened in Paseo Desktop (rc=3: no Desktop process); it is reachable by relay "
+            f"but has no tab: run paseo agent open {NEW}")
+
+
+def test_46_a_tab_page_he_never_received_is_carried_and_retried(monkeypatch, tmp_path):
+    """Adversary D2: `tab_once` hands its reason out ONCE, so a failed send must not consume it."""
+    rw = adopted_world(monkeypatch, tmp_path, open_failure=_tab_reason())
+    rw.pages.clear()
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # one transient `hermes` failure
+    run_pass(rw)
+    assert rw.pages == []
+    carried = rw.load_state()["undisclosed_tab"]
+    assert NEW in carried and _tab_reason() in carried
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and "has no Paseo Desktop tab" in rw.pages[0]
+    assert "undisclosed_tab" not in rw.load_state()
+    run_pass(rw)
+    assert len(rw.pages) == 1                # sent once, never again
+
+
+def test_47_a_page_cooldown_carries_the_reason_instead_of_dropping_it(monkeypatch, tmp_path):
+    """D2(b): the cooldown is one key shared by every seat, so a second seat's reason used to be
+    thrown away. It waits the cooldown out and is then sent - carried, never dropped."""
+    rw = adopted_world(monkeypatch, tmp_path, open_failure=_tab_reason())
+    rw.pages.clear()
+    state = rw.load_state()
+    state["told"]["auto-seat tab"] = NOW                 # another seat paged him just now
+    rw.save_state(state)
+    run_pass(rw)
+    assert rw.pages == []                                # anti-noise still applies
+    assert "undisclosed_tab" in rw.load_state()          # ... but the reason is kept
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.DJB_COOLDOWN_S + 1)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and "has no Paseo Desktop tab" in rw.pages[0]
+    assert "undisclosed_tab" not in rw.load_state()
