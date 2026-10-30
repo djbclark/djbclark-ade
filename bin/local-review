@@ -44,7 +44,7 @@ Rules (each one a way a local review could lie, so each is pinned by a test):
      the PR can still try to talk the model into "no issues", as it can the GitHub bot. A PR whose author is neither the repository owner nor the authenticated gh user is refused (exit 2) unless --allow-untrusted.
      Residual: a tool process that is reparented to init between two 2-second looks AND works outside the worktree escapes (no cgroups on macOS).
 
-Exit: 0 clean, 1 findings, 2 usage / no such PR / not in a checkout of that repo, 3 failed (see `reason` in the file and on stderr), 4 another run for the
+Exit: 0 clean, 1 findings, 2 usage / no such PR / not in a checkout of that repo / an author that is not trusted, 3 failed (see `reason` in the file and on stderr), 4 another run for the
 same head is alive.
 """
 

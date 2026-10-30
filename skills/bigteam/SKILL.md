@@ -822,7 +822,7 @@ findings, 2 usage, 3 failed (codex missing, timeout, non-zero exit, no final mes
 for that head is alive. Then `bin/pr-wait PR --local-codex` replaces the bot's marker with that file (implies `--no-codex`): `merge_ready` needs `clean` on this
 head, else `local-codex-missing`, `local-codex-findings`, `local-codex-failed` or `local-codex-unreadable`. Run it after every push (it takes 2-6 minutes and about 0.3% of
 the weekly Codex quota), fix every finding, and quote the summary line in the PR body. A finding in `.cursor/hooks.json` or `.claude/settings.json` that the review
-worktree itself dirtied (the graft hook) is listed under `ignored_generated` and not counted.
+worktree itself dirtied (the graft hook) is listed under `ignored_generated` and not counted. A PR whose author is neither the repository owner nor the authenticated gh user is refused (exit 2) unless `--allow-untrusted`, because the PR's own diff and AGENTS.md can steer the reviewing model; `pr-wait --local-codex` accepts a result filed that way as the operator's call.
 
 ### Jobs and records — work that must outlive the session
 

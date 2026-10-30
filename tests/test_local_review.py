@@ -73,7 +73,7 @@ Full review comments:
   tests_unrunnable) say "I found no actionable issues in this patch. I could not run tests in the read-only sandbox. The patch also fixes the failed command." ;;
   wasnt_able) say "I wasn't able to review the patch because the repository is unavailable." ;;
   incomplete_records) say "The patch correctly handles incomplete records and rejects inaccessible paths, and I found no actionable issues." ;;
-  late_child) { sleep 300 & echo $! > "$FAKE_PID_FILE"; }; say "The patch looks correct." ;;
+  late_child) { (cd /tmp && sleep 300 & echo $! > "$FAKE_PID_FILE"); }; say "The patch looks correct." ;;
   could_not_find) say "I could not find any bugs in this change." ;;
   cant_review) say "I couldn't review this patch because the repository is inaccessible." ;;
   noexec) { echo "transcript noise"; echo codex; echo "Looks fine."; } >&2; echo "Looks fine." ;;
@@ -322,7 +322,15 @@ def test_only_the_owner_or_the_authenticated_user_may_have_their_pr_reviewed_by_
 
 def test_a_child_started_just_before_codex_exits_is_killed_without_lsof_or_a_snapshot(world: World) -> None:
     """Codex P1 (GitHub review of PR 130): the leader must not be reaped before the group kill, or a late child survives where lsof is missing."""
-    assert world.run(mode="late_child").returncode == 0
+    safe = world.tmp / "nolsof"
+    safe.mkdir()
+    for tool in ("git", "gh", "python3", "codex", "bash", "sleep", "ps", "cat", "env", "cut", "sort", "pwd", "echo"):    # everything but lsof
+        src = world.tmp / "bin" / tool if tool in ("gh", "codex") else Path(shutil.which(tool) or "")
+        if src.exists() and not (safe / tool).exists():
+            (safe / tool).symlink_to(src)
+    env = {"PATH": f"{safe}{os.pathsep}/usr/bin{os.pathsep}/bin"}    # no lsof on this PATH (/usr/sbin is not on it); the child works in /tmp, outside the worktree
+    assert shutil.which("lsof", path=env["PATH"]) is None
+    assert world.run(mode="late_child", env=env).returncode == 0
     time.sleep(0.5)
     assert not alive(int(world.pid_file.read_text())), "a child started right before codex exited survived"
 
