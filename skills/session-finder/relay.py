@@ -145,7 +145,12 @@ the send fails). Retry with --idle S, or --no-defer for the plain refusal" (nobo
 target every 5 s while it is not there or cannot be asked, on a backoff ladder while it works or waits on a card (below; only the head of a target's queue looks) and, once it is idle, sends through
 this same path (every gate, lock and proof) the stored text prefixed `[queued Nm ago] ` (omitted under a minute), under
 the stored label (sanitized again; `--deliver` refuses a record whose label sender_name would not give, and a `hermes xxxx`
-label without stored hops). A target that is gone (3 looks in a row), archived, finished, or no longer the same
+label without stored hops). The re-send is NOT a new message: it passes `--requeued [EXPECT_ID]` (the expectation the
+queueing run reserved, when it reserved one), so the inner run neither re-checks the `?` reply rule nor appends a footer
+(the stored text already carries it, and the sender's own Paseo id in the deliverer's env is only `paseo send`'s
+attribution, never a `self` row), and it writes no second link or expectation. The queueing run stores that shape in the
+record's `"shape"` (expect, fyi, needs_reply); a record queued before 2026-10-29 has none, so the deliverer passes the bare flag.
+A target that is gone (3 looks in a row), archived, finished, or no longer the same
 session (a pane id reused: its agent, session id, transcript differs, or, for a target with neither session id nor transcript, the
 queue-time pid of its TUI is no longer among the pane's foreground pids: tool children come and go, so it is membership, never a
 re-pick; a TUI restarted onto the same session id is still the target) makes the message `failed`. At QUEUE
@@ -239,7 +244,9 @@ expectation is never itself flagged unless it asks a new question or requests an
 `--expect-ack ID` records (state, never a wait) that a reply `ack ID` is expected; the sent text ends "[reply through relay.py to <your id>:
 ack ID]". It is REQUIRED (exit 2, nothing sent) for a text with a `?` outside a URL or with --needs-reply, from a session relay can identify
 (a launchd script has no session an answer could reach, so it is exempt from the `?` rule; --expect-ack from it is refused); --fyi
-overrides a `?` that is no question. The record (sender, target, age) lives in <deferred dir>/expect/ and shows in `--pending`
+overrides a `?` that is no question. A QUEUED message's own re-send (`--requeued [EXPECT_ID]`, internal) is exempt: the run that queued it
+already applied this rule, appended the footer and reserved the ID, so the same text is never judged, footered or reserved twice.
+The record (sender, target, age) lives in <deferred dir>/expect/ and shows in `--pending`
 (`--json` rows with "kind": "expect", "overdue" and "assumed_lost"); `--sweep` resolves it when a user-role line of the SENDER's transcript says `ack ID`
 (its own tool calls and their results never count). A sender with a fleet row but NO readable transcript may use --expect-ack (2026-10-26): its
 record holds `"tx": null`, and relay itself closes it when the TARGET answers through relay.py with a text that BEGINS `ack ID`, sent to the
@@ -2730,9 +2737,13 @@ def deliver(rid):
             t = rec.get("target") or {}
             BUSY["hit"] = False
             try:
-                # "--no-ack" is defence in depth: as_caller(...) sets SENDER_OVERRIDE, so sender_identified is already False; no test fails without the flag
+                # "--no-ack" is defence in depth: as_caller(...) sets SENDER_OVERRIDE, so sender_identified is already False; no test fails without the flag.
+                # "--requeued" says this is a re-send of text the queueing run already shaped: it neither re-runs the reply rule nor appends
+                # a footer, and the ID it carries is the expectation that run reserved (absent: it reserved none).
+                shape = rec.get("shape") if isinstance(rec.get("shape"), dict) else {}
+                requeued = ["--requeued"] + ([shape["expect"]] if shape.get("expect") else [])
                 rc, line = run_captured([t.get("paseo") or t.get("id") or "", (f"[queued {mins}m ago] " if mins >= 1 else "") + rec.get("text", ""),
-                                         "--no-defer", "--no-ack"], rec.get("sender") or "unknown")
+                                         "--no-defer", "--no-ack", *requeued], rec.get("sender") or "unknown")
             except (Exception, SystemExit) as e:    # the send may have happened: never `sending` with nothing running, never resent
                 defer_log(rec, "error", f"{type(e).__name__} during the send")
                 finish(rid, "failed", UNVERIFIED_WHY, allowed=("sending",))
@@ -2834,7 +2845,9 @@ def defer_send(s, a, text, listed, why):
     1 when the queue is full, the sender or the target cannot be identified, or no deliverer can start. The sender's
     identity is read once, here, from this process: its label, its Paseo id (only a verified one: hosted by Paseo, or
     fleet's own `self` row) and its fleet id; a sender with none is refused (nobody could tell it the send failed). A
-    failure notice (NOTICE) is the one exception: a `kind: notice` record that owes no notice, with its own cap and life."""
+    failure notice (NOTICE) is the one exception: a `kind: notice` record that owes no notice, with its own cap and life.
+    The record also keeps the shape TEXT was queued under (`shape`: expect, fyi, needs_reply), so the deliverer's re-send
+    can say with `--requeued` that it is one and not judge the text again."""
     notice = NOTICE[0]
     if notice:
         sender_paseo, ident, hops, label = "", "", 0, "relay"
@@ -2880,6 +2893,8 @@ def defer_send(s, a, text, listed, why):
                 (uuid.uuid4().hex + text).encode()).hexdigest()[:6]
             dup = {"id": rid, "target": {"id": s["id"], "paseo": agent, "name": s.get("name") or "", **tok},
                    "text": text, "sender": label, "sender_ident": ident, "sender_paseo": sender_paseo, "kind": "notice" if notice else "",
+                   "shape": {"expect": getattr(a, "expect_ack", None) or "", "fyi": bool(getattr(a, "fyi", False)),
+                             "needs_reply": bool(getattr(a, "needs_reply", False))},
                    "hops": hops, "created": now, "expires": now + life, "state": "queued", "outcome": "", "pid": 0, "notice": ""}
             rec_write(dup)
             fresh = True
@@ -3666,7 +3681,8 @@ def expect_view(now=None):
 
 def main(argv=None, sweep=True):
     """One relay run. A send that may have reached its target (CTX["sent"]) is recorded afterwards: the link sender -> target and
-    the --expect-ack expectation. A failure of that bookkeeping never changes the exit code."""
+    the --expect-ack expectation. A failure of that bookkeeping never changes the exit code. A re-send of a queued record
+    (`--requeued`) writes neither: the run that queued it did."""
     CTX.clear()
     try:
         rc = _main(argv, sweep)
@@ -3674,7 +3690,7 @@ def main(argv=None, sweep=True):
         if CTX.get("reserved") and not CTX.get("sent"):
             with contextlib.suppress(Exception):    # nothing went out: the ID is free again
                 expect_release(*CTX["reserved"])
-    if CTX.get("sent") and CTX.get("s") is not None:
+    if CTX.get("sent") and CTX.get("s") is not None and not CTX.get("requeued"):
         try:
             note_links_and_expect()
             expect_resolve_by_relay()
@@ -3697,6 +3713,10 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--no-defer", action="store_true", help="refuse a send to a working target (exit 1) instead of queueing it")
     ap.add_argument("--defer-for", type=float, metavar="S", help="how long a queued message may wait for its target (default 6 h, at most 24 h)")
     ap.add_argument("--deliver", metavar="ID", help="(internal) deliver the queued record ID when its target is idle")
+    ap.add_argument("--requeued", metavar="EXPECT_ID", nargs="?", const="", default=None,
+                    help="(internal) the deliverer's re-send of a queued record: its text already carries the footer the queueing run appended, so "
+                    "none is appended again, and EXPECT_ID (the shape it was queued under) was already reserved then, so nothing is reserved: the "
+                    "reply gate passes as it did at queue time. Absent: an ordinary send")
     ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
     ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
@@ -3781,7 +3801,11 @@ def _main(argv=None, sweep=True):
         print("relay: empty text", file=sys.stderr)
         return 2
     listed = fleet.sessions()
-    me = sender_row(listed)
+    # A run under SENDER_OVERRIDE is a deliverer's or a notice's own send of a record: it speaks under the stored label and the
+    # env's PASEO_AGENT_ID is only there so `paseo send` attributes the message to the sender, never this process's own row.
+    # Reading that row as `me` re-ran the queue-time gates on text that already carries their footer (2026-10-29: a queued
+    # question was refused "asks for a reply", and a re-send that passed would have appended a footer naming the sender itself).
+    me = None if SENDER_OVERRIDE[0] else sender_row(listed)
     if a.fyi and a.needs_reply:
         print("relay: --fyi and --needs-reply contradict each other", file=sys.stderr)
         return 2
@@ -3799,6 +3823,18 @@ def _main(argv=None, sweep=True):
     if a.expect_ack is not None and not EXPECT_ID.fullmatch(a.expect_ack):
         print("relay: --expect-ack ID must be 1-40 characters of letters, digits, `.`, `_`, `-`", file=sys.stderr)
         return 2
+    # A re-send is not a new message: it is the same text the queueing run already shaped, footered and reserved for, delivered
+    # once its target went idle (defer_record's `shape`). None is an ordinary send; "" a record queued under a shape that asked for
+    # nothing; an ID the expectation that run reserved.
+    requeued = a.requeued
+    CTX["requeued"] = requeued is not None    # main() keeps no second link and no expectation for a re-send: the queueing run wrote them
+    if requeued is not None:
+        if a.expect_ack is not None:
+            print("relay: --requeued and --expect-ack are exclusive: a re-send reserves nothing", file=sys.stderr)
+            return 2
+        if requeued and not EXPECT_ID.fullmatch(requeued):
+            print("relay: --requeued EXPECT_ID must be 1-40 characters of letters, digits, `.`, `_`, `-`", file=sys.stderr)
+            return 2
     if not a.plan and sender_name(listed) == "unknown":
         why = no_sender_reason()
         print(f"relay: not sent: {why}", file=sys.stderr)
@@ -3825,7 +3861,8 @@ def _main(argv=None, sweep=True):
             print("relay: not sent: a bare `ack ID` reply or a text saying only that no reply is needed expects no answer, so it takes no "
                   "--expect-ack or --needs-reply (an ack of an ack would never end)", file=sys.stderr)
             return 2
-        if (a.needs_reply or (me is not None and asks_for_reply(text) and not a.fyi and not term)) and not a.expect_ack:
+        if (a.needs_reply or (requeued is None and me is not None and asks_for_reply(text) and not a.fyi and not term)) \
+                and not a.expect_ack and requeued is None:
             print("relay: not sent: this message asks for a reply or action, so it needs --expect-ack ID (a record `--sweep` resolves when "
                   "the peer answers `ack ID`; `--pending` lists it). A `?` that is no question: --fyi", file=sys.stderr)
             return 2
@@ -3898,7 +3935,7 @@ def _main(argv=None, sweep=True):
     if CTX.get("reserved") and CTX.get("me") is not None:    # name both ends before the send, so an answer inside a blocking send finds the reservation
         with contextlib.suppress(Exception):
             expect_stamp(CTX["reserved"][0], CTX["me"], s, CTX.get("mark", 0), CTX.get("within"))
-    if me is not None and not a.plan and not NOTICE[0] and not term:    # a terminator asks for nothing, so it carries no footer
+    if me is not None and not a.plan and not NOTICE[0] and not term and requeued is None:    # a terminator asks for nothing, so it carries no footer; a re-send's text already carries the one its queueing run appended
         if a.expect_ack:
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
             CTX["tl_base"] = timeline_base(me)    # what a transcript-less sender had received before it asked: an old `ack` cannot answer this
