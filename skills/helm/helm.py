@@ -207,13 +207,14 @@ def sessions():
 def herald_kind(s, tx=None):
     """The item kind Herald's reason gives a Paseo row (fleet.herald_overlay): question, plan, permission or error, else None. A reply that
     ended in an error is a need only while no new turn runs (a working or blocked row has moved on, the entry is stale). A question whose full
-    text the Claude transcript still holds stays the transcript's item: it carries the options helm can answer."""
+    text the Claude transcript still holds stays the transcript's item, whatever Herald's reason says (a plan, a permission or an error
+    beside it): it carries the options helm can answer, and Herald must neither replace nor drop it."""
     reason = (s.get("herald") or {}).get("reason")
     if s.get("host") != "paseo":
         return None
+    if tx and any(p[1] == "AskUserQuestion" for p in tx["pending"]):
+        return None
     if reason in fleet.HERALD_INPUT and s["status"] == "blocked":
-        if reason == "question" and tx and any(p[1] == "AskUserQuestion" for p in tx["pending"]):
-            return None
         return reason
     if reason == "error" and s["status"] not in ("working", "blocked", "ended"):
         return "error"

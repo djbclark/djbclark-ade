@@ -487,6 +487,7 @@ def paseo_look(info, detail="", listed=None, last="", herald=None):
     if reason in fleet.HERALD_INPUT:
         if look["state"].startswith("card:"):
             if look["state"] not in ("card:" + reason, "card:unknown"):
+                look["agree"] = False    # the witnesses name different kinds: report both, and the methods disagree
                 look["why"] += f" [Herald says {reason.upper()}]"
         elif look["state"] in ("working", "silent"):
             look.update(state="card:" + reason, deliverable=False, agree=False,
@@ -494,7 +495,7 @@ def paseo_look(info, detail="", listed=None, last="", herald=None):
                         "does not: it may have just been answered, so treat the agent as blocked (its text, if any, is in the evidence)")
         else:
             look.update(agree=False, why=look["why"] + f" [Herald reports a {reason.upper()}, but the agent is {state} with no card: probably a "
-                        "leftover entry, so nothing is blocked]")
+                        "leftover entry, so Herald does not block it]")
     elif reason == "error" and state != "running":
         look["why"] += "; Herald: its last turn ended in an error and needs you (not a `paseo permit allow` card)"
         look["needs_you"] = "error"

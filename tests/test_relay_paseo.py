@@ -733,6 +733,9 @@ class RelayPaseo(unittest.TestCase):
         d = relay.diagnose(sess())
         self.assertEqual(d["state"], "card:permission")
         self.assertIn("[Herald says PLAN]", d["why"])
+        self.assertIs(d["agree"], False)    # two witnesses, two kinds: the methods disagree, and both are reported
+        self.assertEqual([e["says"] for e in d["evidence"] if e["src"] == "herald-attention"], ["plan"])
+        self.assertFalse(d["deliverable"])
 
     def test_herald_finished_adds_evidence_and_blocks_nothing(self) -> None:
         self.herald(self.entry("finished"))

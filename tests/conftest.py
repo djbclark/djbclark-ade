@@ -55,6 +55,9 @@ os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.
 # unconditionally; tests/test_gates.py points them at fixtures per test.
 for _var in ("GATE_PROFILE_STATE", "GATE_PROFILE_LOG", "GATE_PROFILE_PING", "GATE_PROFILE_GOVERNOR", "GATE_PROFILE_GUARD"):
     os.environ[_var] = f"/nonexistent/{_var.lower()}"
+# fleet.herald_entries() reads Herald's attention file ($HERALD_ATTENTION_FILE, else ~/.paseo/plugin-data/herald/attention.json): a test never
+# reads the operator's real one. Pinned to a missing path unconditionally; the two Herald test modules point it at a fixture per test.
+os.environ["HERALD_ATTENTION_FILE"] = "/nonexistent/herald-attention.json"
 # relay.py reads RELAY_DEFER_DIR once, at import: every test module that loads it (test_relay_*.py, test_session_relay.py)
 # gets a throwaway queue directory, so no test reads, sweeps, expires or prunes the operator's real deferred-send queue
 # ~/.local/state/relay/deferred (2026-10-24: test_session_relay.py ran relay.main(), whose opportunistic sweep expired and

@@ -530,6 +530,21 @@ def test_helm_gives_each_herald_reason_its_own_kind(paseo, reason, kind):
     assert (it["kind"], it["open"]) == (kind, True)
 
 
+@pytest.mark.parametrize("reason", ["question", "plan", "permission", "error"])
+def test_a_pending_transcript_question_stays_the_answerable_item_whatever_herald_says(paseo, monkeypatch, reason):
+    """Herald's kind must neither replace nor drop a pending AskUserQuestion the transcript still holds: it carries the options helm can answer."""
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, reason))
+    fleet.herald_overlay([s])
+    ask = {"questions": [{"question": "Which?", "options": [{"label": "a"}, {"label": "b"}]}]}
+    monkeypatch.setattr(helm, "transcript", lambda sid: Path("t.jsonl"))
+    monkeypatch.setattr(helm, "parse", lambda p: {"last_text": "", "pending": [("toolu_1", "AskUserQuestion", ask)]})
+    s["status"] = "blocked"    # a live question: the registry says blocked (an error is read as the item only while no turn is blocked)
+    it = helm.classify(s, {})
+    assert (it["kind"], it["open"], it["tool_use_id"], it["questions"]) == ("question", True, "toolu_1", ask["questions"])
+    assert "herald" not in it and "paseo" not in it
+
+
 def test_a_new_herald_event_reopens_a_skipped_item(paseo):
     s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
     write_herald(paseo, attn(CLAUDE, "question"))
