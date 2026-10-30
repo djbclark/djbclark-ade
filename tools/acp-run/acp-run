@@ -4011,22 +4011,35 @@ exit 0
 
 
 def credential_url_key(key: str) -> bool:
-    """Whether a config key embeds userinfo in a url.* base, e.g. url.https://user:token@host/.insteadOf.
+    """Whether a config key embeds userinfo in a URL, e.g. url.https://user:token@host/.insteadOf.
 
     Codex's shell_environment_policy drops variable NAMES containing KEY, SECRET or TOKEN, so a token
     inside a counted GIT_CONFIG_KEY_<n> used to be invisible to an agent's tool commands; moving the
     group into one GIT_CONFIG_PARAMETERS value hands it over (codex security review, PR 156,
     2026-10-30). This is about KEYS only: a credential in a counted VALUE was already readable, because
     the name filter never covered GIT_CONFIG_VALUE_<n>, so refusing those would be a different change.
-    Git section names are case-insensitive (`[URL "..."]` is the same section), so `URL.` counts too.
-    The authority starts after any run of slashes: `https:///user:token@host` is an empty authority to the
-    URL parser but libcurl still sends that userinfo, so it is refused, while a `@` in the first path
-    segment (`url.https://example.org/@scope/.insteadOf`) stays a path and travels.
+
+    EVERY URL-scoped family counts, not just `url.*`: git resolves `http.<url>.*` and
+    `credential.<url>.*` for the matching URL too (measured with `git config --get-urlmatch
+    http.sslVerify https://user:token@host/x`, which answers the setting configured under that
+    userinfo-bearing subsection and answers nothing for another host), and the exposure is about the
+    NAME rather than the key's meaning - any token in any key name was hidden by the filter and the
+    quoted transport would hand it over. So the test is the shape, wherever it appears: every `://` in
+    the key is followed by an authority that must not carry `@`. That also covers a section's case
+    (`URL.`, `HTTP.`) and the scheme's (`HTTPS://`), because neither is matched.
+
+    The authority starts after any run of slashes: `https:///user:token@host` is an empty authority to
+    the URL parser but libcurl still sends that userinfo, so it is refused, while a `@` in the first
+    path segment (`url.https://example.org/@scope/.insteadOf`) stays a path and travels. A base with no
+    `://` at all (`url.git@example.org:.insteadOf`) is a path on a host named `git`, not userinfo, and
+    travels.
     """
-    if key[:4].lower() != "url.":
-        return False
-    _, sep, rest = key[4:].partition("://")
-    return bool(sep) and "@" in rest.lstrip("/").split("/", 1)[0]
+    rest = key
+    while "://" in rest:
+        _, _, rest = rest.partition("://")
+        if "@" in rest.lstrip("/").split("/", 1)[0]:
+            return True
+    return False
 
 
 def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) -> None:
@@ -4062,7 +4075,7 @@ def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) ->
             raise ValueError(f"invalid GIT_CONFIG_KEY_{i}: empty config key")
         if credential_url_key(env[f"GIT_CONFIG_KEY_{i}"]):
             raise ValueError(
-                f"GIT_CONFIG_KEY_{i} embeds a credential in a url.* key, which this transport would make "
+                f"GIT_CONFIG_KEY_{i} embeds a credential in a URL, which this transport would make "
                 "readable to the agent; use a credential helper or ~/.gitconfig instead")
         counted.append((env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]))
     quote = lambda value: "'" + value.replace("'", "'\\''") + "'"
