@@ -4018,10 +4018,11 @@ def credential_url_key(key: str) -> bool:
     group into one GIT_CONFIG_PARAMETERS value hands it over (codex security review, PR 156,
     2026-10-30). This is about KEYS only: a credential in a counted VALUE was already readable, because
     the name filter never covered GIT_CONFIG_VALUE_<n>, so refusing those would be a different change.
+    Git section names are case-insensitive (`[URL "..."]` is the same section), so `URL.` counts too.
     """
-    if not key.startswith("url."):
+    if key[:4].lower() != "url.":
         return False
-    _, sep, rest = key[len("url."):].partition("://")
+    _, sep, rest = key[4:].partition("://")
     return bool(sep) and "@" in rest.split("/", 1)[0]
 
 

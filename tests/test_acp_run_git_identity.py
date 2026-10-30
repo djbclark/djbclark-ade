@@ -198,8 +198,11 @@ class TestGitIdentityGuard(unittest.TestCase):
 
     def test_counted_key_with_an_embedded_credential_is_refused_by_index_only(self):
         guard = load_guard(self.tmp / "guard.sh")
+        # git sections are case-insensitive: `URL.https://...` is the same setting, measured with
+        # `git config --get` on the lowercase spelling
         for key in ("url.https://user:s3cr3t@example.org/.insteadOf",
-                    "url.ssh://deploy:s3cr3t@example.org/.pushInsteadOf"):
+                    "url.ssh://deploy:s3cr3t@example.org/.pushInsteadOf",
+                    "URL.https://user:s3cr3t@example.org/.insteadOf"):
             with self.subTest(key=key):
                 env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
                        "GIT_CONFIG_VALUE_0": "https://example.org/"}
