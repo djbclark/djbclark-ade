@@ -731,6 +731,101 @@ def test_an_explicit_null_beside_an_open_security_thread_still_fails_closed(worl
     assert "open-findings" in summary["merge_blockers"]
 
 
+def test_an_explicit_null_beside_a_FIXED_earlier_security_finding_is_a_clean_review(world: World) -> None:
+    """PR 156 (2026-10-30): the null describes THIS review of THIS head, so an earlier head's finding,
+    fixed and resolved, cannot contradict it.
+
+    Codex's security review of the fixed head reported none (the null pair), and its P2 on the earlier
+    head stayed in the PR as four historical comments. Counting EVERY finding comment of ANY head as
+    evidence against the null made merge_ready unreachable for any pull request where Codex had ever
+    found something and the fix was accepted — which is exactly the round of fixes that produces a
+    clean head. The code review's `has_unresolved_findings: false` never had this problem; only the null
+    pair did.
+    """
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(60)]))
+    world.route("graphql", gql(thread(60, resolved=True)))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = world.file("summary")
+    assert summary["merge_ready"] is True, summary["merge_blockers"]
+    assert summary["merge_blockers"] == [] and summary["open_findings"] == 0
+
+
+def test_an_explicit_null_beside_a_finding_ON_THIS_HEAD_still_fails_closed(world: World) -> None:
+    """The narrower rule, so the null did not simply lose its evidence check: a security finding left on
+    THIS head contradicts "this review found nothing", even when someone resolved its thread without a
+    fix — a resolution is not a fix, and only a new head can be clean."""
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(61, original_commit_id=HEAD)]))
+    world.route("graphql", gql(thread(61, resolved=True, oid=HEAD)))
+    world.run()
+    summary = world.file("summary")
+    assert summary["merge_ready"] is False
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
+def test_a_since_window_cannot_hide_a_finding_on_this_head_from_the_null_check(world: World) -> None:
+    """`--since` narrows what the SUMMARY counts, never the evidence behind a null.
+
+    A resolved finding on this head is exactly what the null contradicts, and `--since` is a caller's
+    choice about history on an old PR: letting it shrink the evidence too would make `--since` a way to
+    wave a finding through, which is the one thing a null must not be.
+    """
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments",
+                ok([sec_finding(62, original_commit_id=HEAD, created_at="2026-10-01T00:00:00Z")]))
+    world.route("graphql", gql(thread(62, resolved=True, oid=HEAD)))
+    assert world.run("--since", "2026-10-23T00:00:00+00:00").returncode == 0
+    summary = world.file("summary")
+    assert summary["findings_for_head"] == 0  # the window did what it says
+    assert summary["merge_ready"] is False
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
+def test_a_null_beside_has_any_findings_true_is_not_a_statement(world: World) -> None:
+    """The null means "nothing of this kind"; `has_any_findings: true` means "something". Both cannot
+    describe one review, so the pair is a marker we do not understand — and it must not become ready
+    just because the only findings the marker could be pointing at sit on an EARLIER head, resolved.
+
+    That is the shape the earlier-head rule would otherwise wave through: the finding on this head is
+    gone, the thread is resolved, `open` is empty, and every other check passes. The two keys disagree
+    with each other, which no amount of thread evidence can settle.
+    """
+    sec = {"commit_sha": HEAD, "status": "completed", "has_any_findings": True, "has_unresolved_findings": None}
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=sec)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(63)]))
+    world.route("graphql", gql(thread(63, resolved=True)))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = world.file("summary")
+    assert summary["merge_ready"] is False, summary["merge_blockers"]
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
+@pytest.mark.parametrize("any_value", ["true", 1, 0, "", []])
+def test_a_has_any_findings_that_is_not_a_boolean_is_not_a_statement(world: World, any_value: object) -> None:
+    """The pair is judged on both keys, not only on `has_unresolved_findings`.
+
+    `"true"`, `1`, `""`, `0` and `[]` are all "neither boolean nor null", the values the docstring already
+    refuses for `has_unresolved_findings`. Beside a null they mean nothing the reviewer can rely on, so the
+    review has not stated its answer however clean the threads look — and `0` is why the guard uses identity
+    rather than `not in (None, False)`.
+    """
+    sec = {"commit_sha": HEAD, "status": "completed", "has_any_findings": any_value,
+           "has_unresolved_findings": None}
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=sec)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(64)]))
+    world.route("graphql", gql(thread(64, resolved=True)))
+    assert world.run().returncode == 0
+    summary = world.file("summary")
+    assert summary["merge_ready"] is False, summary["merge_blockers"]
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
 def test_a_findings_flag_that_is_neither_boolean_nor_null_is_still_unverified(world: World) -> None:
     # a marker we do not understand is not a clean review, and must not be read as one
     sec = {"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": "false"}
