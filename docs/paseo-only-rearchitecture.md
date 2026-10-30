@@ -296,8 +296,11 @@ ops-promotion pilot passes.
    callers of `relay.py` or `fleet.py` (the watchers above, `fleet-watch upstream --relay-to`, `paseowatch`,
    `cfenginewatch`, `tell-chief-of-staff`, the quota guard), `session-finder` is disabled. The search covers
    all of `~/ops`, djbclark-ade, `~/.local/bin`, `~/Library/LaunchAgents`, the provider hook configs
-   (`~/.claude/settings.json`, `~/.codex`, `~/.omp`) and vps-primary's NixOS config, matching
-   `session-finder/(relay|fleet)\.py` and `\brelay\.py\b`. It skips what D7 handles: `docs/history/`,
+   (`~/.claude/settings.json`, `~/.codex`, `~/.omp`) and vps-primary's NixOS config, matching any of
+   `session[-_]finder`, `\b(relay|fleet|launch|where|prompt_line|nested_pty)\.py\b` and
+   `^\s*(import|from)\s+(relay|fleet|launch|where)\b`, because callers also build the path in pieces or
+   import after a `sys.path` insert (today `bin/context-watch:74`, `bin/load-watch:116,232`,
+   `skills/helm/helm.py:56-57`, `skills/herdr-tidy/tidy.py:35`). It skips what D7 handles: `docs/history/`,
    `docs/handoffs/`, `site-private/memory/handoffs/`, `CHANGELOG.md`, `graft/`, `skills/session-finder/`, test
    code that loads or fixtures it (`tests/test_relay_*`, `tests/test_fleet_*`, the relay and fleet fixtures in
    `tests/conftest.py`, the relay case in `tests/test_codex_shell_env_policy.py`), and this plan. A hit in
