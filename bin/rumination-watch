@@ -475,13 +475,21 @@ def chain_staleness() -> str | None:
     rc, head, _ = run_split(["git", "-C", str(REPO), "rev-parse", "HEAD"])
     if rc != 0 or not head:
         return None
+    # A `git` that could not answer at all (rc 127 from run_split's timeout/OSError catch, or any
+    # other rc git does not define for these two commands) is NOT evidence of anything. Saying
+    # "not in this repo" or "repo is behind the pointer" on one would be the same cry-wolf defect
+    # this function was fixed for, one level down, so those stay silent like every other abort
+    # above. `cat-file -e` answers 128 for "no such object", `merge-base --is-ancestor` answers 1
+    # for "not an ancestor"; those are the only two codes either command means.
     rc, _, _ = run_split(["git", "-C", str(REPO), "cat-file", "-e", recorded + "^{commit}"])
-    if rc != 0:
+    if rc == 128:
         return f"Tier 1 log records {recorded[:12]}, repo is at {head[:12]}: not in this repo"
+    if rc != 0:
+        return None
     rc, _, _ = run_split(["git", "-C", str(REPO), "merge-base", "--is-ancestor", recorded, head])
-    if rc == 0:
-        return None                                    # recorded is HEAD or an ancestor of it
-    return f"Tier 1 log records {recorded[:12]}, repo is at {head[:12]}: repo is behind the pointer"
+    if rc == 1:
+        return f"Tier 1 log records {recorded[:12]}, repo is at {head[:12]}: repo is behind the pointer"
+    return None                       # 0: HEAD or an ancestor; anything else: git could not answer
 
 
 def survey() -> dict:

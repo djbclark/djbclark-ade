@@ -124,3 +124,43 @@ def test_a_git_failure_reading_head_is_silent(monkeypatch, tmp_path):
     rw = load(monkeypatch, tmp_path, repo)
     monkeypatch.setattr(rw, "run_split", lambda cmd, timeout=20: (1, "", "boom"))
     assert rw.chain_staleness() is None
+
+
+def _failing_on(real, verb: str, rc: int):
+    """A run_split that really runs git, except for the one command named by `verb`."""
+    def fake(cmd, timeout=20):
+        if verb in cmd:
+            return rc, "", "git could not answer"
+        return real(cmd, timeout)
+    return fake
+
+
+def test_a_git_error_checking_the_recorded_sha_is_silent(monkeypatch, tmp_path):
+    """rc 127 (run_split's timeout/OSError catch) is "no answer", NOT "not in this repo".
+
+    A timeout under load is the ordinary way to get here, and the whole point of this fix is that
+    the watcher must not state a fact it did not learn: this used to read any non-zero rc as
+    "not in this repo".
+    """
+    repo = make_repo(tmp_path)
+    commit(repo, "a.txt", "1\n", "one")
+    write_pointer(tmp_path, repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    rw = load(monkeypatch, tmp_path, repo)
+    monkeypatch.setattr(rw, "run_split", _failing_on(rw.run_split, "cat-file", 127))
+    assert rw.chain_staleness() is None
+
+
+def test_a_git_error_asking_ancestry_is_silent(monkeypatch, tmp_path):
+    """Same for `merge-base --is-ancestor`: rc 1 is the only code that means "not an ancestor".
+
+    Without this branch a git error would be announced as "repo is behind the pointer" — a claim
+    about the repo that git never made.
+    """
+    repo = make_repo(tmp_path)
+    old = commit(repo, "a.txt", "1\n", "one")
+    commit(repo, "a.txt", "2\n", "two")
+    write_pointer(tmp_path, repo, old)
+    rw = load(monkeypatch, tmp_path, repo)
+    monkeypatch.setattr(rw, "run_split", _failing_on(rw.run_split, "merge-base", 128))
+    assert rw.chain_staleness() is None
+
