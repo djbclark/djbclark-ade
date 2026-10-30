@@ -302,8 +302,12 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.hosting: set[str] = {PASEO_AGENT}    # the agent a fake Paseo row belongs to hosts this process
-        for patcher in (mock.patch.object(fleet, "ancestors", set), mock.patch.object(fleet, "_paseo_hosting", lambda anc: self.hosting)):
+        # the ancestry of an agent Paseo launched as PASEO_AGENT at pid 19798: the same process fleet's scan gives its
+        # `pid*` row (see `pid_row`), NEAREST FIRST as `ancestry()` returns it
+        self.anc: list[int] = [19798, 38148]
+        self.hosting: dict[str, int] = {PASEO_AGENT: 19798}
+        for patcher in (mock.patch.object(fleet, "ancestry", lambda: self.anc), mock.patch.object(fleet, "ancestors", set),
+                        mock.patch.object(fleet, "_paseo_hosting_pids", lambda anc: self.hosting)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -324,10 +328,26 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         """Adversary B1: a `PASEO_AGENT_ID` in the environment marks a row `self` on its own (`_paseo_rows`: `pid == me or pid in
         hosting`). A tmux server started from a Paseo agent's shell hands that id to every pane. The pid row is then the real
         caller, and taking the Paseo row would route a genuine answer to another agent's timeline."""
-        self.hosting = set()    # this process is NOT hosted by that agent
-        row = relay.sender_row([self.pid_row(), self.paseo_row()])
-        self.assertEqual(row["id"], "pid19798")
-        self.assertIsNone(row.get("paseo"))
+        self.hosting = {}    # this process is NOT hosted by that agent
+        for rows in ([self.pid_row(), self.paseo_row()], [self.paseo_row(), self.pid_row()]):
+            row = relay.sender_row(rows)
+            self.assertEqual(row["id"], "pid19798", [r["id"] for r in rows])
+            self.assertIsNone(row.get("paseo"))
+
+    def test_a_paseo_row_hosting_a_nested_agents_process_keeps_the_nested_agent_as_sender(self) -> None:
+        """Local review of 2026-10-30: an `omp` Paseo agent that starts a Codex session is an ancestor of this process, so
+        `_paseo_rows` marks the omp row `self` — but Paseo launched the omp process (pid 4242), not the Codex one nearer
+        to us, and naming omp would substitute the parent's identity for the Codex caller and route its replies to the
+        wrong session. Hosting an ancestor is not enough: the sender is the nearest of the two processes."""
+        self.anc = [5150, 4242, 38148]        # this process runs under the Codex TUI, which the omp agent at 4242 started
+        self.hosting = {PASEO_AGENT: 4242}    # Paseo launched the omp agent as pid 4242
+        codex = sess(id="pid5150", agent="codex", host="terminal", pid=5150, cwd="/work/here",
+                     reach="no channel: use its focus command", **{"self": True})
+        for rows in ([codex, self.paseo_row()], [self.paseo_row(), codex]):
+            row = relay.sender_row(rows)
+            self.assertEqual(row["id"], "pid5150", [r["id"] for r in rows])
+            self.assertEqual(row["agent"], "codex")
+            self.assertIsNone(row.get("paseo"))
 
     def test_a_transcript_row_wins_over_the_pid_row_fleet_lists_first(self) -> None:
         row = sess(id="cccccccc", agent="claude", name="alice", transcript="/tmp/me.jsonl", **{"self": True})
@@ -408,6 +428,16 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
             fleet.LINKS_FILE.write_text(json.dumps({"links": {"bbbbbbbb>cccccccc": {"sent": 2, "acked": None}}}))
             rows = fleet.annotate_links([self.pid_row(), self.paseo_row(), sess(id="cccccccc", name="peer")])
         self.assertEqual([r for r in rows if r["id"] == "cccccccc"][0]["link"], {"sent": 2, "acked": None})
+
+
+class TestTheAncestryOrder(unittest.TestCase):
+    def test_nearest_first_and_ancestors_is_its_set(self) -> None:
+        """`sender_row` must tell an agent's own process from one a nested agent started under it, so it needs the ancestry
+        NEAREST FIRST (local review of 2026-10-30); every other caller keeps `ancestors()` as the set it always was."""
+        chain = {str(os.getpid()): 100, "100": 200, "200": 1}
+        with mock.patch.object(fleet, "run", lambda *cmd, **kw: (0, f"{chain[cmd[4]]}\n")):
+            self.assertEqual(fleet.ancestry(), [100, 200])
+            self.assertEqual(fleet.ancestors(), {100, 200})
 
 
 if __name__ == "__main__":
