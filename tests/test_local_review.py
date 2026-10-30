@@ -327,6 +327,22 @@ def test_a_child_started_just_before_codex_exits_is_killed_without_lsof_or_a_sna
     assert not alive(int(world.pid_file.read_text())), "a child started right before codex exited survived"
 
 
+def test_cleanup_masks_termination_signals_so_nothing_cuts_it_short(world: World) -> None:
+    """Codex P2 on PR 130 (round 12): a SIGTERM during the group kill or the worktree removal left tool processes behind."""
+    ld = SourceFileLoader("local_review_mod", str(LOCAL_REVIEW))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("local_review_mod", ld))
+    ld.exec_module(mod)
+    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    try:
+        proc = subprocess.Popen(["sleep", "300"], start_new_session=True)
+        mod.kill_group(proc, world.tmp, {})
+        assert proc.poll() is not None
+        assert all(signal.getsignal(s) == signal.SIG_IGN for s in saved)
+    finally:
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+
 def test_a_clean_message_that_merely_says_could_not_find_is_not_a_refusal(world: World) -> None:
     assert world.run(mode="could_not_find").returncode == 0
 

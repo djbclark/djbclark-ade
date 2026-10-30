@@ -195,6 +195,12 @@ def codex_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if KEEP_ENV_RE.match(k) or not SECRET_ENV_RE.search(k)}
 
 
+def mask_signals() -> None:
+    """From here on nothing may cut the cleanup or the publish short: a SIGTERM there would leave codex's tool processes, the worktree or a stale result."""
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, signal.SIG_IGN)
+
+
 class Interrupted(Exception):
     pass
 
@@ -311,13 +317,12 @@ def main(argv: list[str]) -> int:
         except Exception as e:    # any other fault is a failed review, never a traceback with exit 1 (which reads as "findings")
             doc_out["reason"] = f"{type(e).__name__}: {e}"
     finally:
+        mask_signals()
         if worktree_added:
             rm = run(["git", "worktree", "remove", "--force", str(wt)], cwd=root)
             if rm.returncode != 0:
                 shutil.rmtree(wt, ignore_errors=True)
                 run(["git", "worktree", "prune"], cwd=root)
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(sig, signal.SIG_IGN)    # the review is over: nothing may cut the cleanup and the publish short
     try:
         return finish(doc_out, result_path, t0, a.json)
     finally:
@@ -453,6 +458,7 @@ def kill_group(proc: subprocess.Popen, wt: Path, tracked: dict[int, str]) -> Non
     """SIGKILL everything of codex's: its process group, every descendant seen while it ran or now (TRACKED: tool commands run in sessions of their
     own, and are reparented once codex exits, so only a snapshot taken while it was alive finds one that works outside the worktree) and any process
     still working inside the review worktree; reap the parent."""
+    mask_signals()    # the cleanup is not interruptible (Codex, PR 130 round 12)
     if proc.returncode is None:    # an unreaped leader: its group is still ours (a reaped pid may already belong to someone else)
         try:
             os.killpg(proc.pid, signal.SIGKILL)
