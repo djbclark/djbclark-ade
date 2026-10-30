@@ -1323,9 +1323,9 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None) -> s
            f"No Tier 1 pointer file exists ({pointer or 'none'}); resume from the repo's state.\n")
         + "When available, read that file's ## Current State and - Next steps: and continue at the first unstarted step.\n"
         "Do not page djbclark; if the work needs his decision, put it in the report.\n"
-        f"This seat was started automatically after the previous one disappeared at "
+        f"This seat was started automatically because the previous seat was provably absent at "
         f"{time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(now))} (trigger: {word}); "
-        "it stopped answering.\n"
+        "it had stopped answering.\n"
     )
     # addRunOptions in the installed Paseo bundle supplies provider/no-wait/cwd/title;
     # addJsonAndDaemonHostOptions supplies --json, agentRunSchema.idField supplies agentId.
