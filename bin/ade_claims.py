@@ -757,7 +757,10 @@ def _env_count_config(env: dict[str, str]) -> list[tuple[str, str]]:
     return out
 
 
-_GIT_SPACE = frozenset(" \t\n\v\f\r")     # C isspace() in the C locale, which is what git's parser uses
+# Git does NOT use libc isspace(): git-compat-util.h redefines it as sane_istest(x, GIT_SPACE) over ctype.c's
+# sane_ctype table, which marks only space, \t, \n and \r. `\v` and `\f` are plain control characters to git, so
+# a transport separated by them is "bogus format" and git runs nothing — measured 2026-10-30 (adversary round 3).
+_GIT_SPACE = frozenset(" \t\n\r")
 
 
 def _need_bs_quote(c: str) -> bool:

@@ -33,8 +33,9 @@ GUARD = ROOT / "bin" / "ade-git-guard"
     # csh spelling of an exclamation mark, which `'x!'` would read as a history expansion in csh
     "'ade.bang'='x'\\!'' 'ade.after'='v'",
     "'ade.both'='a'\\''b'\\!'c'",
-    # trailing whitespace after the last entry is fine
+    # trailing whitespace after the last entry is fine, and git's GIT_SPACE is space, \t, \n and \r only
     "'ade.tail'='v' \t",
+    "'ade.nl'='a'\n'ade.cr'='b'\r'ade.tab'='c'\t",
 ])
 def test_parameter_key_value_quoting_matches_git(tmp_path, state, parameters):
     env = base_env(state, GIT_CONFIG_PARAMETERS=parameters)
@@ -58,6 +59,12 @@ def test_parameter_key_value_quoting_matches_git(tmp_path, state, parameters):
     " 'ade.a'='1'",                # git skips NO leading whitespace before the first entry
     " ",                           # ...so a whitespace-only transport is bogus, not empty
     "'ade.slash'='x'\\\\''",       # `\` is not one of the two characters need_bs_quote escapes
+    # git does not use libc isspace(): ctype.c's GIT_SPACE is space, \t, \n and \r, so `\v` and `\f` are NOT
+    # separators. Between two entries, or trailing, they make the transport bogus (measured against git 2.56).
+    "'ade.a'='1'\v'ade.b'='2'",
+    "'ade.a'='1'\f'ade.b'='2'",
+    "'ade.a'='1' \v",
+    "'ade.a'\v'ade.b'='2'",
 ])
 def test_a_parameter_transport_git_refuses_is_dropped_rather_than_guessed(tmp_path, state, parameters):
     """git refuses the whole run on a bogus format, so the guard classifies nothing from it."""
