@@ -81,9 +81,10 @@ a `paseo run` agent has NO tab, and an invisible seat hitting a `card:*` (which 
 is the same darkness one level down (djbclark's ruling, 2026-10-30). A failed open is logged,
 carried into the page to djbclark and never fails the start; a seat that comes alive only by
 recovery (its start's confirmation was lost, or its id came from the Paseo listing) gets ONE
-attempt per id on the first pass that diagnoses it live, and pages him if that fails; a page
-no send accepted is CARRIED (`undisclosed_tab`) and retried, never dropped for good;
-RW_AUTO_SEAT_NO_OPEN (1/true/yes/on) skips the attempt on a host with no desktop.
+attempt per id on the first pass that diagnoses it live, and pages him if that fails. A page no
+send accepted is carried (`undisclosed_start` for the start notice, `undisclosed_tab` for the tab)
+and retried rather than dropped by one failed `hermes send`; one slot each, so a newer page replaces
+an older one. RW_AUTO_SEAT_NO_OPEN (1/true/yes/on) skips the attempt on a host with no desktop.
 
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
 not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
@@ -1630,9 +1631,19 @@ def _pass(a: argparse.Namespace) -> int:
                     # failed page is CARRIED instead of dropped (adversary D2, 2026-10-30).
                     # One slot, like `undisclosed`: a newer reason replaces an older one.
                     state["undisclosed_tab"] = tab_msg
+                    # Saved NOW: `tab_once` already put its stamp on disk, so a kill before the
+                    # pass-end save would leave the stamp without the reason and the reason would
+                    # never be handed out again (adversary E3, 2026-10-30).
+                    save_state(state)
         started = auto_seat(word, state, now, tab_note)
         auto_gone = word == "gone"
-        if auto_gone and (started or should_tell_djbclark("no live session", state, now)):
+        # A start notice still owed means he has not yet heard that a seat exists: the retry block
+        # below sends that (no cooldown gate) instead of a "nothing is listening" page a live seat
+        # would immediately contradict. Skipping the generic page here is what keeps ONE page per
+        # event when the new seat dies again before the notice got out (adversary E1, 2026-10-30).
+        start_owed = bool(state.get("undisclosed_start"))
+        if auto_gone and (started or (should_tell_djbclark("no live session", state, now)
+                                     and not start_owed)):
             said = (f"Dann: no live session for {ROLE!r} (gone). The previous seat stopped answering.")
             if started:
                 said += (f" A seat was started automatically at "
@@ -1642,11 +1653,19 @@ def _pass(a: argparse.Namespace) -> int:
             if to_djbclark(said):
                 djb_page_sent("no live session", state, now)
                 spoke_djb = True
+            elif started:
+                # The gone page retries itself ONLY while no seat exists (its cooldown starts on a
+                # send, and `not ident` re-composes it). With a seat started, the next pass finds it
+                # live, so `auto_gone` and `not ident` are both false and that page is never
+                # composed again: one failed `hermes send` would lose the one notice that a seat was
+                # started - the notice this whole feature exists to send (§L L4, adversary E1). So
+                # the WHOLE page is carried, tab reason included, and retried with no cooldown gate
+                # because it is an event, not a repeated alarm.
+                state["undisclosed_start"] = said
+                save_state(state)               # same kill argument as the tab carry above
             elif tab_note.get("tab"):
-                # The gone page retries itself (its cooldown only starts on a send), but the
-                # tab reason is not in it next pass - `started` is empty by then - so carry
-                # that half alone (adversary D2).
-                state["undisclosed_tab"] = tab_page(started or candidate, tab_note["tab"])
+                state["undisclosed_tab"] = tab_page(candidate, tab_note["tab"])
+                save_state(state)
 
     # An unverified send consumes the line on purpose (relay's own text says "do not resend"), so the
     # only thing left is telling him it may have been lost. That admission used to be attempted ONCE,
@@ -1661,17 +1680,29 @@ def _pass(a: argparse.Namespace) -> int:
             spoke_djb = True
         log(f"unverified-send disclosure retried: told djbclark={spoke_djb}")
 
+    # A seat was started and he was never told. No cooldown gate: this is a one-shot event, and
+    # `djb_page_sent` stamps its own key so a second start inside the window is still suppressed.
+    undisclosed_start = state.get("undisclosed_start")
+    if isinstance(undisclosed_start, str) and undisclosed_start:
+        sent = to_djbclark(undisclosed_start)       # the LOCAL result: `spoke_djb` is pass-wide
+        if sent:
+            djb_page_sent("no live session", state, now)
+            state.pop("undisclosed_start", None)
+            spoke_djb = True
+        log(f"auto-seat start notice retried: told djbclark={sent}")
+
     # The same at-least-once rule for a seat that is alive and has no tab: a page that could
     # not be sent is retried until one returns True, and it waits out the page cooldown rather
     # than jumping it (anti-noise still applies, the reason is only never DROPPED).
     undisclosed_tab = state.get("undisclosed_tab")
     if isinstance(undisclosed_tab, str) and undisclosed_tab:
         if should_tell_djbclark("auto-seat tab", state, now):
-            if to_djbclark(undisclosed_tab):
+            sent = to_djbclark(undisclosed_tab)
+            if sent:
                 djb_page_sent("auto-seat tab", state, now)
                 state.pop("undisclosed_tab", None)
                 spoke_djb = True
-            log(f"auto-seat tab page retried: told djbclark={spoke_djb}")
+            log(f"auto-seat tab page retried: told djbclark={sent}")
 
     # The ONE failure a human has to hear about: no live session for this role means the seat is
     # GONE, not busy. Every other line here is for the seat; this one is for him, and it is checked

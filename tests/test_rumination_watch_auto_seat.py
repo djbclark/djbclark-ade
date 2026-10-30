@@ -872,7 +872,9 @@ def test_46_a_tab_page_he_never_received_is_carried_and_retried(monkeypatch, tmp
     run_pass(rw)
     assert rw.pages == []
     carried = rw.load_state()["undisclosed_tab"]
-    assert NEW in carried and _tab_reason() in carried
+    # E5: the carried text is the PAGE, not the bare reason - `tab_page` is what names the seat
+    # and says why it matters. A carry that dropped the id would page him about a nameless seat.
+    assert f"seat {NEW} has no Paseo Desktop tab" in carried and _tab_reason() in carried
     monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
     run_pass(rw)
     assert len(rw.pages) == 1 and "has no Paseo Desktop tab" in rw.pages[0]
@@ -896,3 +898,42 @@ def test_47_a_page_cooldown_carries_the_reason_instead_of_dropping_it(monkeypatc
     run_pass(rw)
     assert len(rw.pages) == 1 and "has no Paseo Desktop tab" in rw.pages[0]
     assert "undisclosed_tab" not in rw.load_state()
+
+
+def test_48_a_start_notice_he_never_received_is_carried_and_retried(monkeypatch, tmp_path):
+    """Adversary E1 / §L L4: the gone page only recomposes itself while NO seat exists. Once a seat
+    was started the next pass finds it live, so `auto_gone` and `not ident` are both false and that
+    page never exists again - one failed `hermes send` would lose the only notice that a seat
+    exists, which is the event this whole feature was built to send."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # one transient `hermes` failure
+    run_pass(rw)
+    assert rw.pages == []
+    carried = rw.load_state()["undisclosed_start"]
+    # The WHOLE notice is carried, tab reason included, not just its tail.
+    assert "no live session" in carried and "started automatically at" in carried and NEW in carried
+    # The next pass finds the seat LIVE, so the page would never be composed a second time.
+    monkeypatch.setattr(rw, "owner_session", lambda: (NEW, "auto-seat"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and NEW in rw.pages[0]
+    assert "undisclosed_start" not in rw.load_state()
+    run_pass(rw)
+    assert len(rw.pages) == 1               # a start is an event: retried until sent, then never again
+
+
+def test_49_an_owed_start_notice_replaces_the_generic_gone_page(monkeypatch, tmp_path):
+    """E1's second half: if the new seat dies again before the notice got out, the pass must not
+    also send "nothing is listening" - that page would contradict the seat it just started, and he
+    would get two pages for one event."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # the notice never got out
+    run_pass(rw)
+    assert "undisclosed_start" in rw.load_state()
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)                                     # still gone, cooldown has not expired
+    assert len(rw.pages) == 1                        # ONE page for the event, not two
+    assert "started automatically at" in rw.pages[0]
+    assert "Nothing is listening" not in rw.pages[0]
+    assert "undisclosed_start" not in rw.load_state()
