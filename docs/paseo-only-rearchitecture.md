@@ -99,8 +99,12 @@ this plan wins where they disagree about the future, they win about today. Sourc
       (`archiveChildren:true`), or child archiving stays off for good (`archiveChildren:false`) and G1 archives
       a worker after its "branch pushed and report read" mark; `deleteChildren` and `deleteMain` stay false
       permanently either way. Until D2, the D0.2 drain script and the B9 watchdog assert, on the Mac and on
-      vps-primary (`paseo --host vps-primary plugin ls`, or "not installed there"), that the janitor is
-      disabled or all three settings are false, and alert otherwise; D2 replaces that assertion with the
+      vps-primary (`paseo --host wss://vps-primary.greyhound-sidemirror.ts.net:7263 plugin ls`, with D1.8's
+      daemon credential through `sudo-secretspec run` once it exists; a non-zero exit alerts, and only an rc=0
+      list without `session-janitor` counts as "not installed"), that the janitor is
+      disabled or all three settings are false, and alert otherwise. The same check asserts herald's
+      `cleanup.deleteHelpers` is exactly false in `$PASEO_HOME/plugin-data/herald/config.json` (a missing or
+      invalid file means herald's default, true, and alerts). D2 replaces the janitor assertion with the
       chosen mechanism's own (always including `deleteChildren:false` and `deleteMain:false`). G1's "not
       archived until pushed" is a convention: the operator, the UI and `paseo-telegram`
       can still archive, which is why point 2 exists.
@@ -159,7 +163,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `load-watch`, `session-load-watch`, `rumination-watch`, `bg`, gates, `wait-file` | — | KEEP (launchd, F2); drop pane typing | deliver via `paseo send` |
 | `claude-quota-guard`, `context-watch`, `context_size_nudge` (provider hooks) | — | KEEP | they run inside the provider; G2 enforces the same gates for launches that bypass the hook |
 | `pr-wait`, `ade-git-guard`, `git-commit-own`, `local-review`, graft, `aiuse`, `web-get`, `failover.py`; `ci-waiver` once parked PR 118 lands (not on master) | — | KEEP (harness-neutral) | n/a |
-| Running Paseo plugins not covered elsewhere (`paseo plugin ls`, 2026-10-30): `better-paseo` (chat timeline and agent board; its approve/deny and archive buttons act only on the operator's click), `herald` (speaks when an agent waits; it denies tool requests only from its own summary helpers, and **hard-deletes** (`paseo delete`) every agent labelled `herald.role=summarizer`, which it selects by that label, not by its own record), `reopen-archived` (reopens archived workspaces with their agent), `skills` (skills browser), `forges` (no description; no permission, archive or prompt calls; it vendors an unused `agent.create` MCP-injection helper) | — | KEEP; G2 refuses a create or update carrying `herald.role` that does not come from herald | none answers another agent's card or archives on its own. No running plugin attaches tools or MCP servers today (`better-paseo` and `usage-auto-resume` hook the legacy `agent.session_open` and return neither). This inventory is a snapshot: plugins track latest, so D2's catalog check (open-time tools and create-time `mcpServers`) reruns on every plugin install or upgrade |
+| Running Paseo plugins not covered elsewhere (`paseo plugin ls`, 2026-10-30): `better-paseo` (chat timeline and agent board; its approve/deny and archive buttons act only on the operator's click), `herald` (speaks when an agent waits; it denies tool requests only from its own summary helpers; it used to **hard-delete** (`paseo delete`) every agent labelled `herald.role=summarizer`, selected by that label, until djbclark set `cleanup.deleteHelpers:false` on 2026-10-30), `reopen-archived` (reopens archived workspaces with their agent), `skills` (skills browser), `forges` (no description; no permission, archive or prompt calls; it vendors an unused `agent.create` MCP-injection helper) | — | KEEP; herald's hard delete off and asserted (B4.3, G2.8) | none answers another agent's card or archives on its own. No running plugin attaches tools or MCP servers today (`better-paseo` and `usage-auto-resume` hook the legacy `agent.session_open` and return neither). This inventory is a snapshot: plugins track latest, so D2's catalog check (open-time tools and create-time `mcpServers`) reruns on every plugin install or upgrade |
 | `cow-workspaces` | — | RETIRE | Paseo worktree workspaces plus `fresh-worktrees` (running) and setup hooks; the claim stays (B4) |
 | `adversary` and other provider sub-agents | — | KEEP (provider-native) | or as a Paseo subagent in D5 |
 | Hermes: `hermes-ping`; Hermes as a seat | 163 files | KEEP `hermes-ping` as a notification channel (F1); RETIRE Hermes-as-harness; Hermes stays a Paseo provider | Paseo push for agent events |
@@ -263,7 +267,8 @@ ops-promotion pilot passes.
    commands (`;`, `&&`, `|`, `$(`, a newline, `sh -c`) and command-taking options (`git -c`, `find -exec`,
    `xargs`, `env VAR=… cmd`); a `jobs.submit` naming an existing agent id is refused; a non-orchestrator's
    tool catalog lacks `jobs.submit`, including an agent that a worker created with the orchestrator profile;
-   a CLI or `create_agent` create carrying `herald.role` is refused while herald's own helper passes (G2.8);
+   if D1.7b found a create-origin signal, a CLI or `create_agent` create carrying `herald.role` is refused while
+   herald's own helper passes (G2.8; otherwise the `deleteHelpers:false` assertion is the control);
    the janitor mechanism is chosen, its settings are written, and an unmarked worker past
    `archiveAfterHours` survives (B4.3); a non-owner Telegram
    message is refused; a forged agent id in an RPC input is refused; the tool catalogs of a UI-created and a
@@ -293,8 +298,10 @@ ops-promotion pilot passes.
    all of `~/ops`, djbclark-ade, `~/.local/bin`, `~/Library/LaunchAgents`, the provider hook configs
    (`~/.claude/settings.json`, `~/.codex`, `~/.omp`) and vps-primary's NixOS config, matching
    `session-finder/(relay|fleet)\.py` and `\brelay\.py\b`. It skips what D7 handles: `docs/history/`,
-   `docs/handoffs/`, `site-private/memory/handoffs/`, `CHANGELOG.md`, `graft/`, `skills/session-finder/` and its
-   tests, and this plan. A hit in code, config, a launchd plist, a hook or the NixOS config **blocks** the
+   `docs/handoffs/`, `site-private/memory/handoffs/`, `CHANGELOG.md`, `graft/`, `skills/session-finder/`, test
+   code that loads or fixtures it (`tests/test_relay_*`, `tests/test_fleet_*`, the relay and fleet fixtures in
+   `tests/conftest.py`, the relay case in `tests/test_codex_shell_env_policy.py`), and this plan. A hit in
+   code, config, a launchd plist, a hook or the NixOS config **blocks** the
    gate. A hit in a live instruction file (AGENTS.md, `home-agents.mdc`, memory notes, other skills, docs)
    goes onto a triage list that D7's rewrite must empty. **Gate:** a load incident reaches its watcher as a
    Paseo prompt; no blocking hit remains; the triage list is committed.
@@ -386,8 +393,10 @@ records carrying its own server id.
 agent-facing operation (`jobs.submit`, `jobs.get`, `jobs.finish`, `jobs.extend`, `ack.register`) is a **plugin
 agent tool** attached in `agent.open.before` and authorized by the daemon-supplied `context.agent.id`.
 `jobs.submit` (and with it `permit: true`), `jobs.get` and `jobs.extend` are attached only to orchestrators,
-which are identified from an operator-owned list (`config/orchestrators`: agent ids, or profile ids checked
-against who created the agent), never from a field the creator sets; a worker gets `jobs.finish` and
+which are identified from an operator-owned list (`config/orchestrators`), read as the **committed** blob
+(`git show origin/master:config/orchestrators`), never from a working tree another session may have edited.
+It lists agent ids, and profile ids only if probe D1.7b finds a creator signal to check them against; never
+a field the creator sets. A worker gets `jobs.finish` and
 `ack.register`. Every G1-recorded agent and every orchestrator gets `ack.register`. RPCs serve only the operator's UI,
 which records the owner as `operator`. This stops mistakes and impersonation over the tool surface, **not** a
 same-uid agent with a shell that edits the state files directly; like B3, it is not a boundary (adversary r1
@@ -426,16 +435,17 @@ C9, r2 C3 and C8, r3 N2, r4 R4).
       `usage-auto-resume`'s resume prompts are not gated; a disabled, crashed or failed-to-reload plugin
       loses its hook registrations, so creates then pass ungated (the B9 watchdog alerts whenever
       `paseo plugin ls` does not show `ade-gate` running); and G2 has no update hook, so a label added later
-      through `update_agent` is not refused (the B9 watchdog alerts on any `herald.role=summarizer` agent
-      older than herald's timeout).
+      through `update_agent` is not refused. That gap matters only for herald's label, and herald's hard delete
+      is off (G2.8).
    6. On `workspace.create.before` it refuses a `worktree` workspace in a repo without a committed
       `paseo.json` teardown (B4).
    7. It reads no secret; anything that needs one runs under `sudo-secretspec run` (astra C3, Fable 3.4).
-   8. It refuses a create carrying the label `herald.role` unless it comes from herald, because herald
-   hard-deletes every agent with that label (C1). Whether `agent.create.before` can tell a plugin-SDK create
-   from an MCP or CLI create is probe D1.7b. If it cannot, G2 does not refuse (that would break herald's own
-   helpers); the G2.5 watchdog alert is then the only control, and an issue asks herald upstream to select
-   its helpers by its own record of ids rather than by label (standing order 8; adversary r5 T2).
+   8. **Herald's hard delete is off** (djbclark, 2026-10-30: `cleanup.deleteHelpers:false` in
+      `$PASEO_HOME/plugin-data/herald/config.json`; asserted by the B4.3 check). Herald selected agents to
+      `paseo delete` by the label `herald.role`, including in a sweep 30 s after every plugin load; with the
+      setting off, its `autoArchive` helpers are only archived, which is recoverable. As optional hardening, if
+      probe D1.7b finds a create-origin signal, G2 also refuses that label on a create that does not come from
+      herald (adversary r5 T2, r6 U1-U2).
 3. **`ade-ack` (plugin)**: records sends (the `ack.register` agent tool, callable only by the sender). The
    `agent.turn.before` payload carries only the agent and turn ids and hook notifications are best effort with
    no replay, so on each turn start it fetches that turn's timeline through the SDK and marks *delivered*
