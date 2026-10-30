@@ -704,12 +704,15 @@ https://user:token@host/x` answers the setting configured under that subsection,
 nothing for another host) — so the test is the shape: every `://` in the key must be followed
 by an authority without `@`, whatever the section (`url.`, `HTTP.`) or scheme (`HTTPS://`)
 case, and past any run of slashes (`https:///user:token@host` sends that userinfo although
-its authority is empty). A `credential.` subsection that is a PARTIAL url with no scheme is
-also a real subsection (git matches it through `match_partial_url`), so
-`credential.user:token@host.helper` refuses; a colon before the `@` is what marks it
-token-shaped, so a port (`credential.https://host:8443.helper`) still travels. Username-only
-userinfo (`url.ssh://git@github.com/.insteadOf`) refuses too, because a username cannot be
-told apart from a token without decoding it. Use a credential helper or `~/.gitconfig` for
+its authority is empty), and username-only userinfo refuses with it (`url.ssh://git@github.com/.insteadOf`),
+because a username cannot be told apart from a token without decoding it. A `credential.`
+subsection that is a PARTIAL url with no scheme is the one form git resolves as well — measured
+with `git credential fill`, a helper under `credential.example.org.helper` runs for
+`url=https://example.org/x`, and one under `credential.<userinfo>@example.org.helper` runs for
+`url=https://<userinfo>@example.org/x` — so such a subsection refuses whenever its authority
+carries `@` at all: no colon is required, because a GitHub PAT is used as a username and git
+url-decodes `%3A`. A port has no `@`, so `credential.https://host:8443.helper` and the plain
+`credential.example.org.helper` still travel. Use a credential helper or `~/.gitconfig` for
 those. The workspace Git
 guard recognizes only the exact ACP hook event and expected guard path in this
 environment transport, while retaining compatibility with older counted launches.
