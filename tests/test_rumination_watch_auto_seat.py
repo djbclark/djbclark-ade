@@ -583,3 +583,68 @@ def test_36_confirmed_start_clears_unresolved_marker(monkeypatch, tmp_path):
     run_pass(rw)
     assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
     assert rw.load_state()["seated"][rw.ROLE] == NOW
+
+
+@pytest.mark.parametrize("crash_at", ["run", "inspect"])
+def test_37_recovery_crash_keeps_mail_discoverable_from_disk(monkeypatch, tmp_path, crash_at):
+    rw = load(monkeypatch, tmp_path)
+    current = {**QUIET, "mail": ["new-peer-message"]}
+    rw.save_state({"last": QUIET, "pending": []})
+    monkeypatch.setattr(rw, "survey", lambda: current)
+    run = rw.run_split
+
+    def crash(argv, timeout):
+        if argv[:2] == (["paseo", "run"] if crash_at == "run" else ["paseo", "agent"]):
+            raise RuntimeError("interrupted recovery subprocess")
+        return run(argv, timeout)
+
+    monkeypatch.setattr(rw, "run_split", crash)
+    with pytest.raises(RuntimeError, match="interrupted recovery subprocess"):
+        run_pass(rw)
+    disk = json.loads(rw.STATE.read_text())
+    assert disk["last"] == QUIET and disk["pending"] == []
+    assert disk["told"][f"auto-seat attempt:{rw.ROLE}"] == NOW
+    assert disk["told"][f"auto-seat unresolved:{rw.ROLE}"] == NOW
+    if crash_at == "inspect":
+        assert disk["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] == NOW
+
+    # Fresh module, same durable file: no in-memory state from the interrupted pass survives.
+    fresh = load(monkeypatch, tmp_path / "fresh-process")
+    monkeypatch.setattr(fresh, "STATE_DIR", rw.STATE_DIR)
+    monkeypatch.setattr(fresh, "STATE", rw.STATE)
+    monkeypatch.setattr(fresh, "LOG", rw.LOG)
+    monkeypatch.setattr(fresh, "survey", lambda: current)
+    monkeypatch.setattr(fresh, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    announced = []
+    monkeypatch.setattr(fresh, "to_session", lambda text: announced.append(text) or "delivered")
+    run_pass(fresh)
+    assert announced == ["rumination: 1 unread peer message(s): new-peer-message"]
+    disk = json.loads(fresh.STATE.read_text())
+    assert disk["last"] == current and disk["pending"] == []
+    assert starts(fresh) == 0
+
+
+@pytest.mark.parametrize("recovery", ["confirmed", "adopted", "cleared"])
+def test_38_recovery_save_before_page_keeps_previous_survey(monkeypatch, tmp_path, recovery):
+    rw = load(monkeypatch, tmp_path)
+    state = {"last": QUIET, "pending": []}
+    if recovery != "confirmed":
+        state["told"] = {f"auto-seat unresolved:{rw.ROLE}": NOW}
+        rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE if recovery == "adopted" else [])
+    rw.save_state(state)
+    current = {**QUIET, "mail": ["new-peer-message"]}
+    monkeypatch.setattr(rw, "survey", lambda: current)
+
+    def crash(text):
+        raise RuntimeError("interrupted recovery page")
+
+    monkeypatch.setattr(rw, "to_djbclark", crash)
+    with pytest.raises(RuntimeError, match="interrupted recovery page"):
+        run_pass(rw)
+    disk = json.loads(rw.STATE.read_text())
+    assert disk["last"] == QUIET and disk["pending"] == []
+    assert f"auto-seat unresolved:{rw.ROLE}" not in disk["told"]
+    if recovery == "confirmed":
+        assert disk["seated"][rw.ROLE] == NOW
+    if recovery != "cleared":
+        assert disk["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] == NOW

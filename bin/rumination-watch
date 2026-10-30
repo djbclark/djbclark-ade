@@ -1442,8 +1442,8 @@ def _pass(a: argparse.Namespace) -> int:
     # Each item is (key, text). The key is OPT-IN and marks the lines whose condition this pass
     # recomputes from scratch every time, so a queued copy can be checked against it at retry time
     # (see the carry block below). Event items are deliberately KEYLESS: new mail, new jobs and the
-    # new-PR announcement are diffs against `state["last"]`, which has already been advanced; once the
-    # mail is consumed the pass cannot recompute "this was unread", so keying them would silently drop
+    # new-PR announcement are diffs against `state["last"]`, advanced with the pending queue below;
+    # after that advance the pass cannot recompute "this was unread", so keying them would silently drop
     # a real announcement the seat never heard. They keep the plain at-least-once retry.
     items: list[tuple[str | None, str]] = []
     if new_mail:
@@ -1480,7 +1480,6 @@ def _pass(a: argparse.Namespace) -> int:
         print(json.dumps({"changed": changed, "lines": lines, "survey": cur}, indent=1))
         return 10 if lines else 0
 
-    state["last"] = cur
     state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     spoke_session = spoke_djb = False
 
@@ -1563,8 +1562,8 @@ def _pass(a: argparse.Namespace) -> int:
             spoke_djb = True
         log(f"no live session: {why} (told djbclark={spoke_djb})")
 
-    # A line aimed at a seat that refused it has NOT been delivered, and `state["last"] = cur` above
-    # has already consumed the change, so without this the announcement is lost for good. Mail
+    # A line aimed at a seat that refused it has NOT been delivered. Advance `state["last"]` only
+    # alongside its pending queue below, so recovery saves cannot consume an unqueued change. Mail
     # arrives BECAUSE the seat is busy mid-turn, so this is the common collision, not the edge case.
     # Kept at the front, retried next pass, cleared only by a real send.
     #
@@ -1605,6 +1604,7 @@ def _pass(a: argparse.Namespace) -> int:
     queue = front + fresh
     lines = [e["text"] for e in queue]
     # A quiet pass (nothing survived, nothing new) must also persist the cleared queue.
+    state["last"] = cur
     state["pending"] = queue[-PENDING_MAX:]
     known_ages = [x for x in retry_ages if x is not None]
     retry_note = ""
