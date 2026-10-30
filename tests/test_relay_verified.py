@@ -1635,11 +1635,11 @@ class TestNoProofPathIsSaidAtSendTime(Base):
         row["self"] = True
         return row
 
-    def test_a_pid_sender_is_told_the_expectation_will_not_close_by_itself(self) -> None:
+    def test_a_pid_sender_is_told_the_expectation_may_not_close_on_its_own(self) -> None:
         rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row()])
         self.assertEqual(rc, 0, err)
         self.assertIn("relay: warning: pid19798 has no transcript and no Paseo timeline", err)
-        self.assertIn("nothing will close this expectation automatically", err)
+        self.assertIn("may not close on its own", err)
         self.assertIn("`relay.py --retire build1 --reason ...`", err)
         self.assertNotIn("`ack build1` through relay.py", err)    # the close a pid row cannot reach (queue item 9)
 
@@ -1669,12 +1669,12 @@ class TestNoProofPathIsSaidAtSendTime(Base):
         self.assertEqual(rc, 0, err)
         rec = json.loads((relay.expect_dir() / "build1.json").read_text())
         self.assertEqual((rec["sender"], rec["sender_paseo"]), ("pid19798", ""))
-        self.assertIn("nothing will close this expectation automatically", err)
+        self.assertIn("may not close on its own", err)
 
-    def test_a_first_contact_from_a_pid_sender_says_the_link_cannot_be_acked(self) -> None:
+    def test_a_first_contact_from_a_pid_sender_says_the_reply_cannot_mark_the_link_acked(self) -> None:
         rc, _, err = self.go("hello there friend", rows=[self.pid_row()])
         self.assertEqual(rc, 0, err)
-        self.assertIn("this link cannot be marked acked", err)
+        self.assertIn("the reply to this first contact cannot mark the link acked", err)
 
     def test_a_linked_peer_gets_no_warning_when_no_footer_asks_for_the_ack(self) -> None:
         """Adversary B2: the warning belongs to the footer, and a later plain send carries none."""
@@ -1714,7 +1714,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
                 mock.patch.object(relay, "timeline_messages", lambda pid: None):
             rc, _, err = self.go("hello there friend", rows=[self.paseo_row()])
         self.assertEqual(rc, 0, err)
-        self.assertIn("this link cannot be marked acked", err)
+        self.assertIn("the reply to this first contact cannot mark the link acked", err)
         self.assertNotIn("`ack bbbbbbbb` through relay.py", err)
 
 

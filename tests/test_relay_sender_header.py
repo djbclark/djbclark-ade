@@ -353,16 +353,16 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         self.assertIsNone(relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, "build1", {}))
         self.assertIsNone(relay.ack_proof_note(None, "build1", None))
 
-    def test_a_pid_row_is_told_the_expectation_will_not_close_by_itself(self) -> None:
+    def test_a_pid_row_is_told_the_expectation_may_not_close_on_its_own(self) -> None:
         """Adversary B3: the old text promised a relay-side close a `pid*` row can never reach (`docs/queue.md` item 9)."""
         note = relay.ack_proof_note(self.pid_row(), "build1", None)
-        self.assertIn("nothing will close this expectation automatically", note)
+        self.assertIn("may not close on its own", note)
         self.assertIn("`relay.py --retire build1 --reason ...`", note)
         self.assertNotIn("`ack build1` through relay.py", note)
 
-    def test_a_pid_rows_first_contact_is_told_the_link_cannot_be_acked(self) -> None:
+    def test_a_pid_rows_first_contact_cannot_mark_the_link_acked(self) -> None:
         note = relay.ack_proof_note(self.pid_row(), None, None)
-        self.assertIn("this link cannot be marked acked", note)
+        self.assertIn("the reply to this first contact cannot mark the link acked", note)
 
     def test_a_paseo_row_whose_timeline_could_not_be_read_is_told(self) -> None:
         """Adversary B5: `timeline_base` returns None when the timeline is unreadable, and then closes nothing."""
@@ -374,13 +374,13 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         """Codex P2, PR 162: a first-contact footer opens no expectation record, so `expect_resolve_by_relay` never sees the
         reply; promising that `ack <id>` closes it would leave the link ONE-WAY and the operator waiting."""
         note = relay.ack_proof_note({"id": "bbbbbbbb", "transcript": None, "paseo": PASEO_AGENT}, None, None)
-        self.assertIn("this link cannot be marked acked", note)
+        self.assertIn("the reply to this first contact cannot mark the link acked", note)
         self.assertNotIn("`ack bbbbbbbb` through relay.py", note)
 
     def test_a_sender_an_answer_can_reach_in_a_kept_route_is_not_told(self) -> None:
         """Codex P2, PR 162: `expect_resolve_by_relay` closes a transcript-less record when the target's `ack ID` arrives over
         a route that keeps the text (a Paseo agent, an ACP launch, a dispatch inbox), so such a sender must not be told that
-        nothing will close it, nor sent to `--retire`."""
+        nothing auto-closes it, nor sent to `--retire`."""
         for row in (sess(id="acp1234", agent="codex", host="acp"), sess(id="disp1234", agent="codex", dispatch_rec="/tmp/d.json")):
             self.assertIsNone(relay.ack_proof_note(row, "build1", None), row["id"])
 

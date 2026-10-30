@@ -734,11 +734,15 @@ def ack_proof_note(me, expect_id, tl_base):
       - an `--expect-ack` RECORD is ALSO closed by `expect_resolve_by_relay` when the target answers `ack ID` through relay.py
         and that answer's route KEEPS the text (a Paseo agent, an ACP launch, a dispatch inbox: `KEEPING_ROUTES`). A sender
         whose answer can arrive that way is not warned at all -- saying nothing will close it would be false.
-      - a `pid*` row, whose answer comes back over a pane (proofless) or over no route, has no such close: it is told the
-        expectation will not close by itself and given `--retire`, which is the operator's way out.
-      - a FIRST-CONTACT footer opens no record, so the relay-side close never applies to it: if the timeline cannot be read
-        the link cannot be marked acked by anything, and promising an `ack` would be a promise relay cannot keep
-        (`ack_sweep` needs a transcript or a timeline baseline)."""
+      - a row with no transcript and no keeping route (a `pid*` row, a native pane TUI) has no such close: it is told the
+        expectation MAY NOT close on its own and given `--retire`, the operator's way out. "May not", not "will not":
+        `route_pane` resolves a missing transcript for a Codex target itself, and a `delivered` answer closes the record
+        (adversary r3 D2), so the note states the risk, never a guarantee.
+      - a FIRST-CONTACT footer opens no record, so the relay-side close never applies to it: with no transcript and no
+        baseline nothing watches the reply, so the reply to THAT first contact cannot mark the link acked, and promising an
+        `ack` would be a promise relay cannot keep (`ack_sweep` reads a transcript or a timeline baseline). A later answered
+        `--expect-ack` to the same peer still marks the link, which is why the note names the reply and not the link
+        (adversary r3 D3)."""
     if not isinstance(me, dict) or me.get("transcript"):
         return None
     label = me.get("id") or "this sender"
@@ -750,16 +754,17 @@ def ack_proof_note(me, expect_id, tl_base):
         if expect_id:
             return (f"relay: warning: {label} has no transcript and its Paseo timeline could not be read, so nothing here "
                     f"watches for the reply: it closes only if the target sends `ack {ident}` through relay.py")
-        return (f"relay: warning: {label} has no transcript and its Paseo timeline could not be read, so this link cannot be "
-                "marked acked: nothing here watches for the reply, which reaches this session only as a message")
+        return (f"relay: warning: {label} has no transcript and its Paseo timeline could not be read, so nothing here "
+                "watches for the reply: it reaches this session only as a message, so the reply to this first contact cannot "
+                "mark the link acked")
     if expect_id:
         if set(plan(me)) & set(KEEPING_ROUTES):
             return None    # the answer comes back into a Paseo agent, an ACP launch or a dispatch inbox: `expect_resolve_by_relay` closes it
-        return (f"relay: warning: {label} has no transcript and no Paseo timeline, so nothing will close this expectation "
-                f"automatically: once it is answered, close it with `relay.py --retire {expect_id} --reason ...`, "
+        return (f"relay: warning: {label} has no transcript and no Paseo timeline, so this expectation may not close on "
+                f"its own: once it is answered, close it with `relay.py --retire {expect_id} --reason ...`, "
                 "or ask from a session with a transcript")
-    return (f"relay: warning: {label} has no transcript and no Paseo timeline, so this link cannot be marked acked: nothing "
-            "here watches for the reply, which reaches this session only as a message")
+    return (f"relay: warning: {label} has no transcript and no Paseo timeline, so nothing here watches for the reply: it "
+            "reaches this session only as a message, so the reply to this first contact cannot mark the link acked")
 
 
 def timeline_base(me):
