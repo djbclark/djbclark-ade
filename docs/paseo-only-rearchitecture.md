@@ -73,8 +73,11 @@ this plan wins where they disagree about the future, they win about today. Sourc
    worktree workspace removes the worktree (upstream `worktrees.md`), and `session-janitor` archives
    failed or closed subagents after 6 hours. So no slice is created with `autoArchive`; the janitor stays in
    preview mode (its current mode is recorded in D1) or excludes every agent G1 has not marked "branch
-   pushed and report read"; and a `paseo.json` teardown script refuses, or pushes a `rescue/<branch>`
-   branch, when the tree is dirty or ahead of its upstream. The D1 probe proves it (D1.3).
+   pushed and report read"; and a `paseo.json` teardown script **always preserves before anything is
+   removed**: when the tree is dirty or ahead of its upstream it commits the dirty state (untracked files
+   included) to `rescue/<branch>-<date>` and pushes it, and fails loudly if the push fails. Whether a
+   failing teardown stops Paseo removing the worktree is unknown, so nothing relies on refusal: preservation
+   comes first, and the D1 probe proves it (D1.3).
 5. **Native first, plugin only for a hook.** A script that calls the `paseo` CLI, SDK or MCP is native (A3a)
    and lives in djbclark-ade. A plugin is written only when a daemon lifecycle hook, a UI surface or a
    composer command is needed, because plugins are trusted, unsandboxed and sit in the create/turn path of
@@ -171,8 +174,10 @@ ops-promotion pilot passes.
    2. A parent answers a question card's *option*, not only allow/deny, via `respond_to_permission`.
       Expected: works. If not: B3 and G4 are redesigned (cards go to the operator).
    3. Archive an agent whose isolated worktree workspace is dirty and has an unpushed commit (isolated
-      daemon). Expected: the B4 teardown refuses or pushes `rescue/<branch>`. If not: no slice moves into
-      Paseo workspaces until it does. Also record `session-janitor`'s current mode.
+      daemon). Expected: the B4 teardown has pushed `rescue/<branch>-<date>` holding the dirty state and the
+      unpushed commit before the worktree goes; also test a failing push (teardown fails loudly) and record
+      whether a failing teardown stops Paseo removing the worktree. If anything is lost: no slice moves into
+      Paseo workspaces until it is not. Also record `session-janitor`'s current mode.
    4. Archive a parent with a running child. Expected: the child survives. If not: successors stay
       top-level (C1) permanently.
    5. Restart a daemon holding a queued prompt, a pending `notifyOnFinish` and a schedule (isolated
@@ -187,9 +192,13 @@ ops-promotion pilot passes.
       Telegram credentials in the host's secrets mechanism (sops/agenix or `sudo-secretspec`); the
       upgrade 0.13.0 → 0.14 lands only as the pushed `master` head through `deploy-vps-primary` (home rule
       36). Expected: an unauthenticated request from another tailnet node is refused.
-   9. The dead-man check on vps-primary probes the Mac daemon's real RPC over the tailnet and pages only
-      when the Mac is awake by its own heartbeat (the Mac's launchd watchdog touches a heartbeat file on
-      vps-primary each run); a sleeping Mac stops the heartbeat and suppresses the page.
+   9. The dead-man check on vps-primary probes the Mac daemon's real RPC over the tailnet. A missing
+      heartbeat alone cannot tell sleep from a crash or an outage, so the Mac also reports sleep explicitly:
+      a sleep/wake hook (IOKit power notification through `sleepwatcher` or an equivalent launchd agent)
+      writes a `sleeping since T` marker on vps-primary before sleep and clears it on wake. The check pages
+      when the heartbeat is stale and there is no fresh sleep marker, and also when a sleep marker is older
+      than 12 hours (a Mac that died asleep). D1 tests all three: sleep (no page), daemon killed while
+      awake (page), network cut while awake (page).
 2. **Minimum plugins and adopted plugins** (section G): G2, G3, G1, G4; `usage-auto-resume` coverage for omp,
    opencode, cline and grok (G5); the Telegram plugin's 0.14 test (F1). **Gate**, on the isolated daemon:
    three concurrent launches against one pool admit at most what the ledger allows; an `aiuse` failure
