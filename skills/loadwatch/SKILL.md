@@ -111,7 +111,10 @@ for another process. Capture broad command output first and print bounded releva
 truncate away the evidence you need. Inspect installed API signatures and return models before remote writes;
 for example, Deco `get_table()` returns a table object with `.reservations`, not a list. A tool
 result containing a running session ID is not command completion: wait for its exit status before
-any dependent check, stage, commit or push.
+any dependent check, stage, commit or push. Inspect the completed exit status too: `exec_command`
+returns a nonzero result without throwing. Stop dependent writes and completion notices after failed
+verification. Parse verdict markers as JSON; valid whitespace differences must not reject an
+otherwise identical verdict (2026-10-30).
 
 Peer questions/action requests use `relay.py TARGET TEXT --expect-ack UNIQUE_ID`; asking for an ack
 only inside TEXT does not register it and the relay refuses the send. Verify the returned delivery
