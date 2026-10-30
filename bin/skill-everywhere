@@ -50,9 +50,13 @@ priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skill
 # omp (oh-my-pi) added 2026-10-13: it also reads ~/.agents/skills, but dedups
 # by realpath, so its native dir lists each skill once and keeps working if
 # its agents provider is turned off.
+# goose added 2026-10-29: its global skill dir IS ~/.agents/skills (the same
+# one codex uses), so it links there directly rather than into a dir of its
+# own; the links are shared, not duplicated, when both TUIs are installed.
 targets='
 claude|~/.claude/skills
 codex|~/.agents/skills
+goose|~/.agents/skills
 agy|~/.gemini/antigravity-cli/skills
 copilot|~/.copilot/skills
 opencode|~/.config/opencode/skills

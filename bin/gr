@@ -1,9 +1,10 @@
 #!/bin/sh
-# Plain-English BarnOwl.  `g list my subs` runs one Grok turn on the barnowl skill.
+# Plain-English BarnOwl, run by Grok.  `gr list my subs` runs one Grok turn on
+# the barnowl skill.  (`go` is the same for goose; the old `g` name is gone.)
 set -eu
 if [ "$#" -eq 0 ]; then
-  echo "usage: g <plain English BarnOwl request>" >&2
-  echo "example: g list my subs" >&2
+  echo "usage: gr <plain English BarnOwl request>" >&2
+  echo "example: gr list my subs" >&2
   exit 2
 fi
 # --single must take the prompt itself. A later flag is not a value.
