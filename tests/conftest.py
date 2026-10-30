@@ -67,6 +67,13 @@ os.environ["RELAY_DEFER_DIR"] = str(_DEFER_ROOT / "relay" / "deferred")
 # fleet.LINKS_FILE (who has messaged whom, and who ever acked; relay.py writes it, fleet.py list reads it, 2026-10-25): never the
 # operator's real ledger. Unconditional, like RELAY_DEFER_DIR.
 os.environ["RELAY_LINKS_FILE"] = str(_DEFER_ROOT / "relay" / "links.json")
+# `rumination-watch` fast-forwards its OWN checkout at the top of every non-dry pass (issue #143), and
+# SELF_REPO defaults to the checkout these tests run in. Left on, `bg bin/pytest tests/` is a networked
+# actor that can fast-forward the working tree mid-run — in `~/src/djbclark-ade` it would move the
+# SHARED checkout, which standing order 9 keeps for a designated promoter (adversary round 2, B1).
+# test_rumination_watch_deploy.py is the only place that exercises the deploy, and it sets
+# DEPLOY_OFF=False against its own fixture repos.
+os.environ.setdefault("RW_NO_DEPLOY", "1")
 
 
 @pytest.fixture(autouse=True)
