@@ -124,7 +124,7 @@ Stop, and say so:
   draws Console credits. A Go wall on a session that is actually on `opencode/` is a funds wall —
   rotating credentials is right, but check the model prefix before blaming Go. A Paseo agent's model
   is `settings.model`; `paseo agent update` changes it.
-- **`dclark@dclark.us` needs Regions = Global** for DeepSeek models (`requires Global regions`);
+- **`dclark` needs Regions = Global** for DeepSeek models (`requires Global regions`);
   its workspace was switched on 2026-10-29.
 - **Never print a credential.** Not the key, not an OAuth `access` token, not a log line holding one.
   The 2026-10-29 session leaked a Jina bearer token into a transcript through name-based redaction;
