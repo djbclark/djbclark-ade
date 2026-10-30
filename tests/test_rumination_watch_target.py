@@ -34,6 +34,11 @@ def load(monkeypatch, tmp_path, registry: dict | None = None):
     monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
     monkeypatch.setattr(rw, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(rw, "LOG", tmp_path / "state" / "rumination.log")
+    # Every `_pass(dry_run=False)` in this file would otherwise run the REAL deploy: `SELF_REPO`
+    # defaults to the checkout these tests run from, so the suite would fetch over the network and,
+    # on a clean checkout sitting behind origin, fast-forward the working tree mid-run — 43 call
+    # sites' worth (adversary round 2, B1). Only the deploy tests exercise that, on fixture repos.
+    monkeypatch.setattr(rw, "DEPLOY_OFF", True)
     return rw
 
 
@@ -1012,3 +1017,26 @@ def test_a_quiet_pass_still_notices_a_wedged_seat(monkeypatch, tmp_path):
     assert rw._pass(a) == 0
     assert len(told) == 1 and "permission" in told[0], "a quiet pass must still notice a wedged seat"
     assert "seat card:permission" in rw.LOG.read_text()
+
+
+def test_a_real_pass_deploys_first_and_a_dry_run_never_does(monkeypatch, tmp_path):
+    """The PR's entire reason to exist is one call site: `_pass` -> `deploy_update`.
+
+    Round 1 asked for this and round 2 found the call site still unpinned (deleting the two lines in
+    `_pass` kept every deploy test green) AND reaching the real checkout from this very file. So pin
+    both halves: a real pass deploys exactly once, and a dry run never moves anyone's checkout.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [], "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: True)
+    calls = []
+    monkeypatch.setattr(rw, "deploy_update", lambda state, now: calls.append(now) or "")
+
+    assert rw._pass(rw.argparse.Namespace(dry_run=True, quiet=True)) == 0
+    assert calls == [], "a dry run must never move a checkout"
+
+    assert rw._pass(quiet_pass(rw)) == 0
+    assert len(calls) == 1, "a real pass must run the deploy exactly once, before anything else"
