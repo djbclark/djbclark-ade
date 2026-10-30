@@ -793,7 +793,10 @@ this head and its security review too when the marker carries `security_review`,
 thread of either kind is left (an earlier head's finding stays open until its thread is resolved: PR 32,
 2026-10-23, a P1 left open past two pushes while a head-only filter read 0; security findings carry
 `codex-security-review-finding:v1`, e.g. PR 20 thread 4361214081) and the marker's `has_unresolved_findings` agrees
-with the threads per kind (`findings-mismatch` otherwise; never read it as a clean 0). When it is false,
+with the threads per kind (`findings-mismatch` otherwise; never read it as a clean 0). A review that found
+nothing states the pair as an explicit JSON `null` (`status: completed`), which counts as its statement only
+beside no finding comment and no open thread of that kind; a MISSING key is `marker-unverified`, not a clean
+review. When it is false,
 `merge_blockers` says why, any of: `codex-<status>`, `security-failed` / `security-running` / `security-other-head`,
 `findings-not-collected`, `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
 `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`.
