@@ -273,12 +273,13 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
 5. The Jev-like judges now share one Hyades microVM, `djbclark-jevlike`, one judge at a time, Kev by default
    (djbclark, 2026-10-30; jev-like-hyades `bff0d6b`, sipb-agent-skills `6d71b98`, djbclark/mit `bba409f`).
    The freed Hyades slot is spare: F3 moved to vps-primary.
-6. `relay.py:757` `timeline_ack` matches `HEADER_RE` at the start of the body, so an ack delivered through
-   the deferred queue (body starting `[queued Nm ago] [relay from …] ack ID`) is not recognised by a
-   timeline watch; the Claude stop hook already skips that prefix (found by 495e0645, 2026-10-30; no test, not
-   in `docs/queue.md`). It matters until D4 retires `relay.py`, because D0.2's drain gate relies on acks
-   closing expectations. Not a defect: an ack sent by the deferred deliverer under `SENDER_OVERRIDE` never
-   closes an expectation; that is decided in `docs/queue.md` (a deliverer cannot prove whose ack it carries).
+6. `relay.py` sender identification (found by 495e0645, 2026-10-30; not in `docs/queue.md`): a Paseo-hosted
+   agent that neither carries `PASEO_AGENT_ID` nor has an ancestor that does (`fleet.py:627-631,647`; seen
+   with an Antigravity agent) resolves to a channel-less `pid*` row (`fleet.py:878`), so its `--expect-ack`
+   is recorded with no proof path (`relay.py:752` returns before any header is read) and never closes, and
+   nothing warns at send time. Queued acks themselves close correctly (the header precedes the `[queued …]`
+   prefix, pinned by `tests/test_relay_fallback.py:3009`). It matters until D4 retires `relay.py`, because
+   D0.2's drain gate relies on acks closing expectations; until then such records are retired with a reason.
 
 ## F. Decisions (djbclark, 2026-10-30, after the consults and research)
 
