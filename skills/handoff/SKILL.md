@@ -435,6 +435,9 @@ tab ever opened ("several workspaces share this cwd"). After any `self-slash` th
 1. `tail -5 ~/.local/state/self-slash.log` shows no `successor: ... NOT archived` line for this agent;
 2. `paseo agent ls -g --json` lists the new agent (title, status idle or running) and `paseo agent inspect <new id> --json` shows
    `ParentAgentId` null (`ls` does not carry it); say its title and workspace name to the operator;
+   its tab: `self-slash` opens the successor in Paseo Desktop (`paseo agent open <new id>`) before it archives this agent, and keeps this
+   agent when that fails (log: `could not be opened in Paseo Desktop`); a successor started any other way has NO tab until you run
+   `paseo agent open <new id>` (2026-10-30: a lead without a tab sat 13 hours on a question card nobody could see);
 3. if either check fails, say so at once, with the log line, and start the successor by hand (below) or ask which route; do not claim a handoff.
 
 **Partial handoff: the operator keeps this session** ("hand X off to a new tab", "I still use this agent for other things"). The

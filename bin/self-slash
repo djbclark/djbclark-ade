@@ -58,10 +58,11 @@
 # "<old name> → <model>"), (4) polls it (SELF_SLASH_SUCCESSOR_SETTLE seconds, default 20) and needs
 # a new id (never this agent's), ParentAgentId null, the model asked and status idle, running or
 # initializing, every key present (a renamed key is not read as null),
-# and only then (5) archives this agent as --finish does.  The run uses `env -u PASEO_AGENT_ID`:
+# opens it in Paseo Desktop (`paseo agent open <new id>`: a `paseo run` agent has no tab until then; a failure archives nothing, SELF_SLASH_NO_OPEN=1
+# skips it on a host with no desktop; 2026-10-30), and only then (5) archives this agent as --finish does.  The run uses `env -u PASEO_AGENT_ID`:
 # paseo run passes the caller's agent id to the daemon whenever PASEO_AGENT_ID is set, even with
 # --workspace, and the daemon then makes the new agent a SUBAGENT (Paseo 0.12.0 CLI source, read
-# 2026-10-23).  Any failure in 2-4 exits 11 and archives nothing: this session stays usable and
+# 2026-10-23).  Any failure in 2-5 exits 11 and archives nothing: this session stays usable and
 # a successor that was created is left running (logged, never stopped).  The first prompt is
 # /baton, so the Tier 1 pointer must be written first (handoff Step 7).  Not on Orca (exit 2).
 # herdr (2026-10-25; one design with Paseo, see skills/handoff Step 9): `--finish --successor claude/MODEL
@@ -547,6 +548,7 @@ if [ "$dry" = 1 ]; then
     if [ -n "$s_mode" ]; then dry_mode=" --mode $s_mode"; else dry_mode=" --mode <agent mode if the same provider; claude: bypassPermissions; else none>"; fi
     echo "  $paseo_cli run \"/baton${s_baton:+ $s_baton}\" --provider $successor --thinking $s_thinking$dry_mode --workspace ${s_workspace:-<id>} --cwd $dry_cwd --title \"$dry_title\" --no-wait --json   (never --new-workspace)"
     echo "  $paseo_cli agent inspect <new id> --json         (polled up to ${SELF_SLASH_SUCCESSOR_SETTLE:-20}s; needs a new id, ParentAgentId null,${s_model:+ model $s_model,} status idle|running|initializing; else exit 11, nothing archived)"
+    echo "  $paseo_cli agent open <new id> --json            (opens the successor's tab in Paseo Desktop; a failure archives nothing; SELF_SLASH_NO_OPEN=1 skips it)"
     echo "  $paseo_cli agent archive -- $pane                (never --force)"
     if [ "$s_keepws" = 1 ]; then echo "  (--keep-workspace: the old workspace stays)"
     else
@@ -1221,6 +1223,16 @@ successor_paseo() {
   [ "$seen" = 1 ] || successor_fail "successor $newid started but inspect never answered: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-200) (left running)"
   [ -z "$s_model" ] || [ "$nmodel" = "$s_model" ] || successor_fail "successor $newid runs model '${nmodel:-?}', not $s_model (left running)"
   echo "$(gdate '+%F %T') $host $pane: successor: $newid is top-level on $(clean "${nmodel:-$successor}") (status $(clean "$nstatus"))"
+  # A `paseo run` agent has NO tab in Paseo Desktop (tabs are client-side; only `paseo agent open` or the UI make one).  Archiving this agent
+  # without opening the successor left the lead invisible for 13 hours with a question card nobody could see (2026-10-30, djbclark: "that tab
+  # does not exist, the handoff failed").  So the successor is opened first, and a failure keeps this agent: the one that has a tab.
+  if [ "${SELF_SLASH_NO_OPEN:-}" = 1 ]; then
+    echo "$(gdate '+%F %T') $host $pane: successor: $newid NOT opened in Paseo Desktop (SELF_SLASH_NO_OPEN=1): it has no tab until someone runs paseo agent open $newid"
+  else
+    pcli_split agent open "$newid" --json
+    [ "$pcli_rc" = 0 ] || successor_fail "successor $newid is running but could not be opened in Paseo Desktop (rc=$pcli_rc: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-200)), so it has no tab; run paseo agent open $newid yourself, or SELF_SLASH_NO_OPEN=1 on a host with no desktop (left running)"
+    echo "$(gdate '+%F %T') $host $pane: successor: $newid opened in Paseo Desktop"
+  fi
   out=$(pcli agent archive -- "$pane" 2>&1); rc=$?
   if [ "$rc" != 0 ]; then
     echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-200); successor $newid left running"; exit 8
