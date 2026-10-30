@@ -1609,6 +1609,53 @@ class TestCodexSenderRollout(Base):
         self.assertIsNone(relay.expect_read("cx6")["tx"])
 
 
+class TestNoProofPathIsSaidAtSendTime(Base):
+    """A sender row with no transcript and no Paseo id is told, at the send, that nothing here watches for the reply (2026-10-30).
+
+    fleet's `pid*` process row could be taken as the sender of a Paseo-hosted agent (a `self` row listed before the
+    agent's Paseo row): no transcript for the `--ack` watch and no Paseo id for `timeline_ack` means its `--expect-ack`
+    closes only by a reply sent through relay.py, and the footer named a pid. `sender_row` now prefers the row that can
+    prove an ack; this pins the warning for the rows that still cannot. Every id here is fake.
+    """
+
+    def pid_row(self) -> dict[str, Any]:
+        row = sess(id="pid19798", agent="agy", name="antigravity-pane", host="terminal", pid=19798, status="working", cwd="/work/here")
+        row["self"] = True
+        return row
+
+    def test_a_pid_sender_is_told_at_once_that_only_relay_can_close_it(self) -> None:
+        rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row()])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("relay: warning: pid19798 has no transcript and no Paseo timeline", err)
+        self.assertIn("`ack build1` through relay.py", err)
+
+    def test_the_pid_sender_is_what_the_record_keeps(self) -> None:
+        """The failure this warns about, pinned as the record's own shape: nothing in it can be watched or closed."""
+        self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row()])
+        rec = json.loads((relay.expect_dir() / "build1.json").read_text())
+        self.assertEqual((rec["sender"], rec["sender_paseo"], rec["tl_base"]), ("pid19798", "", None))
+
+    def test_a_first_contact_from_a_pid_sender_warns_with_the_id_the_footer_names(self) -> None:
+        rc, _, err = self.go("hello there friend", rows=[self.pid_row()])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("`ack pid19798` through relay.py", err)
+
+    def test_a_transcript_sender_is_not_told(self) -> None:
+        rc, _, err = self.go("is the build green?", "--expect-ack", "build1")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("has no transcript", err)
+
+    def test_a_paseo_sender_is_not_told(self) -> None:
+        """A transcript-less Paseo agent is watched through its timeline, so it needs no warning."""
+        row = sess(id="bbbbbbbb", agent="antigravity", name="research", host="paseo", paseo="eeeeeeee-0000-4000-8000-000000000005",
+                   chan=("paseo", "eeeeeeee-0000-4000-8000-000000000005"), status="working", transcript=None)
+        row["self"] = True
+        with mock.patch.object(relay, "timeline_messages", lambda pid: []):
+            rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[row])
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("has no transcript", err)
+
+
 class TestExpectAnsweredInsideABlockingSend(Base):
     """Codex P2, PR 87 (2026-10-26): a sender with no transcript reserves its --expect-ack ID, then SENDS; the open record is written only after the send
     returns. A Hermes target answers inside that send (its route waits for the whole turn), so its `ack ID` reached the relay while the record was still

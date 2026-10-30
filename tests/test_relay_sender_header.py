@@ -7,8 +7,11 @@ shell keeps them, so the sender is read from an ancestor's environment. Every id
 """
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -286,6 +289,70 @@ class TestEveryRouteTypesAHeader(fb.Harness):
               mock.patch.object(relay, "HERMES_DIR", self.tmp / "hermes-out")):
             self.run_main(row)
         self.assertEqual(FakePopen.cmds[0][4], self.HDR + self.BODY)
+
+
+class TestTheRowThatCanProveAnAck(unittest.TestCase):
+    """The `self` row relay takes as the sender is the one that can PROVE an ack (2026-10-30).
+
+    fleet's process scan lists a `pid*` row for an ancestor TUI BEFORE the Paseo row of the same agent (`fleet.py`
+    `sessions`: `_proc_scan`, then `_paseo_rows`; `self=pid in anc`). A Paseo-hosted agent whose tools ran under a
+    process fleet recognises therefore sent as `sender: pid19798`, `sender_paseo: ""`, `tl_base: null`: no
+    transcript for the `--ack` watch, no Paseo id for `timeline_ack`, so an `--expect-ack` could never close and
+    its footer named a pid (live 2026-10-29, an Antigravity agent). Every id here is fake.
+    """
+
+    def pid_row(self, **kw: Any) -> dict[str, Any]:
+        return sess(id="pid19798", agent="agy", host="terminal", pid=19798, cwd="/work/here",
+                    reach="no channel: use its focus command", **{"self": True, **kw})
+
+    def paseo_row(self, **kw: Any) -> dict[str, Any]:
+        return sess(id="bbbbbbbb", agent="antigravity", name="research", host="paseo", paseo=PASEO_AGENT,
+                    chan=("paseo", PASEO_AGENT), **{"self": True, **kw})
+
+    def test_a_paseo_row_wins_over_the_pid_row_fleet_lists_first(self) -> None:
+        row = relay.sender_row([self.pid_row(), self.paseo_row()])
+        self.assertEqual(row["id"], "bbbbbbbb")
+        self.assertEqual(row["paseo"], PASEO_AGENT)
+
+    def test_a_transcript_row_wins_over_the_pid_row_fleet_lists_first(self) -> None:
+        row = sess(id="cccccccc", agent="claude", name="alice", transcript="/tmp/me.jsonl", **{"self": True})
+        self.assertEqual(relay.sender_row([self.pid_row(), row])["id"], "cccccccc")
+
+    def test_a_lone_pid_row_is_still_the_sender(self) -> None:
+        """Nothing better to pick: a terminal TUI's own shell keeps its pid identity, and the send warns (below)."""
+        self.assertEqual(relay.sender_row([self.pid_row()])["id"], "pid19798")
+
+    def test_no_self_row_is_no_sender(self) -> None:
+        self.assertIsNone(relay.sender_row([]))
+        self.assertIsNone(relay.sender_row([sess(), {**self.pid_row(), "self": False}]))
+
+    def test_ties_keep_fleets_order(self) -> None:
+        """Two rows that can prove alike: fleet's order decides, as it did before this preference."""
+        a = sess(id="aaaaaaaa", transcript="/tmp/a.jsonl", **{"self": True})
+        b = sess(id="bbbbbbbb", transcript="/tmp/b.jsonl", **{"self": True})
+        self.assertEqual(relay.sender_row([a, b])["id"], "aaaaaaaa")
+        self.assertEqual(relay.sender_row([b, a])["id"], "bbbbbbbb")
+
+    def test_a_proof_path_is_a_transcript_or_a_paseo_timeline(self) -> None:
+        self.assertTrue(relay.ack_proof_path({"transcript": "/tmp/me.jsonl"}))
+        self.assertTrue(relay.ack_proof_path({"transcript": None, "paseo": PASEO_AGENT}))
+        self.assertFalse(relay.ack_proof_path(self.pid_row()))
+        self.assertFalse(relay.ack_proof_path({"transcript": None, "paseo": "not-a-uuid"}))
+        self.assertFalse(relay.ack_proof_path(None))
+        self.assertFalse(relay.ack_proof_path({}))
+
+
+    def test_the_proof_path_is_read_from_the_row_relay_sends_as(self) -> None:
+        """`fleet list` annotates links from the same row relay writes them for, so a Paseo sender's links show."""
+        with tempfile.TemporaryDirectory() as d:
+            saved = fleet.LINKS_FILE
+            fleet.LINKS_FILE = Path(d) / "links.json"
+            try:
+                fleet.LINKS_FILE.write_text(json.dumps({"links": {"bbbbbbbb>cccccccc": {"sent": 2, "acked": None}}}))
+                rows = fleet.annotate_links([self.pid_row(), self.paseo_row(), sess(id="cccccccc", name="peer")])
+            finally:
+                fleet.LINKS_FILE = saved
+        self.assertEqual([r for r in rows if r["id"] == "cccccccc"][0]["link"], {"sent": 2, "acked": None})
 
 
 if __name__ == "__main__":

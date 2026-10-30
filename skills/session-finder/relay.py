@@ -722,6 +722,18 @@ def timeline_key(title, body):
     return hashlib.sha256(f"{title}\x00{body}".encode()).hexdigest()[:16]
 
 
+def ack_proof_path(me):
+    """True when an expectation fleet row ME opens can be closed by a proof relay can watch: its own transcript (its `--ack`
+    watch) or, for a transcript-less Paseo agent, its timeline (`tl_base` for `timeline_ack`). False for a `pid*` process-scan
+    row: it has neither, so its record closes only if the target sends `ack ID` through relay.py itself
+    (`expect_resolve_by_relay`). main warns on stderr when an `--expect-ack` (or the first-contact footer) is opened under
+    such a row: the sender believes it will be told, and nothing else can tell it (2026-10-30)."""
+    if not isinstance(me, dict):
+        return False
+    pid = me.get("paseo")
+    return bool(me.get("transcript") or (isinstance(pid, str) and UUID.fullmatch(pid)))
+
+
 def timeline_base(me):
     """{key: count} of the messages a transcript-less Paseo SENDER (fleet row ME) had received before it sent, taken before the send (hashes, not
     the text: a record never holds another agent's words). An `ack` already there cannot answer a question not yet asked (a reused ID, the same
@@ -1511,7 +1523,7 @@ def sender_name(listed):
         return "unknown" if hermes_forged(label, hermes_hops()) else label
     if hermes_hops() and HERMES_SENDER.fullmatch(os.environ.get("RELAY_SENDER", "")):
         return os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller; any other name is a forgery
-    me = next((x for x in listed if x.get("self")), None) or {}
+    me = sender_row(listed) or {}    # the row that can prove an ack, not fleet's first `self` one (a `pid*` process row)
     own = own_paseo_id()
     if not me and own:
         me = next((x for x in listed if own in (x.get("paseo"), (x.get("chan") or (None, None))[1])), None) or {"id": own, "agent": "paseo"}
@@ -2881,7 +2893,7 @@ def defer_send(s, a, text, listed, why):
         sender_paseo, ident, hops, label = "", "", 0, "relay"
     else:
         own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
-        me = next((x for x in listed if x.get("self")), None) or {}
+        me = sender_row(listed) or {}    # the row that can prove an ack, not fleet's first `self` one (a `pid*` process row)
         verified = own if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own) else ""
         sender_paseo = verified or (me.get("paseo") if UUID.fullmatch(me.get("paseo") or "") else "") or ""
         ident = sender_paseo or me.get("id") or ""
@@ -3210,8 +3222,14 @@ def asks_for_reply(text):
 
 def sender_row(listed):
     """The fleet row of the session this process runs in (its `self` row), or None for a caller with no session: a launchd
-    script, whose messages nobody can be held to an ack for."""
-    return next((x for x in listed if x.get("self")), None)
+    script, whose messages nobody can be held to an ack for.
+
+    Among several `self` rows relay takes the one that can PROVE an ack, not the first: fleet's process scan lists a `pid*`
+    row for an ancestor TUI before the Paseo row of the same agent, and a pid names no transcript (`--ack`) and no timeline
+    (`timeline_ack`), so an `--expect-ack` opened under it could never close. `fleet.sender_row` picks it, so relay and the
+    `fleet list` link annotation agree on who this session is (fleet.py:878; live 2026-10-29, a Paseo Antigravity agent);
+    `ack_proof_path` says when even that row has nothing to watch, and `main` warns at the send."""
+    return fleet.sender_row(listed)
 
 
 def outcome_result(line):
@@ -3976,6 +3994,9 @@ def _main(argv=None, sweep=True):
         elif fleet.link_get(fleet.links_read()["links"], me, s) is None:
             text += f" [first contact from {me['id']}: reply `ack {me['id']}` through relay.py to prove this link both ways]"
             CTX["tl_base"] = timeline_base(me)
+        if not ack_proof_path(me):    # say it now: the sender believes an answer will reach it, and nothing here will watch for one
+            print(f"relay: warning: {me['id']} has no transcript and no Paseo timeline, so the reply closes the expectation only if "
+                  f"the target sends `ack {a.expect_ack or me['id']}` through relay.py: nothing here watches for it", file=sys.stderr)
     if card:    # blocked on a card and deferrable: queued now, delivered once the card is answered; typed text would answer it
         if not (is_paseo or plan(s)):    # a record nobody could send (no route at all) would only fail later: refuse now, as the route check below does
             print(f"relay: [{s['id']}] not sent: {card}; and it has no route", file=sys.stderr)
