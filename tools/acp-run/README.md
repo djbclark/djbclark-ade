@@ -732,10 +732,14 @@ with a length floor) refuses wherever it appears in the key, in a subsection
 (`remote.<token>.url`) and in a URL path alike — the name filter hid the token whether or
 not git resolves the key, so the exposure is the NAME, not the setting's meaning. Three
 limits keep that off ordinary names: a match never starts mid-word, each prefix is matched
-in the case its issuer uses, and each floor sits just under the real token length. Refusing
-a name that merely resembles a prefix (`remote.sk-learn-upstream-fork.url`,
-`remote.ghp_mirror01.url`, `remote.pypi-mirror-internal-eu.url`) would break a launch for
-nothing, and an earlier head refused exactly those (adversary round 10, 2026-10-30). Only
+in the case its issuer uses, and each floor sits just under the real token length, measured
+per issuer (`ghp_` 36, `github_pat_` 82, `glpat-` 20, `hf_` 34, `npm_` 36, and LiteLLM's
+default generated `sk-` + 22). Refusing a name that merely resembles a prefix
+(`remote.sk-learn-upstream-fork.url`, `remote.ghp_mirror01.url`,
+`remote.pypi-mirror-internal-eu.url`) would break a launch for nothing, and an earlier head
+refused exactly those (adversary round 10, 2026-10-30). A non-default shorter LiteLLM key
+and a name glued straight onto a token with no separator (`remote.xghp_…url`) are the
+documented limits, as is a name whose `sk-` body is long enough to reach the floor. Only
 KEYS are checked: a credential in a counted VALUE (`GIT_CONFIG_VALUE_n`) never went through
 the name filter, so refusing one would be a different change. A secret of an unknown shape
 sitting in a path segment cannot be told apart from path data

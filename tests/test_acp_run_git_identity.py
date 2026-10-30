@@ -248,7 +248,12 @@ class TestGitIdentityGuard(unittest.TestCase):
                     "remote.sk-FAKE0123456789abcdefghijklmnopqrst.url",
                     "remote.pypi-FAKE0123456789abcdefghijklmnop.url",
                     "remote.AKIAFAKE0123456789.url",
-                    "remote.eyJhbGciOiJIUzI1NiJ9.FAKEpayload.url"):
+                    "remote.eyJhbGciOiJIUzI1NiJ9.FAKEpayload.url",
+                    # a real LiteLLM virtual key is `sk-` + 22 url-safe characters
+                    # (`token_urlsafe(16)`, the default), and this machine runs that proxy: a floor
+                    # of 32 let it travel, so the `sk-` floor is 20 (adversary round 11, F1)
+                    "remote.sk-AbcD3fGhIjKlMnOpQrStUv.url",
+                    "url.https://example.org/sk-AbcD3fGhIjKlMnOpQrStUv/.insteadOf"):
             with self.subTest(key=key):
                 env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
                        "GIT_CONFIG_VALUE_0": "https://example.org/"}
@@ -285,6 +290,9 @@ class TestGitIdentityGuard(unittest.TestCase):
                  ("remote.task-management-service.url", "https://example.org/task"),
                  ("includeif.gitdir:~/src/flask-sqlalchemy-extension/.path", "~/.gitconfig-flask"),
                  ("remote.pypi-mirror-internal-eu.url", "https://example.org/pypi"),
+                 # a body BELOW its floor travels: this is the round-10 literal, 14 characters after
+                 # `ghp_`, so it is not a token this refuses (round 11 pinned it as must-travel)
+                 ("remote.ghp_FAKE0123456789.url", "https://example.org/short-pat"),
                  ("remote.ghp_mirror01.url", "https://example.org/mirror"),
                  ("remote.hf_transformersfork.url", "https://example.org/hf"),
                  ("remote.sk-learn-upstream-fork.url", "https://example.org/sklearn"),

@@ -4019,13 +4019,15 @@ exit 0
 # limits keep it off ordinary configuration: no match starts mid-word (adversary round 10 measured
 # `re.IGNORECASE` and no boundary refusing `task-`, `flask-`, `disk-` and `asiapacific`, 2026-10-30),
 # each prefix is matched in the case its issuer uses, and each body has a floor just under the real
-# length, so a short ordinary name (`sk-1`, `ghp_mirror01`) travels.
+# length, so a short ordinary name (`sk-1`, `ghp_mirror01`) travels. The `sk-` floor is 20 because
+# LiteLLM issues a WORKING key as `sk-` + 22 url-safe characters (`token_urlsafe(16)`, its default),
+# which round 11 caught travelling at a floor of 32; only a non-default shorter length escapes it.
 TOKEN_SHAPE = re.compile(
     r"(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{20,}" # GitHub PAT, OAuth, user, server, refresh token
     r"|github_pat_[A-Za-z0-9_]{20,}"                 # GitHub fine-grained PAT
     r"|glpat-[A-Za-z0-9_-]{16,}"                     # GitLab PAT
     r"|xox[abposr]-[A-Za-z0-9-]{12,}"                # Slack bot, user, app, refresh token
-    r"|sk-(?:ant-)?[A-Za-z0-9_-]{32,}"               # OpenAI and Anthropic style API key
+    r"|sk-(?:ant-)?[A-Za-z0-9_-]{20,}"               # OpenAI, Anthropic and LiteLLM style key
     r"|hf_[A-Za-z0-9]{20,}"                          # Hugging Face token
     r"|npm_[A-Za-z0-9]{20,}"                         # npm automation token
     r"|pypi-[A-Za-z0-9_-]{30,}"                      # PyPI upload token
@@ -4071,9 +4073,12 @@ def credential_in_key(key: str) -> bool:
     issuer uses, and each body has a length floor just under the real length. Refusing a name that
     merely resembles a prefix (`remote.sk-learn-upstream-fork.url`, `remote.ghp_mirror01.url`) would
     break a launch for nothing, and `re.IGNORECASE` with no boundary did exactly that before
-    (adversary round 10, 2026-10-30). A secret of a shape this list does not know, sitting in a path
-    segment, cannot be told apart from path data (`@scope`), so it travels - that is this check's
-    documented limit.
+    (adversary round 10, 2026-10-30). The floors are set from measured issuers: `ghp_` carries 36,
+    `github_pat_` 82, `glpat-` 20, `hf_` 34, `npm_` 36, and LiteLLM's default generated key is `sk-` +
+    22 (`token_urlsafe(16)`), so `sk-` sits at 20 - a smaller family (a custom LiteLLM length below
+    20) and a name glued to a token with no separator are the documented edges. A secret of a shape
+    this list does not know, sitting in a path segment, cannot be told apart from path data
+    (`@scope`), so it travels - that is this check's documented limit.
 
     A `credential.` subsection may also be a PARTIAL url with no scheme, and `credential.` is the one
     family where git really resolves that form: measured with `git credential fill` and a helper
