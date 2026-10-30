@@ -87,6 +87,7 @@ their old paths are symlinks into this checkout).
 |---|---|
 | [`bigteam`](skills/bigteam/SKILL.md) | Run a prompt as a multi-vendor fan-out: probe every quota pool, slice into file-scoped assignments, dispatch, integrate. |
 | [`model-routing`](skills/model-routing/SKILL.md) | Which vendor × model × effort for which work; reading `aiuse` pools. |
+| [`oc-go-key`](skills/oc-go-key/SKILL.md) | Recover a session that stopped on `Go usage limit exceeded` / `Insufficient account funds`: `scripts/go-status` reads the live account state, `oc-go-key use <label>` swaps it for running sessions, and the aborted turn is resumed by relay — never by opening a new tab. |
 | [`fallback-chains`](skills/fallback-chains/SKILL.md) | Every failure chain on this machine, and the not-started plan to make them one system. |
 | [`aws-rules`](skills/aws-rules/SKILL.md) | AWS Agent Toolkit rules and this machine's AWS setup facts (profile, Region, `aws-mcp`); on demand, never in `AGENTS.md`. |
 | [`effort-routing`](skills/effort-routing/SKILL.md) | Match this session's own reasoning effort to the stretch of work in front of it. |
