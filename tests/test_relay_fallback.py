@@ -84,9 +84,11 @@ class Harness(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
         os.environ["CODEX_HOME"] = str(self.tmp / "codex")
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
+        # The last two are stubbed by subclasses (they are live `paseo logs` / `paseo permit ls` calls): restoring them here stops one
+        # class's stub leaking into another module's tests (2026-10-30: the sender-row warning tests read timeline_base for real).
         names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
                  "paseo_run", "paseo_inspect", "paseo_probe", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY", "DEFER_DIR", "DEFER_POLL",
-                 "spawn_deliverer", "own_cwd", "forced_tag"]
+                 "spawn_deliverer", "own_cwd", "forced_tag", "timeline_base", "paseo_card_detail"]
         saved = {n: getattr(relay, n) for n in names}
         saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record", "pane_procs", "ancestors", "transcript")}
         self.addCleanup(lambda: [setattr(relay, n, v) for n, v in saved.items()])
