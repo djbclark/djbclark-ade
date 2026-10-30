@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 import subprocess
@@ -120,6 +121,39 @@ def log(msg: str) -> None:
         fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {msg}\n")
 
 
+def normalise_pending(raw: list) -> tuple[list[dict], int]:
+    """Queued lines as `{"key": str|None, "text": str, "queued_at": float|None}`, plus how many entries
+    could not be read. Accepts the old bare string (no key, no age) and the mapping; anything else is
+    counted, not guessed at: the old `str(x)` turned a stray `5` into a line sent to the seat."""
+    out: list[dict] = []
+    bad = 0
+    for entry in raw:
+        if isinstance(entry, str) and entry:
+            out.append({"key": None, "text": entry, "queued_at": None})
+        elif isinstance(entry, dict) and isinstance(entry.get("text"), str) and entry["text"]:
+            key = entry.get("key")
+            queued = entry.get("queued_at")
+            # A finite number or nothing: a nan/inf/bool age would crash `_age` or print nonsense.
+            stamp = float(queued) if _is_num(queued) and not isinstance(queued, bool) else None
+            if stamp is not None and not math.isfinite(stamp):
+                stamp = None
+            out.append({"key": key if isinstance(key, str) and key else None,
+                        "text": entry["text"], "queued_at": stamp})
+        else:
+            bad += 1
+    return out, bad
+
+
+def _age(seconds: float) -> str:
+    """`45s`, `6m`, `3h`: how long a queued line has waited, for the log."""
+    seconds = max(0, int(seconds)) if math.isfinite(seconds) else 0
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 90 * 60:
+        return f"{round(seconds / 60)}m"
+    return f"{round(seconds / 3600)}h"
+
+
 def load_state() -> dict:
     """The last pass's state. Anything hand-edited into the wrong SHAPE is discarded, not crashed on."""
     try:
@@ -134,8 +168,17 @@ def load_state() -> dict:
     for key in ("last", "told", "stuck"):
         if not isinstance(data.get(key), dict):
             data[key] = {}
-    if not isinstance(data.get("pending", []), list):
-        data["pending"] = []
+    # `pending` entries are `{"key", "text", "queued_at"}` since 2026-10-30 (see `_pass`); before that
+    # they were bare strings, and a state file written by the previous version must keep its queue.
+    # Normalise HERE so the pass sees one shape. An entry that is neither (a number, a mapping with
+    # no text) is dropped from the in-memory queue and COUNTED in `pending_unreadable`, which `_pass`
+    # logs and pops; the file itself is only rewritten by a pass that saves state, as always.
+    raw_pending = data.get("pending", [])
+    if not isinstance(raw_pending, list):
+        raw_pending = []
+    data["pending"], unreadable = normalise_pending(raw_pending)
+    if unreadable:
+        data["pending_unreadable"] = unreadable
     # Shapes are not values. A hand edit that leaves `told` a string timestamp or a `stuck` count a
     # word used to kill the pass at `float(last)` / `int(...)` — the same hand-edit threat the shape
     # guards above are for, one level down. Drop only the unreadable entries; keep the rest.
@@ -817,6 +860,10 @@ SEAT_STUCK_PASSES = _env_int("RW_STUCK_PASSES", 3)
 # A line the seat refused is kept and retried, not dropped (see `_pass`). Cap so a seat that stays
 # busy for a day cannot grow the state file without bound; the newest lines are the ones that matter.
 PENDING_MAX = _env_int("RW_PENDING_MAX", 6)
+# Keys of the state-like pass items (see `_pass`): a `pending` entry carrying one is dropped at retry
+# time when this pass no longer recomputes the condition.
+KEY_STALE = "stale chain log"
+KEY_STUCK = "job(s) finished but not closed"
 
 # A page size for `gh search prs`, not a ceiling on reality: at the cap the count is a lower bound.
 PR_LIMIT = _env_int("RW_PR_LIMIT", 100)
@@ -1020,20 +1067,33 @@ def _pass(a: argparse.Namespace) -> int:
     new_mail = [m for m in cur["mail"] if m not in before_mail]
     new_jobs = [j["name"] for j in cur["jobs"] if j["name"] not in before_job_names]
 
-    lines: list[str] = []
+    # Each item is (key, text). The key is OPT-IN and marks the lines whose condition this pass
+    # recomputes from scratch every time, so a queued copy can be checked against it at retry time
+    # (see the carry block below). Event items are deliberately KEYLESS: new mail, new jobs and the
+    # new-PR announcement are diffs against `state["last"]`, which has already been advanced; once the
+    # mail is consumed the pass cannot recompute "this was unread", so keying them would silently drop
+    # a real announcement the seat never heard. They keep the plain at-least-once retry.
+    items: list[tuple[str | None, str]] = []
     if new_mail:
-        lines.append(f"{len(new_mail)} unread peer message(s): {', '.join(new_mail[:3])}")
+        items.append((None, f"{len(new_mail)} unread peer message(s): {', '.join(new_mail[:3])}"))
     if new_jobs:
-        lines.append(f"{len(new_jobs)} open job(s): {', '.join(new_jobs[:3])}")
+        items.append((None, f"{len(new_jobs)} open job(s): {', '.join(new_jobs[:3])}"))
     if cur["stale"]:
-        lines.append(f"stale chain log: {cur['stale']}")
+        items.append((KEY_STALE, f"stale chain log: {cur['stale']}"))
     if cur["prs"] and not before.get("prs"):
-        lines.append(pr_phrase(cur["prs"]))
+        items.append((None, pr_phrase(cur["prs"])))
 
-    # A job whose `done` file exists but whose record is still open is a real, actionable defect.
+    # A job whose `done` file exists but whose record is still open is a real, actionable defect. The
+    # key is the LABEL ALONE, not label+names: the finding is "some job is finished but not closed".
+    # A queued line naming job A stays true while any job (A or B) is finished-but-open, and a keyed
+    # entry is replaced by THIS pass's freshly computed text, so what is delivered names the jobs
+    # stuck now, never an A that closed meanwhile. Label+names would drop the entry as "resolved" when
+    # A closes even though B is still stuck, trading a refreshed finding for a dropped one; the
+    # at-least-once principle says keep the finding and fix the sentence, not the other way round.
     stuck = [j["name"] for j in cur["jobs"] if j["done_exists"]]
     if stuck:
-        lines.append(f"job(s) finished but not closed: {', '.join(stuck[:3])}")
+        items.append((KEY_STUCK, f"job(s) finished but not closed: {', '.join(stuck[:3])}"))
+    lines = [text for _, text in items]
 
     if a.dry_run:
         print(json.dumps({"changed": changed, "lines": lines, "survey": cur}, indent=1))
@@ -1086,16 +1146,49 @@ def _pass(a: argparse.Namespace) -> int:
     # has already consumed the change, so without this the announcement is lost for good. Mail
     # arrives BECAUSE the seat is busy mid-turn, so this is the common collision, not the edge case.
     # Kept at the front, retried next pass, cleared only by a real send.
+    #
+    # A KEYED entry (see the items above) is a state-like finding the pass recomputes every time, so a
+    # queued copy whose key this pass no longer produces describes a condition that has since been
+    # fixed: it is dropped, with one log line, instead of being replayed as if it were live (the
+    # 067a9868 Tier 1 line was repeated for three passes after the pointer was corrected). One whose
+    # condition still holds is replaced by this pass's fresh text and keeps its original `queued_at`.
+    # A KEYLESS entry is never dropped here: it keeps the at-least-once retry, verbatim.
     carried = state.get("pending")
-    carried = [str(x) for x in carried] if isinstance(carried, list) else []
+    carried = carried if isinstance(carried, list) else []
+    unreadable = state.pop("pending_unreadable", 0)
+    if unreadable:
+        log(f"pending: ignoring {unreadable} unreadable entr{'y' if unreadable == 1 else 'ies'} "
+            "in the state file")
     if len(carried) > PENDING_MAX:
         # Eviction is deliberate (a seat busy for a day cannot grow the file), but it LOSES a line:
         # say so in the log, or the last appearance of that line is an unflagged "pending=N".
         log(f"pending: dropping {len(carried) - PENDING_MAX} oldest line(s) over the cap of "
-            f"{PENDING_MAX}: {carried[0][:100]}")
+            f"{PENDING_MAX}: {carried[0]['text'][:100]}")
     pending = carried[-PENDING_MAX:]
-    if pending:
-        lines = [p for p in pending if p not in lines] + lines
+    fresh = [{"key": k, "text": t, "queued_at": now} for k, t in items]
+    fresh_keys = {e["key"]: e for e in fresh if e["key"]}
+    fresh_texts = {e["text"]: e for e in fresh}
+    front: list[dict] = []
+    retry_ages: list[float | None] = []         # one per queued line that is being retried now
+    for p in pending:
+        if p["key"] and p["key"] not in fresh_keys:
+            log(f"pending: dropping resolved {p['key']}")
+            continue
+        twin = fresh_keys.get(p["key"]) if p["key"] else fresh_texts.get(p["text"])
+        if twin is not None:                    # re-derived this pass: keep ONE line, the older age
+            if p["queued_at"] is not None:
+                twin["queued_at"] = min(twin["queued_at"], p["queued_at"])
+        else:
+            front.append(p)
+        retry_ages.append(None if p["queued_at"] is None else now - p["queued_at"])
+    queue = front + fresh
+    lines = [e["text"] for e in queue]
+    # A quiet pass (nothing survived, nothing new) must also persist the cleared queue.
+    state["pending"] = queue[-PENDING_MAX:]
+    known_ages = [x for x in retry_ages if x is not None]
+    retry_note = ""
+    if retry_ages:
+        retry_note = " (retry" + (f", oldest {_age(max(known_ages))}" if known_ages else "") + ")"
 
     if lines:
         summary = "rumination: " + "; ".join(lines)
@@ -1149,9 +1242,9 @@ def _pass(a: argparse.Namespace) -> int:
             if len(lines) > PENDING_MAX:
                 log(f"pending: dropping {len(lines) - PENDING_MAX} oldest line(s) over the cap of "
                     f"{PENDING_MAX}: {lines[0][:100]}")
-            state["pending"] = lines[-PENDING_MAX:]
+            state["pending"] = queue[-PENDING_MAX:]
         log(f"spoke session={spoke_session or 'none'} djbclark={spoke_djb}"
-            f" pending={len(state['pending'])}: {summary}")
+            f" pending={len(state['pending'])}{retry_note}: {summary}")
     else:
         # A QUIET pass still has to notice a wedged seat. Without this probe, darkness is only ever
         # seen on a pass that had something to say, and a seat that stops working stops producing
