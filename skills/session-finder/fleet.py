@@ -1490,11 +1490,12 @@ def sender_row(ss):
     then the NEAREST process of ours, counting a Paseo row as the process PASEO LAUNCHED for that agent
     (`_paseo_hosting_pids`) and any other row as its own `pid`, against `ancestry()` (nearest first); at one depth, the
     row that can prove the ack. Two consequences this rule exists for: an inherited or exported `PASEO_AGENT_ID` marks a
-    row `self` on its own (`_paseo_rows`: `pid == me or pid in hosting`) and claims no process of ours, so it never beats
-    a row that does (adversary B1); and a Paseo agent that started ANOTHER agent (`omp` running `codex`, `claude` running
-    `opencode`) is an ancestor of this process, so its row is `self` too — naming it would substitute the parent's
-    identity for the caller's and route replies to the wrong session, while the nested agent's own row is nearer (local
-    review of 2026-10-30). A row fleet scans for the very process Paseo launched is at that same depth as its Paseo row,
+    row `self` on its own (`_paseo_rows`: `pid == me or pid in hosting`) and claims no process of ours, so it cannot beat
+    a row that does while one competes (adversary B1; rows that all claim none tie and keep fleet's order, and a lone
+    `self` row never reaches this rule); and a Paseo agent that started ANOTHER agent (`omp` running `codex`) is an
+    ancestor of this process, so its row is `self` too — naming it would substitute the parent's identity for the
+    caller's and route replies to the wrong session, while the nested agent's own row is nearer (local review of
+    2026-10-30). A transcript still outranks any depth, so an outer Paseo Claude that holds one is named. A row fleet scans for the very process Paseo launched is at that same depth as its Paseo row,
     so the Paseo row wins there and the old `pid*` sender cannot come back.
 
     A transcript-backed row gets no second vote for also carrying a Paseo id: `_claude_sessions` gives a daemon-spawned
