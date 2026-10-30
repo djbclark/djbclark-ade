@@ -380,6 +380,15 @@ agent what changed and what is new. Entries end with the pull request number.
   attempted once: the line is still dropped on purpose (relay.py says "do not resend"), but one
   failed `hermes send` at that moment used to consume the trigger and the double failure ended in
   silence (#134).
+- `bin/rumination-watch` round four: a settled-but-unproven send is not health (2026-10-29).
+  relay.py's `accepted`, `queued` and `sent` keep a pending line out of the retry list, but they say
+  nothing about the SEAT: a hung Paseo seat that keeps accepting text cleared its own darkness count
+  on every busy pass, and a seat that produces a line every pass never has a quiet pass, so the
+  `silent` probe could never run — the streak never reached `SEAT_STUCK_PASSES` and nobody was
+  paged. A pass that gets one of those words now asks `relay.py --why` before touching the streak,
+  so the observation that counts is the seat's, not the route's; `delivered`, `working` and `idle`
+  alone reset it, and a probe that cannot be read (`unknown`) leaves the streak where it was rather
+  than guessing either way (#134).
 
 - The quota guard's `critical` advice (2026-10-29) is scoped to the Claude Code subscription pool: "No new Claude work of any kind until the reset ... hand off, stop" read as a stop order by idle omp sessions, so it now says "No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session included) until the reset", states that it is not a stop order for codex, grok, agy, zai and opencode sessions, and that an omp session keeps working only while `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares the Claude weekly rate window, which aiuse gates when every weekly window is exhausted); a Claude Code lead is sent to an omp successor on Paseo (`self-slash --finish --successor omp/anthropic/claude-sonnet-5-5`), told to start omp by hand on herdr and Orca (where `self-slash` refuses an omp successor), or to a codex or grok successor when omp is not listed (agy is not a Paseo provider), instead of another Claude Sonnet session; `skills/handoff` Step 9 keys the same exemption on the state file's `level` being `critical` and drops its old `critical` branches (a Fable lead to Opus, an Opus or Sonnet lead to plain `/new`) (#126).
 - `bin/paseo-new-seat` (2026-10-29): a claude seat created with the shield on no longer prints "auto_accept: NOT verified - the shield may be grey" and exits 4 once its mode is verified. Claude never publishes an `auto_accept` feature (its yolo is the permission mode), so its empty feature list is now "not offered" rather than "unverified"; other providers with an empty list still report unverified (#122).
