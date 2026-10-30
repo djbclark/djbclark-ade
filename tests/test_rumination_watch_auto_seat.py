@@ -237,3 +237,26 @@ def test_18_status_bounds_future_stamps_without_crashing(monkeypatch, tmp_path, 
     monkeypatch.setattr(rw, "running_sha", lambda: "fixture")
     assert rw.cmd_status(rw.argparse.Namespace()) == 0
     assert "auto-seat: on (1 role(s) started, last " in capsys.readouterr().out
+
+
+def test_19_registered_successor_takes_precedence_over_gone_candidate(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    run_pass(rw)
+    rw.pages.clear()
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    monkeypatch.setattr(rw, "owner_session", lambda: ("successor", "registry"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle" if ident == "successor" else "gone", "test"))
+    run_pass(rw)
+    assert len(rw.calls) == 2 and rw.pages == []
+    assert not rw.auto_seat_candidate(rw.load_state())
+
+
+def test_20_retained_candidate_with_stale_fleet_does_not_page_as_absent(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    run_pass(rw)
+    rw.pages.clear()
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + 25000)
+    monkeypatch.setattr(rw, "owner_session", lambda: ("", "fleet has not listed candidate"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "exists"))
+    run_pass(rw)
+    assert len(rw.calls) == 2 and rw.pages == []

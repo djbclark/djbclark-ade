@@ -1417,8 +1417,24 @@ def _pass(a: argparse.Namespace) -> int:
         target = candidate or ident
         if not target and not _LIVE_ERR:
             target = next((candidate for _, candidate in owner_candidates()), "")
-        word = (why_blocked(candidate)[0] if candidate else seat_word() if ident
-                else why_blocked(target)[0] if target else "unknown")
+        # A registered successor may have replaced our saved candidate. Prove the resolved owner
+        # gone BEFORE falling back to the candidate; never spawn over a different existing owner.
+        word = seat_word() if ident else "unknown"
+        if candidate and candidate != ident and (not ident or word == "gone"):
+            target = candidate
+            word = why_blocked(candidate)[0]
+            if word in ("idle", "working", "silent") or word.startswith("card:"):
+                ident = candidate
+                probe[:] = [(word, "auto-seat candidate")]
+        elif candidate and candidate != ident and (word in ("idle", "working", "silent")
+                                                   or word.startswith("card:")):
+            # A live successor is authoritative. Retire the stale candidate so it cannot shadow
+            # future registry changes; this is bookkeeping, never a successful-start stamp.
+            prefix = f"auto-seat candidate:{ROLE}:"
+            state["told"] = {k: v for k, v in state.get("told", {}).items()
+                             if not k.startswith(prefix)}
+        elif not ident and target:
+            word = why_blocked(target)[0]
         started = auto_seat(word, state, now)
         auto_gone = word == "gone"
         if auto_gone and (started or should_tell_djbclark("no live session", state, now)):
