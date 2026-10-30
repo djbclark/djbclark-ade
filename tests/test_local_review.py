@@ -325,11 +325,12 @@ def test_a_child_started_just_before_codex_exits_is_killed_without_lsof_or_a_sna
     """Codex P1 (GitHub review of PR 130): the leader must not be reaped before the group kill, or a late child survives where lsof is missing."""
     safe = world.tmp / "nolsof"
     safe.mkdir()
-    for tool in ("git", "gh", "python3", "codex", "bash", "sleep", "ps", "cat", "env", "cut", "sort", "pwd", "echo"):    # everything but lsof
+    for tool in ("git", "gh", "python3", "codex", "bash", "sleep", "ps", "cat", "env", "cut", "sort", "pwd", "echo", "sh", "uname", "tr", "sed", "grep", "head",
+                 "tail", "mkdir", "rm", "mv", "ln", "date", "dirname", "basename", "readlink", "id"):    # a PATH of its own: everything but lsof (Linux has it in /usr/bin)
         src = world.tmp / "bin" / tool if tool in ("gh", "codex") else Path(shutil.which(tool) or "")
         if src.exists() and not (safe / tool).exists():
             (safe / tool).symlink_to(src)
-    env = {"PATH": f"{safe}{os.pathsep}/usr/bin{os.pathsep}/bin"}    # no lsof on this PATH (/usr/sbin is not on it); the child works in /tmp, outside the worktree
+    env = {"PATH": str(safe)}    # the child works in /tmp, outside the worktree
     assert shutil.which("lsof", path=env["PATH"]) is None
     assert world.run(mode="late_child", env=env).returncode == 0
     time.sleep(0.5)
