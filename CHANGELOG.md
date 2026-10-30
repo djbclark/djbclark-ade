@@ -295,11 +295,101 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Removed
 
+- `bin/rumination-watch autoaccept` (2026-10-29): dead since the tool it wrapped moved to `bin/paseo-set-model autoaccept`, so a subcommand that looked live but mutated `~/.paseo/agents/*.json` by hand was deleted rather than kept beside the daemon-supported one (#134).
 - Removed the OpenUsage wiring (2026-10-29): the canonical `opencode-plugins/openusage-telemetry.ts`, its handling in `bin/opencode-plugin-guard` (the guard now manages `rtk` only), the three `claude-hook.sh` blocks in `agents/claude/settings.json.tmpl` and the `--previous-notify` fanout in `agents/codex/config.toml.tmpl`; an OpenUsage app relaunched from a stale `dist/` build is no longer fed by hooks or plugins (#119).
 
 ### Fixed
 
 - `bin/rumination-watch` could not reach the entity AT ALL, and had not since it was installed: `to_session` resolved the target from `RW_SESSION`/`PASEO_AGENT_ID` only, and a launchd job has neither, so it returned False every pass — 870 consecutive `spoke session=False` lines in `~/.local/state/rumination-watch/rumination.log`, zero deliveries, its whole purpose void (2026-10-29). The target is now resolved at RUN TIME and checked before use: the env override, then the comm registry's `paseo` id for the role, then `peer_mail.py resolve --as <role>`, each verified against `fleet.py` so a stale row cannot send into a dead session, with the unresolved case LOGGED (`cannot speak to session: ...`) instead of swallowed, and the relay outcome logged as delivered / queued / skipped / FAILED (`spoke session=<outcome>`, not a bool that reads like a status). No live session at all now also pings djbclark, once per cooldown and even on a quiet pass: a seat that is GONE stops producing the changes this watcher speaks about, so without that line the watcher would sit silent while the entity was dark — the exact outage it exists to prevent. Two assumptions in the same file were also wrong and are fixed: `--idle` was removed because it BLOCKS relay.py's deferral (a busy target got a refusal and no queue record, so the line was dropped), and a real launchd job cannot defer at all (no sender identity), so a busy target is now logged as skipped rather than retried into a void. Passes are serialised with a non-blocking flock, because launchd does not prevent a 300 s pass from overlapping the next and a second pass would re-announce the same line (#131).
+- `bin/rumination-watch` called every busy seat healthy: a refusal read as the single word `skipped`
+  whether the seat was mid-turn or parked on a question card only djbclark can answer, so a seat
+  waiting on a prompt and a seat wedged with nothing new for 15 minutes both logged the healthy word
+  while the entity was dark. It now asks `relay.py --why <id> --json` and keeps the answer (2026-10-29):
+  `working` is healthy and never paged, `card:question|permission|plan` and `silent` (a hung turn) are
+  darkness, and after `RW_STUCK_PASSES` (default 3, ~15 min) passes in a row of one class it tells
+  djbclark once per cooldown with what the obstacle is and how to clear it. A quiet pass probes too —
+  a seat that stops working stops producing changes, so without that the passes go quiet one after
+  another and an outage reads as "nothing new" all the way through — and an unreadable `--why` pages
+  nobody rather than guessing. `spoke session=` now carries the word (#134).
+- `bin/rumination-watch` lost a line whenever the seat refused it: `state["last"] = cur` had already
+  consumed the change, so the announcement was gone for good — and mail tends to arrive exactly
+  while the seat is busy, so this was the everyday collision, not an edge case. A refused line is
+  now kept in `state["pending"]`, prepended to the next pass and retried, cleared only by a real
+  send (`delivered` / `accepted` / `queued`, or an unrecognised rc 0 shape read as `sent`), and
+  bounded by `RW_PENDING_MAX` (clamped to at least 1, newest lines kept, every eviction logged). The
+  logged word is relay.py's own: `accepted` is no longer reported as `delivered`. Since 2026-10-29 it
+  is read from relay.py's `--json` report (`--json` is passed on the send) rather than its prose —
+  a reworded "do not resend" would have been retried forever and a reworded refusal never explained
+  — with the status line kept only as the fallback for an older relay.py that prints no report, and
+  the prose a peer's untrusted reply preview can carry is never consulted for the outcome. `_pass`
+  says plainly that delivery is AT-LEAST-ONCE on purpose: a crash between the send and the state
+  write re-sends a line, because journaling first would instead lose one, and a duplicate is visible
+  in the log while a lost line is invisible (#134).
+- `bin/rumination-watch` reported a `gh` page size as a count: `--limit 100` printed "100 open
+  PR(s)" whether there were 100 or 200. At the cap it now says "at least N", and a FAILED `gh` read
+  is "PR count unknown (gh unreadable)" rather than a confident 0 — the same class of unearned
+  precision as calling `accepted` "delivered" (#134).
+- `bin/rumination-watch` read both subprocess streams as one string, and `fleet.py` prints a warning
+  on STDERR on its successful `list --json` path: a healthy read could parse as an empty fleet and
+  page "Nothing is listening" — a false dead-seat page on a machine whose seat was running. JSON
+  reads (`fleet.py`, `peer_mail.py resolve`, `gh`, `relay.py --why`) now use stdout alone, and an
+  rc 0 body that is not a fleet is a broken READ, not an empty one. Three more honesty bugs from the
+  same review round: relay.py's rc 1 "it may have reached the daemon" / "do not resend" shapes are
+  `unverified` (settled, never retried, and djbclark is told the line may have been lost) instead of
+  `FAILED` and resent every 5 minutes; `card:picker` and `card:unknown` are darkness like the other
+  cards, so a seat parked on a picker is paged; and a FAILED, unverified or `skipped` pass no longer
+  resets the darkness streak (only a proven send or `working` does), because a flaky route used to
+  hide a parked seat. The knobs are clamped (`RW_PENDING_MAX=0` used to keep everything), and a
+  hand-edited state file of the wrong shape no longer kills the pass (#134).
+- `bin/rumination-watch` three round-two honesty bugs (2026-10-29). A failed page to djbclark used to
+  start a six-hour cooldown anyway: the `told` stamp was written inside `should_tell_djbclark`,
+  BEFORE `to_djbclark()` ran, so one failed `hermes send` — or an `inbox-target` that could not
+  resolve — silenced that page for the whole cooldown with nothing retrying it, on the one channel
+  whose job is saying the entity is dark. The stamp is now a separate `djb_page_sent` called only
+  after a send that actually returned True, at all four page sites (no live session, a dark seat, an
+  item that needs his decision, an unverified send), so a failed page is retried on the next
+  5-minute pass. A healthy `idle` seat resets the darkness streak: `idle` is `deliverable: true` in
+  relay.py and is what a quiet healthy pass sees every 5 minutes, and leaving it out let three card
+  episodes spread over a day page him "unable to take text for 3 passes in a row" — false in both
+  clauses. The hand-edit guards cover VALUES as well as shapes: a `told` timestamp written as a word
+  or a `stuck` count written as a string killed the pass at `float()` / `int()`, and such an entry is
+  now dropped while the rest of the state is kept. Two more glued-stream reads are split the same
+  way the JSON ones were: `inbox-target` warns on stderr and still exits 0, so a warning glued onto
+  the target paged a destination that does not exist, and a git notice on stderr became part of
+  `git rev-parse HEAD` and reported the chain log as permanently stale (#134).
+- `bin/rumination-watch` round three: the darkness rules, the send contract and the disclosure
+  retry (2026-10-29). A `card:*` this table has not learned is darkness: membership-only made
+  `card:slash_menu` (relay.py's `pane_look` gained it after `DARK_MEANING` was written) log as
+  ordinary status, reset the streak and stay mute — the same bug as `card:picker`, in a different
+  key — so the PREFIX is now the rule and `DARK_MEANING` is only the wording. The streak counts
+  CONSECUTIVE darkness, not one tally per class: a seat alternating `card:question` and `silent`
+  (a permission prompt whose turn times out, then re-prompts) counted to one under each key
+  forever and was never paged, though it had been unable to take text the whole time; the class is
+  kept beside the count only to word the message, and the page item is class-independent so a
+  flipping class cannot re-arm the six-hour cooldown and page him every three passes. A refusal
+  whose prose says "blocked on a card" and whose `--why` cannot name the kind is now
+  `card:unknown`, not the healthy `skipped` it used to be filed as, and `why_blocked`'s `detail` is
+  no longer logged: for a card it is relay.py's `paseo_card_detail`, the agent's own tool input,
+  which relay.py documents as shown by `--why` only and "never filed on a record or logged" — a
+  permission prompt can carry a command with a token in it. The send's argv is built by
+  `send_argv` and pinned by a test (`--no-ack --json`, and the pinned argv is the one `to_session`
+  passes): a source-wide `"--json"` match in relay.py also matched four of its own internal
+  `paseo_run` calls, so renaming the SEND parser's flag — argparse exit 2 on every watcher send,
+  logged FAILED and retried forever with nobody paged — would have left the contract test green.
+  And an unverified send's ADMISSION that the line may be lost is now carried in
+  `state["undisclosed"]` and retried until a send actually returns True, instead of being
+  attempted once: the line is still dropped on purpose (relay.py says "do not resend"), but one
+  failed `hermes send` at that moment used to consume the trigger and the double failure ended in
+  silence (#134).
+- `bin/rumination-watch` round four: a settled-but-unproven send is not health (2026-10-29).
+  relay.py's `accepted`, `queued` and `sent` keep a pending line out of the retry list, but they say
+  nothing about the SEAT: a hung Paseo seat that keeps accepting text cleared its own darkness count
+  on every busy pass, and a seat that produces a line every pass never has a quiet pass, so the
+  `silent` probe could never run — the streak never reached `SEAT_STUCK_PASSES` and nobody was
+  paged. A pass that gets one of those words now asks `relay.py --why` before touching the streak,
+  so the observation that counts is the seat's, not the route's; `delivered`, `working` and `idle`
+  alone reset it, and a probe that cannot be read (`unknown`) leaves the streak where it was rather
+  than guessing either way (#134).
 
 - The quota guard's `critical` advice (2026-10-29) is scoped to the Claude Code subscription pool: "No new Claude work of any kind until the reset ... hand off, stop" read as a stop order by idle omp sessions, so it now says "No new Claude Code subscription work (Agent-tool sub-agents of a Claude Code session included) until the reset", states that it is not a stop order for codex, grok, agy, zai and opencode sessions, and that an omp session keeps working only while `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares the Claude weekly rate window, which aiuse gates when every weekly window is exhausted); a Claude Code lead is sent to an omp successor on Paseo (`self-slash --finish --successor omp/anthropic/claude-sonnet-5-5`), told to start omp by hand on herdr and Orca (where `self-slash` refuses an omp successor), or to a codex or grok successor when omp is not listed (agy is not a Paseo provider), instead of another Claude Sonnet session; `skills/handoff` Step 9 keys the same exemption on the state file's `level` being `critical` and drops its old `critical` branches (a Fable lead to Opus, an Opus or Sonnet lead to plain `/new`) (#126).
 - `bin/paseo-new-seat` (2026-10-29): a claude seat created with the shield on no longer prints "auto_accept: NOT verified - the shield may be grey" and exits 4 once its mode is verified. Claude never publishes an `auto_accept` feature (its yolo is the permission mode), so its empty feature list is now "not offered" rather than "unverified"; other providers with an empty list still report unverified (#122).
