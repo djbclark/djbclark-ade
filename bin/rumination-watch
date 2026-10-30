@@ -23,6 +23,7 @@ WHAT IT WATCHES (each an "open loop")
 - **Stuck jobs**: a job whose `done` path exists but whose record is still open.
 - **Open PRs** authored by the operator's account (via `gh`; best-effort, offline is not an incident).
 - **Chain staleness**: the Tier 1 log's `head_sha` vs the repo's real HEAD.
+- **Next move**: the seat is `idle` (relay.py `--why`) and the Tier 1 log declares next steps. See below.
 
 AND IT DEPLOYS ITSELF (issue #143)
 ----------------------------------
@@ -32,6 +33,27 @@ heard" sat merged and unrun for hours while `last pass` looked healthy. Each pas
 fast-forwards its own checkout to `origin/<branch>` (fast-forward only, clean tracked tree only, never
 while another git operation is in progress) and logs `deploy updated <old> -> <new>`; a refusal is
 logged once per cooldown with its reason. `RW_NO_DEPLOY=1` turns it off.
+
+IT SPEAKS WHEN THE SEAT IS IDLE WITH DECLARED WORK (2026-10-30)
+----------------------------------------------------------------
+Everything above fires on a CHANGE, so an idle seat with a full `- Next steps:` list was told
+nothing for as long as nothing else moved: 216 consecutive quiet passes, 18.1 hours (2026-10-26 00:30
+to 18:37) with a healthy watcher and a seat nobody had started. `seat_dark("idle")` is "" on purpose
+(an idle seat is healthy), so `escalate_dark` cannot see it either. So one keyed, state-like item,
+`next move: N declared step(s) still open ...`, goes to the SEAT when ALL hold: the seat's `--why`
+probe (one per pass, cached by `seat_word`; the send paths add one more after an unproven send) says
+`idle` (never `working`, `silent`, `card:*`, `unreachable` or unreadable: those are busy, or already
+covered by the darkness page), the Tier 1 log (the same file `chain_staleness` reads, via
+`resolve_pointer`) has N >= 1 OPEN steps under `- Next steps:`, and the last nudge settled more than
+RW_IDLE_NUDGE_S ago. A bullet that says there is nothing to do (`- None`, `NOTHING IS PENDING ...`,
+`- No further work`) is not a step and is not counted: otherwise the natural way for a seat to say "I
+am done" would keep nudging it every cooldown forever, with no ack that could stop it. The line
+carries the COUNT and never a step's text: several chains write to one pointer, and naming a step
+would send this seat to do another seat's slice. It goes to the seat, not djbclark: it is not his
+decision. The one exception is the tool's standing rule for ANY line — if its send comes back
+`unverified`, the disclosure that an admitted loss happened still goes to him. Knobs:
+`RW_IDLE_NUDGE=0` turns it off; `RW_IDLE_NUDGE_S` is the cooldown (default 10800, 3 h), stamped only
+by a send that settled.
 
 TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
 -------------------------------------------------
@@ -165,7 +187,7 @@ def load_state() -> dict:
     # A list where a mapping belongs used to raise AttributeError mid-pass (the whole watcher down,
     # silently, for as long as the file stayed wrong); a string `pending` was iterated character by
     # character. Neither is reachable except by hand — which is exactly when a watcher must not die.
-    for key in ("last", "told", "stuck"):
+    for key in ("last", "told", "stuck", "nudged"):
         if not isinstance(data.get(key), dict):
             data[key] = {}
     # `pending` entries are `{"key", "text", "queued_at"}` since 2026-10-30 (see `_pass`); before that
@@ -184,16 +206,21 @@ def load_state() -> dict:
     # guards above are for, one level down. Drop only the unreadable entries; keep the rest.
     data["told"] = {k: v for k, v in data["told"].items() if _is_num(v)}
     data["stuck"] = {k: v for k, v in data["stuck"].items() if _is_num(v)}
+    data["nudged"] = {k: v for k, v in data["nudged"].items() if _is_num(v)}
     return data
 
 
 def _is_num(value: object) -> bool:
-    """A number we can do arithmetic with. JSON can hand us a string, a list or null here."""
+    """A number we can do arithmetic with. JSON can hand us a string, a list or null here.
+
+    Non-finite counts as unreadable (`"1e999"` parses to `inf`): a stamp of `inf` would silence the
+    item it guards FOREVER, and no later pass can heal it, because the pass that never fires never
+    re-stamps. Dropping it is the only self-healing answer.
+    """
     try:
-        float(value)                      # type: ignore[arg-type]
+        return math.isfinite(float(value))          # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
         return False
-    return True
 
 
 def save_state(data: dict) -> None:
@@ -490,6 +517,88 @@ def pr_phrase(prs: list[str] | None) -> str:
     return f"{'at least ' if capped else ''}{n} open PR(s) of yours"
 
 
+def resolve_pointer() -> Path | None:
+    """The file that IS the Tier 1 log for REPO, or None when the pointer itself is unreadable.
+
+    Reads `HOME/.local/state/handoffs/<REPO.name>/main/SESSION_LOG.md` and follows a
+    `redirect: <path>` line to the canonical log. The ONE place that decides which file is the
+    pointer: `chain_staleness` (the recorded head) and `declared_next_steps` (the open steps) both
+    read through it, so they cannot disagree about which log they are talking about. The returned
+    path may not exist (a dangling redirect): the caller's own read says so.
+    """
+    root = HOME / ".local/state/handoffs"
+    pointer = root / REPO.name / "main" / "SESSION_LOG.md"
+    try:
+        text = pointer.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if m := re.search(r"^redirect:\s*(\S+)", text, re.M):
+        return root / m.group(1)
+    return pointer
+
+
+_NEXT_STEPS = re.compile(r"^- Next steps:\s*$")
+# Every way a pointer writes a step: `- `, `* `, `+ `, and numbered `1. ` / `1) `. The numbered form
+# was excluded at first and that was a MISS of real open work (`graft-pr519-gitignore` lists its two
+# remaining steps as `1. `/`2. `), which is the direction that costs the entity: a chain with work
+# left says nothing. The count is still structural, never a reading of the words.
+_BULLET = re.compile(r"^(\s+)(?:[-*+]|\d+[.)])\s+(.*)$")
+# ...except a bullet that says there is NOTHING to do. `- Next steps:` + `  - None` is how a seat
+# writes "I am done", and counting it would nudge that seat every cooldown forever with no ack that
+# could end it: 12 of 135 real chains said it (2 of them live repo-keyed pointers) when this was
+# found. The list is deliberately narrow (the words that mean "no work"), never a guess at intent.
+_NOTHING_STEP = re.compile(
+    r"^(?:none|nothing|n/?a|no\s+(?:further|more|action|open|pending|remaining|mandatory|merge|"
+    r"steps?|work))\b", re.I)
+_EMPHASIS = "*`_~ "
+
+
+def _step_text(raw: str) -> str:
+    """A bullet's text with the markdown emphasis a pointer wraps around it removed."""
+    return raw.strip().strip(_EMPHASIS)
+
+
+def declared_next_steps() -> int:
+    """How many OPEN next steps the Tier 1 log declares, or 0. The COUNT only, never their text.
+
+    Finds the line `- Next steps:` (column 0, nothing after the colon: how the pointer files write
+    it inside `## Current State`) and counts the indented bullets that follow it. The block ends at
+    the first blank line or the first unindented line (a new top-level bullet such as
+    `- Substrate question answered: ...`, or the next `## ` heading). Two shapes continue a block
+    without being a step: a wrapped line of text (indented, no bullet) and a bullet nested deeper
+    than the first one. Only bullets at the first bullet's own indentation count, and a bullet whose
+    text says there is nothing to do (`- None`, `NOTHING IS PENDING ...`) counts nothing: "done" is
+    not a step, and a false 1 here nags the seat forever.
+
+    A missing pointer, an unreadable file, no such section or an empty one is 0: the caller treats
+    that as "nothing declared", never as an error and never as a guess.
+    """
+    path = resolve_pointer()
+    if path is None:
+        return 0
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return 0
+    start = next((i for i, ln in enumerate(lines) if _NEXT_STEPS.match(ln)), None)
+    if start is None:
+        return 0
+    count = 0
+    indent: str | None = None
+    for ln in lines[start + 1:]:
+        if not ln.strip() or not ln[0].isspace():
+            break
+        m = _BULLET.match(ln)
+        if not m or (indent is not None and m.group(1) != indent):
+            continue          # wrapped text, or a deeper bullet: part of the block, not a step
+        indent = m.group(1)
+        text = _step_text(m.group(2))
+        if not text or _NOTHING_STEP.match(text) or text[:3].lower() == "[x]":
+            continue          # "nothing to do", an empty bullet, or a ticked-off checklist row
+        count += 1
+    return count
+
+
 def chain_staleness() -> str | None:
     """The Tier 1 log's recorded head vs the repo's real HEAD. A string when they disagree.
 
@@ -498,16 +607,13 @@ def chain_staleness() -> str | None:
     or a peer seat committing) is the normal case, not staleness. This is the same check the
     `session-handoff` skill documents, done mechanically so nobody has to remember it.
     """
-    pointer = HOME / ".local/state/handoffs" / REPO.name / "main" / "SESSION_LOG.md"
+    pointer = resolve_pointer()
+    if pointer is None:
+        return None
     try:
         text = pointer.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
-    if m := re.search(r"^redirect:\s*(\S+)", text, re.M):
-        try:
-            text = (HOME / ".local/state/handoffs" / m.group(1)).read_text()
-        except OSError:
-            return None
     m = re.search(r"head_sha:\s*([0-9a-f]{7,40})", text)
     if not m:
         return None
@@ -868,6 +974,31 @@ def djb_page_sent(item: str, state: dict, now: float) -> None:
     told[item] = now
 
 
+def nudge_due(ident: str, state: dict, now: float) -> bool:
+    """May the idle-with-work nudge be considered this pass? Switch on, a seat to speak to, cooldown over.
+
+    The window is `0 <= age < NUDGE_S`, not `age < NUDGE_S`: a stamp in the FUTURE (a hand edit, or a
+    clock that ran ahead when the stamp was written and was corrected later) must expire rather than
+    hold the cooldown open for as long as it takes the clock to catch up — the one shape that could
+    silence the line that keeps this entity alive, permanently.
+    """
+    if not NUDGE_ON or not ident:
+        return False
+    nudged = state.get("nudged")
+    last = nudged.get(KEY_NEXT) if isinstance(nudged, dict) else None
+    return not (last is not None and 0 <= now - float(last) < NUDGE_S)
+
+
+def nudge_sent(state: dict, now: float) -> None:
+    """The nudge reached the seat: start the cooldown. Called ONLY after a send that settled, never
+    before it (the `djb_page_sent` lesson: stamping first lets one transient failure silence the
+    nudge for the whole cooldown)."""
+    nudged = state.get("nudged")
+    if not isinstance(nudged, dict):
+        nudged = state["nudged"] = {}
+    nudged[KEY_NEXT] = now
+
+
 # A refused pass is a turn boundary, not an outage: the seat is usually mid-work. Only the words
 # that mean "this will not end by itself" are darkness, and only after they repeat this many passes.
 SEAT_STUCK_PASSES = _env_int("RW_STUCK_PASSES", 3)
@@ -879,6 +1010,13 @@ PENDING_MAX = _env_int("RW_PENDING_MAX", 6)
 # time when this pass no longer recomputes the condition.
 KEY_STALE = "stale chain log"
 KEY_STUCK = "job(s) finished but not closed"
+KEY_NEXT = "next move"
+
+# The idle-with-work nudge (see `_pass`). Its own cooldown, in its own `state["nudged"]` map: it is a
+# line to the SEAT, so it shares nothing with the per-item budget of the pages to djbclark.
+# RW_IDLE_NUDGE=0 turns it off.
+NUDGE_ON = os.environ.get("RW_IDLE_NUDGE", "1").strip().lower() not in ("0", "false", "no", "off")
+NUDGE_S = _env_int("RW_IDLE_NUDGE_S", 3 * 3600)
 
 # A page size for `gh search prs`, not a ceiling on reality: at the cap the count is a lower bound.
 PR_LIMIT = _env_int("RW_PR_LIMIT", 100)
@@ -1074,6 +1212,17 @@ def _pass(a: argparse.Namespace) -> int:
     before = state.get("last", {})
     cur = survey()
 
+    # Resolved BEFORE the items, because the idle-nudge below needs the seat. ONE `--why` probe per
+    # pass: whichever of the nudge gate and the quiet branch asks first pays for it, the other reads
+    # the cached answer.
+    ident, why = owner_session()
+    probe: list[tuple[str, str]] = []
+
+    def seat_word() -> str:
+        if ident and not probe:
+            probe.append(why_blocked(ident))
+        return probe[0][0] if probe else ""
+
     changed = [k for k, v in cur.items() if v != before.get(k)]
 
     # What is genuinely NEW drives the session line; a re-observation must stay silent.
@@ -1108,6 +1257,15 @@ def _pass(a: argparse.Namespace) -> int:
     stuck = [j["name"] for j in cur["jobs"] if j["done_exists"]]
     if stuck:
         items.append((KEY_STUCK, f"job(s) finished but not closed: {', '.join(stuck[:3])}"))
+
+    # The one state-like line about WORK instead of about plumbing: the seat is idle and the Tier 1
+    # log declares next steps nobody has started. It is recomputed every pass and keyed, so the
+    # carry block below retires a queued copy exactly as it does `stale chain log`: no special case.
+    # The count is read first (a file) and the probe made only when there is something to say.
+    nudge_n = declared_next_steps() if nudge_due(ident, state, now) else 0
+    if nudge_n and seat_word() == "idle":
+        items.append((KEY_NEXT, f"next move: {nudge_n} declared step(s) still open in the Tier 1 "
+                                "log and this seat is idle"))
     lines = [text for _, text in items]
 
     if a.dry_run:
@@ -1136,7 +1294,6 @@ def _pass(a: argparse.Namespace) -> int:
     # even on a quiet pass — because if the seat died, the survey it reads stops changing too, and
     # the pass then stays quiet forever. That is exactly how the entity went dark for hours at a
     # time with a watcher running the whole while.
-    ident, why = owner_session()
     if not ident and should_tell_djbclark("no live session", state, now):
         if _LIVE_ERR:
             said = (
@@ -1211,6 +1368,12 @@ def _pass(a: argparse.Namespace) -> int:
         # pass may have taken a while since the resolution above, and this is the line that has to
         # arrive, so the target is re-checked rather than trusted from a minute ago.
         spoke_session = to_session(summary) if ident else "unreachable"
+        # Stamped only now, by a send that SETTLED: a refused or failed one leaves the nudge due, and
+        # the keyed pending entry retries it. `unverified` counts: relay says "do not resend", and
+        # resending every pass is exactly the duplicate it warns about.
+        if any(k == KEY_NEXT for k, _ in items) and (spoke_session in SENT_WORDS
+                                                      or spoke_session == "unverified"):
+            nudge_sent(state, now)
         # A settled-but-unverified send is NOT a health observation (see UNPROVEN_SEND): the line is
         # done (`SENT_WORDS` settles `pending` below) but the seat has told us nothing, so ask it. The
         # send word stays in the log line; the probe's word is what counts the streak.
@@ -1267,7 +1430,7 @@ def _pass(a: argparse.Namespace) -> int:
         # all the way through. One `paseo agent inspect` per 5 minutes is the price of noticing.
         # The word here is a `--why` state, so a healthy `idle` must reset the streak (C2): otherwise
         # the streak counts dark passes that were not consecutive and the page says "in a row".
-        word = why_blocked(ident)[0] if ident else ""
+        word = seat_word()
         dark_item, dark_msg = escalate_dark(word, ident, state, now) if word else ("", "")
         if dark_msg and to_djbclark(dark_msg):
             djb_page_sent(dark_item, state, now)
@@ -1361,7 +1524,10 @@ def main(argv: list[str] | None = None) -> int:
             "launchd job without a hand pull: fast-forward only, never a merge commit, reset or stash, "
             "and it refuses rather than forcing on a dirty tracked tree, a detached HEAD, a git "
             "operation in progress, or local commits origin lacks. RW_NO_DEPLOY=1 turns it off, "
-            "--dry-run never touches the checkout, and `status` prints the last deploy."
+            "--dry-run never touches the checkout, and `status` prints the last deploy. "
+            "An idle seat whose Tier 1 log declares next steps gets one `next move: N declared "
+            "step(s) still open` line per RW_IDLE_NUDGE_S (default 10800 s); RW_IDLE_NUDGE=0 "
+            "turns it off."
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)
