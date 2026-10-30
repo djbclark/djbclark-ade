@@ -9,7 +9,8 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
 ## A. The ruling (djbclark, 2026-10-29, verbatim intent)
 
 1. **Paseo only.** No herdr, no tuios, no other harness (Orca, Superset/Paradev, TUICommander, raw tmux
-   panes, Hermes-as-harness). Every agent the operator talks to is a Paseo agent.
+   panes, Hermes-as-harness). Every agent the operator talks to is a Paseo agent. Amended by A8: Herdr, and
+   possibly a modified tuios, stay as attach clients to running Paseo agents, never as harnesses.
 2. **Retire `relay.py`** and every non-Paseo channel; inter-agent communication moves to Paseo's native
    framework (`send_agent_prompt`, `create_agent` with `notifyOnFinish`, `list_agents`,
    `respond_to_permission`, heartbeats, schedules, `PASEO_PARENT_ID` lineage, the parent-wake plugin).
@@ -18,7 +19,7 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
 4. **End state:** no mention of any harness other than Paseo anywhere in djbclark-ade, `~/AGENTS.md`
    (`site-djbclark/cursor/home-agents.mdc`), the ops `AGENTS.md` files, skills, docs or memory pointers,
    except the history that is not normally read (the `docs/history/` directory, F5, to be written from the
-   retired material) and, during the migration, this plan.
+   retired material), the attach-client material of A8, and, during the migration, this plan.
 5. **Basis:** the research in `Open-Source AI Agent Harnesses Compared.pdf` (Paseo Desktop upload
    `upload_d70305b6-6865-461c-83df-aab4fb305afb`, 2026-10-29): Paseo scores 92.2/100 on non-blocking
    inter-TUI communication once ClinePass and OpenCode Go support without code is a hard requirement
@@ -32,6 +33,11 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
    picklist or card.
 7. **Both Fable and codex astra (GPT-6) take part in the re-architecting** (djbclark, 2026-10-29); this
    overrides the routing-policy line that reserves them for `frontier` consults.
+8. **Attach clients stay** (djbclark, 2026-10-30, relayed by e484ad02 of chain `standalone-aff7`): he still
+   wants Herdr to attach to running Paseo agents, and a modified tuios may do the same. Herdr, and tuios if
+   it is modified for this, are **attach clients**: they show and drive an agent that Paseo hosts. They do
+   not host, launch, name, sleep or message agents, and no tool reaches an agent through them. Not yet ruled:
+   the `paseo-herdr` plugin direction (Paseo reaching Herdr-hosted terminals), section E4.
 
 ## B. Principles for the new architecture
 
@@ -49,6 +55,8 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
    living in its own repo or under `paseo-plugins/` here, never a sidecar script that talks to a TUI.
 6. Routing, quota and cost policy stay (they are provider policy, not harness policy) but are expressed
    as Paseo agent profiles (`list_profiles`) plus `aiuse`.
+7. Attach clients (A8) attach to an agent Paseo already hosts. Nothing in the toolchain depends on an attach
+   client being open, and no tool reads or types into one.
 
 ## C. Inventory and disposition (first pass; counts are `rg -li` over the repo on 2026-10-29,
 excluding `graft/` and `docs/handoffs/`)
@@ -56,7 +64,9 @@ excluding `graft/` and `docs/handoffs/`)
 | Capability today | Footprint | Disposition | Paseo replacement |
 |---|---|---|---|
 | `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | RETIRE | `send_agent_prompt` (steer/interrupt), `list_agents`, `PASEO_PARENT_ID`; acks become `notifyOnFinish` events |
-| herdr (`bin/herdr-*`, `docs/herdr-*.md`, `skills/herdr*`, pane/tab naming `-t/-p`) | 139 files | RETIRE | Paseo workspaces/tabs; naming `-pw` only |
+| herdr as a harness (`bin/herdr-*`, `docs/herdr-*.md`, `skills/herdr*`, pane/tab naming `-t/-p`, panes hosting agents, pane typing) | 139 files | RETIRE | Paseo workspaces/tabs; naming `-pw` only |
+| herdr as an attach client to running Paseo agents (A8) | — (to build) | KEEP, as an attach client only | one doc and one skill: how to attach Herdr to a running Paseo agent |
+| tuios as an attach client (A8), possibly modified | — | DECIDE: only if tuios is modified to attach to Paseo agents | same doc and skill as herdr |
 | Orca (`docs/orca-integration.md`, `skills/orca-cli`, `skills/reorg-orca`, worker-start) | 103 files | RETIRE | Paseo workspaces + subagents |
 | Superset/Paradev skills (`skills/superset-*`) | 10 files | RETIRE (evaluation concluded, 2026-10-29) | none |
 | `acp-run`, `acp-dispatch`, `acp-dispatch-wait`, dispatch records, launchd runner scripts, reap sweep | 138 + 109 files | REPLACE | `create_agent` (worktree workspace, `notifyOnFinish`), schedules for unattended runs; keep only what Paseo cannot do (decide in consult: timeouts/wrap-up turn, report files, resume-after-quota) |
@@ -94,7 +104,8 @@ excluding `graft/` and `docs/handoffs/`)
 5. **Docs and instruction files**: README, AGENTS.md (both), ops AGENTS.md, memory pointers, skills
    index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/` from the
    retired material; `rg -i 'herdr|orca|tmux|superset|tuicommander|relay\.py|acp-run|acp-dispatch'`
-   outside that directory returns nothing (CI check, `context-policy` job).
+   outside that directory returns nothing, except `herdr` and `tuios` in the attach-client doc and skill (A8)
+   (CI check, `context-policy` job).
 6. **Plugins**: whatever D0 decided we must write (candidates: dispatch-with-timeout-and-report,
    quota-aware launch gate, Telegram notifier if Paseo's push is insufficient), each its own repo or
    `paseo-plugins/`, upstreamed where general (home rule 38).
@@ -107,6 +118,10 @@ excluding `graft/` and `docs/handoffs/`)
 2. D3 Nimbalyst Wiki install/test, assigned to the lead by djbclark via 0b70f359 (2026-10-29): parked,
    to run as its own Paseo subagent in a worktree workspace after phase 1.
 3. `docs/queue.md` entries unchanged.
+4. The `paseo-herdr` Paseo plugin (fork https://github.com/djbclark/paseo-herdr, branch `seam-fixes` at
+   9e3b393, owned by e484ad02 of chain `standalone-aff7`) lets Paseo reach Herdr-hosted terminals. That is the
+   reverse of A8's attach direction, and djbclark has not ruled on it; its owner paused new adapter slices and
+   upstream posts on 2026-10-30 until he does. This plan writes nothing in `~/src/paseo-herdr`.
 
 ## F. Open questions for djbclark (successor asks with numbered options, one per card)
 
