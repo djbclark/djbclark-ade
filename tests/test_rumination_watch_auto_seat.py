@@ -14,6 +14,15 @@ NEW = "new-seat"
 SECRET = "DISTINCTIVE OTHER CHAIN SLICE DO NOT COPY"
 QUIET = {"mail": [], "jobs": [], "prs": [], "stale": None}
 
+# `auto_seat` starts a seat as `env -u PASEO_AGENT_ID paseo run …`: with that variable set the daemon
+# parents the new agent to it, so a pass run by hand from inside an agent would make the entity's next
+# seat that agent's SUBAGENT (measured 2026-10-30). No test may pin a bare `paseo run`.
+RUN = ["env", "-u", "PASEO_AGENT_ID", "paseo", "run"]
+
+
+def is_start(argv):
+    return argv[:len(RUN)] == RUN
+
 
 def load(monkeypatch, tmp_path, switch="1"):
     monkeypatch.delenv("RW_SESSION", raising=False)
@@ -31,6 +40,7 @@ def load(monkeypatch, tmp_path, switch="1"):
     rw.real_owner_session = rw.owner_session
     rw.real_why_blocked = rw.why_blocked
     rw.real_run_split = rw.run_split
+    rw.real_open_desktop_tab = rw.open_desktop_tab
     monkeypatch.setattr(rw, "HOME", tmp_path)
     monkeypatch.setattr(rw, "REPO", tmp_path / "entity")
     monkeypatch.setattr(rw, "ROLE", "test-role")
@@ -56,6 +66,22 @@ def load(monkeypatch, tmp_path, switch="1"):
     rw.confirm = True
     rw.enum_rc, rw.enum_body = 1, ""
 
+    # The Desktop tab is its own subprocess (`paseo agent open`). Stubbed so every call-count
+    # assertion below stays about the start and its confirmation; the tests at the end restore the
+    # real helper (`rw.real_open_desktop_tab`) to pin what it runs and what it logs.
+    rw.opened = []
+    rw.open_failure = ""
+
+    def open_tab(agent_id):
+        # The tab attempt is stamped AFTER the open on BOTH paths, so a kill during the open leaves
+        # it unrecorded and the next pass retries an idempotent `agent open` (adversary D4: moving
+        # `tab_once`'s stamp above its own open survived every test).
+        assert f"auto-seat tab:{agent_id}" not in rw.load_state().get("told", {})
+        rw.opened.append(agent_id)
+        return rw.open_failure
+
+    monkeypatch.setattr(rw, "open_desktop_tab", open_tab)
+
     def run(argv, timeout=20):
         rw.calls.append((argv, timeout))
         if argv == ["paseo", "ls", "--json", "--background"]:
@@ -63,7 +89,7 @@ def load(monkeypatch, tmp_path, switch="1"):
             return rw.enum_rc, rw.enum_body, "listing failure" if rw.enum_rc else ""
         # The successful-start stamp must not exist during either the start OR confirmation call.
         assert rw.load_state().get("seated", {}).get(rw.ROLE) != NOW
-        if argv[:2] == ["paseo", "run"]:
+        if is_start(argv):
             assert rw.load_state()["told"][f"auto-seat attempt:{rw.ROLE}"] == rw.time.time()
             body = rw.run_body if rw.run_body is not None else (json.dumps({"agentId": NEW}) if rw.run_rc == 0 else "")
             return rw.run_rc, body, "stub failure" if rw.run_rc else ""
@@ -92,8 +118,8 @@ def test_2_gone_starts_once_with_file_not_slice_and_stamps_after_inspect(monkeyp
     run_pass(rw)
     assert len(rw.calls) == 2
     argv, timeout = rw.calls[0]
-    assert argv[:-1] == ["paseo", "run", "--provider", "opencode/opencode-go", "--no-wait", "--json",
-                        "--cwd", str(rw.REPO), "--title", "test-role (auto-seat)", "--"]
+    assert argv[:-1] == RUN + ["--provider", "opencode/opencode-go", "--no-wait", "--json",
+                               "--cwd", str(rw.REPO), "--title", "test-role (auto-seat)", "--"]
     assert str(rw.pointer.resolve()) in argv[-1]
     assert rw.ROLE in argv[-1] and str(rw.REPO) in argv[-1]
     assert SECRET not in argv[-1]
@@ -102,6 +128,9 @@ def test_2_gone_starts_once_with_file_not_slice_and_stamps_after_inspect(monkeyp
     assert len(argv[-1].splitlines()) < 15
     assert timeout <= 120 and rw.calls[1][1] <= 20
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+    # The confirmed start is the ONE path that owes the new seat a tab (adversary N7: the calls
+    # list cannot see this, so a mutant that opens in the WRONG branch survived).
+    assert rw.opened == [NEW]
 
 
 def test_3_error_is_a_broken_read_not_an_absent_seat(monkeypatch, tmp_path):
@@ -146,11 +175,11 @@ def test_7_failed_run_stays_unresolved_after_attempt_window(monkeypatch, tmp_pat
     assert rw.load_state()["told"][f"auto-seat attempt:{rw.ROLE}"] == NOW
     monkeypatch.setattr(rw.time, "time", lambda: NOW + 300)
     run_pass(rw)
-    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
+    assert sum(is_start(argv) for argv, _ in rw.calls) == 1
     assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 1
     monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S)
     run_pass(rw)
-    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
+    assert sum(is_start(argv) for argv, _ in rw.calls) == 1
     assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
     assert not rw.load_state().get("seated")
     assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 1
@@ -164,6 +193,7 @@ def test_8_unconfirmed_start_does_not_stamp(monkeypatch, tmp_path):
     run_pass(rw)
     assert len(rw.calls) == 2
     assert not rw.load_state().get("seated")
+    assert rw.opened == []          # unconfirmed: no seat to give a tab to (adversary N7)
     assert f"auto-seat: confirmation failed id={NEW}; rc=1; stderr='not found'" in rw.LOG.read_text()
 
 
@@ -238,7 +268,7 @@ def test_16_retained_candidate_prevents_duplicates_even_after_cooldown(monkeypat
     monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
     monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle" if ident == NEW else "gone", "test"))
     run_pass(rw)
-    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
+    assert sum(is_start(argv) for argv, _ in rw.calls) == 1
     assert rw.auto_seat_candidate(rw.load_state()) == NEW
     if not confirmed:
         assert not rw.load_state().get("seated")
@@ -325,13 +355,13 @@ def test_22_prior_refusal_cannot_hide_an_invocation_or_consume_attempt_window(mo
     rw.run_rc = 127
     run_pass(rw)
     run_pass(rw)
-    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
+    assert sum(is_start(argv) for argv, _ in rw.calls) == 1
     text = rw.LOG.read_text()
     assert text.count("auto-seat: not started") == 1
     assert text.count("auto-seat: attempted paseo run rc=127; stderr='stub failure'; id=none; failed") == 1
     monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S)
     run_pass(rw)
-    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
+    assert sum(is_start(argv) for argv, _ in rw.calls) == 1
     assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 1
 
 
@@ -361,6 +391,7 @@ def direct_probe_world(monkeypatch, tmp_path, response, ident=ABSENT):
     """Real why_blocked + run_split, with a no-match relay and a fake Paseo executable."""
     rw = load(monkeypatch, tmp_path)
     monkeypatch.setattr(rw, "why_blocked", rw.real_why_blocked)
+    monkeypatch.setattr(rw, "open_desktop_tab", rw.real_open_desktop_tab)
     monkeypatch.setattr(rw, "owner_session", lambda: ("", "no live session"))
     monkeypatch.setattr(rw, "owner_candidates", lambda: iter([("registry", ident)]))
     relay = tmp_path / "src/djbclark-ade/skills/session-finder/relay.py"
@@ -376,6 +407,8 @@ with Path({str(calls)!r}).open('a') as f:
     f.write(json.dumps(args) + '\\n')
 if args[0] == 'run':
     print(json.dumps({{'agentId': {CREATED!r}}}))
+elif args[:2] == ['agent', 'open']:
+    print(json.dumps({{'opened': args[2]}}))
 elif args == ['agent', 'inspect', '--json', '--', {CREATED!r}]:
     print(json.dumps({{'Id': {CREATED!r}, 'Archived': False, 'Status': 'running'}}))
 elif args == ['agent', 'inspect', '--json', '--', {ident!r}]:
@@ -422,6 +455,10 @@ def test_25_real_probe_not_found_reaches_gone_and_exactly_one_start(monkeypatch,
     calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()]
     assert sum(args[0] == "run" for args in calls) == 1
     assert ["agent", "inspect", "--json", "--", ABSENT] in calls
+    # Confirmed, then given a tab: a `paseo run` agent has none, and an invisible seat that hits a
+    # `card:*` (which §J never answers) is the darkness this file exists to end, one level down.
+    assert calls.index(["agent", "open", CREATED, "--json"]) > calls.index(
+        ["agent", "inspect", "--json", "--", CREATED])
     assert rw.load_state()["seated"] == {rw.ROLE: NOW}
 
 
@@ -453,7 +490,7 @@ def test_28_prior_refusal_does_not_hide_failed_inspect_or_bounded_run_stderr(mon
     monkeypatch.setattr(rw, "why_blocked", lambda ident: ("gone", "test"))
 
     def run(argv, timeout=20):
-        if argv[:2] == ["paseo", "run"]:
+        if is_start(argv):
             return 0, json.dumps({"agentId": NEW}), "R" * 160 + "RUN_TAIL"
         return 127, "", "I" * 160 + "INSPECT_TAIL"
 
@@ -494,7 +531,7 @@ def lost_id(monkeypatch, tmp_path):
 
 
 def starts(rw):
-    return sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls)
+    return sum(is_start(argv) for argv, _ in rw.calls)
 
 
 def test_30_timeout_and_expired_window_cannot_duplicate_with_old_registry_gone(monkeypatch, tmp_path):
@@ -557,7 +594,7 @@ def test_33_bad_listing_keeps_marker_and_darkness_page(monkeypatch, tmp_path, rc
 def test_34_marker_is_durable_before_subprocess_can_crash(monkeypatch, tmp_path):
     rw = load(monkeypatch, tmp_path)
     def crash(argv, timeout):
-        assert argv[:2] == ["paseo", "run"]
+        assert is_start(argv)
         state = rw.load_state()
         assert state["told"][f"auto-seat unresolved:{rw.ROLE}"] == NOW
         assert state["told"][f"auto-seat attempt:{rw.ROLE}"] == NOW
@@ -594,7 +631,7 @@ def test_37_recovery_crash_keeps_mail_discoverable_from_disk(monkeypatch, tmp_pa
     run = rw.run_split
 
     def crash(argv, timeout):
-        if argv[:2] == (["paseo", "run"] if crash_at == "run" else ["paseo", "agent"]):
+        if is_start(argv) if crash_at == "run" else argv[:2] == ["paseo", "agent"]:
             raise RuntimeError("interrupted recovery subprocess")
         return run(argv, timeout)
 
@@ -648,3 +685,307 @@ def test_38_recovery_save_before_page_keeps_previous_survey(monkeypatch, tmp_pat
         assert disk["seated"][rw.ROLE] == NOW
     if recovery != "cleared":
         assert disk["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] == NOW
+
+
+def tab_world(monkeypatch, tmp_path, open_rc=0, open_err="", no_open=None):
+    """A whole pass with the REAL tab helper and a stub Paseo: what is opened, and what is logged."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "open_desktop_tab", rw.real_open_desktop_tab)
+    if no_open is None:
+        monkeypatch.delenv("RW_AUTO_SEAT_NO_OPEN", raising=False)
+    else:
+        monkeypatch.setenv("RW_AUTO_SEAT_NO_OPEN", no_open)
+
+    def run(argv, timeout=20):
+        rw.calls.append((argv, timeout))
+        if is_start(argv):
+            return 0, json.dumps({"agentId": NEW}), ""
+        if argv[:3] == ["paseo", "agent", "inspect"]:
+            return 0, json.dumps({"Id": NEW, "Archived": False, "Status": "running"}), ""
+        if argv[:3] == ["paseo", "agent", "open"]:
+            # N3: the seat must already be saved and the unresolved marker gone BEFORE the open
+            # runs. A kill during the open then leaves a seated, diagnosable id, never a seat that
+            # the next pass cannot find.
+            disk = rw.load_state()
+            assert disk["seated"] == {rw.ROLE: NOW}
+            assert f"auto-seat unresolved:{rw.ROLE}" not in disk["told"]
+            return open_rc, "", open_err
+        raise AssertionError(f"unexpected call {argv}")
+
+    monkeypatch.setattr(rw, "run_split", run)
+    return rw
+
+
+def test_39_confirmed_start_opens_the_tab_in_paseo_desktop(monkeypatch, tmp_path):
+    rw = tab_world(monkeypatch, tmp_path)
+    run_pass(rw)
+    opened = [(argv, timeout) for argv, timeout in rw.calls if argv[:3] == ["paseo", "agent", "open"]]
+    assert [argv for argv, _ in opened] == [["paseo", "agent", "open", NEW, "--json"]]
+    assert opened[0][1] <= 20
+    assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+    # N1: `agent open` exits as soon as the app is launched, so the line must not claim a tab was
+    # OBSERVED - only that the deep link was sent.
+    assert f"auto-seat: sent {NEW} to Paseo Desktop (a tab is not confirmable from here)" in rw.LOG.read_text()
+    assert "opened" not in rw.LOG.read_text()
+    assert len(rw.pages) == 1 and NEW in rw.pages[0]
+
+
+def test_40_a_failed_open_keeps_the_seat_and_tells_djbclark(monkeypatch, tmp_path):
+    rw = tab_world(monkeypatch, tmp_path, open_rc=3, open_err="no Desktop process")
+    run_pass(rw)
+    text = rw.LOG.read_text()
+    assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+    assert "NOT opened in Paseo Desktop (rc=3: no Desktop process); it is reachable by relay" in text
+    assert f"run paseo agent open {NEW}" in text
+    # N2: the failure must reach the human, not just the pass log - a card on an unopened seat is
+    # exactly the darkness this feature exists to end.
+    assert len(rw.pages) == 1 and NEW in rw.pages[0]
+    assert "it is reachable by relay but has no tab: run paseo agent open new-seat" in rw.pages[0]
+    # A failed tab must never turn into a SECOND seat or a second open on the next pass - including
+    # when fleet lists the seat, so `owner_session` resolves it as the owner (adversary D3: with the
+    # candidate still diagnosed "gone" the adoption branch was never entered, so dropping the
+    # fresh start's own tab stamp survived this test).
+    monkeypatch.setattr(rw, "owner_session", lambda: (NEW, "auto-seat"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    run_pass(rw)
+    assert sum(is_start(argv) for argv, _ in rw.calls) == 1
+    assert [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]] == [
+        ["paseo", "agent", "open", NEW, "--json"]]
+    assert len(rw.pages) == 1
+
+
+@pytest.mark.parametrize("word", ["1", "true", "yes", "on"])
+def test_41_no_open_switch_skips_the_attempt_and_still_seats(monkeypatch, tmp_path, word):
+    rw = tab_world(monkeypatch, tmp_path, no_open=word)
+    run_pass(rw)
+    assert [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]] == []
+    assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+    # The reason names the value that was actually set (adversary D5): it reaches djbclark.
+    assert f"NOT opened (RW_AUTO_SEAT_NO_OPEN={word}): run paseo agent open {NEW}" in rw.LOG.read_text()
+    assert len(rw.pages) == 1 and NEW in rw.pages[0]
+
+
+@pytest.mark.parametrize("value", ["0", "false", "off", "no", ""])
+def test_41b_other_switch_values_still_attempt_the_open(monkeypatch, tmp_path, value):
+    """An explicit allowlist: any other value still attempts the open, so a typo cannot silence it."""
+    rw = tab_world(monkeypatch, tmp_path, no_open=value)
+    run_pass(rw)
+    attempted = [argv for argv, _ in rw.calls if argv[:3] == ["paseo", "agent", "open"]]
+    assert attempted == [["paseo", "agent", "open", NEW, "--json"]]
+    assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+
+
+def adopted_world(monkeypatch, tmp_path, open_failure=""):
+    """An id whose start never confirmed, adopted from the listing, then diagnosed live next pass."""
+    rw = lost_id(monkeypatch, tmp_path)
+    rw.opened.clear()
+    rw.pages.clear()                               # pass 1's "no live session" page is done with
+    rw.open_failure = open_failure
+    rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE)
+    run_pass(rw)                                   # pass 1: adopt the lost id, diagnose later
+    assert rw.opened == []                         # adoption is not a start: it owes no tab yet
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    return rw
+
+
+def test_43_an_adopted_candidate_gets_its_tab_on_the_first_live_pass(monkeypatch, tmp_path):
+    """Codex P2 / adversary N4: a seat that reached "live" by RECOVERY was never opened."""
+    rw = adopted_world(monkeypatch, tmp_path)
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert rw.load_state()["told"][f"auto-seat tab:{NEW}"] == NOW + rw.AUTO_SEAT_S + 1
+    assert rw.pages == []                          # the open succeeded: nothing to tell
+
+
+def test_44_a_failed_open_on_an_adopted_candidate_pages_and_is_not_retried(monkeypatch, tmp_path):
+    reason = f"NOT opened in Paseo Desktop (rc=3: no Desktop process); it is reachable by relay but has no tab: run paseo agent open {NEW}"
+    rw = adopted_world(monkeypatch, tmp_path, open_failure=reason)
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert len(rw.pages) == 1
+    assert "has no Paseo Desktop tab" in rw.pages[0] and "run paseo agent open new-seat" in rw.pages[0]
+    # One attempt per id: a retry every pass would hammer a headless host and re-page him forever.
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert len(rw.pages) == 1
+
+
+def test_42_a_callers_agent_id_never_reaches_the_started_seat(monkeypatch, tmp_path):
+    """Real `env -u` around a real child: a pass run from inside an agent must not parent it."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "open_desktop_tab", rw.real_open_desktop_tab)
+    monkeypatch.setattr(rw, "run_split", rw.real_run_split)
+    monkeypatch.setenv("PASEO_AGENT_ID", "caller-seat")
+    seen = tmp_path / "child-env.txt"
+    cli = tmp_path / "paseo"
+    cli.write_text(f"""#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[0] == 'run':
+    Path({str(seen)!r}).write_text(repr(os.environ.get('PASEO_AGENT_ID')))
+    print(json.dumps({{'agentId': {NEW!r}}}))
+elif args[:2] == ['agent', 'inspect']:
+    print(json.dumps({{'Id': {NEW!r}, 'Archived': False, 'Status': 'running'}}))
+elif args[:2] == ['agent', 'open']:
+    print(json.dumps({{'opened': args[3]}}))
+else:
+    sys.exit(99)
+""")
+    cli.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    run_pass(rw)
+    assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+    assert seen.read_text() == "None"  # repr(None): the child never inherited the caller's seat id
+
+
+def test_45_a_seat_fleet_already_lists_still_gets_its_one_tab(monkeypatch, tmp_path):
+    """Adversary D1: once fleet lists the new id, `owner_session` returns it as `ident`, so the
+    ADOPTION branch is skipped - and that fleet-listed case is the COMMON one."""
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False                       # the start's confirmation was lost, so it never opened
+    run_pass(rw)
+    assert rw.opened == []
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    monkeypatch.setattr(rw, "owner_session", rw.real_owner_session)
+    monkeypatch.setattr(rw, "live_sessions", lambda: {NEW[:8]: {"ended": False, "archived": False}})
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    rw.pages.clear()
+    run_pass(rw)
+    assert rw.opened == [NEW]
+    assert rw.load_state()["told"][f"auto-seat tab:{NEW}"] == NOW + rw.AUTO_SEAT_S + 1
+    assert rw.pages == []                    # it opened: nothing to tell him
+    run_pass(rw)
+    assert rw.opened == [NEW]                # one attempt per id, ever
+
+
+def _tab_reason():
+    return (f"NOT opened in Paseo Desktop (rc=3: no Desktop process); it is reachable by relay "
+            f"but has no tab: run paseo agent open {NEW}")
+
+
+def test_46_a_tab_page_he_never_received_is_carried_and_retried(monkeypatch, tmp_path):
+    """Adversary D2: `tab_once` hands its reason out ONCE, so a failed send must not consume it."""
+    rw = adopted_world(monkeypatch, tmp_path, open_failure=_tab_reason())
+    rw.pages.clear()
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # one transient `hermes` failure
+    run_pass(rw)
+    assert rw.pages == []
+    carried = rw.load_state()["undisclosed_tab"]
+    # E5: the carried text is the PAGE, not the bare reason - `tab_page` is what names the seat
+    # and says why it matters. A carry that dropped the id would page him about a nameless seat.
+    assert f"seat {NEW} has no Paseo Desktop tab" in carried and _tab_reason() in carried
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and "has no Paseo Desktop tab" in rw.pages[0]
+    assert "undisclosed_tab" not in rw.load_state()
+    run_pass(rw)
+    assert len(rw.pages) == 1                # sent once, never again
+
+
+def test_47_a_page_cooldown_carries_the_reason_instead_of_dropping_it(monkeypatch, tmp_path):
+    """D2(b): the cooldown is one key shared by every seat, so a second seat's reason used to be
+    thrown away. It waits the cooldown out and is then sent - carried, never dropped."""
+    rw = adopted_world(monkeypatch, tmp_path, open_failure=_tab_reason())
+    rw.pages.clear()
+    state = rw.load_state()
+    state["told"]["auto-seat tab"] = NOW                 # another seat paged him just now
+    rw.save_state(state)
+    run_pass(rw)
+    assert rw.pages == []                                # anti-noise still applies
+    assert "undisclosed_tab" in rw.load_state()          # ... but the reason is kept
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.DJB_COOLDOWN_S + 1)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and "has no Paseo Desktop tab" in rw.pages[0]
+    assert "undisclosed_tab" not in rw.load_state()
+
+
+def test_48_a_start_notice_he_never_received_is_carried_and_retried(monkeypatch, tmp_path):
+    """Adversary E1 / §L L4: the gone page only recomposes itself while NO seat exists. Once a seat
+    was started the next pass finds it live, so `auto_gone` and `not ident` are both false and that
+    page never exists again - one failed `hermes send` would lose the only notice that a seat
+    exists, which is the event this whole feature was built to send."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # one transient `hermes` failure
+    run_pass(rw)
+    assert rw.pages == []
+    carried = rw.load_state()["undisclosed_start"]
+    # The WHOLE notice is carried, tab reason included, not just its tail.
+    assert "no live session" in carried and "started automatically at" in carried and NEW in carried
+    # The next pass finds the seat LIVE, so the page would never be composed a second time.
+    monkeypatch.setattr(rw, "owner_session", lambda: (NEW, "auto-seat"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and NEW in rw.pages[0]
+    # F5: a page held for a pass is prefixed, so its present tense ("no live session") is not read
+    # as this minute's news.
+    assert rw.pages[0].startswith("(delayed) ")
+    assert "undisclosed_start" not in rw.load_state()
+    run_pass(rw)
+    assert len(rw.pages) == 1               # a start is an event: retried until sent, then never again
+
+
+def test_49_an_owed_start_notice_replaces_the_generic_gone_page(monkeypatch, tmp_path):
+    """E1's second half: if the new seat dies again before the notice got out, the pass must not
+    also compose the gone page it would otherwise send - "no live session for <role> (gone). The
+    previous seat stopped answering." - because that page contradicts the seat it just started, and
+    he would get two pages for one event."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # the notice never got out
+    run_pass(rw)
+    assert "undisclosed_start" in rw.load_state()
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)                                     # still gone, cooldown has not expired
+    assert len(rw.pages) == 1                        # ONE page for the event, not two
+    # F4: every page here is the START notice. The unbounded "Nothing is listening" wording lives on
+    # a different path (`not ident`), so asserting its absence proved nothing; this is the marker
+    # the suppressed page would NOT carry.
+    assert all("started automatically at" in p for p in rw.pages)
+    assert "undisclosed_start" not in rw.load_state()
+
+
+def test_50_a_non_string_slot_cannot_silence_the_gone_page(monkeypatch, tmp_path):
+    """Adversary F1: `start_owed` gates the only page that says the seat is gone. A hand-edited or
+    corrupted slot (here `true`) is truthy but unsendable, so counting it as owed would suppress
+    that page on EVERY pass while nothing was ever delivered: silence forever, the exact failure
+    this file exists to end."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "AUTO_SEAT_PROVIDER", "")    # absence is proven, but nothing can start
+    state = rw.load_state()
+    state["undisclosed_start"] = True
+    rw.save_state(state)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and rw.pages[0].startswith("Dann: no live session")
+    assert "started automatically at" not in rw.pages[0]   # nothing was started
+    # The unusable value is DROPPED rather than kept forever, and the pass says so.
+    assert "undisclosed_start" not in rw.load_state()
+    assert "non-string carried slot" in (tmp_path / "state/pass.log").read_text()
+
+
+def test_51_a_new_start_notice_supersedes_an_older_owed_one(monkeypatch, tmp_path):
+    """Adversary F2: two starts can be owed at once when `hermes` has been down for an hour. The
+    newer notice must win, or the last thing he reads is the DEAD seat's notice."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # pass 1: the notice never got out
+    run_pass(rw)
+    assert NEW in rw.load_state()["undisclosed_start"]
+    # A second verdict, past the successful-start cooldown, starts a DIFFERENT seat. Its id must
+    # not contain NEW (a substring check would otherwise pass for the wrong reason).
+    new2 = "later-seat"
+
+    def run2(argv, timeout=20):
+        if argv == ["paseo", "ls", "--json", "--background"]:
+            return rw.enum_rc, rw.enum_body, ""
+        if is_start(argv):
+            return 0, json.dumps({"agentId": new2}), ""
+        assert argv == ["paseo", "agent", "inspect", "--json", "--", new2]
+        return 0, json.dumps({"Id": new2, "Archived": False, "Status": "running"}), ""
+
+    monkeypatch.setattr(rw, "run_split", run2)
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and new2 in rw.pages[0]     # the newer seat, once
+    assert NEW not in rw.pages[0]                          # the dead seat's notice is gone
+    assert "undisclosed_start" not in rw.load_state()
