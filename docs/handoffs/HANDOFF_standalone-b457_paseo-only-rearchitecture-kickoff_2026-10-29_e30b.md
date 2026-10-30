@@ -96,6 +96,8 @@ djbclark cancelled the PR 118 round-10 question card twice, then issued the Pase
    at a time (`/steps`).
 2. Promote the plan to v1 in a PR (adversary verdict, CHANGELOG line), then start phase 1 (communication cutover)
    with Paseo-native subagents (`create_agent`, `notifyOnFinish: true`) in worktree workspaces.
+   **Superseded (2026-10-30, lead 1e61c979):** plan v1 (PR 154) reorders the phases; the next phase is D1
+   "Contracts and safety net", and the communication cutover is D4. Follow section D of the plan, not this item.
 3. Carry-overs: PR 118 parked (section E of the plan); D3 Nimbalyst Wiki parked; `docs/queue.md` unchanged.
 
 ## Durable peer list (adopt; all are Paseo agents, ids are the 8-char prefixes `paseo ls -g` shows)
@@ -118,7 +120,7 @@ none (every record of this session under `~/.local/state/bigteam/adhoc-2026-10-2
 
 ```bash
 cd ~/src/djbclark-ade-paseo-only-wt && git status && git log -3 --oneline
-sed -n 1,80p docs/paseo-only-rearchitecture.md
+gsed -n 1,80p docs/paseo-only-rearchitecture.md
 aiuse --available --json | jq '.available[]|{provider,headroom_percent}'
 paseo ls -g --json | jq -r '.[]|"\(.id[:8]) \(.provider) \(.status) \(.title)"'
 ```
