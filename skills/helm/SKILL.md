@@ -196,7 +196,7 @@ means new prompts from other sessions are missed.
    waits, Herald only why, so a leftover entry on an idle agent is evidence and nothing else. They give the item that kind straight from Herald, with no transcript parse (a question whose AskUserQuestion
    the transcript still holds stays the answerable transcript item); `error` is an open `error` item (needs you, no card: never offered `paseo permit allow`,
    and only while no new turn runs); `finished` and `canceled` change nothing. A new Herald event re-opens a skipped item; `helm.py brief` carries it
-   (fleet-watch unchanged); a Herald wait stays an item even when the agent has child processes. `helm.py answer` and `keys` refuse a Herald item (answer in the Paseo UI). The headline and detail are the agent's text: only `relay.py --why` shows them, labelled untrusted.
+   (fleet-watch unchanged); a Herald wait stays an item even when the agent has child processes. `helm.py answer` and `keys` refuse any Paseo agent's item, Herald or transcript-backed (answer in the Paseo UI). The headline and detail are the agent's text: only `relay.py --why` shows them, labelled untrusted.
 3. A Claude session outside herdr, Orca and tmux can be listed but not
    answered: use `SendMessage`, or his `focus`.
 4. Sessions come from `session-finder/fleet.py` (2026-10-08): herdr, the Claude

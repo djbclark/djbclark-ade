@@ -479,8 +479,11 @@ def render(it, full=False):
     elif k in ("plan", "permission", "blocked"):
         label = {"plan": "PLAN APPROVAL", "permission": f"PERMISSION ({it.get('tool')})", "blocked": "BLOCKED"}[k]
         out.append(f"  {label}: {it.get('detail', 'waiting on a prompt helm cannot parse')}")
-        out += ["  screen:"] + ["    | " + ln for ln in it.get("screen", "").splitlines()[-(22 if full else 12):]]
-        out.append(f"  answer: helm.py keys {it['id']} <key>...   (read the screen for the choices)")
+        if it.get("host") == "paseo":
+            out.append(f"  answer in the Paseo UI (`relay.py --why {it['id']}`); helm sends no keys to a Paseo agent")
+        else:
+            out += ["  screen:"] + ["    | " + ln for ln in it.get("screen", "").splitlines()[-(22 if full else 12):]]
+            out.append(f"  answer: helm.py keys {it['id']} <key>...   (read the screen for the choices)")
     elif k == "idle":
         state = "audited" if it["audited"] else "NOT audited"
         cold = f" · COLD cache ({it.get('mb')} MB transcript; an audit re-reads it at full price)" if it["cold"] else ""
