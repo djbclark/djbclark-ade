@@ -63,13 +63,18 @@ TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
 
 OPT-IN ABSENT-SEAT START (djbclark's ruling, 2026-10-30, option 3)
 ---------------------------------------------------------------
-RW_AUTO_SEAT=1 may start a fresh seat, including after a hard error, ONLY on a proven `gone`
-diagnosis. Off by default until field-tested; RW_AUTO_SEAT_PROVIDER must be set explicitly (no
-model or thinking flags). `error` is a broken inspect READ, not proof of absence; `silent` and
-`working` still exist, `card:*` is NEVER auto-started, and `idle` uses the nudge above. Unreadable
-diagnoses start nothing. RW_AUTO_SEAT_S (default 3600 s) limits confirmed starts per role; a failed
-start retries next pass, with refusals logged once per cooldown. The prompt names the absolute
-Tier 1 file, never step text. The darkness page still goes out and names any automatically started id.
+RW_AUTO_SEAT=1 may start a fresh seat ONLY on a proven `gone` diagnosis, narrowing the "including
+after a hard error" ruling. Off by default until field-tested; RW_AUTO_SEAT_PROVIDER must be set
+explicitly (no model or thinking flags). If relay cannot diagnose a UUID-shaped id, one extra
+`paseo agent inspect --json -- <id>` probe (up to 20 s, no model) must confirm AGENT_NOT_FOUND;
+errors, timeouts, unreadable bodies and unknown shapes never prove absence. See the decision table
+in `auto_seat`. A `refused`/`unknown` seat does not auto-start and still pages the human when no owner
+resolves. A `silent` hung seat is NOT replaced, so the individual can stay dark until the human acts.
+RW_AUTO_SEAT_S (default 3600 s): at most one attempt per role per window, confirmed or not. A failed
+start with no id becomes eligible again only after the window; returned ids are retained for diagnosis.
+Every invocation outcome is logged; only pre-invocation refusals are suppressed once per window.
+The prompt names the absolute Tier 1 file, never step text. The darkness page still goes out and
+names any automatically started id.
 
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
 not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
@@ -739,12 +744,9 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
          owning seat keeps current; this is authoritative between the agent and its siblings.
       3. `peer_mail.py resolve --as ROLE --json` -> `live_paseo_ids`, the same record read
          through the peer-comms tool, which prunes ids it can no longer reach.
+      4. A saved auto-seat candidate, as a fallback while the registry catches up.
     """
     seen: set[str] = set()
-    if AUTO_SEAT and (candidate := auto_seat_candidate(load_state())):
-        # Do not depend on the new seat rewriting the peer registry before the next pass.
-        seen.add(candidate[:8])
-        yield ("auto-seat", candidate)
     for src in ("RW_SESSION", "PASEO_AGENT_ID"):
         val = (os.environ.get(src) or "").strip()
         if val:
@@ -772,6 +774,9 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
             if ident[:8] not in seen:
                 seen.add(ident[:8])
                 yield ("peer_mail", ident)
+    if AUTO_SEAT and (candidate := auto_seat_candidate(load_state())) and candidate[:8] not in seen:
+        # Do not depend on the new seat rewriting the peer registry before the next pass.
+        yield ("auto-seat", candidate)
 
 
 def owner_session() -> tuple[str, str]:
@@ -801,19 +806,36 @@ def why_blocked(ident: str) -> tuple[str, str]:
       stays dark until someone answers. Exactly the silence this watcher exists to prevent.
     - `silent` — running with nothing new for 15 min: a hung turn.
 
-    Anything unreadable comes back as ("unknown", reason) and the caller keeps its old behaviour, so
-    a broken `--why` can never turn a healthy pass into a false alarm.
+    With auto-seat enabled, a missing diagnosis for a UUID gets one direct inspect (up to 20 s).
+    Only an explicit AGENT_NOT_FOUND proves absence; a blind read remains `unknown`.
     """
+    uuid = re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", ident)
+
+    def unknown(reason: str) -> tuple[str, str]:
+        if AUTO_SEAT and uuid:
+            rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", ident],
+                                     timeout=20)
+            try:
+                info = json.loads(out or err)
+            except ValueError:
+                info = None
+            error = info.get("error") if isinstance(info, dict) else None
+            if rc in (0, 1) and isinstance(error, dict) and error.get("code") == "AGENT_NOT_FOUND":
+                return "gone", "direct inspect confirmed AGENT_NOT_FOUND"
+        return "unknown", reason
+
     relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
     if not relay.is_file():
-        return "unknown", f"no relay.py at {relay}"
+        return unknown(f"no relay.py at {relay}")
     rc, out, err = run_split(["python3", "-I", str(relay), "--why", ident, "--json"], timeout=90)
     try:
         d = json.loads(out)
     except ValueError:
-        return "unknown", f"unreadable --why (rc {rc}): {(err or out)[:160]}"
-    if not isinstance(d, dict) or not d.get("state"):
-        return "unknown", f"no state in --why (rc {rc}): {out[:160]}"
+        return unknown(f"unreadable --why (rc {rc}): {(err or out)[:160]}")
+    if rc not in (0, 1) or not isinstance(d, dict) or not d.get("state") or d.get("state") == "unknown":
+        return unknown(f"no diagnosis in --why (rc {rc}): {out[:160]}")
+    if d["state"] == "gone" and not uuid:
+        return "unknown", "absence not proven for a non-UUID id"
     return str(d["state"]), str(d.get("why") or "")
 
 
@@ -1057,12 +1079,15 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     """Start only a PROVEN ABSENT seat; return the confirmed id, otherwise ''.
 
     Diagnosis       Start?  Reason
-    gone            yes     Inspect answered and does not know the previous agent.
+    gone            yes     Inspect-confirmed absent (UUID id, not a blind read).
     error           no      Inspect could not answer: broken READ, daemon/socket may be down.
+    refused         no      Finished/archived session or non-idle/running Paseo state.
+    unknown         no      No diagnosis; absence not proven.
     silent/working  no      A seat EXISTS; a second one would duplicate the individual.
     card:*          NEVER   His to answer; spawning leaves the card AND adds another seat.
     idle            no      Healthy; the declared-next-step nudge covers it.
-    unreadable      no      Absence has not been proved.
+
+    `refused`/`unknown` never auto-start; when no owner resolves, they still page the human.
 
     We are narrowing djbclark's 2026-10-30 "including after a hard error" ruling for one case:
     `error` means a broken READ, not a dead seat, and `paseo run` will fail in that same state.
@@ -1073,7 +1098,7 @@ def auto_seat(word: str, state: dict, now: float) -> str:
 
     def refuse(reason: str) -> str:
         # Same shape as _deploy_say, independent of the successful-start cooldown. ONE refusal
-        # per role/window even if the reason changes; a failed start remains eligible next pass.
+        # per role/window even if the reason changes. Only pre-invocation refusals use this.
         key = f"auto-seat refusal:{ROLE}"
         told = state.setdefault("told", {})
         stamp = told.get(key)
@@ -1089,6 +1114,11 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     # Future stamps are IGNORED: a hand edit or clock correction must not silence starts forever.
     if _is_num(last) and 0 <= now - float(last) < AUTO_SEAT_S:
         return refuse("cooldown")
+    attempt_key = f"auto-seat attempt:{ROLE}"
+    told = state.setdefault("told", {})
+    last_attempt = told.get(attempt_key)
+    if _is_num(last_attempt) and 0 <= now - float(last_attempt) < AUTO_SEAT_S:
+        return refuse("attempt window")
     if not AUTO_SEAT_PROVIDER.strip():
         return refuse("RW_AUTO_SEAT_PROVIDER unset")
     pointer = resolve_pointer()
@@ -1112,29 +1142,38 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     argv = ["paseo", "run", "--provider", AUTO_SEAT_PROVIDER, "--no-wait", "--json",
             "--cwd", str(REPO.resolve()), "--title", f"{ROLE} (auto-seat)", "--", prompt]
     deadline = time.monotonic() + 120
-    rc, out, _ = run_split(argv, timeout=100)
-    if rc != 0:
-        return refuse(f"paseo run failed rc={rc}; was {word}")
+    # An invoked start can have created an agent even when its response is lost. Persist the
+    # attempt before invoking it; no outcome may permit another invocation inside this window.
+    told[attempt_key] = now
+    save_state(state)
+    rc, out, err = run_split(argv, timeout=100)
     try:
         result = json.loads(out)
     except ValueError:
-        return refuse("paseo run returned unreadable JSON")
+        result = None
     new_id = result.get("agentId") if isinstance(result, dict) else None
-    if not isinstance(new_id, str) or not new_id.strip():
-        return refuse("paseo run returned no agentId")
+    new_id = new_id.strip() if isinstance(new_id, str) else ""
+    outcome = ("failed" if rc != 0 else "unreadable JSON" if result is None else
+               "no agentId" if not new_id else "id returned")
+    log(f"auto-seat: attempted paseo run rc={rc}; stderr={err[:160]!r}; "
+        f"id={new_id or 'none'}; {outcome}")
+    if not new_id:
+        return ""
     # The daemon may have created a seat even if the following inspect fails. Retain its id BEFORE
     # that read, without stamping seated; the next pass must diagnose it instead of duplicating it.
-    told = state.setdefault("told", {})
     prefix = f"auto-seat candidate:{ROLE}:"
     for key in list(told):
         if key.startswith(prefix):
             del told[key]
     told[prefix + new_id] = now
     save_state(state)
+    if rc != 0:
+        return ""
     remaining = min(20, deadline - time.monotonic())
     if remaining <= 0:
-        return refuse("start confirmation timed out")
-    rc, out, _ = run_split(["paseo", "agent", "inspect", "--json", "--", new_id],
+        log(f"auto-seat: confirmation failed id={new_id}; rc=not-invoked; deadline exhausted")
+        return ""
+    rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", new_id],
                            timeout=remaining)
     try:
         info = json.loads(out) if rc == 0 else None
@@ -1145,7 +1184,9 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     if not (isinstance(info, dict) and info.get("Id") == new_id
             and info.get("Archived") is False
             and info.get("Status") in ("idle", "running", "initializing")):
-        return refuse("new agent could not be confirmed addressable")
+        log(f"auto-seat: confirmation failed id={new_id}; rc={rc}; stderr={err[:160]!r}; "
+            "new agent could not be confirmed addressable")
+        return ""
     seated[ROLE] = now                         # ONLY after inspect confirmed it, like djb_page_sent
     save_state(state)                          # persist before a potentially slow paging operation
     log(f"auto-seat: started {new_id} (was {word}) — {pointer if exists else 'none'}")
