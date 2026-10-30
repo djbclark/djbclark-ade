@@ -54,9 +54,13 @@ def load(monkeypatch, tmp_path, switch="1"):
     rw.run_rc = 0
     rw.run_body = None
     rw.confirm = True
+    rw.enum_rc, rw.enum_body = 1, ""
 
     def run(argv, timeout=20):
         rw.calls.append((argv, timeout))
+        if argv == ["paseo", "ls", "--json", "--background"]:
+            assert timeout <= 20
+            return rw.enum_rc, rw.enum_body, "listing failure" if rw.enum_rc else ""
         # The successful-start stamp must not exist during either the start OR confirmation call.
         assert rw.load_state().get("seated", {}).get(rw.ROLE) != NOW
         if argv[:2] == ["paseo", "run"]:
@@ -134,7 +138,7 @@ def test_6_cooldown_blocks_second_start_and_logs_refusal_once(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("rc,body", [(1, ""), (127, ""), (0, "not JSON"), (0, "{}")])
-def test_7_failed_run_is_one_attempt_per_window_and_retries_after_it(monkeypatch, tmp_path, rc, body):
+def test_7_failed_run_stays_unresolved_after_attempt_window(monkeypatch, tmp_path, rc, body):
     rw = load(monkeypatch, tmp_path)
     rw.run_rc, rw.run_body = rc, body
     run_pass(rw)
@@ -142,13 +146,14 @@ def test_7_failed_run_is_one_attempt_per_window_and_retries_after_it(monkeypatch
     assert rw.load_state()["told"][f"auto-seat attempt:{rw.ROLE}"] == NOW
     monkeypatch.setattr(rw.time, "time", lambda: NOW + 300)
     run_pass(rw)
-    assert len(rw.calls) == 1
+    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
     assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 1
     monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S)
     run_pass(rw)
-    assert len(rw.calls) == 2  # A new window, including for run_split's timeout rc 127.
+    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
     assert not rw.load_state().get("seated")
-    assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 2
+    assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 1
     assert f"rc={rc}; stderr=" in rw.LOG.read_text()
     assert "gone" in rw.pages[0] and NEW not in rw.pages[0]
 
@@ -233,7 +238,7 @@ def test_16_retained_candidate_prevents_duplicates_even_after_cooldown(monkeypat
     monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
     monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle" if ident == NEW else "gone", "test"))
     run_pass(rw)
-    assert len(rw.calls) == 2
+    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
     assert rw.auto_seat_candidate(rw.load_state()) == NEW
     if not confirmed:
         assert not rw.load_state().get("seated")
@@ -320,14 +325,14 @@ def test_22_prior_refusal_cannot_hide_an_invocation_or_consume_attempt_window(mo
     rw.run_rc = 127
     run_pass(rw)
     run_pass(rw)
-    assert len(rw.calls) == 1
+    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
     text = rw.LOG.read_text()
     assert text.count("auto-seat: not started") == 1
     assert text.count("auto-seat: attempted paseo run rc=127; stderr='stub failure'; id=none; failed") == 1
     monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S)
     run_pass(rw)
-    assert len(rw.calls) == 2
-    assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 2
+    assert sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls) == 1
+    assert rw.LOG.read_text().count("auto-seat: attempted paseo run") == 1
 
 
 def test_23_legacy_confirmed_start_cooldown_does_not_consume_an_attempt(monkeypatch, tmp_path):
@@ -469,3 +474,112 @@ def test_29_non_uuid_gone_from_relay_is_not_absence_proof(monkeypatch, tmp_path)
     assert rw.why_blocked("truncated")[0] == "unknown"
     run_pass(rw)
     assert not rw.probe_calls.exists()
+
+
+# Recorded 2026-10-30 from installed `paseo ls --json --background` (rc 0):
+# plain array, lowercase fields; identities/title/cwd sanitized, extra fields retained.
+PASEO_LS_FIXTURE = [{"id": NEW, "shortId": "new-seat", "name": "test-role (auto-seat)",
+                     "status": "running", "cwd": "/sanitized/entity", "provider": "codex",
+                     "created": "2026-10-30T00:00:00.000Z", "thinking": None}]
+
+
+def lost_id(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    rw.run_rc = 127
+    run_pass(rw)
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    monkeypatch.setattr(rw, "owner_session", lambda: ("", "old registry seat gone"))
+    monkeypatch.setattr(rw, "owner_candidates", lambda: iter([("registry", OLD)]))
+    return rw
+
+
+def starts(rw):
+    return sum(argv[:2] == ["paseo", "run"] for argv, _ in rw.calls)
+
+
+def test_30_timeout_and_expired_window_cannot_duplicate_with_old_registry_gone(monkeypatch, tmp_path):
+    rw = lost_id(monkeypatch, tmp_path)
+    run_pass(rw)
+    run_pass(rw)
+    assert starts(rw) == 1
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    assert rw.LOG.read_text().count("unresolved start not reconciled") == 1
+    assert "gone" in rw.pages[0]
+
+
+def test_31_listing_adopts_lost_id_then_next_pass_diagnoses_candidate(monkeypatch, tmp_path):
+    rw = lost_id(monkeypatch, tmp_path)
+    rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE)
+    run_pass(rw)
+    state = rw.load_state()
+    assert state["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] == rw.time.time()
+    assert f"auto-seat unresolved:{rw.ROLE}" not in state["told"]
+    assert starts(rw) == 1 and not state.get("seated")
+    assert f"auto-seat: recovered lost id {NEW}" in rw.LOG.read_text()
+    diagnosed = []
+    def why(ident):
+        diagnosed.append(ident)
+        return ("idle" if ident == NEW else "gone", "fixture")
+    monkeypatch.setattr(rw, "why_blocked", why)
+    run_pass(rw)
+    assert NEW in diagnosed and starts(rw) == 1
+
+
+def test_32_empty_listing_only_clears_and_following_pass_may_start(monkeypatch, tmp_path):
+    rw = lost_id(monkeypatch, tmp_path)
+    rw.enum_rc, rw.enum_body = 0, json.dumps([{**PASEO_LS_FIXTURE[0], "name": "other role"}])
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert starts(rw) == 1
+    assert "auto-seat: unresolved cleared (no live auto-seat agent)" in rw.LOG.read_text()
+    assert "unresolved start not reconciled" not in rw.LOG.read_text()
+    rw.run_rc = 0
+    run_pass(rw)
+    assert starts(rw) == 2
+
+
+@pytest.mark.parametrize("rc,body", [(1, "[]"), (127, ""), (0, "garbage"), (0, "{}"),
+    (0, json.dumps(PASEO_LS_FIXTURE * 2)), (0, '[null]'),
+    (0, json.dumps([{**PASEO_LS_FIXTURE[0], "id": ""}]))])
+def test_33_bad_listing_keeps_marker_and_darkness_page(monkeypatch, tmp_path, rc, body):
+    rw = lost_id(monkeypatch, tmp_path)
+    rw.enum_rc, rw.enum_body = rc, body
+    rw.pages.clear()
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.DJB_COOLDOWN_S + 1)
+    run_pass(rw)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    assert starts(rw) == 1
+    assert rw.LOG.read_text().count("auto-seat: unresolved start not reconciled (") == 1
+    assert len(rw.pages) == 1 and "gone" in rw.pages[0]
+
+
+def test_34_marker_is_durable_before_subprocess_can_crash(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    def crash(argv, timeout):
+        assert argv[:2] == ["paseo", "run"]
+        state = rw.load_state()
+        assert state["told"][f"auto-seat unresolved:{rw.ROLE}"] == NOW
+        assert state["told"][f"auto-seat attempt:{rw.ROLE}"] == NOW
+        raise RuntimeError("crash after invocation")
+    monkeypatch.setattr(rw, "run_split", crash)
+    with pytest.raises(RuntimeError, match="crash after invocation"):
+        run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+
+
+@pytest.mark.parametrize("switch", ["0", "1"])
+def test_35_unresolved_precedes_word_and_seated_but_switch_off_does_not_list(monkeypatch, tmp_path, switch):
+    rw = load(monkeypatch, tmp_path, switch)
+    state = {"seated": {rw.ROLE: NOW}, "told": {f"auto-seat unresolved:{rw.ROLE}": NOW}}
+    rw.save_state(state)
+    assert rw.auto_seat("idle", state, NOW) == ""
+    assert len(rw.calls) == (1 if switch == "1" else 0)
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+
+
+def test_36_confirmed_start_clears_unresolved_marker(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert rw.load_state()["seated"][rw.ROLE] == NOW
