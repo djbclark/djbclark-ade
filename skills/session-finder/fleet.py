@@ -183,8 +183,10 @@ def alive(pid):
         return False
 
 
-def ancestors():
-    pids, pid = set(), os.getpid()
+def ancestry():
+    """This process's ancestors as an ORDER, NEAREST FIRST: the direct parent is `[0]`. `ancestors()` is the same set; a
+    caller that must tell an agent's own process from one a nested agent started underneath it needs the order."""
+    pids, pid = [], os.getpid()
     for _ in range(15):
         try:
             pid = int(run("ps", "-o", "ppid=", "-p", str(pid))[1].strip())
@@ -192,8 +194,12 @@ def ancestors():
             break
         if pid <= 1:
             break
-        pids.add(pid)
+        pids.append(pid)
     return pids
+
+
+def ancestors():
+    return set(ancestry())
 
 
 ANCESTOR_SELF = [True]   # relay.as_caller(scrub=True) sets False: a notice sender hides every id of the session, ancestry included
@@ -624,11 +630,23 @@ def paseo_reach(sid, provider, archived=False):
                    "for delivery when the agent is idle (`queued: <id>`, exit 0; --idle S waits for idle instead, --no-defer refuses)")
 
 
+def _paseo_hosting_pids(anc):
+    """{agent id: pid} for the Paseo agents hosting this process or one of its ancestors (the pid's own parent is titled
+    Paseo Daemon and carries the id: `where.paseo_agent`). The pid is the agent's OWN process, the one Paseo launched, so it
+    tells that agent's row apart from a different agent's process started underneath it (see `sender_row`)."""
+    if not _where:
+        return {}
+    out: dict[str, int] = {}
+    for p in anc:
+        a = _where.paseo_agent(p, _where.env_of(p))
+        if a:
+            out.setdefault(a, p)
+    return out
+
+
 def _paseo_hosting(anc):
     """Paseo agent ids hosting this process or one of its ancestors (parent titled Paseo Daemon, id in its env)."""
-    if not _where:
-        return set()
-    return {a for a in (_where.paseo_agent(p, _where.env_of(p)) for p in anc) if a}
+    return set(_paseo_hosting_pids(anc))
 
 
 def _paseo_rows(have, anc, include_archived=False):
@@ -1456,10 +1474,74 @@ def links_read():
     return d
 
 
+def sender_row(ss):
+    """The `self` row of the session this process runs in, or None for a caller with no session: a launchd script, whose
+    messages nobody can be held to an ack for.
+
+    Among several `self` rows, take the one that can PROVE an ack (2026-10-30). `sessions()` runs `_proc_scan` before
+    `_paseo_rows`, and a process-scan row is `self = pid in ancestors` (`_proc_scan`): a Paseo-hosted agent whose tools run
+    under a process fleet recognises (a transcript-less TUI such as `agy`, `codex` or `opencode`) gets a `pid*` row for that
+    ancestor, host terminal, with no transcript and no Paseo id, listed BEFORE its own Paseo row. Taking the first `self` row
+    then named a pid as the sender: relay wrote `sender: pidNNNN`, `sender_paseo: ""`, `tl_base: null`, so its
+    `--expect-ack` could never close (nothing watches a pid: `--ack` wants a transcript, `timeline_ack` a Paseo id) and its
+    footer told a peer to `ack pidNNNN` (live 2026-10-29, an Antigravity agent).
+
+    Preference, in this order: a transcript (only `--ack` can prove it, and it names a session rather than an ancestor);
+    then the NEAREST process of ours, counting a Paseo row as the process PASEO LAUNCHED for that agent
+    (`_paseo_hosting_pids`) and any other row as its own `pid`, against `ancestry()` (nearest first); at one depth, the
+    row that can prove the ack. Two consequences this rule exists for: an inherited or exported `PASEO_AGENT_ID` marks a
+    row `self` on its own (`_paseo_rows`: `pid == me or pid in hosting`) and claims no process of ours, so it cannot beat
+    a row that does while one competes (adversary B1; rows that all claim none tie and keep fleet's order, and a lone
+    `self` row never reaches this rule); and a Paseo agent that started ANOTHER agent (`omp` running `codex`) is an
+    ancestor of this process, so its row is `self` too — naming it would substitute the parent's identity for the
+    caller's and route replies to the wrong session, while the nested agent's own row is nearer (local review of
+    2026-10-30). A transcript still outranks any depth, so an outer Paseo Claude that holds one is named. A row fleet scans for the very process Paseo launched is at that same depth as its Paseo row,
+    so the Paseo row wins there and the old `pid*` sender cannot come back.
+
+    A transcript-backed row gets no second vote for also carrying a Paseo id: `_claude_sessions` gives a daemon-spawned
+    Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), but a transcript already proves the ack and neither
+    `ack_proof_note` nor `timeline_base` uses that id to prove an ack for a transcript row (`timeline_base` reads it
+    at relay.py:775, then returns None on a transcript at 776), so it adds nothing to the proof and two
+    transcript rows keep fleet's order instead of one jumping ahead on it (adversary 4 F1, 2026-10-30; that tie is item 9
+    (c) of `docs/queue.md`, to be broken by ancestry depth in a later PR). Exact ties keep fleet's order (`max` returns
+    the first of equal keys)."""
+    selfs = [x for x in ss if isinstance(x, dict) and x.get("self")]
+    if len(selfs) < 2:
+        return selfs[0] if selfs else None
+    anc = ancestry()
+    depth = {pid: i for i, pid in enumerate(anc)}
+    hosted: dict[str, int] | None = None
+
+    def hosting() -> dict[str, int]:
+        nonlocal hosted
+        if hosted is None:
+            hosted = _paseo_hosting_pids(anc)
+        return hosted
+
+    def row_depth(x):
+        """The row's process as seen from here: 0 for this process's direct parent, larger further up, None when the row
+        stands for no process of ours (an id an inherited `PASEO_AGENT_ID` merely stamps on it)."""
+        pid = hosting().get(x["paseo"]) if x.get("paseo") else x.get("pid")
+        try:
+            return depth.get(int(pid))
+        except (TypeError, ValueError):
+            return None
+
+    def key(x):
+        if x.get("transcript"):
+            return (3, 0, 0)                       # `--ack` watches it: never traded for a nearer process
+        d = row_depth(x)
+        if d is None:
+            return (0, 0, 0)                       # a claim on no process of ours: only when nothing better exists
+        return (2, -d, 2 if x.get("paseo") else 0)  # nearest process; at one depth, the row that can prove the ack
+
+    return max(selfs, key=key)
+
+
 def annotate_links(ss):
     """Set `link` on every row THIS session (the `self` row) has messaged: {"sent": N, "acked": epoch|None}. A link whose peer
     never answered with `ack <our id>` is one-way: sent, never proven read."""
-    me = next((s for s in ss if s.get("self")), None)
+    me = sender_row(ss)
     if not me:
         return ss
     links = links_read()["links"]
