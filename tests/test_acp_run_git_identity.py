@@ -199,10 +199,12 @@ class TestGitIdentityGuard(unittest.TestCase):
     def test_counted_key_with_an_embedded_credential_is_refused_by_index_only(self):
         guard = load_guard(self.tmp / "guard.sh")
         # git sections are case-insensitive: `URL.https://...` is the same setting, measured with
-        # `git config --get` on the lowercase spelling
+        # `git config --get` on the lowercase spelling; and an empty authority (`https:///user:tok@host`)
+        # still sends that userinfo, so the run of slashes must not hide it
         for key in ("url.https://user:s3cr3t@example.org/.insteadOf",
                     "url.ssh://deploy:s3cr3t@example.org/.pushInsteadOf",
-                    "URL.https://user:s3cr3t@example.org/.insteadOf"):
+                    "URL.https://user:s3cr3t@example.org/.insteadOf",
+                    "url.https:///user:s3cr3t@example.org/.insteadOf"):
             with self.subTest(key=key):
                 env = {**self.env, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key,
                        "GIT_CONFIG_VALUE_0": "https://example.org/"}
@@ -214,15 +216,20 @@ class TestGitIdentityGuard(unittest.TestCase):
 
     def test_keys_without_userinfo_still_travel(self):
         guard = load_guard(self.tmp / "guard.sh")
-        # scp-like bases have no `://`, and a `@` outside a url.* key is not userinfo
-        env = {**self.env, "GIT_CONFIG_COUNT": "2",
+        # scp-like bases have no `://`, a `@` outside a url.* key is not userinfo, and a `@` in the
+        # first path segment is a path, not an authority
+        env = {**self.env, "GIT_CONFIG_COUNT": "3",
                "GIT_CONFIG_KEY_0": "url.git@example.org:.insteadOf",
                "GIT_CONFIG_VALUE_0": "https://mirror.example.org/",
                "GIT_CONFIG_KEY_1": "url.https://example.org/.insteadOf",
-               "GIT_CONFIG_VALUE_1": "https://mirror2.example.org/"}
+               "GIT_CONFIG_VALUE_1": "https://mirror2.example.org/",
+               "GIT_CONFIG_KEY_2": "url.https://example.org/@scope/.insteadOf",
+               "GIT_CONFIG_VALUE_2": "https://mirror3.example.org/"}
         guard(env)
         for name, want in (("url.git@example.org:.insteadOf", "https://mirror.example.org/"),
-                           ("url.https://example.org/.insteadOf", "https://mirror2.example.org/")):
+                           ("url.https://example.org/.insteadOf", "https://mirror2.example.org/"),
+                           ("url.https://example.org/@scope/.insteadOf",
+                            "https://mirror3.example.org/")):
             r = self.git(self.real, "config", "--get", name, env=env)
             self.assertEqual(r.stdout.strip(), want, r.stderr)
 

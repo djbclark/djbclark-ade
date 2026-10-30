@@ -4019,11 +4019,14 @@ def credential_url_key(key: str) -> bool:
     2026-10-30). This is about KEYS only: a credential in a counted VALUE was already readable, because
     the name filter never covered GIT_CONFIG_VALUE_<n>, so refusing those would be a different change.
     Git section names are case-insensitive (`[URL "..."]` is the same section), so `URL.` counts too.
+    The authority starts after any run of slashes: `https:///user:token@host` is an empty authority to the
+    URL parser but libcurl still sends that userinfo, so it is refused, while a `@` in the first path
+    segment (`url.https://example.org/@scope/.insteadOf`) stays a path and travels.
     """
     if key[:4].lower() != "url.":
         return False
     _, sep, rest = key[4:].partition("://")
-    return bool(sep) and "@" in rest.split("/", 1)[0]
+    return bool(sep) and "@" in rest.lstrip("/").split("/", 1)[0]
 
 
 def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) -> None:
