@@ -4127,7 +4127,11 @@ def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) ->
     """
     raw = env.get("GIT_CONFIG_COUNT")
     count = 0
-    if raw is not None:
+    # An EMPTY count means zero, exactly as git reads it (`env && *env` in config.c, measured:
+    # `GIT_CONFIG_COUNT= git config --get ade.x` exits 0) and as master's
+    # `int(env.get("GIT_CONFIG_COUNT") or 0)` did, so a launcher that exports the variable empty
+    # must not turn a launch that used to work into exit 2 (codex review, PR 156).
+    if raw:
         number = raw.lstrip(" \t\n\r\v\f")
         digits = number[1:] if number.startswith(("+", "-")) else number
         if not digits or not digits.isascii() or not digits.isdigit():

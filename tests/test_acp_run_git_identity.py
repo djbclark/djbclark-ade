@@ -153,7 +153,9 @@ class TestGitIdentityGuard(unittest.TestCase):
 
     def test_zero_count_formats_accepted_by_git_are_preserved(self):
         guard = load_guard(self.tmp / "guard.sh")
-        for count in ("0", "+0", "-0", " 0", "00"):
+        # "" is a zero count too: git reads the variable only when it is non-empty (config.c),
+        # and master's `int(env.get("GIT_CONFIG_COUNT") or 0)` launched on it (codex review, PR 156)
+        for count in ("0", "+0", "-0", " 0", "00", ""):
             with self.subTest(count=count):
                 env = {**self.env, "GIT_CONFIG_COUNT": count}
                 guard(env)
