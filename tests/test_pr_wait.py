@@ -786,6 +786,26 @@ def test_a_since_window_cannot_hide_a_finding_on_this_head_from_the_null_check(w
     assert summary["merge_blockers"] == ["security-marker-unverified"]
 
 
+def test_a_null_beside_has_any_findings_true_is_not_a_statement(world: World) -> None:
+    """The null means "nothing of this kind"; `has_any_findings: true` means "something". Both cannot
+    describe one review, so the pair is a marker we do not understand — and it must not become ready
+    just because the only findings the marker could be pointing at sit on an EARLIER head, resolved.
+
+    That is the shape the earlier-head rule would otherwise wave through: the finding on this head is
+    gone, the thread is resolved, `open` is empty, and every other check passes. The two keys disagree
+    with each other, which no amount of thread evidence can settle.
+    """
+    sec = {"commit_sha": HEAD, "status": "completed", "has_any_findings": True, "has_unresolved_findings": None}
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=sec)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(63)]))
+    world.route("graphql", gql(thread(63, resolved=True)))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = world.file("summary")
+    assert summary["merge_ready"] is False, summary["merge_blockers"]
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
 def test_a_findings_flag_that_is_neither_boolean_nor_null_is_still_unverified(world: World) -> None:
     # a marker we do not understand is not a clean review, and must not be read as one
     sec = {"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": "false"}

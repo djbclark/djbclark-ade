@@ -992,8 +992,9 @@ def fetch_threads(repo: str, pr: int) -> list[dict]:
 
 
 def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict:
-    """Codex's findings, code and security alike: `for_head` (selected by head and author, never by a time
-    window) and `open`, each entry tagged `kind` (`code` or `security`, by its mark).
+    """Codex's findings, code and security alike: `for_head_all` (this head's, selected by head and author,
+    never by a time window), `for_head` (the same list narrowed by `--since`) and `open`, each entry tagged
+    `kind` (`code` or `security`, by its mark).
 
     A comment belongs to the head when its `original_commit_id` is the head or its review
     (`pull_request_review_id`) is a `pulls/N/reviews` entry whose `commit_id` is the head: GitHub
@@ -1059,7 +1060,7 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
     A null is a statement only beside the independent evidence: no Codex finding comment **for this head**
     of that kind and no open Codex thread of that kind. A MISSING key, or a value that is neither boolean
     nor null, is still not a statement — that is a marker we do not understand, not a clean review — and
-    the contradiction case (null beside an open thread) already fails closed in `assess`'s mismatch check.
+    the contradiction case (null beside an open thread) already fails closed as `open-findings` in `assess`.
 
     ONLY THIS HEAD'S FINDINGS COUNT AS CONTRADICTION (2026-10-30, PR 156). The null describes THIS
     review of THIS head, so a finding comment of the same kind on an EARLIER head cannot contradict it —
@@ -1069,8 +1070,19 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
     Codex had ever reported a security finding and the fix was accepted: PR 156 fixed the security P2 on
     `a5c44a11`, four historical security comments stayed in the PR, and the clean security review on the
     fixed head read as unverified. An unresolved one is still caught twice, by the open-thread check here
-    and by the mismatch check; a finding on this head whose thread someone resolved WITHOUT a fix stays
-    a contradiction, which is the case `finding_comments` was there to catch.
+    and by `open-findings`; a finding on this head whose thread someone resolved WITHOUT a fix stays a
+    contradiction, which is the case `finding_comments` was there to catch.
+
+    Two limits, stated rather than implied. (1) An EARLIER head's finding resolved without a fix is trusted
+    as fixed — the same trust the boolean `has_unresolved_findings: false` path has always given a resolved
+    thread (AGENTS.md code review rule 9 makes `isResolved` the authority); only a finding on THIS head stays
+    a contradiction after resolution. (2) A finding comment whose thread `fetch_threads` does not return
+    (a GraphQL author login that stopped matching, say) is invisible to the open check as well; the old
+    all-heads count was an accidental backstop for null markers, and this rule does not rebuild it, because
+    the same gap would hide an open earlier-head finding from `open` too.
+
+    A null beside `has_any_findings: true` is not a statement either: it says this review found nothing while
+    the marker says it found something, and the two cannot both describe one review.
     """
     if "has_unresolved_findings" not in r:
         return False
@@ -1079,6 +1091,8 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
         return True
     if v is not None:
         return False
+    if r.get("has_any_findings") is True:
+        return False  # "found nothing" beside "found something": not a review we understand
     if review is None:
         return False
     if any(f["kind"] == kind for f in review["for_head_all"]):
