@@ -1234,7 +1234,8 @@ successor_paseo() {
     # `agent open` returns as soon as the app is LAUNCHED with the deep link; it cannot say a tab appeared (adversary and local Codex review of PR 159).
     # The one check available from here: the Desktop process is running (a deep link sent to an app that never started is dropped).
     desk_pat="${SELF_SLASH_DESKTOP_PROC:-}"
-    [ -n "$desk_pat" ] || { [ "$(uname -s)" != Darwin ] || desk_pat='/Paseo.app/Contents/MacOS/Paseo$'; }
+    # the macOS main binary, with or without launch arguments; its "Paseo Helper" processes live under Frameworks/ and do not match
+    [ -n "$desk_pat" ] || { [ "$(uname -s)" != Darwin ] || desk_pat='/Paseo.app/Contents/MacOS/Paseo( |$)'; }
     if [ -n "$desk_pat" ]; then
       case "${SELF_SLASH_OPEN_WAIT-20}" in ""|*[!0-9]*) successor_fail "SELF_SLASH_OPEN_WAIT must be whole seconds (got: ${SELF_SLASH_OPEN_WAIT-}); successor $newid left running";; esac
       dend=$(( $(gdate +%s) + ${SELF_SLASH_OPEN_WAIT-20} )); dseen=0
