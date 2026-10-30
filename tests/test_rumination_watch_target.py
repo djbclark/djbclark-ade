@@ -324,7 +324,7 @@ def test_a_refused_line_is_kept_and_retried(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "to_session", lambda text: sent.append(text) or "skipped")
     rw._pass(quiet_pass(rw))
     assert len(sent) == 1 and "from eve" in sent[0]
-    pending = rw.load_state()["pending"]
+    pending = [e["text"] for e in rw.load_state()["pending"]]
     assert pending and "from eve" in pending[0], "a refused line must be carried, not consumed"
 
     # The survey has NOT changed (nothing new arrived), so only the pending list can make it speak.
@@ -352,14 +352,14 @@ def test_the_pending_list_cannot_grow_without_bound(monkeypatch, tmp_path):
     # produced in a single pass) and a cap of two.
     rw.save_state({"pending": ["pending A", "pending B", "pending C", "pending D"]})
     rw._pass(quiet_pass(rw))
-    pending = rw.load_state()["pending"]
+    pending = [e["text"] for e in rw.load_state()["pending"]]
     assert pending == ["pending C", "pending D"], "the NEWEST lines survive, or a flood starves them"
     assert "dropping 2 oldest line(s)" in rw.LOG.read_text(), "an evicted line must not vanish silently"
 
     # And the same bound when this pass adds a line of its own on top of a full queue.
     monkeypatch.setattr(rw, "survey", lambda: {"mail": ["from eve"], "jobs": [], "prs": [], "stale": None})
     rw._pass(quiet_pass(rw))
-    pending = rw.load_state()["pending"]
+    pending = [e["text"] for e in rw.load_state()["pending"]]
     assert len(pending) == 2 and "from eve" in pending[-1]
     assert "dropping 1 oldest line(s)" in rw.LOG.read_text()
 
@@ -387,7 +387,7 @@ def test_a_send_that_may_have_arrived_is_not_sent_again(monkeypatch, tmp_path):
     sent = []
     monkeypatch.setattr(rw, "to_session", lambda text: sent.append(text) or "skipped")
     rw._pass(quiet_pass(rw))                                  # refused: carried
-    assert "from eve" in rw.load_state()["pending"][0]
+    assert "from eve" in rw.load_state()["pending"][0]["text"]
     monkeypatch.setattr(rw, "to_session", lambda text: sent.append(text) or "unverified")
     rw._pass(quiet_pass(rw))                                  # may have arrived: settled, not retried
     assert rw.load_state()["pending"] == []
