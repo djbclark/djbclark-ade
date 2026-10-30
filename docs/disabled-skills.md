@@ -148,7 +148,7 @@ old entries are quoted here so they can be pasted back.
 
 | Hook | Change | Re-enable |
 |---|---|---|
-| Superset notify (8 entries: SessionStart, UserPromptSubmit, PostToolUse, Stop) | removed; Superset's skills are off too | re-add `[ -n "$SUPERSET_HOME_DIR" ] && [ -x "$SUPERSET_HOME_DIR/hooks/notify.sh" ] && SUPERSET_AGENT_ID=claude "$SUPERSET_HOME_DIR/hooks/notify.sh"`-style entries (Superset's installer writes them) |
+| Superset notify (8 entries: SessionStart, UserPromptSubmit, PostToolUse, Stop) | removed; Superset itself uninstalled 2026-10-30 (see "Superset uninstalled" below) | none; reinstalling Superset re-writes them |
 | graft per-prompt pack (UserPromptSubmit `node ~/.claude/helpers/graft-hooks.cjs prompt`) | removed: ~150-300 tokens on every prompt, kept in history, often unrelated to the prompt. **`graft init` re-added it; removed again 2026-10-18** (measured ~120 tokens, two of three hits off-target), and site-djbclark's `macos/graft-hook-timeout-fix/graft-hook-guard.sh`, which `graft-hook-timeout-fix.py` keeps on every graft hook, now skips the `prompt` event | add the entry back under UserPromptSubmit and set `GRAFT_PROMPT_HOOK=1` in `env` |
 | graft alwaysLoad keeper (SessionStart `python3 ~/.claude/hooks/graft_mcp_alwaysload.py`) | removed, and `"alwaysLoad": true` dropped from the graft entry in `.mcp.json` of aiuse, djbclark-ade and tendcf: graft's 6 tool schemas (~880 tokens) now load on demand via ToolSearch. Measured: graft called in 6% of sessions, 64% of its answers followed by a read of the same file anyway | re-add the hook and the flag |
 | rtk Bash rewrite (PreToolUse Bash `rtk hook claude`) | now `python3 "$HOME/.claude/hooks/rtk_hook.py"` (symlink to `claude/hooks/rtk_hook.py`), which skips the rewrite when cwd is under `.claude/worktrees/`: Claude Code's worktree-isolation guard refuses rewritten commands, so a worktree sub-agent couldn't run plain `git` (2026-10-12) | set the command back to `rtk hook claude` |
@@ -182,8 +182,8 @@ Re-enable a skill globally by deleting its key. For one repo only, add
 
 ## Skill folders moved aside (2026-10-10, superseded above for bailian)
 
-Moved from `~/.claude/skills/` to `~/.claude/skills-disabled/` (symlinks and
-the `superset` folder, untouched otherwise). The targets under
+Moved from `~/.claude/skills/` to `~/.claude/skills-disabled/` (symlinks,
+untouched otherwise). The targets under
 `~/.agents/skills/` and `~/.bailian/skills/` stay, so Codex and zcode still see
 the bailian and caveman skills; cursor-agent and muse, which read
 `~/.claude/skills`, no longer do. Re-enable one:
@@ -192,6 +192,19 @@ up). The bailian skills are Aliyun Bailian/DashScope `bl` CLI wrappers (model
 calls, image/video/speech generation, fine-tuning, managed agents, web search,
 docs wiki); their descriptions are in Chinese. A second batch (caveman leftovers, a generic coding-discipline pack, the
 ln-* reviewers, book-to-skill) followed the same day.
+
+## Superset uninstalled (2026-10-30)
+
+The Superset desktop app and CLI were not installed (no `superset`/`paradev`
+binary, no app, no `~/.superset`), only their leftovers. Removed: the 14
+`~/.agents/skills/superset-*` skills, `~/.agents/commands/superset`,
+`~/.claude/skills/superset` and `~/.claude/skills-disabled/superset`; the notify
+hooks in the Claude, Codex, Cursor, Gemini, Factory and Mastracode configs, the
+Grok, Amp, omp and pi hook files; the `com.djbclark.superset-home-dir`
+LaunchAgent and the `SUPERSET_HOME_DIR` blocks in `~/.bashrc`, `~/.zshrc` and
+site-djbclark's `shell/bashrc` and `shell/zshrc`; the ShipIt updater plist.
+Timestamps showed the skill and hook files re-written 2026-10-29 17:36 by an
+unidentified writer; if they reappear, find that writer rather than deleting again.
 
 ## Every disabled skill
 
@@ -219,17 +232,6 @@ ln-* reviewers, book-to-skill) followed the same day.
 | `caveman-review` | caveman | Compressed code review - one line per finding with location, problem and fix. Use for /caveman-review, "review this PR", or "review the diff". |
 | `caveman-setup` | caveman | Wire a repository through the Caveman Cloud gateway so every LLM request is measured, with no behavior change. Use for "set up caveman" or adding LLM spend observability. |
 | `caveman-stats` | caveman | Show recorded output and cache-read token usage and mode attribution for the current Claude Code session, or locate the host's native usage report. Trigger: /caveman-stats. |
-| `superset:10x` | superset bundle | Personalized audit that teaches advanced Superset features the user isn't using yet — automations, parallel agents, tasks, multi-host, terminals, custom commands, MCP. Use when the user wants to get more out of Superset, learn advanced Superset features, or 10… |
-| `superset:automate` | superset bundle | Turn a recurring chore into a Superset automation — drafts the agent prompt, confirms schedule and target, creates it with the CLI, and reviews the first run together. Use when the user wants a scheduled or recurring agent, a daily/weekly job, or to automate a… |
-| `superset:browser` | superset bundle | Drive web pages with one of two engines: a workspace's in-app browser panes via the Superset CLI (list, open, navigate, screenshot, read console, eval, raw Chrome DevTools Protocol — the default), or Browser Use 3.0 for a system browser or standalone automatio… |
-| `superset:computer` | superset bundle | Drive native desktop apps and system browser windows on macOS, Windows, or Linux through an accessibility-first driver (Cua Driver by default; Peekaboo supported on macOS). Use when asked to open or operate a real app, click or type in a desktop UI, inspect a … |
-| `superset:contribute` | superset bundle | Set up a Superset open-source contribution — fork and clone superset-sh/superset, run local dev setup, and follow the repo's contribution rules through to a merge-ready PR. Use when the user wants to contribute to Superset, fix a Superset bug themselves, or pr… |
-| `superset:doctor` | superset bundle | Diagnose and fix Superset problems — connection failures, offline hosts, terminals not attaching, auth or update issues. Use when the user reports something broken or misbehaving in Superset itself, before filing feedback. |
-| `superset:feedback` | superset bundle | Collect and submit feedback about Superset — bug reports, feature requests, or general feedback — privately to the Superset team or as a public GitHub issue. Use when the user wants to report a Superset bug, request a feature, or send feedback about Superset. |
-| `superset:orchestrate` | superset bundle | Coordinate multiple terminal coding agents through the Superset CLI by creating isolated workspaces, launching workers, sending follow-ups, reading terminal output, tracking dependencies, and collecting structured results. Use when asked to delegate or paralle… |
-| `superset:setup` | superset bundle | Make a repository Superset-ready — author .superset/config.json with setup/teardown/run scripts so every new workspace boots configured, then verify with a real workspace. Use when the user wants to set up a project or repo for Superset, configure workspace se… |
-| `superset:standup` | superset bundle | Digest of what your Superset agents did — sweeps workspaces, tasks, and agent terminals, then reports what finished, what needs review, and what's blocked. Use when the user asks what their agents did, wants a standup or summary of agent work, or returns after… |
-| `superset /superset-automation` | superset bundle (command) | Manage a single Superset automation — edit its prompt in $EDITOR, view recent runs, or trigger a one-off run. |
 | `adhd` | plugin adhd@adhd | Parallel divergent ideation for coding agents. Spawns N isolated branches under different cognitive frames (regulator, biology, speedrunner, 10-year-old, $0 budget), scores, clusters, prunes traps, and deepens top survivors. Use on /adhd, "ADHD mode", brainsto… |
 | `engineering:architecture` | claude.ai synced plugin engineering | Create or evaluate an architecture decision record (ADR). Use when choosing between technologies (e.g., Kafka vs SQS), documenting a design decision with trade-offs and consequences, reviewing a system design proposal, or designing a new component from require… |
 | `engineering:code-review` | claude.ai synced plugin engineering | Review code changes for security, performance, and correctness. Trigger with a PR URL or diff, "review this before I merge", "is this code safe?", or when checking a change for N+1 queries, injection risks, missing edge cases, or error handling gaps. |
