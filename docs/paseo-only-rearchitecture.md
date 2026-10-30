@@ -2,7 +2,7 @@
 
 Status: v1, the plan of record for the migration. v0 (2026-10-29, omp 086494f8) was refined by lead
 1e61c979 (chain `standalone-b457`) with two second opinions, codex astra (GPT-6) and Fable 5.1, two
-research passes, djbclark's answers in section F (2026-10-30; F8 still open), and the fixes for adversary
+research passes, djbclark's answers in section F (2026-10-30), and the fixes for adversary
 round 1's findings on PR 154 (safety of probes, archive and drains; plugin scope and fail modes). Until phase D7 lands,
 `README.md`, `AGENTS.md` and `docs/orchestration-practices.md` still describe the multi-harness design;
 this plan wins where they disagree about the future, they win about today. Sources: section I.
@@ -220,8 +220,7 @@ ops-promotion pilot passes.
    `site-private/memory/`, which no djbclark-ade CI job can read. Its pattern:
    `herdr|orca|tmux|superset|paradev|tuicommander|tuios|cow.pasture|relay\.py|acp-run|acp-dispatch`
    plus Hermes in a seat or harness role; it reports, for a human, the `tmux` hits that are not harness uses.
-   Exempt: `docs/history/`, the A8 bridges doc and skill (`herdr`, `tuios` only), and whatever F8 rules
-   for `CHANGELOG.md`, `docs/handoffs/`, `docs/queue.md` and `graft/`.
+   Exempt: `docs/history/` and the A8 bridges doc and skill (`herdr`, `tuios` only); nothing else (F8).
 
 Least reversible steps: deleting the dispatch record format (D5; kept readable until calibration moves),
 worktree removal on archive (B4), and the instruction-file rewrites (D7). Each happens only after its gate.
@@ -267,11 +266,12 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
    window), judgment work waits or goes to codex per the routing policy (Fable 1.7).
 7. Phase order: astra's (contracts, minimum plugins, canary, communication, lifecycle/dispatch, watchers,
    deletion), refined with Fable's seat-before-communication and dispatch-before-lifecycle (section D).
-8. **OPEN, for djbclark**: the end-state check (D7) as F5 states it fails by construction. Today
-   `CHANGELOG.md` has 102 matching lines, `docs/queue.md` 174, and `docs/handoffs/` and the generated
-   `graft/` match too. Rewriting the CHANGELOG would destroy release history. Exempt `CHANGELOG.md`,
-   `docs/handoffs/`, `docs/queue.md` (closed entries) and `graft/` as history, or move them under
-   `docs/history/`? (adversary r1 C7).
+8. **History files move into `docs/history/`** (djbclark, 2026-10-30, after adversary r1 C7 showed the
+   check failing on `CHANGELOG.md` (102 lines), `docs/queue.md` (174), `docs/handoffs/` and `graft/`). In D7
+   the current `CHANGELOG.md` and `docs/handoffs/` are frozen into `docs/history/` and new ones start; closed
+   `docs/queue.md` entries move there too and open ones are rewritten. Links to the old paths break, by
+   choice. `graft/` is regenerated in D7 with `docs/history/` left out of its index, so it comes out clean
+   [lead's reading: the ruling did not name `graft/`; it is generated, not history].
 
 ## G. What we build (replacement order A3; interfaces are sketches for D2)
 
