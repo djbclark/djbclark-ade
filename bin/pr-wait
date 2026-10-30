@@ -2,7 +2,7 @@
 """pr-wait: ONE waiter per PR head for CI and Codex's review.
 
   pr-wait PR [--repo OWNER/NAME] [--head SHA] [--since ISO] [--out PREFIX] [--timeout S]
-             [--interval S] [--codex-stuck S] [--ci-grace S] [--no-codex] [--no-request]
+             [--interval S] [--codex-stuck S] [--ci-grace S] [--no-codex | --local-codex] [--no-request]
              [--rerequest-after S] [--json]
 
 Why (2026-10-23): three waiters per head (CI, Codex, adversary) were two thirds of the
@@ -30,6 +30,13 @@ review); it finishes only when both hold on the same poll.
 Only the Codex app is believed: a state marker counts only from a comment whose author is
 `chatgpt-codex-connector[bot]` (type Bot) and whose `performed_via_github_app.slug` is
 `chatgpt-codex-connector`; the repo is public, so anyone can post a comment holding the markers.
+
+Local Codex review (2026-10-29, operator: "switch to making codex reviews run locally"; the bot's review hung on PRs 112 and 124, openai/codex#55890).
+`--local-codex` (implies --no-codex: the bot is neither waited for nor asked) makes Codex's reading the one `bin/local-review PR` filed for THIS
+head, at $LOCAL_REVIEW_STATE_DIR (default ~/.local/state/local-review)/<owner>__<name>-pr<N>-<head>.json. It FAILS CLOSED: `merge_ready` needs status
+`clean` (exit 0, a final message, zero P0-P3 findings), else the blocker is `local-codex-<status>`: `missing` (never run for this head),
+`findings`, `failed` (codex did not finish or did not produce a verifiable review), `unreadable` (bad JSON, another repo/PR/head, an inconsistent clean). The unresolved GitHub review threads of
+earlier bot reviews still gate (`open-findings`), and the summary carries `local_codex`.
 
 Findings for the head are the PR's inline comments (`pulls/N/comments`) that carry
 a finding mark (`<!-- codex-code-review-finding:v1 -->` or `<!-- codex-security-review-finding:v1 -->`), are authored by that bot, and belong to the head: their
@@ -145,6 +152,7 @@ import math
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -1062,7 +1070,7 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
 
 def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, sr: dict | None,
            head: str, review: dict | None, adversary: dict | None = None,
-           adversary_required: bool = False) -> dict:
+           adversary_required: bool = False, local_codex: dict | None = None, local_required: bool = False) -> dict:
     """The findings and merge_ready fields of the summary.
 
     Both Codex reviews are judged the same way: the code review (`code_review`, mark
@@ -1121,7 +1129,16 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
                                 f"{by_kind_open[kind]} open Codex thread(s) found")
             if has_any is True and review["finding_comments"][kind] == 0:
                 mismatch.append(f"{kind}: marker has_any_findings=true but no Codex finding comment found")
-    if no_codex:
+    if no_codex and local_required:
+        # The local review stands in for the GitHub bot's (2026-10-29, operator: "switch to making codex reviews run locally"). Fail
+        # closed: anything but a clean result on THIS head is a blocker with its own name, never "skipped". The bot's earlier threads still
+        # gate, so they must have been collected.
+        status = (local_codex or {}).get("status") or "unreadable"
+        if status != "clean":
+            blockers.append(f"local-codex-{status}")
+        if review is None:
+            blockers.append("findings-not-collected")
+    elif no_codex:
         blockers.append("codex-skipped")
     else:
         if codex_status != "completed":
@@ -1190,7 +1207,86 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
             # Reported whether or not it blocks, so a PR that should carry a verdict shows up even
             # where blocking is not switched on. `adversary` is the raw finding for the PR body.
             "adversary": adversary, "adversary_warnings": adversary_warnings,
-            "adversary_required": adversary_required}
+            "adversary_required": adversary_required, "local_codex": local_codex}
+
+
+# ---- local Codex review ---------------------------------------------------------------------------
+
+# `bin/local-review PR` runs `codex review --base <base sha>` in a clean worktree at the EXACT head and files its result at
+# $LOCAL_REVIEW_STATE_DIR (default ~/.local/state/local-review)/<owner>__<name>-pr<N>-<head>.json, 0600 in a 0700 directory. With
+# `--local-codex` that file stands in for the GitHub bot's marker (the bot's review hung on PRs 112 and 124, openai/codex#55890). Only a
+# same-user process can write it, which is more than the public PR comments the bot's marker rides on, and the head is part of the NAME
+# and of the CONTENT, so a result for another head is never read. It FAILS CLOSED: every anomaly is `unreadable`, and a `clean` result
+# must be self-consistent (exit 0, a final message, no findings) or it is `unreadable` too.
+LOCAL_REVIEW_SCHEMA = 1
+LOCAL_PRIORITIES = ("P0", "P1", "P2", "P3")
+
+
+def local_review_dir() -> Path:
+    return Path(os.environ.get("LOCAL_REVIEW_STATE_DIR") or Path.home() / ".local/state/local-review")
+
+
+def local_codex_read(repo: str, pr: int, head: str, base_ref: str | None = None) -> dict:
+    """{"status": clean|findings|failed|missing|unreadable, "counts_text", "reason", "path"} for the local review of PR at HEAD. BASE_REF, when
+    the PR's own base is known, must be the base the review used (a retargeted PR keeps no old verdict)."""
+    repo = repo.lower()    # bin/local-review lower-cases the repository in the name and in the document
+    path = local_review_dir() / f"{repo.replace('/', '__')}-pr{pr}-{head}.json"
+    out: dict = {"status": "unreadable", "counts_text": "", "reason": "", "path": str(path)}
+    try:
+        st = path.lstat()    # never through a symlink
+    except FileNotFoundError:
+        out.update(status="missing", reason=f"run `bin/local-review {pr}` on this head")
+        return out
+    except OSError as e:
+        out["reason"] = f"cannot stat {path.name}: {e}"
+        return out
+    # The file is only as good as its writer: a regular file of this user that nobody else can write, and small.
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022 or st.st_size > 1 << 20:
+        out["reason"] = "not a regular file of this user, or group/other-writable, or over 1 MiB"
+        return out
+    try:
+        raw = path.read_text()
+    except (OSError, ValueError) as e:    # ValueError: bytes that are not UTF-8
+        out["reason"] = f"cannot read {path.name}: {e}"
+        return out
+    try:
+        doc = json.loads(raw, object_pairs_hook=_strict_object)
+    except ValueError as e:
+        out["reason"] = f"not valid JSON: {e}"
+        return out
+    if not isinstance(doc, dict):
+        out["reason"] = "not a JSON object"
+        return out
+    if (type(doc.get("schema")) is not int or doc["schema"] != LOCAL_REVIEW_SCHEMA or doc.get("repo") != repo
+            or type(doc.get("pr")) is not int or doc["pr"] != pr or doc.get("head") != head):
+        out["reason"] = "schema, repo, PR or head differs from the one asked about"
+        return out
+    if base_ref is not None and doc.get("base_ref") != base_ref:
+        out["reason"] = f"reviewed against {doc.get('base_ref')!r}, not the PR's base {base_ref!r}"
+        return out
+    counts = doc.get("counts")
+    if (not isinstance(counts, dict) or set(counts) != set(LOCAL_PRIORITIES)
+            or any(type(v) is not int or v < 0 for v in counts.values())):
+        out["reason"] = "counts are not four non-negative integers"
+        return out
+    total = sum(counts.values())
+    out["counts_text"] = ", ".join(f"{k} {counts[k]}" for k in LOCAL_PRIORITIES if counts[k]) or "no findings"
+    result, findings = doc.get("result"), doc.get("findings")
+    if result == "clean":
+        if type(doc.get("exit_code")) is not int or doc["exit_code"] != 0 or doc.get("final_message") is not True or total or findings != []:
+            out["reason"] = "a clean result must have exit code 0, a final message and no findings"
+            return out
+        out["status"] = "clean"
+    elif result == "findings":
+        if total < 1 or not isinstance(findings, list) or len(findings) < 1:
+            out["reason"] = "a findings result must list its findings"
+            return out
+        out["status"] = "findings"
+    elif result == "failed":
+        out.update(status="failed", reason=str(doc.get("reason") or "codex did not finish")[:200])
+    else:
+        out["reason"] = f"unknown result {result!r}"
+    return out
 
 
 # ---- files ----------------------------------------------------------------------------------------
@@ -1495,6 +1591,9 @@ def build_parser() -> Parser:
     p.add_argument("--ci-grace", type=number, default=120, help="seconds a head with no checks yet counts as "
                    "pending (default 120)")
     p.add_argument("--no-codex", action="store_true", help="wait for CI only (never requests a review)")
+    p.add_argument("--local-codex", action="store_true",
+                   help="Codex's review is the one `bin/local-review` ran on this exact head (implies --no-codex): "
+                        "a missing, failed or non-clean result is the merge blocker local-codex-<status>")
     p.add_argument("--no-request", action="store_true", help="never post `@codex review`; only wait")
     p.add_argument("--adversary-required", action="store_true",
                    help="make a missing/stale adversary verdict in the PR body a merge BLOCKER "
@@ -1524,6 +1623,10 @@ def main(argv: list[str]) -> int:
             return usage(f"--since must be an ISO time, got '{a.since}'")
     if a.pr < 1:
         return usage("PR must be a positive number")
+    if a.local_codex and a.no_codex:
+        return usage("--local-codex and --no-codex are alternatives: --local-codex already implies --no-codex")
+    if a.local_codex:
+        a.no_codex = True  # the GitHub bot is neither waited for nor asked; bin/local-review's result gates instead
 
     start = time.monotonic()
     deadline = start + a.timeout
@@ -1629,10 +1732,13 @@ def main(argv: list[str]) -> int:
             # UNCOLLECTED verdict is an UNKNOWN: leaving it absent made `adversary_warnings` empty and
             # nothing block, which is the same "an unknown reads as a pass" hole F5 closed for fetches.
             collect_adversary()
+        pr_base = (((s.get("pr_doc") or {}).get("base") or {}).get("ref")) if isinstance(s.get("pr_doc"), dict) else None
+        local = local_codex_read(a.repo, a.pr, head, pr_base if isinstance(pr_base, str) else None) if a.local_codex else None
         judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, security_review(s["codex_match"]),
                         head, s["review"], s["adversary"],
                         adversary_required=(a.adversary_required
-                                            or bool((s["adversary"] or {}).get("required_by_label"))))
+                                            or bool((s["adversary"] or {}).get("required_by_label"))),
+                        local_codex=local, local_required=a.local_codex)
         summary = {"result": result, "exit": code, "repo": a.repo, "pr": a.pr, "head": head,
                    "new_head": new_head, "ci": {"state": ci_state, **counts}, "codex": codex,
                    **judged, "codex_requested": rq["own"], "codex_request_note": request_note(s["codex_match"], result),
@@ -1648,6 +1754,11 @@ def main(argv: list[str]) -> int:
         else:
             parts = [f"PR {a.pr} at {head[:12]}: {result}",
                      f"CI {ci_state} ({counts['pass']} pass, {counts['fail']} fail, {counts['pending']} pending)"]
+            if a.local_codex:
+                lc = judged["local_codex"] or {}
+                parts.append(f"local codex {lc.get('status')}"
+                             + (f" ({lc['counts_text']})" if lc.get("counts_text") else "")
+                             + (f": {lc['reason']}" if lc.get("reason") else ""))
             if not a.no_codex:
                 parts.append(f"codex {codex['status']} (security {judged['security_status']})")
                 if rq["own"]:
@@ -1704,8 +1815,8 @@ def main(argv: list[str]) -> int:
     issue_comments = f"repos/{a.repo}/issues/{a.pr}/comments?per_page=100"
 
     def collect_findings() -> bool:
-        if a.no_codex:
-            return True
+        if a.no_codex and not a.local_codex:
+            return True    # --local-codex still reads the bot's review threads: an earlier head's open finding gates (AGENTS.md item 9)
         review = attempt(fetch_review_state, a.repo, a.pr, head, a.since)
         if review is None:
             return False
@@ -1903,6 +2014,14 @@ def main(argv: list[str]) -> int:
                         s["running_seen"] = True
                         s["codex_clock"] = time.monotonic()
                     request_step(match)
+            elif a.local_codex:
+                # The bot is neither waited for nor asked, but a marker it already left for this head is still READ: with it `assess()` keeps its
+                # marker/thread consistency checks (a marker that reports unresolved findings no thread shows is a mismatch, never a clean 0; Codex, round 10)
+                comments = attempt(api_items, issue_comments)
+                if comments is None:
+                    s["codex_done"] = False    # unknown, so retried: never "no marker"
+                else:
+                    s["codex_match"], s["codex_newest"] = codex_state_for(comments, head)
             # finish only when both hold on this same poll
             if s["ci_done"] and s["codex_done"] and collect_findings():
                 return finish("done", EXIT_DONE)

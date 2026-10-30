@@ -818,6 +818,15 @@ count. With no server push stamp (no CI app) it leans toward posting; the cap of
 `gh` call failed: check suites, timeline or user) posts nothing, says so and is retried on the next poll. Do not post
 `@codex review` by hand while a `pr-wait` is alive.
 
+**The Codex review can be run locally (2026-10-29):** `bin/local-review PR` (from any checkout of the repo; it fetches into its object store and adds one temporary worktree) runs `codex review --base
+<base sha>` in a clean detached worktree at the PR's exact head, kills it after `--timeout` (default 1500 s), and files
+`~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (counts by P0-P3, findings' titles; the full text stays in the `.out` beside it). Exit 0 clean, 1
+findings, 2 usage, 3 failed (codex missing, timeout, non-zero exit, no final message, a head that moved, a final message that is not the transcript's own, one that reads as a refusal or ends in a question, a transcript that does not show the pinned base, a read-only sandbox and an `exec` block, or an unparseable final message: never "clean"), 4 a run
+for that head is alive. Then `bin/pr-wait PR --local-codex` replaces the bot's marker with that file (implies `--no-codex`): `merge_ready` needs `clean` on this
+head, else `local-codex-missing`, `local-codex-findings`, `local-codex-failed` or `local-codex-unreadable`. Run it after every push (it takes 2-6 minutes and about 0.3% of
+the weekly Codex quota), fix every finding, and quote the summary line in the PR body. A finding in `.cursor/hooks.json` or `.claude/settings.json` that the review
+worktree itself dirtied (the graft hook) is listed under `ignored_generated` and not counted. A PR whose author is neither the repository owner nor the authenticated gh user is refused (exit 2) unless `--allow-untrusted`, because the PR's own diff and AGENTS.md can steer the reviewing model; `pr-wait --local-codex` accepts a result filed that way as the operator's call.
+
 ### Jobs and records — work that must outlive the session
 
 What survives a session is a file, not a process. Every slice and every

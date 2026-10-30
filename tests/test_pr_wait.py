@@ -2304,3 +2304,160 @@ def test_d1_an_escaped_nested_marker_is_still_not_a_second_verdict() -> None:
     assert r["verdict"] == "APPROVE" and r["matches_head"], r
     assert not r["conflict"] and not r["malformed"], r
     assert passes(body)
+
+
+# ---- --local-codex: the review `bin/local-review` filed for this head stands in for the GitHub bot's ----------------------------
+
+
+def local_doc(**kw: object) -> dict:
+    doc: dict = {"schema": 1, "repo": REPO, "pr": PR, "head": HEAD, "base_ref": "master", "result": "clean", "reason": "",
+                 "exit_code": 0, "final_message": True, "counts": {"P0": 0, "P1": 0, "P2": 0, "P3": 0}, "findings": []}
+    doc.update(kw)
+    return doc
+
+
+def put_local(world: World, doc: object, head: str = HEAD, raw: str | None = None) -> None:
+    d = world.state.parent / "local-review"
+    d.mkdir(exist_ok=True)
+    world.env["LOCAL_REVIEW_STATE_DIR"] = str(d)
+    (d / f"{REPO.replace('/', '__')}-pr{PR}-{head}.json").write_text(raw if raw is not None else json.dumps(doc))
+
+
+def local_run(world: World) -> dict:
+    r = world.run("--local-codex", "--json")
+    assert r.returncode == 0, r.stderr
+    assert world.posts() == 0    # the bot's review is never requested; its comments are only READ
+    return json.loads(r.stdout)
+
+
+def test_a_clean_local_review_of_this_head_is_merge_ready_without_asking_the_bot(world: World) -> None:
+    put_local(world, local_doc())
+    s = local_run(world)
+    assert s["merge_ready"] is True and s["merge_blockers"] == [], s
+    assert s["local_codex"]["status"] == "clean" and s["codex"] == {"status": "skipped"}
+
+
+def test_no_local_review_for_this_head_is_a_named_blocker_not_codex_skipped(world: World) -> None:
+    put_local(world, local_doc(head=OLD), head=OLD)    # a review of another head is never read for this one
+    s = local_run(world)
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["local-codex-missing"], s
+    assert "bin/local-review" in s["local_codex"]["reason"]
+
+
+def test_findings_and_a_failed_run_block_with_their_own_names(world: World) -> None:
+    put_local(world, local_doc(result="findings", counts={"P0": 0, "P1": 1, "P2": 2, "P3": 0},
+                               findings=[{"priority": "P1", "title": "x", "path": "a:1"}]))
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-findings"] and s["local_codex"]["counts_text"] == "P1 1, P2 2", s
+    put_local(world, local_doc(result="failed", reason="codex did not finish in 1500 s", exit_code=None, final_message=False))
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-failed"] and "1500" in s["local_codex"]["reason"], s
+
+
+@pytest.mark.parametrize("doc,raw", [
+    (None, "{not json"),
+    (None, '{"schema": 1, "schema": 1}'),    # a duplicate key: another reading of the same file
+    (local_doc(head=OLD), None),    # right name, another head inside
+    (local_doc(pr=PR + 1), None),
+    (local_doc(repo="someone/else"), None),
+    (local_doc(schema=2), None),
+    (local_doc(exit_code=1), None),    # a clean that says codex exited 1
+    (local_doc(final_message=False), None),    # a clean with no final message
+    (local_doc(counts={"P0": 0, "P1": 1, "P2": 0, "P3": 0}), None),    # a clean that counts a finding
+    (local_doc(findings=[{"priority": "P1", "title": "x", "path": ""}]), None),
+    (local_doc(counts={"P0": 0, "P1": 0, "P2": 0}), None),    # three counts
+    (local_doc(counts={"P0": 0, "P1": True, "P2": 0, "P3": 0}), None),    # a bool is not a count
+    (local_doc(result="findings"), None),    # findings with none listed
+    (local_doc(result="approved"), None),
+    ([], None),
+])
+def test_an_inconsistent_or_foreign_local_result_is_unreadable_and_blocks(world: World, doc: object, raw: str | None) -> None:
+    put_local(world, doc, raw=raw)
+    s = local_run(world)
+    assert s["merge_ready"] is False and s["merge_blockers"] == ["local-codex-unreadable"], s
+
+
+def test_local_codex_still_honours_ci_and_open_threads(world: World) -> None:
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs", checks_page(run_obj("test", conclusion="failure")))
+    assert local_run(world)["merge_blockers"] == ["ci-failed"]
+
+
+def test_a_clean_local_review_does_not_hide_an_open_bot_thread_of_an_earlier_head(world: World) -> None:
+    """Codex P1 and the adversary's P1 on PR 130: `--local-codex` once skipped the review-thread collection, so `open-findings` never fired."""
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([old_finding()]))
+    world.route("graphql", gql(thread(50)))
+    s = local_run(world)
+    assert s["merge_ready"] is False and "open-findings" in s["merge_blockers"], s    # (and a mismatch with the happy marker, which says none are open)
+    assert s["open_findings"] == 1 and s["local_codex"]["status"] == "clean"
+
+
+def test_local_codex_without_collected_threads_is_never_merge_ready(world: World) -> None:
+    put_local(world, local_doc())
+    world.route("graphql", fail("graphql is down"))
+    r = world.run("--local-codex", "--json", "--timeout", "3")
+    s = json.loads(r.stdout)
+    assert s["merge_ready"] is False and "findings-not-collected" in s["merge_blockers"], s
+
+
+def test_a_review_against_another_base_than_the_prs_is_unreadable(world: World) -> None:
+    put_local(world, local_doc(base_ref="release"))
+    world.route(f"repos/{REPO}/pulls/{PR}", ok({"head": {"sha": HEAD}, "base": {"ref": "master"}}))
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-unreadable"] and "master" in s["local_codex"]["reason"], s
+    put_local(world, local_doc(base_ref="master"))
+    assert local_run(world)["merge_ready"] is True
+
+
+def test_local_codex_and_no_codex_are_alternatives(world: World) -> None:
+    r = world.run("--local-codex", "--no-codex")
+    assert r.returncode == 2 and "alternatives" in r.stderr
+
+
+@pytest.mark.parametrize("kind", ["symlink", "group_writable", "other_writable", "oversized"])
+def test_a_local_result_that_is_not_the_writers_plain_private_file_is_unreadable(world: World, kind: str) -> None:
+    put_local(world, local_doc())
+    f = world.state.parent / "local-review" / f"{REPO.replace('/', '__')}-pr{PR}-{HEAD}.json"
+    if kind == "symlink":
+        real = f.with_name("real.json")
+        f.rename(real)
+        f.symlink_to(real)
+    elif kind == "oversized":
+        f.write_text(json.dumps(local_doc(reason="x" * (1 << 20))))
+    else:
+        f.chmod(0o664 if kind == "group_writable" else 0o606)
+    s = local_run(world)
+    assert s["merge_blockers"] == ["local-codex-unreadable"], s
+
+
+@pytest.mark.parametrize("field,value", [("pr", True), ("schema", 1.0), ("exit_code", False)])
+def test_bool_and_float_values_are_not_the_integers_the_result_must_hold(world: World, field: str, value: object) -> None:
+    doc = local_doc()
+    doc[field] = value
+    put_local(world, doc)
+    assert local_run(world)["merge_blockers"] == ["local-codex-unreadable"]
+
+
+def test_a_local_result_that_is_not_utf8_is_unreadable_not_a_crash(world: World) -> None:
+    """Codex P2 on PR 130: `UnicodeDecodeError` escaped `local_codex_read` and aborted the waiter."""
+    put_local(world, None)
+    f = world.state.parent / "local-review" / f"{REPO.replace('/', '__')}-pr{PR}-{HEAD}.json"
+    f.write_bytes(b'{"schema": 1, "x": "\xff\xfe"}')
+    assert local_run(world)["merge_blockers"] == ["local-codex-unreadable"]
+
+
+def test_local_codex_keeps_the_bot_markers_consistency_check(world: World) -> None:
+    """Codex P1 on PR 130 (round 10): a marker that says unresolved findings exist, with no thread to show for it, is a mismatch even under --local-codex."""
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", unresolved=True, any_findings=True)]))
+    s = local_run(world)
+    assert s["merge_ready"] is False and "findings-mismatch" in s["merge_blockers"], s
+    assert world.posts() == 0
+
+
+def test_local_codex_retries_while_the_bot_comments_cannot_be_read(world: World) -> None:
+    put_local(world, local_doc())
+    world.route(f"repos/{REPO}/issues/{PR}/comments", fail("gh: boom"))
+    r = world.run("--local-codex", "--json", "--timeout", "3")
+    assert r.returncode != 0 or json.loads(r.stdout)["merge_ready"] is False
