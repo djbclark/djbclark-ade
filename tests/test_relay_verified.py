@@ -1707,6 +1707,16 @@ class TestNoProofPathIsSaidAtSendTime(Base):
         self.assertIn("`ack build1` through relay.py", err)
         self.assertEqual(json.loads((relay.expect_dir() / "build1.json").read_text())["tl_base"], None)
 
+    def test_a_paseo_first_contact_with_an_unreadable_timeline_promises_no_ack(self) -> None:
+        """Codex P2, PR 162: a first-contact footer opens no record, so no relay-side close can apply; the note must not say
+        an `ack` will settle the link (`ack_sweep` has no transcript and no baseline to read either)."""
+        with mock.patch.object(fleet, "_paseo_hosting", lambda anc: {self.PASEO}), \
+                mock.patch.object(relay, "timeline_messages", lambda pid: None):
+            rc, _, err = self.go("hello there friend", rows=[self.paseo_row()])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("this link cannot be marked acked", err)
+        self.assertNotIn("`ack bbbbbbbb` through relay.py", err)
+
 
 class TestExpectAnsweredInsideABlockingSend(Base):
     """Codex P2, PR 87 (2026-10-26): a sender with no transcript reserves its --expect-ack ID, then SENDS; the open record is written only after the send

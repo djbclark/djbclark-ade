@@ -370,6 +370,20 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         self.assertIn("its Paseo timeline could not be read", note)
         self.assertIn("`ack build1` through relay.py", note)
 
+    def test_a_first_contact_link_with_no_readable_timeline_does_not_promise_an_ack(self) -> None:
+        """Codex P2, PR 162: a first-contact footer opens no expectation record, so `expect_resolve_by_relay` never sees the
+        reply; promising that `ack <id>` closes it would leave the link ONE-WAY and the operator waiting."""
+        note = relay.ack_proof_note({"id": "bbbbbbbb", "transcript": None, "paseo": PASEO_AGENT}, None, None)
+        self.assertIn("this link cannot be marked acked", note)
+        self.assertNotIn("`ack bbbbbbbb` through relay.py", note)
+
+    def test_a_sender_an_answer_can_reach_in_a_kept_route_is_not_told(self) -> None:
+        """Codex P2, PR 162: `expect_resolve_by_relay` closes a transcript-less record when the target's `ack ID` arrives over
+        a route that keeps the text (a Paseo agent, an ACP launch, a dispatch inbox), so such a sender must not be told that
+        nothing will close it, nor sent to `--retire`."""
+        for row in (sess(id="acp1234", agent="codex", host="acp"), sess(id="disp1234", agent="codex", dispatch_rec="/tmp/d.json")):
+            self.assertIsNone(relay.ack_proof_note(row, "build1", None), row["id"])
+
     def test_fleet_list_annotates_links_from_the_row_relay_sends_as(self) -> None:
         """`fleet list` annotates links from the same row relay writes them for, so a Paseo sender's links show."""
         with tempfile.TemporaryDirectory() as d, mock.patch.object(fleet, "LINKS_FILE", Path(d) / "links.json"):

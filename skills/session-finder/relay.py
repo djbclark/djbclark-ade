@@ -728,11 +728,17 @@ def ack_proof_note(me, expect_id, tl_base):
 
     Decided from the artifact relay actually wrote, not the row's shape (adversary 2026-10-30 B5): a transcript is watched by
     `--ack`, and a transcript-less Paseo sender only by its timeline, which closes nothing without a baseline (`timeline_base`
-    returns None when the timeline could not be read: no `paseo` CLI, a failed call). Everything else has no watcher at all, and
-    a `pid*` process-scan row is the live case: the target's `ack` through relay.py cannot close it either, because item 9's
-    relay-side close counts only an answer whose route back to the asker proved delivery or keeps the text, and that sender has
-    no route but a pane (proofless) or no route at all (`docs/queue.md` item 9, adversary r3 A1). So the note says what is true:
-    the expectation will not close by itself, and `--retire` is the operator's way out."""
+    returns None when the timeline could not be read: no `paseo` CLI, a failed call).
+
+    Three things are told apart, because they close differently (Codex P2s, PR 162):
+      - an `--expect-ack` RECORD is ALSO closed by `expect_resolve_by_relay` when the target answers `ack ID` through relay.py
+        and that answer's route KEEPS the text (a Paseo agent, an ACP launch, a dispatch inbox: `KEEPING_ROUTES`). A sender
+        whose answer can arrive that way is not warned at all -- saying nothing will close it would be false.
+      - a `pid*` row, whose answer comes back over a pane (proofless) or over no route, has no such close: it is told the
+        expectation will not close by itself and given `--retire`, which is the operator's way out.
+      - a FIRST-CONTACT footer opens no record, so the relay-side close never applies to it: if the timeline cannot be read
+        the link cannot be marked acked by anything, and promising an `ack` would be a promise relay cannot keep
+        (`ack_sweep` needs a transcript or a timeline baseline)."""
     if not isinstance(me, dict) or me.get("transcript"):
         return None
     label = me.get("id") or "this sender"
@@ -741,9 +747,14 @@ def ack_proof_note(me, expect_id, tl_base):
     if isinstance(pid, str) and UUID.fullmatch(pid):
         if isinstance(tl_base, dict):
             return None
-        return (f"relay: warning: {label} has no transcript and its Paseo timeline could not be read, so nothing here watches "
-                f"for the reply: it closes only if the target sends `ack {ident}` through relay.py")
+        if expect_id:
+            return (f"relay: warning: {label} has no transcript and its Paseo timeline could not be read, so nothing here "
+                    f"watches for the reply: it closes only if the target sends `ack {ident}` through relay.py")
+        return (f"relay: warning: {label} has no transcript and its Paseo timeline could not be read, so this link cannot be "
+                "marked acked: nothing here watches for the reply, which reaches this session only as a message")
     if expect_id:
+        if set(plan(me)) & set(KEEPING_ROUTES):
+            return None    # the answer comes back into a Paseo agent, an ACP launch or a dispatch inbox: `expect_resolve_by_relay` closes it
         return (f"relay: warning: {label} has no transcript and no Paseo timeline, so nothing will close this expectation "
                 f"automatically: once it is answered, close it with `relay.py --retire {expect_id} --reason ...`, "
                 "or ask from a session with a transcript")
