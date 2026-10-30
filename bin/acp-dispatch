@@ -3396,7 +3396,12 @@ def classify(report: Path, done: Path | None = None, finished: bool | None = Non
         return "blocked", first
     if last.startswith(NO_REPORT_PREFIX):
         return "no-report", last
-    if last == "DONE":
+    # A brief may ask for one machine-readable line after the report's `DONE` (a verdict, e.g.
+    # `AC_DONE: adv-e-152-delta APPROVE`, so the lead can grep it). That report is finished; counting
+    # it `partial` made a complete verdict look unfinished (2026-10-30: adv-e-152-delta). Only the
+    # exact two-line shape is accepted, so real trailing prose still reads as partial.
+    finished_by_verdict = last.startswith("AC_DONE:") and len(lines) > 1 and lines[-2].strip() == "DONE"
+    if last == "DONE" or finished_by_verdict:
         return "done", first if first.upper().startswith("STATUS:") else f"{len(text)} chars"
     return "partial", f"no DONE line yet; first line: {first[:120]}"
 
