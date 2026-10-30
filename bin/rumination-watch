@@ -74,7 +74,12 @@ RW_AUTO_SEAT_S (default 3600 s): at most one attempt per role per window, confir
 start with no id becomes eligible again only after the window; returned ids are retained for diagnosis.
 Every invocation outcome is logged; only pre-invocation refusals are suppressed once per window.
 The prompt names the absolute Tier 1 file, never step text. The darkness page still goes out and
-names any automatically started id.
+names any automatically started id. The start runs as `env -u PASEO_AGENT_ID` (a caller's
+PASEO_AGENT_ID makes the new seat that agent's SUBAGENT; `bin/self-slash` clears it for the same
+reason) and, once `paseo agent inspect` confirms the seat, opens its tab with `paseo agent open`:
+a `paseo run` agent has NO tab, and an invisible seat hitting a `card:*` (which §J never answers)
+is the same darkness one level down (djbclark's ruling, 2026-10-30). A failed open is logged and
+never fails the start; RW_AUTO_SEAT_NO_OPEN=1 skips the attempt on a host with no desktop.
 
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
 not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
@@ -1075,6 +1080,31 @@ def auto_seat_candidate(state: dict) -> str:
     return max(candidates, default=(0, ""))[1]
 
 
+def open_desktop_tab(agent_id: str) -> str:
+    """Give a started seat a Paseo Desktop tab; return "" on success, else a reason to LOG.
+
+    A `paseo run` agent has NO tab (tabs are client-side; only `paseo agent open` or the UI make
+    one), so on 2026-10-30 a lead handed over that way was invisible for 13 h with a question card
+    nobody could see. `auto_seat` never answers a `card:*` — that is djbclark's — so an
+    auto-started seat that hits one would be alive, reachable by relay and UNSEEN: the exact
+    darkness this file exists to end, one level down. djbclark ruled 2026-10-30 that the start
+    opens the tab and LOGS a failure; unlike `self-slash --finish --successor` it must not fail the
+    start, because there is no old agent to fall back to and the seat is reachable either way.
+
+    `agent open` returns as soon as the app is launched with the deep link and cannot confirm a tab
+    appeared (#159), so "" means "the CLI accepted it". RW_AUTO_SEAT_NO_OPEN=1 skips the attempt on
+    a host with no desktop and still returns a line naming the hand-run fix.
+    """
+    if os.environ.get("RW_AUTO_SEAT_NO_OPEN", "").strip() == "1":
+        return f"NOT opened (RW_AUTO_SEAT_NO_OPEN=1): run paseo agent open {agent_id}"
+    rc, out, err = run_split(["paseo", "agent", "open", agent_id, "--json"], timeout=20)
+    if rc == 0:
+        return ""
+    detail = " ".join((err or out).split())
+    return (f"NOT opened in Paseo Desktop (rc={rc}{': ' + detail[:160] if detail else ''}); "
+            f"it is reachable by relay but has no tab: run paseo agent open {agent_id}")
+
+
 def auto_seat(word: str, state: dict, now: float) -> str:
     """Start only a PROVEN ABSENT seat; return the confirmed id, otherwise ''.
 
@@ -1171,7 +1201,13 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     # addRunOptions in the installed Paseo bundle supplies provider/no-wait/cwd/title;
     # addJsonAndDaemonHostOptions supplies --json, agentRunSchema.idField supplies agentId.
     # No model/thinking/default-provider: the provider is operator configuration, forwarded as-is.
-    argv = ["paseo", "run", "--provider", AUTO_SEAT_PROVIDER, "--no-wait", "--json",
+    # `env -u PASEO_AGENT_ID`: `paseo run` parents the new agent to $PASEO_AGENT_ID when the
+    # variable is set, so a pass run BY HAND from inside an agent would make the entity's next seat
+    # that agent's SUBAGENT (measured 2026-10-30: the probe came back ParentAgentId = the calling
+    # seat). launchd never sets it, but a debugging pass does; `bin/self-slash` clears it for the
+    # same reason (its header, 2026-10-30).
+    argv = ["env", "-u", "PASEO_AGENT_ID",
+            "paseo", "run", "--provider", AUTO_SEAT_PROVIDER, "--no-wait", "--json",
             "--cwd", str(REPO.resolve()), "--title", f"{ROLE} (auto-seat)", "--", prompt]
     deadline = time.monotonic() + 120
     # An invoked start can have created an agent even when its response is lost. Persist the
@@ -1224,6 +1260,10 @@ def auto_seat(word: str, state: dict, now: float) -> str:
     del told[unresolved_key]
     save_state(state)                          # persist before a potentially slow paging operation
     log(f"auto-seat: started {new_id} (was {word}) — {pointer if exists else 'none'}")
+    # The seat exists, is reachable and is NOT visible to the human until it has a tab. Logged
+    # AFTER the state that records it: a kill during the open must leave a seated, diagnosable id.
+    tab = open_desktop_tab(new_id)
+    log(f"auto-seat: {'opened ' + new_id + ' in Paseo Desktop' if not tab else tab}")
     return new_id
 
 # A page size for `gh search prs`, not a ceiling on reality: at the cap the count is a lower bound.
@@ -1787,7 +1827,10 @@ def main(argv: list[str] | None = None) -> int:
             "RW_AUTO_SEAT_S (default 3600 s) allows at most one attempt per role per window, confirmed "
             "or not; a start whose id was lost refuses further starts until an authoritative Paseo "
             "listing reconciles it. Nothing retries on the next pass; refusal logs are limited to "
-            "one per cooldown. The darkness page still "
+            "one per cooldown. The start runs `env -u PASEO_AGENT_ID` and, once confirmed, opens "
+            "the seat's Paseo Desktop tab (`paseo agent open`): a `paseo run` agent has none, a "
+            "failed open is logged and never fails the start, and RW_AUTO_SEAT_NO_OPEN=1 skips it. "
+            "The darkness page still "
             "goes out and names a newly started seat."
         ),
     )
