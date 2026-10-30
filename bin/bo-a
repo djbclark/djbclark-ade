@@ -5,7 +5,7 @@
 #   tickets    a private Kerberos cache for the tmux session, seeded from the
 #              ticket you forwarded (or a kinit it prompts for), plus a window
 #              that renews it and asks for kinit before it lapses
-#   tmux       session "barnowl", prefix C-b:
+#   tmux       session "barnowl", prefix C-s:
 #                0 barnowl   the client (the session `bo` and `g` drive)
 #                1 tickets   the renewer
 #
@@ -127,7 +127,7 @@ notify_expiry() {
   command -v zwrite >/dev/null || return 0
   idx=$(tmux display-message -p '#I' 2>/dev/null || echo 2)
   for n in 1 2 3 4 5 6 7; do
-    printf 'Kerberos tickets end %s and cannot be renewed past that.\nRun kinit -l1d -r7d in tmux window "tickets" (C-b %s), or forward fresh tickets and run bo-a.\n' \
+    printf 'Kerberos tickets end %s and cannot be renewed past that.\nRun kinit -l1d -r7d in tmux window "tickets" (C-s %s), or forward fresh tickets and run bo-a.\n' \
       "$(hhmm "$1")" "$idx" | zwrite -n "$USER" >/dev/null 2>&1 && return 0
     sleep 15
   done
@@ -231,7 +231,7 @@ ensure_session() {
     log "session $session: created, window barnowl started"
   fi
   t set-environment -t "$session" KRB5CCNAME "FILE:$cache"
-  t set-option -t "$session" prefix C-b
+  t set-option -t "$session" prefix C-s
   t set-option -t "$session" prefix2 None
   t set-option -t "$session" history-limit 50000
   ensure_window barnowl barnowl
