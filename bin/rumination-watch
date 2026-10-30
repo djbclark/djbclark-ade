@@ -339,9 +339,16 @@ def deploy_update(state: dict, now: float) -> str:
                     f"({branch}@{old[:10]} -> {still_branch or '?'}@{(still or '?')[:10]}); another "
                     "session is using this checkout, so the fast-forward is not ours to make", now)
         return "skipped: checkout changed during the fetch"
-    rc, _, err = _git(["merge", "--ff-only", "--quiet", new], timeout=DEPLOY_TIMEOUT_S)
+    # `--no-overwrite-ignore` is not decoration: `git merge` UPDATES ignored files by default, so a
+    # revision that starts tracking a path this checkout already holds as an ignored local file would
+    # silently overwrite it — the status check above sees a clean tree precisely BECAUSE the file is
+    # ignored. Ordinary untracked files are untouched by `git merge`; ignored ones are not.
+    rc, _, err = _git(["merge", "--ff-only", "--quiet", "--no-overwrite-ignore", new],
+                      timeout=DEPLOY_TIMEOUT_S)
     if rc != 0:
-        # Lost the race with a session that touched the checkout between the status check and now.
+        # Either lost the race with a session that touched the checkout between the status check and
+        # now, or the revision would overwrite an ignored local file; both are refusals, and git's
+        # own message names the path.
         _deploy_say(state, "merge-failed",
                     f"deploy skipped: fast-forward {old[:10]} -> {new[:10]} failed: "
                     f"{(err or 'no output')[:200]}", now)

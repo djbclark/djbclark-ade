@@ -134,6 +134,34 @@ def test_untracked_files_do_not_block_the_update(monkeypatch, tmp_path):
     assert (checkout / "scratch-note.md").read_text() == "mine\n"
 
 
+def test_a_revision_that_would_overwrite_an_ignored_local_file_is_refused(monkeypatch, tmp_path):
+    """`git merge` rewrites IGNORED files by default, so the clean-tree check above cannot see this
+    collision: the checkout holds a file locally, untracked and gitignored, and the incoming revision
+    starts tracking that same path. Ordinary untracked files are safe from `git merge`; ignored ones
+    are not (`--overwrite-ignore` is the documented default). The local content must survive, which
+    only happens because the merge passes `--no-overwrite-ignore`.
+    """
+    checkout, upstream, _base = make_repo(tmp_path)
+    rw = load(monkeypatch, tmp_path, checkout)
+    commit(upstream, ".gitignore", "local.cfg\n", "ignore the local config")
+    git(upstream, "push", "-q", "origin", "master")
+    assert rw.deploy_update({}, 0.0).startswith("updated ")  # the ignore rule is now in the checkout
+    (checkout / "local.cfg").write_text("PRECIOUS LOCAL CONTENT\n")
+
+    (upstream / "local.cfg").write_text("FROM UPSTREAM\n")
+    git(upstream, "add", "-f", "local.cfg")
+    git(upstream, "commit", "-q", "-m", "start tracking local.cfg")
+    new = git(upstream, "rev-parse", "HEAD")
+    git(upstream, "push", "-q", "origin", "master")
+
+    word = rw.deploy_update({}, 400.0)
+
+    assert word == "skipped: fast-forward failed"
+    assert (checkout / "local.cfg").read_text() == "PRECIOUS LOCAL CONTENT\n"
+    assert git(checkout, "rev-parse", "HEAD") != new
+    assert any("local.cfg" in line for line in loglines(rw))
+
+
 def test_local_commits_are_reported_not_merged_or_reset(monkeypatch, tmp_path):
     """A session that committed here without pushing must not have its commit swallowed."""
     checkout, _upstream, _base = make_repo(tmp_path)
