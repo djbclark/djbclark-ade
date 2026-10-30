@@ -57,9 +57,10 @@ limit the pass to it) it does the whole from-first-principles layout pass over h
 instead: create and rename workspaces, and move tabs and panes between them. Rename a
 tab only when its label is a single digit. Keep every other tab label, and keep every
 pane label that already has a name. **`all` is herdr only.** First, before any
-`herdr_place.py` call: if `$PASEO_AGENT_ID` is set, reply exactly `autorename all is not
+`herdr_place.py` call: if this session is a Paseo agent (`$PASEO_AGENT_ID` is set, or you know you
+were started by Paseo: a Codex tool shell strips that variable), reply exactly `autorename all is not
 yet supported in Paseo` and stop (nobody has looked into what Paseo supports for this;
-`herdr_place.py config` also refuses there, exit 2). Otherwise, outside herdr
+`herdr_place.py config` also refuses when the variable is set, exit 2). Otherwise, outside herdr
 (`HERDR_ENV` not `1`), say so and stop.
 
 1. Read the operator's special-workspace list (`herdr_place.py config`, file
@@ -287,8 +288,8 @@ session stayed for the whole new session; `replaceable()` in `herdr_place.py`, t
 left the tab at "3" (operator, 2026-10-09 and again 2026-10-11). **Whenever the tab stays
 put** (`ask` false, or the operator says "leave it"), confirm `tab.label` is no longer a
 bare number; if it still is (or `tab_labelled` is an error), run `herdr_place.py label
---from-title`. An operator-asked `/autorename` still runs `label --force --from-title`
-first (step 2).
+--from-title`. An explicit move request first labels with `label --force --from-title`
+(as step 2 does).
 If `ask` is false, stop after that. Skip the question too if you are a dispatched worker
 no human is watching.
 
@@ -312,8 +313,9 @@ suffix (`autorename-hook-t`), per the herdr naming convention. Then:
 ```bash
 herdr_place.py move --workspace <workspace_id> --tab-label <label>-t
 herdr_place.py move --new-workspace <name> --tab-label <label>-t
-herdr_place.py decline                      # "leave it": no re-ask this session
 ```
+
+"Leave it" needs no command: the tab stays where it is.
 
 `move` carries every pane of the tab (this one into a new tab in the target with
 focus, the others split into it) because herdr has no tab-to-workspace move; the
@@ -324,7 +326,8 @@ To sort **another** session's tab (one the hook missed, say), title it with
 chat id, a Grok session id, or a zcode `sess_…` id) and move it with
 `HERDR_PANE_ID=<its pane> herdr_place.py move ... --no-focus`
 so the operator's view doesn't jump; `herdr pane list --workspace <id>` maps
-`agent_session.value` to pane ids.
+`agent_session.value` to pane ids. A Paseo-hosted agent cannot do this: `move` refuses there
+(exit 1), as `/autorename all` does; it is not yet supported in Paseo.
 
 To re-arrange **many** workspaces, tabs and panes at once (a full pass or one
 workspace; sleeping panes included), follow

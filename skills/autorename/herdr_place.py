@@ -6,14 +6,13 @@ Moving a tab out of a generic workspace ("shells", "src", "~", "6" or similar) i
 for `/autorename all` or an explicit operator request (2026-10-30): this script
 gathers the facts (`check`), the agent asks the operator, this script does the move.
 
-    herdr_place.py check [--auto]                 # JSON facts for the agent
+    herdr_place.py check                          # JSON facts for the agent
     herdr_place.py move --workspace W --tab-label L
     herdr_place.py move --new-workspace NAME --tab-label L
     herdr_place.py label [L | --from-title] [--force]   # label THIS tab (a bare number otherwise)
     HERDR_PANE_ID=<other pane> CLAUDE_CODE_SESSION_ID=<its session> \
         herdr_place.py move ... --no-focus        # sort another session's tab
     GROK_SESSION_ID=<id> GROK_AGENT=1 herdr_place.py label --from-title   # a Grok session
-    herdr_place.py decline                        # remember "leave it", no re-ask
 
 herdr has no tab-to-workspace move, so `move` moves every pane of the current
 tab: this pane into a new tab in the target (`herdr pane move --new-tab` or
@@ -21,11 +20,14 @@ tab: this pane into a new tab in the target (`herdr pane move --new-tab` or
 rest split into that tab. The old pane id stays valid as an alias, so the
 running session's HERDR_PANE_ID keeps working.
 
-`check --auto` reports `"ask": false` when the operator already answered for
-this session. Exit 0 always for `check` (`"in_herdr": false` outside herdr); `move`
-exits 1 on a herdr error. A Paseo-hosted agent ($PASEO_AGENT_ID) is never in herdr:
-`check` and `label` report not-in-herdr, `move` exits 1, and `config` (step 1 of
+Exit 0 always for `check` (`"in_herdr": false` outside herdr); `move` exits 1 on a
+herdr error. A Paseo-hosted agent ($PASEO_AGENT_ID set) is never in herdr: `check`
+and `label` report not-in-herdr, `move` exits 1 (also for an explicit HERDR_PANE_ID,
+so a Paseo agent cannot sort a herdr tab either), and `config` (step 1 of
 `/autorename all`) prints "autorename all is not yet supported in Paseo" and exits 2.
+Known limit: the test is the variable, so a Paseo-hosted agent whose tool shell strips
+it (Codex's `shell_environment_policy = "core"`) reads as plain "not in herdr"; that
+shell strips HERDR_* too, so herdr is still never touched.
 """
 
 from __future__ import annotations
@@ -97,10 +99,6 @@ def configured_workspaces() -> list[dict[str, str]]:
     return out
 
 
-def state_path(sid: str) -> Path:
-    return Path.home() / ".local/state/autorename" / f"{sid}.placement"
-
-
 # djbclark, 2026-10-30: the herdr layout pass is herdr-only; nobody has looked into what Paseo supports for it.
 PASEO_ALL_UNSUPPORTED = "autorename all is not yet supported in Paseo"
 
@@ -119,7 +117,7 @@ def herdr_pane() -> str | None:
     return pane_id
 
 
-def check(auto: bool) -> int:
+def check() -> int:
     pane_id = herdr_pane()
     if not pane_id:
         print(json.dumps({"in_herdr": False}))
@@ -160,7 +158,6 @@ def check(auto: bool) -> int:
                 tab_labelled = f"error: {exc}"
 
     reason = generic_reason(here["label"])
-    answered = bool(sid) and state_path(sid).exists()
     print(json.dumps({
         "in_herdr": True,
         "pane_id": pane["pane_id"],
@@ -171,19 +168,9 @@ def check(auto: bool) -> int:
                       "generic": reason is not None, "reason": reason},
         "other_workspaces": others,
         "configured_workspaces": configured_workspaces(),
-        "already_answered": answered,
-        "ask": reason is not None and not (auto and answered),
+        "ask": reason is not None,
     }, indent=1))
     return 0
-
-
-def remember(answer: str) -> None:
-    from autorename import session_id  # same directory
-    sid = session_id()
-    if sid:
-        path = state_path(sid)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(answer + "\n", encoding="utf-8")
 
 
 def move(workspace: str | None, new_workspace: str | None, tab_label: str, focus: bool = True) -> int:
@@ -213,7 +200,6 @@ def move(workspace: str | None, new_workspace: str | None, tab_label: str, focus
             ws_label = herdr("workspace", "get", str(workspace))["workspace"]["label"]
         except (RuntimeError, KeyError, subprocess.TimeoutExpired):
             ws_label = workspace
-    remember(f"moved {new_tab}")
     print(f"moved: tab {tab_label!r} ({1 + len(siblings)} pane(s)) -> workspace {ws_label!r} as {new_tab}")
     return 0
 
@@ -266,8 +252,7 @@ def label(text: str | None, from_title: bool, force: bool) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("check")
-    c.add_argument("--auto", action="store_true", help="don't re-ask once answered this session")
+    sub.add_parser("check")
     m = sub.add_parser("move")
     g = m.add_mutually_exclusive_group(required=True)
     g.add_argument("--workspace", help="existing workspace id, e.g. w22")
@@ -279,13 +264,12 @@ def main() -> int:
     lb.add_argument("text", nargs="?", help="the label, kebab-case with a -t suffix")
     lb.add_argument("--from-title", action="store_true", help="derive it from the session's custom title")
     lb.add_argument("--force", action="store_true", help="replace a non-generic label too")
-    sub.add_parser("decline")
     sub.add_parser("config", help="print the configured special workspaces (workspaces.conf) as JSON;"
                    " step 1 of /autorename all, refused in a Paseo-hosted agent (exit 2)")
     args = ap.parse_args()
 
     if args.cmd == "check":
-        return check(args.auto)
+        return check()
     if args.cmd == "config":
         if paseo_hosted():
             print(PASEO_ALL_UNSUPPORTED, file=sys.stderr)
@@ -296,9 +280,7 @@ def main() -> int:
         return label(args.text, args.from_title, args.force)
     if args.cmd == "move":
         return move(args.workspace, args.new_workspace, args.tab_label, not args.no_focus)
-    remember("declined")
-    print("declined: tab stays where it is")
-    return 0
+    return 2
 
 
 if __name__ == "__main__":

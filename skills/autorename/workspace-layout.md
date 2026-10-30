@@ -251,8 +251,8 @@ typed text that must not receive keys, agents that were `blocked`).
 4. A pane with typed-but-unsubmitted text (`sleeper-review-p` had a bare
    `claude` typed) must only be relabelled, never prompted or moved with
    focus.
-5. `herdr_place.py check --auto` returns `ask: false` once the workspace is
-   not generic, so the autorename hook does not fight the new names.
+5. The autorename hook only relabels a generic or autorename-made tab and
+   never moves it (2026-10-30), so it does not fight the new names.
 
 ## Pitfalls met on 2026-10-29
 

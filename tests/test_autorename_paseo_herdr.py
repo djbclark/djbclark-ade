@@ -51,3 +51,15 @@ def test_a_leaked_herdr_environment_never_reaches_herdr(tmp_path: Path, args: tu
     r, calls = run(tmp_path, *args)
     assert r.returncode == rc and text in getattr(r, stream)
     assert calls == []
+
+
+def test_nudge_asks_only_for_the_title_and_the_tab_label() -> None:
+    # The note is the prompt the agent obeys on the --auto path: it must not bring back placement (djbclark, 2026-10-30).
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("autorename_nudge", SCRIPT.parent / "autorename_nudge.py")
+    nudge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nudge)
+    note = nudge.note_text()
+    assert "autorename.py --auto" in note and "herdr_place.py label --from-title" in note
+    for banned in ("herdr_place.py check", "herdr_place.py move", "AskUserQuestion", "workspace rename"):
+        assert banned not in note
