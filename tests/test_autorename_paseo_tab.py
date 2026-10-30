@@ -109,8 +109,7 @@ def test_pure_and_does_not_consume_inputs() -> None:
 # --- paseo_set_name: the --auto agent-name guard ------------------------------------------------------
 
 def setup_paseo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str, extra: bool = False,
-                terminals: str = "[]", ws_title: str = "plektra-pw",
-                ls: str = '[{"workspaceId": "wks_1", "name": "old-work-pw"}]', ls_rc: int = 0) -> Path:
+                terminals: str = "[]", ws_title: str = "plektra-pw") -> Path:
     home = tmp_path / "home"
     agents = home / "agents" / "Users-x-src-y"
     agents.mkdir(parents=True)
@@ -129,10 +128,7 @@ def setup_paseo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str, e
     cli.write_text(
         "#!/bin/sh\n"
         f'echo "$@" >> {log}\n'
-        'if [ "$1 $2" = "workspace ls" ]; then\n'
-        f"  echo '{ls}'\n"
-        f"  exit {ls_rc}\n"
-        'elif [ "$1 $2" = "terminal ls" ]; then\n'
+        'if [ "$1 $2" = "terminal ls" ]; then\n'
         f"  echo '{terminals}'\n"
         "fi\n")
     cli.chmod(0o755)
@@ -143,7 +139,7 @@ def setup_paseo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str, e
 
 
 def agent_updates(log: Path) -> list[str]:
-    return [ln for ln in log.read_text().splitlines() if ln.startswith("agent update")]
+    return [ln for ln in log.read_text().splitlines() if ln.startswith("agent update")] if log.exists() else []
 
 
 @pytest.mark.parametrize(("auto", "current", "renamed"), [
@@ -211,43 +207,4 @@ def test_tab_name_without_a_workspace_record_still_names(tmp_path: Path, monkeyp
     monkeypatch.setenv("PASEO_CLI", str(cli))
     out = ar.paseo_set_name("Load watcher", auto=True)
     assert agent_updates(log) == ["agent update abc --name loadwatch-pt --json"]
-    assert "paseo workspace: not found" in out
-
-
-def test_rename_of_a_named_session_is_shortened_against_the_applied_workspace_name_not_the_old_title(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # 'Adversary review' -> 'Adversary review fix': the call replaces the workspace title, so the old title's
-    # words ('adversary', 'review') must not be dropped from the tab (the old behaviour gave "fix-pt").
-    log = setup_paseo(tmp_path, monkeypatch, "adversary-review-pt", ws_title="adversary-review-pw")
-    ar.paseo_set_name("Adversary review fix", auto=False)
-    assert agent_updates(log) == ["agent update abc --name adv-rev-fix-pt --json"]
-    assert "workspace rename wks_1 adversary-review-fix-pw" in log.read_text()
-
-
-def test_kept_workspace_context_comes_from_the_workspace_ls_name_that_decided_the_keep(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # workspaces.json has no title, `workspace ls` says old-work-pw (the kept one): the tab drops 'old' and 'work'.
-    log = setup_paseo(tmp_path, monkeypatch, "", ws_title="")
-    out = ar.paseo_set_name("Old work fix", auto=True)
-    assert agent_updates(log) == ["agent update abc --name fix-pt --json"]
-    assert "(paseo workspace kept: old-work-pw)" in out
-
-
-@pytest.mark.parametrize(("ls", "ls_rc"), [
-    ('{"workspaces": []}', 0),            # an object, not a list
-    ('[{"workspaceId": "wks_1", "name": "old-work-pw"}]', 1),   # failing command
-    ('not json', 0),
-])
-def test_unusable_workspace_ls_output_is_reported_never_fatal(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ls: str, ls_rc: int) -> None:
-    log = setup_paseo(tmp_path, monkeypatch, "", ls=ls, ls_rc=ls_rc)
-    out = ar.paseo_set_name("Old work fix", auto=True)
-    assert len(agent_updates(log)) == 1                       # the tab is still named
-    assert "(paseo workspace: " in out and "workspace rename" not in log.read_text()
-
-
-def test_workspace_ls_list_of_non_objects_does_not_crash_and_the_workspace_is_renamed(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    log = setup_paseo(tmp_path, monkeypatch, "", ls='["old-work-pw"]')
-    out = ar.paseo_set_name("Old work fix", auto=True)
-    assert "workspace rename wks_1 old-work-fix-pw" in log.read_text() and "(paseo workspace old-work-fix-pw)" in out
+    assert "workspace" not in out

@@ -1,4 +1,6 @@
-"""autorename: Paseo workspace names (djbclark, 2026-10-23): lower case, hyphens, whole words, `-pw` suffix."""
+"""autorename: Paseo workspace slugs (djbclark, 2026-10-23: lower case, hyphens, whole words, `-pw` suffix), which the
+tab shortener still uses to recognise a workspace named from the same title; autorename never renames a workspace
+(djbclark, 2026-10-30)."""
 
 from __future__ import annotations
 
@@ -71,21 +73,19 @@ def fake_cli(tmp_path: Path, current: str) -> tuple[Path, Path]:
     return cli, log
 
 
-@pytest.mark.parametrize(("auto", "current", "renamed"), [
-    (False, "already-pw", True),   # an operator-asked /autorename always renames
-    (True, "tmp-p", True),         # --auto replaces a name without the convention
-    (True, "old-work-pw", False),  # --auto keeps a name that already follows it
-])
-def test_set_name_renames_the_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                        auto: bool, current: str, renamed: bool) -> None:
+@pytest.mark.parametrize("auto", [False, True])
+def test_set_name_names_the_tab_and_never_touches_the_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                auto: bool) -> None:
+    # djbclark, 2026-10-30: /autorename renames only the agent's own tab; the -pw workspace rename is gone.
     rec = tmp_path / "agents" / "Users-x-src-y"
     rec.mkdir(parents=True)
     (rec / "abc.json").write_text(json.dumps({"workspaceId": "wks_1"}))
-    cli, log = fake_cli(tmp_path, current)
+    cli, log = fake_cli(tmp_path, "tmp-p")
     monkeypatch.setenv("PASEO_HOME", str(tmp_path))
     monkeypatch.setenv("PASEO_AGENT_ID", "abc")
     monkeypatch.setenv("PASEO_CLI", str(cli))
-    ar.paseo_set_name("Paseo skill sync overwrite fix", auto=auto)
-    calls = log.read_text()
+    out = ar.paseo_set_name("Paseo skill sync overwrite fix", auto=auto)
+    calls = log.read_text().splitlines()
     assert "agent update abc --name paseo-skill-pt --json" in calls
-    assert ("workspace rename wks_1 paseo-skill-sync-overwrite-fix-pw" in calls) is renamed
+    assert not [c for c in calls if c.startswith("workspace ")]
+    assert "workspace" not in out

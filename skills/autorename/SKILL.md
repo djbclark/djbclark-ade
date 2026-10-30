@@ -1,11 +1,11 @@
 ---
 name: autorename
 description: >-
-  Rename the current session (what /rename does) to a short derived title, then
-  in herdr offer to move its tab out of a generic workspace. Use for
+  Rename the current session (what /rename does) to a short derived title and
+  name its own tab (the Paseo tab, or the herdr tab label); nothing else. Use for
   /autorename, "name this session", the autorename_nudge hook, and as the last
-  step of /handoff. Also owns the full herdr layout pass (`/autorename all`):
-  reorganize or clean up herdr workspaces, tabs and panes.
+  step of /handoff. Also owns the full herdr layout pass (`/autorename all`, herdr
+  only): reorganize or clean up herdr workspaces, tabs and panes.
 ---
 
 # autorename — title the session from what you know
@@ -48,14 +48,19 @@ dropped in cursor sessions and the once-per-session marker was used up.
 
 ## Arguments: `/autorename all` is the full herdr reorganization
 
-The skill receives whatever follows the command. With no argument it titles this
-session and places its tab (steps 1 to 3 below). With **`all`** (synonyms `reorg`,
-`layout`; optionally followed by one workspace name or id to limit the pass to it)
-it does the whole from-first-principles layout pass over herdr instead:
-create and rename workspaces, and move tabs and panes between them. Rename a
-tab only when its label is a single digit. Keep every other tab label, and
-keep every pane label that already has a name. Only inside herdr
-(`HERDR_ENV=1`); elsewhere say so and stop.
+The skill receives whatever follows the command. **With no argument it titles this
+session and names this agent's own tab, and nothing else** (steps 1 and 2 below; djbclark,
+2026-10-30): in Paseo the agent's tab (`<topic>-pt`, which is the agent's name), in herdr
+the tab label (`<topic>-t`). It never renames a workspace and never moves a tab. With
+**`all`** (synonyms `reorg`, `layout`; optionally followed by one workspace name or id to
+limit the pass to it) it does the whole from-first-principles layout pass over herdr
+instead: create and rename workspaces, and move tabs and panes between them. Rename a
+tab only when its label is a single digit. Keep every other tab label, and keep every
+pane label that already has a name. **`all` is herdr only.** First, before any
+`herdr_place.py` call: if `$PASEO_AGENT_ID` is set, reply exactly `autorename all is not
+yet supported in Paseo` and stop (nobody has looked into what Paseo supports for this;
+`herdr_place.py config` also refuses there, exit 2). Otherwise, outside herdr
+(`HERDR_ENV` not `1`), say so and stop.
 
 1. Read the operator's special-workspace list (`herdr_place.py config`, file
    `~/.config/autorename/workspaces.conf`: names, hints, top-of-herdr order) and follow
@@ -82,8 +87,8 @@ keep every pane label that already has a name. Only inside herdr
    that section before the first move.
 3. Do not retitle this session, and do not relabel its tab, when that tab
    label is not a single digit. Steps 1 and 2 below stay on `/autorename`
-   without `all`. A full pass may move this tab (principle 7) and does not
-   run step 3's placement question.
+   without `all`. A full pass may move this tab (principle 7); step 3 below
+   describes the move commands.
 4. Report: the final workspace, tab and pane tree as one numbered list, and anything
    left alone with the reason.
 
@@ -214,27 +219,26 @@ continuation (`stopHookActive`), on a subagent stop, and on any `Stop` whose
 `reason` is not `end_turn` (session teardown is `channel_closed` or `shutdown`).
 Once per session, via `~/.local/state/autorename/<sid>.nudged`. A manual title
 is left alone. An automatic title is still nudged, so `--auto` can pin it and
-herdr placement can run. The hook runs under `python3.14` (the script needs
+label the tab. The hook runs under `python3.14` (the script needs
 3.10+).
 
-**Paseo** (2026-10-23). A session hosted by a Paseo agent (`$PASEO_AGENT_ID`) also gets its sidebar name set and
-its **workspace renamed** to the title in lower-case hyphen form plus `-pw` (`Paseo skill sync overwrite fix` ->
-`paseo-skill-sync-overwrite-fix-pw`; whole words, number-only words dropped, at most 40 characters before the
-suffix). The one naming rule across the environment, always lower case with hyphens: `-pw` Paseo workspace (at most 40
+**Paseo** (2026-10-23; tab only since 2026-10-30). A session hosted by a Paseo agent (`$PASEO_AGENT_ID`) also gets
+its tab name set. **The workspace is never renamed** (djbclark, 2026-10-30: `/autorename` renames only the
+current agent's own tab; from 2026-10-23 to 2026-10-30 it also renamed the workspace to `<slug>-pw`). The one naming
+rule across the environment, always lower case with hyphens: `-pw` Paseo workspace (at most 40
 characters before the suffix), `-pt` Paseo tab (at most 17 characters **including** `-pt`: Paseo shows about 17 even for
 a lone tab), `-t` herdr tab, `-p` herdr pane (under 24), the agent in a herdr pane bare `<topic>`
 (`feedback_herdr_tab_pane_naming_convention`). A Paseo agent tab's name **is** the agent's name (`paseo agent update
 --name`), so the agent is named `<topic>-pt`; `paseo_tab_name()` in `autorename.py` is the shortener. It drops the words
-of the project name and, when `--auto` keeps an existing `-pw` workspace, of that workspace's title (never of the `-pw`
-name it sets from this same title, so a re-run gives the same tab), abbreviates, and adds `-2`, `-3` ... on a clash with another live agent or terminal of the workspace. Check
-suffixes longest first: `x-pt` also ends in `-t`. The sentence title stays the provider session's title and the `-pw`
-workspace name. The workspace id comes from the agent's record
-under `$PASEO_HOME/agents/`. A direct `/autorename` always renames the agent and the workspace. `--auto` is guarded: it
-keeps an agent name that already ends in `-pt` and a workspace that ends in `-pw` (a name the operator or an earlier run
-set); a name without the suffix is still replaced, because no names store exists yet to explain a rename. The reply line
-ends `(paseo tab <name>)` (`(paseo tab kept: <name>)` when guarded) and `(paseo workspace <name>)` (`(paseo workspace
-kept: <name>)` when guarded), replacing the old `(paseo name set)`; under `--auto` a tab part also carries `(names store
-unavailable)`. Other workspaces are never touched.
+of the project name and of the workspace's title (except a workspace named `<slug>-pw` from this same title, so a re-run
+gives the same tab), abbreviates, and adds `-2`, `-3` ... on a clash with another live agent or terminal of the
+workspace. Check suffixes longest first: `x-pt` also ends in `-t`. The sentence title stays the provider session's
+title. The workspace id comes from the agent's record under `$PASEO_HOME/agents/`. A direct `/autorename` always
+renames the agent. `--auto` is guarded: it keeps an agent name that already ends in `-pt` (a name the operator or an
+earlier run set); a name without the suffix is still replaced, because no names store exists yet to explain a rename.
+The reply line ends `(paseo tab <name>)` (`(paseo tab kept: <name>)` when guarded); under `--auto` it also carries
+`(names store unavailable)`. A Paseo-hosted agent is never in herdr: `herdr_place.py` skips `label` and `check` there,
+even if the daemon passed a herdr environment down to it.
 
 **The herdr tab label is a separate thing.** Neither `/rename` nor `autorename.py`
 touches the sidebar tab: it keeps its default number ("2") until something labels
@@ -252,10 +256,10 @@ It prints `labelled:`, `unchanged:`, `kept:` (the tab already had a real label) 
 old label is usually left over from whatever ran in the tab before (2026-10-09:
 "monorepo setup" survived a rename and the operator saw no change), and the
 operator asking is the signal that the current name is wrong. Only the `--auto`
-path keeps a real label, so a hook never overwrites a name he typed. Step 3 then
-decides whether the tab also moves.
+path keeps a real label, so a hook never overwrites a name he typed. That is the
+whole no-argument path in herdr: the tab is not moved (step 3 is not part of it).
 
-## 3. herdr placement (only when `HERDR_ENV=1`)
+## 3. Moving a herdr tab (only for `all` or an explicit request)
 
 Orca needs no step here (checked 2026-10-09, read-only): its terminal title is the one Claude sets
 itself, and in a titled session `orca terminal list --json` showed exactly `autorename.py --show`
@@ -264,11 +268,11 @@ Re-check if the live label ever lags the rename in Orca. zcode needs no step eit
 (checked 2026-10-10): its pane terminal title is activity status only (`ZC | ⠸ running Bash…`),
 so the tab label below carries the name.
 
-Run this after step 2 whatever it printed (renamed, unchanged or skipped). `/handoff` Step 8 skips it: a session being handed off is about to end.
+Not part of `/autorename` without an argument, nor of the nudge hook or `/handoff` (djbclark, 2026-10-30). Use it
+when the operator asks to move or sort a tab, and within `/autorename all`.
 
 ```bash
-python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py check          # operator asked
-python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py check --auto   # the nudge hook
+python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py check
 ```
 
 It prints JSON: this tab, its workspace (with `generic` and `reason`), the other
@@ -285,9 +289,8 @@ put** (`ask` false, or the operator says "leave it"), confirm `tab.label` is no 
 bare number; if it still is (or `tab_labelled` is an error), run `herdr_place.py label
 --from-title`. An operator-asked `/autorename` still runs `label --force --from-title`
 first (step 2).
-If `ask` is false, stop after that. (`--auto` gives `ask: false` once the
-operator answered this session.)
-Skip the question too if you are a dispatched worker no human is watching.
+If `ask` is false, stop after that. Skip the question too if you are a dispatched worker
+no human is watching.
 
 Otherwise ask with **one** AskUserQuestion, recommended option first:
 

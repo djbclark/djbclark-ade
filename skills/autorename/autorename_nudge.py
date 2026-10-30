@@ -3,8 +3,8 @@
 
 Built 2026-10-08 for Claude Code (where /autorename only ran when asked), and
 extended 2026-10-10 to zcode and Grok. It hands the agent a note telling it to
-run the autorename skill in --auto mode, herdr placement step included, as the
-last step of that turn.
+run the autorename skill in --auto mode as the last step of that turn: title the
+session and label its own tab, nothing else (no placement question, 2026-10-30).
 
 The backend is chosen by the hook event, then by session-id shape: a Grok
 `Stop` event, else zcode ids (`sess_<uuid>`), else Claude Code.
@@ -38,7 +38,7 @@ The backend is chosen by the hook event, then by session-id shape: a Grok
 
 Fires at most once per session (state in ~/.local/state/autorename/), skips
 slash commands and very short prompts, skips Claude non-interactive entrypoints
-(SDK, `claude -p`, acp-run) where nobody can answer the placement question, and
+(SDK, `claude -p`, acp-run) where no human sees the session's tab, and
 skips when a title is already set. MUST always exit 0 quickly; stdlib only.
 """
 
@@ -128,14 +128,9 @@ def note_text() -> str:
         "[autorename] This session has no title yet. As the LAST step of this turn, after "
         "the requested work, follow the autorename skill in --auto mode: pick a title, run "
         f"`{py} {SKILL_DIR}/autorename.py --auto \"<title>\"`, THEN run "
-        f"`{py} {SKILL_DIR}/herdr_place.py check --auto` (prints JSON; no-op outside herdr; "
-        "it also relabels a generic sidebar tab from the new title, `tab_labelled` says what it did: "
-        "if `tab.label` is still a bare number or `tab_labelled` is an error, run "
-        f"`{py} {SKILL_DIR}/herdr_place.py label --from-title`). "
-        "If it says `\"ask\": true`, the tab sits in a generic workspace: follow the skill's "
-        "step 3 and ask the operator with one AskUserQuestion (matching existing workspace / "
-        "new workspace / leave it), then run `herdr_place.py move ...` or `herdr_place.py decline`. Skip that "
-        "question only if you are a dispatched worker no human is watching. "
+        f"`{py} {SKILL_DIR}/herdr_place.py label --from-title` (labels a generic herdr tab from the new "
+        "title; prints `skipped:` outside herdr and in a Paseo-hosted agent, whose tab autorename.py names). "
+        "Rename nothing else: no workspace, no moving the tab. "
         "Mention the result in one line; don't otherwise discuss this note."
     )
 

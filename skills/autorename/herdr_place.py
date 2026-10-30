@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Offer to move this session's herdr tab out of a generic workspace.
+"""Label this session's herdr tab, and move herdr tabs between workspaces.
 
-Part of /autorename: after the session is titled, a tab sitting in a workspace
-called "shells", "src", "~", "6" or similar should probably live with related
-work. This script gathers the facts; the agent asks the operator; this script
-does the move.
+Part of /autorename. With no argument /autorename only labels this tab (`label`).
+Moving a tab out of a generic workspace ("shells", "src", "~", "6" or similar) is
+for `/autorename all` or an explicit operator request (2026-10-30): this script
+gathers the facts (`check`), the agent asks the operator, this script does the move.
 
     herdr_place.py check [--auto]                 # JSON facts for the agent
     herdr_place.py move --workspace W --tab-label L
@@ -21,9 +21,11 @@ tab: this pane into a new tab in the target (`herdr pane move --new-tab` or
 rest split into that tab. The old pane id stays valid as an alias, so the
 running session's HERDR_PANE_ID keeps working.
 
-`check --auto` (the nudge-hook path) reports `"ask": false` when
-the operator already answered for this session. Exit 0 always for `check`
-(`"in_herdr": false` outside herdr); `move` exits 1 on a herdr error.
+`check --auto` reports `"ask": false` when the operator already answered for
+this session. Exit 0 always for `check` (`"in_herdr": false` outside herdr); `move`
+exits 1 on a herdr error. A Paseo-hosted agent ($PASEO_AGENT_ID) is never in herdr:
+`check` and `label` report not-in-herdr, `move` exits 1, and `config` (step 1 of
+`/autorename all`) prints "autorename all is not yet supported in Paseo" and exits 2.
 """
 
 from __future__ import annotations
@@ -99,9 +101,27 @@ def state_path(sid: str) -> Path:
     return Path.home() / ".local/state/autorename" / f"{sid}.placement"
 
 
-def check(auto: bool) -> int:
+# djbclark, 2026-10-30: the herdr layout pass is herdr-only; nobody has looked into what Paseo supports for it.
+PASEO_ALL_UNSUPPORTED = "autorename all is not yet supported in Paseo"
+
+
+def paseo_hosted() -> bool:
+    return bool(os.environ.get("PASEO_AGENT_ID"))
+
+
+def herdr_pane() -> str | None:
+    """This session's herdr pane id, or None outside herdr. A Paseo-hosted agent is never in herdr, even
+    when a daemon started from a herdr pane passed HERDR_ENV and HERDR_PANE_ID down to it: that pane is the
+    daemon's, and labelling or moving it would rename someone else's tab."""
     pane_id = os.environ.get("HERDR_PANE_ID")
-    if os.environ.get("HERDR_ENV") != "1" or not pane_id:
+    if paseo_hosted() or os.environ.get("HERDR_ENV") != "1" or not pane_id:
+        return None
+    return pane_id
+
+
+def check(auto: bool) -> int:
+    pane_id = herdr_pane()
+    if not pane_id:
         print(json.dumps({"in_herdr": False}))
         return 0
     from autorename import session_id  # same directory
@@ -167,9 +187,9 @@ def remember(answer: str) -> None:
 
 
 def move(workspace: str | None, new_workspace: str | None, tab_label: str, focus: bool = True) -> int:
-    pane_id = os.environ.get("HERDR_PANE_ID")
+    pane_id = None if paseo_hosted() else os.environ.get("HERDR_PANE_ID")
     if not pane_id:
-        print("herdr_place: not in a herdr pane", file=sys.stderr)
+        print("herdr_place: not in a herdr pane" + (" (Paseo-hosted)" if paseo_hosted() else ""), file=sys.stderr)
         return 1
     try:
         pane = herdr("pane", "get", pane_id)["pane"]
@@ -210,8 +230,8 @@ def slug_from_title(title: str, max_len: int = 21) -> str:
 def label(text: str | None, from_title: bool, force: bool) -> int:
     """Rename this pane's herdr tab. /rename and autorename.py set the session title and the
     terminal title only; the sidebar tab keeps its default number until this runs."""
-    pane_id = os.environ.get("HERDR_PANE_ID")
-    if os.environ.get("HERDR_ENV") != "1" or not pane_id:
+    pane_id = herdr_pane()
+    if not pane_id:
         print("skipped: not in a herdr pane")
         return 0
     if from_title:
@@ -260,12 +280,16 @@ def main() -> int:
     lb.add_argument("--from-title", action="store_true", help="derive it from the session's custom title")
     lb.add_argument("--force", action="store_true", help="replace a non-generic label too")
     sub.add_parser("decline")
-    sub.add_parser("config", help="print the configured special workspaces (workspaces.conf) as JSON")
+    sub.add_parser("config", help="print the configured special workspaces (workspaces.conf) as JSON;"
+                   " step 1 of /autorename all, refused in a Paseo-hosted agent (exit 2)")
     args = ap.parse_args()
 
     if args.cmd == "check":
         return check(args.auto)
     if args.cmd == "config":
+        if paseo_hosted():
+            print(PASEO_ALL_UNSUPPORTED, file=sys.stderr)
+            return 2
         print(json.dumps({"path": str(config_path()), "workspaces": configured_workspaces()}, indent=1))
         return 0
     if args.cmd == "label":
