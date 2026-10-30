@@ -1472,9 +1472,10 @@ def sender_row(ss):
     (`_paseo_hosting`, the same test `_paseo_rows` uses for `self`). An inherited or exported `PASEO_AGENT_ID` marks a row
     `self` on its own (`_paseo_rows`: `pid == me or pid in hosting`) and must not win: the pid row is then the real caller,
     and naming the other agent would route a genuine answer to it (adversary 2026-10-30 B1). A transcript-backed row gets no
-    second vote for also carrying a Paseo id (`_from_herdr`'s daemon-spawned terminal row has both): its transcript already
-    proves an ack, and that id may be an inherited one, so two transcript rows keep fleet's order rather than one jumping
-    ahead on an unproven id (local-review of 2026-10-30). Exact ties keep fleet's order (`max` returns the first of equal
+    second vote for also carrying a Paseo id: `_claude_sessions` gives a daemon-spawned Claude both (`_where.lookup` ->
+    `paseo_agent`, fleet.py:525-530), but a transcript already proves the ack and neither `ack_proof_note` nor `timeline_base`
+    reads a transcript row's Paseo id, so it adds nothing to the proof and two transcript rows keep fleet's order instead of
+    one jumping ahead on it (adversary 4 F1, 2026-10-30). Exact ties keep fleet's order (`max` returns the first of equal
     keys)."""
     selfs = [x for x in ss if isinstance(x, dict) and x.get("self")]
     if len(selfs) < 2:
