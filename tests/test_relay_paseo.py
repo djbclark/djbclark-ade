@@ -90,6 +90,8 @@ class RelayPaseo(unittest.TestCase):
         relay.hosted_by = lambda agent_id: agent_id == CALLER    # the test runner "is" the CALLER agent
         relay.DEFER_DIR = Path(self.tmp.name) / "relay" / "deferred"    # never the real queue, and a deferral never starts a real deliverer
         os.environ["RELAY_DEFER_DIR"] = str(relay.DEFER_DIR)
+        self.herald_file = Path(self.tmp.name) / "herald" / "attention.json"    # never the real ~/.paseo file; absent until a test writes it
+        os.environ["HERALD_ATTENTION_FILE"] = str(self.herald_file)
         self.spawned: list[str] = []
         relay.spawn_deliverer = lambda rid: self.spawned.append(rid) or 4242
 
@@ -679,6 +681,93 @@ class RelayPaseo(unittest.TestCase):
         d = relay.diagnose(sess())
         self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("card:unknown", False, False))
         self.assertIn("`paseo agent inspect` does not", d["why"])
+
+    # ---- Herald's attention file as the third witness (issue 135, 2026-10-30): synthetic entries only, never a live headline ----
+
+    HEAD = "SYNTHETIC-HEADLINE which branch"
+
+    def herald(self, *entries: Any, raw: str | None = None) -> None:
+        self.herald_file.parent.mkdir(parents=True, exist_ok=True)
+        self.herald_file.write_text(raw if raw is not None else json.dumps(list(entries)))
+
+    def entry(self, reason: str, agent: str = AGENT, **kw: Any) -> dict[str, Any]:
+        return {"agentId": agent, "reason": reason, "eventId": "ev-1", "requestId": "rq-1" if reason in ("question", "plan", "permission") else None,
+                "createdAt": "2026-10-30T00:00:00.000Z", "headline": self.HEAD, "detail": "SYNTHETIC-DETAIL body", "summary": {"status": "idle"}, **kw}
+
+    def test_herald_question_alone_blocks_and_the_methods_disagree(self) -> None:
+        self.herald(self.entry("question"))    # inspect lists no card and permit ls lists none
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["deliverable"], d["agree"]), ("card:question", False, False))
+        self.assertIn(self.HEAD, d["why"])
+        self.assertEqual([e["src"] for e in d["evidence"]][-1], "herald-attention")
+        self.assertEqual(d["evidence"][-1]["says"], "question")
+
+    def test_herald_and_the_card_lists_agree_on_a_question(self) -> None:
+        os.environ.update(FAKE_PENDING=self.QUESTION, FAKE_PERMITS=self.PERMIT_Q)
+        self.herald(self.entry("question"))
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["agree"]), ("card:question", True))
+        self.assertIn("Which branch should I use?", d["why"])
+        self.assertEqual([e["src"] for e in d["evidence"] if e["src"] != "paseo-logs"], ["paseo-inspect", "paseo-permit-ls", "herald-attention"])
+
+    def test_herald_naming_another_kind_than_the_card_is_reported_beside_it(self) -> None:
+        os.environ.update(FAKE_PENDING='[{"id": "p2", "tool": "Bash"}]', FAKE_PERMITS="[]")
+        self.herald(self.entry("plan"))
+        d = relay.diagnose(sess())
+        self.assertEqual(d["state"], "card:permission")
+        self.assertIn("[Herald says PLAN]", d["why"])
+
+    def test_herald_finished_adds_evidence_and_blocks_nothing(self) -> None:
+        self.herald(self.entry("finished"))
+        d = relay.diagnose(sess())
+        self.assertEqual((d["state"], d["deliverable"], d["why"]), ("idle", True, "idle"))
+        self.assertEqual(d["evidence"][-1]["says"], "finished")
+        self.herald(self.entry("canceled"))
+        self.assertTrue(relay.diagnose(sess())["deliverable"])
+
+    def test_herald_error_is_needs_you_and_no_permit_card(self) -> None:
+        self.herald(self.entry("error"))
+        rc, out, err = self.main([sess()], "--why", SID)
+        self.assertEqual((rc, err), (0, ""), out)    # an idle agent still takes text: the error is a need, not a block
+        self.assertIn("needs you", out)
+        self.assertIn(self.HEAD, out)
+        self.assertNotIn(f"paseo permit allow {AGENT}", out)
+        rc, out, _ = self.main([sess()], "--why", SID, "--json")
+        d = json.loads(out)
+        self.assertEqual((d["state"], d["needs_you"], d["deliverable"]), ("idle", "error", True))
+        self.assertEqual(d["evidence"][-1]["src"], "herald-attention")
+
+    def test_a_stale_herald_error_on_a_running_agent_is_evidence_only(self) -> None:
+        os.environ["FAKE_STATUS"] = "running"
+        self.herald(self.entry("error"))
+        d = relay.diagnose(sess())
+        self.assertEqual(d["state"], "working")
+        self.assertNotIn("needs_you", d)
+        self.assertNotIn("needs you", d["why"])
+
+    def test_a_missing_unreadable_or_non_array_herald_file_changes_nothing(self) -> None:
+        base = relay.diagnose(sess())
+        self.assertNotIn("herald-attention", [e["src"] for e in base["evidence"]])
+        for raw in ("not json", '{"agentId": "x"}', '"question"', "", "null"):
+            self.herald(raw=raw)
+            self.assertEqual(relay.diagnose(sess()), base, raw)
+        self.herald_file.unlink()
+        self.herald_file.mkdir()    # a directory where the file should be: unreadable
+        self.assertEqual(relay.diagnose(sess()), base)
+
+    def test_one_bad_herald_entry_does_not_drop_the_good_one(self) -> None:
+        self.herald("junk", 7, None, {"agentId": 5, "reason": "question"}, {"agentId": AGENT, "reason": "bogus"}, self.entry("question"))
+        self.assertEqual(relay.diagnose(sess())["state"], "card:question")
+
+    def test_herald_text_is_shown_by_why_but_never_filed_by_a_poll(self) -> None:
+        os.environ["FAKE_PENDING"] = self.QUESTION
+        self.herald(self.entry("question", headline=self.HEAD + " \x1b[31mred\x07"))
+        shown = relay.diagnose(sess())
+        self.assertIn(self.HEAD + " red", shown["why"])    # no escape sequence reaches the terminal
+        self.assertNotIn("\x1b", json.dumps(shown))
+        relay.target_poll({"target": {"paseo": AGENT}})
+        filed = json.dumps(relay.target_poll.look)    # the look a deliverer files on a record and in deferred.log
+        self.assertNotIn("SYNTHETIC", filed)
 
     def test_why_reports_a_hard_stop_as_refused_though_the_agent_is_idle(self) -> None:
         me = sess(self=True)

@@ -95,6 +95,11 @@ PASEO_STEER_DEFAULT = frozenset({"claude"})
 PASEO_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 PASEO_LS_TIMEOUT = 20
 PASEO_STATUS = {"running": "working", "idle": "idle"}
+# Herald (`@gpambrozio/paseo-herald` 0.6.0) writes why a Paseo agent wants a person to this JSON array, one entry per agent (2026-10-30)
+HERALD_FILE = "~/.paseo/plugin-data/herald/attention.json"
+HERALD_MAX_BYTES = 1_000_000
+HERALD_INPUT = ("question", "plan", "permission")    # the agent is blocked on a person's answer (a permission request, `requestId` set)
+HERALD_REASONS = HERALD_INPUT + ("error", "finished", "canceled")    # error needs a person but is no card; the last two only announce the end of a turn
 # binary name -> agent label, for TUIs running outside herdr (herdr panes are taken from herdr itself)
 PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode",
                "zcode": "zcode", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
@@ -528,6 +533,7 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
                 # the Paseo daemon spawned it: no terminal, `paseo send` is its channel (relay.py; 2026-10-20)
                 s.update(host="paseo", chan=("paseo", w["paseo_agent"]), paseo=w["paseo_agent"],
                          reach=s["reach"].replace("types it into its pane", "`paseo send --behavior steer` into its Paseo agent"))
+                herald_overlay([s])    # a Claude row that already has its sid: Herald still says why it waits
             elif _in_orca(env):
                 chan = _orca_chan(env)
                 s.update(host="orca", **({"chan": chan} if chan else {"reach": ORCA_STALE}))
@@ -610,6 +616,68 @@ def _paseo_waiting():
     return out
 
 
+def herald_path():
+    """The Herald attention file: $HERALD_ATTENTION_FILE (tests), else HERALD_FILE under the home directory."""
+    return Path(os.environ.get("HERALD_ATTENTION_FILE") or os.path.expanduser(HERALD_FILE))
+
+
+def _herald_str(value, n):
+    return clip(" ".join(clean_text(value).split()), n) if isinstance(value, str) else ""
+
+
+def herald_entries(detail=False):
+    """{Paseo agent id: entry} from the Herald attention file, each entry {"reason", "eventId", "requestId", "createdAt", "status"} (strings,
+    control characters stripped; requestId None unless a plain token) and, with DETAIL, the agent's own "headline" and "detail" text. Fail closed
+    like a bad `paseo` call: a missing or unreadable file, bad JSON, a non-array and a file over HERALD_MAX_BYTES give {}; an entry that is not
+    an object, whose agentId is not a Paseo id or whose reason is not one of HERALD_REASONS is skipped without dropping the rest. A later entry for
+    the same agent replaces an earlier one. The headline and detail are the agent's text: callers show them at diagnose time (relay.py --why) and
+    never store them on a row, a record, a log or a notice."""
+    path = herald_path()
+    try:
+        if path.stat().st_size > HERALD_MAX_BYTES:
+            return {}
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for d in data if isinstance(data, list) else []:
+        agent = d.get("agentId") if isinstance(d, dict) else None
+        reason = d.get("reason") if isinstance(d, dict) else None
+        if not isinstance(agent, str) or not PASEO_ID.fullmatch(agent) or reason not in HERALD_REASONS:
+            continue
+        rid, summary = d.get("requestId"), d.get("summary")
+        created = d.get("createdAt")
+        if isinstance(created, (int, float)) and not isinstance(created, bool):
+            created = str(created)    # an epoch stamp; the payload keeps strings only
+        e = {"reason": reason, "eventId": _herald_str(d.get("eventId"), 80),
+             "requestId": rid if isinstance(rid, str) and PASEO_REQ.fullmatch(rid) else None,
+             "createdAt": _herald_str(created, 40), "status": _herald_str(summary.get("status"), 40) if isinstance(summary, dict) else ""}
+        if detail:
+            e.update(headline=_herald_str(d.get("headline"), 300), detail=_herald_str(d.get("detail"), 600))
+        out[agent] = e
+    return out
+
+
+def herald_overlay(rows):
+    """Join the Herald attention file onto every non-archived row in ROWS whose Paseo agent id (`paseo`, else a paseo chan) it names, including a row
+    that already has a Claude `sid`: `herald` carries the small payload (reason, eventId, requestId, createdAt, status; never the headline or detail),
+    and a question, plan or permission also sets status `blocked`. `error`, `finished` and `canceled` change no status: an announcement leaves a
+    row deliverable, and an error is a need helm reads from `herald`. An archived or ended row is left alone: its entry is a leftover."""
+    entries = None
+    for s in rows:
+        chan = s.get("chan") or ("",)
+        agent = s.get("paseo") or (chan[1] if chan[0] == "paseo" else None)
+        if not agent or s.get("archived") or s.get("status") == "ended":
+            continue
+        if entries is None:
+            entries = herald_entries()
+        e = entries.get(agent)
+        if e:
+            s["herald"] = e
+            if e["reason"] in HERALD_INPUT:
+                s["status"] = "blocked"
+
+
 def paseo_reach(sid, provider, archived=False):
     if archived:
         return "archived Paseo agent: relay.py refuses it (a send would unarchive it); unarchive it in Paseo first"
@@ -672,6 +740,7 @@ def _paseo_rows(have, anc, include_archived=False):
                 cards = waiting[s["paseo"]]
                 s.update(status="blocked", paseo_cards=cards,
                          paseo_pending=cards[0]["text"] if len(cards) == 1 else f"{len(cards)} cards, the first: {cards[0]['text']}")
+    herald_overlay(out)    # the second source: why the agent waits, for every row, not only a running one
     return out
 
 
@@ -1489,6 +1558,8 @@ def render(s):
         lines.append(f"    busy: {len(s['busy'])} child process(es) in flight: {'; '.join(s['busy'][:3])}")
     if s["title"]:
         lines.append(f"    title: {s['title']}")
+    if (s.get("herald") or {}).get("reason") in HERALD_INPUT + ("error",):
+        lines.append(f"    herald: {s['herald']['reason']} (why it waits on a person; relay.py --why {s['id']} shows its text)")
     if s["where"]:
         lines.append(f"    where: {s['where']}" + (f"   focus: {s['focus']}" if s["focus"] else ""))
     if s.get("link"):

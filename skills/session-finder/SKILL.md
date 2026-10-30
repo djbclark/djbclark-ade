@@ -121,7 +121,11 @@ queued at once, 2026-10-28, instead of refused). **Why it waits (2026-10-29): `r
 methods compared: a Paseo agent by `paseo agent inspect` (status, pending cards by tool: a QUESTION is a picklist, a PERMISSION a tool awaiting approval)
 plus `paseo permit ls` (the card's text) plus `paseo logs` (its last activity), a pane by the multiplexer status plus the screen itself; states idle,
 working, silent (running, nothing new for 15 min: hung or one long tool call), card:question|permission|plan|picker|unknown, archived, gone, error, refused (a
-hard stop: the caller's own session, a finished one); a
+hard stop: the caller's own session, a finished one). **Herald (2026-10-30)** is a third witness (`src` `herald-attention`, from `~/.paseo/plugin-data/herald/attention.json`;
+an absent file changes nothing): a `question`, `plan` or `permission` it reports blocks like a card even when `inspect` and `permit ls` list none (the methods
+DISAGREE, blocking wins), an `error` is `needs_you` in `--json` and `why` (never a `paseo permit allow` card; the agent stays deliverable), `finished` and
+`canceled` only add evidence; its headline and detail are shown by `--why` only, never filed. A Paseo-hosted Claude row with a sid is `blocked` in
+`fleet.py` from Herald too (row key `herald`: reason, eventId, requestId, createdAt, status). a
 disagreement between the methods is reported and the blocking reading wins. `--pending` shows each queued record's latest reason as `[why: ...]`. **Two
 witnesses for delivery (2026-10-29):** a Paseo target's transcript AND its own timeline (`paseo logs`), either proves, so codex, omp, opencode and cline
 Paseo agents are "delivered", not "unverified"; `--sweep` reads a transcript-less sender's own timeline for `ack ID`. A record

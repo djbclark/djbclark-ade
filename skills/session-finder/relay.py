@@ -463,10 +463,44 @@ def paseo_card_detail(agent_id):
     return (text if text not in ("", "-") else clean_text(mine[0].get("name"))), True
 
 
-def paseo_look(info, detail="", listed=None, last=""):
+def paseo_look(info, detail="", listed=None, last="", herald=None):
     """The diagnosis of a Paseo agent from its `inspect` INFO: {"state", "why", "deliverable", "agree", "evidence"}. DETAIL is the card text from
-    `permit ls`, LISTED whether that list names the agent (None: not asked), LAST the last line of its timeline. state is idle, working, silent
-    (running with nothing new for HUNG_AFTER), card:question|permission|plan, archived, or the agent's own state word."""
+    `permit ls`, LISTED whether that list names the agent (None: not asked), LAST the last line of its timeline, HERALD its entry in Herald's
+    attention file (fleet.herald_entries(detail=True); None: no entry or not asked). state is idle, working, silent (running with nothing new
+    for HUNG_AFTER), card:question|permission|plan, archived, or the agent's own state word.
+
+    Herald is a third witness (`src` herald-attention): a question, plan or permission it reports blocks like a card, even when `inspect` and
+    `permit ls` list none (the methods then disagree, the blocking reading wins); an `error` is a need ("needs-you") in `why` and no card to
+    allow, and leaves `deliverable` as the other methods give it; `finished` and `canceled` only add evidence. The headline and detail are shown
+    here and in `evidence` only, like a card's text, never filed on a record."""
+    look = _paseo_look(info, detail, listed, last)
+    if not herald:
+        return look
+    reason = herald.get("reason")
+    state = info.get("Status") or "unknown"
+    line = clean_text(" - ".join(x for x in (herald.get("headline"), herald.get("detail")) if x), 300)
+    look["evidence"].append({"src": "herald-attention", "says": reason, **({"line": line} if line else {})})
+    if info.get("Archived"):
+        return look
+    if reason in fleet.HERALD_INPUT:
+        if look["state"].startswith("card:"):
+            if look["state"] not in ("card:" + reason, "card:unknown"):
+                look["why"] += f" [Herald says {reason.upper()}]"
+            if line:
+                look["why"] += f"; Herald says: {line}"
+            return look
+        look.update(state="card:" + reason, deliverable=False, agree=False,
+                    why=f"Herald reports a {reason.upper()} waiting on a person, but `paseo agent inspect` lists no card and `paseo permit ls` "
+                    "does not: it may have just been answered, so treat the agent as blocked" + (f"; Herald says: {line}" if line else ""))
+    elif reason == "error" and state != "running":
+        look["why"] += "; Herald: its last turn ended in an error and needs you (not a `paseo permit allow` card)"
+        look["needs_you"] = "error"
+        if line:
+            look["why"] += f"; Herald says: {line}"
+    return look
+
+
+def _paseo_look(info, detail="", listed=None, last=""):
     state = info.get("Status") or "unknown"
     silent = silent_seconds(info)
     ev = [{"src": "paseo-inspect", "says": state + (" archived" if info.get("Archived") else ""), **({"silent_s": silent} if silent is not None else {})}]
@@ -564,7 +598,7 @@ def diagnose(s):
     detail, listed = paseo_card_detail(agent)    # asked whatever inspect says: a card only one of the two lists is a disagreement to report
     tl = paseo_timeline(agent, 3)
     last = next((r.strip() for r in reversed((tl or "").splitlines()) if r.strip()), "")
-    return paseo_look(info, detail, listed, last)
+    return paseo_look(info, detail, listed, last, fleet.herald_entries(detail=True).get(agent))
 
 
 def paseo_cwd_mismatch(s, info):

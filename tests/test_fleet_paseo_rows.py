@@ -64,8 +64,10 @@ def paseo(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_LIVE", str(live))
     monkeypatch.setenv("FAKE_ALL", str(everything))
     monkeypatch.setenv("FAKE_PERMITS", str(permits))
+    herald_file = tmp_path / "herald" / "attention.json"    # never the real ~/.paseo file; absent until a test writes it
+    monkeypatch.setenv("HERALD_ATTENTION_FILE", str(herald_file))
     monkeypatch.setattr(fleet, "_paseo_hosting", lambda anc: set())    # hermetic: the runner's ancestry is not under test
-    return type("P", (), {"log": log, "live": live, "all": everything, "permits": permits})
+    return type("P", (), {"log": log, "live": live, "all": everything, "permits": permits, "herald": herald_file})
 
 
 def rows(have=(), archived=False):
@@ -354,3 +356,189 @@ def test_a_paseo_agent_with_no_claude_row_is_not_found_by_its_workspace_title(pa
     assert [s["paseo"] for s in relay.find(CLINE, ss)] == [CLINE] and [s["paseo"] for s in relay.find(OMP[:8], ss)] == [OMP]
     on_paseo = fleet._rec(id="cafe0002", agent="claude", name="peer-1", sid="t" * 36, host="paseo", paseo=CLAUDE)
     assert relay.find("peer-1", [on_paseo]) == [on_paseo]    # a Claude agent Paseo hosts keeps its session name
+
+
+# ---- Herald's attention file (issue 135, 2026-10-30): synthetic entries only, never a live headline ----
+
+HEAD = "SYNTHETIC-HEADLINE pick a branch"
+
+
+def attn(agent_id: str, reason: str, **kw) -> dict:
+    return {"agentId": agent_id, "reason": reason, "eventId": "ev-1", "requestId": "rq-1" if reason in ("question", "plan", "permission") else None,
+            "createdAt": "2026-10-30T00:00:00.000Z", "headline": HEAD, "detail": "SYNTHETIC-DETAIL body", "summary": {"status": "idle"}, **kw}
+
+
+def write_herald(paseo, *entries, raw=None) -> None:
+    paseo.herald.parent.mkdir(parents=True, exist_ok=True)
+    paseo.herald.write_text(raw if raw is not None else json.dumps(list(entries)))
+
+
+def test_a_missing_herald_file_leaves_the_rows_as_they_were(paseo):
+    assert fleet.herald_entries() == {}
+    got = {r["paseo"]: r for r in rows()}
+    assert [r["status"] for r in got.values()] == ["idle", "working", "working"]
+    assert all("herald" not in r for r in got.values())
+
+
+@pytest.mark.parametrize("raw", ["", "garbage", "null", '{"agentId": "x"}', '"question"', "7"])
+def test_an_unreadable_or_non_array_herald_file_is_an_empty_list(paseo, raw):
+    write_herald(paseo, raw=raw)
+    assert fleet.herald_entries() == {}
+    assert [r["status"] for r in rows()] == ["idle", "working", "working"]
+
+
+def test_a_herald_path_that_is_a_directory_or_oversized_is_an_empty_list(paseo, monkeypatch):
+    paseo.herald.mkdir(parents=True)
+    assert fleet.herald_entries() == {}
+    paseo.herald.rmdir()
+    write_herald(paseo, attn(OMP, "question"))
+    monkeypatch.setattr(fleet, "HERALD_MAX_BYTES", 10)
+    assert fleet.herald_entries() == {}
+
+
+def test_one_bad_herald_entry_does_not_drop_the_good_ones(paseo):
+    write_herald(paseo, "junk", 5, None, ["x"], {"agentId": OMP}, {"agentId": 3, "reason": "question"}, {"agentId": "../../x", "reason": "question"},
+                 {"agentId": CLINE, "reason": "bogus"}, attn(OMP, "question"))
+    assert list(fleet.herald_entries()) == [OMP]
+    got = {r["paseo"]: r for r in rows()}
+    assert got[OMP]["status"] == "blocked" and got[CLINE]["status"] == "idle"
+
+
+def test_a_herald_question_blocks_a_running_row_and_keeps_only_a_small_payload(paseo):
+    write_herald(paseo, attn(OMP, "question", requestId="rq-9"))
+    r = {r["paseo"]: r for r in rows()}[OMP]
+    assert r["status"] == "blocked"
+    assert r["herald"] == {"reason": "question", "eventId": "ev-1", "requestId": "rq-9", "createdAt": "2026-10-30T00:00:00.000Z", "status": "idle"}
+    assert "SYNTHETIC" not in json.dumps(r)    # the headline and detail never reach a row
+
+
+@pytest.mark.parametrize("reason", ["question", "plan", "permission"])
+def test_each_input_reason_blocks_an_idle_agent_too(paseo, reason):
+    write_herald(paseo, attn(CLINE, reason))
+    assert {r["paseo"]: r for r in rows()}[CLINE]["status"] == "blocked"
+
+
+@pytest.mark.parametrize("reason", ["finished", "canceled", "error"])
+def test_finished_canceled_and_error_do_not_block_a_row(paseo, reason):
+    write_herald(paseo, attn(CLINE, reason))
+    r = {r["paseo"]: r for r in rows()}[CLINE]
+    assert (r["status"], r["herald"]["reason"]) == ("idle", reason)
+
+
+def test_the_herald_payload_is_sanitised(paseo):
+    write_herald(paseo, attn(OMP, "question", requestId="--all", eventId="e\x1b[31m1\u202e", createdAt=1761782400000, summary="x"))
+    h = fleet.herald_entries()[OMP]
+    assert (h["requestId"], h["eventId"], h["createdAt"], h["status"]) == (None, "e1", "1761782400000", "")
+
+
+def test_the_headline_is_read_only_on_request_and_cleaned(paseo):
+    write_herald(paseo, attn(OMP, "question", headline="pick \x1b[31mone\x07 now", detail=7))
+    assert "headline" not in fleet.herald_entries()[OMP]
+    e = fleet.herald_entries(detail=True)[OMP]
+    assert (e["headline"], e["detail"]) == ("pick one now", "")
+
+
+def test_the_later_entry_for_an_agent_replaces_the_earlier(paseo):
+    write_herald(paseo, attn(OMP, "question"), attn(OMP, "finished", eventId="ev-2"))
+    assert fleet.herald_entries()[OMP]["eventId"] == "ev-2"
+    assert {r["paseo"]: r for r in rows()}[OMP]["status"] == "working"
+
+
+def test_herald_and_permit_ls_are_both_kept_when_they_agree(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP)]))
+    write_herald(paseo, attn(OMP, "question"))
+    r = {r["paseo"]: r for r in rows()}[OMP]
+    assert r["status"] == "blocked" and r["paseo_pending"] and r["herald"]["reason"] == "question"
+
+
+def test_an_archived_row_ignores_a_leftover_herald_entry(paseo):
+    write_herald(paseo, attn(OLD, "question"))
+    old = {r["paseo"]: r for r in rows(archived=True)}[OLD]
+    assert (old["status"], "herald" not in old) == ("ended", True)
+
+
+def test_a_claude_row_that_already_has_its_sid_gets_the_herald_status(paseo, monkeypatch, tmp_path):
+    """The blind spot: `_claude_sessions` builds a Paseo-hosted Claude row with a sid, which `_paseo_rows` never sees."""
+    write_herald(paseo, attn(CLAUDE, "question"))
+    sid = "5" * 8 + "-1111-4000-8000-" + "0" * 12
+    reg = tmp_path / "claude"
+    (reg / "sessions").mkdir(parents=True)
+    (reg / "sessions" / "a.json").write_text(json.dumps({"pid": 4242, "sessionId": sid, "cwd": "/x/y", "status": "busy"}))
+    monkeypatch.setattr(fleet, "CLAUDE", reg)
+    monkeypatch.setattr(fleet, "alive", lambda pid: True)
+    monkeypatch.setattr(fleet, "transcript", lambda s: None)
+    monkeypatch.setattr(fleet, "dispatch_record", lambda s: None)
+    monkeypatch.setattr(fleet, "_where", type("W", (), {"lookup": staticmethod(lambda pid, start: {"paseo_agent": CLAUDE}),
+                                                         "env_of": staticmethod(lambda pid: {})}))
+    [s] = fleet._claude_sessions({}, set(), set())
+    assert (s["host"], s["sid"], s["paseo"], s["status"]) == ("paseo", sid, CLAUDE, "blocked")
+    assert s["herald"]["reason"] == "question" and "SYNTHETIC" not in json.dumps(s)
+
+
+def test_helm_names_a_claude_paseo_question_from_herald_without_the_transcript(paseo):
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, "question"))
+    fleet.herald_overlay([s])
+    it = helm.classify(s, {})    # no transcript for that sid: the kind is Herald's
+    assert (it["kind"], it["open"], it["herald"], it["reachable"]) == ("question", True, "question", False)
+    text = helm.render(it)
+    assert "WAITS ON A QUESTION" in text and "relay.py --why deadbeef" in text and "SYNTHETIC" not in text
+
+
+@pytest.mark.parametrize("reason,kind", [("question", "question"), ("plan", "plan"), ("permission", "permission"), ("error", "error")])
+def test_helm_gives_each_herald_reason_its_own_kind(paseo, reason, kind):
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="idle", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, reason))
+    fleet.herald_overlay([s])
+    it = helm.classify(s, {})
+    assert (it["kind"], it["open"]) == (kind, True)
+
+
+def test_a_new_herald_event_reopens_a_skipped_item(paseo):
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="idle", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, "question"))
+    fleet.herald_overlay([s])
+    st = {"skipped": helm.classify(s, {})["fp"]}
+    assert helm.classify(s, st)["open"] is False
+    write_herald(paseo, attn(CLAUDE, "question", eventId="ev-2"))
+    fleet.herald_overlay([s])
+    assert helm.classify(s, st)["open"] is True
+
+
+def test_helm_shows_finished_as_an_announcement_and_leaves_the_row_alone(paseo):
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="idle", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, "finished"))
+    fleet.herald_overlay([s])
+    assert s["status"] == "idle"
+    assert helm.classify(s, {})["kind"] not in ("question", "plan", "permission", "error")
+
+
+def test_helm_reports_an_error_as_needs_you_and_offers_no_permit_allow(paseo):
+    write_herald(paseo, attn(CLINE, "error"))
+    r = {r["paseo"]: r for r in rows()}[CLINE]    # idle, no card
+    it = helm.classify(r, {})
+    assert (it["kind"], it["open"], it["cards"]) == ("error", True, [])
+    text = helm.render(it)
+    assert "ENDED IN AN ERROR" in text and "paseo permit allow" not in text.replace("no card to allow or deny", "")
+
+
+def test_a_real_permit_ls_card_stays_the_permission_item_over_a_herald_error(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP)]))    # the second source lists a pending card: it wins, and it is the only source of a command
+    write_herald(paseo, attn(OMP, "error"))
+    it = helm.classify({r["paseo"]: r for r in rows()}[OMP], {})
+    assert (it["kind"], len(it["cards"])) == ("permission", 1)
+
+
+def test_a_working_row_with_an_old_herald_error_is_not_a_need(paseo):
+    write_herald(paseo, attn(CLAUDE, "error"))
+    r = {r["paseo"]: r for r in rows()}[CLAUDE]    # running: a new turn started after the error
+    assert helm.classify(r, {})["kind"] == "remote"
+
+
+def test_helm_brief_carries_a_herald_wait(paseo, monkeypatch, capsys):
+    write_herald(paseo, attn(OMP, "question"))
+    monkeypatch.setattr(helm, "sessions", lambda: rows())
+    monkeypatch.setattr(helm, "save", lambda state: None)
+    helm.cmd_brief(None, {})
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("1:") and OMP[:8] in out

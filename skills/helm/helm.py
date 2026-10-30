@@ -63,12 +63,12 @@ HERDR = fleet.HERDR
 HOME = str(Path.home())
 COLD = 55 * 60   # idle longer than this: the prompt cache (1 h) is gone, an audit re-reads it all
 POLL = 5
-ATTENTION = ("question", "reply", "plan", "permission", "blocked", "finished", "done", "idle")
+ATTENTION = ("question", "reply", "plan", "permission", "error", "blocked", "finished", "done", "idle")
 LAUNCH = HERE.parent / "session-finder" / "launch.py"
 # Minutes of unattended work an answer is expected to unlock (operator 2026-10-08: order the walk so
 # the fleet is busy as much of the time as possible). A question's value comes from that session's
 # own measured work stretch (fleet.parse: median minutes between an operator prompt and the next stop).
-UNLOCK = {"plan": 45, "permission": 20, "finished": 25, "reply": 15, "blocked": 5, "done": 2}
+UNLOCK = {"plan": 45, "permission": 20, "error": 10, "finished": 25, "reply": 15, "blocked": 5, "done": 2}
 
 
 run, herdr_json, short, clip, transcript, parse = fleet.run, fleet.herdr_json, fleet.short, fleet.clip, fleet.transcript, fleet.parse
@@ -204,6 +204,22 @@ def sessions():
     return fleet.sessions()
 
 
+def herald_kind(s, tx=None):
+    """The item kind Herald's reason gives a Paseo row (fleet.herald_overlay): question, plan, permission or error, else None. A reply that
+    ended in an error is a need only while no new turn runs (a working or blocked row has moved on, the entry is stale). A question whose full
+    text the Claude transcript still holds stays the transcript's item: it carries the options helm can answer."""
+    reason = (s.get("herald") or {}).get("reason")
+    if s.get("host") != "paseo":
+        return None
+    if reason in fleet.HERALD_INPUT and s["status"] == "blocked":
+        if reason == "question" and tx and any(p[1] == "AskUserQuestion" for p in tx["pending"]):
+            return None
+        return reason
+    if reason == "error" and s["status"] not in ("working", "blocked", "ended"):
+        return "error"
+    return None
+
+
 def classify(s, st):
     """Turn a session into a queue item. `st` is this session's saved state (mutated)."""
     it = {k: s[k] for k in ("id", "agent", "name", "title", "where", "focus", "status")}
@@ -214,6 +230,7 @@ def classify(s, st):
     if tx:
         it["context"] = clip(tx["last_text"], 500)
         it["stretch"] = tx.get("stretch_min")
+    hk = herald_kind(s, tx)
     if s.get("host") == "acp":            # a session launch.py started over ACP: one turn per run
         la = s.get("launch") or {}
         turn = la.get("turns", 0)
@@ -225,13 +242,17 @@ def classify(s, st):
                       exit=(la.get("result") or {}).get("exit"))
         else:
             it.update(kind="working", fp="")
-    elif s.get("host") == "paseo" and not s.get("sid") and s["status"] == "blocked":
-        # a Paseo agent with no Claude transcript waiting on a permission or question card (fleet.py reads `paseo permit ls`):
-        # no terminal for helm to read or press keys in, so the item only points at the Paseo UI
-        pend, cards = s.get("paseo_pending") or "", s.get("paseo_cards") or []
+    elif hk or (s.get("host") == "paseo" and not s.get("sid") and s["status"] == "blocked"):
+        # a Paseo agent waiting on a person: Herald's reason (fleet.py reads the attention file; question, plan, permission or error) names the kind,
+        # with or without a Claude sid; `paseo permit ls` cards (fleet.py, a row without a sid) are the second source and give the commands.
+        # No terminal for helm to read or press keys in, so the item only points at the Paseo UI. An error is no card: nothing to allow or deny.
+        h = s.get("herald") or {}
+        pend, cards = ("", []) if hk == "error" else (s.get("paseo_pending") or "", s.get("paseo_cards") or [])
         fp = "\n".join(f"{c.get('id')}\0{c.get('text')}" for c in cards) or pend    # every request id: a new card re-opens the item
-        it.update(kind="permission", fp="paseo:" + hashlib.sha1(fp.encode()).hexdigest()[:12], tool="paseo", detail=pend,
-                  paseo=True, reachable=False, cards=cards, paseo_agent=s.get("paseo"))
+        if hk:
+            fp = "\n".join([hk, str(h.get("eventId")), str(h.get("requestId")), fp])    # a new Herald event re-opens it; never its headline
+        it.update(kind=hk or "permission", fp="paseo:" + hashlib.sha1(fp.encode()).hexdigest()[:12], tool="paseo", detail=pend,
+                  paseo=True, reachable=False, cards=cards, paseo_agent=s.get("paseo"), **({"herald": h["reason"]} if hk else {}))
     elif s.get("host") == "hermes-gw" or (s.get("host") == "paseo" and not s.get("sid")):
         # a Hermes chat, or a Paseo agent with no Claude transcript (fleet.py lists them all): not a terminal, nothing to relay by keys
         it.update(kind="remote", fp="")
@@ -427,6 +448,14 @@ def render(it, full=False):
     elif k == "busy-background":
         out.append(f"  BUSY IN THE BACKGROUND: {len(it.get('busy') or [])} child process(es) still running; not audited, not closed")
         out += [f"    - {b}" for b in (it.get("busy") or [])[:4]]
+    elif it.get("herald") == "error":
+        out.append("  PASEO AGENT'S TURN ENDED IN AN ERROR (Herald): it needs you, but there is no card to allow or deny")
+        out.append(f"  see why: `relay.py --why {it['id']}` (its text and timeline)   |  or open it in the Paseo UI (helm has no terminal to press keys in)")
+    elif it.get("herald") in ("question", "plan"):
+        what = "A QUESTION" if it["herald"] == "question" else "A PLAN APPROVAL"
+        out.append(f"  PASEO AGENT WAITS ON {what} (Herald)" + (f": {it.get('detail', '')}" if it.get("detail") else ""))
+        out += paseo_answers(it)
+        out.append(f"  see its text: `relay.py --why {it['id']}`")
     elif k == "question":
         for qi, q in enumerate(it["questions"], 1):
             tag = f"QUESTION {qi}/{len(it['questions'])}" if len(it["questions"]) > 1 else "QUESTION"

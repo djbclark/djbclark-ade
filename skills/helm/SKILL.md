@@ -190,6 +190,12 @@ means new prompts from other sessions are missed.
    `paseo permit ls --json`) it is an open `permission` item listing every card with its own
    `paseo permit allow|deny <agent> -- <request id>` (never without the request id: `allow` alone approves ALL the agent's
    pending cards, `deny` alone fails), or the Paseo UI; a new card re-opens a skipped item. helm has no terminal there, and `keys` refuses it.
+   **Herald (2026-10-30, issue 135):** `fleet.py` also reads Herald's `~/.paseo/plugin-data/herald/attention.json` (a missing, unreadable or non-array file is an
+   empty list; a bad entry is skipped alone) and joins it on the Paseo agent id onto every row, **including a Claude Paseo row that has a sid**. `question`,
+   `plan` and `permission` set status `blocked` and give the item that kind straight from Herald, with no transcript parse (a question whose AskUserQuestion
+   the transcript still holds stays the answerable transcript item); `error` is an open `error` item (needs you, no card: never offered `paseo permit allow`,
+   and only while no new turn runs); `finished` and `canceled` change nothing. A new Herald event re-opens a skipped item; `helm.py brief` carries it
+   (fleet-watch unchanged). The headline and detail are the agent's text: only `relay.py --why` shows them.
 3. A Claude session outside herdr, Orca and tmux can be listed but not
    answered: use `SendMessage`, or his `focus`.
 4. Sessions come from `session-finder/fleet.py` (2026-10-08): herdr, the Claude
