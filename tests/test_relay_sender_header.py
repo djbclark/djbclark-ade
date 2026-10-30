@@ -348,6 +348,23 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         self.assertEqual(relay.sender_row([a, b])["id"], "aaaaaaaa")
         self.assertEqual(relay.sender_row([b, a])["id"], "bbbbbbbb")
 
+    def test_a_paseo_id_on_a_transcript_row_does_not_jump_the_fleet_order(self) -> None:
+        """A transcript already proves an ack, so a Paseo id beside it is no second vote: `_from_herdr` gives a
+        daemon-spawned terminal TUI both a transcript and the daemon's `paseo_agent`, and that id is never checked against
+        hosting here. Two transcript rows keep fleet's order whichever carries the id (local-review of 2026-10-30)."""
+        plain = sess(id="aaaaaaaa", agent="claude", transcript="/tmp/a.jsonl", **{"self": True})
+        both = sess(id="bbbbbbbb", agent="claude", transcript="/tmp/b.jsonl", paseo=PASEO_AGENT, **{"self": True})
+        self.assertEqual(relay.sender_row([plain, both])["id"], "aaaaaaaa")
+        self.assertEqual(relay.sender_row([both, plain])["id"], "bbbbbbbb")
+        self.assertEqual(relay.sender_row([both, plain])["paseo"], PASEO_AGENT)
+
+    def test_a_transcript_row_still_beats_a_hosted_paseo_row(self) -> None:
+        """The transcript is the first vote and only an id proves the second, so the order between the two kinds is
+        unchanged by the tie rule above."""
+        tx = sess(id="cccccccc", agent="claude", transcript="/tmp/me.jsonl", **{"self": True})
+        self.assertEqual(relay.sender_row([self.paseo_row(), tx])["id"], "cccccccc")
+        self.assertEqual(relay.sender_row([tx, self.paseo_row()])["id"], "cccccccc")
+
     def test_the_note_is_silent_when_a_transcript_or_a_readable_timeline_can_prove_the_ack(self) -> None:
         self.assertIsNone(relay.ack_proof_note({"transcript": "/tmp/me.jsonl"}, "build1", None))
         self.assertIsNone(relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, "build1", {}))

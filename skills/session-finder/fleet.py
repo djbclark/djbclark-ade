@@ -1471,8 +1471,11 @@ def sender_row(ss):
     Preference: a transcript (watched by `--ack`), then a Paseo id only when that agent actually HOSTS this process
     (`_paseo_hosting`, the same test `_paseo_rows` uses for `self`). An inherited or exported `PASEO_AGENT_ID` marks a row
     `self` on its own (`_paseo_rows`: `pid == me or pid in hosting`) and must not win: the pid row is then the real caller,
-    and naming the other agent would route a genuine answer to it (adversary 2026-10-30 B1). Ties keep fleet's order (`max`
-    returns the first of equal keys)."""
+    and naming the other agent would route a genuine answer to it (adversary 2026-10-30 B1). A transcript-backed row gets no
+    second vote for also carrying a Paseo id (`_from_herdr`'s daemon-spawned terminal row has both): its transcript already
+    proves an ack, and that id may be an inherited one, so two transcript rows keep fleet's order rather than one jumping
+    ahead on an unproven id (local-review of 2026-10-30). Exact ties keep fleet's order (`max` returns the first of equal
+    keys)."""
     selfs = [x for x in ss if isinstance(x, dict) and x.get("self")]
     if len(selfs) < 2:
         return selfs[0] if selfs else None
@@ -1480,9 +1483,11 @@ def sender_row(ss):
 
     def key(x):
         nonlocal hosting
+        if x.get("transcript"):
+            return (True, False)
         pid = x.get("paseo")
-        if not pid or x.get("transcript"):
-            return (bool(x.get("transcript")), bool(pid))
+        if not pid:
+            return (False, False)
         if hosting is None:
             hosting = _paseo_hosting(ancestors())
         return (False, pid in hosting)
