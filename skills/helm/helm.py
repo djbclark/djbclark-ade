@@ -207,14 +207,15 @@ def sessions():
 def herald_kind(s, tx=None):
     """The item kind Herald's reason gives a Paseo row (fleet.herald_overlay): question, plan, permission or error, else None. A reply that
     ended in an error is a need only while no new turn runs (a working or blocked row has moved on, the entry is stale). A question whose full
-    text the Claude transcript still holds stays the transcript's item, whatever Herald's reason says (a plan, a permission or an error
-    beside it): it carries the options helm can answer, and Herald must neither replace nor drop it."""
+    text the Claude transcript still holds stays the transcript's item on a blocked row, whatever Herald's reason says (a plan or a permission
+    beside it): it carries the options helm can answer, and Herald must neither replace nor drop it. An error is no such row: classify shows a
+    transcript question only while blocked, so an old unanswered question in the tail never hides the error of an idle or unknown row."""
     reason = (s.get("herald") or {}).get("reason")
     if s.get("host") != "paseo":
         return None
-    if tx and any(p[1] == "AskUserQuestion" for p in tx["pending"]):
-        return None
     if reason in fleet.HERALD_INPUT and s["status"] == "blocked":
+        if tx and any(p[1] == "AskUserQuestion" for p in tx["pending"]):
+            return None
         return reason
     if reason == "error" and s["status"] not in ("working", "blocked", "ended"):
         return "error"
@@ -467,8 +468,8 @@ def render(it, full=False):
                 out.append(f"    {n}. {o.get('label', '')}{desc}")
         if it.get("context"):
             out.append(f"  said before asking: {it['context']}")
-        how = (f"helm.py answer {it['id']} --fp {it['fp']} <n> | --text \"...\"" if it["reachable"]
-               else "no channel: answer in the pane")
+        how = (f"answer in the Paseo UI (`relay.py --why {it['id']}` shows its text): helm has no terminal to press keys in" if it.get("host") == "paseo"
+               else f"helm.py answer {it['id']} --fp {it['fp']} <n> | --text \"...\"" if it["reachable"] else "no channel: answer in the pane")
         out.append(f"  answer: {how}")
     elif k == "permission" and it.get("paseo"):
         cards = it.get("cards") or []
@@ -661,7 +662,7 @@ def cmd_answer(a, state):
         sys.exit(ANSWERED if status == "answered" else CHANGED)
     if it["kind"] != "question":
         sys.exit(f"helm: {it['id']} has no pending question (it is {it['kind']}); nothing sent")
-    if it.get("paseo"):    # a Herald question on a Paseo agent: no `questions`, no terminal to press keys in
+    if it.get("paseo") or it.get("host") == "paseo":    # a Paseo agent, its Herald question or a transcript-backed one: no terminal to press keys in
         sys.exit(f"helm: {it['id']} is a Paseo agent: answer in the Paseo UI (`relay.py --why {it['id']}` shows its text); nothing sent")
     if not s.get("chan"):
         sys.exit(f"helm: no channel to {it['id']}; answer in the pane ({it['focus'] or it['where']})")
@@ -800,7 +801,7 @@ def cmd_keys(a, state):
     s, it = find(a.id, state)
     if it["kind"] not in ("question", "plan", "permission", "blocked"):
         sys.exit(f"helm: {it['id']} is {it['kind']}, not waiting on a prompt; nothing sent")
-    if it.get("paseo"):
+    if it.get("paseo") or it.get("host") == "paseo":
         sys.exit(f"helm: {it['id']} is a Paseo agent: no terminal to press keys in; answer in the Paseo UI or per card with "
                  f"`paseo permit allow|deny <agent> -- <request id>` (`paseo permit ls`)")
     if not s.get("chan"):

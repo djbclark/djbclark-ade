@@ -530,7 +530,7 @@ def test_helm_gives_each_herald_reason_its_own_kind(paseo, reason, kind):
     assert (it["kind"], it["open"]) == (kind, True)
 
 
-@pytest.mark.parametrize("reason", ["question", "plan", "permission", "error"])
+@pytest.mark.parametrize("reason", ["question", "plan", "permission"])
 def test_a_pending_transcript_question_stays_the_answerable_item_whatever_herald_says(paseo, monkeypatch, reason):
     """Herald's kind must neither replace nor drop a pending AskUserQuestion the transcript still holds: it carries the options helm can answer."""
     s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
@@ -539,10 +539,25 @@ def test_a_pending_transcript_question_stays_the_answerable_item_whatever_herald
     ask = {"questions": [{"question": "Which?", "options": [{"label": "a"}, {"label": "b"}]}]}
     monkeypatch.setattr(helm, "transcript", lambda sid: Path("t.jsonl"))
     monkeypatch.setattr(helm, "parse", lambda p: {"last_text": "", "pending": [("toolu_1", "AskUserQuestion", ask)]})
-    s["status"] = "blocked"    # a live question: the registry says blocked (an error is read as the item only while no turn is blocked)
+    s["status"] = "blocked"    # a live question: the registry says blocked
     it = helm.classify(s, {})
     assert (it["kind"], it["open"], it["tool_use_id"], it["questions"]) == ("question", True, "toolu_1", ask["questions"])
     assert "herald" not in it and "paseo" not in it
+
+
+@pytest.mark.parametrize("status", ["idle", "unknown"])
+def test_a_herald_error_survives_an_old_unanswered_transcript_question_on_a_row_that_is_not_blocked(paseo, monkeypatch, status):
+    """A turn that died leaves its AskUserQuestion pending in the transcript tail; on an idle or unknown row that is no live question, so the
+    Herald error stays the needs-you item (and an unknown row stays open) instead of being dropped."""
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, "error"))
+    fleet.herald_overlay([s])
+    ask = {"questions": [{"question": "Which?", "options": [{"label": "a"}, {"label": "b"}]}]}
+    monkeypatch.setattr(helm, "transcript", lambda sid: Path("t.jsonl"))
+    monkeypatch.setattr(helm, "parse", lambda p: {"last_text": "", "pending": [("toolu_1", "AskUserQuestion", ask)]})
+    s["status"] = status
+    it = helm.classify(s, {})
+    assert (it["kind"], it["open"], it.get("herald")) == ("error", True, "error")
 
 
 def test_a_new_herald_event_reopens_a_skipped_item(paseo):
@@ -665,3 +680,28 @@ def test_helm_answer_on_a_herald_question_refuses_cleanly(paseo, monkeypatch, ca
     with pytest.raises(SystemExit) as e:
         helm.cmd_answer(type("A", (), {"id": "deadbeef", "fp": None, "text": None, "choice": [1]}), {})
     assert "Paseo agent" in str(e.value) and "nothing sent" in str(e.value) and "KeyError" not in repr(e.value)
+
+
+def test_a_transcript_backed_paseo_question_points_at_the_paseo_ui_and_sends_no_keys(paseo, monkeypatch):
+    """Herald blocks a Paseo Claude row whose transcript still holds the question: the item keeps the transcript's options (no `paseo` flag), but
+    the row has no terminal, so `answer` and `keys` refuse cleanly and `render` does not advertise `helm.py answer`."""
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36, status="working", cwd="/x/y")
+    write_herald(paseo, attn(CLAUDE, "question"))
+    fleet.herald_overlay([s])
+    ask = {"questions": [{"question": "Which?", "options": [{"label": "a"}, {"label": "b"}]}]}
+    monkeypatch.setattr(helm, "transcript", lambda sid: Path("t.jsonl"))
+    monkeypatch.setattr(helm, "parse", lambda p: {"last_text": "", "pending": [("toolu_1", "AskUserQuestion", ask)]})
+    s["status"] = "blocked"
+    it = helm.classify(s, {})
+    assert (it["kind"], it["questions"], "paseo" in it) == ("question", ask["questions"], False)
+    text = helm.render(it)
+    assert "helm.py answer" not in text and "Paseo UI" in text and "1. a" in text
+    monkeypatch.setattr(helm, "find", lambda ident, state: (s, it))
+    monkeypatch.setattr(helm, "question_status", lambda *a, **k: ("pending", None))
+    monkeypatch.setattr(helm, "send_keys", lambda *a, **k: pytest.fail("keys were sent to a Paseo agent"))
+    with pytest.raises(SystemExit) as e:
+        helm.cmd_answer(type("A", (), {"id": "deadbeef", "fp": None, "text": None, "choice": [1]}), {})
+    assert "Paseo agent" in str(e.value) and "nothing sent" in str(e.value)
+    with pytest.raises(SystemExit) as e:
+        helm.cmd_keys(type("A", (), {"id": "deadbeef", "key": ["1"]}), {})
+    assert "Paseo agent" in str(e.value) and "no terminal" in str(e.value)
