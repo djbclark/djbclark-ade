@@ -24,6 +24,11 @@ GUARD = ROOT / "bin" / "ade-git-guard"
     "'ade.a=b.example'='a'\\''b=c' 'ade.empty'='' 'ade.flag'",
     "'ade.old=value=with=equals' 'ade.new'='space here'",
     "'ade.new'='line\nbreak' 'ade.slash'='a\\b'",
+    # git's own sq_quote spelling of an embedded quote, and two runs of it in one value
+    "'ade.quote'='it'\\''s' 'ade.tail'",
+    "'ade.runs'='a'\\''b'\\''c'",
+    # a valueless entry followed by another setting is TWO entries, not a value for the first
+    "'ade.flag'= 'ade.after'='v'",
 ])
 def test_parameter_key_value_quoting_matches_git(tmp_path, state, parameters):
     env = base_env(state, GIT_CONFIG_PARAMETERS=parameters)
@@ -36,6 +41,22 @@ def test_parameter_key_value_quoting_matches_git(tmp_path, state, parameters):
             expected.append((key, value if separator else "true"))
     call = ade_claims.parse_git_argv(["status"], str(tmp_path), env)
     assert call.config == expected
+
+
+@pytest.mark.parametrize("parameters", [
+    "'ade.a'='1''ade.b'='2'",      # entries need whitespace between them
+    "'ade.q'='x''y'",              # adjacent quoted strings are not one value
+    "'ade.unquoted'=v",            # values are single-quoted
+    "'ade.trail'='x'\\'",          # an escape with no reopening quote
+    "'=no-key'",                   # an old-style entry with an empty key
+])
+def test_a_parameter_transport_git_refuses_is_dropped_rather_than_guessed(tmp_path, state, parameters):
+    """git refuses the whole run on a bogus format, so the guard classifies nothing from it."""
+    env = base_env(state, GIT_CONFIG_PARAMETERS=parameters)
+    r = subprocess.run(["git", "config", "--null", "--list"], cwd=tmp_path, env=env,
+                       capture_output=True, text=True, check=False)
+    assert r.returncode != 0 and "bogus" in r.stderr
+    assert ade_claims.parse_git_argv(["status"], str(tmp_path), env).config == []
 
 
 @pytest.fixture(autouse=True)

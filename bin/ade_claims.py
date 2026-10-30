@@ -757,30 +757,87 @@ def _env_count_config(env: dict[str, str]) -> list[tuple[str, str]]:
     return out
 
 
+_GIT_SPACE = frozenset(" \t\n\v\f\r")     # C isspace() in the C locale, which is what git's parser uses
+
+
+def _sq_dequote(src: str, i: int) -> Optional[tuple[str, int]]:
+    """Git's sq_dequote_step (quote.c): the single-quoted string starting at `src[i]`, and the index just past it.
+    A closing quote followed by `\\'` and then a reopening quote continues the SAME string — that is how git's own
+    sq_quote writes `it's` as `'it'\\''s'`. Any other character after a closing quote is a bogus format (None), as is
+    a string that ends inside the quotes; measured against git 2.56, `''`, `\\\\` and a trailing escape are all bogus."""
+    if i >= len(src) or src[i] != "'":
+        return None
+    out: list[str] = []
+    i += 1
+    while True:
+        if i >= len(src):
+            return None
+        c = src[i]
+        if c != "'":
+            out.append(c)
+            i += 1
+            continue
+        i += 1
+        if i >= len(src):
+            return "".join(out), i
+        # Only the `\'` + reopening-quote form continues the same string; `''`, `\\` and a bare
+        # trailing escape are all git's bogus format (measured: `'x''y'`, `'x'\\''y'`, `'x'\'`).
+        if src[i] == "\\" and i + 2 < len(src) and src[i + 1] == "'" and src[i + 2] == "'":
+            out.append("'")
+            i += 3
+            continue
+        return "".join(out), i
+
+
+def _parse_config_parameters(params: str) -> Optional[list[tuple[str, str]]]:
+    """Git's parse_config_env_list (config.c), the grammar GIT_CONFIG_PARAMETERS actually carries: entries separated
+    by whitespace, each a single-quoted string with an optional `=` and a single-quoted value. In the new-style
+    `'key'='value'` form the quoted key is literal; in the old-style `'key=value'` form (no quoted value follows) git
+    splits the dequoted string at the FIRST `=` and keeps later ones in the value. `key`, `key=`, and `key=` followed
+    by whitespace are the same implicit boolean, and what follows the whitespace is a NEW entry — never the previous
+    entry's value (`'ade.flag'= 'ade.x'='foo'` is two entries, measured against git 2.56). Unquoted keys or values,
+    adjacent quoted strings and trailing junk are git's `bogus format`, after which git runs nothing at all. None
+    means bogus."""
+    out: list[tuple[str, str]] = []
+    i, n = 0, len(params)
+    while True:
+        while i < n and params[i] in _GIT_SPACE:
+            i += 1
+        if i >= n:
+            return out
+        step = _sq_dequote(params, i)
+        if step is None:
+            return None
+        key, i = step
+        if i < n and params[i] == "=":
+            # new-style `'key'='value'`: the quoted key is literal (a `=` in it belongs to the name/subsection)
+            i += 1
+            if i < n and params[i] not in _GIT_SPACE:
+                step = _sq_dequote(params, i)
+                if step is None:
+                    return None
+                value, i = step
+            else:
+                value = "true"                      # implicit bool: `'key'=`
+        else:
+            # old-style `'key=value'`: git hands the dequoted string to git_config_parse_parameter, which splits it
+            # at the FIRST `=` and keeps every later one in the value (`'ade.old=value=with=equals'`)
+            key, sep, value = key.partition("=")
+            if not sep:
+                value = "true"
+            if not key:
+                return None                          # git: "bogus config parameter" for an empty key
+        if i < n and params[i] not in _GIT_SPACE:      # entries are separated by whitespace: `'a'='1''b'='2'` is bogus
+            return None
+        out.append((_ckey(key), value))
+
+
 def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
     """Config git reads from the environment: GIT_CONFIG_COUNT/KEY_n/VALUE_n, then GIT_CONFIG_PARAMETERS."""
     out = _env_count_config(env)
     params = env.get("GIT_CONFIG_PARAMETERS", "")
     if params:
-        try:
-            # Git accepts both 'key=value' and 'key'='value'. Preserve quoted '='
-            # in subsection names: shlex.split alone loses that distinction.
-            lexer = shlex.shlex(params, posix=True, punctuation_chars="=")
-            lexer.whitespace_split = True
-            lexer.commenters = ""
-            tokens = list(lexer)
-            i = 0
-            while i < len(tokens):
-                if i + 1 < len(tokens) and tokens[i + 1] == "=":
-                    k, eq = tokens[i], "="
-                    v = tokens[i + 2] if i + 2 < len(tokens) else "true"
-                    i += 3
-                else:
-                    k, eq, v = tokens[i].partition("=")
-                    i += 1
-                out.append((_ckey(k), v if eq else "true"))
-        except ValueError:
-            pass
+        out.extend(_parse_config_parameters(params) or [])
     return out
 
 

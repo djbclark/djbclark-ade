@@ -5,6 +5,7 @@ import ast
 import asyncio
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -95,7 +96,7 @@ class TestGitIdentityGuard(unittest.TestCase):
             self.assertNotIn(name, got)
         self.init(self.real)
         hook = self.real / ".git/hooks/pre-commit"
-        hook.write_text(f"#!/bin/sh\ntouch '{self.real}/hook-ran'\n")
+        hook.write_text("#!/bin/sh\ntouch %s\n" % shlex.quote(str(self.real / "hook-ran")))
         hook.chmod(0o755)
         r = self.git(self.real, "commit", "-q", "--allow-empty", "-m", "operator", env=got)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -107,6 +108,19 @@ class TestGitIdentityGuard(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0, r.stderr)
             self.assertIn("identity guard", r.stderr)
             self.assertEqual(self.head(self.real), before)
+
+    def test_hook_path_with_an_apostrophe_still_runs(self):
+        """The generated hook names its output path through shlex.quote: a home directory with an apostrophe
+        must not turn the hook into a shell syntax error before the guard is even reached."""
+        repo = self.real / "it's a repo"
+        repo.mkdir()
+        self.init(repo)
+        hook = repo / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\ntouch %s\n" % shlex.quote(str(repo / "hook-ran")))
+        hook.chmod(0o755)
+        r = self.git(repo, "commit", "-q", "--allow-empty", "-m", "operator")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((repo / "hook-ran").exists())
 
     def test_counted_values_and_existing_parameters_keep_their_order_and_quoting(self):
         values = ["plain", "space here", "a'b", "a\\b", "line\nbreak", "a=b", "!", ""]
@@ -235,7 +249,7 @@ class TestGitIdentityGuard(unittest.TestCase):
     def test_repo_hooks_still_run(self):
         self.init(self.real)
         hook = self.real / ".git/hooks/pre-commit"
-        hook.write_text(f"#!/bin/sh\ntouch '{self.real}/hook-ran'\n")
+        hook.write_text("#!/bin/sh\ntouch %s\n" % shlex.quote(str(self.real / "hook-ran")))
         hook.chmod(0o755)
         r = self.git(self.real, "commit", "-q", "--allow-empty", "-m", "ok")
         self.assertEqual(r.returncode, 0, r.stderr)
