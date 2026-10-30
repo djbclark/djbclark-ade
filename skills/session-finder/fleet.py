@@ -1499,7 +1499,8 @@ def sender_row(ss):
 
     A transcript-backed row gets no second vote for also carrying a Paseo id: `_claude_sessions` gives a daemon-spawned
     Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), but a transcript already proves the ack and neither
-    `ack_proof_note` nor `timeline_base` reads a transcript row's Paseo id, so it adds nothing to the proof and two
+    `ack_proof_note` nor `timeline_base` uses that id to prove an ack for a transcript row (`timeline_base` reads it
+    at relay.py:775, then returns None on a transcript at 776), so it adds nothing to the proof and two
     transcript rows keep fleet's order instead of one jumping ahead on it (adversary 4 F1, 2026-10-30; that tie is item 9
     (c) of `docs/queue.md`, to be broken by ancestry depth in a later PR). Exact ties keep fleet's order (`max` returns
     the first of equal keys)."""

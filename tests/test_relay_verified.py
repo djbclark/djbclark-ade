@@ -1629,6 +1629,16 @@ class TestNoProofPathIsSaidAtSendTime(Base):
         row["self"] = True
         return row
 
+    HOST_PID = 19798    # the process Paseo launched for the agent: the very one `pid_row` scans
+
+    def hosting(self, agent: str | None = "") -> Any:
+        """The Paseo hosting probe and this process's ancestry, stubbed together: `sender_row` ranks `self` rows by how
+        near the process each names is, so a Paseo row proves itself by the pid Paseo launched for that agent. AGENT None
+        models an inherited `PASEO_AGENT_ID`: the row is `self` by the id alone and hosts nothing."""
+        return mock.patch.multiple(
+            fleet, _paseo_hosting_pids=mock.Mock(return_value={} if agent is None else {agent: self.HOST_PID}),
+            ancestry=mock.Mock(return_value=[self.HOST_PID, 38148]))
+
     def paseo_row(self, **kw: Any) -> dict[str, Any]:
         row = sess(id="bbbbbbbb", agent="antigravity", name="research", host="paseo", paseo=self.PASEO,
                    chan=("paseo", self.PASEO), status="working", transcript=None, **kw)
@@ -1651,7 +1661,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
 
     def test_a_paseo_hosting_the_sender_becomes_the_sender_and_its_record_can_close(self) -> None:
         """The live defect end to end: the pid row is listed first, and the record is the Paseo row's, with a timeline baseline."""
-        with mock.patch.object(fleet, "_paseo_hosting", lambda anc: {self.PASEO}), \
+        with self.hosting(self.PASEO), \
                 mock.patch.object(relay, "timeline_messages", lambda pid: []):
             rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row(), self.paseo_row()])
         self.assertEqual(rc, 0, err)
@@ -1663,7 +1673,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
 
     def test_a_paseo_row_marked_self_only_by_an_inherited_id_changes_nothing(self) -> None:
         """Adversary B1: `_paseo_rows` marks a row `self` for an inherited `PASEO_AGENT_ID` alone; it must not become the sender."""
-        with mock.patch.object(fleet, "_paseo_hosting", lambda anc: set()), \
+        with self.hosting(None), \
                 mock.patch.object(relay, "timeline_messages", lambda pid: []):
             rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row(), self.paseo_row()])
         self.assertEqual(rc, 0, err)
@@ -1691,7 +1701,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
 
     def test_a_paseo_sender_with_a_readable_timeline_is_not_told(self) -> None:
         """A transcript-less Paseo agent is watched through its timeline, so it needs no warning."""
-        with mock.patch.object(fleet, "_paseo_hosting", lambda anc: {self.PASEO}), \
+        with self.hosting(self.PASEO), \
                 mock.patch.object(relay, "timeline_messages", lambda pid: []):
             rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.paseo_row()])
         self.assertEqual(rc, 0, err)
@@ -1699,7 +1709,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
 
     def test_a_paseo_sender_whose_timeline_could_not_be_read_is_told(self) -> None:
         """Adversary B5: `timeline_base` returns None when the timeline is unreadable, and then nothing closes the record."""
-        with mock.patch.object(fleet, "_paseo_hosting", lambda anc: {self.PASEO}), \
+        with self.hosting(self.PASEO), \
                 mock.patch.object(relay, "timeline_messages", lambda pid: None):
             rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.paseo_row()])
         self.assertEqual(rc, 0, err)
@@ -1710,7 +1720,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
     def test_a_paseo_first_contact_with_an_unreadable_timeline_promises_no_ack(self) -> None:
         """Codex P2, PR 162: a first-contact footer opens no record, so no relay-side close can apply; the note must not say
         an `ack` will settle the link (`ack_sweep` has no transcript and no baseline to read either)."""
-        with mock.patch.object(fleet, "_paseo_hosting", lambda anc: {self.PASEO}), \
+        with self.hosting(self.PASEO), \
                 mock.patch.object(relay, "timeline_messages", lambda pid: None):
             rc, _, err = self.go("hello there friend", rows=[self.paseo_row()])
         self.assertEqual(rc, 0, err)
