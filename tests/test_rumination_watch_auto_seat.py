@@ -260,3 +260,18 @@ def test_20_retained_candidate_with_stale_fleet_does_not_page_as_absent(monkeypa
     monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "exists"))
     run_pass(rw)
     assert len(rw.calls) == 2 and rw.pages == []
+
+
+def test_21_broken_fleet_cannot_hide_a_successor_behind_gone_candidate(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    run_pass(rw)
+    rw.pages.clear()
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + 25000)
+    monkeypatch.setattr(rw, "owner_session", lambda: ("", "unreadable"))
+    monkeypatch.setattr(rw, "_LIVE_ERR", "broken read")
+    monkeypatch.setattr(rw, "owner_candidates", lambda: iter([("auto-seat", NEW), ("registry", "successor")]))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("gone", "test"))
+    run_pass(rw)
+    assert len(rw.calls) == 2
+    assert len(rw.pages) == 1 and "cannot READ the fleet" in rw.pages[0]
+    assert "(gone)" not in rw.pages[0]

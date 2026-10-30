@@ -1435,6 +1435,10 @@ def _pass(a: argparse.Namespace) -> int:
                              if not k.startswith(prefix)}
         elif not ident and target:
             word = why_blocked(target)[0]
+        # A gone candidate cannot establish that no registered successor exists when fleet reads
+        # are broken. Keep live candidate diagnostics above, but refuse spawning while blind.
+        if _LIVE_ERR and word == "gone":
+            word = "unknown"
         started = auto_seat(word, state, now)
         auto_gone = word == "gone"
         if auto_gone and (started or should_tell_djbclark("no live session", state, now)):
