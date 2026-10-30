@@ -610,6 +610,87 @@ def test_a_healthy_idle_seat_resets_the_darkness_streak(monkeypatch, tmp_path):
     assert item and "2 passes in a row" in msg
 
 
+def test_a_settled_but_unverified_send_does_not_clear_the_streak(monkeypatch, tmp_path):
+    """`accepted`/`queued`/`sent` are not evidence about the seat, and relay.py says so.
+
+    Codex review, 2026-10-30 (P2): they used to be `HEALTHY_WORDS`, so a hung seat that kept
+    ACCEPTING text reset its own count every pass and was never paged. They are now neither healthy
+    nor dark — the streak neither grows nor clears — and the pass asks `--why` instead.
+    """
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 2)
+    monkeypatch.setattr(rw, "should_tell_djbclark", lambda item, state, now: True)
+    state: dict = {}
+    assert rw.escalate_dark("card:question", LIVE, state, time.time()) == ("", "")   # streak 1
+    for word in ("accepted", "queued", "sent"):
+        assert word not in rw.HEALTHY_WORDS
+        assert word in rw.UNPROVEN_SEND
+        assert rw.escalate_dark(word, LIVE, state, time.time()) == ("", ""), \
+            f"{word} is not proof of anything, so it cannot clear the streak either"
+    item, msg = rw.escalate_dark("card:question", LIVE, state, time.time())
+    assert item == "seat dark" and "2 passes in a row" in msg
+
+
+def test_a_busy_pass_probes_the_seat_instead_of_trusting_an_accepted_send(monkeypatch, tmp_path):
+    """A hung seat that ACCEPTS a line every pass must still be paged.
+
+    The send is settled (the line is not resent) but it proves nothing about the seat, so the pass
+    asks `--why`, whose `silent` is the darkness that used to be invisible here: the only probe ran
+    on a QUIET pass, and a seat with a stale chain log has something to say every pass.
+    """
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "SEAT_STUCK_PASSES", 2)
+    monkeypatch.setattr(rw, "should_tell_djbclark", lambda item, state, now: item == "seat dark")
+    told = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: told.append(text) or True)
+    # A stale chain log is a line on EVERY pass, which is exactly the shape that used to keep the
+    # quiet-pass probe from ever running.
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [], "prs": [],
+                                               "stale": "standalone-a276"})
+    asked = []
+
+    def fake_split(cmd, timeout=20):
+        if "--why" in cmd:
+            asked.append(cmd)
+            return 1, json.dumps({"state": "silent", "why": "nothing new for 22 min",
+                                  "deliverable": False}), ""
+        return 0, json.dumps({"id": LIVE, "result": "accepted", "via": "paseo"}), ""
+
+    monkeypatch.setattr(rw, "run_split", fake_split)
+    a = rw.argparse.Namespace(dry_run=False, quiet=True)
+    rw._pass(a)
+    assert told == [], "one accepted send is a turn boundary, not an outage"
+    rw._pass(a)
+    assert len(told) == 1 and "hung" in told[0]
+    assert asked, "the seat must be asked what it is doing, not guessed from the send"
+    assert "seat probe after accepted send: silent" in rw.LOG.read_text()
+
+
+def test_a_delivered_send_is_proof_and_needs_no_probe(monkeypatch, tmp_path):
+    """`delivered` is verified delivery: it clears the streak without spending a probe."""
+    rw = load(monkeypatch, tmp_path, {"dann": {"paseo": LIVE}})
+    monkeypatch.setattr(rw, "live_sessions", lambda: {LIVE[:8]: {"paseo": LIVE}})
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(rw, "should_tell_djbclark", lambda item, state, now: False)
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": [], "jobs": [], "prs": [],
+                                               "stale": "standalone-a276"})
+    asked = []
+
+    def fake_split(cmd, timeout=20):
+        if "--why" in cmd:
+            asked.append(cmd)
+            return 1, "", ""
+        return 0, json.dumps({"id": LIVE, "result": "delivered", "via": "paseo"}), ""
+
+    monkeypatch.setattr(rw, "run_split", fake_split)
+    rw._pass(rw.argparse.Namespace(dry_run=False, quiet=True))
+    assert asked == [], "a proven send adds no probe to the 5-minute pass"
+
+
 def test_a_zero_or_bogus_cap_is_clamped(monkeypatch, tmp_path):
     """`RW_PENDING_MAX=0` used to keep EVERYTHING (`lines[-0:]`), and a typo killed the watcher."""
     rw = load(monkeypatch, tmp_path)

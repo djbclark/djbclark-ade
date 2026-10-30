@@ -638,14 +638,24 @@ DARK_MEANING = {
 # row": both clauses false, in exactly the dishonesty class this watcher exists to remove.
 DELIVERABLE_WHY = frozenset({"idle"})
 
-# The words that PROVE the channel worked or the seat is healthy — the only ones that reset a
-# darkness streak. A FAILED, `skipped` or unverified send says nothing about the seat, and letting it
-# reset the count is how a genuinely dark seat hides behind a flaky route (or one 5-minute `paseo
-# send` blip wipes out the four passes that were about to page him).
-HEALTHY_WORDS = frozenset({"delivered", "accepted", "queued", "sent", "working"}) | DELIVERABLE_WHY
-
 # A send that reached (or may have reached) the seat: the pending line is settled, not retried.
 SENT_WORDS = frozenset({"delivered", "accepted", "queued", "sent"})
+
+# A send the route SETTLED but did not VERIFY. relay.py documents `accepted` as "the daemon took it;
+# not a verified delivery", `queued` as waiting for the target to go idle (or for a card to be
+# answered), and `sent` as the weakest rc-0 reading. For the pending list they are done — the line
+# must not go twice — but as evidence about the SEAT they say nothing, so a pass that gets one ASKS
+# `--why` rather than resetting the streak (Codex review, 2026-10-30, P2). Before this, a hung Claude
+# Paseo seat that keeps ACCEPTING text cleared its own count on every busy pass: the probe that would
+# have called it `silent` runs on a QUIET pass, and a seat that produces a line every pass never has
+# one — so the streak could never reach SEAT_STUCK_PASSES and nobody was ever paged.
+UNPROVEN_SEND = frozenset(SENT_WORDS - {"delivered"})
+
+# The words that PROVE the channel worked or the seat is healthy — the only ones that reset a
+# darkness streak. A FAILED, `skipped`, unverified or merely-settled send says nothing about the seat,
+# and letting it reset the count is how a genuinely dark seat hides behind a flaky route (or one
+# 5-minute `paseo send` blip wipes out the four passes that were about to page him).
+HEALTHY_WORDS = frozenset({"delivered", "working"}) | DELIVERABLE_WHY
 
 # relay.py's rc==1 shapes split three ways and only one may be retried. A REFUSAL says "not sent",
 # so nothing arrived and retrying next pass is right. An UNVERIFIED send is the opposite: the route
@@ -879,7 +889,14 @@ def _pass(a: argparse.Namespace) -> int:
         # pass may have taken a while since the resolution above, and this is the line that has to
         # arrive, so the target is re-checked rather than trusted from a minute ago.
         spoke_session = to_session(summary) if ident else "unreachable"
-        dark_item, dark_msg = escalate_dark(spoke_session, ident, state, now)
+        # A settled-but-unverified send is NOT a health observation (see UNPROVEN_SEND): the line is
+        # done (`SENT_WORDS` settles `pending` below) but the seat has told us nothing, so ask it. The
+        # send word stays in the log line; the probe's word is what counts the streak.
+        observed = spoke_session
+        if ident and spoke_session in UNPROVEN_SEND:
+            observed = why_blocked(ident)[0]
+            log(f"seat probe after {spoke_session} send: {observed or 'unknown'}")
+        dark_item, dark_msg = escalate_dark(observed, ident, state, now)
         if dark_msg:
             if to_djbclark(dark_msg):
                 djb_page_sent(dark_item, state, now)
