@@ -19,7 +19,7 @@ Read the **paseo** skill. Use `list_profiles` and read configured profiles' `not
 ## Parsing arguments
 
 1. **Agent profile** — explicit profile name first; otherwise choose the profile whose `notes` best match the work. Materialize it into `create_agent` as described by the **paseo** skill. If no profile fits, use Paseo's provider discovery fallback.
-2. **Isolation** — "in a worktree" / "worktree" → create a workspace with `isolation: "worktree"`, using a short branch name derived from the task.
+2. **Isolation** — "in a worktree" / "worktree" → create a workspace with `isolation: "worktree"`, using a short branch name derived from the task. **Interim rule (2026-10-30, `docs/paseo-only-rearchitecture.md` D0.3; local patch 2 in `skills/paseo/UPSTREAM.md`):** until that plan's D1.3 and D2 gate have passed, archiving a Paseo worktree workspace can delete unpushed work. So run `git worktree add` first (AGENTS.md order 9), then create the `isolation: "local"` workspace at that worktree's path, so the agent never starts in the shared checkout; tell the user why.
 3. **Task description** — anything else the user said.
 
 ## The handoff prompt

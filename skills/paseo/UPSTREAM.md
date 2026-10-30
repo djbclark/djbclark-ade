@@ -6,10 +6,14 @@ Source: https://github.com/getpaseo/paseo, `skills/` at commit fcda2f1 (2026-10-
 files): no scripts, no install-and-run lines, network use is fetching paseo.sh docs and the local
 `paseo` CLI.
 
-**One local patch** (the only change from upstream): the `description` of `paseo-advisor`,
-`paseo-committee` and `paseo-handoff` is narrowed to explicit Paseo requests. Upstream triggers on
-plain "handoff", "second opinion" and "stuck", which would take those requests away from this
-repo's `handoff` skill, `acp-run`/`dialogue` and orca-cli. Re-apply when updating.
+**Local patches** (re-apply both when updating):
+
+1. The `description` of `paseo-advisor`, `paseo-committee` and `paseo-handoff` is narrowed to explicit Paseo
+   requests. Upstream triggers on plain "handoff", "second opinion" and "stuck", which would take those
+   requests away from this repo's `handoff` skill, `acp-run`/`dialogue` and orca-cli.
+2. Interim, local-only site policy (2026-10-30; not for upstream): `paseo-handoff`'s Isolation item sends an
+   "in a worktree" handoff to a `git worktree add` task worktree with an `isolation: "local"` workspace, until
+   `docs/paseo-only-rearchitecture.md` rule D0.3 lifts (D1.3 and D2's gate passed). Remove it then.
 
 The `paseo` CLI reaches the local daemon from its config (port 7263 on every host here, not
 upstream's 6767); other hosts with `--host`. Setup on this fleet: site-djbclark `docs/paseo.md`.
