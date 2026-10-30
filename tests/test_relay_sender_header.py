@@ -295,11 +295,17 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
     """The `self` row relay takes as the sender is the one that can PROVE an ack (2026-10-30).
 
     fleet's process scan lists a `pid*` row for an ancestor TUI BEFORE the Paseo row of the same agent (`fleet.py`
-    `sessions`: `_proc_scan`, then `_paseo_rows`; `self=pid in anc`). A Paseo-hosted agent whose tools ran under a
-    process fleet recognises therefore sent as `sender: pid19798`, `sender_paseo: ""`, `tl_base: null`: no
-    transcript for the `--ack` watch, no Paseo id for `timeline_ack`, so an `--expect-ack` could never close and
-    its footer named a pid (live 2026-10-29, an Antigravity agent). Every id here is fake.
+    `sessions`: `_proc_scan`, then `_paseo_rows`; `self = pid in ancestors`). A Paseo-hosted agent whose tools ran under a
+    process fleet recognises therefore sent as `sender: pid19798`, `sender_paseo: ""`, `tl_base: null`: no transcript for
+    the `--ack` watch, no Paseo id for `timeline_ack`, so an `--expect-ack` could never close and its footer named a pid
+    (live 2026-10-29, an Antigravity agent). Every id here is fake; the process tree and the Paseo hosting probe are stubbed.
     """
+
+    def setUp(self) -> None:
+        self.hosting: set[str] = {PASEO_AGENT}    # the agent a fake Paseo row belongs to hosts this process
+        for patcher in (mock.patch.object(fleet, "ancestors", set), mock.patch.object(fleet, "_paseo_hosting", lambda anc: self.hosting)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def pid_row(self, **kw: Any) -> dict[str, Any]:
         return sess(id="pid19798", agent="agy", host="terminal", pid=19798, cwd="/work/here",
@@ -309,10 +315,19 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         return sess(id="bbbbbbbb", agent="antigravity", name="research", host="paseo", paseo=PASEO_AGENT,
                     chan=("paseo", PASEO_AGENT), **{"self": True, **kw})
 
-    def test_a_paseo_row_wins_over_the_pid_row_fleet_lists_first(self) -> None:
+    def test_a_paseo_row_that_hosts_this_process_wins_over_the_pid_row_fleet_lists_first(self) -> None:
         row = relay.sender_row([self.pid_row(), self.paseo_row()])
         self.assertEqual(row["id"], "bbbbbbbb")
         self.assertEqual(row["paseo"], PASEO_AGENT)
+
+    def test_a_paseo_row_marked_self_only_by_an_inherited_id_never_wins(self) -> None:
+        """Adversary B1: a `PASEO_AGENT_ID` in the environment marks a row `self` on its own (`_paseo_rows`: `pid == me or pid in
+        hosting`). A tmux server started from a Paseo agent's shell hands that id to every pane. The pid row is then the real
+        caller, and taking the Paseo row would route a genuine answer to another agent's timeline."""
+        self.hosting = set()    # this process is NOT hosted by that agent
+        row = relay.sender_row([self.pid_row(), self.paseo_row()])
+        self.assertEqual(row["id"], "pid19798")
+        self.assertIsNone(row.get("paseo"))
 
     def test_a_transcript_row_wins_over_the_pid_row_fleet_lists_first(self) -> None:
         row = sess(id="cccccccc", agent="claude", name="alice", transcript="/tmp/me.jsonl", **{"self": True})
@@ -333,25 +348,33 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         self.assertEqual(relay.sender_row([a, b])["id"], "aaaaaaaa")
         self.assertEqual(relay.sender_row([b, a])["id"], "bbbbbbbb")
 
-    def test_a_proof_path_is_a_transcript_or_a_paseo_timeline(self) -> None:
-        self.assertTrue(relay.ack_proof_path({"transcript": "/tmp/me.jsonl"}))
-        self.assertTrue(relay.ack_proof_path({"transcript": None, "paseo": PASEO_AGENT}))
-        self.assertFalse(relay.ack_proof_path(self.pid_row()))
-        self.assertFalse(relay.ack_proof_path({"transcript": None, "paseo": "not-a-uuid"}))
-        self.assertFalse(relay.ack_proof_path(None))
-        self.assertFalse(relay.ack_proof_path({}))
+    def test_the_note_is_silent_when_a_transcript_or_a_readable_timeline_can_prove_the_ack(self) -> None:
+        self.assertIsNone(relay.ack_proof_note({"transcript": "/tmp/me.jsonl"}, "build1", None))
+        self.assertIsNone(relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, "build1", {}))
+        self.assertIsNone(relay.ack_proof_note(None, "build1", None))
 
+    def test_a_pid_row_is_told_the_expectation_will_not_close_by_itself(self) -> None:
+        """Adversary B3: the old text promised a relay-side close a `pid*` row can never reach (`docs/queue.md` item 9)."""
+        note = relay.ack_proof_note(self.pid_row(), "build1", None)
+        self.assertIn("nothing will close this expectation automatically", note)
+        self.assertIn("`relay.py --retire build1 --reason ...`", note)
+        self.assertNotIn("`ack build1` through relay.py", note)
 
-    def test_the_proof_path_is_read_from_the_row_relay_sends_as(self) -> None:
+    def test_a_pid_rows_first_contact_is_told_the_link_cannot_be_acked(self) -> None:
+        note = relay.ack_proof_note(self.pid_row(), None, None)
+        self.assertIn("this link cannot be marked acked", note)
+
+    def test_a_paseo_row_whose_timeline_could_not_be_read_is_told(self) -> None:
+        """Adversary B5: `timeline_base` returns None when the timeline is unreadable, and then closes nothing."""
+        note = relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, "build1", None)
+        self.assertIn("its Paseo timeline could not be read", note)
+        self.assertIn("`ack build1` through relay.py", note)
+
+    def test_fleet_list_annotates_links_from_the_row_relay_sends_as(self) -> None:
         """`fleet list` annotates links from the same row relay writes them for, so a Paseo sender's links show."""
-        with tempfile.TemporaryDirectory() as d:
-            saved = fleet.LINKS_FILE
-            fleet.LINKS_FILE = Path(d) / "links.json"
-            try:
-                fleet.LINKS_FILE.write_text(json.dumps({"links": {"bbbbbbbb>cccccccc": {"sent": 2, "acked": None}}}))
-                rows = fleet.annotate_links([self.pid_row(), self.paseo_row(), sess(id="cccccccc", name="peer")])
-            finally:
-                fleet.LINKS_FILE = saved
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(fleet, "LINKS_FILE", Path(d) / "links.json"):
+            fleet.LINKS_FILE.write_text(json.dumps({"links": {"bbbbbbbb>cccccccc": {"sent": 2, "acked": None}}}))
+            rows = fleet.annotate_links([self.pid_row(), self.paseo_row(), sess(id="cccccccc", name="peer")])
         self.assertEqual([r for r in rows if r["id"] == "cccccccc"][0]["link"], {"sent": 2, "acked": None})
 
 

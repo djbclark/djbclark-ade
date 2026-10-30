@@ -1461,17 +1461,33 @@ def sender_row(ss):
     messages nobody can be held to an ack for.
 
     Among several `self` rows, take the one that can PROVE an ack (2026-10-30). `sessions()` runs `_proc_scan` before
-    `_paseo_rows`, and a process-scan row is `self=pid in anc` (fleet.py:878): a Paseo-hosted agent whose tools run under a
-    process fleet recognises (`agy`, `claude`, ...) gets a `pid*` row for that ancestor, host terminal, with no transcript
-    and no Paseo id, listed BEFORE its own Paseo row. Taking the first `self` row then named a pid as the sender: relay wrote
-    `sender: pidNNNN`, `sender_paseo: ""`, `tl_base: null`, so its `--expect-ack` could never close (nothing watches a pid:
-    `--ack` wants a transcript, `timeline_ack` a Paseo id) and its footer told a peer to `ack pidNNNN` (live 2026-10-29, an
-    Antigravity agent). Prefer a transcript (watched by `--ack`), then a Paseo id (watched by `timeline_ack`). Ties keep
-    fleet's order (`max` returns the first of equal keys), so a row fleet resolved one way resolves as before."""
+    `_paseo_rows`, and a process-scan row is `self = pid in ancestors` (`_proc_scan`): a Paseo-hosted agent whose tools run
+    under a process fleet recognises (a transcript-less TUI such as `agy`, `codex` or `opencode`) gets a `pid*` row for that
+    ancestor, host terminal, with no transcript and no Paseo id, listed BEFORE its own Paseo row. Taking the first `self` row
+    then named a pid as the sender: relay wrote `sender: pidNNNN`, `sender_paseo: ""`, `tl_base: null`, so its
+    `--expect-ack` could never close (nothing watches a pid: `--ack` wants a transcript, `timeline_ack` a Paseo id) and its
+    footer told a peer to `ack pidNNNN` (live 2026-10-29, an Antigravity agent).
+
+    Preference: a transcript (watched by `--ack`), then a Paseo id only when that agent actually HOSTS this process
+    (`_paseo_hosting`, the same test `_paseo_rows` uses for `self`). An inherited or exported `PASEO_AGENT_ID` marks a row
+    `self` on its own (`_paseo_rows`: `pid == me or pid in hosting`) and must not win: the pid row is then the real caller,
+    and naming the other agent would route a genuine answer to it (adversary 2026-10-30 B1). Ties keep fleet's order (`max`
+    returns the first of equal keys)."""
     selfs = [x for x in ss if isinstance(x, dict) and x.get("self")]
-    if not selfs:
-        return None
-    return max(selfs, key=lambda x: (bool(x.get("transcript")), bool(x.get("paseo"))))
+    if len(selfs) < 2:
+        return selfs[0] if selfs else None
+    hosting: set[str] | None = None
+
+    def key(x):
+        nonlocal hosting
+        pid = x.get("paseo")
+        if not pid or x.get("transcript"):
+            return (bool(x.get("transcript")), bool(pid))
+        if hosting is None:
+            hosting = _paseo_hosting(ancestors())
+        return (False, pid in hosting)
+
+    return max(selfs, key=key)
 
 
 def annotate_links(ss):

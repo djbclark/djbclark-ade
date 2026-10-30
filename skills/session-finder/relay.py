@@ -722,16 +722,33 @@ def timeline_key(title, body):
     return hashlib.sha256(f"{title}\x00{body}".encode()).hexdigest()[:16]
 
 
-def ack_proof_path(me):
-    """True when an expectation fleet row ME opens can be closed by a proof relay can watch: its own transcript (its `--ack`
-    watch) or, for a transcript-less Paseo agent, its timeline (`tl_base` for `timeline_ack`). False for a `pid*` process-scan
-    row: it has neither, so its record closes only if the target sends `ack ID` through relay.py itself
-    (`expect_resolve_by_relay`). main warns on stderr when an `--expect-ack` (or the first-contact footer) is opened under
-    such a row: the sender believes it will be told, and nothing else can tell it (2026-10-30)."""
-    if not isinstance(me, dict):
-        return False
+def ack_proof_note(me, expect_id, tl_base):
+    """The stderr warning for an `--expect-ack` (EXPECT_ID) or a first-contact footer opened under fleet row ME when nothing here
+    can watch for the reply, or None when something can (2026-10-30).
+
+    Decided from the artifact relay actually wrote, not the row's shape (adversary 2026-10-30 B5): a transcript is watched by
+    `--ack`, and a transcript-less Paseo sender only by its timeline, which closes nothing without a baseline (`timeline_base`
+    returns None when the timeline could not be read: no `paseo` CLI, a failed call). Everything else has no watcher at all, and
+    a `pid*` process-scan row is the live case: the target's `ack` through relay.py cannot close it either, because item 9's
+    relay-side close counts only an answer whose route back to the asker proved delivery or keeps the text, and that sender has
+    no route but a pane (proofless) or no route at all (`docs/queue.md` item 9, adversary r3 A1). So the note says what is true:
+    the expectation will not close by itself, and `--retire` is the operator's way out."""
+    if not isinstance(me, dict) or me.get("transcript"):
+        return None
+    label = me.get("id") or "this sender"
+    ident = expect_id or me.get("id")
     pid = me.get("paseo")
-    return bool(me.get("transcript") or (isinstance(pid, str) and UUID.fullmatch(pid)))
+    if isinstance(pid, str) and UUID.fullmatch(pid):
+        if isinstance(tl_base, dict):
+            return None
+        return (f"relay: warning: {label} has no transcript and its Paseo timeline could not be read, so nothing here watches "
+                f"for the reply: it closes only if the target sends `ack {ident}` through relay.py")
+    if expect_id:
+        return (f"relay: warning: {label} has no transcript and no Paseo timeline, so nothing will close this expectation "
+                f"automatically: once it is answered, close it with `relay.py --retire {expect_id} --reason ...`, "
+                "or ask from a session with a transcript")
+    return (f"relay: warning: {label} has no transcript and no Paseo timeline, so this link cannot be marked acked: nothing "
+            "here watches for the reply, which reaches this session only as a message")
 
 
 def timeline_base(me):
@@ -3228,7 +3245,8 @@ def sender_row(listed):
     row for an ancestor TUI before the Paseo row of the same agent, and a pid names no transcript (`--ack`) and no timeline
     (`timeline_ack`), so an `--expect-ack` opened under it could never close. `fleet.sender_row` picks it, so relay and the
     `fleet list` link annotation agree on who this session is (fleet.py:878; live 2026-10-29, a Paseo Antigravity agent);
-    `ack_proof_path` says when even that row has nothing to watch, and `main` warns at the send."""
+    a Paseo id counts only when that agent hosts this process, so an inherited `PASEO_AGENT_ID` cannot lend its row the name;
+    `ack_proof_note` says when even that row leaves nothing to watch, and `main` warns at the send."""
     return fleet.sender_row(listed)
 
 
@@ -3988,15 +4006,18 @@ def _main(argv=None, sweep=True):
         with contextlib.suppress(Exception):
             expect_stamp(CTX["reserved"][0], CTX["me"], s, CTX.get("mark", 0), CTX.get("within"))
     if me is not None and not a.plan and not NOTICE[0] and not term and requeued is None:    # a terminator asks for nothing, so it carries no footer; a re-send's text already carries the one its queueing run appended
+        asked = False
         if a.expect_ack:
             text += f" [reply through relay.py to {me['id']}: ack {a.expect_ack}]"
             CTX["tl_base"] = timeline_base(me)    # what a transcript-less sender had received before it asked: an old `ack` cannot answer this
+            asked = True
         elif fleet.link_get(fleet.links_read()["links"], me, s) is None:
             text += f" [first contact from {me['id']}: reply `ack {me['id']}` through relay.py to prove this link both ways]"
             CTX["tl_base"] = timeline_base(me)
-        if not ack_proof_path(me):    # say it now: the sender believes an answer will reach it, and nothing here will watch for one
-            print(f"relay: warning: {me['id']} has no transcript and no Paseo timeline, so the reply closes the expectation only if "
-                  f"the target sends `ack {a.expect_ack or me['id']}` through relay.py: nothing here watches for it", file=sys.stderr)
+            asked = True
+        note = ack_proof_note(me, a.expect_ack, CTX.get("tl_base")) if asked else None    # only when a footer asked for the ack: a linked peer's plain send asks nothing
+        if note:
+            print(note, file=sys.stderr)
     if card:    # blocked on a card and deferrable: queued now, delivered once the card is answered; typed text would answer it
         if not (is_paseo or plan(s)):    # a record nobody could send (no route at all) would only fail later: refuse now, as the route check below does
             print(f"relay: [{s['id']}] not sent: {card}; and it has no route", file=sys.stderr)
