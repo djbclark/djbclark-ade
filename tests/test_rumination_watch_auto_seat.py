@@ -446,10 +446,17 @@ elif args == ['agent', 'inspect', '--json', '--', {ident!r}]:
                           'UpdatedAt': '2026-10-30T13:44:07.592Z'}}))
     if mode == 'archived':
         print(json.dumps({{'Id': {ident!r}, 'Archived': True, 'Status': 'idle'}}))
+    if mode == 'archived-string':
+        # A future Paseo (or a hand-edited record) saying `Archived` as TEXT. `"false"` is truthy
+        # in Python, so only an `is True` test keeps this from proving a live seat absent.
+        print(json.dumps({{'Id': {ident!r}, 'Archived': 'false', 'Status': 'idle'}}))
     if mode == 'idle-live':
         print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'idle'}}))
     if mode == 'wrong-id':
-        print(json.dumps({{'Id': {CREATED!r}}}))
+        # Names ANOTHER agent. It carries a proving Status/Archived pair precisely so the
+        # `Id == ident` guard is the only thing that keeps this reply from proving THIS seat
+        # absent: without the values, the guard could be deleted and the test would still pass.
+        print(json.dumps({{'Id': {CREATED!r}, 'Archived': True, 'Status': 'closed'}}))
 else:
     sys.exit(99)
 """)
@@ -525,8 +532,8 @@ def test_52_a_refused_seat_its_own_record_calls_closed_or_archived_is_gone(
     assert any("A seat was started automatically" in page for page in rw.pages)
 
 
-@pytest.mark.parametrize("response", ["idle-live", "error", "timeout", "unreadable", "unknown-shape",
-                                      "wrong-id"])
+@pytest.mark.parametrize("response", ["idle-live", "archived-string", "error", "timeout", "unreadable",
+                                      "unknown-shape", "wrong-id"])
 def test_53_a_refusal_the_record_does_not_prove_absent_never_starts(monkeypatch, tmp_path, response):
     """The refusal that is NOT absence: a card, a live-but-unsendable seat, a blind read."""
     rw = direct_probe_world(monkeypatch, tmp_path, response, relay_state="refused")
@@ -1072,3 +1079,70 @@ def test_51_a_new_start_notice_supersedes_an_older_owed_one(monkeypatch, tmp_pat
     assert len(rw.pages) == 1 and new2 in rw.pages[0]     # the newer seat, once
     assert NEW not in rw.pages[0]                          # the dead seat's notice is gone
     assert "undisclosed_start" not in rw.load_state()
+
+
+# `owner_candidates` puts the comm registry ahead of peer-mail, and the registry row is written by
+# the seat itself. A seat that STOPS leaves a `closed` id that `usable()` still accepts (Paseo keeps
+# the record and resumes it on the next send), so the resolution used to stop there — hiding a live
+# successor named further down the list. Before the closed-as-absent probe that only made the role
+# quiet; with it, the closed id is exactly what the probe calls `gone`, so the same stale row would
+# license a DUPLICATE start over a successor that is answering (adv-seat D3 / the Codex finding).
+CLOSED_SEAT = "cccccccc-1111-4222-8333-444444444444"
+SUCCESSOR = "dddddddd-1111-4222-8333-444444444444"
+
+
+def _rows(**states):
+    """fleet-shaped rows: `paseo_state` is the raw Paseo state, `ended` only for archived."""
+    return {ident[:8]: {"ended": False, "archived": False, "paseo_state": state, "status": state}
+            for ident, state in states.items()}
+
+
+def test_60_a_closed_registry_seat_yields_to_the_live_successor(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "owner_candidates",
+                        lambda: iter([("registry", CLOSED_SEAT), ("peer_mail", SUCCESSOR)]))
+    monkeypatch.setattr(rw, "live_sessions",
+                        lambda: _rows(**{CLOSED_SEAT: "closed", SUCCESSOR: "running"}))
+    assert rw.real_owner_session() == (SUCCESSOR, "peer_mail")
+    # And the consequence that matters: the live successor is written to, and NO duplicate starts.
+    monkeypatch.setattr(rw, "owner_session", rw.real_owner_session)
+    monkeypatch.setattr(rw, "why_blocked",
+                        lambda ident: ("gone", "closed") if ident == CLOSED_SEAT else ("working", "ok"))
+    run_pass(rw)
+    assert not [argv for argv, _ in rw.calls if is_start(argv)]
+    assert not rw.load_state().get("seated")
+
+
+def test_61_a_lone_closed_seat_is_still_the_owner_and_is_replaced(monkeypatch, tmp_path):
+    """The ordinary case auto-seat exists for: the previous seat finished, nothing else resolves."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "owner_candidates", lambda: iter([("registry", CLOSED_SEAT)]))
+    monkeypatch.setattr(rw, "live_sessions", lambda: _rows(**{CLOSED_SEAT: "closed"}))
+    assert rw.real_owner_session() == (CLOSED_SEAT, "registry")
+    monkeypatch.setattr(rw, "owner_session", rw.real_owner_session)
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("gone", "closed"))
+    run_pass(rw)
+    assert len([argv for argv, _ in rw.calls if is_start(argv)]) == 1
+
+
+def test_62_an_unusable_candidate_is_skipped_before_a_closed_one_is_used(monkeypatch, tmp_path):
+    """Ordering, pinned: archived/ended candidates are not fallbacks; only a CLOSED one is."""
+    rw = load(monkeypatch, tmp_path)
+    gone = "eeeeeeee-1111-4222-8333-444444444444"
+    monkeypatch.setattr(rw, "owner_candidates",
+                        lambda: iter([("registry", gone), ("peer_mail", CLOSED_SEAT)]))
+    rows = _rows(**{CLOSED_SEAT: "closed", gone: "archived"})
+    rows[gone[:8]].update(ended=True, archived=True)
+    monkeypatch.setattr(rw, "live_sessions", lambda: rows)
+    assert rw.real_owner_session() == (CLOSED_SEAT, "peer_mail")
+
+
+def test_63_nothing_resolvable_keeps_the_no_live_session_reason(monkeypatch, tmp_path):
+    """The fallback must not swallow the "nothing live" diagnosis that the page text depends on."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "owner_candidates", lambda: iter([("registry", ABSENT)]))
+    monkeypatch.setattr(rw, "live_sessions", lambda: {})
+    monkeypatch.setattr(rw, "_LIVE_ERR", "")
+    ident, why = rw.real_owner_session()
+    assert ident == ""
+    assert why.startswith("no live session")

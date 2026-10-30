@@ -738,11 +738,30 @@ _LIVE_ERR = ""            # why the fleet read failed, "" when it succeeded (fee
 
 
 def usable(ident: str) -> bool:
-    """Would relay.py find this id? True when fleet lists it and it is neither over nor archived."""
+    """Would relay.py find this id? True when fleet lists it and it is neither over nor archived.
+
+    A `closed` row IS usable: Paseo keeps the record and `ensureAgentLoaded` resumes it on the next
+    send, so a message still reaches it. `is_closed` is the separate question of whether it is a
+    seat that is still WORKING this role — see `owner_session`.
+    """
     row = live_sessions().get(ident[:8])
     if not row:
         return False
     return not row.get("ended") and not row.get("archived")
+
+
+def is_closed(ident: str) -> bool:
+    """True when fleet's row for this id says Paseo has STOPPED the agent (`paseo_state` closed).
+
+    `fleet.py` sets `ended` only for archived agents and maps only `running`/`idle` into a friendly
+    status, so a closed seat arrives as `paseo_state="closed"` (and `status="closed"`); it is not
+    ended, not archived, and `usable()` therefore says yes.
+    """
+    row = live_sessions().get(ident[:8]) or {}
+    for key in ("paseo_state", "status"):
+        if str(row.get(key) or "").strip().lower() == "closed":
+            return True
+    return False
 
 
 def owner_candidates() -> Iterator[tuple[str, str]]:
@@ -795,14 +814,33 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
 
 
 def owner_session() -> tuple[str, str]:
-    """(agent id, source) for this role, or ("", reason) when nothing live resolves."""
+    """(agent id, source) for this role, or ("", reason) when nothing live resolves.
+
+    A non-closed candidate ALWAYS wins over a closed one, even when the closed one is listed first.
+    `owner_candidates` puts the comm registry ahead of peer-mail, and the registry row is written by
+    the seat itself, so a seat that stops leaves a `closed` but still `usable()` id at the head of
+    the list. Returning it would do two separate kinds of damage: the live successor named further
+    down the list is never written to (the role goes quiet while the watcher pages a stopped seat),
+    and with the switch on the closed id is exactly what the absence probe calls `gone`, so the
+    watcher would LICENSE A DUPLICATE START over a successor that is answering (adv-seat D3, and
+    the Codex finding on #164). So the closed candidate is only a FALLBACK, used when nothing else
+    resolves — which is the ordinary case of a finished session and the one auto-seat exists for.
+    """
     first = ""
+    fallback = ("", "")
     for src, ident in owner_candidates():
         if src in ("RW_SESSION", "PASEO_AGENT_ID"):
             return ident, src
         first = first or f"{src}={ident[:8]}"
-        if usable(ident):
-            return ident, src
+        if not usable(ident):
+            continue
+        if is_closed(ident):
+            if not fallback[1]:
+                fallback = (src, ident)
+            continue
+        return ident, src
+    if fallback[1]:
+        return fallback[1], fallback[0]
     if _LIVE_ERR:
         return "", (f"cannot check which session is live: {_LIVE_ERR} — this is a broken READ, not "
                     f"a dead seat ({ROLE!r} registry/peer_mail said {first or 'nothing'})")
@@ -855,7 +893,7 @@ def why_blocked(ident: str) -> tuple[str, str]:
         if rc in (0, 1) and isinstance(error, dict) and error.get("code") == "AGENT_NOT_FOUND":
             return "gone", "direct inspect confirmed AGENT_NOT_FOUND"
         if rc == 0 and info.get("Id") == ident:
-            if info.get("Archived"):
+            if info.get("Archived") is True:
                 return "gone", "direct inspect says the seat is archived"
             if str(info.get("Status") or "") == "closed":
                 return "gone", (f"direct inspect says the seat is closed (it stopped at "
