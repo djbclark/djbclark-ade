@@ -387,16 +387,28 @@ ABSENT = "11111111-2222-4333-8444-555555555555"
 CREATED = "66666666-7777-4888-9999-aaaaaaaaaaaa"
 
 
-def direct_probe_world(monkeypatch, tmp_path, response, ident=ABSENT):
-    """Real why_blocked + run_split, with a no-match relay and a fake Paseo executable."""
-    rw = load(monkeypatch, tmp_path)
+def direct_probe_world(monkeypatch, tmp_path, response, ident=ABSENT, relay_state=None,
+                       switch="1"):
+    """Real why_blocked + run_split, with a fake relay and a fake Paseo executable.
+
+    `relay_state=None` means relay.py cannot diagnose the id (a no-match, exit 2), which is the
+    `unknown` path. Any state string makes relay.py answer as it does for that diagnosis, which is
+    the only way to reach the `refused` path — where a closed seat actually lives.
+    """
+    rw = load(monkeypatch, tmp_path, switch=switch)
     monkeypatch.setattr(rw, "why_blocked", rw.real_why_blocked)
     monkeypatch.setattr(rw, "open_desktop_tab", rw.real_open_desktop_tab)
     monkeypatch.setattr(rw, "owner_session", lambda: ("", "no live session"))
     monkeypatch.setattr(rw, "owner_candidates", lambda: iter([("registry", ident)]))
     relay = tmp_path / "src/djbclark-ade/skills/session-finder/relay.py"
     relay.parent.mkdir(parents=True)
-    relay.write_text("import sys\nprint('no session(s) match', file=sys.stderr)\nsys.exit(2)\n")
+    if relay_state is None:
+        relay.write_text("import sys\nprint('no session(s) match', file=sys.stderr)\nsys.exit(2)\n")
+    else:
+        reply = json.dumps({"id": ident[:8], "name": "seat", "state": relay_state,
+                            "why": f"its Paseo agent is {relay_state}, not idle or running",
+                            "deliverable": False, "agree": True, "evidence": []})
+        relay.write_text("import sys\nprint(" + repr(reply) + ")\nsys.exit(1)\n")
     cli = tmp_path / "paseo"
     calls = tmp_path / "paseo.calls"
     cli.write_text(f"""#!{sys.executable}
@@ -428,6 +440,14 @@ elif args == ['agent', 'inspect', '--json', '--', {ident!r}]:
         print('not JSON')
     if mode == 'unknown-shape':
         print(json.dumps({{'Status': 'unknown'}}))
+    if mode == 'closed':
+        # Exactly what `paseo agent inspect` printed for a real closed agent on 2026-10-30.
+        print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'closed',
+                          'UpdatedAt': '2026-10-30T13:44:07.592Z'}}))
+    if mode == 'archived':
+        print(json.dumps({{'Id': {ident!r}, 'Archived': True, 'Status': 'idle'}}))
+    if mode == 'idle-live':
+        print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'idle'}}))
     if mode == 'wrong-id':
         print(json.dumps({{'Id': {CREATED!r}}}))
 else:
@@ -481,6 +501,69 @@ def test_27_real_probe_non_uuid_never_trusts_not_found(monkeypatch, tmp_path, id
     assert not rw.probe_calls.exists()  # Did not even ask Paseo about an invalid id.
     assert not rw.load_state().get("seated")
     assert rw.pages
+
+
+# A finished seat does not vanish, it goes `closed` and leaves its record behind: 13 of the 25
+# Paseo agents on this Mac on 2026-10-30. relay.py calls that `refused` (right for SENDING: a send
+# into it is pointless), so without reading the agent record every such death pages djbclark and
+# stays dark — which is the gap this group closes.
+@pytest.mark.parametrize("response,expect", [
+    ("closed", "direct inspect says the seat is closed"),
+    ("archived", "direct inspect says the seat is archived"),
+])
+def test_52_a_refused_seat_its_own_record_calls_closed_or_archived_is_gone(
+        monkeypatch, tmp_path, response, expect):
+    rw = direct_probe_world(monkeypatch, tmp_path, response, relay_state="refused")
+    state, why = rw.why_blocked(ABSENT)
+    assert state == "gone"
+    assert why.startswith(expect)
+    run_pass(rw)
+    run_pass(rw)
+    calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()]
+    assert sum(args[0] == "run" for args in calls) == 1
+    assert rw.load_state()["seated"] == {rw.ROLE: NOW}
+    assert any("A seat was started automatically" in page for page in rw.pages)
+
+
+@pytest.mark.parametrize("response", ["idle-live", "error", "timeout", "unreadable", "unknown-shape",
+                                      "wrong-id"])
+def test_53_a_refusal_the_record_does_not_prove_absent_never_starts(monkeypatch, tmp_path, response):
+    """The refusal that is NOT absence: a card, a live-but-unsendable seat, a blind read."""
+    rw = direct_probe_world(monkeypatch, tmp_path, response, relay_state="refused")
+    assert rw.why_blocked(ABSENT)[0] == "refused"
+    run_pass(rw)
+    calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()]
+    assert all(args[0] != "run" for args in calls)
+    assert not rw.load_state().get("seated")
+    assert rw.pages  # A seat that cannot be reached or replaced still needs the human.
+
+
+def test_54_a_closed_seat_is_not_even_probed_with_the_switch_off(monkeypatch, tmp_path):
+    rw = direct_probe_world(monkeypatch, tmp_path, "closed", relay_state="refused", switch=None)
+    assert rw.why_blocked(ABSENT)[0] == "refused"
+    run_pass(rw)
+    assert not rw.probe_calls.exists()  # No extra probe, no start: the opt-in stays opt-in.
+    assert not rw.load_state().get("seated")
+    assert rw.pages
+
+
+def test_55_a_closed_seat_named_by_a_non_uuid_is_never_proved_absent(monkeypatch, tmp_path):
+    rw = direct_probe_world(monkeypatch, tmp_path, "closed", ident="closed-seat",
+                            relay_state="refused")
+    assert rw.why_blocked("closed-seat")[0] == "refused"
+    run_pass(rw)
+    assert not rw.probe_calls.exists()  # A hand-typed id never reaches a start.
+    assert not rw.load_state().get("seated")
+
+
+def test_56_a_reply_naming_another_agent_never_proves_this_one_absent(monkeypatch, tmp_path):
+    """`paseo agent inspect` answers about SOME agent; it must be the one asked about."""
+    rw = direct_probe_world(monkeypatch, tmp_path, "wrong-id", relay_state="refused")
+    assert rw.why_blocked(ABSENT)[0] == "refused"
+    run_pass(rw)
+    calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()]
+    assert all(args[0] != "run" for args in calls)
+    assert not rw.load_state().get("seated")
 
 
 def test_28_prior_refusal_does_not_hide_failed_inspect_or_bounded_run_stderr(monkeypatch, tmp_path):
