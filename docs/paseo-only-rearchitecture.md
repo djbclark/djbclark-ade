@@ -36,8 +36,9 @@ this plan wins where they disagree about the future, they win about today. Sourc
    built in its own herdr tab:
    1. **`herdr4paseo`** (tab `herdr4paseo-t`): Herdr attaches to running Paseo agents, as an **attach
       client** that shows and drives an agent Paseo hosts. A modified tuios may do the same.
-   2. **`paseo4herdr`** (tab `paseo4herdr-t`; formerly the `paseo-herdr` plugin, installed disabled today as
-      `herdr-harness`): Paseo reaches terminals that Herdr hosts.
+   2. **`paseo4herdr`** (tab `paseo4herdr-t`; fork https://github.com/djbclark/paseo4herdr, checkout
+      `~/src/paseo4herdr`; formerly the `paseo-herdr` plugin, installed disabled today as `herdr-harness`):
+      Paseo reaches terminals that Herdr hosts.
 
    **These two are the only Herdr integration.** Herdr agents do not talk to Paseo agents: no messaging,
    relaying, launching, naming, sleeping or fleet tracking through Herdr, and no djbclark-ade tool depends
@@ -64,20 +65,32 @@ this plan wins where they disagree about the future, they win about today. Sourc
    operator by push or Telegram (F1). A peer never waits on another's card. **Cards are not a security
    boundary**: `respond_to_permission` is on every agent's MCP catalog and an agent with a shell can reach
    the host anyway (upstream `mcp.md`), so an agent could answer its own card. Hard-to-reverse protection
-   stays in provider-side hooks and `ade-git-guard`; `respond_to_permission` is disabled (`disabledTools`)
-   in every agent profile except named orchestrators.
+   stays in provider-side hooks and `ade-git-guard`. In every agent profile except named orchestrators,
+   `disabledTools` removes `respond_to_permission`, `update_agent`, `set_agent_mode` and `archive_agent`.
+   That applies to **every profile id, each custom one included** (custom profiles do not inherit it through
+   `extends`, `mcp.md`), and D2 lists the tool catalog of a UI-created and a Telegram-created agent to prove
+   it.
 4. **Workspaces are Paseo workspaces** (`isolation: worktree`), which replaces `git worktree add` and cow
    pastures. Paseo has **no writer lock** (several agents may share a workspace), so order 9's one-writer
    claim stays in `ade-git-guard` and its claim registry; the Paseo workspace is the claim's target
    (astra B1, Fable 1.4). **Archive must never delete unpushed work**: archiving the last agent of a
-   worktree workspace removes the worktree (upstream `worktrees.md`), and `session-janitor` archives
-   failed or closed subagents after 6 hours. So no slice is created with `autoArchive`; the janitor stays in
-   preview mode (its current mode is recorded in D1) or excludes every agent G1 has not marked "branch
-   pushed and report read"; and a `paseo.json` teardown script **always preserves before anything is
-   removed**: when the tree is dirty or ahead of its upstream it commits the dirty state (untracked files
-   included) to `rescue/<branch>-<date>` and pushes it, and fails loudly if the push fails. Whether a
-   failing teardown stops Paseo removing the worktree is unknown, so nothing relies on refusal: preservation
-   comes first, and the D1 probe proves it (D1.3).
+   worktree workspace removes the worktree (upstream `worktrees.md`), `session-janitor` archives failed or
+   closed subagents after 6 hours, and Paseo has no hook before an archive (only `workspace.archive.after`).
+   So:
+   1. **The `paseo.json` teardown is the only preserve point**, and it runs only in repos whose base branch
+      commits one. Every repo a slice may target carries it (the list lives in `config/paseo-teardown-repos`),
+      and G2 refuses a `worktree` workspace create (`workspace.create.before`) in any repo without it. Upstream
+      forks are not slice targets (standing order 8 forbids adding the file to someone else's tree).
+   2. The teardown **preserves locally first, unconditionally**: a `git bundle` of the branch, a stash commit of
+      tracked changes, and a tar of untracked non-ignored files, written atomically into a 0700 directory
+      outside the worktree (`~/.local/state/ade/rescue/<repo>/<branch>-<date>/`). Only then does it push a
+      `rescue/<branch>-<date>` branch with **tracked changes only**, and only to a private remote; untracked
+      files never leave the machine. A failed push still leaves the local rescue.
+   3. No slice is created with `autoArchive`; the janitor stays in preview mode (its current mode is
+      recorded in D1) or excludes every agent G1 has not marked "branch pushed and report read"; workers lose
+      `archive_agent` (B3). G1's "not archived until pushed" is a convention: the operator, the UI and
+      `paseo-telegram` can still archive, which is why point 2 exists.
+   4. D1.3 proves all of it.
 5. **Native first, plugin only for a hook.** A script that calls the `paseo` CLI, SDK or MCP is native (A3a)
    and lives in djbclark-ade. A plugin is written only when a daemon lifecycle hook, a UI surface or a
    composer command is needed, because plugins are trusted, unsandboxed and sit in the create/turn path of
@@ -163,7 +176,8 @@ ops-promotion pilot passes.
    2. **Drain gate** (before any "disable" of B8): a script under `tests/paseo-acceptance/drain/` records,
       for the tool being disabled, that it holds nothing: `bin/herdr-sleeper list` empty or each sleeper
       resumed as a Paseo agent with its session UUID; no `acp-dispatch` record quota-stopped or resumable and
-      no launchd `auto-resume` job pending (or each re-registered with `usage-auto-resume`, never a fresh
+      no launchd `auto-resume` job pending (each is resumed with `acp-dispatch resume` to completion, with
+      `acp-dispatch` enabled until then, or imported as a Paseo agent with its session id; never a fresh
       dispatch); `relay.py --pending` empty or each expectation retired with a reason; every Orca worktree and
       cow pasture clean and pushed, or its owner named; bigteam inboxes drained.
 1. **Contracts and safety net.** Each probe is a repeatable script under `tests/paseo-acceptance/` with an
@@ -174,10 +188,11 @@ ops-promotion pilot passes.
    2. A parent answers a question card's *option*, not only allow/deny, via `respond_to_permission`.
       Expected: works. If not: B3 and G4 are redesigned (cards go to the operator).
    3. Archive an agent whose isolated worktree workspace is dirty and has an unpushed commit (isolated
-      daemon). Expected: the B4 teardown has pushed `rescue/<branch>-<date>` holding the dirty state and the
-      unpushed commit before the worktree goes; also test a failing push (teardown fails loudly) and record
-      whether a failing teardown stops Paseo removing the worktree. If anything is lost: no slice moves into
-      Paseo workspaces until it is not. Also record `session-janitor`'s current mode.
+      daemon). Expected: the B4 local rescue (bundle, stash commit, untracked tar) exists before the worktree
+      goes, also when the push fails; the pushed `rescue/` branch carries tracked changes only. Also: a
+      `worktree` create in a repo without a committed `paseo.json` teardown is refused by G2. Record whether a
+      failing teardown stops Paseo removing the worktree, and `session-janitor`'s current mode. If anything
+      is lost: no slice moves into Paseo workspaces until it is not.
    4. Archive a parent with a running child. Expected: the child survives. If not: successors stay
       top-level (C1) permanently.
    5. Restart a daemon holding a queued prompt, a pending `notifyOnFinish` and a schedule (isolated
@@ -192,19 +207,27 @@ ops-promotion pilot passes.
       Telegram credentials in the host's secrets mechanism (sops/agenix or `sudo-secretspec`); the
       upgrade 0.13.0 → 0.14 lands only as the pushed `master` head through `deploy-vps-primary` (home rule
       36). Expected: an unauthenticated request from another tailnet node is refused.
-   9. The dead-man check on vps-primary probes the Mac daemon's real RPC over the tailnet. A missing
-      heartbeat alone cannot tell sleep from a crash or an outage, so the Mac also reports sleep explicitly:
-      a sleep/wake hook (IOKit power notification through `sleepwatcher` or an equivalent launchd agent)
-      writes a `sleeping since T` marker on vps-primary before sleep and clears it on wake. The check pages
-      when the heartbeat is stale and there is no fresh sleep marker, and also when a sleep marker is older
-      than 12 hours (a Mac that died asleep). D1 tests all three: sleep (no page), daemon killed while
-      awake (page), network cut while awake (page).
+   9. The dead-man check on vps-primary **holds no Mac credential and never calls the Mac daemon**; the Mac
+      daemon stays bound to `127.0.0.1`. Each run, the Mac's B9 watchdog writes a heartbeat to vps-primary
+      that carries its own result (`/api/health` and the timed real RPC), so a wedged daemon on an awake Mac
+      still pages from vps-primary. A sleep/wake hook (IOKit power notification through `sleepwatcher` or an
+      equivalent launchd agent) writes `sleeping since T` before sleep and clears it on wake. The Mac writes
+      both through a dedicated ssh key restricted on vps-primary (`restrict,command="…write-heartbeat"`) that
+      can only replace those two files. The check pages when the heartbeat is stale with no sleep marker,
+      when the heartbeat reports a failing daemon, and when a sleep marker is older than a configurable
+      threshold (default 72 hours, so a weekend away does not page). A marker followed by silence counts as
+      asleep until that threshold. Expected: sleep (no page), daemon killed while awake (page), network cut
+      while awake (page); from vps-primary an authenticated Paseo call to the Mac is impossible, and the key
+      cannot run anything else.
 2. **Minimum plugins and adopted plugins** (section G): G2, G3, G1, G4; `usage-auto-resume` coverage for omp,
-   opencode, cline and grok (G5); the Telegram plugin's 0.14 test (F1). **Gate**, on the isolated daemon:
-   three concurrent launches against one pool admit at most what the ledger allows; an `aiuse` failure
-   follows G2's fail mode and its override; a reroute is visible to the launcher; a held G3 send survives a
-   daemon restart; G4 leaves an unlabelled agent's card untouched and escalates an unknown command; a
-   non-owner Telegram message is refused; every plugin RPC refuses a caller that is not authorised (G).
+   opencode, cline and grok (G5); the Telegram plugin's 0.14 test (F1). **Gate**, on the isolated daemon,
+   asserting that the live daemon's state files under `~/.local/state/ade/<serverId>/` are byte-identical
+   before and after: three concurrent launches against one pool admit at most what the ledger allows; an
+   `aiuse` failure follows G2's fail mode; a reroute is visible to the launcher; a held G3 send survives a
+   daemon restart; G4 ignores an agent G1 never recorded (also one labelled after create) and escalates
+   compound commands (`;`, `&&`, `|`, `$(`, a newline, `sh -c`); a non-owner Telegram message is refused; a
+   forged agent id in an RPC input is refused; the tool catalogs of a UI-created and a Telegram-created
+   agent lack the B3 tools.
 3. **Canary.** One real workflow end to end on Paseo only: work → review → CI → report, including a forced
    quota stop that resumes and a daemon restart that loses nothing (isolated daemon, or a drained window
    with djbclark's yes), and the one-task pilot on vps-primary with its report retrieved on the Mac.
@@ -216,7 +239,8 @@ ops-promotion pilot passes.
    `delivered` for a cross-workspace send; the drain record is committed.
 5. **Dispatch, then lifecycle.** `acp-dispatch`/`acp-run` replaced by G1 on Paseo subagents (records kept
    readable until calibration reads G1's); `/bigteam` and the dispatch footer rewritten; after the drain gate,
-   `acp-dispatch` is disabled; then `self-slash` successors (C1). **Gate:** one `/bigteam` wave of three
+   `acp-dispatch` is disabled; then `self-slash` successors (C1). `acp-run` retires only when zcode and crush
+   have working custom Paseo providers, or djbclark rules to drop them. **Gate:** one `/bigteam` wave of three
    slices with deadline, report file and one forced quota stop; a successor survives its parent's archive with
    the chain pointer intact.
 6. **Watchers and notifiers.** `fleet-watch`, `load-watch` delivery, quota-guard steers and the watch roles
@@ -227,9 +251,12 @@ ops-promotion pilot passes.
    end-state check is a **new** CI step in djbclark-ade (the `context-policy` job runs only pytest today)
    plus a local script over `~/AGENTS.md`, `home-agents.mdc`, the ops `AGENTS.md` files and
    `site-private/memory/`, which no djbclark-ade CI job can read. Its pattern:
-   `herdr|orca|tmux|superset|paradev|tuicommander|tuios|cow.pasture|relay\.py|acp-run|acp-dispatch`
-   plus Hermes in a seat or harness role; it reports, for a human, the `tmux` hits that are not harness uses.
-   Exempt: `docs/history/` and the A8 bridges doc and skill (`herdr`, `tuios` only); nothing else (F8).
+   `herdr|orca|tmux|\bsuperset\b|paradev|tuicommander|tuios|cow.pasture|relay\.py|acp-run|acp-dispatch`
+   plus Hermes in a seat or harness role; `tmux` and `superset` hits go to a human for triage (ordinary
+   English and non-harness uses). Exempt: `docs/history/`; the A8 bridges doc and skill (`herdr`, `tuios`);
+   the literal names `herdr4paseo` and `paseo4herdr` wherever they appear (indexes must list the skill,
+   review rule 8); and the check's own script and workflow. D7 moves this plan into `docs/history/`, and its
+   own `Removed` CHANGELOG lines go into the frozen history CHANGELOG (F8).
 
 Least reversible steps: deleting the dispatch record format (D5; kept readable until calibration moves),
 worktree removal on archive (B4), and the instruction-file rewrites (D7). Each happens only after its gate.
@@ -246,6 +273,12 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
 5. The Jev-like judges now share one Hyades microVM, `djbclark-jevlike`, one judge at a time, Kev by default
    (djbclark, 2026-10-30; jev-like-hyades `bff0d6b`, sipb-agent-skills `6d71b98`, djbclark/mit `bba409f`).
    The freed Hyades slot is spare: F3 moved to vps-primary.
+6. `relay.py:757` `timeline_ack` matches `HEADER_RE` at the start of the body, so an ack delivered through
+   the deferred queue (body starting `[queued Nm ago] [relay from …] ack ID`) is not recognised by a
+   timeline watch; the Claude stop hook already skips that prefix (found by 495e0645, 2026-10-30; no test, not
+   in `docs/queue.md`). It matters until D4 retires `relay.py`, because D0.2's drain gate relies on acks
+   closing expectations. Not a defect: an ack sent by the deferred deliverer under `SENDER_OVERRIDE` never
+   closes an expectation; that is decided in `docs/queue.md` (a deliverer cannot prove whose ack it carries).
 
 ## F. Decisions (djbclark, 2026-10-30, after the consults and research)
 
@@ -285,10 +318,19 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
 ## G. What we build (replacement order A3; interfaces are sketches for D2)
 
 All hook names are Paseo 0.14's (`agent.create.before`, `agent.open.before`, `agent.turn.before`,
-`agent.permission.before`; upstream `plugins_hooks.md`, "Renamed hooks"). Every plugin keeps its state
-outside worktrees under `~/.local/state/ade/<plugin>/`, written atomically (temp file and rename), and
-reconciled after a daemon restart. **Every plugin RPC checks the caller's agent id** against the record's
-owner and refuses anyone else (adversary r1 C9).
+`agent.permission.before`, `workspace.create.before`; upstream `plugins_hooks.md`, "Renamed hooks").
+
+**State.** Every plugin keeps its state outside worktrees under `~/.local/state/ade/<serverId>/<plugin>/`,
+keyed by the daemon's server id, so an isolated test daemon (B10) never reads or writes the live daemon's
+ledgers. State is written atomically (temp file and rename), and every `reconcile()` acts only on records
+carrying its own server id.
+
+**Authorization.** A plugin RPC handler gets no authenticated caller (its input is self-asserted), so
+agent-facing operations (`jobs.finish`, `jobs.extend`, `ack.register`) are **plugin agent tools** attached in
+`agent.open.before`, authorized by the daemon-supplied `context.agent.id` against the record's owner. RPCs
+serve only the operator's UI. This stops mistakes and impersonation over the tool surface, **not** a same-uid
+agent with a shell that edits the state files directly; like B3, it is not a boundary (adversary r1 C9, r2 C3
+and C8).
 
 1. **`ade-jobs` (plugin, hooks needed)**: durable task ids, deadline and grace, a wrap-up steer at
    T-minus-grace, interrupt at T recorded as exit 124 (cancellation confirmed, and the agent's child
@@ -297,36 +339,48 @@ owner and refuses anyone else (adversary r1 C9).
    never archived until the job records "branch pushed and report read" (B4). Native parts:
    `paseo run --output-schema`, `paseo wait --timeout` (waits, does not cancel). Interface:
    `jobs.submit(taskId, host, workspace, profile, reportPath, deadline, grace)`, `jobs.get`, and, for the
-   job's owner only, `jobs.finish`, `jobs.extend(taskId, seconds)`; `jobs.reconcile` (astra C1, Fable 3.1).
+   job's owner only (as agent tools), `jobs.finish`, `jobs.extend(taskId, seconds)`; `jobs.reconcile` (astra C1, Fable 3.1).
 2. **`ade-gate` (plugin)**: `agent.create.before` runs the `aiuse` and `load-watch ci decide` checks
    (cached about 60 s, inside the hook's 30 s ceiling) and enforces B9's workspace cap.
    1. **Fails closed**: an `aiuse` error, stale evidence or a hook timeout refuses the launch with the reason.
-      The override is an expiring entry written by the operator through `bin/gate-profile`
-      (`config/gates.toml`), so a broken `aiuse` cannot stop recovery work for long and no agent can grant
-      itself the override.
-   2. **Reservations** are a locked ledger under `~/.local/state/ade/gate/`, decremented on every create, so
-      launches inside one cache window cannot all pass.
+      The override is an expiring entry written through `bin/gate-profile` (`config/gates.toml`), so a broken
+      `aiuse` cannot stop recovery work for long. Agents are told never to write it; G2 logs every launch
+      that used an override and sends `hermes-ping` for it. It is **not a boundary**: `gate-profile` has no
+      human-presence check, and any agent running as the operator's user could write the entry.
+   2. **Reservations** are a locked ledger under `~/.local/state/ade/<serverId>/gate/`, decremented on every
+      create, so launches inside one cache window cannot all pass.
    3. **Refuse by default; reroute only when the launch carries the label `ade.reroute=ok`**, and then only
       `provider` and `model`, never mode, env, tools or MCP servers; the reroute is written to the agent's
       timeline and the ledger. (Changes made in `agent.create.before` persist after the plugin is removed.)
    4. `agent.open.before` can change only env, tools and MCP servers, so on open the gate can only refuse.
    5. **Named gaps**, taken upstream: `agent.turn.before` is notify-only, so UI sends and
-      `usage-auto-resume`'s resume prompts are not gated.
-   6. It reads no secret; anything that needs one runs under `sudo-secretspec run` (astra C3, Fable 3.4).
-3. **`ade-ack` (plugin)**: records sends (`ack.register(agentId, token)`, callable only by the sender),
-   marks *delivered* on the recipient's next `agent.turn.before` carrying it, holds sends to busy non-steer
-   agents in a **durable** queue until idle, and deduplicates finish callbacks
+      `usage-auto-resume`'s resume prompts are not gated; and a disabled, crashed or failed-to-reload plugin
+      loses its hook registrations, so creates then pass ungated. The B9 watchdog alerts whenever
+      `paseo plugin ls` does not show `ade-gate` running.
+   6. On `workspace.create.before` it refuses a `worktree` workspace in a repo without a committed
+      `paseo.json` teardown (B4).
+   7. It reads no secret; anything that needs one runs under `sudo-secretspec run` (astra C3, Fable 3.4).
+3. **`ade-ack` (plugin)**: records sends (the `ack.register` agent tool, callable only by the sender). The
+   `agent.turn.before` payload carries only the agent and turn ids and hook notifications are best effort with
+   no replay, so on each turn start it fetches that turn's timeline through the SDK and marks *delivered*
+   when the send is in it; after a restart it reconciles missed turns from history. It holds sends to busy
+   non-steer agents in a **durable** queue until idle and deduplicates finish callbacks
    (`messages.send/ack/reconcile`; astra C4, Fable 3.5 and 3.8). Native sends bypass it (B2).
 4. **`ade-permit` (plugin)**: **opt-in and fail-closed.**
-   1. It acts only on agents created with the label `ade.permit=yolo` by an ADE launcher (G1). G1 refuses
-      that label on an agent launched in a restrictive mode (Always Ask, Write Approval, Plan) or with a
-      deny brief, and the operator's own sessions are never labelled.
-   2. On `agent.permission.before` (a notification) it answers with `respondToPermission` only for requests
-      that match an **allow-list** in a reviewed file (`config/permit-allow.toml`: exact tool names and
-      command prefixes). Everything else, including every question card and every outward or hard-to-reverse
-      action, goes to the parent or the operator.
-   3. Audit: `~/.local/state/ade/permit/audit.jsonl`, one line per decision, with the request, the decision
-      and the policy revision (the allow-list file's git blob id).
+   1. It trusts **its own record, not a label**: it acts only on agent ids G1 recorded at `jobs.submit`,
+      with the provider and the bypass/full mode recorded then (G1 refuses to record an agent launched in a
+      restrictive mode such as Always Ask, Write Approval or Plan, or with a deny brief). Labels and modes
+      can be changed after create (`update_agent`, `set_agent_mode`), so on every `agent.permission.before`
+      it re-reads the agent's current mode through the SDK and does nothing unless it still matches the
+      record. The operator's own sessions are never recorded.
+   2. On `agent.permission.before` (a notification) it answers with `respondToPermission` only when the
+      request, **tokenized with a shell parser**, matches an entry of the reviewed allow-list
+      (`config/permit-allow.toml`) exactly as a whole argv, or an entry plus a declared argument shape. It
+      escalates any request containing `;`, `&`, `|`, a backtick, `$(`, `>`, `<` or a newline, and any
+      `sh -c`, `bash -c`, `python -c` or `eval` wrapper. Everything else, including every question card and
+      every outward or hard-to-reverse action, goes to the parent or the operator.
+   3. Audit: `~/.local/state/ade/<serverId>/permit/audit.jsonl`, one line per decision, with the request, the
+      decision and the policy revision (the allow-list file's git blob id).
    4. It is not a security boundary (B3) (astra C5, Fable 3.6, adversary r1 B1).
 5. **Adopted**: `usage-auto-resume` (running; covers Codex, Claude, Antigravity; extend it, or add a small
    turn-end hook (0.14 name per `plugins_hooks.md`), for omp, opencode, cline and grok), `session-janitor` (bounded by B4),
