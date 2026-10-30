@@ -476,8 +476,10 @@ class SelfSlashPaseoTests(unittest.TestCase):
         cwd2 = str(Path(self._tmp.name) / "work2")
         Path(cwd).mkdir(exist_ok=True)
         Path(cwd2).mkdir(exist_ok=True)
+        # SELF_SLASH_DESKTOP_PROC "." matches any running process: the real Paseo.app is never probed (a Linux runner, or a Mac with the app closed,
+        # would otherwise decide these tests); the tests of the probe itself pass their own pattern
         return {"FAKE_CWD": cwd, "FAKE_CWD2": cwd2, "PASEO_AGENT_CWD": cwd,
-                "SELF_SLASH_SUCCESSOR_SETTLE": "0", **extra}
+                "SELF_SLASH_SUCCESSOR_SETTLE": "0", "SELF_SLASH_DESKTOP_PROC": ".", "SELF_SLASH_OPEN_WAIT": "2", **extra}
 
     def run_waiter(self, *args: str, interp: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
         """The waiter itself, in the foreground, as the parent spawns it (its exit code is observable).
