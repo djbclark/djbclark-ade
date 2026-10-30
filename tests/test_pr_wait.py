@@ -806,6 +806,26 @@ def test_a_null_beside_has_any_findings_true_is_not_a_statement(world: World) ->
     assert summary["merge_blockers"] == ["security-marker-unverified"]
 
 
+@pytest.mark.parametrize("any_value", ["true", 1, 0, "", []])
+def test_a_has_any_findings_that_is_not_a_boolean_is_not_a_statement(world: World, any_value: object) -> None:
+    """The pair is judged on both keys, not only on `has_unresolved_findings`.
+
+    `"true"`, `1`, `""`, `0` and `[]` are all "neither boolean nor null", the values the docstring already
+    refuses for `has_unresolved_findings`. Beside a null they mean nothing the reviewer can rely on, so the
+    review has not stated its answer however clean the threads look — and `0` is why the guard uses identity
+    rather than `not in (None, False)`.
+    """
+    sec = {"commit_sha": HEAD, "status": "completed", "has_any_findings": any_value,
+           "has_unresolved_findings": None}
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=sec)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(64)]))
+    world.route("graphql", gql(thread(64, resolved=True)))
+    assert world.run().returncode == 0
+    summary = world.file("summary")
+    assert summary["merge_ready"] is False, summary["merge_blockers"]
+    assert summary["merge_blockers"] == ["security-marker-unverified"]
+
+
 def test_a_findings_flag_that_is_neither_boolean_nor_null_is_still_unverified(world: World) -> None:
     # a marker we do not understand is not a clean review, and must not be read as one
     sec = {"commit_sha": HEAD, "status": "completed", "has_unresolved_findings": "false"}

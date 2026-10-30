@@ -68,9 +68,10 @@ print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true o
 check succeeded and none failed or is pending (skipped and neutral count as passed beside a success,
 never alone), Codex's code review completed on this head, the security review too when the marker carries
 it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings
-for each review it carries: a boolean, or an explicit null beside no finding comment on THIS head and no
-open thread of that kind (Codex's "this review found none", see `unresolved_stated`; a missing key is not a
-statement and blocks as marker-unverified). merge_blockers lists why not: codex-<status>, security-<status>
+for each review it carries: a boolean, or an explicit null beside no finding comment on THIS head, no open
+thread of that kind, and a `has_any_findings` that is not `true` (Codex's "this review found none", see
+`unresolved_stated`; a missing key is not a statement and blocks, as `marker-unverified` for the code review
+or `security-marker-unverified` for the security one). merge_blockers lists why not: codex-<status>, security-<status>
 (security-failed, security-running, security-other-head), findings-not-collected, marker-unverified,
 security-marker-unverified, no-checks, ci-pending, ci-failed, ci-none-succeeded, open-findings,
 findings-mismatch, codex-skipped. The exit code does not carry it: the caller reads merge_ready.
@@ -1058,9 +1059,11 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
     by hand or the word lost its meaning.
 
     A null is a statement only beside the independent evidence: no Codex finding comment **for this head**
-    of that kind and no open Codex thread of that kind. A MISSING key, or a value that is neither boolean
-    nor null, is still not a statement — that is a marker we do not understand, not a clean review — and
-    the contradiction case (null beside an open thread) already fails closed as `open-findings` in `assess`.
+    of that kind, no open Codex thread of that kind, and a `has_any_findings` that is not `true` (nor any
+    value we do not understand) — one key saying the review found nothing while the other says it found
+    something is not a review that states its answer. A MISSING key, or a value that is neither boolean nor
+    null, is still not a statement — that is a marker we do not understand, not a clean review — and the
+    contradiction case (null beside an open thread) already fails closed as `open-findings` in `assess`.
 
     ONLY THIS HEAD'S FINDINGS COUNT AS CONTRADICTION (2026-10-30, PR 156). The null describes THIS
     review of THIS head, so a finding comment of the same kind on an EARLIER head cannot contradict it —
@@ -1081,8 +1084,9 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
     all-heads count was an accidental backstop for null markers, and this rule does not rebuild it, because
     the same gap would hide an open earlier-head finding from `open` too.
 
-    A null beside `has_any_findings: true` is not a statement either: it says this review found nothing while
-    the marker says it found something, and the two cannot both describe one review.
+    A null beside a `has_any_findings` that is `true`, or any value we do not understand, is not a statement
+    either: it says this review found nothing while the marker says it found something (or says something we
+    cannot read), and the two cannot both describe one review.
     """
     if "has_unresolved_findings" not in r:
         return False
@@ -1091,8 +1095,12 @@ def unresolved_stated(r: dict, kind: str, review: dict | None) -> bool:
         return True
     if v is not None:
         return False
-    if r.get("has_any_findings") is True:
-        return False  # "found nothing" beside "found something": not a review we understand
+    a = r.get("has_any_findings")
+    if a is not None and a is not False:
+        # "found nothing" beside "found something", or beside a value we do not understand: either way the
+        # pair is not a review that states its answer. Identity, not `not in (None, False)`, because
+        # `0 in (None, False)` is true and `0` is a value we do not understand.
+        return False
     if review is None:
         return False
     if any(f["kind"] == kind for f in review["for_head_all"]):
@@ -1117,11 +1125,13 @@ def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: d
     says `security_status: absent`); zero open Codex threads of either kind (outdated or not); no mismatch;
     and a marker that states has_unresolved_findings for each review it carries - a boolean, or an explicit
     null beside no finding comment ON THIS HEAD and no open thread of that kind (`unresolved_stated`; a
-    missing key is not a statement). A finding on an EARLIER head does not contradict the null: its fix is
-    what produced this head.
+    missing key is not a statement, and neither is a null beside `has_any_findings` `true`). A finding on an
+    EARLIER head does not contradict the null: its fix is what produced this head, and where it was resolved
+    WITHOUT one it is trusted as fixed anyway, at parity with the boolean `false` path (see
+    `unresolved_stated`, limit 1).
     merge_blockers names why not: `codex-<status>` (code review not completed on the head), `security-<status>`
     (`security-failed`, `security-running`, `security-other-head`), `findings-not-collected`,
-    `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
+    `marker-unverified` (the code review's), `security-marker-unverified` (the security review's), `no-checks`, `ci-pending`, `ci-failed`,
     `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`, plus - ONLY when the
     adversary gate is switched on (`--adversary-required` or an `adversary-required` label), or when a
     fetch failed or the marker is malformed - `adversary-missing`, `adversary-stale-or-blocked`,
