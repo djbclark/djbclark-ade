@@ -61,6 +61,8 @@ Agent-scoped creation always creates your subagent. Omit `workspaceId` to use yo
 
 Detach is an explicit user action in the subagents track, not an agent tool. A cross-workspace child remains your subagent even though it also appears as a normal tab in its workspace.
 
+**A sibling tab is not a subagent** (verified by failure, 2026-10-30). When djbclark asks for a new tab of the same kind as yours — a successor chat seat, a second worker, anything he expects to see and click in his workspace — `paseo run` inside your agent session silently parents it to you: the CLI inherits `PASEO_AGENT_ID` (and `PASEO_AGENT_CWD`) from the environment, so the result has `ParentAgentId` set and lands in the **subagents track**, not the workspace tab list. It runs, answers, and is invisible to him as a tab. `exit 0` plus `status: running` proves nothing about visibility. To create a real sibling, unset both variables for the child command and then check `paseo inspect <id> --json` reports `"ParentAgentId": null` before saying the tab exists. Reported as "I do not see a <name> tab" after exactly this mistake.
+
 Agent-scoped `create_agent` defaults `notifyOnFinish` to true. Set it to `false` only for truly fire-and-forget agents.
 
 **`send_agent_prompt`** — `{ agentId, prompt, activeTurnBehavior? }`. Use for follow-ups to an existing agent. Agent-scoped calls default to `steer`; top-level calls default to `interrupt`. Set `activeTurnBehavior` to `steer` or `interrupt` to override the default. Steering falls back to interruption when unavailable. CLI agent sends use the same defaults and accept `--behavior steer|interrupt`. Returns after dispatch acknowledgement. Agent-scoped calls default `notifyOnFinish` to true; top-level calls have no parent callback.
