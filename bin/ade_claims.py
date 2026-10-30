@@ -757,17 +757,103 @@ def _env_count_config(env: dict[str, str]) -> list[tuple[str, str]]:
     return out
 
 
+# Git does NOT use libc isspace(): git-compat-util.h redefines it as sane_istest(x, GIT_SPACE) over ctype.c's
+# sane_ctype table, which marks only space, \t, \n and \r. `\v` and `\f` are plain control characters to git, so
+# a transport separated by them is "bogus format" and git runs nothing — measured 2026-10-30 (adversary round 3).
+_GIT_SPACE = frozenset(" \t\n\r")
+
+
+def _need_bs_quote(c: str) -> bool:
+    """Git's need_bs_quote: the two characters sq_quote escapes outside the single quotes for csh safety."""
+    return c in "'!"
+
+
+def _sq_dequote(src: str, i: int) -> Optional[tuple[str, int]]:
+    """Git's sq_dequote_step (quote.c): the single-quoted string starting at `src[i]`, and the index just past it.
+    A closing quote followed by `\\` + a character that NEEDS backslash quoting, then a reopening quote, continues the
+    SAME string — that is how git's own sq_quote writes `it's` as `'it'\\''s'` and an exclamation as `'x'\\!'` (csh).
+    Any other character after a closing quote is a bogus format (None), as is a string that ends inside the quotes;
+    measured against git 2.56, `''`, `\\\\` and a trailing escape are all bogus."""
+    if i >= len(src) or src[i] != "'":
+        return None
+    out: list[str] = []
+    i += 1
+    while True:
+        if i >= len(src):
+            return None
+        c = src[i]
+        if c != "'":
+            out.append(c)
+            i += 1
+            continue
+        i += 1
+        if i >= len(src):
+            return "".join(out), i
+        # Only `\` + an escapable character + a reopening quote continues the same string; `''`, `\\` and a bare
+        # trailing escape are all git's bogus format (measured: `'x''y'`, `'x'\\''y'`, `'x'\'`).
+        if (src[i] == "\\" and i + 2 < len(src) and _need_bs_quote(src[i + 1]) and src[i + 2] == "'"):
+            out.append(src[i + 1])
+            i += 3
+            continue
+        return "".join(out), i
+
+
+def _parse_config_parameters(params: str) -> Optional[list[tuple[str, str]]]:
+    """Git's parse_config_env_list (config.c), the grammar GIT_CONFIG_PARAMETERS actually carries: entries separated
+    by whitespace, each a single-quoted string with an optional `=` and a single-quoted value. In the new-style
+    `'key'='value'` form the quoted key is literal; in the old-style `'key=value'` form (no quoted value follows) git
+    splits the dequoted string at the FIRST `=` and keeps later ones in the value. `key`, `key=`, and `key=` followed
+    by whitespace are the same implicit boolean, and what follows the whitespace is a NEW entry — never the previous
+    entry's value (`'ade.flag'= 'ade.x'='foo'` is two entries, measured against git 2.56). Unquoted keys or values,
+    adjacent quoted strings and trailing junk are git's `bogus format`, after which git runs nothing at all. None
+    means bogus. Key VALIDITY is deliberately not ported: git refuses a run whose key has no section (`a b`) or an
+    invalid one (`a.b=c`) and this returns the entry anyway, exactly as the `-c` path has always done (measured
+    2026-10-30; filed as djbclark-ade#158 M2). It cannot hide config from the guard — git runs nothing in that case."""
+    out: list[tuple[str, str]] = []
+    i, n = 0, len(params)
+    # git's loop is `while (cur && *cur)` and it skips NO whitespace before the first entry: an empty transport is
+    # fine, a whitespace-only one is bogus (measured: `" "`, `"\t"` and `" 'a.b'='v'"` are all rc 128).
+    while i < n:
+        step = _sq_dequote(params, i)
+        if step is None:
+            return None
+        key, i = step
+        if i >= n or params[i] in _GIT_SPACE:
+            # old-style `'key=value'`: git hands the dequoted string to git_config_parse_parameter, which splits it
+            # at the FIRST `=` and keeps every later one in the value (`'ade.old=value=with=equals'`)
+            key, sep, value = key.partition("=")
+            if not sep:
+                value = "true"
+            if not key:
+                return None                          # git: "bogus config parameter" for an empty key
+        elif params[i] == "=":
+            # new-style `'key'='value'`: the quoted key is literal (a `=` in it belongs to the name/subsection)
+            i += 1
+            if i < n and params[i] == "'":
+                step = _sq_dequote(params, i)
+                if step is None:
+                    return None
+                value, i = step
+            elif i >= n or params[i] in _GIT_SPACE:
+                value = "true"                       # implicit bool: `'key'=`
+            else:
+                return None
+        else:
+            return None
+        if i < n and params[i] not in _GIT_SPACE:      # a quoted value must be followed by whitespace or the end
+            return None
+        out.append((_ckey(key), value))
+        while i < n and params[i] in _GIT_SPACE:
+            i += 1
+    return out
+
+
 def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
     """Config git reads from the environment: GIT_CONFIG_COUNT/KEY_n/VALUE_n, then GIT_CONFIG_PARAMETERS."""
     out = _env_count_config(env)
     params = env.get("GIT_CONFIG_PARAMETERS", "")
     if params:
-        try:
-            for item in shlex.split(params):
-                k, eq, v = item.partition("=")
-                out.append((_ckey(k), v if eq else "true"))
-        except ValueError:
-            pass
+        out.extend(_parse_config_parameters(params) or [])
     return out
 
 
@@ -1492,11 +1578,12 @@ def _template_decision(call: GitCall, env: dict[str, str], alt: str) -> Optional
     return None
 
 
-# The two config pairs acp-run appends to every agent's environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n; tools/acp-run/acp-run,
+# The two config pairs acp-run adds to every agent's environment (GIT_CONFIG_PARAMETERS; legacy COUNT pairs also accepted;
+# tools/acp-run/acp-run,
 # git_identity_guard): a `reference-transaction` config hook that refuses an agent's branch update with the wrong git identity.
 # A config hook only ADDS a hook (measured 2026-10-25, git 2.56: `hook.<name>.enabled=false` does not stop the hooks
 # directory's hook), so these two cannot switch the ref guard off. Exempt exactly this (key, value) shape, from the
-# environment's COUNT pairs only: never `-c`, `--config-env` or GIT_CONFIG_PARAMETERS, and no other `hook.*` key.
+# environment's config only: never `-c` or `--config-env`, and no other `hook.*` key.
 ACP_RUN_IDENTITY_EVENT = ("hook.acp-run-identity.event", "reference-transaction")
 ACP_RUN_IDENTITY_COMMAND_KEY = "hook.acp-run-identity.command"
 
@@ -1510,10 +1597,9 @@ def _acp_run_pair(k: str, v: str) -> bool:
 
 
 def _unexempted_config(call: GitCall, env: dict[str, str]) -> list[tuple[str, str]]:
-    """`call.config` minus the acp-run pairs that came from the environment's COUNT pairs: each such pair is spent once, so a
-    second copy of it (from `-c`, GIT_CONFIG_PARAMETERS or more COUNT pairs than the env holds) stays judged."""
+    """Spend exact ACP pairs from environment config once; command-line copies stay judged."""
     budget: dict[tuple[str, str], int] = {}
-    for k, v in _env_count_config(env):
+    for k, v in _env_config(env):
         if _acp_run_pair(k, v):
             budget[(k, v)] = budget.get((k, v), 0) + 1
     out: list[tuple[str, str]] = []

@@ -137,11 +137,12 @@ Evaluated in order; the module docstring has every form.
    1 = unset) (`hook-config`). A repository's own (local or worktree) `hooksPath` is not refused: the repository chose it
    (husky, pre-commit), the hooks do not run there, and `install` reports it (78). If git answers neither 0 nor 1 (timeout, a
    config file it cannot parse) the call is refused with that reason (`hook-config-unknown`): **the shim fails closed, the
-   hooks fail open**. **acp-run's own config pairs (round 11):** acp-run puts two `GIT_CONFIG_COUNT` pairs in every agent's
+   hooks fail open**. **acp-run's own config pairs (2026-10-26):** acp-run puts two `GIT_CONFIG_PARAMETERS` entries in every agent's
    environment, `hook.acp-run-identity.event=reference-transaction` and `hook.acp-run-identity.command=~/.cache/acp-run/git-identity-guard.sh`
    (a config hook that checks the git identity; a config hook only adds a hook, it cannot switch the hooks directory's off). The
-   per-key rule exempts exactly those two pairs, from the environment's COUNT pairs only (command value compared after `realpath`);
-   the same key with another value, via `-c`, `--config-env` or `GIT_CONFIG_PARAMETERS`, a second copy, and every other `hook.*`,
+   per-key rule exempts exactly those two pairs from environment configuration (PARAMETERS or legacy COUNT pairs; command value
+   compared after `realpath`), spending each environment occurrence once. Another value, a command-line copy via `-c` or
+   `--config-env`, and every other `hook.*`,
    `include*` and `core.hooksPath` key stay refused. **`clone` and `init` copy a template directory (its `config` and `hooks` included) into the new repository
    (round 11, 2026-10-25; djbclark's ruling): the shim refuses every non-default template source** as `hook-config`: `--template`
    (any abbreviation, `=` or next word), `GIT_TEMPLATE_DIR` in the environment, `init.templateDir` set on the command line, in the

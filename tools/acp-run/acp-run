@@ -219,6 +219,7 @@ import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote
 
 # zcode-acp-server sends its turn-state notification as "$/zcode/turnState". The
 # ACP Python library only knows "_" as the extension prefix and raises
@@ -3982,7 +3983,7 @@ async def all_models_options(conn, sess, options):
 GIT_IDENTITY_GUARD = Path.home() / ".cache/acp-run/git-identity-guard.sh"
 GIT_IDENTITY_GUARD_SH = r"""#!/bin/bash
 # acp-run's git identity guard: a reference-transaction hook acp-run injects into every agent's git
-# through GIT_CONFIG_COUNT (git_identity_guard in tools/acp-run/acp-run). Refuses a branch update to a
+# through GIT_CONFIG_PARAMETERS (git_identity_guard in tools/acp-run/acp-run). Refuses a branch update to a
 # commit made in the last 10 minutes whose committer is not the operator, outside temp dirs.
 [ "$1" = prepared ] && [ -n "${ACP_RUN_GIT_EMAIL:-}" ] && [ "${ACP_RUN_ALLOW_GIT_IDENTITY:-}" != 1 ] \
     || { cat >/dev/null; exit 0; }
@@ -4010,6 +4011,188 @@ exit 0
 """
 
 
+# Token shapes a counted GIT_CONFIG KEY may carry. Codex's shell_environment_policy drops variable
+# NAMES containing KEY, SECRET or TOKEN, which is why a whole counted group was invisible to an
+# agent's tools; the quoted transport below hands every key and value over, so a token that was
+# merely hidden becomes readable (codex security review, PR 156, 2026-10-30). These are the shapes
+# worth refusing WHEREVER they appear in a key, including a subsection git never treats as a URL
+# (`remote.<token>.url`), because the exposure is the name and not the setting's meaning. Three
+# limits keep it off ordinary configuration: no match starts mid-word (adversary round 10 measured
+# `re.IGNORECASE` and no boundary refusing `task-`, `flask-`, `disk-` and `asiapacific`, 2026-10-30),
+# each prefix is matched in the case its issuer uses, and each body has a floor just under the real
+# length, so a short ordinary name (`sk-1`, `ghp_mirror01`) travels. The `sk-` floor is 20 because
+# LiteLLM issues a WORKING key as `sk-` + 22 url-safe characters (`token_urlsafe(16)`, its default),
+# which round 11 caught travelling at a floor of 32; only a non-default shorter length escapes it.
+TOKEN_SHAPE = re.compile(
+    r"(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{20,}" # GitHub PAT, OAuth, user, server, refresh token
+    r"|github_pat_[A-Za-z0-9_]{20,}"                 # GitHub fine-grained PAT
+    r"|glpat-[A-Za-z0-9_-]{16,}"                     # GitLab PAT
+    r"|xox[abposr]-[A-Za-z0-9-]{12,}"                # Slack bot, user, app, refresh token
+    r"|sk-(?:ant-)?[A-Za-z0-9_-]{20,}"               # OpenAI, Anthropic and LiteLLM style key
+    r"|hf_[A-Za-z0-9]{20,}"                          # Hugging Face token
+    r"|npm_[A-Za-z0-9]{20,}"                         # npm automation token
+    r"|pypi-[A-Za-z0-9_-]{30,}"                      # PyPI upload token
+    r"|AIza[A-Za-z0-9_-]{20,}"                       # Google API key
+    r"|(?:AKIA|ASIA)[A-Z0-9]{12,}"                   # AWS access key id
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"      # JWT
+    r")")
+
+
+def credential_in_key(key: str) -> bool:
+    """Whether a counted config key embeds a credential, by URL POSITION or by token SHAPE.
+
+    This is about KEYS only: a credential in a counted VALUE was already readable, because the name
+    filter never covered GIT_CONFIG_VALUE_<n>, so refusing those would be a different change.
+
+    POSITION: `url.*` is not the only URL-scoped family - git resolves `http.<url>.*` and
+    `credential.<url>.*` for the matching URL too (measured with `git config --get-urlmatch
+    http.sslVerify https://user:token@host/x`, which answers the setting configured under that
+    userinfo-bearing subsection and answers nothing for another host) - so every `://` in a key must
+    be followed by an authority that does not carry `@`. That covers a section's case (`URL.`,
+    `HTTP.`) and the scheme's (`HTTPS://`), because neither is matched. The authority starts after any
+    run of slashes: `https:///user:token@host` is an empty authority to the URL parser but libcurl
+    still sends that userinfo, so it is refused, while a `@` in the first path segment
+    (`url.https://example.org/@scope/.insteadOf`) stays a path and travels. A base with no `://` at
+    all (`url.git@example.org:.insteadOf`) is a path on a host named `git`, not userinfo, and
+    travels.
+
+    POSITION, query and fragment: a `?` or `#` after a `://` is refused as well, because git matches
+    those exactly and a token in them needs no `@`. Measured: with a key of
+    `http.https://example.org/repo?access_token=TOK3N.sslVerify`, `git config --get-urlmatch
+    http.sslVerify 'https://example.org/repo?access_token=TOK3N'` answers `true` while the same URL
+    without the query answers nothing, and a loopback `git ls-remote` to that URL sent the token in its
+    request target. A query is legitimate in a real remote (`https://dev.azure.com/o/p/_git/r?path=/src`,
+    a cgit web url `?h=main`), so such a key refuses too: that is the intended trade, and it stays
+    usable in `~/.gitconfig`. The one exception to "refuses" is an `includeIf.hasconfig:` glob pattern
+    with a `?` wildcard, which cannot travel through a counted config at all (fail closed, with a
+    message that names the variable only).
+
+    SHAPE: a known token shape is refused wherever it appears in the key, in a subsection
+    (`remote.<token>.url`) and in a path segment (`url.https://example.org/<token>/.insteadOf`) alike,
+    because the name filter hid the token whether or not git resolves the key. Three limits keep that
+    off ordinary configuration: a match never starts mid-word, each prefix is matched in the case its
+    issuer uses, and each body has a length floor just under the real length. Refusing a name that
+    merely resembles a prefix (`remote.sk-learn-upstream-fork.url`, `remote.ghp_mirror01.url`) would
+    break a launch for nothing, and `re.IGNORECASE` with no boundary did exactly that before
+    (adversary round 10, 2026-10-30). The floors are set from measured issuers: `ghp_` carries 36,
+    `github_pat_` 82, `glpat-` 20, `hf_` 34, `npm_` 36, and LiteLLM's default generated key is `sk-` +
+    22 (`token_urlsafe(16)`), so `sk-` sits at 20 - a smaller family (a custom LiteLLM length below
+    20) and a name glued to a token with no separator are the documented edges. A secret of a shape
+    this list does not know, sitting in a path segment, cannot be told apart from path data
+    (`@scope`), so it travels - that is this check's documented limit.
+
+    A `credential.` subsection may also be a PARTIAL url with no scheme, and `credential.` is the one
+    family where git really resolves that form: measured with `git credential fill` and a helper
+    configured under `credential.<partial>.helper`, `credential.example.org.helper` runs the helper for
+    `url=https://example.org/x`, and `credential.<userinfo>@example.org.helper` runs it for
+    `url=https://<userinfo>@example.org/x` (the ordinary case of a remote URL with an embedded token) -
+    while the same shape under `http.` never matches (`git config --get-urlmatch http.sslVerify
+    https://user:token@host/x` answers nothing for `http.user:token@host.sslVerify`). So a schemeless
+    `credential.` subsection is refused whenever its authority carries `@` at all, including the
+    username slot: a GitHub PAT is used as a username (`https://ghp_...@github.com/...`), and git
+    url-decodes `%3A`, so `credential.user%3Atoken@host.helper` matches a request whose username is
+    literally `user:token` (adversary round 9 measured that form match on git 2.56.0; the colon
+    spelling matched neither spelling there, and both are refused anyway). No colon is required,
+    because a username cannot be told apart from a token without decoding it. A port has no `@`, so
+    `credential.https://host:8443.helper` still travels, and so does a schemeless subsection without
+    userinfo (`credential.example.org.helper`).
+
+    ENCODING: both checks also run on every percent-DECODED spelling of the key, not just the text as
+    written, because the exposure is the name and not the setting's meaning: an agent reads the
+    converted key and can decode it, so `http.https://host/ghp%5F<20+>.sslVerify` spells the same
+    secret as `ghp_`. Measured with `git config --get-urlmatch http.sslVerify <url>` on 2.56.0: a
+    setting written under `http.https://host/ghp%5Fabc....sslVerify` answers for BOTH
+    `https://host/ghp_abc...` and `https://host/ghp%5Fabc...`, so git treats the two as one subsection
+    too (codex security review, PR 156, 2026-10-30). Decoding repeats until the text stops changing -
+    each step strictly shortens, so it terminates - which covers double encoding (`ghp%255F...`).
+    Escapes that are not valid escapes are left alone, so a `%` in ordinary path data travels. This
+    refuses a key that only spells a credential once decoded (`credential.user%40host.helper`,
+    `url.https%3A%2F%2Fuser%3Atoken%40host/x.insteadOf`); that is the intended trade, and both stay
+    usable in `~/.gitconfig`.
+    """
+    def refuses(spelling: str) -> bool:
+        if TOKEN_SHAPE.search(spelling):
+            return True
+        tails = []
+        rest = spelling
+        while "://" in rest:
+            _, _, rest = rest.partition("://")
+            tails.append(rest)
+            if "@" in rest.lstrip("/").split("/", 1)[0]:
+                return True
+        if any("?" in tail or "#" in tail for tail in tails):
+            return True
+        section, _, tail = spelling.partition(".")
+        if section.lower() == "credential":
+            subsection = tail.rpartition(".")[0] or tail
+            if "://" not in subsection and ("@" in subsection.split("/", 1)[0]
+                                           or "?" in subsection or "#" in subsection):
+                return True
+        return False
+
+    if refuses(key):
+        return True
+    written, decoded = key, unquote(key)
+    while decoded != written:
+        if refuses(decoded):
+            return True
+        written, decoded = decoded, unquote(decoded)
+    return False
+
+
+def git_config_parameters(env: dict, pairs: tuple[tuple[str, str], ...] = ()) -> None:
+    """Move complete counted config into Git's quoted transport, which survives KEY-name filtering.
+
+    Git reads COUNT entries before PARAMETERS. Insert new guard pairs between those layers, as
+    the old counted injection did. Validate the entire counted group before changing `env`.
+    This is Git's single-quoted format, not shell execution (shlex.quote can emit unquoted tokens).
+    A counted key that carries a credential is refused, in the caller's words and never by value:
+    the message names the index only, because the key itself is the secret.
+    """
+    raw = env.get("GIT_CONFIG_COUNT")
+    count = 0
+    # An EMPTY count means zero, exactly as git reads it (`env && *env` in config.c; measured on
+    # 2.56.0, `GIT_CONFIG_COUNT= git -c ade.x=1 config --get ade.x` prints 1 and exits 0, with no
+    # `bogus count`) and as master's `int(env.get("GIT_CONFIG_COUNT") or 0)` did, so a launcher
+    # that exports the variable empty must not turn a launch that used to work into exit 2
+    # (codex review, PR 156).
+    if raw:
+        number = raw.lstrip(" \t\n\r\v\f")
+        digits = number[1:] if number.startswith(("+", "-")) else number
+        if not digits or not digits.isascii() or not digits.isdigit():
+            raise ValueError("invalid GIT_CONFIG_COUNT: expected a nonnegative integer")
+        try:
+            count = int(raw)
+        except ValueError:
+            raise ValueError("invalid GIT_CONFIG_COUNT: expected a nonnegative integer") from None
+        if count < 0:
+            raise ValueError("invalid GIT_CONFIG_COUNT: expected a nonnegative integer")
+        if count > len(env):
+            raise ValueError("invalid GIT_CONFIG_COUNT: incomplete counted configuration")
+    counted = []
+    for i in range(count):
+        for name in (f"GIT_CONFIG_KEY_{i}", f"GIT_CONFIG_VALUE_{i}"):
+            if name not in env:
+                raise ValueError(f"missing {name}: incomplete counted configuration")
+        if not env[f"GIT_CONFIG_KEY_{i}"]:
+            raise ValueError(f"invalid GIT_CONFIG_KEY_{i}: empty config key")
+        if credential_in_key(env[f"GIT_CONFIG_KEY_{i}"]):
+            raise ValueError(
+                f"GIT_CONFIG_KEY_{i} embeds a credential, which this transport would make readable "
+                "to the agent; use a credential helper or ~/.gitconfig instead")
+        counted.append((env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]))
+    quote = lambda value: "'" + value.replace("'", "'\\''") + "'"
+    tokens = [quote(key) + "=" + quote(value) for key, value in [*counted, *pairs]]
+    if tokens:
+        env["GIT_CONFIG_PARAMETERS"] = " ".join(tokens) + (
+            " " + env["GIT_CONFIG_PARAMETERS"] if env.get("GIT_CONFIG_PARAMETERS") else "")
+    if raw is not None:
+        env.pop("GIT_CONFIG_COUNT")
+        for i in range(count):
+            env.pop(f"GIT_CONFIG_KEY_{i}")
+            env.pop(f"GIT_CONFIG_VALUE_{i}")
+
+
 def git_identity_guard(env: dict) -> None:
     """Every agent's commits stay the operator's (2026-10-18).
 
@@ -4023,26 +4206,25 @@ def git_identity_guard(env: dict) -> None:
     am and cherry-pick keep the author and make the operator the committer, so they pass. The
     identity is read before --strip-user-config can move HOME."""
     if env.get("ACP_RUN_GIT_EMAIL"):
+        git_config_parameters(env)
         return                                   # a nested acp-run: already guarded
+    email = ""
     try:
         email = subprocess.run(["git", "config", "--global", "--get", "user.email"], capture_output=True,
                                text=True, check=False, timeout=5).stdout.strip()
-        if not email:
-            return
-        if not GIT_IDENTITY_GUARD.exists() or GIT_IDENTITY_GUARD.read_text() != GIT_IDENTITY_GUARD_SH:
+        if email and (not GIT_IDENTITY_GUARD.exists() or GIT_IDENTITY_GUARD.read_text() != GIT_IDENTITY_GUARD_SH):
             GIT_IDENTITY_GUARD.parent.mkdir(parents=True, exist_ok=True)
             tmp = GIT_IDENTITY_GUARD.with_name(GIT_IDENTITY_GUARD.name + f".{os.getpid()}")
             tmp.write_text(GIT_IDENTITY_GUARD_SH)
             tmp.chmod(0o755)
             os.replace(tmp, GIT_IDENTITY_GUARD)
     except (OSError, subprocess.SubprocessError):
-        return
-    n = int(env.get("GIT_CONFIG_COUNT") or 0)
-    for i, (key, value) in enumerate((("hook.acp-run-identity.event", "reference-transaction"),
-                                      ("hook.acp-run-identity.command", str(GIT_IDENTITY_GUARD))), n):
-        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
-    env["GIT_CONFIG_COUNT"] = str(n + 2)
-    env["ACP_RUN_GIT_EMAIL"] = email
+        email = ""
+    pairs = (("hook.acp-run-identity.event", "reference-transaction"),
+             ("hook.acp-run-identity.command", str(GIT_IDENTITY_GUARD))) if email else ()
+    git_config_parameters(env, pairs)
+    if email:
+        env["ACP_RUN_GIT_EMAIL"] = email
 
 
 async def run(a, log, err, log_path):
@@ -4056,7 +4238,11 @@ async def run(a, log, err, log_path):
         cmd = [x for x in cmd if x != "--always-approve"]
     root = Path(a.dir).resolve()
     env = dict(os.environ)
-    git_identity_guard(env)
+    try:
+        git_identity_guard(env)
+    except ValueError as e:
+        print(f"acp-run: refusing launch: {e}", file=sys.stderr)
+        return 2
     deny_dir = None
     t0, out, code = time.time(), {"agent": a.agent, "log": str(log_path)}, 1
     handshake_timeout = a.handshake_timeout or HANDSHAKE_TIMEOUT.get(
