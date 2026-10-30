@@ -918,6 +918,9 @@ def test_48_a_start_notice_he_never_received_is_carried_and_retried(monkeypatch,
     monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
     run_pass(rw)
     assert len(rw.pages) == 1 and NEW in rw.pages[0]
+    # F5: a page held for a pass is prefixed, so its present tense ("no live session") is not read
+    # as this minute's news.
+    assert rw.pages[0].startswith("(delayed) ")
     assert "undisclosed_start" not in rw.load_state()
     run_pass(rw)
     assert len(rw.pages) == 1               # a start is an event: retried until sent, then never again
@@ -925,8 +928,9 @@ def test_48_a_start_notice_he_never_received_is_carried_and_retried(monkeypatch,
 
 def test_49_an_owed_start_notice_replaces_the_generic_gone_page(monkeypatch, tmp_path):
     """E1's second half: if the new seat dies again before the notice got out, the pass must not
-    also send "nothing is listening" - that page would contradict the seat it just started, and he
-    would get two pages for one event."""
+    also compose the gone page it would otherwise send - "no live session for <role> (gone). The
+    previous seat stopped answering." - because that page contradicts the seat it just started, and
+    he would get two pages for one event."""
     rw = load(monkeypatch, tmp_path)
     monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # the notice never got out
     run_pass(rw)
@@ -934,6 +938,54 @@ def test_49_an_owed_start_notice_replaces_the_generic_gone_page(monkeypatch, tmp
     monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
     run_pass(rw)                                     # still gone, cooldown has not expired
     assert len(rw.pages) == 1                        # ONE page for the event, not two
-    assert "started automatically at" in rw.pages[0]
-    assert "Nothing is listening" not in rw.pages[0]
+    # F4: every page here is the START notice. The unbounded "Nothing is listening" wording lives on
+    # a different path (`not ident`), so asserting its absence proved nothing; this is the marker
+    # the suppressed page would NOT carry.
+    assert all("started automatically at" in p for p in rw.pages)
+    assert "undisclosed_start" not in rw.load_state()
+
+
+def test_50_a_non_string_slot_cannot_silence_the_gone_page(monkeypatch, tmp_path):
+    """Adversary F1: `start_owed` gates the only page that says the seat is gone. A hand-edited or
+    corrupted slot (here `true`) is truthy but unsendable, so counting it as owed would suppress
+    that page on EVERY pass while nothing was ever delivered: silence forever, the exact failure
+    this file exists to end."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "AUTO_SEAT_PROVIDER", "")    # absence is proven, but nothing can start
+    state = rw.load_state()
+    state["undisclosed_start"] = True
+    rw.save_state(state)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and rw.pages[0].startswith("Dann: no live session")
+    assert "started automatically at" not in rw.pages[0]   # nothing was started
+    # The unusable value is DROPPED rather than kept forever, and the pass says so.
+    assert "undisclosed_start" not in rw.load_state()
+    assert "non-string carried slot" in (tmp_path / "state/pass.log").read_text()
+
+
+def test_51_a_new_start_notice_supersedes_an_older_owed_one(monkeypatch, tmp_path):
+    """Adversary F2: two starts can be owed at once when `hermes` has been down for an hour. The
+    newer notice must win, or the last thing he reads is the DEAD seat's notice."""
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: False)      # pass 1: the notice never got out
+    run_pass(rw)
+    assert NEW in rw.load_state()["undisclosed_start"]
+    # A second verdict, past the successful-start cooldown, starts a DIFFERENT seat. Its id must
+    # not contain NEW (a substring check would otherwise pass for the wrong reason).
+    new2 = "later-seat"
+
+    def run2(argv, timeout=20):
+        if argv == ["paseo", "ls", "--json", "--background"]:
+            return rw.enum_rc, rw.enum_body, ""
+        if is_start(argv):
+            return 0, json.dumps({"agentId": new2}), ""
+        assert argv == ["paseo", "agent", "inspect", "--json", "--", new2]
+        return 0, json.dumps({"Id": new2, "Archived": False, "Status": "running"}), ""
+
+    monkeypatch.setattr(rw, "run_split", run2)
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    run_pass(rw)
+    assert len(rw.pages) == 1 and new2 in rw.pages[0]     # the newer seat, once
+    assert NEW not in rw.pages[0]                          # the dead seat's notice is gone
     assert "undisclosed_start" not in rw.load_state()

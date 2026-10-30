@@ -84,7 +84,8 @@ recovery (its start's confirmation was lost, or its id came from the Paseo listi
 attempt per id on the first pass that diagnoses it live, and pages him if that fails. A page no
 send accepted is carried (`undisclosed_start` for the start notice, `undisclosed_tab` for the tab)
 and retried rather than dropped by one failed `hermes send`; one slot each, so a newer page replaces
-an older one. RW_AUTO_SEAT_NO_OPEN (1/true/yes/on) skips the attempt on a host with no desktop.
+an older one, and a retried one is prefixed `(delayed)` and carries its date so it is not read as
+this minute's news. RW_AUTO_SEAT_NO_OPEN (1/true/yes/on) skips the attempt on a host with no desktop.
 
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
 not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
@@ -1641,18 +1642,28 @@ def _pass(a: argparse.Namespace) -> int:
         # below sends that (no cooldown gate) instead of a "nothing is listening" page a live seat
         # would immediately contradict. Skipping the generic page here is what keeps ONE page per
         # event when the new seat dies again before the notice got out (adversary E1, 2026-10-30).
-        start_owed = bool(state.get("undisclosed_start"))
+        # The SHAPE matters: the retry block sends strings only, so a hand-edited `true` or a list
+        # must not count as owed - that would suppress this page on every pass and page nobody
+        # (adversary F1, 2026-10-30). The retry block drops such a value with a log line.
+        owed = state.get("undisclosed_start")
+        start_owed = isinstance(owed, str) and bool(owed)
         if auto_gone and (started or (should_tell_djbclark("no live session", state, now)
                                      and not start_owed)):
             said = (f"Dann: no live session for {ROLE!r} (gone). The previous seat stopped answering.")
             if started:
                 said += (f" A seat was started automatically at "
-                         f"{time.strftime('%H:%M', time.localtime(now))}: {started}.")
+                         f"{time.strftime('%m-%d %H:%M', time.localtime(now))}: {started}.")
                 if tab_note.get("tab"):
                     said += f" {tab_note['tab']}"
             if to_djbclark(said):
                 djb_page_sent("no live session", state, now)
                 spoke_djb = True
+                if started:
+                    # This page supersedes any earlier start notice still owed: sending a dead
+                    # seat's notice AFTER a live one would leave "a seat was started: <dead id>"
+                    # as the last thing he read (adversary F2, 2026-10-30).
+                    state.pop("undisclosed_start", None)
+                    save_state(state)
             elif started:
                 # The gone page retries itself ONLY while no seat exists (its cooldown starts on a
                 # send, and `not ident` re-composes it). With a seat started, the next pass finds it
@@ -1663,9 +1674,6 @@ def _pass(a: argparse.Namespace) -> int:
                 # because it is an event, not a repeated alarm.
                 state["undisclosed_start"] = said
                 save_state(state)               # same kill argument as the tab carry above
-            elif tab_note.get("tab"):
-                state["undisclosed_tab"] = tab_page(candidate, tab_note["tab"])
-                save_state(state)
 
     # An unverified send consumes the line on purpose (relay's own text says "do not resend"), so the
     # only thing left is telling him it may have been lost. That admission used to be attempted ONCE,
@@ -1683,8 +1691,13 @@ def _pass(a: argparse.Namespace) -> int:
     # A seat was started and he was never told. No cooldown gate: this is a one-shot event, and
     # `djb_page_sent` stamps its own key so a second start inside the window is still suppressed.
     undisclosed_start = state.get("undisclosed_start")
-    if isinstance(undisclosed_start, str) and undisclosed_start:
-        sent = to_djbclark(undisclosed_start)       # the LOCAL result: `spoke_djb` is pass-wide
+    if undisclosed_start is not None and not isinstance(undisclosed_start, str):
+        log("auto-seat start notice: ignoring a non-string carried slot")
+        state.pop("undisclosed_start", None)
+    elif undisclosed_start:
+        # `(delayed)`: this page is a pass or more old, so its "no live session ... (gone)" is about
+        # the moment it was composed, not now (adversary F5, 2026-10-30).
+        sent = to_djbclark(f"(delayed) {undisclosed_start}")   # local result: `spoke_djb` is pass-wide
         if sent:
             djb_page_sent("no live session", state, now)
             state.pop("undisclosed_start", None)
