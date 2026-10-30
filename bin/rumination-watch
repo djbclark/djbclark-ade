@@ -61,6 +61,21 @@ TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
 - **To djbclark, via the `dann` quiet topic** (`inbox-target dann`), **only** when something needs
   HIS decision. Rate-limited by a per-item cooldown, because the point of a quiet channel is quiet.
 
+OPT-IN ABSENT-SEAT START (djbclark's ruling, 2026-10-30, option 3)
+---------------------------------------------------------------
+RW_AUTO_SEAT=1 may start a fresh seat ONLY on a proven `gone` diagnosis, narrowing the "including
+after a hard error" ruling. Off by default until field-tested; RW_AUTO_SEAT_PROVIDER must be set
+explicitly (no model or thinking flags). If relay cannot diagnose a UUID-shaped id, one extra
+`paseo agent inspect --json -- <id>` probe (up to 20 s, no model) must confirm AGENT_NOT_FOUND;
+errors, timeouts, unreadable bodies and unknown shapes never prove absence. See the decision table
+in `auto_seat`. A `refused`/`unknown` seat does not auto-start and still pages the human when no owner
+resolves. A `silent` hung seat is NOT replaced, so the individual can stay dark until the human acts.
+RW_AUTO_SEAT_S (default 3600 s): at most one attempt per role per window, confirmed or not. A failed
+start with no id becomes eligible again only after the window; returned ids are retained for diagnosis.
+Every invocation outcome is logged; only pre-invocation refusals are suppressed once per window.
+The prompt names the absolute Tier 1 file, never step text. The darkness page still goes out and
+names any automatically started id.
+
 Exit codes: 0 nothing to say (the normal case); 10 something to say — and it was PRINTED, whether or
 not the seat took it (a refused pass exits 10 too, with the line carried to the next pass); 2
 usage/error. The exit code is the interface for launchd and for a session that runs it by hand.
@@ -187,7 +202,7 @@ def load_state() -> dict:
     # A list where a mapping belongs used to raise AttributeError mid-pass (the whole watcher down,
     # silently, for as long as the file stayed wrong); a string `pending` was iterated character by
     # character. Neither is reachable except by hand — which is exactly when a watcher must not die.
-    for key in ("last", "told", "stuck", "nudged"):
+    for key in ("last", "told", "stuck", "nudged", "seated"):
         if not isinstance(data.get(key), dict):
             data[key] = {}
     # `pending` entries are `{"key", "text", "queued_at"}` since 2026-10-30 (see `_pass`); before that
@@ -207,6 +222,7 @@ def load_state() -> dict:
     data["told"] = {k: v for k, v in data["told"].items() if _is_num(v)}
     data["stuck"] = {k: v for k, v in data["stuck"].items() if _is_num(v)}
     data["nudged"] = {k: v for k, v in data["nudged"].items() if _is_num(v)}
+    data["seated"] = {k: v for k, v in data["seated"].items() if _is_num(v)}
     return data
 
 
@@ -728,6 +744,7 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
          owning seat keeps current; this is authoritative between the agent and its siblings.
       3. `peer_mail.py resolve --as ROLE --json` -> `live_paseo_ids`, the same record read
          through the peer-comms tool, which prunes ids it can no longer reach.
+      4. A saved auto-seat candidate, as a fallback while the registry catches up.
     """
     seen: set[str] = set()
     for src in ("RW_SESSION", "PASEO_AGENT_ID"):
@@ -757,6 +774,9 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
             if ident[:8] not in seen:
                 seen.add(ident[:8])
                 yield ("peer_mail", ident)
+    if AUTO_SEAT and (candidate := auto_seat_candidate(load_state())) and candidate[:8] not in seen:
+        # Do not depend on the new seat rewriting the peer registry before the next pass.
+        yield ("auto-seat", candidate)
 
 
 def owner_session() -> tuple[str, str]:
@@ -786,19 +806,36 @@ def why_blocked(ident: str) -> tuple[str, str]:
       stays dark until someone answers. Exactly the silence this watcher exists to prevent.
     - `silent` — running with nothing new for 15 min: a hung turn.
 
-    Anything unreadable comes back as ("unknown", reason) and the caller keeps its old behaviour, so
-    a broken `--why` can never turn a healthy pass into a false alarm.
+    With auto-seat enabled, a missing diagnosis for a UUID gets one direct inspect (up to 20 s).
+    Only an explicit AGENT_NOT_FOUND proves absence; a blind read remains `unknown`.
     """
+    uuid = re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", ident)
+
+    def unknown(reason: str) -> tuple[str, str]:
+        if AUTO_SEAT and uuid:
+            rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", ident],
+                                     timeout=20)
+            try:
+                info = json.loads(out or err)
+            except ValueError:
+                info = None
+            error = info.get("error") if isinstance(info, dict) else None
+            if rc in (0, 1) and isinstance(error, dict) and error.get("code") == "AGENT_NOT_FOUND":
+                return "gone", "direct inspect confirmed AGENT_NOT_FOUND"
+        return "unknown", reason
+
     relay = HOME / "src/djbclark-ade/skills/session-finder/relay.py"
     if not relay.is_file():
-        return "unknown", f"no relay.py at {relay}"
+        return unknown(f"no relay.py at {relay}")
     rc, out, err = run_split(["python3", "-I", str(relay), "--why", ident, "--json"], timeout=90)
     try:
         d = json.loads(out)
     except ValueError:
-        return "unknown", f"unreadable --why (rc {rc}): {(err or out)[:160]}"
-    if not isinstance(d, dict) or not d.get("state"):
-        return "unknown", f"no state in --why (rc {rc}): {out[:160]}"
+        return unknown(f"unreadable --why (rc {rc}): {(err or out)[:160]}")
+    if rc not in (0, 1) or not isinstance(d, dict) or not d.get("state") or d.get("state") == "unknown":
+        return unknown(f"no diagnosis in --why (rc {rc}): {out[:160]}")
+    if d["state"] == "gone" and not uuid:
+        return "unknown", "absence not proven for a non-UUID id"
     return str(d["state"]), str(d.get("why") or "")
 
 
@@ -1018,6 +1055,177 @@ KEY_NEXT = "next move"
 NUDGE_ON = os.environ.get("RW_IDLE_NUDGE", "1").strip().lower() not in ("0", "false", "no", "off")
 NUDGE_S = _env_int("RW_IDLE_NUDGE_S", 3 * 3600)
 
+# A mechanism that starts agents is opt-in until it has run in the field.
+AUTO_SEAT = _env_int("RW_AUTO_SEAT", 0, minimum=0)
+AUTO_SEAT_S = _env_int("RW_AUTO_SEAT_S", 3600)
+AUTO_SEAT_PROVIDER = os.environ.get("RW_AUTO_SEAT_PROVIDER", "")
+
+
+def auto_seat_candidate(state: dict) -> str:
+    """The most recent run's id, including an unconfirmed one. This is NOT a cooldown stamp.
+
+    Reuse the existing `told` bookkeeping map (numeric values, sanitized by load_state), with a
+    separate namespace from pages/refusals. Keep it after confirmation so a stale peer registry
+    cannot cause a second seat after cooldown. A failed confirmation is a failed READ of this id,
+    never permission to spawn again; a later probe must prove THIS candidate gone first.
+    """
+    prefix = f"auto-seat candidate:{ROLE}:"
+    candidates = [(float(at), key[len(prefix):]) for key, at in state.get("told", {}).items()
+                  if key.startswith(prefix) and key[len(prefix):] and _is_num(at)]
+    return max(candidates, default=(0, ""))[1]
+
+
+def auto_seat(word: str, state: dict, now: float) -> str:
+    """Start only a PROVEN ABSENT seat; return the confirmed id, otherwise ''.
+
+    Diagnosis       Start?  Reason
+    gone            yes     Inspect-confirmed absent (UUID id, not a blind read).
+    error           no      Inspect could not answer: broken READ, daemon/socket may be down.
+    refused         no      Finished/archived session or non-idle/running Paseo state.
+    unknown         no      No diagnosis; absence not proven.
+    silent/working  no      A seat EXISTS; a second one would duplicate the individual.
+    card:*          NEVER   His to answer; spawning leaves the card AND adds another seat.
+    idle            no      Healthy; the declared-next-step nudge covers it.
+
+    `refused`/`unknown` never auto-start; when no owner resolves, they still page the human.
+
+    We are narrowing djbclark's 2026-10-30 "including after a hard error" ruling for one case:
+    `error` means a broken READ, not a dead seat, and `paseo run` will fail in that same state.
+    He can overrule it. `silent` also refuses because the hung seat still exists.
+    """
+    if not AUTO_SEAT:
+        return ""
+
+    def refuse(reason: str, message: str = "") -> str:
+        # Same shape as _deploy_say, independent of the successful-start cooldown. ONE refusal
+        # per role/window even if the reason changes. Only pre-invocation refusals use this.
+        key = f"auto-seat refusal:{ROLE}"
+        told = state.setdefault("told", {})
+        stamp = told.get(key)
+        if not (_is_num(stamp) and 0 <= now - float(stamp) < AUTO_SEAT_S):
+            told[key] = now
+            log(message or f"auto-seat: not started ({reason})")
+        return ""
+
+    told = state.setdefault("told", {})
+    unresolved_key = f"auto-seat unresolved:{ROLE}"
+    if unresolved_key in told:
+        # Observed 2026-10-30: `paseo ls --json --background` returned rc 0 and a plain
+        # JSON array of non-archived agents with id, shortId, name, status, cwd (lowercase).
+        # No --all (archived agents) or --cwd (unsupported). Listing may ONLY adopt/clear;
+        # it never proves absence for a start, even when the attempt window has expired.
+        rc, out, err = run_split(["paseo", "ls", "--json", "--background"], timeout=20)
+        reason = f"listing rc={rc}"
+        rows = None
+        if rc == 0:
+            try:
+                rows = json.loads(out)
+                reason = "listing is not an agent array"
+            except ValueError:
+                reason = "unreadable listing JSON"
+        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+            matches = [row for row in rows if row.get("name") == f"{ROLE} (auto-seat)"]
+            reason = f"{len(matches)} matching agents"
+            recovered = matches[0].get("id") if len(matches) == 1 else ""
+            if len(matches) <= 1 and (not matches or isinstance(recovered, str) and recovered.strip()):
+                if matches:
+                    told[f"auto-seat candidate:{ROLE}:{recovered}"] = now
+                del told[unresolved_key]
+                save_state(state)
+                log(f"auto-seat: recovered lost id {recovered}" if matches else
+                    "auto-seat: unresolved cleared (no live auto-seat agent)")
+                return ""  # Diagnose a recovered candidate, or prove absence, on the NEXT pass.
+            if len(matches) == 1:
+                reason = "matching agent has no usable id"
+        return refuse("unresolved start", f"auto-seat: unresolved start not reconciled ({reason})")
+
+    if word != "gone":
+        return refuse(f"{word or 'unreadable'}: absence not proven")
+    seated = state.setdefault("seated", {})
+    last = seated.get(ROLE)
+    # Future stamps are IGNORED: a hand edit or clock correction must not silence starts forever.
+    if _is_num(last) and 0 <= now - float(last) < AUTO_SEAT_S:
+        return refuse("cooldown")
+    attempt_key = f"auto-seat attempt:{ROLE}"
+    told = state.setdefault("told", {})
+    last_attempt = told.get(attempt_key)
+    if _is_num(last_attempt) and 0 <= now - float(last_attempt) < AUTO_SEAT_S:
+        return refuse("attempt window")
+    if not AUTO_SEAT_PROVIDER.strip():
+        return refuse("RW_AUTO_SEAT_PROVIDER unset")
+    pointer = resolve_pointer()
+    pointer = pointer.resolve() if pointer is not None else None
+    exists = pointer is not None and pointer.is_file()
+    if not exists:
+        log("auto-seat: no pointer")
+    prompt = (
+        f"Resume the existing individual as role {ROLE} in repo {REPO.resolve()}.\n"
+        + (f"Tier 1 pointer file: {pointer}\n" if exists else
+           f"No Tier 1 pointer file exists ({pointer or 'none'}); resume from the repo's state.\n")
+        + "When available, read that file's ## Current State and - Next steps: and continue at the first unstarted step.\n"
+        "Do not page djbclark; if the work needs his decision, put it in the report.\n"
+        f"This seat was started automatically after the previous one disappeared at "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(now))} (trigger: {word}); "
+        "it stopped answering.\n"
+    )
+    # addRunOptions in the installed Paseo bundle supplies provider/no-wait/cwd/title;
+    # addJsonAndDaemonHostOptions supplies --json, agentRunSchema.idField supplies agentId.
+    # No model/thinking/default-provider: the provider is operator configuration, forwarded as-is.
+    argv = ["paseo", "run", "--provider", AUTO_SEAT_PROVIDER, "--no-wait", "--json",
+            "--cwd", str(REPO.resolve()), "--title", f"{ROLE} (auto-seat)", "--", prompt]
+    deadline = time.monotonic() + 120
+    # An invoked start can have created an agent even when its response is lost. Persist the
+    # attempt before invoking it; no outcome may permit another invocation inside this window.
+    told[attempt_key] = now
+    told[unresolved_key] = now
+    save_state(state)
+    rc, out, err = run_split(argv, timeout=100)
+    try:
+        result = json.loads(out)
+    except ValueError:
+        result = None
+    new_id = result.get("agentId") if isinstance(result, dict) else None
+    new_id = new_id.strip() if isinstance(new_id, str) else ""
+    outcome = ("failed" if rc != 0 else "unreadable JSON" if result is None else
+               "no agentId" if not new_id else "id returned")
+    log(f"auto-seat: attempted paseo run rc={rc}; stderr={err[:160]!r}; "
+        f"id={new_id or 'none'}; {outcome}")
+    if not new_id:
+        return ""
+    # The daemon may have created a seat even if the following inspect fails. Retain its id BEFORE
+    # that read, without stamping seated; the next pass must diagnose it instead of duplicating it.
+    prefix = f"auto-seat candidate:{ROLE}:"
+    for key in list(told):
+        if key.startswith(prefix):
+            del told[key]
+    told[prefix + new_id] = now
+    save_state(state)
+    if rc != 0:
+        return ""
+    remaining = min(20, deadline - time.monotonic())
+    if remaining <= 0:
+        log(f"auto-seat: confirmation failed id={new_id}; rc=not-invoked; deadline exhausted")
+        return ""
+    rc, out, err = run_split(["paseo", "agent", "inspect", "--json", "--", new_id],
+                           timeout=remaining)
+    try:
+        info = json.loads(out) if rc == 0 else None
+        # Inspect serializes structured agent data; CLI versions may wrap it in a list.
+        info = info[0] if isinstance(info, list) and info else info
+    except ValueError:
+        info = None
+    if not (isinstance(info, dict) and info.get("Id") == new_id
+            and info.get("Archived") is False
+            and info.get("Status") in ("idle", "running", "initializing")):
+        log(f"auto-seat: confirmation failed id={new_id}; rc={rc}; stderr={err[:160]!r}; "
+            "new agent could not be confirmed addressable")
+        return ""
+    seated[ROLE] = now                         # ONLY after inspect confirmed it, like djb_page_sent
+    del told[unresolved_key]
+    save_state(state)                          # persist before a potentially slow paging operation
+    log(f"auto-seat: started {new_id} (was {word}) — {pointer if exists else 'none'}")
+    return new_id
+
 # A page size for `gh search prs`, not a ceiling on reality: at the cap the count is a lower bound.
 PR_LIMIT = _env_int("RW_PR_LIMIT", 100)
 PR_CAP_MARK = f"(at least {PR_LIMIT}: the listing is capped)"
@@ -1234,8 +1442,8 @@ def _pass(a: argparse.Namespace) -> int:
     # Each item is (key, text). The key is OPT-IN and marks the lines whose condition this pass
     # recomputes from scratch every time, so a queued copy can be checked against it at retry time
     # (see the carry block below). Event items are deliberately KEYLESS: new mail, new jobs and the
-    # new-PR announcement are diffs against `state["last"]`, which has already been advanced; once the
-    # mail is consumed the pass cannot recompute "this was unread", so keying them would silently drop
+    # new-PR announcement are diffs against `state["last"]`, advanced with the pending queue below;
+    # after that advance the pass cannot recompute "this was unread", so keying them would silently drop
     # a real announcement the seat never heard. They keep the plain at-least-once retry.
     items: list[tuple[str | None, str]] = []
     if new_mail:
@@ -1272,9 +1480,49 @@ def _pass(a: argparse.Namespace) -> int:
         print(json.dumps({"changed": changed, "lines": lines, "survey": cur}, indent=1))
         return 10 if lines else 0
 
-    state["last"] = cur
     state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     spoke_session = spoke_djb = False
+
+    # Only the opt-in path probes a candidate that owner_session rejected as non-live. An empty
+    # fleet alone is not proof: ask relay's inspect-backed diagnosis, and never spawn on a blind read.
+    auto_gone = False
+    if AUTO_SEAT:
+        candidate = auto_seat_candidate(state)
+        target = candidate or ident
+        if not target and not _LIVE_ERR:
+            target = next((candidate for _, candidate in owner_candidates()), "")
+        # A registered successor may have replaced our saved candidate. Prove the resolved owner
+        # gone BEFORE falling back to the candidate; never spawn over a different existing owner.
+        word = seat_word() if ident else "unknown"
+        if candidate and candidate != ident and (not ident or word == "gone"):
+            target = candidate
+            word = why_blocked(candidate)[0]
+            if word in ("idle", "working", "silent") or word.startswith("card:"):
+                ident = candidate
+                probe[:] = [(word, "auto-seat candidate")]
+        elif candidate and candidate != ident and (word in ("idle", "working", "silent")
+                                                   or word.startswith("card:")):
+            # A live successor is authoritative. Retire the stale candidate so it cannot shadow
+            # future registry changes; this is bookkeeping, never a successful-start stamp.
+            prefix = f"auto-seat candidate:{ROLE}:"
+            state["told"] = {k: v for k, v in state.get("told", {}).items()
+                             if not k.startswith(prefix)}
+        elif not ident and target:
+            word = why_blocked(target)[0]
+        # A gone candidate cannot establish that no registered successor exists when fleet reads
+        # are broken. Keep live candidate diagnostics above, but refuse spawning while blind.
+        if _LIVE_ERR and word == "gone":
+            word = "unknown"
+        started = auto_seat(word, state, now)
+        auto_gone = word == "gone"
+        if auto_gone and (started or should_tell_djbclark("no live session", state, now)):
+            said = (f"Dann: no live session for {ROLE!r} (gone). The previous seat stopped answering.")
+            if started:
+                said += (f" A seat was started automatically at "
+                         f"{time.strftime('%H:%M', time.localtime(now))}: {started}.")
+            if to_djbclark(said):
+                djb_page_sent("no live session", state, now)
+                spoke_djb = True
 
     # An unverified send consumes the line on purpose (relay's own text says "do not resend"), so the
     # only thing left is telling him it may have been lost. That admission used to be attempted ONCE,
@@ -1294,7 +1542,7 @@ def _pass(a: argparse.Namespace) -> int:
     # even on a quiet pass — because if the seat died, the survey it reads stops changing too, and
     # the pass then stays quiet forever. That is exactly how the entity went dark for hours at a
     # time with a watcher running the whole while.
-    if not ident and should_tell_djbclark("no live session", state, now):
+    if not ident and not auto_gone and should_tell_djbclark("no live session", state, now):
         if _LIVE_ERR:
             said = (
                 f"Dann: the rumination watcher cannot READ the fleet ({_LIVE_ERR}), so it stopped "
@@ -1314,8 +1562,8 @@ def _pass(a: argparse.Namespace) -> int:
             spoke_djb = True
         log(f"no live session: {why} (told djbclark={spoke_djb})")
 
-    # A line aimed at a seat that refused it has NOT been delivered, and `state["last"] = cur` above
-    # has already consumed the change, so without this the announcement is lost for good. Mail
+    # A line aimed at a seat that refused it has NOT been delivered. Advance `state["last"]` only
+    # alongside its pending queue below, so recovery saves cannot consume an unqueued change. Mail
     # arrives BECAUSE the seat is busy mid-turn, so this is the common collision, not the edge case.
     # Kept at the front, retried next pass, cleared only by a real send.
     #
@@ -1356,6 +1604,7 @@ def _pass(a: argparse.Namespace) -> int:
     queue = front + fresh
     lines = [e["text"] for e in queue]
     # A quiet pass (nothing survived, nothing new) must also persist the cleared queue.
+    state["last"] = cur
     state["pending"] = queue[-PENDING_MAX:]
     known_ages = [x for x in retry_ages if x is not None]
     retry_note = ""
@@ -1462,6 +1711,10 @@ def cmd_status(a: argparse.Namespace) -> int:
     print(f"code:  {running_sha()} on {branch if rc == 0 and branch else '?'} in {SELF_REPO}"
           + (f" (last deploy: {word})" if word else ""))
     print(f"last pass: {state.get('last_run') or 'never'}")
+    seated = state.get("seated", {})
+    latest = max((float(v) for v in seated.values() if 0 <= float(v) <= time.time()), default=None)
+    last = time.strftime('%Y-%m-%d %H:%M', time.localtime(latest)) if latest is not None else 'never'
+    print("auto-seat: " + (f"on ({len(seated)} role(s) started, last {last})" if AUTO_SEAT else "off"))
     return 0
 
 
@@ -1527,7 +1780,15 @@ def main(argv: list[str] | None = None) -> int:
             "--dry-run never touches the checkout, and `status` prints the last deploy. "
             "An idle seat whose Tier 1 log declares next steps gets one `next move: N declared "
             "step(s) still open` line per RW_IDLE_NUDGE_S (default 10800 s); RW_IDLE_NUDGE=0 "
-            "turns it off."
+            "turns it off. RW_AUTO_SEAT=1 opts into absent-seat starts (OFF by default until "
+            "field-tested), authorised by djbclark's 2026-10-30 option-3 ruling. Only a proven "
+            "gone diagnosis starts a seat; error/unreadable reads, silent/working/idle seats and "
+            "card:* NEVER do. RW_AUTO_SEAT_PROVIDER must be set; no model/thinking flags are passed. "
+            "RW_AUTO_SEAT_S (default 3600 s) allows at most one attempt per role per window, confirmed "
+            "or not; a start whose id was lost refuses further starts until an authoritative Paseo "
+            "listing reconciles it. Nothing retries on the next pass; refusal logs are limited to "
+            "one per cooldown. The darkness page still "
+            "goes out and names a newly started seat."
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)
