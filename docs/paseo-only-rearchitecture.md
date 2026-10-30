@@ -94,12 +94,15 @@ this plan wins where they disagree about the future, they win about today. Sourc
       never archived anything). djbclark set `archiveChildren:false` and then disabled the plugin outright the
       same day, because its built-in defaults are archive-and-delete (`archiveChildren`, `deleteChildren` and
       `deleteMain` all true), so a settings reset, a reinstall or a fresh daemon would start there. It stays
-      disabled until D2, which re-enables it only with those three settings written explicitly and names the
-      exclusion mechanism: either G1 adds each worker to the janitor's native `protectedIds` through a
-      supported surface, or child archiving stays off for good and G1 archives a worker after its "branch
-      pushed and report read" mark. The D0.2 drain script and the B9 watchdog assert, on every daemon where
-      the janitor is installed, that it is disabled or that all three settings are false, and alert
-      otherwise. G1's "not archived until pushed" is a convention: the operator, the UI and `paseo-telegram`
+      disabled until D2, which chooses the exclusion mechanism and writes all three settings explicitly:
+      either G1 adds each worker to the janitor's native `protectedIds` through a supported surface
+      (`archiveChildren:true`), or child archiving stays off for good (`archiveChildren:false`) and G1 archives
+      a worker after its "branch pushed and report read" mark; `deleteChildren` and `deleteMain` stay false
+      permanently either way. Until D2, the D0.2 drain script and the B9 watchdog assert, on the Mac and on
+      vps-primary (`paseo --host vps-primary plugin ls`, or "not installed there"), that the janitor is
+      disabled or all three settings are false, and alert otherwise; D2 replaces that assertion with the
+      chosen mechanism's own (always including `deleteChildren:false` and `deleteMain:false`). G1's "not
+      archived until pushed" is a convention: the operator, the UI and `paseo-telegram`
       can still archive, which is why point 2 exists.
    4. D1.3 proves the teardown and the rescue; D2's gate proves G2's refusal.
 5. **Native first, plugin only for a hook.** A script that calls the `paseo` CLI, SDK or MCP is native (A3a)
@@ -220,9 +223,12 @@ ops-promotion pilot passes.
    7. The B9 watchdog: it fires on a forced hang **of the isolated daemon**, and does **not** restart a
       healthy daemon during one forced load incident (false-positive soak).
    7a. Tabs: an agent started with `paseo run` gets no tab in the app until something opens one (found by
-      3bdcc475, 2026-10-30; `self-slash` fixed for successors in PR 159 by opening before archiving). Record
-      which creation paths open a tab (`paseo run`, `create_agent`, schedules, Telegram). If any does not,
-      every ADE launcher opens one (`paseo agent open`), so no agent the operator must see is invisible.
+      agent 3bdcc475, 2026-10-30; `self-slash` fixed for successors in PR 159 by opening before archiving).
+      Record which creation paths open a tab (`paseo run`, `create_agent`, schedules, Telegram). Where one does
+      not, ADE launchers call `paseo agent open`, which is best effort (it needs a running Desktop and cannot
+      confirm the tab); `paseo ls -g` (D4's gate) stays the visibility check.
+   7b. Create origin: does `agent.create.before` tell a plugin-SDK create from an MCP or CLI create? Record the
+      answer; G2.8 depends on it.
    8. vps-primary, before the pilot (F3): the Paseo daemon password set and the listener bound to the tailnet
       interface only, with a Tailscale ACL that admits the Mac; pilot agents run as a dedicated unprivileged
       user with their own `PASEO_HOME` and no access to the host's deploy or service secrets; provider and
@@ -256,7 +262,10 @@ ops-promotion pilot passes.
    (also one labelled after create) and a job submitted without `permit: true`, and escalates compound
    commands (`;`, `&&`, `|`, `$(`, a newline, `sh -c`) and command-taking options (`git -c`, `find -exec`,
    `xargs`, `env VAR=… cmd`); a `jobs.submit` naming an existing agent id is refused; a non-orchestrator's
-   tool catalog lacks `jobs.submit`; a non-owner Telegram
+   tool catalog lacks `jobs.submit`, including an agent that a worker created with the orchestrator profile;
+   a CLI or `create_agent` create carrying `herald.role` is refused while herald's own helper passes (G2.8);
+   the janitor mechanism is chosen, its settings are written, and an unmarked worker past
+   `archiveAfterHours` survives (B4.3); a non-owner Telegram
    message is refused; a forged agent id in an RPC input is refused; the tool catalogs of a UI-created and a
    Telegram-created agent lack the B3 tools, including tools any running plugin attaches in
    `agent.open.before`; a `worktree` create in a repo without a committed `paseo.json` teardown is refused
@@ -278,14 +287,17 @@ ops-promotion pilot passes.
    slices with deadline, report file and one forced quota stop; a successor survives its parent's archive with
    the chain pointer intact.
 6. **Watchers and notifiers.** `fleet-watch`, `load-watch` delivery, quota-guard steers and the watch roles
-   on `paseo send`; Paseo schedules for judgment jobs only (F2). Then, after the drain gate and a search
-   showing no caller of `relay.py` or `fleet.py` left outside `docs/history/` (the watchers above,
-   `fleet-watch upstream --relay-to`, `paseowatch`, `cfenginewatch`, `tell-chief-of-staff`, the quota guard),
-   `session-finder` is disabled. The search covers all of `~/ops`, djbclark-ade, `~/.local/bin`,
-   `~/Library/LaunchAgents`, the provider hook configs (`~/.claude/settings.json`, `~/.codex`, `~/.omp`) and
-   vps-primary's NixOS config, matching `session-finder/(relay|fleet)\.py` and `\brelay\.py\b`; a hit
-   anywhere, a mention in a comment or doc included, blocks the gate until it is edited. **Gate:** a load
-   incident reaches its watcher as a Paseo prompt; that search is empty.
+   on `paseo send`; Paseo schedules for judgment jobs only (F2). Then, after the drain gate and a search for
+   callers of `relay.py` or `fleet.py` (the watchers above, `fleet-watch upstream --relay-to`, `paseowatch`,
+   `cfenginewatch`, `tell-chief-of-staff`, the quota guard), `session-finder` is disabled. The search covers
+   all of `~/ops`, djbclark-ade, `~/.local/bin`, `~/Library/LaunchAgents`, the provider hook configs
+   (`~/.claude/settings.json`, `~/.codex`, `~/.omp`) and vps-primary's NixOS config, matching
+   `session-finder/(relay|fleet)\.py` and `\brelay\.py\b`. It skips what D7 handles: `docs/history/`,
+   `docs/handoffs/`, `site-private/memory/handoffs/`, `CHANGELOG.md`, `graft/`, `skills/session-finder/` and its
+   tests, and this plan. A hit in code, config, a launchd plist, a hook or the NixOS config **blocks** the
+   gate. A hit in a live instruction file (AGENTS.md, `home-agents.mdc`, memory notes, other skills, docs)
+   goes onto a triage list that D7's rewrite must empty. **Gate:** a load incident reaches its watcher as a
+   Paseo prompt; no blocking hit remains; the triage list is committed.
 7. **Deletion and docs.** Delete what earlier phases disabled; README, both AGENTS.md, ops AGENTS.md, memory
    pointers, skills index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/`. The
    end-state check is a **new** CI step in djbclark-ade (the `context-policy` job runs only pytest today)
@@ -373,8 +385,10 @@ records carrying its own server id.
 **Authorization.** A plugin RPC handler gets no authenticated caller (its input is self-asserted), so every
 agent-facing operation (`jobs.submit`, `jobs.get`, `jobs.finish`, `jobs.extend`, `ack.register`) is a **plugin
 agent tool** attached in `agent.open.before` and authorized by the daemon-supplied `context.agent.id`.
-`jobs.submit` (and with it `permit: true`), `jobs.get` and `jobs.extend` are attached only to the named
-orchestrator profiles (B3's exception); a worker gets `jobs.finish` only. RPCs serve only the operator's UI,
+`jobs.submit` (and with it `permit: true`), `jobs.get` and `jobs.extend` are attached only to orchestrators,
+which are identified from an operator-owned list (`config/orchestrators`: agent ids, or profile ids checked
+against who created the agent), never from a field the creator sets; a worker gets `jobs.finish` and
+`ack.register`. Every G1-recorded agent and every orchestrator gets `ack.register`. RPCs serve only the operator's UI,
 which records the owner as `operator`. This stops mistakes and impersonation over the tool surface, **not** a
 same-uid agent with a shell that edits the state files directly; like B3, it is not a boundary (adversary r1
 C9, r2 C3 and C8, r3 N2, r4 R4).
@@ -409,12 +423,19 @@ C9, r2 C3 and C8, r3 N2, r4 R4).
       timeline and the ledger. (Changes made in `agent.create.before` persist after the plugin is removed.)
    4. `agent.open.before` can change only env, tools and MCP servers, so on open the gate can only refuse.
    5. **Named gaps**, taken upstream: `agent.turn.before` is notify-only, so UI sends and
-      `usage-auto-resume`'s resume prompts are not gated; and a disabled, crashed or failed-to-reload plugin
-      loses its hook registrations, so creates then pass ungated. The B9 watchdog alerts whenever
-      `paseo plugin ls` does not show `ade-gate` running.
+      `usage-auto-resume`'s resume prompts are not gated; a disabled, crashed or failed-to-reload plugin
+      loses its hook registrations, so creates then pass ungated (the B9 watchdog alerts whenever
+      `paseo plugin ls` does not show `ade-gate` running); and G2 has no update hook, so a label added later
+      through `update_agent` is not refused (the B9 watchdog alerts on any `herald.role=summarizer` agent
+      older than herald's timeout).
    6. On `workspace.create.before` it refuses a `worktree` workspace in a repo without a committed
       `paseo.json` teardown (B4).
    7. It reads no secret; anything that needs one runs under `sudo-secretspec run` (astra C3, Fable 3.4).
+   8. It refuses a create carrying the label `herald.role` unless it comes from herald, because herald
+   hard-deletes every agent with that label (C1). Whether `agent.create.before` can tell a plugin-SDK create
+   from an MCP or CLI create is probe D1.7b. If it cannot, G2 does not refuse (that would break herald's own
+   helpers); the G2.5 watchdog alert is then the only control, and an issue asks herald upstream to select
+   its helpers by its own record of ids rather than by label (standing order 8; adversary r5 T2).
 3. **`ade-ack` (plugin)**: records sends (the `ack.register` agent tool, callable only by the sender). The
    `agent.turn.before` payload carries only the agent and turn ids and hook notifications are best effort with
    no replay, so on each turn start it fetches that turn's timeline through the SDK and marks *delivered*
@@ -440,7 +461,8 @@ C9, r2 C3 and C8, r3 N2, r4 R4).
       decision and the policy revision (the allow-list file's git blob id).
    4. It is not a security boundary (B3) (astra C5, Fable 3.6, adversary r1 B1).
 5. **Adopted**: `usage-auto-resume` (running; covers Codex, Claude, Antigravity; extend it, or add a small
-   turn-end hook (0.14 name per `plugins_hooks.md`), for omp, opencode, cline and grok), `session-janitor` (bounded by B4),
+   turn-end hook (0.14 name per `plugins_hooks.md`), for omp, opencode, cline and grok), `session-janitor`
+   (disabled until D2, B4.3),
    `fresh-worktrees`, `Daaaaave/paseo-telegram` (F1). Before adding any plugin, check overlap with these
    (astra B3).
 6. **Not plugins**: the B9 watchdog and dead-man check (launchd/systemd), the report footer (a skill),
