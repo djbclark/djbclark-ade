@@ -311,7 +311,7 @@ agent what changed and what is new. Entries end with the pull request number.
   head and its thread resolved, and Codex's review of the new head found nothing. So `merge_ready` was unreachable
   for exactly the pull requests that had had a finding and then fixed it (PR 156: the security P2 fixed on
   `a5c44a11`, four historical security comments still in the pull request, clean security review on the fixed
-  head, blocked forever). The contradiction is now THIS head's findings (`review["for_head"]`) plus any open
+  head, blocked forever). The contradiction is now THIS head's findings (`review["for_head_all"]`) plus any open
   thread of that kind, so a finding on an earlier head cannot block the fix that produced this one, while a
   finding on this head whose thread someone resolved WITHOUT a fix still does — a resolution is not a fix. The
   evidence comes from `for_head_all`, unwindowed, so `--since` (which narrows the summary's counts) cannot wave a
