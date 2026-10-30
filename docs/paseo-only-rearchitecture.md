@@ -9,8 +9,8 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
 ## A. The ruling (djbclark, 2026-10-29, verbatim intent)
 
 1. **Paseo only.** No herdr, no tuios, no other harness (Orca, Superset/Paradev, TUICommander, raw tmux
-   panes, Hermes-as-harness). Every agent the operator talks to is a Paseo agent. Amended by A8: Herdr, and
-   possibly a modified tuios, stay as attach clients to running Paseo agents, never as harnesses.
+   panes, Hermes-as-harness). Every agent the operator talks to is a Paseo agent. Amended by A8: two
+   edge-case Herdr bridges and possibly a modified tuios stay, never as harnesses.
 2. **Retire `relay.py`** and every non-Paseo channel; inter-agent communication moves to Paseo's native
    framework (`send_agent_prompt`, `create_agent` with `notifyOnFinish`, `list_agents`,
    `respond_to_permission`, heartbeats, schedules, `PASEO_PARENT_ID` lineage, the parent-wake plugin).
@@ -19,7 +19,7 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
 4. **End state:** no mention of any harness other than Paseo anywhere in djbclark-ade, `~/AGENTS.md`
    (`site-djbclark/cursor/home-agents.mdc`), the ops `AGENTS.md` files, skills, docs or memory pointers,
    except the history that is not normally read (the `docs/history/` directory, F5, to be written from the
-   retired material), the attach-client material of A8, and, during the migration, this plan.
+   retired material), the Herdr bridges and attach-client material of A8, and, during the migration, this plan.
 5. **Basis:** the research in `Open-Source AI Agent Harnesses Compared.pdf` (Paseo Desktop upload
    `upload_d70305b6-6865-461c-83df-aab4fb305afb`, 2026-10-29): Paseo scores 92.2/100 on non-blocking
    inter-TUI communication once ClinePass and OpenCode Go support without code is a hard requirement
@@ -33,11 +33,16 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
    picklist or card.
 7. **Both Fable and codex astra (GPT-6) take part in the re-architecting** (djbclark, 2026-10-29); this
    overrides the routing-policy line that reserves them for `frontier` consults.
-8. **Attach clients stay** (djbclark, 2026-10-30, relayed by e484ad02 of chain `standalone-aff7`): he still
-   wants Herdr to attach to running Paseo agents, and a modified tuios may do the same. Herdr, and tuios if
-   it is modified for this, are **attach clients**: they show and drive an agent that Paseo hosts. They do
-   not host, launch, name, sleep or message agents, and no tool reaches an agent through them. Not yet ruled:
-   the `paseo-herdr` plugin direction (Paseo reaching Herdr-hosted terminals), section E4.
+8. **Herdr bridges and attach clients stay, for edge cases** (djbclark, 2026-10-30): two separate projects,
+   each built in its own herdr tab, and both allowed to exist:
+   1. **`herdr4paseo`** (tab `herdr4paseo-t`): Herdr attaches to running Paseo agents. Herdr is an **attach
+      client**: it shows and drives an agent that Paseo hosts. A modified tuios may do the same.
+   2. **`paseo4herdr`** (tab `paseo4herdr-t`; formerly the `paseo-herdr` plugin): Paseo reaches terminals
+      that Herdr hosts.
+
+   **These two are the only Herdr integration.** Herdr agents do not talk to Paseo agents: no messaging,
+   relaying, launching, naming, sleeping or fleet tracking through Herdr, and no djbclark-ade tool depends on
+   either bridge. They are useful in a few edge cases, nothing more.
 
 ## B. Principles for the new architecture
 
@@ -55,8 +60,8 @@ promotes it to the architecture of record. Until then the facts in `README.md`, 
    living in its own repo or under `paseo-plugins/` here, never a sidecar script that talks to a TUI.
 6. Routing, quota and cost policy stay (they are provider policy, not harness policy) but are expressed
    as Paseo agent profiles (`list_profiles`) plus `aiuse`.
-7. Attach clients (A8) attach to an agent Paseo already hosts. Nothing in the toolchain depends on an attach
-   client being open, and no tool reads or types into one.
+7. The A8 bridges are edge-case tools. Nothing in the toolchain depends on either being installed or open, and
+   no tool reads, types into, or messages an agent through Herdr or tuios.
 
 ## C. Inventory and disposition (first pass; counts are `rg -li` over the repo on 2026-10-29,
 excluding `graft/` and `docs/handoffs/`)
@@ -65,8 +70,9 @@ excluding `graft/` and `docs/handoffs/`)
 |---|---|---|---|
 | `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | RETIRE | `send_agent_prompt` (steer/interrupt), `list_agents`, `PASEO_PARENT_ID`; acks become `notifyOnFinish` events |
 | herdr as a harness (`bin/herdr-*`, `docs/herdr-*.md`, `skills/herdr*`, pane/tab naming `-t/-p`, panes hosting agents, pane typing) | 139 files | RETIRE | Paseo workspaces/tabs; naming `-pw` only |
-| herdr as an attach client to running Paseo agents (A8) | — (to build) | KEEP, as an attach client only | one doc and one skill: how to attach Herdr to a running Paseo agent |
-| tuios as an attach client (A8), possibly modified | — | DECIDE: only if tuios is modified to attach to Paseo agents | same doc and skill as herdr |
+| `herdr4paseo`: Herdr as an attach client to running Paseo agents (A8.1) | own project, tab `herdr4paseo-t` | KEEP, edge case | one doc and one skill: how to attach Herdr to a running Paseo agent |
+| `paseo4herdr`: Paseo reaching Herdr-hosted terminals (A8.2), formerly `paseo-herdr` | own project, tab `paseo4herdr-t` | KEEP, edge case | the same doc and skill |
+| tuios as an attach client (A8.1), possibly modified | — | DECIDE: only if tuios is modified to attach to Paseo agents | the same doc and skill |
 | Orca (`docs/orca-integration.md`, `skills/orca-cli`, `skills/reorg-orca`, worker-start) | 103 files | RETIRE | Paseo workspaces + subagents |
 | Superset/Paradev skills (`skills/superset-*`) | 10 files | RETIRE (evaluation concluded, 2026-10-29) | none |
 | `acp-run`, `acp-dispatch`, `acp-dispatch-wait`, dispatch records, launchd runner scripts, reap sweep | 138 + 109 files | REPLACE | `create_agent` (worktree workspace, `notifyOnFinish`), schedules for unattended runs; keep only what Paseo cannot do (decide in consult: timeouts/wrap-up turn, report files, resume-after-quota) |
@@ -104,7 +110,7 @@ excluding `graft/` and `docs/handoffs/`)
 5. **Docs and instruction files**: README, AGENTS.md (both), ops AGENTS.md, memory pointers, skills
    index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/` from the
    retired material; `rg -i 'herdr|orca|tmux|superset|tuicommander|relay\.py|acp-run|acp-dispatch'`
-   outside that directory returns nothing, except `herdr` and `tuios` in the attach-client doc and skill (A8)
+   outside that directory returns nothing, except `herdr` and `tuios` in the one A8 bridges doc and skill
    (CI check, `context-policy` job).
 6. **Plugins**: whatever D0 decided we must write (candidates: dispatch-with-timeout-and-report,
    quota-aware launch gate, Telegram notifier if Paseo's push is insufficient), each its own repo or
@@ -118,21 +124,29 @@ excluding `graft/` and `docs/handoffs/`)
 2. D3 Nimbalyst Wiki install/test, assigned to the lead by djbclark via 0b70f359 (2026-10-29): parked,
    to run as its own Paseo subagent in a worktree workspace after phase 1.
 3. `docs/queue.md` entries unchanged.
-4. The `paseo-herdr` Paseo plugin (fork https://github.com/djbclark/paseo-herdr, branch `seam-fixes` at
-   9e3b393, owned by e484ad02 of chain `standalone-aff7`) lets Paseo reach Herdr-hosted terminals. That is the
-   reverse of A8's attach direction, and djbclark has not ruled on it; its owner paused new adapter slices and
-   upstream posts on 2026-10-30 until he does. This plan writes nothing in `~/src/paseo-herdr`.
+4. The former `paseo-herdr` plugin is now `paseo4herdr` (A8.2), worked on in herdr tab `paseo4herdr-t`;
+   `herdr4paseo` (A8.1) is worked on in tab `herdr4paseo-t`. djbclark wants both (2026-10-30). This plan
+   writes in neither project; it only bounds them (A8, B7).
 
 ## F. Open questions for djbclark (successor asks with numbered options, one per card)
 
 Answers so far (djbclark, 2026-10-30, after the codex astra consult; the Fable consult is pending):
 
-1. Hermes: keep `hermes-ping` as the out-of-band alert, with Paseo mobile for agent events; a Telegram Paseo
-   plugin is possible. OPEN: djbclark asked for a web search of Paseo-native practice first, then a discussion.
-2. Unattended runs: probably Paseo schedules for agent jobs and launchd for non-model monitors. OPEN: same
-   search, plus a launchd-versus-Paseo-schedules pros and cons discussion.
-3. Remote Linux workers: probably a second daemon piloted now on one isolated task, on Hyades. OPEN: which
-   Hyades placement. Not on pastebin.xvm.mit.edu (too little memory).
+1. **DECIDED** (2026-10-30, after research): Paseo native push for agent events (finished, error, permission,
+   question). A launchd watchdog outside Paseo probes `/api/health` and times a real RPC, and sends `hermes-ping`
+   on a sustained failure, unexpected exit, failed recovery and recovery. A dead-man check on the second
+   daemon's host covers the Mac asleep or offline. Also install the reviewed `Daaaaave/paseo-telegram` plugin
+   (0.2.3) to answer cards from Telegram, after a 0.14 compatibility test; it covers no daemon outage.
+2. **DECIDED** (2026-10-30): split by job kind. Paseo schedules only for runs that need judgment
+   (`skillopt-night`, triage, reports); launchd (systemd on Linux) for monitors, collectors, record reaping and
+   the daemon watchdog, which must not depend on the daemon. Schedules that keep worktrees need archive-on-finish
+   turned off in the app first.
+3. **DECIDED** (2026-10-30): pilot a second Paseo daemon now on Hyades, in a new `djbclark-paseo` microVM, on
+   one isolated task; it also hosts the F1 dead-man check. Not on pastebin.xvm.mit.edu (too little memory). The
+   slot comes from folding `djbclark-kev` and `djbclark-laya` into one `djbclark-jevlike` microVM that loads one
+   judge at a time (each needs nearly the 8 GiB per-microVM cap, MemTotal measured 7.78 GiB); both
+   `*.sipb.cloud` names stay; the default judge is the one consumer d2a505dd is using. Reach the daemon over
+   Tailscale inside the microVM, as `get` did, or Paseo's outbound relay; no `exposeports`.
 4. **DECIDED**: keep OpenCode plugins that act inside the provider session; drop anything that acts as an
    alternate harness.
 5. **DECIDED**: a `docs/history/` directory rather than one file; the end-state grep exempts only that directory.
