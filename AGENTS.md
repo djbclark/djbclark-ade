@@ -41,6 +41,7 @@ Each doc carries its own summary.
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/](skills/), [docs/skills.md](docs/skills.md) | canonical copy of every hand-written skill: **edit and add skills here**, never via a TUI path; wrappers in [claude/commands/](claude/commands/) |
 | [skills/autorename/workspace-layout.md](skills/autorename/workspace-layout.md) | naming: -pw/-pt Paseo, -t/-p herdr; tab use |
+| [skills/paseo-handoff/](skills/paseo-handoff/SKILL.md) | tab lifecycle (2026-10-30): verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
 | [tools/acp-run/](tools/acp-run/README.md) | the ACP client every launcher uses (`~/.local/bin/acp-run`) |
 | [bin/fleet-watch](bin/fleet-watch) | launchd fleet change notices to Hermes |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere |

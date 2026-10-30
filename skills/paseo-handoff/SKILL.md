@@ -70,7 +70,34 @@ For a durable continuation, first use **handoff** to write and commit the Tier 2
 
 After startup and any expectation transfer below, tell every still-relevant peer the new agent ID/title, workspace ID/name, task worktree and chain pointer through **peer-relay**. Check `delivered`; carry queued/unverified records without resending. A permission/question-card refusal remains blocked: report it and leave the notice for after that card is resolved, never bypass it. Preserve the old transcript until the receiver is verified; do not archive a workspace containing other agents or terminals.
 
+## Retire the predecessor, and register the successor with peers (djbclark, 2026-10-30)
+
+Two standing rules, made in the Dann Chat thinking room; they bind **every** Paseo seat here, not only
+Dann's. The Dann-specific reading, with commands and a dated seat map, is
+`~/src/techno-euphora/docs/handoffs/TAB-LIFECYCLE.md`.
+
+1. **Archive the old tab once the successor is verifiably up.** *"Whenever you verifiably open a
+   successor tab, you can close the old tab."* Verification is, in this order: `paseo inspect <id>
+   --json` reports `ParentAgentId: null` (a parented agent runs, answers and is invisible in the tab
+   list — see the **paseo** skill); the `Cwd`, provider and model are the ones intended; and the
+   successor has answered at least one turn. Then `paseo archive <old-id>` — a **soft-delete** that
+   interrupts only if the old agent is still running and returns `archivedAt`. Re-list and prove the
+   old id left the active list; the transcript stays retrievable with `--include-archived`. Archive
+   the **agent**, never the workspace (a workspace archive takes every agent and terminal in it, and
+   until `docs/paseo-only-rearchitecture.md` D1.3/D2 gate can delete unpushed work). A seat that has
+   not written down what it learned has not handed off.
+2. **Every sibling and child learns the successor's id, and the successor learns theirs** — both
+   directions, on every handoff. A peer that does not know the id of the seat above or beside it
+   cannot hand off to it, cannot relay to it, and cannot notice it was archived; that is a one-way
+   link and it is how an entity splits. A notice names the agent id and tab title, the **role** it
+   answers to and the role it is being told about, and that this id supersedes any earlier id for that
+   role. Send it through **peer-relay** and read the status word: unsent until `delivered` or an
+   `ack <id>`. An idle peer gets a plain prompt, never `--steer`. **The role is the durable address
+   and the id is the instance** — ids go in the notice and in the routing table, never in a brief as
+   if they were permanent.
+
 ## Peer notices belong to the successor (operator, 2026-10-27)
+
 
 `relay.py --expect-ack` and the first-contact footer tell the peer to reply to the **sender's own** id (`relay.py` footer, `me[id]`),
 and the expectation watches the **sender's** transcript. A notice sent by the retiring session therefore sends every late ack to a
