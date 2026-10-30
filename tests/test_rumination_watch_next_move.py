@@ -250,3 +250,97 @@ def test_a_queued_next_move_is_dropped_once_the_seat_is_working_again(rw, monkey
     assert run_pass(rw, QUIET) == 0
     assert seat.sent == []
     assert rw.LOG.read_text().count("pending: dropping resolved next move") == 1
+
+
+# --- "nothing to do" is not a step (adv-157, blocking 1) ---------------------------------------
+# `- Next steps:` followed by `- None` is how a seat writes "I am done". Counting it nudged the seat
+# every cooldown FOREVER ("1 declared step(s) still open ... this seat is idle") with no ack that could
+# stop it: 12 of 135 real chains said it when this was found, 2 of them live repo-keyed pointers.
+
+
+@pytest.mark.parametrize("bullet", ["- None", "- none.", "- Nothing required.", "- Nothing pending",
+                                    "- NOTHING IS PENDING. Ask the operator what they want next.",
+                                    "- No further work", "- no more steps", "- N/A",
+                                    "- **Nothing**", "- `none`", "-"])
+def test_a_bullet_that_says_there_is_nothing_counts_nothing(rw, tmp_path, bullet):
+    write_pointer(tmp_path, f"- Next steps:\n  {bullet}\n")
+    assert rw.declared_next_steps() == 0
+
+
+def test_a_pointer_that_says_it_is_done_gets_no_nudge_at_all(rw, monkeypatch, tmp_path):
+    write_pointer(tmp_path, "- Next steps:\n  - None\n")
+    Probe(rw, monkeypatch, "idle")
+    seat = Seat(rw, monkeypatch, "delivered")
+    assert run_pass(rw, QUIET) == 0, "a finished pointer must not wake the seat"
+    assert seat.sent == []
+    assert nudged_on_disk(rw) == {}
+
+
+def test_a_mixed_block_counts_only_the_real_steps(rw, tmp_path):
+    write_pointer(tmp_path, "- Next steps:\n  - Nothing required.\n  - step one, really\n"
+                            "  - no open questions\n  - step two, really\n")
+    assert rw.declared_next_steps() == 2
+
+
+def test_a_bullet_that_merely_BEGINS_with_none_is_skipped_on_purpose(rw, tmp_path):
+    """The rule is a prefix match, so a real step that happens to start "none of the guards ..." is
+    MISSED. That is the deliberate direction of the trade: a miss costs one cooldown and the block's
+    other steps still count, while a false positive nags an idle seat forever with no way to ack it.
+    A whole block written that way is a missed nudge, never a wrong one."""
+    write_pointer(tmp_path, "- Next steps:\n  - none of the guards cover the resume path\n")
+    assert rw.declared_next_steps() == 0
+
+
+def test_numbered_starred_and_plus_steps_are_steps(rw, tmp_path):
+    write_pointer(tmp_path, "- Next steps:\n  1. rebase the tip\n  2) after merge: redeploy\n"
+                            "  * check the log\n  + tell djbclark\n  - plain\n")
+    assert rw.declared_next_steps() == 5, "a numbered list is how a real chain writes open work"
+
+
+def test_a_ticked_checkbox_is_not_an_open_step(rw, tmp_path):
+    write_pointer(tmp_path, "- Next steps:\n  - [x] merged\n  - [ ] still open\n")
+    assert rw.declared_next_steps() == 1
+
+
+# --- the stamp is exercised on every word the judgement turns on (adv-157, non-blocking 2) -----
+
+
+@pytest.mark.parametrize("word", ["delivered", "accepted", "queued", "unverified"])
+def test_every_settled_word_starts_the_cooldown(rw, monkeypatch, tmp_path, word):
+    """`accepted` is the NORMAL success word from launchd (relay: a sender that wants no proof gets
+    the instant accepted); `queued`/`unverified` are the two the judgement deliberately includes."""
+    write_pointer(tmp_path, steps_body(2))
+    Probe(rw, monkeypatch, "idle")
+    seat = Seat(rw, monkeypatch, word)
+    assert run_pass(rw, QUIET) == 10
+    assert len(seat.sent) == 1
+    assert "next move" in nudged_on_disk(rw), f"{word} reached the relay path and must start the clock"
+
+
+@pytest.mark.parametrize("word", ["skipped", "refused", "unreachable", "FAILED", ""])
+def test_an_unsettled_word_leaves_the_nudge_due(rw, monkeypatch, tmp_path, word):
+    write_pointer(tmp_path, steps_body(2))
+    Probe(rw, monkeypatch, "idle")
+    Seat(rw, monkeypatch, word)
+    assert run_pass(rw, QUIET) == 10
+    assert nudged_on_disk(rw) == {}, f"{word} proved nothing; the next pass must try again"
+    assert [e["key"] for e in pending_on_disk(rw)] == ["next move"]
+
+
+# --- a stamp cannot silence the line forever (adv-157, non-blocking 3) -------------------------
+
+
+@pytest.mark.parametrize("stamp", ["future", "1e999", "Infinity"])
+def test_a_stamp_from_the_future_or_with_no_finite_value_expires(rw, monkeypatch, tmp_path, stamp):
+    """`age < NUDGE_S` alone made a future/inf stamp hold the cooldown open for as long as it took
+    the clock to catch up — or forever, because a nudge that never fires never re-stamps."""
+    write_pointer(tmp_path, steps_body(1))
+    Probe(rw, monkeypatch, "idle")
+    seat = Seat(rw, monkeypatch, "delivered")
+    write_state(rw, [], QUIET)
+    state = json.loads(rw.STATE.read_text())
+    value = {"future": time.time() + 86400, "1e999": "1e999", "Infinity": float("inf")}[stamp]
+    state["nudged"] = {"next move": value}
+    rw.STATE.write_text(json.dumps(state))
+    assert run_pass(rw, QUIET) == 10, f"a {stamp} stamp must not outlast the cooldown"
+    assert len(seat.sent) == 1

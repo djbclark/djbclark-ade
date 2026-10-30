@@ -40,14 +40,20 @@ Everything above fires on a CHANGE, so an idle seat with a full `- Next steps:` 
 nothing for as long as nothing else moved: 216 consecutive quiet passes, 18.1 hours (2026-10-26 00:30
 to 18:37) with a healthy watcher and a seat nobody had started. `seat_dark("idle")` is "" on purpose
 (an idle seat is healthy), so `escalate_dark` cannot see it either. So one keyed, state-like item,
-`next move: N declared step(s) still open ...`, goes to the SEAT when ALL hold: the seat's one
-`--why` probe per pass says `idle` (never `working`, `silent`, `card:*`, `unreachable` or unreadable:
-those are busy, or already covered by the darkness page), the Tier 1 log (the same file
-`chain_staleness` reads, via `resolve_pointer`) has N >= 1 steps under `- Next steps:`, and the last
-nudge settled more than RW_IDLE_NUDGE_S ago. The line carries the COUNT and never a step's text:
-several chains write to one pointer, and naming a step would send this seat to do another seat's
-slice. It never goes to djbclark: it is not his decision. Knobs: `RW_IDLE_NUDGE=0` turns it off;
-`RW_IDLE_NUDGE_S` is the cooldown (default 10800, 3 h), stamped only by a send that settled.
+`next move: N declared step(s) still open ...`, goes to the SEAT when ALL hold: the seat's `--why`
+probe (one per pass, cached by `seat_word`; the send paths add one more after an unproven send) says
+`idle` (never `working`, `silent`, `card:*`, `unreachable` or unreadable: those are busy, or already
+covered by the darkness page), the Tier 1 log (the same file `chain_staleness` reads, via
+`resolve_pointer`) has N >= 1 OPEN steps under `- Next steps:`, and the last nudge settled more than
+RW_IDLE_NUDGE_S ago. A bullet that says there is nothing to do (`- None`, `NOTHING IS PENDING ...`,
+`- No further work`) is not a step and is not counted: otherwise the natural way for a seat to say "I
+am done" would keep nudging it every cooldown forever, with no ack that could stop it. The line
+carries the COUNT and never a step's text: several chains write to one pointer, and naming a step
+would send this seat to do another seat's slice. It goes to the seat, not djbclark: it is not his
+decision. The one exception is the tool's standing rule for ANY line — if its send comes back
+`unverified`, the disclosure that an admitted loss happened still goes to him. Knobs:
+`RW_IDLE_NUDGE=0` turns it off; `RW_IDLE_NUDGE_S` is the cooldown (default 10800, 3 h), stamped only
+by a send that settled.
 
 TWO OUTPUTS, TWO AUDIENCES (djbclark, 2026-10-24)
 -------------------------------------------------
@@ -205,12 +211,16 @@ def load_state() -> dict:
 
 
 def _is_num(value: object) -> bool:
-    """A number we can do arithmetic with. JSON can hand us a string, a list or null here."""
+    """A number we can do arithmetic with. JSON can hand us a string, a list or null here.
+
+    Non-finite counts as unreadable (`"1e999"` parses to `inf`): a stamp of `inf` would silence the
+    item it guards FOREVER, and no later pass can heal it, because the pass that never fires never
+    re-stamps. Dropping it is the only self-healing answer.
+    """
     try:
-        float(value)                      # type: ignore[arg-type]
+        return math.isfinite(float(value))          # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
         return False
-    return True
 
 
 def save_state(data: dict) -> None:
@@ -528,18 +538,37 @@ def resolve_pointer() -> Path | None:
 
 
 _NEXT_STEPS = re.compile(r"^- Next steps:\s*$")
-_BULLET = re.compile(r"^(\s+)- ")
+# Every way a pointer writes a step: `- `, `* `, `+ `, and numbered `1. ` / `1) `. The numbered form
+# was excluded at first and that was a MISS of real open work (`graft-pr519-gitignore` lists its two
+# remaining steps as `1. `/`2. `), which is the direction that costs the entity: a chain with work
+# left says nothing. The count is still structural, never a reading of the words.
+_BULLET = re.compile(r"^(\s+)(?:[-*+]|\d+[.)])\s+(.*)$")
+# ...except a bullet that says there is NOTHING to do. `- Next steps:` + `  - None` is how a seat
+# writes "I am done", and counting it would nudge that seat every cooldown forever with no ack that
+# could end it: 12 of 135 real chains said it (2 of them live repo-keyed pointers) when this was
+# found. The list is deliberately narrow (the words that mean "no work"), never a guess at intent.
+_NOTHING_STEP = re.compile(
+    r"^(?:none|nothing|n/?a|no\s+(?:further|more|action|open|pending|remaining|mandatory|merge|"
+    r"steps?|work))\b", re.I)
+_EMPHASIS = "*`_~ "
+
+
+def _step_text(raw: str) -> str:
+    """A bullet's text with the markdown emphasis a pointer wraps around it removed."""
+    return raw.strip().strip(_EMPHASIS)
 
 
 def declared_next_steps() -> int:
-    """How many next steps the Tier 1 log declares, or 0. The COUNT only, never their text.
+    """How many OPEN next steps the Tier 1 log declares, or 0. The COUNT only, never their text.
 
     Finds the line `- Next steps:` (column 0, nothing after the colon: how the pointer files write
     it inside `## Current State`) and counts the indented bullets that follow it. The block ends at
     the first blank line or the first unindented line (a new top-level bullet such as
     `- Substrate question answered: ...`, or the next `## ` heading). Two shapes continue a block
     without being a step: a wrapped line of text (indented, no bullet) and a bullet nested deeper
-    than the first one. Only bullets at the first bullet's own indentation count.
+    than the first one. Only bullets at the first bullet's own indentation count, and a bullet whose
+    text says there is nothing to do (`- None`, `NOTHING IS PENDING ...`) counts nothing: "done" is
+    not a step, and a false 1 here nags the seat forever.
 
     A missing pointer, an unreadable file, no such section or an empty one is 0: the caller treats
     that as "nothing declared", never as an error and never as a guess.
@@ -560,9 +589,13 @@ def declared_next_steps() -> int:
         if not ln.strip() or not ln[0].isspace():
             break
         m = _BULLET.match(ln)
-        if m and (indent is None or m.group(1) == indent):
-            indent = m.group(1)
-            count += 1
+        if not m or (indent is not None and m.group(1) != indent):
+            continue          # wrapped text, or a deeper bullet: part of the block, not a step
+        indent = m.group(1)
+        text = _step_text(m.group(2))
+        if not text or _NOTHING_STEP.match(text) or text[:3].lower() == "[x]":
+            continue          # "nothing to do", an empty bullet, or a ticked-off checklist row
+        count += 1
     return count
 
 
@@ -942,12 +975,18 @@ def djb_page_sent(item: str, state: dict, now: float) -> None:
 
 
 def nudge_due(ident: str, state: dict, now: float) -> bool:
-    """May the idle-with-work nudge be considered this pass? Switch on, a seat to speak to, cooldown over."""
+    """May the idle-with-work nudge be considered this pass? Switch on, a seat to speak to, cooldown over.
+
+    The window is `0 <= age < NUDGE_S`, not `age < NUDGE_S`: a stamp in the FUTURE (a hand edit, or a
+    clock that ran ahead when the stamp was written and was corrected later) must expire rather than
+    hold the cooldown open for as long as it takes the clock to catch up — the one shape that could
+    silence the line that keeps this entity alive, permanently.
+    """
     if not NUDGE_ON or not ident:
         return False
     nudged = state.get("nudged")
     last = nudged.get(KEY_NEXT) if isinstance(nudged, dict) else None
-    return not (last is not None and now - float(last) < NUDGE_S)
+    return not (last is not None and 0 <= now - float(last) < NUDGE_S)
 
 
 def nudge_sent(state: dict, now: float) -> None:
