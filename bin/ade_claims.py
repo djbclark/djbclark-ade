@@ -797,7 +797,9 @@ def _parse_config_parameters(params: str) -> Optional[list[tuple[str, str]]]:
     by whitespace are the same implicit boolean, and what follows the whitespace is a NEW entry — never the previous
     entry's value (`'ade.flag'= 'ade.x'='foo'` is two entries, measured against git 2.56). Unquoted keys or values,
     adjacent quoted strings and trailing junk are git's `bogus format`, after which git runs nothing at all. None
-    means bogus."""
+    means bogus. Key VALIDITY is deliberately not ported: git refuses a run whose key has no section (`a b`) or an
+    invalid one (`a.b=c`) and this returns the entry anyway, exactly as the `-c` path has always done (measured
+    2026-10-30; filed as djbclark-ade#158 M2). It cannot hide config from the guard — git runs nothing in that case."""
     out: list[tuple[str, str]] = []
     i, n = 0, len(params)
     while True:
