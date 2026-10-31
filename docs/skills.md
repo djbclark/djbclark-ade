@@ -31,7 +31,7 @@ directory in `~/ops/site-private/skills/` (this repo is public).
 Tool-managed skills (bailian-*, composio-cli,
 sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 (The Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration` and the
-`computer-use` stub were removed from the machine on 2026-10-31; Orca and herdr are retired.)
+`computer-use` stub were removed from the machine on 2026-10-31; Orca and herdr are retired from djbclark-ade but stay installed and configured on the machine, untouched.)
 
 **Since when, and the rule.** This repo has been the canonical git copy of the
 orchestration and session-hygiene skills since 2026-10-08 (`herdr-tidy` and

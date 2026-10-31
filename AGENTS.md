@@ -17,10 +17,11 @@ own worktrees; it was run through Orca, which is now retired, so read it as Pase
 [README.md](README.md): architecture, how they compose, every skill.
 
 > **Retired as of 2026-10-31 (operator ruling).** herdr (except the two edge-case bridges `herdr4paseo` and
-> `paseo4herdr`), Orca and BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) are retired, and
-> **Paseo is the only harness**. A doc, skill or script in this repo that still presents them as live is stale:
+> `paseo4herdr`), Orca and BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) are retired **from djbclark-ade**, and
+> **Paseo is the only harness**: no djbclark-ade route, skill or doc sends anyone to them. They stay installed and configured on
+> djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my computer"). A doc, skill or script in this repo that still presents them as live is stale:
 > [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) is the plan of record. The docs say so
-> now; uninstalling or decommissioning the tools is a separate proposal. For screen control use the `paseo-screen`
+> now; machine-side uninstall is NOT planned, and never touch their config. For screen control use the `paseo-screen`
 > skill (Paseo plugin), never Orca's `orca computer`.
 
 ## Read before acting
@@ -32,7 +33,7 @@ Each doc carries its own summary.
 | [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
 | [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow since 2026-10-11) |
-| [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the plan of record (2026-10-30; update 2026-10-31): Paseo is the only harness; herdr (bar its two bridges), Orca and BB retired |
+| [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the plan of record (2026-10-30; update 2026-10-31): Paseo is the only harness; herdr (bar its two bridges), Orca and BB retired from djbclark-ade |
 | [docs/orca-integration.md](docs/orca-integration.md) | **RETIRED (2026-10-31)**: Orca macro-graph commands; kept as a record only |
 | [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20): assets, actors, entry points, ranked threats; read by Codex's security review |
@@ -40,7 +41,7 @@ Each doc carries its own summary.
 | [docs/gates.md](docs/gates.md) | `config/gates.toml` and `bin/gate-profile` (2026-10-26): the Claude quota gates' numbers in git, floors, a temporary expiring `away` profile |
 | [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
 | [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
-| [docs/agent-sleep.md](docs/agent-sleep.md) | **RETIRED (2026-10-31) with herdr**: idle-agent sleep; a record until `herdr-sleeper` is decommissioned |
+| [docs/agent-sleep.md](docs/agent-sleep.md) | **RETIRED (2026-10-31) with herdr**: idle-agent sleep; a record only |
 | [docs/helm.md](docs/helm.md) | `/helm` ([skills/helm/](skills/helm/)): answer every waiting session from one window |
 | [docs/herdr-tidy.md](docs/herdr-tidy.md) | **RETIRED (2026-10-31)**: `/herdr-tidy`, closing idle herdr panes; a record only |
 | [docs/skillopt-sleep.md](docs/skillopt-sleep.md) | nightly skill-edit cycle, `bin/skillopt-night` |
@@ -133,9 +134,9 @@ Each doc carries its own summary.
 ## Machine context
 
 - **Paseo is the only harness (2026-10-31).** herdr (except `herdr4paseo` and `paseo4herdr`), Orca and BB are
-  retired by ruling; the Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration`
+  retired from djbclark-ade by ruling (the tools stay installed and configured on the machine, untouched); the Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration`
   and the `computer-use` stub were removed from the machine the same day. Do not start Orca, open a herdr pane
-  or reach for BB; see `docs/paseo-only-rearchitecture.md`. Many docs and tools below this level still describe
+  or reach for BB from here; see `docs/paseo-only-rearchitecture.md`. Many docs and tools below this level still describe
   them as live until the plan's D7 sweep.
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
   `bin/route_agent.py` discovers agents from it plus installed headless TUIs

@@ -1,16 +1,17 @@
 ---
 name: reorg-orca
 description: >-
-  RETIRED (2026-10-31): Orca is retired, Paseo is the only harness; organize
+  RETIRED (2026-10-31): Orca is retired from djbclark-ade, Paseo is the only harness; organize
   workspaces and tabs with `paseo`. Do not use for new work (record only: it
   reorganized Orca worktrees, projects and tabs from the CLI).
 ---
 
 # reorg-orca
 
-> **RETIRED (2026-10-31, operator ruling).** Orca is retired completely; Paseo is the only harness
+> **RETIRED (2026-10-31, operator ruling).** Orca is retired from djbclark-ade (it stays installed and
+> configured on the machine, untouched; never modify its config); Paseo is the only harness
 > (`docs/paseo-only-rearchitecture.md`). Do not run any `orca` command from this skill. The text below
-> is kept only as a record until Orca is decommissioned (a separate proposal).
+> is kept only as a record.
 
 Orca's CLI can create/rename/reparent/close but cannot yet move, swap, resize
 or reorder (upstream: stablyai/orca#23272 umbrella). This skill does what

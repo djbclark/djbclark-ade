@@ -118,10 +118,10 @@ what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
 
 What changed in 5.12 (2026-10-31, operator ruling): herdr (except the `herdr4paseo` and `paseo4herdr`
-bridges), Orca and BB are retired, and Paseo is the only harness. The BB agent workspace block is removed;
+bridges), Orca and BB are retired from djbclark-ade (they stay installed and configured on djbclark's computer, untouched), and Paseo is the only harness. The BB agent workspace block is removed;
 the herdr and Orca items (the `autorename` herdr-pane wording) are gone; `herdr4paseo` and `paseo4herdr` stay
-as edge-case bridges; the Paseo block gains **paseo-screen** (`paseo plugin add kevguy/screen`), the one
-screen-control tool, with its skill. Uninstalling the retired tools is a separate proposal.
+as edge-case bridges; the Paseo block gains two plugins, **paseo-screen** (`paseo plugin add kevguy/screen`), the one
+screen-control tool, with its skill, and **next-question** (`paseo plugin install github:djbclark/paseo-plugin-next-question`). Machine-side uninstall is not planned.
 
 What changed in 5.11 (2026-10-16): a new **MIT Athena** block after the SiYuan notes
 (AuriStor AFS client, `athena-kinit` Kerberos renewal with AFS tokens, `athena-locker`
@@ -224,7 +224,7 @@ default. Do **not** enable them; plain subagents are enough here. Use them only
 if plain subagents prove insufficient, and then only with user approval and a
 backup of any settings file you change (§15).
 
-No external orchestrator (Herdr, Orca, BB, Ralph TUI, Beads) is used; Herdr, Orca and BB are retired (2026-10-31).
+No external orchestrator (Herdr, Orca, BB, Ralph TUI, Beads) is used; Herdr, Orca and BB are retired from djbclark-ade (2026-10-31).
 
 ### 0.2 Working rules for orchestration
 
@@ -891,11 +891,15 @@ steer/interrupt, permission confirm; runs in a Herdr pane; added 2026-10-28, djb
 then `herdr4paseo [agent-id]`. It only wraps the `paseo` CLI, so quitting never touches the agent.
 `paseo4herdr` (fork github.com/djbclark/paseo4herdr, formerly the `paseo-herdr` plugin, installed disabled as
 `herdr-harness`) lets Paseo reach terminals that Herdr hosts; leave it disabled unless that is needed.
-**Screen control (added 2026-10-31, djbclark):** `paseo plugin add kevguy/screen` installs `paseo-screen`
-(https://github.com/kevguy/paseo-screen, MIT; plugin id `paseo-screen`; viewer "Screen · mac" in the Paseo
-sidebar; RPCs `screen.status`, `screen.frame`, `screen.input`). It is THE screen-control tool and stays enabled
-when idle; anyone paired with the host can see and control the screen while it is enabled (host-wide Pause on
-its sidebar row). Skill: `paseo-screen` (in `djbclark-ade/skills/`, link it with `bin/skill-everywhere`).
+
+**Paseo plugins (added 2026-10-31, djbclark).** Two plugins, both **user-level and outside the repo: Paseo plugins must be
+enabled first, and you ask djbclark before enabling them** (they run code inside the Paseo daemon/app). Neither is installed
+for a repo that does not use Paseo; skip both otherwise.
+
+| Item | Website | Install | What it does |
+|---|---|---|---|
+| `paseo-screen` (**macOS only**) | https://github.com/kevguy/paseo-screen (MIT; listing https://paseo.cafe/plugins/paseo-screen) | `paseo plugin add kevguy/screen` (registry pin `1df9050d3721d927aa73655ad2cb4b4b53f42db9`, plugin id `paseo-screen`). **Once at the Mac, grant Paseo Screen Recording and Accessibility** (System Settings, Privacy & Security); it compiles a Swift helper and has no network, listening socket or runtime dependency (read 2026-10-30) | THE screen-control tool: the viewer "Screen · mac" in the Paseo sidebar and the RPCs `screen.status`, `screen.frame`, `screen.input`. **Stays enabled when idle (djbclark's choice).** Anyone paired with the host can see and control its screen while it is enabled; the viewer's "view only" switch is per viewer, and the host-wide Pause on its sidebar row is the lock. Skill: `paseo-screen` (in `djbclark-ade/skills/`, link it with `bin/skill-everywhere`) |
+| `next-question` | https://github.com/djbclark/paseo-plugin-next-question (public, MIT, v0.1.0) | `paseo plugin install github:djbclark/paseo-plugin-next-question` | Cmd+Shift+U (Ctrl+Shift+U off macOS) jumps to the next agent waiting for input |
 
 **SiYuan notes (machine-specific; added 2026-10-12, djbclark).** Only where the
 SiYuan desktop app (https://b3log.org/siyuan/) is installed and the repo's work

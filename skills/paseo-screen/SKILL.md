@@ -15,7 +15,7 @@ description: >-
 `paseo-screen` (https://github.com/kevguy/paseo-screen, MIT; listing
 https://paseo.cafe/plugins/paseo-screen) streams the host Mac's display into a Paseo
 viewer and sends mouse and keyboard events back. **It is the one screen-control tool**
-(operator ruling, 2026-10-31); Orca's `orca computer` and the `computer-use` stub are retired, never
+(operator ruling, 2026-10-31); Orca's `orca computer` and the `computer-use` stub are retired from djbclark-ade (Orca itself stays installed, untouched), never
 start Orca for a GUI task. **It stays enabled when idle** (operator's choice, 2026-10-31).
 
 ## Install and state
