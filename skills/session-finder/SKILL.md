@@ -479,7 +479,7 @@ escalated to the operator about silence that was a queue; two queued messages we
    relay-verified closer's rule, for a sender with NO transcript; a transcript-backed sender's `--sweep` (and `--pending`) still accepts the token anywhere in a line that carries the target's
    relay header. Lines are those of the text AS YOU TYPED IT: relay folds the whitespace of what it sends (and stores), so it keeps the line starts of the argument for the closer, only the lines
    that begin `ack ` (at most 40, each clipped to 120 characters), and a queued record keeps them as `ack_leads`.
-   `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
+   `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--ack` (a second one is the delivery watch of the inner send), `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
    never dropped. `--status ID` is a query: combined with any other option or command (`--cancel`, `--retire`, a send) it is refused, exit 2, and nothing runs. A transcript-backed expectation whose
    transcript cannot be read reads `open (uncollected, ...)` even after a complete sweep.
 

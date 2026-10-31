@@ -2980,7 +2980,9 @@ def defer_send(s, a, text, listed, why):
     ack_caller = {"id": caller.get("id"), "sid": caller.get("sid") or "", "host": caller.get("host") or ""} if isinstance(caller.get("id"), str) else None
     with state_lock():
         live = [r for r in rec_all() if r.get("state") in ("queued", "sending") and (r.get("kind") == "notice") == notice]
+        leads = [] if notice else list(CTX.get("leads") or [])
         dup = None if notice else next((r for r in live if target_key(r) == key and r.get("text") == text and sender_key(r) == ident
+                                        and list(r.get("ack_leads") or []) == leads    # the folded text is equal, but the lines the closer reads may not be: a reply that ENDS `ack q1` is not the single line that merely contains it
                                         and float(r.get("expires") or 0) > now), None)
         if dup is None:
             caps = (((len(live), DEFER_NOTICES),) if notice else
@@ -4123,7 +4125,7 @@ def ack_verb(eid, a):
     if not (isinstance(to, str) and to):
         return refuse(1, "the expectation names no sender to answer")
     out = [to, f"ack {eid}", "--wait", str(a.wait)]
-    for flag, on in (("--json", a.json), ("--no-defer", a.no_defer), ("--steer", a.steer), ("--no-ack", a.no_ack)):
+    for flag, on in (("--json", a.json), ("--no-defer", a.no_defer), ("--steer", a.steer), ("--no-ack", a.no_ack), ("--ack", a.ack)):
         out += [flag] if on else []
     for flag, val in (("--via", a.via), ("--defer-for", a.defer_for), ("--idle", a.idle)):
         out += [flag, str(val)] if val is not None else []

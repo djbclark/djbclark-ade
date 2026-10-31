@@ -681,10 +681,10 @@ class TestAckVerbOptions(AckBase):
 
     def test_the_send_options_are_carried_into_the_ordinary_send(self) -> None:
         self.status = "idle"
-        rc, calls, err = self.seen("--ack", "q1", "--via", "paseo", "--steer", "--idle", "5", "--no-defer", "--defer-for", "60", "--wait", "3", "--no-ack")
+        rc, calls, err = self.seen("--ack", "q1", "--via", "paseo", "--steer", "--idle", "5", "--no-defer", "--defer-for", "60", "--wait", "3", "--no-ack", "--ack")
         inner = calls[-1]
         self.assertEqual((inner[0] == fb.AGENT, inner[1]), (True, "ack q1"), (rc, err))
-        for flag in ("--steer", "--no-defer", "--no-ack"):
+        for flag in ("--steer", "--no-defer", "--no-ack", "--ack"):    # a second --ack is the caller's explicit delivery watch: carried, never dropped (adversary r2 B1)
             self.assertIn(flag, inner)
         for flag, val in (("--via", "paseo"), ("--idle", "5.0"), ("--defer-for", "60.0"), ("--wait", "3.0")):
             self.assertEqual(inner[inner.index(flag) + 1], val, flag)
@@ -717,6 +717,92 @@ class TestMissingTranscriptIsUncollected(AckBase):
         self.assertRegex(out, r"expect-ack q1  open   ")    # no transcript recorded: not waiting for one
         rows = {r["id"]: r for r in json.loads(self.run_relay("--pending", "--json")[1]) if r.get("kind") == "expect"}
         self.assertEqual((rows["g1"].get("uncollected"), rows["g2"].get("uncollected"), "uncollected" in rows["q1"]), (True, True, False))
+
+
+class TestCollapsedDuplicatesKeepTheirLeads(AckBase):
+    """Codex P2 (PR 177 round 2): two texts equal after the whitespace fold can differ in the lines the closer reads."""
+
+    def queued(self) -> list[dict[str, Any]]:
+        return sorted(relay.rec_all(), key=lambda r: r["id"])
+
+    def test_a_reply_that_ends_with_the_ack_is_not_collapsed_into_the_one_line_text_that_merely_contains_it(self) -> None:
+        self.go(text="merged ack q1")    # one line: `ack q1` is mid-line, so this record closes nothing
+        self.go(text="merged\nack q1")    # the same folded text, but the token begins a line
+        recs = self.queued()
+        self.assertEqual(sorted(r.get("ack_leads") for r in recs), [[], ["ack q1"]])    # two records: each keeps its own leads
+        for r in recs:
+            self.deliver(r["id"])
+        self.assertEqual(self.state(), "acked")    # the second send's promise is kept
+
+    def test_the_other_order_and_a_true_duplicate_still_collapse_as_before(self) -> None:
+        self.go(text="merged\nack q1")
+        self.go(text="merged ack q1")
+        self.assertEqual(len(self.queued()), 2)
+        out = self.go(text="merged\nack q1")[1]    # identical lines: the old collapse
+        self.assertIn("an identical message was already queued", out)
+        self.assertEqual(len(self.queued()), 2)
+
+
+class TestMergeConditionRealMessages(AckBase):
+    """The two real message shapes PR 173/177's merge condition names (lead 1e61c979, 2026-10-31): both close through the verified path with no
+    timeline read, queued first and delivered later; a third party's identical text closes nothing."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.timeline_reads: list[str] = []
+        self.addCleanup(setattr, relay, "paseo_timeline", relay.paseo_timeline)
+        self.addCleanup(setattr, relay, "timeline_messages", relay.timeline_messages)
+        relay.paseo_timeline = lambda *a, **k: self.timeline_reads.append("paseo logs") or None
+        relay.timeline_messages = lambda *a, **k: self.timeline_reads.append("timeline_messages") or None
+
+    def expect(self, eid: str) -> None:
+        self.open_expectation(eid, created=time.time() - 60)    # the target (alice, bbbbbbbb) owes the sender (cccccccc, Paseo agent AGENT) this ack
+
+    def queue_and_deliver(self, text: str) -> str:
+        rc, out, err = self.go("--wait", "0.1", text=text)
+        self.assertEqual(rc, 3, (out, err))    # queued under the default delivery watch: unverified, and nothing is closed yet
+        rec = relay.rec_all()[0]
+        self.assertEqual(rec["state"], "queued")
+        self.deliver(rec["id"])
+        return rec["id"]
+
+    def test_d7_k7c3f_a_reply_that_begins_with_the_token_closes_when_the_queued_message_is_delivered(self) -> None:
+        self.expect("d7-k7c3f")
+        text = "ack d7-k7c3f: the branch is merged and the checks are green"
+        self.go("--wait", "0.1", text=text)
+        self.assertEqual(self.state("d7-k7c3f"), "open")    # queued, not delivered
+        self.deliver(relay.rec_all()[0]["id"])
+        done = relay.expect_read("d7-k7c3f")
+        self.assertEqual((done["state"], done.get("acked_via")), ("acked", "relay"))
+        self.assertEqual(self.timeline_reads, [])
+
+    def test_host_branch_durability_2_a_reply_that_ends_with_the_line_closes_when_the_deferred_record_is_delivered(self) -> None:
+        self.expect("host-branch-durability-2")
+        text = ("host branch durability is in: the branch survives a host restart.\n"
+                "Evidence: the second run kept all 14 commits.\n"
+                "ack host-branch-durability-2")
+        self.queue_and_deliver(text)
+        done = relay.expect_read("host-branch-durability-2")
+        self.assertEqual((done["state"], done.get("acked_via")), ("acked", "relay"))
+        self.assertEqual(self.timeline_reads, [])
+
+    def test_a_third_partys_identical_text_closes_neither(self) -> None:
+        for eid, text in (("d7-k7c3f", "ack d7-k7c3f: the branch is merged"),
+                          ("host-branch-durability-2", "durability is in.\nack host-branch-durability-2")):
+            self.expect(eid)
+            self.status = "running"    # busy again, so the text is queued
+            os.environ["PASEO_AGENT_ID"] = fb.CAROL    # carol is not the target
+            self.queue_and_deliver(text)
+            self.assertEqual(self.state(eid), "open", eid)
+            for p in relay.DEFER_DIR.glob("2*.json"):
+                p.unlink()    # the next shape starts with an empty queue
+            os.environ["PASEO_AGENT_ID"] = fb.SENDER
+        self.assertEqual(self.timeline_reads, [])
+
+    def test_a_forwarded_quote_of_the_token_in_the_body_closes_nothing(self) -> None:
+        self.expect("host-branch-durability-2")
+        self.queue_and_deliver("as asked: please send host-branch-durability-2 later\n> ack host-branch-durability-2")
+        self.assertEqual(self.state("host-branch-durability-2"), "open")
 
 
 if __name__ == "__main__":
