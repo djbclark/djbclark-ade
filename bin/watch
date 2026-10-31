@@ -22,7 +22,7 @@ up       per domain, in this order:
               replaced nor woken just to be checked. Dead means: status `error`, archived, or no longer listed
               by `paseo agent ls -g -a`. If the daemon cannot be asked, the holder's state is unknown and
               nothing is launched (exit 1), `--force` included. Background workspaces count too:
-               `ls -g --background` includes them without including archived agents (2026-10-31)
+              `ls -g --background` includes them without including archived agents (2026-10-31)
            2. a holder that is dead or unreachable, or no holder at all, gets one new watcher
            3. a launch in progress or an agent started earlier and still registering counts as claimed:
               ~/.local/state/watch/<domain>.json plus a per-domain flock, so two concurrent `up` runs
@@ -35,11 +35,13 @@ up       per domain, in this order:
          the superseded ones (and the holder it replaced) are renamed `x <old title>`, and every idle or closed `x` one is
          then archived (so is any other idle or closed agent titled `x ...`), except a `--force`-replaced holder, whose id is kept in
          ~/.local/state/watch/kept.json and which is never archived (a retired one with a turn in flight is left and archived on a later `up`; 2026-10-28)
+         Title numbering uses a successful all-agent listing, falling back to this run's last successful snapshot.
+         Without one the launch is refused (exit 1), so a failed query cannot reuse an existing number (2026-10-31).
          `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
          line to a live Paseo holder (default: a holder that Paseo lists as alive or closed counts, because the
          test line costs the holder a model turn each tick and wakes a collected one). A `--probe` test that
          fails on a collected holder starts nothing either (exit 1; inspect it, or `--force`).
-          A forced live holder keeps its tab even if its probe fails (2026-10-31)
+         A forced live holder keeps its tab even if its probe fails (2026-10-31)
 down     drops the role through the domain's off_cmd (which clears only if the agent we started still holds
          it) and archives that agent; an agent `watch` did not start is never touched
 
@@ -163,6 +165,7 @@ class Paseo:
     def __init__(self) -> None:
         self._agents: list[dict] | None = None
         self._agents_ok = False
+        self._all: list[dict] | None = None
         self._providers: dict[str, str] | None = None
         self._models: dict[str, list[dict]] = {}
 
@@ -184,11 +187,15 @@ class Paseo:
             d = json.loads(out) if rc == 0 else None
         except ValueError:
             d = None
-        return [a for a in d if isinstance(a, dict)] if isinstance(d, list) else None
+        if isinstance(d, list):
+            self._all = [a for a in d if isinstance(a, dict)]
+            return self._all
+        return None
 
-    def all_agents(self) -> list[dict]:
-        """all_listing for title numbering, which must never reuse a number ([] when the daemon cannot be asked)."""
-        return self.all_listing() or []
+    def all_agents(self) -> list[dict] | None:
+        """Fresh titles, or the last successful snapshot in this run; None means numbering is unsafe."""
+        rows = self.all_listing()
+        return rows if rows is not None else self._all
 
     @staticmethod
     def matches(a: dict, ident: str) -> bool:
@@ -580,11 +587,14 @@ def seq_path(domain: str) -> Path:
     return STATE / f"{domain}.seq"
 
 
-def next_tag(domain: str, pv: Paseo) -> str:
+def next_tag(domain: str, pv: Paseo) -> str | None:
     """The next base-36 generation number for the domain: past every numbered title the daemon still lists
     (retired and archived included) and past the last one we handed out, so a number is never reused."""
+    rows = pv.all_agents()
+    if rows is None:
+        return None
     top = 0
-    for a in pv.all_agents():
+    for a in rows:
         m = title_re(domain).match(a.get("name") or "")
         if m:
             top = max(top, int(m.group(2) or "0", 36))
@@ -734,10 +744,12 @@ def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: 
     cwd = os.path.expanduser(row["cwd"])
     if not Path(cwd).is_dir():
         return 1, f"not launched: cwd {cwd} does not exist"
+    tag = next_tag(domain, pv)
+    if tag is None:
+        return 1, "not launched: cannot list existing watcher titles; generation unknown"
     wid, how = pv.workspace_for(dflt, create=True)
     if not wid:
         return 1, f"not launched: {how}"
-    tag = next_tag(domain, pv)
     title = f"watch {domain} {tag}"
     STATE.mkdir(parents=True, exist_ok=True)
     seq_path(domain).write_text(tag + "\n")

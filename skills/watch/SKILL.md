@@ -41,9 +41,11 @@ $W up                     # start what is missing; verify each registration
    and `--dry-run` included, so a transient failure never starts a duplicate. `--probe` on a collected holder wakes it
    (the test line resumes the session); if that test fails `up` exits 1 with `not starting a duplicate` and only
    `--force` replaces it. A retired `x …` agent that is `closed` is archived like an idle one (no turn in flight).
-    Background workspace holders count as live too (2026-10-31): liveness and retirement sweeps use
-    `ls -g --background`, which excludes archived agents; numbering uses `ls -g -a`, including both.
-    A forced live holder keeps its tab and `kept.json` protection even when its old-only probe fails.
+   Background workspace holders count as live too (2026-10-31): liveness and retirement sweeps use
+   `ls -g --background`, which excludes archived agents; numbering uses `ls -g -a`, including both.
+   A forced live holder keeps its tab and `kept.json` protection even when its old-only probe fails.
+   If a later title-list query fails, numbering uses this run's last successful all-agent snapshot. Without any
+   successful snapshot it refuses the launch (exit 1) instead of reusing a generation number (2026-10-31).
 4. `watch down DOMAIN` drops the role (`--relay-off <agent>` / `watcher clear <agent>`: clears only if that
    agent still holds it) and archives the agent `watch` started; an agent it did not start is never touched.
 5. A domain with no row is added in `config/watch.toml`: skill, cwd, chain, `holder_cmd` (exit 1 = nobody),

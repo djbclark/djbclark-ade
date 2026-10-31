@@ -20,8 +20,8 @@ s = json.load(open(f)) if os.path.exists(f) else {"agents": [], "ws": []}
 a = sys.argv[1:]
 def save(): json.dump(s, open(f, "w"))
 if a[:3] == ["agent", "ls", "-g"]:
-    if os.environ.get("STUB_LSA_FAIL" if "-a" in a else "STUB_LS_FAIL"): sys.exit(1)
     assert a in (["agent", "ls", "-g", "--background", "--json"], ["agent", "ls", "-g", "-a", "--json"]), a
+    if os.environ.get("STUB_LSA_FAIL" if "-a" in a else "STUB_LS_FAIL"): sys.exit(1)
     if "-a" in a:
         countfile = d + "/lsa-count"
         count = int(open(countfile).read()) + 1 if os.path.exists(countfile) else 1
@@ -134,7 +134,7 @@ def env(tmp_path):
              WATCH_LOAD_STATE=str(tmp_path / "lwstate"), WATCH_PASEO=str(bindir / "paseo"), WATCH_NEW_SEAT=str(bindir / "paseo-new-seat"),
              WATCH_ROUTE_AGENT=str(bindir / "route_agent.py"), WATCH_FLEET_WATCH=str(bindir / "fleet-watch"), HOME=str(tmp_path))
     for k in ("PASEO_AGENT_ID", "STUB_NO_REGISTER", "STUB_TEST_FAIL", "STUB_NO_ROUTE", "STUB_SEAT_SLEEP", "STUB_MODEL", "STUB_CALIB",
-              "STUB_LS_FAIL", "STUB_LSA_FAIL"):
+              "STUB_LS_FAIL", "STUB_LSA_FAIL", "STUB_LSA_FAIL_AFTER_FIRST"):
         e.pop(k, None)
     e["_tmp"] = str(tmp_path)
     return e
@@ -646,6 +646,8 @@ def test_second_archived_query_failure_cannot_override_known_dead_holder(env):
     rc, out = watch(env, "up", extra={"STUB_LSA_FAIL_AFTER_FIRST": "1"})
     assert rc == 0 and "is archived" in out and "registered:" in out, out
     assert "already watched" not in out and len(seat_calls(env)) == 1
+    assert "watch alpha 2" in titles(env).values()
+    assert "watch alpha 1" not in titles(env).values()
 
 
 def test_background_retirement_sweeps_preserve_busy_and_other_workspaces(env):
@@ -661,3 +663,16 @@ def test_background_retirement_sweeps_preserve_busy_and_other_workspaces(env):
     assert quiet not in t and other_retired not in t
     assert t[busy] == "x watch alpha y" and t[unrelated] == "other workspace task"
     assert "watch alpha 10" in t.values()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_no_title_snapshot_refuses_launch_without_allocating_generation(env, force):
+    if force:
+        old = add_agent(env, status="idle", name="watch alpha z")
+        set_role(env, old)
+    rc, out = watch(env, "up", *(["--force"] if force else []), extra={"STUB_LSA_FAIL": "1"})
+    assert rc == 1 and "cannot list existing watcher titles" in out, out
+    assert seat_calls(env) == []
+    assert not (Path(env["_tmp"]) / "state" / "alpha.seq").exists()
+    if force:
+        assert titles(env)[old] == "watch alpha z"
