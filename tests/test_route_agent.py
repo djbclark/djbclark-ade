@@ -91,6 +91,26 @@ class TestStandingRules(unittest.TestCase):
         self.assertIsNone(r.route("judgment", quota=q))
 
 
+class TestOpencodeGoTakesNoCode(unittest.TestCase):
+    """djbclark 2026-10-30: no code slice goes to opencode-go, however idle it is."""
+
+    ONLY_GO = {name: {"remaining": 0.0} for name in IDLE} | {"opencode-go": {"remaining": 100.0}}
+
+    def test_code_is_never_routed_to_opencode_go(self):
+        choice = r.route("code", quota=self.ONLY_GO)
+        self.assertTrue(choice is None or choice.service.name != "opencode-go")
+        for _, c in r.plan(["code", "code", "code", "code"], quota=IDLE):
+            self.assertTrue(c is None or c.service.name != "opencode-go")
+        for _, c in r.plan(["code", "code", "code", "code"], quota=self.ONLY_GO):
+            self.assertTrue(c is None or c.service.name != "opencode-go")
+
+    def test_opencode_go_still_takes_bulk_and_mechanical(self):
+        for kind in ("bulk", "mechanical"):
+            c = r.route(kind, quota=self.ONLY_GO)
+            self.assertIsNotNone(c, kind)
+            self.assertEqual(c.service.name, "opencode-go")
+
+
 class TestWasteBurning(unittest.TestCase):
     def test_bulk_goes_to_idle_capacity(self):
         c = r.route("bulk", quota=IDLE)
@@ -2292,6 +2312,29 @@ class TestSubstrateChain(unittest.TestCase):
             chain = r.substrate_chain({}, [], file_age=60.0)
         self.assertEqual([e["pool"] for e in chain], ["clinepass"])
 
+    # the lifeline is not collected by aiuse while disabled: absent from --available != exhausted
+    ABSENT = {"clinepass": {"remaining": 0.0, "absent_from_available": True}}
+
+    def test_disabled_lifeline_absent_from_available_is_listed_unmeasured(self):
+        chain = self._chain(self._opencode(self.HEALTHY), quota=self.ABSENT,
+                            disabled={"opencode-go", "clinepass"})
+        self.assertEqual([(e["role"], e["pool"], e["remaining"], e["usable"]) for e in chain],
+                         [("primary", "clinepass", None, True)])
+        both = self._chain(self._opencode(self.HEALTHY), quota=self.ABSENT,
+                           disabled={"clinepass"})
+        self.assertEqual([e["pool"] for e in both], ["opencode-go", "clinepass"])
+        self.assertIsNone(both[1]["remaining"])
+
+    def test_enabled_pool_absent_from_available_is_still_exhausted(self):
+        chain = self._chain(self._opencode(self.HEALTHY), quota=self.ABSENT, disabled=set())
+        cline = next(e for e in chain if e["pool"] == "clinepass")
+        self.assertEqual((cline["remaining"], cline["usable"]), (0.0, False))
+
+    def test_disabled_lifeline_still_obeys_a_real_zero_reading(self):
+        chain = self._chain([], quota={"clinepass": {"remaining": 0.0}},
+                            disabled={"opencode-go", "clinepass"})
+        self.assertEqual([(e["pool"], e["usable"]) for e in chain], [("clinepass", False)])
+
     # F3: the same guards load_snapshot applies
     def test_stale_snapshot_file_measures_nothing(self):
         chain = self._chain(self._opencode(self.HEALTHY), file_age=9 * 86400.0)
@@ -2398,6 +2441,14 @@ class TestSubstrateCommand(unittest.TestCase):
         self.assertEqual(rc, r.SUBSTRATE_EXIT_NONE_USABLE)
         self.assertIn("no usable substrate", out)
         self.assertEqual(calls, [])
+
+    def test_lifeline_omitted_from_available_still_runs_the_command(self):
+        rc, out, _ = self._run(["substrate", "--json"], disabled={"opencode-go", "clinepass"},
+                               quota={"clinepass": {"remaining": 0.0,
+                                                    "absent_from_available": True}})
+        self.assertEqual(rc, 0)
+        self.assertEqual([(e["pool"], e["remaining"]) for e in json.loads(out)["chain"]],
+                         [("clinepass", None)])
 
     def test_apply_failure_exit_code_reaches_the_caller(self):
         rc, _, _ = self._run(["substrate", "--apply", "ab1"],

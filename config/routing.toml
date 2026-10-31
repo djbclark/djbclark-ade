@@ -250,8 +250,8 @@ access = "cli-only"
 # available options we can use it for non-frontier"): `plenty_kinds` makes those kinds eligible
 # only while the pool's tightest window holds at least [routing].plenty_min percent; below it
 # (or with no fresh reading) codex is frontier-only again. They rank like any other pool
-# (code 15: behind agy's Claude pool, claude, omp and Cursor Auto, ahead of zai and
-# opencode-go; mechanical 12, bulk 20: behind the free pools). judgment too (operator 2026-10-25:
+# (code 15: behind agy's Claude pool, claude, omp and Cursor Auto, ahead of zai; opencode-go
+# has no code rank since 2026-10-30; mechanical 12, bulk 20: behind the free pools). judgment too (operator 2026-10-25:
 # a Codex adversary round was refused; rank 3 behind claude 1 and omp 2, so it is eligible, not
 # preferred, on gpt-6.1-sol at high). astra stays frontier-only (`[dispatch].frontier_models`),
 # and no research/github row: conservative.
@@ -325,11 +325,14 @@ agent = "opencode"
 [[service]]
 name = "opencode-go"
 cli = "opencode (go tier)"
-good_at = { bulk = 2, mechanical = 1, code = 18 }
+# No `code` rank or model (djbclark 2026-10-30): no code slice ever goes to opencode-go, so
+# `route`/`plan` never name it for code. DeepSeek V4.1 Flash stays only the main-loop
+# substrate model (`route_agent.py substrate`, DANN_SUBSTRATE), never a dispatched code slice.
+good_at = { bulk = 2, mechanical = 1 }
 billing = "subscription"
-note = "Go Plus shares one monthly allowance; costly models require bounded read-only advice (config/go-model-policy.json)"
+note = "Go Plus shares one monthly allowance; bulk and mechanical only, never code; costly models require bounded read-only advice (config/go-model-policy.json)"
 agent = "opencode"
-models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low", code = "opencode-go/deepseek-v4.1-flash" }
+models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low" }
 
 [[service]]
 name = "zai"

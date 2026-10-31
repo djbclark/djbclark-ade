@@ -1644,7 +1644,8 @@ SUBSTRATE_MIN_HEADROOM = 10.0
 
 def _substrate_pool_state(pool: str, quota: dict[str, Any] | None,
                           accounts: list[dict[str, Any]],
-                          file_age: float | None = None) -> dict[str, Any]:
+                          file_age: float | None = None,
+                          ignore_absent: bool = False) -> dict[str, Any]:
     """Binding allowance across all measured windows, including monthly.
 
     Wide-open rate windows do not replenish an exhausted monthly budget. Keep
@@ -1696,7 +1697,12 @@ def _substrate_pool_state(pool: str, quota: dict[str, Any] | None,
             remaining = row_rem if remaining is None else min(remaining, row_rem)
         if monthly is None and not old:
             monthly = next((rem(w) for w in wins if is_month(w)), None)
-    fresh = _pct(((quota or {}).get(pool) or {}).get("remaining"))
+    fresh_info = (quota or {}).get(pool) or {}
+    # `--available` lists only pools aiuse collects, and a disabled pool is not collected:
+    # load_snapshot reads such a pool as 0% (`absent_from_available`). For the lifeline that
+    # is "not measured", not "exhausted" (operator 2026-10-23), so the marker is ignored.
+    fresh = None if (ignore_absent and fresh_info.get("absent_from_available")) else _pct(
+        fresh_info.get("remaining"))
     if fresh is not None:
         remaining = fresh if remaining is None else min(remaining, fresh)
     return {"remaining": remaining, "monthly": monthly}
@@ -1721,10 +1727,15 @@ def substrate_chain(quota: dict[str, Any] | None = None,
     """
     quota = quota or {}
     accounts = accounts or []
-    off = (operator_disabled() if disabled is None else set(disabled)) - set(
-        SUBSTRATE_LIFELINE if lifeline is None else lifeline)
+    disabled_set = operator_disabled() if disabled is None else set(disabled)
+    allowed = set(SUBSTRATE_LIFELINE if lifeline is None else lifeline)
+    off = disabled_set - allowed
     pools = [t for t in DANN_SUBSTRATE if t[0] not in off]
-    states = {p: _substrate_pool_state(p, quota, accounts, file_age) for p, _, _ in pools}
+    # a lifeline kept despite being disabled is not collected by aiuse: absent from
+    # `--available` there means unmeasured, not exhausted
+    states = {p: _substrate_pool_state(p, quota, accounts, file_age,
+                                       ignore_absent=p in disabled_set & allowed)
+              for p, _, _ in pools}
 
     def key(item: tuple[str, str, str]) -> tuple[int, float]:
         rem = states[item[0]]["remaining"]
