@@ -666,12 +666,14 @@ def test_background_retirement_sweeps_preserve_busy_and_other_workspaces(env):
 
 
 @pytest.mark.parametrize("force", [False, True])
-def test_no_title_snapshot_refuses_launch_without_allocating_generation(env, force):
+@pytest.mark.parametrize("dry", [False, True])
+def test_no_title_snapshot_refuses_launch_without_allocating_generation(env, force, dry):
     if force:
         old = add_agent(env, status="idle", name="watch alpha z")
         set_role(env, old)
-    rc, out = watch(env, "up", *(["--force"] if force else []), extra={"STUB_LSA_FAIL": "1"})
-    assert rc == 1 and "cannot list existing watcher titles" in out, out
+    args = (["--force"] if force else []) + (["--dry-run"] if dry else [])
+    rc, out = watch(env, "up", *args, extra={"STUB_LSA_FAIL": "1"})
+    assert rc == 1 and "cannot list existing watcher titles" in out and "watch alpha None" not in out, out
     assert seat_calls(env) == []
     assert not (Path(env["_tmp"]) / "state" / "alpha.seq").exists()
     if force:

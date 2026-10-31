@@ -956,8 +956,12 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
         if plan.get("governor_hold"):
             log(domain, f"  - {plan['governor_hold']}", dry)
         if dry:
+            tag = next_tag(domain, pv)
+            if tag is None:
+                log(domain, "would not launch: cannot list existing watcher titles; generation unknown", dry)
+                return 1
             ws, how = pv.workspace_for(dflt, create=False)
-            log(domain, f"would launch: {plan_line(plan)}; title 'watch {domain} {next_tag(domain, pv)}' in workspace {dflt['workspace']} ({how}); first prompt {row['skill']}", dry)
+            log(domain, f"would launch: {plan_line(plan)}; title 'watch {domain} {tag}' in workspace {dflt['workspace']} ({how}); first prompt {row['skill']}", dry)
             return 0
         rc, msg = launch(domain, row, dflt, pv, plan, replaces)
         log(domain, msg)
