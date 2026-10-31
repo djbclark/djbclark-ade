@@ -189,7 +189,7 @@ idempotent and safe to run daily. It does, in order, every step below; nothing h
    pulls first and then reports them with the fix).
 4. **Changelog.** It prints the [CHANGELOG.md](CHANGELOG.md) entries new since the commit recorded
    in `~/.local/state/ade/applied` (every Unreleased entry the first time), then records the new
-   HEAD there. Every pull request adds its line to the changelog (AGENTS.md code-review rule 10),
+   HEAD there. Every pull request adds its line as a `changelog.d/` fragment that `bin/changelog-fold` folds in (AGENTS.md code-review rule 10),
    so that is the one place that says what changed and what is new.
 
 Exit codes: 0 current, 10 behind (`--check`) or a link unresolved (including one `skill-everywhere` leaves alone, on the first run), 2 dirty, 3 diverged (git's explicit

@@ -1,8 +1,9 @@
 # Changelog
 
 All notable changes to this repository are recorded here, newest first, in the
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) form. Every pull request adds its line
-under **Unreleased** (AGENTS.md, code review rule 10, since 2026-10-20); a tag moves that section
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) form. Every pull request adds its line as a
+fragment `changelog.d/<branch>.md`; `bin/changelog-fold` folds the fragments under **Unreleased**
+(AGENTS.md, code review rule 10, since 2026-10-20, fragments since 2026-10-31); a tag moves that section
 under a dated heading. `ade update` (proposal 4.4 item 9) prints the entries between the commit a
 machine last applied and the head it is moving to, so this file is what tells an operator or an
 agent what changed and what is new. Entries end with the pull request number.
