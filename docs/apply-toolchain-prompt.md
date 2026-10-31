@@ -121,7 +121,7 @@ What changed in 5.12 (2026-10-31, operator ruling): herdr (except the `herdr4pas
 bridges), Orca and BB are retired from djbclark-ade (they stay installed and configured on djbclark's computer, untouched), and Paseo is the only harness. The BB agent workspace block is removed;
 the herdr and Orca items (the `autorename` herdr-pane wording) are gone; `herdr4paseo` and `paseo4herdr` stay
 as edge-case bridges; the Paseo block gains two plugins, **paseo-screen** (`paseo plugin add kevguy/screen`), the one
-screen-control tool, with its skill, and **next-question** (`paseo plugin install github:djbclark/paseo-plugin-next-question`). Machine-side uninstall is not planned.
+screen-control tool, with its skill, and **questions-please** (`paseo plugin install github:djbclark/paseo-plugin-questions-please`). Machine-side uninstall is not planned.
 
 What changed in 5.11 (2026-10-16): a new **MIT Athena** block after the SiYuan notes
 (AuriStor AFS client, `athena-kinit` Kerberos renewal with AFS tokens, `athena-locker`
@@ -899,7 +899,7 @@ for a repo that does not use Paseo; skip both otherwise.
 | Item | Website | Install | What it does |
 |---|---|---|---|
 | `paseo-screen` (**macOS only**) | https://github.com/kevguy/paseo-screen (MIT; listing https://paseo.cafe/plugins/paseo-screen) | `paseo plugin add kevguy/screen` (registry pin `1df9050d3721d927aa73655ad2cb4b4b53f42db9`, plugin id `paseo-screen`). **Once at the Mac, grant Paseo Screen Recording and Accessibility** (System Settings, Privacy & Security); it compiles a Swift helper and has no network, listening socket or runtime dependency (read 2026-10-30) | THE screen-control tool: the viewer "Screen · mac" in the Paseo sidebar and the RPCs `screen.status`, `screen.frame`, `screen.input`. **Stays enabled when idle (djbclark's choice).** Anyone paired with the host can see and control its screen while it is enabled; the viewer's "view only" switch is per viewer, not a lock; the off switch is `paseo plugin disable paseo-screen` (upstream README, Security), and a viewer's Pause only stops that viewer's frames. Skill: `paseo-screen` (in `djbclark-ade/skills/`, link it with `bin/skill-everywhere`) |
-| `next-question` | https://github.com/djbclark/paseo-plugin-next-question (public, MIT, v0.1.1: the first tag with the Cmd+Shift+. default) | `paseo plugin install github:djbclark/paseo-plugin-next-question` | Cmd+Shift+. (Ctrl+Shift+. off macOS) jumps to the next agent waiting for input: the default since the plugin's commit 7c5c3a8; works in the macOS desktop app and in a browser (confirmed by djbclark 2026-10-30 with this default). The first default, Cmd+Shift+U, did not work in the desktop app; cause not found |
+| `questions-please` (plugin id `questions-please`; named next-question until 2026-10-31) | https://github.com/djbclark/paseo-plugin-questions-please (public, MIT, v0.1.2) | `paseo plugin install github:djbclark/paseo-plugin-questions-please` | Cmd+Shift+. (Ctrl+Shift+. off macOS) jumps to the next agent waiting for input: the default since the plugin's commit 7c5c3a8; works in the macOS desktop app and in a browser (confirmed by djbclark 2026-10-30 with this default). The first default, Cmd+Shift+U, did not work in the desktop app; cause not found |
 
 **SiYuan notes (machine-specific; added 2026-10-12, djbclark).** Only where the
 SiYuan desktop app (https://b3log.org/siyuan/) is installed and the repo's work
