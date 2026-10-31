@@ -21,7 +21,14 @@ a = sys.argv[1:]
 def save(): json.dump(s, open(f, "w"))
 if a[:3] == ["agent", "ls", "-g"]:
     if os.environ.get("STUB_LSA_FAIL" if "-a" in a else "STUB_LS_FAIL"): sys.exit(1)
-    print(json.dumps(s["agents"] if "-a" in a else [x for x in s["agents"] if not x.get("archived")]))
+    assert a in (["agent", "ls", "-g", "--background", "--json"], ["agent", "ls", "-g", "-a", "--json"]), a
+    if "-a" in a:
+        countfile = d + "/lsa-count"
+        count = int(open(countfile).read()) + 1 if os.path.exists(countfile) else 1
+        open(countfile, "w").write(str(count))
+        if os.environ.get("STUB_LSA_FAIL_AFTER_FIRST") and count > 1: sys.exit(1)
+    print(json.dumps([x for x in s["agents"] if ("-a" in a or not x.get("archived"))
+                      and ("-a" in a or "--background" in a or not x.get("background"))]))
 elif a[:2] == ["provider", "ls"]: print(json.dumps([{"provider": "omp", "status": "available"}, {"provider": "opencode", "status": "unavailable"}]))
 elif a[:2] == ["provider", "models"]: print(json.dumps([{"id": "anthropic/claude-sonnet-5-5", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
                                                       {"id": "anthropic/claude-sonnet-5-5[1m]", "thinkingOptionIds": ["low", "medium", "high"]}]))
@@ -595,8 +602,11 @@ def test_down_with_an_unanswered_daemon_keeps_the_record(env):
     assert (Path(env["_tmp"]) / "state" / "alpha.json").exists()
 
 
-def test_forced_collected_holder_is_kept_when_its_probe_fails(env):
-    old = add_agent(env, status="closed", name="watch alpha 1")
+@pytest.mark.parametrize("status", ["idle", "running", "closed"])
+@pytest.mark.parametrize("background", [False, True])
+def test_forced_live_holder_is_kept_when_its_probe_fails(env, status, background):
+    old = add_agent(env, status=status, name="watch alpha 1")
+    set_agent(env, old, background=background)
     set_role(env, old)
     rc, out = watch(env, "up", "--force", "--probe", extra={"STUB_TEST_FAIL": old})
     assert rc == 0 and "registered:" in out, out
@@ -604,3 +614,50 @@ def test_forced_collected_holder_is_kept_when_its_probe_fails(env):
     assert titles(env)[old] == "x watch alpha 1"
     assert old in json.loads((Path(env["_tmp"]) / "state" / "kept.json").read_text())
     assert old in {a["id"] for a in agents(env)}    # still listed: never archived by the sweep
+
+
+@pytest.mark.parametrize("status", ["idle", "closed", "running"])
+def test_background_holder_is_preserved_without_a_turn_or_generation(env, status):
+    old = add_agent(env, status=status, name="watch alpha 1f")
+    set_agent(env, old, background=True)
+    set_role(env, old)
+    for command in ("up", "status", "up"):
+        rc, out = watch(env, command)
+        assert rc == 0 and ("already watched" in out or "reachable: yes" in out), out
+    assert seat_calls(env) == [] and channel_test_calls(env) == []
+    assert titles(env) == {old: "watch alpha 1f"}
+    assert not (Path(env["_tmp"]) / "state" / "alpha.seq").exists()
+
+
+def test_background_archived_holder_is_dead_and_number_is_not_reused(env):
+    old = add_agent(env, status="closed", name="watch alpha z")
+    set_agent(env, old, background=True, archived=True)
+    set_role(env, old)
+    rc, out = watch(env, "up")
+    assert rc == 0 and "is archived" in out and "registered:" in out, out
+    assert "watch alpha 10" in titles(env).values()
+    assert next(a for a in json.loads((Path(env["_tmp"]) / "paseo.json").read_text())["agents"] if a["id"] == old)["archived"]
+
+
+def test_second_archived_query_failure_cannot_override_known_dead_holder(env):
+    old = add_agent(env, status="closed", name="watch alpha 1")
+    set_agent(env, old, archived=True)
+    set_role(env, old)
+    rc, out = watch(env, "up", extra={"STUB_LSA_FAIL_AFTER_FIRST": "1"})
+    assert rc == 0 and "is archived" in out and "registered:" in out, out
+    assert "already watched" not in out and len(seat_calls(env)) == 1
+
+
+def test_background_retirement_sweeps_preserve_busy_and_other_workspaces(env):
+    quiet = add_agent(env, status="closed", name="watch alpha z")
+    busy = add_agent(env, status="running", name="x watch alpha y")
+    unrelated = add_agent(env, status="idle", name="other workspace task")
+    other_retired = add_agent(env, status="idle", name="x other task")
+    for aid in (quiet, busy, unrelated, other_retired):
+        set_agent(env, aid, background=True)
+    rc, out = watch(env, "up")
+    assert rc == 0 and "registered:" in out, out
+    t = titles(env)
+    assert quiet not in t and other_retired not in t
+    assert t[busy] == "x watch alpha y" and t[unrelated] == "other workspace task"
+    assert "watch alpha 10" in t.values()

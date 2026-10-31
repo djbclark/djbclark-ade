@@ -21,7 +21,8 @@ up       per domain, in this order:
               is persisted and un-archived, and the next message resumes the same conversation, so it is neither
               replaced nor woken just to be checked. Dead means: status `error`, archived, or no longer listed
               by `paseo agent ls -g -a`. If the daemon cannot be asked, the holder's state is unknown and
-              nothing is launched (exit 1), `--force` included
+              nothing is launched (exit 1), `--force` included. Background workspaces count too:
+               `ls -g --background` includes them without including archived agents (2026-10-31)
            2. a holder that is dead or unreachable, or no holder at all, gets one new watcher
            3. a launch in progress or an agent started earlier and still registering counts as claimed:
               ~/.local/state/watch/<domain>.json plus a per-domain flock, so two concurrent `up` runs
@@ -37,7 +38,8 @@ up       per domain, in this order:
          `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
          line to a live Paseo holder (default: a holder that Paseo lists as alive or closed counts, because the
          test line costs the holder a model turn each tick and wakes a collected one). A `--probe` test that
-         fails on a collected holder starts nothing either (exit 1; inspect it, or `--force`)
+         fails on a collected holder starts nothing either (exit 1; inspect it, or `--force`).
+          A forced live holder keeps its tab even if its probe fails (2026-10-31)
 down     drops the role through the domain's off_cmd (which clears only if the agent we started still holds
          it) and archives that agent; an agent `watch` did not start is never touched
 
@@ -167,7 +169,7 @@ class Paseo:
     def agents(self, refresh: bool = False) -> list[dict] | None:
         """None when the daemon cannot be asked (liveness unknown, never 'gone')."""
         if self._agents is None or refresh:
-            rc, out, _ = run([PASEO, "agent", "ls", "-g", "--json"], 30)
+            rc, out, _ = run([PASEO, "agent", "ls", "-g", "--background", "--json"], 30)
             try:
                 d = json.loads(out) if rc == 0 else None
             except ValueError:
@@ -200,11 +202,11 @@ class Paseo:
 
     def lifecycle(self, ident: str) -> tuple[str, str]:
         """(state, why) of one agent id, from the daemon's own listings:
-          live       listed (`ls -g`, un-archived) idle/running/initializing/...
+          live       listed (`ls -g --background`, un-archived) idle/running/initializing/...
           collected  listed with status `closed`: the idle runtime was garbage collected, the session is persisted
                      and resumable, the next message wakes the SAME conversation; never replace it
           dead       listed with status `error`
-          archived   absent from `ls -g` but present in `ls -g -a`: retired on purpose, never auto-resumed
+          archived   absent from `ls -g --background` but present in `ls -g -a`: retired on purpose, never auto-resumed
           gone       absent from both
           unknown    the daemon could not be asked (never 'gone': callers must not launch on it)"""
         if self.agents() is None:
@@ -297,13 +299,14 @@ def query_holder(row: dict) -> tuple[Holder | None, str]:
     return None, f"unknown holder_parse {parse!r}"
 
 
-def holder_alive(row: dict, h: Holder, pv: Paseo, probe: bool, send: bool = True) -> tuple[bool | None, str]:
+def holder_alive(row: dict, h: Holder, pv: Paseo, probe: bool, send: bool = True,
+                 lifecycle: tuple[str, str] | None = None) -> tuple[bool | None, str]:
     """(alive, why). alive is None when `send` is False and the answer needs a channel test line, or when a Paseo
     holder's state is unknown because the daemon could not be asked (up_one refuses to launch on that).
     A Paseo holder whose idle runtime was collected (`closed`) is alive: it wakes on its next message with its
     conversation intact. Without --probe nothing is sent to it, so no model turn is spent per tick."""
     if UUID.match(h.target):
-        st, why = pv.lifecycle(h.target)
+        st, why = lifecycle if lifecycle is not None else pv.lifecycle(h.target)
         who = f"Paseo agent {h.target[:8]}"
         if st == "unknown":
             return None, f"{who}: {why}; liveness unknown"
@@ -891,15 +894,19 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
                 log(domain, f"archive: {line}")
         replaces = None
         if h:
-            st = pv.lifecycle(h.target)[0] if UUID.match(h.target) else "other"
+            lifecycle = pv.lifecycle(h.target) if UUID.match(h.target) else None
+            st = lifecycle[0] if lifecycle else "other"
             if st == "unknown":   # the daemon did not answer: neither alive nor gone, so launching could duplicate a live holder
                 log(domain, f"cannot tell whether holder {h.name or h.target} ({h.target[:8]}) is alive: the Paseo daemon could not be asked; not launching blind", dry)
                 return 1
-            if st == "collected" and args.force:
+            if st in ("live", "collected") and args.force:
                 replaces = h   # a failed probe must not discard a forced holder's saved tab
-            alive, why = holder_alive(row, h, pv, args.probe, send=not dry)
-            if alive is None:   # dry-run: a channel test line would be needed; assume it passes, say so
-                alive = True
+            alive, why = holder_alive(row, h, pv, args.probe, send=not dry, lifecycle=lifecycle)
+            if alive is None:
+                if not dry:
+                    log(domain, f"cannot tell whether holder {h.name or h.target} is alive: {why}; not launching blind", dry)
+                    return 1
+                alive = True   # known live Paseo or non-Paseo dry-run: a channel test would be needed; the reason says so
             if alive and not args.force:
                 log(domain, f"already watched by {h.name or h.target} ({h.target[:8]}, since {h.since}): {why}", dry)
                 return 0
