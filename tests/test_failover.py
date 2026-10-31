@@ -543,6 +543,70 @@ def test_sweep_logs(tmp_path):
     assert not old.exists() and new.exists()
 
 
+def _age(path, days):
+    t = time.time() - days * 86400
+    os.utime(path, (t, t), follow_symlinks=False)
+
+
+def test_sweep_tmp_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(failover.tempfile, "gettempdir", lambda: str(tmp_path))
+    stale = tmp_path / "failover-ab12_xyz"
+    (stale / "work" / ".cache").mkdir(parents=True)
+    (stale / "prompt.md").write_text("p")
+    for p in (stale / "work" / ".cache", stale / "work", stale / "prompt.md", stale):
+        _age(p, 3)
+    fresh = tmp_path / "failover-fresh123"
+    fresh.mkdir()
+    busy = tmp_path / "failover-busy_456"  # old dir, but a child was just written
+    busy.mkdir()
+    (busy / "prompt.md").write_text("p")
+    _age(busy, 3)
+    other = tmp_path / "other-ab12_xyz"  # not ours
+    odd = tmp_path / "failover-notatmpname"  # wrong shape
+    plain = tmp_path / "failover-file1234"  # a file, not a dir
+    for d in (other, odd):
+        d.mkdir()
+        _age(d, 3)
+    plain.write_text("x")
+    _age(plain, 3)
+    assert failover.sweep_tmp_dirs(1) == 1
+    assert not stale.exists()
+    assert all(p.exists() for p in (fresh, busy, other, odd, plain))
+
+
+def test_sweep_tmp_dirs_never_follows_symlinks(tmp_path, monkeypatch):
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    monkeypatch.setattr(failover.tempfile, "gettempdir", lambda: str(tmp))
+    target = tmp_path / "precious"
+    target.mkdir()
+    (target / "keep.txt").write_text("k")
+    _age(target, 3)
+    top = tmp / "failover-link_top"  # a stale-looking symlink to a real directory
+    top.symlink_to(target, target_is_directory=True)
+    _age(top, 3)
+    inner = tmp / "failover-inner_ln"  # a stale real dir holding a symlink out
+    inner.mkdir()
+    (inner / "out").symlink_to(target, target_is_directory=True)
+    _age(inner / "out", 3)
+    _age(inner, 3)
+    assert failover.sweep_tmp_dirs(1) == 1
+    assert top.is_symlink() and not inner.exists()
+    assert (target / "keep.txt").read_text() == "k"
+
+
+def test_sweep_tmp_dirs_swallows_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(failover.tempfile, "gettempdir", lambda: str(tmp_path / "missing"))
+    assert failover.sweep_tmp_dirs(1) == 0
+    monkeypatch.setattr(failover.tempfile, "gettempdir", lambda: str(tmp_path))
+    d = tmp_path / "failover-locked_1"
+    d.mkdir()
+    _age(d, 3)
+    monkeypatch.setattr(failover.shutil, "rmtree", lambda *a, **k: (_ for _ in ()).throw(PermissionError("no")))
+    assert failover.sweep_tmp_dirs(1) == 0
+    assert d.exists()
+
+
 def test_ask_many_stops_on_first_failure(monkeypatch):
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
 

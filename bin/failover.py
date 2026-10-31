@@ -77,6 +77,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -849,6 +850,46 @@ def sweep_logs(max_age_days: float = LOG_RETENTION_DAYS) -> int:
         try:
             if f.is_file() and f.stat().st_mtime < cutoff:
                 f.unlink()
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+TMP_DIR_RE = re.compile(r"failover-[a-z0-9_]{8}")  # tempfile.TemporaryDirectory(prefix="failover-") names
+TMP_RETENTION_DAYS = 1.0
+
+
+def sweep_tmp_dirs(max_age_days: float = TMP_RETENTION_DAYS) -> int:
+    """Delete failover-* temp dirs that killed runs left in tempfile.gettempdir(); return how many went.
+
+    _acp_once() runs each turn in a TemporaryDirectory(prefix="failover-"), which a SIGKILLed
+    run never cleans up (a background process can also re-create work/.cache after cleanup).
+    Only a real directory (lstat: a symlink is never followed or removed) named exactly like
+    tempfile's output (prefix plus 8 of [a-z0-9_]), owned by this user, and whose own mtime and
+    every direct child's mtime are older than max_age_days is removed, so a live run's dir
+    (just made, or still written to) stays. shutil.rmtree unlinks nested symlinks, never
+    follows them. Every error is swallowed: this is housekeeping and never fails the caller."""
+    cutoff, n = time.time() - max_age_days * 86400, 0
+    try:
+        entries = list(os.scandir(tempfile.gettempdir()))
+    except OSError:
+        return 0
+    for e in entries:
+        try:
+            if not TMP_DIR_RE.fullmatch(e.name):
+                continue
+            st = e.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+                continue
+            newest = st.st_mtime
+            with os.scandir(e.path) as it:
+                for child in it:
+                    newest = max(newest, child.stat(follow_symlinks=False).st_mtime)
+            if newest >= cutoff:
+                continue
+            shutil.rmtree(e.path, ignore_errors=True)
+            if not os.path.lexists(e.path):
                 n += 1
         except OSError:
             continue

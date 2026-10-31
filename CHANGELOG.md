@@ -305,6 +305,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `failover.sweep_tmp_dirs()` (2026-10-30) removes stale `failover-*` scratch directories that killed runs leave in the temp dir: only real directories (never symlinks) named like `TemporaryDirectory(prefix="failover-")`, owned by the caller, whose own and children's mtimes are over a day old; errors never propagate (#TBD)
 - `skills/oc-go-key/scripts/go-status` (2026-10-30): no upstream error text is printed any more (it could carry an `access_token` or a lowercase `bearer` token), only a fixed explanation per failure class; an auth failure naming another provider no longer advises rotating the Go key, and one with no provider recorded exits 3 instead of 2; the Go wall, no-funds and region errors still exit 2; a timestamp without a time zone is skipped instead of crashing the scan (#171)
 
 - `/autorename` with no argument renamed more than the operator asked for (2026-10-30): in Paseo it also renamed the workspace to `<slug>-pw`, and in herdr it offered to move the tab to another workspace. It now titles the session and names only this agent's own tab (the Paseo tab or the herdr tab label); the nudge hook does the same. `/autorename all` stays herdr-only and in a Paseo-hosted agent replies `autorename all is not yet supported in Paseo` (`herdr_place.py config` exits 2 there), and a Paseo-hosted agent never touches herdr even when the daemon passed a herdr environment down to it (#169).
