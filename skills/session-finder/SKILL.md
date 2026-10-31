@@ -466,6 +466,17 @@ escalated to the operator about silence that was a queue; two queued messages we
    non-final record older than `--stuck-after S` (default 300): `STUCK 14m 20261030-211457-b98c64 -> [d2a505dd] blocked on card frm_18f85bead001xBPfK85BC2N2Gx (question: AskUserQuestion) [why: ...]`.
    A watcher or a launchd job greps `^STUCK` (exit status stays 0). A STUCK line means **queued, not lost**: the text is waiting for its target, and `--status ID` shows when it
    was last looked at; "no ack yet" and "never delivered" are no longer the same silence.
+6. **Is this expectation answered?** `relay.py --pending` runs the ack sweep first (bounded to 3 s; transcript reads only, since the Paseo timeline never closes an ack), so it prints
+   current state. A transcript-backed row it could not collect reads `open (uncollected, last swept 2026-10-31T09:12:03-04:00)` (`--json`: `"uncollected": true, "last_swept"`); run `relay.py --sweep`
+   to collect it. A fresh listing is byte-identical to before. The filtered views (`--queued-only`, `--older-than`, `--summary`) list messages and do not sweep. The per-send sweep
+   is the message half only: the ack half runs in `--sweep` and `--pending`, not at the start of every relay (two locks and a transcript read on every send).
+7. **How to answer an expectation** (2026-10-31). When a peer's text ends `[reply through relay.py to <id>: ack ID]` (or `--pending` lists `expect-ack ID` addressed to you), answer with
+   `relay.py --ack ID` (alone: no target, no text; valid when ID exists, is `open` and you are its target) or, written out, `relay.py <sender> "ack ID"`. Both are the ORDINARY send: the
+   sender sees the ack, the verified closer settles it when it is delivered, and a busy sender queues it; the `queued:` line then says `this text answers expectation ID, which closes only
+   when the queued message is delivered (or on relay.py --sweep), not now`. There is no local-only close. Refused with the form named: an unknown, settled or malformed ID (exit 1; 2 for a
+   malformed one) or a caller that is not the target. `--ack` after a target and text stays the delivery-watch flag. **An `ack ID` token that BEGINS ANY LINE** of a send from the
+   expectation's target to its sender closes it (a reply that ends `ack host-branch-durability-2` included); one quoted inside a line, or sent by a third party, closes nothing. Lines are
+   those of the text AS YOU TYPED IT: relay folds the whitespace of what it sends (and stores), so it keeps the line starts of the argument for the closer, and a queued record keeps them as `ack_leads`.
 
 
 ## Direct Herdr control and detached relay workers (2026-10-25)
