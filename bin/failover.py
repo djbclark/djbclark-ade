@@ -866,10 +866,11 @@ def sweep_tmp_dirs(max_age_days: float = TMP_RETENTION_DAYS) -> int:
     _acp_once() runs each turn in a TemporaryDirectory(prefix="failover-"), which a SIGKILLed
     run never cleans up (a background process can also re-create work/.cache after cleanup).
     Only a real directory (lstat: a symlink is never followed or removed) named exactly like
-    tempfile's output (prefix plus 8 of [a-z0-9_]), owned by this user, and whose own mtime and
-    every direct child's mtime are older than max_age_days is removed, so a live run's dir
-    (just made, or still written to) stays. shutil.rmtree unlinks nested symlinks, never
-    follows them. Every error is swallowed: this is housekeeping and never fails the caller."""
+    tempfile's output (prefix plus 8 of [a-z0-9_]), owned by this user, and in which NOTHING at any
+    depth (the dir, its subdirectories and files, symlinks by their own lstat) is newer than
+    max_age_days is removed, so a live run's dir (just made, or still written to anywhere inside,
+    e.g. work/.cache/...) stays. shutil.rmtree unlinks nested symlinks, never follows them. Every
+    error is swallowed: this is housekeeping and never fails the caller."""
     cutoff, n = time.time() - max_age_days * 86400, 0
     try:
         entries = list(os.scandir(tempfile.gettempdir()))
@@ -882,11 +883,7 @@ def sweep_tmp_dirs(max_age_days: float = TMP_RETENTION_DAYS) -> int:
             st = e.stat(follow_symlinks=False)
             if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
                 continue
-            newest = st.st_mtime
-            with os.scandir(e.path) as it:
-                for child in it:
-                    newest = max(newest, child.stat(follow_symlinks=False).st_mtime)
-            if newest >= cutoff:
+            if st.st_mtime >= cutoff or _recently_touched(e.path, cutoff):
                 continue
             shutil.rmtree(e.path, ignore_errors=True)
             if not os.path.lexists(e.path):
@@ -894,6 +891,24 @@ def sweep_tmp_dirs(max_age_days: float = TMP_RETENTION_DAYS) -> int:
         except OSError:
             continue
     return n
+
+
+def _recently_touched(root: str, cutoff: float) -> bool:
+    """True when any entry under root (at any depth, never following symlinks) has an mtime at or
+    after cutoff, or when the tree cannot be read completely (fail safe: an unreadable tree is kept)."""
+    stack = [root]
+    try:
+        while stack:
+            with os.scandir(stack.pop()) as it:
+                for child in it:
+                    st = child.stat(follow_symlinks=False)
+                    if st.st_mtime >= cutoff:
+                        return True
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append(child.path)
+    except OSError:
+        return True
+    return False
 
 
 def acp_command(entry: Entry, prompt_file: Path, cwd: Path, log: Path | None = None) -> list[str]:

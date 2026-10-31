@@ -574,6 +574,20 @@ def test_sweep_tmp_dirs(tmp_path, monkeypatch):
     assert all(p.exists() for p in (fresh, busy, other, odd, plain))
 
 
+def test_sweep_tmp_dirs_keeps_a_dir_with_activity_deep_inside(tmp_path, monkeypatch):
+    # a live run writing under work/.cache/ refreshes only that file and its own parent: every
+    # directory above it can look old, and the run's scratch dir must still survive the sweep
+    monkeypatch.setattr(failover.tempfile, "gettempdir", lambda: str(tmp_path))
+    live = tmp_path / "failover-live_789"
+    deep = live / "work" / ".cache" / "pkg"
+    deep.mkdir(parents=True)
+    (deep / "blob").write_text("just written")
+    for p in (deep, live / "work" / ".cache", live / "work", live):
+        _age(p, 3)
+    assert failover.sweep_tmp_dirs(1) == 0
+    assert (deep / "blob").exists()
+
+
 def test_sweep_tmp_dirs_never_follows_symlinks(tmp_path, monkeypatch):
     tmp = tmp_path / "tmp"
     tmp.mkdir()
