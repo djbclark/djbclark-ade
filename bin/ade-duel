@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""ade-duel — two agents argue antagonistically about one artifact, and the transcript is the record.
+
+WHY. A single model asked to review its own work agrees with itself. The `dialogue` skill runs several
+vendors in fixed rounds and `paseo-committee` gives an advisor/committee shape; both aim at consensus.
+This is the opposite: one agent PROPOSES, the other ATTACKS it, for N rounds, and every rebuttal has to
+name the claim it kills. Competition, not politeness.
+
+WHAT IT IS NOT. It does not decide anything. It writes `transcript.md` and, with a judge, a parsed
+`VERDICT: A|B|TIE` line. A human or the caller reads the transcript; the exit status says only whether
+the run completed.
+
+RUNNER. No model is baked in. `--runner` (or ADE_DUEL_RUNNER) is a command template with three
+placeholders, substituted with shlex.quote:
+
+    {agent}   the agent name for that turn
+    {prompt}  a file the runner reads as its prompt
+    {output}  a file the runner MUST write; an empty or missing file fails the turn
+
+    ADE_DUEL_RUNNER='acp-run {agent} -f {prompt} > {output}'
+
+A runner that writes nothing, or exits non-zero, stops the duel (exit 3): a silent agent must never be
+read as an argument. Every turn's output is checked before it feeds the next prompt.
+
+EXIT CODES: 0 completed, 2 usage/runner missing, 3 an agent produced nothing, 4 the judge's verdict line
+is missing or unparseable.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+PROPOSER, CHALLENGER = "proposer", "challenger"
+
+ROLE_PROMPT = {
+    PROPOSER: (
+        "You are the PROPOSER. State a concrete position on the artifact below and defend it.\n"
+        "Be specific: name files, invariants, risks. No hedging, no summary of the artifact.\n"
+        "If a challenger's objection is answered by the artifact, say exactly where.\n"
+    ),
+    CHALLENGER: (
+        "You are the CHALLENGER. Your job is to kill the other side's position, not to agree with it.\n"
+        "For every claim you attack, quote it and name the concrete failure: input, state, caller, cost.\n"
+        "Report agreement ONLY where you verified it, and say how you verified it.\n"
+        "Never soften an objection to be agreeable; never invent one to look thorough.\n"
+    ),
+}
+
+JUDGE_PROMPT = (
+    "You are the JUDGE. Read the exchange. Decide which side survived on the evidence, not on tone.\n"
+    "Count only objections that name a concrete failure and were answered or left standing.\n"
+    "End with exactly one line: `VERDICT: A`, `VERDICT: B`, or `VERDICT: TIE`, then one sentence why.\n"
+)
+
+
+def fail(code: int, msg: str) -> "SystemExit":
+    print(f"ade-duel: {msg}", file=sys.stderr)
+    return SystemExit(code)
+
+
+def run_turn(runner: str, agent: str, prompt: str, work: Path, label: str) -> str:
+    """One agent turn. Returns its text; raises SystemExit(3) when it produced nothing."""
+    prompt_file = work / f"{label}.prompt.txt"
+    out_file = work / f"{label}.out.txt"
+    prompt_file.write_text(prompt)
+    argv = shlex.split(runner.format(agent=shlex.quote(agent), prompt=shlex.quote(str(prompt_file)),
+                                     output=shlex.quote(str(out_file))))
+    if not argv:
+        raise fail(2, "runner template is empty")
+    started = time.time()
+    done = subprocess.run(argv, capture_output=True, text=True)
+    if done.returncode != 0:
+        raise fail(3, f"{label}: runner exited {done.returncode}: {(done.stderr or done.stdout).strip()[:300]}")
+    if done.stdout.strip() and not out_file.exists():
+        out_file.write_text(done.stdout)
+    text = out_file.read_text() if out_file.exists() else ""
+    if not text.strip():
+        raise fail(3, f"{label}: agent {agent!r} produced no output after {time.time() - started:.1f}s; "
+                      "a silent turn must not be read as an argument")
+    return text.strip()
+
+
+def parse_verdict(text: str) -> str | None:
+    for line in reversed(text.splitlines()):
+        line = line.strip().strip("`*_ ").upper()
+        if line.startswith("VERDICT:"):
+            value = line.split(":", 1)[1].strip()
+            return value if value in ("A", "B", "TIE") else "?"
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="ade-duel", description=__doc__.splitlines()[0])
+    p.add_argument("artifact", help="file (or - for stdin) both agents argue about")
+    p.add_argument("--rounds", type=int, default=2, help="challenge/rebuttal rounds after the opening (default 2)")
+    p.add_argument("--a", default="claude", help="proposer agent (default claude)")
+    p.add_argument("--b", default="codex", help="challenger agent (default codex)")
+    p.add_argument("--judge", help="agent that reads the exchange and emits VERDICT: A|B|TIE")
+    p.add_argument("--runner", default=os.environ.get("ADE_DUEL_RUNNER"),
+                   help="command template, see the module docstring (or ADE_DUEL_RUNNER)")
+    p.add_argument("--out", default="duel", help="output directory (default ./duel); never overwritten silently")
+    p.add_argument("--force", action="store_true", help="reuse an existing --out directory")
+    a = p.parse_args(argv)
+    if a.rounds < 0:
+        raise fail(2, "--rounds must be >= 0")
+    if not a.runner:
+        raise fail(2, "no runner: set --runner or ADE_DUEL_RUNNER "
+                      "(e.g. ADE_DUEL_RUNNER='acp-run {agent} -f {prompt} > {output}')")
+    text = sys.stdin.read() if a.artifact == "-" else Path(a.artifact).read_text()
+    if not text.strip():
+        raise fail(2, "artifact is empty: there is nothing to argue about")
+    out = Path(a.out)
+    if out.exists() and any(out.iterdir()) and not a.force:
+        raise fail(2, f"{out} is not empty; pass --force to append into it")
+    out.mkdir(parents=True, exist_ok=True)
+    turns: list[tuple[str, str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="ade-duel-") as tmp:
+        work = Path(tmp)
+        def prompt_for(role: str, others: list[tuple[str, str, str]], round_no: int) -> str:
+            body = [ROLE_PROMPT[role], f"## Round {round_no}", "## Artifact", text]
+            if others:
+                body.append("## The exchange so far (oldest first)")
+                for who, rnd, said in others:
+                    body.append(f"### {who} (round {rnd})\n{said}")
+            return "\n\n".join(body) + "\n"
+        first = run_turn(a.runner, a.a, prompt_for(PROPOSER, [], 0), work, "r0-proposer")
+        turns.append((PROPOSER, 0, first))
+        for rnd in range(1, a.rounds + 1):
+            for role, agent in ((CHALLENGER, a.b), (PROPOSER, a.a)):
+                said = run_turn(a.runner, agent, prompt_for(role, turns, rnd), work, f"r{rnd}-{role}")
+                turns.append((role, rnd, said))
+        verdict = None
+        if a.judge:
+            said = run_turn(a.runner, a.judge, JUDGE_PROMPT + "\n## Artifact\n" + text + "\n\n## Exchange\n" +
+                           "\n\n".join(f"### {w} (round {r})\n{s}" for w, r, s in turns) + "\n", work, "judge")
+            turns.append(("judge", a.rounds + 1, said))
+            verdict = parse_verdict(said)
+    transcript = out / "transcript.md"
+    parts = [f"# ade-duel {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+             f"- proposer: `{a.a}`  challenger: `{a.b}`  rounds: {a.rounds}  judge: `{a.judge or '-'}`",
+             f"- artifact: `{a.artifact}`"]
+    if verdict:
+        parts.append(f"- verdict: **{verdict}**")
+    for who, rnd, said in turns:
+        parts.append(f"\n## {who} — round {rnd}\n\n{said}")
+    transcript.write_text("\n".join(parts) + "\n")
+    print(f"ade-duel: {len(turns)} turns -> {transcript}")
+    if a.judge:
+        if verdict in (None, "?"):
+            raise fail(4, "judge produced no parsable `VERDICT: A|B|TIE` line")
+        print(f"ade-duel: VERDICT {verdict}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
