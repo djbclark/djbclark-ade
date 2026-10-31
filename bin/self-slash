@@ -117,6 +117,12 @@
 # model answers "I can't run /compact"; upstream getpaseo/paseo#7169 did not cover
 # a self-send on 0.12.0).  Paseo has no /new: /new and /reset are sent as /clear,
 # which rebinds the agent to a fresh Claude session (verified the same day).
+# Clear aliases and /compact require Provider=claude from this agent's daemon inspect
+# record (exit 7 otherwise, including unknown; also checked with --dry-run). The
+# installed Paseo CLI exposes no per-agent slash-command list (2026-10-31); use
+# this dated provider allow-list rather than treating advertised text as execution.
+# Claude-only proof covers both commands; omp /clear was plain text (2026-10-31).
+# Use self-slash --finish --successor PROVIDER/MODEL for other providers.
 #
 # Rules: only ever targets this session's own pane/terminal (never another);
 # waits --delay seconds (default 6) so the current turn can end, then refuses if
@@ -209,7 +215,7 @@ finish_flag=$finish
                   value exits 11 and starts nothing; for a claude successor --mode is a permission mode of the installed
                   claude CLI, else exit 2 before anything starts)
        exit codes: 2 usage, 3 no host or unknown baton syntax, 4 draft in the input box, 5 no prompt (a busy pane is waited for up to SELF_SLASH_WAIT), 6 session still working,
-       7 refused (gap check or lifecycle already queued), 8 archive refused or Codex submission unconfirmed (identity, target change or no rollout receipt), 9 dispatched agent
+       7 refused (gap check, lifecycle already queued, or unproved Paseo clear/compact provider), 8 archive refused or Codex submission unconfirmed (identity, target change or no rollout receipt), 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
        11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable),
        12 bare --finish refused: this agent holds a watch role (Paseo; bin/watch status; --successor is not refused))" >&2; exit 2; }
@@ -535,6 +541,38 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "$lifecycle" = 1 ]; then
     held*) holder=$(lock_pid "$tlock"); echo "self-slash: a lifecycle action (/new, /clear, /reset, /quit, /exit or --finish) is already queued for $host $pane (pid $holder); not queuing another. See $log." >&2; exit 7;;
   esac
 fi
+# Claude-only daemon built-ins: 2026-10-19 proof; omp clear was plain text 2026-10-31.
+# Inspect this exact agent, never infer the provider from the requested model or environment.
+# Also called immediately before a send, after idle, including an explicit --then command.
+paseo_check_builtin() {
+  [ "$host" = paseo ] || return 0
+  case "$1" in /new|/clear|/reset|/compact|/new[[:space:]]*|/clear[[:space:]]*|/reset[[:space:]]*|/compact[[:space:]]*) ;;
+    *) return 0;; esac
+  local provider
+  provider=$(python3 - "$paseo_cli" "$pane" <<'PY_PROVIDER'
+import json, os, subprocess, sys
+try:
+    env = dict(os.environ)
+    env.pop("PASEO_AGENT_ID", None)
+    env.pop("PASEO_AGENT_CWD", None)
+    r = subprocess.run([sys.argv[1], "agent", "inspect", sys.argv[2], "--json"],
+                       env=env, capture_output=True, text=True, timeout=20, check=True)
+    row = json.loads(r.stdout)
+    if not isinstance(row, dict) or row.get("Id") != sys.argv[2]:
+        raise ValueError("wrong agent record")
+    provider = row.get("Provider")
+    print(provider if isinstance(provider, str) and provider.isalnum() else "unknown")
+except (OSError, ValueError, subprocess.SubprocessError):
+    print("unknown")
+PY_PROVIDER
+)
+  if [ "$provider" != claude ]; then
+    echo "self-slash: Paseo provider ${provider:-unknown}: daemon clear/compact is unproved; refused (nothing sent). Use self-slash --finish --successor PROVIDER/MODEL" >&2
+    return 7
+  fi
+}
+paseo_check_builtin "$text" || exit 7
+paseo_check_builtin "$then" || exit 7
 if [ "$dry" = 1 ]; then
   if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -n "$successor" ]; then
     s_model="${successor#*/}"; [ "$s_model" = "$successor" ] && s_model=""
@@ -818,6 +856,7 @@ PY
 }
 send_text() {
   if [ "$host" = paseo ]; then
+    paseo_check_builtin "$text" || exit 7
     # PASEO_AGENT_ID unset so the daemon does not envelope the send as agent-to-agent
     # text; --behavior steer so a turn that began meanwhile is never torn down.
     out=$(env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" send "$pane" --no-wait --behavior steer --json "$text" 2>&1) || { echo "$(gdate '+%F %T') $host $pane: paseo send failed: ${out:0:200}"; return 1; }
