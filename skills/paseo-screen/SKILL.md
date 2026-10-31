@@ -24,11 +24,8 @@ start Orca for a GUI task. **It stays enabled when idle** (operator's choice, 20
 paseo plugin add kevguy/screen        # plugin id: paseo-screen; operator only (rule 4)
 ```
 
-Installed 2026-10-30 from the registry's reviewed pin `1df9050d3721d927aa73655ad2cb4b4b53f42db9` (a registry
-install uses the pin its reviewer recorded; `docs/apply-toolchain-prompt.md` names the same pin). **Mandatory
-verify after any install or update:** `git -C ~/.paseo/plugins/paseo-screen/*/checkout rev-parse HEAD` must print
-that sha (it did on 2026-10-31) and `paseo plugin ls` must show `paseo-screen` `running`; a different sha is
-an unreviewed revision, so stop and tell the operator. It compiles a Swift helper (ScreenCaptureKit for frames,
+Installed 2026-10-30 from the Paseo plugin registry, tracking whatever it lists: no version pin (djbclark, 2026-10-31:
+nothing is version-pinned). After an install, `paseo plugin ls` must show `paseo-screen` `running`. It compiles a Swift helper (ScreenCaptureKit for frames,
 CGEvent for input); the server code has no network, no listening sockets and no runtime dependencies (read
 before install, 2026-10-30). Paseo already holds macOS Screen Recording and Accessibility, so there was no
 permission prompt.
