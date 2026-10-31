@@ -221,7 +221,7 @@ agent what changed and what is new. Entries end with the pull request number.
 - `herdr-tidy`: Orca host mode (`--host orca`, `/orca-tidy`) (#2).
 
 ### Changed
-- djbclark-ade `master` is PR-only (2026-10-31, djbclark): GitHub branch protection, enforced for admins, refuses a direct push, force push or deletion; AGENTS.md "Machine context" says so. Also merged the unbuilt "model tiers as data" design as `docs/model-tiers-design.md`, queued to build after D1 (#TBD).
+- djbclark-ade `master` is PR-only (2026-10-31, djbclark): GitHub branch protection, enforced for admins, refuses a direct push, force push or deletion; AGENTS.md "Machine context" says so. Also merged the unbuilt "model tiers as data" design as `docs/model-tiers-design.md`, queued to build after D1 (#188).
 
 - `AGENTS.md` standing order 11 (2026-10-30, djbclark): djbclark-ade is the lead's project; a change to code or configuration in another repository or in installed files outside a repository waits for the operator's yes (own installs, memory notes and upstream filing of an approved change excepted), and findings there are reported as proposals (#170).
 - `skills/paseo-handoff` (2026-10-30): an "in a worktree" handoff now gets an `isolation: "local"` workspace and a `git worktree add` task worktree instead of a Paseo worktree workspace, until the Paseo-only plan's D1.3 and D2 gate prove that archiving cannot delete unpushed work (plan rule D0.3) (#154).
