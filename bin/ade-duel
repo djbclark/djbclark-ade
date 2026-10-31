@@ -17,7 +17,7 @@ placeholders, substituted with shlex.quote:
     {prompt}  a file the runner reads as its prompt
     {output}  a file the runner MUST write; an empty or missing file fails the turn
 
-    ADE_DUEL_RUNNER='acp-run {agent} -f {prompt} > {output}'
+    ADE_DUEL_RUNNER='acp-run {agent} -f {prompt}'          # stdout is captured when {output} is absent
 
 A runner that writes nothing, or exits non-zero, stops the duel (exit 3): a silent agent must never be
 read as an argument. Every turn's output is checked before it feeds the next prompt.
@@ -41,6 +41,7 @@ is missing or unparseable, 5 code mode: no side passed --check (nothing to promo
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import os
 import shlex
@@ -76,7 +77,8 @@ INSULT_RULE = (
 )
 
 JUDGE_PROMPT = (
-    "You are the JUDGE. Read the exchange. Decide which side survived on the evidence, not on tone.\n"
+    "You are the JUDGE. A is the PROPOSER (defends a position); B is the CHALLENGER (attacks it). "
+    "Read the exchange. Decide which side survived on the evidence, not on tone.\n"
     "Count only objections that name a concrete failure and were answered or left standing.\n"
     "End with exactly one line: `VERDICT: A`, `VERDICT: B`, or `VERDICT: TIE`, then one sentence why.\n"
 )
@@ -228,6 +230,7 @@ def run_code_mode(a, text: str, src: Path, out: Path) -> int:
     lines = [f"# ade-duel (code) {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
              f"- proposer: `{a.a}`  challenger: `{a.b}`  pick: `{a.pick}`  judge: `{a.judge or '-'}`",
              f"- source: `{src}`  copies: `{out / 'a'}` and `{out / 'b'}` (both kept; nothing promoted)",
+             f"- task: `{out / 'artifact.md'}`",
              f"- winner: **{winner}** — {reason}"]
     for role, r in results.items():
         lines.append(f"\n## {role} — {r['agent']}\n\n"
@@ -285,7 +288,10 @@ def main(argv: list[str] | None = None) -> int:
     if a.artifact == "-":
         text = sys.stdin.read()
     elif Path(a.artifact).is_file():
-        text = Path(a.artifact).read_text()
+        try:
+            text = Path(a.artifact).read_text()
+        except OSError as exc:
+            raise fail(2, f"{a.artifact}: cannot read the artifact ({exc.strerror or exc})")
     elif src is not None:
         text = a.artifact          # code mode: the positional is the task, inline
     else:
@@ -296,6 +302,18 @@ def main(argv: list[str] | None = None) -> int:
     if out.exists() and any(out.iterdir()) and not a.force:
         raise fail(2, f"{out} is not empty; pass --force to append into it")
     out.mkdir(parents=True, exist_ok=True)
+    # RESERVE THE DIRECTORY: two duels into one --out would interleave turns into a single transcript.
+    try:
+        fd = os.open(out / "duel.lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        raise fail(2, f"{out} is in use by another duel (duel.lock exists); remove it once that run is dead")
+    except OSError as exc:
+        raise fail(2, f"{out}: cannot reserve the output directory ({exc.strerror or exc})")
+    atexit.register(lambda: (out / "duel.lock").unlink(missing_ok=True))
+    os.write(fd, f"{os.getpid()} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n".encode())
+    os.close(fd)
+    keep = out / "artifact.md"
+    atomic_write(keep, text)
     if src is not None:
         return run_code_mode(a, text, src, out)
     turns: list[tuple[str, str, str]] = []
@@ -326,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     transcript = out / "transcript.md"
     parts = [f"# ade-duel {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
              f"- proposer: `{a.a}`  challenger: `{a.b}`  rounds: {a.rounds}  judge: `{a.judge or '-'}`",
-             f"- artifact: `{a.artifact}`"]
+             f"- artifact: `{a.artifact}` (copy evaluated: `{keep}`)"]
     if verdict:
         parts.append(f"- verdict: **{verdict}**")
     for who, rnd, said in turns:

@@ -225,3 +225,20 @@ def test_failed_run_does_not_truncate_an_existing_transcript(tmp_path, runner, a
     assert r.returncode == 3
     assert (out / "transcript.md").read_text() == "previous run\n"
     assert not list(out.glob(".*.tmp")), "a temp file was left behind"
+
+
+def test_output_directory_is_reserved_against_a_second_duel(tmp_path, runner, artifact):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "duel.lock").write_text("1234 running\n")
+    r = run(None, artifact, "--runner", runner, "--rounds", 1, "--out", out, "--force")
+    assert r.returncode == 2 and "in use by another duel" in r.stderr
+    assert not (out / "transcript.md").exists()
+
+
+def test_the_artifact_evaluated_is_kept_beside_the_transcript(tmp_path, runner, artifact):
+    r = run(None, artifact, "--runner", runner, "--rounds", 1, "--out", tmp_path / "out")
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "out" / "artifact.md").read_text() == artifact.read_text()
+    assert "artifact.md" in (tmp_path / "out" / "transcript.md").read_text()
+    assert not (tmp_path / "out" / "duel.lock").exists(), "the reservation must be released"
