@@ -225,12 +225,17 @@ def isolated_watcher_environment(monkeypatch, tmp_path):
     for key in list(os.environ):
         if key.startswith("RW_") or key == "PASEO_AGENT_ID":
             monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("RW_NO_DEPLOY", "1")
     real = subprocess.run
     def guarded(argv, *args, **kwargs):
         command = list(argv) if not isinstance(argv, str) else [argv]
         if command[:3] == ["env", "-u", "PASEO_AGENT_ID"]:
             command = command[3:]
-        allowed = command and (command[0] == "git" or
+        git_read = {"rev-parse", "cat-file", "merge-base", "log", "status"}
+        git_cwd = Path(command[command.index("-C") + 1]).resolve() if "-C" in command else Path.cwd()
+        fixture_git = git_cwd.is_relative_to(tmp_path)
+        allowed = command and ((command[0] == "git" and
+                    (fixture_git or (command[3] if command[1:2] == ["-C"] else command[1]) in git_read)) or
                   (Path(command[0]).name.startswith("python") and "-c" in command))
         import shutil
         executable = shutil.which(command[0]) if command else None
