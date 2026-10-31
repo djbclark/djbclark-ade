@@ -35,7 +35,7 @@ Watcher registered 2026-10-24 7:52 PM, channel tested. Done and pushed this sess
 1. Boost signal = churn, limit 2.0, churn line 25k. Rejected: swap, flat higher limit.
 2. App Tamer was uninstalled 2026-10-24 (A/B trimmed day worse); do not reinstall. B8 (com.apple.container 8.6 GiB) kept: Apple containers in use. B9 (Chrome OptGuideOnDeviceModel 4 GiB) skipped by djbclark.
 3. Chrome: Memory Saver is at Maximum; Auto Tab Discard is the one enabled tab extension; removing the disabled ones is djbclark's job in chrome://extensions.
-4. No Gradle move: the shared remote cache on vps-primary (since 2026-10-13) holds only 4.2 MiB; vps-primary has 12 GB free on a 31 GB root and a 15 GB sdb at /var/lib/bb (bb project). djbclark mentioned a "new larger disk"; none found.
+4. No Gradle move: the shared remote cache on vps-primary (since 2026-10-13) holds only 4.2 MiB; vps-primary has 12 GB free on a 31 GB root and a 15 GB sdb at /home/djbclark. djbclark mentioned a "new larger disk"; none found.
 
 ## Evidence & Data
 Load 69 at 9:04 AM = memory exhaustion (swap 13.5/14 GiB, ~33 MB free, churn 52k), not a build; Chrome main process at 97% on account.dyn.com. Tests: test_load_watch_admit.py 23 pass, test_load_watch_chrome_alert.py 2 pass, test_herdr_server_run.py 4 pass; site-djbclark test_bg_load_gate.py 8 pass. The admit/bg tests run via `bg uv run --no-project --with pytest python -m pytest` from /tmp.
