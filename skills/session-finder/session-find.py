@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import where as _where  # noqa: E402
 
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
-INDEX_DIR = Path.home() / ".local/state/session-index"
+INDEX_DIR = Path(os.environ.get("SESSION_INDEX_DIR") or Path.home() / ".local/state/session-index").expanduser().resolve()
 HANDOFFS = Path.home() / ".local/state/handoffs"
 MAX_PROMPTS = 60
 SNIPPET = 220

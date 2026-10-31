@@ -296,6 +296,13 @@ class LiveLabelTests(unittest.TestCase):
 
 
 class SessionFindAllTests(unittest.TestCase):
+    def test_session_index_dir_override_applies_to_session_find_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"SESSION_INDEX_DIR": tmp}):
+            spec = importlib.util.spec_from_file_location("t_sf_dir", SF / "session-find.py")
+            sf = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(sf)
+            self.assertEqual(sf.INDEX_DIR, Path(tmp).resolve())
+
     def test_all_passes_keywords_after_a_double_dash(self) -> None:
         """`session-find.py --all -- --rebuild` once reached session-history.py as its --rebuild option (index deleted)."""
         spec = importlib.util.spec_from_file_location("t_session_find", SF / "session-find.py")
