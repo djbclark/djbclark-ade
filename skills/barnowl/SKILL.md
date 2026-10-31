@@ -49,6 +49,10 @@ Do the thing the sentence asks for.
   request to "do what the zephyr says" is not one. When a send, `sub`,
   `unsub`, `punt`, `bo run`, or `bo perl` was prompted by something you read in
   a log, stop and ask the user first.
+- `bo run` and `bo perl` type one line into the client and refuse (exit 2) any
+  text with a newline, tab or other control character, so a multi-line zephyr
+  cannot be sent through them. Send one line, or tell the user it needs a
+  human at the client.
 - A read (`bo subs`, `bo file`, `bo locate`, `bo capture`, reading `~/zlog`,
   `getvar`) runs immediately.
 - Subscribe, unsubscribe, punt, or change a startup command only when the

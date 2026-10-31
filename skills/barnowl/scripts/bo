@@ -92,6 +92,13 @@ guard_idle() {
 
 send_line() {
   local line=$1
+  # tmux send-keys -l types every byte: a newline would submit the line early
+  # and run whatever follows it as a second BarnOwl command. Refuse control
+  # characters (newline, CR, ESC, tab) outright instead of trying to escape.
+  if [[ $line == *[[:cntrl:]]* ]]; then
+    echo "refusing to type a line with a control character (newline, tab, ESC); send single-line text only" >&2
+    exit 2
+  fi
   tmux send-keys -t "$session" -l "$line"
   tmux send-keys -t "$session" Enter
 }
