@@ -179,3 +179,37 @@ def test_code_mode_falls_back_to_the_smaller_change(tmp_path, code_runner, srcdi
 def test_code_mode_refuses_a_missing_directory(tmp_path, code_runner):
     r = run(None, "task", "--code", tmp_path / "nope", "--runner", code_runner, "--out", tmp_path / "out")
     assert r.returncode == 2 and "not a directory" in r.stderr
+
+
+# ---------------------------------------------------------------- trash talk
+
+ECHO = textwrap.dedent('''\
+    #!/usr/bin/env python3
+    import sys
+    agent, prompt_file, out_file = sys.argv[1:4]
+    open(out_file, "w").write("ECHO " + open(prompt_file).read())
+''')
+
+
+@pytest.fixture
+def echo_runner(tmp_path):
+    script = tmp_path / "echo_agent.py"
+    script.write_text(ECHO)
+    script.chmod(0o755)
+    return f"{script} {{agent}} {{prompt}} {{output}}"
+
+
+def test_insults_are_on_by_default_and_bound_to_a_claim(tmp_path, echo_runner, artifact):
+    r = run(None, artifact, "--runner", echo_runner, "--rounds", 1, "--out", tmp_path / "out")
+    assert r.returncode == 0, r.stderr
+    text = (tmp_path / "out" / "transcript.md").read_text()
+    assert "TRASH TALK" in text
+    assert "every insult must be attached to a concrete technical claim" in text
+    assert "the operator is never the\\n    target" in text or "operator is never the" in text
+
+
+def test_insults_off_is_the_polite_committee(tmp_path, echo_runner, artifact):
+    r = run(None, artifact, "--runner", echo_runner, "--rounds", 1, "--insults", "off",
+            "--out", tmp_path / "out")
+    assert r.returncode == 0, r.stderr
+    assert "TRASH TALK" not in (tmp_path / "out" / "transcript.md").read_text()

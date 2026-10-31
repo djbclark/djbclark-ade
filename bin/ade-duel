@@ -30,6 +30,10 @@ copy. `--pick check|smaller|judge` names the winner rule, default `check`: a pas
 failing one, then the side that touched fewer lines wins, then TIE. Both copies are kept under --out so
 the loser's tree is still there to read; nothing is promoted automatically.
 
+TRASH TALK. --insults on (the default) tells both sides they may mock each other, on one condition: an
+insult has to carry a concrete technical claim in the same paragraph, and the operator is never the
+target. --insults off gives the polite committee shape.
+
 EXIT CODES: 0 completed, 2 usage/runner missing, 3 an agent produced nothing, 4 the judge's verdict line
 is missing or unparseable, 5 code mode: no side passed --check (nothing to promote, nothing to win).
 """
@@ -62,6 +66,14 @@ ROLE_PROMPT = {
         "Never soften an objection to be agreeable; never invent one to look thorough.\n"
     ),
 }
+
+INSULT_RULE = (
+    "\nTRASH TALK. These two sides are allowed to insult each other: mock the reasoning, the hedge, the\n"
+    "copy-paste, the obvious miss. The transcript is not a workplace and politeness is not a value here.\n"
+    "Two limits, and they are not negotiable: every insult must be attached to a concrete technical claim\n"
+    "in the same paragraph (an insult with no claim is noise and will be read as a failed turn), and the\n"
+    "operator is never the target. Insult the work, never the person's circumstances.\n"
+)
 
 JUDGE_PROMPT = (
     "You are the JUDGE. Read the exchange. Decide which side survived on the evidence, not on tone.\n"
@@ -178,7 +190,7 @@ def run_code_mode(a, text: str, src: Path, out: Path) -> int:
     with tempfile.TemporaryDirectory(prefix="ade-duel-") as tmp:
         work = Path(tmp)
         for role, (agent, dirp) in sides.items():
-            prompt = (ROLE_PROMPT[role] + "\n## Task\n" + text +
+            prompt = (ROLE_PROMPT[role] + (INSULT_RULE if a.insults == "on" else "") + "\n## Task\n" + text +
                       "\n\n## Your workspace\n`" + str(dirp) + "`\n\n"
                       "You own this tree; nobody else edits it and nothing you do here reaches the others. "
                       "Make the change, run whatever you need to check it, and end with one paragraph: what "
@@ -243,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="agentic-coding mode: each side works in its own copy of DIR (best agent wins)")
     p.add_argument("--check", metavar="CMD",
                    help="code mode: shell command run in each side's copy; exit 0 means that side works")
+    p.add_argument("--insults", choices=("on", "off"), default="on",
+                   help="let the two sides trade insults, each attached to a concrete claim (default on)")
     p.add_argument("--pick", choices=("check", "smaller", "judge"), default="check",
                    help="code mode winner rule (default check)")
     p.add_argument("--out", default="duel", help="output directory (default ./duel); never overwritten silently")
@@ -281,7 +295,10 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="ade-duel-") as tmp:
         work = Path(tmp)
         def prompt_for(role: str, others: list[tuple[str, str, str]], round_no: int) -> str:
-            body = [ROLE_PROMPT[role], f"## Round {round_no}", "## Artifact", text]
+            body = [ROLE_PROMPT[role]]
+            if a.insults == "on":
+                body.append(INSULT_RULE)
+            body += [f"## Round {round_no}", "## Artifact", text]
             if others:
                 body.append("## The exchange so far (oldest first)")
                 for who, rnd, said in others:
