@@ -194,7 +194,20 @@ def check(db) -> bool:
         return False
 
 
-FLEET_ENDED = ("closed", "finished", "gone", "ended")
+FLEET_RUNNING = frozenset({"working", "idle", "silent", "blocked", "busy-background"})
+
+
+def fleet_is_running(status) -> bool:
+    """A whitelist: a finished or failed ACP launch, an archived or closed pane must not read as running."""
+    status = str(status or "")
+    return status in FLEET_RUNNING or status.startswith("card:")
+
+
+def native_id(sid) -> str:
+    """The id a fleet row reports: a plain id (hermes, which may contain underscores) as is, an omp transcript
+    path as the id after the `_` in its file stem."""
+    sid = str(sid)
+    return Path(sid).stem.split("_")[-1] if "/" in sid else sid
 
 
 def fleet_running(agents):
@@ -206,10 +219,10 @@ def fleet_running(agents):
         sys.path.insert(0, str(HERE))  # python -I drops the script dir
         import fleet
         for r in fleet.sessions():
-            if r.get("agent") not in agents or r.get("status") in FLEET_ENDED:
+            if r.get("agent") not in agents or not fleet_is_running(r.get("status")):
                 continue
             if r.get("sid"):
-                exact.add((r["agent"], Path(str(r["sid"])).stem.split("_")[-1]))  # omp reports a path
+                exact.add((r["agent"], native_id(r["sid"])))
             cwds.add((r["agent"], r.get("cwd") or ""))
     except Exception:
         pass

@@ -234,10 +234,13 @@ class LiveLabelTests(unittest.TestCase):
         rows = [{"agent": "omp", "status": "idle", "sid": "/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_abc-1", "cwd": "/s"},
                 {"agent": "codex", "status": "idle", "sid": None, "cwd": "/c"},
                 {"agent": "codex", "status": "closed", "sid": None, "cwd": "/old"},
-                {"agent": "hermes", "status": "idle", "sid": "20261029-1", "cwd": "/"}]
+                {"agent": "hermes", "status": "idle", "sid": "20261029-1", "cwd": "/"},
+                {"agent": "hermes", "status": "working", "sid": "cron_17af0eeb3949_20260813_075144", "cwd": "/"},
+                {"agent": "codex", "status": "done", "sid": None, "cwd": "/launch"},   # a completed ACP launch
+                {"agent": "codex", "status": "failed", "sid": None, "cwd": "/launch2"}]
         with mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: rows)}):
             exact, cwds = sh.fleet_running({"omp", "codex", "hermes"})
-        self.assertEqual(exact, {("omp", "abc-1"), ("hermes", "20261029-1")})
+        self.assertEqual(exact, {("omp", "abc-1"), ("hermes", "20261029-1"), ("hermes", "cron_17af0eeb3949_20260813_075144")})
         self.assertEqual(cwds, {("omp", "/s"), ("codex", "/c"), ("hermes", "/")})  # closed rows are not running
 
     def test_crush_reads_text_parts_only(self) -> None:
