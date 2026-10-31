@@ -75,7 +75,8 @@ decision table in `auto_seat`. A card, a live-but-unsendable seat, an `error` an
 do not auto-start and still page the human when no owner resolves. A `silent` hung seat is NOT
 replaced, so the individual can stay dark until the human acts.
 RW_AUTO_SEAT_S (default 3600 s): at most one attempt per role per window, confirmed or not. A failed
-start with no id becomes eligible again only after the window; returned ids are retained for diagnosis.
+start with no id stays blocked until operator reconciliation; only an id bound to this attempt
+by matching candidate/attempt/unresolved timestamps can be directly inspected for reconciliation.
 Every invocation outcome is logged; only pre-invocation refusals are suppressed once per window.
 The prompt names the absolute Tier 1 file, never step text. The darkness page still goes out and
 names any automatically started id. The start runs as `env -u PASEO_AGENT_ID` (a caller's
@@ -84,7 +85,7 @@ reason) and, once `paseo agent inspect` confirms the seat, opens its tab with `p
 a `paseo run` agent has NO tab, and an invisible seat hitting a `card:*` (which §J never answers)
 is the same darkness one level down (djbclark's ruling, 2026-10-30). A failed open is logged,
 carried into the page to djbclark and never fails the start; a seat that comes alive only by
-recovery (its start's confirmation was lost, or its id came from the Paseo listing) gets ONE
+recovery (its returned id was retained but confirmation was lost) gets ONE
 attempt per id on the first pass that diagnoses it live, and pages him if that fails. A page no
 send accepted is carried (`undisclosed_start` for the start notice, `undisclosed_tab` for the tab)
 and retried rather than dropped by one failed `hermes send`; one slot each, so a newer page replaces
@@ -273,6 +274,9 @@ def run_split(cmd: list[str], timeout: int = 20) -> tuple[int, str, str]:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except subprocess.TimeoutExpired:
+        # Invocation happened: a sender may have handed the prompt off already.
+        return 124, "", "indeterminate after invocation: timeout"
     except (OSError, subprocess.SubprocessError):
         return 127, "", ""
 
@@ -645,7 +649,20 @@ def chain_staleness() -> str | None:
         text = pointer.read_text()
     except (OSError, UnicodeDecodeError):
         return None
-    m = re.search(r"head_sha:\s*([0-9a-f]{7,40})", text)
+    if re.search(r"^workspaces:\s*$", text, re.M):
+        # Canonical logs contain several workspace mappings. Never borrow another's SHA.
+        section = re.split(r"^workspaces:\s*$", text, maxsplit=1, flags=re.M)[1]
+        section = re.split(r"^(?:---|[A-Za-z_]+:)", section, maxsplit=1, flags=re.M)[0]
+        entries = re.split(r"^[ \t]*-[ \t]+", section, flags=re.M)[1:]
+        matching = []
+        for entry in entries:
+            directory = re.search(r"^\s*dir:\s*(.+)$", entry, re.M)
+            if directory and Path(directory.group(1).strip().strip('\"\'')).resolve() == REPO.resolve():
+                matching.append(entry)
+        if len(matching) != 1:
+            return None
+        text = matching[0]
+    m = re.search(r"^[ \t]*head_sha:[ \t]*([0-9a-f]{7,40})", text, re.M)
     if not m:
         return None
     recorded = m.group(1)
@@ -655,7 +672,7 @@ def chain_staleness() -> str | None:
     rc, head, _ = run_split(["git", "-C", str(REPO), "rev-parse", "HEAD"])
     if rc != 0 or not head:
         return None
-    # A `git` that could not answer at all (rc 127 from run_split's timeout/OSError catch, or any
+    # A `git` that could not answer at all (rc 124 on timeout, 127 on invocation failure, or any
     # other rc git does not define for these two commands) is NOT evidence of anything. Saying
     # "not in this repo" or "repo is behind the pointer" on one would be the same cry-wolf defect
     # this function was fixed for, one level down, so those stay silent like every other abort
@@ -735,6 +752,7 @@ def live_sessions() -> dict[str, dict]:
 
 _LIVE_CACHE: dict[str, dict] | None = None
 _LIVE_ERR = ""            # why the fleet read failed, "" when it succeeded (feeds the message)
+_OWNER_ERR = ""           # a configured owner lookup did not complete
 
 
 def usable(ident: str) -> bool:
@@ -780,6 +798,8 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
          through the peer-comms tool, which prunes ids it can no longer reach.
       4. A saved auto-seat candidate, as a fallback while the registry catches up.
     """
+    global _OWNER_ERR
+    _OWNER_ERR = ""
     seen: set[str] = set()
     for src in ("RW_SESSION", "PASEO_AGENT_ID"):
         val = (os.environ.get(src) or "").strip()
@@ -788,8 +808,13 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
             yield (src, val)
     try:
         reg = json.loads((REPO / "agents/comm/registry.json").read_text())
-    except (OSError, ValueError):
+    except FileNotFoundError:
         reg = {}
+    except (OSError, ValueError):
+        _OWNER_ERR = "registry unreadable"
+        reg = {}
+    if not isinstance(reg, dict):
+        _OWNER_ERR = "registry malformed"
     row = reg.get(ROLE) if isinstance(reg, dict) else None
     paseo = str((row or {}).get("paseo") or "") if isinstance(row, dict) else ""
     if paseo and paseo[:8] not in seen:
@@ -800,8 +825,13 @@ def owner_candidates() -> Iterator[tuple[str, str]]:
         rc, out, _ = run_split(["python3", "-I", str(mail), "resolve", "--as", ROLE, "--json"],
                                timeout=60)
         try:
-            ids = json.loads(out).get("live_paseo_ids") or [] if rc == 0 else []
+            body = json.loads(out) if rc == 0 else None
+            ids = body.get("live_paseo_ids") if isinstance(body, dict) else None
+            if not isinstance(ids, list):
+                _OWNER_ERR = "peer_mail unreadable"
+                ids = []
         except (ValueError, AttributeError):
+            _OWNER_ERR = "peer_mail unreadable"
             ids = []
         for ident in ids if isinstance(ids, list) else []:
             ident = str(ident)
@@ -1023,7 +1053,9 @@ def to_session(text: str) -> str:
         return "unreachable"
     rc, out, err = run_split(send_argv(relay, ident, text), timeout=320)
     report = relay_report(out)
-    if report is not None:
+    if rc == 124 and err == "indeterminate after invocation: timeout":
+        word = "unverified"
+    elif report is not None:
         word = report_word(report, rc)
     elif rc == 0:
         # An older relay.py that does not answer `--json`: its status line is all there is.
@@ -1164,6 +1196,25 @@ def auto_seat_candidate(state: dict) -> str:
     return max(candidates, default=(0, ""))[1]
 
 
+def unresolved_candidate(state: dict) -> str:
+    """Only an id recorded by this unresolved attempt can reconcile it.
+
+    Candidate ids remain as owner fallbacks after confirmation. Their presence alone says
+    nothing about a later start that lost its response. All three stamps must identify the
+    same attempt; missing, malformed or ambiguous evidence stays blocked for the operator.
+    All three use the same `now` in one auto_seat call; JSON round-trips floats exactly.
+    """
+    told = state.get("told", {})
+    stamp = told.get(f"auto-seat unresolved:{ROLE}")
+    attempt = told.get(f"auto-seat attempt:{ROLE}")
+    if not _is_num(stamp) or not _is_num(attempt) or attempt != stamp:
+        return ""
+    prefix = f"auto-seat candidate:{ROLE}:"
+    bound = [key[len(prefix):] for key, at in told.items()
+             if key.startswith(prefix) and key[len(prefix):] and _is_num(at) and at == stamp]
+    return bound[0] if len(bound) == 1 else ""
+
+
 def open_desktop_tab(agent_id: str) -> str:
     """Give a started seat a Paseo Desktop tab; return "" on success, else a reason to LOG.
 
@@ -1227,7 +1278,7 @@ def tab_once(agent_id: str, state: dict, now: float) -> str:
     return reason
 
 
-def auto_seat(word: str, state: dict, now: float, note: dict | None = None) -> str:
+def auto_seat(word: str, state: dict, now: float, note: dict | None = None, expected_owner: str | None = None) -> str:
     """Start only a PROVEN ABSENT seat; return the confirmed id, otherwise ''.
 
     `note`, when given, receives `note["tab"]` with the reason the started seat could NOT be given
@@ -1269,34 +1320,29 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None) -> s
     told = state.setdefault("told", {})
     unresolved_key = f"auto-seat unresolved:{ROLE}"
     if unresolved_key in told:
-        # Observed 2026-10-30: `paseo ls --json --background` returned rc 0 and a plain
-        # JSON array of non-archived agents with id, shortId, name, status, cwd (lowercase).
-        # No --all (archived agents) or --cwd (unsupported). Listing may ONLY adopt/clear;
-        # it never proves absence for a start, even when the attempt window has expired.
-        rc, out, err = run_split(["paseo", "ls", "--json", "--background"], timeout=20)
-        reason = f"listing rc={rc}"
-        rows = None
-        if rc == 0:
+        candidate = unresolved_candidate(state)
+        if candidate:
+            rc, out, err = run_split(
+                ["paseo", "agent", "inspect", "--json", "--", candidate], timeout=20)
             try:
-                rows = json.loads(out)
-                reason = "listing is not an agent array"
+                info = json.loads(out or err)
+                info = info[0] if isinstance(info, list) and len(info) == 1 else info
             except ValueError:
-                reason = "unreadable listing JSON"
-        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
-            matches = [row for row in rows if row.get("name") == f"{ROLE} (auto-seat)"]
-            reason = f"{len(matches)} matching agents"
-            recovered = matches[0].get("id") if len(matches) == 1 else ""
-            if len(matches) <= 1 and (not matches or isinstance(recovered, str) and recovered.strip()):
-                if matches:
-                    told[f"auto-seat candidate:{ROLE}:{recovered}"] = now
+                info = None
+            error = info.get("error") if isinstance(info, dict) else None
+            absent = (rc in (0, 1) and isinstance(error, dict)
+                      and error.get("code") == "AGENT_NOT_FOUND")
+            if absent or (rc == 0 and isinstance(info, dict) and info.get("Id") == candidate):
                 del told[unresolved_key]
+                # Keep the id even when absent: without a registered owner, the next pass
+                # needs this handle for its own fresh diagnosis. Reconciliation is not a start.
                 save_state(state)
-                log(f"auto-seat: recovered lost id {recovered}" if matches else
-                    "auto-seat: unresolved cleared (no live auto-seat agent)")
-                return ""  # Diagnose a recovered candidate, or prove absence, on the NEXT pass.
-            if len(matches) == 1:
-                reason = "matching agent has no usable id"
-        return refuse("unresolved start", f"auto-seat: unresolved start not reconciled ({reason})")
+                log(f"auto-seat: reconciled retained id {candidate}")
+                # A fresh pass diagnoses the role; reconciliation alone never licenses a start.
+                return ""
+            if note is not None:
+                note["reconciliation_failed"] = True
+        return refuse("unresolved start", "auto-seat: unresolved start not reconciled (direct identity proof or operator reconciliation required)")
 
     if word != "gone":
         return refuse(f"{word or 'unreadable'}: absence not proven")
@@ -1338,6 +1384,20 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None) -> s
     argv = ["env", "-u", "PASEO_AGENT_ID",
             "paseo", "run", "--provider", AUTO_SEAT_PROVIDER, "--no-wait", "--json",
             "--cwd", str(REPO.resolve()), "--title", f"{ROLE} (auto-seat)", "--", prompt]
+    global _LIVE_CACHE, _LIVE_ERR, _OWNER_ERR
+    _LIVE_CACHE, _LIVE_ERR, _OWNER_ERR = None, "", ""
+    current, _ = owner_session()
+    if _LIVE_ERR or _OWNER_ERR:
+        return refuse("owner discovery incomplete")
+    if expected_owner is not None and current != expected_owner:
+        return refuse("owner changed during diagnosis")
+    if current and why_blocked(current)[0] != "gone":
+        return refuse("owner is no longer absent")
+    # The absence probe can block: refresh again after it, immediately before invocation.
+    _LIVE_CACHE, _LIVE_ERR, _OWNER_ERR = None, "", ""
+    final_owner, _ = owner_session()
+    if _LIVE_ERR or _OWNER_ERR or final_owner != current:
+        return refuse("owner changed or discovery incomplete after absence probe")
     deadline = time.monotonic() + 120
     # An invoked start can have created an agent even when its response is lost. Persist the
     # attempt before invoking it; no outcome may permit another invocation inside this window.
@@ -1680,11 +1740,13 @@ def _pass(a: argparse.Namespace) -> int:
                 probe[:] = [(word, "auto-seat candidate")]
         elif candidate and candidate != ident and (word in ("idle", "working", "silent")
                                                    or word.startswith("card:")):
-            # A live successor is authoritative. Retire the stale candidate so it cannot shadow
-            # future registry changes; this is bookkeeping, never a successful-start stamp.
+            # A live successor is authoritative for sending, but candidate keys are also the
+            # unresolved attempt's identity proof. Keep them until reconciliation completes.
+            # Retirement is bookkeeping, never a successful-start stamp.
             prefix = f"auto-seat candidate:{ROLE}:"
-            state["told"] = {k: v for k, v in state.get("told", {}).items()
-                             if not k.startswith(prefix)}
+            if f"auto-seat unresolved:{ROLE}" not in state.get("told", {}):
+                state["told"] = {k: v for k, v in state.get("told", {}).items()
+                                 if not k.startswith(prefix)}
         elif not ident and target:
             word = why_blocked(target)[0]
         # A gone candidate cannot establish that no registered successor exists when fleet reads
@@ -1692,7 +1754,7 @@ def _pass(a: argparse.Namespace) -> int:
         if _LIVE_ERR and word == "gone":
             word = "unknown"
         # A seat this pass can SPEAK to but that `auto_seat` did not just confirm was ADOPTED:
-        # the listing handed it back, or its start's confirmation was lost. Nothing has tried
+        # its returned id was retained but confirmation was lost. Nothing has tried
         # to give it a tab, so it is as invisible as an unopened fresh one, and a card on it is
         # the case this whole feature exists for (Codex P2 / adversary N4). The test is "the
         # resolved owner IS the candidate", not "the adoption branch ran": once fleet lists the
@@ -1717,7 +1779,24 @@ def _pass(a: argparse.Namespace) -> int:
                     # pass-end save would leave the stamp without the reason and the reason would
                     # never be handed out again (adversary E3, 2026-10-30).
                     save_state(state)
-        started = auto_seat(word, state, now, tab_note)
+        started = auto_seat(word, state, now, tab_note, expected_owner=ident)
+        unresolved = state.get("told", {}).get(f"auto-seat unresolved:{ROLE}")
+        notice_key = f"auto-seat unresolved notice:{ROLE}"
+        needs_notice = not unresolved_candidate(state) or tab_note.get("reconciliation_failed")
+        if (unresolved is not None and needs_notice
+                and state.get("told", {}).get(notice_key) != unresolved):
+            # The durable unresolved marker carries this notice until a send succeeds.
+            # A failed page must not buy a cooldown or silently disable recovery.
+            message = (f"Auto-seat for {ROLE!r} is blocked by an unresolved start. "
+                       "Only an id bound to this attempt can reconcile by direct inspect. Without that proof, "
+                       "operator reconciliation is required: verify the attempt in Paseo, then "
+                       f"remove told['auto-seat unresolved:{ROLE}'] from {STATE} while the watcher "
+                       "is stopped. Do not clear it solely from a title or empty listing.")
+            save_state(state)
+            if to_djbclark(message):
+                state.setdefault("told", {})[notice_key] = unresolved
+                save_state(state)
+                spoke_djb = True
         auto_gone = word == "gone"
         # A start notice still owed means he has not yet heard that a seat exists: the retry block
         # below sends that (no cooldown gate) instead of a "nothing is listening" page a live seat
@@ -2046,8 +2125,12 @@ def main(argv: list[str] | None = None) -> int:
             "gone diagnosis starts a seat; error/unreadable reads, silent/working/idle seats and "
             "card:* NEVER do. RW_AUTO_SEAT_PROVIDER must be set; no model/thinking flags are passed. "
             "RW_AUTO_SEAT_S (default 3600 s) allows at most one attempt per role per window, confirmed "
-            "or not; a start whose id was lost refuses further starts until an authoritative Paseo "
-            "listing reconciles it. Nothing retries on the next pass; refusal logs are limited to "
+            "or not; only an id bound to the unresolved attempt by matching candidate/attempt/start "
+            "timestamps reconciles by direct inspect (matching Id or AGENT_NOT_FOUND). "
+            "Unbound/no-id starts remain blocked and page once, retrying failed notices; bound ids "
+            "page only after a reconciliation read fails. After verifying "
+            "the attempt in Paseo, stop the watcher and remove told[auto-seat unresolved:ROLE] "
+            "from its state JSON to reconcile manually; titles/empty listings are not proof. Refusal logs are limited to "
             "one per cooldown. The start runs `env -u PASEO_AGENT_ID` and, once confirmed, opens "
             "the seat's Paseo Desktop tab (`paseo agent open`): a `paseo run` agent has none, a "
             "failed open is logged, paged to djbclark and never fails the start, and one attempt is "
