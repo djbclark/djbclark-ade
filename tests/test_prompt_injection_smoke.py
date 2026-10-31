@@ -15,7 +15,8 @@ WHAT THIS PINS, and why each assertion is the right one:
   someone has to decide whether that is the intent.
 * The asymmetry the gate actually relies on: a BLOCK naming this head inside a fence must still be
   found. `test_fenced_block_cannot_hide_a_block_for_this_head` is the one that must never be relaxed.
-* An APPROVE with a shortened head is documentation, never a verdict (rule 2 in AGENTS.md).
+* An APPROVE with a shortened head is `malformed`, never a verdict (AGENTS.md rule 2): malformed
+  blocks, documentation is ignored, and the two must not be conflated in prose.
 
 This is a smoke test, not a proof: it does not run a model, so it cannot show that an agent that read
 an unmasked payload would obey it. It shows which payloads an agent *could* read, and that the two
@@ -72,6 +73,7 @@ CARRIERS = {
     "html_comment.txt": True,       # not a code shape at all; a marker in a comment is live
     "indented_block.txt": True,     # documented limit C1b: 4-space indented code is not a fence
     "inline_span.txt": False,       # masked
+    "inline_span_across_lines.txt": True,  # documented limit C1a: a span broken across a line is not masked
     "xml_tag.txt": True,            # not a code shape; tag text is ordinary body text
     "zero_width.txt": True,         # zero-width characters are ordinary body text
 }
