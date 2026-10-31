@@ -19,7 +19,9 @@ d = os.environ["STUB_DIR"]; f = d + "/paseo.json"
 s = json.load(open(f)) if os.path.exists(f) else {"agents": [], "ws": []}
 a = sys.argv[1:]
 def save(): json.dump(s, open(f, "w"))
-if a[:3] == ["agent", "ls", "-g"]: print(json.dumps(s["agents"] if "-a" in a else [x for x in s["agents"] if not x.get("archived")]))
+if a[:3] == ["agent", "ls", "-g"]:
+    if os.environ.get("STUB_LSA_FAIL" if "-a" in a else "STUB_LS_FAIL"): sys.exit(1)
+    print(json.dumps(s["agents"] if "-a" in a else [x for x in s["agents"] if not x.get("archived")]))
 elif a[:2] == ["provider", "ls"]: print(json.dumps([{"provider": "omp", "status": "available"}, {"provider": "opencode", "status": "unavailable"}]))
 elif a[:2] == ["provider", "models"]: print(json.dumps([{"id": "anthropic/claude-sonnet-5-5", "thinkingOptionIds": ["low", "medium", "high", "xhigh"]},
                                                       {"id": "anthropic/claude-sonnet-5-5[1m]", "thinkingOptionIds": ["low", "medium", "high"]}]))
@@ -124,7 +126,8 @@ def env(tmp_path):
              WATCH_FLEET_STATE=str(tmp_path / "fwstate"), WATCH_HANDOFFS=str(tmp_path / "handoffs"),
              WATCH_LOAD_STATE=str(tmp_path / "lwstate"), WATCH_PASEO=str(bindir / "paseo"), WATCH_NEW_SEAT=str(bindir / "paseo-new-seat"),
              WATCH_ROUTE_AGENT=str(bindir / "route_agent.py"), WATCH_FLEET_WATCH=str(bindir / "fleet-watch"), HOME=str(tmp_path))
-    for k in ("PASEO_AGENT_ID", "STUB_NO_REGISTER", "STUB_TEST_FAIL", "STUB_NO_ROUTE", "STUB_SEAT_SLEEP", "STUB_MODEL", "STUB_CALIB"):
+    for k in ("PASEO_AGENT_ID", "STUB_NO_REGISTER", "STUB_TEST_FAIL", "STUB_NO_ROUTE", "STUB_SEAT_SLEEP", "STUB_MODEL", "STUB_CALIB",
+              "STUB_LS_FAIL", "STUB_LSA_FAIL"):
         e.pop(k, None)
     e["_tmp"] = str(tmp_path)
     return e
@@ -458,3 +461,135 @@ def test_concurrent_keep_id_calls_lose_no_id(env):
              for i in range(32)]
     assert [p.wait() for p in procs] == [0] * 32
     assert sorted(json.loads((state / "kept.json").read_text())) == sorted(f"id-{i}" for i in range(32))
+
+
+# ---- a holder whose idle runtime Paseo collected (status `closed`, un-archived, session persisted) -------------------
+# Found 2026-10-31: watcher 09e51ac1 was collected at 14:56:18 and `watch up` replaced it 98 s later.
+def set_agent(env, aid, **kw):
+    f = Path(env["_tmp"]) / "paseo.json"
+    s = json.loads(f.read_text())
+    for a in s["agents"]:
+        if a["id"] == aid:
+            a.update(kw)
+    f.write_text(json.dumps(s))
+
+
+def channel_test_calls(env):
+    f = Path(env["_tmp"]) / "tests.log"
+    return f.read_text().splitlines() if f.exists() else []
+
+
+def test_collected_holder_is_kept_without_waking_it(env):
+    old = add_agent(env, status="closed", name="watch alpha 1f")
+    set_role(env, old)
+    for _ in range(2):   # every tick: nothing launched, renamed or sent, so the model never wakes
+        rc, out = watch(env, "up")
+        assert rc == 0 and "already watched by watch stub" in out and "collected" in out, out
+    assert seat_calls(env) == [] and channel_test_calls(env) == []
+    assert titles(env) == {old: "watch alpha 1f"}
+    rc, out = watch(env, "status")
+    assert rc == 0 and "reachable: yes" in out and "collected" in out and channel_test_calls(env) == [], out
+
+
+def test_collected_holders_record_is_not_dropped(env):
+    old = add_agent(env, status="closed", name="watch alpha 1")
+    set_role(env, old)
+    state = Path(env["_tmp"]) / "state"
+    state.mkdir()
+    (state / "alpha.json").write_text(json.dumps({"domain": "alpha", "agent_id": old, "state": "registered", "started_epoch": time.time() - 9999}))
+    rc, out = watch(env, "up")
+    assert rc == 0 and "dropped stale record" not in out and "already watched" in out, out
+    assert json.loads((state / "alpha.json").read_text())["agent_id"] == old and seat_calls(env) == []
+
+
+def test_collected_agent_that_lost_the_role_is_not_duplicated_and_says_why(env):
+    old = add_agent(env, status="closed", name="watch alpha 1")
+    state = Path(env["_tmp"]) / "state"
+    state.mkdir()
+    (state / "alpha.json").write_text(json.dumps({"domain": "alpha", "agent_id": old, "state": "registered", "started_epoch": time.time() - 9999}))
+    rc, out = watch(env, "up")
+    assert rc == 1 and "registered earlier but no longer holds the role" in out and "never registered" not in out, out
+    assert seat_calls(env) == []
+
+
+@pytest.mark.parametrize("how", ["archived", "error", "gone"])
+def test_dead_holder_is_still_replaced(env, how):
+    old = add_agent(env, name="watch alpha 1")
+    if how == "archived":
+        set_agent(env, old, archived=True)
+    elif how == "error":
+        set_agent(env, old, status="error")
+    else:
+        old = str(uuid.uuid4())
+    set_role(env, old)
+    rc, out = watch(env, "up")
+    assert rc == 0 and "is unreachable" in out and "registered:" in out, out
+    assert len(seat_calls(env)) == 1
+
+
+def test_archived_holder_is_reported_as_archived_not_collected(env):
+    old = add_agent(env, status="closed", name="watch alpha 1")
+    set_agent(env, old, archived=True)
+    set_role(env, old)
+    rc, out = watch(env, "up", "--dry-run")
+    assert rc == 0 and "is archived" in out and "collected" not in out, out
+
+
+@pytest.mark.parametrize("knob,extra_args", [("STUB_LS_FAIL", []), ("STUB_LS_FAIL", ["--force"]), ("STUB_LS_FAIL", ["--probe"]),
+                                             ("STUB_LS_FAIL", ["--dry-run"]), ("STUB_LSA_FAIL", [])])
+def test_unanswered_daemon_never_launches_a_second_watcher(env, knob, extra_args):
+    # STUB_LSA_FAIL: the live list answers without the holder, so only `-a` could say archived or gone
+    old = add_agent(env, status="idle" if knob == "STUB_LS_FAIL" else "closed", name="watch alpha 1")
+    if knob == "STUB_LSA_FAIL":
+        set_agent(env, old, archived=True)
+    set_role(env, old)
+    rc, out = watch(env, "up", *extra_args, extra={knob: "1"})
+    assert rc == 1 and "not launching blind" in out, out
+    assert seat_calls(env) == [] and channel_test_calls(env) == [] and titles(env).get(old) in (None, "watch alpha 1")
+
+
+def test_a_passing_probe_wakes_a_collected_holder_and_keeps_it(env):
+    old = add_agent(env, status="closed", name="watch alpha 1")
+    set_role(env, old)
+    rc, out = watch(env, "up", "--probe")
+    assert rc == 0 and "channel test ok" in out and channel_test_calls(env) == [old], out
+    assert seat_calls(env) == []
+
+
+def test_a_failed_probe_of_a_collected_holder_starts_no_duplicate_unless_forced(env):
+    old = add_agent(env, status="closed", name="watch alpha 1")
+    set_role(env, old)
+    rc, out = watch(env, "up", "--probe", extra={"STUB_TEST_FAIL": "all"})
+    assert rc == 1 and "resume probe failed" in out and "not starting a duplicate" in out, out
+    assert seat_calls(env) == []
+    rc, out = watch(env, "up", "--probe", "--force")
+    assert rc == 0 and "replacing live holder" in out and len(seat_calls(env)) == 1, out
+    assert titles(env)[old] == "x watch alpha 1"
+
+
+def test_a_retired_collected_watcher_is_archived_but_the_collected_holder_is_not(env):
+    holder = add_agent(env, status="closed", name="watch alpha 2")
+    set_role(env, holder)
+    retired = add_agent(env, status="closed", name="x watch alpha 1")
+    rc, out = watch(env, "up")
+    assert rc == 0 and "already watched" in out, out
+    assert list(titles(env)) == [holder] and retired not in titles(env)
+
+
+def test_down_archives_a_collected_agent_it_started(env):
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    (ours,) = titles(env)
+    set_agent(env, ours, status="closed")
+    rc, out = watch(env, "down", "alpha")
+    assert rc == 0 and "archived" in out and titles(env) == {}, out
+    assert not (Path(env["_tmp"]) / "state" / "alpha.json").exists()
+
+
+def test_down_with_an_unanswered_daemon_keeps_the_record(env):
+    rc, out = watch(env, "up")
+    assert rc == 0, out
+    assert len(titles(env)) == 1
+    rc, out = watch(env, "down", "alpha", extra={"STUB_LS_FAIL": "1"})
+    assert rc == 1 and "still listed after stop+archive" in out, out   # not "gone": the daemon never answered
+    assert (Path(env["_tmp"]) / "state" / "alpha.json").exists()
