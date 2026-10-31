@@ -22,6 +22,7 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "ade-update"
 REAL_SE = SCRIPT.parent / "skill-everywhere"
+FOLD = SCRIPT.parent / "changelog-fold"
 
 CHANGELOG_V1 = """# Changelog
 
@@ -99,6 +100,7 @@ class Env:
         (self.lone / "bin").mkdir(parents=True)
         for d in (self.bin, self.lone / "bin"):
             shutil.copy(SCRIPT, d / "ade-update")
+            shutil.copy(FOLD, d / "changelog-fold")  # the sibling that parses changelog.d fragments
         self.se_log.write_text("")
         self.se_state.write_text("{}")
         fake = self.bin / "skill-everywhere"
@@ -1146,3 +1148,99 @@ def test_skill_everywhere_no_copy_skips_the_grokbot_target_only(tmp_path):
     r = check(SKILL_EVERYWHERE_NO_COPY="1")
     rows = mod_rows(r.stdout)
     assert rows and not any(row[1] == "grokbot" for row in rows) and r.stdout.splitlines()[-1] == "== end", r.stdout
+
+
+FRAG_A = "### Added\n\n- Fragment thing A (#10).\n\n### Fixed\n\n- Fragment fix A\n  wrapped (#11).\n"
+FRAG_B = "### Changed\n\n- Fragment thing B (#12).\n"
+
+
+def test_an_unfolded_fragment_is_listed_by_ade_update(env):  # adversary PR190 r1 A1
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-a.md": FRAG_A, "changelog.d/README.md": "readme, not a fragment\n"})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Unreleased (changelog.d) / Added" in r.stdout and "Fragment thing A (#10)." in r.stdout
+    assert "Unreleased (changelog.d) / Fixed" in r.stdout and "Fragment fix A wrapped (#11)." in r.stdout
+    assert "readme, not a fragment" not in r.stdout
+    assert "3 entries" in r.stdout  # CHANGELOG's "Second thing" plus the two fragment entries
+
+
+def test_a_fragment_already_seen_at_the_base_is_not_listed_again(env):
+    env.state.parent.mkdir(parents=True)
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    env.run()  # applies and records a revision that already carries feat-a
+    env.publish({"changelog.d/feat-b.md": FRAG_B}, message="third")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B (#12)." in r.stdout and "Fragment thing A" not in r.stdout
+
+
+def test_a_fragment_folded_between_base_and_target_shows_once(env):
+    env.state.parent.mkdir(parents=True)
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    env.run()  # recorded with the fragment unfolded
+    folded = CHANGELOG_V2.replace("- First thing (#1).", "- Fragment thing A (#10).\n- First thing (#1).")
+    sh("git", "rm", "-q", "changelog.d/feat-a.md", cwd=env.seed)
+    env.publish({"CHANGELOG.md": folded}, message="fold")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("Fragment thing A (#10).") == 1  # once, through CHANGELOG.md
+    assert "changelog.d" not in r.stdout
+
+
+def test_an_entry_in_both_a_fragment_and_changelog_at_the_target_shows_once(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    both = CHANGELOG_V2.replace("- First thing (#1).", "- Fragment thing B (#12).\n- First thing (#1).")
+    env.publish({"CHANGELOG.md": both, "changelog.d/feat-b.md": FRAG_B})
+    r = env.run()
+    assert r.stdout.count("Fragment thing B (#12).") == 1
+
+
+def test_every_unfolded_fragment_is_listed_when_no_revision_is_recorded(env):
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing A (#10)." in r.stdout
+
+
+def test_an_invalid_fragment_is_skipped_not_a_crash(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/bad.md": "### Added\n\n- no number\n", "changelog.d/feat-b.md": FRAG_B})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B (#12)." in r.stdout and "no number" not in r.stdout
+
+
+def test_a_fragment_older_than_14_days_on_the_target_is_warned_about(env, monkeypatch):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+    env.publish({"changelog.d/old-one.md": FRAG_A})
+    monkeypatch.delenv("GIT_COMMITTER_DATE")
+    env.publish({"changelog.d/new-one.md": FRAG_B}, message="third")
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    stale = json.loads(r.stdout)["changelog"]["stale_fragments"]
+    assert [s["name"] for s in stale] == ["old-one.md"] and stale[0]["age_days"] > 14
+    text = env.run().stdout
+    assert "older than 14 days" in text and "old-one.md" in text and "new-one.md (" not in text
+
+
+def test_no_stale_warning_without_old_fragments(env):
+    env.state.parent.mkdir(parents=True)
+    env.publish({"changelog.d/new-one.md": FRAG_B})
+    r = env.run()
+    assert "older than" not in r.stdout
+
+
+def test_fragments_are_not_listed_when_no_changelog_fold_sits_beside_ade_update(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    (env.bin / "changelog-fold").unlink()
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B" not in r.stdout and "fragments not listed" in r.stdout

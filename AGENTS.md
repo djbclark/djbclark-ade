@@ -293,8 +293,11 @@ pull request here is expected to meet these; flag any it misses.
     only because every merge conflicted in that shared block): `<branch>` is the branch name with `/` replaced by `-`; the file holds one line per user-visible
     change (a new or changed command, flag, skill, exit code, service or rule), in the past
     tense, ending with the PR number, under `### Added`, `### Changed`, `### Fixed`, `### Removed` or `### Security`.
-    `CHANGELOG.md` is edited only by `bin/changelog-fold`, run by whoever cuts a release or by the lead after merges (`changelog.d/README.md`);
-    `bin/changelog-fold --check` and the suite validate fragments. Flag a PR that edits `CHANGELOG.md` by hand or adds a malformed fragment.
+    `CHANGELOG.md` is edited only by `bin/changelog-fold`, by ONE writer: the lead, at release time or when it chooses, in a fresh worktree from master
+    (order 9), landing through a normal PR (master is PR-only since 2026-10-31); nobody else folds, so two folds never conflict. Nothing waits invisibly:
+    `bin/ade-update` lists the entries of fragments present at its target and absent at its base (once, even when a fold moved them into `CHANGELOG.md`
+    meanwhile) and warns about a fragment on master older than 14 days. `bin/changelog-fold --check` and the suite validate fragments. Flag a PR that
+    edits `CHANGELOG.md` by hand or adds a malformed fragment; an open PR that predates this rule moves its `CHANGELOG.md` hunk into its fragment at its next master merge.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.
 11. **Codex's review may be the LOCAL one** (2026-10-29, djbclark: "could we just switch to making codex reviews run locally in general"; GitHub's

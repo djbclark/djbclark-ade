@@ -52,7 +52,12 @@ Steps, in order:
    checkout (symlink state), not of upstream, and is not evaluated at the upstream revision.
 4. The CHANGELOG.md entries new since the revision recorded in the state file (parsed from
    `git show <rev>:CHANGELOG.md` at both revisions; an entry moved under a release heading is not
-   new), or every Unreleased entry when nothing is recorded. Then the new HEAD is written to the
+   new), or every Unreleased entry when nothing is recorded; plus the entries of `changelog.d/` fragments
+   (2026-10-31, parsed by the `changelog-fold` beside this script) present at the target and not at the
+   base, shown under "Unreleased (changelog.d) / ...", so an unfolded fragment loses nothing; an entry whose
+   text is already in either CHANGELOG.md or the base's fragments shows once, whichever place it is in. A
+   fragment that has sat on the target for more than 14 days prints a warning (the lead folds, AGENTS.md
+   code review rule 10; informational, no exit code). Then the new HEAD is written to the
    state file (temp file beside, `os.replace`), unless a skill link stayed unresolved.
 
 Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (a link skill-everywhere leaves alone included, on the first run), CLAUDE.md or
@@ -172,6 +177,74 @@ def changelog_at(repo, rev):
     """The CHANGELOG.md text at `rev`, or None when the file does not exist there."""
     rc, out, _ = git(repo, "show", f"{rev}:CHANGELOG.md")
     return out if rc == 0 else None
+
+
+FRAGMENT_DIR = "changelog.d"
+STALE_FRAGMENT_DAYS = 14
+_FOLD = []
+
+
+def load_fold():
+    """The changelog-fold module beside the running ade-update (code already being executed, like the
+    skill-everywhere helper: never one inside --repo), or None when that sibling is missing."""
+    if not _FOLD:
+        mod = None
+        cand = Path(__file__).resolve().parent / "changelog-fold"
+        if cand.is_file():
+            import importlib.machinery
+            import importlib.util
+            loader = importlib.machinery.SourceFileLoader("changelog_fold", str(cand))
+            spec = importlib.util.spec_from_loader("changelog_fold", loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+        _FOLD.append(mod)
+    return _FOLD[0]
+
+
+def fragment_files_at(repo, rev):
+    """[name] of the changelog.d/*.md fragments in the tree at `rev` (README.md and dotfiles are not fragments)."""
+    rc, out, _ = git(repo, "ls-tree", "--name-only", rev, f"{FRAGMENT_DIR}/")
+    if rc != 0:
+        return []
+    names = [Path(l).name for l in out.splitlines() if l]
+    return sorted(n for n in names if n.endswith(".md") and n != "README.md" and not n.startswith("."))
+
+
+def fragment_entries_at(repo, rev, fold):
+    """[(heading, entry text)] of every valid fragment at `rev`; an unreadable or invalid one is skipped here
+    (changelog-fold --check is what refuses it)."""
+    entries = []
+    for name in fragment_files_at(repo, rev):
+        rc, text, _ = git(repo, "show", f"{rev}:{FRAGMENT_DIR}/{name}")
+        if rc != 0:
+            continue
+        sections, problems = fold.parse_fragment_text(name, text.lstrip("\ufeff"))
+        if problems:
+            continue
+        for heading, group in sections.items():
+            entries += [(f"Unreleased (changelog.d) / {heading}", fold.entry_body(e)) for e in group]
+    return entries
+
+
+def fragment_delta(old_frags, new_frags, old_text, new_text):
+    """Fragment entries at the target that are neither fragment entries at the base nor CHANGELOG.md entries at
+    either revision: an entry folded between the two revisions shows once, through CHANGELOG.md."""
+    seen = {t for _, t in old_frags} | {t for _, t in parse_changelog(old_text or "")} | {t for _, t in parse_changelog(new_text or "")}
+    return [(h, t) for h, t in new_frags if t not in seen]
+
+
+def stale_fragments(repo, rev, days=STALE_FRAGMENT_DAYS, now=None):
+    """[(name, age in days)] of the fragments at `rev` whose adding commit is more than `days` old."""
+    import time
+    now = time.time() if now is None else now
+    stale = []
+    for name in fragment_files_at(repo, rev):
+        rc, out, _ = git(repo, "log", "--diff-filter=A", "--format=%ct", "-1", rev, "--", f"{FRAGMENT_DIR}/{name}")
+        if rc == 0 and out.strip().isdigit():
+            age = (now - int(out.strip())) / 86400
+            if age > days:
+                stale.append((name, int(age)))
+    return stale
 
 
 def changelog_delta(old_text, new_text):
@@ -657,7 +730,15 @@ def update(rep, args, repo):
     new_text = changelog_at(repo, target)
     old_text = changelog_at(repo, base) if base else None
     entries = changelog_delta(old_text, new_text) if new_text is not None else []
-    d["changelog"] = {"since": base, "to": target, "entries": [{"section": h, "text": t} for h, t in entries]}
+    fold = load_fold()
+    stale = []
+    if fold is not None:
+        new_frags = fragment_entries_at(repo, target, fold)
+        old_frags = fragment_entries_at(repo, base, fold) if base else []
+        entries += fragment_delta(old_frags, new_frags, old_text, new_text)
+        stale = stale_fragments(repo, target)
+    d["changelog"] = {"since": base, "to": target, "entries": [{"section": h, "text": t} for h, t in entries],
+                    "stale_fragments": [{"name": n, "age_days": a} for n, a in stale]}
     if new_text is None:
         rep.say(f"changelog: no CHANGELOG.md at {short(target)}")
     elif base == target:
@@ -671,6 +752,11 @@ def update(rep, args, repo):
                 rep.say(f"  {h}")
                 last = h
             rep.say(wrap_entry(t))
+    if fold is None:
+        rep.say("changelog: changelog.d fragments not listed (no changelog-fold beside this ade-update)")
+    if stale:
+        rep.say(f"changelog: {len(stale)} fragment(s) on {short(target)} older than {STALE_FRAGMENT_DAYS} days, not yet folded: "
+                + ", ".join(f"{n} ({a}d)" for n, a in stale) + " (the lead folds them: bin/changelog-fold in a fresh worktree, via a PR)")
 
     unresolved_links = bool(d["skills"]["unresolved"]) or (script is None and not no_helper)
     state_note = f"state file {state_path}"

@@ -157,6 +157,17 @@ def test_empty_fragment_and_stray_file_are_refused(tmp_path):
     assert r.returncode == 1 and "empty.md" in r.stderr and "notes.txt" in r.stderr
 
 
+def test_a_wrong_repo_or_a_missing_changelog_is_exit_2_even_for_check(tmp_path):  # adversary PR190 r1 A4
+    assert run(tmp_path / "typo").returncode == 2
+    assert run(tmp_path / "typo", "--check").returncode == 2
+    (tmp_path / "r").mkdir()
+    repo = make_repo(tmp_path / "r", fragments={"a.md": "### Added\n\n- x (#1)\n"})
+    (repo / "CHANGELOG.md").unlink()
+    assert run(repo, "--check").returncode == 2
+    (repo / "changelog.d" / "a.md").unlink()
+    assert run(repo, "--check").returncode == 2  # no fragments is not an excuse either
+
+
 def test_second_run_is_a_noop(tmp_path):
     repo = make_repo(tmp_path, fragments={"a.md": "### Added\n\n- once (#50)\n"})
     assert run(repo).returncode == 0
@@ -173,6 +184,20 @@ def test_rerun_after_a_crash_before_the_deletions_does_not_duplicate(tmp_path):
     r = run(repo)
     assert r.returncode == 0 and "skipped" in r.stdout
     assert (repo / "CHANGELOG.md").read_text() == folded and frags(repo) == []
+
+
+def test_rerun_after_a_release_moved_the_entry_under_a_dated_heading_does_not_duplicate(tmp_path):  # adversary PR190 r1 A3
+    moved = "# Changelog\n\n## Unreleased\n\n## 1.1.0 - 2026-02-01\n\n### Added\n\n- once (#50)\n"
+    repo = make_repo(tmp_path, changelog=moved, fragments={"a.md": "### Added\n\n- once (#50)\n"})
+    r = run(repo)
+    assert r.returncode == 0 and "skipped" in r.stdout
+    assert (repo / "CHANGELOG.md").read_text().count("- once (#50)") == 1 and frags(repo) == []
+
+
+def test_a_bom_in_a_fragment_is_accepted(tmp_path):
+    repo = make_repo(tmp_path, fragments={})
+    (repo / "changelog.d" / "bom.md").write_bytes(b"\xef\xbb\xbf### Added\n\n- with a bom (#60)\n")
+    assert run(repo, "--check").returncode == 0
 
 
 def test_missing_changelog_is_a_usage_error_and_keeps_the_fragments(tmp_path):

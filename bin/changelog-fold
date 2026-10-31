@@ -3,7 +3,9 @@
 
 A pull request adds `changelog.d/<branch>.md` (branch name, `/` replaced by `-`) instead of editing
 the shared CHANGELOG.md, so merges stop conflicting on that one block (AGENTS.md, code review rule 10).
-Whoever cuts a release, or the lead after merges, runs this tool.
+ONE writer runs this tool: the lead, at release time or when it chooses, in a fresh worktree from master,
+and the fold lands through a normal PR (master is PR-only). `bin/ade-update` lists unfolded fragments, so
+nothing is invisible while they wait, and warns about a fragment on master older than 14 days.
 
 usage: changelog-fold [--check] [--repo DIR]
 
@@ -20,11 +22,12 @@ README.md and dotfiles in changelog.d/ are not fragments; any other non-`.md` fi
 Merge rules: fragments are taken in file-name order; under each heading the new entries go at the top
 of that subsection (the file is newest first), in that order, ahead of the existing entries; a missing
 subsection is created in Keep a Changelog order (Added, Changed, Deprecated, Removed, Fixed, Security);
-an entry whose text is already in the subsection is skipped, so a run killed between the write and the
+an entry whose text is already anywhere in CHANGELOG.md (any section) is skipped, so a run killed between the write and the
 deletions can be run again without duplicating anything. No fragments: nothing happens (idempotent).
 
 exit codes: 0 folded, nothing to fold, or --check passed; 1 a fragment is invalid (all problems are
-printed, nothing is written or deleted); 2 usage error or CHANGELOG.md missing or unreadable.
+printed, nothing is written or deleted); 2 usage error, --repo not a directory, or CHANGELOG.md missing or
+unreadable (checked first, --check included).
 """
 import argparse
 import os
@@ -58,18 +61,24 @@ def fragment_files(frag_dir: Path):
 
 
 def parse_fragment(path: Path):
-    """({heading: [entry lines list, ...]}, [problems]); an entry is its list of source lines."""
-    problems, sections = [], {}
+    """({heading: [entry lines list, ...]}, [problems]) of one fragment file."""
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")  # a BOM from an editor is not part of the first line
     except (OSError, UnicodeDecodeError) as e:
         return {}, [f"{path.name}: unreadable ({e})"]
+    return parse_fragment_text(path.name, text)
+
+
+def parse_fragment_text(label: str, text: str):
+    """({heading: [entry lines list, ...]}, [problems]); an entry is its list of source lines. `label` (the file name) labels
+    problems (bin/ade-update calls this with a fragment read from a git revision)."""
+    problems, sections = [], {}
     cur_heading, cur_entry = None, None
 
     def close_entry():
         nonlocal cur_entry
         if cur_entry is not None and not ENTRY_END.search(" ".join(l.strip() for l in cur_entry)):
-            problems.append(f"{path.name}: entry does not end with (#N): {cur_entry[0][:70]!r}")
+            problems.append(f"{label}: entry does not end with (#N): {cur_entry[0][:70]!r}")
         cur_entry = None
 
     for n, line in enumerate(text.splitlines(), 1):
@@ -77,21 +86,21 @@ def parse_fragment(path: Path):
             close_entry()
             name = line[4:].strip()
             if name not in HEADINGS:
-                problems.append(f"{path.name}:{n}: heading {name!r} is not one of {', '.join(HEADINGS)}")
+                problems.append(f"{label}:{n}: heading {name!r} is not one of {', '.join(HEADINGS)}")
                 cur_heading = None
             else:
                 cur_heading = name
                 sections.setdefault(name, [])
         elif line.startswith("#"):
             close_entry()
-            problems.append(f"{path.name}:{n}: only `### <{'|'.join(HEADINGS)}>` headings are allowed")
+            problems.append(f"{label}:{n}: only `### <{'|'.join(HEADINGS)}>` headings are allowed")
             cur_heading = None
         elif not line.strip():
             close_entry()
         elif line.startswith("- "):
             close_entry()
             if cur_heading is None:
-                problems.append(f"{path.name}:{n}: entry before any valid heading")
+                problems.append(f"{label}:{n}: entry before any valid heading")
             else:
                 cur_entry = [line]
                 sections[cur_heading].append(cur_entry)
@@ -99,18 +108,23 @@ def parse_fragment(path: Path):
             cur_entry.append(line)
         else:
             close_entry()
-            problems.append(f"{path.name}:{n}: line is neither a heading, a `- ` entry nor its indented continuation")
+            problems.append(f"{label}:{n}: line is neither a heading, a `- ` entry nor its indented continuation")
     close_entry()
     for name, entries in sections.items():
         if not entries:
-            problems.append(f"{path.name}: heading {name!r} has no entries")
+            problems.append(f"{label}: heading {name!r} has no entries")
     if not sections and not problems:
-        problems.append(f"{path.name}: empty fragment (no heading, no entries)")
+        problems.append(f"{label}: empty fragment (no heading, no entries)")
     return sections, problems
 
 
 def entry_text(lines) -> str:
     return " ".join(l.strip() for l in lines)
+
+
+def entry_body(lines) -> str:
+    """The entry's text as bin/ade-update's CHANGELOG parser reads it (no leading `- `, wrapped lines joined)."""
+    return entry_text(lines)[2:].strip()
 
 
 def merge(changelog: str, fragments):
@@ -139,6 +153,9 @@ def merge(changelog: str, fragments):
     for _, sections in fragments:
         for heading, entries in sections.items():
             combined.setdefault(heading, []).extend(entries)
+    # Every `- ` entry anywhere in the file, not only the current subsection: a rerun after a crash between the
+    # write and the deletions must not add an entry again even when a release has since moved it under a dated heading.
+    present = {entry_text(e) for e in _entries_of(lines)}
     added = skipped = 0
     for heading in sorted(combined, key=rank):
         entries = combined[heading]
@@ -149,7 +166,6 @@ def merge(changelog: str, fragments):
             if later == len(subs) and subs and subs[-1][1] and subs[-1][1][-1].strip():
                 subs[-1][1].append("")  # keep a blank line between the old last subsection and the new one
             subs.insert(later, sub)
-        present = {entry_text(e) for e in _entries_of(sub[1])}
         fresh = []
         for e in entries:
             if entry_text(e) in present:
@@ -202,8 +218,15 @@ def atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # the new file is on disk before the fragments are unlinked
         os.chmod(tmp, path.stat().st_mode & 0o777)
         os.replace(tmp, path)
+        dfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -223,6 +246,9 @@ def main(argv) -> int:
         return EXIT_OK if e.code == 0 else EXIT_USAGE
     repo = Path(args.repo)
     changelog, frag_dir = repo / "CHANGELOG.md", repo / "changelog.d"
+    if not repo.is_dir() or not changelog.is_file():  # a typo in --repo must not read as "no fragments"
+        print(f"changelog-fold: {changelog} not found (is --repo the repository root?)", file=sys.stderr)
+        return EXIT_USAGE
     if not frag_dir.is_dir():
         print(f"changelog-fold: no fragments ({frag_dir} does not exist)")
         return EXIT_OK
