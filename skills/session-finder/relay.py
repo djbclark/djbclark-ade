@@ -3643,6 +3643,16 @@ def resolve_acks(me, s, text):
                 ln["acked"] = now
                 atomic_json(fleet.LINKS_FILE, data)
                 n += 1
+            elif (ln is None and fleet.link_key(s["id"], me["id"]) not in data["links"] and not s.get("transcript")
+                    and (me.get("host") != "hermes-gw" or me.get("sid"))):
+                # The answer came while S's own run was still sending: `main` writes the link only after the send and its watch return, so there is
+                # none yet to close (adversary PR 173 C1, Codex P2). Record it already acked; `note_links_and_expect` finds it and keeps `acked`.
+                data["links"][fleet.link_key(s["id"], me["id"])] = {
+                    "sender": s["id"], "target": me["id"], "first_sent": now, "last_sent": now, "sent": 0, "acked": now, "early": True, "tx": "", "mark": 0,
+                    "who": peer_words(me), "sender_sid": s.get("sid") or "", "target_sid": me.get("sid") or "", "sender_paseo": s.get("paseo") or "",
+                    "target_name": me.get("name") or ""}
+                atomic_json(fleet.LINKS_FILE, data)
+                n += 1
     return n
 
 
@@ -3688,8 +3698,9 @@ def ack_sweep():
             data = fleet.links_read()
             changed = False
             for key, ln in list(data["links"].items()):
-                if not isinstance(ln, dict) or now - _num(ln.get("last_sent") or ln.get("first_sent"), now) > EXPECT_KEEP:
-                    del data["links"][key]    # junk, or no message to that peer for EXPECT_KEEP: a later one is a first contact again
+                if not isinstance(ln, dict) or now - _num(ln.get("last_sent") or ln.get("first_sent"), now) > (
+                        EXPECT_RESERVE_TTL if ln.get("early") and not _num(ln.get("sent")) else EXPECT_KEEP):
+                    del data["links"][key]    # junk, or no message to that peer for EXPECT_KEEP (an early ack no send of the asker followed: EXPECT_RESERVE_TTL): a later one is a first contact again
                     changed = True
                     continue
                 if ln.get("acked"):

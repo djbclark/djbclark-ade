@@ -1483,13 +1483,13 @@ def sender_row(ss):
     under a process fleet recognises (a transcript-less TUI such as `agy`, `codex` or `opencode`) gets a `pid*` row for that
     ancestor, host terminal, with no transcript and no Paseo id, listed BEFORE its own Paseo row. Taking the first `self` row
     then named a pid as the sender: relay wrote `sender: pidNNNN`, `sender_paseo: ""`, `tl_base: null`, so its
-    `--expect-ack` could never close (nothing watches a pid: `--ack` wants a transcript, `timeline_ack` a Paseo id) and its
+    `--expect-ack` could never close (nothing watches a pid: `--ack` wants a transcript, `resolve_acks` a keeping route) and its
     footer told a peer to `ack pidNNNN` (live 2026-10-29, an Antigravity agent).
 
     Preference, in this order: the NEAREST process of ours, counting a Paseo row as the process PASEO LAUNCHED for that
     agent (`_paseo_hosting_pids`), a transcript row as its own `pid` and any other row as its own `pid`, against
     `ancestry()` (nearest first); at one depth (rows that stand for the same process), the row that can prove the ack: a
-    transcript (`--ack` watches it), then a Paseo id (`timeline_ack`), then neither. The depth comes first because the
+    transcript (`--ack` watches it), then a Paseo id (a keeping route for `resolve_acks`), then neither. The depth comes first because the
     caller's identity decides who an answer goes to, and an outer Claude that started this Codex is not the caller
     (review F1, 2026-10-30; the first version let any transcript outrank any depth, so a reply, its footer and the retirement
     self-check named the parent). Two consequences this rule exists for: an inherited or exported `PASEO_AGENT_ID` marks a
@@ -1502,8 +1502,8 @@ def sender_row(ss):
     as its Paseo row, so the Paseo row wins there and the old `pid*` sender cannot come back.
 
     A transcript-backed row gets no second vote for also carrying a Paseo id: `_claude_sessions` gives a daemon-spawned
-    Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), but a transcript already proves the ack and neither
-    `ack_proof_note` nor `timeline_base` uses that id to prove an ack for a transcript row, so it adds nothing to the proof
+    Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), but a transcript already proves the ack and
+    `ack_proof_note` does not use that id for a transcript row, so it adds nothing to the proof
     (adversary 4 F1, 2026-10-30). Exact ties keep fleet's order (`max` returns the first of equal keys)."""
     selfs = [x for x in ss if isinstance(x, dict) and x.get("self")]
     if len(selfs) < 2:

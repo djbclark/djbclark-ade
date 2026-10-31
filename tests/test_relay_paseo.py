@@ -636,18 +636,42 @@ class RelayPaseo(unittest.TestCase):
         """Adversary PR 173 B2a: the peer answered the footer (`reply ack <sender id> through relay.py`); relay knows both ends from the fleet."""
         sender = {"id": "cccccccc", "sid": ""}
         peer = {"id": "dddddddd", "sid": "", "host": "claude"}
-        for caller, recipient, text, closes in (
-                (peer, sender, "ack cccccccc", 1),
-                (peer, sender, "ack cccccccc (read it)", 1),
-                ({"id": "eeeeeeee", "sid": ""}, sender, "ack cccccccc", 0),    # a third party's answer proves nothing about this pair
-                (peer, {"id": "ffffffff", "sid": ""}, "ack ffffffff", 0),    # another recipient: no such link
-                (peer, sender, "thanks, ack cccccccc is what the footer says", 0),    # the text must BEGIN with the ack
-                (peer, sender, "ack someoneelse", 0)):
+        for caller, recipient, text, returns, closes in (
+                (peer, sender, "ack cccccccc", 1, True),
+                (peer, sender, "ack cccccccc (read it)", 1, True),
+                ({"id": "eeeeeeee", "sid": ""}, sender, "ack cccccccc", 1, False),    # a third party's answer closes nothing of THIS pair (it can only note its own early ack, below)
+                (peer, {"id": "ffffffff", "sid": ""}, "ack ffffffff", 1, False),    # another recipient: not this link either
+                (peer, sender, "thanks, ack cccccccc is what the footer says", 0, False),    # the text must BEGIN with the ack
+                (peer, sender, "ack someoneelse", 0, False)):
             links = self.link()
             with mock.patch.object(relay.fleet, "LINKS_FILE", links):
-                self.assertEqual(relay.resolve_acks(caller, recipient, text), closes, (caller, text))
+                self.assertEqual(relay.resolve_acks(caller, recipient, text), returns, (caller, text))
                 ln = relay.fleet.links_read()["links"][relay.fleet.link_key("cccccccc", "dddddddd")]
-            self.assertEqual(bool(ln["acked"]), bool(closes), (caller, text))
+            self.assertEqual(bool(ln["acked"]), closes, (caller, text))
+
+    def test_an_answer_that_arrives_while_the_askers_send_is_still_running_is_kept(self) -> None:
+        """Codex P2 on PR 173 / adversary C1: `main` writes the first-contact link only after the send and its watch return, so a quick peer
+        answers before the link exists. The answer is recorded already acked, the asker's own bookkeeping keeps it, and a stale one with no
+        send behind it is pruned."""
+        asker = {"id": "cccccccc", "sid": "", "name": "me", "transcript": None, "paseo": CALLER}
+        peer = {"id": "dddddddd", "sid": "", "name": "peer-long-name", "host": "claude"}
+        key = relay.fleet.link_key("cccccccc", "dddddddd")
+        with mock.patch.object(relay.fleet, "LINKS_FILE", Path(self.tmp.name) / "links.json"):
+            self.assertEqual(relay.resolve_acks(peer, asker, "ack cccccccc"), 1)    # no link yet
+            self.assertTrue(relay.fleet.links_read()["links"][key]["acked"])
+            with mock.patch.dict(relay.CTX, {"me": asker, "s": peer, "mark": 0}, clear=True):
+                relay.note_links_and_expect()    # the asker's run finishes its send
+            ln = relay.fleet.links_read()["links"][key]
+            self.assertEqual((bool(ln["acked"]), ln["sent"]), (True, 1))
+            self.assertEqual(relay.resolve_acks(peer, asker, "ack cccccccc"), 0)    # a replay changes nothing
+            old = relay.fleet.links_read()
+            old["links"][relay.fleet.link_key("cccccccc", "eeeeeeee")] = {"sender": "cccccccc", "target": "eeeeeeee", "first_sent": time.time() - 700,
+                                                                         "last_sent": time.time() - 700, "sent": 0, "acked": time.time() - 700, "early": True, "tx": ""}
+            relay.atomic_json(relay.fleet.LINKS_FILE, old)
+            relay.ack_sweep()
+            links = relay.fleet.links_read()["links"]
+        self.assertIn(key, links)
+        self.assertNotIn(relay.fleet.link_key("cccccccc", "eeeeeeee"), links)    # an early answer nothing followed
 
     def test_resolve_acks_leaves_a_transcript_backed_link_to_its_transcript(self) -> None:
         with mock.patch.object(relay.fleet, "LINKS_FILE", self.link(tx="/tmp/x.jsonl")):

@@ -297,7 +297,7 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
     fleet's process scan lists a `pid*` row for an ancestor TUI BEFORE the Paseo row of the same agent (`fleet.py`
     `sessions`: `_proc_scan`, then `_paseo_rows`; `self = pid in ancestors`). A Paseo-hosted agent whose tools ran under a
     process fleet recognises therefore sent as `sender: pid19798`, `sender_paseo: ""`, `tl_base: null`: no transcript for
-    the `--ack` watch, no Paseo id for `timeline_ack`, so an `--expect-ack` could never close and its footer named a pid
+    the `--ack` watch, no Paseo id for `resolve_acks`, so an `--expect-ack` could never close and its footer named a pid
     (live 2026-10-29, an Antigravity agent). Every id here is fake; the process tree and the Paseo hosting probe are stubbed.
     """
 
@@ -370,8 +370,8 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
 
     def test_a_paseo_id_on_a_transcript_row_does_not_jump_the_fleet_order(self) -> None:
         """A transcript already proves an ack, so a Paseo id beside it is no second vote: `_claude_sessions` gives a
-        daemon-spawned Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), and neither `ack_proof_note` nor
-        `timeline_base` uses that id to prove an ack for a transcript row, so it adds nothing to the proof. Two transcript rows keep fleet's
+        daemon-spawned Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), and `ack_proof_note` does not
+        use that id for a transcript row, so it adds nothing to the proof. Two transcript rows keep fleet's
         order whichever carries the id (local-review of 2026-10-30, wording corrected by adversary 4 F1)."""
         plain = sess(id="aaaaaaaa", agent="claude", transcript="/tmp/a.jsonl", **{"self": True})
         both = sess(id="bbbbbbbb", agent="claude", transcript="/tmp/b.jsonl", paseo=PASEO_AGENT, **{"self": True})
