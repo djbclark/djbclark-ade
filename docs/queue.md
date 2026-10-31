@@ -3,6 +3,26 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## relay.py: tell what a message did, and make a stuck queue visible (djbclark, 2026-10-31; branch `relay-status`, stacked on PR 173)
+
+Built 2026-10-31. Measured by Dann VPS 2 (techno-euphora) on 2026-10-30/31, four times, relaying to a Paseo peer whose tab had a question card up: `--cancel ID` was the only
+authoritative state check and destroyed two still-queued messages (20261030-210630-dcd597, 20261030-210743-6ff27c); a record file on disk says nothing about its state (256 sat there in
+final states); a 346-line `--pending` hid the one queued row from `tail -8`; the `queued:` line did not name the card; nothing flagged a message queued past the operator's 5-minute rule.
+
+### How to tell what a message did
+
+1. `relay.py --status ID` (alias `--show`, `--json`): state, target, age, the deliverer's last `look` (state, why, when, the pending card by id and tool), every `deferred.log` event of that id, any expectation sharing the id. Non-destructive: no lock, no file created, no write (pinned by a byte-compare of the record, `deferred.log` and the expectation store). Exit 0 found, 1 unknown or pruned.
+2. `relay.py --pending --queued-only` (queued and sending), `--older-than S`, and `--summary` (counts by state plus the oldest non-final record and what holds it; `--json` too). Plain `--pending` is byte-identical. The filters list message records only.
+3. `relay.py --why TARGET`: the live obstacle, two methods compared.
+4. **`--cancel ID` is destructive and never a state check** (it withdraws a queued record).
+5. `relay.py --sweep` prints `STUCK 14m ID -> [target] blocked on card CARD (question: TOOL) [why: ...]` for every non-final record older than `--stuck-after S` (default 300): the mechanical hook of the five-minute rule (a watcher greps `^STUCK`; exit status stays 0).
+6. The `queued:` line (and `--json` `obstacle` / `cards`) names the card by id and tool when the target is blocked on one, e.g. `queued: ID for [cccccccc] peer-fb: blocked on card frm_X (question: AskUserQuestion). Delivered once its card is answered ...`; the deliverer files the card ids on the record's `look` and in `deferred.log` (ids and tool names only, never a card's text).
+
+### Housekeeping (2026-10-31)
+
+1. **`deferred.log` cap**: `defer_log` rotates it at 1 MiB (`DEFER_LOG_CAP`) to `deferred.log.1`, and that to `deferred.log.2`; older is dropped (at most about 3 MiB). The rotation is taken under `.deferred.log.lock` and re-checks the size, so two writers rotate once.
+2. **Week-old prune** (`DEFER_KEEP`, 7 days after a record finished): `revive` prunes a final record, and `sweep_all` runs `revive` for every record both in `relay.py --sweep` and, opportunistically, at the start of every relay that gets past its refusals. It does NOT run for `--pending`, `--status`, `--why` or `--cancel`, which is by design (a listing never deletes). The 256 records read on 2026-10-31 carried ids from 2026-10-24: the oldest were at most the seven days, so the prune was not shown broken. One real gap was fixed: a single record with a hand-edited non-numeric `finished` raised out of `sweep_all` (silenced by the caller), so every record after it was never pruned; the sweep now skips that record and carries on.
+
 ## `paseo-bypass-watch` test gaps from adversary round 4 (PR 121 merged 2026-10-29 as 306039a; djbclark deferred them 2026-10-29 via `/steps`: "track everything like it and resurface at the appropriate time")
 
 Both are coverage gaps only; the code is exact and the adversary APPROVED 78f3a5c. Full report: `~/.local/state/bigteam/adhoc-2026-10-29/watch-adv4-report.md` (B1, B3). Not started by design.
