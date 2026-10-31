@@ -140,6 +140,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(failover, "preflight", lambda e, probe=True: (True, "ok (test)"))
     monkeypatch.setattr(failover, "ask", lambda e, p: failover.Answer(f"ANS-{e.model}-{p}"))
     monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: False)
+    # main()'s finally sweeps stale failover-* dirs: keep it off the real temp dir
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(failover.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
     # the engine and adapters get a minimal env (M2): let the fake's own knobs through
     monkeypatch.setattr(failover, "BASE_ENV_KEYS",
                         (*failover.BASE_ENV_KEYS, "FAKE_LOG", "FAKE_RESULT", "FAKE_ROUNDS", "FAKE_STUCK"))
@@ -606,12 +609,13 @@ def test_a_stopped_source_ends_the_night(env, monkeypatch):
     assert seen == ["claude"]
 
 
-def test_logs_swept_after_the_night(env, monkeypatch):
+def test_logs_and_temp_dirs_swept_after_the_night(env, monkeypatch):
     _night(env / "home", HAIKU_SONNET)
-    swept: list[bool] = []
-    monkeypatch.setattr(failover, "sweep_logs", lambda *a: swept.append(True) or 0)
+    swept: list[str] = []
+    monkeypatch.setattr(failover, "sweep_logs", lambda *a: swept.append("logs") or 0)
+    monkeypatch.setattr(failover, "sweep_tmp_dirs", lambda *a: swept.append("tmp") or 0)
     night.main(["--source", "claude"])
-    assert swept == [True]
+    assert swept == ["logs", "tmp"]
     assert (env / "state").stat().st_mode & 0o777 == 0o700
 
 
