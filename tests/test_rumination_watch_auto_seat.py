@@ -1353,3 +1353,27 @@ def test_returned_id_successful_reconciliation_needs_no_manual_notice(monkeypatc
     run_pass(rw)
     assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
     assert rw.unresolved_pages == []
+
+
+@pytest.mark.parametrize("successor_state", ["idle", "working"])
+def test_live_successor_preserves_unresolved_id_until_reconciled(monkeypatch, tmp_path, successor_state):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    key = f"auto-seat unresolved:{rw.ROLE}"
+    assert rw.unresolved_candidate(rw.load_state()) == NEW
+    monkeypatch.setattr(rw, "owner_session", lambda: (SUCCESSOR, "registry"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: (successor_state, "successor live"))
+    # The first reconciliation read fails: retain the id even though another owner is live.
+    run_pass(rw)
+    assert key in rw.load_state()["told"]
+    assert rw.unresolved_candidate(rw.load_state()) == NEW
+    assert starts(rw) == 1
+    # The next pass reads this attempt's returned id successfully, then a subsequent pass
+    # may retire the owner fallback. No manual state edit or additional start is needed.
+    rw.confirm = True
+    run_pass(rw)
+    assert key not in rw.load_state()["told"]
+    run_pass(rw)
+    assert rw.auto_seat_candidate(rw.load_state()) == ""
+    assert starts(rw) == 1

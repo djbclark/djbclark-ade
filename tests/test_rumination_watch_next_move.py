@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -376,3 +377,9 @@ def isolated_watcher_environment(monkeypatch, tmp_path):
             raise AssertionError(f"unexpected external launcher: {command}")
         return real(argv, *args, **kwargs)
     monkeypatch.setattr(subprocess, "run", guarded)
+
+
+def test_next_move_guard_rejects_live_launcher_without_running_it():
+    import subprocess
+    with pytest.raises(AssertionError, match="unexpected external launcher"):
+        subprocess.run(["paseo", "agent", "inspect", "--json", "--", "fixture-id"])

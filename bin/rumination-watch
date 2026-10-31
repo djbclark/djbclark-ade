@@ -1202,6 +1202,7 @@ def unresolved_candidate(state: dict) -> str:
     Candidate ids remain as owner fallbacks after confirmation. Their presence alone says
     nothing about a later start that lost its response. All three stamps must identify the
     same attempt; missing, malformed or ambiguous evidence stays blocked for the operator.
+    All three use the same `now` in one auto_seat call; JSON round-trips floats exactly.
     """
     told = state.get("told", {})
     stamp = told.get(f"auto-seat unresolved:{ROLE}")
@@ -1739,11 +1740,13 @@ def _pass(a: argparse.Namespace) -> int:
                 probe[:] = [(word, "auto-seat candidate")]
         elif candidate and candidate != ident and (word in ("idle", "working", "silent")
                                                    or word.startswith("card:")):
-            # A live successor is authoritative. Retire the stale candidate so it cannot shadow
-            # future registry changes; this is bookkeeping, never a successful-start stamp.
+            # A live successor is authoritative for sending, but candidate keys are also the
+            # unresolved attempt's identity proof. Keep them until reconciliation completes.
+            # Retirement is bookkeeping, never a successful-start stamp.
             prefix = f"auto-seat candidate:{ROLE}:"
-            state["told"] = {k: v for k, v in state.get("told", {}).items()
-                             if not k.startswith(prefix)}
+            if f"auto-seat unresolved:{ROLE}" not in state.get("told", {}):
+                state["told"] = {k: v for k, v in state.get("told", {}).items()
+                                 if not k.startswith(prefix)}
         elif not ident and target:
             word = why_blocked(target)[0]
         # A gone candidate cannot establish that no registered successor exists when fleet reads
