@@ -217,7 +217,7 @@ def main() -> int:
         live_ids = {r["sessionId"] for r in rows}
         try:
             r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
-                                "--limit", "20", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
+                                "--limit", "80", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
             # the `--` matters: without it a keyword such as --rebuild is an option of the child (it deletes the index)
             if r.returncode not in (0, 1):
                 raise ValueError(f"session-history.py exit {r.returncode}: {r.stderr.strip()[-300:]}")
@@ -227,6 +227,7 @@ def main() -> int:
         except (subprocess.SubprocessError, ValueError) as e:
             print(f"history search failed: {e}", file=sys.stderr)
             found = []
+        # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
         found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
         for i, h in enumerate(f for f in found if f["sessionId"] not in live_ids and not f.get("live")):
             rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,

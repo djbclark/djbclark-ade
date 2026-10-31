@@ -166,6 +166,7 @@ def install(remove: bool) -> int:
         return 2
     INDEX_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)  # launchd's stdout/stderr files live here
     subprocess.run(["launchctl", "bootout", domain, str(dest)], check=False, capture_output=True)  # reinstall = replace
+    dest.parent.mkdir(parents=True, exist_ok=True)  # a fresh account has no ~/Library/LaunchAgents yet
     tmp = dest.with_suffix(".tmp")
     tmp.write_text((repo / "launchd" / PLIST).read_text().replace("__REPO__", escape(str(repo))))
     os.replace(tmp, dest)

@@ -71,10 +71,14 @@ def sessions():
             st = chat.stat()
         except OSError:
             continue
-        try:
-            sst = (sdir / "summary.json").stat()
-            sfp, mtime = f"{sst.st_size}:{int(sst.st_mtime)}", max(st.st_mtime, sst.st_mtime)
-        except OSError:
-            sfp, mtime = "", st.st_mtime
+        sfp, mtime = "", st.st_mtime
+        # summary.json and the cwd's prompt_history.jsonl feed the indexed text too: a change to either re-indexes
+        for extra in (sdir / "summary.json", sdir.parent / "prompt_history.jsonl"):
+            try:
+                x = extra.stat()
+            except OSError:
+                continue
+            sfp += f"{extra.name[:3]}{x.st_size}:{int(x.st_mtime)}:"
+            mtime = max(mtime, x.st_mtime)
         yield {"key": f"grok:{sdir.name}", "sid": sdir.name, "fp": f"{st.st_size}:{int(st.st_mtime)}:{sfp}",
                "mtime": mtime, "load": lambda d=sdir: _read(d)}

@@ -83,6 +83,17 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(msgs, [("user", "an early prompt a compaction dropped"), ("user", "where is the wormhole"),
                                 ("assistant", "the wormhole is in sector nine")])
 
+    def test_grok_fingerprint_follows_prompt_history_and_summary(self) -> None:
+        cwd_dir = self.home / ".grok/sessions/%2Fsrc%2Fy"
+        write_jsonl(cwd_dir / "sess-1/chat_history.jsonl", [{"type": "user", "content": [{"type": "text", "text": "hello grok"}]}])
+        mod = load("grok", self.home)
+        fp1 = next(iter(mod.sessions()))["fp"]
+        write_jsonl(cwd_dir / "prompt_history.jsonl", [{"session_id": "sess-1", "prompt": "typed before a compaction"}])
+        fp2 = next(iter(mod.sessions()))["fp"]
+        (cwd_dir / "sess-1/summary.json").write_text("{}")
+        fp3 = next(iter(mod.sessions()))["fp"]
+        self.assertEqual(len({fp1, fp2, fp3}), 3)
+
     def test_goose_reads_text_blocks(self) -> None:
         db_path = self.home / ".local/share/goose/sessions/sessions.db"
         db_path.parent.mkdir(parents=True)
@@ -224,6 +235,7 @@ class SessionFindAllTests(unittest.TestCase):
                 sf.main()
         (argv,) = calls
         self.assertEqual(argv[-2:], ["--", "--rebuild"])
+        self.assertGreaterEqual(int(argv[argv.index("--limit") + 1]), 60)  # live rows are dropped after the cap
 
 
 if __name__ == "__main__":
