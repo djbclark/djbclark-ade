@@ -16,8 +16,13 @@ status   read-only: per domain who holds the role, whether the holder is reachab
          launch (provider, model, thinking, context, why). Starts nothing, sends nothing.
 up       per domain, in this order:
            1. a live holder is never replaced (that would throw away work in flight); `--force` replaces it
-              by starting a new watcher, whose own registration tells the old one
-           2. a holder that is gone or unreachable, or no holder at all, gets one new watcher
+              by starting a new watcher, whose own registration tells the old one. A holder whose Paseo status is
+              `closed` is live too (2026-10-31): Paseo's idle-runtime collector closed its runtime but the session
+              is persisted and un-archived, and the next message resumes the same conversation, so it is neither
+              replaced nor woken just to be checked. Dead means: status `error`, archived, or no longer listed
+              by `paseo agent ls -g -a`. If the daemon cannot be asked, the holder's state is unknown and
+              nothing is launched (exit 1), `--force` included
+           2. a holder that is dead or unreachable, or no holder at all, gets one new watcher
            3. a launch in progress or an agent started earlier and still registering counts as claimed:
               ~/.local/state/watch/<domain>.json plus a per-domain flock, so two concurrent `up` runs
               never double-start, and a record whose agent no longer exists is dropped
@@ -26,12 +31,13 @@ up       per domain, in this order:
               exit 1, the agent is left running for inspection
          Every agent lives in ONE shared Paseo workspace (config [defaults] workspace, "watch") and is titled
          `watch <domain> <n>`, n the next per-domain base-36 number (0-9a-z); once the new agent is registered,
-         the superseded ones (and the holder it replaced) are renamed `x <old title>`, and every idle `x` one is then
-         archived (so is any other idle agent titled `x ...`), except a `--force`-replaced holder, whose id is kept in
+         the superseded ones (and the holder it replaced) are renamed `x <old title>`, and every idle or closed `x` one is
+         then archived (so is any other idle or closed agent titled `x ...`), except a `--force`-replaced holder, whose id is kept in
          ~/.local/state/watch/kept.json and which is never archived (a retired one with a turn in flight is left and archived on a later `up`; 2026-10-28)
          `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
-         line to a live Paseo holder (default: a holder that Paseo lists as alive counts, because the test line
-         costs the holder a model turn each tick)
+         line to a live Paseo holder (default: a holder that Paseo lists as alive or closed counts, because the
+         test line costs the holder a model turn each tick and wakes a collected one). A `--probe` test that
+         fails on a collected holder starts nothing either (exit 1; inspect it, or `--force`)
 down     drops the role through the domain's off_cmd (which clears only if the agent we started still holds
          it) and archives that agent; an agent `watch` did not start is never touched
 
@@ -78,7 +84,13 @@ FLEET_WATCH = os.environ.get("WATCH_FLEET_WATCH") or str(HOME / "ops/site-privat
 LOAD_WATCH = os.environ.get("WATCH_LOAD_WATCH") or str(HERE / "load-watch")
 
 EFFORTS = ["minimal", "low", "medium", "high"]   # ceiling is high on purpose: watchers coordinate, /bigteam slices code
-DEAD_STATUS = {"error", "closed", "archived"}
+# `closed` is NOT dead: Paseo's idle-runtime collector ("Collected idle agent runtime" in daemon.log) closes the
+# runtime of an idle agent but keeps it listed (un-archived) with its persistence handle, and the next message
+# resumes the same session (agent-loading.ts ensureAgentLoaded). Found 2026-10-31: a collected watcher was
+# mistaken for a dead one and replaced 98 s later. Only `error` and an archived agent are dead.
+DEAD_STATUS = {"error", "archived"}
+# A retired (`x ...`) agent in one of these has no turn in flight, so a sweep may archive it.
+QUIET_STATUS = {"idle", "closed"}
 # Providers whose yolo is a permission MODE, not the auto_accept feature: codex has no auto_accept and starts in `auto`
 # (Default Permissions), where an unattended watcher can stall on a prompt (found 2026-10-27).
 YOLO_MODE = {"codex": "full-access"}
@@ -163,20 +175,54 @@ class Paseo:
             self._agents = [a for a in d if isinstance(a, dict)] if isinstance(d, list) else None
         return self._agents
 
-    def all_agents(self) -> list[dict]:
-        """Every agent the daemon still lists, archived included (title numbering must never reuse a number)."""
+    def all_listing(self) -> list[dict] | None:
+        """Every agent the daemon still lists, archived included; None when the daemon cannot be asked."""
         rc, out, _ = run([PASEO, "agent", "ls", "-g", "-a", "--json"], 30)
         try:
-            d = json.loads(out) if rc == 0 else []
+            d = json.loads(out) if rc == 0 else None
         except ValueError:
-            d = []
-        return [a for a in d if isinstance(a, dict)] if isinstance(d, list) else []
+            d = None
+        return [a for a in d if isinstance(a, dict)] if isinstance(d, list) else None
+
+    def all_agents(self) -> list[dict]:
+        """all_listing for title numbering, which must never reuse a number ([] when the daemon cannot be asked)."""
+        return self.all_listing() or []
+
+    @staticmethod
+    def matches(a: dict, ident: str) -> bool:
+        return bool(ident) and (a.get("id") == ident or (len(ident) >= 7 and str(a.get("id", "")).startswith(ident)))
 
     def agent(self, ident: str) -> dict | None:
         for a in self.agents() or []:
-            if ident and (a.get("id") == ident or (len(ident) >= 7 and str(a.get("id", "")).startswith(ident))):
+            if self.matches(a, ident):
                 return a
         return None
+
+    def lifecycle(self, ident: str) -> tuple[str, str]:
+        """(state, why) of one agent id, from the daemon's own listings:
+          live       listed (`ls -g`, un-archived) idle/running/initializing/...
+          collected  listed with status `closed`: the idle runtime was garbage collected, the session is persisted
+                     and resumable, the next message wakes the SAME conversation; never replace it
+          dead       listed with status `error`
+          archived   absent from `ls -g` but present in `ls -g -a`: retired on purpose, never auto-resumed
+          gone       absent from both
+          unknown    the daemon could not be asked (never 'gone': callers must not launch on it)"""
+        if self.agents() is None:
+            return "unknown", "the daemon could not be asked (`paseo agent ls` failed)"
+        a = self.agent(ident)
+        if a is not None:
+            st = str(a.get("status"))
+            if st == "closed":
+                return "collected", "status closed: idle runtime collected, session persisted, resumable by the next message"
+            if st in DEAD_STATUS:
+                return "dead", f"status {st}"
+            return "live", f"status {st}"
+        rows = self.all_listing()
+        if rows is None:
+            return "unknown", "the daemon could not be asked (`paseo agent ls -a` failed)"
+        if any(self.matches(r, ident) for r in rows):
+            return "archived", "archived"
+        return "gone", "not in `paseo agent ls`"
 
     def providers(self) -> dict[str, str]:
         if self._providers is None:
@@ -252,16 +298,19 @@ def query_holder(row: dict) -> tuple[Holder | None, str]:
 
 
 def holder_alive(row: dict, h: Holder, pv: Paseo, probe: bool, send: bool = True) -> tuple[bool | None, str]:
-    """(alive, why). alive is None only when `send` is False and the answer needs a channel test line."""
-    ags = pv.agents()
-    if ags is not None and UUID.match(h.target):
-        a = pv.agent(h.target)
-        if a is None:
-            return False, f"Paseo agent {h.target[:8]} is not in `paseo ls`"
-        if str(a.get("status")) in DEAD_STATUS:
-            return False, f"Paseo agent {h.target[:8]} is {a.get('status')}"
+    """(alive, why). alive is None when `send` is False and the answer needs a channel test line, or when a Paseo
+    holder's state is unknown because the daemon could not be asked (up_one refuses to launch on that).
+    A Paseo holder whose idle runtime was collected (`closed`) is alive: it wakes on its next message with its
+    conversation intact. Without --probe nothing is sent to it, so no model turn is spent per tick."""
+    if UUID.match(h.target):
+        st, why = pv.lifecycle(h.target)
+        who = f"Paseo agent {h.target[:8]}"
+        if st == "unknown":
+            return None, f"{who}: {why}; liveness unknown"
+        if st in ("gone", "archived", "dead"):
+            return False, f"{who} is {why}"
         if not probe:
-            return True, f"Paseo agent {h.target[:8]} is {a.get('status')}"
+            return True, f"{who} is {why}"
     if not send:
         return None, "needs a channel test line (a read-only run sends none; `watch up --probe` does)"
     rc, out, err = run(sub(row["test_cmd"], h.target), 60)
@@ -581,7 +630,7 @@ def archive_if_idle(pv: Paseo, rid: str, name: str) -> str:
     cur = pv.agent(rid)
     if cur is None:
         return f"{rid[:8]} {name!r} not listed (gone, or the daemon could not be asked); nothing archived"
-    if (cur.get("name") or "") != name or cur.get("status") != "idle":
+    if (cur.get("name") or "") != name or cur.get("status") not in QUIET_STATUS:
         return f"{rid[:8]} {name!r} left running (status {cur.get('status')!r}); archived once idle"
     rc, out, err = run([PASEO, "agent", "archive", rid], 60)
     return (f"{rid[:8]} {name!r} archived" if rc == 0
@@ -628,7 +677,7 @@ def archive_retired(domain: str, pv: Paseo, holder_target: str | None) -> list[s
         rid = str(a.get("id") or "")
         if not (m and m.group(1)) or rid in kept or (holder_target and len(holder_target) >= 7 and rid.startswith(holder_target)):
             continue
-        if a.get("status") != "idle":
+        if a.get("status") not in QUIET_STATUS:
             done.append(f"{rid[:8]} {name!r} left running (status {a.get('status')!r}); archived once idle")
             continue
         done.append(archive_if_idle(pv, rid, name))
@@ -842,6 +891,12 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
                 log(domain, f"archive: {line}")
         replaces = None
         if h:
+            st = pv.lifecycle(h.target)[0] if UUID.match(h.target) else "other"
+            if st == "unknown":   # the daemon did not answer: neither alive nor gone, so launching could duplicate a live holder
+                log(domain, f"cannot tell whether holder {h.name or h.target} ({h.target[:8]}) is alive: the Paseo daemon could not be asked; not launching blind", dry)
+                return 1
+            if st == "collected" and args.force:
+                replaces = h   # a failed probe must not discard a forced holder's saved tab
             alive, why = holder_alive(row, h, pv, args.probe, send=not dry)
             if alive is None:   # dry-run: a channel test line would be needed; assume it passes, say so
                 alive = True
@@ -851,6 +906,10 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
             if alive and args.force:
                 replaces = h
                 log(domain, f"--force: replacing live holder {h.name or h.target} ({h.target[:8]}): {why}", dry)
+            elif st == "collected" and not args.force:   # --probe woke a persisted session and the test line failed: recovery is uncertain
+                log(domain, f"holder {h.name or h.target} ({h.target[:8]}) has a collected idle runtime and its resume probe failed ({why}); "
+                            f"not starting a duplicate, inspect it or use --force", dry)
+                return 1
             else:
                 log(domain, f"holder {h.name or h.target} ({h.target[:8]}) is unreachable ({why}): starting a replacement", dry)
         elif hnote:
@@ -859,7 +918,8 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
         if rec and not args.force and rec.get("agent_id"):
             age = time.time() - float(rec.get("started_epoch", 0))
             if rec.get("state") == "unregistered" or age > float(dflt["register_timeout_s"]) * 2:
-                log(domain, f"claimed: agent {rec['agent_id'][:8]} was started at {rec.get('started_at')} and never registered "
+                log(domain, f"claimed: agent {rec['agent_id'][:8]} was started at {rec.get('started_at')} and "
+                            f"{'registered earlier but no longer holds the role' if rec.get('state') == 'registered' else 'never registered'} "
                             f"({rec.get('reason') or 'no reason recorded'}); not starting another, inspect it or use --force", dry)
                 return 1
             log(domain, f"claimed: agent {rec['agent_id'][:8]} started at {rec.get('started_at')} is still registering", dry)
@@ -902,7 +962,7 @@ def archive_other_retired(pv: Paseo) -> list[str]:
         rid = str(a.get("id") or "")
         if not name.startswith("x ") or name.startswith("x watch ") or not rid or rid in kept:
             continue
-        if a.get("status") != "idle":
+        if a.get("status") not in QUIET_STATUS:
             done.append(f"{rid[:8]} {name!r} left running (status {a.get('status')!r}); archived once idle")
             continue
         done.append(archive_if_idle(pv, rid, name))
