@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""ade-duel — two agents argue antagonistically about one artifact, and the transcript is the record.
+
+WHY. A single model asked to review its own work agrees with itself. The `dialogue` skill runs several
+vendors in fixed rounds and `paseo-committee` gives an advisor/committee shape; both aim at consensus.
+This is the opposite: one agent PROPOSES, the other ATTACKS it, for N rounds, and every rebuttal has to
+name the claim it kills. Competition, not politeness.
+
+WHAT IT IS NOT. It does not decide anything. It writes `transcript.md` and, with a judge, a parsed
+`VERDICT: A|B|TIE` line. A human or the caller reads the transcript; the exit status says only whether
+the run completed.
+
+RUNNER. No model is baked in. `--runner` (or ADE_DUEL_RUNNER) is a command template with three
+placeholders, substituted with shlex.quote:
+
+    {agent}   the agent name for that turn
+    {prompt}  a file the runner reads as its prompt
+    {output}  a file the runner MUST write; an empty or missing file fails the turn
+
+    ADE_DUEL_RUNNER='acp-run {agent} -f {prompt}'          # stdout is captured when {output} is absent
+
+A runner that writes nothing, or exits non-zero, stops the duel (exit 3): a silent agent must never be
+read as an argument. Every turn's output is checked before it feeds the next prompt.
+
+CODE MODE (--code DIR) — agentic coding, best agent wins. Each side gets its OWN copy of DIR and is
+told to do the task there; nothing is shared, so the toes they step on are each other's ideas, not each
+other's files. After both are done the duel reports, per side: changed files, the paths BOTH sides
+changed (the toe-stepping list), and, with --check CMD, whether the command succeeds in that side's
+copy. `--pick check|smaller|judge` names the winner rule, default `check`: a passing check beats a
+failing one, then the side that touched fewer lines wins, then TIE. Both copies are kept under --out so
+the loser's tree is still there to read; nothing is promoted automatically.
+
+TRASH TALK. --insults on (the default) tells both sides they may mock each other, on one condition: an
+insult has to carry a concrete technical claim in the same paragraph, and the operator is never the
+target. --insults off gives the polite committee shape.
+
+EXIT CODES: 0 completed, 2 usage/runner missing, 3 an agent produced nothing, 4 the judge's verdict line
+is missing or unparseable, 5 code mode: no side passed --check (nothing to promote, nothing to win).
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import hashlib
+import os
+import shlex
+import subprocess
+import sys
+import shutil
+import tempfile
+import time
+from pathlib import Path
+
+PROPOSER, CHALLENGER = "proposer", "challenger"
+
+ROLE_PROMPT = {
+    PROPOSER: (
+        "You are the PROPOSER. State a concrete position on the artifact below and defend it.\n"
+        "Be specific: name files, invariants, risks. No hedging, no summary of the artifact.\n"
+        "If a challenger's objection is answered by the artifact, say exactly where.\n"
+    ),
+    CHALLENGER: (
+        "You are the CHALLENGER. Your job is to kill the other side's position, not to agree with it.\n"
+        "For every claim you attack, quote it and name the concrete failure: input, state, caller, cost.\n"
+        "Report agreement ONLY where you verified it, and say how you verified it.\n"
+        "Never soften an objection to be agreeable; never invent one to look thorough.\n"
+    ),
+}
+
+INSULT_RULE = (
+    "\nTRASH TALK. These two sides are allowed to insult each other: mock the reasoning, the hedge, the\n"
+    "copy-paste, the obvious miss. The transcript is not a workplace and politeness is not a value here.\n"
+    "Two limits, and they are not negotiable: every insult must be attached to a concrete technical claim\n"
+    "in the same paragraph (an insult with no claim is noise and will be read as a failed turn), and the\n"
+    "operator is never the target. Insult the work, never the person's circumstances.\n"
+)
+
+JUDGE_PROMPT = (
+    "You are the JUDGE. A is the PROPOSER (defends a position); B is the CHALLENGER (attacks it). "
+    "Read the exchange. Decide which side survived on the evidence, not on tone.\n"
+    "Count only objections that name a concrete failure and were answered or left standing.\n"
+    "End with exactly one line: `VERDICT: A`, `VERDICT: B`, or `VERDICT: TIE`, then one sentence why.\n"
+)
+
+
+def fail(code: int, msg: str) -> "SystemExit":
+    print(f"ade-duel: {msg}", file=sys.stderr)
+    return SystemExit(code)
+
+
+def run_turn(runner: str, agent: str, prompt: str, work: Path, label: str, cwd: Path | None = None) -> str:
+    """One agent turn. Returns its text; raises SystemExit(3) when it produced nothing."""
+    prompt_file = work / f"{label}.prompt.txt"
+    out_file = work / f"{label}.out.txt"
+    prompt_file.write_text(prompt)
+    argv = shlex.split(runner.format(agent=shlex.quote(agent), prompt=shlex.quote(str(prompt_file)),
+                                     output=shlex.quote(str(out_file))))
+    if not argv:
+        raise fail(2, "runner template is empty")
+    started = time.time()
+    done = subprocess.run(argv, capture_output=True, text=True, cwd=str(cwd) if cwd else None)
+    if done.returncode != 0:
+        raise fail(3, f"{label}: runner exited {done.returncode}: {(done.stderr or done.stdout).strip()[:300]}")
+    if done.stdout.strip() and not out_file.exists():
+        out_file.write_text(done.stdout)
+    text = out_file.read_text() if out_file.exists() else ""
+    if not text.strip():
+        raise fail(3, f"{label}: agent {agent!r} produced no output after {time.time() - started:.1f}s; "
+                      "a silent turn must not be read as an argument")
+    return text.strip()
+
+
+def snapshot(root: Path) -> dict[str, str]:
+    """path -> sha256 for every regular file, skipping VCS internals."""
+    out: dict[str, str] = {}
+    for p in root.rglob("*"):
+        if not p.is_file() or ".git" in p.parts:
+            continue
+        out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+def changed(before: dict[str, str], after: dict[str, str]) -> dict[str, int]:
+    """path -> number of changed lines (added+removed is unknown without the old text, so: 1 per file
+    plus the size delta is meaningless; we report files and bytes between differing versions)."""
+    out: dict[str, int] = {}
+    for path, digest in after.items():
+        if before.get(path) != digest:
+            out[path] = 1
+    for path in before:
+        if path not in after:
+            out[path] = 1
+    return out
+
+
+def byte_delta(before: dict[str, str], root: Path, paths) -> int:
+    total = 0
+    for rel in paths:
+        p = root / rel
+        total += p.stat().st_size if p.exists() else 0
+    return total
+
+
+def run_check(argv: list[str], cwd: Path) -> tuple[bool, str]:
+    done = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
+    tail = (done.stdout + done.stderr).strip().splitlines()[-3:]
+    return done.returncode == 0, f"exit {done.returncode}" + (": " + " / ".join(tail) if tail else "")
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Temp file beside the target, then os.replace: a killed duel never leaves half a transcript."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def parse_verdict(text: str) -> str | None:
+    for line in reversed(text.splitlines()):
+        line = line.strip().strip("`*_ ").upper()
+        if line.startswith("VERDICT:"):
+            value = line.split(":", 1)[1].strip()
+            return value if value in ("A", "B", "TIE") else "?"
+    return None
+
+
+
+def decide(results: dict, pick: str) -> tuple[str, str]:
+    """(winner key, reason). Fails closed: no check passed means no winner, not a coin toss."""
+    a_ok = results[PROPOSER]["check"]
+    b_ok = results[CHALLENGER]["check"]
+    if pick == "check" and a_ok is not None:
+        if a_ok != b_ok:
+            key = PROPOSER if a_ok else CHALLENGER
+            return key, f"only {key}'s copy passes --check"
+        if not a_ok:
+            return "none", "neither copy passes --check"
+    if pick == "judge":
+        return "judge", "the judge decided"
+    a_n, b_n = len(results[PROPOSER]["paths"]), len(results[CHALLENGER]["paths"])
+    if a_n != b_n:
+        key = PROPOSER if a_n < b_n else CHALLENGER
+        return key, f"{key} touched {min(a_n, b_n)} files instead of {max(a_n, b_n)}"
+    a_b, b_b = results[PROPOSER]["delta"], results[CHALLENGER]["delta"]
+    if a_b != b_b:
+        key = PROPOSER if a_b < b_b else CHALLENGER
+        return key, f"{key} wrote fewer bytes ({min(a_b, b_b)} vs {max(a_b, b_b)})"
+    return "tie", "same file count and same size: the trees are equally changed"
+
+
+def run_code_mode(a, text: str, src: Path, out: Path) -> int:
+    before = snapshot(src)
+    sides = {PROPOSER: (a.a, out / "a"), CHALLENGER: (a.b, out / "b")}
+    for _, dirp in sides.values():
+        if dirp.exists():
+            shutil.rmtree(dirp)
+        shutil.copytree(src, dirp, symlinks=True)
+    results: dict[str, dict] = {}
+    with tempfile.TemporaryDirectory(prefix="ade-duel-") as tmp:
+        work = Path(tmp)
+        for role, (agent, dirp) in sides.items():
+            prompt = (ROLE_PROMPT[role] + (INSULT_RULE if a.insults == "on" else "") + "\n## Task\n" + text +
+                      "\n\n## Your workspace\n`" + str(dirp) + "`\n\n"
+                      "You own this tree; nobody else edits it and nothing you do here reaches the others. "
+                      "Make the change, run whatever you need to check it, and end with one paragraph: what "
+                      "you changed, what you ran, what you could not finish. Do not describe what you would "
+                      "do - do it.\n")
+            said = run_turn(a.runner, agent, prompt, work, f"code-{role}", cwd=dirp)
+            after = snapshot(dirp)
+            paths = sorted(changed(before, after))
+            results[role] = {"agent": agent, "said": said, "paths": paths,
+                             "delta": byte_delta(before, dirp, paths), "check": None, "check_text": ""}
+            if a.check:
+                ok, txt = run_check(shlex.split(a.check), dirp)
+                results[role] = {**results[role], "check": ok, "check_text": txt}
+        both = sorted(set(results[PROPOSER]["paths"]) & set(results[CHALLENGER]["paths"]))
+        verdict = None
+        if a.judge:
+            exchange = "\n\n".join(
+                f"### {role} ({r['agent']}) changed {len(r['paths'])} files: {', '.join(r['paths'][:20]) or 'nothing'}\n"
+                f"check: {r['check_text'] or 'not run'}\n\n{r['said']}" for role, r in results.items())
+            said = run_turn(a.runner, a.judge, JUDGE_PROMPT + "\n## Task\n" + text + "\n\n## The two attempts\n" +
+                            exchange + "\n\nEach side worked in its own copy. Winner: A = proposer, B = challenger.\n",
+                            work, "judge", cwd=src)
+            verdict = parse_verdict(said)
+            if verdict in (None, "?"):
+                raise fail(4, "judge produced no parsable `VERDICT: A|B|TIE` line")
+        winner, reason = ({"A": PROPOSER, "B": CHALLENGER, "TIE": "tie"}.get(verdict or "", "judge"), reason_for_judge(verdict)) \
+            if a.judge else decide(results, a.pick)
+    lines = [f"# ade-duel (code) {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+             f"- proposer: `{a.a}`  challenger: `{a.b}`  pick: `{a.pick}`  judge: `{a.judge or '-'}`",
+             f"- source: `{src}`  copies: `{out / 'a'}` and `{out / 'b'}` (both kept; nothing promoted)",
+             f"- task: `{out / 'artifact.md'}`",
+             f"- winner: **{winner}** — {reason}"]
+    for role, r in results.items():
+        lines.append(f"\n## {role} — {r['agent']}\n\n"
+                     f"- changed: {len(r['paths'])} files" + (": " + ", ".join(r["paths"][:40]) if r["paths"] else " (none)") +
+                     f"\n- check: {r['check_text'] or 'not run'}\n\n{r['said']}")
+    lines.append("\n## toe-stepping\n\n" + (", ".join(both) + "\n" if both else
+                 "none: the two sides never edited the same path (that is evidence about the task, not about the agents)\n"))
+    if verdict:
+        lines.append(f"\n## judge\n\n{said}\n")
+    atomic_write(out / "transcript.md", "\n".join(lines) + "\n")
+    print(f"ade-duel: code duel -> {out / 'transcript.md'}")
+    print(f"ade-duel: WINNER {winner} ({reason})")
+    if winner == "none":
+        raise fail(5, "neither side passes --check; the loser's tree is still under --out/b for reading")
+    return 0
+
+
+def reason_for_judge(verdict: str | None) -> str:
+    return {"A": "the judge preferred the proposer", "B": "the judge preferred the challenger"}.get(verdict or "", "the judge could not separate them")
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="ade-duel", description=__doc__.splitlines()[0])
+    p.add_argument("artifact", help="file (or - for stdin) both agents argue about")
+    p.add_argument("--rounds", type=int, default=2, help="challenge/rebuttal rounds after the opening (default 2)")
+    p.add_argument("--a", default="claude", help="proposer agent (default claude)")
+    p.add_argument("--b", default="codex", help="challenger agent (default codex)")
+    p.add_argument("--judge", help="agent that reads the exchange and emits VERDICT: A|B|TIE")
+    p.add_argument("--runner", default=os.environ.get("ADE_DUEL_RUNNER"),
+                   help="command template, see the module docstring (or ADE_DUEL_RUNNER)")
+    p.add_argument("--code", metavar="DIR",
+                   help="agentic-coding mode: each side works in its own copy of DIR (best agent wins)")
+    p.add_argument("--check", metavar="CMD",
+                   help="code mode: shell command run in each side's copy; exit 0 means that side works")
+    p.add_argument("--insults", choices=("on", "off"), default="on",
+                   help="let the two sides trade insults, each attached to a concrete claim (default on)")
+    p.add_argument("--pick", choices=("check", "smaller", "judge"), default="check",
+                   help="code mode winner rule (default check)")
+    p.add_argument("--out", default="duel", help="output directory (default ./duel); never overwritten silently")
+    p.add_argument("--force", action="store_true", help="reuse an existing --out directory")
+    a = p.parse_args(argv)
+    if a.rounds < 0:
+        raise fail(2, "--rounds must be >= 0")
+    if not a.runner:
+        raise fail(2, "no runner: set --runner or ADE_DUEL_RUNNER "
+                      "(e.g. ADE_DUEL_RUNNER='acp-run {agent} -f {prompt} > {output}')")
+    src = Path(a.code).resolve() if a.code else None
+    if src is not None and not src.is_dir():
+        raise fail(2, f"--code {a.code}: not a directory")
+    if src is not None and a.check is not None and not shlex.split(a.check):
+        raise fail(2, "--check is empty")
+    if src is not None and Path(a.artifact).is_dir():
+        raise fail(2, "in --code mode the artifact is the task text (or a file holding it); "
+                      "--code takes the directory to copy")
+    if a.artifact == "-":
+        text = sys.stdin.read()
+    elif Path(a.artifact).is_file():
+        try:
+            text = Path(a.artifact).read_text()
+        except OSError as exc:
+            raise fail(2, f"{a.artifact}: cannot read the artifact ({exc.strerror or exc})")
+    elif src is not None:
+        text = a.artifact          # code mode: the positional is the task, inline
+    else:
+        raise fail(2, f"{a.artifact}: no such file (use - for stdin)")
+    if not text.strip():
+        raise fail(2, "the task is empty: there is nothing to argue about")
+    out = Path(a.out)
+    if out.exists() and any(out.iterdir()) and not a.force:
+        raise fail(2, f"{out} is not empty; pass --force to append into it")
+    out.mkdir(parents=True, exist_ok=True)
+    # RESERVE THE DIRECTORY: two duels into one --out would interleave turns into a single transcript.
+    try:
+        fd = os.open(out / "duel.lock", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        raise fail(2, f"{out} is in use by another duel (duel.lock exists); remove it once that run is dead")
+    except OSError as exc:
+        raise fail(2, f"{out}: cannot reserve the output directory ({exc.strerror or exc})")
+    atexit.register(lambda: (out / "duel.lock").unlink(missing_ok=True))
+    os.write(fd, f"{os.getpid()} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n".encode())
+    os.close(fd)
+    keep = out / "artifact.md"
+    atomic_write(keep, text)
+    if src is not None:
+        return run_code_mode(a, text, src, out)
+    turns: list[tuple[str, str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="ade-duel-") as tmp:
+        work = Path(tmp)
+        def prompt_for(role: str, others: list[tuple[str, str, str]], round_no: int) -> str:
+            body = [ROLE_PROMPT[role]]
+            if a.insults == "on":
+                body.append(INSULT_RULE)
+            body += [f"## Round {round_no}", "## Artifact", text]
+            if others:
+                body.append("## The exchange so far (oldest first)")
+                for who, rnd, said in others:
+                    body.append(f"### {who} (round {rnd})\n{said}")
+            return "\n\n".join(body) + "\n"
+        first = run_turn(a.runner, a.a, prompt_for(PROPOSER, [], 0), work, "r0-proposer")
+        turns.append((PROPOSER, 0, first))
+        for rnd in range(1, a.rounds + 1):
+            for role, agent in ((CHALLENGER, a.b), (PROPOSER, a.a)):
+                said = run_turn(a.runner, agent, prompt_for(role, turns, rnd), work, f"r{rnd}-{role}")
+                turns.append((role, rnd, said))
+        verdict = None
+        if a.judge:
+            said = run_turn(a.runner, a.judge, JUDGE_PROMPT + "\n## Artifact\n" + text + "\n\n## Exchange\n" +
+                           "\n\n".join(f"### {w} (round {r})\n{s}" for w, r, s in turns) + "\n", work, "judge")
+            turns.append(("judge", a.rounds + 1, said))
+            verdict = parse_verdict(said)
+    transcript = out / "transcript.md"
+    parts = [f"# ade-duel {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+             f"- proposer: `{a.a}`  challenger: `{a.b}`  rounds: {a.rounds}  judge: `{a.judge or '-'}`",
+             f"- artifact: `{a.artifact}` (copy evaluated: `{keep}`)"]
+    if verdict:
+        parts.append(f"- verdict: **{verdict}**")
+    for who, rnd, said in turns:
+        parts.append(f"\n## {who} — round {rnd}\n\n{said}")
+    atomic_write(transcript, "\n".join(parts) + "\n")
+    print(f"ade-duel: {len(turns)} turns -> {transcript}")
+    if a.judge:
+        if verdict in (None, "?"):
+            raise fail(4, "judge produced no parsable `VERDICT: A|B|TIE` line")
+        print(f"ade-duel: VERDICT {verdict}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
