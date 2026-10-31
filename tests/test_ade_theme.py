@@ -35,18 +35,28 @@ def test_touhou_has_its_own_palette():
 
 
 def test_show_paints_with_the_theme_palette():
-    out = run("show", "touhou").stdout
+    out = run("show", "touhou", "--color").stdout
     assert "\033[38;5;196m" in out and "Reimu" in out
 
 
+def test_a_pipe_gets_no_escapes_unless_it_asks():
+    assert "\033[" not in run("show", "touhou").stdout
+    assert "\033[" in run("show", "touhou", "--color").stdout
+
+
+def test_unknown_subcommand_is_status_3():
+    r = run("frob")
+    assert r.returncode == 3 and "unknown subcommand" in r.stderr
+
+
 def test_no_color_flag_strips_escapes():
-    out = run("show", "touhou", "--no-color").stdout
+    out = run("show", "touhou", "--color", "--no-color").stdout
     assert "\033[" not in out
     assert "[error] error" in out
 
 
 def test_no_color_environment_variable_wins():
-    out = run("show", "touhou", env={"NO_COLOR": "1"}).stdout
+    out = run("show", "touhou", "--color", env={"NO_COLOR": "1"}).stdout
     assert "\033[" not in out
 
 

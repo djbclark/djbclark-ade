@@ -49,14 +49,23 @@ def paint(role: str, text: str, theme: str, colour: bool) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="ade-theme", description="named colour palettes for ADE output")
-    p.add_argument("command", nargs="?", default="list", choices=("list", "show", "export", "roles"))
+    p = argparse.ArgumentParser(prog="ade-theme", description="named colour palettes for ADE output",
+                                epilog="Commands: list, show, export, roles. Exit: 0 ok, 2 unknown theme or role, "
+                                       "3 unknown subcommand. --color forces escapes through a pipe; NO_COLOR wins.")
+    p.add_argument("command", nargs="?", default="list")
     p.add_argument("theme", nargs="?", default=os.environ.get("ADE_THEME", "default"))
     p.add_argument("--format", choices=("ansi", "json", "sh"), default="ansi")
     p.add_argument("--no-color", action="store_true", help="print role names only (NO_COLOR also works)")
+    p.add_argument("--color", action="store_true",
+                   help="emit escapes even when stdout is not a terminal (pipes get none by default)")
     a = p.parse_args(argv)
+    if a.command not in ("list", "show", "export", "roles"):
+        print(f"ade-theme: unknown subcommand {a.command!r}; use list, show, export, roles", file=sys.stderr)
+        return 3
     theme = a.theme
-    colour = not (a.no_color or os.environ.get("NO_COLOR") or theme == "mono")
+    # No colour wins: an explicit flag, NO_COLOR, the mono theme, or a pipe that did not ask (--color).
+    tty = sys.stdout.isatty()
+    colour = not (a.no_color or os.environ.get("NO_COLOR") or theme == "mono" or (not tty and not a.color))
     if a.command == "roles":
         print("\n".join(ROLES))
         return 0
