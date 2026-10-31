@@ -173,10 +173,16 @@ the same target is collapsed into the first record. On `failed`/`expired` ONE no
 its fleet id) from a detached deliverer, in the same clean environment; the record is marked `notice: owed` in the same
 write as its final state. A notice to a BUSY sender is itself deferred once: a `kind: notice` record that owes no notice, is
 never collapsed with a normal record, has its own cap (20) and lives an hour, so there is no notice loop; an unverified one is
-worded "unverified ... do not resend". Every event is also appended to ~/.local/state/relay/deferred.log (no text).
+worded "unverified ... do not resend". Every event is also appended to ~/.local/state/relay/deferred.log (no text; capped at 1 MiB,
+then rotated to deferred.log.1 and .2, older dropped).
 `--sweep` (also run at the start of every relay, and cheap: it only changes states and starts detached deliverers, never
 sends or waits) re-starts a queued record whose deliverer is gone (a reboot), expires old ones and prunes week-old final
-records. `--pending` lists the records (no text unless `--text`), `--cancel ID` withdraws a queued one. Not deferred,
+records, and prints `STUCK 14m ID -> [target] what holds it [why: ...]` for every non-final record older than `--stuck-after S` (300): the
+mechanical hook of the five-minute rule (a message that did not get through in 5 minutes is reported, never read as silence).
+`--pending` lists the records (no text unless `--text`; `--queued-only`, `--older-than S` and `--summary` narrow it to what is
+still open), `--status ID` (alias `--show`) says what became of ONE record, changing nothing (state, last look, deferred.log events,
+any expectation of that id; exit 0 found, 1 not), `--cancel ID` withdraws a queued one: it DESTROYS a message still queued, so it is
+never a state check. Not deferred,
 still refused (exit 1): archived, wrong directory, no route, text starting with `/` or `!`; `--idle S`
 keeps its blocking meaning and wins; `--steer` is unchanged; `--no-defer` restores the refusal; `--plan` queues nothing.
 A target BLOCKED ON A PERMISSION OR QUESTION CARD (a Paseo agent with a pending permission, a pane TUI showing a dialog; 2026-10-28, djbclark:
@@ -424,6 +430,22 @@ def card_summary(cards):
     return ", ".join(parts) + (f" and {len(items) - 3} more" if len(items) > 3 else "")
 
 
+def card_list(cards):
+    """The pending cards of a Paseo agent as [{"id", "tool", "kind"}], at most 3: ids and tool names only, never a card's own text (a tool input can
+    carry a secret), so a record, a log line and a queued line may hold them."""
+    return [{"id": clean_text(c.get("id"), 60), "tool": clean_text(c.get("tool"), 40), "kind": card_kind(c.get("tool"))}
+            for c in (cards if isinstance(cards, list) else [])[:3] if isinstance(c, dict)]
+
+
+def obstacle_text(look):
+    """`blocked on card frm_X (question: AskUserQuestion)` for a diagnosis (`paseo_look`) or a record's filed `look` that names pending cards by
+    id and tool, else "": a caller falls back to the short why (2026-10-31: a queued line that only said "blocked on a permission or question card"
+    left the sender nothing to answer)."""
+    items = [c for c in (look.get("cards") if isinstance(look, dict) else None) or [] if isinstance(c, dict)]
+    return ("blocked on " + ", ".join(f"card {clean_text(c.get('id'), 60) or '?'} ({clean_text(c.get('kind'), 12) or 'permission'}: "
+                                      f"{clean_text(c.get('tool'), 40) or '?'})" for c in items[:3])) if items else ""
+
+
 def silent_seconds(info):
     """Seconds since a Paseo agent's `UpdatedAt` (ISO 8601), or None when it is missing or unreadable."""
     raw = info.get("UpdatedAt")
@@ -485,7 +507,7 @@ def paseo_look(info, detail="", listed=None, last=""):
         agree = listed is not False
         if not agree:
             why += " [`paseo agent inspect` lists a card that `paseo permit ls` does not: it may have just been answered]"
-        return {"state": "card:" + kinds[0], "why": why, "deliverable": False, "agree": agree, "evidence": ev}
+        return {"state": "card:" + kinds[0], "why": why, "deliverable": False, "agree": agree, "evidence": ev, "cards": card_list(cards)}
     if state == "idle":
         return {"state": "idle", "why": "idle", "deliverable": True, "agree": True, "evidence": ev}
     if state == "running":
@@ -2238,6 +2260,8 @@ DEFER_FOR = 6 * 3600       # default life of a queued message; --defer-for S, ca
 DEFER_MAX = 24 * 3600
 DEFER_POLL = 5             # seconds between the deliverer's looks at the target
 DEFER_KEEP = 7 * 86400     # a finished record is pruned by a sweep after a week
+DEFER_LOG_CAP = 1 << 20    # deferred.log is rotated to deferred.log.1 (and that to .2; older is dropped) by the append that finds it this big
+DEFER_LOG_KEEP = 2         # rotated generations kept: deferred.log.1 and deferred.log.2
 DEFER_MISSES = 3           # consecutive looks at which the target is not there before the message fails
 DEFER_ERRORS = 3           # consecutive looks that could not ask Paseo at all (a daemon error), DEFER_POLL apart, before it fails
 DEFER_NOTICES = 20         # queued failure notices (their own cap: they never use the normal ones)
@@ -2383,9 +2407,10 @@ def target_label(rec):
 def note_look(rid, rec, look):
     """File the deliverer's latest diagnosis (state, why, agreement, when) on queued record RID, and log the change: `--pending` shows it, so the
     sender can tell a picklist from a hung tab without opening the pane."""
-    filed = {"state": look.get("state"), "why": (look.get("why") or "")[:300], "agree": look.get("agree", True), "at": time.time()}
+    filed = {"state": look.get("state"), "why": (look.get("why") or "")[:300], "agree": look.get("agree", True), "at": time.time(),
+             **({"cards": look["cards"]} if look.get("cards") else {})}
     if transition(rid, ("queued",), look=filed) is not None:
-        defer_log(rec, "look", f"{filed['state']}: {filed['why']}")
+        defer_log(rec, "look", f"{filed['state']}: {obstacle_text(filed) or filed['why']}")
 
 
 def sender_key(rec):
@@ -2400,12 +2425,34 @@ def label_ok(label, hops):
             and not hermes_forged(label, hops))
 
 
+def log_rotate(log):
+    """Rotate deferred.log when it holds DEFER_LOG_CAP bytes or more: .1 becomes .2, the log becomes .1 (a fresh log follows). The size is read again
+    under a lock, so two processes that both saw a big log rotate it once, not twice (the second would drop a generation)."""
+    try:
+        if log.lstat().st_size < DEFER_LOG_CAP:
+            return
+    except OSError:
+        return
+    with _flock(log.with_name(".deferred.log.lock")):
+        try:
+            if log.lstat().st_size < DEFER_LOG_CAP:
+                return
+        except OSError:
+            return
+        for n in range(DEFER_LOG_KEEP, 1, -1):
+            if log.with_name(f"{log.name}.{n - 1}").exists():
+                os.replace(log.with_name(f"{log.name}.{n - 1}"), log.with_name(f"{log.name}.{n}"))
+        os.replace(log, log.with_name(log.name + ".1"))
+
+
 def defer_log(rec, state, why=""):
-    """One line per event in deferred.log beside the record directory: never the text."""
+    """One line per event in deferred.log beside the record directory: never the text. Capped (log_rotate): ~1 MiB, then two older generations."""
     stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     line = f"{stamp} {rec.get('id')} {state} target={target_key(rec)} {' '.join(str(why).split())[:200]}\n"
+    log = DEFER_DIR.parent / "deferred.log"
     with contextlib.suppress(OSError):
-        fd = os.open(DEFER_DIR.parent / "deferred.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        log_rotate(log)
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "a") as fh:
             fh.write(line)
 
@@ -2557,11 +2604,15 @@ def revive(rec, now=None):
 
 
 def sweep_all():
-    """revive every record, oldest first (an earlier message of a target is re-armed before a later one). Counts per action."""
+    """revive every record, oldest first (an earlier message of a target is re-armed before a later one). Counts per action. One record that cannot
+    be revived (a hand-edited field that is no number) is skipped: it must not stop the prune of every record after it."""
     n = {"rearmed": 0, "expired": 0, "failed": 0, "pruned": 0, "noticed": 0}
     now = time.time()
     for rec in rec_all():
-        act = revive(rec, now)
+        try:
+            act = revive(rec, now)
+        except (ValueError, TypeError, OSError):
+            continue
         if act:
             n[act] += 1
     return n
@@ -2709,7 +2760,8 @@ def deliver(rid):
                 finish(rid, "failed", poll[1], allowed=("queued",))
                 return 0
             look = getattr(target_poll, "look", None)
-            key = (look.get("state"), look.get("why") if str(look.get("state")).startswith("card:") else "") if look else None    # `silent`'s minutes change every minute: only a card's wording keys
+            key = ((look.get("state"), look.get("why") if str(look.get("state")).startswith("card:") else "",
+                    tuple(str(c.get("id")) for c in look.get("cards") or [] if isinstance(c, dict))) if look else None)    # `silent`'s minutes change every minute: only a card's wording and ids key
             if look and look.get("state") != "idle" and key != looked:    # an idle look is about to be sent: nothing to explain
                 looked = key
                 note_look(rid, rec, look)    # kind and tool only: the card's own text (a tool input) stays in `--why`, never on a record, in a log or in a notice
@@ -2943,35 +2995,88 @@ def defer_send(s, a, text, listed, why):
             return 1
     left = max(0, int(float(dup.get("expires") or now) - now))
     CTX["sent"] = True    # queued (or collapsed into an identical queued one): the link and expectation records are written by main
+    look = None
+    if card_why(why):    # the same two-method diagnosis `--why` prints, for the card's id and tool: best effort, a failed look never stops a queue
+        with contextlib.suppress(Exception):
+            look = diagnose(s)
+    obstacle = obstacle_text(look) or why    # a known card by id and tool, else the short why
     if not a.json:
-        print(f"queued: {rid} for [{s['id']}] {s['name']}{'' if fresh else ' (an identical message was already queued)'}: {why}. "
+        print(f"queued: {rid} for [{s['id']}] {s['name']}{'' if fresh else ' (an identical message was already queued)'}: {obstacle}. "
               f"Delivered {'once its card is answered (looked at again after 5 s, then at growing intervals up to 2 min)' if card_why(why) else 'when it is idle'}, "
-              f"within {left // 60} min; `relay.py --pending` lists, `relay.py --cancel {rid}` withdraws it")
+              f"within {left // 60} min; `relay.py --pending` lists, `relay.py --status {rid}` shows what became of it, `relay.py --cancel {rid}` "
+              "withdraws it (and destroys a queued one: never a state check)")
     word, note = defer_ack(rid, ack_window(a)) if a.ack else (None, "")
     CTX["accepted"] = word == "delivered"    # a record only queued is not delivered yet: the deliverer runs as no session, so it cannot close an expectation
     if a.json:
         print(json.dumps({"id": s["id"], "name": s["name"], "state": "queued", "queued": True, "record": rid, "expires_in": left,
-                          "duplicate_of": None if fresh else rid, "reason": why,
+                          "duplicate_of": None if fresh else rid, "reason": why, "obstacle": obstacle, "cards": (look or {}).get("cards") or [],
                           **({"ack": word, "ack_note": note, **({"ack_default": True} if getattr(a, "ack_default", False) else {})} if a.ack else {})},
                          ensure_ascii=False))
     return ack_report(a, s, word, note) if a.ack else 0
 
 
-def pending_cmd(as_json, show_text=False):
+def queue_view(r, now, show_text=False):
+    """One record as the row `--pending` lists (text only as a clipped preview when SHOW_TEXT)."""
+    return {"id": r["id"], "state": r.get("state"), "target": r.get("target"), "sender": r.get("sender"),
+            "age_s": int(now - float(r.get("created") or now)), "expires_in": int(float(r.get("expires") or now) - now),
+            "outcome": r.get("outcome") or "", **({"look": r["look"]} if isinstance(r.get("look"), dict) else {}),
+            **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
+
+
+def held_by(v):
+    """(what holds the non-final row V, the target's own why): a pending card by id and tool, else the last look's state word, else `sending` or
+    `no look yet`. The why is the deliverer's last filed one, cleaned and clipped; "" when none."""
+    look = v.get("look") if isinstance(v.get("look"), dict) else {}
+    phrase = obstacle_text(look) or (str(look["state"]) if look.get("state") else "") or ("sending" if v.get("state") == "sending" else "no look yet")
+    return phrase, clean_text(look.get("why"), 160)
+
+
+def held_line(v):
+    """`14m 20261030-211457-b98c64 -> [d2a505dd] blocked on card frm_X (question: AskUserQuestion) [why: ...]`: the one line a non-final row `--sweep`
+    flags STUCK and `--pending --summary` names as its oldest."""
+    phrase, why = held_by(v)
+    t = v.get("target") if isinstance(v.get("target"), dict) else {}
+    return f"{int(v['age_s']) // 60}m {v['id']} -> [{t.get('id') or '?'}] {phrase}" + (f" [why: {why}]" if why else "")
+
+
+def summary_cmd(view, as_json):
+    """`--pending --summary`: the rows' counts by state and the oldest non-final one with what holds it, on one line (--json: one object)."""
+    counts = {}
+    for v in view:
+        counts[v.get("state") or "unknown"] = counts.get(v.get("state") or "unknown", 0) + 1
+    order = [s for s in ("queued", "sending", *DEFER_FINAL) if s in counts] + sorted(s for s in counts if s not in ("queued", "sending", *DEFER_FINAL))
+    oldest = next((v for v in view if v.get("state") not in DEFER_FINAL), None)    # rows come oldest first
+    if as_json:
+        phrase, why = held_by(oldest) if oldest else ("", "")
+        print(json.dumps({"total": len(view), "counts": counts,
+                          "oldest_non_final": {"id": oldest["id"], "state": oldest.get("state"), "age_s": oldest["age_s"], "target": oldest.get("target"),
+                                               "held_by": phrase, "why": why} if oldest else None}, ensure_ascii=False))
+    else:
+        print("pending: " + (", ".join(f"{counts[s]} {s}" for s in order) or "no deferred messages")
+              + ("; oldest non-final: " + held_line(oldest) if oldest else "; none non-final" if view else ""))
+    return 0
+
+
+def pending_cmd(as_json, show_text=False, queued_only=False, older_than=None, summary=False):
     """The records. The text stays in the 0600 record unless --text asks for a clipped preview: another agent's queued
-    message is not printed to whoever runs --pending."""
+    message is not printed to whoever runs --pending. QUEUED_ONLY keeps the non-final records (queued, sending) and OLDER_THAN S those created at least
+    S seconds ago; either one lists message records only (no expectation rows: plain --pending lists them). SUMMARY prints the one-liner (summary_cmd)
+    over the rows that remain. With none of the three the output is byte-for-byte what it always was: scripts parse it."""
     rows = rec_all()
     now = time.time()
-    view = [{"id": r["id"], "state": r.get("state"), "target": r.get("target"), "sender": r.get("sender"),
-             "age_s": int(now - float(r.get("created") or now)), "expires_in": int(float(r.get("expires") or now) - now),
-             "outcome": r.get("outcome") or "", **({"look": r["look"]} if isinstance(r.get("look"), dict) else {}),
-             **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
-            for r in rows]
-    expects = expect_view()    # rows with "kind": "expect" (the message rows have no `kind`): --json lists both
+    if queued_only:
+        rows = [r for r in rows if r.get("state") not in DEFER_FINAL]
+    if older_than is not None:
+        rows = [r for r in rows if now - float(r.get("created") or now) >= older_than]
+    view = [queue_view(r, now, show_text) for r in rows]
+    if summary:
+        return summary_cmd(view, as_json)
+    filtered = queued_only or older_than is not None
+    expects = [] if filtered else expect_view()    # rows with "kind": "expect" (the message rows have no `kind`): --json lists both
     if as_json:
         print(json.dumps(view + expects, ensure_ascii=False))
     elif not view and not expects:
-        print("no deferred messages")
+        print("no matching deferred messages" if filtered else "no deferred messages")
     for v in ([] if as_json else view):
         print(f"{v['id']}  {v['state']:<9} {target_label({'target': v['target']})}  from {v['sender'] or '?'}  {v['age_s'] // 60}m old"
               + (f"  {v['outcome']}" if v["outcome"] else "")
@@ -2988,6 +3093,96 @@ def pending_cmd(as_json, show_text=False):
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
               + (f"  -> assumed lost ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never call it read" if e["assumed_lost"]
                  else "  -> escalate to the operator: no ack" if e["overdue"] else ""))
+    return 0
+
+
+def stuck_rows(after, now=None):
+    """The non-final records older than AFTER seconds, oldest first, as `queue_view` rows: what `--sweep` flags STUCK (the mechanical hook of the
+    five-minute rule: a message that did not get through is the sender's to report, and it was queued, not lost)."""
+    now = now or time.time()
+    rows = (queue_view(r, now) for r in rec_all() if r.get("state") not in DEFER_FINAL)
+    return [v for v in rows if v["age_s"] > after]
+
+
+def log_events(rid):
+    """The events of record RID from deferred.log and its two rotated generations, oldest first: [{"at", "event", "detail"}]. Read only; a line is
+    `STAMP ID EVENT target=KEY WHY` (log_rotate and defer_log), so a message's text is never in it."""
+    log = DEFER_DIR.parent / "deferred.log"
+    events = []
+    for p in [log.with_name(f"{log.name}.{n}") for n in range(DEFER_LOG_KEEP, 0, -1)] + [log]:
+        try:
+            with os.fdopen(os.open(p, os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            parts = ln.split(" ", 3)
+            if len(parts) >= 3 and parts[1] == rid:
+                rest = parts[3] if len(parts) == 4 else ""
+                head, _, tail = rest.partition(" ")
+                events.append({"at": parts[0], "event": parts[2], "detail": tail if head.startswith("target=") else rest})
+    return events
+
+
+def pid_running(pid):
+    """True when process PID exists (a pid check only: a reused pid reads as running)."""
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, TypeError, OverflowError):
+        return False
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True    # EPERM: it exists, it is not ours
+    return True
+
+
+def status_cmd(rid, as_json=False):
+    """`relay.py --status ID` (alias --show): what became of record ID, without changing anything: it takes no lock, creates no file and
+    writes nothing (the record, deferred.log and the expectation store keep their bytes). State, target, age, the deliverer's last look, the
+    events of deferred.log for that id, and any expectation sharing the id. Exit 0 when the record exists, 1 when it does not. Never the text.
+    `--cancel` is NOT a state check: on a queued record it withdraws it."""
+    rec = rec_read(rid) if DEFER_ID.fullmatch(rid or "") else None
+    expects = [e for e in expect_view() if e["id"] == rid]
+    if rec is None:
+        print(f"relay: no deferred message {rid!r} (relay.py --pending lists them; deferred records are pruned a week after they finish)", file=sys.stderr)
+        if as_json:
+            print(json.dumps({"id": rid, "found": False, "expectations": expects}, ensure_ascii=False))
+        for e in ([] if as_json else expects):
+            print(f"expect-ack {e['id']}: {e['state']}, {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)" + ("  OVERDUE" if e["overdue"] else ""))
+        return 1
+    now = time.time()
+    state, final = rec.get("state"), rec.get("state") in DEFER_FINAL
+    v = queue_view(rec, now)
+    created, finished = _num(rec.get("created"), now), _num(rec.get("finished"), 0)
+    look = dict(v["look"], age_s=int(now - _num(v["look"].get("at"), now))) if isinstance(v.get("look"), dict) else None
+    pid = rec.get("pid")
+    deliverer = None if final else {"pid": pid or 0, "running": bool(pid) and pid_running(pid)}
+    events = log_events(rid)
+    if as_json:
+        print(json.dumps({"id": rid, "found": True, "state": state, "final": final, "target": v["target"], "sender": v["sender"], "age_s": v["age_s"],
+                          "created": created, **({"expires_in": v["expires_in"]} if not final else {}), **({"finished": finished} if finished else {}),
+                          "outcome": v["outcome"], "look": look, "deliverer": deliverer, "events": events, "expectations": expects}, ensure_ascii=False))
+        return 0
+    iso = lambda t: datetime.datetime.fromtimestamp(t).astimezone().isoformat(timespec="seconds")    # noqa: E731
+    print(f"{rid}  {state}  {target_label({'target': v['target']})}  from {v['sender'] or '?'}")
+    print(f"  age {v['age_s'] // 60}m {v['age_s'] % 60}s (created {iso(created)})"
+          + (f"; finished {iso(finished)}" if finished else "") + ("" if final else f"; expires in {max(0, v['expires_in']) // 60}m"))
+    if v["outcome"]:
+        print(f"  outcome: {v['outcome']}")
+    if look:
+        print(f"  last look: {look.get('state')} at {iso(_num(look.get('at'), now))} ({look['age_s']}s ago)"
+              + (f": {obstacle_text(look)}" if obstacle_text(look) else "") + (f" [why: {clean_text(look.get('why'), 200)}]" if look.get("why") else ""))
+    else:
+        print("  last look: none filed" + ("" if final else " (the deliverer has not found the target busy yet)"))
+    if deliverer:
+        print("  deliverer: " + (f"pid {deliverer['pid']} {'running' if deliverer['running'] else 'NOT running (a sweep re-arms it)'}" if deliverer["pid"]
+                                 else "no pid recorded yet (not started, or it has not taken its first look)"))
+    print("  events (deferred.log):" + ("" if events else " none (the log may have rotated past them)"))
+    for ev in events:
+        print(f"    {ev['at']} {ev['event']}" + (f" {ev['detail']}" if ev["detail"] else ""))
+    for e in expects:
+        print(f"  expect-ack {e['id']}: {e['state']}, {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)" + ("  OVERDUE" if e["overdue"] else ""))
     return 0
 
 
@@ -3780,9 +3975,15 @@ def _main(argv=None, sweep=True):
                     "so none is appended again, and EXPECT_ID (the expectation that run reserved, from the record's shape) was already reserved, so "
                     "nothing is reserved: the reply gate passes as it did at queue time. Refused (exit 2) for an ordinary send, which takes "
                     "--expect-ack, --fyi or --needs-reply. Absent: an ordinary send")
-    ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones")
+    ap.add_argument("--sweep", action="store_true", help="re-arm queued messages whose deliverer is gone, expire old ones; flag a message queued past --stuck-after as STUCK")
     ap.add_argument("--pending", action="store_true", help="list the deferred messages (--json: as JSON)")
-    ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message")
+    ap.add_argument("--queued-only", action="store_true", help="with --pending: only the non-final records (queued, sending); message records only, no expectation rows")
+    ap.add_argument("--older-than", type=float, metavar="S", help="with --pending: only records created at least S seconds ago; message records only")
+    ap.add_argument("--summary", action="store_true", help="with --pending: one line, counts by state and the oldest non-final record with what holds it (--json: one object)")
+    ap.add_argument("--stuck-after", type=float, metavar="S", help="with --sweep: seconds a non-final record may wait before it is flagged STUCK (default 300)")
+    ap.add_argument("--status", "--show", metavar="ID", dest="status", help="what became of deferred record ID, changing nothing: state, target, age, the last look, "
+                    "the deferred.log events and any expectation of that id (exit 0 when the record exists, 1 when not; --json). NEVER use --cancel to ask")
+    ap.add_argument("--cancel", metavar="ID", help="withdraw a queued message (DESTROYS it when still queued: not a state check, use --status)")
     ap.add_argument("--retire", metavar="ID", help="close an expectation that will never be answered, recording --reason (required) instead of "
                     "deleting or bare-cancelling the record: state retired, reason and --evidence stay in it and --pending shows them. Only an "
                     "open expectation retires (acked is settled, reserved is a live send: exit 1); retiring a retired ID is a no-op")
@@ -3826,8 +4027,23 @@ def _main(argv=None, sweep=True):
         if a.detach:
             detach()
         return deliver(a.deliver)
+    for flag, value in (("--older-than", a.older_than), ("--stuck-after", a.stuck_after)):
+        if value is not None and not (math.isfinite(value) and value >= 0):
+            print(f"relay: {flag} must be a finite number of seconds >= 0", file=sys.stderr)
+            return 2
+    if (a.queued_only or a.older_than is not None or a.summary) and not a.pending:
+        print("relay: --queued-only, --older-than and --summary are used with --pending", file=sys.stderr)
+        return 2
+    if a.stuck_after is not None and not a.sweep:
+        print("relay: --stuck-after is used with --sweep", file=sys.stderr)
+        return 2
+    if a.status is not None:
+        if a.ident is not None or a.text is not None or a.pending or a.cancel or a.sweep or a.plan or a.why:
+            print("relay: usage: relay.py --status ID [--json]", file=sys.stderr)
+            return 2
+        return status_cmd(a.status, a.json)
     if a.pending:
-        return pending_cmd(a.json, a.show_text)
+        return pending_cmd(a.json, a.show_text, a.queued_only, a.older_than, a.summary)
     if a.cancel:
         return cancel_cmd(a.cancel)
     if a.sweep:
@@ -3841,6 +4057,9 @@ def _main(argv=None, sweep=True):
                   f"[{r.get('sender')}] in {int((time.time() - _num(r.get('created'))) // 60)}m; "
                   + (f"ASSUMED LOST ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never assume it was read" if ack_lost(*expect_age(r, time.time()))
                      else "tell the operator, never assume it was read"))
+        stuck_after = 300 if a.stuck_after is None else a.stuck_after
+        for v in stuck_rows(stuck_after):    # the mechanical hook of the five-minute rule: grep `^STUCK` (a non-final record the sweep could not get delivered)
+            print("STUCK " + held_line(v))
         return 0
     if a.why:
         if a.ident is None or a.text is not None:
@@ -3848,7 +4067,7 @@ def _main(argv=None, sweep=True):
             return 2
         return why_cmd(a.ident, a.json)
     if a.ident is None or a.text is None:
-        print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] | --cancel ID | --sweep | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
+        print("relay: usage: relay.py <id> \"<text>\" [options] | --pending [--json] [--queued-only] [--older-than S] [--summary] | --status ID | --cancel ID | --sweep [--stuck-after S] | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
     if a.defer_for is not None and not (math.isfinite(a.defer_for) and a.defer_for > 0):
         print("relay: --defer-for must be a finite number of seconds > 0", file=sys.stderr)
