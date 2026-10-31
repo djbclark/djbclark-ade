@@ -298,11 +298,13 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Removed
 
+- `skills/autorename/herdr_place.py decline`, `check --auto` and `check`'s `already_answered` field (2026-10-30): they only stopped the nudge hook from asking about tab placement twice, and no path asks about placement on its own any more; "leave it" needs no command (#169).
 - `bin/rumination-watch autoaccept` (2026-10-29): dead since the tool it wrapped moved to `bin/paseo-set-model autoaccept`, so a subcommand that looked live but mutated `~/.paseo/agents/*.json` by hand was deleted rather than kept beside the daemon-supported one (#134).
 - Removed the OpenUsage wiring (2026-10-29): the canonical `opencode-plugins/openusage-telemetry.ts`, its handling in `bin/opencode-plugin-guard` (the guard now manages `rtk` only), the three `claude-hook.sh` blocks in `agents/claude/settings.json.tmpl` and the `--previous-notify` fanout in `agents/codex/config.toml.tmpl`; an OpenUsage app relaunched from a stale `dist/` build is no longer fed by hooks or plugins (#119).
 
 ### Fixed
 
+- `/autorename` with no argument renamed more than the operator asked for (2026-10-30): in Paseo it also renamed the workspace to `<slug>-pw`, and in herdr it offered to move the tab to another workspace. It now titles the session and names only this agent's own tab (the Paseo tab or the herdr tab label); the nudge hook does the same. `/autorename all` stays herdr-only and in a Paseo-hosted agent replies `autorename all is not yet supported in Paseo` (`herdr_place.py config` exits 2 there), and a Paseo-hosted agent never touches herdr even when the daemon passed a herdr environment down to it (#169).
 - `bin/pr-wait` still reported `security-marker-unverified` on a head whose Codex security review was clean
   whenever Codex had EVER found a security problem on an earlier head (2026-10-30, PR 156): the explicit null
   pair is a statement only beside the evidence that `this review found none of that kind`, and `unresolved_stated`

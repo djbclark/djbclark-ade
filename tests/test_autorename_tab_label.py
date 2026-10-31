@@ -73,6 +73,7 @@ def test_codex_pane_title_uses_cli_envelope_and_never_stringifies_null(monkeypat
 def test_label_from_codex_title_preserves_tab_when_title_missing(monkeypatch, title, expected_rc, expected_rename):
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
+    monkeypatch.delenv("PASEO_AGENT_ID", raising=False)   # a Paseo-hosted agent is never in herdr
     monkeypatch.setitem(sys.modules, "autorename", ar)
     monkeypatch.setattr(ar, "session_id", lambda: "thread")
     monkeypatch.setattr(ar, "backend_for", lambda _: "codex")

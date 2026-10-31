@@ -13,7 +13,7 @@ description: >-
 Canonical copy: `~/src/djbclark-ade/skills/herdr-tidy/` (git: `~/src/djbclark-ade`); every TUI
 reaches it via a direct skill-everywhere link `~/src/djbclark-ade/skills/herdr-tidy`. Design
 record and the first pass: `~/src/djbclark-ade/docs/herdr-tidy.md`. Its sibling for the start of
-a session's life (titles, workspace placement) is `autorename`.
+a session's life (titles and tab labels; workspace placement only through `/autorename all`) is `autorename`.
 
 **Safe** means: after the close, everything the pane held can be found again from `/helm-all`
 (`helm.py scan --ended`) or `/session-finder-all`, and nothing in flight is killed. The script

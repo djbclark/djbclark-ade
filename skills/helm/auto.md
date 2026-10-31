@@ -225,7 +225,7 @@ handled once, in this order, and not repaired:
    queue it, do not pick a repo.
 3. `~/.local/bin/hermes-ping "ClaudeHelm: done — <one line, the doc path>"`.
 4. `python3 ~/src/djbclark-ade/skills/autorename/autorename.py --auto "<title>"`
-   then `herdr_place.py check --auto`, so the session is findable later.
+   then `herdr_place.py label --from-title`, so the session is findable later.
 5. Append tonight's learnings to this file's sources (section 9 grows; the
    operator asked for the skill to learn from each run).
 
