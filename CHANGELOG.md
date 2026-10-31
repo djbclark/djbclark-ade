@@ -299,6 +299,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Removed
 
+- Removed the `grok` agent (2026-10-31): out of `tools/acp-run/acp-run`'s registry, out of `bin/route_agent.py`'s agent map and out of `config/routing.toml`'s services, so `acp-run grok` and the `realtime-web` route both stop existing rather than emitting an invocation that cannot run; `docs/model-routing.md` and `skills/model-routing/SKILL.md` mark the route retired, and the read-only gate test names `crush` for the class the removed agent used to stand for (#187).
 - `skills/autorename/herdr_place.py decline`, `check --auto` and `check`'s `already_answered` field (2026-10-30): they only stopped the nudge hook from asking about tab placement twice, and no path asks about placement on its own any more; "leave it" needs no command (#169).
 - `bin/rumination-watch autoaccept` (2026-10-29): dead since the tool it wrapped moved to `bin/paseo-set-model autoaccept`, so a subcommand that looked live but mutated `~/.paseo/agents/*.json` by hand was deleted rather than kept beside the daemon-supported one (#134).
 - Removed the OpenUsage wiring (2026-10-29): the canonical `opencode-plugins/openusage-telemetry.ts`, its handling in `bin/opencode-plugin-guard` (the guard now manages `rtk` only), the three `claude-hook.sh` blocks in `agents/claude/settings.json.tmpl` and the `--previous-notify` fanout in `agents/codex/config.toml.tmpl`; an OpenUsage app relaunched from a stale `dist/` build is no longer fed by hooks or plugins (#119).

@@ -444,13 +444,6 @@ models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "
 # Ordinary subscription pool (SuperGrok). It was a reserve 2026-10-15..18 because GrokBot
 # drew on it; GrokBot moved to its own Cursor pool 2026-10-18 (operator), so the floor and
 # the one-slice cap are gone. Ranked behind the burn-first pools (antigravity, cursor-auto).
-[[service]]
-name = "grok"
-cli = "grok"
-good_at = { realtime-web = 1, research = 25, bulk = 30 }
-billing = "subscription"
-note = "SuperGrok subscription; realtime X/web angle first, research and bulk behind the burn-first pools"
-models = { realtime-web = "grok-4.7 --effort high", research = "grok-4.7 --effort high", bulk = "grok-4.7-build-fast --effort low" }
 
 [[service]]
 name = "clinepass"

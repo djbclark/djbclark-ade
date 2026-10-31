@@ -145,11 +145,11 @@ class TestDegradation(unittest.TestCase):
     def test_works_with_no_quota_at_all(self):
         """A stale or missing cache must degrade to capability-only routing,
         except for the reserve pool (copilot), which fails closed without a fresh
-        reading (review 2026-10-15): github stays queued. realtime-web routes
-        again since grok stopped being a reserve (2026-10-18)."""
+        reading (review 2026-10-15): github stays queued. realtime-web is unservable since the grok
+        agent was retired (2026-10-31), so it also routes nothing rather than guessing."""
         for kind in r.KINDS:
             c = r.route(kind, quota={})
-            if kind == "github":
+            if kind in ("github", "realtime-web"):
                 self.assertIsNone(c, f"{kind} is reserve-only and must not route unmeasured")
             else:
                 self.assertIsNotNone(c, f"{kind} should still route without quota")
@@ -159,8 +159,13 @@ class TestDegradation(unittest.TestCase):
             r.route("vibes", quota=IDLE)
 
     def test_every_kind_is_servable(self):
+        # realtime-web lost its only service when the grok agent was retired (2026-10-31): it must
+        # fail closed, not silently pick a pool that cannot serve it.
         for kind in r.KINDS:
-            self.assertIsNotNone(r.route(kind, quota=IDLE), kind)
+            if kind == "realtime-web":
+                self.assertIsNone(r.route(kind, quota=IDLE), "realtime-web has no service since grok retired")
+            else:
+                self.assertIsNotNone(r.route(kind, quota=IDLE), kind)
 
     def test_alternatives_exclude_the_winner(self):
         c = r.route("bulk", quota=IDLE)
@@ -599,20 +604,14 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         q["copilot"] = {}
         self.assertIsNone(r.route("github", quota=q))
 
-    def test_grok_is_an_ordinary_pool_since_grokbot_moved_off_it(self):
-        # 2026-10-18: GrokBot runs on its own Cursor pool, so grok has no floor.
-        svc = next(s for s in r.SERVICES if s.name == "grok")
-        self.assertEqual(svc.reserve_floor, 0.0)
-        self.assertGreater(svc.max_parallel, 1)
-        for kind in ("realtime-web", "research", "bulk"):
-            self.assertTrue(svc.eligible(kind), kind)
-        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
-        q["grok"] = {"remaining": 20.0}
-        self.assertEqual(r.route("realtime-web", quota=q).service.name, "grok")
-        # Behind the burn-first pools: with antigravity open, research goes there.
-        q["antigravity"] = {"remaining": 90.0}
-        q["grok"] = {"remaining": 90.0}
-        self.assertEqual(r.route("research", quota=q).service.name, "antigravity")
+    def test_grok_service_is_retired(self):
+        # 2026-10-31: the grok ACP agent is gone from acp-run, so the service that routed to it is
+        # gone too. A kind that used to select it must route elsewhere or fail closed, never emit
+        # `acp-dispatch grok ...`.
+        self.assertFalse([s for s in r.SERVICES if s.name == "grok"])
+        q = {name: {"remaining": 90.0} for name in IDLE}
+        picked = r.route("realtime-web", quota=q)
+        self.assertTrue(picked is None or picked.service.name != "grok")
 
     def test_everyday_code_avoids_the_frontier_pools_when_others_have_room(self):
         q = {**IDLE, "antigravity-claude": {"remaining": 0.0}, "cursor-auto": {"remaining": 75.0}}
