@@ -498,6 +498,11 @@ has already been violated by a real agent on this machine:
   live Codex runner, ran 98 s and sent a real `hermes-ping`). An adversary or
   review brief says "no live agent, no network, no notifications" in exactly
   those terms: fake runner pinned and checked, no `hermes-ping`, no fetch.
+- **Map callers before changing a return type or signature.** Use `graft callers SYMBOL --depth all`.
+  For a genuinely unindexed script, enumerate literal symbol references with scoped `rg -n -F SYMBOL PATH`;
+  inspect every hit, including dry-run, probe and error branches. The edit is complete only when every
+  caller handles the new result. Read-only source excerpts follow the machine CLI rules too: use Python
+  line slices or GNU `gsed` (2026-10-31: a missed dry-run caller printed a `None` generation).
 - **Verify before acting.** Findings handed to an agent were written by another
   AI. Tell it so, and tell it that reporting a finding as wrong is a better
   outcome than a confident wrong edit.
@@ -902,6 +907,11 @@ detached job follows the same contract (2026-10-08).
    not hand work to the next session on the assumption that a background task or
    waiter will still be there.
 
+**Single-run launchd waiters (macOS, verified 2026-10-31).** Bootstrap a plist with
+`RunAtLoad: true`, `KeepAlive: false`, and no interval keys. Verify the live job's
+properties lack `keepalive` before reporting it as one-shot: `launchctl submit`
+created keep-alive jobs on this Mac. Model slices still use `acp-dispatch`.
+
 **Why jobs are records on disk (investigation, 2026-10-08).** A Claude Code
 docs and local-process investigation found: background Bash tasks are
 children of the `claude` process and "automatically cleaned up when Claude Code
@@ -958,6 +968,9 @@ returned; do not guess a reset time.
   as its whole reply. Since 2026-10-14 nothing refuses a slice that leaves its
   files (acp-run runs yolo): the post-run `git status --short` / `git diff
   --stat` check in Step 4 is what catches it.
+- Inspect each preparation command's exit code before a dependent stage or
+  commit. A failed preparation stops that mutation until its resulting files
+  have been checked.
 - Read every diff yourself before committing. Agents are good and still get
   ordering, alphabetisation and scope wrong.
 - Run the checks centrally after the batch settles, **focused first**: lint
