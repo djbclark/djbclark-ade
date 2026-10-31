@@ -128,7 +128,7 @@ Paseo agents are "delivered", not "unverified"; the timeline is a delivery witne
 `sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
 the notice say "unverified", never "delivered". `--idle S`
 still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at
-most 24 h); `relay.py --pending [--text] [--json]` lists (the text only with `--text`), `--cancel ID` withdraws a queued
+most 24 h); `relay.py --pending [--text] [--json]` lists (the text only with `--text`; `--queued-only`, `--older-than S`, `--summary` narrow it, `--status ID` says what became of ONE record without changing it, see "How to tell what a message did"; `deferred.log` is capped at 1 MiB, then rotated to `.1` and `.2`), `--cancel ID` withdraws a queued
 one, `--retire ID --reason "..."` closes an expectation that will never be answered and records why (only an `open` one; state
 `retired`, the reason and evidence stay in the record and `--pending` shows them; the target cannot retire its own, it answers
 `ack ID`), `--sweep` re-arms records whose deliverer died (it also runs, cheaply, at the start of every relay: it only changes
@@ -380,7 +380,7 @@ only where the message asks a question or requests action. An FYI that provably 
    `--expect-ack` and `--needs-reply` (exit 2); on any longer text the flag wins and the text is an ordinary one. `ack the PR and merge it` is no terminator: it goes the normal path with the first-contact footer (the peer answers `ack ID`, one extra message).
    **When the proof is not `delivered`, you handle it** (requester steps, never assume read):
    a. Exit **1**, or a link that fleet shows as `ONE-WAY`: the text did not land or was never answered. Re-send **once** by **another** route (`--via`; `--plan` lists them), never the same route twice.
-   b. Exit **3** (`unverified`), `queued`, or `accepted`: do **not** resend yet; read the target's transcript (or `relay.py --pending` for a deferred record) for the text first. Only a text that is absent is re-sent, by a different `--via`.
+   b. Exit **3** (`unverified`), `queued`, or `accepted`: do **not** resend yet; ask `relay.py --status ID` for a deferred record (see "How to tell what a message did") and read the target's transcript for the text first. Only a text that is absent is re-sent, by a different `--via`.
    c. An `OVERDUE ack ID` line from `--sweep`: ask for a named ack in a new message (`... please reply ack ID2`, with `--expect-ack ID2`).
    d. Still unproven after that: report to the operator with the exact line from `relay.py --pending` (or the `OVERDUE ack ID: ...` line); once it reads `ASSUMED LOST` (6 h past due), re-route your own expectation's work instead. Never assume read.
 2. **A question or an action request needs `--expect-ack ID`**: a `?` outside a URL, or `--needs-reply`, is refused (exit 2, nothing sent) without it
@@ -447,6 +447,41 @@ only where the message asks a question or requests action. An FYI that provably 
    not nudged, also under a first-contact footer, and an `FYI` text is silent even WITH a `?` (`FYI: load is 11, can you pause your build?`; only relay's reply footer overrides it). It only under-nudges and cannot loop. Slice A merged in #81 (`is_terminator` is on master); the hook sharing relay's `is_terminator` is the follow-up after this PR, not done here; docs/queue.md item 8 lists the 18 request texts that are its acceptance corpus. Accepted: a herdr pane id with no `(DIR)` counts `?`; two envelopes in one prompt (no harness writes it): only the first is read.
    `RELAY_PROSE_NUDGE_OFF=1` disables it. Registered in `agents/claude/settings.json.tmpl` under `Stop`; the live `~/.claude/settings.json` gets it only by the operator's install
    (docs/queue.md, "Verified peer messaging, round 2").
+
+### How to tell what a message did (2026-10-31)
+
+Measured 2026-10-30/31 by an agent relaying to a Paseo peer with a question card up: it concluded "delivered" and "queued" from the wrong source and
+escalated to the operator about silence that was a queue; two queued messages were destroyed by `--cancel` used as a state check. The questions and the commands:
+
+1. **What became of record ID?** `relay.py --status ID` (alias `--show`; `--json`): state, target, age, the deliverer's last look (state, why, when, and the pending card by id and tool),
+   every event of `deferred.log` for that id (queued, look, delivered, cancelled, expired, failed) and any expectation that shares the id. It **changes nothing** (no lock, no file, no
+   write) and never prints the text. Exit 0 when the record exists, 1 when it does not (also after the week-old prune: `delivered` records are removed seven days after they finish).
+   The `queued:` line a busy send prints names the id to ask about.
+2. **What is still open?** `relay.py --pending --queued-only` (queued and sending only; `--older-than S` for age; `--json` too), or `relay.py --pending --summary` for ONE line: counts by
+   state and the oldest non-final record with what holds it. Plain `--pending` lists every record (hundreds of `delivered` rows); never `tail` it for the open one. The filters
+   list message records only (expectations stay in plain `--pending`). Plain `--pending` output is unchanged: scripts parse it.
+3. **Why can the target not take it?** `relay.py --why TARGET`: two methods compared (card by kind and tool, a turn still running, silent, archived, gone).
+4. **`--cancel ID` is destructive. It is never a state check.** It answers "delivered: only a queued message can be cancelled" for a final record and WITHDRAWS a queued one. Use `--status`.
+5. **The five-minute rule, mechanically.** An agent that cannot get a message through with an ack within 5 minutes tells the operator. `relay.py --sweep` prints one line per
+   non-final record older than `--stuck-after S` (default 300): `STUCK 14m 20261030-211457-b98c64 -> [d2a505dd] blocked on card frm_18f85bead001xBPfK85BC2N2Gx (question: AskUserQuestion) [why: ...]`.
+   A watcher or a launchd job greps `^STUCK` (exit status stays 0). A STUCK line means **queued, not lost**: the text is waiting for its target, and `--status ID` shows when it
+   was last looked at; "no ack yet" and "never delivered" are no longer the same silence.
+6. **Is this expectation answered?** `relay.py --pending` runs the ack sweep first (bounded to 3 s; transcript reads only, since the Paseo timeline never closes an ack), so it prints
+   current state. A transcript-backed row it could not collect reads `open (uncollected, last swept 2026-10-31T09:12:03-04:00)` (`--json`: `"uncollected": true, "last_swept"`); run `relay.py --sweep`
+   to collect it. A fresh listing is byte-identical to before. The filtered views (`--queued-only`, `--older-than`, `--summary`) list messages and do not sweep. The per-send sweep
+   is the message half only: the ack half runs in `--sweep` and `--pending`, not at the start of every relay (two locks and a transcript read on every send).
+7. **How to answer an expectation** (2026-10-31). When a peer's text ends `[reply through relay.py to <id>: ack ID]` (or `--pending` lists `expect-ack ID` addressed to you), answer with
+   `relay.py --ack ID` (alone: no target, no text; valid when ID exists, is `open` and you are its target) or, written out, `relay.py <sender> "ack ID"`. Both are the ORDINARY send: the
+   sender sees the ack, the verified closer settles it when it is delivered, and a busy sender queues it; the `queued:` line then says `this text answers expectation ID, which closes only
+   when the queued message is delivered (or on relay.py --sweep), not now`. There is no local-only close. Refused with the form named: an unknown, settled or malformed ID (exit 1; 2 for a
+   malformed one) or a caller that is not the target. `--ack` after a target and text stays the delivery-watch flag. **An `ack ID` token that BEGINS ANY LINE** of a send from the
+   expectation's target to its sender closes it (a reply that ends `ack host-branch-durability-2` included); one quoted inside a line, or sent by a third party, closes nothing. That is the
+   relay-verified closer's rule, for a sender with NO transcript; a transcript-backed sender's `--sweep` (and `--pending`) still accepts the token anywhere in a line that carries the target's
+   relay header. Lines are those of the text AS YOU TYPED IT: relay folds the whitespace of what it sends (and stores), so it keeps the line starts of the argument for the closer, only the lines
+   that begin `ack ` (at most 40, each clipped to 120 characters), and a queued record keeps them as `ack_leads`.
+   `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--ack` (a second one is the delivery watch of the inner send), `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
+   never dropped. `--status ID` is a query: combined with any other option or command (`--cancel`, `--retire`, a send) it is refused, exit 2, and nothing runs. A transcript-backed expectation whose
+   transcript cannot be read reads `open (uncollected, ...)` even after a complete sweep.
 
 
 ## Direct Herdr control and detached relay workers (2026-10-25)
