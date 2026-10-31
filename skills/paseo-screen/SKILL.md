@@ -36,7 +36,9 @@ that `paseo-screen` is `running` before relying on it.
    live host desktop and a key bar. A human uses it directly.
 2. **The RPCs**, for an agent: `client.invokePluginRpc("paseo-screen", METHOD, INPUT)` through the daemon,
    which is what the plugin's own `scripts/rpc-probe.mjs` does
-   (`node scripts/rpc-probe.mjs <extracted Paseo app.asar dir> <method> '<json>'`). Schemas are in the
+   (`node scripts/rpc-probe.mjs <extracted Paseo app.asar dir> <method> '<json>'`; it saves a frame to
+   `build/probe-frame.jpg` under the CURRENT directory and fails if `build/` is missing, so run it from the
+   plugin checkout after `mkdir -p build`). Schemas are in the
    plugin's `shared/rpc.ts` (checkout under `~/.paseo/plugins/paseo-screen/<id>/checkout/`):
 
 | RPC | Input | Returns |
@@ -63,7 +65,7 @@ that tests the questions-please plugin (then named next-question), whose first d
 **Not verified:** mouse clicks, drags, the clipboard (`paste`, `screen.clipboard`), and multiple displays.
 Test those on a throwaway target before depending on them, and say so in a report that relies on them.
 
-## Driving the viewer without hurting anything (the method that worked)
+## Driving the viewer without hurting anything (the method used on 2026-10-30)
 
 1. Open the viewer in a **headless browser** (not the human's desktop window).
 2. **Focus the viewer's stage element from JavaScript** (`div[tabindex=0]`, about 1080 x 675) instead of
@@ -71,7 +73,8 @@ Test those on a throwaway target before depending on them, and say so in a repor
 3. Send keys as browser key events. A Paseo plugin of your own loaded in the same page swallows a chord
    first: rebind or disable it in that page.
 4. Chords the Paseo app handles first (Cmd+Tab, Cmd+Space, Cmd+W, Cmd+Q) do not pass through key events;
-   use the viewer's **key bar** buttons.
+   use the viewer's **key bar** buttons (reported 2026-10-30, not tested; the buttons exist in the plugin's
+   client/screen.tsx at the pin).
 
 ## Safety rules (they bind every agent)
 

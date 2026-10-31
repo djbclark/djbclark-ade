@@ -44,10 +44,10 @@ their old paths are symlinks into this checkout).
    continues: message the running session, `/baton` from its handoff, resume
    a stopped one, or start a clean agent. `fleet.py conflicts` refuses
    overlap.
-2. **Start** — `session-finder/launch.py` starts a session over ACP
-   (`acp-run --interactive`) in a Paseo workspace (formerly a herdr tab or Orca terminal, retired 2026-10-31), with a
-   claim on the files it will touch, and can `reply` to it later through its
-   inbox.
+2. **Start** — `paseo run` (or `bin/paseo-new-seat`, which turns on auto-accept from the first tool call)
+   starts an agent in a Paseo workspace. `session-finder/launch.py` (an ACP session over
+   `acp-run --interactive`, with a file claim and an inbox) predates Paseo and retires with session-finder
+   (docs/paseo-only-rearchitecture.md, D6); herdr tabs and Orca terminals are retired from djbclark-ade (2026-10-31).
 3. **Answer everything from one window** — [`helm`](skills/helm/SKILL.md)
    (`helm.py scan`, no model tokens) collects every session waiting on the
    operator, reads its pending question verbatim, ranks the walk by how much
