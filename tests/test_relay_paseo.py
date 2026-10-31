@@ -46,7 +46,8 @@ echo "$*" >> "$FAKE_LOG"
 echo "$1 ${PASEO_AGENT_ID:-NOID}" >> "$FAKE_ENVLOG"
 case "$1 $2" in
   "agent inspect") id="${@: -1}"; [ "$id" = "$FAKE_KNOWN" ] || { echo "no such agent" >&2; exit 1; }
-    echo "{\\"Id\\": \\"${FAKE_ID:-$id}\\", \\"Name\\": \\"fake\\", \\"Provider\\": \\"${FAKE_PROVIDER:-claude}\\", \\"Status\\": \\"${FAKE_STATUS:-idle}\\", \\"Archived\\": ${FAKE_ARCHIVED:-false}, \\"PendingPermissions\\": ${FAKE_PENDING:-[]}, \\"Cwd\\": \\"${FAKE_CWD:-/tmp}\\", \\"UpdatedAt\\": \\"${FAKE_UPDATED:-}\\"}" ;;
+    caps="${FAKE_CAPS:-}"; [ -n "$caps" ] || caps='{"Persistence": true}'
+    echo "{\\"Id\\": \\"${FAKE_ID:-$id}\\", \\"Name\\": \\"fake\\", \\"Provider\\": \\"${FAKE_PROVIDER:-claude}\\", \\"Status\\": \\"${FAKE_STATUS:-idle}\\", \\"Archived\\": ${FAKE_ARCHIVED:-false}, \\"Capabilities\\": $caps, \\"PendingPermissions\\": ${FAKE_PENDING:-[]}, \\"Cwd\\": \\"${FAKE_CWD:-/tmp}\\", \\"UpdatedAt\\": \\"${FAKE_UPDATED:-}\\"}" ;;
   "permit ls") echo "${FAKE_PERMITS:-[]}" ;;
   "wait "*) exit "${FAKE_WAIT_RC:-0}" ;;
   "logs "*) [ -n "$FAKE_TIMELINE" ] && [ -f "$FAKE_TIMELINE" ] && cat "$FAKE_TIMELINE" ;;
@@ -76,7 +77,7 @@ class RelayPaseo(unittest.TestCase):
         saved_env = dict(os.environ)
         os.environ.update(PASEO_CLI=str(fake), FAKE_LOG=str(self.log), FAKE_ENVLOG=str(self.envlog), FAKE_KNOWN=AGENT,
                           PASEO_AGENT_ID=CALLER, RELAY_NO_ACK="1")    # these tests assert the route's own result; the default delivery watch is tested in test_relay_verified.py
-        for k in ("FAKE_PROVIDER", "FAKE_STATUS", "FAKE_WAIT_RC", "FAKE_ARCHIVED", "FAKE_PENDING", "FAKE_ID", "FAKE_CWD",
+        for k in ("FAKE_PROVIDER", "FAKE_STATUS", "FAKE_WAIT_RC", "FAKE_ARCHIVED", "FAKE_PENDING", "FAKE_ID", "FAKE_CWD", "FAKE_CAPS",
                   "CLAUDE_CODE_SESSION_ID", "ACP_RUN_AGENT"):    # an acp-run slice running the suite sets ACP_RUN_AGENT: it changes who is tagged as the sender
             os.environ.pop(k, None)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved_env)))
@@ -365,20 +366,65 @@ class RelayPaseo(unittest.TestCase):
         self.assertIn("no session(s) match", err)
         self.assertFalse(self.sends())
 
-    def test_closed_or_errored_paseo_agent_is_refused(self) -> None:
-        os.environ["FAKE_STATUS"] = "closed"
+    # ---- a `closed` agent a send wakes (2026-10-31: relay refused "Dann VPS 2", closed + persistent, that a plain `paseo send` woke) ----
+
+    def test_a_closed_unarchived_persistent_agent_is_sent_through_the_normal_route_and_watched(self) -> None:
+        os.environ.update(FAKE_STATUS="closed", FAKE_PROVIDER="opencode")
+        tl = self.timeline(EMPTY_TIMELINE)
+        for n, (listed, ident) in enumerate((([], AGENT), ([sess(agent="opencode", status="closed", paseo_state="closed", transcript=None)], SID))):
+            rc, out, err = self.main(listed, ident, f"hello there friend {n}", "--wait", "5", "--ack")    # a text already in the timeline is no witness: one text per send
+            self.assertEqual(rc, 0, err)
+            self.assertIn(": delivered;", out)    # the timeline witness, as for an idle agent
+        sends = self.sends()
+        self.assertEqual(len(sends), 2)
+        self.assertTrue(all(c.startswith("send --no-wait --behavior steer --json -- " + AGENT) for c in sends), sends)    # never blocks on the woken turn
+        self.assertTrue(self.logs_calls())
+        self.assertIn("hello there friend 1", tl.read_text())
+
+    def test_a_closed_agent_is_not_held_back_by_the_non_steering_rule(self) -> None:
+        os.environ.update(FAKE_STATUS="closed", FAKE_PROVIDER="cline")    # cline cannot steer a RUNNING turn: a closed one has none
+        rc, _out, err = self.main([], AGENT, "ping", "--no-defer")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.sends()), 1)
+
+    def test_a_closed_archived_agent_is_refused_and_says_archived(self) -> None:
+        os.environ.update(FAKE_STATUS="closed", FAKE_ARCHIVED="true")
         rc, _out, err = self.main([], AGENT, "ping")
         self.assertEqual(rc, 1)
-        self.assertIn("closed", err)
+        self.assertIn("archived", err)
+        self.assertNotIn("closed", err)
         self.assertFalse(self.sends())
 
-    def test_fleet_listed_but_closed_paseo_agent_is_refused(self) -> None:
-        # a fleet-listed record never ran `inspect` before; the gate now does it for every Paseo target
-        os.environ["FAKE_STATUS"] = "closed"
-        rc, _out, err = self.main([sess()], SID, "ping")
+    def test_a_closed_non_persistent_agent_is_refused_with_the_reason(self) -> None:
+        os.environ.update(FAKE_STATUS="closed", FAKE_CAPS='{"Persistence": false}')
+        for listed, ident in (([], AGENT), ([sess(status="closed", paseo_state="closed")], SID)):
+            rc, _out, err = self.main(listed, ident, "ping")
+            self.assertEqual(rc, 1)
+            self.assertIn("non-persistent", err)
+            self.assertIn("cannot wake it", err)
+        os.environ["FAKE_CAPS"] = "{}"    # Paseo says nothing about persistence: relay cannot know a send wakes it
+        rc, _out, err = self.main([], AGENT, "ping")
         self.assertEqual(rc, 1)
-        self.assertIn("closed", err)
+        self.assertIn("does not report it persistent", err)
         self.assertFalse(self.sends())
+
+    def test_why_reports_a_closed_persistent_agent_as_woken_by_a_send_and_the_others_as_refused(self) -> None:
+        os.environ["FAKE_STATUS"] = "closed"
+        rc, out, err = self.main([sess()], "--why", SID)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("closed: a send wakes it", out)
+        rc, out, _ = self.main([sess()], "--why", SID, "--json")
+        self.assertEqual((rc, json.loads(out)["state"], json.loads(out)["deliverable"]), (0, "closed", True))
+        os.environ["FAKE_CAPS"] = '{"Persistence": false}'
+        rc, out, _ = self.main([sess()], "--why", SID)
+        self.assertEqual(rc, 1)
+        self.assertIn("non-persistent", out)
+        os.environ.pop("FAKE_CAPS")
+        os.environ["FAKE_ARCHIVED"] = "true"
+        rc, out, _ = self.main([sess()], "--why", SID, "--json")
+        d = json.loads(out)
+        self.assertEqual((rc, d["state"], d["deliverable"]), (1, "archived", False))
+        self.assertNotIn("closed", d["why"])
 
     def test_archived_paseo_agent_is_refused_listed_or_not(self) -> None:
         os.environ["FAKE_ARCHIVED"] = "true"

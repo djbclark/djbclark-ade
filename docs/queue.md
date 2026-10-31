@@ -3,6 +3,14 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## relay: card-blocked records should fail fast (2026-10-31; proposal, djbclark rules on it)
+
+Evidence, Dann VPS 2 (techno-euphora), 2026-10-31: its three relays to the lead (`20261031-001833-f7f88f`, `20261031-002136-e8aafa`, `20261031-003108-a98a16`) each expired after 360 min with the reason
+`blocked on a permission or question (a QUESTION (OMP ask))`. A card needs a human and a busy agent only needs time, yet the deliverer treats both as "wait": the card-blocked record sat for the full
+six hours with nobody told beyond the expiry notice. Proposal: a record whose target shows a pending permission or question card pages the operator or fails within minutes (the sender is told at once,
+the operator via the `STUCK` line or a ping), while a merely busy target (`working`, `silent`) keeps waiting as today. PR 177's `--sweep` STUCK line at 300 s is the visibility half; this is the
+delivery half. It changes delivery semantics (a card-blocked message that would have been delivered after a late answer would now fail first), so it is a proposal only: no code until djbclark rules.
+
 ## relay.py: tell what a message did, and make a stuck queue visible (djbclark, 2026-10-31; branch `relay-status`, stacked on PR 173)
 
 Built 2026-10-31. Measured by Dann VPS 2 (techno-euphora) on 2026-10-30/31, four times, relaying to a Paseo peer whose tab had a question card up: `--cancel ID` was the only

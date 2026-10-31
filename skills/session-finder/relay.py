@@ -27,7 +27,8 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                refuses). A Paseo agent with no Claude registry row is found by its id, its Paseo id or a hex prefix of 6+
                characters, never by its workspace title. Before any send
                `paseo agent inspect` must show the agent unarchived, with no pending permission or question, idle
-               or running, in the directory its process runs in; any refusal ends the run, whatever `--via` says.
+               or running (or `closed` with Capabilities.Persistence true: a send wakes it, and it routes like an idle
+               agent), in the directory its process runs in; any refusal ends the run, whatever `--via` says.
                Delivery is what the daemon acknowledges ("accepted"), upgraded to "delivered" once a Claude
                transcript shows the text.
   2. dispatch  a headless acp-dispatch slice (no pane): `acp-dispatch tell RECORD` (its inbox plus its live Claude). The result is
@@ -397,6 +398,18 @@ def paseo_inspect(agent_id):
     return paseo_probe(agent_id)[0]
 
 
+def paseo_wakes(info):
+    """True when Paseo agent INFO is `closed` but a send wakes it (2026-10-31: `relay.py 88286468` refused "Dann VPS 2", closed, unarchived,
+    Persistence true, its tab open in the app, while a plain `paseo send` to it worked: closed -> running). Closed means no live turn or process,
+    not gone: a persistent provider resumes its stored session on the send. An archived agent is never woken (a send would unarchive it)."""
+    caps = info.get("Capabilities")
+    return (info.get("Status") == "closed" and not info.get("Archived") and isinstance(caps, dict) and caps.get("Persistence") is True)
+
+
+# Paseo status -> the fleet status relay routes on. A woken `closed` agent routes exactly like an idle one: no running turn to steer, nothing busy.
+PASEO_ROUTE_STATUS = {"idle": "idle", "running": "working", "closed": "idle"}
+
+
 def paseo_blocker(info):
     """Why a Paseo agent whose `inspect` is INFO must not be sent text, or None. A send unarchives an archived
     agent, and on a steer Paseo denies every pending permission card with the sent text as the answer."""
@@ -406,8 +419,14 @@ def paseo_blocker(info):
     if info.get("PendingPermissions"):
         return (f"blocked on a permission or question ({card_summary(info['PendingPermissions'])}): typed text would answer it "
                 "(helm / the Paseo UI answers it)")
-    if state not in ("idle", "running"):
-        return f"its Paseo agent is {state}, not idle or running"
+    if state == "closed" and not paseo_wakes(info):
+        caps = info.get("Capabilities")
+        persistence = caps.get("Persistence") if isinstance(caps, dict) else None
+        return ("its Paseo agent is closed and Paseo reports it non-persistent (Persistence false): a send cannot wake it, its session is not kept"
+                if persistence is False else
+                "its Paseo agent is closed and Paseo does not report it persistent (no Capabilities.Persistence): relay cannot know a send wakes it")
+    if state not in PASEO_ROUTE_STATUS:
+        return f"its Paseo agent is {state}, not idle, running or closed (persistent)"
     return None
 
 
@@ -516,6 +535,10 @@ def paseo_look(info, detail="", listed=None, last=""):
         if not agree:
             why += " [`paseo agent inspect` lists a card that `paseo permit ls` does not: it may have just been answered]"
         return {"state": "card:" + kinds[0], "why": why, "deliverable": False, "agree": agree, "evidence": ev, "cards": card_list(cards)}
+    if state == "closed" and paseo_wakes(info):
+        return {"state": "closed", "why": "closed: a send wakes it (persistent, not archived)", "deliverable": True, "agree": True, "evidence": ev}
+    if state == "closed":
+        return {"state": "closed", "why": paseo_blocker(info), "deliverable": False, "agree": True, "evidence": ev}
     if state == "idle":
         return {"state": "idle", "why": "idle", "deliverable": True, "agree": True, "evidence": ev}
     if state == "running":
@@ -523,7 +546,7 @@ def paseo_look(info, detail="", listed=None, last=""):
             return {"state": "silent", "why": f"running, but nothing new for {silent // 60} min: a hung turn or one long tool call "
                     "(the text is queued for its next idle)", "deliverable": False, "agree": True, "evidence": ev}
         return {"state": "working", "why": "working: it takes the text when its turn ends", "deliverable": False, "agree": True, "evidence": ev}
-    return {"state": state, "why": f"its Paseo agent is {state}, not idle or running", "deliverable": False, "agree": True, "evidence": ev}
+    return {"state": state, "why": f"its Paseo agent is {state}, not idle, running or closed (persistent)", "deliverable": False, "agree": True, "evidence": ev}
 
 
 SCREEN_ROWS = 8    # a dialog is at the bottom of the screen: only the last rows can name one (a line the agent printed higher up is history)
@@ -622,7 +645,7 @@ def paseo_gate(s):
     if paseo_cwd_mismatch(s, info):
         return f"its process directory differs from Paseo agent {agent}'s ({info.get('Cwd')}): mapping not trusted"
     state = info["Status"]
-    s["paseo_state"], s["status"] = state, {"idle": "idle", "running": "working"}[state]
+    s["paseo_state"], s["status"] = state, PASEO_ROUTE_STATUS[state]
     return None
 
 
@@ -649,7 +672,7 @@ def paseo_session(agent_id):
     state = info.get("Status") or "unknown"
     return fleet._rec(id=agent_id[:8], agent=info.get("Provider") or "paseo", name=info.get("Name") or "",
                       cwd=info.get("Cwd") or "", host="paseo", chan=("paseo", agent_id), paseo=agent_id,
-                      paseo_state=state, status={"idle": "idle", "running": "working"}.get(state, state),
+                      paseo_state=state, status=PASEO_ROUTE_STATUS.get(state, state),
                       self=paseo_is_self(agent_id), where=f"host=paseo agent={agent_id}")
 
 
@@ -1294,7 +1317,7 @@ def paseo_steer_refusal(s, steer=False):
     Paseo then replaces the turn the same way: only claude (fleet.PASEO_STEER_DEFAULT) is steered into a working agent
     without STEER (`--steer`)."""
     prov = (s.get("agent") or "").lower()
-    if s.get("status") == "idle" or prov in fleet.PASEO_STEER_DEFAULT or (steer and prov in fleet.PASEO_STEER_PROVIDERS):
+    if s.get("status") == "idle" or s.get("paseo_state") == "closed" or prov in fleet.PASEO_STEER_DEFAULT or (steer and prov in fleet.PASEO_STEER_PROVIDERS):
         return None
     if prov in fleet.PASEO_STEER_PROVIDERS:
         return (f"its {prov} Paseo agent is {s.get('status')}: Paseo replaces a running turn when {prov} declines a steer "
@@ -1371,8 +1394,8 @@ def hard_stop(s):
     if s.get("finished"):
         return (f"finished ({s['finished']}): never continue there; start a fresh session from its handoff "
                 "(session-finder rung 3b, launch.py --baton)")
-    if s.get("host") == "paseo" and s.get("paseo_state") not in (None, "idle", "running"):
-        return f"its Paseo agent is {s['paseo_state']}, not idle or running"
+    if s.get("host") == "paseo" and s.get("paseo_state") not in (None, "idle", "running", "closed"):    # closed: the Paseo gate (inspect: archived? persistent?) decides, a fleet row cannot
+        return f"its Paseo agent is {s['paseo_state']}, not idle, running or closed (persistent)"
     if s.get("status") == "blocked":
         return ("blocked on a permission or question card: a message would answer or replace it (the Paseo UI, or "
                 "`paseo permit allow|deny <agent> -- <request id>`, one card at a time, answers it)" if s.get("host") == "paseo" else
@@ -2643,7 +2666,7 @@ def target_poll(rec):
         why = paseo_blocker(info)
         if why:
             return ("fail", why)
-        return ("idle",) if info.get("Status") == "idle" else ("busy",)
+        return ("idle",) if PASEO_ROUTE_STATUS[info["Status"]] == "idle" else ("busy",)
     s = next((x for x in fleet.sessions() if x.get("id") == t.get("id")), None)
     if s is None:
         return ("miss", "its session is gone")
@@ -3628,6 +3651,15 @@ def scan_texts(tx, mark):
             out.append(" ".join(b.get("text", "") for b in body if isinstance(b, dict)) if isinstance(body, list) else None)
         elif isinstance(o.get("attachment"), dict) and o["attachment"].get("type") == "queued_command":
             out.append(o["attachment"].get("prompt"))
+        elif kind == "api-request-blob":
+            # 2026-10-31 (expectation aff7-attach, open and ASSUMED LOST for 28 h): Claude Code logged an idle session's peer message ONLY as a copy of the
+            # API request, a user-role blob whose text holds the harness prefix and the `<cross-session-message ...>` envelope, with no `user` line for it.
+            # Only a user-role TEXT block that carries that envelope counts (a blob also repeats the conversation: never a tool result, never plain prose).
+            m = o.get("message")
+            c = m.get("content") if isinstance(m, dict) and m.get("role") == "user" else None
+            if isinstance(c, list):
+                out.extend(b["text"] for b in c if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+                           and "<cross-session-message " in b["text"])
     return [" ".join(t.split()) for t in out if isinstance(t, str)], end
 
 

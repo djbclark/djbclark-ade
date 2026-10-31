@@ -247,6 +247,22 @@ class TestExpectAck(Base):
         self.assertEqual(rows[0]["state"], "acked")
         self.assertFalse(rows[0]["overdue"])
 
+    def test_an_answer_logged_only_as_an_api_request_blob_closes_it_and_a_quoting_blob_or_tool_result_does_not(self) -> None:
+        """2026-10-31, expectation aff7-attach: Claude Code logged an idle session's peer message ONLY as a user-role `api-request-blob`
+        (harness prefix + `<cross-session-message>` envelope), no `user` line; the expectation stayed open and went ASSUMED LOST for 28 h."""
+        self.go("is the build green?", "--expect-ack", "build1")
+        prefix = "Another Claude session sent a message:\n"
+        env = ('<cross-session-message from="relay.py" from-name="relay.py (claude cccccccc aka peer-fb (x))" from-mode="bypass">\n'
+               "{}\n</cross-session-message>")
+        blob = lambda content: {"type": "api-request-blob", "hash": "h", "message": {"role": "user", "content": content}}    # noqa: E731
+        self.append(self.me_tx, blob([{"type": "tool_result", "tool_use_id": "t1", "content": prefix + env.format("ack build1")}]))    # a tool result quotes it
+        self.append(self.me_tx, blob([{"type": "text", "text": "the operator wrote: ack build1"}]))    # plain prose, no envelope
+        self.append(self.me_tx, {"type": "api-request-blob", "message": {"role": "assistant", "content": [{"type": "text", "text": env.format("ack build1")}]}})
+        self.assertIn("0 resolved", self.run_cli("--sweep")[1])
+        self.append(self.me_tx, blob([{"type": "text", "text": prefix + env.format("ack build1 (from lead). Plan amended and pushed.")}]))
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+        self.assertEqual(relay.expect_read("build1")["state"], "acked")
+
     def test_a_longer_id_is_not_the_ack(self) -> None:
         self.go("is the build green?", "--expect-ack", "build1")
         self.reply_to_me("ack build12")
