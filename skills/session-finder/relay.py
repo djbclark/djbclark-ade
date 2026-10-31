@@ -3607,7 +3607,7 @@ def expect_resolve_by_relay():
 
 
 def resolve_acks(me, s, text):
-    """Close what the text just sent from verified caller ME to recipient S answers, and count it: the open or reserved transcript-less expectations
+    """Close or record what the text just sent from verified caller ME to recipient S answers, and count it: the open or reserved transcript-less expectations
     (see `expect_resolve_by_relay`) and the transcript-less FIRST-CONTACT link S -> ME when the text begins `ack <S's id>` (the reply a footer asked
     for: `[first contact from S: reply `ack S` through relay.py ...]`, adversary PR 173 B2a, 2026-10-30). The caller must be the fleet's `self` row (or the
     Hermes conversation proved), never a name in the text, and each end must also match the session id the record stored. The caller of this function
@@ -3644,7 +3644,7 @@ def resolve_acks(me, s, text):
                 atomic_json(fleet.LINKS_FILE, data)
                 n += 1
             elif (ln is None and fleet.link_key(s["id"], me["id"]) not in data["links"] and not s.get("transcript")
-                    and (me.get("host") != "hermes-gw" or me.get("sid"))):
+                    and (me.get("sid") or me.get("host") == "paseo" or me.get("paseo"))):    # an id nobody reuses: a sid-less pane row's id is the NEXT occupant's too (Codex P2, adversary D1)
                 # The answer came while S's own run was still sending: `main` writes the link only after the send and its watch return, so there is
                 # none yet to close (adversary PR 173 C1, Codex P2). Record it already acked; `note_links_and_expect` finds it and keeps `acked`.
                 data["links"][fleet.link_key(s["id"], me["id"])] = {

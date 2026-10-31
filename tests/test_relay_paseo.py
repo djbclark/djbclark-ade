@@ -635,12 +635,12 @@ class RelayPaseo(unittest.TestCase):
     def test_resolve_acks_closes_a_first_contact_link_for_the_verified_peer_only(self) -> None:
         """Adversary PR 173 B2a: the peer answered the footer (`reply ack <sender id> through relay.py`); relay knows both ends from the fleet."""
         sender = {"id": "cccccccc", "sid": ""}
-        peer = {"id": "dddddddd", "sid": "", "host": "claude"}
+        peer = {"id": "dddddddd", "sid": "", "host": "claude"}    # no sid: only an EXISTING link is closed (the early record needs a non-reusable identity)
         for caller, recipient, text, returns, closes in (
                 (peer, sender, "ack cccccccc", 1, True),
                 (peer, sender, "ack cccccccc (read it)", 1, True),
-                ({"id": "eeeeeeee", "sid": ""}, sender, "ack cccccccc", 1, False),    # a third party's answer closes nothing of THIS pair (it can only note its own early ack, below)
-                (peer, {"id": "ffffffff", "sid": ""}, "ack ffffffff", 1, False),    # another recipient: not this link either
+                ({"id": "eeeeeeee", "sid": ""}, sender, "ack cccccccc", 0, False),    # a third party's answer closes nothing of THIS pair (and, with no session id, records nothing)
+                (peer, {"id": "ffffffff", "sid": ""}, "ack ffffffff", 0, False),    # another recipient: not this link either
                 (peer, sender, "thanks, ack cccccccc is what the footer says", 0, False),    # the text must BEGIN with the ack
                 (peer, sender, "ack someoneelse", 0, False)):
             links = self.link()
@@ -654,7 +654,7 @@ class RelayPaseo(unittest.TestCase):
         answers before the link exists. The answer is recorded already acked, the asker's own bookkeeping keeps it, and a stale one with no
         send behind it is pruned."""
         asker = {"id": "cccccccc", "sid": "", "name": "me", "transcript": None, "paseo": CALLER}
-        peer = {"id": "dddddddd", "sid": "", "name": "peer-long-name", "host": "claude"}
+        peer = {"id": "dddddddd", "sid": "peer-session-2222", "name": "peer-long-name", "host": "claude"}
         key = relay.fleet.link_key("cccccccc", "dddddddd")
         with mock.patch.object(relay.fleet, "LINKS_FILE", Path(self.tmp.name) / "links.json"):
             self.assertEqual(relay.resolve_acks(peer, asker, "ack cccccccc"), 1)    # no link yet
@@ -672,6 +672,19 @@ class RelayPaseo(unittest.TestCase):
             links = relay.fleet.links_read()["links"]
         self.assertIn(key, links)
         self.assertNotIn(relay.fleet.link_key("cccccccc", "eeeeeeee"), links)    # an early answer nothing followed
+
+    def test_a_pane_row_with_no_session_id_leaves_no_early_ack_for_the_next_occupant(self) -> None:
+        """Codex P2 on PR 173 (adversary D1): a sid-less herdr pane row is only its pane id, which the NEXT occupant of that pane has too, so
+        `fleet.link_get` (no stored sid, nothing to compare) would hand that occupant a pre-acked link and its first contact would carry no
+        footer. Only an identity nobody reuses (a session id, a Paseo agent) records an early ack."""
+        asker = {"id": "cccccccc", "sid": "", "name": "me", "transcript": None, "paseo": CALLER}
+        pane = {"id": "w9:p3", "sid": None, "name": "", "host": "herdr"}
+        with mock.patch.object(relay.fleet, "LINKS_FILE", Path(self.tmp.name) / "links.json"):
+            self.assertEqual(relay.resolve_acks(pane, asker, "ack cccccccc"), 0)
+            self.assertEqual(relay.fleet.links_read()["links"], {})
+            self.assertIsNone(relay.fleet.link_get(relay.fleet.links_read()["links"], asker, {"id": "w9:p3", "sid": "bob-session-1111"}))
+            paseo = {"id": "dddddddd", "sid": None, "name": "peer", "host": "paseo", "paseo": AGENT}
+            self.assertEqual(relay.resolve_acks(paseo, asker, "ack cccccccc"), 1)    # a Paseo agent id is never reused
 
     def test_resolve_acks_leaves_a_transcript_backed_link_to_its_transcript(self) -> None:
         with mock.patch.object(relay.fleet, "LINKS_FILE", self.link(tx="/tmp/x.jsonl")):
