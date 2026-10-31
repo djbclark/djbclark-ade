@@ -383,3 +383,6 @@ a live canonical marker with valid JSON and the full head.
 
 On 2026-10-31 (PR 175), malformed BLOCK rescue began matching the marker's head fields, excluding
 revision mentions in notes, and accepting a doubled comment start for same-head BLOCK detection.
+
+On 2026-10-31 (PR 175), raw BLOCK rescue stopped looking for a JSON payload at a comment's closing
+`-->`. Standalone JSON after a closed documentation marker cannot supply that marker's verdict.

@@ -297,8 +297,9 @@ def pr_doc(repo: str, pr: int) -> dict:
 #      marker - in a fence, in the live text and in the raw-body rescue alike. Only a start whose JSON
 #      does not balance falls back to a capture that may not cross another `<!--`, which is what stops
 #      an unclosed start quoted in prose from swallowing the next marker. And masking may not "repair"
-#      JSON: a live marker whose JSON slice differs between the raw body and the stripped text is
-#      `malformed`, not approved (C2'). The rescue scans EVERY start, with no `consumed` cursor (D1): a
+#      JSON: the marker's JSON is parsed exactly as written in the raw body. Backticks inside JSON
+#      strings are content; outside strings they make JSON invalid, hence malformed (C2'). The rescue
+#      scans EVERY start, with no `consumed` cursor (D1): a
 #      candidate is accepted before its JSON is validated, so letting a rejected outer one hide the
 #      BLOCK inside it read as a clean false APPROVE.
 # A marker whose JSON is broken is still CAPTURED and then reported as `malformed`, never as an
@@ -755,7 +756,10 @@ def adversary_verdict(body: str, head: str) -> dict:
         if (text[start:match.end()] == body[start:match.end()]
                 and not CANONICAL_START_RE.match(body, start)):
             continue
-        js = body.find("{", match.end())
+        # Discover the payload only inside this comment. Once JSON starts,
+        # the existing JSON-aware scanner keeps delimiters in strings as content.
+        comment_end = body.find("-->", match.end())
+        js = body.find("{", match.end(), comment_end if comment_end >= 0 else len(body))
         next_start = body.find("<!--", match.end())
         if js < 0:
             continue

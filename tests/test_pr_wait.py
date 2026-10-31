@@ -2621,3 +2621,19 @@ def test_duplicate_head_fields_cannot_hide_current_head(values):
     body = marker("APPROVE") + "\n```\n<!-- adversary-verdict:v1 " + payload + " -->\n```"
     assert adv(body)["verdict"] == "BLOCK"
     assert gate(body, required=False)[0] is False
+
+
+@pytest.mark.parametrize("start", ["<!-- adversary-verdict:v1 -->", "<!-- adversary-verdict:V1 -->"])
+def test_closed_marker_cannot_borrow_standalone_block_json(start):
+    unrelated = json.dumps({"verdict": "BLOCK", "head": ADV_HEAD})
+    body = marker("APPROVE") + "\n```\n" + start + "\n" + unrelated + "\n```"
+    result = adv(body)
+    assert result["verdict"] == "APPROVE" and not result["malformed"]
+    assert gate(body, required=False)[0] is True
+
+
+def test_closed_marker_does_not_hide_a_separate_same_head_block():
+    body = marker("APPROVE") + "\n```\n<!-- adversary-verdict:v1 -->\n" + marker("BLOCK") + "\n```"
+    result = adv(body)
+    assert result["verdict"] == "BLOCK" and result["matches_head"] and result["conflict"]
+    assert gate(body)[0] is False
