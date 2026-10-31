@@ -535,10 +535,16 @@ prepaid account. Check `aiuse` for what is left in each. z.ai serves GLM, not De
 
 For the **main loop** (the agent's own substrate, not a dispatched slice), run
 `bin/route_agent.py substrate` at session start: it prints the Flash-primary chain
-(opencode-go ↔ cline, same model, provider failover) with the real rolling-window headroom, and
-`--apply <agent>` does a within-provider switch. A cross-provider move is refused — a live
-cross-provider model switch is what broke the ◈ Dann tab on 2026-10-23; failover is a session-start
-choice, never a live switch.
+(opencode-go ↔ cline, same model, provider failover) with the binding headroom (monthly budget
+included; a stale, errored or expired reading counts as unmeasured), and
+`--apply <agent>` does a within-provider switch. A pool in aiuse's `[disabled_services]` (or
+`operator_disabled()`) is never named, except the lifeline listed in `config/routing.toml`
+`[substrate].lifeline` (`clinepass`, operator 2026-10-23); with nothing usable left it prints
+`no usable substrate` and exits 6, also when every pool is exhausted. A cross-provider move is
+refused (exit 5) — a live cross-provider model switch is what broke the ◈ Dann tab on 2026-10-23;
+failover is a session-start choice, never a live switch. Exit codes: 0 ok; 1 `paseo-set-model`
+failed; 2 `--apply` agent empty or ambiguous (an exact id, else a unique id prefix); 3 no such
+agent; 4 model not applied; 5 cross-provider; 6 no usable substrate; 7 cannot list agents.
 
 Rules that fall out of this:
 

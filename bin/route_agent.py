@@ -303,6 +303,7 @@ ALIASES: dict[str, str]
 DISPATCH_EXTRA: dict[str, str]
 HERMES_MODELS: dict[str, list[str]]
 HERMES_PROVIDER_NAME: dict[str, str]
+SUBSTRATE_LIFELINE: frozenset[str]
 CALIBRATE_MIN_OUTCOMES: int
 CALIBRATE_MIN_PEERS: int
 CALIBRATE_SUGGEST_WORSE_BELOW: float
@@ -355,6 +356,12 @@ def load_policy(path: Path | str) -> dict[str, Any]:
     for section in ("routing", "discovery", "dispatch", "hermes", "calibrate"):
         if section not in data or not isinstance(data[section], dict):
             raise ValueError(f"routing policy {path}: missing [{section}] table")
+    substrate = data.get("substrate")
+    if substrate is not None:
+        lifeline = substrate.get("lifeline", []) if isinstance(substrate, dict) else None
+        if not (isinstance(lifeline, list) and all(isinstance(x, str) for x in lifeline)):
+            raise ValueError(f"routing policy {path}: [substrate] must be a table whose "
+                             "lifeline is an array of service names")
     lead = data.get("lead")
     if lead is not None:
         if not isinstance(lead, dict):
@@ -393,6 +400,7 @@ def apply_policy(data: dict[str, Any]) -> None:
     global PLENTY_MIN, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
     global ALIASES, DISPATCH_EXTRA, HERMES_MODELS
     global HERMES_PROVIDER_NAME
+    global SUBSTRATE_LIFELINE
     global CALIBRATE_MIN_OUTCOMES, CALIBRATE_MIN_PEERS
     global CALIBRATE_SUGGEST_WORSE_BELOW
     global CALIBRATE_SUGGEST_WORSE_DELTA, CALIBRATE_SUGGEST_BETTER_ABOVE
@@ -427,6 +435,8 @@ def apply_policy(data: dict[str, Any]) -> None:
                           for k, v in (hermes.get("models") or {}).items()}
         HERMES_PROVIDER_NAME = {str(k): str(v)
                                 for k, v in (hermes.get("provider_name") or {}).items()}
+        SUBSTRATE_LIFELINE = frozenset(
+            str(x) for x in ((data.get("substrate") or {}).get("lifeline") or []))
 
         CALIBRATE_MIN_OUTCOMES = int(calibrate["min_outcomes"])
         CALIBRATE_MIN_PEERS = int(calibrate["min_peers"])
@@ -1633,48 +1643,88 @@ SUBSTRATE_MIN_HEADROOM = 10.0
 
 
 def _substrate_pool_state(pool: str, quota: dict[str, Any] | None,
-                          accounts: list[dict[str, Any]]) -> dict[str, Any]:
+                          accounts: list[dict[str, Any]],
+                          file_age: float | None = None) -> dict[str, Any]:
     """Binding allowance across all measured windows, including monthly.
 
     Wide-open rate windows do not replenish an exhausted monthly budget. Keep
     monthly headroom visible, but never skip it to promote a spent Go pool.
+
+    Applies the guards `load_snapshot` applies to the same rows: a row with an
+    `error` is skipped; a row older than STALE_SOFT (or `reading_expired`) measures
+    nothing except an exhausted window; a file older than STALE_HARD measures
+    nothing. The fresh quota dict (`aiuse --available`) can only tighten the file's
+    reading, never loosen it.
     """
+    remaining: float | None = None
+    monthly: float | None = None
     for a in accounts:
-        if a.get("provider") != pool:
+        if a.get("provider") != pool or a.get("error"):
             continue
+        row_age = _clean_age(a.get("age_seconds"))
+        if row_age is None and a.get("collected_at"):
+            try:
+                row_age = (datetime.now(UTC)
+                           - datetime.fromisoformat(str(a["collected_at"]))).total_seconds()
+            except (ValueError, TypeError):
+                row_age = None
+        if row_age is None:
+            row_age = file_age
+        if (row_age is not None and row_age > STALE_HARD) or (
+                file_age is not None and file_age > STALE_HARD):
+            continue                                  # hard-stale: unmeasured
+        old = ((row_age is not None and row_age > STALE_SOFT)
+               or a.get("reading_expired") is True)
         wins = a.get("windows") or []
 
         def rem(w: dict[str, Any]) -> float | None:
-            return w.get("remaining_percent")
+            head = _pct(w.get("headroom_percent"))
+            return head if head is not None else _pct(w.get("remaining_percent"))
 
         def is_month(w: dict[str, Any]) -> bool:
             return "month" in ((w.get("label") or "").lower())
 
-        measured = [rem(w) for w in wins if rem(w) is not None]
-        monthly = next((rem(w) for w in wins if is_month(w)), None)
-        if a.get("usable_now") is False or any(w.get("state") == "exhausted" for w in wins):
-            remaining: float | None = 0.0
+        exhausted = (a.get("usable_now") is False
+                     or any(w.get("state") == "exhausted" for w in wins))
+        measured = [] if old else [x for x in (rem(w) for w in wins) if x is not None]
+        row_rem: float | None
+        if exhausted:
+            row_rem = 0.0
         else:
-            remaining = min(measured) if measured else None
-        return {"remaining": remaining, "monthly": monthly}
-    # not in the raw snapshot (clinepass is operator-disabled from collection):
-    # fall back to the filtered quota dict, else unknown.
-    return {"remaining": (quota or {}).get(pool, {}).get("remaining"), "monthly": None}
+            row_rem = min(measured) if measured else None
+        if row_rem is not None:
+            remaining = row_rem if remaining is None else min(remaining, row_rem)
+        if monthly is None and not old:
+            monthly = next((rem(w) for w in wins if is_month(w)), None)
+    fresh = _pct(((quota or {}).get(pool) or {}).get("remaining"))
+    if fresh is not None:
+        remaining = fresh if remaining is None else min(remaining, fresh)
+    return {"remaining": remaining, "monthly": monthly}
 
 
 def substrate_chain(quota: dict[str, Any] | None = None,
-                    accounts: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                    accounts: list[dict[str, Any]] | None = None,
+                    *, file_age: float | None = None,
+                    disabled: set[str] | frozenset[str] | None = None,
+                    lifeline: set[str] | frozenset[str] | None = None) -> list[dict[str, Any]]:
     """Order the main-loop substrates: healthy-measured first, unmeasured lifeline last.
 
     Both Flash entries serve deepseek-v4.1-flash, so a provider failover keeps
-    the model constant. `remaining` is None for a pool aiuse does not measure
-    (clinepass is operator-disabled from collection); such a pool sorts last but
-    is never dropped — it is the reserved lifeline, and it is the fallback when
-    the measured pool is tight.
+    the model constant. A pool in aiuse's `[disabled_services]` (`operator_disabled()`)
+    is never chosen, except a pool named in `[substrate].lifeline` of routing.toml
+    (clinepass, operator ruling 2026-10-23): that one is allowed while disabled, and
+    sorts as unmeasured because aiuse does not collect it. `remaining` is None for a
+    pool aiuse does not measure; such a pool sorts after a healthy one but is never
+    dropped. An exhausted pool stays listed with `usable: False`; with nothing usable
+    left the caller prints `no usable substrate`. `disabled` and `lifeline` default
+    to the live aiuse config and the loaded policy.
     """
     quota = quota or {}
     accounts = accounts or []
-    states = {p: _substrate_pool_state(p, quota, accounts) for p, _, _ in DANN_SUBSTRATE}
+    off = (operator_disabled() if disabled is None else set(disabled)) - set(
+        SUBSTRATE_LIFELINE if lifeline is None else lifeline)
+    pools = [t for t in DANN_SUBSTRATE if t[0] not in off]
+    states = {p: _substrate_pool_state(p, quota, accounts, file_age) for p, _, _ in pools}
 
     def key(item: tuple[str, str, str]) -> tuple[int, float]:
         rem = states[item[0]]["remaining"]
@@ -1687,43 +1737,79 @@ def substrate_chain(quota: dict[str, Any] | None = None,
         return (3, 0.0)                           # exhausted -> last
 
     chain: list[dict[str, Any]] = []
-    for i, (pool, provider, model) in enumerate(sorted(DANN_SUBSTRATE, key=key)):
+    seen_usable = False
+    for pool, provider, model in sorted(pools, key=key):
+        rem = states[pool]["remaining"]
+        usable = rem is None or rem > 0
+        if not usable:
+            role = "exhausted"
+        elif not seen_usable:
+            role, seen_usable = "primary", True
+        else:
+            role = "fallback"
         chain.append({
-            "role": "primary" if i == 0 else "fallback",
+            "role": role, "usable": usable,
             "pool": pool, "provider": provider, "model": model,
-            "remaining": states[pool]["remaining"], "monthly": states[pool]["monthly"],
+            "remaining": rem, "monthly": states[pool]["monthly"],
         })
     return chain
 
 
-def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> str:
+# `route_agent.py substrate` exit codes beyond 0; 1 and 3-4 pass paseo-set-model's own through.
+SUBSTRATE_EXIT_BAD_AGENT = 2          # --apply AGENT empty or ambiguous
+SUBSTRATE_EXIT_NO_AGENT = 3           # --apply AGENT matches nothing
+SUBSTRATE_EXIT_CROSS_PROVIDER = 5     # needs a NEW session on the primary's provider
+SUBSTRATE_EXIT_NONE_USABLE = 6        # every substrate disabled or exhausted
+SUBSTRATE_EXIT_CANNOT_LIST = 7        # paseo-set-model list failed or unreadable
+
+
+def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> tuple[int, str]:
     """Apply the chain's primary to `agent` IF it is a within-provider move.
 
-    `paseo-set-model` talks to the daemon's own `set_agent_model` RPC, which
-    only sets a model *within* the agent's provider. So a cross-provider move is
-    refused here with the start-a-new-session instruction rather than attempted
-    (attempting it is what breaks the session).
+    Returns (exit code, message). `paseo-set-model` talks to the daemon's own
+    `set_agent_model` RPC, which only sets a model *within* the agent's provider. So a
+    cross-provider move is refused here with the start-a-new-session instruction rather
+    than attempted (attempting it is what breaks the session). The agent is an exact id
+    or a unique id prefix; the id actually checked is the id passed to `set`.
     """
+    primary = next((e for e in chain if e.get("usable") and e.get("role") == "primary"), None)
+    if primary is None:
+        return SUBSTRATE_EXIT_NONE_USABLE, "no usable substrate"
+    if not agent:
+        return SUBSTRATE_EXIT_BAD_AGENT, "empty agent id"
     helper = Path(__file__).resolve().parent / "paseo-set-model"
-    proc = subprocess.run([str(helper), "list", "--json"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return f"cannot list agents (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
     try:
-        agents = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return "cannot parse paseo-set-model list output"
-    match = [a for a in agents if str(a.get("id", "")).startswith(agent)]
+        proc = subprocess.run([str(helper), "list", "--json"], capture_output=True, text=True)
+    except OSError as e:
+        return SUBSTRATE_EXIT_CANNOT_LIST, f"cannot run paseo-set-model: {e}"
+    if proc.returncode != 0:
+        return (SUBSTRATE_EXIT_CANNOT_LIST,
+                f"cannot list agents (rc={proc.returncode}): {proc.stderr.strip()[:200]}")
+    try:
+        agents = [a for a in json.loads(proc.stdout) if isinstance(a, dict)]
+    except (json.JSONDecodeError, TypeError):
+        return SUBSTRATE_EXIT_CANNOT_LIST, "cannot parse paseo-set-model list output"
+    match = [a for a in agents if str(a.get("id", "")) == agent]
     if not match:
-        return f"no such agent: {agent}"
+        match = [a for a in agents if str(a.get("id", "")).startswith(agent)]
+    if not match:
+        return SUBSTRATE_EXIT_NO_AGENT, f"no such agent: {agent}"
+    if len(match) > 1:
+        ids = ", ".join(str(a.get("id", ""))[:12] for a in match[:5])
+        return SUBSTRATE_EXIT_BAD_AGENT, f"ambiguous agent {agent!r}: {len(match)} match ({ids})"
     cur = match[0]
-    primary = chain[0]
     if cur.get("provider") != primary["provider"]:
-        return (f"cross-provider: {agent} is {cur.get('provider')}/{cur.get('model')}; "
+        return (SUBSTRATE_EXIT_CROSS_PROVIDER,
+                f"cross-provider: {agent} is {cur.get('provider')}/{cur.get('model')}; "
                 f"start a NEW session on {primary['provider']}/{primary['model']} "
                 f"(set_agent_model cannot switch providers)")
-    proc = subprocess.run([str(helper), "set", agent, primary["model"]],
-                          capture_output=True, text=True)
-    return (proc.stdout.strip() or proc.stderr.strip()
+    try:
+        proc = subprocess.run([str(helper), "set", str(cur["id"]), primary["model"]],
+                              capture_output=True, text=True)
+    except OSError as e:
+        return SUBSTRATE_EXIT_CANNOT_LIST, f"cannot run paseo-set-model: {e}"
+    return (proc.returncode,
+            proc.stdout.strip() or proc.stderr.strip()
             or f"set rc={proc.returncode} ({primary['model']})")
 
 
@@ -2127,7 +2213,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     sb.add_argument("--json", action="store_true")
     sb.add_argument("--apply", metavar="AGENT", default=None,
-                    help="apply the primary to this Paseo agent (within-provider only)")
+                    help="apply the primary to this Paseo agent (within-provider only). "
+                    "Exit codes: 0 ok; 1 paseo-set-model failed; 2 empty or ambiguous AGENT; "
+                    "3 no such agent; 4 model not applied; 5 cross-provider (start a new session); "
+                    "6 no usable substrate (also without --apply); 7 cannot list agents")
     pol = sub.add_parser("policy", help="print the effective routing policy")
     pol.add_argument("--md", action="store_true",
                      help="markdown tables (services × kinds, gates, caps)")
@@ -2255,23 +2344,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "substrate":
-        chain = substrate_chain(quota, _read_snapshot_file()[0])
+        accounts, file_age = _read_snapshot_file()
+        chain = substrate_chain(quota, accounts, file_age=file_age)
+        usable = any(e["usable"] for e in chain)
         if args.json:
-            print(json.dumps({"snapshot_age_s": age, "chain": chain}, indent=2))
+            doc: dict[str, Any] = {"snapshot_age_s": age, "usable": usable, "chain": chain}
+            if not usable:
+                doc["error"] = "no usable substrate"
+            print(json.dumps(doc, indent=2))
+            if not usable:
+                print("no usable substrate", file=sys.stderr)
         else:
             for e in chain:
                 rem = e["remaining"]
                 remtxt = "unmeasured" if rem is None else f"{rem:.0f}% left"
                 mon = e.get("monthly")
                 montxt = "" if mon is None else f"  (monthly {mon:.0f}%)"
-                print(f"  {e['role']:9} {e['provider']}/{e['model']:34} {remtxt}{montxt}")
+                flag = "" if e["usable"] else "  [EXHAUSTED]"
+                print(f"  {e['role']:9} {e['provider']}/{e['model']:34} {remtxt}{montxt}{flag}")
             print("\n  primary→fallback is a PROVIDER failover at session start, not a live")
             print("  switch: Paseo binds one provider per session (set_agent_model refuses a")
             print("  cross-provider change), so a new session starts on the other provider")
-            print(f"  with the SAME model. escalate ({DANN_ESCALATION[2]}) is a within-opencode")
-            print("  switch and is safe live.")
+            print("  with the SAME model.")
+            if not usable:
+                print("no usable substrate")
+        if not usable:
+            return SUBSTRATE_EXIT_NONE_USABLE
         if args.apply:
-            print("\n  apply:", apply_substrate(args.apply, chain))
+            rc, msg = apply_substrate(args.apply, chain)
+            print("\n  apply:", msg, file=sys.stderr if args.json else sys.stdout)
+            return rc
         return 0
 
     if args.command == "policy":

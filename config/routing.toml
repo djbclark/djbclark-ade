@@ -168,6 +168,13 @@ ladder = ["mechanical", "bulk", "code", "judgment", "frontier"]
 [escalation.next]
 research = "judgment"
 
+[substrate]
+# Pools `route_agent.py substrate` may name although aiuse's [disabled_services] switches them
+# off (aiuse does not collect a disabled pool, so it reads as unmeasured). clinepass only: the
+# lifeline/substrate of Hermes and Dann (operator 2026-10-23). Any other disabled pool is
+# never chosen; with nothing left the command prints `no usable substrate` and exits 6.
+lifeline = ["clinepass"]
+
 [hermes]
 # Hermes names the provider differently from aiuse for the paid pool.
 provider_name = { clinepass = "cline" }

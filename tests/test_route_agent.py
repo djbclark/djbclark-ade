@@ -2204,21 +2204,31 @@ class TestSubstrateChain(unittest.TestCase):
 
     The rule under test is the 2026-10-23 accident: a live cross-provider model
     switch broke the ◈ Dann tab. The chain keeps the model constant across a
-    provider failover and ranks healthy -> lifeline -> tight -> exhausted.
+    provider failover and ranks healthy -> lifeline -> tight -> exhausted. A pool
+    the operator disabled in aiuse is never chosen, bar the configured lifeline.
     """
 
+    LIFELINE = frozenset({"clinepass"})
+
     @staticmethod
-    def _opencode(windows: list[tuple[str, float, str]]) -> list[dict[str, Any]]:
-        return [{"provider": "opencode-go",
+    def _opencode(windows: list[tuple[str, float, str]], **extra: Any) -> list[dict[str, Any]]:
+        return [{"provider": "opencode-go", **extra,
                  "windows": [{"label": label, "remaining_percent": rem, "state": state}
                              for (label, rem, state) in windows]}]
+
+    def _chain(self, accounts: list[dict[str, Any]] | None = None, quota: Any = None,
+               disabled: Any = frozenset(), lifeline: Any = None,
+               file_age: float | None = 60.0) -> list[dict[str, Any]]:
+        return r.substrate_chain(quota or {}, accounts or [], file_age=file_age,
+                                 disabled=disabled,
+                                 lifeline=self.LIFELINE if lifeline is None else lifeline)
 
     HEALTHY = [("OpenCode Go 5-hour", 98.0, "ok"),
                ("OpenCode Go weekly", 96.0, "ok"),
                ("OpenCode Go monthly", 55.0, "ok")]
 
     def test_healthy_opencode_go_is_primary_with_cline_fallback(self):
-        chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
+        chain = self._chain(self._opencode(self.HEALTHY))
         self.assertEqual(chain[0]["role"], "primary")
         self.assertEqual(chain[0]["provider"], "opencode")
         self.assertEqual(chain[0]["model"], "opencode-go/deepseek-v4.1-flash")
@@ -2227,9 +2237,9 @@ class TestSubstrateChain(unittest.TestCase):
         self.assertNotIn("opencode-go/deepseek-v4-pro", [entry["model"] for entry in chain])
 
     def test_monthly_budget_binds_even_with_open_rate_windows(self):
-        chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
+        chain = self._chain(self._opencode(self.HEALTHY))
         self.assertAlmostEqual(chain[0]["remaining"], 55.0)
-        spent = r.substrate_chain({}, self._opencode([
+        spent = self._chain(self._opencode([
             ("OpenCode Go 5-hour", 98.0, "ok"),
             ("OpenCode Go weekly", 96.0, "ok"),
             ("OpenCode Go monthly", 0.6, "exhausted")]))
@@ -2238,20 +2248,237 @@ class TestSubstrateChain(unittest.TestCase):
         self.assertEqual(spent[1]["monthly"], 0.6)
 
     def test_tight_opencode_go_yields_to_the_unmeasured_lifeline(self):
-        chain = r.substrate_chain({}, self._opencode([
+        chain = self._chain(self._opencode([
             ("OpenCode Go 5-hour", 4.0, "ok"), ("OpenCode Go weekly", 5.0, "ok")]))
         self.assertEqual(chain[0]["provider"], "cline")
         self.assertEqual(chain[1]["provider"], "opencode")
 
     def test_exhausted_opencode_go_falls_to_the_lifeline(self):
-        chain = r.substrate_chain({}, self._opencode([
+        chain = self._chain(self._opencode([
             ("OpenCode Go 5-hour", 0.0, "exhausted"),
             ("OpenCode Go weekly", 0.0, "exhausted")]))
         self.assertEqual(chain[0]["provider"], "cline")
         self.assertEqual(chain[1]["provider"], "opencode")
+        self.assertFalse(chain[1]["usable"])
+        self.assertEqual(chain[1]["role"], "exhausted")
 
-    def test_unmeasured_quota_still_returns_the_full_chain(self):
-        chain = r.substrate_chain({}, [])
-        self.assertEqual([e["role"] for e in chain], ["primary", "fallback"])
-        # no data: original order preserved, so opencode-go stays primary
-        self.assertEqual(chain[0]["provider"], "opencode")
+    def test_exhausted_pool_is_not_named_primary_and_nothing_is_usable(self):
+        chain = self._chain(self._opencode([("OpenCode Go monthly", 0.0, "exhausted")]),
+                            quota={"clinepass": {"remaining": 0.0}})
+        self.assertEqual({e["role"] for e in chain}, {"exhausted"})
+        self.assertFalse(any(e["usable"] for e in chain))
+
+    # F2: operator-disabled pools
+    def test_disabled_pool_is_never_chosen_even_when_healthy(self):
+        chain = self._chain(self._opencode(self.HEALTHY), disabled={"opencode-go"})
+        self.assertEqual([e["pool"] for e in chain], ["clinepass"])
+        self.assertEqual(chain[0]["role"], "primary")
+
+    def test_disabled_without_data_is_dropped_not_kept_by_tuple_order(self):
+        # both pools unmeasured (aiuse does not collect a disabled pool): opencode-go
+        # used to win the tie by tuple order
+        chain = self._chain([], disabled={"opencode-go", "clinepass"})
+        self.assertEqual([e["pool"] for e in chain], ["clinepass"])
+
+    def test_only_the_configured_lifeline_may_be_disabled(self):
+        chain = self._chain([], disabled={"opencode-go", "clinepass"}, lifeline=frozenset())
+        self.assertEqual(chain, [])
+        chain = self._chain([], disabled={"clinepass"}, lifeline=frozenset())
+        self.assertEqual([e["pool"] for e in chain], ["opencode-go"])
+
+    def test_default_lifeline_comes_from_the_policy_and_default_disabled_from_aiuse(self):
+        with mock.patch.object(r, "operator_disabled",
+                               return_value={"opencode-go", "clinepass"}):
+            chain = r.substrate_chain({}, [], file_age=60.0)
+        self.assertEqual([e["pool"] for e in chain], ["clinepass"])
+
+    # F3: the same guards load_snapshot applies
+    def test_stale_snapshot_file_measures_nothing(self):
+        chain = self._chain(self._opencode(self.HEALTHY), file_age=9 * 86400.0)
+        self.assertIsNone(next(e for e in chain if e["pool"] == "opencode-go")["remaining"])
+
+    def test_row_older_than_soft_stale_reads_unmeasured_but_keeps_an_exhausted_window(self):
+        old = r.STALE_SOFT + 60
+        chain = self._chain(self._opencode(self.HEALTHY, age_seconds=old))
+        self.assertIsNone(next(e for e in chain if e["pool"] == "opencode-go")["remaining"])
+        spent = self._chain(self._opencode(
+            [("OpenCode Go monthly", 0.0, "exhausted")], age_seconds=old))
+        self.assertEqual(next(e for e in spent if e["pool"] == "opencode-go")["remaining"], 0.0)
+
+    def test_expired_reading_is_unmeasured(self):
+        chain = self._chain(self._opencode(self.HEALTHY, reading_expired=True))
+        self.assertIsNone(next(e for e in chain if e["pool"] == "opencode-go")["remaining"])
+
+    def test_row_with_an_error_is_skipped(self):
+        chain = self._chain(self._opencode(self.HEALTHY, error="auth expired"))
+        self.assertIsNone(next(e for e in chain if e["pool"] == "opencode-go")["remaining"])
+
+    def test_fresh_available_reading_can_only_tighten_the_file(self):
+        chain = self._chain(self._opencode(self.HEALTHY),
+                            quota={"opencode-go": {"remaining": 0.0,
+                                                   "absent_from_available": True}})
+        oc = next(e for e in chain if e["pool"] == "opencode-go")
+        self.assertEqual(oc["remaining"], 0.0)
+        self.assertEqual(chain[0]["pool"], "clinepass")
+        loose = self._chain(self._opencode(self.HEALTHY),
+                            quota={"opencode-go": {"remaining": 99.0}})
+        self.assertAlmostEqual(next(e for e in loose if e["pool"] == "opencode-go")["remaining"],
+                               55.0)
+
+    # F6: _pct on every percentage
+    def test_nonfinite_oversized_and_string_percentages(self):
+        chain = self._chain(self._opencode([("OpenCode Go 5-hour", float("inf"), "ok")]))
+        self.assertIsNone(next(e for e in chain if e["pool"] == "opencode-go")["remaining"])
+        chain = self._chain(self._opencode([("OpenCode Go 5-hour", 250.0, "ok")]))
+        self.assertEqual(next(e for e in chain if e["pool"] == "opencode-go")["remaining"], 100.0)
+        chain = self._chain(self._opencode([("OpenCode Go 5-hour", "50", "ok")]))   # no TypeError
+        self.assertEqual(next(e for e in chain if e["pool"] == "opencode-go")["remaining"], 50.0)
+
+
+class TestSubstrateCommand(unittest.TestCase):
+    """`route_agent.py substrate` end to end: output, exit codes, --apply."""
+
+    HEALTHY_ROWS = [{"provider": "opencode-go", "windows": [
+        {"label": "OpenCode Go monthly", "remaining_percent": 55.0, "state": "ok"}]}]
+
+    def _run(self, argv: list[str], *, disabled: set[str] | None = None,
+             rows: list[dict[str, Any]] | None = None, lifeline: Any = None,
+             apply: Any = None, quota: Any = None) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        patches = [
+            mock.patch.object(r, "load_snapshot", return_value=(quota or {}, 60.0)),
+            mock.patch.object(r, "_read_snapshot_file",
+                              return_value=(self.HEALTHY_ROWS if rows is None else rows, 60.0)),
+            mock.patch.object(r, "operator_disabled", return_value=set(disabled or ())),
+            mock.patch.object(r, "SUBSTRATE_LIFELINE",
+                              frozenset({"clinepass"}) if lifeline is None else lifeline),
+        ]
+        if apply is not None:
+            patches.append(mock.patch.object(r, "apply_substrate", side_effect=apply))
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            rc = r.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_plain_text_form_prints_the_chain(self):
+        # the documented command used to raise NameError after building the chain
+        rc, out, _ = self._run(["substrate"])
+        self.assertEqual(rc, 0)
+        self.assertIn("primary", out)
+        self.assertIn("opencode/opencode-go/deepseek-v4.1-flash", out)
+        self.assertIn("fallback", out)
+
+    def test_disabled_pools_leave_only_the_lifeline(self):
+        rc, out, _ = self._run(["substrate", "--json"], disabled={"opencode-go", "clinepass"})
+        self.assertEqual(rc, 0)
+        chain = json.loads(out)["chain"]
+        self.assertEqual([(e["role"], e["pool"]) for e in chain], [("primary", "clinepass")])
+
+    def test_nothing_usable_says_so_and_exits_nonzero(self):
+        rc, out, _ = self._run(["substrate"], disabled={"opencode-go", "clinepass"},
+                               lifeline=frozenset())
+        self.assertEqual(rc, r.SUBSTRATE_EXIT_NONE_USABLE)
+        self.assertIn("no usable substrate", out)
+        rc, out, err = self._run(["substrate", "--json"], disabled={"opencode-go", "clinepass"},
+                                 lifeline=frozenset())
+        self.assertEqual(rc, r.SUBSTRATE_EXIT_NONE_USABLE)
+        doc = json.loads(out)
+        self.assertEqual((doc["usable"], doc["chain"]), (False, []))
+        self.assertIn("no usable substrate", err)
+
+    def test_all_exhausted_exits_nonzero_and_apply_is_not_attempted(self):
+        rows = [{"provider": "opencode-go", "usable_now": False, "windows": []}]
+        calls: list[Any] = []
+        rc, out, _ = self._run(["substrate", "--apply", "ab1"], rows=rows,
+                               quota={"clinepass": {"remaining": 0.0}},
+                               apply=lambda *a: calls.append(a) or (0, "x"))
+        self.assertEqual(rc, r.SUBSTRATE_EXIT_NONE_USABLE)
+        self.assertIn("no usable substrate", out)
+        self.assertEqual(calls, [])
+
+    def test_apply_failure_exit_code_reaches_the_caller(self):
+        rc, _, _ = self._run(["substrate", "--apply", "ab1"],
+                             apply=lambda agent, chain: (5, "cross-provider: ..."))
+        self.assertEqual(rc, 5)
+        rc, _, _ = self._run(["substrate", "--apply", "ab1"],
+                             apply=lambda agent, chain: (0, "ok"))
+        self.assertEqual(rc, 0)
+
+
+class TestApplySubstrate(unittest.TestCase):
+    """`apply_substrate`: one agent, checked and set by the same id; failures carry exit codes."""
+
+    CHAIN = [{"role": "primary", "usable": True, "pool": "opencode-go",
+              "provider": "opencode", "model": "opencode-go/deepseek-v4.1-flash",
+              "remaining": 55.0, "monthly": 55.0}]
+
+    @staticmethod
+    def _helper(agents: Any, *, list_rc: int = 0, set_rc: int = 0, set_out: str = "ok"):
+        calls: list[list[str]] = []
+
+        def run(argv, **kw):
+            calls.append(list(argv))
+            if argv[1] == "list":
+                return subprocess.CompletedProcess(
+                    argv, list_rc, stdout=agents if isinstance(agents, str) else json.dumps(agents),
+                    stderr="boom")
+            return subprocess.CompletedProcess(argv, set_rc, stdout=set_out, stderr="")
+        return run, calls
+
+    AGENTS: ClassVar[list[dict[str, str]]] = [
+        {"id": "ab1-full-id", "provider": "opencode", "model": "x"},
+        {"id": "cd2-full-id", "provider": "claude", "model": "y"}]
+
+    def _apply(self, agent: str, agents: Any = None, chain: Any = None, **kw: Any):
+        run, calls = self._helper(self.AGENTS if agents is None else agents, **kw)
+        with mock.patch.object(r.subprocess, "run", side_effect=run):
+            rc, msg = r.apply_substrate(agent, self.CHAIN if chain is None else chain)
+        return rc, msg, calls
+
+    def test_within_provider_move_sets_the_checked_agents_full_id(self):
+        rc, _, calls = self._apply("ab1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[-1][1:], ["set", "ab1-full-id", "opencode-go/deepseek-v4.1-flash"])
+
+    def test_cross_provider_is_refused_with_its_own_exit_code_and_no_set(self):
+        rc, msg, calls = self._apply("cd2")
+        self.assertEqual(rc, r.SUBSTRATE_EXIT_CROSS_PROVIDER)
+        self.assertIn("NEW session", msg)
+        self.assertEqual([c[1] for c in calls], ["list"])
+
+    def test_unknown_agent_exits_3(self):
+        rc, msg, _ = self._apply("zz9")
+        self.assertEqual(rc, r.SUBSTRATE_EXIT_NO_AGENT)
+        self.assertIn("no such agent", msg)
+
+    def test_set_failure_passes_the_helpers_exit_code_through(self):
+        for code in (1, 3, 4):
+            rc, _, _ = self._apply("ab1", set_rc=code, set_out="")
+            self.assertEqual(rc, code)
+
+    def test_empty_or_ambiguous_prefix_is_refused_without_a_set(self):
+        agents = [{"id": "ab1-x", "provider": "opencode", "model": "m"},
+                  {"id": "ab1-y", "provider": "claude", "model": "m"}]
+        for agent in ("", "ab1"):
+            rc, _, calls = self._apply(agent, agents=agents)
+            self.assertEqual(rc, r.SUBSTRATE_EXIT_BAD_AGENT, agent)
+            self.assertNotIn("set", [c[1] for c in calls])
+
+    def test_an_exact_id_beats_a_longer_id_it_prefixes(self):
+        agents = [{"id": "ab1", "provider": "opencode", "model": "m"},
+                  {"id": "ab1-longer", "provider": "claude", "model": "m"}]
+        rc, _, calls = self._apply("ab1", agents=agents)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[-1][2], "ab1")
+
+    def test_unlistable_or_unparseable_agents_exit_7(self):
+        self.assertEqual(self._apply("ab1", list_rc=1)[0], r.SUBSTRATE_EXIT_CANNOT_LIST)
+        self.assertEqual(self._apply("ab1", agents="not json")[0], r.SUBSTRATE_EXIT_CANNOT_LIST)
+
+    def test_no_usable_primary_never_touches_paseo(self):
+        rc, _, calls = self._apply("ab1", chain=[])
+        self.assertEqual(rc, r.SUBSTRATE_EXIT_NONE_USABLE)
+        self.assertEqual(calls, [])
