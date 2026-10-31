@@ -56,8 +56,10 @@ sending any input. Pass `since: <hash>` when polling.
 
 ## What was verified (2026-10-30) and what was not
 
-Verified: the viewer showed the live host desktop at about 10 fps; a Cmd+Shift+U chord sent through the
-viewer reached the host's Paseo desktop app and triggered the plugin's jump.
+Verified: the viewer showed the live host desktop at about 10 fps, and keys forwarded through the viewer
+reach the host's Paseo window (a forwarded Cmd+K opened the Command Center). Corrected 2026-10-31: an
+earlier claim that a forwarded Cmd+Shift+U triggered the next-question plugin's jump was confounded by a
+window switch; a controlled retest showed that shortcut does not work in the desktop app (a separate bug).
 **Not verified:** mouse clicks, drags, the clipboard (`paste`, `screen.clipboard`), and multiple displays.
 Test those on a throwaway target before depending on them, and say so in a report that relies on them.
 
