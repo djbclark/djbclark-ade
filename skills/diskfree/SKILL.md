@@ -52,6 +52,10 @@ numbers.
    (live NeoFinder nightly image — it already `hdiutil compact`s itself), or a
    CCC snapshot while its backup is running.
 
+   **Standing (djbclark, 2026-10-31): a step whose risk is low or none runs without asking**
+   (caches the skill lists, `brew cleanup -s`, Trash, dry-runs). Medium risk, or another
+   session's work, still asks.
+
 ## 1. Measure (read-only)
 
 ```bash
@@ -171,6 +175,17 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   incident once took this Mac from 3.8 GB to 84 GB available (2026-08-03).
 - `/nix` if it exists and nothing uses it (removed on this Mac 2026-10-02)
 - Old installers/DMGs/ISOs in `~/Downloads`
+- **Big SQLite stores** (standing, djbclark 2026-10-31: re-check every pass). plocate is
+  current to the last night: `plocate -d /opt/homebrew/var/lib/plocate/plocate.db --regex -i -0
+  '\.(sqlite3?|db|sqlite-wal|db-wal|vscdb)$' | xargs -0 stat -f '%z %N' | sort -rn | head -40`
+  (`--regex` is needed for the `(..|..)` form). Read free pages without a lock:
+  `python3 -c` with `sqlite3.connect("file:PATH?immutable=1", uri=True)` and `pragma
+  freelist_count` (the `sqlite3` CLI fails on `s1-evidence` files, 2026-10-31). 2026-10-31 sizes:
+  `s1-evidence/candidates.sqlite3` 12.2 GB (6.1 GB on 2026-10-13, no free pages: real growth),
+  `cas-pack/pack.sqlite3` 4.9 GB (2.3 GB), hermes `state.db` 1.4 GB, `opencode.db` 1.0 GB with 0.49 GB
+  free (the Sunday `sqlite-vacuum` Jobber job reclaims it). Growth of the s1 pair is the one to watch.
+- `~/.local/state/bigteam` (11 GB, 2026-10-31): task dirs with worktrees of finished fan-outs;
+  another session's work, so ask before pruning.
 
 ## 8. Close out
 
