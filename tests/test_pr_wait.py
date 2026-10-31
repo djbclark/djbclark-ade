@@ -1164,7 +1164,7 @@ def test_a_post_that_errored_but_landed_is_recorded_as_ours_so_the_re_request_is
 
 
 def test_codex_receipts_and_quotes_of_the_phrase_are_not_requests(world: World) -> None:
-    # AGENTS.md rule 9 (PR 12, PR 10): Codex's own comments quote `@codex review`
+    # AGENTS.md code-review rule 9: Codex's own comments quote `@codex review`
     world.route(TIMELINE, ok([committed(HEAD),
                               commented("@codex review", CODEX_LOGIN),
                               commented('About Codex: Comment "@codex review".', CODEX_LOGIN),
