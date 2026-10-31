@@ -323,8 +323,20 @@ def _agy_server():
 # options always applied for an agent (before --set): its ACP mode can ignore
 # the TUI's own settings. Verified 2026-10-03 unless noted;
 # see site-djbclark/research/acp-trial/ and memory/reference_acp_support_*.md.
+def _cirno_cmd() -> str:
+    """The dummy agent's executable: ADE_CIRNO, else PATH, else this checkout's bin/ade-cirno."""
+    return (os.environ.get("ADE_CIRNO") or shutil.which("ade-cirno")
+            or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))),
+                            "bin", "ade-cirno"))
+
+
 AGENTS = {
     # npm -g @agentclientprotocol/claude-agent-acp
+    # cirno: the DUMMY agent (bin/ade-cirno). Speaks real ACP and streams one fixed sentence forever
+    # ("an agent that is more scarlet than red", model `scarlet`) so a launcher, a stream reader, a rate
+    # display or an interrupt can be tested without spending a token or needing a provider. Env:
+    # CIRNO_LINES (0 = never stop), CIRNO_DELAY, CIRNO_TEXT; ADE_CIRNO overrides the path.
+    "cirno": ([_cirno_cmd()], None),
     "claude": (["claude-agent-acp"], None),
     # npm -g @agentclientprotocol/codex-acp
     "codex": (["codex-acp"], None),

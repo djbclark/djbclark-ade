@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""ade-cirno — the dummy ACP agent: it says the one thing it knows, and says it forever.
+
+WHY. Testing an agent launcher, a stream reader, a rate display or an interrupt path should not cost
+tokens and should not depend on a provider being up. cirno is a real ACP agent over stdio that streams
+one fixed sentence until stopped, so every downstream layer sees a genuine token stream: chunked
+`agent_message_chunk` session updates, a stop reason, and a cancel that has to work.
+
+WHAT IT IS NOT. Not a harness for reasoning, tools or permissions: it never calls a tool, never asks for
+permission, never changes its mind. A test that needs those needs a fixture, not cirno.
+
+THE MODEL. One, named `scarlet`; the output is "an agent that is more scarlet than red". It advertises no
+model list on purpose: a client that wants to switch models should be told there is nothing to switch.
+
+STDLIB ONLY, on purpose: this is the thing a client is tested against, so it must not share the client's
+protocol library — a mismatch in the shared library would hide exactly the bug the dummy exists to find.
+
+KNOBS (env): CIRNO_TEXT, CIRNO_LINES (0 = until cancelled), CIRNO_DELAY (seconds per chunk, default 0.02).
+PATH: registered as `cirno` in acp-run, which resolves the executable as ADE_CIRNO, else `cirno` on PATH,
+else this checkout's bin/ade-cirno — so an install anywhere else is spelled `ADE_CIRNO=/path/to/ade-cirno`.
+
+EXIT 0 on EOF or a clean end. Nothing here reads files, env secrets or the network.
+"""
+
+import json
+import os
+import queue
+import sys
+import threading
+import time
+
+TEXT = os.environ.get("CIRNO_TEXT", "an agent that is more scarlet than red")
+LINES = int(os.environ.get("CIRNO_LINES", "0"))
+DELAY = float(os.environ.get("CIRNO_DELAY", "0.02"))
+MODEL = "scarlet"
+
+_state = {"cancelled": False, "eof": False}
+_inbox: "queue.Queue[dict | None]" = queue.Queue()
+
+
+def reader() -> None:
+    """One thread owns stdin: the prompt loop must be able to stream while a cancel arrives."""
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            _inbox.put(json.loads(line))
+        except ValueError:
+            continue
+    _state["eof"] = True
+    _inbox.put(None)
+
+
+def send(msg: dict) -> None:
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", **msg}) + "\n")
+    sys.stdout.flush()
+
+
+def result(mid, payload: dict) -> None:
+    send({"id": mid, "result": payload})
+
+
+def error(mid, code: int, message: str) -> None:
+    send({"id": mid, "error": {"code": code, "message": message}})
+
+
+def chunk(session_id: str) -> None:
+    send({"method": "session/update",
+          "params": {"sessionId": session_id,
+                     "update": {"sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": TEXT + "\n"}}}})
+
+
+def drain() -> None:
+    """Apply any message that arrived while streaming. Only cancel and EOF matter mid-turn."""
+    while True:
+        try:
+            msg = _inbox.get_nowait()
+        except queue.Empty:
+            return
+        if msg is None:
+            _state["eof"] = True        # stdin closed: stop the turn, but that is not a client cancel
+            _inbox.put(None)            # leave the sentinel for main(): draining must not swallow EOF
+            return
+        elif msg.get("method") == "session/cancel":
+            _state["cancelled"] = True
+
+
+def prompt(mid, params: dict) -> None:
+    session_id = params.get("sessionId") or "cirno"
+    _state["cancelled"] = False
+    sent = 0
+    while True:
+        drain()
+        if (_state["cancelled"]
+                or (LINES > 0 and sent >= LINES)
+                or (LINES == 0 and _state["eof"] and sent > 0)):
+            break
+        chunk(session_id)
+        sent += 1
+        if DELAY:
+            time.sleep(DELAY)
+    stop = "cancelled" if _state["cancelled"] else "end_turn"
+    result(mid, {"stopReason": stop})
+
+
+def main() -> int:
+    threading.Thread(target=reader, daemon=True).start()
+    for msg in iter(_inbox.get, None):
+        mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+        if method == "initialize":
+            result(mid, {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {},
+                         "agentInfo": {"name": "cirno", "title": f"cirno (dummy, model {MODEL})",
+                                       "version": "1"}})
+        elif method == "session/new":
+            result(mid, {"sessionId": "cirno"})
+        elif method == "session/prompt":
+            prompt(mid, params)
+        elif method == "session/cancel":
+            _state["cancelled"] = True
+        elif mid is not None:
+            error(mid, -32601, f"method not found: {method}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        sys.exit(0)
