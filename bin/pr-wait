@@ -691,14 +691,9 @@ def adversary_verdict(body: str, head: str) -> dict:
     placeholders = 0
     for _start, jstart, jend in spans:
         raw = text[jstart:jend]
-        # MASKING MAY NOT "REPAIR" JSON (bundled review, C2'). Stripping replaces code with spaces, so
-        # ``{"verdict":"APPROVE", `junk` "head":"..."}`` kept its structural commas and parentheses and
-        # parsed as valid JSON nobody wrote. `_strip_code` preserves offsets exactly, so the same slice
-        # of the raw body shows what is actually there: if they differ, part of this JSON was code, and
-        # what was written cannot be read. Malformed, not approved.
-        if raw != body[jstart:jend]:
-            problems.append("marker's JSON is partly inside code, so it cannot be read as written")
-            continue
+        # Parse JSON as written: backticks inside a JSON string are content, while
+        # backticks outside strings must never be masked into valid JSON.
+        raw = body[jstart:jend]
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
         except ValueError as e:
@@ -749,6 +744,49 @@ def adversary_verdict(body: str, head: str) -> dict:
     # before the JSON is validated - so a real same-head BLOCK nested inside an INVALID outer candidate
     # was invisible here and the body read as a clean APPROVE. The rescue rescans every start; escaped
     # JSON quoted in a `note` still cannot parse, so no false BLOCK arrives that way.
+    # A typo cannot hide a same-head BLOCK in code (2026-10-30). Scan wide
+    # starts too; only actual BLOCK fields plus a matching head trigger this
+    # conservative fallback. Canonical valid markers retain their normal result.
+    canonical = {(start, js, je) for start, js, je in _marker_spans(body, nested=True)}
+    for match in MARKER_START_RE.finditer(body):
+        start = match.start()
+        # Live near-miss starts are already malformed; preserve their diagnostic
+        # rather than promoting a typo to a verdict. Hidden ones need rescuing.
+        if (text[start:match.end()] == body[start:match.end()]
+                and not CANONICAL_START_RE.match(body, start)):
+            continue
+        js = body.find("{", match.end())
+        next_start = body.find("<!--", match.end())
+        if js < 0 or (next_start >= 0 and next_start < js):
+            continue
+        je = _json_object_end(body, js)
+        if je < 0:
+            close = body.find("-->", js)
+            je = close if close >= 0 else len(body)
+        candidate = body[js:je]
+        if not re.search(r'"verdict"\s*:\s*"block"', candidate, re.I):
+            continue
+        # Even an invalid six-hex abbreviation is a recognizable typo here;
+        # refuse it conservatively, never treat it as a valid abbreviated verdict.
+        runs = re.finditer(r"(?<![0-9a-f])[0-9a-f]{6,40}(?![0-9a-f])", candidate, re.I)
+        if not any(head.lower().startswith(run.group().lower()) for run in runs):
+            continue
+        try:
+            doc = json.loads(candidate, object_pairs_hook=_strict_object)
+        except ValueError:
+            doc = None
+        if doc is None and next_start >= 0 and next_start < je:
+            continue  # inspect the nested start itself, not an invalid outer quotation
+        if ((start, js, je) in canonical and isinstance(doc, dict)
+                and doc.get("verdict") == "BLOCK" and isinstance(doc.get("head"), str)
+                and HEX40.fullmatch(doc["head"]) and not _head_matches(doc["head"], head)):
+            continue  # a well-formed verdict for another head remains report-only
+        if ((start, js, je) not in canonical or not isinstance(doc, dict)
+                or doc.get("verdict") != "BLOCK" or not _head_matches(doc.get("head"), head)):
+            return {"present": True, "verdict": "BLOCK", "quoted_sha": head,
+                    "matches_head": True, "conflict": any(p["verdict"] == "APPROVE"
+                    and p["head"] == head.lower() for p in parsed), "malformed": True,
+                    "detail": "malformed same-head BLOCK in raw body"}
     for _start, jstart, jend in _marker_spans(body, nested=True):
         try:
             doc = json.loads(body[jstart:jend], object_pairs_hook=_strict_object)
