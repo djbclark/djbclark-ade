@@ -86,7 +86,7 @@ Test those on a throwaway target before depending on them, and say so in a repor
    screens, without the operator's explicit yes for that action. A `locked: true` host is not yours to unlock.
 4. **Exposure (the operator's accepted risk, 2026-10-31):** the plugin has no host-side authorization. While it
    is enabled, **every paired Paseo client and any local caller of the daemon's plugin RPC (so any agent on this
-   Mac, whatever it has read) can see the screen and drive its mouse, keyboard, paste and clipboard** with the
+   Mac, whatever it has read; inferred from the daemon's local RPC, not tested; upstream's README says only "anyone paired") can see the screen and drive its mouse, keyboard, paste and clipboard** with the
    Screen Recording and Accessibility grants Paseo holds. The viewer's "view only" switch is per viewer, not a
    lock, and a viewer's Pause button only stops that viewer's frames (client/screen.tsx at the pin); a host-wide
    Pause on the sidebar row was reported but is untested, so never rely on it. A host-side authorization check

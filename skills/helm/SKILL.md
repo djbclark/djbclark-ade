@@ -234,8 +234,7 @@ collector call and two item kinds differ.
    holds its exact resume command, why it was closed and its last screen rows.
    Offer exactly: **Resume it** (first; give the item's `resume:` line to run in
    a free pane, or `herdr agent start <name> --kind <kind> --pane <free pane> --
-   <its resume tokens>`; `fleet.py conflicts --sid <sid>` first; then
-   `tidy.py resumed <id>`), **Start fresh** (`$L --agent <A> --cwd <dir> --model
+   <its resume tokens>`; `fleet.py conflicts --sid <sid>` first), **Start fresh** (`$L --agent <A> --cwd <dir> --model
    <M> -p "<brief from the item's title and why>"`), **Skip** (`$H skip <id>`).
    Hidden by itself once the session is live again or its handoff chain is listed.
 5. **`sleeping`** — a herdr-sleeper journal entry whose pane no longer exists

@@ -28,7 +28,7 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
    `memory/feedback_herdr_tab_pane_naming_convention.md`). On the
    single-session `/autorename` path, `<topic>` is the session's subject,
    taken from the session itself (first user message, handoff, sleeper
-   journal entry), not from a stale label. A full pass (`/autorename all`)
+   journal entry), not from a stale label. A full pass (the retired `/autorename all`)
    does not follow that. It places by the current tab label (principle 12),
    keeps every tab label that is not a single digit, and keeps every pane
    label that already has a name. A single-digit tab is named from its

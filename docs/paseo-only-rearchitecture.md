@@ -170,7 +170,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `/bigteam`, job records under `~/.local/state/bigteam` | 73 files | REWRITE in D5 | `paseo run` fan-out on G1 |
 | `self-slash`, `/new`-`/baton` lifecycle, successor launch, `paseo-new-seat`, `paseo-bypass-watch` | — | SIMPLIFY in D5 | successor created **top-level** from the CLI without `PASEO_AGENT_ID` until D1 proves archive-parent behaviour (an agent-scoped `create_agent` makes the successor a child of the retiring agent, Fable 2.4); keep `/baton` and Tier 1/Tier 2 |
 | `helm`, `/helm-all` | — | REPLACE | `paseo permit ls` / `respond_to_permission` for live seats; `paseo ls -a` and Tier 1 pointers for ended sessions |
-| `herdr-tidy`, `herdr-sleeper`, `agent-sleep`, `autorename` herdr half | — | RETIRE after the D0.2 drain (sleepers hold Claude session UUIDs per pane: `bin/herdr-sleeper list` must be empty or each resumed as a Paseo agent) | `session-janitor` (disabled until D2, B4.3), `archive_agent`; Paseo titles |
+| `herdr-tidy`, `herdr-sleeper`, `agent-sleep`, `autorename` herdr half | — | RETIRE after the D0.2 drain (sleepers hold Claude session UUIDs per pane: `plugins/herdr-sleeper/herdr-sleeper list` (bin/herdr-sleeper was removed 2026-10-31) plus the legacy journal `~/.local/state/herdr-sleeper/sleeping.json` must be empty or each resumed as a Paseo agent) | `session-janitor` (disabled until D2, B4.3), `archive_agent`; Paseo titles |
 | `watch` roles, `fleet-watch` (in `~/ops/site-private/bin`, not this repo), `paseowatch`/`cfenginewatch` (`fleet-watch upstream --relay-to` uses relay.py), `tell-chief-of-staff` | — | REWRITE in D6 | `paseo send` from the launchd script; schedules only where a run needs judgment (F2) |
 | `load-watch`, `session-load-watch`, `rumination-watch`, `bg`, gates, `wait-file` | — | KEEP (launchd, F2); drop pane typing | deliver via `paseo send` |
 | `claude-quota-guard`, `context-watch`, `context_size_nudge` (provider hooks) | — | KEEP | they run inside the provider; G2 enforces the same gates for launches that bypass the hook |
@@ -207,7 +207,7 @@ ops-promotion pilot passes.
 0. **Consult and research**: done 2026-10-30 (this v1). Three rules bind every later phase:
    1. **B10**: destructive probes run only on an isolated test daemon or in a drained, approved window.
    2. **Drain gate** (before any "disable" of B8): a script under `tests/paseo-acceptance/drain/` records,
-      for the tool being disabled, that it holds nothing: `bin/herdr-sleeper list` empty or each sleeper
+      for the tool being disabled, that it holds nothing: `plugins/herdr-sleeper/herdr-sleeper list` and the legacy journal `~/.local/state/herdr-sleeper/sleeping.json` empty (`fleet.py ended` `sleeping` items show both), or each sleeper
       resumed as a Paseo agent with its session UUID; no `acp-dispatch` record quota-stopped or resumable and
       no launchd `auto-resume` job pending (each is resumed with `acp-dispatch resume` to completion, with
       `acp-dispatch` enabled until then, or imported as a Paseo agent with its session id; never a fresh

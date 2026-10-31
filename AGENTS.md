@@ -21,10 +21,10 @@ own worktrees; it was run through Orca, which is now retired from djbclark-ade: 
 > **Paseo is the only harness**: new work goes through Paseo (`paseo run`, `bin/paseo-new-seat`, the `paseo` skills). They stay installed and configured on
 > djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my computer"); machine-side uninstall is NOT planned, and never touch their config.
 > **What is gone (2026-10-31):** `skills/herdr-tidy`, `skills/reorg-orca` and their `/herdr-tidy`, `/orca-tidy` wrappers, `bin/herdr-ai`, `bin/herdr-jump`,
-> `bin/orca-reorg-watch`, `docs/orca-integration.md`, `docs/herdr-tidy.md` and the vendored Orca guide (git history has them). **What is still live, on purpose,
+> `bin/herdr-sleeper` (the plugin copy `plugins/herdr-sleeper/herdr-sleeper` stays), `bin/orca-reorg-watch`, `docs/orca-integration.md`, `docs/herdr-tidy.md`, `docs/herdr-ai.md`, `docs/herdr-jump.md` and the vendored Orca guide (git history has them; the operator's machine symlink `~/.local/bin/herdr-sleeper` pointed into the removed `bin/herdr-sleeper` and may dangle: his to fix, order 11). **What is still live, on purpose,
 > until the plan's D4/D6 drain** (so a route can still send someone to herdr or Orca; do not start it for new work): `skills/session-finder` (`fleet.py`, `relay.py`
 > pane routes, and `launch.py --host auto|herdr|orca|none`, which is not Paseo-native and retires in D6), the herdr and Orca host branches of `self-slash`,
-> `autorename`'s herdr half (`herdr_place.py`, `/autorename all`), `bin/seat-name`, `plugins/herdr-sleeper`, and `bin/herdr-server-run` with
+> `autorename`'s herdr half (the `herdr_place.py` code and the herdr tab label; `/autorename all` itself is retired and refused in every host), `bin/seat-name`, `plugins/herdr-sleeper`, and `bin/herdr-server-run` with
 > `config/launchd/dev.herdr.server.plist` (these two also stay for the installed server and the bridges). A doc, skill or script that presents herdr, Orca or BB as the
 > current way to do something is stale: [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) is the plan of record (D4/D6/D7 are its phases). For screen control use the `paseo-screen`
 > skill (Paseo plugin), never Orca's `orca computer`.

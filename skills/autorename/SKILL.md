@@ -59,15 +59,12 @@ session and names this agent's own tab, and nothing else** (steps 1 and 2 below;
 2026-10-30): in Paseo the agent's tab (`<topic>-pt`, which is the agent's name), in herdr
 the tab label (`<topic>-t`). It never renames a workspace and never moves a tab. With
 **`all`** (synonyms `reorg`, `layout`; optionally followed by one workspace name or id to
-limit the pass to it) it does the whole from-first-principles layout pass over herdr
-instead: create and rename workspaces, and move tabs and panes between them. Rename a
-tab only when its label is a single digit. Keep every other tab label, and keep every
-pane label that already has a name. **`all` is herdr only.** First, before any
-`herdr_place.py` call: if this session is a Paseo agent (`$PASEO_AGENT_ID` is set, or you know you
-were started by Paseo: a Codex tool shell strips that variable), reply exactly `autorename all is not
-yet supported in Paseo` and stop (nobody has looked into what Paseo supports for this;
-`herdr_place.py config` also refuses when the variable is set, exit 2). Otherwise, outside herdr
-(`HERDR_ENV` not `1`), say so and stop.
+limit the pass to it) it was the from-first-principles layout pass over herdr
+(retired: see the refusal above; do not run it). Record of what it did: create and rename
+workspaces, and move tabs and panes between them; rename a tab only when its label is a
+single digit; keep every other tab label and every pane label that already has a name.
+`herdr_place.py config` still refuses inside a Paseo agent (exit 2), but the refusal above
+comes first and applies in every host.
 
 1. Read the operator's special-workspace list (`herdr_place.py config`, file
    `~/.config/autorename/workspaces.conf`: names, hints, top-of-herdr order) and follow
@@ -276,7 +273,7 @@ Re-check if the live label ever lags the rename in Orca. zcode needs no step eit
 so the tab label below carries the name.
 
 Not part of `/autorename` without an argument, nor of the nudge hook or `/handoff` (djbclark, 2026-10-30). Use it
-when the operator asks to move or sort a tab, and within `/autorename all`.
+when the operator asks to move or sort a tab (herdr only; `/autorename all` itself is retired).
 
 ```bash
 python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py check
@@ -333,7 +330,7 @@ chat id, a Grok session id, or a zcode `sess_…` id) and move it with
 `HERDR_PANE_ID=<its pane> herdr_place.py move ... --no-focus`
 so the operator's view doesn't jump; `herdr pane list --workspace <id>` maps
 `agent_session.value` to pane ids. A Paseo-hosted agent cannot do this: `move` refuses there
-(exit 1), as `/autorename all` does; it is not yet supported in Paseo.
+(exit 1); it is not supported in Paseo.
 
 To re-arrange **many** workspaces, tabs and panes at once (a full pass or one
 workspace; sleeping panes included), follow
