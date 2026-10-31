@@ -1,11 +1,9 @@
 ---
-description: close idle herdr panes safely (herdr-tidy scan → handoff → close, ledger)
+description: "RETIRED (2026-10-31): herdr is retired, Paseo is the only harness; do not run"
 ---
 
-Follow the mounted `herdr-tidy` skill exactly: run `tidy.py scan`, perform the
-precondition for each `handoff-then-close` pane (`tidy.py handoff`), close every
-`close` verdict (`tidy.py close`), and report every pane with the action taken or
-the one-line decision the operator has to make. Canonical copy:
-`~/src/djbclark-ade/skills/herdr-tidy/SKILL.md`.
+**Retired (2026-10-31, operator ruling).** herdr (bar the `herdr4paseo` and `paseo4herdr` bridges) is retired from djbclark-ade (installed, untouched) and Paseo is
+the only harness, so do not run `tidy.py`. Say so and stop; list and archive idle agents with the `paseo` skill if
+that is what is wanted. Record only: `~/src/djbclark-ade/skills/herdr-tidy/SKILL.md`.
 
-Arguments, if any (a pane id to limit the pass to, or `--dry-run`): $ARGUMENTS
+Arguments, if any: $ARGUMENTS

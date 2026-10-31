@@ -8,12 +8,21 @@ Copilot, Grok, Cursor, …).
 ## What this repo is
 
 The agentic development environment (ADE) for this machine: one operator,
-many agent TUIs, herdr/Orca as the terminal fabric, ACP for agent-to-agent
+many agent TUIs, **Paseo as the only harness**, ACP for agent-to-agent
 control; since 2026-10-08 also the git home of the orchestration and
 session-hygiene skills and tools. Two altitudes, verified by real runs on
 2026-08-23: the **micro graph** (Claude Code dynamic workflows, in-process
-fan-out) and the **macro graph** (an Orca task DAG across agent CLIs in their
-own worktrees). [README.md](README.md): architecture, how they compose, every skill.
+fan-out) and the **macro graph** (a task DAG across agent CLIs in their
+own worktrees; it was run through Orca, which is now retired, so read it as Paseo workspaces and subagents).
+[README.md](README.md): architecture, how they compose, every skill.
+
+> **Retired as of 2026-10-31 (operator ruling).** herdr (except the two edge-case bridges `herdr4paseo` and
+> `paseo4herdr`), Orca and BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) are retired **from djbclark-ade**, and
+> **Paseo is the only harness**: no djbclark-ade route, skill or doc sends anyone to them. They stay installed and configured on
+> djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my computer"). A doc, skill or script in this repo that still presents them as live is stale:
+> [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) is the plan of record. The docs say so
+> now; machine-side uninstall is NOT planned, and never touch their config. For screen control use the `paseo-screen`
+> skill (Paseo plugin), never Orca's `orca computer`.
 
 ## Read before acting
 
@@ -24,24 +33,26 @@ Each doc carries its own summary.
 | [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
 | [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow since 2026-10-11) |
-| [docs/orca-integration.md](docs/orca-integration.md) | macro-graph commands, live-run lessons; `orca skills get orchestration` is authoritative |
+| [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) | the plan of record (2026-10-30; update 2026-10-31): Paseo is the only harness; herdr (bar its two bridges), Orca and BB retired from djbclark-ade |
+| [docs/orca-integration.md](docs/orca-integration.md) | **RETIRED (2026-10-31)**: Orca macro-graph commands; kept as a record only |
 | [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20): assets, actors, entry points, ranked threats; read by Codex's security review |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard` and the claim registry (2026-10-24): commands, exit codes 0/2/77, claim lifecycle, refusal rules, override, integration status |
 | [docs/gates.md](docs/gates.md) | `config/gates.toml` and `bin/gate-profile` (2026-10-26): the Claude quota gates' numbers in git, floors, a temporary expiring `away` profile |
 | [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
 | [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
-| [docs/agent-sleep.md](docs/agent-sleep.md) | idle-agent sleep; run `bin/herdr-sleeper list` before calling a pane dead |
+| [docs/agent-sleep.md](docs/agent-sleep.md) | **RETIRED (2026-10-31) with herdr**: idle-agent sleep; a record only |
 | [docs/helm.md](docs/helm.md) | `/helm` ([skills/helm/](skills/helm/)): answer every waiting session from one window |
-| [docs/herdr-tidy.md](docs/herdr-tidy.md) | `/herdr-tidy`: close idle panes without losing anything |
+| [docs/herdr-tidy.md](docs/herdr-tidy.md) | **RETIRED (2026-10-31)**: `/herdr-tidy`, closing idle herdr panes; a record only |
 | [docs/skillopt-sleep.md](docs/skillopt-sleep.md) | nightly skill-edit cycle, `bin/skillopt-night` |
 | [docs/failover.md](docs/failover.md) | `bin/failover.py`: reuse it, never hand-roll a fallback |
 | [docs/upstream-issues.md](docs/upstream-issues.md) | unfiled bug drafts for third-party projects |
 | [docs/mcp-servers.md](docs/mcp-servers.md) | MCP server roster (`claude mcp list`) |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/](skills/), [docs/skills.md](docs/skills.md) | canonical copy of every hand-written skill: **edit and add skills here**, never via a TUI path; wrappers in [claude/commands/](claude/commands/) |
-| [skills/autorename/workspace-layout.md](skills/autorename/workspace-layout.md) | naming: -pw/-pt Paseo, -t/-p herdr; tab use |
+| [skills/autorename/workspace-layout.md](skills/autorename/workspace-layout.md) | naming: -pw/-pt Paseo; tab use (the herdr -t/-p scheme is retired, 2026-10-31) |
 | [skills/paseo-handoff/](skills/paseo-handoff/SKILL.md) | tab lifecycle (2026-10-30): verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
+| [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
 | [tools/acp-run/](tools/acp-run/README.md) | the ACP client every launcher uses (`~/.local/bin/acp-run`) |
 | [bin/fleet-watch](bin/fleet-watch) | launchd fleet change notices to Hermes |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere |
@@ -49,7 +60,7 @@ Each doc carries its own summary.
 ## Standing orders (operator-issued; they bind every agent here)
 
 1. **Continuous operation — never stop work because context is large.**
-   Externalize heavy work (subagents, background workflows, Orca workers),
+   Externalize heavy work (subagents, background workflows, Paseo agents),
    keep state on disk, let compaction bridge context windows. A handoff
    document is written *without stopping*, for work where the conversation
    itself is the state.
@@ -122,9 +133,14 @@ Each doc carries its own summary.
 
 ## Machine context
 
+- **Paseo is the only harness (2026-10-31).** herdr (except `herdr4paseo` and `paseo4herdr`), Orca and BB are
+  retired from djbclark-ade by ruling (the tools stay installed and configured on the machine, untouched); the Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration`
+  and the `computer-use` stub were removed from the machine the same day. Do not start Orca, open a herdr pane
+  or reach for BB from here; see `docs/paseo-only-rearchitecture.md`. Many docs and tools below this level still describe
+  them as live until the plan's D7 sweep.
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
-  `bin/route_agent.py` discovers agents from it plus installed headless TUIs;
-  Orca's roster is a GUI list only (docs/model-routing.md).
+  `bin/route_agent.py` discovers agents from it plus installed headless TUIs
+  (docs/model-routing.md).
 - Ops-suite conventions live in `~/CLAUDE.md` and site-private and govern
   `~/ops`. This repo is ordinary: commit to master, push to
   `djbclark/djbclark-ade`.
