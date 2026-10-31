@@ -146,6 +146,13 @@ def run_check(argv: list[str], cwd: Path) -> tuple[bool, str]:
     return done.returncode == 0, f"exit {done.returncode}" + (": " + " / ".join(tail) if tail else "")
 
 
+def atomic_write(path: Path, text: str) -> None:
+    """Temp file beside the target, then os.replace: a killed duel never leaves half a transcript."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def parse_verdict(text: str) -> str | None:
     for line in reversed(text.splitlines()):
         line = line.strip().strip("`*_ ").upper()
@@ -230,7 +237,7 @@ def run_code_mode(a, text: str, src: Path, out: Path) -> int:
                  "none: the two sides never edited the same path (that is evidence about the task, not about the agents)\n"))
     if verdict:
         lines.append(f"\n## judge\n\n{said}\n")
-    (out / "transcript.md").write_text("\n".join(lines) + "\n")
+    atomic_write(out / "transcript.md", "\n".join(lines) + "\n")
     print(f"ade-duel: code duel -> {out / 'transcript.md'}")
     print(f"ade-duel: WINNER {winner} ({reason})")
     if winner == "none":
@@ -324,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         parts.append(f"- verdict: **{verdict}**")
     for who, rnd, said in turns:
         parts.append(f"\n## {who} — round {rnd}\n\n{said}")
-    transcript.write_text("\n".join(parts) + "\n")
+    atomic_write(transcript, "\n".join(parts) + "\n")
     print(f"ade-duel: {len(turns)} turns -> {transcript}")
     if a.judge:
         if verdict in (None, "?"):

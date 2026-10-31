@@ -213,3 +213,15 @@ def test_insults_off_is_the_polite_committee(tmp_path, echo_runner, artifact):
             "--out", tmp_path / "out")
     assert r.returncode == 0, r.stderr
     assert "TRASH TALK" not in (tmp_path / "out" / "transcript.md").read_text()
+
+
+def test_failed_run_does_not_truncate_an_existing_transcript(tmp_path, runner, artifact):
+    """Atomic write: a duel that dies mid-way must leave the previous transcript intact, not half-written."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "transcript.md").write_text("previous run\n")
+    r = run(None, artifact, "--runner", runner, "--rounds", 1, "--out", out, "--force",
+            env={"FAKE_MODE": "silent"})
+    assert r.returncode == 3
+    assert (out / "transcript.md").read_text() == "previous run\n"
+    assert not list(out.glob(".*.tmp")), "a temp file was left behind"
