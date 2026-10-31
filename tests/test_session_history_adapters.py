@@ -102,7 +102,7 @@ class AdapterTests(unittest.TestCase):
                 {"type": "title", "title": "Quokka migration plan"}, {"type": "session", "id": "t1", "cwd": "/s"},
                 {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "unrelated words only"}]}}])
             env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
-            env.update(HOME=tmp, SESSION_INDEX_DIR=str(Path(tmp) / "idx"))
+            env.update(PATH="/usr/bin:/bin", HOME=tmp, SESSION_INDEX_DIR=str(Path(tmp) / "idx"))
             r = subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), "--json", "--", "quokka", "migration"],
                                env=env, capture_output=True, text=True, check=False)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -145,7 +145,7 @@ class StatusTests(unittest.TestCase):
                 {"type": "session", "id": "s1", "cwd": "/s"},
                 {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "findable zebra"}]}}])
             env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
-            env.update(HOME=tmp, SESSION_INDEX_DIR=str(home / "idx"))
+            env.update(PATH="/usr/bin:/bin", HOME=tmp, SESSION_INDEX_DIR=str(home / "idx"))
             run = lambda *args: subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), *args],  # noqa: E731
                                                env=env, capture_output=True, text=True, check=False)
             self.assertEqual(run("--status").returncode, 2)  # no index yet, and none created
@@ -173,7 +173,7 @@ class StatusTests(unittest.TestCase):
                 {"type": "session", "id": "x", "cwd": "/s"},
                 {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "hostile giraffe"}]}}])
             env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
-            env.update(HOME=tmp, SESSION_INDEX_DIR=str(home / "idx"))
+            env.update(PATH="/usr/bin:/bin", HOME=tmp, SESSION_INDEX_DIR=str(home / "idx"))
             r = subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), "--json", "giraffe"],
                                env=env, capture_output=True, text=True, check=False)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -186,7 +186,7 @@ class HardeningTests(unittest.TestCase):
     @staticmethod
     def _env(tmp: str, idx: str) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
-        env.update(HOME=tmp, SESSION_INDEX_DIR=idx)
+        env.update(PATH="/usr/bin:/bin", HOME=tmp, SESSION_INDEX_DIR=idx)
         return env
 
     def _run(self, tmp: str, idx: str, *args: str, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -242,6 +242,41 @@ class LiveLabelTests(unittest.TestCase):
             exact, cwds = sh.fleet_running({"omp", "codex", "hermes"})
         self.assertEqual(exact, {("omp", "abc-1"), ("hermes", "20261029-1"), ("hermes", "cron_17af0eeb3949_20260813_075144")})
         self.assertEqual(cwds, {("omp", "/s"), ("codex", "/c"), ("hermes", "/")})  # closed rows are not running
+
+    def test_an_exited_launch_row_is_not_running(self) -> None:
+        spec = importlib.util.spec_from_file_location("t_sh3", SF / "session-history.py")
+        sh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sh)
+        rows = [{"agent": "omp", "status": "idle", "sid": None, "cwd": "/gone", "finished": "done"},
+                {"agent": "omp", "status": "idle", "sid": None, "cwd": "/gone2", "launch": {"result": "ok"}},
+                {"agent": "omp", "status": "idle", "sid": None, "cwd": "/live", "launch": {"result": None}}]
+        with mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: rows)}):
+            _, cwds = sh.fleet_running({"omp"})
+        self.assertEqual(cwds, {("omp", "/live")})
+
+    def test_fleet_scan_runs_only_when_a_printed_hit_needs_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            write_jsonl(home / ".omp/agent/sessions/-s/2026-10-31T00-00-00-000Z_s1.jsonl", [
+                {"type": "session", "id": "s1", "cwd": "/s"},
+                {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "findable okapi"}]}}])
+            spec = importlib.util.spec_from_file_location("t_sh4", SF / "session-history.py")
+            with mock.patch.dict(os.environ, {"SESSION_INDEX_DIR": str(home / "idx"), "HOME": tmp}), \
+                    mock.patch.object(Path, "home", return_value=home):
+                sh = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(sh)
+                calls: list[set] = []
+                with mock.patch.object(sh, "fleet_running", lambda agents: calls.append(set(agents)) or (set(), set())):
+                    for kw, expect in (("zzzznothing", 0), ("okapi", 1)):
+                        with mock.patch.object(sys, "argv", ["session-history.py", "--json", "--", kw]):
+                            sh.main()
+                        self.assertEqual(len(calls), expect, kw)
+
+    def test_clean_strips_control_characters_and_empty_keywords_match_nothing(self) -> None:
+        spec = importlib.util.spec_from_file_location("t_sh5", SF / "session-history.py")
+        sh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sh)
+        self.assertEqual(sh.clean("a\x1b[31mb\nc\x7fd\x85e"), "a?[31mb?c?d?e")
 
     def test_crush_reads_text_parts_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

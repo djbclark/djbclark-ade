@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 
 AGENT = "crush"
-RESUME = "crush --session {sid}  # needs CRUSH_GLOBAL_DATA=~/.local/share/crush-acp"
+RESUME = "crush -D ~/.local/share/crush-acp --session {sid}"
 DB = Path.home() / ".local" / "share" / "crush-acp" / "crush.db"
 
 

@@ -221,12 +221,20 @@ def fleet_running(agents):
         for r in fleet.sessions():
             if r.get("agent") not in agents or not fleet_is_running(r.get("status")):
                 continue
+            # an exited ACP launch stays in launches.jsonl with status idle: fleet marks it finished
+            if r.get("finished") or r.get("ended") or (r.get("launch") or {}).get("result") is not None:
+                continue
             if r.get("sid"):
                 exact.add((r["agent"], native_id(r["sid"])))
             cwds.add((r["agent"], r.get("cwd") or ""))
     except Exception:
         pass
     return exact, cwds
+
+
+def clean(text) -> str:
+    """Printable text: C0, C1 and DEL control characters (escape sequences, newlines in an id) become '?'."""
+    return "".join("?" if ord(c) < 32 or 127 <= ord(c) < 160 else c for c in str(text or ""))
 
 
 def resume_hint(template: str, sid: str, cwd: str) -> str:
@@ -302,20 +310,24 @@ def _main() -> int:
     # titles are not in the FTS table (a Hermes or omp title may never appear in the message text): a session
     # whose title holds every keyword is a hit too, ranked after the text matches
     esc = lambda k: k.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace('"', "")  # noqa: E731
-    title_sql = " AND ".join("lower(title) LIKE ? ESCAPE '\\'" for _ in a.keywords)
-    for key, title in db.execute(f"SELECT key, title FROM files WHERE {title_sql} {agent_sql.replace('f.agent', 'agent')} LIMIT 100",
-                                 [f"%{esc(k.lower())}%" for k in a.keywords] + a.agent):
-        best.setdefault(key, (1e9, "title", title or "", 0))
+    tkw = [esc(k.lower()) for k in a.keywords if esc(k).strip()]  # an empty keyword would match every title
+    if tkw:
+        title_sql = " AND ".join("lower(title) LIKE ? ESCAPE '\\'" for _ in tkw)
+        for key, title in db.execute(f"SELECT key, title FROM files WHERE {title_sql} {agent_sql.replace('f.agent', 'agent')} LIMIT 100",
+                                     [f"%{k}%" for k in tkw] + a.agent):
+            best.setdefault(key, (1e9, "title", title or "", 0))
     live = {m.AGENT: (m.live() if hasattr(m, "live") else set()) for m in mods}
     labels = {m.AGENT: (getattr(m, "LIVE_LABEL", "LIVE"), getattr(m, "ENDED_LABEL", "ended")) for m in mods}
     info = {m.AGENT: (m.live_info() if hasattr(m, "live_info") else {}) for m in mods}
     resume = {m.AGENT: getattr(m, "RESUME", "") for m in mods}
     blind = {m.AGENT for m in mods if not hasattr(m, "live")}
-    fl_exact, fl_cwds = fleet_running(blind) if blind else (set(), set())
+    picked = [(hit, db.execute("SELECT agent, sid, cwd, title, mtime FROM files WHERE key=?", (hit[0],)).fetchone())
+              for hit in sorted(((k, *v) for k, v in best.items()), key=lambda h: h[1])[: a.limit]]
+    # the fleet scan (herdr, orca, paseo, ps: seconds when a service stalls) only when a printed hit needs it
+    need = blind & {row[0] for _, row in picked}
+    fl_exact, fl_cwds = fleet_running(need) if need else (set(), set())
     out = []
-    for key, (rank, role, snip, count) in sorted(best.items(), key=lambda kv: kv[1][0])[: a.limit]:
-        agent, sid, cwd, title, mtime = db.execute(
-            "SELECT agent, sid, cwd, title, mtime FROM files WHERE key=?", (key,)).fetchone()
+    for (key, rank, role, snip, count), (agent, sid, cwd, title, mtime) in picked:
         is_live = sid in live.get(agent, set()) or (agent, sid) in fl_exact
         likely = (not is_live and agent in blind and (agent, cwd) in fl_cwds and time.time() - mtime < 600)
         out.append({"agent": agent, "sessionId": sid, "live": is_live,
@@ -335,16 +347,16 @@ def _main() -> int:
         print(json.dumps(out, indent=1))
     else:
         for r in out:
-            print(f"{r['agent']}  {r['sessionId']}  {r['state']}  {r['lastActive']}  hits={r['hits']}  cwd={r['cwd']}")
-            print(f"    title: {r['title'] or '(untitled)'}")
+            print(f"{r['agent']}  {clean(r['sessionId'])}  {r['state']}  {r['lastActive']}  hits={r['hits']}  cwd={clean(r['cwd'])}")
+            print(f"    title: {clean(r['title']) or '(untitled)'}")
             if r.get("name"):
                 print(f"    send to: {r['name']}")
             if r.get("where"):
                 print(f"    where: {r['where']['where']} · {r['where']['cwd']}")
                 if r["where"]["focus"]:
                     print(f"    focus: {r['where']['focus']}")
-            print(f"    {r['role']}: {r['snippet']}")
-            if not r["live"] and r["resume"]:
+            print(f"    {r['role']}: {clean(r['snippet'])}")
+            if r["resume"] and (not r["live"] or r["agent"] in blind):  # fleet-derived LIVE is not authoritative
                 print(f"    resume: {r['resume']}")
     return 0 if out else 1
 
