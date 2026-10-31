@@ -11,6 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `session-history.py --status` (read-only index lag per agent), `--install`/`--uninstall` (a 10-minute launchd refresh of the history index, primary checkout only), `SESSION_INDEX_DIR`; history adapters for omp, grok and goose, so their 2,300 sessions are searchable (#191).
 - `docs/paseo-only-rearchitecture.md` (plan v1, 2026-10-30): the plan of record for djbclark's Paseo-only ruling of 2026-10-29 (retire `relay.py`, herdr-as-harness, Orca, `acp-run`/`acp-dispatch` in phases), refined by codex astra and Fable consults and djbclark's decisions on notifications, unattended runs, the second daemon (the existing vps-primary Paseo host), OpenCode plugins, the `docs/history/` directory, lead models, phase order and the two edge-case Herdr bridges (`paseo4herdr`, `herdr4paseo`); it adds a provider map, four plugins to build (`ade-jobs`, `ade-gate`, `ade-ack`, `ade-permit`) and a live acceptance gate per phase. Nothing is retired by this PR (#154).
 - Added opt-in `rumination-watch` absent-seat recovery under djbclark's 2026-10-30 option-3 ruling: `RW_AUTO_SEAT` stayed off by default, required an explicit provider, NARROWED his "including after a hard error" ruling to inspect-confirmed `gone` (never broken reads, existing seats or `card:*`), limited every start attempt per role/window whether confirmed or not, logged every invocation, and kept saved ids behind authoritative owners, still paged with the new id, left a `silent` hung seat unreplaced, and required the README field check proving a started seat reachable by relay before enabling (#160).
 - `bin/local-review PR` (2026-10-29) runs Codex's code review locally on the exact head of a PR (`codex review --base <base sha>` in a clean detached worktree, killed after `--timeout` seconds) and files `~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (counts by P0-P3, findings' titles; exit 0 clean, 1 findings, 2 usage, 3 failed, 4 a run for that head is alive); and `bin/pr-wait PR --local-codex` (implies `--no-codex`) reads that file instead of waiting on the GitHub bot, so `merge_ready` needs a `clean` result on this head and the blocker is `local-codex-missing`, `-findings`, `-failed` or `-unreadable`, after the bot's review hung on PRs 112 and 124 (openai/codex#55890); a PR by someone other than the repository owner or the authenticated gh user is refused unless `--allow-untrusted`; AGENTS.md "Code review" item 11 and the bigteam skill say how (#130).
@@ -221,6 +222,7 @@ agent what changed and what is new. Entries end with the pull request number.
 - `herdr-tidy`: Orca host mode (`--host orca`, `/orca-tidy`) (#2).
 
 ### Changed
+- `session-find.py --all` now searches ended sessions of every agent in the SQLite history index (it covered ~160 Claude sessions) and needs keywords; its history child is started with `--` before the keywords (#191).
 - djbclark-ade `master` is PR-only (2026-10-31, djbclark): GitHub branch protection, enforced for admins, refuses a direct push, force push or deletion; AGENTS.md "Machine context" says so. Also merged the unbuilt "model tiers as data" design as `docs/model-tiers-design.md`, queued to build after D1 (#188).
 
 - `AGENTS.md` standing order 11 (2026-10-30, djbclark): djbclark-ade is the lead's project; a change to code or configuration in another repository or in installed files outside a repository waits for the operator's yes (own installs, memory notes and upstream filing of an approved change excepted), and findings there are reported as proposals (#170).
@@ -306,6 +308,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- A Cursor session present under two project directories no longer re-indexes itself on every run; printed `resume:` hints quote the session id and directory (#191).
 - Fixed rumination-watch duplicate paid sends and starts, bound retained-ID reconciliation to each start attempt, preserved unresolved IDs across owner changes and absent IDs for fresh diagnosis, and added operator notices, isolated watcher tests, and parsed canonical workspace SHAs. (#174)
 - Fixed Paseo self-slash clear and compact refusing unproved providers and directing them to successor handoffs (#179)
 - `failover.sweep_tmp_dirs()` (2026-10-30) removes stale `failover-*` scratch directories that killed runs leave in the temp dir: only real directories (never symlinks) named like `TemporaryDirectory(prefix="failover-")`, owned by the caller, whose own and children's mtimes are over a day old; errors never propagate (#176)
