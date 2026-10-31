@@ -56,6 +56,8 @@ The receiving agent has zero context. Include:
 
 ## Launch
 
+When using `bin/paseo-new-seat`, invoke the Python front door directly with `--title`, `--prompt`, `--provider`, `--model`, `--cwd` and `--workspace`. It has no `create` subcommand or `--auto-accept` option: auto-accept is enabled by default; only the internal `.mjs` helper takes those arguments. Read the front door usage before constructing its argv.
+
 Prepare the handoff in a dedicated workspace:
 
 1. Select the current workspace or call `create_workspace` with the requested isolation.
