@@ -44,7 +44,10 @@ def _read(path):
 
 def sessions():
     for path in ROOT.glob("*/*.jsonl"):
-        st = path.stat()
+        try:
+            st = path.stat()
+        except OSError:  # deleted mid-scan, or a broken link
+            continue
         sid = path.stem.split("_", 1)[-1]
         yield {"key": f"omp:{sid}", "sid": sid, "fp": f"{st.st_size}:{int(st.st_mtime)}", "mtime": st.st_mtime,
                "load": lambda p=path: _read(p)}

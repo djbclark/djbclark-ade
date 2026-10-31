@@ -1,4 +1,5 @@
 """goose adapter: ~/.local/share/goose/sessions/sessions.db (sessions + messages tables; added 2026-10-31)."""
+import calendar
 import json
 import sqlite3
 import time
@@ -25,7 +26,7 @@ def _text(content_json):
 
 def _epoch(v):
     try:
-        return time.mktime(time.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S")) - time.timezone  # CURRENT_TIMESTAMP is UTC
+        return calendar.timegm(time.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S"))  # CURRENT_TIMESTAMP is UTC
     except ValueError:
         return 0.0
 

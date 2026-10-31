@@ -119,7 +119,8 @@ class StatusTests(unittest.TestCase):
             write_jsonl(home / ".omp/agent/sessions/-s/2026-10-31T00-00-00-000Z_s1.jsonl", [
                 {"type": "session", "id": "s1", "cwd": "/s"},
                 {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "findable zebra"}]}}])
-            env = {**os.environ, "HOME": tmp, "SESSION_INDEX_DIR": str(home / "idx")}
+            env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+            env.update(HOME=tmp, SESSION_INDEX_DIR=str(home / "idx"))
             run = lambda *args: subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), *args],  # noqa: E731
                                                env=env, capture_output=True, text=True, check=False)
             self.assertEqual(run("--status").returncode, 2)  # no index yet, and none created
@@ -138,6 +139,45 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(run("--status").returncode, 1)  # one unindexed session
             self.assertEqual(run("--update-only").returncode, 0)
             self.assertEqual(run("--status").returncode, 0)
+            self.assertEqual((home / "idx/history.v2.sqlite").stat().st_mode & 0o777, 0o600)
+
+    def test_resume_hint_quotes_a_hostile_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            write_jsonl(home / ".omp/agent/sessions/-s/2026-10-31T00-00-00-000Z_x;touch pwned.jsonl", [
+                {"type": "session", "id": "x", "cwd": "/s"},
+                {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "hostile giraffe"}]}}])
+            env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+            env.update(HOME=tmp, SESSION_INDEX_DIR=str(home / "idx"))
+            r = subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), "--json", "giraffe"],
+                               env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)[0]["resume"], "omp --resume='x;touch pwned'")
+
+
+class SessionFindAllTests(unittest.TestCase):
+    def test_all_passes_keywords_after_a_double_dash(self) -> None:
+        """`session-find.py --all -- --rebuild` once reached session-history.py as its --rebuild option (index deleted)."""
+        spec = importlib.util.spec_from_file_location("t_session_find", SF / "session-find.py")
+        sf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sf)
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kw):  # noqa: ANN001
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 1, "[]", "")
+
+        fleet = sys.modules.get("fleet")
+        with mock.patch.object(sf, "live_sessions", return_value=[]), mock.patch.object(sf.subprocess, "run", fake_run), \
+                mock.patch.object(sys, "argv", ["session-find.py", "--all", "--", "--rebuild"]), \
+                mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: [])} if fleet is None else {}):
+            if fleet is not None:
+                with mock.patch.object(fleet, "sessions", return_value=[]):
+                    sf.main()
+            else:
+                sf.main()
+        (argv,) = calls
+        self.assertEqual(argv[-2:], ["--", "--rebuild"])
 
 
 if __name__ == "__main__":

@@ -67,7 +67,10 @@ def _read(sdir):
 def sessions():
     for chat in ROOT.glob("*/*/chat_history.jsonl"):
         sdir = chat.parent
-        st = chat.stat()
+        try:
+            st = chat.stat()
+        except OSError:
+            continue
         try:
             sst = (sdir / "summary.json").stat()
             sfp, mtime = f"{sst.st_size}:{int(sst.st_mtime)}", max(st.st_mtime, sst.st_mtime)

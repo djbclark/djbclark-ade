@@ -217,16 +217,22 @@ def main() -> int:
         live_ids = {r["sessionId"] for r in rows}
         try:
             r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
-                                "--limit", "20", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
+                                "--limit", "20", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
+            # the `--` matters: without it a keyword such as --rebuild is an option of the child (it deletes the index)
+            if r.returncode not in (0, 1):
+                raise ValueError(f"session-history.py exit {r.returncode}: {r.stderr.strip()[-300:]}")
             found = json.loads(r.stdout) if r.stdout.strip() else []
+            if not isinstance(found, list):
+                raise ValueError("unexpected JSON from session-history.py")
         except (subprocess.SubprocessError, ValueError) as e:
             print(f"history search failed: {e}", file=sys.stderr)
             found = []
-        for i, h in enumerate(f for f in found if f["sessionId"] not in live_ids and not f["live"]):
-            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h["cwd"] or None,
-                         "titles": [h["title"]] if h["title"] else [], "score": max(1, 40 - i), "match": h["snippet"],
-                         "live": False, "self": False, "agent": h["agent"], "finished": "",
-                         "where": None, "resume": h["resume"]})
+        found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
+        for i, h in enumerate(f for f in found if f["sessionId"] not in live_ids and not f.get("live")):
+            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,
+                         "titles": [h["title"]] if h.get("title") else [], "score": max(1, 40 - i), "match": h.get("snippet", ""),
+                         "live": False, "self": False, "agent": h.get("agent", ""), "finished": "",
+                         "where": None, "resume": h.get("resume", "")})
 
     if a.list:
         hits = rows

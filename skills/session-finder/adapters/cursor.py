@@ -82,15 +82,19 @@ def sessions():
     # store.db or transcript under both project dirs (2026-10-31: e7ba3d69 under aiuse and one-offs),
     # and yielding both made them overwrite each other, reindexing the session on every run.
     best = {}  # sid -> (mtime, entry)
-    def offer(sid, st, load):
+    def offer(sid, path, load):
+        try:
+            st = path.stat()
+        except OSError:
+            return
         if sid not in best or st.st_mtime > best[sid][0]:
             best[sid] = (st.st_mtime, {"key": f"cursor:{sid}", "sid": sid, "fp": f"{st.st_size}:{int(st.st_mtime)}",
                                        "mtime": st.st_mtime, "load": load})
     for store in (ROOT / "chats").glob("*/*/store.db"):
-        offer(store.parent.name, store.stat(), _load_chat(store, store.parent / "meta.json"))
+        offer(store.parent.name, store, _load_chat(store, store.parent / "meta.json"))
     chat_ids = set(best)
     for path in (ROOT / "projects").glob("*/agent-transcripts/*/*.jsonl"):
         if path.stem not in chat_ids:
-            offer(path.stem, path.stat(), _load_transcript(path, path.parent.parent.parent.name))
+            offer(path.stem, path, _load_transcript(path, path.parent.parent.parent.name))
     for _, entry in best.values():
         yield entry

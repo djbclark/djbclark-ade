@@ -6,6 +6,9 @@
     session-history.py --limit 20 ccc       # more sessions
     session-history.py --json ccc           # machine-readable
     session-history.py --update-only        # just bring the index up to date
+    session-history.py --status             # read-only: index age, sessions not yet indexed per agent
+    session-history.py --install|--uninstall  # the 10-minute launchd refresh (primary checkout only)
+    SESSION_INDEX_DIR=DIR ...               # use another index directory (tests)
     session-history.py --rebuild            # drop and rebuild (slow)
     session-history.py --agents             # which adapters loaded, session counts
     session-history.py --check              # prove the FTS5 index works (integrity + a MATCH)
@@ -19,6 +22,7 @@ Exit 0 = hits, 1 = none, 2 = cannot run.
 """
 import argparse
 import os
+import shlex
 import subprocess
 import importlib.util
 import json
@@ -26,6 +30,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 HERE = Path(__file__).resolve().parent
 INDEX_DIR = Path(os.environ.get("SESSION_INDEX_DIR") or Path.home() / ".local/state/session-index")
@@ -101,7 +106,7 @@ def status() -> int:
     if not DB.exists():
         print("no index yet: run session-history.py --update-only", file=sys.stderr)
         return 2
-    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=30)
+    db = sqlite3.connect(DB.as_uri() + "?mode=ro", uri=True, timeout=30)
     now = time.time()
     try:
         last = db.execute("SELECT v FROM meta WHERE k='updated'").fetchone()
@@ -139,14 +144,23 @@ def install(remove: bool) -> int:
     """Copy launchd/<PLIST> to ~/Library/LaunchAgents and (un)load it."""
     dest = Path.home() / "Library/LaunchAgents" / PLIST
     domain = f"gui/{os.getuid()}"
-    subprocess.run(["launchctl", "bootout", domain, str(dest)], check=False, capture_output=True)
     if remove:
+        subprocess.run(["launchctl", "bootout", domain, str(dest)], check=False, capture_output=True)
         dest.unlink(missing_ok=True)
         print(f"removed {dest}")
         return 0
-    repo = HERE.parent.parent
+    # The job must run the primary checkout, never a linked worktree (unreviewed branch state that
+    # `git worktree remove` later deletes): resolve it from the repository's common git dir.
+    g = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                       check=False, capture_output=True, text=True)
+    repo = Path(g.stdout.strip()).parent if g.returncode == 0 and g.stdout.strip() else HERE.parent.parent
+    if not ((repo / "launchd" / PLIST).is_file() and (repo / "skills/session-finder/session-history.py").is_file()):
+        print(f"{repo} (the primary checkout) lacks this job or script: merge this change and fast-forward it first", file=sys.stderr)
+        return 2
+    INDEX_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)  # launchd's stdout/stderr files live here
+    subprocess.run(["launchctl", "bootout", domain, str(dest)], check=False, capture_output=True)  # reinstall = replace
     tmp = dest.with_suffix(".tmp")
-    tmp.write_text((repo / "launchd" / PLIST).read_text().replace("__REPO__", str(repo)))
+    tmp.write_text((repo / "launchd" / PLIST).read_text().replace("__REPO__", escape(str(repo))))
     os.replace(tmp, dest)
     r = subprocess.run(["launchctl", "bootstrap", domain, str(dest)], check=False, capture_output=True, text=True)
     print(f"installed {dest}; bootstrap rc={r.returncode} {r.stderr.strip()}")
@@ -198,6 +212,7 @@ def main() -> int:
     if a.rebuild and DB.exists():
         DB.unlink()
     db = sqlite3.connect(DB, timeout=120)
+    os.chmod(DB, 0o600)  # prompt text: private even if SESSION_INDEX_DIR points into a shared directory
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
     mods = load_adapters(set(a.agent))
@@ -246,7 +261,7 @@ def main() -> int:
                     "state": labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,
                     "title": title, "lastActive": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
                     "hits": count, "role": role, "snippet": " ".join(snip.split()),
-                    "resume": resume.get(agent, "").format(sid=sid, cwd=cwd) if resume.get(agent) else ""})
+                    "resume": resume.get(agent, "").format(sid=shlex.quote(sid), cwd=shlex.quote(cwd or "")) if resume.get(agent) else ""})
     if info:
         sys.path.insert(0, str(HERE))  # python -I drops the script dir
         import where as _where

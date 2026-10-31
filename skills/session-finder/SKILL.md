@@ -44,10 +44,11 @@ here (`/session-finder-all` loads this skill for it).
    FTS5; first run indexes everything, 1–2 minutes, start it with
    `run_in_background`). **It searches live and ended sessions together: there is no
    active-only mode** (running-only is step 1). Ended hits print a `resume:` command.
-   A launchd job (`session-history.py --install`, every 10 min, 2026-10-31) keeps the
+   A launchd job (`session-history.py --install`, run from the primary checkout; `--uninstall` removes it; every 10 min, 2026-10-31) keeps the
    index fresh, and every search also brings it up to date first, so a search is never
    stale, only slower when the job is off. `--status` is the read-only lag report: last
-   full update, and per agent the sessions on disk not yet indexed or changed since. `--agent hermes`
+   full update, and per agent the sessions on disk not yet indexed or changed since.
+   `SESSION_INDEX_DIR=DIR` points both scripts at another index directory (tests). `--agent hermes`
    narrows to one agent. The same index holds every Basic Memory project's
    `todo/` notes (the `todo` skill's items): a hit prints as agent `todo`,
    `OPEN`/`closed`, `title: [open] main: <title>` and the note path; `--agent todo`
