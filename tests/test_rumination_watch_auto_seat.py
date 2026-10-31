@@ -89,7 +89,7 @@ def load(monkeypatch, tmp_path, switch="1"):
             assert timeout <= 20
             return rw.enum_rc, rw.enum_body, "listing failure" if rw.enum_rc else ""
         # The successful-start stamp must not exist during either the start OR confirmation call.
-        assert rw.load_state().get("seated", {}).get(rw.ROLE) != NOW
+        assert rw.load_state().get("seated", {}).get(rw.ROLE) != rw.time.time()
         if is_start(argv):
             assert rw.load_state()["told"][f"auto-seat attempt:{rw.ROLE}"] == rw.time.time()
             body = rw.run_body if rw.run_body is not None else (json.dumps({"agentId": NEW}) if rw.run_rc == 0 else "")
@@ -1269,3 +1269,87 @@ def test_unresolved_notice_retries_failure_then_sends_once(monkeypatch, tmp_path
     assert "operator reconciliation" in notices[0]
     assert "auto-seat unresolved:test-role" in notices[0]
     assert starts(rw) == 1
+
+
+@pytest.mark.parametrize("reply,rc", [
+    ({"Id": NEW, "Status": "closed"}, 0),
+    ({"error": {"code": "AGENT_NOT_FOUND"}}, 1),
+])
+def test_stale_candidate_cannot_reconcile_later_no_id_start(monkeypatch, tmp_path, reply, rc):
+    # Adversary round-2 S2: A confirmed, A closed, B started with lost id, then inspect A.
+    rw = load(monkeypatch, tmp_path)
+    moment = [NOW]
+    monkeypatch.setattr(rw.time, "time", lambda: moment[0])
+    run_pass(rw)
+    assert starts(rw) == 1
+    assert rw.auto_seat_candidate(rw.load_state()) == NEW
+    moment[0] += rw.AUTO_SEAT_S + 1
+    rw.run_rc = 124
+    run_pass(rw)
+    assert starts(rw) == 2
+    unresolved_key = f"auto-seat unresolved:{rw.ROLE}"
+    attempt = rw.load_state()["told"][unresolved_key]
+    assert rw.load_state()["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] != attempt
+    original = rw.run_split
+    inspected = []
+    def probe(argv, timeout=20):
+        if argv[:3] == ["paseo", "agent", "inspect"]:
+            inspected.append(argv)
+            return rc, json.dumps(reply), ""
+        return original(argv, timeout)
+    monkeypatch.setattr(rw, "run_split", probe)
+    run_pass(rw)
+    assert rw.load_state()["told"][unresolved_key] == attempt
+    moment[0] += rw.AUTO_SEAT_S + 1
+    run_pass(rw)
+    assert rw.load_state()["told"][unresolved_key] == attempt
+    assert starts(rw) == 2
+    assert inspected == [], "stale A is not identity evidence for B"
+    assert len(rw.unresolved_pages) == 1
+
+
+@pytest.mark.parametrize("damage", ["missing-attempt", "wrong-attempt", "missing-candidate",
+                                     "old-candidate", "ambiguous-candidates"])
+def test_unbound_attempt_stays_unresolved_and_notifies_once(monkeypatch, tmp_path, damage):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    state = rw.load_state()
+    if damage == "missing-attempt":
+        state["told"].pop(f"auto-seat attempt:{rw.ROLE}")
+    elif damage == "wrong-attempt":
+        state["told"][f"auto-seat attempt:{rw.ROLE}"] = NOW - 1
+    elif damage == "missing-candidate":
+        state["told"].pop(f"auto-seat candidate:{rw.ROLE}:{NEW}")
+    elif damage == "old-candidate":
+        state["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] = NOW - 1
+    else:
+        state["told"][f"auto-seat candidate:{rw.ROLE}:another"] = NOW
+    rw.save_state(state)
+    rw.confirm = True
+    run_pass(rw)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    assert starts(rw) == 1
+    assert len(rw.unresolved_pages) == 1
+
+
+def test_returned_id_notice_waits_for_failed_reconciliation(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    assert rw.unresolved_pages == []
+    run_pass(rw)
+    assert len(rw.unresolved_pages) == 1
+    run_pass(rw)
+    assert len(rw.unresolved_pages) == 1
+
+
+def test_returned_id_successful_reconciliation_needs_no_manual_notice(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    rw.confirm = True
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert rw.unresolved_pages == []

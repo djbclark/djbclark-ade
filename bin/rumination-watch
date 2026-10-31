@@ -75,7 +75,8 @@ decision table in `auto_seat`. A card, a live-but-unsendable seat, an `error` an
 do not auto-start and still page the human when no owner resolves. A `silent` hung seat is NOT
 replaced, so the individual can stay dark until the human acts.
 RW_AUTO_SEAT_S (default 3600 s): at most one attempt per role per window, confirmed or not. A failed
-start with no id stays blocked until operator reconciliation; returned ids are directly inspected.
+start with no id stays blocked until operator reconciliation; only an id bound to this attempt
+by matching candidate/attempt/unresolved timestamps can be directly inspected for reconciliation.
 Every invocation outcome is logged; only pre-invocation refusals are suppressed once per window.
 The prompt names the absolute Tier 1 file, never step text. The darkness page still goes out and
 names any automatically started id. The start runs as `env -u PASEO_AGENT_ID` (a caller's
@@ -1195,6 +1196,24 @@ def auto_seat_candidate(state: dict) -> str:
     return max(candidates, default=(0, ""))[1]
 
 
+def unresolved_candidate(state: dict) -> str:
+    """Only an id recorded by this unresolved attempt can reconcile it.
+
+    Candidate ids remain as owner fallbacks after confirmation. Their presence alone says
+    nothing about a later start that lost its response. All three stamps must identify the
+    same attempt; missing, malformed or ambiguous evidence stays blocked for the operator.
+    """
+    told = state.get("told", {})
+    stamp = told.get(f"auto-seat unresolved:{ROLE}")
+    attempt = told.get(f"auto-seat attempt:{ROLE}")
+    if not _is_num(stamp) or not _is_num(attempt) or attempt != stamp:
+        return ""
+    prefix = f"auto-seat candidate:{ROLE}:"
+    bound = [key[len(prefix):] for key, at in told.items()
+             if key.startswith(prefix) and key[len(prefix):] and _is_num(at) and at == stamp]
+    return bound[0] if len(bound) == 1 else ""
+
+
 def open_desktop_tab(agent_id: str) -> str:
     """Give a started seat a Paseo Desktop tab; return "" on success, else a reason to LOG.
 
@@ -1300,7 +1319,7 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None, expe
     told = state.setdefault("told", {})
     unresolved_key = f"auto-seat unresolved:{ROLE}"
     if unresolved_key in told:
-        candidate = auto_seat_candidate(state)
+        candidate = unresolved_candidate(state)
         if candidate:
             rc, out, err = run_split(
                 ["paseo", "agent", "inspect", "--json", "--", candidate], timeout=20)
@@ -1320,6 +1339,8 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None, expe
                 log(f"auto-seat: reconciled retained id {candidate}")
                 # A fresh pass diagnoses the role; reconciliation alone never licenses a start.
                 return ""
+            if note is not None:
+                note["reconciliation_failed"] = True
         return refuse("unresolved start", "auto-seat: unresolved start not reconciled (direct identity proof or operator reconciliation required)")
 
     if word != "gone":
@@ -1758,11 +1779,13 @@ def _pass(a: argparse.Namespace) -> int:
         started = auto_seat(word, state, now, tab_note, expected_owner=ident)
         unresolved = state.get("told", {}).get(f"auto-seat unresolved:{ROLE}")
         notice_key = f"auto-seat unresolved notice:{ROLE}"
-        if unresolved is not None and state.get("told", {}).get(notice_key) != unresolved:
+        needs_notice = not unresolved_candidate(state) or tab_note.get("reconciliation_failed")
+        if (unresolved is not None and needs_notice
+                and state.get("told", {}).get(notice_key) != unresolved):
             # The durable unresolved marker carries this notice until a send succeeds.
             # A failed page must not buy a cooldown or silently disable recovery.
             message = (f"Auto-seat for {ROLE!r} is blocked by an unresolved start. "
-                       "A retained id will be reconciled by direct inspect. Without an id, "
+                       "Only an id bound to this attempt can reconcile by direct inspect. Without that proof, "
                        "operator reconciliation is required: verify the attempt in Paseo, then "
                        f"remove told['auto-seat unresolved:{ROLE}'] from {STATE} while the watcher "
                        "is stopped. Do not clear it solely from a title or empty listing.")
@@ -2099,8 +2122,10 @@ def main(argv: list[str] | None = None) -> int:
             "gone diagnosis starts a seat; error/unreadable reads, silent/working/idle seats and "
             "card:* NEVER do. RW_AUTO_SEAT_PROVIDER must be set; no model/thinking flags are passed. "
             "RW_AUTO_SEAT_S (default 3600 s) allows at most one attempt per role per window, confirmed "
-            "or not; retained ids reconcile by direct inspect (matching Id or AGENT_NOT_FOUND). "
-            "No-id starts remain blocked and page once, retrying failed notices. After verifying "
+            "or not; only an id bound to the unresolved attempt by matching candidate/attempt/start "
+            "timestamps reconciles by direct inspect (matching Id or AGENT_NOT_FOUND). "
+            "Unbound/no-id starts remain blocked and page once, retrying failed notices; bound ids "
+            "page only after a reconciliation read fails. After verifying "
             "the attempt in Paseo, stop the watcher and remove told[auto-seat unresolved:ROLE] "
             "from its state JSON to reconcile manually; titles/empty listings are not proof. Refusal logs are limited to "
             "one per cooldown. The start runs `env -u PASEO_AGENT_ID` and, once confirmed, opens "
