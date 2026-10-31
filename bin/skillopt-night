@@ -824,6 +824,7 @@ def cmd_night(args: argparse.Namespace) -> int:
                     break
         finally:
             failover.sweep_logs()
+            failover.sweep_tmp_dirs()
     for r in rows:
         print(f"{r['source']:12} {r.get('status', 'ok'):15} entry={r.get('entry', '-')} "
               f"perm={r.get('perm') or ','.join(sorted(set((r.get('perms') or {}).values()))) or '-'} "

@@ -67,6 +67,14 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    gets a minimal env (`BASE_ENV_KEYS` plus the entry's allow-listed `env`) and
    runs in its own process group, killed whole on timeout. acp-run logs go to
    `~/.local/state/failover/acp-logs/` (0700), trimmed by `sweep_logs()`.
+   Each turn's scratch dir is `tempfile.TemporaryDirectory(prefix="failover-")`; a killed
+   run leaves it behind, so `sweep_tmp_dirs(max_age_days=1)` (2026-10-30) removes the
+   strays from `tempfile.gettempdir()`: only a real directory (an `lstat` check, so a symlink
+   is neither followed nor removed) named `failover-` plus 8 of `[a-z0-9_]`, owned by this
+   user, whose own mtime and every direct child's are older than the cutoff (a live run's
+   dir is fresh or still being written to). Nested symlinks are unlinked, never followed;
+   every error is swallowed and the return is the count removed. Callers invoke it beside
+   `sweep_logs()`.
 
    **5a. Token counts (2026-10-13).** `ask()` returns `Answer(text, usage)`.
    `usage` is what the backend itself reported for that one prompt, never an
