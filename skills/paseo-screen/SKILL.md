@@ -58,8 +58,8 @@ sending any input. Pass `since: <hash>` when polling.
 
 Verified 2026-10-30: the viewer showed the live host desktop at about 10 fps, and a Cmd+K chord sent
 through it reached the host Paseo window and opened the Command Center. Cmd+Shift+U was also sent, but
-that tests the next-question plugin, whose shortcut does not work in djbclark's desktop app (a known bug,
-under diagnosis), so it proves nothing about input delivery.
+that tests the next-question plugin, whose first default shortcut did not work in djbclark's desktop app
+(cause not found; its default is now Cmd+Shift+.), so it proves nothing about input delivery.
 **Not verified:** mouse clicks, drags, the clipboard (`paste`, `screen.clipboard`), and multiple displays.
 Test those on a throwaway target before depending on them, and say so in a report that relies on them.
 
