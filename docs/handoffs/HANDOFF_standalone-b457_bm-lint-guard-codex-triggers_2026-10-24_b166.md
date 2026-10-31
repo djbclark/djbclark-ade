@@ -4,7 +4,7 @@ handoff_id: b166
 parent_handoff_ids: [70ab]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 61672be
@@ -61,7 +61,7 @@ Tests: bm-lint 55 pass at 8484b52 (via `bg`); guard 560 pass at 0845004; nothing
 3. djbclark: PR 55's Codex P2 plus the symlink-directory gap are fixed now (8484b52, then r6).
 4. djbclark: "Make pr-wait request the review itself": `bin/pr-wait` posts `@codex review` once when the head
    has no Codex review and none was requested since the push; after ~10 min of "Running" it re-requests once,
-   then reports openai/codex#55890. Small PR in djbclark-ade, own adversary round, CHANGELOG line.
+   then reports openai/codex#55890. Small PR in kool-ade, own adversary round, CHANGELOG line.
 5. Rejected: re-reading the guard adversary result from the Codex stub, or merging the guard on the strength of
    the provisional BLOCK-repair.
 6. Answer given to djbclark's late question ("is Codex refusing PRs at all, or just security-sensitive ones, or

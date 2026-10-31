@@ -285,7 +285,7 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    question). `--no-interactive` is the one-turn-and-exit form, and a `reply`
    to an exited session starts a new turn with the brief and last reply as
    context. **Headless turns go through `acp-dispatch`** (2026-10-08; `bin/` in
-   djbclark-ade): `--model` is mandatory, the shared delivery footer
+   kool-ade): `--model` is mandatory, the shared delivery footer
    (`docs/dispatch-footer.md`) is appended to a copy of the brief, and the turn
    leaves `launch-<id>/<id>-report.md`, its `.done` marker and
    `launch-<id>/jobs/<id>.json`; the launch's recorded exit is acp-dispatch's

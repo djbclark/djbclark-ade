@@ -55,7 +55,7 @@ Currently configured:
 ## ACP: the target route to every TUI (2026-10-11)
 
 Every orchestration skill here must reach several TUIs, through ACP wherever
-the agent has an ACP mode (`docs/orchestration-practices.md`, djbclark-ade).
+the agent has an ACP mode (`docs/orchestration-practices.md`, kool-ade).
 Ralph reaches its vendors through per-CLI plugins instead, which is why it
 inherited `agy --print` (`~/.config/ralph-tui/plugins/agents/antigravity.ts`,
 line ~123), the route that trips agy's hidden burst limit.
@@ -84,7 +84,7 @@ line ~123), the route that trips agy's hidden burst limit.
 4. A stock (non-fork) ralph-tui has no `acp` plugin: install from the fork's
    integration branch, or route multi-vendor work through `bigteam`.
 5. **Fork-only on purpose** (operator, 2026-10-11): it depends on `acp-run`,
-   which exists only in djbclark-ade, so it is not offered upstream. An
+   which exists only in kool-ade, so it is not offered upstream. An
    upstream PR would need a plugin that speaks ACP itself.
 
 ## The one rule everything else follows from

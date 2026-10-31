@@ -79,7 +79,7 @@ matched (upstream chmln/sd PR #347, `--must-match`, is still open), so a
 mistyped or multi-line FIND silently changes nothing; it lost an edit on
 2026-10-09. `srgn` replaces it in §1.2, §1.3 and §8: it matches across lines
 as typed and with `--fail-none` exits 1 when nothing matched. The file also
-moved from `site-djbclark/research/apply-dev-toolchain/` to `djbclark-ade/docs/`.
+moved from `site-djbclark/research/apply-dev-toolchain/` to `kool-ade/docs/`.
 
 What changed in 5.2 (2026-10-11): a new "Agent web access" table in §1.3
 adds web search and fetch for agents with a failover ladder: the keyless Exa
@@ -94,11 +94,11 @@ and report, never continue without the source.
 What changed in 5.3 (2026-10-11): a **search policy** paragraph in §1.3
 (default `rg`, with the opt-in indexed `ig` as a first line for one known
 literal, and when to fall back), and `setup-modern-cli` joins the
-`djbclark-ade` skills table in §0.6. `HOMEBREW_NO_AUTO_UPDATE=1` is kept on the
+`kool-ade` skills table in §0.6. `HOMEBREW_NO_AUTO_UPDATE=1` is kept on the
 install commands and is now labelled correctly: it is a performance knob (no
 slow implicit `brew update` mid-setup), not an update switch — it does not stop
 tools updating. The measured numbers and the caveats that justify the policy
-live in `djbclark-ade/skills/setup-modern-cli/SKILL.md`.
+live in `kool-ade/skills/setup-modern-cli/SKILL.md`.
 
 What changed in 5.4 (2026-10-11): the rest of the modern toolchain is registered
 here, not only in the skill — `miller` (awk/sed/sort/join over CSV/TSV/JSON),
@@ -107,7 +107,7 @@ here, not only in the skill — `miller` (awk/sed/sort/join over CSV/TSV/JSON),
 `ripgrep-all`/`rargs`/`entr`/`csvlens`/`qsv`/`dasel`/`b3sum`/`watchexec` are in
 the §1.2 install line and the §1.3 utilities table; `runiq` is noted as
 crates-only (`cargo install runiq`). Rationale and the per-tool verdicts live in
-`djbclark-ade/skills/setup-modern-cli/` (`SKILL.md` + `references/`).
+`kool-ade/skills/setup-modern-cli/` (`SKILL.md` + `references/`).
 
 What changed in 5.5 (2026-10-11): four agent-data tools added — `duckdb` (SQL
 over CSV/JSON/Parquet with no import), `jc` (command output → JSON), `gron`
@@ -391,7 +391,7 @@ in site-private `memory/project_claude_code_mods_rollout.md` (2026-10-17):
 
 `agent-radar` was removed on 2026-10-18 (djbclark: more trouble than it is worth). Its every-5-second
 shell scans in each Claude session drove load to 46-110 that day. Where it is installed, run
-`claude plugin uninstall agent-radar@djbclark-ade` and `claude plugin uninstall agent-radar@claude-code-mods`,
+`claude plugin uninstall agent-radar@kool-ade` and `claude plugin uninstall agent-radar@claude-code-mods`,
 then `/reload-plugins` in each running session.
 
 | Mod | Install? | What it gives the user |
@@ -415,7 +415,7 @@ directory and registering in `settings.json` (read its README); do that only
 with the user's approval and a backup. Do not install `herdr-orchestration`
 or `ralph-tui-orchestration`; they need tools this setup does not use.
 
-**From djbclark's `djbclark-ade` repo** (public, MIT;
+**From djbclark's `kool-ade` repo** (public, MIT;
 https://github.com/djbclark/djbclark-ade, skills under `skills/`, each
 described in `docs/skills.md`). Install project-scoped by copying or
 symlinking the skill directory into `.claude/skills/<name>/`:
@@ -426,7 +426,7 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 | `dialogue` | yes | Runs a multi-model dialogue that produces one artifact (a spec, a report, a design) with a final-word model: fixed speaking rounds through pinned headless routes (for example Grok, Claude and GPT via `acp-run`), a machine-read footer per turn with point ids, status and dissent, a transcript that is the record, and `scripts/dialogue.py` checks for the failures the first run measured (noise strip, protocol lint, final-word gate). Use when several vendors should argue the points of contention before one writes the deliverable; not for a quick second opinion or for fan-out work with no argument between models. |
 | `sipb-llm-bench` | offer | Benchmarks a model on MIT SIPB LLMs (or any OpenAI-compatible Open WebUI/Ollama server) as an agentic-coding backend: speed probes, a tool-call conformance check, two tool-using tasks scored by running the tests, and a procedure for updating the published report. Serial and gentle on the shared server; only useful for a repo that targets such a server. SIPB's own servers need an MIT account, so skip it for a user without one. |
 | `setup-modern-cli` | yes | The standing instruction to prefer modern tools over the classic ones: the replacement table (`rg`←`grep`, `fd`←`find`, `bat`←`cat`, `srgn`←`sed`, `eza`←`ls`, `hck`←`cut`/`awk`, `jq`/`yq`, `xh`, `ast-grep`, `dust`/`gdu`, `rtk`) with the exact command patterns, the footguns (`rg -rln` is `--replace`; a pathless `rg` over-searches; `sd` is retired), and the measured search policy from §1.3 (`rg` by default, opt-in indexed `ig` as a first line for one known literal, never `ayg`). Load it before shell searches; it is the long form of the §1.3 table. |
-| `autorename` | offer | `/autorename`: names the current agent session (Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex in a herdr pane, omp) from what it is working on, writing where each TUI's own `/rename` writes; `--auto` keeps a title the user set by hand. **omp needs one user-level step:** `ln -s <djbclark-ade>/skills/autorename/omp-bridge.ts ~/.omp/agent/extensions/autorename-bridge.ts`, then restart omp (it loads extensions at startup only). The extension lets the running omp rename itself, because omp moves a session to a new file when anything else writes it. Ask before creating the symlink: it is outside the repo and loads into every omp session. |
+| `autorename` | offer | `/autorename`: names the current agent session (Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex in a herdr pane, omp) from what it is working on, writing where each TUI's own `/rename` writes; `--auto` keeps a title the user set by hand. **omp needs one user-level step:** `ln -s <kool-ade>/skills/autorename/omp-bridge.ts ~/.omp/agent/extensions/autorename-bridge.ts`, then restart omp (it loads extensions at startup only). The extension lets the running omp rename itself, because omp moves a session to a new file when anything else writes it. Ask before creating the symlink: it is outside the repo and loads into every omp session. |
 | `forgejo` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/forgejo` here is a compatibility symlink). Uses a Forgejo instance (default `forgejo.mit.edu`) with the token held in `sudo-secretspec` as `DJBCLARK_<HOST>_TOKEN`: `scripts/setup-token` declares the secret (optional), opens the token page and verifies it; `forgejo-api` makes one `/api/v1` call (mutations need `--yes`); `tea-forgejo` runs `tea` with the secret on its env login. Needs `fj` and `tea` from §1.2, and a token only the user can create in the browser, so offer it only where the user works with a Forgejo server. The default host `forgejo.mit.edu` (and the SIPB runner below) need an MIT account (Athena/Touchstone login), so skip those for a user without one. For the SIPB `ubuntu` CI runner it also records the `LD_PRELOAD` loopback shim (port 0 and `shutdown()`) Gradle needs there (libkrun#818) and the per-job resource limits (16 vCPU, 62.8 GiB, virtiofs disk with a 32 GiB tmpfs). |
 | `jevlike` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/jevlike`; `skills/jevlike` here is a compatibility symlink). Uses djbclark's Jev-like System One judges, Kev-0.8B at djbclark-kev.sipb.cloud (loaded by default) and Laya at djbclark-laya.sipb.cloud, as cheap probabilistic judges; since 2026-10-30 one Hyades microVM, djbclark-jevlike, serves one of them at a time: its `scripts/jevlike ask noul|choice|score` helper reruns itself under `sudo-secretspec run` with `JEVLIKE_API_KEY`, retries restarts with backoff, and returns `decide: yes|no|escalate` (act only at p>=0.9 or p<=0.1). Needs a key only the user holds, so offer it only where the user has access to those servers. Added 2026-10-20 |
 
@@ -764,7 +764,7 @@ which is the normal case mid-edit. Do not adopt **`ayg`** (aygrep): it indexes
 only git-tracked files, so untracked work is invisible even after a rebuild,
 and it writes its index inside the repo. Tables, measured numbers and the
 `rg` flag results (no flag helps; `--sort path` costs 5x) are in
-`djbclark-ade/skills/setup-modern-cli/SKILL.md`. Record any deviation in
+`kool-ade/skills/setup-modern-cli/SKILL.md`. Record any deviation in
 `AGENTS.md`.
 
 Do not change global git config (e.g. making delta the pager) without asking.
@@ -791,7 +791,7 @@ release has `crush acp`.
 Once per machine, not per repo. It mines every agent's past sessions into
 tasks, replays them against the current skills and stages gated SKILL.md /
 AGENTS.md edits for review; nothing changes until someone runs `skillopt-sleep
-adopt`. Guide: `djbclark-ade/docs/skillopt-sleep.md`.
+adopt`. Guide: `kool-ade/docs/skillopt-sleep.md`.
 
 | Step | Command | What it does |
 |---|---|---|
@@ -862,7 +862,7 @@ config and hooks; `--agents claude` does not, and `--no-global` skips them.
 Register the MCP servers in user scope (back up `~/.claude.json` and the other
 clients' configs first, §15), never in a committed `.mcp.json` when a key is
 involved. The failover order per client, and the pause rule, are in
-`djbclark-ade/skills/fallback-chains/references/web-access.md`. Put the rule
+`kool-ade/skills/fallback-chains/references/web-access.md`. Put the rule
 into the target's `AGENTS.md` (§8): an agent tries every rung; when the whole
 ladder fails for a page or search the task needs, it pauses that work,
 reports the failed URLs or queries with each error, and waits. It never
@@ -876,7 +876,7 @@ paseo-desktop-apply` (daemon on `127.0.0.1:7263`, web UI on, relay off, `tailsca
 --https=7263`; never funnel, no password, so tailnet-only). Linux/NixOS hosts use
 forgejo.mit.edu/djbclark/paseo-nix (CI-built package plus `services.paseo`). Skills: `paseo`,
 `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin` (vendored in
-`djbclark-ade/skills/`, link them with `bin/skill-everywhere`; the advisor/committee/handoff triggers
+`kool-ade/skills/`, link them with `bin/skill-everywhere`; the advisor/committee/handoff triggers
 are narrowed to explicit Paseo requests, see `skills/paseo/UPSTREAM.md`). Fleet setup:
 site-djbclark `docs/paseo.md`. Terminal front end for one Paseo agent (log view, prompt box,
 steer/interrupt, permission confirm; runs in a Herdr pane; added 2026-10-28, djbclark):
@@ -892,7 +892,7 @@ own kernel, so there is nothing to install or proxy: register
 `http_request`, `web_fetch`, `web_search`, `unzip`). It works only while the app
 runs and the kernel has no access auth code, so keep `networkServe` off. Skills:
 `siyuan`, `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown`
-(vendored from `zhiluop/siyuan-skills`, MIT, in `djbclark-ade/skills/`; link them
+(vendored from `zhiluop/siyuan-skills`, MIT, in `kool-ade/skills/`; link them
 with `bin/skill-everywhere`). Their scripts read `~/.claude/siyuan.json`
 (`api_url`, `local_path` and `"api_token": ""`: the key must exist but may be empty
 unless the kernel sets an access auth code; `import_article.py` needs a patch for

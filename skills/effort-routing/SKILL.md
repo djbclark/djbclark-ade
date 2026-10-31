@@ -16,7 +16,7 @@ Sibling to [model-routing](../model-routing/SKILL.md), which decides *which
 vendor* runs work. This one decides *how much thinking* the current session
 spends. They are different problems and get confused constantly.
 
-Canonical source: `skills/effort-routing/SKILL.md` in djbclark-ade
+Canonical source: `skills/effort-routing/SKILL.md` in kool-ade
 (`~/src/djbclark-ade`; every TUI links to it directly via skill-everywhere). Snapshot
 **2026-08-23**.
 

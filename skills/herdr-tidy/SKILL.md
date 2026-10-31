@@ -20,7 +20,7 @@ a session's life (titles and tab labels; workspace placement only through `/auto
 enforces it; the agent only decides the few things the script hands back as "decision needed".
 
 ```bash
-T="python3 -I $HOME/src/djbclark-ade/skills/herdr-tidy/tidy.py"
+T="python3 -I $HOME/src/kool-ade/skills/herdr-tidy/tidy.py"
 $T [--host herdr|orca|auto] scan   # every pane: class, verdict, reason, the resume command the ledger would hold
                                # (auto = orca inside an Orca terminal, else herdr; section 6 for Orca)
 $T handoff <pane>              # idle Claude pane: send /handoff, wait until the transcript says it finished
@@ -284,7 +284,7 @@ with the count; give the full handle).
 
 A pass, mirroring section 3:
 
-1. `T="python3 -I $HOME/src/djbclark-ade/skills/herdr-tidy/tidy.py --host orca"`; `$T scan`
+1. `T="python3 -I $HOME/src/kool-ade/skills/herdr-tidy/tidy.py --host orca"`; `$T scan`
    (`cswap list` first: each `handoff-then-close` is one Claude turn).
 2. `$T handoff <pane>` per `handoff-then-close` terminal, one at a time, in the background; the
    receipt is Orca's `send.accepted`, the finish is the transcript plus `worktree ps` idle.

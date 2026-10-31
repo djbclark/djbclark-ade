@@ -280,7 +280,7 @@ herdr, Orca, Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
   result you never read, and routines you scheduled.
 - **G4 Durable places and always-loaded files.** Bot memory, the shared skills
   in `/home/box/agent-data/workflows/` (the parent writes those through its
-  skill tool; a sync-managed `ade-*` copy is changed upstream in djbclark-ade,
+  skill tool; a sync-managed `ade-*` copy is changed upstream in kool-ade,
   never in place) and the repo docs the finding belongs to.
 - **G5 Upstream issues.** Search with `gh search issues`/`gh api` or the
   GitHub connector, and Forgejo's API for forgejo.mit.edu. Filing the issue is

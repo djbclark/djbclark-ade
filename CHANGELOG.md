@@ -222,6 +222,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- Renamed the project from `djbclark-ade` to `kool-ade` in prose (2026-10-31): the name in docs and skills only. No identifier, path, command, module, environment variable or repository slug changes in this PR; those stay `ade`/`djbclark-ade` until the checkout and the GitHub repository move, in that order (#182).
 - `AGENTS.md` standing order 11 (2026-10-30, djbclark): djbclark-ade is the lead's project; a change to code or configuration in another repository or in installed files outside a repository waits for the operator's yes (own installs, memory notes and upstream filing of an approved change excepted), and findings there are reported as proposals (#170).
 - `skills/paseo-handoff` (2026-10-30): an "in a worktree" handoff now gets an `isolation: "local"` workspace and a `git worktree add` task worktree instead of a Paseo worktree workspace, until the Paseo-only plan's D1.3 and D2 gate prove that archiving cannot delete unpushed work (plan rule D0.3) (#154).
 - `skills/aws-rules` and `tools/acp-run/README.md` (2026-10-29): record that Bedrock inference access is off (the Bedrock API key's service credential is `Inactive`, with an inline `Deny bedrock:*`; root can still call Bedrock; gating is issue 141), that the `aws-agent` profile is the root user on purpose, and that goose-scout is off with its key deactivated (#142).

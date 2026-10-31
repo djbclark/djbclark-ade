@@ -23,7 +23,7 @@ reuse, not speed.
 For a new isolated workspace on a **primary checkout**, run:
 
 ```bash
-~/orca/projects/djbclark-ade/bin/cow-pasture create <name> --source <repo> [--branch <b>] [--orca]
+~/orca/projects/kool-ade/bin/cow-pasture create <name> --source <repo> [--branch <b>] [--orca]
 ```
 
 It prints the pasture path. A pasture and a linked `git worktree add`

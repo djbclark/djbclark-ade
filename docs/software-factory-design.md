@@ -425,7 +425,7 @@ All ids, amounts, and times in these wireframes are illustrative placeholders, n
 
 ```
 +--------------------------------------------------------------------------+
-| FACTORY  djbclark-ade        today $1.84 / $10  calls 23/200   [/] search  |
+| FACTORY  kool-ade        today $1.84 / $10  calls 23/200   [/] search  |
 | ! 1 run in PRIMARY CHECKOUT on master      ! claude: quota warning         |
 +--------------------------------------------------------------------------+
 | NEEDS YOU (3)                                                            |
@@ -665,7 +665,7 @@ default path and makes the unisolated path loud.
 
 ## 11. Open questions for Daniel
 
-1. Where does the factory live: `djbclark-ade/tools/factory` (all reviewers
+1. Where does the factory live: `kool-ade/tools/factory` (all reviewers
    leaning this way to start) or its own repo?
 
 2. Merge policy: confirm "never auto-merge in v1".

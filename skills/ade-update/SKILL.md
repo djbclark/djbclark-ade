@@ -1,7 +1,7 @@
 ---
 name: ade-update
 description: >-
-  Keep this machine's djbclark-ade checkout current: fast-forward pull, relink
+  Keep this machine's kool-ade checkout current: fast-forward pull, relink
   missing skills, check CLAUDE.md and ~/.claude links, print the CHANGELOG
   delta. Use for /ade-update, "update the ADE", "pull the toolchain", "are my
   skills current", or after a new skill or changelog entry lands upstream.

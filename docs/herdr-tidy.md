@@ -11,7 +11,7 @@ Fable 5.1 sub-agent of the helm session, from the brief in
 djbclark: "With the current system, would it be safe to just close any TUI
 sessions with open herdr tabs/panes that are not doing work currently, and
 just let helm get to them as it does? I'd like to clean up my herdr." Then:
-make a safe recipe that includes the sleeping panes, put it in a djbclark-ade
+make a safe recipe that includes the sleeping panes, put it in a kool-ade
 skill, move `/autorename` here too, close the cracks so this gets safer to do
 widely, cover every non-Claude TUI and Hermes, and run a pass.
 
@@ -87,7 +87,7 @@ chats (not panes), and `~/src/herdr-sleeper` itself.
 
 ## Orca host mode (`/orca-tidy`, 2026-10-08)
 
-Issue djbclark/djbclark-ade#1; feasibility report
+Issue djbclark/kool-ade#1; feasibility report
 `~/.local/state/bigteam/orca-tidy-feasibility/report.md` (Orca 1.4.219). Skill section:
 [`SKILL.md` §6](../skills/herdr-tidy/SKILL.md). Command: `/orca-tidy`
 (`claude/commands/orca-tidy.md`). Tests: `tests/test_tidy_orca.py`.

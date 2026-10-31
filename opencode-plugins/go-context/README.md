@@ -64,7 +64,7 @@ OpenCode's user plugin discovery directory, preserving any existing entry:
 
 ```python
 from pathlib import Path
-source = Path.home() / "src/djbclark-ade/opencode-plugins/go-context"
+source = Path.home() / "src/kool-ade/opencode-plugins/go-context"
 target = Path.home() / ".config/opencode/plugins/ade-go-context"
 target.parent.mkdir(parents=True, exist_ok=True)
 if target.is_symlink():

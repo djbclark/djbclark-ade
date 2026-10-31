@@ -4,8 +4,8 @@ handoff_id: f961
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-329d]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: 9adc552ba5619f49bf9424ad6a4e04fcff4f3ff7
 created_at: 2026-10-19T19:40:00-04:00
@@ -16,7 +16,7 @@ writer: claude-code
 ## The Goal
 
 djbclark wants the whole AI development environment to live in (or be referenced from)
-`djbclark-ade`, so that on any new machine one clone plus one prompt recreates it; every past
+`kool-ade`, so that on any new machine one clone plus one prompt recreates it; every past
 session of every TUI is reachable from every machine; no central node beyond GitHub, Forgejo and
 Hyades; Paseo as the universal front end; private data handled well; a second person can use the
 public kit with their own private companion. Step one is a proposal document opened in Marked 2.

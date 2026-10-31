@@ -4,7 +4,7 @@ handoff_id: 1513
 parent_handoff_ids: [9ce0]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 1f56db30d305bde6f53588b6d73762b47d7547d8
@@ -14,7 +14,7 @@ writer: claude-code
 # Handoff — PR 98 (the RecursionError one-liner) merged; relay and context-visibility work next
 
 ## The Goal
-Keep the djbclark-ade queue moving as the standing lead ("ade-queue-build"): the gates work is done; what remains is the relay follow-up, the context-visibility audit, a docs-only queue PR, and a last-in-queue follow-up for two sibling readers.
+Keep the kool-ade queue moving as the standing lead ("ade-queue-build"): the gates work is done; what remains is the relay follow-up, the context-visibility audit, a docs-only queue PR, and a last-in-queue follow-up for two sibling readers.
 
 ## Where We Are
 1. PR 98 is merged as `1f56db3` (squash, pinned to the reviewed head `2db316d`, on djbclark's yes): `ade_gates.read_guard_state` now catches `(ValueError, RecursionError)`; `tests/test_gates.py` is 231 passed; CHANGELOG line under Fixed. Two adversary rounds by omp Opus 5.5 high, both APPROVE (r1 at `a8ef839` with one P3 on CHANGELOG wording, repaired in `2db316d`; r2 APPROVE at `2db316d`). CI 5/5, Codex 0 findings for the head. Main checkout `~/src/djbclark-ade` is fast-forwarded to `1f56db3` (this handoff commit goes on top); the PR 98 worktree and branches are removed.

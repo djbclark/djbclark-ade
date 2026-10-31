@@ -75,7 +75,7 @@ orca orchestration check --ack <delivery_id> --wait --types worker_done,escalati
 
 A real two-worker heterogeneous dispatch (run_e36379cdc849: one claude
 worker, one codex worker, child worktrees under
-`~/orca/workspaces/djbclark-ade/`) settled both tasks `completed`. What
+`~/orca/workspaces/kool-ade/`) settled both tasks `completed`. What
 the receipts taught:
 
 - **`agent_prompt_stalled` can be a false death.** The codex worker was
@@ -141,7 +141,7 @@ against Orca's own registry of **Orca-managed** worktrees, not the filesystem.
 A cow pasture is an ordinary clone Orca has never heard of:
 
 ```
-$ cd ~/.cow/pastures/djbclark-ade/probe && orca worktree current
+$ cd ~/.cow/pastures/kool-ade/probe && orca worktree current
 No Orca-managed worktree contains the current directory
 ```
 

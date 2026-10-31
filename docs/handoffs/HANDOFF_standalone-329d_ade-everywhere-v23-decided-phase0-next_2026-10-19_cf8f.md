@@ -4,8 +4,8 @@ handoff_id: cf8f
 parent_handoff_ids: [4330]
 lineage: deterministic
 chain: [standalone-329d]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: 2d528aa
 created_at: 2026-10-19T15:16:22-04:00
@@ -14,7 +14,7 @@ writer: claude-code
 # Handoff — ADE everywhere v2.3 decided (all 25 questions); next is Phase 0 as a PR set
 
 ## The Goal
-Move the whole AI development environment into `djbclark-ade` so one clone plus one prompt recreates
+Move the whole AI development environment into `kool-ade` so one clone plus one prompt recreates
 it on any machine, every past session of every TUI reachable everywhere, no central node beyond
 GitHub/Forgejo/Hyades, Paseo as the universal front end, private data handled well, a second person
 can set it up. The proposal `docs/ade-everywhere-proposal.md` is the plan; implementation starts with
@@ -69,7 +69,7 @@ Phase 0 from a fresh session as a PR set with an `adversary` verdict per PR.
    `~/.local/state/agent-reports/ee9e515d-a74a-42f3-ba7f-3289a2417457/`: `v21-digest-report.md`,
    `v22-fold-report.md`, `v23-fold-report.md`, `acp-run-readonly/acp-run-readonly-perm-report.md`,
    `v21-review/jobs/*.json`. Fold briefs: `v22-fold/brief.md`, `v23-fold/brief.md`.
-3. Memory: `~/.claude/projects/-Users-djbclark-src-djbclark-ade/memory/project_ade_everywhere_proposal.md`.
+3. Memory: `~/.claude/projects/-Users-djbclark-src-kool-ade/memory/project_ade_everywhere_proposal.md`.
 
 ## Operator Feedback
 1. "We should fix acp-run" (done, 3cd8892). Open the latest plan in Marked 2 when a version is done (done each time).

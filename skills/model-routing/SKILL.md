@@ -17,8 +17,8 @@ via a direct skill-everywhere link (`~/src/djbclark-ade/skills/model-routing`),
 so there is nothing to keep in sync.
 
 The canonical, dated matrix lives at
-`~/orca/projects/djbclark-ade/docs/model-routing.md` (repo
-djbclark/djbclark-ade). Read it first; this skill carries the stable
+`~/orca/projects/kool-ade/docs/model-routing.md` (repo
+djbclark/kool-ade). Read it first; this skill carries the stable
 method, not the volatile numbers.
 
 Failure chains (what runs when the chosen model fails) are not here.
@@ -366,7 +366,7 @@ acp-run <agent> --info      # its models, modes and auth methods
 ```
 
 **For a slice that must deliver a report, call `acp-dispatch` instead of
-`acp-run` directly** (`bin/acp-dispatch` in djbclark-ade, on PATH; 2026-10-08):
+`acp-run` directly** (`bin/acp-dispatch` in kool-ade, on PATH; 2026-10-08):
 `acp-dispatch <agent> --model M --kind K --name N --task T -C <dir> -f <brief> [--perm P]
 [--effort L] [--context SIZE] [--timeout S]`. It makes `--model` mandatory
 except for zcode (accepted, still optional) and `--kind` mandatory on a fresh
@@ -573,7 +573,7 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
 - `herdr pane read` prints plain text; every other command prints one JSON
   envelope, `{"error":…}` **with exit 0** on failure — parse the envelope.
 - `herdr agent prompt <target> "/exit"` cleanly ends a Claude session and
-  returns the pane to its shell; `bin/herdr-sleeper` in djbclark-ade
+  returns the pane to its shell; `bin/herdr-sleeper` in kool-ade
   builds on this (see docs/agent-sleep.md). Never `/exit` a pane whose
   composer holds unsent text: the draft dies with the process.
 - A prompt can land unsubmitted (`agent_prompt_stalled`, or the text sits on
@@ -904,7 +904,7 @@ The harness writes the options, code applies a threshold set by risk (cheap
 to undo about 0.6, a failed step about 0.8, irreversible means the operator
 decides), and anything below the threshold goes up a rung, never to a guess.
 Retry caps are counters in code, not sentences in a prompt. Reasons, sources
-and the shadow-mode rollout: `docs/orchestration-practices.md` (djbclark-ade).
+and the shadow-mode rollout: `docs/orchestration-practices.md` (kool-ade).
 
 Standing orders that pair with this: continuous operation over handoff
 rituals; flag best-practice deviations to the operator (site-private

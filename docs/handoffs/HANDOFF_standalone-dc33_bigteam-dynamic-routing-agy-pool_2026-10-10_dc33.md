@@ -4,8 +4,8 @@ handoff_id: dc33
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-dc33]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: 4c3a0c31095d4f0447d4ce606fa64fd13770a809
 created_at: 2026-10-10T13:55:00+00:00

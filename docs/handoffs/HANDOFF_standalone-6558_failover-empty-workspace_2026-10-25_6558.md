@@ -4,7 +4,7 @@ handoff_id: 6558
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-6558]
-repo: djbclark-ade
+repo: kool-ade
 workspace: failover-us8fc0b4/work
 branch: master
 head_sha: 0ec3402477a1e569148f8bad17b767d52c00b0b0
@@ -19,9 +19,9 @@ The session cwd ($TMPDIR/failover-us8fc0b4/work) is empty and not a git repo; no
 ## What We Tried
 Nothing failed. No Tier 1 pointer exists for a non-repo temp dir, so none was refreshed.
 ## Key Decisions
-Wrote the handoff in djbclark-ade/docs/handoffs (ordinary repo, local commit) instead of leaving nothing. Assumption: the work chunk lives in another session (djbclark-ade shows an uncommitted skills/ovhcloud-api/SKILL.md edit and untracked .agents/skills/fastino-glide/, not ours; left untouched).
+Wrote the handoff in kool-ade/docs/handoffs (ordinary repo, local commit) instead of leaving nothing. Assumption: the work chunk lives in another session (kool-ade shows an uncommitted skills/ovhcloud-api/SKILL.md edit and untracked .agents/skills/fastino-glide/, not ours; left untouched).
 ## Evidence & Data
-djbclark-ade at master, head above. No blockers, no BLOCKED sub-agent reports.
+kool-ade at master, head above. No blockers, no BLOCKED sub-agent reports.
 ## Operator Feedback
 none
 ## Where We're Going

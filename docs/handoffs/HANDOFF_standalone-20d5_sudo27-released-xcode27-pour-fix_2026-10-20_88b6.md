@@ -4,8 +4,8 @@ handoff_id: 88b6
 parent_handoff_ids: [4422]
 lineage: deterministic
 chain: [standalone-20d5]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: 9d34c1f3cde724b995684088ea5390548be5b763
 created_at: 2026-10-20T06:05:00-04:00
@@ -60,11 +60,11 @@ All four are done. The next release will pour on this Mac; nothing in this chain
    to `.githooks/private-paths`. Verdict `APPROVE (76edcc1 with the uncommitted sudo-release.yml
    change)`; 3 MEDIUM, 11 LOW, none blocking. It regenerates N5/N6/N7/I1, whose text 4422 had lost with
    an ephemeral scratchpad.
-6. **djbclark-ade 803a11e** (pushed): `docs/queue.md`'s "Resurface 2026-10-14" sub-item 1 is read and
+6. **kool-ade 803a11e** (pushed): `docs/queue.md`'s "Resurface 2026-10-14" sub-item 1 is read and
    answered in place, replacing its own incorrect metering claim.
 7. **site-djbclark ba99cc5** (pushed): home-agents item 21 now reads `git commit -m MSG -- <paths>`;
    `cursor/home-agents.mdc` kept in step; `home-agents.md` back under budget at 13,495 bytes / 121 lines.
-8. **Not mine, left alone in djbclark-ade**: a large in-flight dirty set from another session
+8. **Not mine, left alone in kool-ade**: a large in-flight dirty set from another session
    (`bin/acp-dispatch`, `tools/acp-run/acp-run`, `CHANGELOG.md`, two deleted `tests/test_acp_*.py`,
    the paseo-* and graft SKILL.md edits, `.agents/skills/fastino-glide/`). Master moved from 94cc58d to
    9d34c1f under me during the session.
@@ -113,7 +113,7 @@ All four are done. The next release will pour on this Mac; nothing in this chain
 4. **Chosen**: prove the label by `workflow_dispatch` before any release relies on it (adversary F1.3
    fix 1). **Not done**: F1.3 fix 2, a wall-clock deadline for `watch_run`.
 5. **Chosen**: file the adversary review in **site-private**. **Rejected**: `frdminc/sudo-secretspec`
-   itself and djbclark-ade docs — both public, and publishing unfixed MEDIUM findings about a signing
+   itself and kool-ade docs — both public, and publishing unfixed MEDIUM findings about a signing
    and release path is a disclosure decision; and leaving it untracked under `~/.local/state/`, which is
    how the previous round's text was lost.
 6. **Chosen**: read the night rows now. **Rejected**: flag the queue item stale, drop it, or leave it.
@@ -173,7 +173,7 @@ All four are done. The next release will pour on this Mac; nothing in this chain
    With 1b9c210 the bottle should be `arm64_golden_gate` and `brew reinstall --force-bottle` should pour,
    taking the installed boundary from `.26` to `.28`. If the pour still fails, the fallback is
    `just release VER --build-from-source` (the serial is published by then; release.py's message says how).
-3. **Merge PR #19 once its checks are green** (`gh pr checks 19 -R djbclark/djbclark-ade`), which is what
+3. **Merge PR #19 once its checks are green** (`gh pr checks 19 -R djbclark/kool-ade`), which is what
    makes Rule 4's archive-or-continue picklist canonical rather than branch-only. The peer owns it; ask
    before merging.
 4. **Remaining adversary findings**, all in the site-private doc, none blocking: N6 (MEDIUM), F3.1
@@ -211,5 +211,5 @@ ggrep -n -A30 'F1.3' ~/ops/site-private/docs/sudo-secretspec-release-path-advers
 ggrep -n -B5 -A20 'def watch_run' ~/src/sudo-secretspec/packaging/release.py
 
 # the peer's PR that makes the Paseo archive picklist canonical
-gh pr checks 19 -R djbclark/djbclark-ade
+gh pr checks 19 -R djbclark/kool-ade
 ```

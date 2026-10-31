@@ -310,7 +310,7 @@ crush's one-prompt probe), then set `"enabled": true`. Optionally run one small 
    `staged_skills` (pending), `adopted_skills`, history tail.
 4. `<latest_staging>/report.md`: what was mined, baseline vs candidate scores,
    each proposed edit and why it passed or failed the gate.
-5. A night that stages anything sends one Hermes line: "djbclark-ade:
+5. A night that stages anything sends one Hermes line: "kool-ade:
    skillopt-sleep staged N proposal(s) from <sources>; review: ...". An
    exhausted chain and a refused chain each send one line too.
 

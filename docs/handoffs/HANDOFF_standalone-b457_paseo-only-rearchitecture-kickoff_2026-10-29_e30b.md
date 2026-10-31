@@ -4,7 +4,7 @@ handoff_id: e30b
 parent_handoff_ids: [c02b]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: djbclark-ade-paseo-only-wt
 branch: paseo-only-rearchitecture
 head_sha: ed1fe1b433ef967dc4bead8c55d6f40602f30f86
@@ -17,7 +17,7 @@ writer: omp-claude-sonnet-5-5
 
 djbclark's absolute commandment (2026-10-29, this session, verbatim intent in
 `docs/paseo-only-rearchitecture.md` section A): move to Paseo only, retire `relay.py` and every non-Paseo
-harness (herdr, tuios, Orca, Superset), use Paseo's native inter-agent communication, replace djbclark-ade
+harness (herdr, tuios, Orca, Superset), use Paseo's native inter-agent communication, replace kool-ade
 functionality with native Paseo features, then existing Paseo plugins, then our own plugins; at the end no
 mention of another harness anywhere except one history doc. Re-architect, update the architecture docs, web
 search, and use codex astra (GPT-6) and Fable for second opinions. Fan out with Paseo-native skills (not
@@ -59,8 +59,8 @@ risk noted (omp credits $80 of $200 at 20:45 EDT).
 
 ## Decisions
 
-- [ruling] "we are going to move to using paseo only (no herdr, tuios, or any other harness), and we are going to retire our relay.py, remove references and functionality for anything but paseo from all of djbclark-ade and our AGENTS.md files" (djbclark, 2026-10-29)
-- [ruling] "when at all possible replace djbclark-ade functionality with naitive Paseo functionality/skills or if that is not enough existing paseo plugins and if that is not possible we will look into writing our own paseo plugins" (djbclark, 2026-10-29)
+- [ruling] "we are going to move to using paseo only (no herdr, tuios, or any other harness), and we are going to retire our relay.py, remove references and functionality for anything but paseo from all of kool-ade and our AGENTS.md files" (djbclark, 2026-10-29)
+- [ruling] "when at all possible replace kool-ade functionality with naitive Paseo functionality/skills or if that is not enough existing paseo plugins and if that is not possible we will look into writing our own paseo plugins" (djbclark, 2026-10-29)
 - [ruling] "there should no longer be any mention of any harnessess other than paseo anywhere except in one document that documents the history of the project and is not normally read" (djbclark, 2026-10-29)
 - [ruling] "not with bigteam for now until it is updated, but with Paseo-naitive skills and functions ... both fable and astra should be involved in the re-architecting" (djbclark, 2026-10-29)
 - [ruling] "Do 2 and fix the race before merge" (djbclark, 2026-10-29, PR 118 round 7)

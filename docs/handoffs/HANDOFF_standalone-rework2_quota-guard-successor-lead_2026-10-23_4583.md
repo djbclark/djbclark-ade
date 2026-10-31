@@ -4,7 +4,7 @@ handoff_id: 4583
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-rework2]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 3ffa82e
@@ -30,7 +30,7 @@ model from now on, never asks the operator to.
    (weekly 58% at 00:06Z → 100% at 16:51Z on 10-20, `conserve` alert from 06:xxZ, nothing acted on
    it). The volume driver was the lead's **579 background-notification turns** against 49 operator
    prompts and 45 compactions, each re-reading a 150-200k context on Fable/Opus. Memory:
-   `~/.claude/projects/-Users-djbclark-src-djbclark-ade/memory/project_claude_weekly_exhaustion_2026-10-20.md`
+   `~/.claude/projects/-Users-djbclark-src-kool-ade/memory/project_claude_weekly_exhaustion_2026-10-20.md`
    (peer's), queue entry in `docs/queue.md` "Follow-ups from PRs 29 and 30" (mine, `330cade`).
 2. **PR 30 merged** `2eeeb7a`: `bin/self-slash --finish --successor PROVIDER/MODEL` (Paseo): handoff →
    `paseo run "/baton" --workspace <id>` as a top-level agent → verify → archive self → archive the
@@ -154,7 +154,7 @@ closed; the peer's records are its own).
 
 ```bash
 cat ~/.local/state/self-slash.log | tail -n 20
-paseo ls --json | jq -r '.[] | select(.cwd|test("djbclark-ade")) | "\(.shortId) \(.status) \(.provider) \(.name[0:40])"'
+paseo ls --json | jq -r '.[] | select(.cwd|test("kool-ade")) | "\(.shortId) \(.status) \(.provider) \(.name[0:40])"'
 ~/src/djbclark-ade/bin/claude-quota-guard status
 jq . ~/.local/state/ade/quota-guard.json
 ~/.claude/hooks/handoff-tools/.venv/bin/python ~/.claude/hooks/handoff-tools/session_log.py read --state-root ~/.local/state/handoffs --dir ~/.local/state/handoffs/chains/standalone-329d

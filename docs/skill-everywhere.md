@@ -12,7 +12,7 @@ its description cost listing budget in every session of every TUI.
 
 The skill lives once, in git, and every TUI gets a **direct symlink** to it —
 no hub, no chained symlinks (the old TUI → `site-private/skills` →
-`site-djbclark/skills` → djbclark-ade chain was collapsed 2026-10-14; ops-repo
+`site-djbclark/skills` → kool-ade chain was collapsed 2026-10-14; ops-repo
 churn can no longer break skill loading):
 
 - public skills: `~/src/djbclark-ade/skills/<name>/` — link target

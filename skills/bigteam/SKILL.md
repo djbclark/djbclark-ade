@@ -52,7 +52,7 @@ policy (*Routing policy (operator, 2026-10-15)*), the verified invocation
 forms and the billing-class map; read it, don't duplicate it here.
 The reasons and sources behind the brief shape, run sizing, the 3-attempt cap
 and focused-checks-first are in `docs/orchestration-practices.md`
-(djbclark-ade, 2026-10-11).
+(kool-ade, 2026-10-11).
 
 **Decide in code, reason in Claude.** The orchestrator's multiple-choice
 calls (which kind, which pool, retry or re-route or stop, which tests first)
@@ -544,7 +544,7 @@ work that must outlive it, see *Jobs and records* after the waiter paragraph.
 Send every slice in **one message as parallel Bash calls**, each
 `run_in_background: true`, so each reports as it finishes and the first results
 arrive first. **For every agent that speaks ACP, dispatch through
-`acp-dispatch`** (`bin/acp-dispatch` in djbclark-ade, on PATH; it wraps
+`acp-dispatch`** (`bin/acp-dispatch` in kool-ade, on PATH; it wraps
 `acp-run`, whose agent list, flags and current status are in `model-routing`):
 
     acp-dispatch <agent> --model <m> --kind <kind> --name <name> --task <task> -C <repo> \

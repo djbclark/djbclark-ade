@@ -4,8 +4,8 @@ handoff_id: 4422
 parent_handoff_ids: [9eaf]
 lineage: deterministic
 chain: [standalone-20d5]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: 0b5f1a2847f52814a871b4f969a5b3d7951d12c8
 created_at: 2026-10-18T22:32:53-04:00
@@ -46,7 +46,7 @@ All done. Nothing open in this chain needs action before the next release.
 2. site-djbclark (pushed): c237ed9 `bg` lets `just release*`/`release.py` run in a load-watch `ci`-mode repo
    (`--local-tests` still refused), tests/test_bg_ci_mode.py 37 passed; 3e9d9c0 home-agents item 2 says the atomic
    temp file goes in the same directory (also cursor/home-agents.mdc).
-3. djbclark-ade (pushed): 0b5f1a2 load-watch briefs attribute the repo from the heavy processes' cwd (or nearest
+3. kool-ade (pushed): 0b5f1a2 load-watch briefs attribute the repo from the heavy processes' cwd (or nearest
    ancestor's), say whether they ran under bg and by which rule; 19 load_watch tests; full suite on GitHub CI
    https://github.com/djbclark/djbclark-ade/actions/runs/39186083335 (1754 passed).
 4. Peer djbclark-ade-4d set `HOMEBREW_MAKE_JOBS=1` in /opt/homebrew/etc/homebrew/brew.env and `[build] jobs = 1` in
@@ -86,7 +86,7 @@ All done. Nothing open in this chain needs action before the next release.
    each exit 1.
 3. Reports: /Users/djbclark/.local/state/bigteam/adhoc-2026-10-18/{sudo-bottle-ci,sudo-bottle-fix,sudo-bottle-attest,sudo-bottle-n123,loadwatch-attrib}-report.md;
    security reviews in this session's scratchpad (adversary-report.md, adversary2-report.md under
-   /private/tmp/claude-501/-Users-djbclark-src-djbclark-ade/82c4844a-d21f-40fa-98ac-4793616a6919/scratchpad/,
+   /private/tmp/claude-501/-Users-djbclark-src-kool-ade/82c4844a-d21f-40fa-98ac-4793616a6919/scratchpad/,
    ephemeral; the slice reports quote their findings).
 4. Tests: packaging 91 passed (bg, single file); CI green as linked above; no full cargo suite on this Mac.
 
@@ -111,7 +111,7 @@ All done. Nothing open in this chain needs action before the next release.
    full text was in adversary2-report.md (scratchpad, ephemeral); rerun an adversary review on 90a067e to regenerate.
 3. Optional: delete the merged `bottle-ci` branch on origin (`git -C ~/src/sudo-secretspec push origin --delete
    bottle-ci`) — outward-facing, ask first.
-4. Not mine, left alone in djbclark-ade: paseo skill edits + `.paseo-managed-files.json`, `skills/graft/SKILL.md`,
+4. Not mine, left alone in kool-ade: paseo skill edits + `.paseo-managed-files.json`, `skills/graft/SKILL.md`,
    `bin/graft/`, `docs/handoffs/HANDOFF_standalone-32c0_…` (another session's).
 
 ## Detached jobs

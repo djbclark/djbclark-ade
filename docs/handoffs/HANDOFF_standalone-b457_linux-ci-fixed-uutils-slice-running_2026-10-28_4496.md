@@ -4,7 +4,7 @@ handoff_id: 4496
 parent_handoff_ids: [1513]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 07894079af22c3a4274810a093bef6f3cadc85a5
@@ -14,7 +14,7 @@ writer: claude-code
 # Handoff — Linux CI fixed (PR 102), queue PR 99 merged, uutils port slice running, audit next
 
 ## The Goal
-Work down the djbclark-ade queue: keep CI green, then the context-visibility and compact/handoff discipline audit (djbclark: "examine, search, talk, fix"), the uutils
+Work down the kool-ade queue: keep CI green, then the context-visibility and compact/handoff discipline audit (djbclark: "examine, search, talk, fix"), the uutils
 port that lets Linux CI unpin `ubuntu-24.04`, and last the sibling `RecursionError` PR.
 
 ## Where We Are

@@ -4,7 +4,7 @@ handoff_id: e753
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-4f18]
-repo: djbclark-ade
+repo: kool-ade
 workspace: failover-93p9mhi1/work
 branch: master
 head_sha: 41941fcceed5ce6cdf22f9626c8b3f62d5e29c06
@@ -19,7 +19,7 @@ This session ran in a non-git failover scratch dir (`/private/var/folders/.../fa
 ## What We Tried
 Nothing failed; no experiments.
 ## Key Decisions
-Target repo is djbclark-ade (the repo this chain's tooling lives in). Rejected: asking for more info, since the instructions say to write a best-effort artifact. Only this file is committed, not pushed, because the repo has no push exception for handoffs beyond the existing docs/handoffs convention.
+Target repo is kool-ade (the repo this chain's tooling lives in). Rejected: asking for more info, since the instructions say to write a best-effort artifact. Only this file is committed, not pushed, because the repo has no push exception for handoffs beyond the existing docs/handoffs convention.
 ## Evidence & Data
 Previous handoff of the same kind: `docs/handoffs/HANDOFF_standalone-6558_failover-empty-workspace_2026-10-25_6558.md` (not a parent; unrelated scratch session).
 ## Operator Feedback

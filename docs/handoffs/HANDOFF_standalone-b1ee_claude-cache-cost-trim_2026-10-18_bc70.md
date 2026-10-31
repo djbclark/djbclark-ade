@@ -4,8 +4,8 @@ handoff_id: bc70
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-b1ee]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: 0570f8012b516439e10f0bc22df23d36ecb4ed89
 created_at: 2026-10-18T21:02:17-04:00
@@ -35,7 +35,7 @@ operator-deferred items remain.
 
 Files changed this session, by repo:
 
-1. djbclark-ade:
+1. kool-ade:
    1. New: `bin/claude-cost-mix`, `bin/claude-cost-whatif`, `bin/context-budget-check`,
       `config/context-budget.toml`, `launchd/com.djbclark.context-budget.plist`.
    2. Edited: `claude/hooks/context_size_nudge.py`, `bin/self-slash`,
@@ -73,7 +73,7 @@ Tests: all run through `~/ops/site-private/bin/bg`, rc read from a file.
 | `test_context_size_nudge` | 36 passed |
 | `test_bash_habits_gate` | 115 passed |
 
-Dirty files in djbclark-ade that are **not this session's**: `skills/graft/SKILL.md`, `skills/paseo*`,
+Dirty files in kool-ade that are **not this session's**: `skills/graft/SKILL.md`, `skills/paseo*`,
 `bin/graft/`, `docs/handoffs/HANDOFF_standalone-32c0_quota-reset-recovery_...`. Leave them alone.
 
 ## What We Tried
@@ -112,7 +112,7 @@ Dirty files in djbclark-ade that are **not this session's**: `skills/graft/SKILL
    2. `bin/claude-cost-whatif 7` (TTL and threshold simulations).
    3. `bin/context-budget-check --dry-run`.
 2. Fable review (scratchpad only, may be cleaned):
-   `/private/tmp/claude-501/-Users-djbclark-src-djbclark-ade/cc7ee65d-33b4-47aa-a2c6-be517ffb3f8e/scratchpad/cachecost-fable-review.md`.
+   `/private/tmp/claude-501/-Users-djbclark-src-kool-ade/cc7ee65d-33b4-47aa-a2c6-be517ffb3f8e/scratchpad/cachecost-fable-review.md`.
    Its conclusions are carried into the report's Outcome section and into `docs/disabled-skills.md`.
 3. Upstream:
    1. Filed https://github.com/anthropics/claude-code/issues/103330 (user `deniedMcpServers` labelled

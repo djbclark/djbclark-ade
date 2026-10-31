@@ -4,7 +4,7 @@ handoff_id: bf06
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-f2a4]
-repo: djbclark-ade
+repo: kool-ade
 workspace: orca-vs-herdr-with-djbclark-ade-and-acp
 branch: djbclark/orca-vs-herdr-with-djbclark-ade-and-acp
 head_sha: 96bb454b70fd44378b3d6742e4e2c3dfb49f14d6
@@ -26,7 +26,7 @@ writer: claude-code
 
 ## Where We Are
 
-All four goals are done and on `origin/master` of djbclark-ade (f689247).
+All four goals are done and on `origin/master` of kool-ade (f689247).
 This Orca worktree's branch still points at 96bb454; its two commits were
 cherry-picked onto master as ee3b1ce and 8033fe5 because other sessions'
 unstaged edits (`.claude/helpers/graft-*.cjs`, `.cursor/*`, `.mcp.json`) made a
@@ -90,7 +90,7 @@ site-private and the Claude auto-memory note of the same name.
 
 ## Evidence & Data
 
-1. Commits on djbclark-ade master this session: ee3b1ce, 8033fe5, 72c797d,
+1. Commits on kool-ade master this session: ee3b1ce, 8033fe5, 72c797d,
    8c7fbd3, f689247. Tests: 377 passed (full suite via `bg pytest`, three runs),
    `tests/test_route_agent.py` 30 passed.
 2. zcode preflights: `~/.local/state/acp-run/20261009-000130-zcode-5906.jsonl`

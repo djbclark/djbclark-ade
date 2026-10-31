@@ -5,7 +5,7 @@ parent_handoff_ids: [a7e7]
 lineage: deterministic
 chain: [standalone-20d5]
 repo: sudo-secretspec
-workspace: djbclark-ade
+workspace: kool-ade
 branch: sudo-main
 head_sha: 0839caf
 created_at: 2026-10-23T06:05:00-04:00
@@ -132,7 +132,7 @@ not blocking anything.
    *label* can fall through to self-hosted pools — not a claim about what it
    resolved to.
 
-4. **The djbclark-ade branch divergence is the operator's call, not mine.**
+4. **The kool-ade branch divergence is the operator's call, not mine.**
    Re-verified 2026-10-20: local `master` was ahead 9 / behind 17, and `git
    cherry -v origin/master master` shows **8 of the 9 are already upstream as
    patch-equivalents** (the repo lands work through squashed PRs). Only
@@ -220,7 +220,7 @@ From the `/steps` walk of 2026-10-20, all honoured:
 3. **Cut `.30` to prove 3b end-to-end.** Nothing short of a real release
    exercises the attestation path.
 
-4. **Report to djbclark (do not fix) the djbclark-ade divergence** — decision 4
+4. **Report to djbclark (do not fix) the kool-ade divergence** — decision 4
    above. One commit, `adc2012`, is the whole of it.
 
 5. **Optional, operator-timed:** upgrade the installed boundary `.28` → `.29`

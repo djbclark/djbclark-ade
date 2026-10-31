@@ -4,7 +4,7 @@ handoff_id: 93fa
 parent_handoff_ids: []
 lineage: none
 chain: [load-spike-monitor-t]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 9a64617e8a5d5c64453f996b6072cd02c874c859
@@ -20,7 +20,7 @@ This Paseo agent (96a17744, workspace `loadwatch-p`, wks_d7ef123a8fdc01c5) is th
 App Tamer work below.
 
 ## Where We Are
-Done and pushed (djbclark-ade): memory gate in `load-watch admit` (limit 60000 pages/s, `--max-mem-churn`), churn
+Done and pushed (kool-ade): memory gate in `load-watch admit` (limit 60000 pages/s, `--max-mem-churn`), churn
 alert in `load-watch sample` (180 s sustained), loadwatch skill updates (auto Tier 1, Grok Bot/Chrome standing
 exception), `bin/app-tamer-ab` (+ fix cbd94b2). site-djbclark: `bin/bg` also asks `admit` (f370ad7, 98e47f7, c82d47b).
 relay.py `hermes` route: built by agent 24f5b849 (workspace `paseo-workspace-navigation-plugins-pw`,
@@ -78,7 +78,7 @@ instead of polling; tier logs may be updated freely; use /session-finder to find
    by the job). Basic Memory is back to normal; a future notice naming it needs a real look.
 3. Open on others: coordinator reply on push-on-completion scoping; the omp BREW session building from source (let
    it finish; if load stays > 30 for long, look again); optional churn limit recalibration later.
-4. Not mine: untracked `.agents/skills/fastino-glide/` in djbclark-ade.
+4. Not mine: untracked `.agents/skills/fastino-glide/` in kool-ade.
 
 ## Detached jobs
 Job records still open for this session (all finished, reports already read; nothing to re-arm):

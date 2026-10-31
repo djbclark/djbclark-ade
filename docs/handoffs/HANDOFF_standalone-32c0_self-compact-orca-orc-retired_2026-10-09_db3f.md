@@ -4,7 +4,7 @@ handoff_id: db3f
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-32c0]
-repo: djbclark-ade
+repo: kool-ade
 workspace: you-can-compact-yourself
 branch: djbclark/you-can-compact-yourself (worktree; work landed on master)
 head_sha: 4c0252d0bce4a0b528e2b3cef2c199e160ca7374
@@ -23,7 +23,7 @@ writer: claude-code
 
 Everything requested is done, pushed and verified. Nothing is in flight.
 
-1. **djbclark-ade (master):**
+1. **kool-ade (master):**
    1. 585c4ab: `self-slash` Orca backend and the hint-text filter.
    2. af2904c: parity gaps queued.
    3. be52f2e: `loose`/`steps` self-compact wording.
@@ -87,7 +87,7 @@ Everything requested is done, pushed and verified. Nothing is in flight.
 ## Operator Feedback
 
 1. "Remember to do so at opportune moments": self-compact via `self-slash` at natural boundaries is standing say-so (`memory/feedback_self_compact.md`).
-2. On retirement: "Do 2, but make sure anything useful in all of them gets ported to djbclark-ade currently used skills". Done.
+2. On retirement: "Do 2, but make sure anything useful in all of them gets ported to kool-ade currently used skills". Done.
 
 ## Where We're Going
 

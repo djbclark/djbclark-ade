@@ -4,7 +4,7 @@ handoff_id: 83af
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-7626]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: ff5ea1154a412e3ad1212341fba0dc4469d5df42
@@ -15,7 +15,7 @@ writer: grok
 
 ## The Goal
 
-Give Daniel a plain-English BarnOwl workflow: a skill in `djbclark-ade`, a shell command `g`, an in-client `:g show my subs`, a public Forgejo snapshot, version 1.0.1 only on `barnowl-history-loader`, and the MIT index updated. Then preserve, for the other coding agent, the prompt that asks for a non-NixOS Linux installer of sudo-secretspec. This session does not implement that installer.
+Give Daniel a plain-English BarnOwl workflow: a skill in `kool-ade`, a shell command `g`, an in-client `:g show my subs`, a public Forgejo snapshot, version 1.0.1 only on `barnowl-history-loader`, and the MIT index updated. Then preserve, for the other coding agent, the prompt that asks for a non-NixOS Linux installer of sudo-secretspec. This session does not implement that installer.
 
 The product work is done. This document is the close.
 
@@ -172,6 +172,6 @@ git -C ~/src/djbclark-ade log -1 --oneline
 tmux list-sessions
 ```
 
-Tier 1 pointer, after Step 7: `~/.local/state/handoffs/djbclark-ade/main/SESSION_LOG.md` redirects to `chains/standalone-7626/SESSION_LOG.md`.
+Tier 1 pointer, after Step 7: `~/.local/state/handoffs/kool-ade/main/SESSION_LOG.md` redirects to `chains/standalone-7626/SESSION_LOG.md`.
 
 Skill body: `~/src/djbclark-ade/skills/barnowl/SKILL.md`. Shell entry: `~/src/djbclark-ade/bin/g`.

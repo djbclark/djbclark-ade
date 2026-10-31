@@ -4,7 +4,7 @@ handoff_id: a011
 parent_handoff_ids: [8c3e]
 lineage: deterministic
 chain: [standalone-6d56]
-repo: djbclark-ade
+repo: kool-ade
 workspace: hermes-worktrees
 branch: master
 head_sha: 030884382c3ae188699a7b978fa3ff3779c3f286

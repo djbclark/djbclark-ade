@@ -4,8 +4,8 @@ handoff_id: 7bcd
 parent_handoff_ids: [7273]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
-workspace: djbclark-ade (lead session 750c1e02-86d6-425a-90d3-c37f8a0e04e9, resumed from baton of fd720445)
+repo: kool-ade
+workspace: kool-ade (lead session 750c1e02-86d6-425a-90d3-c37f8a0e04e9, resumed from baton of fd720445)
 branch: feat/expect-ack-no-transcript (PR 87 worktree /Users/djbclark/src/djbclark-ade-expect-notx-wt)
 head_sha: 26a37f39229e9d83d5da8d3ffda7f206cd2708fe
 created_at: 2026-10-27T06:57:00-04:00

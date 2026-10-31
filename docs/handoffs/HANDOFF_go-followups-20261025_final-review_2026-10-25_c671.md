@@ -4,7 +4,7 @@ handoff_id: c671
 parent_handoff_ids: []
 lineage: none
 chain: [go-followups-20261025]
-repo: djbclark-ade
+repo: kool-ade
 workspace: codex-herdr-env
 branch: fix/codex-herdr-env
 head_sha: 6e795a593b831bee6e8c373e8fc11d94699aeaaa
@@ -201,7 +201,7 @@ Work in /Users/djbclark/src/djbclark-ade-codex-herdr-env-wt.
 ```sh
 git status --short --branch
 git rev-parse HEAD
-gh pr view 71 --repo djbclark/djbclark-ade --json headRefOid,mergeable,statusCheckRollup,body
+gh pr view 71 --repo djbclark/kool-ade --json headRefOid,mergeable,statusCheckRollup,body
 aiuse --available --json
 ```
 

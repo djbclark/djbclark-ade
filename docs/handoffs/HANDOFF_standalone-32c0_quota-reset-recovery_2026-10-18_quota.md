@@ -4,7 +4,7 @@ handoff_id: quota
 parent_handoff_ids: [db3f]
 lineage: 32c0
 chain: [standalone-32c0]
-repo: djbclark-ade
+repo: kool-ade
 workspace: you-can-compact-yourself
 branch: djbclark/you-can-compact-yourself (merged; worktree persists as Orca workspace)
 head_sha: a46aa16
@@ -47,17 +47,17 @@ The resume recipe lives at three layers; the session reads the one closest
 to where it wakes up:
 
 1. **Worktree-local Tier 1 pointer**:
-   `~/orca/workspaces/djbclark-ade/you-can-compact-yourself/SESSION_LOG.md`
+   `~/orca/workspaces/kool-ade/you-can-compact-yourself/SESSION_LOG.md`
    — readable by any session whose cwd resolves to the worktree.
 2. **Out-of-tree canonical Tier 1 log**:
    `~/.local/state/handoffs/chains/standalone-32c0/SESSION_LOG.md`
-   (pointer file at `~/.local/state/handoffs/djbclark-ade/you-can-compact-yourself/SESSION_LOG.md` redirects here).
+   (pointer file at `~/.local/state/handoffs/kool-ade/you-can-compact-yourself/SESSION_LOG.md` redirects here).
 3. **Tier 2 durable handoff**: this file.
 
 ### Resume recipe (the next session's two commands)
 
 ```
-cd ~/orca/workspaces/djbclark-ade/you-can-compact-yourself
+cd ~/orca/workspaces/kool-ade/you-can-compact-yourself
 git rev-parse HEAD         # expect a46aa16
 git status                 # expect "nothing to commit, working tree clean"
 ```

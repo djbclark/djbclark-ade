@@ -205,7 +205,7 @@ djbclark, 2026-10-24: "At appropriate point, consider if we want to remove the p
 
 1. **Today (verified 2026-10-24):** brew cask `paseo` 0.13.0 (`/opt/homebrew/Caskroom/paseo/0.13.0`, installed 11:15 AM) puts `/Applications/Paseo.app` (bundle `sh.paseo.desktop`); `/opt/homebrew/bin/paseo` and `~/.local/bin/paseo` are both symlinks to `/Applications/Paseo.app/Contents/Resources/bin/paseo`; launchd has `com.djbclark.paseo-desktop` (`~/Library/LaunchAgents`, opens `/Applications/Paseo.app`) and a `paseo-upgrade` label whose plist I did not find under `~/Library/LaunchAgents`, `~/ops/site-djbclark/roles` or `bin/` (locate it first). The fork is `~/src/paseo` ([djbclark/paseo](https://github.com/djbclark/paseo), upstream [getpaseo/paseo](https://github.com/getpaseo/paseo)), currently on branch `feat/workspace-identity-accent`, 4 commits ahead of `upstream/main`; packages: app, cli, client, desktop, protocol, relay, server, plugin.
 2. **Decide first (research, cheap):** why we want the fork (our patches: workspace identity accent, tab colors, lifecycle), what we lose (brew's automatic upgrades and the signed, notarized upstream build; an unsigned fork build needs a Gatekeeper decision), and how the fork would track upstream releases (a rebase cadence, a CI build on GitHub runners per item 37, never a heavy build on the Mac). Web-search the desktop packaging (`packages/desktop`, electron-builder or similar) and whether upstream publishes build instructions.
-3. **If djbclark says go (ask separately, naming what it interrupts: every Paseo agent, this window included):** 1. build the fork's desktop app and CLI; 2. `brew uninstall --cask paseo` only after the fork build runs; 3. put the fork's `paseo` on PATH at `~/.local/bin/paseo` (and remove the `/opt/homebrew/bin` symlink or point it at the fork) so every client (`acp-run`, `relay.py`, `fleet.py`, the load watcher) finds it; 4. replace `/Applications/Paseo.app` with the fork app and update `com.djbclark.paseo-desktop` and `paseo-upgrade` (through the Ansible role in site-djbclark, never a live plist edit, rule 18); 5. grep djbclark-ade, site-djbclark and site-private for the old paths (`/Applications/Paseo.app`, `/opt/homebrew/Caskroom/paseo`); 6. restart the daemon once, verify `paseo --version`, `paseo ls`, the connected-hosts round trip and the skill-sync guard (memory `project_paseo_skill_sync_writes_through_symlinks`).
+3. **If djbclark says go (ask separately, naming what it interrupts: every Paseo agent, this window included):** 1. build the fork's desktop app and CLI; 2. `brew uninstall --cask paseo` only after the fork build runs; 3. put the fork's `paseo` on PATH at `~/.local/bin/paseo` (and remove the `/opt/homebrew/bin` symlink or point it at the fork) so every client (`acp-run`, `relay.py`, `fleet.py`, the load watcher) finds it; 4. replace `/Applications/Paseo.app` with the fork app and update `com.djbclark.paseo-desktop` and `paseo-upgrade` (through the Ansible role in site-djbclark, never a live plist edit, rule 18); 5. grep kool-ade, site-djbclark and site-private for the old paths (`/Applications/Paseo.app`, `/opt/homebrew/Caskroom/paseo`); 6. restart the daemon once, verify `paseo --version`, `paseo ls`, the connected-hosts round trip and the skill-sync guard (memory `project_paseo_skill_sync_writes_through_symlinks`).
 4. **Order:** after the connected-hosts upgrade is verified on stock 0.13.0 (so a regression can be told apart from the fork), before tuios. Not started; blocked on djbclark's go.
 
 ## Paseo connected hosts: make full use of them, after we quiesce and upgrade Paseo (djbclark, direct, 2026-10-24)
@@ -362,7 +362,7 @@ merge** (both open 2026-10-23). Nothing is built.
    `ci decide` per repo that already has a workflow. Blockers: PRs 27 and 31; the Hyades runner is shared (never fan out
    past its capacity); the `jevlike` key is only djbclark's; agents never post on `SIPB/*` (home rule 35).
 3. **Restated by djbclark, 2026-10-23** (a duplicate of item 2's kev/laya half, folded in here): "add using the
-   Jev-like hyades things we set up to djbclark-ade process", the two servers being Kev and Laya (`jevlike` skill;
+   Jev-like hyades things we set up to kool-ade process", the two servers being Kev and Laya (`jevlike` skill;
    source `~/src/jev-like-hyades`). Process sites to check against `docs/jev.md`'s list: `bin/jev`'s shadow sites
    (`pick-seat`, `stuck-check`, `merge-gate`), and whether a kev/laya `merge_gate` can stand in for the paid plan in
    "Buy a Jev plan before the factory's merge gate goes live (SF-Q10)" below.
@@ -567,7 +567,7 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    and the launchd job is loaded per the aiuse README. **Done 2026-10-20**: aiuse 3.8.0 released (PyPI, GitHub release, Homebrew tap; this Mac upgraded) and `com.djbclark.aiuse-credits-refresh` bootstrapped, hourly, run-at-load. Codex's "Path to threat model file" set to `docs/threat-model.md` the same day (djbclark, GUI). The figure is a lower bound (it counts all org spend).
    Also (adversary on the aiuse branch, finding 5, 2026-10-20): `bin/route_agent.py` reads aiuse's `latest.json`
    directly, so it never sees the operator credits override; make it read `aiuse --available --json` (or the
-   same resolver aiuse uses) so routing and the quota gate agree. Small djbclark-ade PR after the aiuse branch merges.
+   same resolver aiuse uses) so routing and the quota gate agree. Small kool-ade PR after the aiuse branch merges.
    **Done 2026-10-20, PR 12 merged (72252da)**: `route_agent.py` runs `aiuse --available --json` (available-row
    contract fields; `windows[]` only tightens; `excluded[]` and absent pools read 0 on a fresh payload), falls back
    to the snapshot file with a stderr log and `quota_source` in the output; `ROUTE_AGENT_AIUSE_JSON` feeds canned
@@ -845,7 +845,7 @@ text and the send goes to the default daemon). No test covers R1.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
-djbclark, 2026-10-20: "We need a clear way to keep all of djbclark-ade up-to-date on new
+djbclark, 2026-10-20: "We need a clear way to keep all of kool-ade up-to-date on new
 systems, and also we should have a changelog so people know what changes or new features are
 added." Done the same day: `CHANGELOG.md` (Keep a Changelog form, seeded from the merged PRs
 since 2026-10-09), AGENTS.md code-review rule 10 (every PR adds its line), README "Update
@@ -881,7 +881,7 @@ since 2026-10-09), AGENTS.md code-review rule 10 (every PR adds its line), READM
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
 `docs/ade-everywhere-proposal.md` §11.5 rules that paid-for cloud agents are used first for
-slices that can leave the Mac. Two need djbclark once: (1) environment `ccarenv_02c6721d65dc4191b57a76a84baa4121` for `djbclark-ade` created
+slices that can leave the Mac. Two need djbclark once: (1) environment `ccarenv_02c6721d65dc4191b57a76a84baa4121` for `kool-ade` created
 2026-10-19, but codex-cli 0.163.0 cannot see new-style environments (`codex cloud exec` exits 1,
 "no cloud environments are available for this workspace"; upstream openai/codex#50182 and
 #51585, open). Re-probe after each codex-cli release (`codex cloud exec --env <ID> --branch
@@ -994,7 +994,7 @@ Verdict `APPROVE ac0e0d8`. Left open:
 
 ## Verified peer messaging (djbclark, 2026-10-25; part of the big ADE queue)
 
-djbclark, 2026-10-25: always verify the other agent got the message, or we may sit on a one-way receive-only link; "make sure that always happens as part of the big djbclark-ade queue". Case: the
+djbclark, 2026-10-25: always verify the other agent got the message, or we may sit on a one-way receive-only link; "make sure that always happens as part of the big kool-ade queue". Case: the
 herdr successor `29a5535c` sent a contract proposal; the reply was written only in prose, then relayed (`relay.py` status: `queued`, the target was inside a long command): not yet proven. Standing order 10 in AGENTS.md
 states the rule. Build items, each one Sonnet `code` slice with a test:
 1. **`relay.py --ack`**: after a send that is not `delivered`, keep watching (transcript or inbox of the target, bounded by `--wait`) and print `delivered`, `unverified` or `not delivered` as the exit status
@@ -1029,7 +1029,7 @@ E. Everything else: verified delivery is enough; an FYI that provably landed nee
 
 Proposal §8 item 9 and §9.3. Starts after Phase 1's first PR. First slices: `bin/factory` F1
 orchestrator (claude sonnet, high), Jev `pick-seat`/`stuck-check`/`merge-gate` sites in shadow,
-the workspace adapter (cow + worktree). Pilot repo `djbclark-ade`, allowlist of small
+the workspace adapter (cow + worktree). Pilot repo `kool-ade`, allowlist of small
 non-security tasks.
 
 ## A read-only codex advisor ends on its first refused escalation (found 2026-10-19)
@@ -1633,7 +1633,7 @@ Actionable here, in order of expected value:
    points — misunderstood requests, buggy code — rather than token counts.
 3. **Keep instruction files lean.** Docs say aim for **under 200 lines** and
    move specialised instructions into skills, which load on demand.
-   `djbclark-ade/AGENTS.md` is **180 lines** and grew substantially on
+   `kool-ade/AGENTS.md` is **180 lines** and grew substantially on
    2026-08-23; `site-private/home-agents.md` is 135. Both load in an ops
    session. Trim before adding more.
 4. **Consider `ENABLE_PROMPT_CACHING_1H=1`** — preserves the one-hour cache

@@ -15,9 +15,9 @@ this plan wins where they disagree about the future, they win about today. Sourc
 2. **Retire `relay.py`** and every non-Paseo channel; inter-agent communication moves to Paseo's native
    framework (`send_agent_prompt`, `create_agent` with `notifyOnFinish`, `list_agents`,
    `list_pending_permissions`/`respond_to_permission`, heartbeats, schedules, lineage).
-3. **Replacement order for every djbclark-ade capability:** (a) native Paseo functionality or skill;
-   (b) an existing Paseo plugin; (c) a Paseo plugin we write; (d) only then keep it in djbclark-ade.
-4. **End state:** no mention of any harness other than Paseo anywhere in djbclark-ade, `~/AGENTS.md`
+3. **Replacement order for every kool-ade capability:** (a) native Paseo functionality or skill;
+   (b) an existing Paseo plugin; (c) a Paseo plugin we write; (d) only then keep it in kool-ade.
+4. **End state:** no mention of any harness other than Paseo anywhere in kool-ade, `~/AGENTS.md`
    (`site-djbclark/cursor/home-agents.mdc`), the ops `AGENTS.md` files, skills, docs or memory pointers,
    except the `docs/history/` directory (F5), the A8 bridges doc and skill, and, during the migration, this
    plan. The ban is on harness **roles**, not on words that name something else: Hermes is also a Paseo
@@ -43,14 +43,14 @@ this plan wins where they disagree about the future, they win about today. Sourc
       Paseo reaches terminals that Herdr hosts.
 
    **These two are the only Herdr integration.** Herdr agents do not talk to Paseo agents: no messaging,
-   relaying, launching, naming, sleeping or fleet tracking through Herdr, and no djbclark-ade tool depends
+   relaying, launching, naming, sleeping or fleet tracking through Herdr, and no kool-ade tool depends
    on either bridge.
 
 ## B. Principles
 
 1. **One authority per host.** The local `paseo` daemon holds that host's agents, lineage, permissions,
    terminals, worktrees, schedules and heartbeats; the Mac and vps-primary (F3) are two hosts.
-   djbclark-ade keeps no fleet registry, pane map, transcript finder or waiter of its own. It does keep
+   kool-ade keeps no fleet registry, pane map, transcript finder or waiter of its own. It does keep
    **durable evidence**: task ids, report files and outcome records live outside worktrees, so an
    archived workspace or a daemon restart loses no result (astra A2, B1e).
 2. **Communication is a Paseo prompt or event, never typed text**: no screen scraping, prompt-line
@@ -110,7 +110,7 @@ this plan wins where they disagree about the future, they win about today. Sourc
       can still archive, which is why point 2 exists.
    4. D1.3 proves the teardown and the rescue; D2's gate proves G2's refusal.
 5. **Native first, plugin only for a hook.** A script that calls the `paseo` CLI, SDK or MCP is native (A3a)
-   and lives in djbclark-ade. A plugin is written only when a daemon lifecycle hook, a UI surface or a
+   and lives in kool-ade. A plugin is written only when a daemon lifecycle hook, a UI surface or a
    composer command is needed, because plugins are trusted, unsandboxed and sit in the create/turn path of
    the one daemon. Never a script that talks to a TUI (Fable 1.5; astra A1 on B5).
 6. **Policy stays, enforcement moves.** Routing, quota and cost policy (`aiuse`, `route_agent.py`,
@@ -171,7 +171,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `opencode-plugins/`, OpenCode V2 Go sessions, `opencode-plugin-guard` | 128 files | F4: keep provider-side plugins, drop harness-like ones | Paseo provider `opencode` |
 | `cursor-cloud` | 14 files | KEEP as a tool (a cloud agent, not a harness) | — |
 | `README.md` "two altitudes", `docs/orchestration-practices.md`, `docs/coding-factory.md`, `docs/ade-everywhere-*` | — | REWRITE in D7; history into `docs/history/` | — |
-| `~/AGENTS.md` items 4, 24-26, 30, 33; `djbclark-ade/AGENTS.md` orders 9-10 and Machine context | — | REWRITE per phase, as each behaviour changes (astra B1h), final pass in D7; Opus 5.5+ edits `home-agents.mdc` | — |
+| `~/AGENTS.md` items 4, 24-26, 30, 33; `kool-ade/AGENTS.md` orders 9-10 and Machine context | — | REWRITE per phase, as each behaviour changes (astra B1h), final pass in D7; Opus 5.5+ edits `home-agents.mdc` | — |
 
 ### C2. Provider map (`paseo provider ls`, Mac daemon 0.14.0, 2026-10-30)
 
@@ -295,7 +295,7 @@ ops-promotion pilot passes.
    on `paseo send`; Paseo schedules for judgment jobs only (F2). Then, after the drain gate and a search for
    callers of `relay.py` or `fleet.py` (the watchers above, `fleet-watch upstream --relay-to`, `paseowatch`,
    `cfenginewatch`, `tell-chief-of-staff`, the quota guard), `session-finder` is disabled. The search covers
-   all of `~/ops`, djbclark-ade, `~/.local/bin`, `~/Library/LaunchAgents`, the provider hook configs
+   all of `~/ops`, kool-ade, `~/.local/bin`, `~/Library/LaunchAgents`, the provider hook configs
    (`~/.claude/settings.json`, `~/.codex`, `~/.omp`) and vps-primary's NixOS config, matching any of
    `session[-_]finder`, `\b(relay|fleet|launch|where|prompt_line|nested_pty)\.py\b` and
    `^\s*(import|from)\s+(relay|fleet|launch|where)\b`, because callers also build the path in pieces or
@@ -312,9 +312,9 @@ ops-promotion pilot passes.
    Paseo prompt; no blocking hit remains; the triage list is committed.
 7. **Deletion and docs.** Delete what earlier phases disabled; README, both AGENTS.md, ops AGENTS.md, memory
    pointers, skills index, `apply-toolchain-prompt.md`, `mcp-servers.md`; write `docs/history/`. The
-   end-state check is a **new** CI step in djbclark-ade (the `context-policy` job runs only pytest today)
+   end-state check is a **new** CI step in kool-ade (the `context-policy` job runs only pytest today)
    plus a local script over `~/AGENTS.md`, `home-agents.mdc`, the ops `AGENTS.md` files and
-   `site-private/memory/`, which no djbclark-ade CI job can read. Its pattern:
+   `site-private/memory/`, which no kool-ade CI job can read. Its pattern:
    `herdr|orca|tmux|\bsuperset\b|paradev|tuicommander|tuios|cow.pasture|relay\.py|acp-run|acp-dispatch`
    plus Hermes in a seat or harness role; `tmux` and `superset` hits go to a human for triage (ordinary
    English and non-harness uses). Exempt: `docs/history/`; the A8 bridges doc and skill (`herdr`, `tuios`);

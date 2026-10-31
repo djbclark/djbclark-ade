@@ -4,7 +4,7 @@ handoff_id: 0d0e
 parent_handoff_ids: [4496]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: docs/queue-picklist-deadlocks-2026-10-28
 head_sha: 94411d1

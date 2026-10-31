@@ -20,8 +20,8 @@ waiting and carries answers back; you only present the choice. He changes
 windows only when an item needs more depth than a prompt can carry.
 
 ```bash
-H="python3 -I $HOME/src/djbclark-ade/skills/helm/helm.py"
-L="python3 -I $HOME/src/djbclark-ade/skills/session-finder/launch.py"
+H="python3 -I $HOME/src/kool-ade/skills/helm/helm.py"
+L="python3 -I $HOME/src/kool-ade/skills/session-finder/launch.py"
 $H scan                      # open items, every TUI, ranked (--all: every session; --ended: section 7; --order attention: old order)
 $H wait --auto-audit         # block until something new needs him
 $H check <id> --fp <fp>      # still pending? exit 0 yes, 10 already answered in the terminal, 11 changed

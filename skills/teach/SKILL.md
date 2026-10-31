@@ -104,7 +104,7 @@ item at a time: a few paragraphs about that item, then its picklist (step 3).
    (today's date; the repeat and recap logic reads it)
    and append one short "result:" clause (kept / uninstalled / disabled again).
    `git -C ~/ops/site-private add memory/project_claude_code_mods_rollout.md &&
-   git commit && git push`; same for djbclark-ade if the prompt doc changed.
+   git commit && git push`; same for kool-ade if the prompt doc changed.
    Then `~/.local/bin/hermes-ping "teach: Day N done — <one line>"`.
 
 ## Rules carried over

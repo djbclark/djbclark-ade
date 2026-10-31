@@ -5,7 +5,7 @@ parent_handoff_ids: [88b6]
 lineage: deterministic
 chain: [standalone-20d5]
 repo: sudo-secretspec
-workspace: djbclark-ade
+workspace: kool-ade
 branch: sudo-main
 head_sha: 6ce267478c7c4d9117dec5db87fd8ae7a9abe693
 created_at: 2026-10-20T12:50:37-04:00
@@ -143,7 +143,7 @@ here and it is now `memory/feedback_re_review_every_repair.md`:
    `None` rather than raising, so it reports through the same `_require`.
 6. **1b held out of `sudo-main` while `.29` ran.** `just release` executes
    `packaging/release.py` from the working tree.
-7. **The djbclark-ade master divergence is reported, not fixed.** See Where
+7. **The kool-ade master divergence is reported, not fixed.** See Where
    We're Going item 5.
 
 ## Evidence & Data
@@ -204,7 +204,7 @@ here and it is now `memory/feedback_re_review_every_repair.md`:
    filesystem stays writable between the build step and the attest step. 3b
    **cannot be verified without cutting a release after it**, so plan for
    `.30`. Get an adversary pass on it (see Decisions, and the memory note).
-5. **Report, do not fix, the djbclark-ade master divergence.** `master` is
+5. **Report, do not fix, the kool-ade master divergence.** `master` is
    ahead 8 / behind 16 of `origin/master` with another session's uncommitted
    edits (`CHANGELOG.md`, `bin/acp-dispatch`, `tools/acp-run/*`,
    `tests/test_acp_*`). The `djbclark-ade-db` peer verified `c179f42` and
