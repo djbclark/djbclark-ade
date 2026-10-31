@@ -16,6 +16,8 @@ STDLIB ONLY, on purpose: this is the thing a client is tested against, so it mus
 protocol library — a mismatch in the shared library would hide exactly the bug the dummy exists to find.
 
 KNOBS (env): CIRNO_TEXT, CIRNO_LINES (0 = until cancelled), CIRNO_DELAY (seconds per chunk, default 0.02).
+PATH: registered as `cirno` in acp-run, which resolves the executable as ADE_CIRNO, else `cirno` on PATH,
+else this checkout's bin/ade-cirno — so an install anywhere else is spelled `ADE_CIRNO=/path/to/ade-cirno`.
 
 EXIT 0 on EOF or a clean end. Nothing here reads files, env secrets or the network.
 """
