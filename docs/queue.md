@@ -3,6 +3,13 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Build "model tiers as data" after D1 (djbclark via `/steps`, 2026-10-31)
+
+Design: [docs/model-tiers-design.md](model-tiers-design.md) (2026-10-26, from the orphaned branch `docs/model-tiers-design`; design
+only). It moves every hard-coded model name and tier rule into `config/model-tiers.toml` with a `bin/model-tiers promote` command, so a
+new top model is one data change. Start only after D1 of `docs/paseo-only-rearchitecture.md`; re-check its inventory (section A) against
+the code then, since routing moves to Paseo in the later phases.
+
 ## `paseo-bypass-watch` test gaps from adversary round 4 (PR 121 merged 2026-10-29 as 306039a; djbclark deferred them 2026-10-29 via `/steps`: "track everything like it and resurface at the appropriate time")
 
 Both are coverage gaps only; the code is exact and the adversary APPROVED 78f3a5c. Full report: `~/.local/state/bigteam/adhoc-2026-10-29/watch-adv4-report.md` (B1, B3). Not started by design.
