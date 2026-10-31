@@ -21,14 +21,17 @@ start Orca for a GUI task. **It stays enabled when idle** (operator's choice, 20
 ## Install and state
 
 ```sh
-paseo plugin add kevguy/screen        # plugin id: paseo-screen
+paseo plugin add kevguy/screen        # plugin id: paseo-screen; operator only (rule 4)
 ```
 
-Installed 2026-10-30 from registry pin `1df9050d3721d927aa73655ad2cb4b4b53f42db9`, `running`, enabled. It
-compiles a Swift helper (ScreenCaptureKit for frames, CGEvent for input); the server code has no network,
-no listening sockets and no runtime dependencies (read before install, 2026-10-30). Paseo already holds
-macOS Screen Recording and Accessibility, so there was no permission prompt. Check with `paseo plugin ls`
-that `paseo-screen` is `running` before relying on it.
+Installed 2026-10-30 from the registry's reviewed pin `1df9050d3721d927aa73655ad2cb4b4b53f42db9` (a registry
+install uses the pin its reviewer recorded; `docs/apply-toolchain-prompt.md` names the same pin). **Mandatory
+verify after any install or update:** `git -C ~/.paseo/plugins/paseo-screen/*/checkout rev-parse HEAD` must print
+that sha (it did on 2026-10-31) and `paseo plugin ls` must show `paseo-screen` `running`; a different sha is
+an unreviewed revision, so stop and tell the operator. It compiles a Swift helper (ScreenCaptureKit for frames,
+CGEvent for input); the server code has no network, no listening sockets and no runtime dependencies (read
+before install, 2026-10-30). Paseo already holds macOS Screen Recording and Accessibility, so there was no
+permission prompt.
 
 ## Two ways in
 
@@ -84,12 +87,19 @@ Test those on a throwaway target before depending on them, and say so in a repor
    before sending input; wait or ask rather than steal focus.
 3. **Never send `Cmd+Q`, `Cmd+W`, delete, send or purchase actions**, or touch password, 1Password or lock
    screens, without the operator's explicit yes for that action. A `locked: true` host is not yours to unlock.
-4. **Exposure:** anyone paired with the host can see and control its screen while the plugin is enabled, and
-   the viewer's "view only" switch is per viewer, not a lock. The off switch is
-   `paseo plugin disable paseo-screen` (upstream README, Security); use it only when the operator asks, since
-   staying enabled when idle is the operator's accepted risk. A viewer's Pause button only stops that viewer's
-   frames and is not a lock (client/screen.tsx at the pin); a host-wide Pause on the sidebar row was reported
-   but is untested, so never rely on it.
+4. **Exposure (the operator's accepted risk, 2026-10-31):** the plugin has no host-side authorization. While it
+   is enabled, **every paired Paseo client and any local caller of the daemon's plugin RPC (so any agent on this
+   Mac, whatever it has read) can see the screen and drive its mouse, keyboard, paste and clipboard** with the
+   Screen Recording and Accessibility grants Paseo holds. The viewer's "view only" switch is per viewer, not a
+   lock, and a viewer's Pause button only stops that viewer's frames (client/screen.tsx at the pin); a host-wide
+   Pause on the sidebar row was reported but is untested, so never rely on it. A host-side authorization check
+   would be an upstream (kevguy/paseo-screen) feature; none exists. Rules that follow from this, binding every agent:
+   - **Never pair a new client** to the host, and never approve or accept a pairing request.
+   - **Never enable, re-enable, reinstall, update, reconfigure or change the settings of the plugin.** Only the
+     operator does.
+   - **`paseo plugin disable paseo-screen` only on the operator's word.** It is the off switch (upstream README,
+     Security), but it cuts the screen RPCs and the viewer for every other session mid-task, and staying enabled
+     when idle is the operator's choice.
 5. Report every input you sent (events and target window) and what the next frame showed; never claim a
    click landed from the event count alone (`handled` is not proof).
 

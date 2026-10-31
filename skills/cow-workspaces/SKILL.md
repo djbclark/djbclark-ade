@@ -6,7 +6,7 @@ description: >-
   when starting parallel or isolated work on a checkout under ~/src or ~/.hermes,
   dispatching a Hermes or Paseo worker into its own directory, or asked about
   cow, pastures, `cow migrate`. Orca (and `~/orca/projects`) is retired
-  (2026-10-31); ignore its recipes below.
+  (2026-10-31); no Orca recipe is kept in this skill.
 ---
 
 # cow workspaces

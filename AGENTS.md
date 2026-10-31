@@ -13,15 +13,20 @@ control; since 2026-10-08 also the git home of the orchestration and
 session-hygiene skills and tools. Two altitudes, verified by real runs on
 2026-08-23: the **micro graph** (Claude Code dynamic workflows, in-process
 fan-out) and the **macro graph** (a task DAG across agent CLIs in their
-own worktrees; it was run through Orca, which is now retired, so read it as Paseo workspaces and subagents).
+own worktrees; it was run through Orca, which is now retired from djbclark-ade: run the same shape with Paseo workspaces and agents (`skills/paseo`, `skills/bigteam`; plan: `docs/paseo-only-rearchitecture.md`). Its Orca command reference, `docs/orca-integration.md`, was removed 2026-10-31 (git history has it) and no Paseo DAG runbook is written yet).
 [README.md](README.md): architecture, how they compose, every skill.
 
 > **Retired as of 2026-10-31 (operator ruling).** herdr (except the two edge-case bridges `herdr4paseo` and
 > `paseo4herdr`), Orca and BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) are retired **from djbclark-ade**, and
-> **Paseo is the only harness**: no djbclark-ade route, skill or doc sends anyone to them. They stay installed and configured on
-> djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my computer"). A doc, skill or script in this repo that still presents them as live is stale:
-> [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) is the plan of record. The docs say so
-> now; machine-side uninstall is NOT planned, and never touch their config. For screen control use the `paseo-screen`
+> **Paseo is the only harness**: new work goes through Paseo (`paseo run`, `bin/paseo-new-seat`, the `paseo` skills). They stay installed and configured on
+> djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my computer"); machine-side uninstall is NOT planned, and never touch their config.
+> **What is gone (2026-10-31):** `skills/herdr-tidy`, `skills/reorg-orca` and their `/herdr-tidy`, `/orca-tidy` wrappers, `bin/herdr-ai`, `bin/herdr-jump`,
+> `bin/orca-reorg-watch`, `docs/orca-integration.md`, `docs/herdr-tidy.md` and the vendored Orca guide (git history has them). **What is still live, on purpose,
+> until the plan's D4/D6 drain** (so a route can still send someone to herdr or Orca; do not start it for new work): `skills/session-finder` (`fleet.py`, `relay.py`
+> pane routes, and `launch.py --host auto|herdr|orca|none`, which is not Paseo-native and retires in D6), the herdr and Orca host branches of `self-slash`,
+> `autorename`'s herdr half (`herdr_place.py`, `/autorename all`), `bin/seat-name`, `plugins/herdr-sleeper`, and `bin/herdr-server-run` with
+> `config/launchd/dev.herdr.server.plist` (these two also stay for the installed server and the bridges). A doc, skill or script that presents herdr, Orca or BB as the
+> current way to do something is stale: [docs/paseo-only-rearchitecture.md](docs/paseo-only-rearchitecture.md) is the plan of record (D4/D6/D7 are its phases). For screen control use the `paseo-screen`
 > skill (Paseo plugin), never Orca's `orca computer`.
 
 ## Read before acting
@@ -134,8 +139,9 @@ Each doc carries its own summary.
 - **Paseo is the only harness (2026-10-31).** herdr (except `herdr4paseo` and `paseo4herdr`), Orca and BB are
   retired from djbclark-ade by ruling (the tools stay installed and configured on the machine, untouched); the Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration`
   and the `computer-use` stub were removed from the machine the same day. Do not start Orca, open a herdr pane
-  or reach for BB from here; see `docs/paseo-only-rearchitecture.md`. Many docs and tools below this level still describe
-  them as live until the plan's D7 sweep.
+  or reach for BB from here, for new work; see `docs/paseo-only-rearchitecture.md`. The exact state is in the
+  retirement box at the top: removed code is gone, and the live herdr/Orca paths named there stay until D4/D6.
+  Docs not yet swept (D7) may still describe them as live.
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
   `bin/route_agent.py` discovers agents from it plus installed headless TUIs
   (docs/model-routing.md).

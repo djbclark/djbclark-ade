@@ -46,7 +46,13 @@ started with `acp`, `-p` or `--print`) and chats titled with `/rename` (verified
 live 2026-10-10). Before that fix, the Claude-format output was silently
 dropped in cursor sessions and the once-per-session marker was used up.
 
-## Arguments: `/autorename all` is the full herdr reorganization
+## Arguments: `/autorename all` is RETIRED (refuse it)
+
+**If the argument is `all`, `reorg` or `layout` (with or without a workspace name), do NOT run the pass.** Reply exactly
+`autorename all is retired from djbclark-ade (2026-10-31)` and stop, in every host (Paseo, herdr or none), and make no
+`herdr_place.py` call. The paragraphs and numbered steps of this section and section 3 that follow are a **record of the
+retired herdr layout pass, not instructions**; their code stays in `herdr_place.py` until the plan's D4/D6 drain
+(`docs/paseo-only-rearchitecture.md`), which is not a reason to run it. The no-argument path below is the live one.
 
 The skill receives whatever follows the command. **With no argument it titles this
 session and names this agent's own tab, and nothing else** (steps 1 and 2 below; djbclark,
