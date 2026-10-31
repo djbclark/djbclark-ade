@@ -229,9 +229,9 @@ pull request here is expected to meet these; flag any it misses.
       report a readable bad one.
    5. **The marker's JSON is delimited by its own braces, not by the first `<!--`** (2026-10-27): a
       `note` may quote the format, and a body that documents the marker is not read as a second
-      mistyped one. The marker's JSON must also be written where `pr-wait` reads it live — a marker
-      whose JSON is partly inside a code span is **malformed**, never approved, because masking code
-      cannot "repair" JSON nobody wrote.
+      mistyped one. The marker's JSON is parsed exactly as written in the raw body (2026-10-31, PR 175):
+      backticks inside a JSON string are content; a backtick outside a string makes the JSON invalid,
+      hence **malformed**. Masking never repairs JSON.
 
    Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
    is the head merged. Remove the worktree and delete the branch only after `gh pr view N --json state`

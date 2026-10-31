@@ -380,3 +380,6 @@ Adversary markers read by `bin/pr-wait` (2026-10-30): JSON notes may contain Mar
 when the JSON as written is valid. Malformed same-head BLOCK markers in code fail closed, including
 near-miss version spelling, duplicate keys, decorated heads and trailing text. APPROVE still requires
 a live canonical marker with valid JSON and the full head.
+
+On 2026-10-31 (PR 175), malformed BLOCK rescue began matching the marker's head fields, excluding
+revision mentions in notes, and accepting a doubled comment start for same-head BLOCK detection.

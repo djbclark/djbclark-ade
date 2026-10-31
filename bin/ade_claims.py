@@ -1601,7 +1601,11 @@ def _acp_run_pair(k: str, v: str) -> bool:
         argv = shlex.split(v)
     except ValueError:
         return False
-    return len(argv) == 1 and os.path.realpath(argv[0]) == _acp_run_guard_path()
+    # The shell executes the command before path resolution: lexical ../ cleanup
+    # must not turn a command substitution or shell operator into an exempt path.
+    expected = {str(Path.home() / ".cache/acp-run/git-identity-guard.sh"), _acp_run_guard_path()}
+    return (len(argv) == 1 and argv[0] in expected
+            and os.path.normpath(argv[0]) == argv[0] and v == shlex.quote(argv[0]))
 
 
 def _unexempted_config(call: GitCall, env: dict[str, str]) -> list[tuple[str, str]]:

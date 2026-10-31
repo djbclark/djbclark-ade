@@ -141,7 +141,8 @@ Evaluated in order; the module docstring has every form.
    environment, `hook.acp-run-identity.event=reference-transaction` and `hook.acp-run-identity.command=~/.cache/acp-run/git-identity-guard.sh`
    (a config hook that checks the git identity; a config hook only adds a hook, it cannot switch the hooks directory's off). The
    per-key rule exempts exactly those two pairs from environment configuration (PARAMETERS or legacy COUNT pairs; command value
-   shell-decoded as exactly one argument, then compared after `realpath`), spending each environment occurrence once. Another value, a command-line copy via `-c` or
+   shell-decoded as exactly one argument and matched exactly to the expected guard path (or its realpath),
+   with canonical shell quoting and no lexical path normalization), spending each environment occurrence once. Another value, a command-line copy via `-c` or
    `--config-env`, and every other `hook.*`,
    `include*` and `core.hooksPath` key stay refused. **`clone` and `init` copy a template directory (its `config` and `hooks` included) into the new repository
    (round 11, 2026-10-25; djbclark's ruling): the shim refuses every non-default template source** as `hook-config`: `--template`

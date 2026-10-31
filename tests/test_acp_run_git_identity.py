@@ -12,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import uuid
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +78,10 @@ class TestGitIdentityGuard(unittest.TestCase):
 
     def head(self, repo: Path) -> str:
         return self.git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def test_abandoned_identity_fixture_is_ignored(self):
+        r = self.git(SCRIPT.parents[2], "check-ignore", "--no-index", ".identity-test-killed-run/artifact")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_injected_config(self):
         self.assertEqual(self.env["ACP_RUN_GIT_EMAIL"], OPERATOR)

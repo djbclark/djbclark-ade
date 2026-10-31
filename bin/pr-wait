@@ -474,14 +474,15 @@ def _strip_code(body: str) -> str:
     in place and the lines are rejoined with `"\n"` after splitting on `"\n"`, so the result is the same
     length as `body` and every index in it points at the same character of `body`. `splitlines()` would
     silently drop a trailing newline and rewrite `\r\n` as `\n`, shifting every offset after the first
-    such line - and `adversary_verdict` relies on those offsets to compare a marker's JSON to the same
-    slice of the raw body.
+    such line - and `adversary_verdict` relies on those offsets to parse the marker's JSON
+    exactly as written in the raw body.
 
     HONEST ABOUT THE ERROR DIRECTION (review C3): an over-strip can still hide a MALFORMED or near-miss
     marker, and so lose its `malformed` warning; what it cannot do is lose a BLOCK naming this head,
     because that is read from the RAW body. Every replacement is a same-width run of spaces, so the text
     outside code is byte-identical and no marker can be "repaired" into a different one; a live marker
-    whose JSON slice differs between body and stripped text is now `malformed`, never read (C2').
+    is parsed from the raw body. Backticks inside JSON strings are content; backticks outside
+    strings make the JSON invalid. Masking never repairs JSON (C2').
 
     KNOWN LIMIT, accepted by djbclark at the bundled review of 66/67: a BLOCK whose head is MISTYPED -
     not a prefix of this head at all - and that sits inside code is documentation, so a body with such
@@ -690,7 +691,6 @@ def adversary_verdict(body: str, head: str) -> dict:
     parsed: list[dict] = []
     placeholders = 0
     for _start, jstart, jend in spans:
-        raw = text[jstart:jend]
         # Parse JSON as written: backticks inside a JSON string are content, while
         # backticks outside strings must never be masked into valid JSON.
         raw = body[jstart:jend]
@@ -757,7 +757,10 @@ def adversary_verdict(body: str, head: str) -> dict:
             continue
         js = body.find("{", match.end())
         next_start = body.find("<!--", match.end())
-        if js < 0 or (next_start >= 0 and next_start < js):
+        if js < 0:
+            continue
+        if (next_start >= 0 and next_start < js
+                and body[next_start:js].strip() != "<!--"):
             continue
         je = _json_object_end(body, js)
         if je < 0:
@@ -768,14 +771,35 @@ def adversary_verdict(body: str, head: str) -> dict:
             continue
         # Even an invalid six-hex abbreviation is a recognizable typo here;
         # refuse it conservatively, never treat it as a valid abbreviated verdict.
-        runs = re.finditer(r"(?<![0-9a-f])[0-9a-f]{6,40}(?![0-9a-f])", candidate, re.I)
+        # Revision mentions in a note cannot identify the BLOCK's head. Read
+        # every head field independently so duplicate keys cannot hide this head.
+        try:
+            fields = json.loads(candidate, object_pairs_hook=lambda pairs: pairs)
+        except ValueError:
+            fields = None
+        if isinstance(fields, list) and all(isinstance(pair, tuple) and len(pair) == 2 for pair in fields):
+            # Preserve duplicate top-level keys without mistaking nested metadata for fields.
+            if not any(key == "verdict" and isinstance(value, str) and value.upper() == "BLOCK"
+                       for key, value in fields):
+                continue
+            quoted_heads = [value for key, value in fields if key == "head" and isinstance(value, str)]
+        else:
+            head_fields = re.finditer(r'"head"\s*:\s*("(?:[^"\\]|\\.)*")', candidate)
+            quoted_heads = []
+            for field in head_fields:
+                try:
+                    quoted_heads.append(json.loads(field.group(1)))
+                except ValueError:
+                    continue
+        runs = (run for value in quoted_heads for run in
+                re.finditer(r"(?<![0-9a-f])[0-9a-f]{6,40}(?![0-9a-f])", value, re.I))
         if not any(head.lower().startswith(run.group().lower()) for run in runs):
             continue
         try:
             doc = json.loads(candidate, object_pairs_hook=_strict_object)
         except ValueError:
             doc = None
-        if doc is None and next_start >= 0 and next_start < je:
+        if doc is None and js <= next_start < je:
             continue  # inspect the nested start itself, not an invalid outer quotation
         if ((start, js, je) in canonical and isinstance(doc, dict)
                 and doc.get("verdict") == "BLOCK" and isinstance(doc.get("head"), str)

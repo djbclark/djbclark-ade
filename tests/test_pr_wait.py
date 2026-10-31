@@ -2595,3 +2595,29 @@ def test_null_security_review_checks_review_id_anchor(world):
     world.route("graphql", gql(thread(92, resolved=True)))
     world.run()
     assert world.file("summary")["merge_blockers"] == ["security-marker-unverified"]
+
+
+@pytest.mark.parametrize("old_head", ["1234567", "1234567" * 5 + "12345"])
+def test_fenced_other_head_block_note_cannot_name_current_head(old_head):
+    # Adversary c4: only the head field identifies the reviewed revision.
+    doc = {"verdict": "BLOCK", "head": old_head, "note": "fixed in " + ADV_HEAD[:7]}
+    body = marker("APPROVE") + "\n```\n<!-- adversary-verdict:v1 " + json.dumps(doc) + " -->\n```"
+    result = adv(body)
+    assert result["verdict"] == "APPROVE" and not result["malformed"]
+    assert gate(body)[0] is True
+
+
+def test_doubled_start_cannot_hide_same_head_block():
+    broken = '<!-- adversary-verdict:v1 <!-- ' + json.dumps({"verdict": "BLOCK", "head": ADV_HEAD}) + ' -->'
+    body = marker("APPROVE") + "\n```\n" + broken + "\n```"
+    result = adv(body)
+    assert result["verdict"] == "BLOCK" and result["malformed"]
+    assert gate(body, required=False)[0] is False
+
+
+@pytest.mark.parametrize("values", [(ADV_HEAD, OTHER_HEAD), (OTHER_HEAD, ADV_HEAD)])
+def test_duplicate_head_fields_cannot_hide_current_head(values):
+    payload = '{"verdict":"BLOCK","head":"' + values[0] + '","head":"' + values[1] + '"}'
+    body = marker("APPROVE") + "\n```\n<!-- adversary-verdict:v1 " + payload + " -->\n```"
+    assert adv(body)["verdict"] == "BLOCK"
+    assert gate(body, required=False)[0] is False
