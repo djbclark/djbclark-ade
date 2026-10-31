@@ -307,6 +307,7 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Fixed
 
 - Fixed adversary marker edge cases, comment boundaries, JSON-string metadata and top-level verdict/head matching, nested identity guard recovery and exact quoted hook exemptions in bin/ade_claims.py, and dispatch completion consistency (#175).
+- Fixed `watch up` replacing watchers after Paseo collected their idle runtimes; retained saved sessions without periodic model wake-ups, let real events resume them through the relay, and refused duplicate launches when daemon state was unknown (#192).
 - Fixed rumination-watch duplicate paid sends and starts, bound retained-ID reconciliation to each start attempt, preserved unresolved IDs across owner changes and absent IDs for fresh diagnosis, and added operator notices, isolated watcher tests, and parsed canonical workspace SHAs. (#174)
 - Fixed Paseo self-slash clear and compact refusing unproved providers and directing them to successor handoffs (#179)
 - `failover.sweep_tmp_dirs()` (2026-10-30) removes stale `failover-*` scratch directories that killed runs leave in the temp dir: only real directories (never symlinks) named like `TemporaryDirectory(prefix="failover-")`, owned by the caller, whose own and children's mtimes are over a day old; errors never propagate (#176)

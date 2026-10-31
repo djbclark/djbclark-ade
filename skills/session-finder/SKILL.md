@@ -95,6 +95,16 @@ id>)`, from `paseo ls -g --background --json`, deduplicated on the Paseo agent i
 adds the archived agents as `ended` rows (`relay.py` never sends to one). No `paseo` CLI, or a failed or slow call
 (20 s): no Paseo rows, as before. `relay.py` takes a hex **prefix of 6 or more characters** of a Paseo agent id
 (`paseo ls`'s 7-character short id works); exactly one agent must match, else it refuses and lists the candidates.
+
+**A `closed` Paseo agent is sent to like an idle one (2026-10-31)**: Paseo reports `closed` for an agent whose runtime it
+collected (not archived, not failed); `paseo send` into it resumes the SAME persisted conversation. `relay.py` (`hard_stop`,
+`paseo_blocker`, the gate, `--why`, the deferred deliverer's poll) treats `closed` as idle and the result stays
+`accepted` until a witness shows the text; a failed send is a failure, never a delivery. `archived`, `error`, `initializing`
+and any other state are still refused. This is the path fleet-watch's `upr_relay` takes
+(`relay.py <agent uuid> <msg> --no-ack`) for a collected `watch` holder. `fleet.py` keeps the row's `status`/`paseo_state`
+as `closed`; relay maps it to idle when it sends. Not yet proven live: a `closed` agent that is a failed resume rather than a
+collected one would fail the `paseo send` (reported, exit 1).
+
 A working agent whose provider cannot steer (cline and every other ACP provider, which Paseo would interrupt and replace
 the running turn of) is **queued, not refused** (2026-10-24): `relay.py` writes a 0600 record under
 `~/.local/state/relay/deferred/`, starts a detached deliverer and **exits 0** with `queued: <id> ...` on stdout
