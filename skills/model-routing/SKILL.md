@@ -140,9 +140,11 @@ skill's snapshot in the same turn.
 
 Go Plus is a $40 subscription with shared allowance, not a free model bundle.
 Use `config/go-model-policy.json` as the cost classification. Routine routing
-uses MiniMax M3 for bulk, GPT-6 Luna for mechanical work, and DeepSeek V4.1 Flash
-for code. Luna stays routine: a smaller model allowance alone does not establish
-high per-token cost. Unknown Go model IDs are refused until classified.
+uses MiniMax M3 for bulk and GPT-6 Luna for mechanical work. **No code slice goes to
+opencode-go** (djbclark 2026-10-30): `route`/`plan` never name it for `code`; DeepSeek V4.1
+Flash stays only the main-loop substrate model (`route_agent.py substrate`). Luna stays
+routine: a smaller model allowance alone does not establish high per-token cost. Unknown Go
+model IDs are refused until classified.
 
 Costly Go models (including Grok 4.7, Kimi K3/K2.7 Code, GLM 5.3 and DeepSeek
 V4 Pro) are advisors only. Use `acp-dispatch opencode --model opencode-go/kimi-k3
@@ -522,7 +524,7 @@ TUI with `&` inherits the harness's stdin and codex blocks on it forever.
 | codex (GPT-6 Astra default) | `codex exec -s read-only -C <dir> "<prompt>" < /dev/null > out 2>&1` | without `< /dev/null`: prints `Reading additional input from stdin...` and hangs with no timeout. |
 | agy (Antigravity) | `agy --dangerously-skip-permissions --print-timeout 120s -p='<prompt>' < /dev/null > out 2>&1` — **attach the prompt with `-p=`**, which is order-independent and cannot be confused with a flag. `-p`/`--print`/`--prompt` is a *required-value string flag*, not a boolean. | `agy -p` with no value: exits 2, `flag needs an argument: -p`. `agy -p --effort high` (value-less `-p` before another flag): **since 1.1.18 this is a clean exit 2** naming the mistake — *"-p took \"--effort\" as its prompt…"* — and before 1.1.18 it silently ran with `--effort` as the prompt. Verified on 1.2.16, 2026-10-03. Headless still needs `--dangerously-skip-permissions` or tool permissions auto-deny (by design, hardened in 1.2.15). **`RESOURCE_EXHAUSTED (code 429)` with `aiuse` showing headroom** (2026-10-03: every CLI model, 15:42 to 23:50+, while ACP worked): a CLI burst lockout, not an empty pool; the CLI retries 8 times (~2m20s) so it looks like a hang, and `--print-timeout` cuts it with exit 0 and partial output. Check `grep 'attempt [0-9]* failed' ~/.gemini/antigravity-cli/log/cli-*.log` and switch to `acp-run agy`. |
 | copilot | `copilot -p "<prompt>" --model auto --allow-all-tools --allow-all-paths --silent < /dev/null > out 2>&1` | fine as-is. **Do not add `--reasoning-effort` with `--model auto`**: exits 1, `Model "auto" does not support reasoning effort configuration` (2026-09-26). Name a concrete model if you want an effort level. |
-| opencode (Go subscription) | Use `acp-dispatch opencode` with an explicitly qualified routine model such as `opencode-go/deepseek-v4.1-flash`, `opencode-go/minimax-m3` or `opencode-go/gpt-6-luna`. Expensive models require the bounded advisory form below; direct `opencode run` bypasses the ACP cost gate. | **`opencode/<model>` is the prepaid Zen catalogue, not Go**: every `opencode/*` model except `big-pickle` fails with `Upstream request failed: Insufficient account funds`. `big-pickle` answers but on a review prompt spent its run trying to install pytest and returned nothing — steer it with "do not run tests or install anything". **Side effect:** every `opencode run` rewrites `./opencode.json` in the cwd (adds a `$schema` key) — `git checkout -- opencode.json` afterwards in repos that track it. |
+| opencode (Go subscription) | Use `acp-dispatch opencode` with an explicitly qualified routine model such as `opencode-go/minimax-m3` (bulk) or `opencode-go/gpt-6-luna` (mechanical); never a code slice (djbclark 2026-10-30). Expensive models require the bounded advisory form below; direct `opencode run` bypasses the ACP cost gate. | **`opencode/<model>` is the prepaid Zen catalogue, not Go**: every `opencode/*` model except `big-pickle` fails with `Upstream request failed: Insufficient account funds`. `big-pickle` answers but on a review prompt spent its run trying to install pytest and returned nothing — steer it with "do not run tests or install anything". **Side effect:** every `opencode run` rewrites `./opencode.json` in the cwd (adds a `$schema` key) — `git checkout -- opencode.json` afterwards in repos that track it. |
 | cursor-agent | `cursor-agent -p --yolo --output-format text "<prompt>" < /dev/null > out 2>&1` | without `--trust` (or `--yolo`/`-f`) in a directory Cursor hasn't trusted: exits 1 with a "Workspace Trust Required" prompt and no review. |
 | zai (zcode) | `zcode -p "<prompt>" < /dev/null > out 2>&1` — `-p` already defaults to `--mode yolo`; `--attach <file>` works (verified 2026-09-30). Inlining the file into the prompt is equally fine. | **Never pass `--mode build` (or `--mode edit`) headless**: it gates every tool behind an approval no one can give, so the run hangs indefinitely — process alive, ~0 CPU, no `zcode-cli` worker doing work, zero output — until it's killed (seen 2026-09-30, `--mode build --attach`). The default yolo mode auto-approves. The `ZCode Built-in skipped (not-due)` lines on stderr are a benign memory-heartbeat, not an error. |
 
@@ -535,10 +537,16 @@ prepaid account. Check `aiuse` for what is left in each. z.ai serves GLM, not De
 
 For the **main loop** (the agent's own substrate, not a dispatched slice), run
 `bin/route_agent.py substrate` at session start: it prints the Flash-primary chain
-(opencode-go ↔ cline, same model, provider failover) with the real rolling-window headroom, and
-`--apply <agent>` does a within-provider switch. A cross-provider move is refused — a live
-cross-provider model switch is what broke the ◈ Dann tab on 2026-10-23; failover is a session-start
-choice, never a live switch.
+(opencode-go ↔ cline, same model, provider failover) with the binding headroom (monthly budget
+included; a stale, errored or expired reading counts as unmeasured), and
+`--apply <agent>` does a within-provider switch. A pool in aiuse's `[disabled_services]` (or
+`operator_disabled()`) is never named, except the lifeline listed in `config/routing.toml`
+`[substrate].lifeline` (`clinepass`, operator 2026-10-23); with nothing usable left it prints
+`no usable substrate` and exits 6, also when every pool is exhausted. A cross-provider move is
+refused (exit 5) — a live cross-provider model switch is what broke the ◈ Dann tab on 2026-10-23;
+failover is a session-start choice, never a live switch. Exit codes: 0 ok; 1 `paseo-set-model`
+failed; 2 `--apply` agent empty or ambiguous (an exact id, else a unique id prefix); 3 no such
+agent; 4 model not applied; 5 cross-provider; 6 no usable substrate; 7 cannot list agents.
 
 Rules that fall out of this:
 
@@ -685,7 +693,7 @@ method that runs the waves.
    left (Opus/Sonnet 5.5 quality that is otherwise lost at reset), Cursor's
    Auto pool (`--model default`; its third-party pool is separate and often
    tight), zai GLM-5.3 (`GLM-5.3 --effort high` for code, `GLM-5.3-Flash
-   --effort low` for bulk), opencode-go, agy Gemini for bulk and big-context
+   --effort low` for bulk), opencode-go (bulk and mechanical only, never code), agy Gemini for bulk and big-context
    reads, crush/SIPB (free, 30B-class) for light bulk. Claude's own pool
    codes on Sonnet 5.5 (`claude --model sonnet --effort high`, rank 12, right
    after agy's Claude pool; operator 2026-10-18: only Fable stays out of

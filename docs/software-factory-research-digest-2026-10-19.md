@@ -108,7 +108,7 @@ agent checks the deployed app after merge.
 | Alireza29675/teamctl, creynir/phalanx, VeNom, agent-teams, Aqua, teamfuse | 3-20 | mixed | | small team runners | nothing the above do not |
 
 The Fable report's own list (zazencodes, spec-kit, OpenSpec, ccpm, Aperant, claude-squad,
-Superset, Cloudroom, OpenHands Agent Canvas, Copilot, Jules) stands; it missed every row above
+Superset, OpenHands Agent Canvas, Copilot, Jules) stands; it missed every row above
 except Symphony.
 
 Ry Walker's comparison gives five criteria every row above can be scored on, and the factory
@@ -225,8 +225,7 @@ Python CLIs that import each other).
    unattended execution is unproven and must be gated, not assumed.
 5. **The adversary-before-PR rule is not merge authority.** The two factory documents conflict
    (coding-factory.md wanted zero clicks; the design wants human merge); decide it once.
-6. **Licences re-checked:** Superset is Elastic License 2.0, not permissive; Cloudroom's core is
-   now Apache-2.0 and self-hostable (the "cloud only" objection is stale); Aperant and
+6. **Licences re-checked:** Superset is Elastic License 2.0, not permissive; Aperant and
    claude-squad stay AGPL, excluded from code and design-idea reuse.
 7. **Closer comparators Fable missed:** watt-mind/factory (Apache-2.0, multiple ACP agents, path
    ownership per ticket, cold PR review, CI gates, GitHub only), Fabro (MIT, graph workflows,

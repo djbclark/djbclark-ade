@@ -48,7 +48,7 @@ quoting a chain, and update its snapshot if you change one.
 > pool**: Fable is a <=50% sublimit of the shared weekly and bills the 5-hour
 > window too, so the "separate Fable weekly" wording below is **wrong**; (3)
 > everyday work goes to the other pools (agy Claude/GPT, Cursor Auto, zai
-> GLM-5.3, opencode-go, agy Gemini, crush/SIPB) at the minimum spec that does
+> GLM-5.3, opencode-go (bulk and mechanical only, never code: djbclark 2026-10-30), agy Gemini, crush/SIPB) at the minimum spec that does
 > it well, proactively through `/bigteam` and minimum-spec sub-agents; (4)
 > **grok and copilot are reserves** (**grok released 2026-10-18**: GrokBot moved to its own Cursor pool, so grok is an ordinary subscription pool and copilot the only reserve) with a hard floor of 60% left (GrokBot and
 > GitHub-side Copilot review ran on them; copilot read 100% used that day);
@@ -143,7 +143,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
 | `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
 | `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
-| `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3, DeepSeek V4.1 Flash, GPT-6 Luna | $40/month | subscription shared allowance | 5h + weekly + monthly |
+| `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3 (bulk), GPT-6 Luna (mechanical); never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash is the main-loop substrate model only | $40/month | subscription shared allowance | 5h + weekly + monthly |
 | `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
 | `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
 | `deepseek` | gated `opencode-ralph-tui-deepseek` | prepaid | **prepaid balance** | balance |
@@ -419,7 +419,7 @@ The governor's and the guard's numbers live in `config/gates.toml` and a tempora
 2. **Everyday work on the other pools**, cheapest adequate first: agy
    Claude/GPT (>= 40% left), Cursor Auto, codex `gpt-6.1-sol` / `gpt-6-luna`
    (only while every codex window has >= 50% left, operator 2026-10-25; never
-   astra), zai GLM-5.3, opencode-go, agy Gemini
+   astra), zai GLM-5.3, opencode-go (bulk and mechanical only), agy Gemini
    for bulk and big-context reads, crush/SIPB for light bulk. Minimum spec
    (model × effort × context) that does it well. Start on the cheap eligible
    tier and escalate through `acp-dispatch reroute` on a verified failure

@@ -329,15 +329,7 @@ Sources read 2026-10-19 (READMEs, product pages, zazencodes source). Items marke
 
    2. Avoid: IDE-scale scope; scale-to-100-agents framing invites cost blowups.
 
-6. Cloudroom (product page)
-
-   1. Keep: "start a task, close the lid, come back to the result" —
-      a result-first return view; each agent on its own branch in an
-      isolated sandbox.
-
-   2. Avoid: cloud dependence for v1.
-
-7. Synthesis: the strongest shared pattern is an **attention queue**
+6. Synthesis: the strongest shared pattern is an **attention queue**
    ("waiting on you") above a status board, plus a diff-first job detail.
 
 ### 7.2 User journeys

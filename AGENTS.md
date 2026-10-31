@@ -126,8 +126,9 @@ Each doc carries its own summary.
   `bin/route_agent.py` discovers agents from it plus installed headless TUIs;
   Orca's roster is a GUI list only (docs/model-routing.md).
 - Ops-suite conventions live in `~/CLAUDE.md` and site-private and govern
-  `~/ops`. This repo is ordinary: commit to master, push to
-  `djbclark/djbclark-ade`.
+  `~/ops`. In this repo every change lands on master **by PR only**: branch protection, enforced for admins too,
+  refuses a direct push (djbclark, 2026-10-31, after a session pushed 7961b261 straight to master); the lead merges
+  with `gh pr merge --squash --match-head-commit`. Repo: `djbclark/djbclark-ade`.
 - Facts here carry snapshot dates; probes beat memory. When you verify a
   change, update the doc in the same breath (standing order 2).
 
