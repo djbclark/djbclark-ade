@@ -37,10 +37,11 @@ state and performs the rotation when asked; it does not decide on its own which 
 It prints every server, every credential label with the active one starred, the failures in the
 log window, and the account table. Read-only; it prints labels and emails, never key material.
 As of 2026-10-30, failure explanations are fixed text; failed credential listings withhold raw
-diagnostics. Only explicit `provider`, `integration`, or provider-prefixed `model` record metadata
-identifying `opencode`/`opencode-go` enables exit 2 and recovery advice. Foreign or unattributed
-failures remain visible with their attribution, but do not justify Go credential changes.
-Records with timezone-free timestamps are skipped.
+diagnostics. Exit 2 and the recovery advice come from OpenCode Go/Console failures: the Go wall,
+no-funds and region errors attribute themselves by their own text (OpenCode's log records carry no
+provider field), and an auth failure counts only when its record names an `opencode`/`opencode-go`
+provider. A recent auth failure with no provider recorded exits 3 with no rotation advice (it may be
+another provider's key); a foreign one is listed and advises nothing. Timezone-free timestamps are skipped.
 
 ## Which credential actually serves Go — the trap
 

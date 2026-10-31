@@ -10,8 +10,10 @@ WHAT IT IS FOR
   dark until someone notices. This prints the state in one screen so that noticing is cheap.
 
 EXIT
-  0  no attributed OpenCode failure in the recent recovery window
-  2  an explicitly attributed OpenCode quota/auth failure is recent; inspect recovery advice
+  0  no OpenCode Go/Console failure in the recent recovery window
+  2  a recent OpenCode Go/Console failure: the Go wall, no funds or region text (OpenCode's own errors), or an auth
+     failure whose record names an opencode/opencode-go provider; inspect recovery advice
+  3  a recent auth failure whose record names no provider: it may not be the Go account, so no rotation advice
   4  cannot read the state at all (no servers, no log)
 """
 from __future__ import annotations
@@ -48,6 +50,10 @@ def provenance(core: str) -> str:
         provider = value.split("/", 1)[0] if key == "model" else value
         own.append(provider in {"opencode", "opencode-go"})
     return "opencode" if all(own) else "foreign"
+
+# These causes are OpenCode Go/Console's own error texts, so the message itself attributes them; OpenCode's log
+# records carry no provider field (checked 2026-10-30). Only the generic auth failure needs explicit metadata.
+SELF_ATTRIBUTING = frozenset({"go-limit", "go-429", "no-funds", "region"})
 
 # Ordered offer, cheapest-to-lose first is the OPERATOR's call, not this script's: it only lists
 # them. `dclark` is a vault key; the other two are Console logins.
@@ -146,7 +152,10 @@ def scan(text: str, hours: float) -> list[tuple[dt.datetime, str, str]]:
             continue
         for name, pat in FAILURES:
             if re.search(pat, core):
-                hits.append((when, name, provenance(core)))
+                source = provenance(core)
+                if source == "unattributed" and name in SELF_ATTRIBUTING:
+                    source = "opencode"
+                hits.append((when, name, source))
                 break
     return sorted(hits)
 
@@ -201,8 +210,9 @@ def main(argv: list[str]) -> int:
     if unknown:
         print("  not in this table: " + ", ".join(unknown))
 
-    fresh = [h for h in hits if h[2] == "opencode" and (dt.datetime.now(dt.timezone.utc) - h[0]).total_seconds()
-             <= a.recent * 3600]
+    now = dt.datetime.now(dt.timezone.utc)
+    recent = [h for h in hits if (now - h[0]).total_seconds() <= a.recent * 3600]
+    fresh = [h for h in recent if h[2] == "opencode"]
     if fresh:
         kinds = sorted({name for _, name, _ in fresh})
         print(f"\nBROKEN NOW: {', '.join(kinds)} in the last {a.recent:g} h.")
@@ -215,6 +225,10 @@ def main(argv: list[str]) -> int:
         print("  A reload alone does NOT re-prompt: the aborted turn needs the resume step in the")
         print("  oc-go-key skill, or it stays dark with a working key.")
         return 2
+    if any(name == "auth" and source == "unattributed" for _, name, source in recent):
+        print(f"\nRECENT AUTH FAILURE (provider not recorded) in the last {a.recent:g} h: it may be another")
+        print("  provider's key, not the Go account. Find the failing session's provider before re-storing or rotating.")
+        return 3
     return 0
 
 

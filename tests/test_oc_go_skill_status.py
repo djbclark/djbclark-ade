@@ -293,16 +293,35 @@ def test_failed_listing_stderr_never_reaches_output(state, capsys):
     assert "EXAMPLE_PRIVATE_TOKEN" not in captured.out + captured.err
 
 
-@pytest.mark.parametrize("context", ["provider=anthropic", "", 'model=anthropic/claude',
+@pytest.mark.parametrize("context", ["provider=anthropic", 'model=anthropic/claude',
                                         'provider=anthropic model=opencode-go/test'])
-def test_foreign_or_unattributed_auth_withholds_go_recovery(state, capsys, context):
+def test_foreign_auth_withholds_go_recovery(state, capsys, context):
     state.LOG.write_text(f'timestamp={ts()} level=ERROR {context} cause="AI.Error: invalid api key"')
     assert state.main([]) == 0
     output = capsys.readouterr().out
     assert "auth" in output
-    assert "BROKEN NOW" not in output
-    assert "Rotate:" not in output
-    assert "re-store" not in output
+    assert "BROKEN NOW" not in output and "RECENT AUTH FAILURE" not in output
+    assert "Rotate:" not in output and "re-store" not in output
+
+
+def test_unattributed_auth_is_flagged_without_go_recovery(state, capsys):
+    # OpenCode's real error records carry no provider field (2026-10-30): a recent generic auth failure is surfaced
+    # with its own exit code, but never as a Go credential problem.
+    state.LOG.write_text(f'timestamp={ts()} level=ERROR run=r1 message=x cause="AI.Error: invalid api key"')
+    assert state.main([]) == 3
+    output = capsys.readouterr().out
+    assert "RECENT AUTH FAILURE (provider not recorded)" in output
+    assert "BROKEN NOW" not in output and "Rotate:" not in output and "re-store" not in output
+
+
+@pytest.mark.parametrize("cause,kind", [("Go usage limit exceeded", "go-limit"), ("GoUsageLimitError", "go-429"),
+                                        ("Insufficient account funds", "no-funds"),
+                                        ("requires Global regions", "region")])
+def test_go_console_errors_attribute_themselves_without_a_provider_field(state, capsys, cause, kind):
+    # The record shape OpenCode actually writes (no provider/model field): the Go wall must still read as broken.
+    state.LOG.write_text(f'timestamp={ts()} level=ERROR run=r1 message=x cause="AI.Error: {cause}"')
+    assert state.main([]) == 2
+    assert f"BROKEN NOW: {kind}" in capsys.readouterr().out
 
 
 def test_mixed_provider_only_open_code_failure_drives_advice(state, capsys):
