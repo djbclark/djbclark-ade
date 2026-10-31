@@ -2637,3 +2637,22 @@ def test_closed_marker_does_not_hide_a_separate_same_head_block():
     result = adv(body)
     assert result["verdict"] == "BLOCK" and result["matches_head"] and result["conflict"]
     assert gate(body)[0] is False
+
+
+@pytest.mark.parametrize("verdict", ["APPROVE", "BLOCK"])
+def test_marker_start_in_json_string_cannot_borrow_metadata_object(verdict):
+    doc = {"verdict": verdict, "head": ADV_HEAD,
+           "note": "format: <!-- adversary-verdict:v1",
+           "example": {"verdict": "BLOCK", "head": ADV_HEAD}}
+    result = adv('<!-- adversary-verdict:v1 ' + json.dumps(doc) + ' -->')
+    assert result["verdict"] == verdict
+    assert result["malformed"] is False
+
+
+def test_quoted_marker_start_does_not_hide_real_block_after_valid_marker():
+    doc = {"verdict": "APPROVE", "head": ADV_HEAD,
+           "note": "format: <!-- adversary-verdict:v1",
+           "example": {"verdict": "BLOCK", "head": ADV_HEAD}}
+    body = '<!-- adversary-verdict:v1 ' + json.dumps(doc) + ' -->\n' + marker("BLOCK")
+    assert adv(body)["verdict"] == "BLOCK"
+    assert gate(body)[0] is False

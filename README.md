@@ -386,3 +386,6 @@ revision mentions in notes, and accepting a doubled comment start for same-head 
 
 On 2026-10-31 (PR 175), raw BLOCK rescue stopped looking for a JSON payload at a comment's closing
 `-->`. Standalone JSON after a closed documentation marker cannot supply that marker's verdict.
+
+On 2026-10-31 (PR 175), raw BLOCK rescue stopped interpreting marker starts inside successfully
+parsed JSON strings as markers. Invalid outer candidates still permit nested same-head BLOCK rescue.

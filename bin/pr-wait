@@ -299,7 +299,7 @@ def pr_doc(repo: str, pr: int) -> dict:
 #      an unclosed start quoted in prose from swallowing the next marker. And masking may not "repair"
 #      JSON: the marker's JSON is parsed exactly as written in the raw body. Backticks inside JSON
 #      strings are content; outside strings they make JSON invalid, hence malformed (C2'). The rescue
-#      scans EVERY start, with no `consumed` cursor (D1): a
+#      scans every start outside validated JSON strings, with no `consumed` cursor (D1): a
 #      candidate is accepted before its JSON is validated, so letting a rejected outer one hide the
 #      BLOCK inside it read as a clean false APPROVE.
 # A marker whose JSON is broken is still CAPTURED and then reported as `malformed`, never as an
@@ -743,14 +743,26 @@ def adversary_verdict(body: str, head: str) -> dict:
     # exactly as in the stripped text. It runs with `nested=True` (bundled review, D1): the live scan's
     # `consumed` cursor skips starts inside a candidate it has already accepted, and acceptance happens
     # before the JSON is validated - so a real same-head BLOCK nested inside an INVALID outer candidate
-    # was invisible here and the body read as a clean APPROVE. The rescue rescans every start; escaped
+    # was invisible here and the body read as a clean APPROVE. The rescue rescans starts outside valid JSON strings; escaped
     # JSON quoted in a `note` still cannot parse, so no false BLOCK arrives that way.
     # A typo cannot hide a same-head BLOCK in code (2026-10-30). Scan wide
     # starts too; only actual BLOCK fields plus a matching head trigger this
     # conservative fallback. Canonical valid markers retain their normal result.
     canonical = {(start, js, je) for start, js, je in _marker_spans(body, nested=True)}
+    # A successfully parsed marker's JSON strings are metadata, never new markers.
+    # Invalid outer candidates protect nothing: nested real BLOCKs must still be found.
+    quoted_strings = []
+    for _start, js, je in canonical:
+        try:
+            json.loads(body[js:je], object_pairs_hook=_strict_object)
+        except ValueError:
+            continue
+        quoted_strings.extend((js + token.start(), js + token.end()) for token in
+                              re.finditer(r'"(?:[^"\\]|\\.)*"', body[js:je]))
     for match in MARKER_START_RE.finditer(body):
         start = match.start()
+        if any(lo <= start < hi for lo, hi in quoted_strings):
+            continue
         # Live near-miss starts are already malformed; preserve their diagnostic
         # rather than promoting a typo to a verdict. Hidden ones need rescuing.
         if (text[start:match.end()] == body[start:match.end()]
@@ -816,6 +828,8 @@ def adversary_verdict(body: str, head: str) -> dict:
                     and p["head"] == head.lower() for p in parsed), "malformed": True,
                     "detail": "malformed same-head BLOCK in raw body"}
     for _start, jstart, jend in _marker_spans(body, nested=True):
+        if any(lo <= _start < hi for lo, hi in quoted_strings):
+            continue
         try:
             doc = json.loads(body[jstart:jend], object_pairs_hook=_strict_object)
         except ValueError:
