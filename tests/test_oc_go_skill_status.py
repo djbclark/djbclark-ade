@@ -44,7 +44,7 @@ def state(tmp_path, monkeypatch):
 
 def test_printed_failures_redact_credentials_after_cause_split(state, capsys):
     state.LOG.write_text(
-        f'timestamp={ts()} level=ERROR cause="AI.Error: Go usage limit exceeded '
+        f'timestamp={ts()} level=ERROR provider=opencode-go cause="AI.Error: Go usage limit exceeded '
         'oc_live_abcdef123 Bearer zzz.bbb sk-fake_123"\n'
     )
     assert state.main([]) == 2
@@ -53,16 +53,7 @@ def test_printed_failures_redact_credentials_after_cause_split(state, capsys):
     assert "oc_live_abcdef123" not in output
     assert "zzz.bbb" not in output
     assert "sk-fake_123" not in output
-    assert output.count("<redacted>") == 3
-
-
-def test_redact_uses_the_compiled_pattern_and_handles_sliced_bearer():
-    gs = load()
-    assert gs.REDACT_RE.pattern == r"(oc_|sk-)[A-Za-z0-9_-]+|Bearer\s+\S+"
-    assert gs.redact("cause=oc_123 sk-456 Bearer zzz.bbb") == (
-        "cause=<redacted> <redacted> <redacted>"
-    )
-    assert gs.redact("Bearer zzz.bbb"[:10]) == "<redacted>"
+    assert "quota" in output
 
 
 def test_covered_hours_uses_first_timestamp_and_requested_window():
@@ -146,7 +137,7 @@ def test_region_and_auth_are_their_own_classes():
 )
 def test_unrelated_401_is_not_auth(detail):
     gs = load()
-    assert gs.scan(f"timestamp={ts()} level=ERROR cause=AI.Error: {detail}", 1) == []
+    assert gs.scan(f"timestamp={ts()} level=ERROR provider=opencode-go cause=AI.Error: {detail}", 1) == []
 
 
 # Every shape an HTTP client prints a 401 in. `http.span=` is deliberately absent: it is a request
@@ -161,7 +152,7 @@ def test_unrelated_401_is_not_auth(detail):
 ])
 def test_http_401_and_existing_literals_are_auth(detail):
     gs = load()
-    hits = gs.scan(f"timestamp={ts()} level=ERROR cause=AI.Error: {detail}", 1)
+    hits = gs.scan(f"timestamp={ts()} level=ERROR provider=opencode-go cause=AI.Error: {detail}", 1)
     assert [name for _, name, _ in hits] == ["auth"]
 
 
@@ -179,7 +170,7 @@ def test_changelog_names_ui_go_429_and_its_observation_date():
 
 def test_both_quota_phrases_use_first_match_go_limit():
     gs = load()
-    line = (f"timestamp={ts()} level=ERROR cause=AI.Error: "
+    line = (f"timestamp={ts()} level=ERROR provider=opencode-go cause=AI.Error: "
             "Insufficient account funds; Go usage limit exceeded")
     assert [name for _, name, _ in gs.scan(line, 1)] == ["go-limit"]
 
@@ -220,7 +211,7 @@ def test_main_missing_oc_go_key_returns_4(state, capsys):
 def test_main_failed_listing_returns_4(state, capsys):
     state.OC_GO_KEY.write_text("#!/bin/sh\nprintf 'listing unavailable\\n' >&2\nexit 7\n")
     assert state.main([]) == 4
-    assert "oc-go-key list failed (rc 7): listing unavailable" in capsys.readouterr().err
+    assert "oc-go-key list failed (rc 7)" in capsys.readouterr().err
 
 
 def test_main_unreadable_log_returns_4(state, capsys):
@@ -232,7 +223,7 @@ def test_main_unreadable_log_returns_4(state, capsys):
 
 def test_main_fresh_failure_returns_2_with_broken_now(state, capsys):
     state.LOG.write_text(state.LOG.read_text() +
-                        f"timestamp={ts()} level=ERROR cause=AI.Error: Go usage limit exceeded\n")
+                        f"timestamp={ts()} level=ERROR provider=opencode-go cause=AI.Error: Go usage limit exceeded\n")
     assert state.main([]) == 2
     output = capsys.readouterr().out
     assert "BROKEN NOW: go-limit in the last 0.5 h." in output
@@ -281,3 +272,52 @@ def test_first_unstarred_unknown_label_survives_listing_strip(state, capsys):
     state.OC_GO_KEY.write_text("#!/bin/sh\nprintf \"  opencode 'fourth' key cred_fake\\n\"\n")
     assert state.main([]) == 0
     assert "  not in this table: fourth" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("detail", [
+    "access_token=EXAMPLE_PRIVATE_TOKEN", "Authorization: bearer EXAMPLE_PRIVATE_TOKEN",
+    '"API_KEY": "EXAMPLE_PRIVATE_TOKEN"', "password=EXAMPLE_PRIVATE_TOKEN",
+])
+def test_upstream_credentials_never_reach_output(state, capsys, detail):
+    state.LOG.write_text(f'timestamp={ts()} level=ERROR provider=opencode-go cause="AI.Error: invalid api key {detail}"')
+    assert state.main([]) == 2
+    captured = capsys.readouterr()
+    assert "EXAMPLE_PRIVATE_TOKEN" not in captured.out + captured.err
+    assert "authentication failed" in captured.out
+
+
+def test_failed_listing_stderr_never_reaches_output(state, capsys):
+    state.OC_GO_KEY.write_text("#!/bin/sh\nprintf 'Authorization: bearer EXAMPLE_PRIVATE_TOKEN\\n' >&2\nexit 7\n")
+    assert state.main([]) == 4
+    captured = capsys.readouterr()
+    assert "EXAMPLE_PRIVATE_TOKEN" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("context", ["provider=anthropic", "", 'model=anthropic/claude',
+                                        'provider=anthropic model=opencode-go/test'])
+def test_foreign_or_unattributed_auth_withholds_go_recovery(state, capsys, context):
+    state.LOG.write_text(f'timestamp={ts()} level=ERROR {context} cause="AI.Error: invalid api key"')
+    assert state.main([]) == 0
+    output = capsys.readouterr().out
+    assert "auth" in output
+    assert "BROKEN NOW" not in output
+    assert "Rotate:" not in output
+    assert "re-store" not in output
+
+
+def test_mixed_provider_only_open_code_failure_drives_advice(state, capsys):
+    state.LOG.write_text(
+        f'timestamp={ts()} level=ERROR provider=anthropic cause="AI.Error: invalid api key"\n'
+        f'timestamp={ts()} level=ERROR model=opencode/test cause="AI.Error: Insufficient account funds"\n')
+    assert state.main([]) == 2
+    output = capsys.readouterr().out
+    assert "BROKEN NOW: no-funds" in output
+    assert "re-store" not in output
+
+
+def test_naive_timestamp_skipped_before_valid_failure(state, capsys):
+    state.LOG.write_text(
+        'timestamp=2026-10-30T20:00:00 level=ERROR provider=opencode-go cause="AI.Error: invalid api key"\n'
+        f'timestamp={ts()} level=ERROR provider=opencode-go cause="AI.Error: Go usage limit exceeded"\n')
+    assert state.main([]) == 2
+    assert "BROKEN NOW: go-limit" in capsys.readouterr().out
