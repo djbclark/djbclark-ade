@@ -46,6 +46,7 @@ FAKE_PASEO = textwrap.dedent("""\
     echo "$1 $2: PASEO_AGENT_ID=${PASEO_AGENT_ID-unset} PASEO_AGENT_CWD=${PASEO_AGENT_CWD-unset}" >> "$FAKE_LOG.env"
     case "$1 $2" in
       "agent inspect")
+        [ -n "$FAKE_INSPECT_FAIL" ] && { echo "daemon unavailable" >&2; exit 1; }
         if [ "$3" = new-agent-1 ]; then
           [ -n "$FAKE_NEW_STDERR" ] && echo "$FAKE_NEW_STDERR" >&2
           if [ -n "$FAKE_NEW_JSON" ]; then echo "$FAKE_NEW_JSON"; else
@@ -353,6 +354,33 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(list(self.lockdir.glob("*.stale.*")), [])
 
     # (e)
+    def test_unproved_provider_refuses_clear_and_compact_without_queueing(self) -> None:
+        for provider in ("omp", "codex", "opencode", "", "unknown"):
+            for command in ("/new", "/clear", "/reset", "/compact focus"):
+                with self.subTest(provider=provider, command=command):
+                    r = self.run_ss(command, FAKE_OLD_PROVIDER=provider)
+                    self.assertEqual(r.returncode, 7, r.stderr)
+                    self.assertIn("--finish --successor PROVIDER/MODEL", r.stderr)
+                    self.assertIn(provider or "unknown", r.stderr)
+        self.assertTrue(all(c == "agent inspect test-agent --json" for c in self.paseo_calls()))
+        self.assertFalse(self.log.exists())
+        self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
+
+    def test_failed_inspect_and_followup_clear_fail_closed(self) -> None:
+        r = self.run_ss("/new", FAKE_INSPECT_FAIL="1")
+        self.assertEqual(r.returncode, 7, r.stderr)
+        r = self.run_ss("--then", "/clear", "/context", FAKE_OLD_PROVIDER="omp")
+        self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertFalse(any(c.startswith("send") for c in self.paseo_calls()))
+        self.assertFalse(self.log.exists())
+
+    def test_unknown_or_wrong_agent_record_fails_closed(self) -> None:
+        for record in ('{}', 'not json', '{"Id":"other","Provider":"claude"}'):
+            r = self.run_ss("/new", FAKE_OLD_JSON=record)
+            self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertFalse(any(c.startswith("send") for c in self.paseo_calls()))
+        self.assertFalse(self.log.exists())
+
     def test_new_is_sent_as_clear_then_one_baton(self) -> None:
         r = self.run_ss("/new")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -385,7 +413,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
             r = self.run_ss("--dry-run", *args)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("dry run", r.stdout)
-        self.assertEqual(self.paseo_calls(), [])
+        self.assertEqual(self.paseo_calls(), ["agent inspect test-agent --json"])
         self.assertFalse(self.log.exists())
         self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
         r = self.run_ss("--dry-run", "--finish")

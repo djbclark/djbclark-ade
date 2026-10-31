@@ -227,7 +227,7 @@ mode, `shell/`.
 | caut | cargo | | |
 | agent CLIs | claude (`~/.local/share/claude/versions`), codex (`~/.codex/packages`), cursor-agent | vendor installers | |
 | npm globals | cline, opencode, zcode, claude-agent-acp, codex-acp, firecrawl-mcp, claude-powerline | npm; node/npm/npx on PATH are `~/.hermes/node/bin` (fragile) | |
-| unversioned `~/.local/bin` files | muse, caam, tokscale, superbrain, terminus-kira, hreload, hsudo, the `*-acp-bb` wrappers, opencode-all | hand-made | |
+| unversioned `~/.local/bin` files | muse, caam, tokscale, superbrain, terminus-kira, hreload, hsudo, opencode-all | hand-made | |
 
 ## 6. Session state (path; format; size; synced?)
 
