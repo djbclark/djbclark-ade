@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# ade-console-run LABEL [ARGS...] - run an operator-console flow from console/ under the Ren'Py SDK.
+#
+# Tools whose job is mostly asking the operator to choose (seat names, model switches, cost what-ifs)
+# live in the console project as labels, so their prompts, history and rollback come from the engine
+# rather than from hand-rolled input() loops. Set RENPY_SDK to an unpacked SDK (8.5 or later); the
+# default is the path ade-update installs to. ARGS reach the label as `ade_argv`.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+label="${1:?usage: ade-console-run LABEL [ARGS...]}"; shift
+sdk="${RENPY_SDK:-$HOME/.local/opt/renpy/renpy-8.5.3-sdk}"
+[ -x "$sdk/renpy.sh" ] || { echo "ade-console-run: Ren'Py SDK not found at $sdk (set RENPY_SDK)" >&2; exit 2; }
+ADE_CONSOLE_LABEL="$label" ADE_CONSOLE_ARGV="$(printf '%s\0' "$@" | base64 -w0)" exec "$sdk/renpy.sh" "$ROOT/console"
