@@ -57,6 +57,13 @@ numbers.
 ```bash
 df -h /System/Volumes/Data
 cow stats                    # pastures: logical vs on-disk (cheap)
+# Standing (djbclark, 2026-10-31): run the dry-run without asking when the stamp is a day or
+# more old (or missing), then touch it. Deleting still needs the operator's go (step 6).
+s=~/.local/state/diskfree/cow-gc-dry-run; mkdir -p "${s%/*}"
+[ -z "$(find "$s" -mtime -1 2>/dev/null)" ] && cow gc --merged --dry-run && touch "$s"
+# Standing: always size Trash and the Homebrew cleanup, no ask (read-only):
+~/ops/site-private/bin/bg nice -n 19 dust -d 1 -n 10 ~/.Trash
+brew cleanup -s -n           # dry-run; the Homebrew cache may sit on an external volume, not Data
 tmutil listlocalsnapshots /System/Volumes/Data
 jobber list | rg 'apfs-compress|chrome-cache-trim'
 ~/src/djbclark-ade/bin/load-watch admit --json     # proceed only while status is ok
