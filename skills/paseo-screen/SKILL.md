@@ -82,9 +82,11 @@ Test those on a throwaway target before depending on them, and say so in a repor
 3. **Never send `Cmd+Q`, `Cmd+W`, delete, send or purchase actions**, or touch password, 1Password or lock
    screens, without the operator's explicit yes for that action. A `locked: true` host is not yours to unlock.
 4. **Exposure:** anyone paired with the host can see and control its screen while the plugin is enabled, and
-   the viewer's "view only" switch is per viewer, not a lock. The **host-wide Pause** on the plugin's
-   sidebar row stops it: use it whenever screen control is not needed for a while and the operator asks, or when
-   a task ends with sensitive windows open. (Staying enabled when idle is the operator's accepted risk.)
+   the viewer's "view only" switch is per viewer, not a lock. The off switch is
+   `paseo plugin disable paseo-screen` (upstream README, Security); use it only when the operator asks, since
+   staying enabled when idle is the operator's accepted risk. A viewer's Pause button only stops that viewer's
+   frames and is not a lock (client/screen.tsx at the pin); a host-wide Pause on the sidebar row was reported
+   but is untested, so never rely on it.
 5. Report every input you sent (events and target window) and what the next frame showed; never claim a
    click landed from the event count alone (`handled` is not proof).
 

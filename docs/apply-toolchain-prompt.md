@@ -892,13 +892,13 @@ then `herdr4paseo [agent-id]`. It only wraps the `paseo` CLI, so quitting never 
 `paseo4herdr` (fork github.com/djbclark/paseo4herdr, formerly the `paseo-herdr` plugin, installed disabled as
 `herdr-harness`) lets Paseo reach terminals that Herdr hosts; leave it disabled unless that is needed.
 
-**Paseo plugins (added 2026-10-31, djbclark).** Two plugins, both **user-level and outside the repo: Paseo plugins must be
-enabled first, and you ask djbclark before enabling them** (they run code inside the Paseo daemon/app). Neither is installed
+**Paseo plugins (added 2026-10-31, djbclark).** Two plugins, both **user-level and outside the repo: ask djbclark before
+installing or enabling them** (they run code inside the Paseo daemon/app). Neither is installed
 for a repo that does not use Paseo; skip both otherwise.
 
 | Item | Website | Install | What it does |
 |---|---|---|---|
-| `paseo-screen` (**macOS only**) | https://github.com/kevguy/paseo-screen (MIT; listing https://paseo.cafe/plugins/paseo-screen) | `paseo plugin add kevguy/screen` (registry pin `1df9050d3721d927aa73655ad2cb4b4b53f42db9`, plugin id `paseo-screen`). **Once at the Mac, grant Paseo Screen Recording and Accessibility** (System Settings, Privacy & Security); it compiles a Swift helper and has no network, listening socket or runtime dependency (read 2026-10-30) | THE screen-control tool: the viewer "Screen · mac" in the Paseo sidebar and the RPCs `screen.status`, `screen.frame`, `screen.input`. **Stays enabled when idle (djbclark's choice).** Anyone paired with the host can see and control its screen while it is enabled; the viewer's "view only" switch is per viewer, and the host-wide Pause on its sidebar row is the lock. Skill: `paseo-screen` (in `djbclark-ade/skills/`, link it with `bin/skill-everywhere`) |
+| `paseo-screen` (**macOS only**) | https://github.com/kevguy/paseo-screen (MIT; listing https://paseo.cafe/plugins/paseo-screen) | `paseo plugin add kevguy/screen` (registry pin `1df9050d3721d927aa73655ad2cb4b4b53f42db9`, plugin id `paseo-screen`). **Once at the Mac, grant Paseo Screen Recording and Accessibility** (System Settings, Privacy & Security); it compiles a Swift helper and has no network, listening socket or runtime dependency (read 2026-10-30) | THE screen-control tool: the viewer "Screen · mac" in the Paseo sidebar and the RPCs `screen.status`, `screen.frame`, `screen.input`. **Stays enabled when idle (djbclark's choice).** Anyone paired with the host can see and control its screen while it is enabled; the viewer's "view only" switch is per viewer, not a lock; the off switch is `paseo plugin disable paseo-screen` (upstream README, Security), and a viewer's Pause only stops that viewer's frames. Skill: `paseo-screen` (in `djbclark-ade/skills/`, link it with `bin/skill-everywhere`) |
 | `next-question` | https://github.com/djbclark/paseo-plugin-next-question (public, MIT, v0.1.0) | `paseo plugin install github:djbclark/paseo-plugin-next-question` | Cmd+Shift+. (Ctrl+Shift+. off macOS) jumps to the next agent waiting for input: the default since the plugin's commit 7c5c3a8 (2026-10-31), replacing Cmd+Shift+U, which was dead in the Paseo desktop app; the new chord is not yet verified there |
 
 **SiYuan notes (machine-specific; added 2026-10-12, djbclark).** Only where the
