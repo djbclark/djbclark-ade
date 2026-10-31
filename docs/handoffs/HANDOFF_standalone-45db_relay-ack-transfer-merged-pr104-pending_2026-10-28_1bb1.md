@@ -4,7 +4,7 @@ handoff_id: 1bb1
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-45db]
-repo: djbclark-ade
+repo: kool-ade
 workspace: djbclark-ade-queue-ack-wt
 branch: docs/queue-ack-followups-2026-10-28
 head_sha: 1cebf3202b58e407d05931231f22e9a69c56f7c7

@@ -19,7 +19,7 @@ to read first.
 
 Canonical source: `skills/setup-modern-cli/SKILL.md` in `~/src/djbclark-ade`.
 Every other TUI reaches it through the skill-everywhere symlink chain, so there
-is nothing to keep in sync. `djbclark-ade/docs/apply-toolchain-prompt.md` §1.2
+is nothing to keep in sync. `kool-ade/docs/apply-toolchain-prompt.md` §1.2
 is the full, versioned installer for a new machine or repo.
 
 ## Search policy: `rg` by default, `ig` as an opt-in first line
@@ -171,7 +171,7 @@ scheduled `brew-fast-upgrade` job owns updating.
 2. For "which files contain X under glob Y", use the one-command `rg -g`/`rg -t`
    form — never a `find … | xargs grep …` pipeline.
 3. For a repo with no toolchain yet, point at
-   `djbclark-ade/docs/apply-toolchain-prompt.md` (full, versioned installer).
+   `kool-ade/docs/apply-toolchain-prompt.md` (full, versioned installer).
 4. Report which tool ran when a search is slow, so a missing install is visible
    (`command -v rg fd ast-grep mlr duckdb`).
 

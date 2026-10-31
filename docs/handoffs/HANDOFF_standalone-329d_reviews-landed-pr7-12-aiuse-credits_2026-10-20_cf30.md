@@ -4,7 +4,7 @@ handoff_id: cf30
 parent_handoff_ids: [cf8f]
 lineage: deterministic
 chain: [standalone-329d]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 59b7960d8339f22a98f42efb2d0a1c01163d17a5
@@ -23,7 +23,7 @@ land, write a handoff, then `/new` for Phase 0.
 ## Where We Are
 All of it is merged; nothing of this chain is open on a branch.
 
-- djbclark-ade (master 59b7960): PR 7 load gate (776ecda), PR 10 threat model (fa1c4c9), PR 11
+- kool-ade (master 59b7960): PR 7 load gate (776ecda), PR 10 threat model (fa1c4c9), PR 11
   cursor-cloud place + route_agent service (d6c27da), PR 12 route_agent reads
   `aiuse --available --json` (72252da). AGENTS.md rule 9 (656b65e, 6889bb4): how to read Codex's
   result. `docs/queue.md` items 1-7 under "Follow-ups from the 2026-10-20 reviews" (59b7960).

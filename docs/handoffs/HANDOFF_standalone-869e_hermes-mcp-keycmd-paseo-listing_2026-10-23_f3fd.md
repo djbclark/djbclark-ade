@@ -4,7 +4,7 @@ handoff_id: f3fd
 parent_handoff_ids: [ce8b]
 lineage: inferred
 chain: [standalone-869e]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: d715d31
@@ -35,7 +35,7 @@ check and a pull moved it to `d715d31` (other sessions' work); the untracked
 3. Paseo listing: `72167ff` (fleet.py lists every non-archived Paseo agent of any provider; relay.py
    resolves a Paseo id prefix and refuses a working agent whose provider cannot steer). Dann confirmed.
 4. Pane repairs: `a8934b3`. Both adversary rounds ended APPROVE.
-Tests: full Hermes suite 2843 passed, 5 environmental failures; djbclark-ade relay/fleet tests pass
+Tests: full Hermes suite 2843 passed, 5 environmental failures; kool-ade relay/fleet tests pass
 (new `tests/test_fleet_paseo_rows.py`). Site-private note updated and pushed (`aa08492`).
 
 ## What We Tried

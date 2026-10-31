@@ -1,7 +1,7 @@
 ---
 name: skills-everywhere
 description: >-
-  Make a shared djbclark-ade skill available to every installed agent TUI, or
+  Make a shared kool-ade skill available to every installed agent TUI, or
   check the current links. Use for /skills-everywhere and when a universal
   skill is missing from one client.
 ---

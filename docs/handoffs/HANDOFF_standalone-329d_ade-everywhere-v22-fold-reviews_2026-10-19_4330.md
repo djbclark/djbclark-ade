@@ -4,8 +4,8 @@ handoff_id: 4330
 parent_handoff_ids: [f961]
 lineage: deterministic
 chain: [standalone-329d]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: 2951fff
 created_at: 2026-10-19T13:46:00-04:00
@@ -16,7 +16,7 @@ writer: claude-code
 ## The Goal
 
 djbclark wants the whole AI development environment to live in (or be referenced from)
-`djbclark-ade`, so one clone plus one prompt recreates it on any Mac or Linux machine; every
+`kool-ade`, so one clone plus one prompt recreates it on any Mac or Linux machine; every
 past session of every TUI reachable from every machine; no indispensable personal machine;
 Paseo as the universal front end; private data handled well; a second person able to use the
 public kit with their own private companion. The proposal is the agreed first step; it is now

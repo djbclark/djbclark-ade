@@ -1,4 +1,4 @@
-# Threat model: djbclark-ade (2026-10-20)
+# Threat model: kool-ade (2026-10-20)
 
 Snapshot **2026-10-20**, written for reviewers (Codex's GitHub security review is set to read this file for
 every PR, operator; the `adversary` sub-agent and Cursor's review checks may too) and as the baseline the
@@ -7,7 +7,7 @@ Every claim names the file that shows it; a claim without a file is the operator
 "operator". Re-read the code before relying on a line here: facts rot.
 
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
-(`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener, on
+(`djbclark/kool-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener, on
 loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random
 per-process bearer token. `--open` drops the token and refuses a non-loopback address, and since 2026-10-20 so
 does the serve-only form (no child, "for tests", no token): every tokenless run is loopback-only. While it runs, any process that
@@ -204,7 +204,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   "Automatically triggered" (the repo setting is "whenever code review runs"); whether either runs unasked on
   PR open is unverified (on PR 9 the automatic review answered "create an environment", `docs/queue.md`).
 * **Gap 1 (verified 2026-10-20 01:05Z).** `master` has no branch protection
-  (`gh api repos/djbclark/djbclark-ade/branches/master/protection` returns 404 "Branch not protected") and
+  (`gh api repos/djbclark/kool-ade/branches/master/protection` returns 404 "Branch not protected") and
   the repo has no rulesets. Nothing on GitHub requires a pull request, a review, a status check or
   `--match-head-commit`. Any token that can push (the operator's `gh` login, a local agent running as the
   operator, a cloud agent's app token if it has contents: write) can push straight to `master`, and the

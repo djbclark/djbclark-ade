@@ -4,7 +4,7 @@ handoff_id: 0cc7
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-cdee]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: d94d4fa0d0974d9551ae70d68fb2b922c8400db8
@@ -16,7 +16,7 @@ writer: claude-code
 ## The Goal
 1. Give agents API access to https://forgejo.mit.edu (Forgejo 16.0.5): token in
    `sudo-secretspec` as `DJBCLARK_FORGEJO_MIT_EDU_TOKEN`, a universal skill in
-   djbclark-ade. **Done and verified** (`forgejo-api whoami` returns the login).
+   kool-ade. **Done and verified** (`forgejo-api whoami` returns the login).
 2. Use the private test repo `djbclark/plektra-djbclark` on forgejo.mit.edu (a copy of
    the GitHub fork of Plektra) to **compare Gradle compile/test times: github.com vs
    forgejo.mit.edu vs local**, without starting new github.com or local builds just to
@@ -26,7 +26,7 @@ writer: claude-code
    reads run logs and comments through the skill's scripts. Built, partly exercised.
 
 ## Where We Are
-**Skill `skills/forgejo/`** (committed and pushed to `djbclark/djbclark-ade` master):
+**Skill `skills/forgejo/`** (committed and pushed to `djbclark/kool-ade` master):
 `scripts/setup-token` (declare + browser + `sudo-secretspec set` + verify),
 `forgejo-api` (stdlib client, mutations need `--yes`), `tea-forgejo` (tea with the secret
 on `GITEA_INSTANCE_URL`/`GITEA_TOKEN`), `git-forgejo` + `git-askpass` (HTTPS git via
@@ -119,7 +119,7 @@ Caveats: local daemon capped at 2 CPUs (`-XX:ActiveProcessorCount=2`), JDK 21, l
 GitHub: zero runs ever (`ci.yml` is `pull_request` only; the other three workflows are
 `workflow_dispatch`; upstream PR runs sit at `action_required`).
 MIT run ids: 168 cancelled, 169 probe ok, 170 CI (Gradle connect failure), 171 to 173
-probe failures, 174 cancelled. Commits this session in djbclark-ade: bc4811a, cf07a69,
+probe failures, 174 cancelled. Commits this session in kool-ade: bc4811a, cf07a69,
 faed249, d6ddd61, 2eeb63d, 6159bd8, d365663, d94d4fa.
 
 ## Operator Feedback
@@ -155,7 +155,7 @@ faed249, d6ddd61, 2eeb63d, 6159bd8, d365663, d94d4fa.
    `bench/mit-ci`.
 6. Not mine, leave alone: uncommitted `skills/autorename/*`, `skills/helm/*`,
    `tests/test_autorename_tab_label.py`, `tests/test_helm_question_status.py` in
-   djbclark-ade belong to another agent.
+   kool-ade belong to another agent.
 
 ## Detached jobs
 none. No bigteam job records are open for this session. The sub-agent

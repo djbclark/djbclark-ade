@@ -90,7 +90,7 @@ read.
    elsewhere — so before stating a plan, spend one call on each that
    applies:
 
-   - **This repo's curated docs.** `docs/queue.md` in `djbclark-ade`
+   - **This repo's curated docs.** `docs/queue.md` in `kool-ade`
      carries accepted-but-unstarted work and open blockers; a resume plan
      that contradicts the queue is already wrong.
      Bound large-document reads (2026-10-25): search headings and task IDs
@@ -159,10 +159,10 @@ working a worktree task and `~/ops` concurrently — that's the whole point
 of v0.4, one call updates the canonical log and every pointer at once.
 **List a repo as owned only if this chain owns it.** Each owned workspace's
 pointer is rewritten to redirect to *your* chain, so listing a repo you merely
-touched (a harness fix in `djbclark-ade`, a one-line config commit in `~/ops`)
+touched (a harness fix in `kool-ade`, a one-line config commit in `~/ops`)
 steals that repo's pointer from the chain that owns it, and the next `/baton`
 there resumes the wrong work (2026-10-12: a Plektra session hijacked
-`djbclark-ade/main`). Before listing a repo, read its pointer: if it redirects
+`kool-ade/main`). Before listing a repo, read its pointer: if it redirects
 to another live chain, list it as a **side workspace** instead, by adding
 `"side": true` to its entry (since 2026-10-13). A side workspace keeps its git
 anchor in your log but gets no pointer, keeps the owner's sidecars, and its

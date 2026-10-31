@@ -4,7 +4,7 @@ handoff_id: 5a25
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-relay-refresh-01a1735a]
-repo: djbclark-ade
+repo: kool-ade
 workspace: /Users/djbclark/src/one-offs
 branch: fix/self-slash-codex
 head_sha: c93ac5d2b5f7ff7848a0266fe21b333c69953306

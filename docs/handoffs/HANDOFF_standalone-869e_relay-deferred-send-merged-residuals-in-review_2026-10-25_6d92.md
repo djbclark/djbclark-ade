@@ -4,7 +4,7 @@ handoff_id: 6d92
 parent_handoff_ids: [843b]
 lineage: deterministic
 chain: [standalone-869e]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 52cff0324b1ebdef98d36b317bdecafa81429b23
@@ -49,7 +49,7 @@ Fix peer messaging in `skills/session-finder/relay.py`: a send to a busy agent t
 
 ## Where We're Going
 1. **Read the adversary result for `f7aabb7`** (see Detached jobs). APPROVE: open the PR, fill `PR_N`, wait for CI, merge. BLOCK: send a repair brief to a `--kind code` omp Sonnet slice in the same worktree, then a narrow adversary round.
-   1. PR: `gh pr create --repo djbclark/djbclark-ade --base master --head fix/relay-deferred-residuals --title "relay.py: close PR 57 round-4 residuals C1, C2, C4" --body-file <body>`. Body quotes the adversary verdict line with the reviewed SHA (`APPROVE <sha>`), the C1/C2/C4 summary, and that the commit after the reviewed head only fills `PR_N`.
+   1. PR: `gh pr create --repo djbclark/kool-ade --base master --head fix/relay-deferred-residuals --title "relay.py: close PR 57 round-4 residuals C1, C2, C4" --body-file <body>`. Body quotes the adversary verdict line with the reviewed SHA (`APPROVE <sha>`), the C1/C2/C4 summary, and that the commit after the reviewed head only fills `PR_N`.
    2. After the number exists: `gsed -i 's/PR_N/#NN/g' CHANGELOG.md docs/queue.md` in the worktree (check `rg PR_N` first; the queue paragraph says "fixed in PR_N"), commit with `git-commit-own`, push, wait `gh pr checks NN --watch` (run in the background), then `gh pr merge NN --squash --match-head-commit <head>`.
    3. Cleanup: `git worktree remove ~/src/djbclark-ade-relay-residuals-wt`, `git branch -D fix/relay-deferred-residuals`, `git push origin --delete fix/relay-deferred-residuals`, close the job records (`.closed=(now|floor)` with temp file and `mv -f`).
 2. `/loose` Rule 4 is still owed after item 1: ask handoff-and-continue / finish-and-archive / keep working.

@@ -1,6 +1,6 @@
 # Cutting Claude Code's cache cost: what the data says (2026-10-18)
 
-Scope: item 3a of the graphify answer ("cache reads are most of the cost; shorter sessions and earlier delegation"). Written as research only (the changes that followed are in the Outcome section): nothing on the machine was changed except the new measuring tool, `bin/claude-cost-mix` (djbclark-ade `b117768`, `24bfc5d`).
+Scope: item 3a of the graphify answer ("cache reads are most of the cost; shorter sessions and earlier delegation"). Written as research only (the changes that followed are in the Outcome section): nothing on the machine was changed except the new measuring tool, `bin/claude-cost-mix` (kool-ade `b117768`, `24bfc5d`).
 
 Data: the last 7 days of Claude Code transcripts on this Mac: 667 transcripts, 25,408 API requests, 77 compactions. Costs are API list-price dollars, priced by each request's own model. On the subscription this is a quota equivalent, not a bill.
 
@@ -42,7 +42,7 @@ Navigation output is at most 13.1% (it was 16%). The graphify verdict stands. Th
 
 | Part | 2026-10-10 | Today |
 |---|---|---|
-| Memory files | 5.5k | 14.5k (global `CLAUDE.md` 8.3k, `djbclark-ade/AGENTS.md` 5.8k) |
+| Memory files | 5.5k | 14.5k (global `CLAUDE.md` 8.3k, `kool-ade/AGENTS.md` 5.8k) |
 | MCP tools loaded up front | 4.8k | 11.0k |
 | MCP server instructions | 3.1k | 4.8k |
 | Skills listing | 10k | 10k (bailian ×10 ≈ 1.6k, paseo ×6 ≈ 0.6k, ralph ×5 ≈ 0.5k) |
@@ -75,7 +75,7 @@ The "auto-compact skill" here is `claude/hooks/context_size_nudge.py` plus `bin/
 4. **Keep summaries short.** The `/compact <focus>` text should ask for a brief summary. A `Compact Instructions` section in `AGENTS.md` steers automatic compactions too<sup>[5](#C5)</sup>. Compaction inherits extended thinking, and its output is billed at 5×<sup>[5](#C5)</sup>.
 5. **Add a preamble budget guard.** The 10-10 trim grew back within 8 days. A nightly `claude -p "/context"` check (skillopt-night or fleet-watch) should send a Hermes ping when a fresh session goes over about 30k, naming the part that grew.
 6. **Do the 4.1 trim itself:**
-   1. Condense the global `CLAUDE.md` and `djbclark-ade/AGENTS.md` (14.5k → ~8k).
+   1. Condense the global `CLAUDE.md` and `kool-ade/AGENTS.md` (14.5k → ~8k).
    2. Move rarely used skill families (bailian, paseo, ralph, siyuan) out of the global listing into the projects that use them.
    3. Check which MCP servers load tools up front (11k).
    4. Review the claude.ai connectors in interactive sessions: Gmail, Calendar, Drive, and the cloud Firecrawl that rule 7 already forbids.

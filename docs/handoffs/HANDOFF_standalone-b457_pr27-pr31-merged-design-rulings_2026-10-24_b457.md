@@ -4,7 +4,7 @@ handoff_id: b457
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 24c989077788b91ebef0792293672d7ed2c9cc5c
@@ -14,7 +14,7 @@ writer: claude-code
 # Handoff — PR 27 and PR 31 merged; tabs, isolation and Basic Memory design rulings recorded
 
 ## The Goal
-The /steps loop ("keep doing more /steps until there is nothing left to do") on djbclark-ade: drive the Phase 0 scan PR (27) and the Claude fleet-governor PR (31) to merge under the repo's review rules, record djbclark's three direct requests (Paseo tabs and `-pt` names with a name-history store; heavier use of cow pastures/worktrees for isolation; better use of Basic Memory), and make sure Claude quota is never exhausted before a reset.
+The /steps loop ("keep doing more /steps until there is nothing left to do") on kool-ade: drive the Phase 0 scan PR (27) and the Claude fleet-governor PR (31) to merge under the repo's review rules, record djbclark's three direct requests (Paseo tabs and `-pt` names with a name-history store; heavier use of cow pastures/worktrees for isolation; better use of Basic Memory), and make sure Claude quota is never exhausted before a reset.
 
 ## Where We Are
 1. PR 31 merged (d3b2122, adversary APPROVE eaab5bf, Codex clean). `bin/claude-fleet-governor --install` done; launchd `com.djbclark.claude-fleet-governor` loaded, level `tight` (state `~/.local/state/ade/fleet-governor.json`; seven agents stay downshifted until the level is `ok`, then restore). The Claude weekly window reset 2026-10-24 10:00Z: 67% left, next reset 2026-10-30 09:59Z (aiuse).

@@ -4,8 +4,8 @@ handoff_id: 8bed
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-265e]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: e28aa35
 created_at: 2026-10-08T10:45:45-0400

@@ -4,7 +4,7 @@ handoff_id: 0346
 parent_handoff_ids: [6776]
 lineage: deterministic
 chain: [standalone-6776]
-repo: djbclark-ade
+repo: kool-ade
 workspace: djbclark-ade-zz-probe-wt
 branch: zz-probe-archive
 head_sha: fbcbfadfc5fa1aa8636b74d52837fef9d9b73f15
@@ -45,7 +45,7 @@ Known leftovers (adversary-rated informational): an unreadable kept.json exits 0
 Standing: fix known gaps without asking (memory `feedback_fix_gaps_without_asking.md`). The Claude subscription is critical (weekly 13% left, reset 2026-10-30T09:59Z): continue on omp (`omp/anthropic/claude-sonnet-5-5`), no Fable/Opus Agent-tool sub-agents, no `acp-dispatch claude`. Peer `1b6c5412` (omp, relay-ack-pr87-pt) confirmed the guard text is subscription-only.
 
 ## Where We're Going
-1. Check PR 100: `gh pr view 100 --repo djbclark/djbclark-ade --json headRefOid,mergeable` and `gh pr checks 100 --repo djbclark/djbclark-ade`. If the head is still `fbcbfad`, all three checks pass, and it is MERGEABLE: `gh pr merge 100 --repo djbclark/djbclark-ade --squash --match-head-commit <that head>`.
+1. Check PR 100: `gh pr view 100 --repo djbclark/kool-ade --json headRefOid,mergeable` and `gh pr checks 100 --repo djbclark/kool-ade`. If the head is still `fbcbfad`, all three checks pass, and it is MERGEABLE: `gh pr merge 100 --repo djbclark/kool-ade --squash --match-head-commit <that head>`.
 2. If master moved and the PR conflicts again: in the worktree `git merge --no-commit --no-ff origin/master`, keep both sides of additive conflicts (read code conflicts, run the four test files via `~/ops/site-private/bin/bg bin/pytest ...`), `git-commit-own --staged`, push, rewrite the marker's `head` in the PR body (`gh pr edit 100 --body-file`), wait for CI, repeat. The marker must name the exact current head.
 3. After the merge: `git worktree remove ../djbclark-ade-zz-probe-wt` (and delete the branch), `hermes-ping "djbclark-ade: PR 100 merged <sha>"`, and update this chain's Tier 1.
 4. Verify the relay ack to `1b6c5412` (id `20261029-045432-e9d994`, queued because its omp agent was working): `python3 ~/src/djbclark-ade/skills/session-finder/relay.py --pending --text`. If still unsent after the agent idles, check its transcript, then re-send; report to djbclark if unreachable.
@@ -57,5 +57,5 @@ none (the three adversary job records were closed 2026-10-29).
 ## Quick Start
 ```bash
 cd ~/src/djbclark-ade-zz-probe-wt && git status -sb && git log -3 --oneline
-gh pr checks 100 --repo djbclark/djbclark-ade
+gh pr checks 100 --repo djbclark/kool-ade
 ```

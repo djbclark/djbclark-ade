@@ -4,7 +4,7 @@ handoff_id: 6edb
 parent_handoff_ids: [4583]
 lineage: deterministic
 chain: [standalone-rework2]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 2187f8e
@@ -33,7 +33,7 @@ Merged or pushed to master this session:
    fixed (93) or process-only (11). Its report is `~/.local/state/bigteam/rework2-codex-triage/codex-triage-report.md`.
    The 8 still-applies threads stay open, 6 of them until PRs 36-38 merge.
 
-Open PRs (each in its own cow pasture `~/.cow/pastures/djbclark-ade/<name>`):
+Open PRs (each in its own cow pasture `~/.cow/pastures/kool-ade/<name>`):
 
 | PR | Pasture, head | State |
 |---|---|---|
@@ -91,7 +91,7 @@ djbclark-ade-rework-pw (peer 6ebd939, relay id a0c69a11).
       with 9fa0605 and `gh pr edit 32 --body-file` it. Codex last reviewed dcf7e8d: comment `@codex review`, then wait
       for the marker's `code_review.commit_sha` and `security_review.commit_sha` to equal 9fa0605, both `completed`
       with `has_unresolved_findings: false`, and GraphQL to show no open Codex thread. Then merge with
-      `--match-head-commit 9fa0605…` (full SHA: `git -C ~/.cow/pastures/djbclark-ade/subagent-model rev-parse HEAD`).
+      `--match-head-commit 9fa0605…` (full SHA: `git -C ~/.cow/pastures/kool-ade/subagent-model rev-parse HEAD`).
       Verify `state` is `MERGED`, THEN hermes-ping.
    2. PR 35 round 5 is **APPROVE (head d102e18, LOW only)**, the last line of
       `~/.local/state/bigteam/rework2-review-selfslash/adv-selfslash-5-report.md`. Decide on its F1 before merging.
@@ -124,7 +124,7 @@ djbclark-ade-rework-pw (peer 6ebd939, relay id a0c69a11).
    The main checkout's dirty relay/fleet/helm/session-finder files are that session's; never stage them.
 4. Peer 6ebd939 (PR 31, claude-fleet-governor) was told about its two current open Codex threads. On its handoff,
    adopt `~/.local/state/handoffs/chains/standalone-329d/SESSION_LOG.md`.
-5. Remove pastures as their PRs merge: `bin/cow-pasture remove djbclark-ade/<name> --force`, after checking
+5. Remove pastures as their PRs merge: `bin/cow-pasture remove kool-ade/<name> --force`, after checking
    `git status` and that nothing is unpushed. Pastures: subagent-model, pr-wait, review-selfslash, codex-fix-a/b/c,
    codex-triage (read-only, removable now), modes-hotfix.
 6. Watch `bin/claude-quota-guard status` until 2026-10-30.
@@ -149,6 +149,6 @@ prototype waiters and do not survive: check those PRs directly (item 1.3).
 ```bash
 cd ~/src/djbclark-ade
 for r in rework2-subagent-model/jobs/adv-subagent-7 rework2-pr-wait/jobs/adv-pr-wait-4 ; do bin/acp-dispatch check ~/.local/state/bigteam/$r.json; done
-for n in 32 34 35 36 37 38; do gh pr checks $n --repo djbclark/djbclark-ade --json name,state > /tmp/c$n.json; echo "$n rc=$?"; done
-gh api graphql -f query='query{repository(owner:"djbclark",name:"djbclark-ade"){pullRequest(number:37){headRefOid reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{databaseId author{login}}}}}}}}' > /tmp/t37.json
+for n in 32 34 35 36 37 38; do gh pr checks $n --repo djbclark/kool-ade --json name,state > /tmp/c$n.json; echo "$n rc=$?"; done
+gh api graphql -f query='query{repository(owner:"djbclark",name:"kool-ade"){pullRequest(number:37){headRefOid reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{databaseId author{login}}}}}}}}' > /tmp/t37.json
 ```

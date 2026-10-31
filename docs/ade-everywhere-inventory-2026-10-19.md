@@ -194,7 +194,7 @@ Linking, per agent (by hand unless noted):
 4. `~/.codex/*`: per-entry symlinks into `site-private/.codex-runtime`, `codex/rules` and
    `memory/codex`. No script creates them.
 5. `~/.zcode/commands`: 15 symlinks to `ade/zcode/commands`.
-6. Claude plugins: marketplaces `djbclark-ade` (the ade repo) and `local`
+6. Claude plugins: marketplaces `kool-ade` (the ade repo) and `local`
    (`site-djbclark/claude/local-marketplace`) are registered in `settings.json`.
 
 Mac-only: `brew/`, all launchd plists, `macos/`, roles launchd_path, mac_dns and site_agents, the
@@ -211,7 +211,7 @@ mode, `shell/`.
 | acp-run | `ade/tools/acp-run` | 3-hop symlink chain | yes |
 | acp-dispatch, web-get, web-digest, firecrawl-router, wait-file, skill-get, context-budget-check | `ade/bin` | direct `~/.local/bin` symlinks | yes |
 | herdr | fork github.com/djbclark/herdr | `~/.local/bin/herdr` is a 20.7M real binary; `~/.herdr-wrapper/bin/herdr` (unversioned guard) is first on PATH; docs say Homebrew but it is not in the Cellar | yes |
-| herdr plugins | djbclark/herdr-sleeper; collie (`~/.collie`, self-updating) | `~/.local/bin/herdr-sleeper` points at `~/orca/projects/djbclark-ade/bin` | yes |
+| herdr plugins | djbclark/herdr-sleeper; collie (`~/.collie`, self-updating) | `~/.local/bin/herdr-sleeper` points at `~/orca/projects/kool-ade/bin` | yes |
 | orca | app at `~/.local/churn-producing-apps/Orca.app`; fork djbclark/orca | CLI symlink into the bundle | yes |
 | cswap | uv tool claude-swap (`just install-cswap`) | PyPI | yes |
 | session-finder, helm, herdr-tidy | `ade/skills/*` Python; index at `~/.local/state/session-index` | run through the skills, not on PATH | yes |

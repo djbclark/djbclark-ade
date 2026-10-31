@@ -1,4 +1,4 @@
-# djbclark-ade — an agentic development environment
+# kool-ade — an agentic development environment
 
 One operator, many agent TUIs. This repo is the operating kit for running a
 fleet of coding agents on one Mac as a single environment: the skills every

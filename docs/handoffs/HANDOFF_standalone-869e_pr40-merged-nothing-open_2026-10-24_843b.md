@@ -4,7 +4,7 @@ handoff_id: 843b
 parent_handoff_ids: [4996]
 lineage: deterministic
 chain: [standalone-869e]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 045c4332dbd8055d64d369c51efa253cc079536e
@@ -42,7 +42,7 @@ Land PR 40 (queued lows: pane P1-P5, Paseo L1-L4, Hermes route) from handoff 499
 1. Asked for the frontier consult and the final adversary round; chose merge-as-is plus a follow-up fix.
 
 ## Where We're Going
-1. THE next action: nothing is owed by this chain. Optionally confirm master CI is green: `gh run list --repo djbclark/djbclark-ade --branch master --limit 3 --json conclusion,headSha,status`.
+1. THE next action: nothing is owed by this chain. Optionally confirm master CI is green: `gh run list --repo djbclark/kool-ade --branch master --limit 3 --json conclusion,headSha,status`.
 2. Open lows in `docs/queue.md` (each a small PR when picked up): env-free hop detection for Hermes `execute_code` relays (`rg -n "execute_code" docs/queue.md`); L-D, the pane lock's hash can be missed while the holder releases (`rg -n "L-D" docs/queue.md`); the dict-guard test.
 3. `b4`'s ci-green job (`~/.local/state/bigteam/adhoc-2026-10-24/jobs/ci-green.json`) belongs to another session (owner f401e78b); it was `pending` behind a load gate. It may be moot now that PR 42/44 fixed master CI; do not touch it, ask its owner.
 
@@ -52,6 +52,6 @@ none (the frontier advisor and final adversary job records were closed).
 ## Quick Start
 ```
 cd ~/src/djbclark-ade && git status -sb && git log --oneline -3
-gh run list --repo djbclark/djbclark-ade --branch master --limit 3 --json conclusion,headSha,status
+gh run list --repo djbclark/kool-ade --branch master --limit 3 --json conclusion,headSha,status
 rg -n "execute_code|L-D" docs/queue.md
 ```

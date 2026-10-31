@@ -4,7 +4,7 @@ handoff_id: 6776
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-6776]
-repo: djbclark-ade
+repo: kool-ade
 workspace: djbclark-ade-zz-probe-wt
 branch: zz-probe-archive
 head_sha: 6998c441ee774095508741bf298b7c0abc4f0f76
@@ -98,7 +98,7 @@ agents are archived only when idle and only after the replacement registered, so
 
 ## Where We're Going
 
-1. THE next action: read the two CI runs. `gh run view 40776576703 --repo djbclark/djbclark-ade --json status,conclusion` and the same for 40782293787. If `pytest-linux` fails on the same 59 tests as master, the failure is not this PR (say so; PR 102 pins ubuntu-24.04). If it passes, or fails identically to master, tell djbclark and merge only on his go: `gh pr merge 100 --squash --match-head-commit 6998c441ee774095508741bf298b7c0abc4f0f76`.
+1. THE next action: read the two CI runs. `gh run view 40776576703 --repo djbclark/kool-ade --json status,conclusion` and the same for 40782293787. If `pytest-linux` fails on the same 59 tests as master, the failure is not this PR (say so; PR 102 pins ubuntu-24.04). If it passes, or fails identically to master, tell djbclark and merge only on his go: `gh pr merge 100 --squash --match-head-commit 6998c441ee774095508741bf298b7c0abc4f0f76`.
 2. Repo rule 1 asks for an adversary verdict marker in the PR body (`<!-- adversary-verdict:v1 {"verdict":"APPROVE","head":"<40-hex>"} -->`). I have not run the adversary on this head. Dispatch it, read-only, and add the marker for head 6998c44 before merge. Re-review any repair too.
 3. Put the consolidation question to djbclark as a /steps card: one `watch` agent covering all domains versus the per-domain watchers. Cost to quote: each watcher is a live agent process; measure with `ps` before quoting a number (I did not). My recommendation: keep per-domain agents but archive retired ones automatically (done), and decide on consolidation only with a measurement.
 4. After merge, run one real `watch up` and check `paseo agent ls -g -a` shows no stray `x ` or `zz probe` agent (everything above is tested against a fake paseo only; no live run of `archive_retired` has happened yet).
@@ -112,7 +112,7 @@ none
 
 ```
 cd /Users/djbclark/src/djbclark-ade-zz-probe-wt   # a claimed workspace; git status and git log -3 first
-gh pr view 100 --repo djbclark/djbclark-ade --json state,mergeStateStatus,headRefOid
+gh pr view 100 --repo djbclark/kool-ade --json state,mergeStateStatus,headRefOid
 ~/ops/site-private/bin/bg bin/pytest tests/test_watch.py tests/test_paseo_new_seat_probe.py tests/test_bin_pytest.py
 ```
 

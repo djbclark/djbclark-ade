@@ -4,7 +4,7 @@ handoff_id: 869e
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-869e]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: a5fe7ec
@@ -88,5 +88,5 @@ python3 -I skills/session-finder/relay.py --plan <id>      # route order for a s
 ~/ops/site-private/bin/bg python3 -m unittest tests.test_session_relay tests.test_relay_paseo tests.test_relay_fallback
 ```
 Not mine in this checkout: `.agents/skills/fastino-glide/` (untracked). Branch master, head a5fe7ec at write time;
-the checkout is shared with other sessions (pointer `djbclark-ade/main` belongs to chain standalone-329d, listed here
+the checkout is shared with other sessions (pointer `kool-ade/main` belongs to chain standalone-329d, listed here
 as a side workspace).

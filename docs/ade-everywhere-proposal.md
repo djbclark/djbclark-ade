@@ -29,7 +29,7 @@ installs the standard way (Q22); the release matrix, key and name (Q24) and the 
 
 ## 1. Goal, restated as acceptance tests
 
-The request: move the entire AI development environment into `djbclark-ade` (or have it
+The request: move the entire AI development environment into `kool-ade` (or have it
 referenced from there), so that on a new machine, after cloning that one repo and telling an
 agent "recreate my environment", djbclark can work on any project exactly as on any other
 machine. Every past session of every TUI must be reachable from every machine. No central node
@@ -39,7 +39,7 @@ Someone else must be able to use the public kit with their own private companion
 Written as tests the finished project must pass:
 
 1. **T1 fresh machine.** On a clean Mac or Linux box with the stage-zero prerequisites (4.4): clone
-   `djbclark-ade`, run one command (or paste one prompt into any agent), answer the interactive
+   `kool-ade`, run one command (or paste one prompt into any agent), answer the interactive
    questions once (private repo URL, secret backend sign-in, vendor logins), and every tool,
    skill, hook, service, plugin and project checkout is present and `ade doctor` is green.
    Running it again changes nothing (idempotent). chezmoi keeps no originals<sup>[1](#C63)</sup>, so
@@ -85,7 +85,7 @@ Written as tests the finished project must pass:
 
 ## 2. What exists today, in one paragraph each
 
-**The kit is real but hand-wired.** `djbclark-ade` holds the skills, orchestration CLIs, hooks,
+**The kit is real but hand-wired.** `kool-ade` holds the skills, orchestration CLIs, hooks,
 commands and docs, and `skill-everywhere` links skills into eleven TUIs. But nothing creates the
 rest of the wiring: the per-file symlinks in `~/.claude`, `~/.codex`, `~/.config/opencode`,
 `~/.zcode` and `~/AGENTS.md` were made by hand, five of them are broken today (Gemini, opencode,
@@ -95,7 +95,7 @@ nowhere (inventory §1).
 
 **Three ops repos overlap.** `site-djbclark` (public) carries Ansible roles for services, the
 Brewfile fragments, about 100 site scripts, the home rules file and shell config; `site-private`
-is now mostly symlinks back into it plus `memory/`; `djbclark-ade` holds the agent kit. The
+is now mostly symlinks back into it plus `memory/`; `kool-ade` holds the agent kit. The
 same thing lives in two places in at least eleven cases (inventory §3): `book-to-kb` differs
 between two copies, three `hooks.json` files all differ, `acp-run` is reached through a three-hop
 symlink chain, and launchd plists come from four sources with 109 copies installed.
@@ -117,7 +117,7 @@ installed into `ade/skills` and carry uncommitted edits from Paseo's own refresh
 
 ## 3. Principles
 
-1. **One public kit, one private companion, nothing else required.** `djbclark-ade` is the
+1. **One public kit, one private companion, nothing else required.** `kool-ade` is the
    environment. The private companion holds what must be private. Machine provisioning that is
    not about agents (phone fleet, DNS, monitoring stacks) stays in `site-djbclark`/`stayturgid`
    and is optional.
@@ -163,7 +163,7 @@ cloud agents are preferred for slices that can run away from the Mac (§11.5).
 
 | Repo | Visibility | Role after the project |
 |---|---|---|
-| `djbclark-ade` | public | The environment: manifest, bootstrap CLI, skills, orchestration tools, per-TUI config templates, service units, Paseo plugin, docs, tests. Nothing that names a host or account. |
+| `kool-ade` | public | The environment: manifest, bootstrap CLI, skills, orchestration tools, per-TUI config templates, service units, Paseo plugin, docs, tests. Nothing that names a host or account. |
 | `site-private` (rename to `ade-private` later, Q1) | private | The operator's companion: memory, handoffs (Tier 1 chains and Tier 2 documents), private skills, machine facts and per-machine overrides, project list, secret declarations and backend references, Paseo profile notes. A template for it ships in the public repo. |
 | `site-djbclark` + `stayturgid` | public | Infrastructure that is not the agent environment: phone fleet, DNS, monitoring stack, VPS NixOS, Hyades services. `ade` delegates package and service roles to it where they exist; it never depends on it being present. |
 | `aiuse`, `sudo-secretspec`, `herdr`, `hermes-agent`, `orca`, `sipb-agent-skills`, `loopback-port-shim`, `sipb-llms` | public, own repos | Referenced from the manifest with install method and version; not vendored. |
@@ -173,14 +173,14 @@ policy, the three `AGENTS.md` slices, `OPS_ROOT` paths, `.codex-runtime`) is map
 newcomer sees `ade-private` from day one because the template creates it under that name
 (Q1).
 
-### 4.2 `djbclark-ade` directory structure (proposed)
+### 4.2 `kool-ade` directory structure (proposed)
 
 Today's layout grew by accretion: `claude/`, `zcode/`, `opencode-plugins/`, `launchd/`,
 `config/`, `plugins/`, `scripts/`, `bench/` are seven top-level answers to "where does per-TUI
 and per-OS stuff go". Proposed:
 
 ```
-djbclark-ade/
+kool-ade/
   AGENTS.md  CLAUDE.md -> AGENTS.md  README.md  LICENSE  .chezmoiroot (contains "home")
   home/                # the one chezmoi source state (Q4): every dotfile, per-TUI config template and rules link,
                        # with .chezmoi.toml.tmpl prompting once for the companion URL and operator data
@@ -285,7 +285,7 @@ snapshot and restore, doctor, clone, sessions, services). Stage zero (below) com
    `--check` to stop there. The same command is what a launchd or systemd timer may run daily
    in `--check` mode, so a machine that fell behind says so in `ade doctor` and in Hermes.
 
-The prompt for an agent is then one paragraph: "clone djbclark-ade, read AGENTS.md, run `ade
+The prompt for an agent is then one paragraph: "clone kool-ade, read AGENTS.md, run `ade
 bootstrap`, answer its questions, run `ade doctor` until green". `docs/apply-toolchain-prompt.md`
 stays as the per-repo toolchain prompt; it is not a machine bootstrap (inventory §4).
 
@@ -822,14 +822,14 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
       `bin/jev`, shadow first; spec, progress and proof per job; an optional witness slice
       after merge for repos that declare a witness command (SF-Q12, Phase 5+); one time-boxed
       OpenRig spike on a Linux host after F1, never as a third fabric.
-   9. **Pilot (SF-Q2):** `djbclark-ade` itself, an allowlist of small non-security tasks (docs,
+   9. **Pilot (SF-Q2):** `kool-ade` itself, an allowlist of small non-security tasks (docs,
       skills, `bin/` fixes); the factory cannot touch `config/factory*`, CI, auth, deploy or
       its own gates.
    10. **Gates.** F1 orchestrator (1 week): one job, sequential; the kill test (`kill -9` in
        every state, restart, one PR and one alert, `acp-dispatch reap` clean). F2 reviews,
        merge and intake (1-2 weeks): parallel reviewers, rework loop, CI verify, PR opener,
        approval-driven merge, issue-label intake, Telegram alert and buttons; gate: one issue
-       on `djbclark-ade` runs to merged from the phone. F2b automatic merge: rulesets on the
+       on `kool-ade` runs to merged from the phone. F2b automatic merge: rulesets on the
        pilot repo, Jev `merge_gate` live, a negative test (a planted failing check never
        merges). F3 Paseo panel, in Phase 4; gate: the T5 pilot includes one factory job.
        Cut from v1: approver LLM, UX/UI reviewers, spec-kit or OpenSpec, parallel jobs,
@@ -853,7 +853,7 @@ walk on 2026-10-19; the answer follows each question.
    **Decided: vps-primary.** **Superseded by Q18 (2026-10-19):** vps-primary is trusted.
 3. **Q3 Move the agent-service Ansible roles (`shared_mcp`, `basic_memory_mcp`, `litellm`,
    `paseo_desktop`, the agent half of `site_agents`) from `site-djbclark` into
-   `djbclark-ade/services`?** Recommended: yes, in Phase 5; until then `ade install` calls them
+   `kool-ade/services`?** Recommended: yes, in Phase 5; until then `ade install` calls them
    where they are.
    **Decided: yes, Phase 5.**
 4. **Q4 Provisioner.** Recommended as written in 4.4: a narrow `ade` CLI for ADE concepts,
@@ -982,7 +982,7 @@ Questions from the two frontier reads, the OpenRig study and the plugin scan
 §5-6); walked with `/steps` on 2026-10-19. The answer follows each question.
 
 1. **SF-Q1 Placement.** **Decided: a parallel Phase F after Phase 1's CI PR** (§8 item 9).
-2. **SF-Q2 Pilot repo and change class.** **Decided: `djbclark-ade`, small non-security tasks**
+2. **SF-Q2 Pilot repo and change class.** **Decided: `kool-ade`, small non-security tasks**
    on an allowlist; no factory policy, CI, auth or deploy changes.
 3. **SF-Q3 Spec-writer tier.** **Decided: Opus `judgment`, high.**
 4. **SF-Q4 Caps.** **Decided: 12 calls, 4 h, 3 jobs/day, 1 parallel, 2 ready PRs waiting**, and
@@ -1021,7 +1021,7 @@ Questions from the two frontier reads, the OpenRig study and the plugin scan
 ### 9.4 Round 4 (decided 2026-10-20)
 
 26. **Q26 Keeping every machine current, and a changelog.** djbclark (2026-10-20): "we need a
-    clear way to keep all of djbclark-ade up-to-date on new systems, and also we should have a
+    clear way to keep all of kool-ade up-to-date on new systems, and also we should have a
     changelog so people know what changes or new features are added." Decided:
     1. `ade update` is a Phase 1 command (4.4 item 9, acceptance test T8), not a later nicety:
        a machine that cannot be brought to the current head with one idempotent command is
@@ -1158,7 +1158,7 @@ needs it, during this project and in general; avoid high Mac load.
 
 | Work | Runs on | Notes |
 |---|---|---|
-| pytest, lint, the `ade` container smoke test, plugin build | GitHub Actions on `djbclark-ade` | free runners for a GitHub-sourced repo; the first PR of Phase 1 adds the workflow; `load-watch ci decide` is the check before any local run |
+| pytest, lint, the `ade` container smoke test, plugin build | GitHub Actions on `kool-ade` | free runners for a GitHub-sourced repo; the first PR of Phase 1 adds the workflow; `load-watch ci decide` is the check before any local run |
 | private companion template test, `ade doctor` against a real companion | GitHub Actions on the private repo, or Forgejo CI on Hyades when the data or the minutes require it | secrets via the `none` backend in CI; never the operator's 1Password |
 | the real-Linux-user gate (reboot, linger, services) | vps-primary or a VM, not CI | the one test a container cannot run |
 | capture and export (collector, Hermes `.backup` and export, exporters) | the origin device, always | the native store exists only there; Hermes and its `state.db` live on the Mac |
@@ -1192,7 +1192,7 @@ monthly, they change.
 |---|---|---|---|---|
 | Claude Max 20x | cloud sessions (`claude --cloud`, claude.ai/code, mobile, Routines); no VM charge | `claude --cloud --model <m> "<task>"` from the repo (clones the GitHub remote at the current branch, or uploads the checkout when no remote or no GitHub App); `claude -p "<msg>" --cloud <session-id>` to follow up; `--teleport` pulls it local | the same 5h and weekly windows as local use | yes: first session started 2026-10-19 (Linux pytest job, branch `ci/linux-pytest-job`) |
 | Claude Max | monthly API credits for the Claude API: the pool `aiuse` labels `omp` (djbclark, 2026-10-19; JSON `credits_label: "Claude API credits"` since the same day). Console 2026-10-19: $95.57 of the $200.00 promotional grant left (granted 2026-10-13, expires 2026-11-08; applies to the API, Agent SDK, Batch API, Playground, Managed Agents), $3.98 cash, $110.44 spent this cycle (resets 2026-11-01), $200 monthly spend limit. `aiuse` showed the pool 100% unused the same day: its CodexBar reading is stale or a different row; fix in `~/src/aiuse` | the omp TUI was set up on it (`acp-run omp`); also any `ANTHROPIC_API_KEY` path (the Claude SDK in `bin/failover.py`, a verdict classifier) | its own monthly credit, wasted when unspent | yes via omp, no per-run gate (SF-Q19, decided 2026-10-19; needs `omp login` for Anthropic first, `docs/queue.md`); rename the pool in `aiuse` |
-| Codex, ChatGPT $100 plan | Codex Cloud tasks, no VM charge; cloud tasks use the allowance faster than local turns | `codex cloud exec --env <ENV_ID> --attempts 1-4 "<task>"`; `codex cloud list --json`, `status`, `diff`, `apply`; also `@codex` on a GitHub issue or PR | the Codex weekly window | partly: environment `ccarenv_02c6721d65dc4191b57a76a84baa4121` for `djbclark-ade` exists (djbclark, 2026-10-19), but codex-cli 0.163.0 only reads the legacy catalog, so `codex cloud exec --env … --branch …` fails with "no cloud environments are available for this workspace" (openai/codex#50182, #51585, open, no CLI workaround). The Codex GitHub app is on the repo and `@codex review` on a PR works (PR 5, 2026-10-19: "Didn't find any major issues"); the task path (`@codex <task>` on an issue or PR) answers "create an environment for this repo" (open upstream bug, non-review mentions). So today Codex Cloud is a reviewer on PRs, not a builder; re-probe `codex cloud exec` and a task mention after each Codex release |
+| Codex, ChatGPT $100 plan | Codex Cloud tasks, no VM charge; cloud tasks use the allowance faster than local turns | `codex cloud exec --env <ENV_ID> --attempts 1-4 "<task>"`; `codex cloud list --json`, `status`, `diff`, `apply`; also `@codex` on a GitHub issue or PR | the Codex weekly window | partly: environment `ccarenv_02c6721d65dc4191b57a76a84baa4121` for `kool-ade` exists (djbclark, 2026-10-19), but codex-cli 0.163.0 only reads the legacy catalog, so `codex cloud exec --env … --branch …` fails with "no cloud environments are available for this workspace" (openai/codex#50182, #51585, open, no CLI workaround). The Codex GitHub app is on the repo and `@codex review` on a PR works (PR 5, 2026-10-19: "Didn't find any major issues"); the task path (`@codex <task>` on an issue or PR) answers "create an environment for this repo" (open upstream bug, non-review mentions). So today Codex Cloud is a reviewer on PRs, not a builder; re-probe `codex cloud exec` and a task mention after each Codex release |
 | Cursor Pro+ | Cloud Agents on every paid plan, API v1 in public beta; billed at API price for the chosen model against the included usage, then on-demand (on-demand must be enabled) | `POST https://api.cursor.com/v1/agents` with a user API key (`autoCreatePR`, `startingRef`); `@cursor` in a *comment* on a GitHub issue or PR (the issue body does not trigger it: 2026-10-20 the mention in issue 6's body drew nothing for 10 min, the same text as a comment got "Taking a look!" in seconds); Automations on a schedule | the Cursor pool at API price, not the `auto` rate, so it drains faster than local `auto` | yes (2026-10-19; first slice done the same day: agent bc-21d9d115 wrote 26 tests for the launcher on branch `cursor/tests-for-bin-cursor-cloud-2d21` in 104 s, merged as PR 5; second slice 2026-10-20 from an `@cursor` comment on issue 6: agent bc-614266a6 documented the launcher, PR 8, $1.04 of Cursor usage for 5 doc lines, so mentions suit small well-specified slices): key `CURSOR_API_KEY` in `sudo-secretspec`; launcher `bin/cursor-cloud launch --repo <url> --ref <branch> --prompt-file F` (re-execs under `sudo-secretspec run`, `autoCreatePR` always false, prints the agent JSON), `status|run|usage|followup|list|models`; the Cursor GitHub app is also on the repo: its Security Agent and Approval Agent ran as checks on PR 3 |
 | GitHub Copilot | coding agent (`gh agent-task`, preview) | off by ruling (§11.1); reserve only | premium requests | not used |
 | antigravity, z.ai GLM, Grok, OpenCode Go, omp | no included cloud agent found | local ACP only | | |

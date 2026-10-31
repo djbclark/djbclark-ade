@@ -4,7 +4,7 @@ handoff_id: 4996
 parent_handoff_ids: [f3fd]
 lineage: deterministic
 chain: [standalone-869e]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 5734f37d47723d60fee796af95cc4894726eab30
@@ -68,7 +68,7 @@ codex/omp/opencode/pi Paseo agent needs `--steer` or `--idle S`.
 
 ## Where We're Going
 1. **THE next action: wait for `djbclark-ade-b4`'s ci-green fix to reach master.** Check without a model loop:
-   `gh run list --repo djbclark/djbclark-ade --branch master --limit 3 --json conclusion,headSha,displayTitle`; or a relay line from b4 (`relay.py afe31994 ...` addresses the old session id; the new one has the same Paseo agent 24f5b849).
+   `gh run list --repo djbclark/kool-ade --branch master --limit 3 --json conclusion,headSha,displayTitle`; or a relay line from b4 (`relay.py afe31994 ...` addresses the old session id; the new one has the same Paseo agent 24f5b849).
    If b4 reports no progress by the time you resume and master is still red, ask `session-finder` who is on it (`~/src/djbclark-ade/skills/session-finder/relay.py f401e78b "<line>"`), do not fix it yourself.
 2. When master is green: in `~/src/djbclark-ade-lows-wt` run `git fetch origin && git merge origin/master --no-edit` (expect a trivial or `CHANGELOG.md` conflict; keep both sides' lines), run the six test files above through
    `~/ops/site-private/bin/bg`, push, and let CI re-run. Update the PR body to name the new head ("reviewed APPROVE at c438a99; head differs only by merges with master and the docs-only PR-number commit").
@@ -82,8 +82,8 @@ none open. All seven `queued-lows-*` and `adversary-queued-lows-*` records under
 ## Quick Start
 ```bash
 cd ~/src/djbclark-ade && git pull --rebase && git status -sb
-gh pr view 40 --repo djbclark/djbclark-ade --json state,headRefOid,mergeStateStatus,statusCheckRollup -q '{state,headRefOid,mergeStateStatus}'
-gh run list --repo djbclark/djbclark-ade --branch master --limit 3 --json conclusion,headSha,displayTitle
+gh pr view 40 --repo djbclark/kool-ade --json state,headRefOid,mergeStateStatus,statusCheckRollup -q '{state,headRefOid,mergeStateStatus}'
+gh run list --repo djbclark/kool-ade --branch master --limit 3 --json conclusion,headSha,displayTitle
 git -C ~/src/djbclark-ade-lows-wt status -sb
 jq -c '{closed,failure}' ~/.local/state/bigteam/adhoc-2026-10-24/jobs/ci-green.json
 ```

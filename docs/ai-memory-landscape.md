@@ -186,12 +186,12 @@ works without a reviewer.
 **Correction: install it now.** My "not yet" argument rested on the claim
 that the curated layer is *about a dozen documents*. That was wrong, and
 wrong in the way standing order 4 warns about — I counted a proxy
-(`djbclark-ade/docs`, 7 files) and called it the curated layer. Measured
+(`kool-ade/docs`, 7 files) and called it the curated layer. Measured
 across all three doc roots:
 
 | Root | Pages | Size | Changed in 14d |
 |---|---|---|---|
-| `djbclark-ade/docs` | 7 | 81KB | 7 |
+| `kool-ade/docs` | 7 | 81KB | 7 |
 | `ops/site-private/memory` | **176** | 1.3MB | 53 |
 | `ops/site-djbclark/research` | 11 | 112KB | 11 |
 | **Total** | **194** | **1.5MB** | **71** |
@@ -241,7 +241,7 @@ deterministic injection was the reliable part.
 
 ### We already have a markdown wiki, and it is this repo
 
-`docs/` in djbclark-ade is git-backed, human-editable, diffable, reviewed at
+`docs/` in kool-ade is git-backed, human-editable, diffable, reviewed at
 commit time, readable by every agent, and pointed at from `AGENTS.md`. That
 is substantially what Link provides as a substrate. What Link adds on top is
 FTS/semantic retrieval over the wiki, a propose/review lifecycle, backlinks
@@ -318,7 +318,7 @@ and survives restarts by construction. Verified ✔ Connected.
 
 **It rewrites source files. Do not point it at an existing repo.**
 
-Registering `~/ops/site-private/memory`, `djbclark-ade/docs` and
+Registering `~/ops/site-private/memory`, `kool-ade/docs` and
 `site-djbclark/research` as projects caused it to prepend YAML frontmatter to
 every file it synced:
 

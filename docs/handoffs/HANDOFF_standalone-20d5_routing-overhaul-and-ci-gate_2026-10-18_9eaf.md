@@ -4,8 +4,8 @@ handoff_id: 9eaf
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-20d5]
-repo: djbclark-ade
-workspace: djbclark-ade
+repo: kool-ade
+workspace: kool-ade
 branch: master
 head_sha: fdce56bb60a34b28b97d70ac6a4b622527d39759
 created_at: 2026-10-18T20:10:53-04:00
@@ -25,7 +25,7 @@ Both are complete. Nothing is open for this chain.
 
 ## Where We Are
 
-1. djbclark-ade master (all pushed): slices B, C, `tell`, D1 (waiter/lazy policy/reap throttle),
+1. kool-ade master (all pushed): slices B, C, `tell`, D1 (waiter/lazy policy/reap throttle),
    D2 (quota: reset formats, far-reset reroute, pmset wake via NOPASSWD rule, exit-0 quota scan,
    `[escalation] ladder`), D3 (`acp-dispatch outcome`), `claude/hooks/bash_habits_gate.py`
    (0f4d9a9, live in Claude/Codex/Cursor), claude Sonnet code pool + quality band (128415a),
@@ -77,7 +77,7 @@ Both are complete. Nothing is open for this chain.
 3. Earlier tag failure cause: https://github.com/frdminc/sudo-secretspec/actions/runs/39151733655
    (`ruff format --check` on `test_release.py`).
 4. State file: `~/.local/state/bigteam/routing-overhaul/merge-b-todo.md` (last line: DONE ~20:30).
-5. Tests: djbclark-ade full suites green at each merge (1584, 1590, 1631); sudo-secretspec checked only
+5. Tests: kool-ade full suites green at each merge (1584, 1590, 1631); sudo-secretspec checked only
    on CI (above).
 
 ## Operator Feedback

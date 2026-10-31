@@ -72,6 +72,6 @@ Practical consequences:
   a headless worker you spawn.
 - If you are blocked on an approval and the operator is away, a Claude
   session may resolve it — mention this when reporting a stuck approval.
-- Claude sessions carry the machine playbook (`~/orca/projects/djbclark-ade`,
+- Claude sessions carry the machine playbook (`~/orca/projects/kool-ade`,
   see its `docs/mcp-servers.md`) and a fast local Gmail search skill; assume
   they know the fleet conventions.

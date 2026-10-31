@@ -4,7 +4,7 @@ handoff_id: 9c2e
 parent_handoff_ids: [f3fd]
 lineage: inferred
 chain: [standalone-869e]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 8ff3098
@@ -33,7 +33,7 @@ belong to other sessions' graft/fastino work, not this chain — do not stage th
 2. key_cmd model listing: merged to Hermes fork `djbclark/hermes-agent` `main` (`bdea3a9933`) and
    pushed; branch `fix/validate-custom-key-cmd-upstream` pushed; comment on upstream #87641.
    **Gateway NOT yet restarted as of 2026-10-24 — the live gateway does not run the fix.**
-3. Paseo agent listing / pane-route repairs: `72167ff`, `a8934b3` on djbclark-ade master (pushed);
+3. Paseo agent listing / pane-route repairs: `72167ff`, `a8934b3` on kool-ade master (pushed);
    site-private note `aa08492` (pushed). Full Hermes suite 2843 passed, 5 environmental failures.
 
 ## Next Steps
@@ -49,7 +49,7 @@ belong to other sessions' graft/fastino work, not this chain — do not stage th
 ## Lineage / identifiers
 - Chain: `standalone-869e` — canonical log
   `~/.local/state/handoffs/chains/standalone-869e/SESSION_LOG.md`;
-  pointer `~/.local/state/handoffs/djbclark-ade/main/SESSION_LOG.md`.
+  pointer `~/.local/state/handoffs/kool-ade/main/SESSION_LOG.md`.
 - Handoff lineage: `ce8b` → `f3fd` → `9c2e` (this file).
-- Commits of record: djbclark-ade `72167ff`, `a8934b3` (pushed); fork `bdea3a9933` (pushed);
+- Commits of record: kool-ade `72167ff`, `a8934b3` (pushed); fork `bdea3a9933` (pushed);
   site-private `aa08492` (pushed); master head `8ff3098` = origin/master.

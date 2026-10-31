@@ -18,7 +18,7 @@ close-and-recreate on a live agent: that kills the running process.
 ## 0. Re-probe first — verbs may have landed
 
 ```bash
-~/orca/projects/djbclark-ade/bin/orca-reorg-watch --show   # cli:{...} true = verb now exists
+~/orca/projects/kool-ade/bin/orca-reorg-watch --show   # cli:{...} true = verb now exists
 orca --version
 ```
 

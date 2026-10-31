@@ -4,7 +4,7 @@ handoff_id: d165
 parent_handoff_ids: [a621]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: e048e19
@@ -14,7 +14,7 @@ writer: claude-code
 # Handoff — wave 1 lead: O2 build and three adversary rounds in flight
 
 ## The Goal
-Lead of djbclark-ade's ADE queue build wave 1: drive PRs 51, 52, 53 and 59 to merge-ready. Every merge needs
+Lead of kool-ade's ADE queue build wave 1: drive PRs 51, 52, 53 and 59 to merge-ready. Every merge needs
 djbclark's explicit yes and is pinned with `gh pr merge --squash --match-head-commit <reviewed sha>`.
 
 ## Where We Are

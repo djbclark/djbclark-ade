@@ -486,7 +486,7 @@ answered "say hi" with five shell calls and repeated `ls /tmp | head -3` until t
 `GOOSE_SCOUT_BACKEND=bedrock` restores the direct route.
 **Off since 2026-10-28** (`~/.config/goose-scout/DISABLED`, memory pressure); since 2026-10-29
 its Bedrock API key is also deactivated, so even removing the marker gives 403 until Bedrock is
-re-enabled (djbclark-ade issue 141).
+re-enabled (kool-ade issue 141).
 
 Session modes: `auto` (yolo, YOLO_SET), `approve`, `smart_approve`, `chat`. DENY_SET uses
 `approve`: `chat` set over ACP still ran the shell tool (tripwire, 2026-10-23); with `approve`
@@ -794,7 +794,7 @@ Needs [uv](https://docs.astral.sh/uv/) and the agents' own CLIs/adapters.
 
 The script itself is self-contained (a `uv run --script` header pulls its
 dependencies): a copy on your PATH runs every agent and every non-Go model
-with no other file. On this machine it lives in djbclark-ade
+with no other file. On this machine it lives in kool-ade
 at `tools/acp-run/acp-run`
 and is reached as `~/.local/bin/acp-run` → `~/ops/site-private/bin/acp-run` →
 `~/ops/site-djbclark/tools/acp-run` → here. Elsewhere, copy the script onto

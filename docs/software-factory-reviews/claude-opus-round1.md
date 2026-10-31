@@ -94,7 +94,7 @@ That leaves M0 + M1 + M2 (with guards and sandboxing folded in) + M3.
 
 ## Suggested answers to the open questions
 
-1. Start in `djbclark-ade/tools/factory` and split it out once its interface with `acp-run` settles.
+1. Start in `kool-ade/tools/factory` and split it out once its interface with `acp-run` settles.
 2. Never auto-merge in v1.
 3. Plain markdown spec.
 4. Cheap models everywhere except security. Set hard call and time caps before setting USD caps.

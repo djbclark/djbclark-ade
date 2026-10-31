@@ -24,7 +24,7 @@ Two halves that work together:
    There is only ever one watcher: `set` replaces the old one and tells it so.
 
 Chain: `load-spike-monitor-t` (`/baton load-spike-monitor-t`). It is a side-workspace chain, so the
-`djbclark-ade` pointer stays with its own chain (djbclark, 2026-10-20).
+`kool-ade` pointer stays with its own chain (djbclark, 2026-10-20).
 
 ## 1. Become the watcher (default action)
 

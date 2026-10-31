@@ -4,7 +4,7 @@ handoff_id: 9ec0
 parent_handoff_ids: [dc33]
 lineage: deterministic
 chain: [standalone-dc33]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 828dd462e22a72ce884e46f51d27ea6f66b24ea0
@@ -122,7 +122,7 @@ runner's `REVIEWED_REV` refuses any other installed commit.
   Gemini weekly 15%; z.ai weekly 0% (resets 2026-10-14); Fable sub-cap ~5%.
 - Adversary findings: C1 critical, H1-H3, M1-M5, L1-L5, re-verification R10
   (argparse abbreviation bypass) and R3 (zcode tool list, MCP); all fixed.
-- Commits this session on djbclark-ade: 06ed46c .. 828dd46 (about 60).
+- Commits this session on kool-ade: 06ed46c .. 828dd46 (about 60).
   site-private 7519213 (two memory notes).
 
 ## Operator Feedback

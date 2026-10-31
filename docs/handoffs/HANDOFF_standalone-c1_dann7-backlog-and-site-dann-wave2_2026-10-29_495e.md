@@ -15,7 +15,7 @@ cannot build until djbclark supplies two Gmail OAuth values.
 
 ## 2. Done and merged (do not redo)
 
-- **PR #133 MERGED** — squash `a8816bd4` on `djbclark-ade` master, head `f9dbb5a7`, `pytest-linux`
+- **PR #133 MERGED** — squash `a8816bd4` on `kool-ade` master, head `f9dbb5a7`, `pytest-linux`
   pass 16m54s, `context-policy` pass. Branch `relay-retire-pw` may now be deleted.
   `relay: retire an expectation with a reason, never a bare cancel (#133)`.
 - Adversary review passed (omp / `anthropic/claude-opus-5-5`, `--kind judgment --effort high`,

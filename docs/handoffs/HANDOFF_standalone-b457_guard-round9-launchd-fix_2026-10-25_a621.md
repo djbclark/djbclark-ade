@@ -4,7 +4,7 @@ handoff_id: a621
 parent_handoff_ids: [79fd]
 lineage: deterministic
 chain: [standalone-b457]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: 9512823
@@ -17,7 +17,7 @@ writer: claude-code
 Drive the ADE queue build wave 1 to merged PRs. Open: ade-git-guard PR 59 (adversary round 9 pending), the harness fix PR 62, the verified-peer-messaging rule. Lead naming is settled.
 
 ## Where We Are
-1. **Names (done):** this agent `e934e0e6` is `LEAD ade-queue-build (PR 59 guard)` in workspace `LEAD-ade-queue-build-pw` (wks_7248e8ff0e5b5bce). The other two djbclark-ade sessions: `66ec84c` "relay deferred send" (`relay-residuals-pw`), `bb2a32d` "load watcher" (`load-watcher-pw`). `6ebd939` finished and archived itself (2026-10-25 2:42 AM), `23ca18d` (old rework lead) archived 2026-10-24.
+1. **Names (done):** this agent `e934e0e6` is `LEAD ade-queue-build (PR 59 guard)` in workspace `LEAD-ade-queue-build-pw` (wks_7248e8ff0e5b5bce). The other two kool-ade sessions: `66ec84c` "relay deferred send" (`relay-residuals-pw`), `bb2a32d` "load watcher" (`load-watcher-pw`). `6ebd939` finished and archived itself (2026-10-25 2:42 AM), `23ca18d` (old rework lead) archived 2026-10-24.
 2. **PR 59 (ade-git-guard), branch `build/iso-w1-2026-10-24`, worktree `~/.local/state/bigteam/ade-queue-build-2026-10-24/wt-iso-w1`, head `7df76ad` pushed.** Round 7 BLOCK (B1-B7) -> redesign to `git fetch --dry-run --porcelain` (684c585) -> round 8 BLOCK (N1 parallel multi-remote fetch hides ref lines on stderr, N3 `--namespace` not carried) -> repair 7df76ad (stderr ref-line rule, `--jobs=1`, globals carried into every helper run, refusal text names `ADE_GUARD_FETCH_TIMEOUT`, `pull --summary`, N2 documented not redirected; 723 tests pass; mutants M2-M8 killed; **M1 (`--jobs=1` dropped) NOT re-proven**). Adversary round 9 (omp Opus 5.5) is dispatched, see Detached jobs. N6, N7 are queue lines (docs/queue.md, pushed). A second BLOCK already happened and djbclark chose repair-and-round-9; a **round-9 BLOCK means stop and ask djbclark**. Ask before every merge.
 3. **PR 62 (https://github.com/djbclark/djbclark-ade/pull/62), branch `fix/dispatch-launchd-label-slash`, worktree `~/src/djbclark-ade-launchd-label-wt`, head `ac0e0d8` pushed:** root cause of three falsely "lost" slices: `launchctl print gui/UID/<label>` cannot address a label containing `/` (every `--task` dispatch), so `dead_reason` called a live job "gone" after 120 s in the load gate. Fix: `launchd_print` uses `launchctl list <label>` for such labels; `launchd_last_exit` returns None. Test `test_a_loaded_job_whose_label_holds_a_path_is_not_reaped_as_gone` passes (3 targeted tests). **Mutation check done (04:2x AM): the new test FAILS against master's bin/acp-dispatch (rc=1, /tmp/lbl-mut.log) and passes on the branch.** PR body says adversary verdict pending. Needs adversary round (omp Opus judgment), then `@codex review`, `bin/pr-wait 62`, quote verdict + head SHA in the body, ask djbclark before merge.
 4. **Verified peer messaging (djbclark rule, 2026-10-25):** AGENTS.md standing order 10 and docs/queue.md "Verified peer messaging" (4 build items) pushed (3e61d78); memory `feedback_verify_peer_message_delivery.md` saved. The home-file clause is DONE: slice `homefile-ack` committed `2e5786f` on site-djbclark master (pushed) touching `home-agents.md` (item 24, now 13998 of 14000 bytes, 114 lines) and `cursor/home-agents.mdc` (full four-part text); item 24's wording was tightened to fit. Record closed.
@@ -65,5 +65,5 @@ The owner of the one open record is this session id; after the baton set `owner`
 ```bash
 cd ~/src/djbclark-ade
 ~/src/djbclark-ade/bin/wait-file --timeout 7000 --match '^DONE' ~/.local/state/bigteam/ade-queue-build-2026-10-24/adv-iso-w1-r9-report.md   # run_in_background
-paseo workspace ls | rg djbclark-ade; gh pr view 59 --json headRefOid,state; gh pr view 62 --json headRefOid,state
+paseo workspace ls | rg kool-ade; gh pr view 59 --json headRefOid,state; gh pr view 62 --json headRefOid,state
 ```

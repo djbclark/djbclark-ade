@@ -4,8 +4,8 @@ handoff_id: 7273
 parent_handoff_ids: [299c]
 lineage: inferred
 chain: [standalone-b457]
-repo: djbclark-ade
-workspace: djbclark-ade (lead session fd720445-c4ae-49fa-ae0a-cf2980a49ee8)
+repo: kool-ade
+workspace: kool-ade (lead session fd720445-c4ae-49fa-ae0a-cf2980a49ee8)
 branch: master (shared checkout); work in worktrees, see Where We Are
 head_sha: de17d82ddf90da6323f6645df0b208527d775930
 created_at: 2026-10-26T17:05:23-04:00

@@ -4,7 +4,7 @@ handoff_id: 7be7
 parent_handoff_ids: [83af]
 lineage: inferred
 chain: [standalone-7626]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: b68befa2d38c0b2fabf1e0ed36eafe7c46a031c0
@@ -123,4 +123,4 @@ Read parent then this file:
 - `docs/handoffs/HANDOFF_standalone-7626_barnowl-plain-english_2026-10-29_83af.md`
 - `docs/handoffs/HANDOFF_standalone-7626_barnowl-tmux-start_2026-10-29_7be7.md`
 
-Tier 1: `~/.local/state/handoffs/djbclark-ade/main/SESSION_LOG.md` → `chains/standalone-7626/SESSION_LOG.md`.
+Tier 1: `~/.local/state/handoffs/kool-ade/main/SESSION_LOG.md` → `chains/standalone-7626/SESSION_LOG.md`.

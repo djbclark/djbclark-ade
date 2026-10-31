@@ -159,7 +159,7 @@ SF-Q1 to SF-Q9 are the Fable report's, restated in one line each; the recommende
 
 1. **SF-Q1 Where in the phase plan?** (a) parallel Phase F after Phase 1's first PR; (b) fold
    into Phase 4; (c) start before Phase 0 ends.
-2. **SF-Q2 First pilot repo?** (a) `djbclark-ade` itself; (b) a repo already on `ci/base`;
+2. **SF-Q2 First pilot repo?** (a) `kool-ade` itself; (b) a repo already on `ci/base`;
    (c) hyades-bench.
 3. **SF-Q3 Spec-writer tier?** (a) Opus `judgment`; (b) cheap-first with `--escalate`.
 4. **SF-Q4 Hard caps for v1?** (a) 12 calls, 4 h, 3 jobs/day, 1 parallel; (b) other numbers.
@@ -235,7 +235,7 @@ Python CLIs that import each other).
    review-queue limit, human merges), StrongDM Attractor (Apache-2.0, a workflow specification
    with human-gate handlers, not an engine). Its evidence file `prior-art-repos.json` sits in the
    scratchpad.
-8. **CI probe on `djbclark-ade` at 20:29 UTC:** public, two active workflow entries, no rulesets,
+8. **CI probe on `kool-ade` at 20:29 UTC:** public, two active workflow entries, no rulesets,
    master unprotected, `allow_auto_merge` false. An active workflow is not a default-branch gate.
 
 ### 6.3 Its questions, merged into §5

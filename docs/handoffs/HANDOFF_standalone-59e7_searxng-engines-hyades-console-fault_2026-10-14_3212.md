@@ -4,7 +4,7 @@ handoff_id: 3212
 parent_handoff_ids: []
 lineage: none
 chain: [standalone-59e7]
-repo: djbclark-ade
+repo: kool-ade
 workspace: main
 branch: master
 head_sha: e2cad59d3f145b6a4aa2e4470f059f9c901c4143
@@ -30,7 +30,7 @@ This session's tail tuned its SearXNG backend:
 
 1. **Live:** `forgejo.mit.edu/djbclark/firecrawl-searxng:2026.10.15-b00212a83-r1` runs as
    `djbclark-fc-searxng`. Brave off; Wikipedia/Wikidata patched to `searxng_useragent()`
-   with `outgoing.useragent_suffix: "(+<djbclark-ade firecrawl examples URL>)"`.
+   with `outgoing.useragent_suffix: "(+<kool-ade firecrawl examples URL>)"`.
 2. **Built, not deployed:** `...-r2` (digest `sha256:154518668e87...`). Adds Grokipedia
    (general category: every plain query asks it) and, shortcut-only: hackernews, npm,
    crates.io, lib.rs, pkg.go.dev, huggingface, codeberg, gitlab, openalex (`mailto` = git

@@ -4,7 +4,7 @@ handoff_id: 0d50
 parent_handoff_ids: [c671]
 lineage: deterministic
 chain: [go-followups-20261025]
-repo: djbclark-ade
+repo: kool-ade
 workspace: djbclark-ade-ack-period-wt
 branch: fix/relay-ack-period-01a17631
 head_sha: 36905dbfd53dbbf633819a5fe8f8cc1b5a98d286
