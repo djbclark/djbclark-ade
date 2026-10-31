@@ -9,9 +9,11 @@ operator twice about silence that was a queue. Every id, path and text here is f
 from __future__ import annotations
 
 import contextlib
+import datetime
 import io
 import json
 import os
+import threading
 import re
 import time
 import unittest
@@ -308,25 +310,32 @@ class QueueBase(fb.Harness):
         self.timeline_calls: list[str] = []
         target = fb.pasess(agent="cline", status="working")
         sender = fb.sess(id="bbbbbbbb", name="alice", agent="claude", host="paseo", paseo=fb.SENDER, chan=("paseo", fb.SENDER), status="idle")
-        rows = [target, sender]
+        carol = fb.sess(id="ffffffff", name="carol", agent="cline", host="paseo", paseo=fb.CAROL, chan=("paseo", fb.CAROL), status="idle")
+        rows = [target, sender, carol]
+        self.status = "running"    # the target's Paseo status: "idle" lets a deliverer send
+        self.sent: list[tuple[str, str]] = []
+        relay.send_paseo = lambda s, text, wait: self.sent.append((s["paseo"], text)) or "delivered"    # proven in the target's timeline: the send counts
         relay.fleet.sessions = lambda: [dict(r, self=bool(r.get("paseo") == os.environ.get("PASEO_AGENT_ID"))) for r in rows]
         saved_links = relay.fleet.LINKS_FILE
         relay.fleet.LINKS_FILE = self.tmp / "links.json"
         self.addCleanup(setattr, relay.fleet, "LINKS_FILE", saved_links)
         relay.fleet.LINKS_FILE.write_text(json.dumps({"links": {relay.fleet.link_key(a["id"], b["id"]): {"sent": 1, "acked": None}
                                                                  for a in rows for b in rows}}))
-        relay.paseo_inspect = lambda agent: {"Id": agent, "Status": "running", "Cwd": "/x", "Archived": False, "PendingPermissions": list(self.cards)}
+        relay.paseo_inspect = lambda agent: {"Id": agent, "Status": self.status, "Cwd": "/x", "Archived": False, "PendingPermissions": list(self.cards)}
         relay.paseo_probe = lambda agent: (relay.paseo_inspect(agent), "ok")
         relay.paseo_card_detail = lambda agent: ("Which branch?" if self.cards else "", bool(self.cards))
         self.addCleanup(setattr, relay, "paseo_timeline", relay.paseo_timeline)
         relay.paseo_timeline = lambda agent, tail=0, timeout=None: self.timeline_calls.append(agent)
         relay.paseo_gate = lambda s: (relay.paseo_blocker(relay.paseo_inspect(fb.AGENT)) if self.cards
-                                      else s.update(status="working"))
+                                      else s.update(status="working" if self.status == "running" else "idle"))
 
-    def go(self, *argv: str) -> tuple[int, str, str]:
+    def go(self, *argv: str, text: str = "hello there friend", to: str = fb.AGENT) -> tuple[int, str, str]:
+        return self.run_relay(to, text, "--wait", "2", *argv)
+
+    def run_relay(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = relay.main([fb.AGENT, "hello there friend", "--wait", "2", *argv])
+            rc = relay.main(list(argv))
         return rc, out.getvalue(), err.getvalue()
 
 
@@ -386,6 +395,230 @@ class TestQueuedLineNamesTheObstacle(QueueBase):
         relay.rec_write(rec("20261001-000000-aaaaaa", "delivered", 30 * 86400, finished=time.time() - 8 * 86400))
         self.assertEqual(self.go()[0], 0)
         self.assertEqual([r["id"] for r in relay.rec_all() if r["id"] == "20261001-000000-aaaaaa"], [])
+
+
+class AckBase(QueueBase):
+    """Expectation `q1`, asked by the target row (cccccccc) of the caller alice (bbbbbbbb, the `self` row): alice owes `ack q1`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ["PASEO_AGENT_ID"] = fb.SENDER
+        os.environ.pop("RELAY_NO_ACK", None)    # the default delivery watch is what makes a send count for the closer (`CTX["accepted"]`), as in life
+        self.addCleanup(setattr, relay, "IMPLICIT_ACK_WAIT", relay.IMPLICIT_ACK_WAIT)
+        relay.IMPLICIT_ACK_WAIT = 0.1    # a queued send's watch must not wait ten real seconds
+        self.open_expectation()
+
+    def open_expectation(self, eid: str = "q1", **kw: Any) -> None:
+        relay.atomic_json(relay.expect_dir() / f"{eid}.json", {
+            "id": eid, "state": "open", "created": time.time(), "acked": None, "within": 1800, "sender": "cccccccc", "sender_sid": "", "sender_label": "peer-fb",
+            "tx": None, "mark": 0, "sender_paseo": fb.AGENT,
+            "target": {"id": "bbbbbbbb", "name": "alice", "paseo": fb.SENDER, "sid8": "", "sid": "", "host": "paseo"}, **kw})
+
+    def state(self, eid: str = "q1") -> str:
+        return relay.expect_read(eid)["state"]
+
+    def deliver(self, rid: str) -> None:
+        """The detached deliverer: a clean environment, the target idle."""
+        with mock.patch.object(relay.subprocess, "Popen") as popen:
+            fb.REAL_SPAWN("20261024-000000-abcdef")
+        self.status = "idle"
+        with mock.patch.dict(os.environ, popen.call_args.kwargs["env"], clear=True):
+            self.assertEqual(relay.deliver(rid), 0)
+        self.assertEqual(relay.rec_read(rid)["state"], "delivered")
+
+
+class TestAckTokenOnAnyLine(AckBase):
+    """H1 (2026-10-31): Dann 7's queued reply ENDED with `ack host-branch-durability-2` and the expectation never closed."""
+
+    def test_an_ack_on_the_last_line_of_a_direct_send_closes_it(self) -> None:
+        self.status = "idle"
+        rc, out, err = self.go(text="merged, all green\nack q1")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual((self.state(), relay.expect_read("q1").get("acked_via")), ("acked", "relay"))
+
+    def test_the_measured_scenario_a_queued_reply_with_the_ack_last_closes_when_it_is_delivered_not_before(self) -> None:
+        rc, out, err = self.go(text="the durability branch is merged\nack q1")
+        self.assertEqual(rc, 3, err)    # queued under the default delivery watch: unverified, exit 3 (never 0 for a message not yet delivered)
+        rid = relay.rec_all()[0]["id"]
+        self.assertEqual((self.state(), self.sent), ("open", []))    # queued: not delivered, so not closed
+        self.assertIn("answers expectation q1, which closes only when the queued message is delivered (or on `relay.py --sweep`), not now", out)
+        self.deliver(rid)
+        self.assertEqual((self.state(), relay.expect_read("q1").get("acked_via")), ("acked", "relay"))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_queued_text_that_answers_nothing_says_nothing_about_expectations(self) -> None:
+        out = self.go(text="a plain status line")[1]
+        self.assertNotIn("answers expectation", out)
+        self.assertNotIn("answers", json.loads(self.go("--json", text="another plain status line")[1]))
+        res = json.loads(self.go("--json", text="x\nack q1")[1])
+        self.assertEqual(res["answers"], ["q1"])
+
+    def test_a_third_partys_identical_text_closes_nothing(self) -> None:
+        self.status = "idle"
+        os.environ["PASEO_AGENT_ID"] = fb.CAROL    # carol is not the expectation's target
+        rc, out, err = self.go(text="merged, all green\nack q1")
+        self.assertEqual((rc, len(self.sent)), (0, 1), (out, err))    # it was sent, as any text is
+        self.assertEqual(self.state(), "open")
+
+    def test_an_ack_to_someone_who_did_not_ask_closes_nothing(self) -> None:
+        self.status = "idle"
+        rc, out, err = self.go(text="merged\nack q1", to=fb.CAROL)    # alice is the target, but carol is not the expectation's sender
+        self.assertEqual((rc, len(self.sent)), (0, 1), (out, err))
+        self.assertEqual(self.state(), "open")
+
+    def test_an_ack_quoted_inside_a_line_closes_nothing(self) -> None:
+        self.status = "idle"
+        for text in ("I will ack q1 later, first the merge", "see the footer: ack q1", "> ack q1\nnot yet", "ack q10 means another question",
+                     "the token is `x ack q1`"):
+            rc, out, err = self.go(text=text)
+            self.assertEqual(rc, 0, (text, out, err))
+            self.assertEqual(self.state(), "open", text)
+        rc, out, err = self.go(text="done.\n  `ack q1`")    # a line that BEGINS with the token (quote marks and indent stripped) does close it
+        self.assertEqual((rc, self.state()), (0, "acked"), (out, err))
+
+    def test_an_ack_on_a_line_of_a_queued_reply_from_another_caller_closes_nothing(self) -> None:
+        self.go(text="merged\nack q1")
+        rid = relay.rec_all()[0]["id"]
+        rec = relay.rec_read(rid)
+        rec["ack_caller"] = {"id": "zzzzzzzz", "sid": "", "host": ""}    # a record is plain JSON: only the caller it names can answer
+        relay.rec_write(rec)
+        self.deliver(rid)
+        self.assertEqual(self.state(), "open")
+
+
+class TestAckVerb(AckBase):
+    """H2: `relay.py --ack ID` alone sends `ack ID` to the expectation's sender through the ordinary send."""
+
+    def test_it_sends_ack_to_the_sender_and_the_verified_closer_settles_it(self) -> None:
+        self.status = "idle"
+        rc, out, err = self.run_relay("--ack", "q1", "--wait", "2")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.sent, [(fb.AGENT, self.sent[0][1])])
+        self.assertTrue(self.sent[0][1].endswith("ack q1"), self.sent)    # the ordinary text, so the sender sees it
+        self.assertEqual((self.state(), relay.expect_read("q1").get("acked_via")), ("acked", "relay"))
+
+    def test_a_caller_that_is_not_the_target_is_refused_naming_the_form_and_sends_nothing(self) -> None:
+        os.environ["PASEO_AGENT_ID"] = fb.CAROL
+        self.status = "idle"
+        rc, out, err = self.run_relay("--ack", "q1")
+        self.assertEqual((rc, self.sent, self.state()), (1, [], "open"))
+        self.assertIn('to answer an expectation: relay.py <sender> "ack q1" (or `relay.py --ack q1` as the caller it is addressed to)', err)
+        self.assertIn("you [ffffffff] are not its target [bbbbbbbb]", err)
+
+    def test_an_unknown_settled_or_malformed_id_is_refused_the_same_way(self) -> None:
+        self.status = "idle"
+        rc, _, err = self.run_relay("--ack", "nope")
+        self.assertEqual(rc, 1)
+        self.assertIn("no such expectation", err)
+        self.assertIn('relay.py <sender> "ack nope"', err)
+        self.open_expectation("old", state="acked")
+        rc, _, err = self.run_relay("--ack", "old")
+        self.assertEqual(rc, 1)
+        self.assertIn("the expectation is acked, only an open one is answered", err)
+        rc, _, err = self.run_relay("--ack", "../x")
+        self.assertEqual(rc, 2)
+        self.assertIn("not an expectation id", err)
+        self.assertEqual(self.sent, [])
+
+    def test_with_a_target_and_a_text_ack_is_still_the_delivery_watch_in_every_position(self) -> None:
+        self.status = "idle"
+        for argv in ((fb.AGENT, "hello one", "--ack"), ("--ack", fb.AGENT, "hello two"), (fb.AGENT, "--ack", "hello three"),
+                     ("--wait", "2", "--ack", fb.AGENT, "hello four"), ("--json", "--ack", fb.AGENT, "hello five")):
+            self.sent.clear()
+            rc, out, err = self.run_relay(*argv)
+            self.assertEqual(rc, 0, (argv, out, err))
+            self.assertEqual(len(self.sent), 1, argv)
+            self.assertTrue(self.sent[0][1].split("] ", 1)[-1].startswith("hello"), (argv, self.sent))
+        self.assertEqual(self.state(), "open")
+
+    def test_it_is_alone_it_cannot_carry_a_text_or_another_command(self) -> None:
+        for argv in (("--ack", "q1", "--pending"), ("--ack", "q1", "--sweep"), ("--ack", "q1", "--status", "q1")):
+            rc, _, err = self.run_relay(*argv)
+            self.assertEqual(rc, 2, argv)
+            self.assertIn("--ack ID is used alone", err)
+        self.assertEqual((self.sent, self.state()), ([], "open"))
+
+    def test_a_busy_sender_queues_the_ack_and_the_line_says_it_closes_on_delivery(self) -> None:
+        rc, out, err = self.run_relay("--ack", "q1", "--wait", "2")
+        self.assertEqual(rc, 3, err)
+        self.assertTrue(out.startswith("queued: "), out)
+        self.assertIn("this text answers expectation q1, which closes only when the queued message is delivered (or on `relay.py --sweep`), not now", out)
+        self.assertEqual(self.state(), "open")
+        self.deliver(relay.rec_all()[0]["id"])
+        self.assertEqual(self.state(), "acked")
+
+
+class TestPendingCollects(AckBase):
+    """H3: `--pending` runs the ack sweep first, bounded, and says which rows it could not collect."""
+
+    def transcript_backed(self, eid: str = "q2") -> None:
+        tx = self.tmp / f"{eid}.jsonl"
+        tx.write_text(fb.user_line(f"[relay from claude bbbbbbbb aka alice (here)] merged, ack {eid}") + "\n")
+        self.open_expectation(eid, tx=str(tx), mark=0)
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [r for r in json.loads(self.run_relay("--pending", "--json")[1]) if r.get("kind") == "expect"]
+
+    def test_an_answered_transcript_backed_expectation_reads_acked_without_a_sweep_command(self) -> None:
+        self.transcript_backed("q2")
+        rc, out, err = self.run_relay("--pending")
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(out, r"expect-ack q2  acked  ")
+        self.assertRegex(out, r"expect-ack q1  open   ")    # the transcript-less one is as before
+        self.assertNotIn("uncollected", out)
+        self.assertEqual(err, "")
+
+    def test_a_sweep_that_runs_out_of_time_marks_the_rows_it_could_not_collect_and_says_so(self) -> None:
+        self.transcript_backed("q2")
+        relay.atomic_json(relay.DEFER_DIR / ".ack-swept.json", {"at": 1_800_000_000.0})
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.addCleanup(setattr, relay, "ack_sweep", relay.ack_sweep)
+        self.addCleanup(setattr, relay, "PENDING_SWEEP_CAP", relay.PENDING_SWEEP_CAP)
+        relay.ack_sweep = lambda: gate.wait(5) and (0, [])
+        relay.PENDING_SWEEP_CAP = 0.05
+        rc, out, err = self.run_relay("--pending")
+        stamp = datetime.datetime.fromtimestamp(1_800_000_000.0).astimezone().isoformat(timespec="seconds")
+        self.assertEqual(rc, 0)
+        self.assertIn(f"expect-ack q2  open (uncollected, last swept {stamp}) ", out)
+        self.assertRegex(out, r"expect-ack q1  open   ")    # no transcript: closed only by a verified send, never waiting for a sweep
+        self.assertIn("the ack sweep did not finish in 0.05 s", err)
+        by_id = {r["id"]: r for r in self.rows()}
+        self.assertEqual((by_id["q2"]["uncollected"], by_id["q2"]["last_swept"], "uncollected" in by_id["q1"]), (True, 1_800_000_000.0, False))
+        gate.set()
+
+    def test_a_sweep_that_fails_marks_them_too_and_the_time_of_the_last_one_is_never_when_none_ran(self) -> None:
+        self.transcript_backed("q2")
+        self.addCleanup(setattr, relay, "ack_sweep", relay.ack_sweep)
+
+        def boom() -> Any:
+            raise RuntimeError("transcript unreadable")
+        relay.ack_sweep = boom
+        rc, out, err = self.run_relay("--pending")
+        self.assertEqual(rc, 0)
+        self.assertIn("expect-ack q2  open (uncollected, last swept never) ", out)
+        self.assertIn("the ack sweep failed (RuntimeError: transcript unreadable)", err)
+
+    def test_a_complete_sweep_stamps_the_time_and_leaves_every_row_fresh(self) -> None:
+        self.transcript_backed("q2")
+        before = time.time()
+        self.assertEqual(relay.swept_at(), None)
+        self.run_relay("--pending")
+        self.assertGreaterEqual(relay.swept_at() or 0, before)
+        self.assertTrue(all("uncollected" not in r for r in self.rows()))
+
+    def test_the_filtered_views_do_not_sweep_and_a_state_that_does_not_exist_is_not_created(self) -> None:
+        self.addCleanup(setattr, relay, "ack_sweep", relay.ack_sweep)
+        relay.ack_sweep = lambda: self.fail("a filtered listing must not sweep")
+        for argv in (("--pending", "--queued-only"), ("--pending", "--summary"), ("--pending", "--older-than", "0")):
+            self.assertEqual(self.run_relay(*argv)[0], 0, argv)
+
+
+class TestPendingNothingToSweep(Base):
+    def test_pending_on_a_machine_with_no_state_creates_none(self) -> None:
+        rc, out, _ = self.cli("--pending")
+        self.assertEqual((rc, out), (0, "no deferred messages\n"))
+        self.assertFalse(relay.DEFER_DIR.exists())
 
 
 if __name__ == "__main__":
