@@ -907,6 +907,11 @@ detached job follows the same contract (2026-10-08).
    not hand work to the next session on the assumption that a background task or
    waiter will still be there.
 
+**Single-run launchd waiters (macOS, verified 2026-10-31).** Bootstrap a plist with
+`RunAtLoad: true`, `KeepAlive: false`, and no interval keys. Verify the live job's
+properties lack `keepalive` before reporting it as one-shot: `launchctl submit`
+created keep-alive jobs on this Mac. Model slices still use `acp-dispatch`.
+
 **Why jobs are records on disk (investigation, 2026-10-08).** A Claude Code
 docs and local-process investigation found: background Bash tasks are
 children of the `claude` process and "automatically cleaned up when Claude Code
