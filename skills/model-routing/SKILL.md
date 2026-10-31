@@ -310,9 +310,9 @@ Rules for any agent that dispatches to agy:
   half of every window is left, item 1b), antigravity/agy (Google AI Pro — also
   exposes Claude/GPT windows), copilot (premium requests; **reserve, floor
   60%**), cursor Pro (Auto and third-party sublimits; GrokBot has its own
-  separate Cursor pool since 2026-10-18, never a target), grok (SuperGrok; an
-  ordinary pool since 2026-10-18: realtime-web, research, bulk;
-  `acp-run grok --model grok-4.7`),
+  separate Cursor pool since 2026-10-18, never a target), grok (**RETIRED
+  2026-10-31**: the agent is out of acp-run's registry and its routing service
+  is out of `config/routing.toml`; do not route to it),
   zai GLM coding plan (via the zcode TUI; an everyday pool), clinepass (Cline
   windows; feeds hermes via LiteLLM :4000; never delegated, aiuse-disabled),
   devin (disabled in Orca on purpose).

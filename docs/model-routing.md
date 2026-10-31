@@ -50,10 +50,11 @@ quoting a chain, and update its snapshot if you change one.
 > everyday work goes to the other pools (agy Claude/GPT, Cursor Auto, zai
 > GLM-5.3, opencode-go (bulk and mechanical only, never code: djbclark 2026-10-30), agy Gemini, crush/SIPB) at the minimum spec that does
 > it well, proactively through `/bigteam` and minimum-spec sub-agents; (4)
-> **grok and copilot are reserves** (**grok released 2026-10-18**: GrokBot moved to its own Cursor pool, so grok is an ordinary subscription pool and copilot the only reserve) with a hard floor of 60% left (GrokBot and
+> **copilot is the reserve**, with a hard floor of 60% left (GrokBot and
 > GitHub-side Copilot review ran on them; copilot read 100% used that day);
 > after an adversarial review the same day, only an explicit kind reaches
-> them (`github` for copilot, `realtime-web` for grok), a stale or missing
+> them (`github` for copilot; the `realtime-web` grok route was retired 2026-10-31 with the agent),
+ a stale or missing
 > reading fails closed, `acp-dispatch claude` is judgment-only (Fable xhigh;
 > Haiku lookups go through the Agent tool), and clinepass is `NEVER_ROUTE`;
 > (5) **hermes is never a delegation target** (gated in acp-run/acp-dispatch);
@@ -140,7 +141,6 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
-| `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
 | `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
 | `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3 (bulk), GPT-6 Luna (mechanical); never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash is the main-loop substrate model only | $40/month | subscription shared allowance | 5h + weekly + monthly |
@@ -298,7 +298,7 @@ resumed session.
 3. **copilot.** `--effort` sets `reasoning_effort` (launch `--reasoning-effort` is the same knob). `auto` and `claude-haiku-4.5` have no option. Context is a launch flag: `200k` / `256k` / `272k` become `--context default`; `1m` becomes `--context long_context`. The words `default` and `long` are not `--context` values. `--model` is repeated on that server command because `set_config_option model` resets the tier. A tier that does not land is failure class `config`, exit 1. acp-run does not filter on Copilot's 1M product table. Long measured 922000 on gpt-5.5 and costs more AI credits.
 4. **opencode.** `--effort` is the variant list on the `effort` option (`default` means no variant). `--context` exits 2. `limit.context` is fixed per model in the models.dev catalog.
 5. **cursor.** `--effort` picks the `thought_level` option whose id is not `thinking` (`reasoning_effort`, `effort`, or `reasoning`). `xhigh` matches `extra-high`. `--set reasoning_effort=LEVEL` works only on grok-4.7, claude-sonnet-5-5, claude-haiku-5-5, gemini-4-argon and gemini-3.8-flash. `--context` sets option `context` where the model has one (`256k`/`500k`, `300k`/`1m`, `200k`/`1m`, `272k`/`1m`).
-6. **grok.** Effort is option `reasoning_effort`: `low` / `medium` / `high` / `xhigh` on grok-4.7, grok-4.7-build-fast and grok-4.6; grok-4.5 stops at `high`. Context is `session/set_model` `_meta.contextWindow`, and the size must be one that model offers. grok-4.7 is `256k` / `500k` (`300k` exits 2). (The `ocx-*` ids, OpenAI models through the opencodex proxy, went with the proxy on 2026-10-19.) Read-back is `_x.ai/session/info` `context.total`.
+6. **grok — RETIRED 2026-10-31.** The agent is out of `acp-run`'s registry and its routing service is out of `config/routing.toml`; `acp-run grok` is now "agent must be one of: …". The flags below are a record only: effort via the `reasoning_effort` option, context via `session/set_model` `_meta.contextWindow` (grok-4.7 `256k`/`500k`).
 7. **qwen.** No clamp: only a listed `reasoning_effort` value is accepted. Toggle-only models (qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, kimi-k2.5, qwen3-max-2026-01-23) offer `none` / `default`; `low` exits 2. qwen3.8-max offers `none` / `low` / `medium` / `xhigh` (`high` and `max` exit 2). glm-5, glm-4.7 and MiniMax-M2.5 offer low through max. The coder models have no option. `--model qwen3.8-max` selects `qwen3.8-max(openai)`. `--context` exits 2.
 8. **cline.** `--effort` is the launch flag `--thinking` (`none` / `low` / `medium` / `high` / `xhigh`). `max` exits 2. `default` adds no flag. There is no ACP option, so effort read-back is `(unverified)`. Omitted, ACP sends `reasoning_effort` `none`. `--context` exits 2.
 9. **hermes.** `--model` works via `session/set_model` (read-back `(unverified)`). `--effort` and `--context` exit 2. `config_options` is null and `--set` is stored and ignored. A bigger window is a model id such as `openai-codex:gpt-6-astra-900k`. An ambiguous short name (`claude-sonnet-5.5`) exits 2. Effort in `config.yaml` `agent.reasoning_effort` is what the process starts with.
