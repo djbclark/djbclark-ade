@@ -1,6 +1,6 @@
 ---
 name: paseo-handoff
-description: Hand off the current task to another agent running in Paseo, with full context. Use only when the user asks to hand off through Paseo ("/paseo-handoff", "hand this to a Paseo agent"); a plain "handoff" is the handoff skill (Tier 2 document), and an Orca hand-off is orca-cli.
+description: Hand off the current task to another agent running in Paseo, with full context. Use only when the user asks to hand off through Paseo ("/paseo-handoff", "hand this to a Paseo agent"); a plain "handoff" is the handoff skill (Tier 2 document). Orca hand-offs are retired (2026-10-31).
 user-invocable: true
 ---
 

@@ -2,10 +2,10 @@
 name: autorename
 description: >-
   Rename the current session (what /rename does) to a short derived title and
-  name its own tab (the Paseo tab, or the herdr tab label); nothing else. Use for
+  name its own tab (the Paseo tab; herdr tab labels are retired, 2026-10-31); nothing else. Use for
   /autorename, "name this session", the autorename_nudge hook, and as the last
-  step of /handoff. Also owns the full herdr layout pass (`/autorename all`, herdr
-  only): reorganize or clean up herdr workspaces, tabs and panes.
+  step of /handoff. `/autorename all` (the herdr layout pass) is RETIRED
+  (2026-10-31): herdr is gone except its two Paseo bridges.
 ---
 
 # autorename — title the session from what you know

@@ -7,6 +7,12 @@ round 1's findings on PR 154 (safety of probes, archive and drains; plugin scope
 `README.md`, `AGENTS.md` and `docs/orchestration-practices.md` still describe the multi-harness design;
 this plan wins where they disagree about the future, they win about today. Sources: section I.
 
+**Update 2026-10-31 (djbclark):** herdr (except the `herdr4paseo` and `paseo4herdr` bridges), Orca and BB
+(get-bb/bb, npm `bb-app`; not `bigteam`) are retired by ruling, and Paseo is the only harness. The docs now say
+so (`AGENTS.md`, `README.md`, `docs/apply-toolchain-prompt.md`, retired skill descriptions); actually uninstalling or
+decommissioning those tools is a separate proposal, not done here. The phases below are unchanged. Many files
+still describe herdr or Orca as live until phase D7's sweep.
+
 ## A. The ruling (djbclark, 2026-10-29 and 2026-10-30)
 
 1. **Paseo only.** No herdr, no tuios, no other harness (Orca, Superset/Paradev, TUICommander, raw tmux
@@ -146,12 +152,14 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | Capability today | Footprint | Disposition | Replacement (section G for plugins) |
 |---|---|---|---|
 | `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | non-Paseo routes RETIRE in D4; relay.py and fleet.py in D6, once no watcher calls them | `send_agent_prompt` with B2's states; G3 for delivery and deferred send |
-| herdr as a harness (`bin/herdr-*`, herdr docs and skills, `-t/-p` naming, panes hosting agents, pane typing) | 139 files | RETIRE | Paseo workspaces; naming `-pw` only |
+| herdr as a harness (`bin/herdr-*`, herdr docs and skills, `-t/-p` naming, panes hosting agents, pane typing) | 139 files | RETIRE; **retired by ruling 2026-10-31** (docs now; uninstall/decommission is a separate proposal) | Paseo workspaces; naming `-pw` only |
 | `herdr4paseo` (A8.1) | own project | KEEP, edge case | one A8 bridges doc and skill |
 | `paseo4herdr` (A8.2), plugin `herdr-harness` (installed, disabled) | own project | KEEP, edge case | same doc and skill |
 | tuios as an attach client (A8.1) | — | DECIDE: only if modified for it | same doc and skill |
-| Orca (`docs/orca-integration.md`, `skills/orca-cli`, `skills/reorg-orca`, `orca-reorg-watch`, worker-start) | 103 files | RETIRE | Paseo workspaces and subagents |
+| Orca (`docs/orca-integration.md`, `skills/orca-cli`, `skills/reorg-orca`, `orca-reorg-watch`, worker-start) | 103 files | RETIRE; **retired by ruling 2026-10-31** (docs now; uninstall/decommission is a separate proposal) | Paseo workspaces and subagents |
 | Superset/Paradev skills | 10 files | RETIRE (evaluation concluded 2026-10-29) | none |
+| BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) | few files (`docs/apply-toolchain-prompt.md`) | RETIRE; **retired by ruling 2026-10-31** (docs now; uninstall/decommission is a separate proposal) | Paseo |
+| Orca `computer-use` stub and `orca computer` for GUI control | outside the repo | RETIRED 2026-10-31 (the lead removed the Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration` and the stub from the machine) | Paseo plugin `paseo-screen` (`skills/paseo-screen/`), THE screen-control tool; stays enabled when idle (2026-10-31) |
 | `acp-run` (also the agent registry: `acp-run --list` feeds `route_agent.py`) | 138 files | REPLACE in D5 | `paseo provider ls` and the C2 map; an agent with no working provider blocks its own retirement |
 | `acp-dispatch`, `acp-dispatch-wait`, records, launchd runners, reap sweep, `tell`, `resume`, `reroute`, exit-code contract (3 no report, 4 BLOCKED, 124 timeout) | 109 files | REPLACE in D5 | `paseo run`/`create_agent` + G1 jobs/deadline + G2 admission + `usage-auto-resume` (+ G5); report-file footer stays as a skill; `paseo run --output-schema` for typed results |
 | `acp-dispatch outcome` → `route_agent.py calibrate`, `agent_stats.py burn` | — | KEEP the data | G1 writes the same outcome records, so calibration keeps its source (Fable 2.1, 4.3) |

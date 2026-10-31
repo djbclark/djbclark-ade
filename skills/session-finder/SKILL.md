@@ -2,7 +2,7 @@
 name: session-finder
 description: >-
   Find which agent session (any TUI, running or ended) is or was on a topic,
-  with its handoff chains, where it lives (herdr/Orca/tmux/Paseo/Ghostty) and how to
+  with its handoff chains, where it lives (Paseo, tmux or Ghostty; herdr and Orca are retired, 2026-10-31) and how to
   continue: message it, /baton from its handoff, resume it, or brief a clean
   agent. Use for "tell the agent doing X ...", "which session is on X", "did we
   ever look at X", "find the session where we did X", /session-finder-all, or

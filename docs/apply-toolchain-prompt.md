@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.11 (2026-10-16). Supersedes 5.10, 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.12 (2026-10-31). Supersedes 5.11, 5.10, 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -117,6 +117,12 @@ They are in the §1.2 install line, the §1.3 utilities table, and the skill's
 what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
 
+What changed in 5.12 (2026-10-31, operator ruling): herdr (except the `herdr4paseo` and `paseo4herdr`
+bridges), Orca and BB are retired, and Paseo is the only harness. The BB agent workspace block is removed;
+the herdr and Orca items (the `autorename` herdr-pane wording) are gone; `herdr4paseo` and `paseo4herdr` stay
+as edge-case bridges; the Paseo block gains **paseo-screen** (`paseo plugin add kevguy/screen`), the one
+screen-control tool, with its skill. Uninstalling the retired tools is a separate proposal.
+
 What changed in 5.11 (2026-10-16): a new **MIT Athena** block after the SiYuan notes
 (AuriStor AFS client, `athena-kinit` Kerberos renewal with AFS tokens, `athena-locker`
 for `attach`/`add`/`detach`/`fsid` and `/mit`). Everything Athena-related, and the other
@@ -218,7 +224,7 @@ default. Do **not** enable them; plain subagents are enough here. Use them only
 if plain subagents prove insufficient, and then only with user approval and a
 backup of any settings file you change (§15).
 
-No external orchestrator (Herdr, Orca, Ralph TUI, Beads) is used.
+No external orchestrator (Herdr, Orca, BB, Ralph TUI, Beads) is used; Herdr, Orca and BB are retired (2026-10-31).
 
 ### 0.2 Working rules for orchestration
 
@@ -426,7 +432,7 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 | `dialogue` | yes | Runs a multi-model dialogue that produces one artifact (a spec, a report, a design) with a final-word model: fixed speaking rounds through pinned headless routes (for example Grok, Claude and GPT via `acp-run`), a machine-read footer per turn with point ids, status and dissent, a transcript that is the record, and `scripts/dialogue.py` checks for the failures the first run measured (noise strip, protocol lint, final-word gate). Use when several vendors should argue the points of contention before one writes the deliverable; not for a quick second opinion or for fan-out work with no argument between models. |
 | `sipb-llm-bench` | offer | Benchmarks a model on MIT SIPB LLMs (or any OpenAI-compatible Open WebUI/Ollama server) as an agentic-coding backend: speed probes, a tool-call conformance check, two tool-using tasks scored by running the tests, and a procedure for updating the published report. Serial and gentle on the shared server; only useful for a repo that targets such a server. SIPB's own servers need an MIT account, so skip it for a user without one. |
 | `setup-modern-cli` | yes | The standing instruction to prefer modern tools over the classic ones: the replacement table (`rg`←`grep`, `fd`←`find`, `bat`←`cat`, `srgn`←`sed`, `eza`←`ls`, `hck`←`cut`/`awk`, `jq`/`yq`, `xh`, `ast-grep`, `dust`/`gdu`, `rtk`) with the exact command patterns, the footguns (`rg -rln` is `--replace`; a pathless `rg` over-searches; `sd` is retired), and the measured search policy from §1.3 (`rg` by default, opt-in indexed `ig` as a first line for one known literal, never `ayg`). Load it before shell searches; it is the long form of the §1.3 table. |
-| `autorename` | offer | `/autorename`: names the current agent session (Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex in a herdr pane, omp) from what it is working on, writing where each TUI's own `/rename` writes; `--auto` keeps a title the user set by hand. **omp needs one user-level step:** `ln -s <djbclark-ade>/skills/autorename/omp-bridge.ts ~/.omp/agent/extensions/autorename-bridge.ts`, then restart omp (it loads extensions at startup only). The extension lets the running omp rename itself, because omp moves a session to a new file when anything else writes it. Ask before creating the symlink: it is outside the repo and loads into every omp session. |
+| `autorename` | offer | `/autorename`: names the current agent session (Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, omp) from what it is working on, writing where each TUI's own `/rename` writes; `--auto` keeps a title the user set by hand. **omp needs one user-level step:** `ln -s <djbclark-ade>/skills/autorename/omp-bridge.ts ~/.omp/agent/extensions/autorename-bridge.ts`, then restart omp (it loads extensions at startup only). The extension lets the running omp rename itself, because omp moves a session to a new file when anything else writes it. Ask before creating the symlink: it is outside the repo and loads into every omp session. |
 | `forgejo` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/forgejo` here is a compatibility symlink). Uses a Forgejo instance (default `forgejo.mit.edu`) with the token held in `sudo-secretspec` as `DJBCLARK_<HOST>_TOKEN`: `scripts/setup-token` declares the secret (optional), opens the token page and verifies it; `forgejo-api` makes one `/api/v1` call (mutations need `--yes`); `tea-forgejo` runs `tea` with the secret on its env login. Needs `fj` and `tea` from §1.2, and a token only the user can create in the browser, so offer it only where the user works with a Forgejo server. The default host `forgejo.mit.edu` (and the SIPB runner below) need an MIT account (Athena/Touchstone login), so skip those for a user without one. For the SIPB `ubuntu` CI runner it also records the `LD_PRELOAD` loopback shim (port 0 and `shutdown()`) Gradle needs there (libkrun#818) and the per-job resource limits (16 vCPU, 62.8 GiB, virtiofs disk with a 32 GiB tmpfs). |
 | `jevlike` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/jevlike`; `skills/jevlike` here is a compatibility symlink). Uses djbclark's Jev-like System One judges, Kev-0.8B at djbclark-kev.sipb.cloud (loaded by default) and Laya at djbclark-laya.sipb.cloud, as cheap probabilistic judges; since 2026-10-30 one Hyades microVM, djbclark-jevlike, serves one of them at a time: its `scripts/jevlike ask noul|choice|score` helper reruns itself under `sudo-secretspec run` with `JEVLIKE_API_KEY`, retries restarts with backoff, and returns `decide: yes|no|escalate` (act only at p>=0.9 or p<=0.1). Needs a key only the user holds, so offer it only where the user has access to those servers. Added 2026-10-20 |
 
@@ -878,10 +884,18 @@ forgejo.mit.edu/djbclark/paseo-nix (CI-built package plus `services.paseo`). Ski
 `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin` (vendored in
 `djbclark-ade/skills/`, link them with `bin/skill-everywhere`; the advisor/committee/handoff triggers
 are narrowed to explicit Paseo requests, see `skills/paseo/UPSTREAM.md`). Fleet setup:
-site-djbclark `docs/paseo.md`. Terminal front end for one Paseo agent (log view, prompt box,
+site-djbclark `docs/paseo.md`. **Edge-case bridges (the only herdr items kept; herdr itself is retired as a harness,
+2026-10-31):** `herdr4paseo`, a terminal front end for one Paseo agent (log view, prompt box,
 steer/interrupt, permission confirm; runs in a Herdr pane; added 2026-10-28, djbclark):
 `uv tool install git+https://github.com/djbclark/herdr4paseo` (github.com/djbclark/herdr4paseo),
 then `herdr4paseo [agent-id]`. It only wraps the `paseo` CLI, so quitting never touches the agent.
+`paseo4herdr` (fork github.com/djbclark/paseo4herdr, formerly the `paseo-herdr` plugin, installed disabled as
+`herdr-harness`) lets Paseo reach terminals that Herdr hosts; leave it disabled unless that is needed.
+**Screen control (added 2026-10-31, djbclark):** `paseo plugin add kevguy/screen` installs `paseo-screen`
+(https://github.com/kevguy/paseo-screen, MIT; plugin id `paseo-screen`; viewer "Screen · mac" in the Paseo
+sidebar; RPCs `screen.status`, `screen.frame`, `screen.input`). It is THE screen-control tool and stays enabled
+when idle; anyone paired with the host can see and control the screen while it is enabled (host-wide Pause on
+its sidebar row). Skill: `paseo-screen` (in `djbclark-ade/skills/`, link it with `bin/skill-everywhere`).
 
 **SiYuan notes (machine-specific; added 2026-10-12, djbclark).** Only where the
 SiYuan desktop app (https://b3log.org/siyuan/) is installed and the repo's work
@@ -909,19 +923,6 @@ below is the macOS setup in `~/src/athena-mac/`
 | Kerberos renewal (`athena-kinit`) | https://forgejo.mit.edu/djbclark/athena-mac (`~/src/athena-mac/`) | `~/src/athena-mac/install.sh` (user level; first run `athena-kinit init` stores the password in the login Keychain). Apple's Heimdal `kinit`, `~/Library/Preferences/edu.mit.Kerberos` (realm `ATHENA.MIT.EDU`, forwardable, renewable 7 d), hourly LaunchAgent `com.djbclark.athena-kinit` | Keeps a renewable TGT; each renewal also runs `aklog` for the local AFS token and pushes the TGT to the Athena dialup and, if configured, a VPS. The dialups still require Duo after Kerberos (one shared ssh master; the `athena-master` and `athena-duo-askpass` scripts in the same directory) |
 | AuriStor AFS client | https://www.auristor.com/filesystem/client-installer/ | Download the dmg for the installed macOS (macOS 27: `https://www.auristor.com/downloads/auristor/osx/macos-27.0/AuriStor-client-2021.05-72-GoldenGate.dmg`; the path is `osx/macos-<version>/`, find the current file name on the installer page), check `pkgutil --check-signature` on the `.pkg`, then `sudo installer -pkg Auristor-Lite.pkg -target /`. Edit `/etc/yfs/yfs-client.conf.d/thiscell.conf` to `thiscell = athena.mit.edu` (the pkg's cell dialog only runs in the GUI installer). On Apple Silicon the Mac needs Permissive Security with "allow user management of kernel extensions" (Startup Security Utility in Recovery; `sudo bputil -d` shows it), then Privacy & Security → Allow "AuriStor, Inc." and a reboot, which also creates `/afs` (`afs` line in `/etc/synthetic.conf`) | `/afs` with the Athena cell; the OpenAFS client has no maintained Apple Silicon build. The AuriStor EULA applies. Tokens: `aklog` (done by `athena-kinit`), check with `tokens` |
 | `athena-locker` (`attach`, `detach`, `add`, `fsid`) and `/mit` | https://forgejo.mit.edu/djbclark/athena-mac (`~/src/athena-mac/athena-locker`) | `~/src/athena-mac/install.sh` links the commands into `~/.local/bin` and adds the `add` shell function to `~/.bashrc.local`; once as root `sudo /bin/sh ~/src/athena-mac/install-root.sh` makes `/mit` a synthetic symlink to `/Users/Shared/mit` (reboot). Lockers to pre-attach go in `~/.config/athena/lockers` (LaunchAgent `com.djbclark.athena-lockers`, hourly). Needs the AuriStor client above | Athena's `attach`/`add` on a Mac: Hesiod lookup (TXT `<name>.filsys.ns.athena.mit.edu`), `aklog -path`, symlink into `/mit`. Not on demand: a locker must be attached before `cd /mit/<locker>` (Athena's FUSE `pyhesiodfs` is not reproduced). Most locker binaries are Linux builds, so only scripts and data lockers are useful |
-
-**BB agent workspace (machine-specific; added 2026-10-17, djbclark).** **Only on
-djbclark's own machines, and only if the user has a tailnet with a BB server; skip
-every item in this block otherwise.** BB (https://github.com/get-bb/bb, npm
-`bb-app`) is the web workspace that starts coding agents on a machine. It has
-**no login**: reach it over the tailnet only, never `tailscale funnel`. djbclark's
-server is on vps-primary (docs in site-djbclark `docs/bb-vps-primary.md`; module
-and enrolment steps in the bb-nix README, https://github.com/djbclark/bb-nix).
-
-| Item | Website | Install | What it does |
-|---|---|---|---|
-| `bb` CLI (and `bb-app`, `bb-host-daemon`) | https://www.npmjs.com/package/bb-app | `npm i -g bb-app@<server version>` (the version the vps-primary server runs, pinned in bb-nix `pkgs/pins.json`; mismatched versions break the daemon protocol). Do not run BB's own `install.sh` on NixOS | Command line for threads, projects, machines, plugins and settings (`bb thread spawn`, `bb machine list`) |
-| Enrol this machine into vps-primary's BB | https://github.com/djbclark/bb-nix#adding-another-machine | In the BB web UI (tailnet URL in `docs/bb-vps-primary.md`): Settings, Machines, add a machine, **Manual** provider (never `bb connect`); the credential lasts 15 minutes and is a secret. Then `bb machine enroll --bootstrap-env BB_ENROLLMENT` as the user the agents should run as, and start the host daemon. The machine URL is the server's :38443 address, exactly as shown in Settings | The machine appears online in the server's UI; threads started there run here. Log each agent in on this machine as that user (their own logins; never copy another machine's refresh tokens) |
 
 **GitHub-side services** (accounts and app installs happen in the interactive phase)
 

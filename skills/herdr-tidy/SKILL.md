@@ -1,14 +1,17 @@
 ---
 name: herdr-tidy
 description: >-
-  Close idle herdr panes and tabs safely, every TUI and Hermes included, via a
-  no-model classifier that writes a close ledger with the resume command; the
-  same pass runs over Orca terminals (/orca-tidy). Use for /herdr-tidy,
-  /orca-tidy, "clean up my herdr", "tidy my Orca", "close the idle panes", or
-  whether a pane or terminal is safe to close. Fails closed.
+  RETIRED (2026-10-31): herdr and Orca are retired, Paseo is the only harness; list
+  and archive idle agents with `paseo` instead. Do not use for new work (record
+  only: it closed idle herdr panes and Orca terminals, /herdr-tidy, /orca-tidy).
 ---
 
 # herdr-tidy — close idle panes without losing anything helm cannot find again
+
+> **RETIRED (2026-10-31, operator ruling).** herdr (except the `herdr4paseo` and `paseo4herdr` bridges)
+> and Orca are retired; Paseo is the only harness (`docs/paseo-only-rearchitecture.md`). Do not run this
+> skill for new work. The text below is kept only as a record until the tool is decommissioned
+> (a separate proposal).
 
 Canonical copy: `~/src/djbclark-ade/skills/herdr-tidy/` (git: `~/src/djbclark-ade`); every TUI
 reaches it via a direct skill-everywhere link `~/src/djbclark-ade/skills/herdr-tidy`. Design

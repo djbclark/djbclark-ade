@@ -1,14 +1,16 @@
 ---
 name: reorg-orca
 description: >-
-  Reorganize a cluttered Orca setup from the CLI: rename
-  worktrees/projects/tabs, reparent worktrees, split and close terminals,
-  applying only verbs Orca has and saying which requested moves it cannot do.
-  Use when asked to tidy, clean up, reorganize or restructure Orca workspaces,
-  worktrees, projects or tabs.
+  RETIRED (2026-10-31): Orca is retired, Paseo is the only harness; organize
+  workspaces and tabs with `paseo`. Do not use for new work (record only: it
+  reorganized Orca worktrees, projects and tabs from the CLI).
 ---
 
 # reorg-orca
+
+> **RETIRED (2026-10-31, operator ruling).** Orca is retired completely; Paseo is the only harness
+> (`docs/paseo-only-rearchitecture.md`). Do not run any `orca` command from this skill. The text below
+> is kept only as a record until Orca is decommissioned (a separate proposal).
 
 Orca's CLI can create/rename/reparent/close but cannot yet move, swap, resize
 or reorder (upstream: stablyai/orca#23272 umbrella). This skill does what

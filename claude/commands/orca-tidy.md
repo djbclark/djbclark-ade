@@ -1,14 +1,9 @@
 ---
-description: close idle Orca terminals safely (herdr-tidy --host orca scan → handoff → close, ledger)
+description: "RETIRED (2026-10-31): Orca is retired, Paseo is the only harness; do not run"
 ---
 
-Follow section 6 of the mounted `herdr-tidy` skill exactly, with `tidy.py --host orca`:
-run `tidy.py --host orca scan`, perform the precondition for each `handoff-then-close`
-terminal (`tidy.py --host orca handoff`), close every `close` verdict
-(`tidy.py --host orca close`; an exit 1 after "ledger written" means the terminal
-survived, say so), and report every terminal with the action taken or the one-line
-decision the operator has to make. Canonical copy:
-`~/src/djbclark-ade/skills/herdr-tidy/SKILL.md`.
+**Retired (2026-10-31, operator ruling).** Orca is retired and Paseo is the only harness, so do not run
+`tidy.py --host orca` or any `orca` command. Say so and stop; list and archive idle agents with the `paseo`
+skill if that is what is wanted. Record only: `~/src/djbclark-ade/skills/herdr-tidy/SKILL.md`.
 
-Arguments, if any (a terminal handle, pane key or handle prefix to limit the pass to, or
-`--dry-run`): $ARGUMENTS
+Arguments, if any: $ARGUMENTS
