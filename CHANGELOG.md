@@ -222,6 +222,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `AGENTS.md` standing order 11 (2026-10-30, djbclark): djbclark-ade is the lead's project; any change to another repository or to installed files outside a repository waits for the operator's yes, and findings there are reported as proposals.
 - `skills/paseo-handoff` (2026-10-30): an "in a worktree" handoff now gets an `isolation: "local"` workspace and a `git worktree add` task worktree instead of a Paseo worktree workspace, until the Paseo-only plan's D1.3 and D2 gate prove that archiving cannot delete unpushed work (plan rule D0.3) (#154).
 - `skills/aws-rules` and `tools/acp-run/README.md` (2026-10-29): record that Bedrock inference access is off (the Bedrock API key's service credential is `Inactive`, with an inline `Deny bedrock:*`; root can still call Bedrock; gating is issue 141), that the `aws-agent` profile is the root user on purpose, and that goose-scout is off with its key deactivated (#142).
 - `skills/aws-rules` (2026-10-29): the `aws-mcp` server is the uv tool `~/.local/bin/mcp-proxy-for-aws` called directly instead of `uvx mcp-proxy-for-aws@latest` (one process of about 50 MB at start instead of about 175 MB across the uv wrapper and Python); upgrade with `uv tool upgrade mcp-proxy-for-aws` (#139).
