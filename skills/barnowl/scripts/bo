@@ -5,7 +5,8 @@
 set -euo pipefail
 
 session=${BO_SESSION:-barnowl}
-out=${BO_OUT:-/tmp/bo-out.txt}
+out=${BO_OUT:-}
+trap '[[ -z $out ]] || rm -f "$out"' EXIT
 
 usage() {
   cat <<'EOF'
@@ -32,6 +33,15 @@ need_session() {
   fi
 }
 
+# One bo call at a time per session: two callers would interleave keystrokes
+# in the one live client. flock is on Linux, where the live client runs; where
+# it is missing there is no session to talk to anyway.
+lock_client() {
+  command -v flock >/dev/null 2>&1 || return 0
+  exec 9>"${BO_LOCK:-${TMPDIR:-/tmp}/bo-$session.lock}"
+  flock -w 120 9 || { echo "another bo call is using $session; gave up after 120 s" >&2; exit 1; }
+}
+
 # Lines under the status bar are the type window. A compose expands it.
 type_window() {
   tmux capture-pane -p -J -t "$session" | awk '
@@ -52,6 +62,18 @@ type_window() {
 
 guard_idle() {
   need_session
+  lock_client
+  # Keys sent while a pager or popup is open land in it, not the command line.
+  # No status-bar line means a full-screen page; a popup (":show commands",
+  # help) keeps the status bar but draws a box whose bottom edge is a line of
+  # "└──┘". Either is refused; a message body that draws such a box is a
+  # harmless false alarm.
+  local screen
+  screen=$(tmux capture-pane -p -J -t "$session")
+  if ! grep -q '^── ' <<<"$screen" || grep -Eq '^ *└─+┘ *$' <<<"$screen"; then
+    echo "BarnOwl is showing a pager or popup (or an unrecognised screen); not sending keys." >&2
+    exit 3
+  fi
   local lines count first
   lines=$(type_window)
   count=$(printf '%s\n' "$lines" | sed '/^$/d' | wc -l)
@@ -100,6 +122,8 @@ print_marked() {
 perl_eval() {
   local expr=$1
   guard_idle
+  # A private output file per call: concurrent callers never see each other's.
+  [[ -n $out ]] || out=$(mktemp "${TMPDIR:-/tmp}/bo-out.XXXXXX")
   rm -f "$out"
   # The expression is one Perl value. It is wrapped so a failure is visible.
   local line
@@ -116,7 +140,9 @@ cmd_run() {
   send_line ":${cmd}"
   sleep 0.5
   after=$(tmux capture-pane -p -J -t "$session")
-  if ! printf '%s\n' "$after" | grep -q '^── '; then
+  # A pager (no status bar) or a popup (status bar plus a "└──┘" box): print
+  # the screen and close it, so the next call finds the message list.
+  if ! printf '%s\n' "$after" | grep -q '^── ' || printf '%s\n' "$after" | grep -Eq '^ *└─+┘ *$'; then
     printf '%s\n' "$after"
     tmux send-keys -t "$session" q
     return 0
