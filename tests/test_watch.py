@@ -65,7 +65,7 @@ if "--relay-status" in a:
     print(f"relay to {cur} (watch stub, set 2026-10-25 10:00:00)")
 elif "--relay-test" in a:
     open(d + "/tests.log", "a").write(cur + "\\n")
-    t = os.environ.get("STUB_TEST_FAIL"); sys.exit(1 if (t == "all" or (t and len(cur) != 36)) or not cur else 0)
+    t = os.environ.get("STUB_TEST_FAIL"); sys.exit(1 if (t == "all" or t == cur or (t and len(cur) != 36)) or not cur else 0)
 elif "--relay-off" in a:
     who = a[a.index("--relay-off") + 1]
     if who != cur: print("left it", file=sys.stderr); sys.exit(1)
@@ -593,3 +593,14 @@ def test_down_with_an_unanswered_daemon_keeps_the_record(env):
     rc, out = watch(env, "down", "alpha", extra={"STUB_LS_FAIL": "1"})
     assert rc == 1 and "still listed after stop+archive" in out, out   # not "gone": the daemon never answered
     assert (Path(env["_tmp"]) / "state" / "alpha.json").exists()
+
+
+def test_forced_collected_holder_is_kept_when_its_probe_fails(env):
+    old = add_agent(env, status="closed", name="watch alpha 1")
+    set_role(env, old)
+    rc, out = watch(env, "up", "--force", "--probe", extra={"STUB_TEST_FAIL": old})
+    assert rc == 0 and "registered:" in out, out
+    assert len(seat_calls(env)) == 1
+    assert titles(env)[old] == "x watch alpha 1"
+    assert old in json.loads((Path(env["_tmp"]) / "state" / "kept.json").read_text())
+    assert old in {a["id"] for a in agents(env)}    # still listed: never archived by the sweep

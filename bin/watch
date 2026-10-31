@@ -895,6 +895,8 @@ def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
             if st == "unknown":   # the daemon did not answer: neither alive nor gone, so launching could duplicate a live holder
                 log(domain, f"cannot tell whether holder {h.name or h.target} ({h.target[:8]}) is alive: the Paseo daemon could not be asked; not launching blind", dry)
                 return 1
+            if st == "collected" and args.force:
+                replaces = h   # a failed probe must not discard a forced holder's saved tab
             alive, why = holder_alive(row, h, pv, args.probe, send=not dry)
             if alive is None:   # dry-run: a channel test line would be needed; assume it passes, say so
                 alive = True
