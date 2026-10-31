@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keep session-finder's full-text index (~/.local/state/session-index/history.v2.sqlite) fresh
+     (2026-10-31). Until then nothing refreshed it except a search: the first query after a quiet
+     spell paid the catch-up (95 s for ~1,400 changed sessions) and `session-history.py` of any
+     kind was the only writer. Every 10 minutes (and at login) this runs the same incremental pass
+     (`--update-only`: only sessions whose size/mtime fingerprint changed are re-read), niced and
+     at low IO priority. Installed by `session-history.py --install` (it fills in __REPO__),
+     removed by `session-history.py --uninstall`; `session-history.py --status` shows the lag. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.session-history-update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>-I</string>
+    <string>__REPO__/skills/session-finder/session-history.py</string>
+    <string>--update-only</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>600</integer>
+  <key>Nice</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/session-index/update.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/session-index/update.err</string>
+</dict>
+</plist>

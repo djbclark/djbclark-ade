@@ -18,6 +18,8 @@ The index holds prompt text: private, never copy it into a repo. No model tokens
 Exit 0 = hits, 1 = none, 2 = cannot run.
 """
 import argparse
+import os
+import subprocess
 import importlib.util
 import json
 import sqlite3
@@ -26,11 +28,12 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-INDEX_DIR = Path.home() / ".local/state/session-index"
+INDEX_DIR = Path(os.environ.get("SESSION_INDEX_DIR") or Path.home() / ".local/state/session-index")
 DB = INDEX_DIR / "history.v2.sqlite"
 CAP = {"user": 4000, "assistant": 2000, "note": 4000}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files(key TEXT PRIMARY KEY, agent TEXT, sid TEXT, fp TEXT, cwd TEXT, title TEXT, mtime REAL);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v REAL);
 CREATE VIRTUAL TABLE IF NOT EXISTS msgs USING fts5(key UNINDEXED, role UNINDEXED, text, tokenize='porter unicode61');
 """
 
@@ -87,7 +90,67 @@ def update(db, mods, only=()):
             n = db.execute("DELETE FROM files WHERE agent=?", (agent,)).rowcount
             db.commit()
             stats[agent] = (0, -n)
+    if not only:
+        db.execute("INSERT OR REPLACE INTO meta VALUES('updated', ?)", (time.time(),))
+        db.commit()
     return stats
+
+
+def status() -> int:
+    """Read-only: how far behind the index is. Nothing is written or reindexed."""
+    if not DB.exists():
+        print("no index yet: run session-history.py --update-only", file=sys.stderr)
+        return 2
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=30)
+    now = time.time()
+    try:
+        last = db.execute("SELECT v FROM meta WHERE k='updated'").fetchone()
+    except sqlite3.Error:
+        last = None
+    print("last full update: " + (f"{(now - last[0]) / 60:.0f} min ago" if last else "never recorded (run --update-only)"))
+    indexed = {k: (fp, mt) for k, fp, mt in db.execute("SELECT key, fp, mtime FROM files")}
+    per = {a: n for a, n in db.execute("SELECT agent, count(*) FROM files GROUP BY agent")}
+    print(f"{'agent':10}{'indexed':>8}{'on disk':>8}{'unindexed':>10}{'changed':>8}{'orphan':>7}  newest session")
+    worst = 0
+    for m in load_adapters(set()):
+        seen, new, changed, newest = set(), 0, 0, 0.0
+        try:
+            for sess in m.sessions():
+                seen.add(sess["key"])
+                newest = max(newest, sess["mtime"] or 0)
+                row = indexed.get(sess["key"])
+                new += row is None
+                changed += row is not None and row[0] != sess["fp"]
+        except Exception as e:
+            print(f"{m.AGENT:10} sessions() failed: {e}")
+            continue
+        orphan = sum(1 for k in indexed if k.startswith(m.AGENT + ":") and k not in seen)
+        worst = max(worst, new + changed)
+        age = f"{(now - newest) / 3600:.1f} h ago" if newest else "-"
+        print(f"{m.AGENT:10}{per.get(m.AGENT, 0):8}{len(seen):8}{new:10}{changed:8}{orphan:7}  {age}")
+    print("orphan = session gone from its agent's store, kept here as history (never pruned)")
+    return 1 if worst else 0
+
+
+PLIST = "com.djbclark.session-history-update.plist"
+
+
+def install(remove: bool) -> int:
+    """Copy launchd/<PLIST> to ~/Library/LaunchAgents and (un)load it."""
+    dest = Path.home() / "Library/LaunchAgents" / PLIST
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", domain, str(dest)], check=False, capture_output=True)
+    if remove:
+        dest.unlink(missing_ok=True)
+        print(f"removed {dest}")
+        return 0
+    repo = HERE.parent.parent
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text((repo / "launchd" / PLIST).read_text().replace("__REPO__", str(repo)))
+    os.replace(tmp, dest)
+    r = subprocess.run(["launchctl", "bootstrap", domain, str(dest)], check=False, capture_output=True, text=True)
+    print(f"installed {dest}; bootstrap rc={r.returncode} {r.stderr.strip()}")
+    return r.returncode
 
 
 def check(db) -> bool:
@@ -119,7 +182,14 @@ def main() -> int:
     ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--agents", action="store_true")
     ap.add_argument("--check", action="store_true", help="FTS5 integrity check and a probe MATCH; exit 2 on failure")
+    ap.add_argument("--status", action="store_true", help="read-only: index age and, per agent, sessions not yet indexed; exit 1 if any")
+    ap.add_argument("--install", action="store_true", help="install the launchd job that runs --update-only every 10 minutes")
+    ap.add_argument("--uninstall", action="store_true", help="remove that launchd job")
     a = ap.parse_args()
+    if a.install or a.uninstall:
+        return install(a.uninstall)
+    if a.status:
+        return status()
     if not (a.keywords or a.update_only or a.rebuild or a.agents or a.check):
         ap.print_usage(sys.stderr)
         return 2

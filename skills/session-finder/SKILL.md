@@ -34,13 +34,20 @@ here (`/session-finder-all` loads this skill for it).
 
 1. `session-find.py` ranks **running** sessions: Claude ones by a per-session
    keyword index (title, name, cwd, prompts), every other TUI's by title, name and
-   cwd (`fleet.py` supplies them). 1–3 distinctive words. A hit shows agent, name,
+   cwd (`fleet.py` supplies them). **`--all` adds the ended sessions of every agent**
+   from the step-2 history index (2026-10-31; before, only ~160 Claude sessions from a
+   JSON keyword file). 1–3 distinctive words. A hit shows agent, name,
    status, `title:`, `where:` + `focus:` and, for Claude, the matching prompt.
    **`FINISHED (/handoff)`** on a hit means that session already handed off: do not
    message it (section 3b).
 2. `session-history.py` searches the full text of every agent's sessions (SQLite
    FTS5; first run indexes everything, 1–2 minutes, start it with
-   `run_in_background`). Ended hits print a `resume:` command. `--agent hermes`
+   `run_in_background`). **It searches live and ended sessions together: there is no
+   active-only mode** (running-only is step 1). Ended hits print a `resume:` command.
+   A launchd job (`session-history.py --install`, every 10 min, 2026-10-31) keeps the
+   index fresh, and every search also brings it up to date first, so a search is never
+   stale, only slower when the job is off. `--status` is the read-only lag report: last
+   full update, and per agent the sessions on disk not yet indexed or changed since. `--agent hermes`
    narrows to one agent. The same index holds every Basic Memory project's
    `todo/` notes (the `todo` skill's items): a hit prints as agent `todo`,
    `OPEN`/`closed`, `title: [open] main: <title>` and the note path; `--agent todo`
@@ -531,10 +538,16 @@ never ask the operator to press Enter as the normal delivery path.
    question, the `herdr-tidy` close ledger (`~/.local/state/session-finder/closed.jsonl`,
    `closed` items with resume commands) and herdr-sleeper journal entries whose
    pane is gone (`sleeping` items with the manual resume line).
-2. Claude keyword index: `~/.local/state/session-index/<sessionId>.json`, extended
-   from the byte offset last read. History: one adapter per agent in
+2. Claude keyword index (running sessions only, for step 1): `~/.local/state/session-index/<sessionId>.json`,
+   extended from the byte offset last read. History: one adapter per agent in
    `adapters/*.py` (contract in `adapters/README.md`), FTS5 at
    `~/.local/state/session-index/history.v2.sqlite`; a broken adapter is skipped.
+   Adapters (2026-10-31): agy, claude, cline, codex, copilot, cursor, goose, grok, hermes, muse,
+   omp, opencode, qwen, zcode and todo. **No adapter yet** (small, or not installed): kiro, pi,
+   gemini, crush-acp, devin. A session that has left its agent's store stays in the index as
+   history (`orphan` in `--status`; never pruned). Only claude, cline, copilot and muse report
+   `live()`, so a running codex/hermes/omp session prints `ended` in a history hit: use
+   `session-find.py` (fleet) for running state.
    `adapters/todo.py` is a document adapter: one entry per note under
    `<project>/todo/*.md` for every project in `~/.basic-memory/config.json`,
    split into one FTS row per `##` section, `live()` = `status: open`. A full

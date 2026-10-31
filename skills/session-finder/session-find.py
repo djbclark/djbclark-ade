@@ -2,7 +2,7 @@
 """Find which live Claude Code session is working on a topic.
 
     session-find.py ccc slowness            # rank live sessions by keyword match
-    session-find.py --all ccc               # include ended sessions (for /baton or a resume)
+    session-find.py --all ccc               # also ended sessions of every agent (full-text history; for /baton or a resume)
     session-find.py --json ccc              # machine-readable
     session-find.py --list                  # every live session, no query
     session-find.py --reindex               # rebuild every index from scratch
@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -164,7 +165,7 @@ def handoff_hits(kws: list[str]) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("keywords", nargs="*")
-    ap.add_argument("--all", action="store_true", help="also search ended sessions already indexed")
+    ap.add_argument("--all", action="store_true", help="also search ended sessions of every agent (full-text history, session-history.py)")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--reindex", action="store_true")
@@ -209,15 +210,23 @@ def main() -> int:
                          "live": True, "self": s.get("self", False), "agent": s["agent"], "finished": s.get("finished", "")})
     except Exception as e:  # fleet is optional here
         print(f"fleet unavailable: {e}", file=sys.stderr)
-    if a.all:
-        for f in INDEX_DIR.glob("*.json"):
-            sid = f.stem
-            if sid in seen:
-                continue
-            ix = json.loads(f.read_text())
-            s, why = score(ix, kws, "", "")
-            rows.append({"name": None, "pid": None, "sessionId": sid, "status": "ended", "cwd": None,
-                         "titles": ix["titles"], "score": s, "match": why, "live": False, "self": False})
+    if a.all and kws:
+        # ended sessions of every agent from the full-text history (session-history.py's SQLite
+        # index, which it brings up to date first); the older per-session JSON keyword index
+        # covered only the ~160 Claude sessions that had once been live while this script ran
+        live_ids = {r["sessionId"] for r in rows}
+        try:
+            r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
+                                "--limit", "20", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
+            found = json.loads(r.stdout) if r.stdout.strip() else []
+        except (subprocess.SubprocessError, ValueError) as e:
+            print(f"history search failed: {e}", file=sys.stderr)
+            found = []
+        for i, h in enumerate(f for f in found if f["sessionId"] not in live_ids and not f["live"]):
+            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h["cwd"] or None,
+                         "titles": [h["title"]] if h["title"] else [], "score": max(1, 40 - i), "match": h["snippet"],
+                         "live": False, "self": False, "agent": h["agent"], "finished": "",
+                         "where": None, "resume": h["resume"]})
 
     if a.list:
         hits = rows
@@ -238,6 +247,8 @@ def main() -> int:
                 print(f"       where: {r['where']['where']}" + (f"   focus: {r['where']['focus']}" if r["where"]["focus"] else ""))
             if r["match"]:
                 print(f"       prompt: {r['match']}")
+            if r.get("resume"):
+                print(f"       resume: {r['resume']}")
         if kws and not hits:
             print("no live-session hit; handoff files:", handoff_hits(kws) or "none")
     return 0 if hits else 1

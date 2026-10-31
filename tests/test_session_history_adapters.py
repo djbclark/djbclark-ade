@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""session-finder's full-text history index (2026-10-31).
+
+  * omp, grok and goose have adapters (before: 2,028 omp, 220 grok and 82 goose sessions were invisible).
+  * cursor yields one entry per session id: a session under two project dirs used to flip-flop.
+  * `session-history.py --status` is read-only and reports unindexed sessions; `--update-only` records the
+    time of the last full pass and fixes what `--status` found.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+SF = ROOT / "skills" / "session-finder"
+
+
+def load(name: str, home: Path):
+    spec = importlib.util.spec_from_file_location(f"t_{name}", SF / "adapters" / f"{name}.py")
+    with mock.patch.object(Path, "home", return_value=home):
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    return mod
+
+
+def write_jsonl(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+
+class AdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_omp_reads_user_and_assistant_text_only(self) -> None:
+        write_jsonl(self.home / ".omp/agent/sessions/-src-x/2026-10-31T17-00-00-000Z_abc-123.jsonl", [
+            {"type": "title", "title": "Fix the flux capacitor"},
+            {"type": "session", "id": "abc-123", "cwd": "/src/x"},
+            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "please repair the capacitor"}]}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "thinking", "text": "hmm"},
+                                                                             {"type": "text", "text": "capacitor repaired"}]}},
+            {"type": "message", "message": {"role": "toolResult", "content": [{"type": "text", "text": "tool output"}]}},
+        ])
+        mod = load("omp", self.home)
+        (s,) = list(mod.sessions())
+        self.assertEqual((s["key"], s["sid"]), ("omp:abc-123", "abc-123"))
+        cwd, title, msgs = s["load"]()
+        self.assertEqual((cwd, title), ("/src/x", "Fix the flux capacitor"))
+        self.assertEqual(msgs, [("user", "please repair the capacitor"), ("assistant", "capacitor repaired")])
+
+    def test_grok_drops_synthetic_reminders_and_recovers_compacted_prompts(self) -> None:
+        cwd_dir = self.home / ".grok/sessions/%2Fsrc%2Fy"
+        sdir = cwd_dir / "sess-1"
+        write_jsonl(sdir / "chat_history.jsonl", [
+            {"type": "system", "content": "system prompt"},
+            {"type": "user", "synthetic_reason": "system_reminder", "content": [{"type": "text", "text": "reminder text"}]},
+            {"type": "user", "content": [{"type": "text", "text": "<user_query>\nwhere is the wormhole\n</user_query>"}]},
+            {"type": "assistant", "content": [{"type": "text", "text": "the wormhole is in sector nine"}]},
+        ])
+        write_jsonl(cwd_dir / "prompt_history.jsonl", [
+            {"session_id": "sess-1", "prompt": "an early prompt a compaction dropped"},
+            {"session_id": "sess-1", "prompt": "where is the wormhole"},
+            {"session_id": "other", "prompt": "someone else's prompt"},
+            {"session_id": "sess-1", "prompt": "ls -la", "is_bash": True},
+        ])
+        (sdir / "summary.json").write_text(json.dumps({"info": {"cwd": "/src/y"}, "session_summary": "Wormhole hunt"}))
+        mod = load("grok", self.home)
+        (s,) = list(mod.sessions())
+        cwd, title, msgs = s["load"]()
+        self.assertEqual((cwd, title), ("/src/y", "Wormhole hunt"))
+        self.assertEqual(msgs, [("user", "an early prompt a compaction dropped"), ("user", "where is the wormhole"),
+                                ("assistant", "the wormhole is in sector nine")])
+
+    def test_goose_reads_text_blocks(self) -> None:
+        db_path = self.home / ".local/share/goose/sessions/sessions.db"
+        db_path.parent.mkdir(parents=True)
+        db = sqlite3.connect(db_path)
+        db.executescript("""
+            CREATE TABLE sessions(id TEXT, name TEXT, working_dir TEXT, updated_at TEXT);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content_json TEXT);
+        """)
+        db.execute("INSERT INTO sessions VALUES('g1','Goose chat','/src/z','2026-10-31 12:00:00')")
+        db.execute("INSERT INTO messages(session_id, role, content_json) VALUES('g1','user',?)",
+                   (json.dumps([{"type": "text", "text": "hello goose"}, {"type": "toolRequest", "id": "1"}]),))
+        db.commit()
+        db.close()
+        mod = load("goose", self.home)
+        (s,) = list(mod.sessions())
+        self.assertEqual(s["key"], "goose:g1")
+        self.assertEqual(s["load"](), ("/src/z", "Goose chat", [("user", "hello goose")]))
+
+    def test_cursor_yields_one_entry_per_session_id_the_newest(self) -> None:
+        for slug, mtime in (("proj-old", 1_000_000_000), ("proj-new", 1_000_000_500)):
+            p = self.home / f".cursor/projects/{slug}/agent-transcripts/dup-1/dup-1.jsonl"
+            write_jsonl(p, [{"role": "user", "message": {"content": [{"type": "text", "text": f"hello from {slug}"}]}}])
+            os.utime(p, (mtime, mtime))
+        mod = load("cursor", self.home)
+        entries = list(mod.sessions())
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["mtime"], 1_000_000_500)
+
+
+class StatusTests(unittest.TestCase):
+    def test_status_is_read_only_and_update_clears_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            write_jsonl(home / ".omp/agent/sessions/-s/2026-10-31T00-00-00-000Z_s1.jsonl", [
+                {"type": "session", "id": "s1", "cwd": "/s"},
+                {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "findable zebra"}]}}])
+            env = {**os.environ, "HOME": tmp, "SESSION_INDEX_DIR": str(home / "idx")}
+            run = lambda *args: subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), *args],  # noqa: E731
+                                               env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(run("--status").returncode, 2)  # no index yet, and none created
+            self.assertFalse((home / "idx").exists())
+            self.assertEqual(run("--update-only").returncode, 0)
+            st = run("--status")
+            self.assertEqual(st.returncode, 0, st.stdout)
+            self.assertIn("last full update:", st.stdout)
+            self.assertNotIn("never recorded", st.stdout)
+            hit = run("--json", "zebra")
+            self.assertEqual(hit.returncode, 0, hit.stderr)
+            self.assertEqual(json.loads(hit.stdout)[0]["agent"], "omp")
+            write_jsonl(home / ".omp/agent/sessions/-s/2026-10-31T01-00-00-000Z_s2.jsonl", [
+                {"type": "session", "id": "s2", "cwd": "/s"},
+                {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "another session"}]}}])
+            self.assertEqual(run("--status").returncode, 1)  # one unindexed session
+            self.assertEqual(run("--update-only").returncode, 0)
+            self.assertEqual(run("--status").returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
