@@ -1223,16 +1223,11 @@ when the subcommand ships and the research skill's SKILL.md names it.
 
 ## Watch Orca upstream for structural-reorg verbs
 
-**Queued 2026-09-26. Watcher built; waiting on upstream.** We filed
-[stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272) (CLI
-parity with herdr for move/swap/resize/reorder) and commented on #9632, #12306
-and #8766. Run `bin/orca-reorg-watch` periodically (exit 10 = something moved:
-an issue/PR changed state or comment count, or the installed `orca` gained a
-verb). When it fires: read the change, re-probe `orca terminal --help`, update
-`skills/reorg-orca/SKILL.md` §3/§4 (move gaps from "cannot" to "can"), and
-refresh the gap list in [upstream-issues.md](upstream-issues.md) §3. Gate to
-watch first: PR #15108 (`orca terminal move`). Drop this item when the verbs
-in the skill's §4 table have shipped or upstream declines them.
+**Dropped 2026-10-31: Orca is retired from djbclark-ade.** Queued 2026-09-26;
+the watcher `bin/orca-reorg-watch` and `skills/reorg-orca` were removed with
+it (git history has them). The filed upstream issue
+[stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272) and the
+gap list in [upstream-issues.md](upstream-issues.md) §3 stay as a record only.
 
 ## Quota-aware automatic cross-vendor subagent routing
 
@@ -1364,7 +1359,7 @@ in hooks, settings, cron, LaunchAgents or the ops repos invoked cow. Now:
   `agent_readiness` because **Claude Code's folder-trust dialog fires in any
   new directory** and Orca has no Claude trust preset (it has Codex/Cursor/
   Copilot ones). Operator decision pending on the mechanism; end-to-end
-  `worker_done` not yet observed. See `docs/orca-integration.md`.
+  `worker_done` not yet observed. (`docs/orca-integration.md` was removed with Orca, 2026-10-31.)
 - "Compact into cow" = reclaim disk by migrating (operator, 2026-09-20);
   the dirty Hermes worktrees stay un-migrated until their changes are
   committed or discarded (no `--force`).
@@ -1528,8 +1523,8 @@ foreclose it. Worth its own evaluation another time.
   skill now says to use `cow create --print-path` for worker workspaces,
   with the two rules that bit us (source tree must be clean; a pasture carries
   `.env`). The Orca composition (`--worktree path:$(cow create … --print-path)`)
-  is documented in [orca-integration.md](orca-integration.md) but **not yet
-  exercised in a live dispatch**.
+  was documented in `orca-integration.md`, removed with Orca on 2026-10-31
+  (retired from djbclark-ade).
 - **S1 Hermes event sink** built and backfilled (`bin/hindsight_s1_hermes.py`,
   13 tests).
 

@@ -12,8 +12,8 @@ description: >-
 
 Canonical copy: `~/src/djbclark-ade/skills/autorename/` (git: `~/src/djbclark-ade`; moved
 from `~/ops/site-djbclark/skills/autorename` on 2026-10-08); every TUI links to it directly
-(skill-everywhere). Its sibling for the other end of a
-session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
+(skill-everywhere). Its former sibling for the other end of a
+session's life, closing idle herdr panes, was the `herdr-tidy` skill, retired from djbclark-ade 2026-10-31.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
@@ -78,7 +78,7 @@ yet supported in Paseo` and stop (nobody has looked into what Paseo supports for
    after another**, only after that work is finished: one question, apply the
    answer, re-count tabs, then the next question. Do not combine them into one
    question, and do not ask while sure moves are still pending.
-   The plan never closes a pane or tab (herdr-tidy owns closing; the one
+   The plan never closes a pane or tab (closing is not autorename's job; the one
    exception is the untouched default shell of a workspace the pass just
    created, and only after a real tab is already in it) and never touches the
    `coord` panes. Helm tabs are placed in the `helm` workspace like any other.

@@ -573,7 +573,7 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
 - `herdr pane read` prints plain text; every other command prints one JSON
   envelope, `{"error":…}` **with exit 0** on failure — parse the envelope.
 - `herdr agent prompt <target> "/exit"` cleanly ends a Claude session and
-  returns the pane to its shell; `bin/herdr-sleeper` in djbclark-ade
+  returns the pane to its shell; the `herdr-sleeper` plugin in djbclark-ade
   builds on this (see docs/agent-sleep.md). Never `/exit` a pane whose
   composer holds unsent text: the draft dies with the process.
 - A prompt can land unsubmitted (`agent_prompt_stalled`, or the text sits on

@@ -43,7 +43,7 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
 5. **Sleeping panes keep the `💤 ` prefix** on the pane label (the
    herdr-sleeper plugin's identity mark for legacy records). The tab label
    has no prefix.
-6. **This procedure closes nothing.** Closing idle panes is `herdr-tidy`'s
+6. **This procedure closes nothing.** Closing idle panes was `herdr-tidy`'s (retired from djbclark-ade 2026-10-31)
    job (it checks preconditions and writes a resume ledger). Empty tabs are
    moved out of, not deleted; `pane move --new-tab` closes the *source* tab for you
    (and a workspace closes itself once its last tab is gone). The one closure
@@ -69,7 +69,7 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
 10. **Paseo** (2026-10-24): one top-level agent per Paseo workspace (`<topic>-pw`). Its tab and each worker's tab are
     `<name>-pt`, at most 17 characters with the suffix (shortener: `autorename.py paseo_tab_name`). Workers and adversary
     rounds are sub-agent tabs in the lead's workspace, not new workspaces. Closing a top-level agent's tab archives the
-    agent; only `self-slash --finish` (or a `herdr-tidy` close of its herdr host pane) closes one.
+    agent; only `self-slash --finish` closes one.
 11. **At most 5 tabs in a workspace** (operator, 2026-10-29). The next tab of that
     same kind goes to `<name>-2`, then `<name>-3`. Count tabs after the moves, not before.
 12. **The tab label is the placement key** (operator, 2026-10-29). Match it against

@@ -24,16 +24,14 @@ Each doc carries its own summary.
 | [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
 | [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow since 2026-10-11) |
-| [docs/orca-integration.md](docs/orca-integration.md) | macro-graph commands, live-run lessons; `orca skills get orchestration` is authoritative |
 | [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20): assets, actors, entry points, ranked threats; read by Codex's security review |
 | [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard` and the claim registry (2026-10-24): commands, exit codes 0/2/77, claim lifecycle, refusal rules, override, integration status |
 | [docs/gates.md](docs/gates.md) | `config/gates.toml` and `bin/gate-profile` (2026-10-26): the Claude quota gates' numbers in git, floors, a temporary expiring `away` profile |
 | [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
 | [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
-| [docs/agent-sleep.md](docs/agent-sleep.md) | idle-agent sleep; run `bin/herdr-sleeper list` before calling a pane dead |
+| [docs/agent-sleep.md](docs/agent-sleep.md) | idle-agent sleep (herdr plugin `plugins/herdr-sleeper`; herdr retired from djbclark-ade 2026-10-31, a record until the D4/D6 drain): check a pane's journal before calling it dead |
 | [docs/helm.md](docs/helm.md) | `/helm` ([skills/helm/](skills/helm/)): answer every waiting session from one window |
-| [docs/herdr-tidy.md](docs/herdr-tidy.md) | `/herdr-tidy`: close idle panes without losing anything |
 | [docs/skillopt-sleep.md](docs/skillopt-sleep.md) | nightly skill-edit cycle, `bin/skillopt-night` |
 | [docs/failover.md](docs/failover.md) | `bin/failover.py`: reuse it, never hand-roll a fallback |
 | [docs/upstream-issues.md](docs/upstream-issues.md) | unfiled bug drafts for third-party projects |
