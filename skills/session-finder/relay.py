@@ -3615,6 +3615,10 @@ def user_texts(tx, mark):
     return scan_texts(tx, mark)[0]
 
 
+CSM_BLOB = re.compile(r'\A(?:<system-reminder(?: [^>]*)?>\s*)?Another Claude session sent a message(?: while you were working)?:\s*'
+                      r'(<cross-session-message [^>]*>.*?</cross-session-message>)', re.S)    # the harness's own rendering of a peer message in an API-request blob, anchored at the start of the block
+
+
 def scan_texts(tx, mark):
     """(texts, end) of the complete lines of transcript TX after byte MARK (`user_texts`), END being the byte after the last newline
     read: a sweep that stores it never reads those bytes again, and never starts inside a line a writer has not finished
@@ -3654,12 +3658,15 @@ def scan_texts(tx, mark):
         elif kind == "api-request-blob":
             # 2026-10-31 (expectation aff7-attach, open and ASSUMED LOST for 28 h): Claude Code logged an idle session's peer message ONLY as a copy of the
             # API request, a user-role blob whose text holds the harness prefix and the `<cross-session-message ...>` envelope, with no `user` line for it.
-            # Only a user-role TEXT block that carries that envelope counts (a blob also repeats the conversation: never a tool result, never plain prose).
+            # A blob also renders every other context attachment into user-role text (hook output, nested memory and instruction re-reads, skill bodies,
+            # compaction summaries, task notifications), all of which the `user` route skips on purpose (isMeta, isCompactSummary, attachments but
+            # queued_command), and anyone who edits an AGENTS.md can put text there (adversary PR 177 r4 B1). So only a text block that STARTS with
+            # the harness's own prefix counts, and only the envelope that follows it is returned: never the rest of the block (CSM_BLOB).
             m = o.get("message")
             c = m.get("content") if isinstance(m, dict) and m.get("role") == "user" else None
             if isinstance(c, list):
-                out.extend(b["text"] for b in c if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
-                           and "<cross-session-message " in b["text"])
+                out.extend(mm.group(1) for b in c if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+                           and (mm := CSM_BLOB.match(b["text"])))
     return [" ".join(t.split()) for t in out if isinstance(t, str)], end
 
 

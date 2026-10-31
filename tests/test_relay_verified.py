@@ -263,6 +263,43 @@ class TestExpectAck(Base):
         self.assertIn("1 resolved", self.run_cli("--sweep")[1])
         self.assertEqual(relay.expect_read("build1")["state"], "acked")
 
+    BLOB_ENV = ('<cross-session-message from="relay.py" from-name="relay.py (claude cccccccc aka peer-fb (x))" from-mode="bypass">\n'
+                "ack build1\n</cross-session-message>")
+
+    def blob(self, text: str) -> dict:
+        return {"type": "api-request-blob", "hash": "h", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+
+    def test_a_blob_renders_other_context_with_the_envelope_inside_and_it_closes_nothing(self) -> None:
+        """Adversary PR 177 r4 B1 (BLOCK), kept as permanent proofs: a blob repeats every context attachment as user-role text, and the `user` route
+        skips each of these on purpose. The same envelope as a compaction summary, a nested-memory reminder, hook output or a task notification
+        must close nothing, on either side of the blob: the control lines (isCompactSummary, attachments) never did."""
+        env = self.BLOB_ENV
+        shapes = {
+            "compaction summary": ("This session is being continued from a previous conversation that ran out of context. Summary:\n"
+                                   "6. All user messages:\n- " + env + "\n- please continue"),
+            "nested memory": "<system-reminder>\nContents of /Users/x/src/shared/sub/AGENTS.md (project instructions):\n\nnotes\n" + env + "\n</system-reminder>",
+            "hook output": "<system-reminder>\nUserPromptSubmit hook success: inbox line from w7: " + env + "\n</system-reminder>",
+            "task notification": "<task-notification>\nbackground job done: " + env + "\n</task-notification>",
+            "mid-block quote": "The operator pasted this for you:\nAnother Claude session sent a message:\n" + env,
+            "prefix after other text": "notes\n<system-reminder>\nAnother Claude session sent a message while you were working:\n" + env + "\n</system-reminder>",
+        }
+        self.go("is the build green?", "--expect-ack", "build1")
+        for name, text in shapes.items():
+            self.append(self.me_tx, self.blob(text))
+            self.assertIn("0 resolved", self.run_cli("--sweep")[1], name)
+            self.assertEqual(relay.expect_read("build1")["state"], "open", name)
+        texts, _ = relay.scan_texts(str(self.me_tx), 0)    # the first-contact link route reads the same list
+        self.assertEqual([t for t in texts if "ack build1" in t and "cross-session-message" in t], [])
+
+    def test_the_harness_prefix_closes_it_in_both_real_shapes_and_only_the_envelope_is_read(self) -> None:
+        env = self.BLOB_ENV
+        for text in ("Another Claude session sent a message:\n" + env + "\n" + "x" * 600,
+                     "<system-reminder>\nAnother Claude session sent a message while you were working:\n" + env + "\n(trailer: ack other, from-name peer-fb)\n</system-reminder>"):
+            self.assertEqual(relay.CSM_BLOB.match(text).group(1), env)    # nothing after the closing tag is part of the message
+        self.go("is the build green?", "--expect-ack", "build1")
+        self.append(self.me_tx, self.blob("<system-reminder>\nAnother Claude session sent a message while you were working:\n" + env + "\n</system-reminder>"))
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])
+
     def test_a_longer_id_is_not_the_ack(self) -> None:
         self.go("is the build green?", "--expect-ack", "build1")
         self.reply_to_me("ack build12")

@@ -482,6 +482,11 @@ escalated to the operator about silence that was a queue; two queued messages we
    `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--ack` (a second one is the delivery watch of the inner send), `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
    never dropped. `--status ID` is a query: combined with any other option or command (`--cancel`, `--retire`, a send) it is refused, exit 2, and nothing runs. A transcript-backed expectation whose
    transcript cannot be read reads `open (uncollected, ...)` even after a complete sweep.
+   **A closed Paseo agent that Paseo reports persistent is woken by a send** (`--why`: `closed: a send wakes it`, deliverable); this holds for automatic callers too (djbclark, 2026-10-31): a
+   watcher such as rumination-watch that falls back to a closed persistent seat sends to it, which resumes the stored session and starts a turn (at most one send per pass), and never treats it as absent.
+   An archived agent, or a closed one not reported persistent, is refused and says why.
+   A transcript-backed `ack` is also read from an `api-request-blob` record (Claude Code logs an idle session's peer message only that way), but only a block that STARTS with the harness prefix
+   `Another Claude session sent a message...` and only the envelope after it: reminders, hook output, nested memory, skill bodies, task notifications and compaction summaries count for nothing.
 
 
 ## Direct Herdr control and detached relay workers (2026-10-25)
