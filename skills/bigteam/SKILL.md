@@ -963,6 +963,9 @@ returned; do not guess a reset time.
   as its whole reply. Since 2026-10-14 nothing refuses a slice that leaves its
   files (acp-run runs yolo): the post-run `git status --short` / `git diff
   --stat` check in Step 4 is what catches it.
+- Inspect each preparation command's exit code before a dependent stage or
+  commit. A failed preparation stops that mutation until its resulting files
+  have been checked.
 - Read every diff yourself before committing. Agents are good and still get
   ordering, alphabetisation and scope wrong.
 - Run the checks centrally after the batch settles, **focused first**: lint

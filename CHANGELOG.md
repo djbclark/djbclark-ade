@@ -306,7 +306,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- Changed `/bigteam` briefs to require exhaustive caller checks for unindexed scripts and GNU-safe source excerpts (#195).
+- Fixed `/bigteam` caller-discovery and commit-preparation checks, including unindexed scripts and GNU-safe source excerpts (#195).
 - Fixed `watch` handling of uncertain lifecycle reads, forced replacements after failed probes, watchers in background workspaces, and generation reuse after title-list failures (#195).
 - Fixed `watch up` replacing watchers after Paseo collected their idle runtimes; retained saved sessions without periodic model wake-ups, let real events resume them through the relay, and refused duplicate launches when daemon state was unknown (#192).
 - Fixed rumination-watch duplicate paid sends and starts, bound retained-ID reconciliation to each start attempt, preserved unresolved IDs across owner changes and absent IDs for fresh diagnosis, and added operator notices, isolated watcher tests, and parsed canonical workspace SHAs. (#174)
