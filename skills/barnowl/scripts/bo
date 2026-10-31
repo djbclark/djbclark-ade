@@ -4,34 +4,48 @@
 # on this machine fails looking for a WindowGram port; do not use it.
 #
 # Everything that prints Zephyr text goes through bo-log.py: sanitized, framed
-# JSON lines, and the text counts as "tainted" for BO_TAINT_TTL seconds. While
-# tainted, `run` and `perl` first ask the human at the live client ([y/N]); this
-# script cannot answer for them. See SKILL.md, "Reading Zephyr text".
+# JSON lines, and the first such read marks this machine "tainted" (a file in
+# $BO_STATE). While tainted, `perl` and every `run` that is not a plain read first
+# ask the human at the live client ([y/N], showing the whole command) and type
+# nothing until they answer y; this script cannot answer for them. Only the
+# operator clears the mark, with `bo untaint` on this machine (the restricted ssh
+# key cannot run it). See SKILL.md, "Reading Zephyr text".
 set -euo pipefail
+umask 077
 
 argv_str="$*"
 session=${BO_SESSION:-barnowl}
 out=${BO_OUT:-}
+ans=
+pending_question=
 state=${BO_STATE:-$HOME/.local/state/bo}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-taint_ttl=${BO_TAINT_TTL:-14400}
 confirm_wait=${BO_CONFIRM_WAIT:-120}
+confirm_max=${BO_CONFIRM_MAX:-90}
 
 finish() {
   local rc=$?
+  # A question left open at the client would swallow the next caller's keys.
+  [[ -z $pending_question ]] || tmux send-keys -t "$session" C-g 2>/dev/null || true
   [[ -z $out ]] || rm -f "$out"
-  if mkdir -p "$state" 2>/dev/null; then
+  [[ -z $ans ]] || rm -f "$ans"
+  if mkdir -p -m 700 "$state" 2>/dev/null; then
     printf '%s exit=%s bo %s\n' "$(date +%FT%T)" "$rc" \
       "$(printf '%s' "$argv_str" | tr -c '[:print:]' '?' | cut -c1-200)" >>"$state/audit.log" 2>/dev/null || true
   fi
 }
 trap finish EXIT
+trap 'exit 143' TERM HUP INT
 
 blog() { python3 -I "$here/bo-log.py" "$@"; }
 
+# Private scratch files, made here and never removed and re-created by name, so
+# nobody else can swap in a file of their own between the two steps.
+scratch() { mkdir -p -m 700 "$state" && mktemp "$state/$1.XXXXXX"; }
+
 usage() {
   cat <<'EOF'
-usage: bo log (--user U | --class C) [--instance I] [--from P] [--grep RE]
+usage: bo log (--user U | --class C) [--instance I] [--from P] [--grep TEXT]
               [--since today|yesterday|Nh|Nd|YYYY-MM-DD[ HH:MM]] [--until W]
               [--last N] [--new] [--mark] [--bodies | --bodies-all]
        bo screen
@@ -48,9 +62,11 @@ file    subscriptions saved in ~/.zephyr.subs (zctl list)
 run     type a BarnOwl command into the live client and print what came back
 perl    evaluate one Perl expression inside BarnOwl and print its value
 locate  zlocate a user
+untaint (operator only, not over the restricted key) forget that untrusted text was read
 
-After any read of Zephyr text, run and perl ask the human at the live client first.
-Exit codes: 2 refused argument, 3 client busy, 4 human declined or absent.
+After any read of Zephyr text, perl and non-read-only run ask the human at the live
+client first, and refuse commands longer than BO_CONFIRM_MAX (90) characters.
+Exit codes: 2 refused argument, 3 client busy, 4 human declined or absent, 5 output cut by a cap.
 EOF
 }
 
@@ -117,8 +133,8 @@ guard_idle() {
     exit 3
   fi
   case "$first" in
-    :*|zwrite*|zcrypt*)
-      echo "BarnOwl already has a command or zwrite in progress; not sending keys." >&2
+    :*|zwrite*|zcrypt*|"bo asks:"*)
+      echo "BarnOwl already has a command, a zwrite or a bo question in progress; not sending keys." >&2
       exit 3
       ;;
   esac
@@ -137,28 +153,36 @@ send_line() {
   tmux send-keys -t "$session" Enter
 }
 
-# True while Zephyr text was shown to a caller within the last BO_TAINT_TTL
-# seconds. Only bo-log.py touches the file; nothing here clears it.
-tainted() {
-  [[ -n $(find "$state/tainted" -mmin "-$((taint_ttl / 60))" 2>/dev/null) ]]
-}
+# True once Zephyr text was shown to a caller; only bo-log.py creates the file
+# and only `bo untaint` (operator, local) removes it. There is no timer: the
+# agent's context stays contaminated for as long as its session lives.
+tainted() { [[ -e $state/tainted ]]; }
 
-# Ask the human at the live client, with the exact command, and wait. The
-# answer comes back through a file BarnOwl writes from the question's callback.
-# No answer, or anything but y/yes, is exit 4 and nothing more is typed.
+# Commands that only look. They need no confirmation even while tainted.
+read_only_command() { [[ $1 =~ ^(show|help|getvar|getsubs|getview)([[:space:]]|$) ]]; }
+
+# Ask the human at the live client and wait. The question shows the WHOLE command:
+# a command too long to show, or with a control character, or with `{`, `}` or `\`
+# (the characters that could end the Perl string the question sits in), is refused
+# (exit 2) instead of approved in part or shown altered. The answer comes back through
+# a file BarnOwl writes from the question's callback. No answer, or anything but y/yes,
+# is exit 4 and nothing more is typed.
 confirm() {
   tainted || return 0
-  local what ans reply i
-  what=$(printf '%s' "$1" | tr -c 'A-Za-z0-9 ._:@*/,=+-' '?' | cut -c1-160)
-  ans=$(mktemp "${TMPDIR:-/tmp}/bo-ans.XXXXXX")
-  rm -f "$ans"
-  send_line ":perl BarnOwl::start_question(q{bo asks: allow ${what}? [y/N]: }, sub { open my \$f, q{>}, q{${ans}}; print \$f \$_[0]; close \$f }); q{ok}"
+  local what=$1 reply i
+  if [[ ${#what} -gt $confirm_max || $what == *[[:cntrl:]]* || $what == *[\{\}\\]* ]]; then
+    echo "after reading Zephyr text this command must be confirmed by the human, and it is too long (over $confirm_max), has a control character, or has { } \\ : shorten it" >&2
+    exit 2
+  fi
+  ans=$(scratch ans)
+  send_line ":perl BarnOwl::start_question(q{bo asks: allow ${what}? [y/N]: }, sub { open my \$f, q{>}, q{${ans}}; print \$f qq{ans:\$_[0]\\n}; close \$f }); q{ok}"
+  pending_question=1
   for ((i = 0; i < confirm_wait * 2; i++)); do
-    if [[ -e $ans ]]; then
+    if [[ -s $ans ]]; then
       sleep 0.2
       reply=$(<"$ans")
-      rm -f "$ans"
-      if [[ $reply =~ ^[[:space:]]*[yY]([eE][sS])?[[:space:]]*$ ]]; then
+      pending_question=
+      if [[ $reply =~ ^ans:[[:space:]]*[yY]([eE][sS])?[[:space:]]*$ ]]; then
         sleep 0.3
         return 0
       fi
@@ -167,9 +191,8 @@ confirm() {
     fi
     sleep 0.5
   done
-  tmux send-keys -t "$session" C-g
   echo "no answer from the human at the live client in ${confirm_wait}s; nothing was run" >&2
-  exit 4
+  exit 4  # finish() cancels the open question with C-g
 }
 
 wait_marker() {
@@ -189,11 +212,9 @@ print_marked() {
   local kind=$1
   if grep -q "^BO_ERR_${nonce}\$" "$out"; then
     sed "/^BO_ERR_${nonce}\$/d" "$out" | blog frame error >&2 || true
-    rm -f "$out"
     exit 1
   fi
-  sed "/^BO_OK_${nonce}\$/d" "$out" | blog frame "$kind" || [[ $? -eq 5 ]]
-  rm -f "$out"
+  sed "/^BO_OK_${nonce}\$/d" "$out" | blog frame "$kind"
 }
 
 # perl_eval EXPR KIND GATED: GATED=1 asks the human first while tainted. Only
@@ -204,8 +225,7 @@ perl_eval() {
   [[ $gated -eq 0 ]] || confirm "perl: $expr"
   # A private output file and marker per call: concurrent callers, and text on
   # the screen, can neither see nor forge each other's.
-  [[ -n $out ]] || out=$(mktemp "${TMPDIR:-/tmp}/bo-out.XXXXXX")
-  rm -f "$out"
+  [[ -n $out ]] || out=$(scratch out)
   nonce=$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')
   # The expression is one Perl value. It is wrapped so a failure is visible.
   local line
@@ -218,7 +238,7 @@ perl_eval() {
 cmd_run() {
   local cmd=$1 before after rc=0
   guard_idle
-  confirm "run: $cmd"
+  read_only_command "$cmd" || confirm "run: $cmd"
   before=$(capture)
   send_line ":${cmd}"
   sleep 0.5
@@ -243,7 +263,7 @@ cmd_run() {
       END { for (i = 1; i <= n; i++) print lines[i] }
     ' | blog frame run || rc=$?
   fi
-  [[ $rc -eq 0 || $rc -eq 5 ]]
+  return "$rc"
 }
 
 # A user name for zlocate: no leading dash, no shell or option surprises.
@@ -252,17 +272,17 @@ valid_user() { [[ $1 =~ ^[A-Za-z0-9._@+][A-Za-z0-9._@+-]{0,79}$ ]]; }
 case "${1:-}" in
   log)
     shift
-    blog log "$@" || [[ $? -eq 5 ]]
+    blog log "$@"
     ;;
   screen|capture)
     need_session
-    capture | blog frame screen || [[ $? -eq 5 ]]
+    capture | blog frame screen
     ;;
   subs)
     perl_eval 'BarnOwl::zephyr_getsubs()' subs 0
     ;;
   file)
-    { zctl list 2>&1 || true; } | blog frame file || [[ $? -eq 5 ]]
+    { zctl list 2>&1 || true; } | blog frame file
     ;;
   run)
     shift
@@ -278,7 +298,11 @@ case "${1:-}" in
     shift
     [[ $# -ge 1 && $# -le 5 ]] || { usage >&2; exit 2; }
     for u in "$@"; do valid_user "$u" || { echo "refused user name" >&2; exit 2; }; done
-    { zlocate "$@" 2>&1 || true; } | blog frame locate || [[ $? -eq 5 ]]
+    { zlocate "$@" 2>&1 || true; } | blog frame locate
+    ;;
+  untaint)
+    rm -f "$state/tainted"
+    echo "untainted: run/perl no longer ask until Zephyr text is read again"
     ;;
   -h|--help|help|"")
     usage
