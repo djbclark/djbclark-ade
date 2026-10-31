@@ -305,7 +305,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- Fixed adversary marker edge cases, nested identity guard recovery and quoted hook exemptions in bin/ade_claims.py, and dispatch completion consistency (#TBD).
+- Fixed adversary marker edge cases, nested identity guard recovery and quoted hook exemptions in bin/ade_claims.py, and dispatch completion consistency (#175).
 
 - `skills/oc-go-key/scripts/go-status` (2026-10-30): no upstream error text is printed any more (it could carry an `access_token` or a lowercase `bearer` token), only a fixed explanation per failure class; an auth failure naming another provider no longer advises rotating the Go key, and one with no provider recorded exits 3 instead of 2; the Go wall, no-funds and region errors still exit 2; a timestamp without a time zone is skipped instead of crashing the scan (#171)
 
