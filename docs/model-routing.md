@@ -140,7 +140,6 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
-| `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
 | `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
 | `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3 (bulk), GPT-6 Luna (mechanical); never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash is the main-loop substrate model only | $40/month | subscription shared allowance | 5h + weekly + monthly |

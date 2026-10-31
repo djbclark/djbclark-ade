@@ -357,8 +357,6 @@ AGENTS = {
         [_agy_server()],
         None,
     ),
-    # native ACP; xAI registry entry grok-build (a reserve pool: GrokBot)
-    "grok": (["grok", "agent", "--always-approve", "stdio"], None),
     # Crush has no ACP mode in a release. This is the unmerged upstream PR
     # charmbracelet/crush#2450 (`crush acp`), merged onto upstream main in
     # ~/src/crush-acp and installed as ~/.local/bin/crush-acp. It insists on an

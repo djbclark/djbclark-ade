@@ -1841,7 +1841,6 @@ _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
     "cline": ("clinepass", None),
     "opencode": ("opencode-go", None),
     "zcode": ("zai", None),
-    "grok": ("grok", None),
 }
 
 

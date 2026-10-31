@@ -207,10 +207,12 @@ class TestReadOnlyPolicy(unittest.TestCase):
         self.assertEqual(ok, [0, None])
 
     def test_unsupported_agent_is_refused_up_front(self):
-        r = subprocess.run([str(SCRIPT), "grok", "--perm", "read-only", "-p", "x"], check=False,
+        # Any agent outside READONLY_AGENTS is refused up front; crush stands in for the class now
+        # that grok is retired (the assertion is about the gate, not about the agent).
+        r = subprocess.run([str(SCRIPT), "crush", "--perm", "read-only", "-p", "x"], check=False,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("--perm read-only: grok:", r.stderr)
+        self.assertIn("--perm read-only: crush:", r.stderr)
 
 
 class TestDispatch(Base):
