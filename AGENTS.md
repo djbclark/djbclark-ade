@@ -22,7 +22,7 @@ Each doc carries its own summary.
 |---|---|
 | [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
-| [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow mode) |
+| [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer |
 | [docs/orca-integration.md](docs/orca-integration.md) | macro-graph commands, live-run lessons; `orca skills get orchestration` is authoritative |
 | [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
 | [docs/threat-model.md](docs/threat-model.md) | threat model: assets, actors, entry points, ranked threats; read by Codex's security review |
@@ -121,7 +121,7 @@ Each doc carries its own summary.
   `~/ops`. In this repo every change lands on master **by PR only**: branch protection, enforced for admins too,
   refuses a direct push; the lead merges
   with `gh pr merge --squash --match-head-commit`. Repo: `djbclark/djbclark-ade`.
-- Facts here carry snapshot dates; probes beat memory. When you verify a
+- Probes beat memory. Date volatile facts in the linked docs. When you verify a
   change, update the doc in the same breath (standing order 2).
 
 <!-- graft:start -->
@@ -168,12 +168,8 @@ no API key, $0).
 
 ## Code review (what a reviewer checks here)
 
-Readers: Codex (`@codex review`; its Security Review runs with
-each code review; its automatic review on PR open can answer "create an
-environment", the environment-catalog bug that also blocks task mentions),
-Cursor's Security Agent and Approval Agent checks, and the `adversary`
-sub-agent. A
-pull request here is expected to meet these; flag any it misses.
+Apply these checks during code, security and adversary reviews. Flag any a
+pull request misses.
 
 1. **The PR body carries the adversary's verdict as a MACHINE-READABLE MARKER**, naming the head it
    reviewed:
