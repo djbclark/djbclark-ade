@@ -184,7 +184,8 @@ and, bounded to 3 s (PENDING_SWEEP_CAP), at the start of a plain `--pending`, wh
 `open (uncollected, last swept WHEN)`. It does NOT run at the start of every relay (decided 2026-10-31: two locks and a transcript read on every
 send). `relay.py --ack ID` alone answers expectation ID: it sends `ack ID` to its sender by the ordinary send (valid for an open one when the
 caller is its target), so the verified closer settles it and the sender sees it; an `ack ID` that BEGINS ANY LINE of such a send closes it
-(a queued reply that ends with the token included), never one quoted mid-line.
+(a queued reply that ends with the token included), never one quoted mid-line: that rule is the relay-verified closer's, for a sender with no transcript; a
+transcript-backed sender's sweep (`ack_seen`) still accepts the token anywhere in a line that carries the target's relay header.
 `--pending` lists the records (no text unless `--text`; `--queued-only`, `--older-than S` and `--summary` narrow it to what is
 still open), `--status ID` (alias `--show`) says what became of ONE record, changing nothing (state, last look, deferred.log events,
 any expectation of that id; exit 0 found, 1 not), `--cancel ID` withdraws a queued one: it DESTROYS a message still queued, so it is
@@ -2995,7 +2996,7 @@ def defer_send(s, a, text, listed, why):
                    "shape": {"expect": getattr(a, "expect_ack", None) or "", "fyi": bool(getattr(a, "fyi", False)),
                              "needs_reply": bool(getattr(a, "needs_reply", False))},
                    "hops": hops, "created": now, "expires": now + life, "state": "queued", "outcome": "", "pid": 0, "notice": "",
-                   "ack_leads": [] if notice else (CTX.get("leads") or [])[:40]}    # the line starts of the text AS TYPED (relay folds its whitespace): `resolve_deferred_ack` reads them
+                   "ack_leads": [] if notice else (CTX.get("leads") or [])}    # the closing line starts of the text AS TYPED (relay folds its whitespace; `ack_leads` caps and clips them): `resolve_deferred_ack` reads them
             rec_write(dup)
             fresh = True
         else:
@@ -3840,11 +3841,18 @@ def is_target_of(r, me):
                                         else same_sid(t.get("sid") or t.get("sid8"), me.get("sid")))
 
 
+ACK_LEADS_MAX = 40    # closing line starts kept from one text: the live closer, the `queued:` promise and the stored record all read this one list
+ACK_LEAD_RE = re.compile(r"ack[ :=]", re.I)
+
+
 def ack_leads(text):
-    """The lines of TEXT, each stripped and without leading opening quote or bracket characters: where an `ack ID` token may sit in a verified
-    send (H1, 2026-10-31: a queued reply ENDED with `ack host-branch-durability-2` and never closed). Only the START of a line counts: `ack ID`
-    quoted mid-line (`I will ack q1 later`) closes nothing."""
-    return [ln.strip().lstrip("[`'\"") for ln in text.splitlines() if ln.strip()]
+    """The lines of TEXT that BEGIN with `ack` followed by a space, colon or equals sign (stripped, without leading opening quote or bracket characters),
+    each clipped to 120 characters, at most ACK_LEADS_MAX: the only places an `ack ID` token may sit in a verified send (H1, 2026-10-31: a queued
+    reply ENDED with `ack host-branch-durability-2` and never closed). Only the START of a line counts: `ack ID` quoted mid-line closes nothing. Every
+    other line is dropped here (adversary PR 177 B1: the record stored the first 40 lines of any kind while the live closer read them all, so a long reply
+    whose ack came after line 40 was promised a close the delivery never made); one list feeds the closer, `queued_acks` and the stored record."""
+    leads = (ln.strip().lstrip("[`'\"") for ln in text.splitlines())
+    return [ln[:120] for ln in leads if ACK_LEAD_RE.match(ln)][:ACK_LEADS_MAX]
 
 
 def acks(token, leads):
@@ -4010,6 +4018,19 @@ def ack_lost(age, within):
     return age - within > REROUTE_AFTER_S
 
 
+def transcript_missing(r):
+    """True when expectation R is transcript-backed and its transcript cannot be read now (the file is gone or unreadable): a sweep that completed
+    read nothing for it, so its `open` is not current."""
+    tx = r.get("tx")
+    if not tx:
+        return False
+    try:
+        with open(tx, "rb"):
+            return False
+    except (OSError, TypeError, ValueError):
+        return True
+
+
 def expect_state(e):
     """The state word of an expectation row: `open (uncollected, last swept 2026-10-31T09:12:03-04:00)` for a transcript-backed one the sweep could not
     read (never `open` as if it were current), else its state."""
@@ -4034,9 +4055,11 @@ def expect_view(now=None, uncollected=False, last_swept=None):
                      "assumed_lost": r.get("state") == "open" and ack_lost(age, within), "created": _num(r.get("created")),
                      **({"reason": r.get("reason") or "", "evidence": r.get("evidence") or "", "retired_by": r.get("retired_by") or "",
                          "retired": _num(r.get("retired"))} if r.get("state") == "retired" else {}),
-                     **({"uncollected": True, "last_swept": last_swept} if uncollected and r.get("state") == "open" and r.get("tx") else {})})
+                     **({"uncollected": True, "last_swept": last_swept} if r.get("state") == "open" and r.get("tx") and (uncollected or transcript_missing(r)) else {})})
     return rows
 
+
+ACK_VERB_CARRIES = frozenset({"ack", "wait", "json", "no_defer", "steer", "no_ack", "via", "defer_for", "idle"})    # the send options `relay.py --ack ID` passes on to its ordinary send
 
 
 ACK_VALUE_OPTS = frozenset({"--wait", "--idle", "--via", "--defer-for", "--ack-within", "--expect-ack", "--deliver", "--cancel", "--retire", "--status", "--show",
@@ -4100,9 +4123,9 @@ def ack_verb(eid, a):
     if not (isinstance(to, str) and to):
         return refuse(1, "the expectation names no sender to answer")
     out = [to, f"ack {eid}", "--wait", str(a.wait)]
-    for flag, on in (("--json", a.json), ("--no-defer", a.no_defer)):
+    for flag, on in (("--json", a.json), ("--no-defer", a.no_defer), ("--steer", a.steer), ("--no-ack", a.no_ack)):
         out += [flag] if on else []
-    for flag, val in (("--via", a.via), ("--defer-for", a.defer_for)):
+    for flag, val in (("--via", a.via), ("--defer-for", a.defer_for), ("--idle", a.idle)):
         out += [flag, str(val)] if val is not None else []
     return out, None
 
@@ -4184,14 +4207,24 @@ def _main(argv=None, sweep=True):
     a = ap.parse_args(argv)
     t0 = time.time()
     if eid is not None:
-        if (a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan or a.retire is not None
-                or a.status is not None or a.why or a.transfer_expectations is not None):
-            print("relay: --ack ID is used alone: " + ack_form(eid), file=sys.stderr)
+        defaults = ap.parse_args([])
+        extra = sorted("--" + k.replace("_", "-").replace("show-text", "text") for k, v in vars(a).items() if k not in ACK_VERB_CARRIES and v != getattr(defaults, k))
+        if extra:    # an option the sent ack would silently drop is refused, never ignored: the verb carries only the send options below
+            print(f"relay: --ack ID is used alone or with {', '.join('--' + k.replace('_', '-') for k in sorted(ACK_VERB_CARRIES))}, not with {', '.join(extra)}: "
+                  + ack_form(eid), file=sys.stderr)
             return 2
         argv2, rc = ack_verb(eid, a)
         if argv2 is None:
             return rc
         raise AckVerb(argv2)
+    if a.status is not None:
+        defaults = ap.parse_args([])
+        others = sorted("--" + k.replace("_", "-").replace("show-text", "text") for k, v in vars(a).items()
+                        if k not in ("status", "json") and v != getattr(defaults, k))
+        if others:    # decided before every command that mutates (--cancel, --retire, --transfer-expectations, --deliver, a send): a query never runs one
+            print(f"relay: usage: relay.py --status ID [--json]; --status is a query and cannot be combined with {', '.join(others)}", file=sys.stderr)
+            return 2
+        return status_cmd(a.status, a.json)
     if a.transfer_expectations is not None:
         if a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan or a.retire is not None:
             print("relay: --transfer-expectations cannot be combined with a send or another command", file=sys.stderr)
@@ -4222,11 +4255,6 @@ def _main(argv=None, sweep=True):
     if a.stuck_after is not None and not a.sweep:
         print("relay: --stuck-after is used with --sweep", file=sys.stderr)
         return 2
-    if a.status is not None:
-        if a.ident is not None or a.text is not None or a.pending or a.cancel or a.sweep or a.plan or a.why:
-            print("relay: usage: relay.py --status ID [--json]", file=sys.stderr)
-            return 2
-        return status_cmd(a.status, a.json)
     if a.pending:
         return pending_cmd(a.json, a.show_text, a.queued_only, a.older_than, a.summary)
     if a.cancel:

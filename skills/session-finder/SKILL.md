@@ -475,8 +475,13 @@ escalated to the operator about silence that was a queue; two queued messages we
    sender sees the ack, the verified closer settles it when it is delivered, and a busy sender queues it; the `queued:` line then says `this text answers expectation ID, which closes only
    when the queued message is delivered (or on relay.py --sweep), not now`. There is no local-only close. Refused with the form named: an unknown, settled or malformed ID (exit 1; 2 for a
    malformed one) or a caller that is not the target. `--ack` after a target and text stays the delivery-watch flag. **An `ack ID` token that BEGINS ANY LINE** of a send from the
-   expectation's target to its sender closes it (a reply that ends `ack host-branch-durability-2` included); one quoted inside a line, or sent by a third party, closes nothing. Lines are
-   those of the text AS YOU TYPED IT: relay folds the whitespace of what it sends (and stores), so it keeps the line starts of the argument for the closer, and a queued record keeps them as `ack_leads`.
+   expectation's target to its sender closes it (a reply that ends `ack host-branch-durability-2` included); one quoted inside a line, or sent by a third party, closes nothing. That is the
+   relay-verified closer's rule, for a sender with NO transcript; a transcript-backed sender's `--sweep` (and `--pending`) still accepts the token anywhere in a line that carries the target's
+   relay header. Lines are those of the text AS YOU TYPED IT: relay folds the whitespace of what it sends (and stores), so it keeps the line starts of the argument for the closer, only the lines
+   that begin `ack ` (at most 40, each clipped to 120 characters), and a queued record keeps them as `ack_leads`.
+   `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
+   never dropped. `--status ID` is a query: combined with any other option or command (`--cancel`, `--retire`, a send) it is refused, exit 2, and nothing runs. A transcript-backed expectation whose
+   transcript cannot be read reads `open (uncollected, ...)` even after a complete sweep.
 
 
 ## Direct Herdr control and detached relay workers (2026-10-25)

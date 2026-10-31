@@ -143,6 +143,21 @@ class TestStatus(Base):
         self.assertEqual(self.cli("--status", QUEUED, "--pending")[0], 2)
         self.assertEqual(self.cli("--status", QUEUED, "someone", "hello")[0], 2)
 
+    def test_a_status_query_never_runs_the_mutation_it_is_combined_with(self) -> None:
+        self.fixture()
+        relay.expect_write({"id": "open1", "state": "open", "sender": "aaaaaaaa", "sender_label": "alice", "target": dict(TARGET), "created": NOW - 100, "within": 1800})
+        before = self.snapshot()
+        for argv in (("--status", QUEUED, "--cancel", QUEUED), ("--show", QUEUED, "--cancel", QUEUED),
+                     ("--status", "open1", "--retire", "open1", "--reason", "gone"), ("--status", QUEUED, "--transfer-expectations", "old"),
+                     ("--status", QUEUED, "--deliver", QUEUED), ("--status", QUEUED, "--reason", "x"), ("--status", QUEUED, "--sweep"),
+                     ("--status", QUEUED, "--why"), ("--status", QUEUED, "--no-defer"), ("--status", QUEUED, "--queued-only")):
+            rc, out, err = self.cli(*argv)
+            self.assertEqual((rc, out), (2, ""), argv)
+            self.assertIn("--status is a query and cannot be combined with", err)
+        self.assertEqual(self.snapshot(), before)    # nothing was withdrawn, retired, delivered or swept
+        self.assertEqual((relay.rec_read(QUEUED)["state"], relay.expect_read("open1")["state"]), ("queued", "open"))
+        self.assertEqual(self.cli("--status", QUEUED, "--json")[0], 0)    # --json is the one companion
+
     def test_the_timeline_reads_the_rotated_logs_too(self) -> None:
         self.fixture()
         self.log.rename(self.log.with_name("deferred.log.1"))
@@ -619,6 +634,89 @@ class TestPendingNothingToSweep(Base):
         rc, out, _ = self.cli("--pending")
         self.assertEqual((rc, out), (0, "no deferred messages\n"))
         self.assertFalse(relay.DEFER_DIR.exists())
+
+
+class TestAckLeadsCap(QueueBase):
+    """Adversary PR 177 B1: the stored leads, the live closer and the `queued:` promise read ONE list of closing lines."""
+
+    def test_an_ack_after_line_40_is_stored_promised_and_closed(self) -> None:
+        text = "\n".join([f"line {n}" for n in range(60)] + ["ack p4"])
+        self.assertEqual(relay.ack_leads(text), ["ack p4"])    # every other line is dropped, so the cap is on acks, not on prose
+        self.assertEqual(len(relay.ack_leads("\n".join(f"ack x{n}" for n in range(100)))), relay.ACK_LEADS_MAX)
+        self.assertTrue(all(len(x) <= 120 for x in relay.ack_leads("ack " + "z" * 400)))
+
+    def test_the_queued_record_keeps_only_closing_lines_and_the_delivery_closes(self) -> None:
+        os.environ["PASEO_AGENT_ID"] = fb.SENDER
+        relay.atomic_json(relay.expect_dir() / "p4.json", {
+            "id": "p4", "state": "open", "created": time.time(), "acked": None, "within": 1800, "sender": "cccccccc", "sender_sid": "", "sender_label": "peer-fb",
+            "tx": None, "mark": 0, "sender_paseo": fb.AGENT,
+            "target": {"id": "bbbbbbbb", "name": "alice", "paseo": fb.SENDER, "sid8": "", "sid": "", "host": "paseo"}})
+        os.environ.pop("RELAY_NO_ACK", None)
+        text = "\n".join([f"detail {n}" for n in range(60)] + ["ack p4"])
+        rc, out, err = self.go("--wait", "0.1", text=text)
+        rec = relay.rec_all()[0]
+        self.assertEqual(rec["ack_leads"], ["ack p4"])    # one short list, not 40 prose lines
+        self.assertIn("this text answers expectation p4", out)
+        self.status = "idle"
+        with mock.patch.object(relay.subprocess, "Popen") as popen:
+            fb.REAL_SPAWN("20261024-000000-abcdef")
+        with mock.patch.dict(os.environ, popen.call_args.kwargs["env"], clear=True):
+            self.assertEqual(relay.deliver(rec["id"]), 0)
+        self.assertEqual(relay.expect_read("p4")["state"], "acked")    # the promise the line made is kept
+
+
+class TestAckVerbOptions(AckBase):
+    """Codex P2 (PR 177): `relay.py --ack ID` carries the send options it understands and refuses the rest, never drops one."""
+
+    def seen(self, *argv: str) -> tuple[int, list[list[str]], str]:
+        calls: list[list[str]] = []
+        real = relay.main
+
+        def spy(a: Any = None, sweep: bool = True) -> int:
+            calls.append(list(a))
+            return real(a, sweep)
+        with mock.patch.object(relay, "main", spy):
+            rc, out, err = self.run_relay(*argv)
+        return rc, calls, err
+
+    def test_the_send_options_are_carried_into_the_ordinary_send(self) -> None:
+        self.status = "idle"
+        rc, calls, err = self.seen("--ack", "q1", "--via", "paseo", "--steer", "--idle", "5", "--no-defer", "--defer-for", "60", "--wait", "3", "--no-ack")
+        inner = calls[-1]
+        self.assertEqual((inner[0] == fb.AGENT, inner[1]), (True, "ack q1"), (rc, err))
+        for flag in ("--steer", "--no-defer", "--no-ack"):
+            self.assertIn(flag, inner)
+        for flag, val in (("--via", "paseo"), ("--idle", "5.0"), ("--defer-for", "60.0"), ("--wait", "3.0")):
+            self.assertEqual(inner[inner.index(flag) + 1], val, flag)
+
+    def test_an_option_the_ack_would_drop_is_refused_and_nothing_is_sent(self) -> None:
+        self.status = "idle"
+        for extra in (("--expect-ack", "x1"), ("--needs-reply",), ("--fyi",), ("--ack-within", "5"), ("--text",), ("--queued-only",),
+                      ("--summary",), ("--requeued",), ("--older-than", "3"), ("--reason", "r")):
+            rc, calls, err = self.seen("--ack", "q1", *extra)
+            self.assertEqual(rc, 2, extra)
+            self.assertIn("--ack ID is used alone or with", err)
+            self.assertIn(extra[0], err)
+            self.assertEqual(calls, [calls[0]], extra)    # the outer run only: no inner send began
+        self.assertEqual((self.sent, self.state()), ([], "open"))
+
+
+class TestMissingTranscriptIsUncollected(AckBase):
+    """Codex P2 (PR 177): a complete sweep reads NOTHING for a transcript that is gone, so its `open` row is not current."""
+
+    def test_a_transcript_backed_row_whose_file_is_gone_reads_uncollected_after_a_complete_sweep(self) -> None:
+        tx = self.tmp / "gone.jsonl"
+        tx.write_text("{}\n")
+        self.open_expectation("g1", tx=str(tx), mark=0)
+        self.open_expectation("g2", tx=str(self.tmp / "never-existed.jsonl"), mark=0)
+        tx.unlink()
+        rc, out, err = self.run_relay("--pending")
+        self.assertEqual((rc, err), (0, ""))    # the sweep itself completed
+        self.assertIn("expect-ack g1  open (uncollected, last swept ", out)
+        self.assertIn("expect-ack g2  open (uncollected, last swept ", out)
+        self.assertRegex(out, r"expect-ack q1  open   ")    # no transcript recorded: not waiting for one
+        rows = {r["id"]: r for r in json.loads(self.run_relay("--pending", "--json")[1]) if r.get("kind") == "expect"}
+        self.assertEqual((rows["g1"].get("uncollected"), rows["g2"].get("uncollected"), "uncollected" in rows["q1"]), (True, True, False))
 
 
 if __name__ == "__main__":
