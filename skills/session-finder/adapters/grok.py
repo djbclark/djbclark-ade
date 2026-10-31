@@ -72,13 +72,16 @@ def sessions():
         except OSError:
             continue
         sfp, mtime = "", st.st_mtime
-        # summary.json and the cwd's prompt_history.jsonl feed the indexed text too: a change to either re-indexes
-        for extra in (sdir / "summary.json", sdir.parent / "prompt_history.jsonl"):
+        # summary.json and the cwd's prompt_history.jsonl feed the indexed text too: a change to either re-indexes.
+        # Only the session's own files set `mtime`: prompt_history.jsonl is shared by every session in the cwd,
+        # so it would stamp them all "active just now".
+        for extra, own in ((sdir / "summary.json", True), (sdir.parent / "prompt_history.jsonl", False)):
             try:
                 x = extra.stat()
             except OSError:
                 continue
             sfp += f"{extra.name[:3]}{x.st_size}:{int(x.st_mtime)}:"
-            mtime = max(mtime, x.st_mtime)
+            if own:
+                mtime = max(mtime, x.st_mtime)
         yield {"key": f"grok:{sdir.name}", "sid": sdir.name, "fp": f"{st.st_size}:{int(st.st_mtime)}:{sfp}",
                "mtime": mtime, "load": lambda d=sdir: _read(d)}

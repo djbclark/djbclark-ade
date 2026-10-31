@@ -194,6 +194,28 @@ def check(db) -> bool:
         return False
 
 
+FLEET_ENDED = ("closed", "finished", "gone", "ended")
+
+
+def fleet_running(agents):
+    """For agents whose adapter cannot say what is running (no live()): the native ids and the (agent, cwd)
+    pairs of their running fleet rows. Most fleet rows carry no native id (a Paseo-hosted codex has none), so
+    the cwd pairs back a weaker "LIVE?" label. Empty when fleet.py cannot run."""
+    exact, cwds = set(), set()
+    try:
+        sys.path.insert(0, str(HERE))  # python -I drops the script dir
+        import fleet
+        for r in fleet.sessions():
+            if r.get("agent") not in agents or r.get("status") in FLEET_ENDED:
+                continue
+            if r.get("sid"):
+                exact.add((r["agent"], Path(str(r["sid"])).stem.split("_")[-1]))  # omp reports a path
+            cwds.add((r["agent"], r.get("cwd") or ""))
+    except Exception:
+        pass
+    return exact, cwds
+
+
 def resume_hint(template: str, sid: str, cwd: str) -> str:
     """The printed `resume:` line. Quoted, and empty when an id or directory holds a control character
     (a newline ends a shell comment or a quoted string a template might sit in)."""
@@ -264,17 +286,27 @@ def _main() -> int:
             best[key] = (rank, role, snip, count)
         else:
             best[key] = (prev[0], prev[1], prev[2], count)
+    # titles are not in the FTS table (a Hermes or omp title may never appear in the message text): a session
+    # whose title holds every keyword is a hit too, ranked after the text matches
+    esc = lambda k: k.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace('"', "")  # noqa: E731
+    title_sql = " AND ".join("lower(title) LIKE ? ESCAPE '\\'" for _ in a.keywords)
+    for key, title in db.execute(f"SELECT key, title FROM files WHERE {title_sql} {agent_sql.replace('f.agent', 'agent')} LIMIT 100",
+                                 [f"%{esc(k.lower())}%" for k in a.keywords] + a.agent):
+        best.setdefault(key, (1e9, "title", title or "", 0))
     live = {m.AGENT: (m.live() if hasattr(m, "live") else set()) for m in mods}
     labels = {m.AGENT: (getattr(m, "LIVE_LABEL", "LIVE"), getattr(m, "ENDED_LABEL", "ended")) for m in mods}
     info = {m.AGENT: (m.live_info() if hasattr(m, "live_info") else {}) for m in mods}
     resume = {m.AGENT: getattr(m, "RESUME", "") for m in mods}
+    blind = {m.AGENT for m in mods if not hasattr(m, "live")}
+    fl_exact, fl_cwds = fleet_running(blind) if blind else (set(), set())
     out = []
     for key, (rank, role, snip, count) in sorted(best.items(), key=lambda kv: kv[1][0])[: a.limit]:
         agent, sid, cwd, title, mtime = db.execute(
             "SELECT agent, sid, cwd, title, mtime FROM files WHERE key=?", (key,)).fetchone()
-        is_live = sid in live.get(agent, set())
+        is_live = sid in live.get(agent, set()) or (agent, sid) in fl_exact
+        likely = (not is_live and agent in blind and (agent, cwd) in fl_cwds and time.time() - mtime < 600)
         out.append({"agent": agent, "sessionId": sid, "live": is_live,
-                    "state": labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,
+                    "state": "LIVE?" if likely else labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,
                     "title": title, "lastActive": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
                     "hits": count, "role": role, "snippet": " ".join(snip.split()),
                     "resume": resume_hint(resume.get(agent, ""), sid, cwd)})

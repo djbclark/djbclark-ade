@@ -93,6 +93,20 @@ class AdapterTests(unittest.TestCase):
         (cwd_dir / "sess-1/summary.json").write_text("{}")
         fp3 = next(iter(mod.sessions()))["fp"]
         self.assertEqual(len({fp1, fp2, fp3}), 3)
+        os.utime(cwd_dir / "prompt_history.jsonl", (2_000_000_000, 2_000_000_000))  # shared by the whole cwd
+        self.assertLess(next(iter(mod.sessions()))["mtime"], 1_900_000_000)
+
+    def test_title_only_match_is_a_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_jsonl(Path(tmp) / ".omp/agent/sessions/-s/2026-10-31T00-00-00-000Z_t1.jsonl", [
+                {"type": "title", "title": "Quokka migration plan"}, {"type": "session", "id": "t1", "cwd": "/s"},
+                {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "unrelated words only"}]}}])
+            env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+            env.update(HOME=tmp, SESSION_INDEX_DIR=str(Path(tmp) / "idx"))
+            r = subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), "--json", "--", "quokka", "migration"],
+                               env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)[0]["title"], "Quokka migration plan")
 
     def test_goose_reads_text_blocks(self) -> None:
         db_path = self.home / ".local/share/goose/sessions/sessions.db"
@@ -210,6 +224,37 @@ class HardeningTests(unittest.TestCase):
             db = Path(tmp) / "idx/history.v2.sqlite"
             self.assertEqual(self._run(tmp, str(db.parent), "--reb").returncode, 2)  # argparse: unrecognized, no abbreviation
             self.assertTrue(db.exists())
+
+
+class LiveLabelTests(unittest.TestCase):
+    def test_fleet_running_maps_native_ids_and_cwds_of_adapters_without_live(self) -> None:
+        spec = importlib.util.spec_from_file_location("t_sh2", SF / "session-history.py")
+        sh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sh)
+        rows = [{"agent": "omp", "status": "idle", "sid": "/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_abc-1", "cwd": "/s"},
+                {"agent": "codex", "status": "idle", "sid": None, "cwd": "/c"},
+                {"agent": "codex", "status": "closed", "sid": None, "cwd": "/old"},
+                {"agent": "hermes", "status": "idle", "sid": "20261029-1", "cwd": "/"}]
+        with mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: rows)}):
+            exact, cwds = sh.fleet_running({"omp", "codex", "hermes"})
+        self.assertEqual(exact, {("omp", "abc-1"), ("hermes", "20261029-1")})
+        self.assertEqual(cwds, {("omp", "/s"), ("codex", "/c"), ("hermes", "/")})  # closed rows are not running
+
+    def test_crush_reads_text_parts_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / ".local/share/crush-acp/crush.db"
+            db_path.parent.mkdir(parents=True)
+            db = sqlite3.connect(db_path)
+            db.executescript("CREATE TABLE sessions(id, title, message_count, updated_at);"
+                             "CREATE TABLE messages(id, session_id, role, parts, created_at);")
+            db.execute("INSERT INTO sessions VALUES('c1','Crush chat',2,1790000000)")
+            db.execute("INSERT INTO messages VALUES('m1','c1','user',?,1)", (json.dumps([{"type": "text", "data": {"text": "hello crush"}}]),))
+            db.execute("INSERT INTO messages VALUES('m2','c1','assistant',?,2)", (json.dumps([{"type": "reasoning", "data": {"thinking": "secret"}}]),))
+            db.commit()
+            db.close()
+            mod = load("crush", Path(tmp))
+            (s,) = list(mod.sessions())
+            self.assertEqual(s["load"](), ("", "Crush chat", [("user", "hello crush")]))
 
 
 class SessionFindAllTests(unittest.TestCase):

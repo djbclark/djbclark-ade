@@ -543,12 +543,14 @@ never ask the operator to press Enter as the normal delivery path.
    extended from the byte offset last read. History: one adapter per agent in
    `adapters/*.py` (contract in `adapters/README.md`), FTS5 at
    `~/.local/state/session-index/history.v2.sqlite`; a broken adapter is skipped.
-   Adapters (2026-10-31): agy, claude, cline, codex, copilot, cursor, goose, grok, hermes, muse,
-   omp, opencode, qwen, zcode and todo. **No adapter yet** (small, or not installed): kiro, pi,
-   gemini, crush-acp, devin. A session that has left its agent's store stays in the index as
-   history (`orphan` in `--status`; never pruned). Only claude, cline, copilot and muse report
-   `live()`, so a running codex/hermes/omp session prints `ended` in a history hit: use
-   `session-find.py` (fleet) for running state.
+   Adapters (2026-10-31): agy, claude, cline, codex, copilot, crush, cursor, goose, grok, hermes, muse,
+   omp, opencode, qwen, zcode and todo. **No adapter, by decision** (djbclark, 2026-10-31): kiro, pi,
+   gemini, devin. A session that has left its agent's store stays in the index as history (`orphan`
+   in `--status`; never pruned). **Live labels:** claude, cline, copilot and muse report `live()`
+   exactly (`LIVE`). For every other agent a hit is `LIVE` when `fleet.py` has a running row carrying its
+   native id (hermes, some omp), `LIVE?` when that agent has a running fleet row in the same directory and
+   the session was touched in the last 10 minutes (most fleet rows, e.g. a Paseo-hosted codex, carry no
+   native id), else `ended`. `session-find.py` (fleet) stays the authority on what is running.
    `adapters/todo.py` is a document adapter: one entry per note under
    `<project>/todo/*.md` for every project in `~/.basic-memory/config.json`,
    split into one FTS row per `##` section, `live()` = `status: open`. A full
