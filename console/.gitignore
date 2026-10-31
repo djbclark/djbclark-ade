@@ -1,0 +1,10 @@
+# Ren'Py build output and per-run state
+*.rpyc
+*.rpymc
+*.rpyb
+game/cache/
+game/saves/
+log.txt
+traceback.txt
+errors.txt
+lint.txt

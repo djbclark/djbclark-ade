@@ -11,7 +11,7 @@ and a differently named wrapper is treated as a build and refused (2026-10-28). 
 never shadows Homebrew's own `pytest`; call it by path.
 
 USAGE
-  ~/ops/site-private/bin/bg bin/pytest [PYTEST ARGS]     # always through bg; no args = tests/ -q
+  ~/ops/site-private/bin/bg bin/pytest [PYTEST ARGS]     # always through bg; -q and tests/ are defaults; a path argument replaces tests/
   bin/pytest --print                                         # print the command, run nothing
 
 Runs from the repo root of the checkout this file is in (a worktree runs its own tests).
@@ -31,7 +31,10 @@ def command(args: list[str]) -> list[str]:
     argv = ["uv", "run"]
     for dep in DEPS:
         argv += ["--with", dep]
-    return argv + ["python", "-m", "pytest", *(args or ["tests/", "-q"])]
+    argv += ["python", "-m", "pytest"]
+    # `tests/` is the default collection root unless a path argument names one (filters like -k keep it).
+    has_path = any(not a.startswith("-") and (Path(a.split("::")[0]).exists() or "::" in a) for a in args)
+    return argv + args + ([] if has_path else ["tests/"]) + ([] if "-q" in args else ["-q"])
 
 
 def main(argv: list[str]) -> int:

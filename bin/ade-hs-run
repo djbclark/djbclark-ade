@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# ade-hs-run MODULE [ARGS...] - build (once per source hash) and exec an ade-hs entry point.
+#
+# Each bin/ tool that has moved to Haskell is a three-line shim that calls this with the name of its
+# hs/app/<MODULE>.hs. Binaries are cached under ${XDG_CACHE_HOME:-~/.cache}/ade-hs, keyed by a hash of
+# hs/, so a checkout switch rebuilds and two worktrees never share a stale binary. Needs only GHC and
+# its boot packages (pacman -S ghc, brew install ghc); cabal is used by CI, not here.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+mod="${1:?usage: ade-hs-run MODULE [ARGS...]}"; shift
+src="$ROOT/hs/app/$mod.hs"
+[ -f "$src" ] || { echo "ade-hs-run: no such entry point: hs/app/$mod.hs" >&2; exit 2; }
+key="$( (cd "$ROOT/hs" && find . -name '*.hs' -o -name '*.cabal' | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/ade-hs/$key"
+bin="$cache/$mod"
+if [ ! -x "$bin" ]; then
+  mkdir -p "$cache/obj"
+  ghc -dynamic -O1 -v0 -i"$ROOT/hs/src" -outputdir "$cache/obj/$mod" -o "$bin.tmp" "$src" >&2
+  mv -f "$bin.tmp" "$bin"
+fi
+exec "$bin" "$@"
