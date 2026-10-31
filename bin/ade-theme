@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""ade-theme — named colour palettes for ADE's terminal output, including one for the shrine.
+
+WHY. Every tool here prints status: helm rows, fleet changes, pr-wait blockers, dispatch verdicts. They
+all pick colours ad hoc, so "red" means four different things depending on which script shouted last.
+This names the roles once (`ok`, `warn`, `error`, `info`, `accent`, `dim`) and gives each theme a value
+for each role. A tool that wants colour asks for a role, not for escape code 31.
+
+THEMES. `default`, `gruvbox`, `solarized-dark`, `mono` (no colour at all, for logs and pipes), and
+`touhou` — Gensokyo's palette: Reimu's red-and-white for alarm, Marisa's gold for warnings, Cirno's ice
+blue for information, Sakuya's silver for dim text, Sanae's green for success. A theme is data; adding
+one is a dict entry, not a diff across five scripts.
+
+NO COLOUR WINS. `NO_COLOR` in the environment, `--no-color`, or theme `mono` prints role names only.
+A pipe never gets escapes unless it asks.
+
+EXIT CODES: 0 ok, 2 unknown theme or role, 3 unknown subcommand.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+ROLES = ("ok", "warn", "error", "info", "accent", "dim")
+
+# 256-colour codes. Each theme maps every role; nothing falls back silently.
+THEMES: dict[str, dict[str, int]] = {
+    "default":   {"ok": 34, "warn": 178, "error": 160, "info": 39, "accent": 111, "dim": 244},
+    "gruvbox":   {"ok": 106, "warn": 172, "error": 167, "info": 109, "accent": 214, "dim": 246},
+    "solarized-dark": {"ok": 64, "warn": 136, "error": 160, "info": 37, "accent": 33, "dim": 240},
+    "mono":      {"ok": 0, "warn": 0, "error": 0, "info": 0, "accent": 0, "dim": 0},
+    # Touhou: alarm is Reimu's red over white, warnings are Marisa's gold, information is Cirno's ice,
+    # success is Sanae's green, dim is Sakuya's silver, accent is the shrine's scarlet.
+    "touhou":    {"ok": 71, "warn": 220, "error": 196, "info": 51, "accent": 203, "dim": 250},
+}
+
+SAMPLE = {"ok": "ok — Sanae blesses this", "warn": "warn — Marisa took the book",
+          "error": "error — Reimu is out of patience", "info": "info — Cirno froze the queue",
+          "accent": "accent — the shrine's scarlet", "dim": "dim — Sakuya stopped time"}
+
+
+def paint(role: str, text: str, theme: str, colour: bool) -> str:
+    if not colour:
+        return f"[{role}] {text}"
+    return f"\033[38;5;{THEMES[theme][role]}m{text}\033[0m"
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="ade-theme", description="named colour palettes for ADE output")
+    p.add_argument("command", nargs="?", default="list", choices=("list", "show", "export", "roles"))
+    p.add_argument("theme", nargs="?", default=os.environ.get("ADE_THEME", "default"))
+    p.add_argument("--format", choices=("ansi", "json", "sh"), default="ansi")
+    p.add_argument("--no-color", action="store_true", help="print role names only (NO_COLOR also works)")
+    a = p.parse_args(argv)
+    theme = a.theme
+    colour = not (a.no_color or os.environ.get("NO_COLOR") or theme == "mono")
+    if a.command == "roles":
+        print("\n".join(ROLES))
+        return 0
+    if theme not in THEMES:
+        print(f"ade-theme: unknown theme {theme!r}; known: {', '.join(THEMES)}", file=sys.stderr)
+        return 2
+    if a.command == "list":
+        for name, roles in THEMES.items():
+            swatch = " ".join(paint(r, "██", name, colour and os.environ.get("NO_COLOR") is None)
+                              for r in ROLES) if name != "mono" else "(no colour)"
+            print(f"{name:16} {swatch}")
+        return 0
+    if a.format == "json":
+        print(json.dumps({"theme": theme, "roles": THEMES[theme]}, sort_keys=True))
+        return 0
+    if a.format == "sh":
+        for role in ROLES:
+            print(f"ADE_COLOR_{role.upper()}={THEMES[theme][role]}")
+        return 0
+    if a.command == "export" and a.format == "ansi":
+        for role in ROLES:
+            print(f"{role:7} {paint(role, SAMPLE[role], theme, colour)}")
+        return 0
+    for role in ROLES:
+        print(paint(role, SAMPLE[role], theme, colour))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
