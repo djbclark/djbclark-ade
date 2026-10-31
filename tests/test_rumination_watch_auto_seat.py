@@ -634,35 +634,19 @@ def test_30_timeout_and_expired_window_cannot_duplicate_with_old_registry_gone(m
     assert "gone" in rw.pages[0]
 
 
-def test_31_listing_adopts_lost_id_then_next_pass_diagnoses_candidate(monkeypatch, tmp_path):
+@pytest.mark.parametrize("row", [
+    {"id": NEW, "name": "renamed", "cwd": "/entity"},
+    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/other-repo"},
+    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/entity"},
+])
+def test_lost_start_never_adopts_by_title_or_clears_on_absence(monkeypatch, tmp_path, row):
     rw = lost_id(monkeypatch, tmp_path)
-    rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE)
+    rw.enum_rc, rw.enum_body = 0, json.dumps([row])
     run_pass(rw)
-    state = rw.load_state()
-    assert state["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] == rw.time.time()
-    assert f"auto-seat unresolved:{rw.ROLE}" not in state["told"]
-    assert starts(rw) == 1 and not state.get("seated")
-    assert f"auto-seat: recovered lost id {NEW}" in rw.LOG.read_text()
-    diagnosed = []
-    def why(ident):
-        diagnosed.append(ident)
-        return ("idle" if ident == NEW else "gone", "fixture")
-    monkeypatch.setattr(rw, "why_blocked", why)
     run_pass(rw)
-    assert NEW in diagnosed and starts(rw) == 1
-
-
-def test_32_empty_listing_only_clears_and_following_pass_may_start(monkeypatch, tmp_path):
-    rw = lost_id(monkeypatch, tmp_path)
-    rw.enum_rc, rw.enum_body = 0, json.dumps([{**PASEO_LS_FIXTURE[0], "name": "other role"}])
-    run_pass(rw)
-    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    assert not rw.auto_seat_candidate(rw.load_state())
     assert starts(rw) == 1
-    assert "auto-seat: unresolved cleared (no live auto-seat agent)" in rw.LOG.read_text()
-    assert "unresolved start not reconciled" not in rw.LOG.read_text()
-    rw.run_rc = 0
-    run_pass(rw)
-    assert starts(rw) == 2
 
 
 @pytest.mark.parametrize("rc,body", [(1, "[]"), (127, ""), (0, "garbage"), (0, "{}"),
@@ -701,7 +685,7 @@ def test_35_unresolved_precedes_word_and_seated_but_switch_off_does_not_list(mon
     state = {"seated": {rw.ROLE: NOW}, "told": {f"auto-seat unresolved:{rw.ROLE}": NOW}}
     rw.save_state(state)
     assert rw.auto_seat("idle", state, NOW) == ""
-    assert len(rw.calls) == (1 if switch == "1" else 0)
+    assert len(rw.calls) == 0
     assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
 
 
@@ -751,7 +735,7 @@ def test_37_recovery_crash_keeps_mail_discoverable_from_disk(monkeypatch, tmp_pa
     assert starts(fresh) == 0
 
 
-@pytest.mark.parametrize("recovery", ["confirmed", "adopted", "cleared"])
+@pytest.mark.parametrize("recovery", ["confirmed"])
 def test_38_recovery_save_before_page_keeps_previous_survey(monkeypatch, tmp_path, recovery):
     rw = load(monkeypatch, tmp_path)
     state = {"last": QUIET, "pending": []}
@@ -871,9 +855,11 @@ def adopted_world(monkeypatch, tmp_path, open_failure=""):
     rw.opened.clear()
     rw.pages.clear()                               # pass 1's "no live session" page is done with
     rw.open_failure = open_failure
-    rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE)
-    run_pass(rw)                                   # pass 1: adopt the lost id, diagnose later
-    assert rw.opened == []                         # adoption is not a start: it owes no tab yet
+    # Recovery of a known returned id, never adoption by ambiguous listing title.
+    state = rw.load_state()
+    state["told"].pop(f"auto-seat unresolved:{rw.ROLE}", None)
+    state["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] = NOW
+    rw.save_state(state)
     monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
     return rw
 
@@ -1146,3 +1132,70 @@ def test_63_nothing_resolvable_keeps_the_no_live_session_reason(monkeypatch, tmp
     ident, why = rw.real_owner_session()
     assert ident == ""
     assert why.startswith("no live session")
+
+
+@pytest.fixture(autouse=True)
+def isolated_watcher_environment(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    for key in list(os.environ):
+        if key.startswith("RW_") or key == "PASEO_AGENT_ID":
+            monkeypatch.delenv(key, raising=False)
+    real = subprocess.run
+    def guarded(argv, *args, **kwargs):
+        command = list(argv) if not isinstance(argv, str) else [argv]
+        if command[:3] == ["env", "-u", "PASEO_AGENT_ID"]:
+            command = command[3:]
+        allowed = command and (command[0] == "git" or
+                  (Path(command[0]).name.startswith("python") and "-c" in command))
+        import shutil
+        executable = shutil.which(command[0]) if command else None
+        local_fixture = executable and Path(executable).resolve().is_relative_to(tmp_path)
+        python_fixture = (command and Path(command[0]).name.startswith("python") and
+                          any(Path(arg).is_absolute() and Path(arg).resolve().is_relative_to(tmp_path)
+                              for arg in command[1:]))
+        allowed = allowed or local_fixture or python_fixture
+        if not allowed:
+            raise AssertionError(f"unexpected external launcher: {command}")
+        return real(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", guarded)
+
+
+@pytest.mark.parametrize("response", [(124, "", "timeout"), (1, "", "failed"), (0, "bad json", ""), (0, "{}", "")])
+def test_failed_peer_lookup_forbids_start(monkeypatch, tmp_path, response):
+    rw = load(monkeypatch, tmp_path)
+    registry = rw.REPO / "agents/comm/registry.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({rw.ROLE: {"paseo": CLOSED_SEAT}}))
+    mail = rw.REPO / "projects/hiwymi/spec/composite-individual/tools/peer-comms/peer_mail.py"
+    mail.parent.mkdir(parents=True)
+    mail.touch()
+    monkeypatch.setattr(rw, "live_sessions", lambda: _rows(**{CLOSED_SEAT: "closed", SUCCESSOR: "running"}))
+    original = rw.run_split
+    monkeypatch.setattr(rw, "run_split", lambda argv, timeout=20: response if str(mail) in argv else original(argv, timeout))
+    monkeypatch.setattr(rw, "owner_session", rw.real_owner_session)
+    run_pass(rw)
+    assert starts(rw) == 0
+
+
+def test_owner_handoff_during_probe_forbids_start(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    owner = [OLD]
+    monkeypatch.setattr(rw, "owner_session", lambda: (owner[0], "registry"))
+    def probe(ident):
+        owner[0] = SUCCESSOR
+        return "gone", "old owner closed"
+    monkeypatch.setattr(rw, "why_blocked", probe)
+    run_pass(rw)
+    assert starts(rw) == 0
+
+
+def test_refreshes_cached_fleet_before_start(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "_LIVE_CACHE", {OLD: {"status": "closed"}})
+    def owner():
+        assert rw._LIVE_CACHE is None
+        return SUCCESSOR, "registry"
+    monkeypatch.setattr(rw, "owner_session", owner)
+    assert rw.auto_seat("gone", {}, NOW, expected_owner=OLD) == ""
+    assert starts(rw) == 0

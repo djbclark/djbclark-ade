@@ -164,3 +164,49 @@ def test_a_git_error_asking_ancestry_is_silent(monkeypatch, tmp_path):
     monkeypatch.setattr(rw, "run_split", _failing_on(rw.run_split, "merge-base", 128))
     assert rw.chain_staleness() is None
 
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_watcher_environment(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    for key in list(os.environ):
+        if key.startswith("RW_") or key == "PASEO_AGENT_ID":
+            monkeypatch.delenv(key, raising=False)
+    real = subprocess.run
+    def guarded(argv, *args, **kwargs):
+        command = list(argv) if not isinstance(argv, str) else [argv]
+        if command[:3] == ["env", "-u", "PASEO_AGENT_ID"]:
+            command = command[3:]
+        allowed = command and (command[0] == "git" or
+                  (Path(command[0]).name.startswith("python") and "-c" in command))
+        import shutil
+        executable = shutil.which(command[0]) if command else None
+        local_fixture = executable and Path(executable).resolve().is_relative_to(tmp_path)
+        python_fixture = (command and Path(command[0]).name.startswith("python") and
+                          any(Path(arg).is_absolute() and Path(arg).resolve().is_relative_to(tmp_path)
+                              for arg in command[1:]))
+        allowed = allowed or local_fixture or python_fixture
+        if not allowed:
+            raise AssertionError(f"unexpected external launcher: {command}")
+        return real(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", guarded)
+
+
+@pytest.mark.parametrize("first,second,stale", [("deadbeef" * 5, "a" * 40, False), ("a" * 40, "b" * 40, True)])
+def test_multi_workspace_uses_watched_directory(monkeypatch, tmp_path, first, second, stale):
+    repo = tmp_path / "watched"
+    rw = load(monkeypatch, tmp_path, repo)
+    pointer = tmp_path / "canonical.md"
+    pointer.write_text(f"---\nworkspaces:\n  - repo: other\n    dir: /other\n    head_sha: {first}\n  - repo: watched\n    dir: {repo}\n    head_sha: {second}\n---\n")
+    monkeypatch.setattr(rw, "resolve_pointer", lambda: pointer)
+    def git_read(argv, timeout=20):
+        if "rev-parse" in argv:
+            return 0, "a" * 40, ""
+        if "cat-file" in argv:
+            return (128 if argv[-1].startswith("deadbeef") else 0), "", ""
+        return (0 if argv[-2] == "a" * 40 else 1), "", ""
+    monkeypatch.setattr(rw, "run_split", git_read)
+    assert (rw.chain_staleness() is not None) is stale
