@@ -155,6 +155,52 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(json.loads(r.stdout)[0]["resume"], "omp --resume='x;touch pwned'")
 
 
+class HardeningTests(unittest.TestCase):
+    """Adversary round 2 (PR 191): R1 agy comment, R2 relative index dir, R3 crash exit code, R5 abbreviations."""
+
+    @staticmethod
+    def _env(tmp: str, idx: str) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+        env.update(HOME=tmp, SESSION_INDEX_DIR=idx)
+        return env
+
+    def _run(self, tmp: str, idx: str, *args: str, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), *args], env=self._env(tmp, idx),
+                              capture_output=True, text=True, check=False, cwd=cwd)
+
+    def test_resume_hint_is_empty_for_control_characters_and_agy_has_no_id_in_its_comment(self) -> None:
+        spec = importlib.util.spec_from_file_location("t_sh", SF / "session-history.py")
+        sh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sh)
+        self.assertEqual(sh.resume_hint("x --resume {sid}", "a\nb", "/s"), "")
+        self.assertEqual(sh.resume_hint("cd {cwd}", "a", "/s\x00"), "")
+        self.assertEqual(sh.resume_hint("x {sid}", "a b", "/s"), "x 'a b'")
+        agy = load("agy", Path("/nonexistent-home"))
+        self.assertNotIn("{sid}", agy.RESUME)  # the id sat inside a shell comment, where quoting does nothing
+
+    def test_status_accepts_a_relative_index_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(tmp, "idx", "--update-only", cwd=tmp).returncode, 0)
+            st = self._run(tmp, "idx", "--status", cwd=tmp)
+            self.assertIn("last full update:", st.stdout, st.stderr)  # a crash also exits 1: read the output
+
+    def test_a_corrupt_index_exits_2_not_1(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = Path(tmp) / "idx"
+            idx.mkdir()
+            (idx / "history.v2.sqlite").write_bytes(b"this is not a database" * 100)
+            r = self._run(tmp, str(idx), "--json", "anything")
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("session-history:", r.stderr)
+
+    def test_keyword_abbreviating_an_option_is_not_an_option(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(tmp, str(Path(tmp) / "idx"), "--update-only").returncode, 0)
+            db = Path(tmp) / "idx/history.v2.sqlite"
+            self.assertEqual(self._run(tmp, str(db.parent), "--reb").returncode, 2)  # argparse: unrecognized, no abbreviation
+            self.assertTrue(db.exists())
+
+
 class SessionFindAllTests(unittest.TestCase):
     def test_all_passes_keywords_after_a_double_dash(self) -> None:
         """`session-find.py --all -- --rebuild` once reached session-history.py as its --rebuild option (index deleted)."""

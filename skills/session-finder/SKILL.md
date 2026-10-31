@@ -18,7 +18,7 @@ from local files, with no model tokens:
 ```bash
 S=~/src/djbclark-ade/skills/session-finder
 python3 -I $S/session-find.py <keyword>...       # running sessions, every TUI, ranked by keyword
-python3 -I $S/session-history.py <keyword>...    # every session of every agent, live or ended, full text
+python3 -I $S/session-history.py -- <keyword>...    # every session of every agent, live or ended, full text
 python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet itself
 python3 -I $S/launch.py --agent A --cwd DIR --model M [--baton] -p "..."   # start a session (ACP-first)
 python3 -I $S/launch.py wait <id> [--timeout S]  # block until THAT launch's turn ends

@@ -33,7 +33,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 HERE = Path(__file__).resolve().parent
-INDEX_DIR = Path(os.environ.get("SESSION_INDEX_DIR") or Path.home() / ".local/state/session-index")
+INDEX_DIR = Path(os.environ.get("SESSION_INDEX_DIR") or Path.home() / ".local/state/session-index").expanduser().resolve()
 DB = INDEX_DIR / "history.v2.sqlite"
 CAP = {"user": 4000, "assistant": 2000, "note": 4000}
 SCHEMA = """
@@ -151,9 +151,16 @@ def install(remove: bool) -> int:
         return 0
     # The job must run the primary checkout, never a linked worktree (unreviewed branch state that
     # `git worktree remove` later deletes): resolve it from the repository's common git dir.
+    clean = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")}
     g = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                       check=False, capture_output=True, text=True)
-    repo = Path(g.stdout.strip()).parent if g.returncode == 0 and g.stdout.strip() else HERE.parent.parent
+                       check=False, capture_output=True, text=True, env=clean)
+    if g.returncode == 0 and g.stdout.strip():
+        repo = Path(g.stdout.strip()).parent
+    elif (HERE.parent.parent / ".git").is_dir():  # git failed: only a primary checkout (.git is a directory) is safe
+        repo = HERE.parent.parent
+    else:
+        print("cannot resolve the primary checkout (git failed and this is a linked worktree)", file=sys.stderr)
+        return 2
     if not ((repo / "launchd" / PLIST).is_file() and (repo / "skills/session-finder/session-history.py").is_file()):
         print(f"{repo} (the primary checkout) lacks this job or script: merge this change and fast-forward it first", file=sys.stderr)
         return 2
@@ -186,8 +193,16 @@ def check(db) -> bool:
         return False
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def resume_hint(template: str, sid: str, cwd: str) -> str:
+    """The printed `resume:` line. Quoted, and empty when an id or directory holds a control character
+    (a newline ends a shell comment or a quoted string a template might sit in)."""
+    if not template or any(ord(c) < 32 or c == "\x7f" for c in sid + (cwd or "")):
+        return ""
+    return template.format(sid=shlex.quote(sid), cwd=shlex.quote(cwd or ""))
+
+
+def _main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     ap.add_argument("keywords", nargs="*")
     ap.add_argument("--agent", action="append", default=[])
     ap.add_argument("--limit", type=int, default=8)
@@ -261,7 +276,7 @@ def main() -> int:
                     "state": labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,
                     "title": title, "lastActive": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
                     "hits": count, "role": role, "snippet": " ".join(snip.split()),
-                    "resume": resume.get(agent, "").format(sid=shlex.quote(sid), cwd=shlex.quote(cwd or "")) if resume.get(agent) else ""})
+                    "resume": resume_hint(resume.get(agent, ""), sid, cwd)})
     if info:
         sys.path.insert(0, str(HERE))  # python -I drops the script dir
         import where as _where
@@ -286,6 +301,15 @@ def main() -> int:
             if not r["live"] and r["resume"]:
                 print(f"    resume: {r['resume']}")
     return 0 if out else 1
+
+
+def main() -> int:
+    """_main, but any crash exits 2 with one line: exit 1 means "no hits" to callers (session-find --all)."""
+    try:
+        return _main()
+    except (sqlite3.Error, OSError) as e:
+        print(f"session-history: {type(e).__name__}: {e} (try --check, or --rebuild)", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
