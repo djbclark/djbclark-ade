@@ -658,6 +658,72 @@ def _classify_starts(text: str) -> tuple[int, int]:
     return unclosed, wrongform
 
 
+def _marker_tokens(text: str):
+    """Lex recovery text without interpreting string contents as structure."""
+    i = 0
+    while i < len(text):
+        if text[i].isspace():
+            i += 1
+            continue
+        start = i
+        if text[i] == '"':
+            i += 1
+            while i < len(text):
+                if text[i] == "\\":
+                    i += 2
+                elif text[i] == '"':
+                    i += 1
+                    break
+                else:
+                    i += 1
+            try:
+                value = json.loads(text[start:i])
+            except ValueError:
+                value = None
+            yield "string", value, start
+        elif text[i] in "{}[]:,":
+            i += 1
+            yield text[start], None, start
+        else:
+            i += 1
+            while i < len(text) and not text[i].isspace() and text[i] not in '{}[]:,"':
+                i += 1
+            yield "other", None, start
+
+
+def _top_level_marker_fields(text: str) -> list[tuple[str, str]]:
+    """Recover string pairs at object depth one, even with duplicate keys or trailing commas.
+
+    Nested containers and string values never provide marker fields. This is lexical
+    recovery, not JSON repair; strict parsing still decides validity and approval.
+    """
+    tokens = list(_marker_tokens(text))
+    if not tokens or tokens[0][0] != "{":
+        return []
+    fields = []
+    stack = []
+    i = 0
+    while i < len(tokens):
+        kind, value, _ = tokens[i]
+        if kind in ("{", "["):
+            stack.append(kind)
+        elif kind in ("}", "]"):
+            if not stack or stack[-1] != {"}": "{", "]": "["}[kind]:
+                break  # uncertain depth cannot supply a top-level field
+            stack.pop()
+            if not stack:
+                break
+        elif (stack == ["{"] and kind == "string" and i + 2 < len(tokens)
+              and tokens[i + 1][0] == ":" and tokens[i + 2][0] == "string"):
+            other = tokens[i + 2][1]
+            if isinstance(value, str) and isinstance(other, str):
+                fields.append((value, other))
+            i += 3  # consume the value too: a string value cannot become another key
+            continue
+        i += 1
+    return fields
+
+
 def adversary_verdict(body: str, head: str) -> dict:
     """Read the adversary verdict marker from a PR body and decide whether it names this head.
 
@@ -771,7 +837,9 @@ def adversary_verdict(body: str, head: str) -> dict:
         # Discover the payload only inside this comment. Once JSON starts,
         # the existing JSON-aware scanner keeps delimiters in strings as content.
         comment_end = body.find("-->", match.end())
-        js = body.find("{", match.end(), comment_end if comment_end >= 0 else len(body))
+        payload = body[match.end():comment_end if comment_end >= 0 else len(body)]
+        container = next((token for token in _marker_tokens(payload) if token[0] in ("{", "[")), None)
+        js = match.end() + container[2] if container and container[0] == "{" else -1
         next_start = body.find("<!--", match.end())
         if js < 0:
             continue
@@ -783,33 +851,15 @@ def adversary_verdict(body: str, head: str) -> dict:
             close = body.find("-->", js)
             je = close if close >= 0 else len(body)
         candidate = body[js:je]
-        if not re.search(r'"verdict"\s*:\s*"block"', candidate, re.I):
+        fields = _top_level_marker_fields(candidate)
+        if not any(key == "verdict" and value.upper() == "BLOCK" for key, value in fields):
             continue
-        # Even an invalid six-hex abbreviation is a recognizable typo here;
-        # refuse it conservatively, never treat it as a valid abbreviated verdict.
-        # Revision mentions in a note cannot identify the BLOCK's head. Read
-        # every head field independently so duplicate keys cannot hide this head.
-        try:
-            fields = json.loads(candidate, object_pairs_hook=lambda pairs: pairs)
-        except ValueError:
-            fields = None
-        if isinstance(fields, list) and all(isinstance(pair, tuple) and len(pair) == 2 for pair in fields):
-            # Preserve duplicate top-level keys without mistaking nested metadata for fields.
-            if not any(key == "verdict" and isinstance(value, str) and value.upper() == "BLOCK"
-                       for key, value in fields):
-                continue
-            quoted_heads = [value for key, value in fields if key == "head" and isinstance(value, str)]
-        else:
-            head_fields = re.finditer(r'"head"\s*:\s*("(?:[^"\\]|\\.)*")', candidate)
-            quoted_heads = []
-            for field in head_fields:
-                try:
-                    quoted_heads.append(json.loads(field.group(1)))
-                except ValueError:
-                    continue
-        runs = (run for value in quoted_heads for run in
-                re.finditer(r"(?<![0-9a-f])[0-9a-f]{6,40}(?![0-9a-f])", value, re.I))
-        if not any(head.lower().startswith(run.group().lower()) for run in runs):
+        quoted_heads = [value for key, value in fields if key == "head"]
+        # Preserve duplicate keys and conservative decorated/six-hex typo handling,
+        # but only actual top-level head fields can name the reviewed revision.
+        heads = (re.fullmatch(r"(?:sha\s+)?([0-9a-f]{6,40})(?:…|\.\.\.)?", value.strip(), re.I)
+                 for value in quoted_heads)
+        if not any(token and head.lower().startswith(token.group(1).lower()) for token in heads):
             continue
         try:
             doc = json.loads(candidate, object_pairs_hook=_strict_object)

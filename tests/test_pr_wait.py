@@ -2656,3 +2656,51 @@ def test_quoted_marker_start_does_not_hide_real_block_after_valid_marker():
     body = '<!-- adversary-verdict:v1 ' + json.dumps(doc) + ' -->\n' + marker("BLOCK")
     assert adv(body)["verdict"] == "BLOCK"
     assert gate(body)[0] is False
+
+
+@pytest.mark.parametrize("shape", ["object", "array", "string", "pairs_array", "root_array"])
+@pytest.mark.parametrize("field", ["head", "verdict"])
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("context", ["live", "fenced", "inline"])
+def test_nested_fields_never_supply_a_marker_verdict(shape, field, malformed, context):
+    nested = {"verdict": "BLOCK", "head": ADV_HEAD}
+    extra = {"object": nested, "array": [nested], "string": json.dumps(nested),
+             "pairs_array": list(nested.items()), "root_array": [nested]}[shape]
+    doc = {"verdict": "BLOCK" if field == "head" else "APPROVE",
+           "head": OTHER_HEAD if field == "head" else ADV_HEAD, "example": extra}
+    payload = json.dumps(extra if shape == "root_array" else doc)
+    if malformed:
+        payload = payload[:-1] + "," + payload[-1]
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    if context == "fenced": candidate = "\n```\n" + candidate + "\n```"
+    elif context == "inline": candidate = "\n`" + candidate + "`"
+    body = marker("APPROVE") + "\n" + candidate
+    result = adv(body)
+    if context == "live" and (malformed or shape == "root_array"):
+        assert result["malformed"] and not gate(body, required=False)[0]
+    else:
+        assert result["verdict"] == "APPROVE" and not result["malformed"]
+        assert gate(body, required=False)[0]
+
+
+@pytest.mark.parametrize("shape", ["object", "array", "string", "pairs_array"])
+@pytest.mark.parametrize("field", ["head", "verdict"])
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("context", ["live", "fenced", "inline"])
+def test_structured_marker_field_values_are_never_promoted(shape, field, malformed, context):
+    nested = {"verdict": "BLOCK", "head": ADV_HEAD}
+    value = {"object": nested, "array": [nested], "string": json.dumps(nested),
+             "pairs_array": list(nested.items())}[shape]
+    doc = {"verdict": "BLOCK", "head": ADV_HEAD, field: value}
+    payload = json.dumps(doc)
+    if malformed: payload = payload[:-1] + ",}"
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    if context == "fenced": candidate = "\n```\n" + candidate + "\n```"
+    elif context == "inline": candidate = "\n`" + candidate + "`"
+    body = marker("APPROVE") + "\n" + candidate
+    result = adv(body)
+    if context == "live":
+        assert result["malformed"] and not gate(body, required=False)[0]
+    else:
+        assert result["verdict"] == "APPROVE" and not result["malformed"]
+        assert gate(body, required=False)[0]
