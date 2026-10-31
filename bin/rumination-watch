@@ -1334,8 +1334,8 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None, expe
                       and error.get("code") == "AGENT_NOT_FOUND")
             if absent or (rc == 0 and isinstance(info, dict) and info.get("Id") == candidate):
                 del told[unresolved_key]
-                if absent:
-                    told.pop(f"auto-seat candidate:{ROLE}:{candidate}", None)
+                # Keep the id even when absent: without a registered owner, the next pass
+                # needs this handle for its own fresh diagnosis. Reconciliation is not a start.
                 save_state(state)
                 log(f"auto-seat: reconciled retained id {candidate}")
                 # A fresh pass diagnoses the role; reconciliation alone never licenses a start.

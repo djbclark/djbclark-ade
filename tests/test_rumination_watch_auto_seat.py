@@ -1377,3 +1377,37 @@ def test_live_successor_preserves_unresolved_id_until_reconciled(monkeypatch, tm
     run_pass(rw)
     assert rw.auto_seat_candidate(rw.load_state()) == ""
     assert starts(rw) == 1
+
+
+@pytest.mark.parametrize("next_word", ["gone", "idle", "error"])
+def test_absent_reconciled_candidate_survives_for_fresh_diagnosis(monkeypatch, tmp_path, next_word):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    assert starts(rw) == 1
+    monkeypatch.setattr(rw, "owner_session", lambda: ("", "no registered owner"))
+    monkeypatch.setattr(rw, "owner_candidates", lambda: iter(()))
+    original = rw.run_split
+    def absent(argv, timeout=20):
+        if argv[:3] == ["paseo", "agent", "inspect"]:
+            return 1, json.dumps({"error": {"code": "AGENT_NOT_FOUND"}}), ""
+        return original(argv, timeout)
+    monkeypatch.setattr(rw, "run_split", absent)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert rw.auto_seat_candidate(rw.load_state()) == NEW
+    assert starts(rw) == 1, "reconciliation must never start in the same pass"
+    diagnosed = []
+    monkeypatch.setattr(rw, "why_blocked", lambda ident:
+                        (diagnosed.append(ident) or next_word, "fresh diagnosis"))
+    monkeypatch.setattr(rw, "run_split", original)
+    rw.confirm = True
+    run_pass(rw)
+    assert diagnosed == [NEW]
+    assert starts(rw) == 1, "attempt window still applies"
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    run_pass(rw)
+    assert diagnosed[-1] == NEW
+    assert starts(rw) == (2 if next_word == "gone" else 1)
+    run_pass(rw)
+    assert starts(rw) == (2 if next_word == "gone" else 1), "no extra start on another pass"
