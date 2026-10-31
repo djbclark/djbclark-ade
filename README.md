@@ -375,3 +375,8 @@ A live heterogeneous macro-graph dispatch has also completed: one claude
 worker plus one codex worker under a single Run, both tasks settled
 `completed`, with failure/recovery lessons recorded in
 [`docs/orca-integration.md`](docs/orca-integration.md).
+
+Adversary markers read by `bin/pr-wait` (2026-10-30): JSON notes may contain Markdown backticks
+when the JSON as written is valid. Malformed same-head BLOCK markers in code fail closed, including
+near-miss version spelling, duplicate keys, decorated heads and trailing text. APPROVE still requires
+a live canonical marker with valid JSON and the full head.

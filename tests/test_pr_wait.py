@@ -2556,3 +2556,42 @@ def test_local_codex_retries_while_the_bot_comments_cannot_be_read(world: World)
     world.route(f"repos/{REPO}/issues/{PR}/comments", fail("gh: boom"))
     r = world.run("--local-codex", "--json", "--timeout", "3")
     assert r.returncode != 0 or json.loads(r.stdout)["merge_ready"] is False
+
+
+def test_approve_note_backticks_are_json_content():
+    body = '<!-- adversary-verdict:v1 ' + json.dumps({"verdict": "APPROVE", "head": ADV_HEAD, "note": "fixed `x`"}) + ' -->'
+    assert adv(body)["malformed"] is False
+    assert gate(body)[0] is True
+
+
+@pytest.mark.parametrize("broken", [
+    marker("BLOCK").replace('} -->', '} round2 -->'),
+    marker("BLOCK").replace('{', '{"head":"' + ADV_HEAD + '",'),
+    marker("BLOCK").replace(ADV_HEAD, 'sha ' + ADV_HEAD),
+    marker("BLOCK").replace(':v1', ':V1'),
+    marker("BLOCK").replace(':v1', ': v1'),
+    marker("BLOCK").replace('BLOCK', 'block'),
+    marker("BLOCK").replace(ADV_HEAD, ADV_HEAD[:6]),
+])
+def test_typo_block_in_code_cannot_hide(broken):
+    body = marker("APPROVE") + '\n```\n' + broken + '\n```'
+    assert adv(body)["verdict"] == "BLOCK"
+    assert adv(body)["malformed"] is True
+    assert gate(body, required=False)[0] is False
+
+
+def test_null_code_review_contradicted_by_resolved_this_head_finding(world):
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", explicit_null=True)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([finding(91, "2026-10-23T10:00:00Z", original=HEAD)]))
+    world.route("graphql", gql(thread(91, resolved=True, oid=HEAD)))
+    world.run()
+    assert world.file("summary")["merge_blockers"] == ["marker-unverified"]
+
+
+def test_null_security_review_checks_review_id_anchor(world):
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(92, pull_request_review_id=777)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/reviews", ok([{"id": 777, "commit_id": HEAD}]))
+    world.route("graphql", gql(thread(92, resolved=True)))
+    world.run()
+    assert world.file("summary")["merge_blockers"] == ["security-marker-unverified"]

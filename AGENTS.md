@@ -234,7 +234,9 @@ pull request here is expected to meet these; flag any it misses.
       cannot "repair" JSON nobody wrote.
 
    Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
-   is the head merged.
+   is the head merged. Remove the worktree and delete the branch only after `gh pr view N --json state`
+   reads `MERGED`, never chained after the merge with `;`: a refused merge (a conflict, a moved head)
+   followed by deleting the head branch closes the PR (PR 172, 2026-10-31).
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper and `bin/pytest`

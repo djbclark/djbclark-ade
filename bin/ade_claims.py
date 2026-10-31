@@ -1593,7 +1593,15 @@ def _acp_run_guard_path() -> str:
 
 
 def _acp_run_pair(k: str, v: str) -> bool:
-    return (k, v) == ACP_RUN_IDENTITY_EVENT or (k == ACP_RUN_IDENTITY_COMMAND_KEY and os.path.realpath(v) == _acp_run_guard_path())
+    if (k, v) == ACP_RUN_IDENTITY_EVENT:
+        return True
+    if k != ACP_RUN_IDENTITY_COMMAND_KEY:
+        return False
+    try:
+        argv = shlex.split(v)
+    except ValueError:
+        return False
+    return len(argv) == 1 and os.path.realpath(argv[0]) == _acp_run_guard_path()
 
 
 def _unexempted_config(call: GitCall, env: dict[str, str]) -> list[tuple[str, str]]:
