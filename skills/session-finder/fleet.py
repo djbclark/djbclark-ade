@@ -1532,6 +1532,13 @@ def sender_row(ss):
         """Which SESSION is the caller comes first (the nearest process of ours: an outer Claude that started this Codex is
         not the caller, review F1 2026-10-30); how it proves an ack only breaks a tie between rows of that same process."""
         d = row_depth(x)
+        if d is None and x.get("transcript") and x.get("sid") and x["sid"] == os.environ.get("CLAUDE_CODE_SESSION_ID"):
+            # The registry's pid for this session is no ancestor of ours (a wrapper or exec'd launcher), but its session id IS the one
+            # exported to this process: the session of the nearest same-agent process-scan row that names no Paseo agent and no
+            # transcript, so that the old `pid*` sender (`ack pidNNNN`, 2026-10-29) does not come back (PR 173 adversary B5).
+            near = [n for y in selfs if y is not x and not y.get("transcript") and not y.get("paseo") and y.get("agent") == x.get("agent")
+                    for n in [row_depth(y)] if n is not None]
+            d = min(near) if near else None
         if d is None:
             return (1 if x.get("transcript") else 0, 0, 0)    # a claim on no process of ours: only when nothing better exists
         return (2, -d, 2 if x.get("transcript") else 1 if x.get("paseo") else 0)    # nearest process; at one depth, the row that can prove the ack

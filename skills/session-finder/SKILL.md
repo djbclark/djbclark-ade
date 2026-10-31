@@ -124,7 +124,7 @@ working, silent (running, nothing new for 15 min: hung or one long tool call), c
 hard stop: the caller's own session, a finished one); a
 disagreement between the methods is reported and the blocking reading wins. `--pending` shows each queued record's latest reason as `[why: ...]`. **Two
 witnesses for delivery (2026-10-29):** a Paseo target's transcript AND its own timeline (`paseo logs`), either proves, so codex, omp, opencode and cline
-Paseo agents are "delivered", not "unverified"; `--sweep` reads a transcript-less sender's own timeline for `ack ID`. A record
+Paseo agents are "delivered", not "unverified"; the timeline is a delivery witness only and never closes an ack (2026-10-30: it is rendered text, so a message body can fake an entry): a transcript-less sender's `--expect-ack` and first-contact link close only when the target answers through relay.py (`ack ID`, or `ack <sender id>` for a first contact) and that answer is delivered or goes to a route that keeps it, including an answer relay queued for a busy Paseo recipient. A record
 `sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
 the notice say "unverified", never "delivered". `--idle S`
 still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at
