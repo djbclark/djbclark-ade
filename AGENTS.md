@@ -110,6 +110,16 @@ Each doc carries its own summary.
    (`--via`) when none arrives. The first message to a new peer always asks for an ack, to prove the return path. A peer you cannot reach is reported to the operator,
    never assumed read. Checklist for the queue: `docs/queue.md`, "Verified peer messaging".
 
+11. **djbclark-ade is the lead's project; ask before changing code anywhere else** (operator, 2026-10-30: "You should ask me before you make changes to any code not
+   in your project, which is djbclark-ade."). The lead of this repo edits, commits and pushes in djbclark-ade (and its worktrees and pastures) on its own judgment
+   under the orders above; agents it dispatches here act under the same grant, and ask through the lead for anything outside it. Changing **code or configuration** in
+   another repository (`~/ops/*`, `sipb-agent-skills`, forgejo projects, third-party forks) or in installed files outside a repository (`~/.local/bin` scripts,
+   dotfiles, live plugin or service settings) waits for the operator's explicit yes for that change. Clarified by the operator the same day: (a) installing or
+   relinking djbclark-ade's own artifacts by their normal path (`skill-everywhere`, `ade update`) is part of this project; (b) memory notes and instruction-file
+   upkeep keep the standing permission `~/AGENTS.md` gives them; (c) once a change to someone else's fork is approved, filing it upstream (order 8) is covered by
+   that yes. Order 9 says how a permitted change is made; this order says whether it may be. Reading, reviewing and reporting on code elsewhere needs no
+   permission; a fix found there is reported as a proposal, not applied.
+
 ## Machine context
 
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
