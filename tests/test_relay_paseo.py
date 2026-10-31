@@ -686,6 +686,25 @@ class RelayPaseo(unittest.TestCase):
             paseo = {"id": "dddddddd", "sid": None, "name": "peer", "host": "paseo", "paseo": AGENT}
             self.assertEqual(relay.resolve_acks(paseo, asker, "ack cccccccc"), 1)    # a Paseo agent id is never reused
 
+    def test_a_new_occupants_early_ack_replaces_the_dead_occupants_record_and_survives_the_askers_bookkeeping(self) -> None:
+        """Codex P2 on PR 173 (adversary r4 D1): a reused pane's OLD link (another session id) sits under the key, so `link_get` is None for the new
+        occupant (its first contact carries a footer) and the early answer must still be recorded, over that record, and kept by `note_links_and_expect`."""
+        asker = {"id": "cccccccc", "sid": "", "name": "me", "transcript": None, "paseo": CALLER}
+        bob = {"id": "w9:p3", "sid": "bob-session-1111", "name": "bob", "host": "claude"}
+        old = time.time() - 3600
+        key = relay.fleet.link_key("cccccccc", "w9:p3")
+        links = Path(self.tmp.name) / "links.json"
+        relay.atomic_json(links, {"links": {key: {"sender": "cccccccc", "target": "w9:p3", "sent": 3, "acked": old, "tx": "", "target_sid": "alice-session-0000",
+                                                  "sender_sid": "", "first_sent": old, "last_sent": old}}})
+        with mock.patch.object(relay.fleet, "LINKS_FILE", links):
+            self.assertIsNone(relay.fleet.link_get(relay.fleet.links_read()["links"], asker, bob))    # a first contact for bob: the footer asks
+            self.assertEqual(relay.resolve_acks(bob, asker, "ack cccccccc"), 1)
+            with mock.patch.dict(relay.CTX, {"me": asker, "s": bob, "mark": 0}, clear=True):
+                relay.note_links_and_expect()    # the asker's send returns
+            ln = relay.fleet.links_read()["links"][key]
+        self.assertEqual((ln["target_sid"], ln["sent"]), ("bob-session-1111", 1))
+        self.assertGreater(ln["acked"], old)    # bob's own answer, not alice's hour-old one
+
     def test_resolve_acks_leaves_a_transcript_backed_link_to_its_transcript(self) -> None:
         with mock.patch.object(relay.fleet, "LINKS_FILE", self.link(tx="/tmp/x.jsonl")):
             self.assertEqual(relay.resolve_acks({"id": "dddddddd", "sid": ""}, {"id": "cccccccc", "sid": ""}, "ack cccccccc"), 0)

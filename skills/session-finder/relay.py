@@ -3643,7 +3643,7 @@ def resolve_acks(me, s, text):
                 ln["acked"] = now
                 atomic_json(fleet.LINKS_FILE, data)
                 n += 1
-            elif (ln is None and fleet.link_key(s["id"], me["id"]) not in data["links"] and not s.get("transcript")
+            elif (ln is None and not s.get("transcript")    # ln None: no record, a malformed one, or a DEAD occupant's (another sid): this caller's own record replaces it (Codex P2, adversary r4 D1)
                     and (me.get("sid") or me.get("host") == "paseo" or me.get("paseo"))):    # an id nobody reuses: a sid-less pane row's id is the NEXT occupant's too (Codex P2, adversary D1)
                 # The answer came while S's own run was still sending: `main` writes the link only after the send and its watch return, so there is
                 # none yet to close (adversary PR 173 C1, Codex P2). Record it already acked; `note_links_and_expect` finds it and keeps `acked`.
