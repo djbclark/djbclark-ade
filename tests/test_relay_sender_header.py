@@ -350,7 +350,7 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
             self.assertIsNone(row.get("paseo"))
 
     def test_a_transcript_row_wins_over_the_pid_row_fleet_lists_first(self) -> None:
-        row = sess(id="cccccccc", agent="claude", name="alice", transcript="/tmp/me.jsonl", **{"self": True})
+        row = sess(id="cccccccc", agent="claude", name="alice", transcript="/tmp/me.jsonl", pid=19798, **{"self": True})    # the same process as the pid row
         self.assertEqual(relay.sender_row([self.pid_row(), row])["id"], "cccccccc")
 
     def test_a_lone_pid_row_is_still_the_sender(self) -> None:
@@ -379,12 +379,36 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         self.assertEqual(relay.sender_row([both, plain])["id"], "bbbbbbbb")
         self.assertEqual(relay.sender_row([both, plain])["paseo"], PASEO_AGENT)
 
-    def test_a_transcript_row_still_beats_a_hosted_paseo_row(self) -> None:
-        """The transcript is the first vote and only an id proves the second, so the order between the two kinds is
-        unchanged by the tie rule above."""
-        tx = sess(id="cccccccc", agent="claude", transcript="/tmp/me.jsonl", **{"self": True})
+    def test_a_transcript_row_still_beats_a_hosted_paseo_row_of_the_same_process(self) -> None:
+        """At one depth the two rows stand for the same process, so the proof breaks the tie: the transcript is the first vote and
+        only an id proves the second."""
+        tx = sess(id="cccccccc", agent="claude", transcript="/tmp/me.jsonl", pid=19798, **{"self": True})
         self.assertEqual(relay.sender_row([self.paseo_row(), tx])["id"], "cccccccc")
         self.assertEqual(relay.sender_row([tx, self.paseo_row()])["id"], "cccccccc")
+
+    def test_a_nearer_process_is_the_sender_even_when_an_outer_session_holds_a_transcript(self) -> None:
+        """Review F1, 2026-10-30: an outer Claude (pid 4242, transcript) started this Codex (pid 5150). The caller is the Codex, so a
+        reply, its footer and the retirement self-check must name it: a transcript no longer outranks the process that runs relay."""
+        self.anc = [5150, 4242, 38148]
+        outer = sess(id="outer123", agent="claude", transcript="/tmp/outer.jsonl", pid=4242, **{"self": True})
+        inner = sess(id="pid5150", agent="codex", host="terminal", pid=5150, cwd="/work/here",
+                     reach="no channel: use its focus command", **{"self": True})
+        for rows in ([outer, inner], [inner, outer]):
+            self.assertEqual(relay.sender_row(rows)["id"], "pid5150", [r["id"] for r in rows])
+
+    def test_two_transcript_rows_are_told_apart_by_process_depth_not_fleets_order(self) -> None:
+        """An outer Claude (pid 4242) started this inner Claude (pid 5150): both hold a transcript, and the nearer one is the caller."""
+        self.anc = [5150, 4242, 38148]
+        outer = sess(id="outer123", agent="claude", transcript="/tmp/outer.jsonl", pid=4242, **{"self": True})
+        inner = sess(id="inner456", agent="claude", transcript="/tmp/inner.jsonl", pid=5150, **{"self": True})
+        for rows in ([outer, inner], [inner, outer]):
+            self.assertEqual(relay.sender_row(rows)["id"], "inner456", [r["id"] for r in rows])
+
+    def test_a_transcript_row_that_claims_no_process_of_ours_loses_to_one_that_does(self) -> None:
+        """A Claude row marked `self` only by an inherited CLAUDE_CODE_SESSION_ID (a pid that is no ancestor) is no process of ours."""
+        stamped = sess(id="stamped12", agent="claude", transcript="/tmp/s.jsonl", pid=999999, **{"self": True})
+        for rows in ([stamped, self.pid_row()], [self.pid_row(), stamped]):
+            self.assertEqual(relay.sender_row(rows)["id"], "pid19798", [r["id"] for r in rows])
 
     def test_the_note_is_silent_when_a_transcript_or_a_readable_timeline_can_prove_the_ack(self) -> None:
         self.assertIsNone(relay.ack_proof_note({"transcript": "/tmp/me.jsonl"}, "build1", None))

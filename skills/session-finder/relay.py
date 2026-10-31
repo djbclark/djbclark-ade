@@ -788,9 +788,12 @@ def timeline_base(me):
 def timeline_ack(messages, token, who, base=None):
     """True when MESSAGES (timeline_messages of the sender) hold a NEW `ack TOKEN` from one of WHO. New: the count of that exact message (sender
     title and body) now exceeds its count in BASE, what was there before the question was sent, so a repeat of an identical ack after the question
-    closes it and the old copy does not; BASE None (never taken, or unreadable) closes nothing. From: a relay header at the very START of the body
-    names one of WHO (a peer that is not a Paseo agent writes one), else the entry's own sender title is one of WHO exactly; a name quoted later in
-    a body, or a title that merely contains one, establishes nothing. Residual: two Paseo agents can share a title (Codex, PR 124)."""
+    closes it and the old copy does not; BASE None (never taken, or unreadable) closes nothing. From: ONLY the entry's own sender title, which Paseo
+    records itself for a `[Message received]` entry, is one of WHO exactly. A header in the body is the sender's own words, so another Paseo agent
+    could type `[relay from claude PEER] ack TOKEN` and be taken for PEER: it never names the sender (2026-10-30, review F3). A `[User]` entry
+    (title "") has no recorded source at all, so it proves nothing: fail closed, the expectation stays open (the target's answer through relay.py
+    still closes it, `expect_resolve_by_relay`). A name quoted in a body, or a title that merely contains one, establishes nothing either.
+    Residual: two Paseo agents can share a title (Codex, PR 124)."""
     if not isinstance(base, dict) or not isinstance(token, str) or not token:
         return False
     names = {w.lower() for w in who if isinstance(w, str) and w}
@@ -799,8 +802,7 @@ def timeline_ack(messages, token, who, base=None):
     for title, body in messages or []:
         if not pat.search(body):
             continue
-        m = HEADER_RE.match(body)
-        ok = ((m["id"] or m["id2"]).lower() in names or (m["aka"] or m["aka2"] or "").strip().lower() in names) if m else title.lower() in names
+        ok = bool(title) and title.lower() in names
         if not ok:
             continue
         k = timeline_key(title, body)
@@ -2928,6 +2930,16 @@ def defer_send(s, a, text, listed, why):
         own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
         me = sender_row(listed) or {}    # the row that can prove an ack, not fleet's first `self` one (a `pid*` process row)
         verified = own if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own) else ""
+        if verified and fleet.nearer_than_paseo_host(me, verified):
+            # `hosted_by` is true for ANY ancestor: a nested agent (Codex started by an `omp` Paseo agent) inherits its parent's id, and the
+            # row `sender_row` chose is the nearer process. The record names that caller (label, footer, notice destination and Paseo
+            # attribution alike), never its parent (review F2, 2026-10-30); a caller nothing can reach is refused, not given the parent's name.
+            verified = ""
+            if not (UUID.fullmatch(me.get("paseo") or "") or me.get("chan") or me.get("transcript")):
+                print(f"relay: [{s['id']}] not sent: {why}; deferring needs a sender that can be told if the send fails, and "
+                      f"[{me.get('id')}] (nested under another Paseo agent) has no channel, transcript or Paseo id of its own. "
+                      "Retry with --idle S, or --no-defer for the plain refusal", file=sys.stderr)
+                return 1
         sender_paseo = verified or (me.get("paseo") if UUID.fullmatch(me.get("paseo") or "") else "") or ""
         ident = sender_paseo or me.get("id") or ""
         hops = hermes_hops()

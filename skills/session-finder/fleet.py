@@ -1486,25 +1486,25 @@ def sender_row(ss):
     `--expect-ack` could never close (nothing watches a pid: `--ack` wants a transcript, `timeline_ack` a Paseo id) and its
     footer told a peer to `ack pidNNNN` (live 2026-10-29, an Antigravity agent).
 
-    Preference, in this order: a transcript (only `--ack` can prove it, and it names a session rather than an ancestor);
-    then the NEAREST process of ours, counting a Paseo row as the process PASEO LAUNCHED for that agent
-    (`_paseo_hosting_pids`) and any other row as its own `pid`, against `ancestry()` (nearest first); at one depth, the
-    row that can prove the ack. Two consequences this rule exists for: an inherited or exported `PASEO_AGENT_ID` marks a
+    Preference, in this order: the NEAREST process of ours, counting a Paseo row as the process PASEO LAUNCHED for that
+    agent (`_paseo_hosting_pids`), a transcript row as its own `pid` and any other row as its own `pid`, against
+    `ancestry()` (nearest first); at one depth (rows that stand for the same process), the row that can prove the ack: a
+    transcript (`--ack` watches it), then a Paseo id (`timeline_ack`), then neither. The depth comes first because the
+    caller's identity decides who an answer goes to, and an outer Claude that started this Codex is not the caller
+    (review F1, 2026-10-30; the first version let any transcript outrank any depth, so a reply, its footer and the retirement
+    self-check named the parent). Two consequences this rule exists for: an inherited or exported `PASEO_AGENT_ID` marks a
     row `self` on its own (`_paseo_rows`: `pid == me or pid in hosting`) and claims no process of ours, so it cannot beat
-    a row that does while one competes (adversary B1; rows that all claim none tie and keep fleet's order, and a lone
-    `self` row never reaches this rule); and a Paseo agent that started ANOTHER agent (`omp` running `codex`) is an
-    ancestor of this process, so its row is `self` too — naming it would substitute the parent's identity for the
-    caller's and route replies to the wrong session, while the nested agent's own row is nearer (local review of
-    2026-10-30). A transcript still outranks any depth, so an outer Paseo Claude that holds one is named. A row fleet scans for the very process Paseo launched is at that same depth as its Paseo row,
-    so the Paseo row wins there and the old `pid*` sender cannot come back.
+    a row that does while one competes (adversary B1; rows that all claim none tie and keep fleet's order, a transcript row
+    that claims none ahead of the rest, and a lone `self` row never reaches this rule); and a Paseo agent that started
+    ANOTHER agent (`omp` running `codex`) is an ancestor of this process, so its row is `self` too — naming it would
+    substitute the parent's identity for the caller's and route replies to the wrong session, while the nested agent's own
+    row is nearer (local review of 2026-10-30). A row fleet scans for the very process Paseo launched is at that same depth
+    as its Paseo row, so the Paseo row wins there and the old `pid*` sender cannot come back.
 
     A transcript-backed row gets no second vote for also carrying a Paseo id: `_claude_sessions` gives a daemon-spawned
     Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), but a transcript already proves the ack and neither
-    `ack_proof_note` nor `timeline_base` uses that id to prove an ack for a transcript row (`timeline_base` reads it
-    at relay.py:775, then returns None on a transcript at 776), so it adds nothing to the proof and two
-    transcript rows keep fleet's order instead of one jumping ahead on it (adversary 4 F1, 2026-10-30; that tie is item 9
-    (c) of `docs/queue.md`, to be broken by ancestry depth in a later PR). Exact ties keep fleet's order (`max` returns
-    the first of equal keys)."""
+    `ack_proof_note` nor `timeline_base` uses that id to prove an ack for a transcript row, so it adds nothing to the proof
+    (adversary 4 F1, 2026-10-30). Exact ties keep fleet's order (`max` returns the first of equal keys)."""
     selfs = [x for x in ss if isinstance(x, dict) and x.get("self")]
     if len(selfs) < 2:
         return selfs[0] if selfs else None
@@ -1520,22 +1520,40 @@ def sender_row(ss):
 
     def row_depth(x):
         """The row's process as seen from here: 0 for this process's direct parent, larger further up, None when the row
-        stands for no process of ours (an id an inherited `PASEO_AGENT_ID` merely stamps on it)."""
-        pid = hosting().get(x["paseo"]) if x.get("paseo") else x.get("pid")
+        stands for no process of ours (an id an inherited `PASEO_AGENT_ID` merely stamps on it). A transcript row is placed by
+        its own `pid` (a daemon-spawned Claude also carries a Paseo id, which is no second process)."""
+        pid = hosting().get(x["paseo"]) if x.get("paseo") and not x.get("transcript") else x.get("pid")
         try:
             return depth.get(int(pid))
         except (TypeError, ValueError):
             return None
 
     def key(x):
-        if x.get("transcript"):
-            return (3, 0, 0)                       # `--ack` watches it: never traded for a nearer process
+        """Which SESSION is the caller comes first (the nearest process of ours: an outer Claude that started this Codex is
+        not the caller, review F1 2026-10-30); how it proves an ack only breaks a tie between rows of that same process."""
         d = row_depth(x)
         if d is None:
-            return (0, 0, 0)                       # a claim on no process of ours: only when nothing better exists
-        return (2, -d, 2 if x.get("paseo") else 0)  # nearest process; at one depth, the row that can prove the ack
+            return (1 if x.get("transcript") else 0, 0, 0)    # a claim on no process of ours: only when nothing better exists
+        return (2, -d, 2 if x.get("transcript") else 1 if x.get("paseo") else 0)    # nearest process; at one depth, the row that can prove the ack
 
     return max(selfs, key=key)
+
+
+def nearer_than_paseo_host(row, agent_id):
+    """True when ROW (a `self` row) stands for a process of ours strictly NEARER than the one Paseo launched for AGENT_ID: a
+    nested agent (Codex started by an `omp` Paseo agent) that inherited the parent's `PASEO_AGENT_ID`. False for the row of
+    AGENT_ID itself, or when either depth is unknown."""
+    if not isinstance(row, dict) or row.get("paseo") == agent_id:
+        return False
+    anc = ancestry()
+    depth = {pid: i for i, pid in enumerate(anc)}
+    hosting = _paseo_hosting_pids(anc)
+    try:
+        own = hosting.get(row["paseo"]) if row.get("paseo") and not row.get("transcript") else row.get("pid")
+        mine, host = depth.get(int(own)), depth.get(int(hosting.get(agent_id)))
+    except (TypeError, ValueError):
+        return False
+    return mine is not None and host is not None and mine < host
 
 
 def annotate_links(ss):

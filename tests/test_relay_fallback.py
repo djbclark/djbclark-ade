@@ -3314,6 +3314,37 @@ class TestDeferredSend(Harness):
         rec = relay.rec_read(self.queue("hosted"))
         self.assertEqual((rec["sender_paseo"], rec["sender_ident"]), (SENDER, SENDER))
 
+    def nest_under_sender(self, inner: dict[str, Any]) -> None:
+        """A nested agent: this process runs under INNER (pid 5150), which the Paseo agent SENDER (hosted as pid 4242) started, and it
+        inherited SENDER's PASEO_AGENT_ID. `hosted_by(SENDER)` is true (an ancestor hosts it), as in life."""
+        outer = dict(self.sender, self=True)
+        relay.fleet.sessions = lambda: [*(dict(r, self=False) for r in self.rows if r is not self.sender), outer, dict(inner, self=True)]
+        for patcher in (mock.patch.object(relay.fleet, "ancestry", lambda: [5150, 4242]),
+                        mock.patch.object(relay.fleet, "_paseo_hosting_pids", lambda anc: {SENDER: 4242})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.as_agent(SENDER)
+        relay.hosted_by = lambda a: a == SENDER
+
+    def test_a_nested_agent_that_inherited_its_parents_paseo_id_is_queued_as_itself_not_as_the_parent(self) -> None:
+        """Review F2, 2026-10-30: `fleet.sender_row` picks the nearer process, but `hosted_by` is true for any ancestor, so the queued
+        record took the PARENT's Paseo id as sender and notice destination, and the deliverer sent as the parent."""
+        inner = sess(id="eeee5150", name="inner", agent="claude", transcript=str(self.tmp / "inner.jsonl"), pid=5150)
+        self.nest_under_sender(inner)
+        rec = relay.rec_read(self.queue("hosted"))
+        self.assertEqual((rec["sender_paseo"], rec["sender_ident"]), ("", "eeee5150"))
+        self.assertNotEqual(rec["sender_ident"], SENDER)
+        self.cur = "idle"
+        self.deliver_in(self.deliverer_env_of(dict(os.environ)), rec["id"])
+        self.assertEqual(self.sent_as, [None])    # the deliverer attributes the send to no Paseo agent, least of all the parent
+
+    def test_a_nested_agent_nothing_can_reach_is_refused_rather_than_given_its_parents_identity(self) -> None:
+        inner = sess(id="pid5150", name="", agent="codex", host="terminal", pid=5150, chan=None, reach="no channel: use its focus command")
+        self.nest_under_sender(inner)
+        rc, out, err = self.go()
+        self.assertEqual((rc, relay.rec_all()), (1, []), (out, err))
+        self.assertIn("nested under another Paseo agent", err)
+
     # ---- the failure notice -------------------------------------------------------------------------------------
 
     def test_a_vanished_or_archived_target_fails_the_message_and_tells_the_sender_once(self) -> None:
