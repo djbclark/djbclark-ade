@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""codexbar-cpu-watch: find out what makes CodexBar spike the CPU (2026-10-31, djbclark).
+"""proc-cpu-watch: find out what makes a named process tree spike the CPU (2026-10-31 as codexbar-cpu-watch, djbclark).
 
-    codexbar-cpu-watch sample [-v]               one sample (launchd runs it every 300 s); no model, no pings
-    codexbar-cpu-watch report [-n N]             the last N samples (default 24), spikes marked
-    codexbar-cpu-watch install [--ade DIR]       the launchd job (launchd/com.djbclark.codexbar-cpu-watch.plist)
-    codexbar-cpu-watch uninstall
+Targets (`--target`, required on every subcommand): `codexbar` (CodexBar.app and the CodexBarCLI it runs) and
+`opencode` (`opencode serve`, added 2026-11-01: "opencode serve seems to be having a CPU issue").
 
-A sample takes two `ps` reads WINDOW_S apart over CodexBar's process tree (every process whose argv[0], the
-first whitespace-free token of its command line, is a `.../CodexBar.app/Contents/{MacOS,Helpers}/CodexBar*`, plus all their descendants, e.g. the
-codex/claude probes it spawns) and turns the CPU-time delta into percent of one core. One JSON line per
-sample goes to ~/.local/state/codexbar-cpu-watch/samples.jsonl: total_pct, the top processes, and (on a spike,
-total at or above SPIKE_PCT) up to 15 of them.
+    proc-cpu-watch sample --target T [-v]            one sample (launchd runs it every 300 s); no model, no pings
+    proc-cpu-watch report --target T [-n N]          the last N samples (default 24), spikes marked
+    proc-cpu-watch install --target T [--ade DIR]    the launchd job com.djbclark.<T>-cpu-watch (template:
+                                                     launchd/com.djbclark.proc-cpu-watch.plist)
+    proc-cpu-watch uninstall --target T
+
+A sample takes two `ps` reads WINDOW_S apart over the target's process tree (every process whose argv[0], the
+first whitespace-free token of its command line, matches the target: `.../CodexBar.app/Contents/{MacOS,Helpers}/
+CodexBar*`, or an `opencode`/`opencode.exe` executable whose first argument is `serve`; plus all their
+descendants, e.g. the probes CodexBar spawns or the commands an opencode session runs) and turns the CPU-time
+delta into percent of one core. One JSON line per sample goes to ~/.local/state/<T>-cpu-watch/samples.jsonl:
+total_pct, the top processes, and (on a spike, total at or above SPIKE_PCT) up to 15 of them.
 
 Privacy (adversary rounds 1-2, PR 202): a command line can carry a token, so no command line is ever stored. A
 process is logged as pid, percent, RSS, a short NAME and its FLAG NAMES. The NAME is the executable's basename;
@@ -24,12 +29,13 @@ not authenticate; an app path containing a space is not matched (fails closed). 
 every file in it 0600.
 
 Limits, all by design: it is a point sample every 5 minutes, so a spike shorter than the gap between samples
-can be missed; a process that is born AND exits inside the 3 s window (a probe CodexBar spawns and reaps) is
+can be missed; a process that is born AND exits inside the 3 s window (a probe the target spawns and reaps) is
 not seen, so total_pct is a floor; on Linux procps TIME has whole-second resolution, so a 3 s window moves in
 33% steps. The log appends one line per sample (O_APPEND, no read of the old content) under an flock that also
 covers the rotation to samples.jsonl.1 past CBW_MAX_MB. launchd.out/err are emptied past 1 MB, failed samples included.
 
-Env: CBW_STATE_DIR, CBW_WINDOW_S (default 3), CBW_SPIKE_PCT (default 50), CBW_MAX_MB (default 5).
+Env: CBW_STATE_DIR (this target's state directory; default ~/.local/state/<T>-cpu-watch; `install` passes it to the
+job), CBW_WINDOW_S (default 3), CBW_SPIKE_PCT (default 50), CBW_MAX_MB (default 5).
 """
 import argparse
 import fcntl
@@ -46,17 +52,33 @@ from pathlib import Path
 
 HOME = Path.home()
 ADE = Path(__file__).resolve().parent.parent
-STATE_DIR = Path(os.environ.get("CBW_STATE_DIR", HOME / ".local/state/codexbar-cpu-watch"))
-LOG = STATE_DIR / "samples.jsonl"
-PLIST = ADE / "launchd" / "com.djbclark.codexbar-cpu-watch.plist"
-LABEL = "com.djbclark.codexbar-cpu-watch"
+PLIST = ADE / "launchd" / "com.djbclark.proc-cpu-watch.plist"
 WINDOW_S = float(os.environ.get("CBW_WINDOW_S", "3"))
 SPIKE_PCT = float(os.environ.get("CBW_SPIKE_PCT", "50"))
 MAX_BYTES = int(float(os.environ.get("CBW_MAX_MB", "5")) * 1024 * 1024)
 LAUNCHD_MAX_BYTES = 1024 * 1024
-# argv[0] only: no whitespace may precede the app path, so an argument naming the app (`/usr/bin/vim
-# /x/CodexBar.app/...`) never makes its process a root.
-ROOT_RE = re.compile(r"^/[^\s]*?CodexBar\.app/Contents/(?:MacOS|Helpers)/CodexBar\w*(?:\s|$)")
+# argv[0] only: no whitespace may precede the matched executable, so an argument naming it (`/usr/bin/vim
+# /x/CodexBar.app/...`, `rg opencode serve`) never makes its process a root.
+TARGETS = {
+    "codexbar": re.compile(r"^/[^\s]*?CodexBar\.app/Contents/(?:MacOS|Helpers)/CodexBar\w*(?:\s|$)"),
+    "opencode": re.compile(r"^(?:\S*/)?opencode(?:\.exe)?\s+serve(?:\s|$)"),
+}
+# The target in use, set once by use_target() before anything samples, reports or installs.
+TARGET = ""
+ROOT_RE = None
+STATE_DIR = HOME / ".local/state"
+LOG = STATE_DIR / "samples.jsonl"
+LABEL = ""
+
+
+def use_target(name):
+    global TARGET, ROOT_RE, STATE_DIR, LOG, LABEL
+    TARGET, ROOT_RE = name, TARGETS[name]
+    STATE_DIR = Path(os.environ.get("CBW_STATE_DIR", HOME / f".local/state/{name}-cpu-watch"))
+    LOG = STATE_DIR / "samples.jsonl"
+    LABEL = f"com.djbclark.{name}-cpu-watch"
+
+
 INTERPRETERS = {"node", "bash", "sh", "zsh", "uv", "env", "ruby", "perl", "deno", "bun"}
 SAFE_WORD = re.compile(r"[\w./~+-]+")
 SCRIPT_SUFFIX = (".js", ".mjs", ".cjs", ".ts", ".py", ".sh", ".rb", ".pl")
@@ -125,7 +147,7 @@ def read_ps():
 
 
 def tree(procs, me=None):
-    """CodexBar processes plus every descendant (never this process)."""
+    """The target's processes plus every descendant (never this process)."""
     me = os.getpid() if me is None else me
     keep = {p for p, v in procs.items() if p != me and ROOT_RE.match(v["cmd"])}
     grew = True
@@ -214,8 +236,8 @@ def cmd_sample(a):
     try:
         rec = sample()
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
-        # No record: a failed ps must not read as "CodexBar is not running". launchd.err still gets its cap.
-        print(f"codexbar-cpu-watch: sample failed: {e}", file=sys.stderr)
+        # No record: a failed ps must not read as "the target is not running". launchd.err still gets its cap.
+        print(f"proc-cpu-watch: sample failed: {e}", file=sys.stderr)
         if STATE_DIR.is_dir():
             tidy_launchd_logs()
         return 1
@@ -289,14 +311,14 @@ def disposable_checkout(path):
 
 
 def render_plist(ade):
-    """The LaunchAgent plist as bytes: the tracked template with @ADE@/@STATE@ filled in on the PARSED values, so a path
+    """The LaunchAgent plist as bytes: the tracked template with @ADE@/@STATE@/@TARGET@ filled in on the PARSED values, so a path
     with `&`, `<` or a quote stays valid XML, plus CBW_STATE_DIR in the job's environment so scheduled samples go
     where `install` was told to put them (the template's comments are dropped)."""
     tpl = plistlib.loads(PLIST.read_bytes())
 
     def fill(v):
         if isinstance(v, str):
-            return v.replace("@ADE@", str(ade)).replace("@STATE@", str(STATE_DIR))
+            return v.replace("@ADE@", str(ade)).replace("@STATE@", str(STATE_DIR)).replace("@TARGET@", TARGET)
         if isinstance(v, list):
             return [fill(x) for x in v]
         if isinstance(v, dict):
@@ -311,9 +333,9 @@ def render_plist(ade):
 
 def cmd_install(a):
     if shutil.which("launchctl") is None:
-        print("codexbar-cpu-watch: install/uninstall need launchd (macOS)", file=sys.stderr)
+        print("proc-cpu-watch: install/uninstall need launchd (macOS)", file=sys.stderr)
         return 2
-    dest = HOME / "Library/LaunchAgents" / PLIST.name
+    dest = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
     dom = f"gui/{os.getuid()}"
     if a.cmd == "uninstall":
         subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
@@ -322,11 +344,11 @@ def cmd_install(a):
         return 0
     ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
     if not a.ade and disposable_checkout(ade):
-        print(f"codexbar-cpu-watch: {ade} is a linked worktree or cow pasture that will be removed; run install from "
+        print(f"proc-cpu-watch: {ade} is a linked worktree or cow pasture that will be removed; run install from "
               "the primary checkout, or pass --ade DIR", file=sys.stderr)
         return 2
-    if not (ade / "bin" / "codexbar-cpu-watch").is_file():
-        print(f"codexbar-cpu-watch: {ade}/bin/codexbar-cpu-watch not found", file=sys.stderr)
+    if not (ade / "bin" / "proc-cpu-watch").is_file():
+        print(f"proc-cpu-watch: {ade}/bin/proc-cpu-watch not found", file=sys.stderr)
         return 2
     # Everything that can fail happens before the old job is unloaded: build and validate the plist (plistlib
     # escapes paths), create the directories, write the temp file.
@@ -337,26 +359,30 @@ def cmd_install(a):
         tmp = dest.with_suffix(".tmp")
         tmp.write_bytes(data)
     except (OSError, ValueError) as e:
-        print(f"codexbar-cpu-watch: cannot write the plist, nothing changed: {e}", file=sys.stderr)
+        print(f"proc-cpu-watch: cannot write the plist, nothing changed: {e}", file=sys.stderr)
         return 2
     subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
     tmp.replace(dest)
     r = subprocess.run(["launchctl", "bootstrap", dom, str(dest)], capture_output=True, text=True)
-    print(f"installed {dest} (script {ade / 'bin/codexbar-cpu-watch'})" if r.returncode == 0 else f"bootstrap failed: {r.stderr.strip()}")
+    print(f"installed {dest} (script {ade / 'bin/proc-cpu-watch'}, target {TARGET})" if r.returncode == 0 else f"bootstrap failed: {r.stderr.strip()}")
     return r.returncode
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("sample")
-    p.add_argument("-v", "--verbose", action="store_true")
-    p = sub.add_parser("report")
-    p.add_argument("-n", type=int, default=24)
-    p = sub.add_parser("install")
-    p.add_argument("--ade", help="checkout holding bin/codexbar-cpu-watch (default: the one this script is in; refused for a linked worktree)")
-    sub.add_parser("uninstall")
+
+    def add(name):
+        p = sub.add_parser(name)
+        p.add_argument("--target", required=True, choices=sorted(TARGETS))
+        return p
+    add("sample").add_argument("-v", "--verbose", action="store_true")
+    add("report").add_argument("-n", type=int, default=24)
+    add("install").add_argument("--ade", help="checkout holding bin/proc-cpu-watch (default: the one this script is in; "
+                                "refused for a linked worktree or cow pasture)")
+    add("uninstall")
     a = ap.parse_args()
+    use_target(a.target)
     return {"sample": cmd_sample, "report": cmd_report, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 

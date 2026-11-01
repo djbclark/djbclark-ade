@@ -1,4 +1,4 @@
-"""bin/codexbar-cpu-watch: what is selected, what is logged (never a command line), how the log grows. No launchd."""
+"""bin/proc-cpu-watch: what is selected per target, what is logged (never a command line), how the log grows. No launchd."""
 import importlib.machinery
 import importlib.util
 import json
@@ -8,16 +8,17 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "codexbar-cpu-watch"
+SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "proc-cpu-watch"
 
 
 @pytest.fixture
 def cbw(tmp_path, monkeypatch):
     monkeypatch.setenv("CBW_STATE_DIR", str(tmp_path / "state"))
-    loader = importlib.machinery.SourceFileLoader("codexbar_cpu_watch", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("codexbar_cpu_watch", loader)
+    loader = importlib.machinery.SourceFileLoader("proc_cpu_watch", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("proc_cpu_watch", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
+    mod.use_target("codexbar")
     return mod
 
 
@@ -169,7 +170,7 @@ def test_install_refuses_a_linked_worktree(cbw, tmp_path, monkeypatch, capsys):
     wt = tmp_path / "wt"
     (wt / "bin").mkdir(parents=True)
     (wt / ".git").write_text("gitdir: /elsewhere\n")
-    (wt / "bin" / "codexbar-cpu-watch").write_text("")
+    (wt / "bin" / "proc-cpu-watch").write_text("")
     monkeypatch.setattr(cbw, "ADE", wt)
     monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
     calls = []
@@ -187,7 +188,7 @@ def test_install_refuses_a_cow_pasture(cbw, tmp_path, monkeypatch, capsys):
     past = tmp_path / ".cow" / "pastures" / "djbclark-ade" / "p1"
     (past / "bin").mkdir(parents=True)
     (past / ".git").mkdir()
-    (past / "bin" / "codexbar-cpu-watch").write_text("")
+    (past / "bin" / "proc-cpu-watch").write_text("")
     primary = tmp_path / "src" / "djbclark-ade"
     (primary / ".git").mkdir(parents=True)
     assert cbw.disposable_checkout(past) and not cbw.disposable_checkout(primary)
@@ -241,7 +242,7 @@ def _install(cbw, tmp_path, monkeypatch, ade_name):
     ade = tmp_path / ade_name
     (ade / "bin").mkdir(parents=True)
     (ade / ".git").mkdir()
-    (ade / "bin" / "codexbar-cpu-watch").write_text("")
+    (ade / "bin" / "proc-cpu-watch").write_text("")
     monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
     calls = []
 
@@ -255,7 +256,7 @@ def _install(cbw, tmp_path, monkeypatch, ade_name):
         cmd = "install"
     A.ade = str(ade)
     rc = cbw.cmd_install(A())
-    dest = tmp_path / "home" / "Library/LaunchAgents" / cbw.PLIST.name
+    dest = tmp_path / "home" / "Library/LaunchAgents" / f"{cbw.LABEL}.plist"
     return rc, calls, dest, ade, plistlib
 
 
@@ -263,7 +264,8 @@ def test_install_writes_a_valid_plist_for_special_paths_and_passes_the_state_dir
     rc, calls, dest, ade, plistlib = _install(cbw, tmp_path, monkeypatch, "a&b <c> 'd'")
     assert rc == 0 and dest.exists()  # LaunchAgents created
     doc = plistlib.loads(dest.read_bytes())
-    assert doc["ProgramArguments"][0] == f"{ade.resolve()}/bin/codexbar-cpu-watch"
+    assert doc["ProgramArguments"] == [f"{ade.resolve()}/bin/proc-cpu-watch", "sample", "--target", "codexbar"]
+    assert doc["Label"] == "com.djbclark.codexbar-cpu-watch"
     assert doc["EnvironmentVariables"]["CBW_STATE_DIR"] == str(cbw.STATE_DIR)
     assert doc["StandardOutPath"] == f"{cbw.STATE_DIR}/launchd.out"
     assert [c[1] for c in calls] == ["bootout", "bootstrap"]
@@ -295,3 +297,52 @@ def test_a_child_reparented_away_from_the_tree_still_counts(cbw, monkeypatch):
     orphan = dict(child, ppid=999, cpu_s=1.6)
     rec = _window(cbw, monkeypatch, {1: root, 7: child}, {1: root, 7: orphan})
     assert rec["total_pct"] == pytest.approx(20.0)
+
+
+def test_each_target_has_its_own_state_label_and_cbw_state_dir_override(tmp_path, monkeypatch):
+    loader = importlib.machinery.SourceFileLoader("proc_cpu_watch_t", str(SCRIPT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("proc_cpu_watch_t", loader))
+    loader.exec_module(mod)
+    monkeypatch.setattr(mod, "HOME", tmp_path)
+    monkeypatch.delenv("CBW_STATE_DIR", raising=False)
+    mod.use_target("opencode")
+    assert mod.STATE_DIR == tmp_path / ".local/state/opencode-cpu-watch" and mod.LABEL == "com.djbclark.opencode-cpu-watch"
+    monkeypatch.setenv("CBW_STATE_DIR", str(tmp_path / "x"))
+    mod.use_target("codexbar")
+    assert mod.STATE_DIR == tmp_path / "x" and mod.LABEL == "com.djbclark.codexbar-cpu-watch"
+
+
+def test_opencode_roots_are_the_serve_executable_not_any_argument(cbw):
+    cbw.use_target("opencode")
+    procs = {
+        1: proc(1, 0, "opencode serve --hostname 127.0.0.1 --port 0"),
+        2: proc(2, 0, "/Users/x/.local/lib/node_modules/@opencode/cli/bin/opencode.exe serve --service"),
+        3: proc(3, 1, "/opt/homebrew/bin/bash -c gh run watch 1"),
+        4: proc(4, 0, "opencode run fix the bug"),
+        5: proc(5, 0, "omp --prompt run opencode serve please"),
+        6: proc(6, 0, "/opt/homebrew/bin/rg opencode serve /src"),
+        7: proc(7, 0, "/usr/bin/vim /x/opencode serve"),
+    }
+    assert cbw.tree(procs, me=-1) == {1, 2, 3}
+
+
+def test_install_for_the_opencode_target(cbw, tmp_path, monkeypatch):
+    import plistlib
+    cbw.use_target("opencode")
+    monkeypatch.setattr(cbw, "HOME", tmp_path / "home")
+    ade = tmp_path / "ade"
+    (ade / "bin").mkdir(parents=True)
+    (ade / ".git").mkdir()
+    (ade / "bin" / "proc-cpu-watch").write_text("")
+    monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
+    import subprocess
+    monkeypatch.setattr(cbw.subprocess, "run", lambda args, **k: subprocess.CompletedProcess(args, 0, stdout="", stderr=""))
+
+    class A:
+        cmd = "install"
+    A.ade = str(ade)
+    assert cbw.cmd_install(A()) == 0
+    doc = plistlib.loads((tmp_path / "home/Library/LaunchAgents/com.djbclark.opencode-cpu-watch.plist").read_bytes())
+    assert doc["Label"] == "com.djbclark.opencode-cpu-watch"
+    assert doc["ProgramArguments"][-2:] == ["--target", "opencode"]
+    assert doc["EnvironmentVariables"]["CBW_STATE_DIR"] == str(cbw.STATE_DIR)
