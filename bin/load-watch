@@ -22,7 +22,7 @@ stayturgid-agent already build only on CI (free GitHub runners since 2026-10-18,
 candidate.
 
 Each sample is one `ps` call and `os.getloadavg()`: no model, no network. A sample counts as hot when
-the 1-minute load per core is at least LW_LOAD_PER_CORE (2.0). After LW_SUSTAIN_S (300) seconds of
+the 1-minute load per core is at least LW_LOAD_PER_CORE (4.0; was 2.0 until 2026-11-01, when djbclark called 3.5 per core "not too bad for this system": on this 16 GB, 8-core Mac the real limit is memory pressure and process churn, not the load average). After LW_SUSTAIN_S (300) seconds of
 continuously hot samples it attributes the mean CPU of the samples in that window to sessions (session-finder's fleet.py; a process belongs
 to the session whose pid is its ancestor, a daemonised one such as a Gradle daemon to the only session
 in its git repo) and, for each session above LW_MIN_CORES (1.5) cores, writes a brief, types one line
@@ -75,7 +75,7 @@ covers every repo under that directory. Older 3-column rows (repo, CI command, d
 Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate acp-dispatch calls before it
 launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] / os.cpu_count() and says
 `admit ok load1=X per_core=Y cores=N` (exit 0) when the per-core load is at most --max-per-core (default
-1.5, the threshold `bg` uses; the 2.0 above is only this watcher's blame step and is untouched), else
+1.5; `bg`'s own base is 2.5 since 2026-11-01 and it passes that; the 4.0 boost below usually decides, and LW_LOAD_PER_CORE is only this watcher's blame step), else
 `admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
 `streak` and `hot_for_s`, so a sustained-hot machine reads as such. `--wait 0` (default) is a pure check;
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
@@ -91,8 +91,8 @@ Runaway Chrome (operator 2026-10-25): the sample step tells the watcher (never k
 URL on its command line when it has one, and role-aware Task Manager (Shift+Esc) advice: match the pid and
 report the task; a browser/GPU alert does not identify a busy tab. Only an identified tab may be ended by the operator.
 Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default 25000, just above the calm tail)
-the per-core limit is --boost-per-core (default 2.0; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
-passes 1.5; at higher churn, or when churn cannot be read, the base limit holds. The result and `--json` `max_per_core` are the
+the per-core limit is --boost-per-core (default 4.0, was 2.0 until 2026-11-01; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
+passes its base; at higher churn, or when churn cannot be read, the base limit holds. The result and `--json` `max_per_core` are the
 limit in force. Swap is not the signal (86-92% in calm hours too). The result and the `--json`
 record carry `mem_churn_pages_s`; where `vm_stat` is unavailable (Linux) the gate never blocks. Test hooks (acp-dispatch scrubs them from the environment it
 gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll with the last value repeating),
@@ -121,7 +121,7 @@ PLIST = ADE / "launchd" / "com.djbclark.load-watch.plist"
 LABEL = "com.djbclark.load-watch"
 HERMES_PING = HOME / ".local/bin/hermes-ping"
 
-LOAD_PER_CORE = float(os.environ.get("LW_LOAD_PER_CORE", "2.0"))
+LOAD_PER_CORE = float(os.environ.get("LW_LOAD_PER_CORE", "4.0"))  # was 2.0 until 2026-11-01 (operator: 3.5 per core is not too bad)
 SUSTAIN_S = float(os.environ.get("LW_SUSTAIN_S", "300"))  # seconds of continuous hot load
 MAX_GAP_S = 900  # a longer gap between samples is a sleep, not load
 MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
@@ -1357,7 +1357,7 @@ def cmd_ci_only(a):
     return 0
 
 
-ADMIT_PER_CORE = 1.5  # the threshold ~/ops/site-private/bin/bg uses; LOAD_PER_CORE (2.0) is only the blame step
+ADMIT_PER_CORE = 1.5  # admit's own default base; `bg` passes its own (2.5 since 2026-11-01). LOAD_PER_CORE (4.0) is only the blame step
 ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machine now
 # Memory gate (operator 2026-10-23): load alone cannot tell a busy host from a thrashing one (the 2026-10-23
 # spike was load 42-74 with kern.memorystatus_level 37% and swap 86-92%, the same swap a calm hour shows).
@@ -1370,7 +1370,11 @@ ADMIT_CHURN_PAGES_S = 60000
 # at 86-92% in calm hours too (above), so a swap condition would almost never boost. 25000 is just above the calm
 # tail (11-22k) and well below the thrash median (80k); one session's data, recalibrate. A churn that cannot be read
 # (no vm_stat) never boosts.
-ADMIT_BOOST_PER_CORE = 2.0
+# 2026-11-01 (operator): the boost limit rose from 2.0 to 4.0 per core. A load of 3.5 per core "is actually not too bad for
+# this system"; the real constraint on this 16 GB, 8-core Mac is memory pressure (compressor churn, swap) and process churn
+# (2026-10-31: five parallel pytest runs forked thousands of short git processes, load 222, swap 7.9/9.2 GB). The churn limits
+# (25000 boost, 60000 max) are what guard against that and are unchanged.
+ADMIT_BOOST_PER_CORE = 4.0
 ADMIT_BOOST_CHURN_PAGES_S = 25000
 ADMIT_CHURN_WINDOW_S = 0.5
 EX_TEMPFAIL = 75
