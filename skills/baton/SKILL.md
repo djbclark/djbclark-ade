@@ -51,13 +51,14 @@ its own archive. First run `bin/watch status` and read `~/.local/state/self-slas
 agent (`$PASEO_AGENT_ID`) holds a watch role, or the newest `then: /baton` line for it follows a handoff
 naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
 directory-resolved pointer whose owner is another live session is not yours: say so and look further.
-**Live owner: ask first (2026-11-01).** After resolving any chain, read its log's frontmatter `session_id`
-and `writer` and check `skills/session-finder/fleet.py --json` (and `bin/watch status`). If that writer is a
-LIVE session other than you (`$PASEO_AGENT_ID`), the chain is not yours: relay one question to the owner
-(what may you resume, what overlaps), take NO write action until it answers (no PR edits, merges, thread
-resolves, Tier 1 writes), and tell the operator. An operator's "continue" on a card does not replace asking
-the owner. Why: on 2026-10-31 a `/baton` after `/clear` resumed the djbclark-ade lead's live chain and
-merged PR 173 ahead of PR 177, which the lead's merge plan required to land together.
+**Live owner: ask before the first write (2026-11-01).** After resolving any chain, run `session-handoff`'s
+**Owner check** (Reader protocol; the one wording: how to match `session_id` to a fleet row for claude,
+omp, codex and Paseo logs, the fail-closed rule when nothing matches, the exemptions for your own chain,
+the named successor and your own chain after `/clear` or `/new`). It applies only before the first write
+or resume; a read-only `/baton` just reports the owner. Reconciled with the paragraph above: a
+directory-resolved pointer owned by another live session is not yours, look further; a chain that is yours
+by `/new`, watch role or the operator's naming but that a live other session also owns is asked about
+first. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
 On Paseo, `self-slash --finish` refuses a watch holder (exit 12; `--successor` is allowed, and the guard fails open if `watch status` fails or takes over 20 s); herdr and Orca watchers are not guarded.
 
 If the operator invoked this with no argument, resolve the current

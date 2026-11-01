@@ -65,12 +65,7 @@ read.
    (sidecars land next to the pointer, not the canonical file) — sidecars
    newer than the canonical `updated_at` are unplanned-compaction
    checkpoints that supersede the log's recency.
-   **Then check the owner:** read the log's frontmatter `session_id` and `writer` and look them up in
-   `skills/session-finder/fleet.py --json` (and `bin/watch status`). A LIVE writer other than you means the
-   chain is not yours: relay one question to that owner (what to resume, what overlaps), make no write
-   (no PR edits, merges, thread resolves, Tier 1 writes) until it answers, and tell the operator; an
-   operator's "continue" does not replace asking the owner (2026-10-31: a resumed chain merged PR 173
-   ahead of the PR it had to land with).
+   **Then run the Owner check (below)** on the canonical log. It gates the first write or resume, not reading.
 3. Staleness check: for every workspace listed, compare `head_sha` to
    actual `git rev-parse HEAD` in its `dir`. Any mismatch (or dirty-state
    drift) demotes the file from briefing to lead for that workspace —
@@ -127,6 +122,63 @@ read.
 7. Pointer missing or unparseable: not an error. Bootstrap a minimal
    canonical log from `git status` / `git log -1` / current branch with
    Active work: "no prior context found", then proceed.
+
+### Owner check (2026-11-01; the one wording, `baton` points here)
+
+Why: on 2026-10-31 a `/baton` after `/clear` resumed the djbclark-ade lead's live chain and merged PR 173
+ahead of PR 177, which the lead's merge plan required to land together. An operator's "continue" does not
+replace this check: it was given without knowing the chain had a live writer.
+
+**Scope.** It applies only **before the first write or resume** of a chain: a Tier 1 write, a PR edit, merge
+or thread resolve, a push or any continuation of the chain's tasks. A session that only reads a chain reads
+it, reports the owner status in its resume plan and asks nothing.
+
+1. **Read** the canonical log's frontmatter `session_id` (S) and `writer`. `session_id` is not uniform
+   (checked 2026-11-01 over 143 real logs under `~/.local/state/handoffs/chains/*/SESSION_LOG.md`): a
+   claude transcript UUID, a Paseo agent UUID (any TUI: omp, codex, claude), a herdr pane id such as
+   `w36:p3`, or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id: it narrows
+   candidates in step 4 and matches nobody alone.
+2. **Match S to a row of `skills/session-finder/fleet.py --json`.** The row is the owner if S equals the
+   row's `sid`, `paseo` or `id`; or the row's `id` (8+ chars) is a prefix of S; or S occurs inside the row's
+   `sid` or `transcript` path (herdr omp rows carry a jsonl path). Also read `bin/watch status --json`: a
+   `holder.target` that equals or is a prefix of S, with `alive: true`, is a live owner even when the fleet
+   row says `closed` (a closed Paseo watch holder is resumable by the next message).
+3. **Live** means the row's `status` is neither `closed` nor `ended` and its `ended`, `archived` and `finished` fields are all
+   empty or false (`idle`, `working`, `blocked`, `busy-background` and `unknown` are live), or the watch
+   exception above. **You** are the owner when the row's `self` is true or S equals `$PASEO_AGENT_ID`
+   (herdr and terminal sessions have no Paseo id: use `self`); after `/clear` or `/new` the same agent keeps
+   its Paseo id, so its own chain reads as you, and a claude's old transcript sid that no row carries
+   reads as no match (step 4, covered by exemption C).
+4. **No match is not proof of absence: fail closed.** Treat the owner as possibly live and, unless an
+   exemption below applies, say so in the resume plan and **ask the operator before the first write**.
+   To make that question concrete, list live rows other than you whose `cwd` equals or contains a
+   `workspaces[].dir` of the log and whose `agent` fits `writer` (`claude*` to claude, `omp*` to omp,
+   `codex` to codex, otherwise any); name them in the question. Never proceed on a silent "no owner found".
+5. **A live owner other than you:** relay ONE question to it through `session-finder/relay.py` (what may
+   you resume, what overlaps) and ask the operator too; take no write action until the owner answers or
+   the operator, told the owner is live, decides. Unanswered is not consent.
+
+**Exemptions (resume without asking; state which one in the resume plan):**
+
+- **A. S identifies you** (step 3: `self` true, or S equals `$PASEO_AGENT_ID`): the chain is yours.
+- **B. You are the named successor**, even while the owner still reads live: the log's `latest_handoff`
+  names a handoff file that exists, and one of: your first prompt is `/baton PATH` (or a `launch.py
+  --baton` brief) naming this chain; your agent name is `<owner's name> → <model>` (the `self-slash
+  --finish --successor` default title); the self-slash log has `finish: archived <owner id> (successor
+  <your id>)`. `self-slash` starts and verifies the successor first and archives the owner only
+  afterwards, so the owner normally still reads live while its successor reads the chain: that is the
+  handover, not a conflict.
+- **C. Your own chain after `/clear` or `/new`, no live other owner:** the newest `then: /baton` line for
+  your id in `~/.local/state/self-slash.log` follows a handoff of this chain, you hold the watch role the
+  chain belongs to (`bin/watch status`), or the operator named the chain (`/baton PATH`, `--dir
+  .../chains/<key>`) and its `workspaces[].dir` includes your cwd. C only waives the no-match question of
+  step 4 (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match
+  to a live row that is not you.
+
+**Reconciling with `baton`'s "Which chain".** A pointer resolved only by directory whose owner is another
+live session is not yours: say so and look further, no question. A chain that is otherwise yours (queued by
+your `/new`, watch role, operator-named) but whose log a live other session also owns is asked about, per
+steps 4 and 5 above, before the first write or resume.
 
 ### Chain discovery fallback (cwd doesn't resolve to a workspace)
 
