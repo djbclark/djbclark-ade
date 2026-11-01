@@ -203,7 +203,10 @@ and a 5-day codex weekly has no business in launchd either — finalize records
 ready-to-run `reroute RECORD --agent A --model M` from route_agent's top route for the record's
 kind, excluding the stopped pool (the manual resume hint stays when nothing is eligible).
 (2) The Mac is woken 2 min before the resume fires via `sudo -n pmset schedule wake` (helper:
-`schedule_wake`/`cancel_wake`, binary overridable with ACP_DISPATCH_PMSET); the result lands in
+`schedule_wake`/`cancel_wake`, binary overridable with ACP_DISPATCH_PMSET; the schedule is
+computed in UTC and only the pmset stamp is local wall time, in the real zone from `local_zone()`
+so a DST change before the wake is right; ACP_DISPATCH_NOW=<ISO instant> freezes the clock for
+tests); the result lands in
 `auto_resume.wake` — "unavailable: ..." on a machine without config/sudoers.d/acp-dispatch-pmset
 (installed here 2026-10-18, operator-approved) — and the
 wake is cancelled best-effort when the resume runs or the schedule is cancelled (closed,
@@ -399,7 +402,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, NoReturn
 from zoneinfo import ZoneInfo
@@ -2406,6 +2409,36 @@ DURATION_UNITS = {
 }
 
 
+def local_zone() -> tzinfo:
+    """The machine's real zone (TZ, else the /etc/localtime link), never a fixed offset: an offset
+    taken today is an hour off for a wake that lands after a DST change (2026-11-01 fall-back).
+    A fixed offset is the last resort, when no zone name can be found."""
+    name = (os.environ.get("TZ") or "").lstrip(":")
+    if not name:
+        try:
+            link = os.path.realpath("/etc/localtime")
+        except OSError:
+            link = ""
+        if "zoneinfo/" in link:
+            name = link.split("zoneinfo/", 1)[1]
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def now_utc() -> datetime:
+    """The scheduling clock, an aware UTC datetime; ACP_DISPATCH_NOW (an ISO instant, UTC when it
+    carries no offset) freezes it for tests."""
+    frozen = os.environ.get("ACP_DISPATCH_NOW")
+    if frozen:
+        stamp = datetime.fromisoformat(frozen.strip().replace("Z", "+00:00"))
+        return (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
 def _month_date(val: str) -> datetime | None:
     """codex's `try again at Oct 18th, 2026 4:41 AM` (the operator's local clock), as an aware datetime.
     The clock-time branch used to read the `18` of `18th` as the hour (2026-10-18)."""
@@ -2461,7 +2494,7 @@ def parse_reset_datetime(text: str, when_match: re.Match | None,
     codex's `try again at Oct 18th, 2026 4:41 AM` or `at 8:51 PM`, agy's `in 2 hours, 47 minutes`,
     `Resets in 148h22m36s` (compact, no spaces) and `Refreshes in 6 days and 4 hours` (`and`
     between terms; 2026-10-18, agy's weekly cap)."""
-    now = now or datetime.now().astimezone()
+    now = now or now_utc()
     m = ISO_RESET_RE.search(text)
     if m:
         return datetime.fromisoformat(m.group(1))
@@ -2489,8 +2522,14 @@ def parse_reset_datetime(text: str, when_match: re.Match | None,
                 hour = 0
             if hour > 23 or minute > 59:
                 return None
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            return target + timedelta(days=1) if target <= now else target
+            # the clock time is the local wall clock: build it in the real zone (a fixed offset
+            # puts it an hour off after a DST change), return it in UTC so a later subtraction
+            # is absolute
+            local_now = now.astimezone(local_zone())
+            target = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= local_now:
+                target += timedelta(days=1)
+            return target.astimezone(timezone.utc)
     secs = _duration_seconds(val)
     return now + timedelta(seconds=secs) if secs else None
 
@@ -2531,7 +2570,7 @@ def parse_reset_for_aiuse(text: str, when_match: re.Match | None,
                 hour += 12
             elif meridiem == "AM" and hour == 12:
                 hour = 0
-            now = datetime.now().astimezone()
+            now = now_utc().astimezone(local_zone())
             target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if target <= now:
                 target += timedelta(days=1)
@@ -2647,7 +2686,7 @@ def aiuse_reset_time(agent: str, model: str | None) -> datetime | None:
     except (OSError, ValueError):
         return None
     snap = data.get("snapshot", data)
-    now = datetime.now().astimezone()
+    now = now_utc()
     stamps: list[datetime] = []
     for acct in _pool_entries(snap.get("accounts") or [], provider, None):
         if acct.get("error"):
@@ -2722,9 +2761,11 @@ def pmset_bin() -> str:
 
 
 def wake_stamp(not_before: datetime | float) -> str:
-    """The wake time as pmset's quoted local date/time, "MM/dd/yy HH:mm:ss" (man pmset)."""
-    at = (not_before if isinstance(not_before, datetime)
-          else datetime.fromtimestamp(float(not_before))) - timedelta(seconds=WAKE_LEAD_SECONDS)
+    """The wake time as pmset's quoted local date/time, "MM/dd/yy HH:mm:ss" (man pmset): the
+    instant (epoch seconds) minus the lead, shown as wall time in the real local zone at THAT
+    instant, so a DST change between now and the wake is applied."""
+    ts = not_before.timestamp() if isinstance(not_before, datetime) else float(not_before)
+    at = datetime.fromtimestamp(ts - WAKE_LEAD_SECONDS, tz=local_zone())
     return at.strftime("%m/%d/%y %H:%M:%S")
 
 
@@ -2829,30 +2870,34 @@ def schedule_auto_resume(record_path: Path, rec: dict, stderr_text: str) -> None
         return off("skipped", "no ACP session id in the record or log")
     if supported is False:
         return off("skipped", f"{rec.get('agent')} advertises neither load nor resume")
-    now = datetime.now().astimezone()
+    now = now_utc()
     when = parse_reset_datetime(stderr_text, failure_class(stderr_text, rec.get("exit"))[1], now,
                                agent=rec.get("agent"))
     source = "stderr"
     if when is None:
         when, source = aiuse_reset_time(rec.get("agent", ""), rec.get("model")), "aiuse"
+    if when is not None:
+        when = when.astimezone(timezone.utc)     # absolute arithmetic below, whatever the stamp's zone
     if when is not None and when - now > timedelta(hours=(max_wait := auto_resume_max_wait_hours())):
         # 2026-10-18, 6.5a: a reset days out (agy's weekly cap ~148 h, codex's 5-day weekly) must
         # not sit in launchd waiting — resume_unsupported() already says an agy Claude session
         # may not even reopen. Any agent, not just agy. The back-off guess below is never subject
         # to this: it is 30 minutes, and it is not a reset.
-        off("skipped", f"reset {when.isoformat(timespec='minutes')} is more than "
+        off("skipped", f"reset {when.astimezone(local_zone()).isoformat(timespec='minutes')} is more than "
                        f"{max_wait:g} h away; reroute instead of waiting")
         rec["auto_resume"]["far_reset"] = True
         return
     if when is None:
         when, source = now + timedelta(seconds=AUTO_RESUME_BACKOFF), "backoff"
     not_before = max(when + timedelta(seconds=AUTO_RESUME_MARGIN), now + timedelta(seconds=60))
+    not_before_local = not_before.astimezone(local_zone())
     out = Path(rec["out"])
     label = f"acp-dispatch.{rec.get('task') or out.name}.{rec['name']}.resume{attempt}"
     runner = out / f"{rec['name']}-resume{attempt}.sh"
     write_atomic(runner, auto_resume_runner_script(rec, label, attempt, Path(__file__).resolve()), mode=0o700)
     ar = {"state": "scheduled", "attempt": attempt, "max": AUTO_RESUME_MAX,
-          "not_before": not_before.timestamp(), "not_before_iso": not_before.isoformat(timespec="minutes"),
+          "not_before": not_before.timestamp(),
+          "not_before_iso": not_before_local.isoformat(timespec="minutes"),
           "reset_source": source, "label": label, "runner": str(runner), "scheduled_at": time.time(),
           "history": history}
     err = submit_launchd(label, runner, out / f"{rec['name']}-resume{attempt}.out",
