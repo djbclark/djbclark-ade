@@ -330,7 +330,10 @@ wait, reap, check, footer, extend and finalize invocations pay nothing for the r
 Load gate (operator 2026-10-19): before a slice launches, acp-dispatch runs `bin/load-watch admit
 --wait N --json` (N: --load-wait SECONDS, else ACP_DISPATCH_LOAD_WAIT, else 1800; --no-load-gate or
 ACP_DISPATCH_NO_LOAD_GATE=1 skips it; ACP_DISPATCH_LOAD_WATCH names another binary;
-every LW_* variable is dropped from the environment it gets). admit polls every 15 s while the
+every LW_* variable is dropped from the environment it gets except these, passed as admit flags: LW_MAX_AGENTS ->
+--max-agents (the cap on live acp-run slices; admit applies it ONLY to callers that pass the flag, and acp-dispatch always
+does, `bg` never: a test run starts no agent), LW_MIN_FREE_MB, LW_MAX_COMPRESSOR_S, LW_MAX_PAGEINS_S, and LW_BOOST_CALM_S
+as an environment variable; a bad value is warned about and ignored). admit polls every 15 s while the
 per-core load is above 1.5, staggers 5-30 s once it drops, and the dispatch records `load_gate:
 {load1, per_core, waited_s}`. The gate runs BEFORE the pool reading, in-flight reservation, headroom
 and cap checks, so those are evaluated against the machine as it is after admission, not a snapshot
@@ -372,7 +375,9 @@ Exit codes (dispatch and check):
     5    pool unavailable before launch (headroom, wont-fit, inflight reservation/cap, preflight);
          re-plan with --exclude (no slice attempt consumed)
     75   machine still too hot to start (EX_TEMPFAIL): `load-watch admit` found the 1-minute load per
-         core above 1.5 for the whole --load-wait budget; nothing was launched, retry later
+         core above 1.5, or free memory, the compressor, pageins or the live acp-run count (the agent cap, default 14,
+         env LW_MAX_AGENTS, 0 = off) refused, for the whole --load-wait budget (the refusal names `refused=...`);
+         nothing was launched, retry later
          (`check` on such a record exits 75 too)
     124  timed out waiting for the .done marker (--detach without --no-wait)
     (a reaped record's acp-run exit is 255 `lost` when neither an exit file nor launchd knows it;
@@ -3063,6 +3068,45 @@ def resolve_load_watch(path: str) -> str:
     return str(Path(expanded).resolve())
 
 
+LOAD_KNOBS = (("LW_MAX_AGENTS", "--max-agents", True), ("LW_MIN_FREE_MB", "--min-free-mb", False),
+              ("LW_MAX_COMPRESSOR_S", "--max-mem-churn", False), ("LW_MAX_PAGEINS_S", "--max-pageins", False))
+
+
+def load_gate_knobs() -> tuple[list[str], dict[str, str]]:
+    """The admit flags and environment this dispatcher passes through despite the LW_ scrub: the agent cap is for
+    callers that START agents, so acp-dispatch always passes `--max-agents` (bare = load-watch's default 14, or
+    LW_MAX_AGENTS from our own environment; 0 = no cap), plus LW_MIN_FREE_MB, LW_MAX_COMPRESSOR_S and
+    LW_MAX_PAGEINS_S as their flags and LW_BOOST_CALM_S as an environment variable. A value that is not a finite
+    number at or above 0 (an integer for the cap) is warned about and ignored, never passed on."""
+    flags: list[str] = []
+    cap_given = False
+    for var, flag, integer in LOAD_KNOBS:
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        try:
+            val = int(raw) if integer else float(raw)
+        except ValueError:
+            val = -1
+        if val < 0 or (not integer and not math.isfinite(val)):
+            print(f"acp-dispatch: warning: ignoring {var}={raw!r} (need a number, 0 or more)", file=sys.stderr)
+            continue
+        flags.append(f"{flag}={val}")
+        cap_given = cap_given or flag == "--max-agents"
+    if not cap_given:
+        flags.append("--max-agents")
+    extra: dict[str, str] = {}
+    calm = os.environ.get("LW_BOOST_CALM_S", "").strip()
+    if calm:
+        try:
+            if not math.isfinite(float(calm)) or float(calm) < 0:
+                raise ValueError(calm)
+            extra["LW_BOOST_CALM_S"] = calm
+        except ValueError:
+            print(f"acp-dispatch: warning: ignoring LW_BOOST_CALM_S={calm!r} (need a number, 0 or more)", file=sys.stderr)
+    return flags, extra
+
+
 def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, str]:
     """Ask `load-watch admit --wait WAIT --json` whether a slice may start (never throttles anything).
     Returns (admitted, info, why): info is {"load1", "per_core", "waited_s"} when load-watch answered, or
@@ -3079,14 +3123,17 @@ def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, st
     if not Path(path).exists():
         return unknown(f"{path} not found")
     env = {k: v for k, v in os.environ.items() if not k.startswith(LOAD_SCRUB_PREFIX)}
+    flags, extra_env = load_gate_knobs()
     try:
-        proc = subprocess.run([path, "admit", "--wait", str(wait), "--json"], check=False, stdout=subprocess.PIPE,
-                              stderr=None, text=True, timeout=wait + LOAD_GATE_SUBPROCESS_GRACE, env=env)
+        proc = subprocess.run([path, "admit", "--wait", str(wait), "--json", *flags], check=False, stdout=subprocess.PIPE,
+                              stderr=None, text=True, timeout=wait + LOAD_GATE_SUBPROCESS_GRACE, env={**env, **extra_env})
     except (OSError, subprocess.SubprocessError) as e:
         return unknown(f"load-watch admit failed ({e})")
     try:
         data = json.loads(proc.stdout.strip().splitlines()[-1])
         info = {"load1": data["load1"], "per_core": data["per_core"], "waited_s": data.get("waited_s", 0)}
+        if isinstance(data.get("refused"), list):
+            info["refused"] = [str(x) for x in data["refused"]]
     except (IndexError, KeyError, TypeError, ValueError):
         info = None
     if proc.returncode == 0:
@@ -3097,7 +3144,8 @@ def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, st
     if proc.returncode == LOAD_GATE_EXIT:
         if info is None:
             info = {"load1": None, "per_core": None, "waited_s": wait}
-        return False, info, (f"{LOAD_RETRY_TEXT}: load1={info['load1']} per_core={info['per_core']} "
+        why_refused = f" refused={','.join(info['refused'])}" if info.get("refused") else ""
+        return False, info, (f"{LOAD_RETRY_TEXT}: load1={info['load1']} per_core={info['per_core']}{why_refused} "
                              f"after waiting {info['waited_s']}s of the {wait}s --load-wait budget; not launched")
     return unknown(f"load-watch admit exited {proc.returncode}")
 

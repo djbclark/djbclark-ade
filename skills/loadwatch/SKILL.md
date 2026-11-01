@@ -106,15 +106,29 @@ toward waiting: it refuses (exit 75) while **any** of these holds, and `--json` 
 | free + speculative memory below the floor (`free_mem`) | 600 MB | `--min-free-mb` | `LW_MIN_FREE_MB` |
 | compressions + decompressions per second above (`compressor`) | 20000 (was 60000) | `--max-mem-churn` | `LW_MAX_COMPRESSOR_S` |
 | pageins per second above (`pageins`) | 1000 | `--max-pageins` | `LW_MAX_PAGEINS_S` |
-| live `acp-run` sessions machine-wide at or above the cap (`agents`) | 14 | `--max-agents` | `LW_MAX_AGENTS` (0 = off) |
+| live `acp-run` slices machine-wide at or above the cap (`agents`), **only for a caller that passes `--max-agents`** | 14 (bare `--max-agents`) | `--max-agents [N]` | `LW_MAX_AGENTS` (0 = off) |
 
-**`LW_MAX_AGENTS` is the knob djbclark tunes**: how many agent sessions may run at once. Raise it when memory has
-headroom (the other gates still hold), lower it when `vm_stat` shows free memory under 600 MB with the cap not yet
-reached. The count is one `ps`, an exact argv match of the process running the script named `acp-run` (never `pgrep -f`).
-Rates come from two `vm_stat` reads 2 s apart. A reading that cannot be taken (no `vm_stat`; Linux reads `/proc/meminfo`
-MemAvailable and `/proc/vmstat` pswpin+pswpout and pgmajfault) leaves its gate open and is listed in `unreadable`.
-`acp-dispatch` drops every `LW_*` variable from the environment it gives `admit`, so the env knobs bind a direct
-`load-watch admit` or `bg` call only; a dispatcher run uses the defaults until that scrub passes these five through.
+**The cap gates only NEW agent starts.** `acp-dispatch` always passes `--max-agents`; `bg` never does, because a test run
+starts no agent and gating it would starve the very slices the cap counts (at the cap each slice's `bg` test would be
+refused, so the slice could never end and the count never fall; found by the adversary on PR 210). A plain `admit` runs no
+`ps` and ignores the cap.
+
+**`LW_MAX_AGENTS` is the knob djbclark tunes**: how many `acp-run` slices may be alive when a new one starts (not
+interactive TUIs or Paseo agents, which `acp-run` does not own). Set it in the environment of the `acp-dispatch` run:
+acp-dispatch drops every other `LW_*` variable (test hooks and import-time settings) but reads `LW_MAX_AGENTS`,
+`LW_MIN_FREE_MB`, `LW_MAX_COMPRESSOR_S` and `LW_MAX_PAGEINS_S` itself and passes them to `admit` as flags (`--max-agents=N` ...),
+and passes `LW_BOOST_CALM_S` through as an environment variable; a bad value is warned about and ignored. A refusal
+prints `refused=agents` (or the other gate) in acp-dispatch's exit-75 line and in `load_gate.refused` of the record.
+Raise the cap when memory has headroom (the other gates still hold); lower it when `vm_stat` shows free memory under 600 MB
+with the cap not yet reached. The count is one `ps`, an exact argv match of the process running the script named `acp-run`
+(never `pgrep -f`; `uv run --script` wrappers and mentions do not count).
+Rates come from two `vm_stat` reads 2 s apart. **A reading that fails where the tool exists** (vm_stat or ps times out,
+exits non-zero, prints nonsense; likeliest exactly when the machine is starving) **refuses**: `refused=memory_unreadable` or
+`agents_unreadable`. Only an absent tool (no `vm_stat` and no `/proc/meminfo`, no `ps`) leaves its gate open, listed in
+`unreadable`. Linux reads `/proc/meminfo` MemAvailable and `/proc/vmstat` pswpin+pswpout and pgmajfault: uncalibrated (swap
+pages/s against a line set for the macOS compressor, so that gate rarely trips there). Caveat: macOS `Pageins` also counts
+file-backed reads, so read-heavy work (rg, git, builds) can trip the 1000/s gate with memory to spare; that errs toward
+waiting, and `--max-pageins` / `LW_MAX_PAGEINS_S` raises it.
 
 Hysteresis: the 4.0 per-core calm boost applies only after the machine has stayed calm (churn at most the compressor
 limit, free memory above the floor, pageins under their limit) for `LW_BOOST_CALM_S` (600 s) without a break. Any hot

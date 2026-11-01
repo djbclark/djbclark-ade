@@ -9,7 +9,7 @@
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
-    load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents N]
+    load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]]
                      [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
@@ -86,9 +86,14 @@ it never kills, throttles or signals anything. Memory gate (operator 2026-10-23,
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: free + speculative
 memory is below --min-free-mb (default 600, env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
 exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 2026-11-01); pageins exceed --max-pageins per
-second (default 1000, env LW_MAX_PAGEINS_S); or the live `acp-run` sessions machine-wide (one `ps`, exact argv match of the
-process running the script named acp-run, never pgrep/pkill -f) number --max-agents or more (default 14, env LW_MAX_AGENTS,
-0 = no cap: THE knob to tune how many agent sessions may run at once). Why, measured 2026-11-01 (load watcher d8891c91):
+second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work can trip it
+with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (acp-dispatch does; `bg` never
+does: a test run starts no agent, and gating it would starve the very sessions the cap counts), the live `acp-run` slices
+machine-wide (one `ps`, exact argv match of the process running the script named acp-run, never pgrep/pkill -f) number
+N or more (bare --max-agents = 14, env LW_MAX_AGENTS, 0 = no cap: THE knob to tune how many acp-run slices may START). A
+vm_stat or ps that exists but fails, times out or prints nonsense refuses too (`memory_unreadable`, `agents_unreadable`):
+that is likeliest when the machine is starving. Only an absent tool (Linux without vm_stat, no /proc) leaves its gate open,
+listed in `unreadable`. Why, measured 2026-11-01 (load watcher d8891c91):
 load 35-70 on this 8-core, 16 GB Mac was memory starvation, not CPU: ~64 MB free, ~12k compressions+decompressions/s,
 ~1760 pageins/s, kernel_task 57% and sys 25-39% of CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3); the
 4.0 calm boost let a slice start in every brief dip and each start pushed memory back over. The 2026-10-23 calibration of
@@ -1048,7 +1053,10 @@ def sample_calm(st, t, churn, dry):
         if os.environ.get("LW_FAKE_COMPRESSOR", "").strip():
             calm = True
         else:
-            snap = vm_snapshot()
+            try:
+                snap = vm_snapshot()
+            except ReadFailed:
+                snap = None  # a failed read is not calm
             if snap is not None:
                 prev, prev_t = st.get("pagein_prev"), st.get("pagein_prev_t")
                 st["pagein_prev"], st["pagein_prev_t"] = snap["pageins"], t
@@ -1462,80 +1470,117 @@ def _fake_memory():
                                               ("agents", "LW_FAKE_AGENTS"))}
 
 
+class ReadFailed(Exception):
+    """A reading source that EXISTS on this host (vm_stat, /proc, ps) failed: timed out, exited non-zero or printed
+    something unparsable. That is likeliest exactly when the machine is starving (a fork+exec stalls), so `admit`
+    treats it as hot (refuses), never as open. A source that is absent altogether returns None instead."""
+
+
 def _vm_stat_snapshot():
     """{free_mb, compress, pageins} from macOS `vm_stat` (free = Pages free + Pages speculative; compress =
-    Compressions + Decompressions, cumulative pages), or None."""
+    Compressions + Decompressions, cumulative pages). None when there is no `vm_stat` binary; ReadFailed when it
+    exists and fails."""
     try:
-        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
-        v = {m.group(1): int(m.group(2)) for m in
-             re.finditer(r"^(Pages free|Pages speculative|Pageins|Compressions|Decompressions):\s+(\d+)", out, re.M)}
-        ps = re.search(r"page size of (\d+) bytes", out)
-        page = int(ps.group(1)) if ps else (os.sysconf("SC_PAGE_SIZE") or 16384)
-        if not all(k in v for k in ("Pages free", "Pageins", "Compressions", "Decompressions")):
-            return None
-        return {"free_mb": (v["Pages free"] + v.get("Pages speculative", 0)) * page / 1048576,
-                "compress": v["Compressions"] + v["Decompressions"], "pageins": v["Pageins"]}
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+        r = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
+    except FileNotFoundError:
         return None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ReadFailed(f"vm_stat: {e!r}") from e
+    if r.returncode != 0:
+        raise ReadFailed(f"vm_stat exited {r.returncode}")
+    out = r.stdout
+    v = {m.group(1): int(m.group(2)) for m in
+         re.finditer(r"^(Pages free|Pages speculative|Pageins|Compressions|Decompressions):\s+(\d+)", out, re.M)}
+    ps = re.search(r"page size of (\d+) bytes", out)
+    try:
+        page = int(ps.group(1)) if ps else (os.sysconf("SC_PAGE_SIZE") or 16384)
+    except (ValueError, OSError) as e:
+        raise ReadFailed(f"vm_stat page size: {e!r}") from e
+    if not all(k in v for k in ("Pages free", "Pageins", "Compressions", "Decompressions")):
+        raise ReadFailed("vm_stat output lacks a needed counter")
+    return {"free_mb": (v["Pages free"] + v.get("Pages speculative", 0)) * page / 1048576,
+            "compress": v["Compressions"] + v["Decompressions"], "pageins": v["Pageins"]}
 
 
 def _proc_snapshot():
-    """The Linux equivalents (2026-11-01, not measured on a starving host): free = MemAvailable (else MemFree) in
-    /proc/meminfo, compress = pswpin + pswpout (swap pages moved) and pageins = pgmajfault in /proc/vmstat."""
+    """The Linux equivalents (2026-11-01, uncalibrated: swap pages/s against a line set for the macOS compressor, so
+    that gate rarely trips there; pgmajfault counts faults): free = MemAvailable (else MemFree) in /proc/meminfo,
+    compress = pswpin + pswpout and pageins = pgmajfault in /proc/vmstat. None when /proc/meminfo does not exist;
+    ReadFailed when it exists and cannot be read or parsed."""
     try:
-        mem = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(MemAvailable|MemFree):\s+(\d+) kB",
-                                                                (Path("/proc/meminfo")).read_text(), re.M)}
-        vm = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(pswpin|pswpout|pgmajfault) (\d+)",
-                                                               (Path("/proc/vmstat")).read_text(), re.M)}
-        free_kb = mem.get("MemAvailable", mem.get("MemFree"))
-        if free_kb is None or not all(k in vm for k in ("pswpin", "pswpout", "pgmajfault")):
-            return None
-        return {"free_mb": free_kb / 1024, "compress": vm["pswpin"] + vm["pswpout"], "pageins": vm["pgmajfault"]}
-    except (OSError, ValueError):
+        meminfo = Path("/proc/meminfo").read_text()
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as e:
+        raise ReadFailed(f"/proc/meminfo: {e!r}") from e
+    try:
+        mem = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(MemAvailable|MemFree):\s+(\d+) kB", meminfo, re.M)}
+        vm = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(pswpin|pswpout|pgmajfault) (\d+)",
+                                                               Path("/proc/vmstat").read_text(), re.M)}
+    except (OSError, ValueError) as e:
+        raise ReadFailed(f"/proc/vmstat: {e!r}") from e
+    free_kb = mem.get("MemAvailable", mem.get("MemFree"))
+    if free_kb is None or not all(k in vm for k in ("pswpin", "pswpout", "pgmajfault")):
+        raise ReadFailed("/proc counters missing")
+    return {"free_mb": free_kb / 1024, "compress": vm["pswpin"] + vm["pswpout"], "pageins": vm["pgmajfault"]}
 
 
 def vm_snapshot():
-    return _vm_stat_snapshot() or _proc_snapshot()
+    """One memory snapshot, or None when this host has neither vm_stat nor /proc/meminfo; ReadFailed when the
+    source it has fails."""
+    s = _vm_stat_snapshot()
+    return s if s is not None else _proc_snapshot()
 
 
 def _compressor_pages():
-    """Compressions + Decompressions (cumulative), or None where unreadable."""
-    s = vm_snapshot()
+    """Compressions + Decompressions (cumulative) for the sampler, or None where unreadable (it never refuses)."""
+    try:
+        s = vm_snapshot()
+    except ReadFailed:
+        return None
     return s["compress"] if s else None
 
 
 def is_acp_run(argv):
-    """True for the process that IS an acp-run session: argv[0] or the script right after a python interpreter is
-    named exactly `acp-run`. `uv run --script .../acp-run` (argv[0] `uv`, whose python child is the session) and
-    anything that merely mentions acp-run in an argument do not match, so each session counts once."""
+    """True for the process that IS an acp-run session: argv[0] or the script right after a python interpreter
+    (any case: a framework `Python`; `-X opt` and `-W opt` skipped) is named exactly `acp-run`. `uv run --script
+    .../acp-run` (argv[0] `uv`, whose python child is the session), `python -c`/`-m` and anything that merely
+    mentions acp-run in an argument do not match, so each session counts once."""
     if not argv:
         return False
     if os.path.basename(argv[0]) == "acp-run":
         return True
-    if not re.fullmatch(r"python[\d.]*", os.path.basename(argv[0])):
+    if not re.fullmatch(r"python[\d.]*", os.path.basename(argv[0]), re.I):
         return False
-    script = next((x for x in argv[1:] if not x.startswith("-")), "")
-    return os.path.basename(script) == "acp-run"
+    args, i = argv[1:], 0
+    while i < len(args):
+        x = args[i]
+        if x in ("-X", "-W"):
+            i += 2
+        elif x in ("-c", "-m"):
+            return False
+        elif x.startswith("-"):
+            i += 1
+        else:
+            return os.path.basename(x) == "acp-run"
+    return False
 
 
 def count_agents():
-    """Live acp-run sessions machine-wide, from one `ps` (exact argv match, no pgrep/pkill -f), or None."""
+    """Live acp-run sessions machine-wide, from one `ps` (exact argv match, never pgrep/pkill -f). None when there
+    is no `ps` binary; ReadFailed when ps times out or exits non-zero."""
     try:
         r = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
         return None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ReadFailed(f"ps: {e!r}") from e
     if r.returncode != 0:
-        return None
-    n = 0
-    for ln in r.stdout.splitlines():
-        parts = ln.split(None, 1)
-        if len(parts) == 2 and parts[0] != str(os.getpid()) and is_acp_run(parts[1].split()):
-            n += 1
-    return n
+        raise ReadFailed(f"ps exited {r.returncode}")
+    return sum(1 for ln in r.stdout.splitlines() if len(ln.split(None, 1)) == 2 and is_acp_run(ln.split(None, 1)[1].split()))
 
 
-def admit_memory(fake_load, fake_churn, fake_mem, polls):
+def admit_memory(fake_load, fake_churn, fake_mem, polls, max_agents=0):
     """One memory reading: {churn, free_mb, pageins_s, agents}, each None when it cannot be read (said so in the
     record, never guessed). Real mode reads vm_stat twice ADMIT_MEM_WINDOW_S apart. Test hooks: tests that fake the
     load (or any reading) get a healthy default for the readings they do not fake, so a busy host cannot change
@@ -1545,18 +1590,27 @@ def admit_memory(fake_load, fake_churn, fake_mem, polls):
 
     if fake_load or fake_churn or any(fake_mem.values()):
         return {"churn": pick(fake_churn, 0.0), "free_mb": pick(fake_mem["free_mb"], 8192.0),
-                "pageins_s": pick(fake_mem["pageins_s"], 0.0), "agents": int(pick(fake_mem["agents"], 0))}
-    m = {"churn": None, "free_mb": None, "pageins_s": None, "agents": count_agents()}
-    a = vm_snapshot()
-    if a is not None:
-        t0 = time.monotonic()
-        time.sleep(ADMIT_MEM_WINDOW_S)
-        b = vm_snapshot()
-        if b is not None:
+                "pageins_s": pick(fake_mem["pageins_s"], 0.0), "agents": int(pick(fake_mem["agents"], 0)), "failed": set()}
+    m = {"churn": None, "free_mb": None, "pageins_s": None, "agents": None, "failed": set()}
+    if max_agents:  # the cap gates only callers that START agents (acp-dispatch); everyone else skips the ps
+        try:
+            m["agents"] = count_agents()
+        except ReadFailed:
+            m["failed"].add("agents")
+    try:
+        a = vm_snapshot()
+        if a is not None:
+            t0 = time.monotonic()
+            time.sleep(ADMIT_MEM_WINDOW_S)
+            b = vm_snapshot()
+            if b is None:
+                raise ReadFailed("second vm sample missing")
             dt = time.monotonic() - t0
             dt = dt if dt > 0 else ADMIT_MEM_WINDOW_S
             m.update(churn=max(0.0, (b["compress"] - a["compress"]) / dt), free_mb=b["free_mb"],
                      pageins_s=max(0.0, (b["pageins"] - a["pageins"]) / dt))
+    except ReadFailed:
+        m["failed"].add("memory")
     return m
 
 
@@ -1595,26 +1649,39 @@ def calm_load():
 def calm_note(t, calm):
     """Record one reading in calm.json (atomic) and return calm_since: the time of the first reading of the current
     unbroken calm run, or None. A hot reading clears it; so does a gap over CALM_GAP_S since the last reading
-    (nobody saw the machine in between, so calm was not observed)."""
-    s = calm_load()
-    since, last = s.get("calm_since"), s.get("last_t")
-    if not calm:
-        since = None
-    elif not (_num(since) and _num(last) and 0 <= t - last <= CALM_GAP_S and since <= t):
-        since = t
+    (nobody saw the machine in between, so calm was not observed). The read-modify-write holds an flock on a
+    sibling lock file, so a hot reading by one process is not overwritten by another's stale calm one."""
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_DIR / f"calm.json.tmp{os.getpid()}"
-        tmp.write_text(json.dumps({"calm_since": since, "last_t": t}))
-        tmp.replace(STATE_DIR / "calm.json")
+        lock = open(STATE_DIR / "calm.lock", "a")
     except OSError:
-        pass  # an unwritable state dir only means the boost never accrues: fail toward waiting
+        return None  # an unwritable state dir only means the boost never accrues: fail toward waiting
+    with lock:
+        try:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+        s = calm_load()
+        since, last = s.get("calm_since"), s.get("last_t")
+        if not calm:
+            since = None
+        elif not (_num(since) and _num(last) and 0 <= t - last <= CALM_GAP_S and since <= t):
+            since = t
+        try:
+            tmp = STATE_DIR / f"calm.json.tmp{os.getpid()}"
+            tmp.write_text(json.dumps({"calm_since": since, "last_t": t}))
+            tmp.replace(STATE_DIR / "calm.json")
+        except OSError:
+            return None
     return since
 
 
 def admit_refusals(per_core, limit, m, lim):
-    """Names of the gates that refuse: load, compressor, free_mem, pageins, agents. An unreadable reading (None)
-    never refuses (fail open, reported as `unreadable`); the agent cap 0 is off."""
+    """Names of the gates that refuse: load, compressor, free_mem, pageins, agents, and `memory_unreadable` /
+    `agents_unreadable` (vm_stat or ps exists but the read failed or timed out: that is likeliest exactly when the
+    machine is starving, so it refuses). A reading whose tool is absent altogether (None, no failure) never
+    refuses; it is reported as `unreadable`. The agent cap 0 is off."""
     out = []
     if per_core > limit:
         out.append("load")
@@ -1626,6 +1693,10 @@ def admit_refusals(per_core, limit, m, lim):
         out.append("pageins")
     if lim["max_agents"] and m["agents"] is not None and m["agents"] >= lim["max_agents"]:
         out.append("agents")
+    if "memory" in m["failed"]:
+        out.append("memory_unreadable")
+    if "agents" in m["failed"] and lim["max_agents"]:
+        out.append("agents_unreadable")
     return out
 
 
@@ -1648,7 +1719,9 @@ def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None):
     if m["agents"] is not None:
         rec["agents"] = m["agents"]
     rec["max_agents"] = lim["max_agents"]
-    unreadable = [name for k, name in (("churn", "memory"), ("agents", "agents")) if m[k] is None]
+    cap_on = bool(lim["max_agents"])
+    unreadable = [name for k, name in (("churn", "memory"), ("agents", "agents"))
+                  if m[k] is None and name not in m["failed"] and (k == "churn" or cap_on)]
     if unreadable:
         rec["unreadable"] = unreadable
     if calm_for is not None:
@@ -1711,7 +1784,7 @@ def admit_line(rec):
 def cmd_admit(a):
     """May new work start now? Only ever decides; never kills, throttles or signals anything."""
     lim = {"churn": getattr(a, "max_mem_churn", ADMIT_CHURN_PAGES_S), "min_free_mb": getattr(a, "min_free_mb", ADMIT_MIN_FREE_MB),
-           "max_pageins": getattr(a, "max_pageins", ADMIT_PAGEINS_S), "max_agents": getattr(a, "max_agents", ADMIT_MAX_AGENTS)}
+           "max_pageins": getattr(a, "max_pageins", ADMIT_PAGEINS_S), "max_agents": getattr(a, "max_agents", 0)}
     if (not (math.isfinite(a.wait) and math.isfinite(a.max_per_core) and all(math.isfinite(v) for v in lim.values()))
             or a.wait < 0 or a.max_per_core <= 0 or lim["churn"] <= 0 or lim["max_pageins"] <= 0
             or lim["min_free_mb"] < 0 or lim["max_agents"] < 0):
@@ -1741,12 +1814,12 @@ def cmd_admit(a):
 
     def read(polls):
         load1, cores, per_core = admit_reading(fake, polls)
-        m = admit_memory(fake, fake_churn, fake_mem, polls)
+        m = admit_memory(fake, fake_churn, fake_mem, polls, lim["max_agents"])
         calm_for = None
         if boost and boost > a.max_per_core:
             t = now()
-            since = calm_note(t, memory_calm(m["churn"], m["free_mb"], m["pageins_s"], boost_churn, lim["min_free_mb"],
-                                             lim["max_pageins"]))
+            # judged with the module defaults only: one caller's loose flags must not start the shared calm clock for others
+            since = calm_note(t, memory_calm(m["churn"], m["free_mb"], m["pageins_s"]))
             calm_for = (t - since) if since is not None else None
         # the boost needs an unbroken calm run of at least ADMIT_BOOST_CALM_S (churn None: no boost either)
         limit = admit_limit(a.max_per_core, m["churn"] if calm_for is not None and calm_for >= ADMIT_BOOST_CALM_S else None,
@@ -1838,9 +1911,10 @@ def main():
                    help=f"and free+speculative memory is at least N MB (default {ADMIT_MIN_FREE_MB:g}, env LW_MIN_FREE_MB)")
     p.add_argument("--max-pageins", type=float, default=ADMIT_PAGEINS_S, metavar="N",
                    help=f"and pageins per second are at most N (default {ADMIT_PAGEINS_S:g}, env LW_MAX_PAGEINS_S)")
-    p.add_argument("--max-agents", type=int, default=ADMIT_MAX_AGENTS, metavar="N",
-                   help=f"and fewer than N `acp-run` agent sessions are alive machine-wide (default {ADMIT_MAX_AGENTS}, "
-                        f"env LW_MAX_AGENTS; 0 turns the cap off)")
+    p.add_argument("--max-agents", type=int, nargs="?", const=ADMIT_MAX_AGENTS, default=0, metavar="N",
+                   help=f"and fewer than N `acp-run` agent sessions are alive machine-wide. OFF unless given (0 = off), because "
+                        f"only a caller that STARTS agents (acp-dispatch) may be gated by it; `bg` test runs must never be. "
+                        f"Bare `--max-agents` means {ADMIT_MAX_AGENTS} (env LW_MAX_AGENTS; 0 there = off)")
     p.add_argument("--boost-per-core", type=float, default=ADMIT_BOOST_PER_CORE, metavar="N",
                    help=f"while churn is at most --boost-max-churn, admit up to N per core instead "
                         f"(default {ADMIT_BOOST_PER_CORE:g}; 0 turns the boost off)")

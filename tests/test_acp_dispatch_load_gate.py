@@ -75,12 +75,55 @@ class TestLoadGateRefuses(LoadGate):
         self.assertIn("load1=31.2", r.stdout)
         self.assertIn("after waiting 5s", r.stdout)
         self.assertEqual(len(r.stdout.strip().splitlines()), 1, r.stdout)
-        self.assertEqual(self.calls(), ["admit --wait 5 --json"])
+        self.assertEqual(self.calls(), ["admit --wait 5 --json --max-agents"])
         self.assertFalse((self.out / "s1-report.md").exists())          # acp-run never ran
         self.assertEqual(self.preflight_probes(), 0)                    # the gate sits before the live probe
         rec = self.record()
         self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "load", 75))
         self.assertEqual(rec["load_gate"], {"load1": 31.2, "per_core": 3.9, "waited_s": 5})
+
+
+class TestLoadGateAgentCapAndKnobs(LoadGate):
+    """2026-11-01 (adversary A1/A2/A4 of PR 210): the live-agent cap gates only callers that START agents, so acp-dispatch
+    always asks for it; its LW_ knobs reach admit as flags although every other LW_* variable is scrubbed."""
+
+    def test_the_cap_is_always_requested_bare_so_load_watch_applies_its_default(self):
+        self.assertEqual(self.dispatch("--no-model-check", env=self.gate_env(0, OK)).returncode, 0)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])
+
+    def test_the_knobs_reach_admit_as_flags_and_the_scrub_still_holds(self):
+        env = self.gate_env(0, OK, LW_MAX_AGENTS="20", LW_MIN_FREE_MB="800", LW_MAX_COMPRESSOR_S="15000",
+                            LW_MAX_PAGEINS_S="500", LW_BOOST_CALM_S="300", LW_FAKE_LOAD1="0", LW_STATE_DIR="/nonexistent")
+        self.assertEqual(self.dispatch("--no-model-check", env=env).returncode, 0)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents=20 --min-free-mb=800.0 "
+                                        "--max-mem-churn=15000.0 --max-pageins=500.0"])
+        seen = Path(str(self.lw_args) + ".env").read_text().splitlines()
+        self.assertEqual(seen, ["LW_BOOST_CALM_S=300"])        # the only LW_ variable that crosses; the test hooks do not
+
+    def test_zero_turns_the_cap_off_and_a_bad_value_is_ignored_with_a_warning(self):
+        r = self.dispatch("--no-model-check", env=self.gate_env(0, OK, LW_MAX_AGENTS="0"))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents=0"])
+        for var, bad in (("LW_MAX_AGENTS", "many"), ("LW_MAX_AGENTS", "-3"), ("LW_MAX_AGENTS", "2.5"),
+                         ("LW_MIN_FREE_MB", "nan"), ("LW_MAX_PAGEINS_S", "-1"), ("LW_BOOST_CALM_S", "x")):
+            mod = self.load_module()
+            with self.subTest(var=var, bad=bad):
+                old = os.environ.get(var)
+                os.environ[var] = bad
+                try:
+                    flags, extra = mod.load_gate_knobs()
+                finally:
+                    os.environ.pop(var, None) if old is None else os.environ.__setitem__(var, old)
+                self.assertEqual(flags, ["--max-agents"])      # nothing bad is passed on; the cap still asked for
+                self.assertEqual(extra, {})
+
+    def test_a_refusal_names_the_gate_that_said_no(self):
+        hot = ('{"status": "hot", "load1": 4.0, "per_core": 0.5, "cores": 8, "max_per_core": 1.5, "waited_s": 5, '
+               '"refused": ["agents"], "agents": 14, "max_agents": 14}')
+        r = self.dispatch("--no-model-check", "--load-wait", "5", env=self.gate_env(75, hot))
+        self.assertEqual(r.returncode, 75, r.stderr + r.stdout)
+        self.assertIn("refused=agents", r.stdout)
+        self.assertEqual(self.record()["load_gate"]["refused"], ["agents"])
 
 
 class TestLoadGateAdmits(LoadGate):
@@ -93,13 +136,13 @@ class TestLoadGateAdmits(LoadGate):
 
     def test_default_wait_is_1800(self):
         self.assertEqual(self.dispatch("--no-model-check", env=self.gate_env(0, OK)).returncode, 0)
-        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])
 
     def test_env_overrides_the_default_and_the_flag_overrides_the_env(self):
         env = self.gate_env(0, OK, ACP_DISPATCH_LOAD_WAIT="42")
         self.assertEqual(self.dispatch("--no-model-check", env=env).returncode, 0)
         self.assertEqual(self.dispatch("--no-model-check", "--load-wait", "7", name="s2", env=env).returncode, 0)
-        self.assertEqual(self.calls(), ["admit --wait 42 --json", "admit --wait 7 --json"])
+        self.assertEqual(self.calls(), ["admit --wait 42 --json --max-agents", "admit --wait 7 --json --max-agents"])
 
     def test_no_load_gate_skips_it(self):
         r = self.dispatch("--no-model-check", "--no-load-gate", env=self.gate_env(75, HOT))
@@ -177,7 +220,7 @@ class TestLoadGateBeforeQuotaChecks(LoadGate):
         r = self.dispatch("--no-model-check", "--no-preflight", env=gate)
         self.assertEqual(r.returncode, 5, r.stderr + r.stdout)       # refused on the post-wait 3%, not the 90% before
         self.assertIn("class=headroom", r.stdout)
-        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])
 
     def test_competing_slice_started_during_the_wait_counts_against_the_cap(self):
         planted = self.tmp / "state" / "other-task" / "jobs" / "busy.json"
@@ -331,7 +374,7 @@ class TestLoadGateResume(LoadGate):
         env = {**self.base_env(), **self.gate_env(75, HOT)}
         r = run(["resume", str(rec), "--timeout", "0"], env=env)
         self.assertEqual(r.returncode, 75, r.stdout + r.stderr)
-        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])
         kept = json.loads(rec.read_text())
         self.assertIn("log", kept)                                       # not overwritten by the refusal
         self.assertIn("cmd", kept)
@@ -342,7 +385,7 @@ class TestLoadGateResume(LoadGate):
         env = {**self.base_env(), **self.gate_env(0, OK)}
         r = run(["resume", str(rec), "--timeout", "0"], env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])
         self.assertEqual(json.loads(rec.read_text())["load_gate"], {"load1": 2.4, "per_core": 0.3, "waited_s": 12})
 
 
@@ -424,7 +467,7 @@ class TestLoadGateDetachNoWait(LoadGate):
         env = {**self.base_env(), **self.gate_env(75, HOT)}
         r = run(["execute", path], env=env)
         self.assertEqual(r.returncode, 75, r.stdout + r.stderr)
-        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])
         self.assertFalse((self.out / "s1-report.md").exists())          # no agent started
         rec = self.record()
         self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "load", 75))
