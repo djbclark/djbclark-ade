@@ -1915,6 +1915,8 @@ def admit_line(rec):
             line += f" max_pageins={rec['max_pageins_s']:g}"
         if "agents" in rec["refused"]:
             line += f" max_agents={rec['max_agents']}"
+    if rec.get("reservation"):
+        line += f" reservation={rec['reservation']} (release it: load-watch release {rec['reservation']}; --no-reserve to only check)"
     if "hot_for_s" in rec:
         line += f" streak={rec['streak']} hot_for_s={rec['hot_for_s']}"
     if rec["waited_s"]:

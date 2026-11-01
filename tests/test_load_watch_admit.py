@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -827,3 +828,18 @@ def test_renew_extends_a_live_reservation_and_never_resurrects_or_shortens(tmp_p
     assert {x["id"]: x["until"] for x in json.loads(f.read_text())["r"]}["far"] == now + 5000
     assert renew("dead").returncode == 1 and renew("nope").returncode == 1                    # a lapsed one stays gone
     assert "dead" not in {x["id"] for x in json.loads(f.read_text())["r"]}
+
+
+def test_the_text_line_carries_the_reservation_id_so_it_can_be_released(tmp_path):
+    """Codex P2 on PR 210: a non-JSON `admit --max-agents` reserved but never said which reservation."""
+    res = dict(LW_RESERVE_S="1200", LW_FAKE_AGENTS="3")
+    r = admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res)
+    assert r.returncode == 0, r
+    rid = re.search(r"reservation=(\S+)", r.stdout).group(1)
+    assert rid in [x["id"] for x in res_rows(tmp_path)]
+    env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"))
+    assert subprocess.run([sys.executable, str(LW), "release", rid], capture_output=True, text=True, env=env).returncode == 0
+    # no reservation text for a pure check, for a refusal, or without a cap
+    assert "reservation=" not in admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1, **res).stdout
+    assert "reservation=" not in admit(tmp_path, "--wait", "0", "--max-agents", "2", load1=0.1, **res).stdout
+    assert "reservation=" not in admit(tmp_path, "--wait", "0", load1=0.1, **res).stdout
