@@ -140,10 +140,26 @@ def status() -> int:
 PLIST = "com.djbclark.session-history-update.plist"
 
 
-def render_plist(template: str, repo: Path) -> str:
-    """Fill in the job: the checkout it runs and the index directory it refreshes and logs to (SESSION_INDEX_DIR
-    of the installing shell, else the default), so the installed job and this command see the same database."""
-    return template.replace("__REPO__", escape(str(repo))).replace("__INDEX_DIR__", escape(str(INDEX_DIR)))
+def adapter_env(mods=None) -> dict:
+    """The adapter-root variables (each adapter's ROOT_ENV: CODEX_HOME, CLAUDE_CONFIG_DIR, ...) that are set and
+    non-empty in this process, made absolute: launchd starts the job without the installing shell's environment."""
+    out = {}
+    for m in (load_adapters(set()) if mods is None else mods):
+        for name in getattr(m, "ROOT_ENV", ()):
+            v = os.environ.get(name)
+            if v:
+                out[name] = os.path.abspath(os.path.expanduser(v))
+    return out
+
+
+def render_plist(template: str, repo: Path, env=None) -> str:
+    """Fill in the job: the checkout it runs, the index directory it refreshes and logs to (SESSION_INDEX_DIR of
+    the installing shell, else the default) and every set adapter-root variable, so the scheduled refresh indexes
+    the same stores and writes the same database as an interactive search from this shell."""
+    env = adapter_env() if env is None else env
+    lines = "\n".join(f"    <key>{escape(k)}</key><string>{escape(v)}</string>" for k, v in sorted(env.items()))
+    out = template.replace("    <!--__ADAPTER_ENV__-->\n", lines + "\n" if lines else "")
+    return out.replace("__REPO__", escape(str(repo))).replace("__INDEX_DIR__", escape(str(INDEX_DIR)))
 
 
 def install(remove: bool) -> int:

@@ -381,7 +381,9 @@ class LiveLabelTests(unittest.TestCase):
                 spec = importlib.util.spec_from_file_location("t_sh_plist", SF / "session-history.py")
                 sh = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(sh)
-            out = sh.render_plist(plist, Path("/repo"))
+            with mock.patch.dict(os.environ, {"CODEX_HOME": "", "CLAUDE_CONFIG_DIR": ""}):
+                out = sh.render_plist(plist, Path("/repo"))  # adapter roots unset or empty: none are written
+            self.assertNotIn("CODEX_HOME", out)
             self.assertNotIn("__", out)  # no placeholder left, comment included
             import plistlib
             d = plistlib.loads(out.encode())
@@ -390,6 +392,35 @@ class LiveLabelTests(unittest.TestCase):
             self.assertEqual(d["StandardErrorPath"], f"{idx.resolve()}/update.err")
             self.assertEqual(d["ProgramArguments"][3], "/repo/skills/session-finder/session-history.py")
 
+
+    def test_install_carries_every_set_adapter_root_variable_into_the_job(self) -> None:
+        import plistlib
+        plist = (ROOT / "launchd" / "com.djbclark.session-history-update.plist").read_text()
+        spec = importlib.util.spec_from_file_location("t_sh_plist2", SF / "session-history.py")
+        sh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sh)
+        with mock.patch.dict(os.environ, {"CODEX_HOME": "/alt/codex & co", "CLAUDE_CONFIG_DIR": "~/alt-claude"}):
+            d = plistlib.loads(sh.render_plist(plist, Path("/repo")).encode())
+        env = d["EnvironmentVariables"]
+        self.assertEqual(env["CODEX_HOME"], "/alt/codex & co")
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(Path.home() / "alt-claude"))  # launchd does not expand `~`
+        self.assertIn("SESSION_INDEX_DIR", env)
+        self.assertIn("PATH", env)
+        with mock.patch.dict(os.environ, {"CODEX_HOME": "/alt/codex"}):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            env = plistlib.loads(sh.render_plist(plist, Path("/repo")).encode())["EnvironmentVariables"]
+        self.assertEqual(env["CODEX_HOME"], "/alt/codex")
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env)  # only variables that are set
+
+    def test_every_environment_variable_an_adapter_reads_is_declared_in_its_root_env(self) -> None:
+        """An adapter that finds its store through an environment variable without declaring it would index a
+        different store in the scheduled job than in an interactive search."""
+        import re
+        for p in sorted((SF / "adapters").glob("*.py")):
+            src = p.read_text()
+            used = set(re.findall(r"os\.environ(?:\.get\(|\[)\s*[\"']([A-Z0-9_]+)[\"']", src) + re.findall(r"os\.getenv\(\s*[\"']([A-Z0-9_]+)[\"']", src))
+            declared = set(re.findall(r"[\"']([A-Z0-9_]+)[\"']", next(iter(re.findall(r"^ROOT_ENV\s*=\s*\(([^)]*)\)", src, re.M)), "")))
+            self.assertEqual(used, declared, p.name)
 
 class SessionFindAllTests(unittest.TestCase):
     def test_session_index_dir_override_applies_to_session_find_too(self) -> None:

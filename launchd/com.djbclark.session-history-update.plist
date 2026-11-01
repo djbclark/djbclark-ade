@@ -21,6 +21,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>SESSION_INDEX_DIR</key><string>__INDEX_DIR__</string>
+    <!--__ADAPTER_ENV__-->
     <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>

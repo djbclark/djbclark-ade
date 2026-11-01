@@ -14,6 +14,8 @@ One file per agent. Contract (the core, `session-history.py`, loads every `*.py`
     RESUME = "codex resume {sid}"         # optional hint printed for ended sessions
                                           # (or a function (sid, cwd) -> command, already shell-quoted: crush.py)
     LIVE_LABEL, ENDED_LABEL = "OPEN", "closed"   # optional: what to print instead of LIVE/ended
+    ROOT_ENV = ("CODEX_HOME",)            # REQUIRED if the adapter reads an environment variable to find its store:
+                                          # `--install` copies those variables (when set) into the launchd job
 
 Document adapters (`todo.py`: every Basic Memory project's `todo/` notes) use the same
 contract with one entry per note, role `"note"` (capped at 4000 chars per row, so split a
