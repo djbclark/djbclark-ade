@@ -134,15 +134,19 @@ or thread resolve, a push or any continuation of the chain's tasks. A session th
 it, reports the owner status in its resume plan and asks nothing.
 
 1. **Read** the canonical log's frontmatter `session_id` (S) and `writer`. `session_id` is not uniform
-   (checked 2026-11-01 over 143 real logs under `~/.local/state/handoffs/chains/*/SESSION_LOG.md`): a
+   (checked 2026-11-01 over 146 real logs under `~/.local/state/handoffs/chains/*/SESSION_LOG.md`): a
    claude transcript UUID, a Paseo agent UUID (any TUI: omp, codex, claude), a herdr pane id such as
    `w36:p3`, or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id: it narrows
    candidates in step 4 and matches nobody alone.
 2. **Match S to a row of `skills/session-finder/fleet.py --json`.** The row is the owner if S equals the
-   row's `sid`, `paseo` or `id`; or the row's `id` (8+ chars) is a prefix of S; or S occurs inside the row's
-   `sid` or `transcript` path (herdr omp rows carry a jsonl path). Also read `bin/watch status --json`: a
-   `holder.target` that equals or is a prefix of S, with `alive: true`, is a live owner even when the fleet
-   row says `closed` (a closed Paseo watch holder is resumable by the next message).
+   row's `sid`, `paseo` or `id`; or the row's `id` (8+ chars) is a prefix of S; or S (8+ chars; shorter
+   free text such as `solo` never matches by containment) occurs inside the row's `sid` or `transcript`
+   path (herdr omp rows carry a jsonl path). A match on a herdr pane id (`wN:pM`, reused after a pane
+   closes) also needs the row's `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to
+   codex, otherwise any); a row of another agent is not the owner and is read as no match. Also read
+   `bin/watch status --json`: a `holder.target` that equals or is a prefix of S, with `alive: true`, is a
+   live owner even when the fleet row says `closed` (a closed Paseo watch holder is resumable by the next
+   message).
 3. **Live** means the row's `status` is neither `closed` nor `ended` and its `ended`, `archived` and `finished` fields are all
    empty or false (`idle`, `working`, `blocked`, `busy-background` and `unknown` are live), or the watch
    exception above. **You** are the owner when the row's `self` is true or S equals `$PASEO_AGENT_ID`
@@ -161,13 +165,21 @@ it, reports the owner status in its resume plan and asks nothing.
 **Exemptions (resume without asking; state which one in the resume plan):**
 
 - **A. S identifies you** (step 3: `self` true, or S equals `$PASEO_AGENT_ID`): the chain is yours.
-- **B. You are the named successor**, even while the owner still reads live: the log's `latest_handoff`
-  names a handoff file that exists, and one of: your first prompt is `/baton PATH` (or a `launch.py
-  --baton` brief) naming this chain; your agent name is `<owner's name> → <model>` (the `self-slash
-  --finish --successor` default title); the self-slash log has `finish: archived <owner id> (successor
-  <your id>)`. `self-slash` starts and verifies the successor first and archives the owner only
-  afterwards, so the owner normally still reads live while its successor reads the chain: that is the
-  handover, not a conflict.
+- **B. You are the named successor**, even while the owner still reads live. Evidence, all read from
+  `~/.local/state/self-slash.log`, whose `successor: starting` line is written before the successor's
+  first prompt runs (the `finish: archived ... (successor <id>)` line comes only after the owner is
+  archived, so a successor that reads at once never sees it): a line `<host> <owner id>: successor:
+  starting ...` whose owner id is S or the id of the row matched in step 2 (`paseo` or `id`), newer than
+  the log's `updated_at`, and that names you: on Paseo its `cwd` equals yours and the later line
+  `successor: <your id> is top-level` carries your id when present; on herdr its `pane <pane>` is your own
+  pane. The log's `latest_handoff` (resolved against `~/ops/site-private-djbclark/`; `none` or an
+  unresolvable path fails B) must name a handoff file that exists. The title is NOT evidence (`self-slash`
+  truncates the default `<owner's name> → <model>` and `--title` replaces it), and neither is the first
+  prompt: an operator-typed or relayed `/baton PATH` naming the chain proves only that the operator named
+  it, and goes through the ask. `self-slash` starts and verifies the successor first and archives the
+  owner only afterwards (it waits up to 900 s for the owner to be idle), so the owner normally still reads
+  live while its successor reads the chain: that is the handover, not a conflict. A `launch.py start
+  --baton` start writes no such line, so it goes through the ask.
 - **C. Your own chain after `/clear` or `/new`, no live other owner:** the newest `then: /baton` line for
   your id in `~/.local/state/self-slash.log` follows a handoff of this chain, you hold the watch role the
   chain belongs to (`bin/watch status`), or the operator named the chain (`/baton PATH`, `--dir
