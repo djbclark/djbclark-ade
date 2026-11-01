@@ -192,9 +192,13 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
 - **Big SQLite stores** (standing, djbclark 2026-10-31: re-check every pass). plocate is
   current to the last night: `plocate -d /opt/homebrew/var/lib/plocate/plocate.db --regex -i -0
   '\.(sqlite3?|db|sqlite-wal|db-wal|vscdb)$' | xargs -0 stat -f '%z %N' | sort -rn | head -40`
-  (`--regex` is needed for the `(..|..)` form). Read free pages without a lock:
-  `python3 -c` with `sqlite3.connect("file:PATH?immutable=1", uri=True)` and `pragma
-  freelist_count` (the `sqlite3` CLI fails on `s1-evidence` files, 2026-10-31). 2026-10-31 sizes:
+  (`--regex` is needed for the `(..|..)` form). Read free pages with a
+  read-only, WAL-aware connection: `python3 -c` with `sqlite3.connect("file:PATH?mode=ro",
+  uri=True, timeout=5)` and `pragma freelist_count` (it takes no write lock and sees the WAL;
+  the `sqlite3` CLI fails on `s1-evidence` files, 2026-10-31). Never `immutable=1` on a live
+  store: it ignores the WAL (checked 2026-11-01 on hermes `state.db`: `journal_mode` read
+  `delete` instead of `wal`), so the count can describe an older checkpoint. If `mode=ro`
+  fails (no `-shm` to attach), say so and size the file instead of guessing. 2026-10-31 sizes:
   `s1-evidence/candidates.sqlite3` 12.2 GB (6.1 GB on 2026-10-13, no free pages: real growth),
   `cas-pack/pack.sqlite3` 4.9 GB (2.3 GB), hermes `state.db` 1.4 GB, `opencode.db` 1.0 GB with 0.49 GB
   free (the Sunday `sqlite-vacuum` Jobber job reclaims it). Growth of the s1 pair is the one to watch.
