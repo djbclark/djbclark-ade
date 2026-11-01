@@ -56,8 +56,11 @@ Verified 2026-09-20 (item 1: 2026-11-01, cow 0.1.10):
    `npm install` in a paseo pasture emptied ~392 package directories of
    `~/src/paseo/node_modules`. `cow-pasture create` now passes `--no-symlink`,
    runs `cow materialise <source>/<name>`, and exits 1 without printing a
-   path if any symlink in the pasture still resolves into the source or any
-   other checkout `cow list --json` records.
+   path if any symlink in the pasture still resolves into the source (or a
+   pasture's own recorded source), or an untracked one into any other
+   checkout `cow list --json` records. Tracked links into other repos stay
+   allowed: they are committed content (djbclark-ade's `skills/forgejo`,
+   `skills/sudo-secretspec` and kin).
    Check an older pasture with `cow-pasture check <pasture-path>` (exit 1
    lists the links; on 2026-11-01 `hermes-agent/forgejo-ci-2026-10` had 795)
    and fix it with `cow materialise <source>/<name>`, the `name` that
@@ -67,8 +70,9 @@ Verified 2026-09-20 (item 1: 2026-11-01, cow 0.1.10):
    remove it and create again from the primary checkout. The check sees
    symlinks only: a copied Python venv still names the source's venv by
    absolute path in `bin/activate` and every script's `#!` line, so a
-   `pip`/`uv pip install` through it lands in the source; recreate `.venv`
-   in the pasture (`uv sync`, with `VIRTUAL_ENV` unset) before installing.
+   `pip`/`uv pip install` through it lands in the source; before installing,
+   rebuild it in the pasture (`rm -rf .venv && uv sync`, with `VIRTUAL_ENV`
+   unset): a plain `uv sync` over the copy leaves the old paths in place.
 2. **cow copies gitignored secrets.** `.env`, `*.pem`, keys — everything
    untracked comes along, `uchg` flag included. `cow-pasture` deletes
    gitignored secret-like files after the clone (patterns in the script),

@@ -6,8 +6,8 @@
 # such as .env (verified 2026-09-20). This wrapper:
 #   create  → cow create --no-symlink, then cow materialise and a scan that
 #             fails (exit 1) if any symlink in the pasture still resolves into
-#             the source or another checkout cow records (see local_deps
-#             below), then delete
+#             the source (or its recorded sources), or an untracked one into
+#             another checkout cow records (see PASTURE_PY), then delete
 #             gitignored secret-like files (default on).
 #             Also pre-trusts the folder for Claude Code (default on, `--no-trust`
 #             to skip): without it a headless `claude` start stalls at the
@@ -20,9 +20,8 @@
 #             short name (`foo`) or the full `<source>/<name>`.
 #             Orca registration (`--orca`, unregister on remove) retired from
 #             djbclark-ade 2026-10-31.
-#   check   → list symlinks in a pasture that resolve into its source or another
-#             recorded checkout; exit 1 if any (older pastures, made before
-#             create materialised).
+#   check   → the same scan for an existing pasture; exit 1 if any link
+#             (older pastures, made before create materialised).
 #
 # Never touches the source repo. Never runs in ~/ops/* (deployment checkouts;
 # operator decision 2026-09-20). COW_PASTURE_COW names the cow binary (tests
@@ -41,14 +40,14 @@ usage: cow-pasture create <name> --source <repo> [--branch <b>]
        cow-pasture check <pasture-path>
 
 create: cow create --no-symlink --print-path, cow materialise, fail (exit 1) if a
-        symlink still resolves into the source or another checkout cow records;
-        then scrub gitignored secrets.
+        symlink still resolves into the source; then scrub gitignored secrets.
 trust : pre-trust an existing pasture for Claude Code (create does this by default).
 scrub : delete gitignored files matching SECRET_PATTERNS inside <pasture-path>.
-check : list symlinks under <pasture-path> that resolve into its source or any
-        other checkout in `cow list --json` (sources and pastures); exit 1 if
-        any, 2 if <pasture-path> is not a pasture there or a directory in it is
-        unreadable. Fix: cow materialise <source>/<name>, or recreate.
+check : list symlinks under <pasture-path> that resolve into its source or that
+        source's recorded sources, and untracked ones into any other checkout in
+        `cow list --json`; exit 1 if any, 2 if <pasture-path> is not a pasture
+        there or a directory in it is unreadable. create runs the same scan.
+        Fix: cow materialise <source>/<name>, or recreate.
 remove: drop graft cache, chflags -R nouchg, cow remove.
 EOF
   exit 2
@@ -72,15 +71,18 @@ log() { printf 'cow-pasture: %s\n' "$*" >&2; }
 # 2026-11-01 an `npm install` in a paseo pasture emptied ~392 package dirs of
 # ~/src/paseo/node_modules, and builds there had read the source's stale dist.
 # A pasture made from a pasture inherits its links, which point into the
-# grandparent source and are not in cow's state, so the scan counts every
-# checkout cow records (each entry's source and path) as a source. Reads
-# `cow list --json` on stdin.
+# grandparent source and are not in cow's state, so the scan flags any link
+# into the recorded source chain, and any UNTRACKED link into another checkout
+# cow records (each entry's source and path: the chain may be broken by a
+# removed middle pasture). Tracked links into other checkouts are committed
+# content, the same in the primary (djbclark-ade's skills/sudo-secretspec ->
+# ~/src/sudo-secretspec/...), and are left alone. Reads `cow list --json` on
+# stdin.
 #   name <pasture-path> → print the pasture's full cow name (<source>/<name>)
-#   scan <pasture-path> → print "rel -> target" per symlink resolving into a
-#                         recorded checkout other than this pasture; exit 1 if
-#                         any, 2 if not a pasture or a directory is unreadable
+#   scan <pasture-path> → print "rel -> target" per such link; exit 1 if any,
+#                         2 if not a pasture or a directory is unreadable
 PASTURE_PY='
-import json, os, sys
+import json, os, subprocess, sys
 def fail(msg):
     print("cow-pasture: " + msg, file=sys.stderr)
     sys.exit(2)
@@ -97,12 +99,26 @@ entry = entry[0]
 if mode == "name":
     print(entry["name"])
     sys.exit(0)
-roots = set()
+def spellings(p):
+    return {p.rstrip("/"), real(p)} - {""}
+chain, src = set(), entry.get("source")
+while src and not spellings(src) <= chain:
+    chain |= spellings(src)
+    parent = [e.get("source") for e in entries if real(e.get("path")) == real(src)]
+    src = parent[0] if parent else None
+others = set()
 for e in entries:
     for p in (e.get("source"), e.get("path")):
         if p and real(p) != pasture:
-            roots.update((p.rstrip("/"), real(p)))
-roots.discard("")
+            others |= spellings(p)
+others -= chain
+git = subprocess.run(["git", "-C", pasture, "ls-files", "-s", "-z"], capture_output=True)
+tracked = set()
+if git.returncode == 0:
+    for rec in git.stdout.split(b"\0"):
+        meta, _, path = rec.partition(b"\t")
+        if meta.startswith(b"120000 "):
+            tracked.add(os.fsdecode(path))
 inside = lambda t, r: t == r or t.startswith(r + "/")
 bad, unreadable, stack = [], [], [pasture]
 while stack:
@@ -117,8 +133,12 @@ while stack:
             if e.is_symlink():
                 t = os.readlink(e.path)
                 hit = os.path.normpath(os.path.join(d, t))
-                if not inside(hit, pasture) and any(inside(hit, r) for r in roots):
-                    bad.append(os.path.relpath(e.path, pasture) + " -> " + t)
+                rel = os.path.relpath(e.path, pasture)
+                if inside(hit, pasture):
+                    continue
+                if any(inside(hit, r) for r in chain) or (
+                        rel not in tracked and any(inside(hit, r) for r in others)):
+                    bad.append(rel + " -> " + t)
             elif e.is_dir(follow_symlinks=False) and e.path != os.path.join(pasture, ".git"):
                 stack.append(e.path)
 for b in sorted(bad):

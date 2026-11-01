@@ -31,6 +31,11 @@ if cmd == "create":
     os.symlink(os.path.join(src, "node_modules", "@scope"), os.path.join(path, "node_modules", "@scope"))
     os.symlink("../pkg/cli.js", os.path.join(path, "node_modules", ".bin", "cli"))  # relative, in-pasture
     os.symlink("/usr/bin/env", os.path.join(path, "node_modules", "env"))  # absolute, outside any source
+    if os.environ.get("STUB_OTHER_LINK"):  # like djbclark-ade's skills/forgejo -> ~/src/sipb-agent-skills/...
+        os.makedirs(os.path.join(path, "skills"))
+        os.symlink(os.environ["STUB_OTHER_LINK"], os.path.join(path, "skills", "other"))
+        if os.environ.get("STUB_TRACK"):
+            subprocess.run(["git", "-C", path, "add", "skills/other"], check=True)
     state.append({"name": os.path.basename(src) + "/" + name, "path": path, "source": src,
                   "symlinked_dirs": ["node_modules/@scope"], "linked_dirs": []})
     json.dump(state, open(state_f, "w"))
@@ -162,3 +167,33 @@ def test_check_fails_closed_on_an_unreadable_directory(tmp_path):
         assert "cannot read" in r.stderr and "locked" in r.stderr
     finally:
         locked.chmod(0o755)
+
+
+def _other_checkout(tmp_path):
+    """A second recorded checkout (source plus pasture) the new pasture links into."""
+    other = tmp_path / "src" / "other"
+    (other / "skills" / "x").mkdir(parents=True)
+    (tmp_path / "state.json").write_text(json.dumps([
+        {"name": "other/p", "path": str(tmp_path / "pastures" / "p"), "source": str(other.resolve()),
+         "symlinked_dirs": [], "linked_dirs": []}]))
+    (tmp_path / "pastures" / "p").mkdir(parents=True)
+    return other.resolve() / "skills" / "x"
+
+
+def test_tracked_link_into_another_recorded_checkout_is_allowed(tmp_path):
+    src, cow, bin_dir = setup(tmp_path)
+    target = _other_checkout(tmp_path)
+    r = run(tmp_path, cow, bin_dir, "create", "feat", "--source", str(src), "--no-trust",
+            STUB_OTHER_LINK=str(target), STUB_TRACK="1")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == f"{tmp_path / 'pastures' / 'feat'}\n"
+
+
+def test_untracked_link_into_another_recorded_checkout_fails(tmp_path):
+    src, cow, bin_dir = setup(tmp_path)
+    target = _other_checkout(tmp_path)
+    r = run(tmp_path, cow, bin_dir, "create", "feat", "--source", str(src), "--no-trust",
+            STUB_OTHER_LINK=str(target))
+    assert r.returncode == 1
+    assert r.stdout == ""
+    assert f"skills/other -> {target}" in r.stderr
