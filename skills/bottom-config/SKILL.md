@@ -42,11 +42,14 @@ problems, 2 = unreadable input. It needs `uv` (it carries its own `jsonschema` d
 4. See it, without touching the user's terminal:
    ```sh
    scripts/preview.py                           # live config, 140x30, process widget
-   scripts/preview.py --config /tmp/try.toml --width 100 --keys t   # a draft; `t` = tree
+   scripts/preview.py --config "$draft" --width 100 --keys t   # a draft; `t` = tree
    ```
-   It runs `btm-mt` in a throwaway tmux session and prints the screen. Use a draft file for
-   experiments; copy it over the live config only when it looks right. Keys in the process
-   table: `P` name/command, `t` or `F5` tree, `e` expand widget; more in
+   It runs `btm-mt` in its own private tmux server (the user's tmux is never touched) and
+   prints the screen. It refuses a `--config` that does not exist or is not valid TOML,
+   because bottom writes a default config to any `-C` path it cannot read. Make the draft
+   with `draft=$(mktemp -t btm-draft).toml`; copy it over the live config only when it
+   looks right, and run the validator on it first. Keys in the process table: `P`
+   name/command, `t` or `F5` tree, `e` expand widget; more in
    `~/src/bottom/docs/content/usage/widgets/process.md`.
 5. Config that only `btm-mt` understands goes under a comment saying so; stock `btm` must
    still start with the file (it does: unknown keys are ignored).
@@ -54,17 +57,20 @@ problems, 2 = unreadable input. It needs `uv` (it carries its own `jsonschema` d
 ## Rebuilding btm-mt (never build locally)
 
 Builds go to CI (standing rule, `memory/feedback_macos_ci_on_request_only.md`). Work in
-`~/src/bottom` on `middle-truncate-command`, push to the fork (`origin` = `djbclark/bottom`);
-`.github/workflows/fork-build.yml` runs fmt, clippy and tests, and on a push (not a PR)
-builds the macOS arm64 binary as artifact `btm-macos-arm64`:
+`~/src/bottom` on `middle-truncate-command`, push to the fork (`origin` = `djbclark/bottom`).
+`.github/workflows/fork-build.yml` runs on push only (no `pull_request` trigger: a PR run
+uses the PR's copy of the workflow, so an outsider could replace the artifact), runs fmt,
+clippy and tests, and builds the macOS arm64 binary as artifact `btm-macos-arm64`. Then:
 
 ```sh
-gh run list -R djbclark/bottom --branch middle-truncate-command --limit 3
-gh run download RUN_ID -R djbclark/bottom -n btm-macos-arm64 -D /tmp/btm-mt
-tar xzf /tmp/btm-mt/btm-macos-arm64.tar.gz -C /tmp/btm-mt && xattr -c /tmp/btm-mt/btm
-cp /tmp/btm-mt/btm ~/.local/bin/.btm-mt.tmp && chmod 755 ~/.local/bin/.btm-mt.tmp \
-  && mv -f ~/.local/bin/.btm-mt.tmp ~/.local/bin/btm-mt     # atomic replace
+scripts/install_btm_mt.py
 ```
+
+It takes the fork branch's head commit, requires a successful *push* run for exactly that
+commit (it refuses and installs nothing otherwise), downloads that artifact into a private
+temp dir, checks the binary runs, and replaces `~/.local/bin/btm-mt` atomically. Do not
+replace it by hand with "the newest run": `gh run list --branch` also lists other people's
+PR runs.
 
 To follow upstream: `git fetch upstream && git rebase upstream/main` in `~/src/bottom`
 (the conflict hot spot is `src/widgets/process_table/process_data.rs`), push with
