@@ -3140,17 +3140,32 @@ def release_load_reservation(rec: dict | None = None) -> None:
         pass
 
 
+def transfer_load_reservation() -> None:
+    """Forget (never release) this process's agent reservation: a detached runner now owns it, reading its id from the
+    job record's `load_gate.reservation`, so this caller's exit handler must not shorten it while the runner may still
+    be waiting for capacity or starting its `uv` wrapper."""
+    _LOAD_RESERVATION.pop("id", None)
+    _LOAD_RESERVATION.pop("path", None)
+
+
 def agent_countable(root_pid: int) -> bool:
-    """True once the process tree under `root_pid` holds the `acp-run` process load-watch counts (the `uv run --script`
+    """True once `root_pid` itself or a process in its tree is the `acp-run` process load-watch counts (the `uv run --script`
+    wrapper `acp-run`'s shebang starts is not it): from then on the live count includes this agent. the `acp-run` process load-watch counts (the `uv run --script`
     wrapper `acp-run`'s shebang starts is not it): from then on the live count includes this agent."""
     try:
         r = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return False
     kids: dict[int, list[tuple[int, list[str]]]] = {}
+
+    def counted(argv: list[str]) -> bool:
+        return os.path.basename(argv[0]) != "uv" and any(os.path.basename(x) == "acp-run" for x in argv[:6])
+
     for ln in r.stdout.splitlines():
         parts = ln.split(None, 2)
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            if int(parts[0]) == root_pid and counted(parts[2].split()):
+                return True
             kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2].split()))
     todo, seen = [root_pid], {root_pid}
     while todo:
@@ -3159,8 +3174,7 @@ def agent_countable(root_pid: int) -> bool:
                 continue
             seen.add(pid)
             todo.append(pid)
-            if (os.path.basename(argv[0]) != "uv"
-                    and any(os.path.basename(x) == "acp-run" for x in argv[:6])):
+            if counted(argv):
                 return True
     return False
 
@@ -4682,6 +4696,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         r = subprocess.run(sub, check=False, capture_output=True, text=True)
         if r.returncode != 0:
             die(f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}", 1)
+        transfer_load_reservation()   # the runner owns the agent reservation now (it releases it from the record)
         if a.no_wait:
             print(f"detached\t{a.name}\t{report}\nrecord: {record}\n{rearm_hint(rec)}\nrearm: {rec['rearm']}")
             return 0

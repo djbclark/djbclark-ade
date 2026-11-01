@@ -188,6 +188,34 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         finally:
             mod.subprocess.run = orig
 
+    def test_agent_countable_checks_the_root_process_itself(self):
+        """Codex P2 on PR 210: a directly executed `acp-run` (Python shebang via --acp-run) IS the root pid."""
+        mod = self.load_module()
+        orig = mod.subprocess.run
+        try:
+            mod.subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(
+                argv, 0, "  10   1 /usr/bin/python3 /x/acp-run omp -C /w\n  20   1 /opt/uv run --script /x/acp-run omp\n", "")
+            self.assertTrue(mod.agent_countable(10))                          # the root is the counted process
+            self.assertFalse(mod.agent_countable(20))                         # a uv wrapper root with no child is not
+        finally:
+            mod.subprocess.run = orig
+
+    def test_a_detached_dispatch_hands_the_reservation_to_the_runner(self):
+        """Codex P2 on PR 210: with --detach (but not --no-wait) the caller's exit must not shorten the reservation."""
+        ok = '{"status": "ok", "load1": 2.4, "per_core": 0.3, "cores": 8, "max_per_core": 1.5, "waited_s": 1, "reservation": "r-7"}'
+        lc = self.tmp / "launchctl-submit-only"
+        lc.write_text("#!/bin/bash\nexit 0\n")                                  # accepts the submit, runs nothing
+        lc.chmod(0o755)
+        r = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--wait-timeout", "1",
+                          env=self.gate_env(0, ok, ACP_DISPATCH_LAUNCHCTL=str(lc)))
+        self.assertIn(r.returncode, (0, 124), r.stderr + r.stdout)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])   # no release by the caller
+        self.assertEqual(self.record()["load_gate"]["reservation"], "r-7")           # the runner finds it here
+        mod = self.load_module()
+        mod._LOAD_RESERVATION.update(id="x", path="/p")
+        mod.transfer_load_reservation()
+        self.assertEqual(mod._LOAD_RESERVATION.get("id"), None)
+
     def test_release_uses_this_processes_admission_else_the_one_in_the_record(self):
         mod = self.load_module()
         calls = []
