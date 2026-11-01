@@ -346,3 +346,49 @@ def test_install_for_the_opencode_target(cbw, tmp_path, monkeypatch):
     assert doc["Label"] == "com.djbclark.opencode-cpu-watch"
     assert doc["ProgramArguments"][-2:] == ["--target", "opencode"]
     assert doc["EnvironmentVariables"]["CBW_STATE_DIR"] == str(cbw.STATE_DIR)
+
+
+@pytest.mark.parametrize("cmd,name", [
+    ("env SECRETWORD", "env"),
+    ("sh SECRETWORD", "sh"),
+    ("bun x SECRETWORD", "bun"),
+    ("node /x/server", "node server"),
+    ("python3 manage.py runserver", "python3 manage.py"),
+])
+def test_an_interpreter_names_only_a_script_shaped_argument(cbw, cmd, name):
+    """A bare word after an interpreter (opencode sessions run arbitrary commands) is never logged as a name."""
+    assert cbw.label(cmd) == name
+
+
+def test_records_carry_the_target_and_report_shows_only_its_own(cbw, monkeypatch, capsys):
+    for target, secret in (("codexbar", "sk-CB"), ("opencode", "sk-OC")):
+        cbw.use_target(target)
+        root = "/A/CodexBar.app/Contents/MacOS/CodexBar" if target == "codexbar" else "/opt/homebrew/bin/opencode serve"
+        snap = {1: {"pid": 1, "ppid": 0, "rss_mb": 1, "cpu_s": 0.0, "start": "s", "cmd": f"{root} --token={secret}"},
+                2: {"pid": 2, "ppid": 1, "rss_mb": 1, "cpu_s": 0.0, "start": "t", "cmd": f"sh -c echo {secret}"}}
+        rec = _window(cbw, monkeypatch, snap, snap)
+        assert rec["target"] == target and secret not in __import__("json").dumps(rec)
+        cbw.append(rec)
+    cbw.LOG.open("a").write(__import__("json").dumps({"ts": "legacy", "total_pct": 1.0, "procs": 1, "top": []}) + "\n")
+
+    class A:
+        n = 10
+    cbw.use_target("codexbar")
+    assert cbw.cmd_report(A()) == 0
+    out = capsys.readouterr().out
+    assert "2 samples scanned" in out and "opencode" not in out.split("\n", 1)[1]  # codexbar row + the legacy row
+
+
+def test_opencode_root_with_a_space_in_its_path_fails_closed(cbw):
+    cbw.use_target("opencode")
+    procs = {1: proc(1, 0, "/Users/x/My Tools/opencode serve --port 0"), 2: proc(2, 0, "opencode serve")}
+    assert cbw.tree(procs, me=-1) == {2}
+
+
+@pytest.mark.parametrize("args,needle", [(["sample"], "required: --target"), (["sample", "--target", "nope"], "invalid choice")])
+def test_every_subcommand_needs_a_known_target(tmp_path, args, needle):
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
+                       env=dict(__import__("os").environ, CBW_STATE_DIR=str(tmp_path / "s")), timeout=30)
+    assert r.returncode == 2 and needle in r.stderr and not (tmp_path / "s").exists()

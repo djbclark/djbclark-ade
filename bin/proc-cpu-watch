@@ -19,9 +19,10 @@ total_pct, the top processes, and (on a spike, total at or above SPIKE_PCT) up t
 
 Privacy (adversary rounds 1-2, PR 202): a command line can carry a token, so no command line is ever stored. A
 process is logged as pid, percent, RSS, a short NAME and its FLAG NAMES. The NAME is the executable's basename;
-for node/python/bash-style interpreters it adds the script's basename only when the script is the token right
-after argv[0] or ends in a script suffix (.js .mjs .cjs .ts .py .sh .rb .pl), so an option's separate value
-(`node --require sk-X app.js`) is never taken for the script: then the NAME is the interpreter alone. FLAG NAMES
+for node/python/bash-style interpreters it adds the script's basename only when that token ends in a script
+suffix (.js .mjs .cjs .ts .py .sh .rb .pl) or comes right after argv[0] and is a path (contains `/`), so an
+option's separate value (`node --require sk-X app.js`) or a bare word (`env WORD`, `sh WORD`) is never taken for
+the script: then the NAME is the interpreter alone. Every record carries `target`; `report` shows one target's. FLAG NAMES
 are `--word` or a single letter with any `=value` cut (`--port`, never `--port 1234` or `--token=x`). Known
 limit: a positional VALUE that itself looks like a flag (`--password --hunter2pw`) is logged as a flag name.
 Root matching reads argv[0], which a process sets itself (`exec -a`, a copied binary): it attributes, it does
@@ -35,7 +36,7 @@ not seen, so total_pct is a floor; on Linux procps TIME has whole-second resolut
 covers the rotation to samples.jsonl.1 past CBW_MAX_MB. launchd.out/err are emptied past 1 MB, failed samples included.
 
 Env: CBW_STATE_DIR (this target's state directory; default ~/.local/state/<T>-cpu-watch; `install` passes it to the
-job), CBW_WINDOW_S (default 3), CBW_SPIKE_PCT (default 50), CBW_MAX_MB (default 5).
+job; set it for one target at a time, though a shared one only interleaves records `report` tells apart), CBW_WINDOW_S (default 3), CBW_SPIKE_PCT (default 50), CBW_MAX_MB (default 5).
 """
 import argparse
 import fcntl
@@ -100,8 +101,9 @@ def cputime_s(text):
 def label(cmd):
     """A short name for a command line: executable basename (+ script basename for an interpreter). Never an argument value.
 
-    The script is the first non-option token, taken only when it comes right after argv[0] or ends in a script
-    suffix; otherwise it may be an option's separate value, and the name is the interpreter alone."""
+    The script is the first non-option token, taken only when it looks like a script: it ends in a script suffix,
+    or it comes right after argv[0] AND is a path (contains `/`). Otherwise it may be an option's separate value or
+    an arbitrary word (`env WORD`, `sh WORD`, `bun x WORD`), and the name is the interpreter alone."""
     toks = cmd.split()
     if not toks:
         return "?"
@@ -110,7 +112,7 @@ def label(cmd):
         for i, t in enumerate(toks[1:], start=1):
             if t.startswith("-"):
                 continue
-            if SAFE_WORD.fullmatch(t) and (i == 1 or t.endswith(SCRIPT_SUFFIX)):
+            if SAFE_WORD.fullmatch(t) and (t.endswith(SCRIPT_SUFFIX) or (i == 1 and "/" in t)):
                 name = f"{name} {os.path.basename(t)}"
             break
     return name[:40]
@@ -186,7 +188,7 @@ def sample():
         rows.append({"pid": p, "ppid": b[p]["ppid"], "pct": round(pct, 1), "rss_mb": b[p]["rss_mb"], "cmd": b[p]["cmd"]})
     rows.sort(key=lambda r: -r["pct"])
     total = round(sum(r["pct"] for r in rows), 1)
-    rec = {"ts": datetime.now().astimezone().isoformat(timespec="seconds"), "window_s": round(dt, 1),
+    rec = {"ts": datetime.now().astimezone().isoformat(timespec="seconds"), "target": TARGET, "window_s": round(dt, 1),
            "procs": len(rows), "total_pct": total, "spike": total >= SPIKE_PCT,
            "top": [view(r) for r in rows[:5]]}
     if rec["spike"]:
@@ -288,7 +290,9 @@ def cmd_report(a):
     if not LOG.exists():
         print("no samples yet")
         return 1
-    recs = read_tail()
+    # Only this target's records: a CBW_STATE_DIR shared by two targets cannot mix them. A record from before the
+    # `target` field (2026-11-01) is shown under any target.
+    recs = [r for r in read_tail() if r.get("target") in (None, TARGET)]
     spikes = sum(1 for r in recs if r.get("spike") is True)
     print(f"{len(recs)} samples scanned, {spikes} at or above {SPIKE_PCT:g}%  (log: {LOG})")
     for r in recs[-a.n:]:
