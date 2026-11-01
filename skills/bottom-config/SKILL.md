@@ -51,6 +51,11 @@ problems, 2 = unreadable input. It needs `uv` (it carries its own `jsonschema` d
    looks right, and run the validator on it first. Keys in the process table: `P`
    name/command, `t` or `F5` tree, `e` expand widget; more in
    `~/src/bottom/docs/content/usage/widgets/process.md`.
+   "This size terminal"? An agent shell has no tty (`stty`/`tput` fail or say 80x24). In herdr:
+   `herdr pane list` gives `viewport_rows`; the width is the longest line of
+   `herdr pane read <pane_id> --source visible` (count characters, not bytes). Preview at
+   that size; `preview.py` always expands the process widget (`-e`), so it cannot show the
+   whole layout. For that, start `btm-mt -C FILE` in your own private `tmux -S` server.
 5. Config that only `btm-mt` understands goes under a comment saying so; stock `btm` must
    still start with the file (it does: unknown keys are ignored).
 
