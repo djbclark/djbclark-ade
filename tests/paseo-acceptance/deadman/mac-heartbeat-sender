@@ -1,0 +1,7 @@
+#!/bin/sh
+# mac-heartbeat-sender (DRAFT, runs on the Mac; plan D1.9). The watchdog's --heartbeat-cmd:
+#   bin/paseo-watchdog --heartbeat-cmd ~/.local/bin/mac-heartbeat-sender
+# Reads one JSON object on stdin and forwards it to vps-primary's forced command (write-heartbeat) over a
+# dedicated key that can run nothing else. Bounded; failure exits non-zero and the watchdog ignores it.
+# UNVERIFIED: host alias and key path.
+exec timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 -i "${DEADMAN_KEY:-$HOME/.ssh/deadman_ed25519}" -o IdentitiesOnly=yes "${DEADMAN_HOST:-deadman@vps-primary}" cat

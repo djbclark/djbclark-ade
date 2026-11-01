@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- DRAFT, NOT INSTALLED (plan T14). Alert-only: no --allow-restart. Paths are placeholders until D1 installs it. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.paseo-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/djbclark/src/djbclark-ade/bin/paseo-watchdog</string>
+    <string>--once</string>
+    <string>--json</string>
+    <string>--heartbeat-cmd</string>
+    <string>/Users/djbclark/.local/bin/mac-heartbeat-sender</string>
+  </array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/ade/watchdog/out.log</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/ade/watchdog/err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/djbclark/.local/bin</string></dict>
+</dict>
+</plist>
