@@ -69,7 +69,9 @@ class Env:
             case "$1" in
               has-session) exit 0 ;;
               list-panes) echo "%1 ${FAKE_PANE_CMD:-barnowl}" ;;
-              display-message) echo "${FAKE_ACTIVE:-1} 1 ${FAKE_ATTACHED:-1} ${FAKE_WIDTH:-140} ${FAKE_PANE_CMD:-barnowl}" ;;
+              display-message)
+                if [[ $* == *pane_in_mode* ]]; then echo "${FAKE_IN_MODE:-0}"
+                else echo "${FAKE_ACTIVE:-1} 1 ${FAKE_ATTACHED:-1} ${FAKE_WIDTH:-140} ${FAKE_PANE_CMD:-barnowl}"; fi ;;
               capture-pane) cat "$FAKE_SCREEN" ;;
               send-keys)
                 shift; printf '%s\\n' "$*" >>"$FAKE_KEYS"
@@ -103,7 +105,10 @@ class Env:
 
     def run(self, script: Path, *args: str, answer: str = "", stdin: str = "", wait: str = "1",
             extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "BO_ZLOG": str(self.zlog), "BO_STATE": str(self.state),
+        # BASH_ENV / ENV make every bash script source the caller's rc file, which can put a real tmux
+        # ahead of the fake one.
+        env = {**{k: v for k, v in os.environ.items() if k not in ("BASH_ENV", "ENV")},
+               "BO_ZLOG": str(self.zlog), "BO_STATE": str(self.state),
                "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_SCREEN": str(self.screen),
                "FAKE_KEYS": str(self.keys), "FAKE_ANSWER": answer, "BO_CONFIRM_WAIT": wait,
                "BO_LOCK": str(Path(self.tmp.name) / "lock"), "BO_SESSION": "t", **(extra or {})}
@@ -312,6 +317,41 @@ class ConfirmationGate(unittest.TestCase):
                     self.assertEqual(p.returncode, 3, (how, name, p.stderr))
                     self.assertFalse(e.typed_command(":zwrite eve -m hi"), (how, name))
                     self.assertFalse(any("BO_OK_" in k for k in e.typed()), (how, name))
+
+    def test_a_pane_in_a_tmux_mode_gets_no_keys(self) -> None:
+        for call in (("run", "getvar x"), ("perl", "6*7")):
+            with Env() as e:
+                p = e.run(BO, *call, answer="y", extra={"FAKE_IN_MODE": "1"})
+                self.assertEqual(p.returncode, 3, call)
+                self.assertEqual(e.typed(), [], call)
+
+    def test_a_line_that_ends_in_a_semicolon_is_refused_not_typed_without_it(self) -> None:
+        # tmux drops a trailing ";" from an argument: the human would approve one command and
+        # BarnOwl would get another.
+        with Env() as e:
+            p = e.run(BO, "run", "zwrite eve -m see you;", answer="y")
+            self.assertEqual(p.returncode, 2, p.stderr)
+            self.assertFalse(any("see you" in k and "start_question" not in k for k in e.typed()))
+
+    def test_rows_that_do_not_make_an_idle_layout_are_refused(self) -> None:
+        status = "\u2500\u2500 (1/1/1)  all " + "\u2500" * 20
+        cases = {
+            "status bar and one row (a joined capture)": "msg\n" + status + "\ncommand: ",
+            "a forged status bar above a real command line": status + "\nok\n" + status + "\n\ncommand: zwrite ",
+            "status bar with two blank rows below the message line": "msg\n" + status + "\n\n\n\n",
+        }
+        for name, screen in cases.items():
+            with Env() as e:
+                e.set_screen(screen)
+                self.assertEqual(e.run(BO, "run", "getvar x").returncode, 3, name)
+                self.assertEqual(e.typed(), [], name)
+
+    def test_a_popup_whose_edge_is_one_rule_character_wide_or_long_is_seen(self) -> None:
+        for edge in ("\u2514\u2500\u2518", "\u2514" + "\u2500" * 60 + "\u2518", "+" + "-" * 30 + "+"):
+            with Env() as e:
+                status = "\u2500\u2500 (1/1/1)  all " + "\u2500" * 20
+                e.set_screen("message text " + edge + " more message text\n" + status + "\n\n\n")
+                self.assertEqual(e.run(BO, "run", "getvar x").returncode, 3, edge)
 
     def test_a_question_that_never_clears_is_refused_after_the_answer(self) -> None:
         with Env() as e:

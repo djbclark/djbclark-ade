@@ -115,7 +115,9 @@ view_info() { tmux display-message -p -t "$pane" '#{window_active} #{pane_active
 # bo's question `bo asks: ...`, a search `command: search`. A popup (":show commands", help)
 # keeps the status bar and draws a box (┌─┐ │ └─┘, or +---+ without fancylines) over the list,
 # whose text can sit beside the box's edge; its footer reads `--More--` or `--End--`.
-has_edge() { LC_ALL=C.UTF-8 grep -Eq '└─+┘|┌─+┐|\+-----+\+' <<<"$1"; }
+# `(─)+`, not `─+`: in a byte-mode awk or grep (mawk, busybox, a locale that failed to load) `+` would
+# repeat only the last byte of the multibyte `─` and a real popup edge would not match.
+has_edge() { LC_ALL=C.UTF-8 grep -Eq '└(─)+┘|┌(─)+┐|\+-----+\+' <<<"$1"; }
 has_pager_footer() { grep -Eq "to quit|--More--|\\(END\\)" <<<"$1"; }
 
 # screen_idle: 0 idle; 2 no status bar in the bottom rows (a full-screen page, or a screen we do
@@ -123,26 +125,29 @@ has_pager_footer() { grep -Eq "to quit|--More--|\\(END\\)" <<<"$1"; }
 # judged in $last_screen. A message body can draw a box or a `── ` line: that only refuses.
 last_screen=
 screen_idle() {
+  # A pane in a tmux mode (copy mode, clock) swallows the typed text: not idle.
+  [[ $(tmux display-message -p -t "$pane" '#{pane_in_mode}' 2>/dev/null || echo 1) == 0 ]] || return 5
   # $(...) would drop the trailing blank rows, which are the type window: keep them.
   last_screen=$(capture; printf x)
   last_screen=${last_screen%x}
   printf '%s' "$last_screen" | LC_ALL=C.UTF-8 awk '
     { l[NR] = $0 }
-    /└─+┘|┌─+┐|\+-----+\+/ { edge = 1 }
+    /└(─)+┘|┌(─)+┐|\+-----+\+/ { edge = 1 }
     /^── / { r = NR }
     END {
       if (edge) exit 4
       if (!r) exit 2
       for (i = r + 2; i <= NR; i++) if (l[i] ~ /[^[:space:]]/) exit 3   # command line, compose (it grows the window), question
-      if (NR - r > 4 || NR - r < 2) exit 2   # a status bar that is not where an idle one is
+      if (NR - r != 2) exit 2   # status bar, one message line, ONE type row (typewinsize 1, as in the live config)
       exit 0
     }'
 }
 
 idle_refusal() {
   case $1 in
-    4) echo "BarnOwl is showing a popup; not sending keys." >&2 ;;
+    4) echo "BarnOwl is showing a popup, or a message on screen draws a box (scroll it off); not sending keys." >&2 ;;
     3) echo "BarnOwl has a command line, a compose box or a question open; not sending keys." >&2 ;;
+    5) echo "the BarnOwl pane is in a tmux mode (copy mode?); not sending keys." >&2 ;;
     *) echo "BarnOwl is showing a pager (or an unrecognised screen); not sending keys." >&2 ;;
   esac
   exit 3
@@ -184,6 +189,12 @@ send_line() {
   # characters (newline, CR, ESC, tab) outright instead of trying to escape.
   if [[ $line == *[[:cntrl:]]* ]]; then
     echo "refusing to type a line with a control character (newline, tab, ESC); send single-line text only" >&2
+    exit 2
+  fi
+  # tmux reads an argument that ends in ";" as a command separator and drops it, so the line
+  # the human approved would be typed without its last character.
+  if [[ $line == *\; ]]; then
+    echo "refusing to type a line that ends in ';' (tmux would drop it)" >&2
     exit 2
   fi
   # One tmux call for the text and the Enter: tmux runs the two as one queue item, so a key the
