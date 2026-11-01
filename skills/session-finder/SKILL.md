@@ -2,7 +2,7 @@
 name: session-finder
 description: >-
   Find which agent session (any TUI, running or ended) is or was on a topic,
-  with its handoff chains, where it lives (herdr/Orca/tmux/Paseo/Ghostty) and how to
+  with its handoff chains, where it lives (Paseo, tmux or Ghostty; herdr and Orca are retired, 2026-10-31) and how to
   continue: message it, /baton from its handoff, resume it, or brief a clean
   agent. Use for "tell the agent doing X ...", "which session is on X", "did we
   ever look at X", "find the session where we did X", /session-finder-all, or
@@ -368,7 +368,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 | codex, cursor, opencode, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:`. A herdr-idle agent whose agent API refuses input (`agent_not_ready: not an active named agent`, seen on a Crush pane 2026-10-25): `helm.py show <id>`, read the screen (empty input, nothing pending), then `helm.py send <id> --screen-fp <fp> "<text>"` (pane verbs; fresh-screen and pane checks, plus the pid where fleet knows it; never for a working, question, permission, plan, finished or self row). Without the flag an idle row still uses `agent prompt` | the `resume:` line session-history prints |
 | a TUI herdr does not detect (`zcode`, `muse`, a native Hermes TUI, …; listed from `pane process-info`, status `unknown`: never idle by itself, `helm.py send` refuses it) | `helm.py show <pane>` (prints the screen and `screen-fp`, both from one capture; none, and no send command, if herdr could not read the screen), read that screen, and only if it shows an idle, empty input (a dimmed suggestion is not a draft) and no pending question, approval or plan: `helm.py send <pane> --screen-fp <fp> "<text>"` (2026-10-25). Herdr has no agent entry for such a TUI (`herdr agent read` and `agent prompt` fail `agent_not_found`), so helm reads with `herdr pane read` and types with `pane send-text` then `pane send-keys enter`, after the second fingerprint check; a failed typing never presses Enter, is never retried and reports "unverified, do not resend". It is refused if the screen is unreadable or changed since (elapsed-time counters are ignored, so a turn that shows only as a ticking timer is not seen), is another pane or process, or the row is not such a TUI; nothing is inferred from the screen. `sent` is a submit, not a read: verify on screen (`helm.py show`) or by a named acknowledgement in the text | the `resume:` line session-history prints |
 | anything in Ghostty/iTerm/ssh with no channel | tell the operator the `where:` line | — |
-| a pane `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
+| a pane the retired `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
 
 Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
@@ -576,9 +576,9 @@ never ask the operator to press Enter as the normal delivery path.
    `launches.jsonl`. A Claude session is `finished` when its last real prompt was
    `/handoff`, `/quit` or `/exit`. A session with child processes that are not its
    MCP/LSP servers is `busy-background` (`busy:` lists them): helm never audits
-   it, `herdr-tidy` never closes it.
+   it, and the retired `herdr-tidy` never closed it.
    Ended work (`fleet.py ended`): handoff chains, transcripts that ended on a
-   question, the `herdr-tidy` close ledger (`~/.local/state/session-finder/closed.jsonl`,
+   question, the retired `herdr-tidy`'s close ledger (`~/.local/state/session-finder/closed.jsonl`,
    `closed` items with resume commands) and herdr-sleeper journal entries whose
    pane is gone (`sleeping` items with the manual resume line).
 2. Claude keyword index: `~/.local/state/session-index/<sessionId>.json`, extended
