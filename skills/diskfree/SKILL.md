@@ -151,9 +151,16 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
    `--orca` for Orca workers). Never pastures from `~/ops/*` (deployment
    checkouts — the wrapper refuses).
 2. Reclaim merged work: `cow gc --merged --dry-run`, and with the operator's
-   go, for real. Remove an arbitrary one with `cow-pasture remove <name>`
-   (plain `cow remove` exits 0 having removed nothing on a bad name — `ls`
-   after).
+   go, for real. Remove an arbitrary one with `cow-pasture remove <name>`, or
+   `cow remove -y --force <project>/<name>` (the full project/name form; plain
+   `cow remove` exits 0 having removed nothing on a bad name — `ls` after).
+   A pasture is removable when it has no unpushed commits (`git log @{u}..HEAD`
+   empty) and no uncommitted or untracked file that matters: an untracked file
+   that is generated (graft's `opencode.json` MCP config, `bin/graft/.cache`)
+   does not block it, and anything else is copied to `~/.local/state/` first
+   (2026-10-31: 6 merged pastures removed this way; a stray third-party
+   `SKILL.md` was archived, not lost). Run it only while `load-watch admit`
+   says ok: removal is short but still churn.
 3. Never delete or APFS-compress a live pasture tree — its blocks are shared
    with the source; rewriting breaks the sharing and can multiply usage.
 4. New agent workspaces on primaries under `~/src`, `~/orca/projects`,
@@ -184,8 +191,16 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   `s1-evidence/candidates.sqlite3` 12.2 GB (6.1 GB on 2026-10-13, no free pages: real growth),
   `cas-pack/pack.sqlite3` 4.9 GB (2.3 GB), hermes `state.db` 1.4 GB, `opencode.db` 1.0 GB with 0.49 GB
   free (the Sunday `sqlite-vacuum` Jobber job reclaims it). Growth of the s1 pair is the one to watch.
-- `~/.local/state/bigteam` (11 GB, 2026-10-31): task dirs with worktrees of finished fan-outs;
-  another session's work, so ask before pruning.
+- `~/.local/state/bigteam` (11 GB, 2026-10-31): task dirs of finished fan-outs, holding reports
+  that docs and memory cite, plus repo checkouts. With the operator's go, run
+  `scripts/bigteam-prune.py` (dry run; `--apply` to act). It only touches task dirs a week or more
+  old with no unfinished job record and no `CLAIM` file; inside them it removes a **linked
+  worktree** with `git worktree remove` from its main repository (its branch stays there) when
+  `git status --porcelain` is empty and its HEAD is on a remote branch, and a **clone** only when
+  every branch is pushed and it has no stash. It never removes a report file, and a checkout that
+  holds an ignored report file (`.md .json .txt .log .jsonl .diff .patch`) is kept. Everything
+  kept is listed with its reason. 2026-10-31: 0.68 GB from 11 checkouts; 27 kept (no remote,
+  uncommitted work, or ignored reports); most of the rest is claimed or failed the checks.
 
 ## 8. Close out
 
