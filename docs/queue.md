@@ -49,16 +49,9 @@ only). It moves every hard-coded model name and tier rule into `config/model-tie
 new top model is one data change. Start only after D1 of `docs/paseo-only-rearchitecture.md`; re-check its inventory (section A) against
 the code then, since routing moves to Paseo in the later phases.
 
-## `paseo-bypass-watch` test gaps from adversary round 4 (PR 121 merged 2026-10-29 as 306039a; djbclark deferred them 2026-10-29 via `/steps`: "track everything like it and resurface at the appropriate time")
+## `paseo-bypass-watch` launchd install (deferred 2026-10-29)
 
-Both are coverage gaps only; the code is exact and the adversary APPROVED 78f3a5c. Full report: `~/.local/state/bigteam/adhoc-2026-10-29/watch-adv4-report.md` (B1, B3). Not started by design.
-
-1. **B1, low.** Two mutants pass all 58 tests, a case-folded and a prefix mode comparison. Add `"Auto"`, `"DEFAULT"` and `"autoSomething"` to the parametrize list of `test_only_default_and_auto_modes_are_acted_on` in `tests/test_paseo_bypass_watch.py`, expecting no flip.
-2. **B3, very low.** Mutant `o_verify_accepts_auto` (`if after not in (TARGET_MODE, "auto")`, line 283 of `bin/paseo-bypass-watch`) survives. Add a test where the set "succeeds" but the seat still reads `auto`, and assert the post-set verify rejects it.
-
-**Resurface when** (any one): someone edits `bin/paseo-bypass-watch` or `tests/test_paseo_bypass_watch.py`, so fold these into that PR; djbclark decides to install the watcher's launchd job (do these first, since an installed watcher runs unattended); a new adversary round touches the watcher; or `/baton` on the chain `secrets-collect-yes-bypass-watch-2026-10-29` reads this file (reader protocol step 4). Also listed under Next steps of that chain's `SESSION_LOG.md`. Remove this entry when both ship.
-
-**Related decision, also deferred 2026-10-29 (djbclark, `/steps`: "Not now, track it"):** installing a launchd job for `bin/paseo-bypass-watch` (`--loop 10` or longer). Not installed; the watcher is a hand-run tool until then. Ask djbclark again when the two tests above have shipped, or when a UI-opened claude seat is seen sitting in `default`/`auto` unflipped. Install by site-djbclark's Ansible role or the ade install path, never a hand-written plist (home item 18), in a claimed workspace.
+**Related decision, also deferred 2026-10-29 (djbclark, `/steps`: "Not now, track it"):** installing a launchd job for `bin/paseo-bypass-watch` (`--loop 10` or longer). Not installed; the watcher is a hand-run tool until then. Ask djbclark again now that the two round-4 test gaps have shipped (2026-11-01), or when a UI-opened claude seat is seen sitting in `default`/`auto` unflipped. Install by site-djbclark's Ansible role or the ade install path, never a hand-written plist (home item 18), in a claimed workspace.
 
 ## Context visibility in Paseo and compact/handoff discipline: examine, search, discuss, fix (djbclark via session ab4e97be, 2026-10-27)
 
