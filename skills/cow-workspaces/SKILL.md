@@ -3,10 +3,10 @@ name: cow-workspaces
 description: >-
   Give an agent its own workspace with `cow` (APFS copy-on-write pastures) via
   the `cow-pasture` wrapper, instead of a plain clone or `git worktree`. Use
-  when starting parallel or isolated work on a checkout under ~/src,
-  ~/orca/projects or ~/.hermes, dispatching an Orca or Hermes worker into its
-  own directory, or asked about cow, pastures, `cow migrate`, or a stalled Orca
-  worker in a pasture.
+  when starting parallel or isolated work on a checkout under ~/src or ~/.hermes,
+  dispatching a Hermes or Paseo worker into its own directory, or asked about
+  cow, pastures, `cow migrate`. Orca (and `~/orca/projects`) is retired
+  (2026-10-31); no Orca recipe is kept in this skill.
 ---
 
 # cow workspaces
@@ -23,7 +23,7 @@ reuse, not speed.
 For a new isolated workspace on a **primary checkout**, run:
 
 ```bash
-~/orca/projects/djbclark-ade/bin/cow-pasture create <name> --source <repo> [--branch <b>] [--orca]
+~/src/djbclark-ade/bin/cow-pasture create <name> --source <repo> [--branch <b>]
 ```
 
 It prints the pasture path. A pasture and a linked `git worktree add`
@@ -53,40 +53,30 @@ Verified 2026-09-20:
 2. **`uchg` strands pastures.** Copied `.env` files are often user-immutable,
    so `cow remove` fails. `cow-pasture remove <name>` (short name or
    `<source>/<name>`) runs `chflags -R nouchg` first.
-3. **Orca can't see pastures** (own `.git` ⇒ absent from `git worktree
-   list`). `--orca` runs `orca repo add --path <pasture>` so `worker-start
-   --worktree path:<pasture>` resolves and the pasture groups under the
-   source's project. Removal: `cow-pasture remove <name>` unregisters it via
-   `orca project setup-delete --setup <repo-id>` (plain `cow remove` leaves a
-   dangling registration that Orca still resolves). Real fix: stablyai/orca#16226.
+3. **Orca registration is retired.** `--orca` (`orca repo add`) and the Orca
+   unregistration on `remove` were deleted from `cow-pasture` on 2026-10-31
+   (Orca is retired from djbclark-ade); `create ... --orca` is now a usage
+   error. An older pasture may still sit in Orca's own list; that is left
+   untouched.
 4. **`cow-pasture` is not on `PATH`**: call `~/src/djbclark-ade/bin/cow-pasture`.
    Plain `cow remove <short-name>` prints "not found — skipping" and **exits 0**
    having removed nothing; it needs `<source>/<name>` (2026-10-18). Check `ls`
    afterwards.
 
-## Orca dispatch recipe
-
-```bash
-P=$(cow-pasture create task-foo --source ~/src/aiuse --orca)
-orca orchestration worker-start --spec "<task>" --worktree "path:$P" --agent codex --json
-```
-
-`worker-start` must run from a coordinator terminal: run
-`orca orchestration run-create --objective "<text>"` once first, or it fails
-with `consumer_fenced`.
+## Folder trust
 
 **Claude workers and folder trust.** Claude Code shows a folder-trust "Quick
-safety check" in any directory it has never seen, so `worker-start --agent
-claude` fails at `agent_readiness` (reproduced 2026-09-20). There is no flag
+safety check" in any directory it has never seen, so a headless Claude start
+in a fresh pasture stalls there (reproduced 2026-09-20 through Orca's
+`worker-start`, since retired from djbclark-ade). There is no flag
 or env var for it (the binary's only trust env vars are for Anthropic's cloud
 runner); the mechanism is `~/.claude.json` → `projects[<path>].
 hasTrustDialogAccepted = true`. `cow-pasture create` now pre-seeds that
 (atomic write, backup at `~/.claude.json.bak.cow-pasture`; `--no-trust` to
-skip), and a Claude worker then dispatches and completes normally. Tradeoff:
+skip), and a Claude agent then starts normally. Tradeoff:
 the pasture's own `.claude/` settings, hooks and MCP config run without the
 prompt — acceptable for a clone of your own repo with secrets scrubbed, not
-for untrusted code. Codex, Cursor and Copilot are pre-trusted by Orca itself
-(`src/main/agent-trust-presets.ts`); Claude has no preset upstream.
+for untrusted code.
 
 **graft.** Agent sessions write `graft/.cache/session/*.json` into the
 workspace. `create` adds `graft/.cache/` to the pasture's `.git/info/exclude`

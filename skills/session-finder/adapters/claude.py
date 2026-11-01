@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 AGENT = "claude"
+ROOT_ENV = ("CLAUDE_CONFIG_DIR",)  # variables that move this adapter's store (carried into the scheduled job)
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
 STRIP = re.compile(r"<(system-reminder|local-command-[a-z]+|command-[a-z]+|pasted_content)\b.*?</\1>", re.S)
 

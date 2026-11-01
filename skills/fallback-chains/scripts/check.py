@@ -10,7 +10,6 @@ host only. Does not print secrets.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,7 +22,6 @@ HOME = Path.home()
 HERMES_CONFIG = HOME / ".hermes/config.yaml"
 JOBS = HOME / ".hermes/cron/jobs.json"
 LITELLM = HOME / ".litellm/config.yaml"
-HERDR = HOME / "src/djbclark-ade/bin/herdr-ai"
 SWITCH = HOME / ".hermes/scripts/ai-model-switch.py"
 
 
@@ -192,15 +190,6 @@ def main() -> int:
     if cycle:
         violations.append("litellm cycle: " + " -> ".join(cycle))
 
-    herdr = HERDR.read_text() if HERDR.exists() else ""
-    default_model = _const(herdr, "DEFAULT_MODEL")
-    fallback_model = _const(herdr, "FALLBACK_MODEL")
-    herdr_hops = [default_model, fallback_model, default_model] if default_model else []
-    print("e. herdr-ai default-model fallback")
-    print("  " + " -> ".join(herdr_hops))
-    if len(herdr_hops) != len(set(herdr_hops)):
-        violations.append("herdr-ai cycle: " + " -> ".join(herdr_hops))
-
     loaded = _launchd_loaded("com.djbclark.ai-model-switch")
     refuses = _switch_refuses()
     print("f. Second writer")
@@ -222,11 +211,6 @@ def main() -> int:
     for i, item in enumerate(unique, 1):
         print(f"  {i}. {item}")
     return 1
-
-
-def _const(text: str, name: str) -> str:
-    match = re.search(rf'^{name}\s*=\s*"([^"]+)"', text, re.M)
-    return match.group(1) if match else ""
 
 
 if __name__ == "__main__":

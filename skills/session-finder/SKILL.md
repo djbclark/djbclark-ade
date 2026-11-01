@@ -2,7 +2,7 @@
 name: session-finder
 description: >-
   Find which agent session (any TUI, running or ended) is or was on a topic,
-  with its handoff chains, where it lives (herdr/Orca/tmux/Paseo/Ghostty) and how to
+  with its handoff chains, where it lives (Paseo, tmux or Ghostty; herdr and Orca are retired, 2026-10-31) and how to
   continue: message it, /baton from its handoff, resume it, or brief a clean
   agent. Use for "tell the agent doing X ...", "which session is on X", "did we
   ever look at X", "find the session where we did X", /session-finder-all, or
@@ -18,7 +18,7 @@ from local files, with no model tokens:
 ```bash
 S=~/src/djbclark-ade/skills/session-finder
 python3 -I $S/session-find.py <keyword>...       # running sessions, every TUI, ranked by keyword
-python3 -I $S/session-history.py <keyword>...    # every session of every agent, live or ended, full text
+python3 -I $S/session-history.py -- <keyword>...    # every session of every agent, live or ended, full text
 python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet itself
 python3 -I $S/launch.py --agent A --cwd DIR --model M [--baton] -p "..."   # start a session (ACP-first)
 python3 -I $S/launch.py wait <id> [--timeout S]  # block until THAT launch's turn ends
@@ -41,13 +41,21 @@ here (`/session-finder-all` loads this skill for it).
 
 1. `session-find.py` ranks **running** sessions: Claude ones by a per-session
    keyword index (title, name, cwd, prompts), every other TUI's by title, name and
-   cwd (`fleet.py` supplies them). 1–3 distinctive words. A hit shows agent, name,
+   cwd (`fleet.py` supplies them). **`--all` adds the ended sessions of every agent**
+   from the step-2 history index (2026-10-31; before, only ~160 Claude sessions from a
+   JSON keyword file). 1–3 distinctive words. A hit shows agent, name,
    status, `title:`, `where:` + `focus:` and, for Claude, the matching prompt.
    **`FINISHED (/handoff)`** on a hit means that session already handed off: do not
    message it (section 3b).
 2. `session-history.py` searches the full text of every agent's sessions (SQLite
    FTS5; first run indexes everything, 1–2 minutes, start it with
-   `run_in_background`). Ended hits print a `resume:` command. `--agent hermes`
+   `run_in_background`). **It searches live and ended sessions together: there is no
+   active-only mode** (running-only is step 1). Ended hits print a `resume:` command.
+   A launchd job (`session-history.py --install`, run from the primary checkout; `--uninstall` removes it; every 10 min, 2026-10-31) keeps the
+   index fresh, and every search also brings it up to date first, so a search is never
+   stale, only slower when the job is off. `--status` is the read-only lag report: last
+   full update, and per agent the sessions on disk not yet indexed or changed since.
+   `SESSION_INDEX_DIR=DIR` points both scripts at another index directory (tests). `--agent hermes`
    narrows to one agent. The same index holds every Basic Memory project's
    `todo/` notes (the `todo` skill's items): a hit prints as agent `todo`,
    `OPEN`/`closed`, `title: [open] main: <title>` and the note path; `--agent todo`
@@ -375,7 +383,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 | codex, cursor, opencode, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:`. A herdr-idle agent whose agent API refuses input (`agent_not_ready: not an active named agent`, seen on a Crush pane 2026-10-25): `helm.py show <id>`, read the screen (empty input, nothing pending), then `helm.py send <id> --screen-fp <fp> "<text>"` (pane verbs; fresh-screen and pane checks, plus the pid where fleet knows it; never for a working, question, permission, plan, finished or self row). Without the flag an idle row still uses `agent prompt` | the `resume:` line session-history prints |
 | a TUI herdr does not detect (`zcode`, `muse`, a native Hermes TUI, …; listed from `pane process-info`, status `unknown`: never idle by itself, `helm.py send` refuses it) | `helm.py show <pane>` (prints the screen and `screen-fp`, both from one capture; none, and no send command, if herdr could not read the screen), read that screen, and only if it shows an idle, empty input (a dimmed suggestion is not a draft) and no pending question, approval or plan: `helm.py send <pane> --screen-fp <fp> "<text>"` (2026-10-25). Herdr has no agent entry for such a TUI (`herdr agent read` and `agent prompt` fail `agent_not_found`), so helm reads with `herdr pane read` and types with `pane send-text` then `pane send-keys enter`, after the second fingerprint check; a failed typing never presses Enter, is never retried and reports "unverified, do not resend". It is refused if the screen is unreadable or changed since (elapsed-time counters are ignored, so a turn that shows only as a ticking timer is not seen), is another pane or process, or the row is not such a TUI; nothing is inferred from the screen. `sent` is a submit, not a read: verify on screen (`helm.py show`) or by a named acknowledgement in the text | the `resume:` line session-history prints |
 | anything in Ghostty/iTerm/ssh with no channel | tell the operator the `where:` line | — |
-| a pane `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
+| a pane the retired `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
 
 Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
@@ -583,15 +591,23 @@ never ask the operator to press Enter as the normal delivery path.
    `launches.jsonl`. A Claude session is `finished` when its last real prompt was
    `/handoff`, `/quit` or `/exit`. A session with child processes that are not its
    MCP/LSP servers is `busy-background` (`busy:` lists them): helm never audits
-   it, `herdr-tidy` never closes it.
+   it, and the retired `herdr-tidy` never closed it.
    Ended work (`fleet.py ended`): handoff chains, transcripts that ended on a
-   question, the `herdr-tidy` close ledger (`~/.local/state/session-finder/closed.jsonl`,
+   question, the retired `herdr-tidy`'s close ledger (`~/.local/state/session-finder/closed.jsonl`,
    `closed` items with resume commands) and herdr-sleeper journal entries whose
    pane is gone (`sleeping` items with the manual resume line).
-2. Claude keyword index: `~/.local/state/session-index/<sessionId>.json`, extended
-   from the byte offset last read. History: one adapter per agent in
+2. Claude keyword index (running sessions only, for step 1): `~/.local/state/session-index/<sessionId>.json`,
+   extended from the byte offset last read. History: one adapter per agent in
    `adapters/*.py` (contract in `adapters/README.md`), FTS5 at
    `~/.local/state/session-index/history.v2.sqlite`; a broken adapter is skipped.
+   Adapters (2026-10-31): agy, claude, cline, codex, copilot, crush, cursor, goose, grok, hermes, muse,
+   omp, opencode, qwen, zcode and todo. **No adapter, by decision** (djbclark, 2026-10-31): kiro, pi,
+   gemini, devin. A session that has left its agent's store stays in the index as history (`orphan`
+   in `--status`; never pruned). **Live labels:** claude, cline, copilot and muse report `live()`
+   exactly (`LIVE`). For every other agent a hit is `LIVE` when `fleet.py` has a running row carrying its
+   native id (hermes, some omp), `LIVE?` when that agent has a running fleet row in the same directory and
+   the session was touched in the last 10 minutes (most fleet rows, e.g. a Paseo-hosted codex, carry no
+   native id), else `ended`. `session-find.py` (fleet) stays the authority on what is running.
    `adapters/todo.py` is a document adapter: one entry per note under
    `<project>/todo/*.md` for every project in `~/.basic-memory/config.json`,
    split into one FTS row per `##` section, `live()` = `status: open`. A full
