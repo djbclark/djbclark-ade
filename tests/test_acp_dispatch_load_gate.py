@@ -188,6 +188,26 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         finally:
             mod.subprocess.run = orig
 
+    def test_a_detached_runner_adopts_the_recorded_reservation_and_releases_it_on_a_failed_spawn(self):
+        """Codex P2 on PR 210: an inline-admitted --detach runner never calls load_gate(); its exit cleanup must still exist
+        before the pre-spawn operations (an output file that cannot be opened) can fail."""
+        ok = '{"status": "ok", "load1": 2.4, "per_core": 0.3, "cores": 8, "max_per_core": 1.5, "waited_s": 1, "reservation": "r-8"}'
+        lc = self.tmp / "launchctl-submit-only2"
+        lc.write_text("#!/bin/bash\nexit 0\n")
+        lc.chmod(0o755)
+        r = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--wait-timeout", "1",
+                          env=self.gate_env(0, ok, ACP_DISPATCH_LAUNCHCTL=str(lc)))
+        self.assertIn(r.returncode, (0, 124), r.stderr + r.stdout)
+        path = self.out / "jobs" / "s1.json"
+        rec = json.loads(path.read_text())
+        rec["stderr"] = str(self.tmp / "no-such-dir" / "s1.err")                 # open() of it fails before the spawn
+        rec["load_gate_pending"] = False
+        path.write_text(json.dumps(rec))
+        self.lw_args.unlink(missing_ok=True)
+        r = run(["execute", str(path)], env={**self.base_env(), **self.gate_env(0, ok, ACP_DISPATCH_INFLIGHT="")})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls(), ["release r-8"])
+
     def test_agent_countable_checks_the_root_process_itself(self):
         """Codex P2 on PR 210: a directly executed `acp-run` (Python shebang via --acp-run) IS the root pid."""
         mod = self.load_module()

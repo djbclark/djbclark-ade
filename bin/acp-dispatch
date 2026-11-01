@@ -3148,6 +3148,20 @@ def transfer_load_reservation() -> None:
     _LOAD_RESERVATION.pop("path", None)
 
 
+def adopt_load_reservation(rec: dict) -> None:
+    """A detached runner whose dispatcher admitted inline (--detach without --no-wait) never calls load_gate(), so it
+    adopts the reservation id and admitting binary from the job record and registers the exit-time release itself,
+    before any pre-spawn operation can fail. A process that already holds one (inline dispatch, deferred runner) keeps it."""
+    gate = rec.get("load_gate")
+    rid = gate.get("reservation") if isinstance(gate, dict) else None
+    if not rid or _LOAD_RESERVATION.get("id"):
+        return
+    _LOAD_RESERVATION.update(id=str(rid), path=rec.get("load_watch") or str(HERE / "load-watch"))
+    if not _LOAD_RESERVATION.get("atexit"):
+        _LOAD_RESERVATION["atexit"] = "1"
+        atexit.register(release_load_reservation)
+
+
 def agent_countable(root_pid: int) -> bool:
     """True once `root_pid` itself or a process in its tree is the `acp-run` process load-watch counts (the `uv run --script`
     wrapper `acp-run`'s shebang starts is not it): from then on the live count includes this agent. the `acp-run` process load-watch counts (the `uv run --script`
@@ -3997,6 +4011,7 @@ def execute_record(record: Path, tee: bool = False) -> int:
     refused = runner_load_gate(record)
     if refused is not None:
         return refused
+    adopt_load_reservation(json.loads(record.read_text()))
     wait_for_capacity(record)
     rec = json.loads(record.read_text())
     # wait_for_capacity may have held the slice up to 900 s: judge the stamped plenty gate once more on the
