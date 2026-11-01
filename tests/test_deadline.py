@@ -107,7 +107,8 @@ def test_budget_expiry_soft_then_hard_group_killed_recovery_once(env):
     r = env.run("sweep", "--no-agents", now=T0 + 11)
     assert "soft stop" in r.stdout and env.record("job")["state"] == "stopping"
     assert c.poll() is None and env.group_alive(c.pid), "SIGTERM is ignored by the child, so it must still be alive inside the grace"
-    assert "within grace" in env.run("sweep", "--no-agents", now=T0 + 14).stdout
+    assert env.run("sweep", "--no-agents", now=T0 + 14).stdout == "" and env.record("job")["state"] == "stopping", "within grace: quiet, still stopping"
+    assert "within grace" in env.run("sweep", "--no-agents", "--dry-run", now=T0 + 14).stdout
     r = env.run("sweep", "--no-agents", now=T0 + 17)
     assert "hard kill" in r.stdout
     c.wait(timeout=5)
@@ -149,7 +150,7 @@ def test_extension_allowed_capped_and_refused_after_expiry(env):
     assert r.returncode == 2 and "cap" in r.stderr, "cap defaults to the original budget (10 s): 6 + 6 refused"
     assert env.run("extend", "ext", "--by", "4", "--reason", "fits", now=T0 + 13).returncode == 0
     assert env.run("extend", "ext", "--by", "1", "--reason", "late", now=T0 + 25).returncode == 2, "past the 20 s budget: refused"
-    assert start(env, "late", "--budget", "10").returncode == 0
+    assert start(env, "late", "--budget", "10", "--on-expire", "relay").returncode == 0
     r = env.run("extend", "late", "--by", "1", "--reason", "too late", now=T0 + 11)
     assert r.returncode == 2 and "BEFORE expiry" in r.stderr
     env.run("sweep", "--no-agents", now=T0 + 30)
@@ -203,7 +204,7 @@ def test_corrupt_record_does_not_stop_the_sweep(env):
     (env.state / "wrongname.json").write_text(json.dumps({"name": "other"}))
     assert start(env, "good", "--budget", "5", "--on-expire", "relay").returncode == 0
     r = env.run("sweep", "--no-agents", now=T0 + 10)
-    assert r.returncode == 0 and "bad: corrupt record skipped" in r.stdout
+    assert r.returncode == 0 and "bad: corrupt record quarantined" in r.stdout
     assert env.record("good")["state"] == "expired"
     assert "corrupt" in env.run("ls").stdout
 
@@ -219,14 +220,14 @@ def test_reroute_action_runs_acp_dispatch_once(env):
     env.run("sweep", "--no-agents", now=T0 + 10)
     env.run("sweep", "--no-agents", now=T0 + 20)
     d = env.calls("DISPATCH")
-    assert len(d) == 1 and "reroute /x/jobs/rec.json --agent omp --model anthropic/claude-sonnet-5-5 --detach --no-wait" in d[0]
+    assert len(d) == 1 and "reroute /x/jobs/rec.json --escalate --detach --no-wait" in d[0]
 
 
 def test_duplicate_live_name_refused_and_terminal_name_reusable(env):
-    assert start(env, "dup", "--budget", "50").returncode == 0
-    assert start(env, "dup", "--budget", "50").returncode == 2
+    assert start(env, "dup", "--budget", "50", "--on-expire", "notify").returncode == 0
+    assert start(env, "dup", "--budget", "50", "--on-expire", "notify").returncode == 2
     assert env.run("done", "dup").returncode == 0
-    assert start(env, "dup", "--budget", "50").returncode == 0
+    assert start(env, "dup", "--budget", "50", "--on-expire", "notify").returncode == 0
     assert env.run("beat", "nope").returncode == 1
 
 
@@ -243,7 +244,7 @@ def test_agent_idle_alerts_once_per_hour_and_never_kills(env):
         (env.paseo_dir / f"{c * 8}-0000.json").write_text(json.dumps({"UpdatedAt": iso(ts), "Status": "running"}))
     (env.paseo_dir / "dddddddd-0000.json").write_text(json.dumps({"Status": "running"}))
     # agent c holds a live deadline record: owner is its id
-    assert env.run("start", "cjob", "--owner", "cccccccc-0000", "--budget", "100000", now=T0).returncode == 0
+    assert env.run("start", "cjob", "--owner", "cccccccc-0000", "--budget", "100000", "--on-expire", "notify", now=T0).returncode == 0
     r = env.run("sweep", "--agents-now", now=T0 + 1)
     relays = env.calls("RELAY")
     assert len(relays) == 1 and relays[0].startswith("RELAY aaaaaaaa-0000 --message-file -"), (relays, r.stdout, r.stderr)
@@ -278,3 +279,149 @@ def test_install_dry_run_renders_a_valid_plist(env, tmp_path):
     p = plistlib.loads(r.stdout.encode())
     assert p["Label"] == "com.djbclark.deadline-sweep" and p["StartInterval"] == 60
     assert p["ProgramArguments"] == [f"{ade.resolve()}/bin/deadline", "sweep"] and "__" not in r.stdout
+
+
+# ---------- PR 223 adversary round 1: failed kill, run/sweep race, start-time and ancestry guards, names ----------
+
+def load_module():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("deadline_mod", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("deadline_mod", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def inproc(env, monkeypatch):
+    for k, v in env.base.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("DEADLINE_NOW", str(T0))
+    monkeypatch.setenv("DEADLINE_SETTLE_S", "0.05")
+    return load_module()
+
+
+def test_failed_kill_is_not_a_stop_and_owner_is_told(env, inproc):
+    # pid 1 is alive with a readable start time but is never signalled (unsafe target): the stop FAILS.
+    dl = inproc
+    info = dl.proc_info(1)
+    assert info, "pid 1 must be readable for this test"
+    rec = {"name": "stuck", "owner": "owner-1", "pid": 1, "pgid": None, "pid_start": info[0], "pgid_start": None,
+           "started": T0 - 100, "last_beat": T0 - 100, "budget_s": 10, "grace_s": 5, "on_expire": "kill", "state": "running"}
+    dl.save(rec)
+    out = dl.step(rec)
+    assert "KILL FAILED" in out and rec["state"] == "kill-failed" and rec["recovery"]["state"] == "done"
+    relays = env.calls("RELAY")
+    assert len(relays) == 1 and "COULD NOT BE STOPPED" in env.log.read_text() and "stopped by the enforcer" not in env.log.read_text()
+    assert dl.step(rec) == "kill-failed: still alive" and len(env.calls("RELAY")) == 1, "told once, retried silently"
+    assert dl.quiet("kill-failed: still alive")
+    assert dl.registrar_alive(rec) is False
+    # the operator acknowledges it with `done`, which frees the name
+    assert env.run("done", "stuck").returncode == 0 and env.record("stuck")["state"] == "done"
+
+
+def test_survivor_of_sigkill_is_kill_failed_not_expired(env, inproc, monkeypatch):
+    dl = inproc
+    rec = {"name": "tough", "owner": "owner-1", "pid": 4242, "pgid": None, "pid_start": "x", "started": T0 - 100, "last_beat": T0 - 100,
+           "budget_s": 10, "grace_s": 5, "on_expire": "relay", "state": "stopping", "soft_at": T0 - 50, "stopped_by_us": True}
+    dl.save(rec)
+    monkeypatch.setattr(dl, "target_status", lambda r: "alive")
+    monkeypatch.setattr(dl, "signal_target", lambda r, s: ("sent", "signal 9"))
+    monkeypatch.setattr(dl, "settle", lambda r, secs: False)
+    assert "KILL FAILED" in dl.step(rec) and rec["state"] == "kill-failed"
+    assert "still alive after SIGKILL" in env.log.read_text() and len(env.calls("RELAY")) == 1
+
+
+def test_run_child_exit_before_registrar_polls_is_not_lost(env, inproc, monkeypatch):
+    # the child has exited and is an unreaped zombie; its `run` registrar is alive and has not polled yet
+    dl = inproc
+    c = subprocess.Popen(["sleep", "0.2"], start_new_session=True)
+    start_tok = dl.proc_info(c.pid)[0]
+    reg = dl.proc_info(os.getpid())
+    rec = {"name": "racy", "owner": "owner-1", "pid": c.pid, "pgid": c.pid, "pid_start": start_tok, "pgid_start": start_tok, "started": T0,
+           "last_beat": T0, "budget_s": 1000, "grace_s": 5, "on_expire": "kill", "state": "running", "kind": "run",
+           "registrar_pid": os.getpid(), "registrar_start": reg[0]}
+    dl.save(rec)
+    time.sleep(0.6)
+    assert dl.target_status(rec) == "gone"
+    assert dl.step(rec) == "ok" and rec["state"] == "running" and env.calls("RELAY") == [], "no false lost while the registrar lives"
+    rec["registrar_start"] = "another process now"   # the `run` itself died: nobody will record the rc
+    assert "lost" in dl.step(rec) and rec["state"] == "lost"
+    c.wait()
+
+
+def test_run_exit_code_of_a_signalled_child_is_128_plus_n(env):
+    r = env.run("run", "--budget", "30", "--name", "sig", "--owner", "o", "--", "sh", "-c", "kill -KILL $$", now=None, DEADLINE_RUN_POLL="0.05")
+    assert r.returncode == 137
+
+
+def test_run_returns_124_when_the_sweep_did_the_stopping(env, inproc):
+    dl = inproc
+    assert dl.exit_code(-9) == 137 and dl.exit_code(3) == 3 and dl.exit_code(0) == 0
+
+
+def test_start_refuses_a_pid_whose_start_time_cannot_be_read(env):
+    r = start(env, "ghost", "--budget", "10", "--pid", "999999")
+    assert r.returncode == 2 and "not running" in r.stderr
+    assert not (env.state / "ghost.json").exists()
+
+
+def test_record_without_a_start_time_is_never_signalled(env):
+    c = env.child("sleep 60")
+    assert start(env, "nostart", "--budget", "10", "--pid", str(c.pid), "--on-expire", "relay").returncode == 0
+    p = env.state / "nostart.json"
+    rec = json.loads(p.read_text())
+    rec["pid_start"] = None
+    rec["pgid_start"] = None
+    p.write_text(json.dumps(rec))
+    r = env.run("sweep", "--no-agents", now=T0 + 50)
+    assert "lost (unverified)" in r.stdout and env.record("nostart")["state"] == "lost"
+    assert c.poll() is None and env.group_alive(c.pid), "no recorded start time: never signalled"
+
+
+def test_start_refuses_the_callers_own_ancestry_group_and_mismatched_group(env):
+    me = os.getpid()   # the pytest process is the parent (an ancestor) of the `deadline start` it launches
+    r = start(env, "self", "--budget", "10", "--pid", str(me))
+    assert r.returncode == 2 and "ancestor" in r.stderr
+    r = start(env, "mygroup", "--budget", "10", "--pgid", str(os.getpgrp()))
+    assert r.returncode == 2 and "caller" in r.stderr
+    c = env.child("sleep 60")
+    r = start(env, "mismatch", "--budget", "10", "--pid", str(c.pid), "--pgid", str(os.getpgrp()))
+    assert r.returncode == 2
+    r = start(env, "mismatch2", "--budget", "10", "--pid", str(c.pid), "--pgid", str(c.pid + 1))
+    assert r.returncode == 2 and "not in process group" in r.stderr
+    assert not list(env.state.glob("*.json"))
+
+
+def test_kill_with_nothing_to_kill_is_refused_but_announce_only_is_named(env):
+    r = start(env, "waitonly", "--budget", "10")
+    assert r.returncode == 2 and "nothing to kill" in r.stderr
+    assert start(env, "waitonly", "--budget", "10", "--on-expire", "notify").returncode == 0
+
+
+def test_reserved_and_hidden_names_are_refused(env):
+    for name in ("agents", ".hidden", "-x", "a/b"):
+        assert start(env, name, "--budget", "10", "--on-expire", "notify").returncode == 2, name
+    assert env.run("run", "--budget", "5", "--name", "agents", "--", "true", now=None).returncode == 2
+
+
+def test_record_missing_keys_does_not_crash_ls_or_sweep_and_is_reported_once(env):
+    env.state.mkdir(parents=True)
+    (env.state / "half.json").write_text(json.dumps({"name": "half"}))
+    (env.state / "bad.json").write_text("{nope")
+    r = env.run("ls")
+    assert r.returncode == 0 and "corrupt" in r.stdout
+    first = env.run("sweep", "--no-agents", now=T0 + 10)
+    assert first.returncode == 0 and "quarantined" in first.stdout
+    assert (env.state / "half.json.corrupt").exists() and not (env.state / "half.json").exists()
+    assert env.run("sweep", "--no-agents", now=T0 + 70).stdout == "", "a corrupt record is not logged again every minute"
+    assert "quarantined" in env.run("ls").stdout
+
+
+def test_orphan_lock_files_are_pruned(env):
+    assert start(env, "tmp1", "--budget", "10", "--on-expire", "notify").returncode == 0
+    assert env.run("done", "tmp1").returncode == 0
+    (env.state / "tmp1.json").unlink()
+    env.run("sweep", "--no-agents")
+    assert not (env.state / ".tmp1.lock").exists()

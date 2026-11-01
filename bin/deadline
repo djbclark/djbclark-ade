@@ -12,7 +12,11 @@
     deadline install [--ade DIR] [--dry-run] | uninstall        the launchd job (macOS)
 
 DUR is seconds (90, 1.5) or units (90s, 5m, 2h, 1h30m). Exit: 0 ok; 1 failed or unknown name; 2 refused (bad input, extension
-refused, name already live, install from a linked worktree); `run` returns the command's rc, or 124 when it stopped the command.
+refused, name already live, a reserved name, install from a linked worktree, and the registration guards: the pid is not running or has
+no readable start time, is the caller's ancestor or in the caller's group/session, or is not in --pgid, and the default `kill` with no
+--pid/--pgid: an announce-only wait must say --on-expire notify|relay|reroute:RECORD); `run` returns the command's rc (128+N for a
+signal death), or 124 when the enforcer stopped the command. A stop that failed (the process is still alive) is state `kill-failed`
+(non-terminal), never `expired`; the owner is told whatever the action.
 
 Rule (docs/deadline.md): before any command or wait that may run longer than ~2 min, register a deadline, or use `deadline run`.
 
@@ -57,8 +61,9 @@ from pathlib import Path
 HOME = Path.home()
 ADE = Path(__file__).resolve().parent.parent
 LABEL = "com.djbclark.deadline-sweep"
-TERMINAL = {"done", "lost", "expired"}
-NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+TERMINAL = {"done", "lost", "expired"}   # `kill-failed` is deliberately NOT terminal: the process may still be running
+NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")   # no leading dot: such files are skipped by the sweep
+RESERVED_NAMES = {"agents"}   # agents.json is the agent-check state file
 ACTIONS_PLAIN = {"kill", "notify", "relay"}
 
 
@@ -101,12 +106,20 @@ def rec_path(name: str) -> Path:
     return state_dir() / f"{name}.json"
 
 
+def valid(d) -> bool:
+    """A record the state machine can read: the keys `step` indexes directly are present and numeric."""
+    return (isinstance(d, dict) and isinstance(d.get("name"), str)
+            and all(isinstance(d.get(k), (int, float)) and not isinstance(d.get(k), bool) for k in ("started", "budget_s")))
+
+
 def load(name: str) -> dict | None:
     try:
         d = json.loads(rec_path(name).read_text())
     except FileNotFoundError:
         return None
-    return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+    return d if valid(d) else None
 
 
 def save(rec: dict) -> None:
@@ -139,7 +152,7 @@ class Locked:
 
 
 def all_records() -> list[tuple[str, dict | None]]:
-    """(name, record or None when the file is corrupt) for every record file."""
+    """(name, record or None when the file is corrupt or lacks a required key) for every record file."""
     out = []
     d = state_dir()
     if d.is_dir():
@@ -148,7 +161,7 @@ def all_records() -> list[tuple[str, dict | None]]:
                 continue
             try:
                 v = json.loads(p.read_text())
-                out.append((p.stem, v if isinstance(v, dict) and v.get("name") == p.stem else None))
+                out.append((p.stem, v if valid(v) and v.get("name") == p.stem else None))
             except (OSError, ValueError):
                 out.append((p.stem, None))
     return out
@@ -195,15 +208,18 @@ def group_members(pgid: int) -> list[int]:
 
 
 def target_status(rec: dict) -> str:
-    """alive | gone | reused (same pid, different start time) | none (nothing registered to watch)."""
+    """alive | gone | reused (same pid, different start time) | unverified (a pid with no recorded start time: never
+    signalled, a recycled pid could not be told apart) | none (nothing registered to watch)."""
     pid, pgid = rec.get("pid"), rec.get("pgid")
     if not pid and not pgid:
         return "none"
+    if pid and not rec.get("pid_start"):
+        return "unverified"
     alive = False
     if pid:
         info = proc_info(int(pid))
         if info and info[1] != "Z":
-            if rec.get("pid_start") and info[0] != rec["pid_start"]:
+            if info[0] != rec["pid_start"]:
                 return "reused"
             alive = True
     if pgid and not alive:
@@ -214,23 +230,42 @@ def target_status(rec: dict) -> str:
     return "alive" if alive else "gone"
 
 
-def signal_target(rec: dict, sig: int) -> str:
-    """Signal the group (or the lone pid) after re-checking identity; never our own group, pid 1 or a reused pid."""
-    if target_status(rec) != "alive":
-        return "not signalled: target not alive or reused"
+def signal_target(rec: dict, sig: int) -> tuple[str, str]:
+    """Signal the group (or the lone pid) after re-checking identity; never our own group, pid 1 or a reused pid.
+    (outcome, text): `sent` (a signal was delivered), `gone` (nothing alive to signal), `failed` (alive, NOT signalled:
+    the OS refused, or the target is unsafe). Only `sent` and `gone` may be reported as a stop."""
+    ts = target_status(rec)
+    if ts == "gone":
+        return "gone", "target already gone"
+    if ts != "alive":
+        return "failed", f"not signalled: target is {ts}"
     pgid, pid = rec.get("pgid"), rec.get("pid")
     try:
         if pgid and int(pgid) > 1 and int(pgid) != os.getpgrp():
             os.killpg(int(pgid), sig)
-            return f"signal {sig} to group {pgid}"
+            return "sent", f"signal {sig} to group {pgid}"
         if pid and int(pid) > 1 and int(pid) != os.getpid():
             os.kill(int(pid), sig)
-            return f"signal {sig} to pid {pid}"
+            return "sent", f"signal {sig} to pid {pid}"
     except ProcessLookupError:
-        return "already gone"
+        return "gone", "already gone"
     except PermissionError as e:
-        return f"refused by the OS: {e}"
-    return "not signalled: unsafe target"
+        return "failed", f"refused by the OS: {e}"
+    return "failed", "not signalled: unsafe target"
+
+
+def ancestors() -> set[int]:
+    """This process's parent chain (pids). ProcUnknown propagates: a caller that needs it fails closed."""
+    parent = {}
+    for line in _ps(["-A", "-o", "pid=,ppid="]).splitlines():
+        t = line.split()
+        if len(t) == 2 and t[0].isdigit() and t[1].isdigit():
+            parent[int(t[0])] = int(t[1])
+    chain, p = set(), os.getppid()
+    while p > 1 and p not in chain:
+        chain.add(p)
+        p = parent.get(p, 0)
+    return chain
 
 
 def settle(rec: dict, secs: float) -> bool:
@@ -259,13 +294,30 @@ def sh(argv: list[str], text: str | None = None, timeout: float = 30, keep: int 
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()[-keep:]
 
 
-def tool(env_key: str, rel: str, which: str | None = None) -> list[str]:
-    exe = os.environ.get(env_key) or (shutil.which(which) if which else None) or str(ADE / rel)
+def tool(env_key: str, rel: str, which: str | None = None, fallback: str | None = None) -> list[str]:
+    exe = os.environ.get(env_key) or (shutil.which(which) if which else None) or fallback or str(ADE / rel)
     return [exe] if os.access(exe, os.X_OK) else [sys.executable, exe]
 
 
+def sh_nokill(argv: list[str], wait: float) -> tuple[int, str]:
+    """Run argv and wait up to `wait` s, but NEVER kill it on timeout (acp-dispatch reroute may be mid-submit): it is left running."""
+    import tempfile
+    with tempfile.TemporaryFile("w+") as out:
+        try:
+            p = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            return 127, str(e)
+        try:
+            rc = p.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            return 124, f"still running after {wait:g}s; left alone, not killed"
+        out.seek(0)
+        return rc, out.read().strip()[-400:]
+
+
 def hermes_ping(msg: str) -> str:
-    rc, out = sh(tool("DEADLINE_HERMES_PING", "bin/hermes-ping", "hermes-ping") + [msg], timeout=30)
+    rc, out = sh(tool("DEADLINE_HERMES_PING", "bin/hermes-ping", "hermes-ping", fallback=str(HOME / ".local/bin/hermes-ping")) + [msg],
+                 timeout=30)
     return f"ping rc={rc}"
 
 
@@ -287,28 +339,54 @@ def message(rec: dict, what: str) -> str:
 
 
 def recover(rec: dict) -> dict:
-    """The on-expire recovery. Marked started BEFORE it runs and saved: at most once, even if this pass dies midway."""
+    """The on-expire recovery. Marked started BEFORE it runs and saved: at most once, even if this pass dies midway.
+    A stop that FAILED (`kill_failed`) always tells the owner, whatever the action, and never reroutes: the work is still running."""
     rec["recovery"] = {"state": "started", "at": now()}
     save(rec)
     action = rec.get("on_expire") or "kill"
     steps = []
     killed = rec.get("stopped_by_us", False)
-    msg = message(rec, "stopped by the enforcer" if killed else "expired")
-    steps.append(hermes_ping(f"deadline {rec['name']} ({rec.get('owner')}): {rec.get('reason', 'expired')}; action {action}"))
-    if action == "notify":
-        steps.append(relay(rec.get("owner", "-"), msg))
-    elif action == "relay" or (action == "kill" and not killed):
+    failed = rec.get("kill_failed", False)
+    if failed:
+        msg = message(rec, f"COULD NOT BE STOPPED, the process is still running ({rec.get('kill_detail', '?')})")
+    else:
+        msg = message(rec, "stopped by the enforcer" if killed else "expired")
+    steps.append(hermes_ping(f"deadline {rec['name']} ({rec.get('owner')}): "
+                             + (f"KILL FAILED ({rec.get('kill_detail', '?')})" if failed else f"{rec.get('reason', 'expired')}; action {action}")))
+    if failed or action in ("notify", "relay") or (action == "kill" and not killed):
         steps.append(relay(rec.get("owner", "-"), msg))
     elif action.startswith("reroute:"):
         argv = tool("DEADLINE_ACP_DISPATCH", "bin/acp-dispatch") + [
-            "reroute", action.split(":", 1)[1], "--agent", "omp", "--model", "anthropic/claude-sonnet-5-5", "--detach", "--no-wait"]
-        rc, out = sh(argv, timeout=60)
+            "reroute", action.split(":", 1)[1], "--escalate", "--detach", "--no-wait"]
+        rc, out = sh_nokill(argv, wait=120)
         steps.append(f"reroute rc={rc}: {out[-150:]}")
     rec["recovery"] = {"state": "done", "at": now(), "outcome": steps}
     return rec
 
 
 # ---------- the state machine: one pass over one record ----------
+
+def registrar_alive(rec: dict) -> bool:
+    """True while the `deadline run` that registered this record is itself still running (same pid AND start time)."""
+    pid, start = rec.get("registrar_pid"), rec.get("registrar_start")
+    if rec.get("kind") != "run" or not pid or not start:
+        return False
+    info = proc_info(int(pid))
+    return bool(info and info[1] != "Z" and info[0] == start)
+
+
+def finish(rec: dict, state: str, n: float, **kw) -> dict:
+    rec.update(state=state, ended=n, **kw)
+    return rec
+
+
+def stop_failed(rec: dict, n: float, detail: str) -> str:
+    """The process is alive and could not be stopped: NOT terminal, the owner is told once, retried each pass."""
+    rec.update(state="kill-failed", kill_failed=True, kill_detail=detail)
+    rec = recover(rec)
+    save(rec)
+    return f"KILL FAILED: {detail}; owner told"
+
 
 def step(rec: dict, dry: bool = False) -> str:
     """Advance one record; returns what was (or, in dry mode, would be) done. Caller holds the record lock."""
@@ -319,10 +397,14 @@ def step(rec: dict, dry: bool = False) -> str:
     settle_s = fenv("DEADLINE_SETTLE_S", 1.0)
     ts = target_status(rec)
     if st == "running":
-        if ts in ("gone", "reused"):
+        if ts in ("gone", "reused", "unverified"):
+            if ts != "reused" and registrar_alive(rec):
+                return "ok"   # a `run` child that exited a moment ago: its registrar records the rc on its next poll
             if dry:
                 return f"would mark lost ({ts})"
-            rec.update(state="lost", ended=n, reason=f"process {ts}" + (" (pid reuse: not signalled)" if ts == "reused" else ""))
+            why = {"reused": "pid reuse: the pid now has another start time, not signalled",
+                   "unverified": "no start time was recorded for the pid, so it is never signalled"}.get(ts, "process gone")
+            rec.update(state="lost", ended=n, reason=why)
             rec["lost_notice"] = relay(rec.get("owner", "-"), message(rec, f"watched process is {ts} and was never marked done"))
             save(rec)
             return f"lost ({ts})"
@@ -337,47 +419,85 @@ def step(rec: dict, dry: bool = False) -> str:
             return f"would stop: {reason}"
         rec["reason"] = reason
         if (rec.get("on_expire") or "kill") == "notify" or ts == "none":
-            rec.update(state="expired", ended=n)
-            rec = recover(rec)
+            rec = recover(finish(rec, "expired", n))   # the named announce-only cases: --on-expire notify, or a wait with no pid
             save(rec)
-            return f"expired ({reason}); not killed; recovery once"
-        out = signal_target(rec, signal.SIGTERM)
+            return f"expired ({reason}); announced, nothing to kill or not asked to; recovery once"
+        outcome, text = signal_target(rec, signal.SIGTERM)
+        if outcome == "failed":
+            return stop_failed(rec, n, text)
+        if outcome == "gone":
+            rec = recover(finish(rec, "expired", n))
+            save(rec)
+            return f"expired ({reason}); target already gone; recovery once"
         rec.update(state="stopping", soft_at=n, stopped_by_us=True)
         save(rec)
         if settle(rec, settle_s):
-            rec.update(state="expired", ended=n)
-            rec = recover(rec)
+            rec = recover(finish(rec, "expired", n))
             save(rec)
-            return f"stopped ({reason}): {out}; recovery once"
-        return f"soft stop ({reason}): {out}"
+            return f"stopped ({reason}): {text}; recovery once"
+        return f"soft stop ({reason}): {text}"
     if st == "stopping":
         if ts != "alive":
             if dry:
                 return "would run recovery (target gone)"
-            rec.update(state="expired", ended=n)
-            rec = recover(rec)
+            rec = recover(finish(rec, "expired", n))
             save(rec)
             return "target gone; recovery once"
         if n - rec.get("soft_at", n) < rec.get("grace_s", 60):
             return "stopping: within grace"
         if dry:
             return "would SIGKILL"
-        out = signal_target(rec, signal.SIGKILL)
+        outcome, text = signal_target(rec, signal.SIGKILL)
         rec["hard_at"] = n
+        if outcome == "failed":
+            return stop_failed(rec, n, text)
+        if not settle(rec, max(settle_s, 2.0)):
+            return stop_failed(rec, n, "still alive after SIGKILL and a 2 s wait")
+        rec = recover(finish(rec, "expired", n))
         save(rec)
-        settle(rec, max(settle_s, 2.0))
-        rec.update(state="expired", ended=n)
-        rec = recover(rec)
-        save(rec)
-        return f"hard kill: {out}; recovery once"
+        return f"hard kill: {text}; recovery once"
+    if st == "kill-failed":
+        if ts != "alive":
+            if not dry:
+                save(finish(rec, "expired", n, kill_note="target gone later; the owner was told of the failed stop"))
+            return "kill-failed: target gone later"
+        if dry:
+            return "would retry SIGKILL"
+        outcome, text = signal_target(rec, signal.SIGKILL)
+        if outcome != "failed" and settle(rec, max(settle_s, 2.0)):
+            save(finish(rec, "expired", n, kill_note="killed on a retry; the owner was told of the earlier failure"))
+            return f"kill-failed: killed on retry ({text})"
+        return "kill-failed: still alive"
     return f"unknown state {st}"
 
 
 def prune() -> None:
-    """Terminal records older than 7 days (by their own `ended`) are removed."""
+    """Terminal records older than 7 days (by their own `ended`) are removed; so are orphan lock files, and quarantined
+    corrupt records after 7 days (by mtime)."""
+    d = state_dir()
     for name, rec in all_records():
         if rec and rec.get("state") in TERMINAL and now() - rec.get("ended", now()) > 7 * 86400:
             rec_path(name).unlink(missing_ok=True)
+    for p in d.glob(".*.lock"):
+        if not (d / (p.name[1:-5] + ".json")).exists():
+            with Locked(p.name[1:-5]) as got:   # only when no one holds it
+                if got:
+                    p.unlink(missing_ok=True)
+    for p in d.glob("*.corrupt"):
+        try:
+            if time.time() - p.stat().st_mtime > 7 * 86400:
+                p.unlink()
+        except OSError:
+            pass
+
+
+def quarantine(name: str) -> str:
+    """Move a corrupt record aside (NAME.json.corrupt) so it is reported once, not every minute; `ls` still lists it."""
+    try:
+        os.replace(rec_path(name), state_dir() / f"{name}.json.corrupt")
+        return "corrupt record quarantined as .json.corrupt (reported once)"
+    except OSError as e:
+        return f"corrupt record (could not quarantine: {e})"
 
 
 # ---------- Paseo agent no-progress check (alert only) ----------
@@ -482,35 +602,60 @@ def check_action(v: str) -> str:
     raise argparse.ArgumentTypeError("--on-expire is kill, notify, relay or reroute:RECORD")
 
 
-def make_record(a, pid=None, pgid=None) -> dict:
+def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool = False) -> tuple[dict | None, str | None]:
+    """(record, None) or (None, why it was refused). Registration refusals (exit 2), each a cheap guard against a kill that
+    must never happen: a pid or group whose start time cannot be read (a recycled pid could not be told apart), a pid that
+    is not in the given group, any process in the registrant's own ancestry or group or session (an agent TUI, its shell:
+    a top-level session belongs to the operator), and a `kill` action with nothing to kill. `fresh_child` (deadline run's
+    own child) skips the ancestry checks."""
     n = now()
     pid = pid if pid is not None else a.pid
     pgid = pgid if pgid is not None else a.pgid
-    if pid and pgid is None:
-        try:
-            g = os.getpgid(pid)
-        except OSError:
-            g = None
-        pgid = g if g == pid else None   # a non-leader pid shares a group with its caller: signal the pid only
-    rec = {"name": a.name, "owner": a.owner, "pid": pid, "pgid": pgid, "started": n, "last_beat": n,
-           "budget_s": a.budget, "heartbeat_s": a.heartbeat, "grace_s": a.grace, "on_expire": a.on_expire,
-           "checkpoint": a.checkpoint, "max_extend_s": a.max_extend if a.max_extend is not None else a.budget,
-           "extended_s": 0, "extensions": [], "state": "running", "registrar_pid": os.getpid()}
     try:
         if pid:
             info = proc_info(pid)
-            rec["pid_start"] = info[0] if info else None
-        if pgid:
-            info = proc_info(pgid)
-            rec["pgid_start"] = info[0] if info else None
-    except ProcUnknown:
-        pass
-    return rec
+            if not info or info[1] == "Z":
+                return None, f"pid {pid} is not running (or its start time cannot be read): refusing to register it"
+            if pgid is None:
+                try:
+                    g = os.getpgid(pid)
+                except OSError:
+                    g = None
+                pgid = g if g == pid else None   # a non-leader pid shares a group with its caller: signal the pid only
+            else:
+                try:
+                    if os.getpgid(pid) != pgid:
+                        return None, f"pid {pid} is not in process group {pgid}"
+                except OSError as e:
+                    return None, f"pid {pid}: {e}"
+        if not fresh_child:
+            mine = ancestors() | {os.getpid()}
+            if pid and pid in mine:
+                return None, f"pid {pid} is this command's own caller or ancestor (an agent session or its shell): never registered for a kill"
+            if pgid and (pgid in (os.getpgrp(), os.getsid(0)) or pgid in mine or set(group_members(pgid)) & mine):
+                return None, f"process group {pgid} contains this command's caller, its ancestors or its session: never registered for a kill"
+        if pgid and not pid and not group_members(pgid):
+            return None, f"process group {pgid} has no live process"
+        pid_start = proc_info(pid)[0] if pid else None
+        leader = proc_info(pgid) if pgid else None
+        reg = proc_info(os.getpid())
+    except ProcUnknown as e:
+        return None, f"ps failed ({e}): cannot verify the target, refusing to register it"
+    if not pid and not pgid and a.on_expire == "kill":
+        return None, ("no --pid/--pgid: there is nothing to kill. A wait with no process is the named announce-only case: "
+                      "pass --on-expire notify or relay (or reroute:RECORD) explicitly")
+    rec = {"name": a.name, "owner": a.owner, "pid": pid, "pgid": pgid, "pid_start": pid_start,
+           "pgid_start": leader[0] if leader else None, "started": n, "last_beat": n,
+           "budget_s": a.budget, "heartbeat_s": a.heartbeat, "grace_s": a.grace, "on_expire": a.on_expire,
+           "checkpoint": a.checkpoint, "max_extend_s": a.max_extend if a.max_extend is not None else a.budget,
+           "extended_s": 0, "extensions": [], "state": "running", "kind": kind,
+           "registrar_pid": os.getpid(), "registrar_start": reg[0] if reg else None}
+    return rec, None
 
 
 def register(rec: dict) -> int:
-    if not NAME_RE.match(rec["name"]):
-        return die("name must match [A-Za-z0-9._-]{1,100}")
+    if not NAME_RE.match(rec["name"]) or rec["name"] in RESERVED_NAMES:
+        return die("name must match [A-Za-z0-9_][A-Za-z0-9._-]{0,99} and not be a reserved name (agents)")
     with Locked(rec["name"], block=True):
         old = load(rec["name"])
         if old and old.get("state", "running") not in TERMINAL:
@@ -520,7 +665,11 @@ def register(rec: dict) -> int:
 
 
 def cmd_start(a) -> int:
-    rec = make_record(a)
+    if not NAME_RE.match(a.name) or a.name in RESERVED_NAMES:
+        return die("name must match [A-Za-z0-9_][A-Za-z0-9._-]{0,99} and not be a reserved name (agents)")
+    rec, err = make_record(a)
+    if err:
+        return die(err)
     rc = register(rec)
     if rc == 0:
         print(json.dumps(rec, sort_keys=True) if a.json else f"registered {a.name}: budget {fmt_dur(a.budget)}"
@@ -557,7 +706,7 @@ def cmd_extend(a) -> int:
         if rec.get("extended_s", 0) + a.by > cap:
             return die(f"extension refused: {fmt_dur(rec.get('extended_s', 0))} used + {fmt_dur(a.by)} exceeds the {fmt_dur(cap)} cap", 2)
         rec["extended_s"] = rec.get("extended_s", 0) + a.by
-        rec["extensions"].append({"at": n, "by": a.by, "reason": a.reason})
+        rec.setdefault("extensions", []).append({"at": n, "by": a.by, "reason": a.reason})
         rec["last_beat"] = n
         save(rec)
     print(f"{a.name}: budget now {fmt_dur(rec['budget_s'] + rec['extended_s'])}, {fmt_dur(cap - rec['extended_s'])} of extension left")
@@ -569,7 +718,7 @@ def cmd_done(a) -> int:
         rec = load(a.name)
         if not rec:
             return die(f"no deadline named {a.name}", 1)
-        if rec.get("state", "running") == "running":
+        if rec.get("state", "running") in ("running", "kill-failed"):   # kill-failed: the operator acknowledges it and frees the name
             rec.update(state="done", ended=now(), rc=a.rc)
             save(rec)
         else:
@@ -579,10 +728,11 @@ def cmd_done(a) -> int:
 
 def describe(rec: dict) -> dict:
     n = now()
-    left = rec["started"] + rec["budget_s"] + rec.get("extended_s", 0) - n
-    return {"name": rec["name"], "owner": rec.get("owner"), "pid": rec.get("pid"), "state": rec.get("state", "running"),
-            "elapsed_s": round(n - rec["started"]), "left_s": round(left),
-            "heartbeat_age_s": round(n - rec.get("last_beat", rec["started"])), "checkpoint": rec.get("checkpoint"),
+    started, budget = rec.get("started", n), rec.get("budget_s", 0)
+    left = started + budget + rec.get("extended_s", 0) - n
+    return {"name": rec.get("name"), "owner": rec.get("owner"), "pid": rec.get("pid"), "state": rec.get("state", "running"),
+            "elapsed_s": round(n - started), "left_s": round(left),
+            "heartbeat_age_s": round(n - rec.get("last_beat", started)), "checkpoint": rec.get("checkpoint"),
             "on_expire": rec.get("on_expire"), "reason": rec.get("reason")}
 
 
@@ -590,6 +740,7 @@ def cmd_ls(a) -> int:
     rows, bad = [], []
     for name, rec in all_records():
         (rows if rec else bad).append(describe(rec) if rec else name)
+    bad += [p.name[:-len(".json.corrupt")] + " (quarantined)" for p in sorted(state_dir().glob("*.json.corrupt"))]
     agents = None
     if a.agents:
         ar, err = agent_rows()
@@ -617,7 +768,7 @@ def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
     results = []
     for name, rec in all_records():
         if rec is None:
-            results.append({"name": name, "action": "corrupt record skipped"})
+            results.append({"name": name, "action": "corrupt record skipped" if dry else quarantine(name)})
             continue
         try:
             with Locked(name) as got:
@@ -642,21 +793,44 @@ def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
     return results
 
 
+def quiet(action: str) -> bool:
+    """Actions a 60 s sweep must not log every minute (the launchd log would grow forever)."""
+    return (action in ("ok", "done", "lost", "expired") or action.startswith(("stopping: within grace", "busy", "kill-failed: still alive")))
+
+
+def trim_log() -> None:
+    log = state_dir() / "sweep.log"
+    try:
+        if log.stat().st_size > 1_000_000:
+            os.truncate(log, 0)   # launchd opens it O_APPEND: safe to truncate in place
+    except OSError:
+        pass
+
+
 def cmd_sweep(a) -> int:
+    if not a.dry_run:
+        trim_log()
     res = sweep_once(a.dry_run, not a.no_agents, a.agents_now)
     if a.json:
         print(json.dumps(res, indent=1))
     else:
         for r in res:
-            if r["action"] not in ("ok", "done", "lost", "expired") or a.dry_run:
+            if not quiet(r["action"]) or a.dry_run:
                 print(f"{r['name']}: {r['action']}")
     return 0
+
+
+def exit_code(rc: int) -> int:
+    """A signal death (Popen returncode -N) is the shell's 128+N, not sys.exit(-N)'s 256-N."""
+    return 128 - rc if rc < 0 else rc
 
 
 def cmd_run(a) -> int:
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
     if not cmd:
         return die("run needs a command after --")
+    if not NAME_RE.match(a.name or "x") or (a.name in RESERVED_NAMES):
+        return die("name must match [A-Za-z0-9_][A-Za-z0-9._-]{0,99} and not be a reserved name (agents)")
     a.name = a.name or f"run-{os.getpid()}-{int(time.time())}"
     a.owner = a.owner or os.environ.get("PASEO_AGENT_ID") or "-"
     a.pid = a.pgid = a.max_extend = a.checkpoint = None
@@ -664,29 +838,47 @@ def cmd_run(a) -> int:
         child = subprocess.Popen(cmd, start_new_session=True, env={**os.environ, "DEADLINE_NAME": a.name})
     except OSError as e:
         return die(f"cannot run {cmd[0]}: {e}", 127)
-    rec = make_record(a, pid=child.pid, pgid=child.pid)
-    if register(rec) != 0:
-        os.killpg(child.pid, signal.SIGKILL)
+    rec, err = make_record(a, pid=child.pid, pgid=child.pid, kind="run", fresh_child=True)
+    if err and child.poll() is not None:
+        return exit_code(child.returncode)   # it finished before it could be registered: nothing left to bound
+    if err or register(rec) != 0:
+        for sig in (signal.SIGKILL,):
+            try:
+                os.killpg(child.pid, sig)
+            except OSError:
+                pass
         child.wait()
-        return 2
-    for s in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(s, lambda sg, fr: os.killpg(child.pid, signal.SIGTERM) if child.poll() is None else None)
+        return die(err or "registration refused", 2) if err else 2
+
+    def forward(sg, fr):
+        try:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, forward)
     poll = fenv("DEADLINE_RUN_POLL", 0.5)
-    stopped = False
     while True:
-        rc = child.poll()
         with Locked(a.name, block=True):
+            rc = child.poll()   # polled INSIDE the lock: a sweep cannot see the child as gone-but-unreaped between this poll and step()
             cur = load(a.name) or rec
             if rc is not None:
                 if cur.get("state") == "running":
                     cur.update(state="done", ended=now(), rc=rc)
                     save(cur)
-                elif cur.get("state") == "stopping":
-                    step(cur)   # target is gone: recovery once
-                return 124 if stopped else rc
-            step(cur)
-            if (load(a.name) or cur).get("state") in ("stopping", "expired"):
-                stopped = True
+                else:
+                    try:
+                        step(cur)   # stopping: the target is gone, recovery once
+                    except ProcUnknown:
+                        pass
+                    cur = load(a.name) or cur
+                return 124 if cur.get("stopped_by_us") else exit_code(rc)
+            try:
+                step(cur)
+            except ProcUnknown:
+                pass   # ps failed this tick: no conclusion, try the next one (the sweep also enforces this record)
         time.sleep(poll)
 
 
