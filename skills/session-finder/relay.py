@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
-    relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
+    relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" | --message-file PATH|- [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
                                            [--ack | --no-ack] [--expect-ack ID [--ack-within S]] [--needs-reply | --fyi]
     relay.py --pending [--text] [--json] | --cancel ID | --sweep | --retire ID --reason TEXT [--evidence TEXT]
         (the deferred messages and expected acks, below; --retire closes an expectation that will never be answered)
@@ -10,6 +10,13 @@
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it; a dispatch record is
                                            the exact path of an acp-dispatch job file, e.g. /x/jobs/a.json: route 2 below)
+
+MESSAGE TEXT NEVER GOES THROUGH A SHELL-QUOTED STRING WHEN IT HAS CODE (2026-11-01, a recurring harness failure): a message containing backticks, `$`, `$( )`,
+or quotes goes through `--message-file PATH` (`-` reads stdin), or a Python argv list, never `"..."` in a shell: inside double quotes the caller's
+shell EXECUTES a backtick or `$( )` and silently drops its text (a lead's message lost `stages: [pre-push]`; an earlier one ran a command).
+`--message-file` replaces the positional text (exactly one of the two; an empty file is exit 2) and reads the file as UTF-8 (a leading BOM is dropped)
+without any shell step, so those characters arrive exactly as written. The text then goes through the same one-line fold as a positional text: one trailing
+newline is dropped, and every run of whitespace (newlines and indentation included) becomes ONE space, so a multi-line or indented block arrives on one line.
 
 The one way for an agent to message a peer (2026-10-23, djbclark: "automatically uses the best messaging option
 for any given situation, and tries to fall back itself before returning an error"). It picks the routes that fit
@@ -4115,9 +4122,13 @@ class AckVerb(Exception):
 def split_ack_verb(argv):
     """(expectation id, argv without `--ack ID`) when ARGV holds `--ack ID` and no other positional (no target, no text): the verb (H2, 2026-10-31:
     `relay.py --ack d7-k7c3f` was refused as a usage error, but `--ack` looks like the verb). Else (None, ARGV): `--ack` stays the delivery-watch
-    flag, whether it follows the text (`relay.py T "text" --ack`) or precedes a target (`relay.py --ack T "text"`, which has a second positional)."""
+    flag, whether it follows the text (`relay.py T "text" --ack`) or precedes a target (`relay.py --ack T "text"`, which has a second positional).
+    `--message-file` supplies the text, so `relay.py --ack T --message-file -` is a send to T too (2026-11-01, local Codex review of #211: its value `-`
+    looks like an option, so no positional was counted and T was read as an expectation id)."""
     toks = list(argv)
     if "--ack" not in toks:
+        return None, toks
+    if any(t == "--message-file" or t.startswith("--message-file=") for t in toks):
         return None, toks
     i = toks.index("--ack")
     if i + 1 >= len(toks) or toks[i + 1].startswith("-"):
@@ -4191,6 +4202,9 @@ def _main(argv=None, sweep=True):
     ap.add_argument("ident", nargs="?")
     ap.add_argument("text", nargs="?")
     ap.add_argument("--wait", type=float, default=20, help="seconds to verify delivery (default 20; a hermes turn gets max(100, S))")
+    ap.add_argument("--message-file", metavar="PATH", help="read the message text from PATH (`-`: stdin), UTF-8, instead of the positional text "
+                    "(exactly one of the two; empty: exit 2). REQUIRED for a message with code, backticks, `$` or quotes: a shell-quoted string would be executed or mangled by the caller's shell. "
+                    "The text is then folded to one line like any text: one trailing newline is dropped and every whitespace run (newlines, indentation) becomes one space")
     ap.add_argument("--idle", type=float, metavar="S", help="a working Paseo agent or non-Claude pane TUI: wait up to S seconds for it to go idle first")
     ap.add_argument("--steer", action="store_true", help="send to a WORKING codex, omp, opencode or pi Paseo agent as a steer anyway: "
                     "Paseo replaces its running turn when the provider declines the steer (a review turn, an error); claude needs no flag")
@@ -4258,6 +4272,9 @@ def _main(argv=None, sweep=True):
             print(f"relay: usage: relay.py --status ID [--json]; --status is a query and cannot be combined with {', '.join(others)}", file=sys.stderr)
             return 2
         return status_cmd(a.status, a.json)
+    if a.message_file is not None and (a.transfer_expectations is not None or a.retire is not None or a.deliver or a.pending or a.cancel or a.sweep or a.why):
+        print("relay: --message-file is used with a send: relay.py <id> --message-file PATH|-", file=sys.stderr)
+        return 2
     if a.transfer_expectations is not None:
         if a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan or a.retire is not None:
             print("relay: --transfer-expectations cannot be combined with a send or another command", file=sys.stderr)
@@ -4312,8 +4329,24 @@ def _main(argv=None, sweep=True):
             print("relay: usage: relay.py --why <id> [--json]", file=sys.stderr)
             return 2
         return why_cmd(a.ident, a.json)
+    if a.message_file is not None:
+        if a.text is not None:
+            print("relay: give the message as the positional text or as --message-file, not both", file=sys.stderr)
+            return 2
+        try:
+            raw = sys.stdin.buffer.read() if a.message_file == "-" else Path(a.message_file).read_bytes()
+            a.text = raw.decode("utf-8-sig")    # a BOM from a Windows editor is not part of the message
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"relay: cannot read --message-file {a.message_file}: {exc}", file=sys.stderr)
+            return 2
+        a.text = a.text.removesuffix("\n")    # one trailing newline: the editor's or `echo`'s, never the message's
+        if a.text.endswith("\r"):
+            a.text = a.text[:-1]
+        if not a.text.strip():
+            print(f"relay: --message-file {a.message_file} is empty", file=sys.stderr)
+            return 2
     if a.ident is None or a.text is None:
-        print("relay: usage: relay.py <id> \"<text>\" [options] | --ack EXPECTATION_ID | --pending [--json] [--queued-only] [--older-than S] [--summary] | --status ID | --cancel ID | --sweep [--stuck-after S] | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
+        print("relay: usage: relay.py <id> \"<text>\" | <id> --message-file PATH|- [options] (a message with code, backticks, $ or quotes goes through --message-file, never a shell-quoted string; the text is folded to one line either way) | --ack EXPECTATION_ID | --pending [--json] [--queued-only] [--older-than S] [--summary] | --status ID | --cancel ID | --sweep [--stuck-after S] | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
     if a.defer_for is not None and not (math.isfinite(a.defer_for) and a.defer_for > 0):
         print("relay: --defer-for must be a finite number of seconds > 0", file=sys.stderr)

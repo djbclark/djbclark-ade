@@ -28,7 +28,14 @@ python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet 
 python3 -I $S/launch.py --agent A --cwd DIR --model M [--baton] -p "..."   # start a session (ACP-first)
 python3 -I $S/launch.py wait <id> [--timeout S]  # block until THAT launch's turn ends
 python3 -I $S/relay.py <id|name> "<one line>"    # message any running session: best route, falls back itself
+python3 -I $S/relay.py <id|name> --message-file PATH|-   # the text from a file (or stdin): REQUIRED when it holds code
 ```
+
+**A message containing code, backticks, `$` or quotes goes through `--message-file` (or a Python argv list), never a shell-quoted string**
+(2026-11-01): inside double quotes your shell EXECUTES a backtick or `$( )` and the text silently vanishes (a lead's message lost `stages: [pre-push]`;
+an earlier one ran a command). Write the text with the file tool, then `relay.py <id> --message-file /abs/path` (`-` reads stdin; an empty file, or a
+positional text as well, is exit 2). Those characters arrive exactly as written, but the text is still folded to ONE line like any relay text: one trailing
+newline is dropped and every whitespace run (newlines, indentation) becomes one space, so a multi-line block is not preserved.
 
 Sibling skills: `helm` (answer every waiting session from one window; `/helm-all`
 adds ended sessions), `bigteam` (fan a task out), `model-routing` (which vendor).
