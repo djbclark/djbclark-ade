@@ -131,7 +131,7 @@ skill's snapshot in the same turn.
   under a flock. A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
   starts no new Claude Code subscription work until the reset (Agent-tool sub-agents of a Claude Code
-  session included) and hands off, to an omp successor on Paseo or an omp started by hand, while
+  session included) and hands off, to an omp successor on Paseo or an omp started by hand (on herdr and Orca too, retired from djbclark-ade 2026-10-31; `bin/claude-quota-guard` still prints that advice until D6), while
   `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares
   the Claude weekly rate window, so every weekly window exhausted gates it: then a codex or grok successor).
   `critical` never stops a session on codex, grok, agy, zai or opencode, nor one on omp while aiuse lists
@@ -841,7 +841,7 @@ method that runs the waves.
     pool too. `aiuse` had carried a `conserve` alert for provider `claude` since 06:02Z
     ("projected to run out ~1 day before reset (34% left)"); nothing read it, nothing
     pinged and no session downshifted. The burn was Opus 5.5 (~53%: the `adversary`
-    Agent-tool sub-agent is `model: opus`, judgment slices) and Fable 5.1
+    Agent-tool sub-agent is `model: opus`, judgment slices, Orca workers (Orca since retired from djbclark-ade, 2026-10-31)) and Fable 5.1
     (~30%: the lead session itself ran on Fable), mostly cache re-reads of 150-200k
     contexts. So: **a lead that does judgment work runs on Opus 5.5 at high; a lead that
     only drives a pipeline (PR loops, waiters, merges) runs on Sonnet 5.5 at medium

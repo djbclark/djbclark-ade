@@ -137,7 +137,7 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
    workspace was needed — stale Hermes clones/worktrees once held 3.6 GB),
    propose replacing it with a pasture: `cow-pasture create <name> --source
    <repo>` (scrubs gitignored secrets, handles `uchg`, pre-trusts Claude;
-   (Orca workers: retired from djbclark-ade 2026-10-31). Never pastures from `~/ops/*` (deployment
+   the `--orca` flag for Orca workers is retired from djbclark-ade 2026-10-31 and now a usage error). Never pastures from `~/ops/*` (deployment
    checkouts — the wrapper refuses).
 2. Reclaim merged work: `cow gc --merged --dry-run`, and with the operator's
    go, for real. Remove an arbitrary one with `cow-pasture remove <name>`

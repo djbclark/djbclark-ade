@@ -175,8 +175,8 @@ means new prompts from other sessions are missed.
 2. **Hermes's own open approvals** (Claude side): `permissions_list_open` on
    the `hermes` MCP server lists them, `permissions_respond` answers. Check
    once per round and relay them the same way.
-3. **Collie** (herdr-hosted helm pane; herdr is retired from djbclark-ade 2026-10-31, so a Paseo agent is the current host): a helm pane's prompts are
-   answerable from the phone with nothing extra.
+3. **Collie** (a phone web UI for herdr panes only; herdr is retired from djbclark-ade 2026-10-31 and this route lives only until D6): it answers a helm
+   pane that runs in herdr. Nothing in this repo shows Collie covering a Paseo agent; a helm session hosted on Paseo is answered in the Paseo UI or app.
 4. **Notices**: `fleet-watch` (launchd, every 5 minutes, no model) calls
    `helm.py brief` and sends one Hermes line when a session starts waiting or
    asks a new question. Nothing is sent when one is answered.

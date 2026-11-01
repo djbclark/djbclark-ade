@@ -487,7 +487,7 @@ from them.
 Claude Code weekly window hit 100% at 17:07Z, 2.6 days before its reset, and every
 orchestrating session stopped, which stopped every other pool too; an `aiuse` `conserve`
 alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%: the
-`adversary` Agent-tool sub-agent, judgment slices) and Fable 5.1 (~30%: the
+`adversary` Agent-tool sub-agent, judgment slices, Orca workers (Orca since retired from djbclark-ade, 2026-10-31)) and Fable 5.1 (~30%: the
 lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
 and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
 at medium when it only drives a pipeline, high only for a judgment turn; djbclark 2026-10-23), never Fable; adversary rounds go to `acp-dispatch

@@ -238,7 +238,7 @@ A built-in like `/quit` is not a skill, but you can queue it yourself (operator,
 finish, write the final results as the last message so they stay readable, finish
 everything first (commits pushed, no pending reads), then run
 `~/src/djbclark-ade/bin/self-slash --finish` as the last action and end the turn
-at once. On Paseo `/quit` does nothing
+at once. On herdr and Orca (retired from djbclark-ade 2026-10-31; `self-slash` keeps those hosts until D6) that is the old `/quit`; on Paseo `/quit` does nothing
 (it reaches Claude as plain text, seen twice 2026-10-20), so `--finish` waits for
 idle and archives this agent without `--force` (it stays under "Archived agents",
 and the operator can still read the final message). djbclark, 2026-10-20: "if there
@@ -249,7 +249,7 @@ offer the finish prompt again once it is written.
 `/compact` works the same way, but only when the context prompt's compact tier
 fires (+140k since the start or last compaction, or 217k total) or he picked it, never just
 because context looks large: each compaction costs ~150k+ token-equivalents
-(`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session on Paseo (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`; the herdr and Orca host branches of `self-slash` are retired from djbclark-ade 2026-10-31 and live only until D6), write down
+(`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session on Paseo, or still in a herdr pane or Orca terminal (those two hosts retired from djbclark-ade 2026-10-31, live until D6) (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
 what the next turn needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"`
 and end the turn at once. `self-slash` refuses outside its hosts (see AGENTS.md for what remains), or when his
 input box holds a draft; then ask him to type it. Grok Bot: skip (G6).
