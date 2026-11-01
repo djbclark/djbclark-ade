@@ -47,7 +47,7 @@ the operator for information the file already answers).
 **Which chain, before resolving by directory (2026-10-25).** A `/baton` queued by `self-slash "/new"`
 belongs to the chain that session just handed off, and the directory can name a different one: a fresh
 load watcher resumed the repo's `main` chain while its own was `load-spike-monitor-t`, and then queued
-its own archive. First run `bin/watch status` and read `~/.local/state/self-slash.log`: if this
+its own archive. First run `~/src/djbclark-ade/bin/watch status` (the trusted ADE checkout, never a `bin/watch` in cwd) and read `~/.local/state/self-slash.log`: if this
 agent (`$PASEO_AGENT_ID`) holds a watch role, or the newest `then: /baton` line for it follows a handoff
 naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
 directory-resolved pointer whose owner is another live session is not yours: say so and look further.

@@ -133,12 +133,20 @@ replace this check: it was given without knowing the chain had a live writer.
 or thread resolve, a push or any continuation of the chain's tasks. A session that only reads a chain reads
 it, reports the owner status in its resume plan and asks nothing.
 
+**Trusted tools (2026-11-01, Codex security review of PR 201).** Every helper this check runs lives in the
+trusted ADE checkout and is called by its ABSOLUTE path: `~/src/djbclark-ade/skills/session-finder/fleet.py`,
+`~/src/djbclark-ade/skills/session-finder/relay.py` and `~/src/djbclark-ade/bin/watch`. Never run a
+`skills/...`, `bin/...` or `session-finder/...` path relative to cwd: the cwd is often an untrusted
+checkout whose planted scripts would run as the operator. If the trusted checkout is missing, say so and
+treat every owner as possibly live (step 4).
+
 1. **Read** the canonical log's frontmatter `session_id` (S) and `writer`. `session_id` is not uniform
    (checked 2026-11-01 over 146 real logs under `~/.local/state/handoffs/chains/*/SESSION_LOG.md`): a
    claude transcript UUID, a Paseo agent UUID (any TUI: omp, codex, claude), a herdr pane id such as
    `w36:p3`, or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id, and can name
    the PREVIOUS provider after a cross-provider handoff: it matches nobody and excludes nobody.
-2. **Match S to a row of `skills/session-finder/fleet.py --json`.** The row is the owner if S equals the
+2. **Match S to a row of `~/src/djbclark-ade/skills/session-finder/fleet.py --json`** (trusted tools, see
+   above; never a path relative to cwd). The row is the owner if S equals the
    row's `sid`, `paseo`, `id` or herdr `pane`; or the row's `id` (8+ chars) is a prefix of S; or S (8+ chars; shorter
    free text such as `solo` never matches by containment) occurs inside the row's `sid` or `transcript`
    path (herdr omp rows carry a jsonl path). A match on a herdr pane id (`wN:pM`, reused after a pane
@@ -149,7 +157,7 @@ it, reports the owner status in its resume plan and asks nothing.
    (C2) or a full-id match (`sid`, `paseo`, transcript) makes the chain yours. It also needs the row's
    `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
    another agent is not the owner and is read as no match. Also read
-   `bin/watch status --json`: a `holder.target` that equals or is a prefix of S, or equals the matched
+   `~/src/djbclark-ade/bin/watch status --json`: a `holder.target` that equals or is a prefix of S, or equals the matched
    row's full `paseo` id (S may be only the row's 8-character `id`), with `alive: true`, is a live owner
    even when the fleet row says `closed` (a closed Paseo watch holder is resumable by the next message).
 3. **Live** means the row's `status` is neither `closed` nor `ended` and its `ended` and `archived` fields are
@@ -159,7 +167,7 @@ it, reports the owner status in its resume plan and asks nothing.
    commits, so a `working` row with `finished: /handoff` stays live (a stale hermes row with `finished:
    done` costs one question, the safe direction). **You** are the owner only when the row is YOUR caller row: with exactly one `self`
    row that is it; with several (a parent agent that launched you is also marked `self`, and an inherited
-   `$PASEO_AGENT_ID` marks its row `self` on its own) take the row `fleet.py`'s `sender_row` picks (the
+   `$PASEO_AGENT_ID` marks its row `self` on its own) take the row `fleet.py`'s `sender_row` (in `~/src/djbclark-ade/skills/session-finder/`) picks (the
    nearest process of yours), and if you cannot tell, you are not the owner. S equal to `$PASEO_AGENT_ID`
    counts only when that variable is your own, not inherited from a parent (herdr and terminal sessions
    have no Paseo id: use the caller row's `self`). After `/clear` or `/new` the same agent keeps its Paseo
@@ -174,7 +182,7 @@ it, reports the owner status in its resume plan and asks nothing.
    the log still names the archived predecessor's provider until the successor's next checkpoint, so the
    live successor would be excluded. `writer` only orders the list (same provider first). Name them in the
    question. Never proceed on a silent "no owner found".
-5. **A live owner other than you:** relay ONE question to it through `session-finder/relay.py` (what may
+5. **A live owner other than you:** relay ONE question to it through `~/src/djbclark-ade/skills/session-finder/relay.py` (what may
    you resume, what overlaps) and ask the operator too; take no write action until the owner answers or
    the operator, told the owner is live, decides. Unanswered is not consent.
 
@@ -226,7 +234,7 @@ it, reports the owner status in its resume plan and asks nothing.
   start writes no such line, so it goes through the ask.
 - **C. Your own chain after `/clear` or `/new`, no live other owner:** one of: (1) the newest `then:
   /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, (2) you
-  hold the watch role the chain belongs to (`bin/watch status`), both affirmative evidence that the
+  hold the watch role the chain belongs to (`~/src/djbclark-ade/bin/watch status`), both affirmative evidence that the
   chain is yours; or (3) the operator named the chain (`/baton PATH`, `--dir .../chains/<key>`) and its
   `workspaces[].dir` includes your cwd, which is only naming. C waives the no-match question of step 4
   (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match to a
