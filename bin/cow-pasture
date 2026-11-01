@@ -6,7 +6,8 @@
 # such as .env (verified 2026-09-20). This wrapper:
 #   create  → cow create --no-symlink, then cow materialise and a scan that
 #             fails (exit 1) if any symlink in the pasture still resolves into
-#             the source checkout (see local_deps below), then delete
+#             the source or another checkout cow records (see local_deps
+#             below), then delete
 #             gitignored secret-like files (default on).
 #             Also pre-trusts the folder for Claude Code (default on, `--no-trust`
 #             to skip): without it a headless `claude` start stalls at the
@@ -19,8 +20,9 @@
 #             short name (`foo`) or the full `<source>/<name>`.
 #             Orca registration (`--orca`, unregister on remove) retired from
 #             djbclark-ade 2026-10-31.
-#   check   → list symlinks in a pasture that resolve into its source; exit 1
-#             if any (older pastures, made before create materialised).
+#   check   → list symlinks in a pasture that resolve into its source or another
+#             recorded checkout; exit 1 if any (older pastures, made before
+#             create materialised).
 #
 # Never touches the source repo. Never runs in ~/ops/* (deployment checkouts;
 # operator decision 2026-09-20). COW_PASTURE_COW names the cow binary (tests
@@ -39,12 +41,14 @@ usage: cow-pasture create <name> --source <repo> [--branch <b>]
        cow-pasture check <pasture-path>
 
 create: cow create --no-symlink --print-path, cow materialise, fail (exit 1) if a
-        symlink still resolves into the source; then scrub gitignored secrets.
+        symlink still resolves into the source or another checkout cow records;
+        then scrub gitignored secrets.
 trust : pre-trust an existing pasture for Claude Code (create does this by default).
 scrub : delete gitignored files matching SECRET_PATTERNS inside <pasture-path>.
-check : list symlinks under <pasture-path> that resolve into its source checkout
-        (or that source's own source); exit 1 if any, 2 if <pasture-path> is not
-        a pasture in `cow list`. Fix: cow materialise <source>/<name>, or recreate.
+check : list symlinks under <pasture-path> that resolve into its source or any
+        other checkout in `cow list --json` (sources and pastures); exit 1 if
+        any, 2 if <pasture-path> is not a pasture there or a directory in it is
+        unreadable. Fix: cow materialise <source>/<name>, or recreate.
 remove: drop graft cache, chflags -R nouchg, cow remove.
 EOF
   exit 2
@@ -68,11 +72,13 @@ log() { printf 'cow-pasture: %s\n' "$*" >&2; }
 # 2026-11-01 an `npm install` in a paseo pasture emptied ~392 package dirs of
 # ~/src/paseo/node_modules, and builds there had read the source's stale dist.
 # A pasture made from a pasture inherits its links, which point into the
-# grandparent source and are not in cow's state, so the scan follows the
-# recorded source chain. Reads `cow list --json` on stdin.
+# grandparent source and are not in cow's state, so the scan counts every
+# checkout cow records (each entry's source and path) as a source. Reads
+# `cow list --json` on stdin.
 #   name <pasture-path> → print the pasture's full cow name (<source>/<name>)
 #   scan <pasture-path> → print "rel -> target" per symlink resolving into a
-#                         source in the chain; exit 1 if any, 2 if not a pasture
+#                         recorded checkout other than this pasture; exit 1 if
+#                         any, 2 if not a pasture or a directory is unreadable
 PASTURE_PY='
 import json, os, sys
 def fail(msg):
@@ -91,19 +97,20 @@ entry = entry[0]
 if mode == "name":
     print(entry["name"])
     sys.exit(0)
-roots, src = set(), entry.get("source")
-while src and src not in roots:
-    roots.update((src, real(src)))
-    parent = [e.get("source") for e in entries if real(e.get("path")) == real(src)]
-    src = parent[0] if parent else None
-roots = {r.rstrip("/") for r in roots if r}
+roots = set()
+for e in entries:
+    for p in (e.get("source"), e.get("path")):
+        if p and real(p) != pasture:
+            roots.update((p.rstrip("/"), real(p)))
+roots.discard("")
 inside = lambda t, r: t == r or t.startswith(r + "/")
-bad, stack = [], [pasture]
+bad, unreadable, stack = [], [], [pasture]
 while stack:
     d = stack.pop()
     try:
         it = os.scandir(d)
     except OSError:
+        unreadable.append(d)
         continue
     with it:
         for e in it:
@@ -116,6 +123,8 @@ while stack:
                 stack.append(e.path)
 for b in sorted(bad):
     print(b)
+if unreadable:
+    fail("cannot read " + ", ".join(sorted(unreadable)) + "; a link there would go unseen")
 sys.exit(1 if bad else 0)
 '
 

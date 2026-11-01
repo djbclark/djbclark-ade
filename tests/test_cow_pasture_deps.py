@@ -145,3 +145,20 @@ def test_check_clean_pasture_and_unknown_path(tmp_path):
     r = run(tmp_path, cow, bin_dir, "check", str(src))
     assert r.returncode == 2
     assert "no single cow pasture recorded" in r.stderr
+
+
+def test_check_fails_closed_on_an_unreadable_directory(tmp_path):
+    src, cow, bin_dir = setup(tmp_path)
+    r = run(tmp_path, cow, bin_dir, "create", "feat", "--source", str(src), "--no-trust")
+    assert r.returncode == 0, r.stderr
+    locked = tmp_path / "pastures" / "feat" / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.R_OK):  # root reads anything; nothing to prove
+            return
+        r = run(tmp_path, cow, bin_dir, "check", str(tmp_path / "pastures" / "feat"))
+        assert r.returncode == 2
+        assert "cannot read" in r.stderr and "locked" in r.stderr
+    finally:
+        locked.chmod(0o755)
