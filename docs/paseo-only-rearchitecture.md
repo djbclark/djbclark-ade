@@ -140,6 +140,26 @@ herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's 
    once per 30 minutes (otherwise alert and wait for the operator); reconcile G1 after every restart.
    Keep active workspaces bounded (about 15, enforced by G2's create check), never register giant trees as
    workspaces, and create slice workspaces in the background (Fable 5.2).
+   **Declared budgets for everything long (amended 2026-11-01).** The same outside watchdog is the one
+   enforcer of declared budgets, for every process or wait that may run longer than about two minutes,
+   not only for G1 jobs: test runs (`bg`), `local-review`, `pr-wait`, CI and review waits, orchestration
+   scripts, and any agent's own long command. Cause: on 2026-11-01 a merge train blocked for hours on
+   `load-watch admit --wait 7200`, a two-hour review wait and an unbounded `pr-wait`, while a lead agent
+   sat blocked in a wait; nothing outside them noticed. Rules, from prior art (Temporal heartbeat and
+   Start-To-Close timeouts, systemd `RuntimeMaxSec`/`WatchdogSec`/`EXTEND_TIMEOUT_USEC`, Celery soft and
+   hard limits): (1) the starter registers a budget, an owner, the process group and an on-expiry action
+   before it starts (`bin/deadline start` or `deadline run -- CMD`, interim since 2026-11-01; the
+   long-running wrappers register themselves with defaults); (2) an optional heartbeat, which may carry a
+   checkpoint path, catches a stall long before the budget; (3) on expiry: SIGTERM to the group, a grace
+   period, SIGKILL, then the recovery runs exactly once (reroute a slice from its checkpoint, relay to the
+   owner, or notify); (4) a budget is enforced, never only announced (deepseek-harness discussion 11258: a
+   notify-only 60 s budget hung a session 5.5 h); (5) only declared budgets kill: no global staleness guess
+   (Trinity issue 869: such a watchdog killed healthy runs); a pid whose start time differs from the one
+   registered is never signalled; (6) an extension is asked for before expiry, with a reason, and capped
+   in total; (7) an agent session that shows no timeline progress past its idle limit and holds no live
+   budget is alerted (`hermes-ping` and a relay to it), never killed: a top-level session is the
+   operator's. D1's B9 watchdog absorbs the interim `bin/deadline` sweep; its gate adds a case where a
+   registered over-budget process is stopped and recovered.
 10. **Destructive tests never touch the live daemon.** Every probe that restarts, hangs or kills a daemon
    runs against an isolated test daemon: its own fresh `PASEO_HOME` (never a copy of the live one, so it
    cannot inherit the live server id; it does not install `session-janitor`, or writes the three B4.3
@@ -419,7 +439,9 @@ which records the owner as `operator`. This stops mistakes and impersonation ove
 same-uid agent with a shell that edits the state files directly; like B3, it is not a boundary (adversary r1
 C9, r2 C3 and C8, r3 N2, r4 R4).
 
-1. **`ade-jobs` (plugin, hooks needed)**: durable task ids, deadline and grace, a wrap-up steer at
+1. **`ade-jobs` (plugin, hooks needed)**: durable task ids, deadline and grace, a no-progress timeout
+   (no timeline activity and no report write for the job's heartbeat interval fails the job the same way
+   as the deadline, only sooner, as a Temporal heartbeat timeout does; amended 2026-11-01), a wrap-up steer at
    T-minus-grace, interrupt at T recorded as exit 124 (cancellation confirmed, and the agent's child
    processes gone, before the writer claim is released), report-file validation, outcome records in the
    existing format, `reconcile()` after a daemon restart that never relaunches blindly. A job's agent is
@@ -428,7 +450,8 @@ C9, r2 C3 and C8, r3 N2, r4 R4).
    `jobs.submit(taskId, host, workspace, profile, reportPath, deadline, grace, permit)` **creates the worker
    itself** and never accepts an existing agent id; it records `owner = context.agent.id` (the caller) and
    the worker's id, provider and mode. `jobs.get` for the owner; `jobs.finish` for the worker;
-   `jobs.extend(taskId, seconds)` for the owner; `jobs.reconcile` (astra C1, Fable 3.1, adversary r3 N2).
+   `jobs.extend(taskId, seconds, reason)` for the owner, only before T and capped in total (default: the
+   original deadline), each extension recorded in the ledger; `jobs.reconcile` (astra C1, Fable 3.1, adversary r3 N2).
 2. **`ade-gate` (plugin)**: `agent.create.before` runs `aiuse` (cached about 60 s) and
    `bin/load-watch admit --json` with no wait (the admission predicate `acp-dispatch` already uses; exit 75
    means too hot, so the gate refuses with the load named and the launcher retries outside the hook, which
