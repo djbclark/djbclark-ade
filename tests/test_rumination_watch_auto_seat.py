@@ -55,7 +55,8 @@ def load(monkeypatch, tmp_path, switch="1"):
     monkeypatch.setattr(rw, "why_blocked", lambda ident: ("gone", "inspect answered not found"))
     monkeypatch.setattr(rw, "to_session", lambda text: "FAILED")
     rw.pages = []
-    monkeypatch.setattr(rw, "to_djbclark", lambda text: rw.pages.append(text) or True)
+    rw.unresolved_pages = []
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: (rw.unresolved_pages if text.startswith("Auto-seat for") else rw.pages).append(text) or True)
     pointer = tmp_path / ".local/state/handoffs/entity/main/SESSION_LOG.md"
     pointer.parent.mkdir(parents=True)
     pointer.write_text(f"## Current State\n- Next steps:\n  - {SECRET}\n")
@@ -88,7 +89,7 @@ def load(monkeypatch, tmp_path, switch="1"):
             assert timeout <= 20
             return rw.enum_rc, rw.enum_body, "listing failure" if rw.enum_rc else ""
         # The successful-start stamp must not exist during either the start OR confirmation call.
-        assert rw.load_state().get("seated", {}).get(rw.ROLE) != NOW
+        assert rw.load_state().get("seated", {}).get(rw.ROLE) != rw.time.time()
         if is_start(argv):
             assert rw.load_state()["told"][f"auto-seat attempt:{rw.ROLE}"] == rw.time.time()
             body = rw.run_body if rw.run_body is not None else (json.dumps({"agentId": NEW}) if rw.run_rc == 0 else "")
@@ -388,7 +389,7 @@ CREATED = "66666666-7777-4888-9999-aaaaaaaaaaaa"
 
 
 def direct_probe_world(monkeypatch, tmp_path, response, ident=ABSENT, relay_state=None,
-                       switch="1"):
+                       switch="1", relay_deliverable=False):
     """Real why_blocked + run_split, with a fake relay and a fake Paseo executable.
 
     `relay_state=None` means relay.py cannot diagnose the id (a no-match, exit 2), which is the
@@ -407,7 +408,7 @@ def direct_probe_world(monkeypatch, tmp_path, response, ident=ABSENT, relay_stat
     else:
         reply = json.dumps({"id": ident[:8], "name": "seat", "state": relay_state,
                             "why": f"its Paseo agent is {relay_state}, not idle or running",
-                            "deliverable": False, "agree": True, "evidence": []})
+                            "deliverable": relay_deliverable, "agree": True, "evidence": []})
         relay.write_text("import sys\nprint(" + repr(reply) + ")\nsys.exit(1)\n")
     cli = tmp_path / "paseo"
     calls = tmp_path / "paseo.calls"
@@ -444,6 +445,12 @@ elif args == ['agent', 'inspect', '--json', '--', {ident!r}]:
         # Exactly what `paseo agent inspect` printed for a real closed agent on 2026-10-30.
         print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'closed',
                           'UpdatedAt': '2026-10-30T13:44:07.592Z'}}))
+    if mode == 'closed-persistent':
+        print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'closed', 'Capabilities': {{'Persistence': True}},
+                          'UpdatedAt': '2026-10-31T13:44:07.592Z'}}))
+    if mode == 'closed-nonpersistent':
+        print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'closed', 'Capabilities': {{'Persistence': False}},
+                          'UpdatedAt': '2026-10-31T13:44:07.592Z'}}))
     if mode == 'archived':
         print(json.dumps({{'Id': {ident!r}, 'Archived': True, 'Status': 'idle'}}))
     if mode == 'archived-string':
@@ -554,6 +561,38 @@ def test_54_a_closed_seat_is_not_even_probed_with_the_switch_off(monkeypatch, tm
     assert rw.pages
 
 
+def test_57_a_closed_persistent_seat_is_asleep_not_absent_and_never_replaced(monkeypatch, tmp_path):
+    """djbclark, 2026-10-31: automatic watchers SHOULD wake closed seats. relay.py calls such a seat `closed`, deliverable (a send wakes it):
+    it is not `gone`, so no successor is started over it; and even when relay is stale and still says `refused`, its record (Persistence true)
+    does not prove it absent (adversary PR 177 r4 B2)."""
+    for relay_state, deliverable in (("closed", True), ("refused", False)):
+        (tmp_path / relay_state).mkdir()
+        rw = direct_probe_world(monkeypatch, tmp_path / relay_state, "closed-persistent", relay_state=relay_state, relay_deliverable=deliverable)
+        state = rw.why_blocked(ABSENT)[0]
+        assert state == ("closed" if deliverable else "refused"), relay_state
+        run_pass(rw)
+        calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()] if rw.probe_calls.exists() else []
+        assert all(args[0] != "run" for args in calls), relay_state
+        assert not rw.load_state().get("seated"), relay_state
+
+
+def test_58_a_closed_seat_relay_cannot_wake_is_gone_when_the_record_says_not_persistent(monkeypatch, tmp_path):
+    for response in ("closed-nonpersistent", "closed"):    # Persistence false, and Persistence unreported
+        (tmp_path / response).mkdir()
+        rw = direct_probe_world(monkeypatch, tmp_path / response, response, relay_state="closed", relay_deliverable=False)
+        state, why = rw.why_blocked(ABSENT)
+        assert state == "gone", response
+        assert "closed and cannot be woken" in why, response
+        run_pass(rw)
+        calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()]
+        assert sum(args[0] == "run" for args in calls) == 1, response
+
+
+def test_59_a_closed_seat_that_relay_can_wake_counts_as_deliverable_for_the_watcher(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path, switch="1")
+    assert "closed" in rw.DELIVERABLE_WHY and "closed" in rw.HEALTHY_WORDS
+
+
 def test_55_a_closed_seat_named_by_a_non_uuid_is_never_proved_absent(monkeypatch, tmp_path):
     rw = direct_probe_world(monkeypatch, tmp_path, "closed", ident="closed-seat",
                             relay_state="refused")
@@ -634,35 +673,19 @@ def test_30_timeout_and_expired_window_cannot_duplicate_with_old_registry_gone(m
     assert "gone" in rw.pages[0]
 
 
-def test_31_listing_adopts_lost_id_then_next_pass_diagnoses_candidate(monkeypatch, tmp_path):
+@pytest.mark.parametrize("row", [
+    {"id": NEW, "name": "renamed", "cwd": "/entity"},
+    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/other-repo"},
+    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/entity"},
+])
+def test_lost_start_never_adopts_by_title_or_clears_on_absence(monkeypatch, tmp_path, row):
     rw = lost_id(monkeypatch, tmp_path)
-    rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE)
+    rw.enum_rc, rw.enum_body = 0, json.dumps([row])
     run_pass(rw)
-    state = rw.load_state()
-    assert state["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] == rw.time.time()
-    assert f"auto-seat unresolved:{rw.ROLE}" not in state["told"]
-    assert starts(rw) == 1 and not state.get("seated")
-    assert f"auto-seat: recovered lost id {NEW}" in rw.LOG.read_text()
-    diagnosed = []
-    def why(ident):
-        diagnosed.append(ident)
-        return ("idle" if ident == NEW else "gone", "fixture")
-    monkeypatch.setattr(rw, "why_blocked", why)
     run_pass(rw)
-    assert NEW in diagnosed and starts(rw) == 1
-
-
-def test_32_empty_listing_only_clears_and_following_pass_may_start(monkeypatch, tmp_path):
-    rw = lost_id(monkeypatch, tmp_path)
-    rw.enum_rc, rw.enum_body = 0, json.dumps([{**PASEO_LS_FIXTURE[0], "name": "other role"}])
-    run_pass(rw)
-    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    assert not rw.auto_seat_candidate(rw.load_state())
     assert starts(rw) == 1
-    assert "auto-seat: unresolved cleared (no live auto-seat agent)" in rw.LOG.read_text()
-    assert "unresolved start not reconciled" not in rw.LOG.read_text()
-    rw.run_rc = 0
-    run_pass(rw)
-    assert starts(rw) == 2
 
 
 @pytest.mark.parametrize("rc,body", [(1, "[]"), (127, ""), (0, "garbage"), (0, "{}"),
@@ -701,7 +724,7 @@ def test_35_unresolved_precedes_word_and_seated_but_switch_off_does_not_list(mon
     state = {"seated": {rw.ROLE: NOW}, "told": {f"auto-seat unresolved:{rw.ROLE}": NOW}}
     rw.save_state(state)
     assert rw.auto_seat("idle", state, NOW) == ""
-    assert len(rw.calls) == (1 if switch == "1" else 0)
+    assert len(rw.calls) == 0
     assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
 
 
@@ -751,7 +774,7 @@ def test_37_recovery_crash_keeps_mail_discoverable_from_disk(monkeypatch, tmp_pa
     assert starts(fresh) == 0
 
 
-@pytest.mark.parametrize("recovery", ["confirmed", "adopted", "cleared"])
+@pytest.mark.parametrize("recovery", ["confirmed"])
 def test_38_recovery_save_before_page_keeps_previous_survey(monkeypatch, tmp_path, recovery):
     rw = load(monkeypatch, tmp_path)
     state = {"last": QUIET, "pending": []}
@@ -866,14 +889,17 @@ def test_41b_other_switch_values_still_attempt_the_open(monkeypatch, tmp_path, v
 
 
 def adopted_world(monkeypatch, tmp_path, open_failure=""):
-    """An id whose start never confirmed, adopted from the listing, then diagnosed live next pass."""
+    """A retained returned id is reconciled by inspect, then diagnosed live next pass."""
     rw = lost_id(monkeypatch, tmp_path)
     rw.opened.clear()
     rw.pages.clear()                               # pass 1's "no live session" page is done with
     rw.open_failure = open_failure
-    rw.enum_rc, rw.enum_body = 0, json.dumps(PASEO_LS_FIXTURE)
-    run_pass(rw)                                   # pass 1: adopt the lost id, diagnose later
-    assert rw.opened == []                         # adoption is not a start: it owes no tab yet
+    # Model a returned id whose confirmation was lost; exercise actual reconciliation.
+    state = rw.load_state()
+    state["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] = NOW
+    rw.save_state(state)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
     monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "seat recovered"))
     return rw
 
@@ -1146,3 +1172,280 @@ def test_63_nothing_resolvable_keeps_the_no_live_session_reason(monkeypatch, tmp
     ident, why = rw.real_owner_session()
     assert ident == ""
     assert why.startswith("no live session")
+
+
+@pytest.fixture(autouse=True)
+def isolated_watcher_environment(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    for key in list(os.environ):
+        if key.startswith("RW_") or key == "PASEO_AGENT_ID":
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("RW_NO_DEPLOY", "1")
+    real = subprocess.run
+    def guarded(argv, *args, **kwargs):
+        command = list(argv) if not isinstance(argv, str) else [argv]
+        if command[:3] == ["env", "-u", "PASEO_AGENT_ID"]:
+            command = command[3:]
+        git_read = {"rev-parse", "cat-file", "merge-base", "log", "status"}
+        git_cwd = Path(command[command.index("-C") + 1]).resolve() if "-C" in command else Path.cwd()
+        fixture_git = git_cwd.is_relative_to(tmp_path)
+        allowed = command and ((command[0] == "git" and
+                    (fixture_git or (command[3] if command[1:2] == ["-C"] else command[1]) in git_read)) or
+                  (Path(command[0]).name.startswith("python") and "-c" in command))
+        import shutil
+        executable = shutil.which(command[0]) if command else None
+        local_fixture = executable and Path(executable).resolve().is_relative_to(tmp_path)
+        python_fixture = (command and Path(command[0]).name.startswith("python") and
+                          any(Path(arg).is_absolute() and Path(arg).resolve().is_relative_to(tmp_path)
+                              for arg in command[1:]))
+        allowed = allowed or local_fixture or python_fixture
+        if not allowed:
+            raise AssertionError(f"unexpected external launcher: {command}")
+        return real(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", guarded)
+
+
+@pytest.mark.parametrize("response", [(124, "", "timeout"), (1, "", "failed"), (0, "bad json", ""), (0, "{}", "")])
+def test_failed_peer_lookup_forbids_start(monkeypatch, tmp_path, response):
+    rw = load(monkeypatch, tmp_path)
+    registry = rw.REPO / "agents/comm/registry.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({rw.ROLE: {"paseo": CLOSED_SEAT}}))
+    mail = rw.REPO / "projects/hiwymi/spec/composite-individual/tools/peer-comms/peer_mail.py"
+    mail.parent.mkdir(parents=True)
+    mail.touch()
+    monkeypatch.setattr(rw, "live_sessions", lambda: _rows(**{CLOSED_SEAT: "closed", SUCCESSOR: "running"}))
+    original = rw.run_split
+    monkeypatch.setattr(rw, "run_split", lambda argv, timeout=20: response if str(mail) in argv else original(argv, timeout))
+    monkeypatch.setattr(rw, "owner_session", rw.real_owner_session)
+    run_pass(rw)
+    assert starts(rw) == 0
+
+
+def test_owner_handoff_during_probe_forbids_start(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    owner = [OLD]
+    monkeypatch.setattr(rw, "owner_session", lambda: (owner[0], "registry"))
+    def probe(ident):
+        owner[0] = SUCCESSOR
+        return "gone", "old owner closed"
+    monkeypatch.setattr(rw, "why_blocked", probe)
+    run_pass(rw)
+    assert starts(rw) == 0
+
+
+def test_refreshes_cached_fleet_before_start(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    monkeypatch.setattr(rw, "_LIVE_CACHE", {OLD: {"status": "closed"}})
+    def owner():
+        assert rw._LIVE_CACHE is None
+        return SUCCESSOR, "registry"
+    monkeypatch.setattr(rw, "owner_session", owner)
+    assert rw.auto_seat("gone", {}, NOW, expected_owner=OLD) == ""
+    assert starts(rw) == 0
+
+
+@pytest.mark.parametrize("info,rc", [
+    ({"Id": NEW, "Status": "running"}, 0),
+    ({"Id": NEW, "Status": "closed"}, 0),
+    ({"Id": NEW, "Archived": True}, 0),
+    ({"error": {"code": "AGENT_NOT_FOUND"}}, 1),
+])
+def test_retained_id_reconciles_and_later_gone_can_restart(monkeypatch, tmp_path, info, rc):
+    rw = load(monkeypatch, tmp_path)
+    original = rw.run_split
+    def lost_confirmation(argv, timeout=20):
+        if argv[:3] == ["paseo", "agent", "inspect"]:
+            rw.calls.append((argv, timeout))
+            return 124, "", "indeterminate after invocation: timeout"
+        return original(argv, timeout)
+    monkeypatch.setattr(rw, "run_split", lost_confirmation)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    monkeypatch.setattr(rw, "run_split", lambda argv, timeout=20:
+                        (rc, json.dumps(info), "") if argv[:3] == ["paseo", "agent", "inspect"]
+                        else original(argv, timeout))
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert starts(rw) == 1
+    monkeypatch.setattr(rw, "run_split", original)
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    rw.confirm = True
+    run_pass(rw)
+    assert starts(rw) == 2
+
+
+@pytest.mark.parametrize("response", [(124, "", "timeout"), (0, '{"Id":"different"}', ""),
+                                     (0, 'broken', "")])
+def test_unresolved_identity_mismatch_or_failed_read_keeps_block(monkeypatch, tmp_path, response):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    original = rw.run_split
+    monkeypatch.setattr(rw, "run_split", lambda argv, timeout=20:
+                        response if argv[:3] == ["paseo", "agent", "inspect"] else original(argv, timeout))
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    assert starts(rw) == 1
+
+
+def test_unresolved_notice_retries_failure_then_sends_once(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    rw.run_rc = 1
+    notices = []
+    def page(text):
+        if text.startswith("Auto-seat for"):
+            notices.append(text)
+            return len(notices) > 1
+        return True
+    monkeypatch.setattr(rw, "to_djbclark", page)
+    run_pass(rw)
+    run_pass(rw)
+    run_pass(rw)
+    assert len(notices) == 2
+    assert "operator reconciliation" in notices[0]
+    assert "auto-seat unresolved:test-role" in notices[0]
+    assert starts(rw) == 1
+
+
+@pytest.mark.parametrize("reply,rc", [
+    ({"Id": NEW, "Status": "closed"}, 0),
+    ({"error": {"code": "AGENT_NOT_FOUND"}}, 1),
+])
+def test_stale_candidate_cannot_reconcile_later_no_id_start(monkeypatch, tmp_path, reply, rc):
+    # Adversary round-2 S2: A confirmed, A closed, B started with lost id, then inspect A.
+    rw = load(monkeypatch, tmp_path)
+    moment = [NOW]
+    monkeypatch.setattr(rw.time, "time", lambda: moment[0])
+    run_pass(rw)
+    assert starts(rw) == 1
+    assert rw.auto_seat_candidate(rw.load_state()) == NEW
+    moment[0] += rw.AUTO_SEAT_S + 1
+    rw.run_rc = 124
+    run_pass(rw)
+    assert starts(rw) == 2
+    unresolved_key = f"auto-seat unresolved:{rw.ROLE}"
+    attempt = rw.load_state()["told"][unresolved_key]
+    assert rw.load_state()["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] != attempt
+    original = rw.run_split
+    inspected = []
+    def probe(argv, timeout=20):
+        if argv[:3] == ["paseo", "agent", "inspect"]:
+            inspected.append(argv)
+            return rc, json.dumps(reply), ""
+        return original(argv, timeout)
+    monkeypatch.setattr(rw, "run_split", probe)
+    run_pass(rw)
+    assert rw.load_state()["told"][unresolved_key] == attempt
+    moment[0] += rw.AUTO_SEAT_S + 1
+    run_pass(rw)
+    assert rw.load_state()["told"][unresolved_key] == attempt
+    assert starts(rw) == 2
+    assert inspected == [], "stale A is not identity evidence for B"
+    assert len(rw.unresolved_pages) == 1
+
+
+@pytest.mark.parametrize("damage", ["missing-attempt", "wrong-attempt", "missing-candidate",
+                                     "old-candidate", "ambiguous-candidates"])
+def test_unbound_attempt_stays_unresolved_and_notifies_once(monkeypatch, tmp_path, damage):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    state = rw.load_state()
+    if damage == "missing-attempt":
+        state["told"].pop(f"auto-seat attempt:{rw.ROLE}")
+    elif damage == "wrong-attempt":
+        state["told"][f"auto-seat attempt:{rw.ROLE}"] = NOW - 1
+    elif damage == "missing-candidate":
+        state["told"].pop(f"auto-seat candidate:{rw.ROLE}:{NEW}")
+    elif damage == "old-candidate":
+        state["told"][f"auto-seat candidate:{rw.ROLE}:{NEW}"] = NOW - 1
+    else:
+        state["told"][f"auto-seat candidate:{rw.ROLE}:another"] = NOW
+    rw.save_state(state)
+    rw.confirm = True
+    run_pass(rw)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]
+    assert starts(rw) == 1
+    assert len(rw.unresolved_pages) == 1
+
+
+def test_returned_id_notice_waits_for_failed_reconciliation(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    assert rw.unresolved_pages == []
+    run_pass(rw)
+    assert len(rw.unresolved_pages) == 1
+    run_pass(rw)
+    assert len(rw.unresolved_pages) == 1
+
+
+def test_returned_id_successful_reconciliation_needs_no_manual_notice(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    rw.confirm = True
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert rw.unresolved_pages == []
+
+
+@pytest.mark.parametrize("successor_state", ["idle", "working"])
+def test_live_successor_preserves_unresolved_id_until_reconciled(monkeypatch, tmp_path, successor_state):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    key = f"auto-seat unresolved:{rw.ROLE}"
+    assert rw.unresolved_candidate(rw.load_state()) == NEW
+    monkeypatch.setattr(rw, "owner_session", lambda: (SUCCESSOR, "registry"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: (successor_state, "successor live"))
+    # The first reconciliation read fails: retain the id even though another owner is live.
+    run_pass(rw)
+    assert key in rw.load_state()["told"]
+    assert rw.unresolved_candidate(rw.load_state()) == NEW
+    assert starts(rw) == 1
+    # The next pass reads this attempt's returned id successfully, then a subsequent pass
+    # may retire the owner fallback. No manual state edit or additional start is needed.
+    rw.confirm = True
+    run_pass(rw)
+    assert key not in rw.load_state()["told"]
+    run_pass(rw)
+    assert rw.auto_seat_candidate(rw.load_state()) == ""
+    assert starts(rw) == 1
+
+
+@pytest.mark.parametrize("next_word", ["gone", "idle", "error"])
+def test_absent_reconciled_candidate_survives_for_fresh_diagnosis(monkeypatch, tmp_path, next_word):
+    rw = load(monkeypatch, tmp_path)
+    rw.confirm = False
+    run_pass(rw)
+    assert starts(rw) == 1
+    monkeypatch.setattr(rw, "owner_session", lambda: ("", "no registered owner"))
+    monkeypatch.setattr(rw, "owner_candidates", lambda: iter(()))
+    original = rw.run_split
+    def absent(argv, timeout=20):
+        if argv[:3] == ["paseo", "agent", "inspect"]:
+            return 1, json.dumps({"error": {"code": "AGENT_NOT_FOUND"}}), ""
+        return original(argv, timeout)
+    monkeypatch.setattr(rw, "run_split", absent)
+    run_pass(rw)
+    assert f"auto-seat unresolved:{rw.ROLE}" not in rw.load_state()["told"]
+    assert rw.auto_seat_candidate(rw.load_state()) == NEW
+    assert starts(rw) == 1, "reconciliation must never start in the same pass"
+    diagnosed = []
+    monkeypatch.setattr(rw, "why_blocked", lambda ident:
+                        (diagnosed.append(ident) or next_word, "fresh diagnosis"))
+    monkeypatch.setattr(rw, "run_split", original)
+    rw.confirm = True
+    run_pass(rw)
+    assert diagnosed == [NEW]
+    assert starts(rw) == 1, "attempt window still applies"
+    monkeypatch.setattr(rw.time, "time", lambda: NOW + rw.AUTO_SEAT_S + 1)
+    run_pass(rw)
+    assert diagnosed[-1] == NEW
+    assert starts(rw) == (2 if next_word == "gone" else 1)
+    run_pass(rw)
+    assert starts(rw) == (2 if next_word == "gone" else 1), "no extra start on another pass"
