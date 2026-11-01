@@ -37,7 +37,7 @@ the agent's file tools to access paths outside -C (e.g. bigteam report folders).
     all              allow everything (default; also under --interactive)
     deny             refuse everything (no tools at all; a pure-text answer)
     read-only        the agent may read (tool kinds read, search, fetch) and nothing else:
-                     what an advisory review needs (claude, codex, opencode; every
+                     what an advisory review needs (claude, codex, opencode, zcode; every
                      other agent is refused with exit 2); any other tool call trips the
                      tripwire (exit 77)
 acp-run runs yolo for every agent (operator 2026-10-14): there is no other
@@ -47,28 +47,48 @@ The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
-Under --perm deny (without --interactive) opencode starts without
-the user's plugins, MCP servers and hooks, as claude does: a per-run temp
-config (OPENCODE_CONFIG_DIR holding only provider/model keys, project
-config off), removed afterwards and logged as a "user_config" record. --keep-user-config
-(env ACP_RUN_KEEP_USER_CONFIG=1) keeps them. (agy, crush and zcode had the same strip until
-they retired, 2026-11-06; the xAI CLI adapter went 2026-11-07.)
+A --perm read-only run also allows an execute request that only reads (cat, ls, rg, git log/show/
+diff, a plain curl GET, joined with | && ; only; readonly_command). codex-acp offers a refusal that keeps
+the turn alive ("decline") only sometimes: for a network escalation it offers just "cancel", which ends the
+turn as stop=cancelled. acp-run prefers a keep-alive refusal, and when only "cancel" exists it continues the
+same session (up to 3 times, "denial_continue" log rows) with a prompt that says the call was refused and to
+finish with reading tools. Each refusal prints `acp-run: refused (<kind>): <command>` on stderr.
+Under --perm deny (without --interactive) opencode, agy, crush and grok start without
+the user's plugins, MCP servers and hooks, as claude and zcode do: a per-run temp
+config (opencode: OPENCODE_CONFIG_DIR holding only provider/model keys, project
+config off; agy: GEMINI_HOME with empty mcp_config.json, hooks.json, plugins/;
+crush: CRUSH_GLOBAL_CONFIG whose crushrc sources the user's with mcp/lsp/hook/
+permissions shadowed, no global context or skills; grok: GROK_HOME without hooks/,
+skills/, plugins/, whose config.toml has no hooks, plugins or MCP servers and asks
+before every tool), removed afterwards and logged as a "user_config" record. Under
+--perm deny grok also starts without --always-approve (it is the only way grok
+sends a permission request; before 2026-10-15 every grok deny run tripped, exit 77). --keep-user-config (env ACP_RUN_KEEP_USER_CONFIG=1)
+keeps them. Under any --perm deny crush also gets no tools at all: every built-in
+tool is disabled in per-run config layers (crush runs its read-only tools without
+asking, so no permission answer could deny them); logged as "deny_config".
+Under every other non-interactive --perm grok also starts on that stripped GROK_HOME (operator
+2026-10-15), but only hooks/, skills/, plugins/ and the config's hooks and plugins go: MCP servers and the
+permission mode stay. ACP_RUN_GROK_USER_HOOKS=1 (or --keep-user-config) keeps the user's ~/.grok.
+The "user_config" record names the "home" used.
 --strip-user-config (env ACP_RUN_STRIP_USER_CONFIG=1) applies the same strip of
 the user's plugins, MCP servers and hooks under ANY --perm (not --interactive),
-for opencode; it is a startup-reliability switch, not a
+for opencode, agy, crush, zcode and grok; it is a startup-reliability switch, not a
 permission control (operator 2026-10-13: the SkillOpt-Sleep night runs --perm all
 with it). Outside --perm deny nothing else changes: opencode gets no deny
-permission. Under
+permission, agy and zcode keep their --perm all modes, crush keeps every built-in
+tool (only its LSP auto-start and project MCP servers are off; a per-run data dir
+and --data-dir as under deny); zcode gets a per-run settings file with MCP,
+plugins, skills and hooks off and the user's permission block untouched. Under
 --perm deny it changes nothing (deny already strips). Temp dirs are named
 acp-run-<agent>-strip-<pid>-*; --keep-user-config still wins.
---set applies any config option --info lists (e.g. --set thinking=high).
+--set applies any config option --info lists (e.g. --set provider=cline-pass).
 --effort LEVEL (none, minimal, low, medium, high, xhigh, max, ultra, default; extra-high is
 xhigh) and --context SIZE (200k, 256k, 272k, 400k, 500k, 1m or a token count) are normalized
 across agents. Each is translated to the agent's own knob (an ACP option, a launch flag or
-env var, claude's CLAUDE_CODE_DISABLE_1M_CONTEXT,
-...) and applied after the model and every other option, since a model switch resets
-them. One the agent or model cannot take (hermes effort; opencode/
-hermes context; a size the model does not list; a codex size above the model's
+env var, grok's session/set_model, claude's CLAUDE_CODE_DISABLE_1M_CONTEXT, agy's model-id
+suffix, ...) and applied after the model and every other option, since a model switch resets
+them. One the agent or model cannot take (hermes/crush effort; qwen/opencode/crush/cline/
+agy/hermes context; a size the model does not list; a codex size above the model's
 max_context_window) exits 2 before any prompt, naming the valid values. After the options are set and
 after the turn (usage_update.size) acp-run reads back what the agent reports and prints
 "acp-run: applied: model=... effort=... ctx=..." (values it cannot read back are marked
@@ -84,17 +104,18 @@ archive the caller's Paseo agent, 2026-10-20) and always sees ACP_RUN_AGENT=1.
 Per-host settings: ~/.config/acp-run.env (or $ACP_RUN_ENV_FILE), when present,
 holds KEY=VALUE / export KEY="VALUE" lines (no shell expansion) loaded into the
 environment unless already set, e.g. ACP_RUN_DEFAULT_SET_CLAUDE="model=sonnet,effort=high"
-(merged over that agent's defaults; --model/--set still win).
+(merged over that agent's defaults; --model/--set still win), ACP_RUN_AGY_CMD,
+ACP_RUN_CLINE_CMD.
 cursor: plain model ids plus context/reasoning_effort/fast options (model applied
 first), e.g. acp-run cursor --model grok-4.7 --context 500k --set fast=false
 --effort high; bracketed preset strings no longer apply.
-Some agents may get defaults (DEFAULT_SET below; none since cline retired, 2026-11-06).
+Some agents get defaults (DEFAULT_SET below): cline always runs on cline-pass.
 Agents decide what to ask about: some auto-allow by their own settings (use
 --mode to pick a stricter one; --info lists the modes).
 
 Delivery checks: a turn that ends with end_turn is still a failure (exit 1,
 with "FAILED <class>" on stderr) when the agent returned a provider refusal as
-its answer, its reply ends in a refusal paragraph (an agent may append "Usage Limit
+its answer, its reply ends in a refusal paragraph (agy appends "Usage Limit
 Reached ..." to the progress text it was streaming; a 429 in the agent's stderr
 during the turn also makes a quota mention in that last paragraph one), or its
 reply ends in a provider/transport error line, or the whole short reply is the
@@ -103,7 +124,7 @@ are the FAILURE_CLASSES, REPLY_REFUSALS, MODEL_REFUSALS and TAIL_ERROR tables in
     refused    the model declined the task (never retried; not a deliverable)
     quota      usage/rate limit or quota exhausted
     plan       model not available on the account's plan
-    auth       not logged in / authentication required
+    auth       not logged in / authentication required / zcode token_login_failed
     transient  timeout, unavailable, overloaded, connection reset, 5xx
 A reply cut off by such an error line is reported as "reply truncated; edits
 may be present". ACP errors are classified the same way.
@@ -115,7 +136,7 @@ request; quota, plan and auth failures are never retried. Default 0.
 average per CPU core is above L; with --load-wait S (env ACP_RUN_LOAD_WAIT)
 it waits up to S seconds for the load to drop first. Off by default.
 --handshake-timeout S (env ACP_RUN_HANDSHAKE_TIMEOUT) bounds initialize and
-session/new each; default 40 s, claude 90 s (HANDSHAKE_TIMEOUT).
+session/new each; default 40 s, claude 90 s, kiro 120 s (HANDSHAKE_TIMEOUT).
 --handshake-tries N (default 2) starts a fresh agent after a handshake timeout,
 or after a transient ACP error in initialize or session/new (backoff 1, 2, 4..
 10 s; nothing has run yet). The error names the step that hung.
@@ -206,7 +227,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import unquote
 
-# An ACP server may send a notification under the "$/" prefix. The
+# zcode-acp-server sends its turn-state notification as "$/zcode/turnState". The
 # ACP Python library only knows "_" as the extension prefix and raises
 # method_not_found (a logged traceback per notification) for the JSON-RPC
 # reserved "$/" prefix, so fold "$/" into "_" and let ext_notification ignore it.
@@ -223,7 +244,7 @@ from acp.schema import (
 
 _acp_route = _acp_router.MessageRouter.__call__
 
-# hermes lists its models only in the legacy session/new field `models`, which the
+# hermes and crush-acp list their models only in the legacy session/new field `models`, which the
 # SDK's NewSessionResponse drops; keep unknown fields (sess.model_extra) so --info can list them
 # and --model can use session/set_model.
 import acp.schema as _acp_schema
@@ -236,7 +257,7 @@ async def _route_dollar_as_extension(self, method, params, is_notification):
     if isinstance(method, str) and method.startswith("$/"):
         method = "_" + method[2:]
     elif isinstance(method, str) and is_notification and method != "session/update" and not method.startswith("_"):
-        # a server may send an extension notification without the "_" prefix: a
+        # qwen sends "qwen/notify/session/model-update" without the extension prefix: a
         # logged traceback per notification (2026-10-15); ext_notification ignores it
         method = "_" + method
     return await _acp_route(self, method, params, is_notification)
@@ -244,6 +265,9 @@ async def _route_dollar_as_extension(self, method, params, is_notification):
 
 _acp_router.MessageRouter.__call__ = _route_dollar_as_extension
 
+# The Crush data dir acp-run hands crush-acp. ACP_RUN_CRUSH_DATA moves it for one run (the SIPB
+# benchmark pins a model in a private copy, 2026-10-14, so it never touches the interactive TUI's
+# crush.json in the default dir, which the `crush` shell function shares).
 # Per-host settings file: ~/.config/acp-run.env (ACP_RUN_ENV_FILE overrides
 # the path), read when present so every caller sees it, including shells that
 # source no rc file (agent tool calls, cron, bash -c). Lines are KEY=VALUE or
@@ -277,6 +301,30 @@ def load_env_file(path=None):
 
 load_env_file()
 
+# cline binary: ACP_RUN_CLINE_CMD, else ~/.local/bin/cline when present (the
+# box: a sh wrapper pinning Node 22 over npm -g --prefix ~/.local cline), else
+# "cline" from PATH.
+CLINE_CMD = os.environ.get("ACP_RUN_CLINE_CMD") or (
+    os.path.expanduser("~/.local/bin/cline")
+    if os.access(os.path.expanduser("~/.local/bin/cline"), os.X_OK)
+    else "cline"
+)
+CRUSH_DATA = os.path.expanduser(os.environ.get("ACP_RUN_CRUSH_DATA") or "~/.local/share/crush-acp")
+
+
+def _agy_server():
+    """The newest agy_acp_server.par under ~/.local/share/agy-acp-server/<version>/ (agy upgrades
+    unpack a new version dir; until 2026-10-17 1.3.0 was hard-coded here). Falls back to the
+    bare path pattern so a missing install fails with a readable path."""
+    root = Path.home() / ".local/share/agy-acp-server"
+
+    def key(d):
+        return [int(x) if x.isdigit() else 0 for x in re.split(r"[.-]", d.name)]
+
+    dirs = sorted((d for d in root.glob("*/") if (d / "agy_acp_server.par").is_file()), key=key)
+    return str((dirs[-1] if dirs else root / "<version>") / "agy_acp_server.par")
+
+
 # name: (command, auth method id or None). DEFAULT_SET holds ACP session config
 # options always applied for an agent (before --set): its ACP mode can ignore
 # the TUI's own settings. Verified 2026-10-03 unless noted;
@@ -286,14 +334,85 @@ AGENTS = {
     "claude": (["claude-agent-acp"], None),
     # npm -g @agentclientprotocol/codex-acp
     "codex": (["codex-acp"], None),
+    "copilot": (["copilot", "--acp"], None),
     "opencode": (["opencode", "acp"], None),
     "cursor": (["cursor-agent", "acp"], "cursor_login"),
+    "qwen": (["qwen", "--acp"], None),
+    "devin": (["devin", "acp"], None),
+    "cline": ([CLINE_CMD, "--acp"], None),
     "hermes": (["hermes", "acp"], None),
     # omp (oh-my-pi) native ACP server (`omp acp`, omp 18.12.2 verified 2026-10-19). Its Claude
     # API credits are a normal tier since 2026-10-19 (operator): no per-run approval.
     "omp": (["omp", "acp"], None),
+    # goose (Homebrew block-goose-cli 1.55.0, `goose acp`, 2026-10-23) through
+    # ~/.local/bin/goose-scout: Bedrock Llama 4 Scout (us.meta.llama4-scout-17b-instruct-v1:0,
+    # us-east-1) via goose-scout's private LiteLLM proxy (127.0.0.1:4012), whose callbacks curb
+    # Scout's tool over-use (echo-as-reply, repeated identical calls). AWS_BEARER_TOKEN_BEDROCK
+    # is injected into the proxy by sudo-secretspec. Mode comes from YOLO_SET / DENY_SET (and
+    # GOOSE_MODE: auto in ~/.config/goose/config.yaml); no GOOSE_MODE in the launch env.
+    "goose": ([os.path.expanduser("~/.local/bin/goose-scout"), "acp"], None),
+    # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
+    # zcode-acp-server) wraps `zcode app-server --stdio`. Model switches work when
+    # the server gets ZCODE_BIN=<pkg>/vendor/zcode.cjs (zcode_bin(), set in run()); until
+    # 2026-10-15 every switch failed because it resolved the `zcode` symlink instead
+    # ("unsupported config option or switch failed: model"). `--set thought=low|high|max`
+    # (or --effort) is its effort lever, and a model switch resets it: model goes first.
+    "zcode": (["zcode-acp-server"], None),
+    # Google LLC signed; registry antigravity-acp (dl.google.com)
+    "agy": (
+        [_agy_server()],
+        None,
+    ),
+    # native ACP; xAI registry entry grok-build (a reserve pool: GrokBot)
+    "grok": (["grok", "agent", "--always-approve", "stdio"], None),
+    # Crush has no ACP mode in a release. This is the unmerged upstream PR
+    # charmbracelet/crush#2450 (`crush acp`), merged onto upstream main in
+    # ~/src/crush-acp and installed as ~/.local/bin/crush-acp. It insists on an
+    # `authenticate` (method "local") before session/new, and ignores the
+    # client's cwd: the workspace is the process cwd, so pass -C. Metrics off.
+    # --yolo (operator, 2026-10-11): the ~/.bashrc `crush` function adds it for
+    # shells only, so it is spelled out here; it also lifts the bash blocklist
+    # (our #3909 commits in the build). Needs the persistent --yolo flag.
+    # Provider and model: SIPB LLMs via ~/.config/crush/crushrc. Run WITHOUT
+    # --model: the PR offers models only in the session/new `models` field,
+    # not as a config option, so acp-run refuses (operator: the default
+    # model is enough). Verified 2026-10-11: prompt 'Reply with exactly: OK'
+    # returned OK, stop=end_turn, 74 s.
+    # CRUSH_GLOBAL_DATA gives acp-run its own Crush data dir: the shared one
+    # (~/.local/share/crush/crush.json) holds the model picked in the interactive TUI
+    # (and a Charm Hyper login), which overrides crushrc; on 2026-10-12 that sent
+    # every acp-run crush turn to Hyper ("out of credits") instead of SIPB LLMs.
+    # providers.json (the catalog cache) is copied there once.
+    "crush": (["env", "CRUSH_DISABLE_METRICS=1",
+               "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
+               "crush-acp", "acp"], "local"),
+    # kiro-cli acp (kiro-cli 2.34.0, Homebrew cask, 2026-10-25): native ACP. Its YOLO is the
+    # persistent --trust-all-tools (-a), a flag of `acp` and `chat`, not of the root command; it
+    # is in YOLO_CMD, not here. --perm deny is refused (DENY_UNSUPPORTED): Kiro runs workspace
+    # reads, grep, glob and `code` edits without a permission request, so only the tripwire
+    # would catch them, after the tool ran (adversary BLOCK H1, 2026-10-25).
+    # Never routed by route_agent.py ([discovery].never_route): dispatch it by name.
+    "kiro": (["kiro-cli", "acp"], None),
 }
-DEFAULT_SET = {}
+# ACP_RUN_AGY_SERVER swaps agy's server command for one run without an edit: a
+# specific agy_acp_server.par instead of the newest one, or a wrapper such as
+# refined-antigravity-acp. Unset is the default path above (compared
+# 2026-10-10, tools/acp-run/README.md "agy").
+# ACP_RUN_AGY_CMD is an alias. With neither set, ~/.local/bin/refined-antigravity-acp
+# is used when present: on hosts without a "nobody" group (the Grok Bot box)
+# the official .par crashes at startup, and the wrapper also injects
+# _meta.systemPrompt (GLOBAL_RULES). 2026-10-14.
+_AGY_WRAPPER = os.path.expanduser("~/.local/bin/refined-antigravity-acp")
+_agy_cmd = os.environ.get("ACP_RUN_AGY_SERVER") or os.environ.get("ACP_RUN_AGY_CMD")
+if _agy_cmd:
+    AGENTS["agy"] = ([os.path.expanduser(_agy_cmd)], None)
+elif os.access(_AGY_WRAPPER, os.X_OK):
+    AGENTS["agy"] = ([_AGY_WRAPPER], None)
+DEFAULT_SET = {
+    # cline's ACP mode defaults to provider "cline" (paid Cline account) even
+    # though the TUI is set up for ClinePass; djbclark uses cline-pass.
+    "cline": {"provider": "cline-pass"},
+}
 # Per-host defaults without an edit: ACP_RUN_DEFAULT_SET_<AGENT>="id=value,..."
 # (e.g. ACP_RUN_DEFAULT_SET_CLAUDE="model=sonnet,effort=high") is merged over
 # DEFAULT_SET for that agent; --model/--set still win. An empty value is a no-op.
@@ -308,22 +427,52 @@ for _k, _v in os.environ.items():
 # a read-only run with --perm deny (that needs the agent to send permission
 # requests), and always overridable with --mode/--set. Values are the agent's
 # own mode ids from `acp-run <agent> --info`; agents missing here have no
-# auto-approve mode (opencode, cursor, hermes) and follow their own
-# settings.
+# auto-approve mode (opencode, cursor, cline, hermes) and follow their own
+# settings, or take a flag instead (grok: --always-approve in AGENTS).
 YOLO_SET = {
     "claude": {"mode": "bypassPermissions"},
     "codex": {"mode": "agent-full-access"},
+    "copilot": {
+        "mode": "https://agentclientprotocol.com/protocol/session-modes#autopilot"
+    },
+    "qwen": {"mode": "yolo"},
+    "devin": {"mode": "bypass"},
+    "agy": {"mode": "yolo"},
+    "zcode": {"mode": "yolo"},  # zcode-acp-server 0.69: plan | build | edit | guarded | yolo
+    "goose": {"mode": "auto"},  # goose acp 1.55.0: auto | approve | smart_approve | chat
 }
 # Launch-command variants for agents whose ACP session has no auto-approve mode
-# but whose CLI takes a flag (opencode's --auto belongs to the root command, not
+# but whose CLI takes a flag (audited 2026-10-03: cline --auto-approve true is
+# its documented switch; opencode's --auto belongs to the root command, not
 # `acp`, and breaks it, but opencode's default already allows in-workspace
-# work). Applied under the same condition as YOLO_SET. Empty since cline, crush and
-# kiro retired (2026-11-06).
+# work). Applied under the same condition as YOLO_SET.
 YOLO_CMD = {
+    "cline": [CLINE_CMD, "--acp", "--auto-approve", "true"],
+    # --yolo also lifts crush's bash blocklist, so it is added only under
+    # --perm all (adversary review 2026-10-12, C1c); --perm deny runs crush
+    # without it (and with every tool off).
+    "crush": ["env", "CRUSH_DISABLE_METRICS=1",
+              "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
+              "crush-acp", "acp", "--yolo"],
+    "kiro": ["kiro-cli", "acp", "--trust-all-tools"],
 }
-# ACP clientInfo.name sent on initialize, per agent (default "acp-run"); none since agy
-# retired (2026-11-06).
-CLIENT_NAME = {}
+# Extra environment per agent. agy's ACP server runs the user's global hooks in
+# ~/.gemini/config/hooks.json (Orca/Moshi status hooks); the Orca PreToolUse
+# hook makes every tool call fail there ("External hook 'orca-status' failed to
+# execute"). GEMINI_HOME points it at a shadow home that symlinks everything
+# in ~/.gemini (login included) except an empty hooks.json. See
+# ensure_agy_home() and memory/reference_acp_adapter_vetting_2026-10-03.md.
+# ACP clientInfo.name sent on initialize, per agent (default "acp-run").
+# agy_acp_server 1.3.0 offers its non-Gemini models (Claude Opus/Sonnet 5.5,
+# GPT-OSS) only to clients it recognises: model_selection.py
+# supports_third_party_models() is `is_jetbrains or is_zed or is_xcode`, keyed
+# off clientInfo.name, and _parse_ccpa_response() drops every model id not
+# starting "gemini" for anyone else, so as "acp-run" a Claude --model failed
+# with "no model ... have: gemini-*" (and session/set_model with -32602 "not
+# available for the current authentication method",
+# google-antigravity/antigravity-cli#1168). The name feeds nothing else but the
+# User-Agent host_path. Same finding: pingdotgg/t3code#16489. 2026-10-10.
+CLIENT_NAME = {"agy": "zed"}
 # cursor-agent acp gates models by capability, not clientInfo: without
 # clientCapabilities._meta.parameterizedModelPicker it offers one exploded
 # preset per model ("grok-4.7[context=256k,...,fast=true]"); with it, plain
@@ -331,14 +480,20 @@ CLIENT_NAME = {}
 # (forum.cursor.com/t/161317, zed-industries/zed#57571). The model goes first for
 # every agent now (order_sets, 2026-10-15); this set only decides the capability.
 PARAM_MODEL_PICKER = {"cursor"}
-# User-level global rules sent as session/new _meta.systemPrompt, per agent; none since agy
-# retired (2026-11-06).
-GLOBAL_RULES = {}
+# User-level global rules sent as session/new _meta.systemPrompt, for agents
+# that do not load a global rules file over ACP themselves. agy_acp_server
+# (1.3.0) loads no global GEMINI.md (tested 2026-10-11 with both
+# $GEMINI_HOME/GEMINI.md and $GEMINI_HOME/config/GEMINI.md: not in context);
+# refined-antigravity-acp's missing-system-prompt fix injects _meta.systemPrompt
+# into the first prompt as a <user_instruction> block (the official .par
+# ignores it). Missing files are skipped. New sessions only.
+GLOBAL_RULES = {"agy": ["~/.gemini/GEMINI.md"]}
 # Seconds allowed for initialize and for session/new, each. claude-agent-acp's
 # session/new spends 13 s in its SDK initialize phase on an idle machine and
 # 17-24 s at load 20-70 (measured 2026-10-05), so 40 s was too close; acpx
 # allows it 60 s. Overridden by --handshake-timeout / ACP_RUN_HANDSHAKE_TIMEOUT.
-HANDSHAKE_TIMEOUT = {"claude": 90}
+# kiro: the first session/new downloads an 83 MB model (about 66 s, kirodotdev/Kiro#12118)
+HANDSHAKE_TIMEOUT = {"claude": 90, "kiro": 120}
 HANDSHAKE_TIMEOUT_DEFAULT = 40
 # Removed from the agent's environment on every run (see run()): the caller's herdr pane,
 # Paseo agent and Orca terminal (2026-10-20: a dispatched slice that inherited
@@ -350,6 +505,9 @@ SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID",
 # (/new, /clear, /reset, /compact, /quit, --finish) when it sees it.  Not "ACP_RUN": that
 # name already holds the acp-run path for skills/session-finder/launch.py.
 AGENT_MARKER_ENV = "ACP_RUN_AGENT"
+# Agents that can still write under their per-run home while being stopped (agy: a rotated
+# credential; grok: auth.json): their temp dir is removed after the agent is stopped.
+AFTER_KILL_DROP = ("agy", "grok")
 
 # Exit codes beyond 0/1/2/124. 5 matches acpx's "every permission denied".
 EXIT_ALL_DENIED = 5
@@ -381,7 +539,7 @@ def bin_wait_settings() -> tuple[float, float]:
 
 
 def agent_executable(cmd: list[str]) -> str:
-    """The program a launch command really runs: an `env NAME=VAL ... PROGRAM` wrapper is
+    """The program a launch command really runs: an `env NAME=VAL ... PROGRAM` wrapper (crush) is
     skipped, since `env` is always on PATH and would hide a missing agent binary (Codex 4322594869)."""
     if os.path.basename(cmd[0]) != "env":
         return cmd[0]
@@ -408,13 +566,14 @@ def bin_settle(found: str, poll: float) -> None:
         if now == seen:
             return
         seen = now
-# A tool may report in_progress a moment before it asks: an agent may send in_progress,
+# A tool may report in_progress a moment before it asks: crush-acp sends in_progress,
 # then session/request_permission 1 ms later (canary, 2026-10-12). A started tool
 # trips only if its permission request has not arrived within this grace.
 TRIP_GRACE_S = 2.0
 # ACP tool kinds a caller may exempt from the tripwire with --tripwire-exempt-kinds
-# (read-only kinds only; never execute, edit, delete, move, fetch or other). No caller
-# since 2026-11-06 (failover.py deleted).
+# (read-only kinds only; never execute, edit, delete, move, fetch or other). Used by
+# failover for agy alone (djbclark, 2026-10-12): agy's default mode runs reads such as
+# view_file (kind "read") without asking; its shell commands are kind "execute".
 TRIPWIRE_EXEMPTABLE = ("read", "search")
 # --perm read-only (2026-10-19): the agent may use tools of these ACP kinds without asking; any
 # other tool call trips (EXIT_TRIPWIRE) exactly as under --perm deny, and a permission request for
@@ -427,7 +586,9 @@ PERMS = ("all", "deny", "read-only")
 # --perm deny made real per agent (adversary review 2026-10-12, C1). Each agent's
 # own defaults can run tools without ever sending session/request_permission:
 # claude-agent-acp starts in settings.json permissions.defaultMode (here
-# bypassPermissions) and honours the user's allow rules; opencode allows
+# bypassPermissions) and honours the user's allow rules; zcode-acp-server starts
+# in "yolo"; crush-acp ran with --yolo (and without it still runs its read-only
+# tools unasked: crush_deny_dir turns every tool off); opencode allows
 # edit/bash/webfetch by default. So under --perm deny acp-run (1) sets the strictest session mode
 # (DENY_SET), (2) passes env that switches tools off or to deny (DENY_ENV),
 # (3) asks claude-agent-acp for a session with no built-in tools, no user
@@ -436,6 +597,9 @@ PERMS = ("all", "deny", "read-only")
 # starts or completes without a permission request.
 DENY_SET = {
     "claude": {"mode": "default"},
+    "zcode": {"mode": "plan"},
+    "agy": {"mode": "default"},
+    "goose": {"mode": "approve"},  # goose acp 1.55.0: "chat" still ran tools over ACP (2026-10-23); approve asks, acp-run denies
 }
 # cursor-agent acp decides permissions from ~/.cursor/cli-config.json
 # `approvalMode` ("unrestricted" here: the operator's yolo default) and the
@@ -455,10 +619,27 @@ DENY_UNSUPPORTED = {
               " operator 2026-10-15), or set CURSOR_CONFIG_DIR to a config with approvalMode allowlist",
 }
 DENY_UNSUPPORTED_OVERRIDE_ENV = {"cursor": "CURSOR_CONFIG_DIR"}
+DENY_UNSUPPORTED["kiro"] = (
+    "kiro-cli acp runs read, grep, glob and workspace `code` edits without a session/request_permission"
+    " (kiro.dev/docs/reference/built-in-tools, 2026-10-25), so a deny run would only be caught by the"
+    " tripwire after the tool ran; run it under --perm all with a read-only brief and a diff check")
 DENY_ENV = {
     # opencode's PermissionConfig accepts one action for every tool (config schema,
     # https://opencode.ai/config.json, checked 2026-10-12 against v2.0.27).
     "opencode": {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": "deny"})},
+    # zcode-acp-server reads the start mode from ZCODE_ACP_MODE (no user config file overrides
+    # it here). ZCODE_DISALLOWED_TOOLS and ZCODE_ACP_RUN_ALLOWLIST do NOT reach the backend
+    # through zcode-acp-server (it ignores --disallowed-tools); zcode-denylist-shim.cjs reads
+    # them and sends them as the session's toolDenylist / toolAllowlist (zcode_denylist_shim).
+    # The allowlist is a name no tool has: under deny the session is offered no tool at all,
+    # MCP tools and tools of a later zcode release included.
+    "zcode": {
+        "ZCODE_ACP_MODE": "plan",
+        "ZCODE_DISALLOWED_TOOLS": "Bash Read Write Edit MultiEdit Glob Grep LS WebFetch"
+        " WebSearch Task Agent Skill SendMessage TaskOutput TaskStop NotebookEdit TodoWrite"
+        " CronCreate CronList CronUpdate CronDelete mcp__*",
+        "ZCODE_ACP_RUN_ALLOWLIST": "acp-run-deny-no-tool",
+    },
 }
 # --perm read-only per agent (2026-10-19): a session that can read and cannot change anything.
 # Only agents with a verified equivalent are listed; main() refuses the rest with exit 2.
@@ -467,9 +648,12 @@ DENY_ENV = {
 #   codex    the "read-only" session mode (codex-acp 2.2.2 `--info`: sandbox read-only).
 #   opencode OPENCODE_CONFIG_CONTENT permission block: read/glob/grep/list/webfetch/websearch
 #            allow, everything else deny (schema https://opencode.ai/config.json).
+#   zcode    plan mode, plus the backend session's toolDenylist (the mutating tools) and
+#            toolAllowlist (the reading tools only), installed by zcode-denylist-shim.cjs.
 READONLY_SET = {
     "claude": {"mode": "default"},
     "codex": {"mode": "read-only"},
+    "zcode": {"mode": "plan"},
 }
 READONLY_ENV = {
     "opencode": {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {
@@ -477,14 +661,156 @@ READONLY_ENV = {
         "webfetch": "allow", "websearch": "allow",
         "edit": "deny", "bash": "deny", "task": "deny", "skill": "deny", "todowrite": "deny",
         "external_directory": "deny", "lsp": "deny", "question": "deny"}})},
+    "zcode": {
+        "ZCODE_ACP_MODE": "plan",
+        "ZCODE_DISALLOWED_TOOLS": "Bash Write Edit MultiEdit Task Agent Skill SendMessage"
+        " TaskOutput TaskStop NotebookEdit TodoWrite CronCreate CronList CronUpdate CronDelete"
+        " mcp__*",
+        # only the reading tools: a mutating tool zcode adds later, or an MCP tool, is not offered
+        "ZCODE_ACP_RUN_ALLOWLIST": "Read Glob Grep LS WebFetch WebSearch",
+    },
 }
-READONLY_AGENTS = ("claude", "codex", "opencode")
+READONLY_AGENTS = ("claude", "codex", "opencode", "zcode")
 # Kinds that run unasked under --perm read-only because the agent's own read-only mode contains
 # them: codex's "read-only" session mode runs shell commands inside its read-only sandbox (no
 # writes, no network) without a permission request, so an unasked "execute" there is the sandbox
 # doing its job, not an escape (2026-10-19: `graft ask` tripped a research slice in 14 s, exit
 # 77). A permission request for an execute is still refused (decide()).
 READONLY_UNASKED_KINDS = {"codex": ("execute",)}
+
+# --perm read-only and a command the agent asks to run (2026-10-31: two gpt-6-astra review slices were
+# cancelled at their first permission request, 60 s in). codex's read-only mode runs reading commands
+# inside its sandbox without asking, so a request means the command needs more than the sandbox gives,
+# in practice the network: `curl -fsSL https://raw.githubusercontent.com/...`. codex-acp then offers
+# allow_once, an execpolicy amendment and a single reject_once, "cancel", whose codex decision ends the
+# whole turn (`decline`, "No, continue without running it", is offered only when the app-server lists it).
+# So: a command that only reads (below) is allowed, and a refusal that can only end the turn is followed
+# by a continuation prompt in the same session (prompt_turn; RunClient.denial_continues).
+DENIAL_CONTINUES = 3
+TURN_ENDING_OPTION_IDS = frozenset({"cancel", "abort"})  # codex-acp's reject_once ids that end the turn
+RO_PLAIN = frozenset({
+    "cat", "ls", "head", "tail", "wc", "rg", "grep", "egrep", "fgrep", "fd", "stat", "file", "pwd", "nl",
+    "diff", "cmp", "du", "basename", "dirname", "realpath", "readlink", "which", "true"})
+RO_GIT = frozenset({
+    "log", "show", "diff", "status", "blame", "ls-files", "ls-tree", "rev-parse", "rev-list", "cat-file",
+    "show-ref", "describe", "shortlog", "merge-base", "grep", "diff-tree", "name-rev"})
+RO_GRAFT = frozenset({"ask", "grep", "skeleton", "callers", "map"})
+# arguments that make an otherwise reading command write or run another program
+RO_BAD_ARGS = ("--output", "--pre", "--exec", "--open-files-in-pager", "--ext-diff")
+RO_FIND_BAD = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
+RO_OPERATORS = ("|", "&&", "||", ";")
+
+
+def ro_words(script):
+    lex = shlex.shlex(script, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    return list(lex)
+
+
+def ro_curl(args):
+    """A plain GET: only -f/-s/-S/-L bundles, a numeric --max-time, and one http(s) URL."""
+    urls, i = 0, 0
+    while i < len(args):
+        t = args[i]
+        if re.fullmatch(r"-[fsSL]+", t):
+            pass
+        elif t in ("-m", "--max-time", "--connect-timeout") and i + 1 < len(args) and re.fullmatch(r"\d+", args[i + 1]):
+            i += 1
+        elif re.fullmatch(r"https?://[^\s'\"]+", t):
+            urls += 1
+        else:
+            return False
+        i += 1
+    return urls == 1
+
+
+def ro_segment(words, depth):
+    """True when one simple command only reads."""
+    while words:
+        if words[0] == "rtk":  # the output compactor wrapper
+            words = words[1:]
+        elif words[0] == "timeout" and len(words) > 2 and re.fullmatch(r"\d+(\.\d+)?[smh]?", words[1]):
+            words = words[2:]
+        else:
+            break
+    if not words:
+        return False
+    name, args = os.path.basename(words[0]), words[1:]
+    if name in ("bash", "sh", "zsh"):
+        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], depth + 1)
+    if name == "git":
+        while len(args) >= 2 and args[0] == "-C":
+            args = args[2:]
+        return bool(args) and args[0] in RO_GIT and not any(
+            x.startswith(RO_BAD_ARGS) or x.startswith("-O") for x in args[1:])
+    if any(x.startswith(RO_BAD_ARGS) for x in args):
+        return False
+    if name == "graft":
+        return bool(args) and args[0] in RO_GRAFT
+    if name == "curl":
+        return ro_curl(args)
+    if name == "find":
+        return not RO_FIND_BAD.intersection(args)
+    if name == "sed":
+        return len(args) >= 3 and args[0] == "-n" and bool(re.fullmatch(r"\d+(,(\d+|\$))?p", args[1]))
+    if name == "fd":
+        return not any(x in ("-x", "-X") for x in args)
+    return name in RO_PLAIN
+
+
+def readonly_command(cmd, depth=0):
+    """True when a shell command line only reads: commands from a short list (cat, ls, rg, git log/show/
+    diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect to /dev/null, no
+    expansion, no other redirect. A guess is a refusal."""
+    if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`]", cmd):
+        return False
+    try:
+        toks = ro_words(cmd)
+    except ValueError:
+        return False
+    segs, i = [[]], 0
+    while i < len(toks):
+        t = toks[i]
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        if t in RO_OPERATORS:
+            segs.append([])
+        elif (t in (">", ">>") and nxt == "/dev/null") or (t == ">&" and nxt in ("1", "2")):
+            if segs[-1] and segs[-1][-1] in ("1", "2"):
+                segs[-1].pop()
+            i += 1
+        elif re.fullmatch(r"[();<>|&]+", t):
+            return False
+        else:
+            segs[-1].append(t)
+        i += 1
+    segs = [s for s in segs if s]
+    return bool(segs) and all(ro_segment(s, depth) for s in segs)
+
+
+def tool_command(tool_call):
+    """The shell command line of an execute tool call (rawInput.command), else None."""
+    raw = getattr(tool_call, "raw_input", None)
+    cmd = raw.get("command") if isinstance(raw, dict) else None
+    if isinstance(cmd, list):
+        cmd = shlex.join(str(c) for c in cmd)
+    return cmd if isinstance(cmd, str) else None
+
+
+def denial_continue_text(perm, denial):
+    """The prompt that continues a session whose turn ended on a refused tool call."""
+    what = " ".join((denial.get("command") or denial.get("tool") or "a tool call").split())[:300]
+    return (f"acp-run refused this tool call because this run is --perm {perm}: {what}\n"
+            "It was not run and it will not be allowed, so do not retry it or ask again. Nothing was "
+            "lost: continue the task you were given with reading tools only (file reads, rg, git "
+            "log/show/diff, listing) and finish with your normal report. If the refused call was "
+            "needed for a finding, say in the report which part could not be checked.")
+
+
+# claude-agent-acp's notice when the model declines a request and the session continues on another
+# (2026-10-31: "claude-fable-5-1 declined this request (cyber); retried with claude-opus-4-8."); the
+# chunk is the whole message. acp-run logs it as a `fallback` row so acp-dispatch records who answered.
+MODEL_FALLBACK_RE = re.compile(
+    r"\s*\*\*Model fallback:\*\*\s*(\S+) declined this request \(([^)]*)\); retried with (\S+?)\.(?:\s|$)")
 
 
 def tripwire_exempt_kinds(agent, perm, extra=""):
@@ -585,18 +911,113 @@ def safe_sweep_stale_deny_dirs():
         return None
 
 
+def zcode_bin():
+    """The zcode CLI's real entry for zcode-acp-server's ZCODE_BIN: <pkg>/vendor/zcode.cjs, found
+    from the `zcode` on PATH (a symlink to <pkg>/bin/zcode.js). Left to the server's own lookup
+    (None) when it is not found. Without it the server resolves `which zcode`, gets the
+    symlink without a ".js" suffix, never injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE, and the
+    backend refuses every model switch ("Provider Registry ... does not contain Model";
+    root cause found 2026-10-15; it is why --model looked unsupported since 2026-10-09)."""
+    which = shutil.which("zcode")
+    if not which:
+        return None
+    pkg = Path(os.path.realpath(which)).parent.parent
+    entry = pkg / "vendor" / "zcode.cjs"
+    return str(entry) if entry.is_file() and (entry.parent / "provider" / "zcode-builtin.json").is_file() else None
 
 
-# --perm deny (not --interactive) also starts opencode WITHOUT the user's
-# plugins, MCP servers and hooks, as claude (DENY_META) already runs (2026-10-13). On the
-# 2026-10-13 SkillOpt-Sleep night all 21 failed attempts died while the agent started:
-# opencode's "Location plugins did not finish activating" (its 4 plugins in
-# ~/.config/opencode/plugins/ plus 6 MCP servers). A deny run refuses every tool anyway.
-# opencode has no "no plugins/MCP" switch, so it gets a per-run 0700 temp config, removed
-# after the run; the user's files are only read. --keep-user-config or
-# ACP_RUN_KEEP_USER_CONFIG=1 keeps the old behaviour.
+def zcode_deny_settings():
+    """A per-run zcode CLI settings dir for --perm deny (re-verification R3, 2026-10-12):
+    the user's ~/.zcode/cli/setting.json with MCP servers, plugins, skills, subagents
+    and hooks off and plan permissions, plus a hook-free legacy config.json beside it.
+    zcode reads it through ZCODE_CLI_SETTINGS_FILE ("lets a host run one process on
+    its own settings file (hooks, MCP servers, permissions)"), so only this child is
+    affected. Returns the temp dir (caller removes it)."""
+    return _zcode_settings(deny=True)
+
+
+def zcode_readonly_settings():
+    """zcode_deny_settings for --perm read-only: the same stripped settings, but the disallowed
+    tools are only the mutating ones (READONLY_ENV), so Read/Glob/Grep/LS/Web* stay."""
+    return _zcode_settings(deny=True, readonly=True)
+
+
+def zcode_strip_settings():
+    """The --strip-user-config settings dir for zcode outside --perm deny (2026-10-13):
+    like zcode_deny_settings, MCP servers, plugins, skills and hooks off, but the
+    user's permission block and subagent feature untouched (the run keeps its --perm
+    all yolo mode and every built-in tool). Returns the temp dir (caller removes it)."""
+    return _zcode_settings(deny=False)
+
+
+def _zcode_settings(deny, readonly=False):
+    try:
+        base = json.loads((Path.home() / ".zcode" / "cli" / "setting.json").read_text())
+    except (OSError, ValueError):
+        base = {}
+    if not isinstance(base, dict):
+        base = {}
+    off = {"mcp": False, "subagent": False, "skill": False} if deny else {"mcp": False, "skill": False}
+    base["features"] = {**(base.get("features") or {}), **off}
+    base["mcp"] = {"servers": {}}
+    base["plugins"] = {**(base.get("plugins") or {}), "enabled": False, "enabledPlugins": {}}
+    base["skills"] = {**(base.get("skills") or {}), "enabled": False, "roots": []}
+    base["hooks"] = {"enabled": False, "events": {}}
+    if deny:
+        base["permission"] = {**(base.get("permission") or {}), "mode": "plan", "allowedTools": [],
+                              "autoApproveHighRisk": False, "allowMediumRiskInAuto": False,
+                              "disallowedTools": (READONLY_ENV if readonly else DENY_ENV)["zcode"][
+                                  "ZCODE_DISALLOWED_TOOLS"].split()}
+    tag = "deny" if deny else "strip"  # read-only dirs are named deny too (DENY_DIR_RE sweeps them)
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}zcode-{tag}-{os.getpid()}-"))
+    (d / "cli").mkdir()
+    (d / "cli" / "setting.json").write_text(json.dumps(base, indent=1))
+    (d / "cli" / "config.json").write_text(json.dumps({"hooks": {"enabled": False, "events": {}}}))
+    return d
+
+
+ZCODE_SHIM = Path(__file__).resolve().with_name("zcode-denylist-shim.cjs")
+
+
+def zcode_denylist_shim(deny_dir, env, perm):
+    """Make --perm read-only and --perm deny really remove the disallowed tools from zcode
+    (2026-10-24). `zcode app-server --stdio` ignores --disallowed-tools and zcode-acp-server's
+    session/create carries no toolDenylist, so ZCODE_DISALLOWED_TOOLS and the setting.json
+    permission.disallowedTools never took effect: a live read-only run was offered Bash, Edit and
+    Write and ran `ls` unasked (plan mode lets read-only shell through). zcode-denylist-shim.cjs,
+    started as ZCODE_BIN, adds the list as toolDenylist to the backend's session/create, resume
+    and send requests. It lives in <deny_dir>/shim next to a link to the real provider tables, so
+    zcode-acp-server's builtin-provider injection (and with it model switches) keeps working.
+    Raises ConfigError, never runs unguarded, if the real zcode entry or the shim is missing."""
+    real = env.get("ZCODE_BIN") or zcode_bin()
+    if not real or not Path(real).is_file():
+        raise ConfigError(f"--perm {perm} for zcode needs zcode's vendor/zcode.cjs to install its tool "
+                          "denylist, and none was found: set ZCODE_BIN to it")
+    if not ZCODE_SHIM.is_file():
+        raise ConfigError(f"--perm {perm} for zcode needs {ZCODE_SHIM}, which is missing")
+    real_dir = Path(real).resolve().parent
+    provider = next((p for p in (real_dir / "provider", real_dir.parent / "config" / "provider")
+                     if (p / "zcode-builtin.json").is_file()), None)
+    shim_dir = deny_dir / "shim"
+    shim_dir.mkdir()
+    (shim_dir / "zcode.cjs").symlink_to(ZCODE_SHIM)
+    if provider is not None:
+        (shim_dir / "provider").symlink_to(provider)
+    env["ZCODE_ACP_RUN_REAL_BIN"] = str(Path(real).resolve())
+    env["ZCODE_BIN"] = str(shim_dir / "zcode.cjs")
+
+
+# --perm deny (not --interactive) also starts opencode and agy WITHOUT the user's
+# plugins, MCP servers and hooks, as zcode (zcode_deny_settings) and claude
+# (DENY_META) already run (2026-10-13). On the 2026-10-13 SkillOpt-Sleep night all
+# 21 failed attempts died while the agent started: opencode's "Location plugins did
+# not finish activating" (its 4 plugins in ~/.config/opencode/plugins/ plus 6 MCP
+# servers) and agy's "MCP: 7 server(s) still connecting after 32s". A deny run
+# refuses every tool anyway. Neither agent has a "no plugins/MCP" switch, so each
+# gets a per-run 0700 temp config, removed after the run; the user's files are only
+# read. --keep-user-config or ACP_RUN_KEEP_USER_CONFIG=1 keeps the old behaviour.
 # What was stripped is logged as a "user_config" record (names only, no values).
-STRIP_USER_CONFIG = ("opencode",)
+STRIP_USER_CONFIG = ("opencode", "agy", "crush", "grok")  # crush: crush_strip_config, 2026-10-13; grok: grok_strip_home, 2026-10-15
 # Top-level opencode config keys a stripped run keeps: provider, model and auth
 # selection. Everything else (mcp, plugin/plugins, agent, command, instructions,
 # experimental hooks, permission, ...) is dropped; auth itself lives in opencode's
@@ -618,7 +1039,7 @@ def keep_user_config(a):
 # from --perm deny. The startup failures it fixed were plugins and MCP servers, not
 # permissions, and the SkillOpt-Sleep night now runs --perm all (operator 2026-10-13).
 # Outside deny it applies to these agents; under deny it adds nothing (deny strips already).
-STRIP_ANY_PERM = ("opencode",)
+STRIP_ANY_PERM = ("opencode", "agy", "crush", "zcode", "grok")
 
 
 def strip_requested(a):
@@ -812,31 +1233,433 @@ def opencode_deny_config(env, tag="deny", guard=None):
     return d, info, extra_env
 
 
+def agy_deny_home(tag="deny"):
+    """A per-run GEMINI_HOME for --perm deny: like ensure_agy_home()'s shadow (symlinks
+    to everything in ~/.gemini, login included) but config/ has an empty
+    mcp_config.json, an empty hooks.json and an empty plugins/ dir. agy_acp_server
+    1.3.0 reads global MCP servers from $GEMINI_HOME/config/mcp_config.json
+    (mcp_servers.load_global_mcp_configs) and plugins (each with its own skills,
+    hooks.json and mcp_config.json) from $GEMINI_HOME/config/plugins/. Returns
+    (temp dir, log info); the caller removes the dir (rmtree unlinks the symlinks
+    and never follows them)."""
+    src = Path.home() / ".gemini"
+    mcp, unreadable = [], []
+    try:
+        servers = json.loads((src / "config" / "mcp_config.json").read_text()).get("mcpServers")
+        mcp = sorted(str(s) for s in servers) if isinstance(servers, dict) else []
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, AttributeError, UnicodeDecodeError):
+        unreadable.append(str(src / "config" / "mcp_config.json"))
+    try:
+        plugins = sorted(e.name for e in (src / "config" / "plugins").iterdir() if e.is_dir())
+    except OSError:
+        plugins = []
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}agy-{tag}-{os.getpid()}-"))
+    try:
+        (d / "config").mkdir(mode=0o700)
+        for base, tgt in ((src, d), (src / "config", d / "config")):
+            try:
+                entries = sorted(base.iterdir())
+            except OSError:
+                continue
+            for f in entries:
+                if base == src and f.name == "config":
+                    continue
+                if f.name == "plugins" or f.name.startswith(("hooks.json", "mcp_config.json")):
+                    continue
+                (tgt / f.name).symlink_to(f)
+        _private_write(d / "config" / "mcp_config.json", '{"mcpServers": {}}\n')
+        _private_write(d / "config" / "hooks.json", "{}\n")
+        (d / "config" / "plugins").mkdir(mode=0o700)
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    info = {"agent": "agy", "action": "stripped", "source": str(src), "mcp_servers": mcp,
+            "plugins": plugins, "hooks": "config/hooks.json", "unreadable": unreadable,
+            "env": ["GEMINI_HOME"]}
+    return d, info
+
+
+# --perm deny for grok, made real (2026-10-15). Two causes made `acp-dispatch`'s preflight probe
+# ("Reply with exactly: OK" under --perm deny) exit 77 (tripwire) for grok: (1) acp-run launched
+# `grok agent --always-approve stdio` for every policy, so grok never sent a
+# session/request_permission; (2) the user's grok hooks ran on a trivial prompt: the Stop hook
+# ~/.grok/hooks/autorename.json (autorename_nudge.py) answers "the session still needs a title"
+# (grok's Stop hook may return additionalContext, so the turn goes on), and grok then ran its
+# read-only tool read_file on ~/.grok/skills/autorename/SKILL.md, which grok runs without ever asking.
+# So a deny run (a) drops --always-approve (run()) and (b) starts grok on a per-run GROK_HOME that
+# symlinks everything in the real one except hooks/, skills/, plugins/, installed-plugins/ and
+# config.toml, whose copy has no [[hooks.*]], [plugins] or [mcp_servers.*] tables and, under deny,
+# no ui.permission_mode / ui.yolo (the user's config says always-approve). The config copy is
+# checked with tomllib: it must equal the original minus exactly those parts, else grok keeps the
+# user's home and the run says so. A rotated token grok writes to the temp auth.json as a regular
+# file is copied back by grok_sync_auth. Skills the user keeps elsewhere (~/.agents/skills) stay.
+GROK_HOME_DROP = ("hooks", "skills", "plugins", "installed-plugins", "config.toml")
+GROK_DROP_TABLES = ("mcp_servers", "plugins", "hooks")
+GROK_DENY_UI_KEYS = ("permission_mode", "yolo")
+# Default for every non-interactive grok run (operator 2026-10-15): the same stripped home but
+# only hooks, skills and plugins go; MCP servers (tools the operator configured on purpose) and
+# the permission mode stay. Opt out: ACP_RUN_GROK_USER_HOOKS=1 (or --keep-user-config) keeps ~/.grok.
+GROK_HOOKS_ONLY_TABLES = ("plugins", "hooks")
+# Under deny the copy ends with this table, replacing the user's own [permission]: a bare `*` ask
+# rule makes grok send session/request_permission for every tool, file reads included (grok runs
+# its "read-only" tools, and writes under the user's allow rules, without asking otherwise;
+# severity is deny > ask > allow, so no allow rule from any source beats it).
+GROK_DENY_PERMISSION = '\n# acp-run --perm deny: ask before every tool (the answer is always no)\n[permission]\nask = ["*"]\n'
+
+
+def grok_real_home():
+    return Path(os.environ.get("GROK_HOME") or Path.home() / ".grok").expanduser()
+
+
+def grok_filter_config(text, deny=True, mcp=True):
+    """(filtered config.toml text, dropped names). Drops the tables in GROK_DROP_TABLES (and
+    their sub-tables; mcp=False keeps [mcp_servers.*]) and, with deny, ui.permission_mode /
+    ui.yolo. Line based; the caller checks the result with tomllib (grok_check_config)."""
+    out, dropped, skip, table = [], [], False, ""
+    drop = (GROK_DROP_TABLES if mcp else GROK_HOOKS_ONLY_TABLES) + (("permission",) if deny else ())
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(#.*)?$", line)
+        if m:
+            table = m.group(1).strip()
+            head = re.split(r"\s*\.\s*", table, maxsplit=1)[0].strip("\"'")
+            skip = head in drop
+            if skip and head not in dropped:
+                dropped.append(head)
+        if skip:
+            continue
+        if deny and table == "ui" and re.match(r"\s*(" + "|".join(GROK_DENY_UI_KEYS) + r")\s*=", line):
+            dropped.append("ui." + line.split("=", 1)[0].strip())
+            continue
+        out.append(line)
+    new = "".join(out)
+    if deny:
+        new += ("" if new.endswith("\n") or not new else "\n") + GROK_DENY_PERMISSION
+    return new, dropped
+
+
+def grok_check_config(old_text, new_text, deny=True, mcp=True):
+    """True when new_text parses and equals old_text minus the dropped parts."""
+    import tomllib
+    try:
+        old, new = tomllib.loads(old_text), tomllib.loads(new_text)
+    except (tomllib.TOMLDecodeError, ValueError):
+        return False
+    gone = GROK_DROP_TABLES if mcp else GROK_HOOKS_ONLY_TABLES
+    want = {k: v for k, v in old.items() if k not in gone}
+    if deny:
+        want.pop("permission", None)
+        want["permission"] = {"ask": ["*"]}
+        if isinstance(want.get("ui"), dict):
+            want["ui"] = {k: v for k, v in want["ui"].items() if k not in GROK_DENY_UI_KEYS}
+    return new == want
+
+
+def grok_user_hooks_requested():
+    """True when ACP_RUN_GROK_USER_HOOKS asks for the user's own grok home on headless runs."""
+    v = os.environ.get("ACP_RUN_GROK_USER_HOOKS", "").strip().lower()
+    return bool(v) and v not in ("0", "false", "no", "off")
+
+
+def grok_strip_home(tag="deny", deny=True, mcp=True):
+    """A per-run GROK_HOME without the user's hooks, skills, plugins and MCP servers (see the
+    note above). Returns (temp dir, log info); the caller removes the dir (rmtree unlinks
+    the symlinks and never follows them). Raises ValueError, before creating anything, when
+    the config copy is not exactly the original minus the dropped parts."""
+    src = grok_real_home()
+    cfg = src / "config.toml"
+    try:
+        text = cfg.read_text() if cfg.is_file() else ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"cannot read {cfg}: {e}") from None
+    new_text, dropped = grok_filter_config(text, deny, mcp)
+    if not grok_check_config(text, new_text, deny, mcp):
+        raise ValueError(f"cannot filter {cfg} safely")
+    try:
+        hooks = sorted(e.name for e in (src / "hooks").iterdir())
+    except OSError:
+        hooks = []
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}grok-{tag}-{os.getpid()}-"))
+    try:
+        try:
+            entries = sorted(src.iterdir())
+        except OSError:
+            entries = []
+        for f in entries:
+            if f.name not in GROK_HOME_DROP:
+                (d / f.name).symlink_to(f)
+        if text:
+            _private_write(d / "config.toml", new_text)
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    return d, {"agent": "grok", "action": "stripped", "source": str(src), "home": str(d),
+               "hooks": hooks, "dropped": dropped, "skills": "~/.grok/skills off",
+               "mcp": "off" if mcp else "kept", "env": ["GROK_HOME"]}
+
+
+def grok_sync_auth(d, src=None):
+    """Copy a token grok rewrote as a regular file in the temp home back over the real
+    auth.json when it is newer and valid JSON (rename-over replaces the symlink, so the
+    write would otherwise be lost with the temp dir). True when copied."""
+    new, real = Path(d) / "auth.json", Path(src or grok_real_home()) / "auth.json"
+    try:
+        if new.is_symlink() or not new.is_file() or new.stat().st_mtime <= real.stat().st_mtime:
+            return False
+        json.loads(new.read_text())
+        target = real.resolve()
+        tmp = target.with_name(target.name + f".acp-run-{os.getpid()}")
+        shutil.copyfile(new, tmp)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+# --perm deny for crush, made real (2026-10-13). crush-acp (PR 2450 build) asks
+# permission for bash, edit, write, fetch and download, but runs its read-only tools
+# (glob, grep, ls, view, sourcegraph, LSP lookups) and bash's built-in safe commands
+# without asking: on the 2026-10-13 03:43 SkillOpt-Sleep canary it ran `glob` (ACP kind
+# "search") unasked and the tripwire fired (exit 77). Its ACP modes are "ask" (the
+# default) and "code"; neither makes those tools ask. But crush builds each agent's tool
+# set from an allow list, config.allToolNames() minus options.disabled_tools
+# (internal/config/config.go SetupAgents; buildTools keeps only listed names), so a deny
+# run disables every name in it: the agent has no built-in tool at all and can only
+# answer in text. A tool added to crush later is not in allToolNames until someone lists
+# it, so it stays out too. Config layers merge with go-jsons (arrays append, objects
+# merge, scalars: later wins), so no later layer can take a name off disabled_tools.
+# The list is crush-acp 88a67503's allToolNames(); `agent` and `agentic_fetch` are the
+# sub-agent tools.
+CRUSH_TOOLS = (
+    "agent", "agentic_fetch", "bash", "crush_info", "crush_logs", "job_output", "job_kill",
+    "download", "edit", "multiedit", "fetch", "glob", "grep", "ls", "question", "sourcegraph",
+    "todos", "view", "write", "list_mcp_resources", "read_mcp_resource",
+    "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_symbols", "lsp_definition",
+    "lsp_call_hierarchy", "lsp_rename", "lsp_replace_symbol",
+)
+# Project config files crush merges from -C up to its git root (lookupConfigs).
+CRUSH_PROJECT_FILES = (".crushrc", "crushrc", ".crush.json", "crush.json")
+# `mcp add NAME` in a crushrc (internal/shellconfig/mcp.go); names only, for the log
+# and to disable a project's servers.
+CRUSH_RC_MCP = re.compile(r"^\s*mcp\s+add\s+['\"]?([A-Za-z0-9_.@-]+)", re.MULTILINE)
+# A crushrc line (comments removed) that could reach a config builtin past the stripped
+# run's shell functions: command/builtin/exec skip functions, a command runner (env,
+# xargs, ...) may exec the name directly, unset -f removes the functions. Refuse to strip.
+CRUSH_RC_BYPASS = re.compile(r"\b(command|builtin|exec|env|xargs|nohup|nice|timeout)\b[^\n;|&]*?"
+                             r"\b(mcp|lsp|hook|permissions|option)\b"
+                             r"|\bunset\b[^\n;|&]*?(?<!\S)-\w*f")
+CRUSH_RC_COMMENT = re.compile(r"(^|(?<=\s))#[^\n]*", re.MULTILINE)
+# `option` keys a stripped run passes through from the user's crushrc; context paths,
+# skill paths, data directory, LSP and UI options are dropped.
+CRUSH_RC_KEEP_OPTIONS = ("request-timeout", "disable-skill", "auto-summarize",
+                         "provider-auto-update", "default-providers", "metrics")
+# Top-level keys (and options keys) a stripped run keeps from the user's global crush.json.
+CRUSH_KEEP_KEYS = ("$schema", "providers", "models")
+CRUSH_KEEP_OPTIONS = ("request_timeout", "disabled_skills", "disable_provider_auto_update",
+                      "disable_default_providers", "disable_metrics", "disable_auto_summarize")
+
+
+def crush_project_configs(root):
+    """The project config files crush would merge for cwd root: CRUSH_PROJECT_FILES in
+    root and each parent up to the enclosing git worktree root (root alone outside git)."""
+    root = Path(root).resolve()
+    chain = [root, *root.parents]
+    top = next((p for p in chain if (p / ".git").exists()), root)
+    found = []
+    for p in chain[:chain.index(top) + 1]:
+        found += [p / n for n in CRUSH_PROJECT_FILES if (p / n).is_file()]
+    return found
+
+
+def _crush_mcp_names(path):
+    """MCP server names a crush config file defines (JSON "mcp" keys, or crushrc
+    `mcp add NAME`); [] when it cannot be read."""
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    if path.name.endswith("rc"):
+        return CRUSH_RC_MCP.findall(text)
+    try:
+        m = json.loads(text).get("mcp")
+    except (ValueError, AttributeError):
+        return []
+    return [str(k) for k in m] if isinstance(m, dict) else []
+
+
+def crush_deny_dir(cmd, root, env, tools_off=True):
+    """The tools-off half of --perm deny for crush (always applied, --interactive and
+    --keep-user-config included). A per-run 0700 temp dir holding:
+      data/crush.json     the global data layer (CRUSH_GLOBAL_DATA; it merges after the
+                          user's crush.json and crushrc), and
+      project/crush.json  the workspace layer (--data-dir; it merges after every project
+                          config, so it is the last word),
+    both {"options": {"disabled_tools": CRUSH_TOOLS, "auto_lsp": false},
+    "permissions": {"skip_requests": false}}, plus "mcp": {NAME: {"disabled": true}} for
+    each MCP server a project config file names. data/ also gets a copy of the catalog
+    cache providers.json from the agent's usual data dir. --data-dir moves crush's
+    session database and workspace overrides out of -C (a .crush/crush.json there would
+    otherwise merge last). Returns (temp dir, new cmd, log info); env gets
+    CRUSH_GLOBAL_DATA too. Raises OSError (nothing left behind) when it cannot be built.
+
+    tools_off=False (--strip-user-config outside --perm deny, 2026-10-13) builds the same
+    dir, named crush-strip-, without disabled_tools and without the permissions key:
+    every built-in tool stays on and crush's own --yolo / permission prompts (which
+    --perm all auto-approves) decide; LSP auto-start and project MCP servers stay off."""
+    src = next((x.split("=", 1)[1] for x in cmd if x.startswith("CRUSH_GLOBAL_DATA=")),
+               env.get("CRUSH_GLOBAL_DATA"))
+    project = crush_project_configs(root)
+    mcp = sorted({n for f in project for n in _crush_mcp_names(f)})
+    if tools_off:
+        over = {"options": {"disabled_tools": list(CRUSH_TOOLS), "auto_lsp": False},
+                "permissions": {"skip_requests": False}}
+    else:
+        over = {"options": {"auto_lsp": False}}
+    if mcp:
+        over["mcp"] = {n: {"disabled": True} for n in mcp}
+    tag = "deny" if tools_off else "strip"
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}crush-{tag}-{os.getpid()}-"))
+    try:
+        for sub in ("data", "project"):
+            (d / sub).mkdir(mode=0o700)
+            _private_write(d / sub / "crush.json", json.dumps(over, indent=1) + "\n")
+        if src:
+            with contextlib.suppress(FileNotFoundError):
+                shutil.copyfile(Path(src).expanduser() / "providers.json", d / "data" / "providers.json")
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    data = f"CRUSH_GLOBAL_DATA={d / 'data'}"
+    new = [data if x.startswith("CRUSH_GLOBAL_DATA=") else x for x in cmd]
+    new += ["--data-dir", str(d / "project")]
+    env["CRUSH_GLOBAL_DATA"] = str(d / "data")
+    info = {"agent": "crush", "tools": "none" if tools_off else "all",
+            "disabled_tools": len(CRUSH_TOOLS) if tools_off else 0,
+            "project_config": [str(f) for f in project], "project_mcp_disabled": mcp,
+            "env": ["CRUSH_GLOBAL_DATA"], "args": ["--data-dir"]}
+    rcs = [str(f) for f in project if f.name.endswith("rc")]
+    if rcs:
+        # crush runs a project crushrc as shell when it loads its config; no switch
+        # turns project config off (a deny run's tools stay off regardless)
+        with contextlib.suppress(OSError):
+            print(f"acp-run: warning: crush will run project crushrc {', '.join(rcs)} at startup",
+                  file=sys.stderr)
+    return d, new, info
+
+
+def crush_strip_config(env, d, why="--perm deny"):
+    """The user-config half of --perm deny for crush (STRIP_USER_CONFIG): a per-run
+    global config dir d/config (CRUSH_GLOBAL_CONFIG) whose crushrc sources the user's
+    crushrc for its providers and models, with the config builtins that add MCP servers
+    (mcp), LSP servers (lsp), hooks (hook) and permission rules (permissions) shadowed by
+    no-op shell functions (crush's interpreter resolves a function before a registered
+    builtin; checked 2026-10-13), and `option` passed through only for
+    CRUSH_RC_KEEP_OPTIONS. The user's global crush.json, if any, is copied with only
+    CRUSH_KEEP_KEYS and options.CRUSH_KEEP_OPTIONS. With the config dir moved, crush's
+    default global context files (CRUSH.md beside it, AGENTS.md in its parent) are the
+    temp dir's, which do not exist, and CRUSH_SKILLS_DIR points at an empty d/skills, so
+    no global skill is listed. The user's files are only read; the crushrc keeps its
+    path (no secret is copied). Raises ValueError, before setting env, when the crushrc
+    could bypass the shadows (CRUSH_RC_BYPASS) or a file cannot be read. Returns log info."""
+    src = Path(env.get("CRUSH_GLOBAL_CONFIG") or Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+               / "crush").expanduser()
+    rc, js = src / "crushrc", src / "crush.json"
+    try:
+        text = rc.read_text() if rc.is_file() else ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"cannot read {rc}: {e}") from None
+    if CRUSH_RC_BYPASS.search(CRUSH_RC_COMMENT.sub("", text)):
+        raise ValueError(f"{rc} calls a config builtin through command/builtin or unsets a function")
+    kept, dropped, on_disk = {}, [], []
+    if js.is_file():
+        try:
+            cfg = json.loads(js.read_text())
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            raise ValueError(f"cannot read {js}: {e}") from None
+        if not isinstance(cfg, dict):
+            raise ValueError(f"cannot read {js}: not a JSON object")
+        for k, v in cfg.items():
+            if k in CRUSH_KEEP_KEYS:
+                kept[k] = v
+            elif k == "options" and isinstance(v, dict):
+                kept["options"] = {x: v[x] for x in CRUSH_KEEP_OPTIONS if x in v}
+                dropped += [f"options.{x}" for x in sorted(set(v) - set(CRUSH_KEEP_OPTIONS))]
+            else:
+                dropped.append(k)
+        prov = kept.get("providers")
+        for name, p in (prov.items() if isinstance(prov, dict) else ()):
+            for key in (p if isinstance(p, dict) else ()):
+                if _SECRET_KEY.search(str(key)) and isinstance(p[key], str) and not p[key].startswith("$"):
+                    on_disk.append(f"providers.{name}.{key}")
+    shadows = (
+        f"# acp-run {why}: this run's crush config, removed after the run.\n"
+        "mcp() { :; }\nlsp() { :; }\nhook() { :; }\npermissions() { :; }\n"
+        "option() {\n  case \"$1\" in\n    " + "|".join(CRUSH_RC_KEEP_OPTIONS)
+        + ") command option \"$@\" ;;\n  esac\n}\n"
+        + (f"source {shlex.quote(str(rc))}\n" if text else ""))
+    cfg_dir, skills = d / "config", d / "skills"
+    cfg_dir.mkdir(mode=0o700)
+    skills.mkdir(mode=0o700)
+    _private_write(cfg_dir / "crushrc", shadows)
+    if kept:
+        _private_write(cfg_dir / "crush.json", json.dumps(kept, indent=1) + "\n")
+    env["CRUSH_GLOBAL_CONFIG"] = str(cfg_dir)
+    env["CRUSH_SKILLS_DIR"] = str(skills)
+    return {"agent": "crush", "action": "stripped", "source": str(src),
+            "mcp_servers": sorted(set(CRUSH_RC_MCP.findall(text)) | set(_crush_mcp_names(js))),
+            "lsp": len(re.findall(r"^\s*lsp\s", text, re.MULTILINE)),
+            "hooks": len(re.findall(r"^\s*hook\s", text, re.MULTILINE)),
+            "kept_keys": sorted(kept), "dropped_keys": dropped, "secrets_in_file": on_disk,
+            "global_context": "off", "skills": "none",
+            "env": ["CRUSH_GLOBAL_CONFIG", "CRUSH_SKILLS_DIR"]}
+
+
 def strip_user_config(a, env, deny_dir):
     """Apply STRIP_USER_CONFIG to env (in place) for a --perm deny or read-only, non-interactive run
-    of opencode. Returns (deny_dir, log info or None): deny_dir is the temp dir
+    of opencode, agy or crush (crush builds inside deny_dir, run()'s crush_deny_dir). Returns (deny_dir, log info or None): deny_dir is the temp dir
     the caller removes. Anything else (--perm all, --interactive, other
     agents) is untouched and logs nothing. If the temp config cannot be built the run
     keeps the user's config (deny still refuses every tool) and says so on stderr;
     that includes an unreadable or unparseable opencode config file.
-    Known limit (adversary review 2026-10-13, finding 4): opencode {file:x} references are made
-    absolute, but a relative one added by another config layer would resolve against the temp dir.
+    Known limits (adversary review 2026-10-13, finding 4): auth a run rewrites by
+    write-then-rename through the agy shadow's symlinks (oauth_creds.json) lands in
+    the temp dir and is lost with it; opencode {file:x} references are made absolute,
+    but a relative one added by another config layer would resolve against the temp dir.
 
     --strip-user-config (strips_outside_deny, 2026-10-13) applies the same strip under any
-    other non-interactive --perm for opencode, with dirs named
+    other non-interactive --perm for opencode, agy, crush and zcode, with dirs named
     -strip- and nothing permission-related added: opencode gets no deny permission
-    (DENY_ENV is applied by run() under deny only)."""
+    (DENY_ENV is applied by run() under deny only), zcode a settings file with the user's
+    permission block untouched (zcode_strip_settings), crush builds inside run()'s
+    tools-on dir (crush_deny_dir tools_off=False)."""
     outside = strips_outside_deny(a)
-    if not outside and (a.perm not in RESTRICTED_PERMS or getattr(a, "interactive", False)
+    # grok, every non-interactive run not already stripped above (operator 2026-10-15): no
+    # user hooks, skills or plugins, MCP servers and permission mode kept (tag "hooks").
+    grok_hooks = (a.agent == "grok" and not outside and a.perm not in RESTRICTED_PERMS
+                  and not getattr(a, "interactive", False))
+    if not outside and not grok_hooks and (a.perm not in RESTRICTED_PERMS or getattr(a, "interactive", False)
                                            or a.agent not in STRIP_USER_CONFIG):
         return deny_dir, None
     why = keep_user_config(a)
     if why:
         info = {"agent": a.agent, "action": "kept",
                 "why": "--keep-user-config" if why == "flag" else "ACP_RUN_KEEP_USER_CONFIG"}
+        if a.agent == "grok":
+            info["home"] = str(grok_real_home())
         return deny_dir, info
-    tag = "strip" if outside else "deny"
+    if grok_hooks and grok_user_hooks_requested():
+        return deny_dir, {"agent": "grok", "action": "kept", "why": "ACP_RUN_GROK_USER_HOOKS",
+                          "home": str(grok_real_home())}
+    tag = "hooks" if grok_hooks else "strip" if outside else "deny"
     try:
+        if outside and a.agent == "zcode":
+            d = zcode_strip_settings()
+            env["ZCODE_CLI_SETTINGS_FILE"] = str(d / "cli" / "setting.json")
+            return d, {"agent": "zcode", "action": "stripped", "mcp": "off", "plugins": "off",
+                       "skills": "off", "hooks": "off", "permission": "user's",
+                       "env": ["ZCODE_CLI_SETTINGS_FILE"]}
         if a.agent == "opencode":
             d, info, extra = opencode_deny_config(env, tag, go_guard_dir() if is_go_model(getattr(a, "model", None)) else None)
             env.update(extra)  # literal provider secrets, referenced as {env:...} in d
@@ -845,8 +1668,18 @@ def strip_user_config(a, env, deny_dir):
             env["OPENCODE_CONFIG_PROJECT_DISABLE"] = "1"
             env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
             env.pop("OPENCODE_CONFIG", None)  # an explicit file is loaded on top; its kept keys are in d
+        elif a.agent == "crush":
+            # builds inside the tools-off dir run() made (crush_deny_dir)
+            if deny_dir is None:
+                raise ValueError("no per-run crush dir")
+            if outside:
+                return deny_dir, crush_strip_config(env, deny_dir, "--strip-user-config")
+            return deny_dir, crush_strip_config(env, deny_dir)
+        elif a.agent == "grok":
+            d, info = grok_strip_home(tag, deny=not (outside or grok_hooks), mcp=not grok_hooks)
+            env["GROK_HOME"] = str(d)
         else:
-            return deny_dir, None
+            d, info = agy_deny_home(tag)
     except (OSError, ValueError) as e:
         if a.agent == "opencode" and is_go_model(getattr(a, "model", None)):
             # a Go run must not fall back to the user's unsanitized config: its trusted guard could not be placed
@@ -854,6 +1687,8 @@ def strip_user_config(a, env, deny_dir):
         print(f"acp-run: could not strip {a.agent}'s plugins and MCP servers; keeping them: {e}",
               file=sys.stderr)
         kept = {"agent": a.agent, "action": "kept", "why": f"error: {e}"[:300]}
+        if a.agent == "grok":
+            kept["home"] = str(grok_real_home())
         return deny_dir, kept
     return d, info
 
@@ -938,9 +1773,10 @@ FAILURE_CLASSES = [
             r"invalid api[ _-]?key",
             r"unauthori[sz]ed",
             r"\b401\b",
-            # an auth wall inside an "Internal error" envelope (zcode, 2026-10-16..18) read as transient and was
-            # retried; bin/acp-dispatch AUTH_TERMS still treats the exact code as auth. No \b: it follows "project_".
-            r"token_login_failed",
+            # zcode (2026-10-16..18): "model_request_failed project_token_login_failed" inside an
+            # "Internal error" envelope read as transient and was retried into the auth wall; the exact
+            # code only (a prose "login failed", test_login_failed, LoginFailedError stay unmatched)
+            r"token_login_failed",  # no \b: it follows "project_" (an underscore is a word character)
         ],
     ),
     (
@@ -1018,7 +1854,7 @@ def fake_tool_calls(text, tools):
 # refusal, not an answer. Anchored at the start so a report that merely
 # mentions quotas is not one. The same patterns, anchored at the start of the
 # reply's LAST paragraph (itself at most SHORT_REPLY characters), catch a refusal
-# appended after progress text (an agent server, 2026-10-10: 356 s of work, then "Usage
+# appended after progress text (agy, 2026-10-10: 356 s of work, then "Usage
 # Limit Reached\n\nYou have reached your current quota ... will reset in 2
 # hours, 47 minutes." as the end of the same message).
 SHORT_REPLY = 300
@@ -1033,7 +1869,7 @@ REPLY_REFUSALS = [
     r"auth(entication)? required",
 ]
 # A whole reply of at most MODEL_REFUSAL_REPLY characters that STARTS like this is
-# the model declining the task (a Gemini agent, 2026-10-10: "Sorry, I
+# the model declining the task (agy, gemini-pro-agent, 2026-10-10: "Sorry, I
 # cannot fulfill your request. ... I must decline tasks involving ..." as the
 # whole answer, 780 characters). Failure class "refused": never retried, and
 # acp-dispatch will not turn it into a report. Anchored at the start and length
@@ -1047,11 +1883,11 @@ MODEL_REFUSALS = [
     r"i must (decline|refuse)",
     r"i won't be able to (help|assist|fulfill|comply|complete)",
 ]
-# The agent's stderr during the turn shows the provider answered 429 (a Google
-# agent server logged "Status: RESOURCE_EXHAUSTED"). With that, a last paragraph that
+# The agent's stderr during the turn shows the provider answered 429 (agy's
+# server logs "Status: RESOURCE_EXHAUSTED"). With that, a last paragraph that
 # merely mentions a quota/auth/plan problem is the refusal too.
 STDERR_REFUSAL = r"resource[ _-]?exhausted|\b429\b"
-# an agent server ending the whole run on a provider error (2026-10-18: "Agent run failed:
+# agy's server ending the whole run on a provider error (2026-10-18: "Agent run failed:
 # executor run failed: Error 429, Message: Individual quota reached. ... Resets in
 # 148h22m36s., Status: RESOURCE_EXHAUSTED" while the reply was progress text with stop
 # end_turn and no quota wording). The run was cut off whatever the reply says.
@@ -1060,7 +1896,7 @@ AGENT_RUN_FAILED = (
 )
 # The last non-empty line of a reply that is an error report from the provider
 # or transport (cursor: "Error: RetriableError: ...", claude: "API Error: 529"),
-# or the provider's raw error JSON relayed as the reply (a Google agent, 2026-10-18: a resumed
+# or the provider's raw error JSON relayed as the reply (agy, 2026-10-18: a resumed
 # Claude session answered `{\"type\":\"error\",\"error\":{\"type\":
 # \"invalid_request_error\",...}}` with stop end_turn; the quotes arrive escaped).
 TAIL_ERROR = (
@@ -1132,14 +1968,14 @@ def reply_failure(text, tools, stderr="", perm=None):
     """(class, message) when a reply is a provider refusal, ends in a refusal
     paragraph or a provider error line, else None. stderr is the agent's stderr
     since the prompt was sent: a 429 there backs a quota-looking last paragraph, and an
-    Google agent-server run failure there (AGENT_RUN_FAILED) fails any reply not ending in DONE."""
+    agy run failure there (AGENT_RUN_FAILED) fails any reply not ending in DONE."""
     s = (text or "").strip()
     if not s:
         return None
     if fake_tool_calls(s, tools):
         hint = ("--perm deny gives the agent no tools; use --perm read-only so it can read"
                 if perm == "deny" else
-                "--perm read-only lets the agent read (claude, codex, opencode), --perm all also act")
+                "--perm read-only lets the agent read (claude, codex, opencode, zcode), --perm all also act")
         return "fake-tool-calls", f"{FAILURE_TEXT['fake-tool-calls']}: no tool ran; {hint}"
     lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
     if len(s) <= MODEL_REFUSAL_REPLY and any(
@@ -1265,12 +2101,22 @@ class RunClient(Client):
         # the agent's stderr file and its size when the prompt went out, so a
         # turn's reply is judged with what the agent logged during it
         self.err_path, self.err_mark = None, 0
+        # copilot's autopilot mode ends a task with a `task_complete` tool call
+        # whose rawInput.summary is the answer, and sends no agent_message_chunk
+        # at all (seen 2026-10-10, gpt-6-astra, 38 tool calls, 0 message
+        # chunks): keep that summary as the fallback text.
+        self.task_summary = ""
         self.color = live and sys.stdout.isatty()
         # tripwire (--perm deny): ids that went through request_permission, each
         # tool call's kind, and the first tool that ran without asking
         self.requested, self.tool_kinds, self.tripped = set(), {}, None
         self.exempt_kinds = frozenset()  # --tripwire-exempt-kinds
         self.started_unasked = {}  # tool_call_id -> (monotonic start, title)
+        # the last permission refusal of the current prompt (tool, command, option id, whether the agent
+        # ends its turn on it): turn_loop continues the session when that turn ends `cancelled`
+        self.denial = None
+        self.fallback = None  # {"from", "reason", "to"} once the agent switched models mid-session
+        self.denial_continues = DENIAL_CONTINUES if perm in RESTRICTED_PERMS else 0
 
     def rec(self, kind, data):
         row = {"t": round(time.time(), 3), "kind": kind, "data": data}
@@ -1295,7 +2141,8 @@ class RunClient(Client):
         # main() maps the deprecated scoped:/ask to "all" before this runs.
         # --perm read-only answers yes to read, search and fetch tools and no to the rest.
         if self.perm == "read-only":
-            return infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None)) in READONLY_KINDS
+            kind = infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None))
+            return kind in READONLY_KINDS or (kind == "execute" and readonly_command(tool_command(tool_call)))
         return self.perm != "deny"
 
     def check_tripwire(self, update):
@@ -1355,9 +2202,17 @@ class RunClient(Client):
         )
         ok = self.decide(tool_call)
         allow = next((o for o in options if o.kind == "allow_once"), None)
-        reject = next((o for o in options if o.kind == "reject_once"), None)
+        rejects = [o for o in options if o.kind == "reject_once"]
+        # a refusal that leaves the turn alive ("decline") before one that ends it ("cancel")
+        reject = next((o for o in rejects if o.option_id not in TURN_ENDING_OPTION_IDS), rejects[0] if rejects else None)
         granted = ok and allow is not None
         pick = allow if granted else reject
+        if not granted:
+            what = getattr(tool_call, "title", None) or kind or str(tid)
+            cmd = tool_command(tool_call)
+            self.denial = {"tool": what, "command": cmd, "option": pick.option_id if pick else None,
+                           "ends_turn": bool(pick and pick.option_id in TURN_ENDING_OPTION_IDS)}
+            print(f"acp-run: refused ({kind}): {' '.join((cmd or what).split())[:200]}", file=sys.stderr)
         self.rec(
             "permission",
             {
@@ -1393,6 +2248,17 @@ class RunClient(Client):
         if isinstance(update, AgentMessageChunk) and isinstance(
             update.content, TextContentBlock
         ):
+            # zcode-acp-server appends a per-turn stats chunk ("\u2713 completed
+            # \u00b7 cache 6/7 messages ...") with messageId "turninfo_<uuid>";
+            # it is UI chrome, not the answer.
+            if str(dump(update).get("messageId") or "").startswith("turninfo_"):
+                return
+            fb = MODEL_FALLBACK_RE.match(update.content.text)
+            if fb and not self.fallback:
+                self.fallback = {"from": fb.group(1), "reason": fb.group(2), "to": fb.group(3)}
+                self.rec("fallback", self.fallback)
+                print(f"acp-run: model fallback: {fb.group(1)} declined ({fb.group(2)}); answered by"
+                      f" {fb.group(3)}", file=sys.stderr)
             self.text.append(update.content.text)
             if self.live:
                 self.write(update.content.text)
@@ -1401,6 +2267,11 @@ class RunClient(Client):
             if getattr(update, "title", None):  # the tripwire names the tool, not its id
                 self.titles.setdefault(getattr(update, "tool_call_id", None), update.title)
             self.check_tripwire(update)
+            if getattr(update, "title", None) == "task_complete":
+                raw = dump(update).get("rawInput") or {}
+                summary = raw.get("summary") if isinstance(raw, dict) else None
+                if isinstance(summary, str) and summary.strip():
+                    self.task_summary = summary
             if self.live:
                 title = getattr(update, "title", None) or "tool call"
                 self.titles[getattr(update, "tool_call_id", None)] = title
@@ -1429,9 +2300,9 @@ class RunClient(Client):
 
 def order_sets(sets):
     """The --set/default options in the order they must be applied, for every agent: the
-    provider (some agents' model list depends on it), then the model, then the rest. A model
+    provider (cline: the model list depends on it), then the model, then the rest. A model
     switch resets the agent's effort/context/fast to the new model's defaults and changes
-    which effort values exist (codex, cursor, opencode; R1 headline 2),
+    which effort values exist (grok, codex, cursor, qwen, zcode, opencode; R1 headline 2),
     so anything model-dependent comes after it."""
     return {k: sets[k] for k in ("provider", "model", *sets) if k in sets}
 
@@ -1459,8 +2330,13 @@ def flat_values(option):
 
 def _toks(x, split="-"):
     """Lowercase tokens of x split on `split`, without a trailing "[...]" or "(...)" (claude's
-    "[1m]" suffix)."""
+    "[1m]", qwen's "(openai)" authType suffix)."""
     return re.split(split, re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower())
+
+
+# zcode lists every GLM model twice, builtin:zai\<m> (API-key pool) and builtin:zai-coding-plan\<m>
+# (the everyday Coding Plan pool); a bare model name means the second (2026-10-24).
+ZCODE_DEFAULT_PROVIDER = "builtin:zai-coding-plan\\"
 
 
 def match_value(values, want):
@@ -1468,9 +2344,12 @@ def match_value(values, want):
     name wins. The claude ACP server's model list varies between launches ("fable" one
     time, "claude-fable-5-1[1m]" the next; 2026-10-10), so fall back to a unique token
     match: a value whose dash-separated tokens contain the wanted name's tokens as a
-    contiguous run."""
+    contiguous run. A bare zcode model name ("GLM-5.3") is the coding-plan id."""
     for v in values:
         if want in (v.get("value"), v.get("name")):
+            return v, []
+    for v in values:  # zcode: a bare "GLM-5.3" is the coding-plan pool's model, not builtin:zai\GLM-5.3
+        if str(v.get("value")).lower() == ZCODE_DEFAULT_PROVIDER + str(want).lower():
             return v, []
     for split in (r"-", r"[-:/]"):  # then also across provider prefixes: nous:anthropic/claude-x
         wt = _toks(want, split)
@@ -1525,8 +2404,8 @@ def pick_config(options, want, category):
     """Find a select config option (e.g. category 'model') and the value matching want.
 
     An option whose id is `category` wins over one that only shares the
-    category: an agent may list "provider" (category model) before "model"
-    (category model), and `--model X` must not be matched against providers.
+    category: cline lists "provider" (category model) before "model"
+    (category model), so `--model X` used to be matched against providers.
     Every option of the winning group is tried before giving up (cursor lists
     several thought_level options; the first need not be the one with the value)."""
     opts = [dump(opt) for opt in options or []]
@@ -1731,7 +2610,7 @@ CONTEXT_IDS = ("context", "context_window", "context_size")
 
 def effort_options(options):
     return [o for o in opt_dicts(options)
-            # a `thinking` switch is on/off unless it lists levels: omp's lists
+            # a `thinking` switch is on/off (cline, copilot) unless it lists levels: omp's lists
             # low..max for a Claude model (2026-10-19), and that is its effort
             if (o.get("id") != "thinking" or len(flat_values(o)) > 3)
             and (o.get("id") in EFFORT_IDS or o.get("category") == "thought_level")]
@@ -1774,11 +2653,19 @@ def resolve_context_option(options, tokens, who):
 EFFORT_NOT_REACHABLE = {
     "hermes": "hermes' ACP server has no reasoning option (it reads agent.reasoning_effort from"
               " config.yaml only; a shadow HERMES_HOME is not implemented)",
+    "crush": "crush-acp has no reasoning option (the reasoning level lives in its model config;"
+             " its SIPB models have none)",
 }
 CONTEXT_NOT_REACHABLE = {
+    "agy": "the window is fixed per model (Gemini 1m) and agy has no ACP knob for it",
+    "qwen": "the window is a property of the model entry in settings.json; choose a model with the"
+            " window you want (--info lists them)",
     "opencode": "the window is fixed per model by the models.dev catalog; opencode has no ACP knob",
+    "crush": "the window is fixed per model in crush's catalog",
+    "cline": "the window is fixed per model by the provider catalog",
     "hermes": "the window is resolved per provider and model; choose a -900k model id where one exists",
 }
+COPILOT_TIERS = {200000: "default", 256000: "default", 272000: "default", 1000000: "long_context"}
 CLAUDE_CONTEXTS = (200000, 1000000)
 CODEX_EFFECTIVE = 0.95  # codex reports 95% of model_context_window as the usable window (usage_update.size)
 
@@ -1820,6 +2707,8 @@ def codex_config_with_window(current, ctx):
                        f" it is {current[:60]!r}")
     cfg["model_context_window"] = ctx
     return json.dumps(cfg, separators=(",", ":"))
+CLINE_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+AGY_EFFORTS = ("low", "medium", "high")
 # models whose option list returned by set_config_option(model) can still be the previous
 # model's (opencode, R2 finding 3): the same model is sent once more to get the real list
 REFETCH_AFTER_MODEL = ("opencode",)
@@ -1831,11 +2720,19 @@ def check_static(a):
     if effort and effort != "default":
         if a.agent in EFFORT_NOT_REACHABLE:
             usage_exit(f"--effort: {a.agent}: {EFFORT_NOT_REACHABLE[a.agent]}")
+        if a.agent == "cline" and effort not in CLINE_EFFORTS:
+            usage_exit(f"--effort: cline takes {', '.join(CLINE_EFFORTS)} (--thinking); not {effort}")
+        if a.agent == "agy" and effort not in AGY_EFFORTS:
+            usage_exit(f"--effort: agy's thinking levels are {', '.join(AGY_EFFORTS)}"
+                       f" (xhigh and max are not reachable over ACP); not {effort}")
     if ctx:
         if a.agent in CONTEXT_NOT_REACHABLE:
             usage_exit(f"--context: {a.agent}: {CONTEXT_NOT_REACHABLE[a.agent]}")
         if a.agent == "claude" and ctx not in CLAUDE_CONTEXTS:
             usage_exit("--context: claude is 200k (CLAUDE_CODE_DISABLE_1M_CONTEXT) or the model's own 1m;"
+                       f" not {fmt_size(ctx)}")
+        if a.agent == "copilot" and ctx not in COPILOT_TIERS:
+            usage_exit("--context: copilot has a default tier (200k, 256k or 272k) and a long one (1m);"
                        f" not {fmt_size(ctx)}")
 
 
@@ -1849,47 +2746,25 @@ def env_pairs(text):
     return out
 
 
-# omp's own flags that choose the model (or credentials / config) a run really uses, besides `--model` (omp 18.16:
-# `--smol/--slow/--plan` roles that subagents and prewalk switch to, `--provider`, `--api-key`, `--profile`, `--config`,
-# `--models`). A pass-through --agent-arg carrying one replaces the model the guard below admitted (2026-11-03).
-OMP_MODEL_FLAGS = ("--model", "--models", "--smol", "--slow", "--plan", "--prewalk-into", "--plan-yolo-into",
-                   "--provider", "--api-key", "--profile", "--config")
-
-
-def omp_model_refusal(a):
-    """Why this omp run may spend something other than the Claude API credits omp is routed for, else None.
-
-    omp's own default is github-copilot/gpt-5.6-luna, which spends the Copilot allowance (operator 2026-10-19), so a
-    prompt run needs `--model anthropic/<claude model>`: the provider prefix is required (`github-copilot/claude-...`
-    is a Copilot model), a --resume run is judged like any other (it still launches `omp --model M acp`; a bare
-    `--resume ID` would start omp on its default), and no --agent-arg may name the model, provider, profile, role
-    models or key (they come after the --model root flag and win). `--info` spends nothing. The operator's
-    ACP_RUN_OMP_ANY_MODEL=1 lifts all of it."""
-    if a.agent != "omp" or a.info or os.environ.get("ACP_RUN_OMP_ANY_MODEL"):
-        return None
-    model = a.model or ""
-    if not (model.startswith("anthropic/") and "claude" in model[len("anthropic/"):].lower()):
-        return ("omp needs --model anthropic/<claude model> (its configured default is"
-                " github-copilot/gpt-5.6-luna, which would spend the Copilot allowance, not the"
-                " Claude API credits; a github-copilot/claude-... model is a Copilot model, and --resume needs it too);"
-                " ACP_RUN_OMP_ANY_MODEL=1 overrides")
-    for arg in getattr(a, "agent_arg", None) or []:
-        words = str(arg).split()
-        name = words[0].split("=", 1)[0] if words else ""
-        if len(name) >= 3 and name.startswith("--") and any(f.startswith(name) for f in OMP_MODEL_FLAGS):
-            return (f"omp: --agent-arg {name!r} could replace the admitted Claude API model, provider or credentials"
-                    " (use --model anthropic/<claude model>); ACP_RUN_OMP_ANY_MODEL=1 overrides")
-    return None
-
-
 def launch_tweaks(a, cmd, env):
     """The agent's launch command with the flags --effort/--context/--agent-arg need at start
-    (env changed in place). Claude's 1M switch and the per-agent ACP_RUN_ARGS_<AGENT> / ACP_RUN_ENV_<AGENT> /
+    (env changed in place). cline's --thinking, copilot's --context/--model, claude's 1M switch,
+    zcode's compaction cap and the per-agent ACP_RUN_ARGS_<AGENT> / ACP_RUN_ENV_<AGENT> /
     --agent-arg / --agent-env pass-throughs (R1 6.4, R2 5.1)."""
-    ctx = getattr(a, "context", None)
+    effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
     cmd = list(cmd)
     if a.agent == "claude" and ctx == 200000:
         env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
+    if a.agent == "zcode" and ctx:
+        env["ZCODE_ACP_AUTO_COMPACT_THRESHOLD"] = str(ctx)
+    if a.agent == "copilot" and ctx:
+        # set_config_option(model) resets the context tier to default (R2 finding 1): the tier
+        # and the model are server flags
+        cmd += ["--context", COPILOT_TIERS[ctx]]
+        if a.model:
+            cmd += ["--model", a.model]
+    if a.agent == "cline" and effort and effort != "default":
+        cmd += ["--thinking", effort]
     if a.agent == "omp" and a.model:
         # omp's ACP session has no `model` config option; the model is the root flag
         # (`omp --model M acp`, M like anthropic/claude-sonnet-5-5; verified 2026-10-19: it also widens the `thinking` option to
@@ -1906,8 +2781,17 @@ def launch_tweaks(a, cmd, env):
     return cmd
 
 
+def grok_windows(init, model_id):
+    """The context windows grok's initialize response lists for model_id ([] when unknown)."""
+    meta = (dump(init) or {}).get("_meta") or {}
+    for m in ((meta.get("modelState") or {}).get("availableModels") or []):
+        if m.get("modelId") == model_id:
+            return [w for w in ((m.get("_meta") or {}).get("contextWindows") or []) if isinstance(w, int)]
+    return []
+
+
 def models_extra(sess):
-    """The legacy session/new `models` field (hermes) as a dict, or None. The SDK's
+    """The legacy session/new `models` field (hermes, crush-acp) as a dict, or None. The SDK's
     NewSessionResponse allows extra fields since module load (see _acp_schema below)."""
     extra = getattr(sess, "model_extra", None) or {}
     m = extra.get("models")
@@ -1919,9 +2803,9 @@ def models_values(models):
             if isinstance(m, dict)]
 
 
-async def set_model_fallback(a, conn, sess, client, want):
+async def set_model_fallback(a, conn, sess, client, want, per_run_data):
     """--model for an agent whose session/new has no `model` config option but lists `models`
-    (hermes): the unstable session/set_model, which the pinned SDK lacks. Returns the
+    (hermes, crush-acp): the unstable session/set_model, which the pinned SDK lacks. Returns the
     model id set, or None when the agent lists no models."""
     models = models_extra(sess)
     if not models:
@@ -1932,36 +2816,98 @@ async def set_model_fallback(a, conn, sess, client, want):
         raise SystemExit(f"acp-run: no model '{want}'"
                          + (f" (ambiguous: {', '.join(str(c.get('value')) for c in amb)})" if amb else "")
                          + "; have: " + have_list(values))
+    if a.agent == "crush" and not per_run_data:
+        # crush-acp persists the choice into the data dir's crush.json (R2 finding 4), and the
+        # default dir is shared with the interactive `crush` shell function
+        usage_exit("crush: --model rewrites the data dir's crush.json; give it a private one with"
+                   " ACP_RUN_CRUSH_DATA=DIR (or run under --perm deny / --strip-user-config)")
     await conn._conn.send_request("session/set_model", {"sessionId": sess.session_id, "modelId": v["value"]})
     client.rec("set_model", {"modelId": v["value"]})
     return v["value"]
 
 
-async def apply_config(a, conn, sess, init, client, sets, applied):
+async def grok_set_context(conn, sess, init, client, options, tokens, who):
+    """grok: session/set_model {_meta: {contextWindow, reasoningEffort}} (the method is not in the
+    pinned SDK) and the free read-back _x.ai/session/info context.total. reasoningEffort is
+    repeated so the call does not reset it to the model's default. Returns context.total."""
+    model_id = current_value(options, "model")
+    windows = grok_windows(init, model_id)
+    if windows and tokens not in windows:
+        usage_exit(f"{who} has no context {fmt_size(tokens)}; valid: {', '.join(fmt_size(w) for w in windows)}")
+    meta = {"contextWindow": tokens}
+    eff = current_value(options, "reasoning_effort")
+    if eff:
+        meta["reasoningEffort"] = eff
+    try:
+        await conn._conn.send_request("session/set_model", {"sessionId": sess.session_id, "modelId": model_id, "_meta": meta})
+    except RequestError as e:
+        if "context window" in str(e):
+            usage_exit(f"{who} refused context {fmt_size(tokens)}: {e}")
+        raise
+    client.rec("set_model", {"modelId": model_id, "_meta": meta})
+    info = await conn.ext_method("x.ai/session/info", {"sessionId": sess.session_id})
+    if isinstance(info, dict) and isinstance(info.get("result"), dict):
+        info = info["result"]  # the SDK hands back the JSON-RPC envelope's result under "result"
+    client.rec("session_info", {k: info[k] for k in ("model", "modelDisplayName", "context") if isinstance(info, dict) and k in info}
+               if isinstance(info, dict) else {"raw": str(info)[:200]})
+    total = ((info or {}).get("context") or {}).get("total") if isinstance(info, dict) else None
+    return total if isinstance(total, int) else None
+
+
+def agy_effort_model(options, want_model, level):
+    """agy before 1.4.1 baked the effort into the model id (<base>-low|medium|high): the model
+    value for `level` on want_model's base, or exit 2 naming what the base is offered at."""
+    _cid, val = pick_config(options, want_model, "model") if want_model else (None, None)
+    val = val or current_value(options, "model")
+    base = re.sub(r"-(low|medium|high)$", "", str(val))
+    values = [str(v.get("value")) for o in opt_dicts(options) if o.get("id") == "model" for v in flat_values(o)]
+    levels = [x[len(base) + 1:] for x in values if x.startswith(base + "-") and x[len(base) + 1:] in AGY_EFFORTS]
+    target = f"{base}-{level}"
+    if target not in values:
+        usage_exit(f"agy {base} is offered at effort: {', '.join(levels) or '(none: fixed in the id)'}; not {level}")
+    return target
+
+
+async def apply_config(a, conn, sess, init, client, sets, applied, per_run_data=False):
     """Apply the options in `sets` (order_sets: provider, model, the rest), then --effort and
     --context, to the new session; fill `applied` with what the agent reports back and raise
     ConfigError when it reports something else than was requested. Returns the final options.
     The agent's own response to each set carries the complete updated option list, which is
-    the read-back."""
+    the read-back (grok adds _x.ai/session/info for the window)."""
     options = sess.config_options
     effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
+    copilot_launch_model = a.agent == "copilot" and bool(ctx)
+    want_model = sets.get("model")
+    # agy up to 1.4.0 baked the level into the model id; 1.4.1 offers bare ids plus a
+    # `thinking_level` option (category thought_level), which the generic path sets (2026-10-18)
+    agy_suffix = a.agent == "agy" and not effort_options(options)
+    if effort and effort != "default" and agy_suffix:
+        sets = dict(sets)
+        sets["model"] = agy_effort_model(options, want_model, effort)
+        want_model = sets["model"]
     got = {}  # option id -> (value we set, True when the agent's response confirmed it)
     items = list(sets.items())
     for i, (key, want) in enumerate(items):
         if key == "mode" and not has_config(options, "mode"):
-            # some servers offer their modes only as ACP session modes, not as a config option
+            # refined-antigravity-acp offers its modes (yolo, default)
+            # only as ACP session modes, not as a config option
             mode_ids = [m.get("id") for m in (dump(sess.modes) or {}).get("availableModes", [])]
             if want in mode_ids:
                 await conn.set_session_mode(session_id=sess.session_id, mode_id=want)
                 client.rec("set_mode", {"id": want})
                 continue
         if key == "model" and not has_config(options, "model"):
-            done = await set_model_fallback(a, conn, sess, client, want)
+            done = await set_model_fallback(a, conn, sess, client, want, per_run_data)
             if done is not None:
                 applied["model"] = done
                 applied.setdefault("unverified", []).append("model")
                 continue
         cid, val = pick_config(options, want, key)
+        if key == "model" and copilot_launch_model:
+            # already the server's --model; only check below that it is the session's
+            if current_value(options, "model") != val:
+                raise ConfigError(f"copilot started on model {current_value(options, 'model')!r}, not {val!r}")
+            continue
         resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
         new = getattr(resp, "config_options", None)
         options = new or options
@@ -1972,7 +2918,7 @@ async def apply_config(a, conn, sess, init, client, sets, applied):
             resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
             options = getattr(resp, "config_options", None) or options
     who = f"{a.agent} {current_value(options, 'model') or applied.get('model') or ''}".strip()
-    if effort:
+    if effort and not agy_suffix and a.agent != "cline":
         picked = resolve_effort(options, effort, who)
         if picked:
             cid, val = picked
@@ -1983,29 +2929,40 @@ async def apply_config(a, conn, sess, init, client, sets, applied):
             got[cid] = (val, bool(new))
             applied["effort_id"] = cid
     if ctx:
-        picked = resolve_context_option(options, ctx, who)
-        if picked:
-            cid, val = picked
-            resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
-            new = getattr(resp, "config_options", None)
-            options = new or options
-            client.rec("set_config", {"id": cid, "value": val})
-            got[cid] = (val, bool(new))
-            applied["ctx_id"] = cid
-        elif a.agent == "codex":
-            # launch-time CODEX_CONFIG model_context_window (launch_tweaks); confirmed by
-            # usage_update.size == 95% of it after the turn
-            model = str(current_value(options, "model") or applied.get("model") or a.model or "")
-            limit = codex_max_window(model)
-            if limit and ctx > limit:
-                usage_exit(f"{who}: codex's window for this model is at most {fmt_size(limit)}"
-                           f" (max_context_window); not {fmt_size(ctx)}")
-            applied["ctx_expected"] = ctx
-            applied["ctx_requested"] = ctx
-        elif a.agent == "claude":
-            applied["ctx_expected"] = ctx  # launch-time switch; confirmed by usage_update.size
+        if a.agent == "grok":
+            total = await grok_set_context(conn, sess, init, client, options, ctx, who)
+            applied["ctx"], applied["ctx_source"] = total, "x.ai/session/info"
+            if total is None:
+                applied.setdefault("unverified", []).append("ctx")
+            elif total != ctx:
+                raise ConfigError(f"requested context {fmt_size(ctx)} but grok reports {fmt_size(total)}")
         else:
-            usage_exit(f"{who} offers no context option (valid: see --info)")
+            picked = resolve_context_option(options, ctx, who)
+            if picked:
+                cid, val = picked
+                resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
+                new = getattr(resp, "config_options", None)
+                options = new or options
+                client.rec("set_config", {"id": cid, "value": val})
+                got[cid] = (val, bool(new))
+                applied["ctx_id"] = cid
+            elif a.agent == "codex":
+                # launch-time CODEX_CONFIG model_context_window (launch_tweaks); confirmed by
+                # usage_update.size == 95% of it after the turn
+                model = str(current_value(options, "model") or applied.get("model") or a.model or "")
+                limit = codex_max_window(model)
+                if limit and ctx > limit:
+                    usage_exit(f"{who}: codex's window for this model is at most {fmt_size(limit)}"
+                               f" (max_context_window); not {fmt_size(ctx)}")
+                applied["ctx_expected"] = ctx
+                applied["ctx_requested"] = ctx
+            elif a.agent in ("claude", "copilot"):
+                applied["ctx_expected"] = ctx  # launch-time switch; confirmed by usage_update.size
+            elif a.agent == "zcode":
+                applied["ctx_cap"] = applied["ctx"] = ctx  # compaction cap (ZCODE_ACP_AUTO_COMPACT_THRESHOLD)
+                applied.setdefault("unverified", []).append("ctx")
+            else:
+                usage_exit(f"{who} offers no context option (valid: see --info)")
     read_back(a, options, got, applied)
     return options
 
@@ -2031,6 +2988,12 @@ def read_back(a, options, got, applied):
         applied["effort"] = current_value(options, eid)
     elif effort_opts:
         applied["effort"] = effort_opts[0].get("currentValue")
+    elif a.agent == "agy" and model:
+        m = re.search(r"-(low|medium|high)$", str(model))
+        applied["effort"] = m.group(1) if m else None
+    elif a.agent == "cline" and getattr(a, "effort", None):
+        applied["effort"] = a.effort
+        applied.setdefault("unverified", []).append("effort")
     cid = applied.get("ctx_id") or next(
         (o["id"] for o in opt_dicts(options) if o.get("id") in CONTEXT_IDS and "ctx" not in applied), None)
     if cid:
@@ -2044,14 +3007,14 @@ def read_back(a, options, got, applied):
     if ctx and isinstance(applied.get("ctx"), int) and not size_ok(ctx, applied["ctx"]):
         raise ConfigError(f"requested context {fmt_size(ctx)} but the agent reports {fmt_size(applied['ctx'])}")
     eff = getattr(a, "effort", None)
-    if eff and eff != "default" and applied.get("effort") is not None \
+    if eff and eff != "default" and a.agent not in ("cline",) and applied.get("effort") is not None \
             and not values_match(eff, applied["effort"]):
         raise ConfigError(f"requested effort {eff} but the agent reports {applied['effort']!r}")
 
 
 def size_ok(want, have):
     """A reported window is the requested one: codex and claude report the usable share (95%),
-    so the lower bound is 90%."""
+    copilot the prompt budget, so the lower bound is 90%."""
     return isinstance(have, int) and 0.9 * want <= have <= 1.01 * want
 
 
@@ -2061,6 +3024,8 @@ def post_turn(a, applied, usage):
     the one in effect, else None."""
     size = (usage or {}).get("size")
     ctx = getattr(a, "context", None)
+    if applied.get("ctx_cap"):
+        return None  # a compaction cap (zcode): the window itself is unchanged and nothing reads the cap back
     if isinstance(size, int):
         if not isinstance(applied.get("ctx"), int) or applied.get("ctx_source") in (None, "usage_update"):
             applied["ctx"], applied["ctx_source"] = size, "usage_update"
@@ -2076,7 +3041,13 @@ def post_turn(a, applied, usage):
                             " max_context_window clamps it)")
                 applied["ctx_requested"] = ctx
                 return None
-            if not size_ok(ctx, size):
+            if a.agent == "copilot":
+                # two tiers: the default one reports a ~272k prompt budget whatever 200k/256k/272k
+                # was asked, the long one ~922k of its 1m
+                ok = size <= 300000 if COPILOT_TIERS.get(ctx) == "default" else size >= 800000
+            else:
+                ok = size_ok(ctx, size)
+            if not ok:
                 return f"requested context {fmt_size(ctx)} but the agent reports {fmt_size(size)} (usage_update)"
     elif ctx and not isinstance(applied.get("ctx"), int):
         applied.setdefault("unverified", []).append("ctx")
@@ -2085,7 +3056,7 @@ def post_turn(a, applied, usage):
 
 
 def applied_line(applied):
-    """'model=gpt-5.5 effort=low ctx=500k' with unverified values marked, '' when nothing is known."""
+    """'model=grok-4.7 effort=low ctx=500k' with unverified values marked, '' when nothing is known."""
     unv = set(applied.get("unverified") or [])
     bits = []
     for k in ("model", "effort", "ctx"):
@@ -2098,6 +3069,22 @@ def applied_line(applied):
         bits.append(f"{k}={s}" + ("(unverified)" if k in unv else ""))
     return " ".join(bits)
 
+
+def ensure_agy_home() -> str:
+    """Shadow ~/.gemini with symlinks to everything but hooks.json (see YOLO_SET note)."""
+    src, dst = Path.home() / ".gemini", Path.home() / ".local/share/agy-acp-home"
+    (dst / "config").mkdir(parents=True, exist_ok=True)
+    hooks = dst / "config" / "hooks.json"
+    if not hooks.exists():
+        hooks.write_text("{}\n")
+    for base, tgt in ((src, dst), (src / "config", dst / "config")):
+        for f in base.iterdir():
+            link = tgt / f.name
+            if (f.name == "config" and base == src) or f.name.startswith("hooks.json"):
+                continue
+            if not link.is_symlink() and not link.exists():
+                link.symlink_to(f)
+    return str(dst)
 
 
 
@@ -2296,17 +3283,18 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
     ):
         prompt = [TextContentBlock(type="text", text=current_text)]
         finished, failure, code = False, None, None
-        for attempt in range(a.prompt_retries + 1):
+        denial_turns, denial_limit = 0, getattr(client, "denial_continues", 0)
+        for attempt in range(a.prompt_retries + 1 + denial_limit):
             # Retry only before any side effect (acpx: no retry once the
             # turn touched anything), with acpx's 1 s * 2^n, max 10 s backoff.
             can_retry = (
-                attempt < a.prompt_retries
+                attempt - denial_turns < a.prompt_retries
                 and client.tools == client.allowed == client.denied == 0
             )
             if attempt and client.cancelled:  # cancelled during the backoff
                 out["stop_reason"], finished = "cancelled", True
                 break
-            client.text = []
+            client.text, client.denial = [], None
             if client.err_path:
                 try:
                     client.err_mark = os.path.getsize(client.err_path)
@@ -2379,6 +3367,18 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                     code = EXIT_TRIPWIRE
                     break
                 out["stop_reason"] = resp.stop_reason
+                denial = getattr(client, "denial", None)
+                if (resp.stop_reason == "cancelled" and denial and denial["ends_turn"]
+                        and not client.cancelled and denial_turns < denial_limit
+                        and (deadline is None or deadline - time.monotonic() > 30)):
+                    # codex ends the turn on the only refusal it offers: tell the agent and go on
+                    denial_turns += 1
+                    client.rec("prompt_response", dump(resp))
+                    client.rec("denial_continue", {"n": denial_turns, **denial})
+                    print(f"acp-run: the turn ended at a refused tool ({denial['tool']}); continuing in the"
+                          f" same session {denial_turns}/{denial_limit}", file=sys.stderr)
+                    prompt = [TextContentBlock(type="text", text=denial_continue_text(a.perm, denial))]
+                    continue
                 client.rec("prompt_response", dump(resp))
                 quota = (resp.field_meta or {}).get("quota")
                 if quota:  # e.g. codex-acp/Gemini _meta.quota: keep for --json
@@ -3379,23 +4379,12 @@ def git_identity_guard(env: dict) -> None:
     am and cherry-pick keep the author and make the operator the committer, so they pass. The
     identity is read before --strip-user-config can move HOME."""
     if env.get("ACP_RUN_GIT_EMAIL"):
-        # The marker alone is not proof: an intermediate launcher may drop PARAMETERS.
-        expected = {"hook.acp-run-identity.event": "reference-transaction",
-                    "hook.acp-run-identity.command": shlex.quote(str(GIT_IDENTITY_GUARD))}
-        try:
-            intact = all(subprocess.run(["git", "config", "--get", key], env=env,
-                         capture_output=True, text=True, timeout=5, check=False).stdout.strip() == value
-                         for key, value in expected.items())
-        except (OSError, subprocess.SubprocessError):
-            intact = False
-        if intact:
-            git_config_parameters(env)
-            return
-    email = env.get("ACP_RUN_GIT_EMAIL", "")
+        git_config_parameters(env)
+        return                                   # a nested acp-run: already guarded
+    email = ""
     try:
-        if not email:
-            email = subprocess.run(["git", "config", "--global", "--get", "user.email"], capture_output=True,
-                                   text=True, check=False, timeout=5).stdout.strip()
+        email = subprocess.run(["git", "config", "--global", "--get", "user.email"], capture_output=True,
+                               text=True, check=False, timeout=5).stdout.strip()
         if email and (not GIT_IDENTITY_GUARD.exists() or GIT_IDENTITY_GUARD.read_text() != GIT_IDENTITY_GUARD_SH):
             GIT_IDENTITY_GUARD.parent.mkdir(parents=True, exist_ok=True)
             tmp = GIT_IDENTITY_GUARD.with_name(GIT_IDENTITY_GUARD.name + f".{os.getpid()}")
@@ -3405,7 +4394,7 @@ def git_identity_guard(env: dict) -> None:
     except (OSError, subprocess.SubprocessError):
         email = ""
     pairs = (("hook.acp-run-identity.event", "reference-transaction"),
-             ("hook.acp-run-identity.command", shlex.quote(str(GIT_IDENTITY_GUARD)))) if email else ()
+             ("hook.acp-run-identity.command", str(GIT_IDENTITY_GUARD))) if email else ()
     git_config_parameters(env, pairs)
     if email:
         env["ACP_RUN_GIT_EMAIL"] = email
@@ -3416,6 +4405,10 @@ async def run(a, log, err, log_path):
     auth = a.auth or auth
     if a.perm == "all" and not a.mode and a.agent in YOLO_CMD:
         cmd = YOLO_CMD[a.agent]
+    if a.agent == "grok" and a.perm == "deny":
+        # --always-approve makes grok run every tool without a session/request_permission,
+        # so a deny run could neither refuse nor be told apart from a runaway (2026-10-15)
+        cmd = [x for x in cmd if x != "--always-approve"]
     root = Path(a.dir).resolve()
     env = dict(os.environ)
     try:
@@ -3459,6 +4452,8 @@ async def run(a, log, err, log_path):
     def drop_deny_dir():
         nonlocal deny_dir
         if deny_dir is not None:
+            if a.agent == "grok":
+                grok_sync_auth(deny_dir)
             remove_deny_dir(deny_dir)
             deny_dir = None
 
@@ -3468,15 +4463,63 @@ async def run(a, log, err, log_path):
         # (adversary review 2026-10-13, finding 1).
         if a.perm == "read-only":
             env.update(READONLY_ENV.get(a.agent, {}))
+            if a.agent == "zcode":
+                deny_dir = zcode_readonly_settings()
+                env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+                zcode_denylist_shim(deny_dir, env, "read-only")
         elif a.perm == "deny":
             env.update(DENY_ENV.get(a.agent, {}))
+            if a.agent == "zcode":
+                deny_dir = zcode_deny_settings()
+                env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+                zcode_denylist_shim(deny_dir, env, "deny")
+            elif a.agent == "crush":
+                # every built-in tool off; no fallback: a crush deny run without it
+                # would run its read-only tools unasked, so it fails instead
+                deny_dir, cmd, crush_info = crush_deny_dir(cmd, root, env)
+                log.write(json.dumps({"t": round(time.time(), 3), "kind": "deny_config",
+                                      "data": crush_info}) + "\n")
+                log.flush()
+        elif a.agent == "crush" and strips_outside_deny(a) and not keep_user_config(a):
+            # --strip-user-config outside deny: the same per-run data dir and --data-dir,
+            # every tool on; if it cannot be built, crush runs on the user's config
+            try:
+                deny_dir, cmd, crush_info = crush_deny_dir(cmd, root, env, tools_off=False)
+                log.write(json.dumps({"t": round(time.time(), 3), "kind": "strip_config",
+                                      "data": crush_info}) + "\n")
+                log.flush()
+            except OSError as e:
+                with contextlib.suppress(OSError):
+                    print(f"acp-run: could not build crush's per-run config dir; keeping the "
+                          f"user's: {e}", file=sys.stderr)
         deny_dir, stripped = strip_user_config(a, env, deny_dir)
         if stripped is not None:
             log.write(json.dumps({"t": round(time.time(), 3), "kind": "user_config",
                                   "data": stripped}) + "\n")
             log.flush()
             out["user_config"] = stripped["action"]
-        # Every run, not only --interactive (2026-10-15: an agent probe fired the user's
+        if a.agent == "zcode" and not env.get("ZCODE_BIN") and zcode_bin():
+            env["ZCODE_BIN"] = zcode_bin()
+        if a.agent == "agy":
+            env["GEMINI_HOME"] = str(deny_dir) if deny_dir else ensure_agy_home()
+            # Claude Code's settings used to point HTTPS_PROXY at the opencodex
+            # intercept proxy, which answered agy with 407 (2026-10-09); the proxy
+            # was uninstalled 2026-10-19 but any inherited proxy stays scrubbed.
+            for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+                env.pop(k, None)
+            # agy lists its skills dirs as workspaces too and runs commands in
+            # whichever sorts first ("Command Working Directory"), often
+            # ~/.local/share/agy-acp-home/antigravity-cli/skills, not the session
+            # cwd: verified 2026-10-09 (`pwd` printed the skills dir; agy
+            # recreates that dir if the shadow omits it). Naming the dir in the
+            # prompt fixed it; the refined-antigravity-acp wrapper does not.
+            if a.prompt_text:
+                a.prompt_text = (
+                    f"Your working directory for this task is {root}: run every"
+                    " shell command there and create files there unless told"
+                    " otherwise.\n\n" + a.prompt_text
+                )
+        # Every run, not only --interactive (2026-10-15: a grok probe fired the user's
         # autorename hook, which renamed the CALLER's herdr tab through the inherited
         # HERDR_PANE_ID). Under --interactive acp-run also reports the pane to herdr
         # itself and the agent's own herdr hooks (Claude Code's report as herdr:claude)
@@ -3617,7 +4660,8 @@ async def run(a, log, err, log_path):
                 sets.update(kv.split("=", 1) for kv in a.set)
                 if a.model and a.agent != "omp":
                     sets["model"] = a.model
-                options = await apply_config(a, conn, sess, init, client, order_sets(sets), applied)
+                options = await apply_config(a, conn, sess, init, client, order_sets(sets), applied,
+                                             per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
             info = {
                 "agent": dump(init.agent_info),
                 "perm_modes": perm_modes(a.agent),
@@ -3632,7 +4676,7 @@ async def run(a, log, err, log_path):
                 "config_options": dump(options),
             }
             if models_extra(sess):
-                info["models"] = dict(models_extra(sess))  # hermes: set with --model (session/set_model)
+                info["models"] = dict(models_extra(sess))  # hermes, crush-acp: set with --model (session/set_model)
                 if wants and applied.get("model"):
                     info["models"]["currentModelId"] = applied["model"]
             if wants:
@@ -3672,7 +4716,8 @@ async def run(a, log, err, log_path):
                 sets = {}
                 if getattr(a, "effort", None) or getattr(a, "context", None):
                     usage_exit("--effort/--context: the resumed session offers no config options")
-            await apply_config(a, conn, sess, init, client, sets, applied)
+            await apply_config(a, conn, sess, init, client, sets, applied,
+                               per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
             if a.agent == "opencode":
                 # Validate identity after ACP's fuzzy resolver and on resume, before
                 # the first prompt. An alias is not an exact provider/model ID.
@@ -3705,10 +4750,12 @@ async def run(a, log, err, log_path):
                     code = tcode
     except asyncio.CancelledError:
         if "sig" not in got:
-            drop_deny_dir()
+            if a.agent not in AFTER_KILL_DROP:
+                drop_deny_dir()
             raise
         main_task.uncancel()
-        drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
+        if a.agent not in AFTER_KILL_DROP:
+            drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
         if conn is not None and sess is not None and not a.info:
             try:
                 await asyncio.wait_for(conn.cancel(session_id=sess.session_id), 5)
@@ -3744,8 +4791,11 @@ async def run(a, log, err, log_path):
         # returned, so its turns are over)
         if client is not None:
             await close_session(a, conn, init, sess, client, proc)
-        # opencode: before _kill's waits, the run is over either way.
-        drop_deny_dir()
+        # opencode/zcode: before _kill's waits, the run is over either way. agy: after,
+        # since agy can still write under its GEMINI_HOME (a rotated credential) while
+        # it is being stopped (adversary re-review 2026-10-13, finding 5).
+        if a.agent not in AFTER_KILL_DROP:
+            drop_deny_dir()
         await _kill(proc)
         drop_deny_dir()
         if herdr is not None:
@@ -3778,6 +4828,9 @@ async def run(a, log, err, log_path):
     else:
         tools, allowed, denied = client.tools, client.allowed, client.denied
         text = "".join(client.text)
+        if not text.strip() and client.task_summary:
+            text = client.task_summary  # copilot task_complete summary (see RunClient)
+            out["text_source"] = "task_complete"
         code, label = verdict(a, out, finished, failure, code, client)
         bad = post_turn(a, applied, client.usage) if client.prompt_task is not None else None
         if bad and not failure:
@@ -3829,6 +4882,8 @@ async def run(a, log, err, log_path):
             bits.append(f"tokens={tok}")
         if cost is not None:
             bits.append(f"cost=${cost:.4f}")
+        if getattr(client, "fallback", None):
+            bits.append(f"fallback={client.fallback['to']}")
         if "wrapup" in out:
             bits.append(f"wrapup={out['wrapup'].split(':')[0]}")
         if "verify" in out:
@@ -3873,8 +4928,12 @@ def env_float(name):
 # that needs API access and otherwise for code/bulk slices (skills/model-routing/SKILL.md).
 # The caller sets ACP_OPERATOR_APPROVED=<agent>[,<agent>] only after the operator said yes;
 # acp-dispatch applies the same gate.
+# cline (operator 2026-10-17): the CLI and Cline.app were uninstalled; the machinery stays so it can
+# be re-enabled on purpose (reinstall, then approve). Only Hermes still uses Cline, through its own
+# ClinePass API key, never through this.
 OPERATOR_GATED = {
     "hermes": "the operator's own assistant, never a delegation target (operator 2026-10-15)",
+    "cline": "uninstalled 2026-10-17; only Hermes uses Cline (its ClinePass API pool)",
 }
 APPROVAL_ENV = "ACP_OPERATOR_APPROVED"
 
@@ -3907,20 +4966,20 @@ def main():
     ap.add_argument(
         "--perm",
         default="all",
-        help="all (default, yolo), read-only (may read, changes nothing; claude, codex, opencode)"
-        " or deny (no tools: a text-only answer); the deprecated scoped:PATHS and ask warn"
+        help="all (default, yolo), read-only (may read, changes nothing; claude, codex, opencode,"
+        " zcode) or deny (no tools: a text-only answer); the deprecated scoped:PATHS and ask warn"
         " and run as all",
     )
     ap.add_argument(
         "--keep-user-config",
         action="store_true",
-        help="under --perm deny, start opencode with the user's plugins, MCP"
+        help="under --perm deny, start opencode and agy with the user's plugins, MCP"
         " servers and hooks anyway (default: stripped; env ACP_RUN_KEEP_USER_CONFIG=1)",
     )
     ap.add_argument(
         "--strip-user-config",
         action="store_true",
-        help="strip opencode's plugins, MCP servers and hooks"
+        help="strip opencode's, agy's, crush's and zcode's plugins, MCP servers and hooks"
         " under any --perm, not only deny (not a permission control; env"
         " ACP_RUN_STRIP_USER_CONFIG=1); --keep-user-config wins",
     )
@@ -4017,7 +5076,7 @@ def main():
     ap.add_argument(
         "--auth",
         help="ACP auth method id to authenticate with (see --info), overriding"
-        " the agent default",
+        " the agent default; e.g. agy: oauth-personal",
     )
     ap.add_argument("--log")
     ap.add_argument("--json", action="store_true")
@@ -4036,7 +5095,7 @@ def main():
         default=env_float("ACP_RUN_HANDSHAKE_TIMEOUT"),
         metavar="SECS",
         help="seconds for initialize and for session/new, each (default 40,"
-        " claude 90; env ACP_RUN_HANDSHAKE_TIMEOUT)",
+        " claude 90, kiro 120; env ACP_RUN_HANDSHAKE_TIMEOUT)",
     )
     ap.add_argument(
         "--session-id",
@@ -4117,9 +5176,15 @@ def main():
                  f" ({OPERATOR_GATED[a.agent]}); once given, set {APPROVAL_ENV}={a.agent}")
     if a.agent not in AGENTS:
         ap.error(f"agent must be one of: {', '.join(AGENTS)}")
-    why = omp_model_refusal(a)
-    if why:
-        ap.error(why)
+    if (a.agent == "omp" and not a.info and not a.resume
+            and not (a.model and "claude" in a.model.lower())
+            and not os.environ.get("ACP_RUN_OMP_ANY_MODEL")):
+        # omp's own default is github-copilot/gpt-5.6-luna, which spends the Copilot reserve, not
+        # the Claude API credits omp is routed for (operator 2026-10-19); the credits need
+        # `--model anthropic/claude-...` and a one-time `omp login` for Anthropic.
+        ap.error("omp needs --model anthropic/<claude model> (its configured default is"
+                 " github-copilot/gpt-5.6-luna, which would spend the Copilot reserve, not the"
+                 " Claude API credits); ACP_RUN_OMP_ANY_MODEL=1 overrides")
     if not (a.perm in (*PERMS, "ask") or a.perm.startswith("scoped:")):
         ap.error("--perm must be all, read-only or deny")
     if a.perm == "read-only" and a.agent not in READONLY_AGENTS:
