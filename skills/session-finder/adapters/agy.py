@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlparse
 AGENT = "agy"
 BASE = Path.home() / ".gemini"
 ROOTS = ["antigravity-cli", "antigravity", "antigravity-acp", "antigravity-ide"]
-RESUME = "agy  # unverified: use /resume in the TUI and pick {sid} (agy was not executed to check flags)"
+RESUME = "agy  # unverified: use /resume in the TUI and pick this session (agy was not executed to check flags)"
 USER_REQ = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 TAGS = re.compile(r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|EPHEMERAL_MESSAGE)>.*?</\1>", re.S)
 
