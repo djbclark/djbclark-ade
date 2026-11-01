@@ -27,11 +27,11 @@ REFUSED = ("acp-run: refused (execute): /opt/homebrew/bin/bash -lc 'timeout 25 c
 
 
 class TestCancelledNote(unittest.TestCase):
-    def note(self, stderr: str) -> str:
+    def note(self, stderr: str, rc: int = 1) -> str:
         with tempfile.TemporaryDirectory() as tmp:
             err = Path(tmp) / "err"
             err.write_text(stderr)
-            return MOD.failure_note(err, 1, "codex", "gpt-6-astra")
+            return MOD.failure_note(err, rc, "codex", "gpt-6-astra")
 
     def test_a_cancel_after_a_denied_permission_names_the_refused_call(self):
         note = self.note(REFUSED + "acp-run: agent=codex stop=cancelled secs=59.7 tools=13 perm=0+/1- tokens=9\n")
@@ -59,6 +59,20 @@ class TestCancelledNote(unittest.TestCase):
         note = self.note("acp-run: agent=codex stop=cancelled secs=60.0 tools=13 perm=5+/0-\n")
         self.assertNotIn("an hour", note)
         self.assertIn("after 60 s with no denied permission", note)
+
+
+    def test_a_cancel_at_the_timeout_is_a_timeout_not_a_denial_and_not_a_denial_free_cancel(self):
+        for perm in ("perm=5+/0-", "perm=4+/1-"):
+            note = self.note(REFUSED + f"acp-run: agent=codex stop=cancelled secs=1800.0 tools=40 {perm}\n", rc=124)
+            self.assertIn("cancelled by acp-run's --timeout at 1800 s", note, perm)
+            self.assertNotIn("not a time limit", note)
+            self.assertNotIn("an hour", note)
+            self.assertTrue(note.startswith("NO-REPORT: timeout"), note)
+
+    def test_a_denied_cancel_leaves_the_permission_choice_to_the_lead(self):
+        note = self.note(REFUSED + "acp-run: agent=codex stop=cancelled secs=59.7 tools=13 perm=0+/1-\n")
+        self.assertNotIn("--perm all", note)
+        self.assertIn("for the lead to decide", note)
 
 
 class TestModelFallback(unittest.TestCase):

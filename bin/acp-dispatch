@@ -3292,16 +3292,19 @@ def transient_pool_starved(agent: str, model: str | None) -> float | None:
 CANCELLED_HOUR_SECS = 3000
 
 
-def cancelled_note(text: str) -> str:
+def cancelled_note(text: str, timed_out: bool = False) -> str:
     m = re.search(r"stop=cancelled secs=([\d.]+)(?: tools=\d+)?(?: perm=\d+\+/(\d+)-)?", text)
     secs = float(m.group(1)) if m else None
     denied = int(m.group(2) or 0) if m else 0
+    if timed_out:
+        # acp-run's own --timeout cancels the turn, and the agent answers `cancelled` (exit 124)
+        after = f" at {secs:.0f} s" if secs is not None else ""
+        return f" [stop=cancelled by acp-run's --timeout{after}; the denied permissions, if any, are not the cause]"
     if denied:
         refused = re.findall(r"^acp-run: refused \(([^)]*)\): (.+)$", text, re.M)
         what = f"{refused[-1][0]}: {refused[-1][1]}" if refused else "the session log's permission rows name it"
         return (f" [stop=cancelled after a denied permission ({what}); the agent ended its turn on the "
-                "refusal, not on a time limit; a slice that needs that tool runs under --perm all with a "
-                "read-only brief]")
+                "refusal, not on a time limit; whether the slice needs that tool is for the lead to decide]")
     if secs is not None and secs >= CANCELLED_HOUR_SECS:
         return (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
                 " is a known cause, see dispatch-footer item 10]")
@@ -3352,7 +3355,7 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
         extra = ("; the reply was tool calls printed as text because the agent had no tools: a slice that"
                  " must read needs --perm read-only (--perm deny gives it none)")
     if "stop=cancelled" in text and not extra:
-        extra = cancelled_note(text)
+        extra = cancelled_note(text, timed_out=cls == "timeout" or rc == 124)
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
             f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
 
