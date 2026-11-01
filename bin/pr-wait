@@ -297,8 +297,9 @@ def pr_doc(repo: str, pr: int) -> dict:
 #      marker - in a fence, in the live text and in the raw-body rescue alike. Only a start whose JSON
 #      does not balance falls back to a capture that may not cross another `<!--`, which is what stops
 #      an unclosed start quoted in prose from swallowing the next marker. And masking may not "repair"
-#      JSON: a live marker whose JSON slice differs between the raw body and the stripped text is
-#      `malformed`, not approved (C2'). The rescue scans EVERY start, with no `consumed` cursor (D1): a
+#      JSON: the marker's JSON is parsed exactly as written in the raw body. Backticks inside JSON
+#      strings are content; outside strings they make JSON invalid, hence malformed (C2'). The rescue
+#      scans every start outside validated JSON strings, with no `consumed` cursor (D1): a
 #      candidate is accepted before its JSON is validated, so letting a rejected outer one hide the
 #      BLOCK inside it read as a clean false APPROVE.
 # A marker whose JSON is broken is still CAPTURED and then reported as `malformed`, never as an
@@ -474,14 +475,15 @@ def _strip_code(body: str) -> str:
     in place and the lines are rejoined with `"\n"` after splitting on `"\n"`, so the result is the same
     length as `body` and every index in it points at the same character of `body`. `splitlines()` would
     silently drop a trailing newline and rewrite `\r\n` as `\n`, shifting every offset after the first
-    such line - and `adversary_verdict` relies on those offsets to compare a marker's JSON to the same
-    slice of the raw body.
+    such line - and `adversary_verdict` relies on those offsets to parse the marker's JSON
+    exactly as written in the raw body.
 
     HONEST ABOUT THE ERROR DIRECTION (review C3): an over-strip can still hide a MALFORMED or near-miss
     marker, and so lose its `malformed` warning; what it cannot do is lose a BLOCK naming this head,
     because that is read from the RAW body. Every replacement is a same-width run of spaces, so the text
     outside code is byte-identical and no marker can be "repaired" into a different one; a live marker
-    whose JSON slice differs between body and stripped text is now `malformed`, never read (C2').
+    is parsed from the raw body. Backticks inside JSON strings are content; backticks outside
+    strings make the JSON invalid. Masking never repairs JSON (C2').
 
     KNOWN LIMIT, accepted by djbclark at the bundled review of 66/67: a BLOCK whose head is MISTYPED -
     not a prefix of this head at all - and that sits inside code is documentation, so a body with such
@@ -495,6 +497,13 @@ def _strip_code(body: str) -> str:
     LINE, (b) a 4-SPACE INDENTED CODE BLOCK, (c) a FENCED BLOCK INSIDE A BLOCKQUOTE. Each is a false
     APPROVE only in the direction that needs a human to paste our own template; none can hide a BLOCK,
     which is the asymmetry this gate relies on.
+
+    KNOWN FAIL-CLOSED LIMIT (lead decision, PR 175 round 9): a trailing-comma
+    documentation marker whose note quotes a marker start and whose nested metadata
+    names a same-head BLOCK can be reported as malformed BLOCK. Recovery deliberately
+    protects only strictly valid JSON strings; widening protection for readable
+    prefixes hid real BLOCKs inside broken envelopes. This false BLOCK cannot approve
+    a PR or suppress a same-head BLOCK; keep it fail-closed rather than repairing it.
     """
     out: list[str] = []
     fence = ""  # the open fence: "" when outside, else its character
@@ -656,6 +665,83 @@ def _classify_starts(text: str) -> tuple[int, int]:
     return unclosed, wrongform
 
 
+def _marker_tokens(text: str):
+    """Lex recovery text without interpreting string contents as structure."""
+    i = 0
+    while i < len(text):
+        if text[i].isspace():
+            i += 1
+            continue
+        start = i
+        if text[i] == '"':
+            i += 1
+            while i < len(text):
+                if text[i] == "\\":
+                    i += 2
+                elif text[i] == '"':
+                    i += 1
+                    break
+                else:
+                    i += 1
+            try:
+                value = json.loads(text[start:i])
+            except ValueError:
+                value = None
+            yield "string", value, start
+        elif text[i] in "{}[]:,":
+            i += 1
+            yield text[start], None, start
+        else:
+            i += 1
+            while i < len(text) and not text[i].isspace() and text[i] not in '{}[]:,"':
+                i += 1
+            yield "other", None, start
+
+
+def _top_level_marker_fields(text: str) -> tuple[list[tuple[str, str]], bool]:
+    """Recover string pairs at object depth one, even with duplicate keys or trailing commas.
+
+    Return fields and whether their boundaries are readable. Trailing commas and
+    duplicate keys retain clear boundaries; broken strings/nesting do not. This
+    never repairs the JSON used to validate or approve a marker.
+    """
+    tokens = list(_marker_tokens(text))
+    # Trailing commas and duplicate keys have unambiguous field boundaries.
+    # Everything else must parse before we trust the recovered object depth.
+    trailing = {tokens[i][2] for i in range(len(tokens) - 1)
+                if tokens[i][0] == "," and tokens[i + 1][0] in ("}", "]")}
+    structural = "".join(c for i, c in enumerate(text) if i not in trailing)
+    try:
+        json.loads(structural)
+        certain = True
+    except (ValueError, RecursionError):
+        certain = False
+    if not tokens or tokens[0][0] != "{":
+        return [], certain
+    fields = []
+    stack = []
+    i = 0
+    while i < len(tokens):
+        kind, value, _ = tokens[i]
+        if kind in ("{", "["):
+            stack.append(kind)
+        elif kind in ("}", "]"):
+            if not stack or stack[-1] != {"}": "{", "]": "["}[kind]:
+                break  # uncertain depth cannot supply a top-level field
+            stack.pop()
+            if not stack:
+                break
+        elif (stack == ["{"] and kind == "string" and i + 2 < len(tokens)
+              and tokens[i + 1][0] == ":" and tokens[i + 2][0] == "string"):
+            other = tokens[i + 2][1]
+            if isinstance(value, str) and isinstance(other, str):
+                fields.append((value, other))
+            i += 3  # consume the value too: a string value cannot become another key
+            continue
+        i += 1
+    return fields, certain
+
+
 def adversary_verdict(body: str, head: str) -> dict:
     """Read the adversary verdict marker from a PR body and decide whether it names this head.
 
@@ -690,15 +776,9 @@ def adversary_verdict(body: str, head: str) -> dict:
     parsed: list[dict] = []
     placeholders = 0
     for _start, jstart, jend in spans:
-        raw = text[jstart:jend]
-        # MASKING MAY NOT "REPAIR" JSON (bundled review, C2'). Stripping replaces code with spaces, so
-        # ``{"verdict":"APPROVE", `junk` "head":"..."}`` kept its structural commas and parentheses and
-        # parsed as valid JSON nobody wrote. `_strip_code` preserves offsets exactly, so the same slice
-        # of the raw body shows what is actually there: if they differ, part of this JSON was code, and
-        # what was written cannot be read. Malformed, not approved.
-        if raw != body[jstart:jend]:
-            problems.append("marker's JSON is partly inside code, so it cannot be read as written")
-            continue
+        # Parse JSON as written: backticks inside a JSON string are content, while
+        # backticks outside strings must never be masked into valid JSON.
+        raw = body[jstart:jend]
         try:
             doc = json.loads(raw, object_pairs_hook=_strict_object)
         except ValueError as e:
@@ -747,9 +827,120 @@ def adversary_verdict(body: str, head: str) -> dict:
     # exactly as in the stripped text. It runs with `nested=True` (bundled review, D1): the live scan's
     # `consumed` cursor skips starts inside a candidate it has already accepted, and acceptance happens
     # before the JSON is validated - so a real same-head BLOCK nested inside an INVALID outer candidate
-    # was invisible here and the body read as a clean APPROVE. The rescue rescans every start; escaped
+    # was invisible here and the body read as a clean APPROVE. The rescue rescans starts outside valid JSON strings; escaped
     # JSON quoted in a `note` still cannot parse, so no false BLOCK arrives that way.
+    # A typo cannot hide a same-head BLOCK in code (2026-10-30). Scan wide
+    # starts too; only actual BLOCK fields plus a matching head trigger this
+    # conservative fallback. Canonical valid markers retain their normal result.
+    canonical = {(start, js, je) for start, js, je in _marker_spans(body, nested=True)}
+    # A successfully parsed marker's JSON strings are metadata, never new markers.
+    # Invalid outer candidates protect nothing: nested real BLOCKs must still be found.
+    quoted_strings = []
+    for _start, js, je in canonical:
+        try:
+            json.loads(body[js:je], object_pairs_hook=_strict_object)
+        except ValueError:
+            continue
+        quoted_strings.extend((js + token.start(), js + token.end()) for token in
+                              re.finditer(r'"(?:[^"\\]|\\.)*"', body[js:je]))
+    for match in MARKER_START_RE.finditer(body):
+        start = match.start()
+        if any(lo <= start < hi for lo, hi in quoted_strings):
+            continue
+        # Live near-miss starts are already malformed; preserve their diagnostic
+        # rather than promoting a typo to a verdict. Hidden ones need rescuing.
+        if (text[start:match.end()] == body[start:match.end()]
+                and not CANONICAL_START_RE.match(body, start)):
+            continue
+        # Discover the payload only inside this comment. Once JSON starts,
+        # the existing JSON-aware scanner keeps delimiters in strings as content.
+        canonical_start = CANONICAL_START_RE.match(body, start)
+        payload_start = canonical_start.end() if canonical_start else match.end()
+        comment_end = body.find("-->", payload_start)
+        next_start = body.find("<!--", payload_start)
+        # Bound discovery at the next start too: thousands of empty starts must
+        # not repeatedly scan the remaining body. Allow the doubled-start typo.
+        limit = comment_end if comment_end >= 0 else len(body)
+        if next_start >= 0:
+            if not re.compile(r"<!--\s*\{").match(body, next_start):
+                limit = min(limit, next_start)
+        payload = body[payload_start:limit]
+        # Only an actual root array is documentation; a prose [label] before an
+        # object is malformed syntax and cannot conceal its BLOCK.
+        first = payload.lstrip()
+        root_array = first.startswith("[")
+        if root_array:
+            # Comment delimiters inside array strings are JSON content. Find
+            # the complete root before judging whether its structure is readable.
+            array_start = payload_start + len(payload) - len(first)
+            stack = []
+            array_end = -1
+            for kind, _value, offset in _marker_tokens(body[array_start:]):
+                if kind in ("{", "["):
+                    stack.append(kind)
+                elif kind in ("}", "]"):
+                    if not stack or stack[-1] != {"}": "{", "]": "["}[kind]:
+                        break
+                    stack.pop()
+                    if not stack:
+                        array_end = array_start + offset + 1
+                        break
+            root_array = False
+            if array_end >= 0 and body[array_end:].lstrip().startswith("-->"):
+                array_text = body[array_start:array_end]
+                _, root_array = _top_level_marker_fields(array_text)
+                if root_array:
+                    quoted_strings.extend((array_start + token.start(), array_start + token.end())
+                                          for token in re.finditer(r'"(?:[^"\\]|\\.)*"', array_text))
+        offset = payload.find("{")
+        js = payload_start + offset if offset >= 0 and not root_array else -1
+        if js < 0:
+            continue
+        if (next_start >= 0 and next_start < js
+                and body[next_start:js].strip() != "<!--"):
+            continue
+        je = _json_object_end(body, js)
+        if je < 0:
+            close = body.find("-->", js)
+            je = close if close >= 0 else len(body)
+        candidate = body[js:je]
+        fields, certain = _top_level_marker_fields(candidate)
+        fields = [(key.lower(), value) for key, value in fields]
+        if not certain:
+            # Broken quoting or nesting makes depth unknowable. Fail closed,
+            # retaining exact head-value matching; valid metadata stays narrow.
+            for key, value in re.findall(
+                    r'"(verdict|head)"\s*:\s*("(?:[^"\\]|\\.)*")', candidate, re.I):
+                try:
+                    fields.append((key.lower(), json.loads(value, strict=False)))
+                except ValueError:
+                    continue
+        if not any(key == "verdict" and value.upper() == "BLOCK" for key, value in fields):
+            continue
+        quoted_heads = [value for key, value in fields if key == "head"]
+        # Preserve duplicate keys and conservative decorated/six-hex typo handling,
+        # but only actual top-level head fields can name the reviewed revision.
+        heads = (re.fullmatch(r"(?:sha\s+)?([0-9a-f]{6,40})(?:…|\.\.\.)?", value.strip(), re.I)
+                 for value in quoted_heads)
+        if not any(token and head.lower().startswith(token.group(1).lower()) for token in heads):
+            continue
+        try:
+            doc = json.loads(candidate, object_pairs_hook=_strict_object)
+        except ValueError:
+            doc = None
+        if ((start, js, je) in canonical and isinstance(doc, dict)
+                and doc.get("verdict") == "BLOCK" and isinstance(doc.get("head"), str)
+                and HEX40.fullmatch(doc["head"]) and not _head_matches(doc["head"], head)):
+            continue  # a well-formed verdict for another head remains report-only
+        if ((start, js, je) not in canonical or not isinstance(doc, dict)
+                or doc.get("verdict") != "BLOCK" or not _head_matches(doc.get("head"), head)):
+            return {"present": True, "verdict": "BLOCK", "quoted_sha": head,
+                    "matches_head": True, "conflict": any(p["verdict"] == "APPROVE"
+                    and p["head"] == head.lower() for p in parsed), "malformed": True,
+                    "detail": "malformed same-head BLOCK in raw body"}
     for _start, jstart, jend in _marker_spans(body, nested=True):
+        if any(lo <= _start < hi for lo, hi in quoted_strings):
+            continue
         try:
             doc = json.loads(body[jstart:jend], object_pairs_hook=_strict_object)
         except ValueError:

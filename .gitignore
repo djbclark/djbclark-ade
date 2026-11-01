@@ -11,3 +11,6 @@ __pycache__/
 
 # Paseo's skill sync marker (it writes one beside each bundled skill it manages; see docs/skill-everywhere.md 3a).
 skills/*/.paseo-managed-files.json
+
+# Identity guard test repositories left by an interrupted run.
+/.identity-test-*/
