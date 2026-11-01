@@ -466,6 +466,53 @@ HANDSHAKE_TIMEOUT = {"claude": 90}
 HANDSHAKE_TIMEOUT_DEFAULT = 40
 # Removed from the agent's environment on every run (see run()): the caller's herdr pane.
 SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV")
+
+# Secret env filter (security review H-2, 2026-11-01). The agent's child environment
+# no longer inherits the caller's credentials: names in SECRET_ENV_EXACT or matching
+# SECRET_ENV_RE are removed unless kept by VENDOR_AUTH_ENV (the agents' own logins),
+# --pass-env NAME[,NAME] (repeatable), ACP_RUN_PASS_ENV (host default list, applied
+# only under --perm all, e.g. GH_TOKEN so yolo coding runs can still push) or
+# --full-env (env ACP_RUN_FULL_ENV=1: inherit everything, the old behaviour).
+# Names only are logged ("env_filtered"), never values.
+SECRET_ENV_EXACT = {
+    "GH_TOKEN", "GITHUB_TOKEN", "FORGEJO_TOKEN", "TS_AUTHKEY", "RCLONE_GDRIVE_TOKEN",
+    "BOX_BACKUP_PASSPHRASE", "BEEPER_ACCESS_TOKEN",
+}
+SECRET_ENV_RE = re.compile(
+    r"^(AGENT_WEBHOOK_.*|EVE_WEBHOOK_.*|.*_TOKEN(_.*)?|.*_KEY(_.*)?|.*_SECRET.*|.*PASSPHRASE.*"
+    r"|.*PASSWORD.*|.*_AUTH|.*AUTHKEY.*|.*_CREDENTIALS?)$"
+)
+VENDOR_AUTH_ENV = {
+    "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    "CURSOR_AUTH_TOKEN", "CURSOR_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY",
+    "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ZAI_API_KEY", "DEEPSEEK_API_KEY",
+}
+VENDOR_AUTH_PREFIX = ("CLINEPASS_",)
+
+
+def _env_names(values) -> set:
+    out = set()
+    for v in values or []:
+        out.update(n.strip() for n in str(v).split(",") if n.strip())
+    return out
+
+
+def filter_secret_env(env: dict, a) -> list:
+    """Drop credential-looking variables from env in place; returns the dropped names."""
+    if getattr(a, "full_env", False) or os.environ.get("ACP_RUN_FULL_ENV") == "1":
+        return []
+    keep = _env_names(getattr(a, "pass_env", None))
+    if getattr(a, "perm", "all") == "all":
+        keep |= _env_names([os.environ.get("ACP_RUN_PASS_ENV", "")])
+    dropped = []
+    for k in list(env):
+        if k in keep or k in VENDOR_AUTH_ENV or k.startswith(VENDOR_AUTH_PREFIX):
+            continue
+        if k in SECRET_ENV_EXACT or SECRET_ENV_RE.match(k):
+            env.pop(k, None)
+            dropped.append(k)
+    return sorted(dropped)
+
 # Agents that can still write under their per-run home while being stopped (agy: a rotated
 # credential; grok: auth.json): their temp dir is removed after the agent is stopped.
 AFTER_KILL_DROP = ("agy", "grok")
@@ -2717,6 +2764,7 @@ def fallback_cli(a, client=None) -> int:
     # The prompt goes on stdin, never argv (process listings show argv).
     cmd = ["claude", "-p", "--model", model, "--session-id", sid]
     env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+    filter_secret_env(env, a)
     if getattr(a, "effort", None) and a.effort != "default":
         cmd += ["--effort", a.effort]
     if getattr(a, "context", None) == 200000:
@@ -3787,9 +3835,14 @@ async def run(a, log, err, log_path):
         cmd = [x for x in cmd if x != "--always-approve"]
     root = Path(a.dir).resolve()
     env = dict(os.environ)
+    _dropped_env = filter_secret_env(env, a)
     git_identity_guard(env)
     deny_dir = None
     t0, out, code = time.time(), {"agent": a.agent, "log": str(log_path)}, 1
+    if _dropped_env:
+        log.write(json.dumps({"t": round(time.time(), 3), "kind": "env_filtered",
+                              "data": {"dropped": _dropped_env}}) + "\n")
+        log.flush()
     handshake_timeout = a.handshake_timeout or HANDSHAKE_TIMEOUT.get(
         a.agent, HANDSHAKE_TIMEOUT_DEFAULT
     )
@@ -4321,9 +4374,23 @@ def main():
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file")
     ap.add_argument(
+        "--pass-env",
+        action="append",
+        metavar="NAME[,NAME]",
+        help="keep these credential-looking env vars in the agent's environment (repeatable);"
+        " by default *_TOKEN/*_KEY/*_SECRET/*PASSPHRASE*/AGENT_WEBHOOK_* etc. are removed,"
+        " except the agents' own logins (CLAUDE_CODE_OAUTH_TOKEN, CLINEPASS_*, ...)",
+    )
+    ap.add_argument(
+        "--full-env",
+        action="store_true",
+        help="pass the caller's whole environment, secrets included (old behaviour;"
+        " env ACP_RUN_FULL_ENV=1)",
+    )
+    ap.add_argument(
         "--perm",
-        default="all",
-        help="all (default, yolo), read-only (may read, changes nothing; claude, codex, opencode,"
+        default=os.environ.get("ACP_RUN_DEFAULT_PERM") or "all",
+        help="all (default, yolo; host default via ACP_RUN_DEFAULT_PERM), read-only (may read, changes nothing; claude, codex, opencode,"
         " zcode) or deny (no tools: a text-only answer); the deprecated scoped:PATHS and ask warn"
         " and run as all",
     )
