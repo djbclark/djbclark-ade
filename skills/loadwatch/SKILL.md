@@ -78,13 +78,13 @@ gtail -n 10 ~/.local/state/load-watch/guard.jsonl
 
 Investigate (section 3) when any of these holds. Otherwise report the numbers in one line and stop.
 
-1. The 1-minute load per core is above **2.5** (`admit` says `hot`; that is 20 on 8 cores, `bg`'s base since 2026-11-01, was 1.5; the limit is **4.0** (32) while the compressor churn is at most 25k pages/s (2.0 from 2026-10-25 to 2026-11-01; djbclark: 3.5 per core "is actually not too bad for this system", the real constraints are memory pressure and process churn), `max_per_core` in `admit --json` is the one in force; the same limit
+1. The 1-minute load per core is above **2.5** (`admit` says `hot`; that is 20 on 8 cores, `bg`'s base since 2026-11-01, was 1.5; the limit is **4.0** (32) while the compressor churn is at most 20k pages/s and the machine has been calm for 10 minutes (§2a; 25k and no hysteresis until 2026-11-01; 2.0 from 2026-10-25 to 2026-11-01; djbclark: 3.5 per core "is actually not too bad for this system", the real constraints are memory pressure and process churn), `max_per_core` in `admit --json` is the one in force; the same limit
    `bg` and `acp-dispatch` use) **and** the 5- or 15-minute average agrees. A 1-minute spike over a
    falling 15-minute average is agents starting up, not a problem: report it and move on.
 2. `status` shows a hot streak (`hot for N/300 s`), or `sample.log` has a `sustained load` line from the
    last hour.
 3. An incident has no `ack`, or `guard.jsonl` shows a trip or a `disabled` event from the last day.
-4. A `load-watch: compressor churn ~Nk pages/s for 3+ min (limit 60k); top: ...` line arrived (2026-10-23;
+4. A `load-watch: compressor churn ~Nk pages/s for 3+ min (limit 20k); top: ...` line arrived (2026-10-23, limit 60k until 2026-11-01;
    `status` shows `compressor churn` and the `churn` / `churn-watcher` cooldowns). The sample step reads the
    `vm_stat` compressor delta each 20 s; it is sent when churn stays above the `admit` limit for 180 s
    (`LW_CHURN_SUSTAIN_S`), to you at most hourly and to Hermes every 6 h. `admit` already holds new
@@ -92,6 +92,61 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
    `/bin/ps -axo pid,rss,command -m | head` (not only the CPU list in the line), then section 3 as usual. The
    alert opens no incident and kills nothing; the Standing exceptions below only change the advice (the line
    says so when Grok, Chrome or WindowServer is in its top 3), never whether you investigate.
+
+## 2a. The admit memory gates and the agent cap (2026-11-01)
+
+Why: the load watcher's d8891c91 measured a sustained load of 35-70 on this 8-core, 16 GB Mac that was **memory
+starvation, not CPU**: ~64 MB free, ~12k compressions+decompressions/s, ~1760 pageins/s, kernel_task 57% and sys 25-39% of
+CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3). The 4.0 calm boost let a slice start in every brief dip
+and each start pushed memory back over: an oscillation. So `load-watch admit` (what `bg` and `acp-dispatch` call) fails
+toward waiting: it refuses (exit 75) while **any** of these holds, and `--json` / the line name each in `refused`:
+
+| gate (`refused` name) | default | flag | env |
+|---|---|---|---|
+| free + speculative memory below the floor (`free_mem`) | 600 MB | `--min-free-mb` | `LW_MIN_FREE_MB` |
+| compressions + decompressions per second above (`compressor`) | 20000 (was 60000) | `--max-mem-churn` | `LW_MAX_COMPRESSOR_S` |
+| pageins per second above (`pageins`) | 1000 | `--max-pageins` | `LW_MAX_PAGEINS_S` |
+| live `acp-run` slices machine-wide at or above the cap (`agents`), **only for a caller that passes `--max-agents`** | 14 (bare `--max-agents`) | `--max-agents [N]` | `LW_MAX_AGENTS` (0 = off) |
+
+**The cap gates only NEW agent starts.** `acp-dispatch` always passes `--max-agents`; `bg` never does, because a test run
+starts no agent and gating it would starve the very slices the cap counts (at the cap each slice's `bg` test would be
+refused, so the slice could never end and the count never fall; found by the adversary on PR 210). A plain `admit` runs no
+`ps` and ignores the cap.
+
+**`LW_MAX_AGENTS` is the knob djbclark tunes**: how many `acp-run` slices may be alive when a new one starts (not
+interactive TUIs or Paseo agents, which `acp-run` does not own). Set it in the environment of the `acp-dispatch` run:
+acp-dispatch drops every other `LW_*` variable (test hooks and import-time settings) but reads `LW_MAX_AGENTS`,
+`LW_MIN_FREE_MB`, `LW_MAX_COMPRESSOR_S` and `LW_MAX_PAGEINS_S` itself and passes them to `admit` as flags (`--max-agents=N` ...),
+and passes `LW_BOOST_CALM_S` through as an environment variable; a bad value is warned about and ignored. A refusal
+prints `refused=agents` (or the other gate) in acp-dispatch's exit-75 line and in `load_gate.refused` of the record.
+Raise the cap when memory has headroom (the other gates still hold); lower it when `vm_stat` shows free memory under 600 MB
+with the cap not yet reached. The count is one `ps`, an exact argv match of the process running the script named `acp-run`
+(never `pgrep -f`; `uv run --script` wrappers and mentions do not count).
+**Reservations:** an admission under the cap is recorded in `~/.local/state/load-watch/agent-reservations.json` (under an
+flock, the live `acp-run` count re-read inside the lock) and counted with the live agents until it is **released** or expires, so
+dispatchers that read 13 of 14 at the same moment cannot all be admitted, and a runner queued in `wait_for_capacity` (up to
+900 s) still holds its place. `admit --json` prints the `reservation` id (the text line prints `reservation=ID` too; a human who only wants to look uses `--no-reserve`, else `load-watch release ID`); acp-dispatch runs `load-watch release ID` once the
+agent is countable (its process tree holds the `acp-run` process, not just the `uv run --script` wrapper; checked every 5 s, at most
+10 min; the entry then lives 30 s more), when the agent ends, or on any exit after admission (`die()`, a refusal, an exception). With `--detach` the dispatching
+process hands the reservation to the detached runner after a successful launchctl submit (the id stays in the job record's
+`load_gate.reservation`) and does not release it on its own exit, so a `--wait-timeout` expiry cannot shorten it while the runner is
+still waiting for capacity; the countable check also looks at the spawned process itself, not only its children.
+The dispatch also runs `load-watch renew ID` every 60 s while it waits for capacity or for its agent to become countable (each renewal extends the entry by `LW_RESERVE_S`, never shortens it, never revives a lapsed one), so waits longer than `LW_RESERVE_S` (`ACP_DISPATCH_GATE_MAX`) keep the place. `LW_RESERVE_S` (1200 s, 0 = off) is only the backstop for a dispatcher that died; `--no-reserve` records none but still counts those held (a pure capacity check)
+`admit --max-agents` a pure check. acp-dispatch validates the knobs once (a churn or pageins limit of 0 is ignored with a
+warning, since admit exits 2 on it) and records them in the job record (`load_knobs`), so a `--detach --no-wait` runner under
+launchd uses the same ones. An `admit` that exits 2 refuses the launch (exit 75), never admits it.
+Rates come from two `vm_stat` reads 2 s apart. **A reading that fails where the tool exists** (vm_stat or ps times out,
+exits non-zero, prints nonsense; likeliest exactly when the machine is starving) **refuses**: `refused=memory_unreadable` or
+`agents_unreadable`. Only an absent tool (no `vm_stat` and no `/proc/meminfo`, no `ps`) leaves its gate open, listed in
+`unreadable`. Linux reads `/proc/meminfo` MemAvailable and `/proc/vmstat` pswpin+pswpout and pgmajfault: uncalibrated (swap
+pages/s against a line set for the macOS compressor, so that gate rarely trips there). Caveat: macOS `Pageins` also counts
+file-backed reads, so read-heavy work (rg, git, builds) can trip the 1000/s gate with memory to spare; that errs toward
+waiting, and `--max-pageins` / `LW_MAX_PAGEINS_S` raises it.
+
+Hysteresis: the 4.0 per-core calm boost applies only after the machine has stayed calm (churn at most the compressor
+limit, free memory above the floor, pageins under their limit) for `LW_BOOST_CALM_S` (600 s) without a break. Any hot
+reading by `admit` (whatever its own `--boost-per-core`) or by the 20 s sampler resets the clock (`~/.local/state/load-watch/calm.json`); `status` shows
+`calm boost: calm for N/600 s` and `admit --json` carries `calm_for_s`.
 
 ## 3. Investigate
 
