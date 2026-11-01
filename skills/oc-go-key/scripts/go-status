@@ -153,7 +153,7 @@ def scan(text: str, hours: float) -> list[tuple[dt.datetime, str, str]]:
         for name, pat in FAILURES:
             if re.search(pat, core):
                 source = provenance(core)
-                if source == "unattributed" and name in SELF_ATTRIBUTING:
+                if source in ("unattributed", "foreign") and name in SELF_ATTRIBUTING:
                     source = "opencode"
                 hits.append((when, name, source))
                 break
