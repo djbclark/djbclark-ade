@@ -209,6 +209,25 @@ def fleet_is_running(status) -> bool:
     return status in FLEET_RUNNING or status.startswith("card:")
 
 
+def pid_alive(pid) -> bool:
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except PermissionError:
+        return True  # exists, owned by another user
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def fleet_row_running(r) -> bool:
+    """A fleet row that is running: a known activity status, or an `unknown` one found through its live process
+    (`_proc_scan`, an undetected pane): its pid is checked, since `unknown` alone also marks a gone row."""
+    return fleet_is_running(r.get("status")) or (str(r.get("status") or "") == "unknown" and pid_alive(r.get("pid")))
+
+
 def native_id(sid) -> str:
     sys.path.insert(0, str(HERE))  # python -I drops the script dir
     from nativeid import native_id as _native_id
@@ -224,7 +243,7 @@ def fleet_running(agents):
         sys.path.insert(0, str(HERE))  # python -I drops the script dir
         import fleet
         for r in fleet.sessions():
-            if r.get("agent") not in agents or not fleet_is_running(r.get("status")):
+            if r.get("agent") not in agents or not fleet_row_running(r):
                 continue
             # an exited ACP launch stays in launches.jsonl with status idle: fleet marks it finished
             if r.get("finished") or r.get("ended") or (r.get("launch") or {}).get("result") is not None:

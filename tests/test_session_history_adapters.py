@@ -243,6 +243,20 @@ class LiveLabelTests(unittest.TestCase):
         self.assertEqual(exact, {("omp", "abc-1"), ("hermes", "20261029-1"), ("hermes", "cron_17af0eeb3949_20260813_075144")})
         self.assertEqual(cwds, {("omp", "/s"), ("codex", "/c"), ("hermes", "/")})  # closed rows are not running
 
+    def test_a_process_backed_unknown_row_is_running_only_while_its_process_is(self) -> None:
+        spec = importlib.util.spec_from_file_location("t_sh_unk", SF / "session-history.py")
+        sh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sh)
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        rows = [{"agent": "codex", "status": "unknown", "sid": "uuid-1", "pid": os.getpid(), "cwd": "/live"},
+                {"agent": "codex", "status": "unknown", "sid": "uuid-2", "pid": gone.pid, "cwd": "/gone"},
+                {"agent": "codex", "status": "unknown", "sid": "uuid-3", "pid": None, "cwd": "/nopid"}]
+        with mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: rows)}):
+            exact, cwds = sh.fleet_running({"codex"})
+        self.assertEqual(exact, {("codex", "uuid-1")})
+        self.assertEqual(cwds, {("codex", "/live")})
+
     def test_an_exited_launch_row_is_not_running(self) -> None:
         spec = importlib.util.spec_from_file_location("t_sh3", SF / "session-history.py")
         sh = importlib.util.module_from_spec(spec)
