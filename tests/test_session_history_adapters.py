@@ -331,6 +331,34 @@ class LiveLabelTests(unittest.TestCase):
                              f"cd '{proj}' && crush -D '{proj / '.crush'}' --session proj1")
             self.assertEqual(sh.resume_hint(mod.RESUME, "root1", ""), "crush -D ~/.local/share/crush-acp --session root1")
 
+    def test_crush_keeps_two_databases_registered_for_one_project(self) -> None:
+        def make_db(path: Path, sid: str) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            db = sqlite3.connect(path)
+            db.executescript("CREATE TABLE sessions(id, title, message_count, updated_at);"
+                             "CREATE TABLE messages(id, session_id, role, parts, created_at);")
+            db.execute("INSERT INTO sessions VALUES(?,?,0,1790000000)", (sid, "t " + sid))
+            db.commit()
+            db.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            share = home / ".local/share"
+            proj = home / "src/p"
+            make_db(proj / ".crush-a/crush.db", "a1")  # first registration: no database
+            make_db(proj / ".crush-b/crush.db", "b1")
+            make_db(proj / ".crush-c/crush.db", "c1")
+            (share / "crush-acp").mkdir(parents=True)
+            (share / "crush").mkdir()
+            (share / "crush-acp/projects.json").write_text(json.dumps({"projects": [
+                {"path": str(proj), "data_dir": str(proj / ".crush-missing")}, {"path": str(proj), "data_dir": str(proj / ".crush-b")}]}))
+            (share / "crush/projects.json").write_text(json.dumps({"projects": [
+                {"path": str(proj), "data_dir": str(proj / ".crush-c")}, {"path": str(proj), "data_dir": str(proj / ".crush-a")}]}))
+            mod = load("crush", home)
+            self.assertEqual(sorted(s["sid"] for s in mod.sessions()), ["a1", "b1", "c1"])
+            for sid, d in (("a1", ".crush-a"), ("b1", ".crush-b"), ("c1", ".crush-c")):  # resume names the database holding the session
+                self.assertEqual(mod.resume(sid, str(proj)), f"cd {proj} && crush -D {proj / d} --session {sid}")
+
     def test_install_renders_the_configured_index_directory_into_the_job(self) -> None:
         plist = (ROOT / "launchd" / "com.djbclark.session-history-update.plist").read_text()
         with tempfile.TemporaryDirectory() as tmp:
@@ -389,13 +417,15 @@ class SessionFindAllTests(unittest.TestCase):
         row = {"agent": "codex", "id": "L1", "sid": "S-done", "status": "idle", "cwd": "/w", "title": "unrelated", "name": "n1",
                "where": "", "focus": "", "finished": "done", "reach": "launch.py reply L1 \"<text>\""}
         running = {**row, "id": "L2", "sid": "S-run", "finished": "", "name": "n2"}
+        omp = {**row, "id": "L3", "agent": "omp", "sid": "/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_abc-1", "name": "n3"}
+        omp_run = {**running, "id": "L4", "agent": "omp", "sid": "/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_run-2", "name": "n4"}
         hits = [{"agent": "codex", "sessionId": sid, "live": False, "title": "", "cwd": "/w", "snippet": "okapi", "resume": f"r {sid}"}
-                for sid in ("S-done", "S-run", "S-old")]
+                for sid in ("S-done", "S-run", "S-old", "abc-1", "run-2")]  # omp history ids are the bare uuids
 
         def fake_run(argv, **kw):  # noqa: ANN001
             return subprocess.CompletedProcess(argv, 0, json.dumps(hits), "")
 
-        fleet = mock.Mock(sessions=lambda: [row, running])
+        fleet = mock.Mock(sessions=lambda: [row, running, omp, omp_run])
         out = []
         with mock.patch.object(sf, "live_sessions", return_value=[]), mock.patch.object(sf.subprocess, "run", fake_run), \
                 mock.patch.dict(sys.modules, {"fleet": fleet}), \
@@ -403,7 +433,9 @@ class SessionFindAllTests(unittest.TestCase):
                 mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
             self.assertEqual(sf.main(), 0)
         got = {r["sessionId"]: r for r in json.loads(out[-1])}
-        self.assertEqual(sorted(got), ["S-done", "S-old"])  # the running one is not listed twice; the finished one is
+        self.assertEqual(sorted(got), ["/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_abc-1", "S-done", "S-old"])
+        o = got["/h/.omp/agent/sessions/-s/2026-10-31T17-00-00-000Z_abc-1"]  # the omp launch: one row, FINISHED, with the snippet
+        self.assertEqual((o["match"], o["finished"], o["live"]), ("okapi", "done", True))  # the running one is not listed twice; the finished one is
         self.assertGreater(got["S-done"]["score"], 0)
         self.assertEqual(got["S-done"]["match"], "okapi")  # the history snippet, not the fleet's `launch.py reply` hint
         self.assertTrue(got["S-done"]["live"])  # still the fleet's row, with FINISHED set

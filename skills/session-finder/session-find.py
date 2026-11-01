@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nativeid import native_id  # noqa: E402
 import where as _where  # noqa: E402
 
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
@@ -204,7 +205,7 @@ def main() -> int:
             if s["agent"] == "claude" or s.get("host") == "hermes-gw" and not kws:
                 continue
             if s.get("finished") or s.get("ended") or (s.get("launch") or {}).get("result") is not None:
-                exited_ids.add(s.get("sid") or s["id"])  # an exited ACP launch stays in the fleet until it is archived
+                exited_ids.add(native_id(s.get("sid") or s["id"]))  # an exited ACP launch stays in the fleet until it is archived
             head = " ".join([s.get("title", ""), s.get("name", ""), s.get("cwd", ""), s.get("agent", "")]).lower()
             sc = sum(50 for k in kws if k in head)
             rows.append({"where": {"where": s["where"], "focus": s["focus"]} if s.get("where") else None, "name": s.get("name") or s["id"],
@@ -219,8 +220,10 @@ def main() -> int:
         # covered only the ~160 Claude sessions that had once been live while this script ran
         # only a genuinely running session is dropped from the history hits: an exited launch still in the fleet
         # keeps its row and takes the history hit's score and snippet (its title may not hold the keyword)
-        live_ids = {r["sessionId"] for r in rows if r["sessionId"] not in exited_ids}
-        exited = {r["sessionId"]: r for r in rows if r["sessionId"] in exited_ids}
+        # (ids compared as the history adapters report them: an omp fleet row's id is a transcript path)
+        nid = native_id
+        live_ids = {nid(r["sessionId"]) for r in rows if nid(r["sessionId"]) not in exited_ids}
+        exited = {nid(r["sessionId"]): r for r in rows if nid(r["sessionId"]) in exited_ids}
         try:
             r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
                                 "--limit", "80", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)

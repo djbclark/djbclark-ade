@@ -24,7 +24,8 @@ def _conn(db):
 
 
 def _projects():
-    """(project path, data dir) of every registered project, registry order, first entry per path."""
+    """(project path, data dir) of every registered project, registry order, each pair once (one project may
+    list several data dirs; databases, not projects, are deduplicated in _databases)."""
     out, seen = [], set()
     for pf in PROJECTS:
         try:
@@ -33,8 +34,8 @@ def _projects():
             continue
         for row in rows if isinstance(rows, list) else []:
             path, data_dir = str(row.get("path") or ""), str(row.get("data_dir") or "")
-            if path and data_dir and path not in seen:
-                seen.add(path)
+            if path and data_dir and (path, data_dir) not in seen:
+                seen.add((path, data_dir))
                 out.append((path, data_dir))
     return out
 
@@ -54,13 +55,25 @@ def _databases():
     return out
 
 
+def _has_session(db, sid):
+    try:
+        c = _conn(db)
+        try:
+            return c.execute("SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone() is not None
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+
+
 def resume(sid, cwd):
-    """The resume command: a project's session is resumed from its project directory with its own data dir."""
+    """The resume command: a project's session is resumed from its project directory with the data dir of the
+    database that holds it (a project may be registered with more than one)."""
     q = shlex.quote
     if cwd:
-        for path, data_dir in _projects():
-            if path == cwd:
-                return f"cd {q(cwd)} && crush -D {q(data_dir)} --session {q(sid)}"
+        for path, db in _databases():
+            if path == cwd and _has_session(db, sid):
+                return f"cd {q(cwd)} && crush -D {q(str(db.parent))} --session {q(sid)}"
     return f"crush -D ~/.local/share/crush-acp --session {q(sid)}"
 
 
