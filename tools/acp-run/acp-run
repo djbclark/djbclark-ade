@@ -4462,12 +4462,23 @@ def git_identity_guard(env: dict) -> None:
     am and cherry-pick keep the author and make the operator the committer, so they pass. The
     identity is read before --strip-user-config can move HOME."""
     if env.get("ACP_RUN_GIT_EMAIL"):
-        git_config_parameters(env)
-        return                                   # a nested acp-run: already guarded
-    email = ""
+        # The marker alone is not proof: an intermediate launcher may drop PARAMETERS.
+        expected = {"hook.acp-run-identity.event": "reference-transaction",
+                    "hook.acp-run-identity.command": shlex.quote(str(GIT_IDENTITY_GUARD))}
+        try:
+            intact = all(subprocess.run(["git", "config", "--get", key], env=env,
+                         capture_output=True, text=True, timeout=5, check=False).stdout.strip() == value
+                         for key, value in expected.items())
+        except (OSError, subprocess.SubprocessError):
+            intact = False
+        if intact:
+            git_config_parameters(env)
+            return
+    email = env.get("ACP_RUN_GIT_EMAIL", "")
     try:
-        email = subprocess.run(["git", "config", "--global", "--get", "user.email"], capture_output=True,
-                               text=True, check=False, timeout=5).stdout.strip()
+        if not email:
+            email = subprocess.run(["git", "config", "--global", "--get", "user.email"], capture_output=True,
+                                   text=True, check=False, timeout=5).stdout.strip()
         if email and (not GIT_IDENTITY_GUARD.exists() or GIT_IDENTITY_GUARD.read_text() != GIT_IDENTITY_GUARD_SH):
             GIT_IDENTITY_GUARD.parent.mkdir(parents=True, exist_ok=True)
             tmp = GIT_IDENTITY_GUARD.with_name(GIT_IDENTITY_GUARD.name + f".{os.getpid()}")
@@ -4477,7 +4488,7 @@ def git_identity_guard(env: dict) -> None:
     except (OSError, subprocess.SubprocessError):
         email = ""
     pairs = (("hook.acp-run-identity.event", "reference-transaction"),
-             ("hook.acp-run-identity.command", str(GIT_IDENTITY_GUARD))) if email else ()
+             ("hook.acp-run-identity.command", shlex.quote(str(GIT_IDENTITY_GUARD)))) if email else ()
     git_config_parameters(env, pairs)
     if email:
         env["ACP_RUN_GIT_EMAIL"] = email
