@@ -512,6 +512,25 @@ class TestAckVerb(AckBase):
         self.assertTrue(self.sent[0][1].endswith("ack q1"), self.sent)    # the ordinary text, so the sender sees it
         self.assertEqual((self.state(), relay.expect_read("q1").get("acked_via")), ("acked", "relay"))
 
+    def test_a_fresh_reservation_of_a_send_still_running_is_answered_and_a_stale_one_is_not(self) -> None:
+        """Codex P2 (PR 177 round 5): the sender's `--expect-ack` is `reserved` until its blocking send returns (a Hermes turn); the target's `--ack ID`
+        inside that window must work like the typed `relay.py <sender> "ack ID"`, which `resolve_acks` already keeps."""
+        self.status = "idle"
+        self.open_expectation("r1", state="reserved", created=time.time() - 30)
+        rc, out, err = self.run_relay("--ack", "r1", "--wait", "2")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual((self.state("r1"), relay.expect_read("r1").get("acked_via"), relay.expect_read("r1").get("early")), ("acked", "relay", True))
+        self.open_expectation("r2", state="reserved", created=time.time() - relay.EXPECT_RESERVE_TTL - 5)    # its relay died: the id is free, not answerable
+        self.sent.clear()
+        rc, out, err = self.run_relay("--ack", "r2")
+        self.assertEqual((rc, self.sent, self.state("r2")), (1, [], "reserved"))
+        self.assertIn("only an open one (or a fresh reservation", err)
+        os.environ["PASEO_AGENT_ID"] = fb.CAROL    # a third party is refused on a fresh reservation exactly as on an open one
+        self.open_expectation("r3", state="reserved", created=time.time() - 5)
+        rc, out, err = self.run_relay("--ack", "r3")
+        self.assertEqual((rc, self.sent, self.state("r3")), (1, [], "reserved"))
+        self.assertIn("not its target", err)
+
     def test_a_caller_that_is_not_the_target_is_refused_naming_the_form_and_sends_nothing(self) -> None:
         os.environ["PASEO_AGENT_ID"] = fb.CAROL
         self.status = "idle"
@@ -529,7 +548,7 @@ class TestAckVerb(AckBase):
         self.open_expectation("old", state="acked")
         rc, _, err = self.run_relay("--ack", "old")
         self.assertEqual(rc, 1)
-        self.assertIn("the expectation is acked, only an open one is answered", err)
+        self.assertIn("the expectation is acked, only an open one (or a fresh reservation", err)
         rc, _, err = self.run_relay("--ack", "../x")
         self.assertEqual(rc, 2)
         self.assertIn("not an expectation id", err)

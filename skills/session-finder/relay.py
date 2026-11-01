@@ -4140,7 +4140,7 @@ def split_ack_verb(argv):
 
 def ack_verb(eid, a):
     """(argv of the ordinary send `<sender> "ack EID"`, None) for `relay.py --ack EID`, or (None, exit code) after a refusal that names the right form.
-    Valid only when expectation EID exists, is open, and the caller (the fleet's `self` row, or the Hermes conversation proved) is its target: the send is
+    Valid only when expectation EID exists, is open (or a FRESH reservation: its asking send is still running, as in a blocking Hermes turn, and `resolve_acks` keeps an answer inside it), and the caller (the fleet's `self` row, or the Hermes conversation proved) is its target: the send is
     then the ordinary one, so the verified closer settles it and the sender SEES it (standing order 10): there is no local-only close. An ack that is
     refused, queued or unproven closes nothing, exactly as when typed out."""
     def refuse(rc, why):
@@ -4151,8 +4151,9 @@ def ack_verb(eid, a):
     r = expect_read(eid)
     if r is None:
         return refuse(1, "no such expectation")
-    if r.get("state") != "open":
-        return refuse(1, f"the expectation is {r.get('state')}, only an open one is answered")
+    fresh = r.get("state") == "reserved" and time.time() - _num(r.get("created"), time.time()) < EXPECT_RESERVE_TTL    # its asking send is still running (a Hermes turn): an answer inside it is kept, as `resolve_acks` keeps it
+    if r.get("state") != "open" and not fresh:
+        return refuse(1, f"the expectation is {r.get('state')}, only an open one (or a fresh reservation of a send still running) is answered")
     listed = fleet.sessions()
     me = hermes_caller(listed) or sender_row(listed)
     if not (isinstance(me, dict) and isinstance(me.get("id"), str)):

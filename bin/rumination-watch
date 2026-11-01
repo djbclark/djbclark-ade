@@ -1675,7 +1675,7 @@ def _pass(a: argparse.Namespace) -> int:
     # carry block below retires a queued copy exactly as it does `stale chain log`: no special case.
     # The count is read first (a file) and the probe made only when there is something to say.
     nudge_n = declared_next_steps() if nudge_due(ident, state, now) else 0
-    if nudge_n and seat_word() == "idle":
+    if nudge_n and seat_word() in DELIVERABLE_WHY:    # idle, or closed-and-wakeable: the nudge is the line that resumes a sleeping persistent seat (Codex P2, PR 177)
         items.append((KEY_NEXT, f"next move: {nudge_n} declared step(s) still open in the Tier 1 "
                                 "log and this seat is idle"))
     lines = [text for _, text in items]
