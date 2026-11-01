@@ -244,18 +244,29 @@ pull request here is expected to meet these; flag any it misses.
       describe this format without tripping its own gate: nothing in those two blanked shapes can
       approve, and a placeholder approves nothing. A BLOCK is never skipped this way (property 1), and
       a **live** BLOCK whose head is the placeholder is `malformed` rather than documentation; a BLOCK
-      in code that does not name this head is documentation too (the accepted limit in `_strip_code`).
+      in code that does not name this head is documentation too (the accepted limit in `_strip_code`). With readable
+      structure (including trailing commas), nested object/array fields, a root array, and a head
+      containing arbitrary prose (beyond the existing `sha ` recovery decoration) are documentation
+      in code too (2026-10-31, PR 175). Broken quoting or
+      nesting makes field boundaries uncertain: a recoverable BLOCK and matching head fail closed
+      as malformed rather than being dismissed as nested documentation. A known fail-closed
+      limit (2026-11-01, PR 175 round 9): trailing-comma documentation whose note quotes
+      a marker start and whose nested metadata names a same-head BLOCK can report a
+      malformed BLOCK. String protection remains strict; this limit cannot approve a
+      PR or hide a same-head BLOCK.
    4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
       missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
       report a readable bad one.
    5. **The marker's JSON is delimited by its own braces, not by the first `<!--`** (2026-10-27): a
       `note` may quote the format, and a body that documents the marker is not read as a second
-      mistyped one. The marker's JSON must also be written where `pr-wait` reads it live — a marker
-      whose JSON is partly inside a code span is **malformed**, never approved, because masking code
-      cannot "repair" JSON nobody wrote.
+      mistyped one. The marker's JSON is parsed exactly as written in the raw body (2026-10-31, PR 175):
+      backticks inside a JSON string are content; a backtick outside a string makes the JSON invalid,
+      hence **malformed**. Masking never repairs JSON.
 
    Whoever merges uses `gh pr merge --squash --match-head-commit <reviewed sha>`, so the head reviewed
-   is the head merged.
+   is the head merged. Remove the worktree and delete the branch only after `gh pr view N --json state`
+   reads `MERGED`, never chained after the merge with `;`: a refused merge (a conflict, a moved head)
+   followed by deleting the head branch closes the PR (PR 172, 2026-10-31).
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
    "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
    operator's `bg` wrapper and `bin/pytest`

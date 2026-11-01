@@ -12,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import uuid
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,9 +35,32 @@ def load_guard(guard_path: Path):
             keep.append(n)
     tree.body = keep
     ns = {"os": os, "re": re, "unquote": unquote, "subprocess": subprocess, "Path": Path,
-          "GIT_IDENTITY_GUARD": guard_path}
+          "GIT_IDENTITY_GUARD": guard_path, "shlex": shlex}
     exec(compile(tree, str(SCRIPT), "exec"), ns)  # noqa: S102 - only repository code
     return ns["git_identity_guard"]
+
+
+def identity_exempt_roots():
+    roots = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders")]
+    if os.environ.get("TMPDIR"):
+        roots.append(Path(os.environ["TMPDIR"]))
+    return [root.resolve() for root in roots]
+
+
+def make_identity_fixture():
+    # Checkout location and TMPDIR cannot choose the enforcement test's root.
+    roots = identity_exempt_roots()
+    for parent in (Path("/var/tmp"), Path("/Users/Shared"), Path.home(), Path("/home")):
+        parent = parent.resolve()
+        if any(parent.is_relative_to(root) for root in roots):
+            continue
+        try:
+            fixture = Path(tempfile.mkdtemp(prefix=".identity-test-", dir=parent)).resolve()
+        except OSError:
+            continue
+        assert not any(fixture.is_relative_to(root) for root in roots)
+        return fixture
+    raise RuntimeError("No writable identity-fixture parent outside guard-exempt roots")
 
 
 class TestGitIdentityGuard(unittest.TestCase):
@@ -61,8 +83,9 @@ class TestGitIdentityGuard(unittest.TestCase):
             os.environ.clear()
             os.environ.update(os_env)
         # A repo outside the temp roots the guard exempts.
-        self.real = Path.home() / ".cache" / "acp-run-tests" / uuid.uuid4().hex
-        self.real.mkdir(parents=True)
+        self.real = make_identity_fixture()
+        for root in identity_exempt_roots():
+            self.assertFalse(self.real.is_relative_to(root), (self.real, root))
         self.addCleanup(shutil.rmtree, self.real, True)
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
@@ -80,6 +103,27 @@ class TestGitIdentityGuard(unittest.TestCase):
 
     def head(self, repo: Path) -> str:
         return self.git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def test_abandoned_identity_fixture_is_ignored(self):
+        r = self.git(SCRIPT.parents[2], "check-ignore", "--no-index", ".identity-test-killed-run/artifact")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_fixture_outside_exempt_roots_when_checkout_is_temporary(self):
+        checkout = self.tmp / "checkout"
+        script = checkout / "tools/acp-run/acp-run"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        nested = TestGitIdentityGuard("test_injected_config")
+        try:
+            with (mock.patch.dict(globals(), {"SCRIPT": script}),
+                  mock.patch.dict(os.environ, {"TMPDIR": str(self.tmp)}),
+                  mock.patch.object(Path, "home", return_value=self.tmp)):
+                nested.setUp()
+            roots = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders"), self.tmp]
+            for root in roots:
+                self.assertFalse(nested.real.resolve().is_relative_to(root.resolve()))
+        finally:
+            nested.doCleanups()
 
     def test_injected_config(self):
         self.assertEqual(self.env["ACP_RUN_GIT_EMAIL"], OPERATOR)
@@ -115,17 +159,31 @@ class TestGitIdentityGuard(unittest.TestCase):
             self.assertEqual(self.head(self.real), before)
 
     def test_hook_path_with_an_apostrophe_still_runs(self):
-        """The generated hook names its output path through shlex.quote: a home directory with an apostrophe
-        must not turn the hook into a shell syntax error before the guard is even reached."""
-        repo = self.real / "it's a repo"
-        repo.mkdir()
-        self.init(repo)
-        hook = repo / ".git/hooks/pre-commit"
-        hook.write_text("#!/bin/sh\ntouch %s\n" % shlex.quote(str(repo / "hook-ran")))
-        hook.chmod(0o755)
-        r = self.git(repo, "commit", "-q", "--allow-empty", "-m", "operator")
+        env = dict(self.env)
+        env.pop("ACP_RUN_GIT_EMAIL")
+        env.pop("GIT_CONFIG_PARAMETERS")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            load_guard(self.tmp / "it's a dir" / "guard.sh")(env)
+        r = self.git(self.real, "init", "-q", env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue((repo / "hook-ran").exists())
+        r = self.git(self.real, "commit", "-q", "--allow-empty", "-m", "operator", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.foreign(self.real)
+        r = self.git(self.real, "commit", "--allow-empty", "-m", "foreign", env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("identity guard", r.stderr)
+
+    def test_nested_launch_repairs_stripped_parameters(self):
+        env = dict(self.env)
+        env.pop("GIT_CONFIG_PARAMETERS")
+        # A nested launch can also have an isolated HOME with no global identity.
+        with mock.patch.dict(os.environ, {**self.env, "GIT_CONFIG_GLOBAL": os.devnull}, clear=True):
+            load_guard(self.tmp / "guard.sh")(env)
+        self.init(self.real)
+        self.foreign(self.real)
+        r = self.git(self.real, "commit", "--allow-empty", "-m", "foreign", env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("identity guard", r.stderr)
 
     def test_counted_values_and_existing_parameters_keep_their_order_and_quoting(self):
         values = ["plain", "space here", "a'b", "a\\b", "line\nbreak", "a=b", "!", ""]
