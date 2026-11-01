@@ -35,7 +35,13 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    policies, `all`, `read-only` (2026-10-19) and `deny`. `read-only`: the agent
    may read and change nothing. Its read-only tools (ACP kinds `read`, `search`,
    `fetch`) run without a permission request and are answered yes if they ask;
-   any other tool trips the tripwire (exit 77) and any other request is refused.
+   any other tool trips the tripwire (exit 77) and any other request is refused,
+   except an `execute` request whose command line passes `readonly_command` (an
+   allow-list: cat, ls, rg, git log/show/diff, a plain `curl` GET, joined by `|` `&&` `;`;
+   it runs outside codex's sandbox, so the list refuses `#`, program paths outside
+   `/usr/bin` `/bin` `/opt/homebrew/bin`, long options that run a program (prefixes
+   included), and `git` unless the request's cwd finds an ordinary repository). When codex's
+   only refusal option is `cancel` (it ends the turn), acp-run continues the same session up to 3 times.
    claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
    WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no
    MCP servers, mode `default`); codex the `read-only` mode (its sandbox runs shell commands

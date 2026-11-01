@@ -48,7 +48,11 @@ The answer is always an offered allow_once or reject_once option, never an
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
 A --perm read-only run also allows an execute request that only reads (cat, ls, rg, git log/show/
-diff, a plain curl GET, joined with | && ; only; readonly_command). codex-acp offers a refusal that keeps
+diff, a plain curl GET, joined with | && ; only; readonly_command; never fd, file or graft, which
+execute or write). The allow-list is the only barrier for such a request, so it refuses `#`, any
+program path outside /usr/bin, /bin and /opt/homebrew/bin, any long option that is or abbreviates one
+that runs a program, `git` unless the request's cwd (and each -C) finds an ordinary repository (a bare one
+committed in the reviewed tree runs its own config). codex-acp offers a refusal that keeps
 the turn alive ("decline") only sometimes: for a network escalation it offers just "cancel", which ends the
 turn as stop=cancelled. acp-run prefers a keep-alive refusal, and when only "cancel" exists it continues the
 same session (up to 3 times, "denial_continue" log rows) with a prompt that says the call was refused and to
@@ -688,20 +692,65 @@ READONLY_UNASKED_KINDS = {"codex": ("execute",)}
 # by a continuation prompt in the same session (prompt_turn; RunClient.denial_continues).
 DENIAL_CONTINUES = 3
 TURN_ENDING_OPTION_IDS = frozenset({"cancel", "abort"})  # codex-acp's reject_once ids that end the turn
+# Programs that have no option which runs another program or writes (a harmless option list, so only
+# `tail -f`-style hangs are excluded below). `fd`, `file` and `graft` are NOT here: fd -x runs any command
+# (grouped and attached forms), `file --comp` writes a magic.mgc, `graft ask|map` writes a graft/ tree into
+# the reviewed worktree (adversary PR 208 round 2).
 RO_PLAIN = frozenset({
-    "cat", "ls", "head", "tail", "wc", "rg", "grep", "egrep", "fgrep", "fd", "stat", "file", "pwd", "nl",
+    "cat", "ls", "head", "tail", "wc", "rg", "grep", "egrep", "fgrep", "stat", "pwd", "nl",
     "diff", "cmp", "du", "basename", "dirname", "realpath", "readlink", "which", "true"})
 RO_GIT = frozenset({
     "log", "show", "diff", "status", "blame", "ls-files", "ls-tree", "rev-parse", "rev-list", "cat-file",
     "show-ref", "describe", "shortlog", "merge-base", "grep", "diff-tree", "name-rev"})
-RO_GRAFT = frozenset({"ask", "grep", "skeleton", "callers", "map"})
-# arguments that make an otherwise reading command write or run another program
-RO_BAD_ARGS = ("--output", "--pre", "--exec", "--open-files-in-pager", "--ext-diff", "--hostname-bin")
+# Long options that run another program or write a file. getopt_long and git's parse-options accept any
+# unique prefix (`--open=rm` is `--open-files-in-pager=rm`), so an argument is refused when its name is a
+# prefix of one of these or begins with one (ro_long_bad). Short groups with an attached value (`-nOrm`)
+# are refused for git by ro_short_bad.
+RO_BAD_LONG = ("--output", "--pre", "--exec", "--open-files-in-pager", "--ext-diff", "--hostname-bin")
 RO_FIND_BAD = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
 RO_OPERATORS = ("|", "&&", "||", ";")
 # Where a program given by path may live (a bare name resolves through PATH). A repository under review
 # is untrusted input: `./evil/cat` or `/tmp/evil/git` must not pass for `cat` or `git` (adversary PR 208).
 RO_TRUSTED_DIRS = frozenset({"/usr/bin", "/bin", "/opt/homebrew/bin"})
+
+
+def ro_long_bad(args):
+    """True when an argument before `--` names (or abbreviates, or extends) a long option that runs a program."""
+    for x in args:
+        if x == "--":
+            return False  # everything after it is a path
+        if x.startswith("--"):
+            name = x.split("=", 1)[0]
+            if any(b.startswith(name) or name.startswith(b) for b in RO_BAD_LONG):
+                return True
+    return False
+
+
+def ro_short_bad(args):
+    """True when a short-flag group before `--` carries `O` (git grep -O<pager>, also grouped: -nOrm)."""
+    for x in args:
+        if x == "--":
+            return False
+        if re.fullmatch(r"-[^-].*", x) and "O" in x:
+            return True
+    return False
+
+
+def ro_git_dir_ok(base):
+    """True when git run in `base` finds an ordinary repository, not a bare one committed inside the tree
+    under review: git looks in each directory, from `base` up, for `.git` and then for a directory that is
+    itself a repository (HEAD, objects/, refs/), and runs the config of whichever it meets first
+    (diff.external, core.fsmonitor, gpg.program). A tree without `.git` anywhere above is refused."""
+    d = os.path.realpath(base)
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        if all(os.path.exists(os.path.join(d, n)) for n in ("HEAD", "objects", "refs")):
+            return False
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
 
 
 def ro_words(script):
@@ -736,8 +785,9 @@ def ro_curl(args):
     return urls == 1
 
 
-def ro_segment(words, depth):
-    """True when one simple command only reads."""
+def ro_segment(words, cwd, depth):
+    """True when one simple command only reads. `cwd` is the directory the request runs in (git is
+    judged by the repository it would find there; None refuses git)."""
     while words:
         prog = ro_program(words[0])
         if prog == "rtk":  # the output compactor wrapper; the command after it is judged on its own
@@ -752,16 +802,16 @@ def ro_segment(words, depth):
     if name is None:
         return False
     if name in ("bash", "sh", "zsh"):
-        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], depth + 1)
+        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], cwd, depth + 1)
     if name == "git":
+        base = cwd
         while len(args) >= 2 and args[0] == "-C":
+            base = os.path.join(base, args[1]) if base else None
             args = args[2:]
-        return bool(args) and args[0] in RO_GIT and not any(
-            x.startswith(RO_BAD_ARGS) or x.startswith("-O") for x in args[1:])
-    if any(x.startswith(RO_BAD_ARGS) for x in args):
+        return (bool(args) and args[0] in RO_GIT and base is not None and not ro_long_bad(args[1:])
+                and not ro_short_bad(args[1:]) and ro_git_dir_ok(base))
+    if ro_long_bad(args):
         return False
-    if name == "graft":
-        return bool(args) and args[0] in RO_GRAFT
     if name == "curl":
         return ro_curl(args)
     if name == "find":
@@ -769,19 +819,19 @@ def ro_segment(words, depth):
     if name == "sed":  # GNU sed takes options anywhere: everything after the script must be a file name
         return (len(args) >= 3 and args[0] == "-n" and bool(re.fullmatch(r"\d+(,(\d+|\$))?p", args[1]))
                 and not any(x.startswith("-") for x in args[2:]))
-    if name == "fd":  # clap accepts grouped short flags: -Hx is -H -x
-        return not any(re.fullmatch(r"-[A-Za-z]*[xX][A-Za-z0-9]*", x) for x in args)
-    if name == "file":
-        return not any(x == "--compile" or re.fullmatch(r"-[A-Za-z]*C[A-Za-z]*", x) for x in args)
+    if name == "tail":  # -f/-F/--follow never ends
+        return not any(re.fullmatch(r"-[^-]*[fF].*", x) or x.startswith("--f") or x.startswith("--pid")
+                       for x in args)
     return name in RO_PLAIN
 
 
-def readonly_command(cmd, depth=0):
+def readonly_command(cmd, cwd=None, depth=0):
     """True when a shell command line only reads files and the network: commands from a short list (cat,
     ls, rg, git log/show/diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect
     to /dev/null, no expansion, no comment, no other redirect, a program only by bare name or from
-    RO_TRUSTED_DIRS. `git status` and `describe --dirty` may refresh `.git/index`, a cache, not content.
-    A guess is a refusal."""
+    RO_TRUSTED_DIRS, no long option that runs a program (abbreviations included). git runs only where
+    `cwd` (and each -C) finds an ordinary repository (ro_git_dir_ok). `git status` and `describe --dirty`
+    may refresh `.git/index`, a cache, not content. A guess is a refusal."""
     if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd):
         return False
     try:
@@ -804,7 +854,14 @@ def readonly_command(cmd, depth=0):
             segs[-1].append(t)
         i += 1
     segs = [s for s in segs if s]
-    return bool(segs) and all(ro_segment(s, depth) for s in segs)
+    return bool(segs) and all(ro_segment(s, cwd, depth) for s in segs)
+
+
+def tool_cwd(tool_call):
+    """The directory an execute tool call runs in (rawInput.cwd), else None."""
+    raw = getattr(tool_call, "raw_input", None)
+    cwd = raw.get("cwd") if isinstance(raw, dict) else None
+    return cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
 
 
 def tool_command(tool_call):
@@ -2163,7 +2220,9 @@ class RunClient(Client):
         # --perm read-only answers yes to read, search and fetch tools and no to the rest.
         if self.perm == "read-only":
             kind = infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None))
-            return kind in READONLY_KINDS or (kind == "execute" and readonly_command(tool_command(tool_call)))
+            return kind in READONLY_KINDS or (
+                kind == "execute"
+                and readonly_command(tool_command(tool_call), tool_cwd(tool_call) or os.path.abspath(self.root)))
         return self.perm != "deny"
 
     def check_tripwire(self, update):
