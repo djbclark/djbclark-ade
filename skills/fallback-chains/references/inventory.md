@@ -74,7 +74,7 @@ Each listed alias except those two falls back to the other real aliases, never t
 
 ## f. Other agents
 
-f1. `herdr-ai` falls back only for its default model, and only on a hard failure. The chain is `gemini-free-lite` → `gemini-free` → `gemini-free-lite`. That is a cycle. An explicit model does not fall back. No effort or thinking is set. Those two aliases have no LiteLLM fallback entry, so a LiteLLM failure of either alias stops there. `clinepass-*` is refused.
+f1. (Retired from djbclark-ade 2026-10-31: `bin/herdr-ai` is removed and `scripts/check.py` no longer reads it. As of 2026-10-10 it fell back only for its default model, `gemini-free-lite` → `gemini-free` → `gemini-free-lite`, a cycle.)
 
 f2. `acp-run` has one transport fallback, not a model chain. A Claude ACP handshake failure retries as `claude -p`, keeping the requested model, or `sonnet` if none was requested. `--no-fallback` disables it. Every other agent has no CLI fallback.
 
@@ -88,4 +88,4 @@ g2. `route_agent.py` scores which agent to dispatch. It is not a failure chain, 
 
 `python3 ~/src/djbclark-ade/skills/fallback-chains/scripts/check.py` prints the live layers and exits non-zero on a cycle, a same-vendor pair, a missing MoA preset while MoA is on, a `no_agent` job that still stores a model id, or `ai-model-switch` being able to write the chain.
 
-On 2026-10-10, after the safe pass, it exits 1. The remaining failures are the chains that were not changed: the Hermes `cline2` pair, LiteLLM same-vendor runs and a cycle, and the `herdr-ai` cycle. MoA and the second writer are clean.
+On 2026-10-10, after the safe pass, it exits 1. The remaining failures are the chains that were not changed: the Hermes `cline2` pair, LiteLLM same-vendor runs and a cycle (the `herdr-ai` cycle it also reported was retired with `bin/herdr-ai` on 2026-10-31). MoA and the second writer are clean.
