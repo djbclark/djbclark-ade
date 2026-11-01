@@ -1,6 +1,6 @@
 # Sleeping idle agents — `herdr-sleeper` (herdr retired from djbclark-ade 2026-10-31; a record)
 
-> **Retired from djbclark-ade (2026-10-31).** herdr and Orca no longer have a route in this repo; the `plugins/herdr-sleeper`
+> **Retired from djbclark-ade (2026-10-31).** No skill or doc here recommends herdr or Orca, though a few live code paths still reach them until D4/D6 (listed in AGENTS.md); the `plugins/herdr-sleeper`
 > plugin stays only until the plan's D4/D6 drain (`autorename`'s `relocate-pane.sh` still calls it). Nothing here is a
 > recommended route. The tools stay installed and configured on the machine, untouched.
 

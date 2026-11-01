@@ -8,7 +8,7 @@ round 1's findings on PR 154 (safety of probes, archive and drains; plugin scope
 this plan wins where they disagree about the future, they win about today. Sources: section I.
 
 **Update 2026-10-31 (djbclark):** herdr (except the `herdr4paseo` and `paseo4herdr` bridges), Orca and BB
-(get-bb/bb, npm `bb-app`; not `bigteam`) are retired **from djbclark-ade** by ruling (no djbclark-ade route, skill or doc sends anyone to them), and Paseo is the only
+(get-bb/bb, npm `bb-app`; not `bigteam`) are retired **from djbclark-ade** by ruling (no skill or doc recommends them; a few live code paths still reach herdr or Orca until D4/D6, listed in AGENTS.md), and Paseo is the only
 harness. They stay installed and configured on djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my
 computer"; "don't delete or modify the actual orca config"): **machine-side uninstall is NOT planned.** The docs now say so
 (`AGENTS.md`, `README.md`, `docs/apply-toolchain-prompt.md`, retired skill descriptions). The phases below are unchanged.
