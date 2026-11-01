@@ -480,6 +480,13 @@ has already been violated by a real agent on this machine:
   Read-only git is encouraged.
 - **No test suite, no repo-wide formatter or linter.** The orchestrator runs
   tests centrally. A stray `ruff --fix .` rewrites other agents' files.
+- **At most TWO test-running slices at once** (slices that run pytest or
+  builds, through `bg`). Further slices wait, or are told to run no tests and
+  leave them to the lead. 2026-10-31: five parallel pytest runs forked
+  thousands of short git processes and drove load to 222 (swap 7.9 of 9.2 GB)
+  on this 16 GB, 8-core Mac; the constraint here is memory pressure and
+  process churn, not the load average (`bg`'s base is 2.5 per core since
+  2026-11-01, `load-watch admit` allows 4.0 while compressor churn is low).
 - Leave changes **uncommitted**. The orchestrator commits, staged **by path** —
   `git add -A` in a shared checkout stages other sessions' in-flight work.
 - No package installs, no new directories, no scratch files inside the repo.
