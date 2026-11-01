@@ -23,12 +23,33 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import override
+from unittest import mock
+from zoneinfo import ZoneInfo
 
 from test_acp_dispatch import SCRIPT, Base, run
 
 # agy's weekly cap, 6 days out; the stamp derives from it, the fake's "Resets in" text is the same
 # duration as a literal (change both together)
 FAR_RESET = timedelta(hours=148, minutes=22, seconds=36)
+
+# Frozen-clock cases for the wake time (2026-11-01: the tests failed on the US fall-back because
+# the code did its arithmetic on a fixed-offset `now`). quota_reply says "reset in 2 hours, 47
+# minutes"; not_before adds the 5 min margin, so it is NOW + 2 h 52 min, and the wake is 2 min
+# before it, as wall time in America/New_York AT THAT INSTANT. (now UTC, not_before UTC, wake
+# stamp, not_before_iso); every figure is a literal, none is derived from the code under test.
+NY = "America/New_York"
+WAKE_CASES = {
+    "fall-back": ("2026-11-01T04:30:00Z", "2026-11-01T07:22:00Z", "11/01/26 02:20:00",
+                  "2026-11-01T02:22-05:00"),        # 00:30 EDT now, 02:22 EST then (a 3 h gap on the clock)
+    "spring-forward": ("2026-03-08T06:30:00Z", "2026-03-08T09:22:00Z", "03/08/26 05:20:00",
+                       "2026-03-08T05:22-04:00"),   # 01:30 EST now, 05:22 EDT then
+    "no-transition": ("2026-07-01T12:00:00Z", "2026-07-01T14:52:00Z", "07/01/26 10:50:00",
+                      "2026-07-01T10:52-04:00"),
+}
+
+
+def epoch(iso: str) -> float:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 EXTRA_MODES = textwrap.dedent("""\
       quota_far)  # agy's weekly cap as seen 2026-10-18: reset days out
@@ -444,25 +465,25 @@ class TestFarResetSkips(QuotaBase):
         self.assertIn(" resume ", c.stdout)                          # the manual hint stays
         self.assertIn("no other pool eligible for kind 'frontier'", c.stdout)
 
+    @staticmethod
+    def frozen(case: str) -> dict[str, str]:
+        return {"TZ": NY, "ACP_DISPATCH_NOW": WAKE_CASES[case][0]}
+
     def test_short_reset_still_schedules_with_a_wake(self):
-        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply")
+        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
+                                env=self.frozen("no-transition"))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)       # resume-scheduled
         rec = self.record()
         ar = rec["auto_resume"]
         self.assertEqual(ar["state"], "scheduled")
         self.assertNotIn("far_reset", ar)
         # the wake: 2 min before not_before, pmset's quoted MM/dd/yy HH:mm:ss (man pmset)
-        want = self.mod_wake_stamp(ar["not_before"])
+        want = WAKE_CASES["no-transition"][2]
         self.assertEqual(ar["wake"], f"scheduled {want}")
         self.assertEqual(self.pmset_calls(), [f"pmset schedule wake {want}"])
         # routed through sudo -k -n: a cached ticket must not stand in for the rule (2026-10-18)
         self.assertIn("sudo -k -n ", self.sudo_log.read_text())
         self.assertIn("schedule wake", self.sudo_log.read_text())
-
-    @staticmethod
-    def mod_wake_stamp(not_before: float) -> str:
-        return (datetime.fromtimestamp(not_before) - timedelta(seconds=120)).strftime(
-            "%m/%d/%y %H:%M:%S")
 
     def test_wake_unavailable_is_recorded_not_fatal(self):
         r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
@@ -474,14 +495,119 @@ class TestFarResetSkips(QuotaBase):
         self.assertIn("password is required", ar["wake"])
 
     def test_reroute_cancels_the_wake_with_the_same_time(self):
-        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply")
-        want = self.mod_wake_stamp(self.record()["auto_resume"]["not_before"])
+        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
+                            env=self.frozen("fall-back"))
+        want = WAKE_CASES["fall-back"][2]
         rr = run(["reroute", str(self.record_path()), "--agent", "claude", "--model", "m1",
-                 "--acp-run", str(self.fake)], env=self.base_env())
+                 "--acp-run", str(self.fake)], env=self.base_env(TZ=NY))
         self.assertEqual(rr.returncode, 0, rr.stdout + rr.stderr)
         self.assertEqual(self.record()["auto_resume"]["state"], "cancelled")
         self.assertEqual(self.pmset_calls(),
                          [f"pmset schedule wake {want}", f"pmset schedule cancel wake {want}"])
+
+
+class TestWakeAcrossDst(QuotaBase):
+    """Frozen clock, TZ set: the schedule is computed in UTC and the wake is local wall time at the
+    wake instant, so a DST change between now and the wake is right (it never depends on the day
+    the suite runs)."""
+
+    def check_case(self, case: str) -> None:
+        now, not_before, wake, iso = WAKE_CASES[case]
+        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_reply",
+                                env={"TZ": NY, "ACP_DISPATCH_NOW": now})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        ar = self.record()["auto_resume"]
+        self.assertEqual(ar["state"], "scheduled")
+        self.assertEqual(ar["not_before"], epoch(not_before))
+        self.assertEqual(ar["not_before_iso"], iso)
+        self.assertEqual(ar["wake"], f"scheduled {wake}")
+        self.assertEqual(self.pmset_calls(), [f"pmset schedule wake {wake}"])
+
+    def test_schedule_and_wake_across_fall_back(self):
+        self.check_case("fall-back")
+
+    def test_schedule_and_wake_across_spring_forward(self):
+        self.check_case("spring-forward")
+
+    def test_schedule_and_wake_with_no_transition(self):
+        self.check_case("no-transition")
+
+    def test_wake_stamp_is_wall_time_in_the_zone_at_the_wake_instant(self):
+        mod = runpy.run_path(str(SCRIPT))
+        wake_stamp = mod["wake_stamp"]
+        with mock.patch.dict(os.environ, {"TZ": NY}):
+            for case, (_, not_before, wake, _) in WAKE_CASES.items():
+                with self.subTest(case=case):
+                    aware = datetime.fromisoformat(not_before.replace("Z", "+00:00"))
+                    self.assertEqual(wake_stamp(epoch(not_before)), wake)
+                    self.assertEqual(wake_stamp(aware), wake)
+                    # an aware datetime in a fixed offset taken BEFORE the change is the same instant
+                    self.assertEqual(wake_stamp(aware.astimezone(timezone(timedelta(hours=-4)))), wake)
+            # the 2 min lead itself crosses the change: 01:01 EST (06:01Z) minus 2 min is 01:59 EDT
+            self.assertEqual(wake_stamp(epoch("2026-11-01T06:01:00Z")), "11/01/26 01:59:00")
+            # spring-forward: 03:01 EDT (07:01Z) minus 2 min is 01:59 EST
+            self.assertEqual(wake_stamp(epoch("2026-03-08T07:01:00Z")), "03/08/26 01:59:00")
+
+    def test_local_zone_prefers_tz_and_now_is_frozen_in_utc(self):
+        mod = runpy.run_path(str(SCRIPT))
+        with mock.patch.dict(os.environ, {"TZ": NY, "ACP_DISPATCH_NOW": "2026-11-01T04:30:00Z"}):
+            self.assertEqual(mod["local_zone"](), ZoneInfo(NY))
+            self.assertEqual(mod["now_utc"](), datetime(2026, 11, 1, 4, 30, tzinfo=timezone.utc))
+            self.assertEqual(mod["now_utc"]().utcoffset(), timedelta(0))
+
+    def test_local_zone_resolves_every_tz_form_to_the_real_zone(self):
+        """TZ=:/usr/share/zoneinfo/America/New_York is valid, and ZoneInfo(key) rejects a path: the
+        fallback froze today's offset, so a wake after the change was an hour wrong (Codex, PR 213).
+        Every spelling of the same zone, and a copied zone file outside any zoneinfo directory, must
+        give the DST-aware zone."""
+        import tempfile
+        import zoneinfo
+        zone_file = next((Path(root) / NY for root in zoneinfo.TZPATH if (Path(root) / NY).is_file()), None)
+        if zone_file is None:
+            self.skipTest("no system zoneinfo file for " + NY)
+        mod = runpy.run_path(str(SCRIPT))
+        wake_stamp = mod["wake_stamp"]
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "localtime-copy"
+            copy.write_bytes(zone_file.read_bytes())
+            forms = [NY, ":" + NY, str(zone_file), ":" + str(zone_file), str(copy), ":" + str(copy)]
+            for form in forms:
+                with self.subTest(tz=form), mock.patch.dict(os.environ, {"TZ": form}):
+                    # 06:01Z on the fall-back day is 01:01 EST, a wake 2 min earlier is 01:59 EDT;
+                    # a fixed offset taken on either side of the change gets one of these wrong
+                    self.assertEqual(wake_stamp(epoch("2026-11-01T06:01:00Z")), "11/01/26 01:59:00")
+                    self.assertEqual(wake_stamp(epoch("2026-11-01T07:22:00Z")), "11/01/26 02:20:00")
+                    self.assertEqual(wake_stamp(epoch("2026-03-08T07:01:00Z")), "03/08/26 01:59:00")
+
+    def test_empty_tz_is_utc_and_unset_tz_is_the_machine_zone(self):
+        """libc reads TZ="" (and ":") as UTC; the /etc/localtime lookup is for an UNSET TZ only
+        (Codex local review, PR 213)."""
+        mod = runpy.run_path(str(SCRIPT))
+        wake_stamp = mod["wake_stamp"]
+        at = epoch("2026-11-01T06:01:00Z")
+        for form in ("", ":"):
+            with self.subTest(tz=form), mock.patch.dict(os.environ, {"TZ": form}):
+                self.assertEqual(mod["local_zone"]().utcoffset(None), timedelta(0))
+                self.assertEqual(wake_stamp(at), "11/01/26 05:59:00")
+        env = {k: v for k, v in os.environ.items() if k != "TZ"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                mod["os"].path, "realpath", return_value="/usr/share/zoneinfo/" + NY):
+            self.assertEqual(wake_stamp(at), "11/01/26 01:59:00")
+
+    def test_clock_time_reset_is_local_wall_clock_across_the_change(self):
+        mod = runpy.run_path(str(SCRIPT))
+        prd, fc = mod["parse_reset_datetime"], mod["failure_class"]
+        text = "FAILED quota: try again at 8:51 PM."
+        with mock.patch.dict(os.environ, {"TZ": NY}):
+            # 00:30 EDT on 11-01; 8:51 PM that evening is EST (UTC-5)
+            fall = datetime(2026, 11, 1, 4, 30, tzinfo=timezone.utc)
+            self.assertEqual(prd(text, fc(text, 1)[1], fall), datetime(2026, 11, 2, 1, 51, tzinfo=timezone.utc))
+            # 01:30 EST on 03-08; 8:51 PM that evening is EDT (UTC-4)
+            spring = datetime(2026, 3, 8, 6, 30, tzinfo=timezone.utc)
+            self.assertEqual(prd(text, fc(text, 1)[1], spring), datetime(2026, 3, 9, 0, 51, tzinfo=timezone.utc))
+            # a duration is absolute elapsed time across the change: 00:30 EDT + 2 h 47 = 02:17 EST
+            dur = "FAILED quota: quota exhausted: retry in 2 hours, 47 minutes"
+            self.assertEqual(prd(dur, fc(dur, 1)[1], fall), datetime(2026, 11, 1, 7, 17, tzinfo=timezone.utc))
 
 
 class TestExit0Quota(QuotaBase):
