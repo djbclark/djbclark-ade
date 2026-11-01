@@ -289,6 +289,13 @@ then start a baton and continue running without human intervention"). Run
 ~/src/djbclark-ade/bin/self-slash "/new"
 ```
 
+**Before running it, no background task of this session may still be running** (a `run_in_background` Bash, a Monitor, a
+cron job): its completion notification starts a new turn, `self-slash` then finds the session "working", and
+`/new` and `/baton` are typed into the busy composer and submitted together as the plain text `/new/baton`
+(2026-11-01: a late gather command did exactly that and the context was never cleared). List them, wait for
+or `TaskStop` each, and run `self-slash` as the very last tool call. If a notification arrives anyway, end the
+turn with no tool call; if the cycle did not happen, say so, and rerun `self-slash "/new"` once idle.
+
 **once**, and end the turn at once (no further tool call, no question). On Paseo that sends `/clear`
 to this same agent and then exactly one `/baton` into the fresh session; on herdr and Orca it sends
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
