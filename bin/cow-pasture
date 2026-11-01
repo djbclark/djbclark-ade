@@ -4,7 +4,11 @@
 # `cow create` clones the whole directory via APFS clonefile, so a pasture
 # inherits every untracked file of the source, including gitignored secrets
 # such as .env (verified 2026-09-20). This wrapper:
-#   create  → cow create, then delete gitignored secret-like files (default on).
+#   create  → cow create --no-symlink, then cow materialise and a scan that
+#             fails (exit 1) if any symlink in the pasture still resolves into
+#             the source (or its recorded sources), or an untracked one into
+#             another checkout cow records (see PASTURE_PY), then delete
+#             gitignored secret-like files (default on).
 #             Also pre-trusts the folder for Claude Code (default on, `--no-trust`
 #             to skip): without it a headless `claude` start stalls at the
 #             "Quick safety check" dialog. And it
@@ -16,11 +20,15 @@
 #             short name (`foo`) or the full `<source>/<name>`.
 #             Orca registration (`--orca`, unregister on remove) retired from
 #             djbclark-ade 2026-10-31.
+#   check   → the same scan for an existing pasture; exit 1 if any link
+#             (older pastures, made before create materialised).
 #
 # Never touches the source repo. Never runs in ~/ops/* (deployment checkouts;
-# operator decision 2026-09-20).
+# operator decision 2026-09-20). COW_PASTURE_COW names the cow binary (tests
+# stub it; /opt/homebrew/bin comes first on PATH, so a PATH stub cannot).
 export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
+cow() { command "${COW_PASTURE_COW:-cow}" "$@"; }
 
 usage() {
   cat <<'EOF'
@@ -29,10 +37,17 @@ usage: cow-pasture create <name> --source <repo> [--branch <b>]
        cow-pasture remove <name> [--force]
        cow-pasture scrub <pasture-path> [--dry-run]
        cow-pasture trust <pasture-path>
+       cow-pasture check <pasture-path>
 
-create: cow create --print-path, then scrub gitignored secrets.
+create: cow create --no-symlink --print-path, cow materialise, fail (exit 1) if a
+        symlink still resolves into the source; then scrub gitignored secrets.
 trust : pre-trust an existing pasture for Claude Code (create does this by default).
 scrub : delete gitignored files matching SECRET_PATTERNS inside <pasture-path>.
+check : list symlinks under <pasture-path> that resolve into its source or that
+        source's recorded sources, and untracked ones into any other checkout in
+        `cow list --json`; exit 1 if any, 2 if <pasture-path> is not a pasture
+        there or a directory in it is unreadable. create runs the same scan.
+        Fix: cow materialise <source>/<name>, or recreate.
 remove: drop graft cache, chflags -R nouchg, cow remove.
 EOF
   exit 2
@@ -48,6 +63,113 @@ SECRET_PATTERNS=(
 )
 
 log() { printf 'cow-pasture: %s\n' "$*" >&2; }
+
+# cow 0.1.10 replaces large dependency dirs (node_modules per package, whole
+# scope dirs, .venv/bin) with ABSOLUTE symlinks into the source checkout unless
+# given --no-symlink, and --print-path hides its "writes affect source"
+# warning. A package manager run in such a pasture writes through them: on
+# 2026-11-01 an `npm install` in a paseo pasture emptied ~392 package dirs of
+# ~/src/paseo/node_modules, and builds there had read the source's stale dist.
+# A pasture made from a pasture inherits its links, which point into the
+# grandparent source and are not in cow's state, so the scan flags any link
+# into the recorded source chain, and any UNTRACKED link into another checkout
+# cow records (each entry's source and path: the chain may be broken by a
+# removed middle pasture). Tracked links into other checkouts are committed
+# content, the same in the primary (djbclark-ade's skills/sudo-secretspec ->
+# ~/src/sudo-secretspec/...), and are left alone. Reads `cow list --json` on
+# stdin.
+#   name <pasture-path> → print the pasture's full cow name (<source>/<name>)
+#   scan <pasture-path> → print "rel -> target" per such link; exit 1 if any,
+#                         2 if not a pasture or a directory is unreadable
+PASTURE_PY='
+import json, os, subprocess, sys
+def fail(msg):
+    print("cow-pasture: " + msg, file=sys.stderr)
+    sys.exit(2)
+mode, pasture = sys.argv[1], os.path.realpath(sys.argv[2])
+try:
+    entries = json.load(sys.stdin)
+except ValueError:
+    fail("cow list --json is not JSON")
+real = lambda p: os.path.realpath(p) if p else ""
+entry = [e for e in entries if real(e.get("path")) == pasture]
+if len(entry) != 1:
+    fail("no single cow pasture recorded at " + pasture)
+entry = entry[0]
+if mode == "name":
+    print(entry["name"])
+    sys.exit(0)
+def spellings(p):
+    return {p.rstrip("/"), real(p)} - {""}
+chain, src = set(), entry.get("source")
+while src and not spellings(src) <= chain:
+    chain |= spellings(src)
+    parent = [e.get("source") for e in entries if real(e.get("path")) == real(src)]
+    src = parent[0] if parent else None
+others = set()
+for e in entries:
+    for p in (e.get("source"), e.get("path")):
+        if p and real(p) != pasture:
+            others |= spellings(p)
+others -= chain
+git = subprocess.run(["git", "-C", pasture, "ls-files", "-s", "-z"], capture_output=True)
+tracked = set()
+if git.returncode == 0:
+    for rec in git.stdout.split(b"\0"):
+        meta, _, path = rec.partition(b"\t")
+        if meta.startswith(b"120000 "):
+            tracked.add(os.fsdecode(path))
+inside = lambda t, r: t == r or t.startswith(r + "/")
+bad, unreadable, stack = [], [], [pasture]
+while stack:
+    d = stack.pop()
+    try:
+        it = os.scandir(d)
+    except OSError:
+        unreadable.append(d)
+        continue
+    with it:
+        for e in it:
+            if e.is_symlink():
+                t = os.readlink(e.path)
+                hit = os.path.normpath(os.path.join(d, t))
+                rel = os.path.relpath(e.path, pasture)
+                if inside(hit, pasture):
+                    continue
+                if any(inside(hit, r) for r in chain) or (
+                        rel not in tracked and any(inside(hit, r) for r in others)):
+                    bad.append(rel + " -> " + t)
+            elif e.is_dir(follow_symlinks=False) and e.path != os.path.join(pasture, ".git"):
+                stack.append(e.path)
+for b in sorted(bad):
+    print(b)
+if unreadable:
+    fail("cannot read " + ", ".join(sorted(unreadable)) + "; a link there would go unseen")
+sys.exit(1 if bad else 0)
+'
+
+source_links() { # $1 = pasture path; prints offending links, returns 1 if any
+  local json
+  json=$(cow list --json) || { log "cow list --json failed"; return 2; }
+  python3 -c "$PASTURE_PY" scan "$1" <<<"$json"
+}
+
+# create's guard: materialise whatever cow recorded as linked, then prove no
+# symlink resolves into the source. Nonzero leaves the pasture for inspection.
+local_deps() { # $1 = pasture path
+  local json full links rc=0
+  json=$(cow list --json) || { log "cow list --json failed"; return 1; }
+  full=$(python3 -c "$PASTURE_PY" name "$1" <<<"$json") || return 1
+  cow materialise "$full" >&2 || { log "cow materialise $full failed"; return 1; }
+  links=$(source_links "$1") || rc=$?
+  [ "$rc" = 0 ] && return 0
+  if [ -n "$links" ]; then
+    log "ERROR: $(printf '%s\n' "$links" | wc -l | tr -d ' ') symlink(s) in $1 still resolve into the source; a package install there would write into the source:"
+    printf '  %s\n' "$links" >&2
+  fi
+  log "pasture left in place; fix with: cow materialise $full (links inherited from a pasture used as --source are not in cow's state: cow-pasture remove $full, then create from the primary checkout)"
+  return 1
+}
 
 matches_secret() { # $1 = path relative to pasture
   # Installed packages are code, not secrets: a venv's site-packages holds modules
@@ -157,12 +279,13 @@ case "$cmd" in
       esac
     done
     refuse_ops "$source"
-    [ "$dry" = 1 ] && { log "dry-run: would cow create $name --source $source ${branch:+--branch $branch}"; exit 0; }
-    args=(create "$name" --source "$source" --print-path)
+    [ "$dry" = 1 ] && { log "dry-run: would cow create $name --source $source ${branch:+--branch $branch} --no-symlink, then cow materialise"; exit 0; }
+    args=(create "$name" --source "$source" --print-path --no-symlink)
     [ -n "$branch" ] && args+=(--branch "$branch")
     # cow prints "Switched to a new branch" on stdout before the path; keep the last line.
     path=$(cow "${args[@]}" | gtail -n 1)
     [ -d "$path" ] || { log "cow create did not yield a directory: $path"; exit 1; }
+    local_deps "$path" || exit 1
     if [ "$keep" = 1 ]; then log "--keep-secrets: skipping scrub"; else scrub "$path" 0; fi
     exclude_graft_cache "$path"
     [ "$trust" = 1 ] && trust_claude "$path"
@@ -171,6 +294,12 @@ case "$cmd" in
   trust)
     p=${1:-}; [ -d "$p" ] || usage
     trust_claude "$p"
+    ;;
+  check)
+    p=${1:-}; [ -d "$p" ] || usage
+    rc=0; source_links "$p" || rc=$?
+    [ "$rc" = 0 ] && log "no symlink in $p resolves into its source"
+    exit "$rc"
     ;;
   scrub)
     p=${1:-}; [ -d "$p" ] || usage; shift; dry=0
