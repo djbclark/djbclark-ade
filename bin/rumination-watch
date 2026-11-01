@@ -68,9 +68,12 @@ after a hard error" ruling. Off by default until field-tested; RW_AUTO_SEAT_PROV
 explicitly (no model or thinking flags). If relay cannot diagnose a UUID-shaped id, one extra
 `paseo agent inspect --json -- <id>` probe (up to 20 s, no model) must confirm AGENT_NOT_FOUND;
 errors, timeouts, unreadable bodies and unknown shapes never prove absence. The same probe answers
-for a `refused` id and may prove it absent too, when the agent record says the seat is CLOSED or
-ARCHIVED: a finished seat leaves its record behind instead of vanishing (13 of the 25 agents on
-this Mac were `closed` on 2026-10-30), so waiting for the id to disappear waits forever. See the
+for a `refused` id and may prove it absent too, when the agent record says the seat is ARCHIVED or
+CLOSED AND NOT PERSISTENT: a finished seat leaves its record behind instead of vanishing (13 of the
+25 agents on this Mac were `closed` on 2026-10-30), so waiting for the id to disappear waits
+forever. A `closed` seat relay can send to is asleep, not absent: djbclark ruled 2026-10-31 that
+automatic watchers SHOULD wake closed seats, so a line to it wakes it and starts a turn (one send
+per 300 s pass at most), and no successor is started over it. See the
 decision table in `auto_seat`. A card, a live-but-unsendable seat, an `error` and an `unknown` seat
 do not auto-start and still page the human when no owner resolves. A `silent` hung seat is NOT
 replaced, so the individual can stay dark until the human acts.
@@ -759,7 +762,8 @@ def usable(ident: str) -> bool:
     """Would relay.py find this id? True when fleet lists it and it is neither over nor archived.
 
     A `closed` row IS usable: Paseo keeps the record and `ensureAgentLoaded` resumes it on the next
-    send, so a message still reaches it. `is_closed` is the separate question of whether it is a
+    send, so a message still reaches it (and starts a turn: djbclark, 2026-10-31, wants automatic
+    watchers to wake closed persistent seats). `is_closed` is the separate question of whether it is a
     seat that is still WORKING this role — see `owner_session`.
     """
     row = live_sessions().get(ident[:8])
@@ -851,10 +855,13 @@ def owner_session() -> tuple[str, str]:
     the seat itself, so a seat that stops leaves a `closed` but still `usable()` id at the head of
     the list. Returning it would do two separate kinds of damage: the live successor named further
     down the list is never written to (the role goes quiet while the watcher pages a stopped seat),
-    and with the switch on the closed id is exactly what the absence probe calls `gone`, so the
-    watcher would LICENSE A DUPLICATE START over a successor that is answering (adv-seat D3, and
-    the Codex finding on #164). So the closed candidate is only a FALLBACK, used when nothing else
-    resolves — which is the ordinary case of a finished session and the one auto-seat exists for.
+    and with the switch on a closed NON-persistent id is exactly what the absence probe calls
+    `gone`, so the watcher would LICENSE A DUPLICATE START over a successor that is answering
+    (adv-seat D3, and the Codex finding on #164). So the closed candidate is only a FALLBACK, used
+    when nothing else resolves — the ordinary case of a finished session. A closed PERSISTENT
+    fallback is not absent: djbclark ruled 2026-10-31 that automatic watchers SHOULD wake closed
+    seats, so the line goes to it and relay.py's send wakes it and starts a turn (at most one send
+    per pass, so the cost of a resumed turn is bounded to one per 300 s launchd pass).
     """
     first = ""
     fallback = ("", "")
@@ -893,13 +900,21 @@ def why_blocked(ident: str) -> tuple[str, str]:
     refusal — gets ONE direct `paseo agent inspect` (up to 20 s), and only a fact read off that
     record proves absence. Anything else stays `unknown` or `refused`, and neither starts a seat.
 
-    **Why CLOSED counts as absent** (2026-10-30). A seat does not usually vanish; it stops, and
-    Paseo keeps the record. Measured on this Mac the same day: 13 of 25 agents were `closed`, 6
-    `idle`, 5 `running`, 1 `error`. So a start that waits for the id to disappear waits forever —
-    the entity would page djbclark and stay dark. relay.py calls a closed agent `refused`, which
-    is right for SENDING (a send into it is pointless) and wrong as a liveness verdict, so the
-    verdict is read here from the agent record itself. `archived` is the same situation with the
-    door shut: a send would unarchive it and start a turn.
+    **CLOSED, two kinds** (2026-10-30, revised by djbclark's ruling of 2026-10-31). A seat does
+    not usually vanish; it stops, and Paseo keeps the record (13 of 25 agents on this Mac were
+    `closed` on 2026-10-30). What a stop means depends on the provider:
+
+    - relay.py reports every `closed` Paseo agent that is not archived as `closed` / `deliverable:
+      true` (its daemon collected the idle runtime; a send resumes the same stored session and
+      starts a turn). Automatic watchers SHOULD wake it (the 2026-10-31 ruling), so the line is
+      delivered and it is never `gone`: starting a successor over it would duplicate an
+      individual that answers the moment it is spoken to.
+    - Should relay ever call a `closed` seat not deliverable, or refuse it for another reason,
+      the agent record decides: Persistence not true (false or unreported) cannot be woken, so the
+      record proves it ABSENT (waiting for the id to disappear waits forever); Persistence true
+      stays a sleeping seat, never absent. That verdict is read here from the agent record itself.
+
+    `archived` is absent too, with the door shut: a send would unarchive it and start a turn.
     """
     uuid = re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", ident)
 
@@ -907,8 +922,9 @@ def why_blocked(ident: str) -> tuple[str, str]:
         """("gone", why) when `paseo agent inspect` PROVES this seat cannot answer, else None.
 
         Only a UUID is trusted (a short or hand-edited id proves nothing), only with the switch
-        on, and only three readings count: the agent is unknown to Paseo, archived, or closed.
-        A reply naming a DIFFERENT agent is not a reading of this one.
+        on, and only three readings count: the agent is unknown to Paseo, archived, or closed AND not
+        persistent (a persistent closed seat is asleep, not absent: `Capabilities.Persistence is
+        True` never proves it gone). A reply naming a DIFFERENT agent is not a reading of this one.
         """
         if not (AUTO_SEAT and uuid):
             return None
@@ -925,8 +941,10 @@ def why_blocked(ident: str) -> tuple[str, str]:
         if rc == 0 and info.get("Id") == ident:
             if info.get("Archived") is True:
                 return "gone", "direct inspect says the seat is archived"
-            if str(info.get("Status") or "") == "closed":
-                return "gone", (f"direct inspect says the seat is closed (it stopped at "
+            caps = info.get("Capabilities")
+            persistent = isinstance(caps, dict) and caps.get("Persistence") is True
+            if str(info.get("Status") or "") == "closed" and not persistent:
+                return "gone", (f"direct inspect says the seat is closed and cannot be woken (it stopped at "
                                 f"{info.get('UpdatedAt') or 'an unrecorded time'})")
         return None
 
@@ -948,13 +966,18 @@ def why_blocked(ident: str) -> tuple[str, str]:
         if not uuid:
             return "unknown", "absence not proven for a non-UUID id"
         return "gone", str(d.get("why") or "")
-    # relay.py's refusal is about SENDING, and the three ways it stops are not the same fact: a
-    # closed or archived seat is absent (startable), a card is djbclark's to answer, a broken read
-    # is not a dead seat. Ask the agent record which one it is.
-    if state in ("refused", "archived", "error"):
+    # relay.py's refusal is about SENDING, and the ways it stops are not the same fact: an archived
+    # or non-persistent closed seat is absent (startable), a card is djbclark's to answer, a broken
+    # read is not a dead seat. Ask the agent record which one it is. A `closed` seat relay says it
+    # cannot take text (not deliverable) gets the same question; one it CAN wake is `closed` and
+    # stays a seat (see the docstring), never absent.
+    closed_stuck = state == "closed" and not d.get("deliverable")
+    if state in ("refused", "archived", "error") or closed_stuck:
         proof = proved_absent()
         if proof:
             return proof
+        if closed_stuck:
+            state = "refused"    # the word this watcher always used for a seat that cannot be sent to and is not proved absent
     return state, str(d.get("why") or "")
 
 
@@ -1287,11 +1310,16 @@ def auto_seat(word: str, state: dict, now: float, note: dict | None = None, expe
 
     Diagnosis       Start?  Reason
     gone            yes     Proven absent (UUID id, not a blind read): AGENT_NOT_FOUND, or the
-                            agent record says closed/archived. `why_blocked` maps all three here.
+                            agent record says archived, or closed AND not persistent.
+                            `why_blocked` maps all three here.
+    closed          no      A closed PERSISTENT seat: asleep, not absent. A send wakes it (djbclark,
+                            2026-10-31: automatic watchers should wake closed seats), so the
+                            line is delivered and no successor is started over it.
     error           no      Inspect could not answer: broken READ, daemon/socket may be down.
     refused         no      A hard stop that is not absence: a `card:*` or this session. It DOES
-                            start when the agent record itself proves the seat closed/archived,
-                            which `why_blocked` turns into `gone` before this is reached.
+                            start when the agent record itself proves the seat archived, or closed
+                            and not persistent, which `why_blocked` turns into `gone` before this
+                            is reached.
     unknown         no      No diagnosis; absence not proven.
     silent/working  no      A seat EXISTS; a second one would duplicate the individual.
     card:*          NEVER   His to answer; spawning leaves the card AND adds another seat.
@@ -1489,7 +1517,7 @@ DARK_MEANING = {
 # observation, which must end a darkness streak. Leaving `idle` out let three card episodes spread
 # over a day, with healthy idle passes between them, page him "unable to take text for 3 passes in a
 # row": both clauses false, in exactly the dishonesty class this watcher exists to remove.
-DELIVERABLE_WHY = frozenset({"idle"})
+DELIVERABLE_WHY = frozenset({"idle", "closed"})    # `closed`: relay.py reports a collected, unarchived seat deliverable (a send wakes it)
 
 # A send that reached (or may have reached) the seat: the pending line is settled, not retried.
 SENT_WORDS = frozenset({"delivered", "accepted", "queued", "sent"})
@@ -1708,7 +1736,7 @@ def _pass(a: argparse.Namespace) -> int:
     # carry block below retires a queued copy exactly as it does `stale chain log`: no special case.
     # The count is read first (a file) and the probe made only when there is something to say.
     nudge_n = declared_next_steps() if nudge_due(ident, state, now) else 0
-    if nudge_n and seat_word() == "idle":
+    if nudge_n and seat_word() in DELIVERABLE_WHY:    # idle, or closed-and-wakeable: the nudge is the line that resumes a sleeping persistent seat (Codex P2, PR 177)
         items.append((KEY_NEXT, f"next move: {nudge_n} declared step(s) still open in the Tier 1 "
                                 "log and this seat is idle"))
     lines = [text for _, text in items]
@@ -1735,10 +1763,10 @@ def _pass(a: argparse.Namespace) -> int:
         if candidate and candidate != ident and (not ident or word == "gone"):
             target = candidate
             word = why_blocked(candidate)[0]
-            if word in ("idle", "working", "silent") or word.startswith("card:"):
+            if word in ("idle", "working", "silent", "closed") or word.startswith("card:"):
                 ident = candidate
                 probe[:] = [(word, "auto-seat candidate")]
-        elif candidate and candidate != ident and (word in ("idle", "working", "silent")
+        elif candidate and candidate != ident and (word in ("idle", "working", "silent", "closed")
                                                    or word.startswith("card:")):
             # A live successor is authoritative for sending, but candidate keys are also the
             # unresolved attempt's identity proof. Keep them until reconciliation completes.
@@ -1762,7 +1790,7 @@ def _pass(a: argparse.Namespace) -> int:
         # branch is skipped - and that fleet-listed case is the COMMON one, which is exactly
         # the hole adversary D1 (2026-10-30) found in the branch-only site.
         if candidate and ident[:8] == candidate[:8] and (
-                word in ("idle", "working", "silent") or word.startswith("card:")):
+                word in ("idle", "working", "silent", "closed") or word.startswith("card:")):
             missing_tab = tab_once(candidate, state, now)
             if missing_tab:
                 tab_msg = tab_page(candidate, missing_tab)

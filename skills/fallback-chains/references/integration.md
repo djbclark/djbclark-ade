@@ -16,7 +16,7 @@ These are separate chains today. A unified query or edit has to know which layer
 2. Hermes cron fleet default, and the rule that a job pin drops that chain.
 3. Hermes side routes: compression, MoA, `delegate_task`.
 4. LiteLLM `router_settings.fallbacks`.
-5. `herdr-ai` default-model fallback, which then walks a LiteLLM chain.
+5. (`herdr-ai` default-model fallback: retired from djbclark-ade 2026-10-31.)
 6. `acp-run` Claude transport fallback (not a model chain).
 
 ## Observed gaps

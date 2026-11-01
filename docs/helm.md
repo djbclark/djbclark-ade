@@ -117,7 +117,7 @@ Verified 2026-10-06 with one real check in a launchd-like environment.
    still gets `/loose` after three minutes~~ — closed 2026-10-08: `fleet.py`
    marks such a session `busy-background` (a child process that is not one of
    its servers is still running) and helm never audits it; see the evening entry
-   below and [herdr-tidy.md](herdr-tidy.md).
+   below and the removed `docs/herdr-tidy.md`.
 
 ## Open
 
@@ -140,7 +140,7 @@ Verified 2026-10-06 with one real check in a launchd-like environment.
 ## 2026-10-08 (evening) — busy-background, undetected TUIs, closed and sleeping items
 
 Operator asks: is it safe to close idle panes and let helm get to them later?
-It was not: see [herdr-tidy.md](herdr-tidy.md) for the cracks and the recipe.
+It was not: `docs/herdr-tidy.md` (removed 2026-10-31 with herdr-tidy; git history has it) listed the cracks and the recipe.
 What changed in helm's collector:
 
 1. `fleet.sessions` marks a session `busy-background` when a child process that

@@ -229,13 +229,12 @@ collector call and two item kinds differ.
    operator's answer: <his text>; continue from there"`), **Resume it** (only
    when the item's transcript size is under 2 MB, see session-finder 3d; give
    the `claude --resume` command for him to run in the pane he picks), **Skip**.
-4. **`closed`** — a pane `herdr-tidy` closed (any TUI, Hermes CLI, a shell, a
+4. **`closed`** — a pane the retired `herdr-tidy` closed (any TUI, Hermes CLI, a shell, a
    sleeping stub); the ledger `~/.local/state/session-finder/closed.jsonl`
    holds its exact resume command, why it was closed and its last screen rows.
    Offer exactly: **Resume it** (first; give the item's `resume:` line to run in
    a free pane, or `herdr agent start <name> --kind <kind> --pane <free pane> --
-   <its resume tokens>`; `fleet.py conflicts --sid <sid>` first; then
-   `tidy.py resumed <id>`), **Start fresh** (`$L --agent <A> --cwd <dir> --model
+   <its resume tokens>`; `fleet.py conflicts --sid <sid>` first), **Start fresh** (`$L --agent <A> --cwd <dir> --model
    <M> -p "<brief from the item's title and why>"`), **Skip** (`$H skip <id>`).
    Hidden by itself once the session is live again or its handoff chain is listed.
 5. **`sleeping`** — a herdr-sleeper journal entry whose pane no longer exists
@@ -247,7 +246,7 @@ collector call and two item kinds differ.
    (section 2.5), so the walk continues without you watching them.
 7. Ended items are read from logs and transcripts only; nothing is re-opened
    until he says so. Do not summarise a handoff beyond its Active-work line and
-   next steps as printed. Closing panes is `herdr-tidy`'s job, never helm's.
+   next steps as printed. Closing panes is not helm's job (the `herdr-tidy` closer was retired 2026-10-31).
 
 ## 8. Auto mode (`/helm auto`)
 

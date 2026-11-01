@@ -22,6 +22,7 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "ade-update"
 REAL_SE = SCRIPT.parent / "skill-everywhere"
+FOLD = SCRIPT.parent / "changelog-fold"
 
 CHANGELOG_V1 = """# Changelog
 
@@ -99,6 +100,7 @@ class Env:
         (self.lone / "bin").mkdir(parents=True)
         for d in (self.bin, self.lone / "bin"):
             shutil.copy(SCRIPT, d / "ade-update")
+            shutil.copy(FOLD, d / "changelog-fold")  # the sibling that parses changelog.d fragments
         self.se_log.write_text("")
         self.se_state.write_text("{}")
         fake = self.bin / "skill-everywhere"
@@ -166,7 +168,7 @@ def test_current_exits_zero_and_records_head(env):
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
     assert "repo: current" in r.stdout
-    assert env.state.read_text().strip() == env.first
+    assert env.state.read_text().split()[0] == env.first
     assert "First thing (#1)." in r.stdout  # no record yet: every Unreleased entry
     assert env.calls() == [["--check", "alpha"]]  # nothing to link, so only the check
 
@@ -195,7 +197,7 @@ def test_behind_apply_pulls_records_head_and_prints_only_new_entries(env):
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.head(env.machine) == new
-    assert env.state.read_text().strip() == new
+    assert env.state.read_text().split()[0] == new
     assert "Second thing, which wraps onto a continuation line (#2)." in r.stdout
     assert "First thing" not in r.stdout  # already recorded at the old revision
     assert list(env.state.parent.glob(".applied.*")) == []  # no temp file left beside
@@ -279,7 +281,7 @@ def test_missing_skill_link_is_linked_on_apply_and_only_reported_on_check(env):
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.calls()[2:] == [["alpha"], ["--check", "alpha"]]
     assert "linked now: alpha" in r.stdout
-    assert env.state.read_text().strip() == env.first
+    assert env.state.read_text().split()[0] == env.first
 
 
 def test_unfixable_skill_link_is_reported_and_blocks_the_state_record(env):
@@ -407,7 +409,7 @@ def test_a_non_canonical_repo_never_writes_the_shared_state_record(env, monkeypa
     assert not shared.exists()  # the canonical checkout's record is untouched
     own = Path(out["state_file"])
     assert own.parent == shared.parent and own.name.startswith("applied-") and own != shared
-    assert own.read_text().strip() == sh("git", "-C", str(other), "rev-parse", "HEAD")
+    assert own.read_text().split()[0] == sh("git", "-C", str(other), "rev-parse", "HEAD")
     assert mod.default_state(other) == str(own) and mod.default_state(env.machine) == str(shared)
     # the same clone gets the same record next time; a different clone gets another
     assert mod.default_state(clone(env, "third")) != str(own)
@@ -754,7 +756,7 @@ def test_non_canonical_checkout_with_no_trusted_helper_skips_the_skill_step(env)
     assert out["problems"] == [] and out["skills"]["link_mode"] == "skipped" and out["skills"]["script"] is None
     assert note in out["notes"]
     r = env.run(repo=other, extra_env=bare, script=lone)  # apply: nothing unresolved, so the state is still recorded
-    assert r.returncode == 0 and env.state.read_text().strip() == env.first and not marker.exists()
+    assert r.returncode == 0 and env.state.read_text().split()[0] == env.first and not marker.exists()
     # the canonical checkout with no helper anywhere is a dependency failure (exit 4 like every other
     # skill-everywhere failure, never 10 which means link drift; Codex on PR 20), no state
     env.state.unlink()
@@ -789,7 +791,7 @@ def test_the_scripts_own_warning_exit_is_not_a_crash(env):
                               "echo 'warning: codex global instructions dangling: x -> y' >&2\nexit 1\n")
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
-    assert env.state.read_text().strip() == env.first
+    assert env.state.read_text().split()[0] == env.first
 
 
 # --- adversary round 4 and Codex P1 on 67bed7e (2026-10-20) ---------------------------------------
@@ -1146,3 +1148,219 @@ def test_skill_everywhere_no_copy_skips_the_grokbot_target_only(tmp_path):
     r = check(SKILL_EVERYWHERE_NO_COPY="1")
     rows = mod_rows(r.stdout)
     assert rows and not any(row[1] == "grokbot" for row in rows) and r.stdout.splitlines()[-1] == "== end", r.stdout
+
+
+FRAG_A = "### Added\n\n- Fragment thing A (#10).\n\n### Fixed\n\n- Fragment fix A\n  wrapped (#11).\n"
+FRAG_B = "### Changed\n\n- Fragment thing B (#12).\n"
+
+
+def test_an_unfolded_fragment_is_listed_by_ade_update(env):  # adversary PR190 r1 A1
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-a.md": FRAG_A, "changelog.d/README.md": "readme, not a fragment\n"})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Unreleased (changelog.d) / Added" in r.stdout and "Fragment thing A (#10)." in r.stdout
+    assert "Unreleased (changelog.d) / Fixed" in r.stdout and "Fragment fix A wrapped (#11)." in r.stdout
+    assert "readme, not a fragment" not in r.stdout
+    assert "3 entries" in r.stdout  # CHANGELOG's "Second thing" plus the two fragment entries
+
+
+def test_a_fragment_already_seen_at_the_base_is_not_listed_again(env):
+    env.state.parent.mkdir(parents=True)
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    env.run()  # applies and records a revision that already carries feat-a
+    env.publish({"changelog.d/feat-b.md": FRAG_B}, message="third")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B (#12)." in r.stdout and "Fragment thing A" not in r.stdout
+
+
+def test_a_fragment_folded_between_base_and_target_shows_once(env):
+    env.state.parent.mkdir(parents=True)
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    env.run()  # recorded with the fragment unfolded
+    folded = CHANGELOG_V2.replace("- First thing (#1).", "- Fragment thing A (#10).\n- First thing (#1).")
+    sh("git", "rm", "-q", "changelog.d/feat-a.md", cwd=env.seed)
+    env.publish({"CHANGELOG.md": folded}, message="fold")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing A" not in r.stdout  # run 1 already showed it as a fragment; the fold is not news
+    assert "0 entries" in r.stdout
+
+
+def test_a_fragment_added_and_folded_between_base_and_target_shows_once_through_changelog(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    sh("git", "rm", "-q", "changelog.d/feat-a.md", cwd=env.seed)
+    folded = CHANGELOG_V2.replace("- First thing (#1).", "- Fragment thing A (#10).\n- First thing (#1).")
+    env.publish({"CHANGELOG.md": folded}, message="fold")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("Fragment thing A (#10).") == 1 and "changelog.d" not in r.stdout
+
+
+def test_an_entry_in_both_a_fragment_and_changelog_at_the_target_shows_once(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    both = CHANGELOG_V2.replace("- First thing (#1).", "- Fragment thing B (#12).\n- First thing (#1).")
+    env.publish({"CHANGELOG.md": both, "changelog.d/feat-b.md": FRAG_B})
+    r = env.run()
+    assert r.stdout.count("Fragment thing B (#12).") == 1
+
+
+def test_every_unfolded_fragment_is_listed_when_no_revision_is_recorded(env):
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing A (#10)." in r.stdout
+
+
+def test_an_invalid_fragment_is_skipped_not_a_crash(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/bad.md": "### Added\n\n- no number\n", "changelog.d/feat-b.md": FRAG_B})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B (#12)." in r.stdout and "no number" not in r.stdout
+
+
+def test_a_fragment_older_than_14_days_on_the_target_is_warned_about(env, monkeypatch):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+    env.publish({"changelog.d/old-one.md": FRAG_A})
+    monkeypatch.delenv("GIT_COMMITTER_DATE")
+    env.publish({"changelog.d/new-one.md": FRAG_B}, message="third")
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    stale = json.loads(r.stdout)["changelog"]["stale_fragments"]
+    assert [s["name"] for s in stale] == ["old-one.md"] and stale[0]["age_days"] > 14
+    text = env.run().stdout
+    assert "older than 14 days" in text and "old-one.md" in text and "new-one.md (" not in text
+
+
+def test_no_stale_warning_without_old_fragments(env):
+    env.state.parent.mkdir(parents=True)
+    env.publish({"changelog.d/new-one.md": FRAG_B})
+    r = env.run()
+    assert "older than" not in r.stdout
+
+
+def test_fragments_are_not_listed_when_no_changelog_fold_sits_beside_ade_update(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    (env.bin / "changelog-fold").unlink()
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B" not in r.stdout and "fragments not listed" in r.stdout
+
+
+def test_a_changelog_fold_that_does_not_load_is_a_note_not_a_crash(env):  # adversary PR190 r2 A3
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    (env.bin / "changelog-fold").write_text("def broken(:\n")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Traceback" not in r.stderr and "does not load" in r.stdout
+    assert "Second thing" in r.stdout and env.state.read_text().split()[0] == env.head(env.machine)  # the rest still ran
+
+
+def test_fragment_names_with_a_space_a_newline_or_non_ascii_are_read_exactly(env):  # Codex P2 on 05beee8 (ls-tree -z)
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    names = {"feat with space.md": "Spaced", "feat\nnewline.md": "Newlined", "feat-\u00e9.md": "Accented"}
+    env.publish({f"changelog.d/{n}": f"### Added\n\n- {w} fragment (#{20 + i}).\n" for i, (n, w) in enumerate(names.items())})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    for w in names.values():
+        assert f"{w} fragment" in r.stdout, r.stdout
+    assert "4 entries" in r.stdout  # CHANGELOG's "Second thing" plus the three fragments
+
+
+def test_loading_changelog_fold_writes_no_bytecode_and_ignores_a_stale_cache(env):  # Codex P2 on 450a4ba, bin/ade-update:202-205 [INFERENCE: finding file absent]
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B (#12)." in r.stdout
+    assert not (env.bin / "__pycache__").exists()
+
+
+def _poisoned_copy(env, where, marker):
+    """A copy of ade-update with a changelog-fold beside it whose module body touches `marker`."""
+    (where / "bin").mkdir(parents=True, exist_ok=True)
+    shutil.copy(SCRIPT, where / "bin" / "ade-update")
+    (where / "bin" / "changelog-fold").write_text(f"open({str(marker)!r}, 'w').close()\n" + FOLD.read_text())
+    return where / "bin" / "ade-update"
+
+
+def test_a_modified_changelog_fold_inside_a_non_canonical_checkout_is_never_executed(env):  # Codex P1 on 3bd729f
+    other = clone(env, "other")
+    marker = env.tmp / "pwned"
+    script = _poisoned_copy(env, other, marker)
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    sh("git", "-C", str(other), "pull", "-q")
+    r = env.run("--check", repo=other, script=script)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not marker.exists()
+    assert "not the canonical checkout; not executed" in r.stdout and "Fragment thing B" not in r.stdout
+
+
+def test_nothing_is_executed_before_the_repository_is_validated(env):
+    notrepo = env.tmp / "notrepo"
+    marker = env.tmp / "pwned"
+    script = _poisoned_copy(env, notrepo, marker)
+    r = env.run("--check", repo=notrepo, script=script)
+    assert r.returncode == 4 and not marker.exists()
+
+
+def test_the_canonical_checkouts_own_changelog_fold_still_loads(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    marker = env.tmp / "ran"
+    script = _poisoned_copy(env, env.machine, marker)  # inside the canonical checkout: already-running code
+    r = env.run(script=script)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert marker.exists() and "Fragment thing B (#12)." in r.stdout
+
+
+def test_an_install_upgraded_by_the_fragment_unaware_updater_still_gets_its_fragments(env):  # Codex P2 on 3bd729f
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    sh("git", "pull", "-q", cwd=env.machine)
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.head(env.machine) + "\n")  # what the old updater records: the new head, no marker
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing A (#10)." in r.stdout and "already at the recorded" not in r.stdout
+    assert env.state.read_text().split()[1:] == ["fragments-v1"]
+    r = env.run()  # the marked record is believed from now on
+    assert "Fragment thing A" not in r.stdout and "already at the recorded" in r.stdout
+
+
+def test_an_unmarked_record_does_not_suppress_the_fold_of_a_fragment_it_never_showed(env):
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    sh("git", "pull", "-q", cwd=env.machine)
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.head(env.machine) + "\n")
+    sh("git", "rm", "-q", "changelog.d/feat-a.md", cwd=env.seed)
+    env.publish({"CHANGELOG.md": CHANGELOG_V2.replace("- First thing (#1).", "- Fragment thing A (#10).\n- First thing (#1).")}, message="fold")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("Fragment thing A (#10).") == 1  # never seen as a fragment, so the fold is its first showing
+
+
+def test_a_run_that_could_not_list_fragments_records_no_marker(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    (env.bin / "changelog-fold").unlink()
+    assert env.run().returncode == 0
+    assert env.state.read_text().split() == [env.head(env.machine)]
