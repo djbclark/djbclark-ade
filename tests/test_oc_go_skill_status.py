@@ -324,6 +324,19 @@ def test_go_console_errors_attribute_themselves_without_a_provider_field(state, 
     assert f"BROKEN NOW: {kind}" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("context", ["model=anthropic/claude", "provider=anthropic",
+                                        "provider=anthropic model=opencode-go/test"])
+@pytest.mark.parametrize("cause,kind", [("Go usage limit exceeded", "go-limit"), ("GoUsageLimitError", "go-429"),
+                                        ("Insufficient account funds", "no-funds"),
+                                        ("requires Global regions", "region")])
+def test_go_wall_in_a_record_naming_a_foreign_field_still_reads_as_broken(state, capsys, context, cause, kind):
+    # A fallback record can carry another provider's model before cause=; the Go/Console text attributes itself,
+    # so the wall must not be printed (foreign) with exit 0, a silent quota outage.
+    state.LOG.write_text(f'timestamp={ts()} level=ERROR {context} cause="AI.Error: {cause}"')
+    assert state.main([]) == 2
+    assert f"BROKEN NOW: {kind}" in capsys.readouterr().out
+
+
 def test_mixed_provider_only_open_code_failure_drives_advice(state, capsys):
     state.LOG.write_text(
         f'timestamp={ts()} level=ERROR provider=anthropic cause="AI.Error: invalid api key"\n'
