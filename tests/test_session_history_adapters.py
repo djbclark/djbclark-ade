@@ -487,6 +487,34 @@ class SessionFindAllTests(unittest.TestCase):
         self.assertEqual(got["S-done"]["finished"], "done")
         self.assertEqual(got["S-old"]["status"], "ended")
 
+    def test_a_failed_history_search_is_exit_2_not_no_hits(self) -> None:
+        spec = importlib.util.spec_from_file_location("t_session_find_fail", SF / "session-find.py")
+        sf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sf)
+        fleet_row = {"agent": "codex", "id": "L9", "sid": "S9", "status": "idle", "cwd": "/w", "title": "okapi work", "name": "n9",
+                     "where": "", "focus": "", "finished": ""}
+
+        def run(child, rows):  # noqa: ANN001
+            with mock.patch.object(sf, "live_sessions", return_value=[]), mock.patch.object(sf.subprocess, "run", child), \
+                    mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: rows)}), \
+                    mock.patch.object(sys, "argv", ["session-find.py", "--all", "--", "okapi"]), \
+                    mock.patch("builtins.print"), mock.patch("sys.stderr"):
+                return sf.main()
+
+        def broken(argv, **kw):  # noqa: ANN001
+            return subprocess.CompletedProcess(argv, 2, "", "index corrupt")
+
+        def timeout(argv, **kw):  # noqa: ANN001
+            raise subprocess.TimeoutExpired(argv, 600)
+
+        def empty(argv, **kw):  # noqa: ANN001
+            return subprocess.CompletedProcess(argv, 1, "[]", "")
+
+        self.assertEqual(run(broken, []), 2)
+        self.assertEqual(run(timeout, []), 2)
+        self.assertEqual(run(empty, []), 1)             # a completed search with no hits stays 1
+        self.assertEqual(run(broken, [fleet_row]), 0)   # a fleet hit is still a hit
+
 
 if __name__ == "__main__":
     unittest.main()

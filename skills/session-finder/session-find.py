@@ -214,6 +214,7 @@ def main() -> int:
                          "live": True, "self": s.get("self", False), "agent": s["agent"], "finished": s.get("finished", "")})
     except Exception as e:  # fleet is optional here
         print(f"fleet unavailable: {e}", file=sys.stderr)
+    history_failed = False
     if a.all and kws:
         # ended sessions of every agent from the full-text history (session-history.py's SQLite
         # index, which it brings up to date first); the older per-session JSON keyword index
@@ -235,6 +236,7 @@ def main() -> int:
                 raise ValueError("unexpected JSON from session-history.py")
         except (subprocess.SubprocessError, ValueError) as e:
             print(f"history search failed: {e}", file=sys.stderr)
+            history_failed = True
             found = []
         # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
         found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
@@ -273,7 +275,8 @@ def main() -> int:
                 print(f"       resume: {r['resume']}")
         if kws and not hits:
             print("no live-session hit; handoff files:", handoff_hits(kws) or "none")
-    return 0 if hits else 1
+    # 1 means "searched, nothing found": a history search that could not run must not look like that
+    return 0 if hits else 2 if history_failed else 1
 
 
 if __name__ == "__main__":
