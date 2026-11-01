@@ -201,3 +201,76 @@ def test_install_refuses_a_cow_pasture(cbw, tmp_path, monkeypatch, capsys):
         ade = None
     assert cbw.cmd_install(A()) == 2
     assert not calls and "cow pasture" in capsys.readouterr().err
+
+
+def _window(cbw, monkeypatch, first, second):
+    snaps = iter([first, second])
+    monkeypatch.setattr(cbw, "read_ps", lambda: next(snaps))
+    monkeypatch.setattr(cbw, "WINDOW_S", 0)
+    monkeypatch.setattr(cbw.time, "monotonic", iter([0.0, 3.0]).__next__)
+    return cbw.sample()
+
+
+def test_an_exec_keeps_the_cpu_baseline_and_a_reused_pid_does_not(cbw, monkeypatch):
+    """Same pid + same start time is the same process even after exec changed its command: only the window's CPU counts.
+    A reused pid (other start time) has no baseline."""
+    root = {"pid": 1, "ppid": 0, "rss_mb": 1, "cpu_s": 0.0, "start": "Sun Nov  1 09:00:00 2026",
+            "cmd": "/A/CodexBar.app/Contents/MacOS/CodexBar"}
+    before = {1: root, 2: {"pid": 2, "ppid": 1, "rss_mb": 1, "cpu_s": 600.0, "start": "Sun Nov  1 09:00:01 2026", "cmd": "sh -c probe"}}
+    execd = {1: root, 2: {"pid": 2, "ppid": 1, "rss_mb": 1, "cpu_s": 600.3, "start": "Sun Nov  1 09:00:01 2026", "cmd": "node probe.js"}}
+    rec = _window(cbw, monkeypatch, before, execd)
+    assert rec["total_pct"] == pytest.approx(10.0) and not rec["spike"]  # 0.3 s over 3 s, not 600 s
+    reused = {1: root, 2: {"pid": 2, "ppid": 1, "rss_mb": 1, "cpu_s": 0.3, "start": "Sun Nov  1 12:00:00 2026", "cmd": "node probe.js"}}
+    rec = _window(cbw, monkeypatch, before, reused)
+    assert rec["total_pct"] == pytest.approx(10.0)  # no baseline from the old process: its 600 s are not subtracted
+
+
+def test_read_ps_parses_start_time_and_command(cbw, monkeypatch):
+    import subprocess
+    out = ("  101     1  2048   1:02.50 Sun Nov  1 10:04:45 2026     /A/CodexBar.app/Contents/MacOS/CodexBar --port 1\n"
+           "  102   101  1024   0:00.10 Sun Nov  1 10:05:00 2026     node probe.js\n")
+    monkeypatch.setattr(cbw.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""))
+    procs = cbw.read_ps()
+    assert procs[101]["start"] == "Sun Nov 1 10:04:45 2026" and procs[101]["cpu_s"] == pytest.approx(62.5)
+    assert procs[101]["cmd"] == "/A/CodexBar.app/Contents/MacOS/CodexBar --port 1" and procs[102]["ppid"] == 101
+
+
+def _install(cbw, tmp_path, monkeypatch, ade_name):
+    import plistlib
+    monkeypatch.setattr(cbw, "HOME", tmp_path / "home")  # no ~/Library/LaunchAgents yet
+    ade = tmp_path / ade_name
+    (ade / "bin").mkdir(parents=True)
+    (ade / ".git").mkdir()
+    (ade / "bin" / "codexbar-cpu-watch").write_text("")
+    monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
+    calls = []
+
+    def run(args, **k):
+        import subprocess
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    monkeypatch.setattr(cbw.subprocess, "run", run)
+
+    class A:
+        cmd = "install"
+    A.ade = str(ade)
+    rc = cbw.cmd_install(A())
+    dest = tmp_path / "home" / "Library/LaunchAgents" / cbw.PLIST.name
+    return rc, calls, dest, ade, plistlib
+
+
+def test_install_writes_a_valid_plist_for_special_paths_and_passes_the_state_dir(cbw, tmp_path, monkeypatch):
+    rc, calls, dest, ade, plistlib = _install(cbw, tmp_path, monkeypatch, "a&b <c> 'd'")
+    assert rc == 0 and dest.exists()  # LaunchAgents created
+    doc = plistlib.loads(dest.read_bytes())
+    assert doc["ProgramArguments"][0] == f"{ade.resolve()}/bin/codexbar-cpu-watch"
+    assert doc["EnvironmentVariables"]["CBW_STATE_DIR"] == str(cbw.STATE_DIR)
+    assert doc["StandardOutPath"] == f"{cbw.STATE_DIR}/launchd.out"
+    assert [c[1] for c in calls] == ["bootout", "bootstrap"]
+
+
+def test_install_changes_nothing_when_the_plist_cannot_be_built(cbw, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cbw, "PLIST", tmp_path / "missing.plist")
+    rc, calls, dest, _, _ = _install(cbw, tmp_path, monkeypatch, "ade")
+    assert rc == 2 and not calls and not dest.exists()  # the old job was never booted out
+    assert "nothing changed" in capsys.readouterr().err

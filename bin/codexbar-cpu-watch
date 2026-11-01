@@ -35,6 +35,7 @@ import argparse
 import fcntl
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -104,18 +105,20 @@ def flag_names(cmd):
 
 
 def read_ps():
-    r = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,time=,command="], capture_output=True, text=True,
+    """pid -> {ppid, rss_mb, cpu_s, start, cmd}. `start` (ps lstart, 5 tokens) identifies a process across two reads:
+    the same pid with the same start is the same process even after an exec changed its command line."""
+    r = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,time=,lstart=,command="], capture_output=True, text=True,
                        errors="replace", timeout=30)
     if r.returncode != 0 or not r.stdout.strip():
         raise RuntimeError(f"ps failed (rc={r.returncode})")
     procs = {}
     for line in r.stdout.splitlines():
-        f = line.split(None, 4)
-        if len(f) < 5:
+        f = line.split(None, 9)
+        if len(f) < 10:
             continue
         try:
             procs[int(f[0])] = {"pid": int(f[0]), "ppid": int(f[1]), "rss_mb": int(f[2]) // 1024,
-                                "cpu_s": cputime_s(f[3]), "cmd": f[4]}
+                                "cpu_s": cputime_s(f[3]), "start": " ".join(f[4:9]), "cmd": f[9]}
         except ValueError:
             continue
     return procs
@@ -151,8 +154,9 @@ def sample():
     for p in pids:
         if p not in b:
             continue  # exited inside the window: not counted (module docstring)
-        # A process born inside the window has no first read: its whole CPU time came inside it.
-        before = a[p]["cpu_s"] if p in a and a[p]["cmd"] == b[p]["cmd"] else 0.0
+        # Same pid and same start time = same process, even if it exec'd a new command; a reused pid (other start)
+        # or one born inside the window has no first read: its whole CPU time came inside it.
+        before = a[p]["cpu_s"] if p in a and a[p].get("start") == b[p].get("start") else 0.0
         pct = max(0.0, (b[p]["cpu_s"] - before) / dt * 100)
         rows.append({"pid": p, "ppid": b[p]["ppid"], "pct": round(pct, 1), "rss_mb": b[p]["rss_mb"], "cmd": b[p]["cmd"]})
     rows.sort(key=lambda r: -r["pct"])
@@ -281,6 +285,27 @@ def disposable_checkout(path):
     return (path / ".git").is_file() or path == cow or cow in path.parents
 
 
+def render_plist(ade):
+    """The LaunchAgent plist as bytes: the tracked template with @ADE@/@STATE@ filled in on the PARSED values, so a path
+    with `&`, `<` or a quote stays valid XML, plus CBW_STATE_DIR in the job's environment so scheduled samples go
+    where `install` was told to put them (the template's comments are dropped)."""
+    tpl = plistlib.loads(PLIST.read_bytes())
+
+    def fill(v):
+        if isinstance(v, str):
+            return v.replace("@ADE@", str(ade)).replace("@STATE@", str(STATE_DIR))
+        if isinstance(v, list):
+            return [fill(x) for x in v]
+        if isinstance(v, dict):
+            return {k: fill(x) for k, x in v.items()}
+        return v
+    doc = fill(tpl)
+    doc.setdefault("EnvironmentVariables", {})["CBW_STATE_DIR"] = str(STATE_DIR)
+    data = plistlib.dumps(doc)
+    plistlib.loads(data)  # round-trip check before anything is replaced
+    return data
+
+
 def cmd_install(a):
     if shutil.which("launchctl") is None:
         print("codexbar-cpu-watch: install/uninstall need launchd (macOS)", file=sys.stderr)
@@ -300,10 +325,18 @@ def cmd_install(a):
     if not (ade / "bin" / "codexbar-cpu-watch").is_file():
         print(f"codexbar-cpu-watch: {ade}/bin/codexbar-cpu-watch not found", file=sys.stderr)
         return 2
+    # Everything that can fail happens before the old job is unloaded: build and validate the plist (plistlib
+    # escapes paths), create the directories, write the temp file.
+    try:
+        data = render_plist(ade)
+        ensure_private_dir()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_bytes(data)
+    except (OSError, ValueError) as e:
+        print(f"codexbar-cpu-watch: cannot write the plist, nothing changed: {e}", file=sys.stderr)
+        return 2
     subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
-    ensure_private_dir()
-    tmp = dest.with_suffix(".tmp")
-    tmp.write_text(PLIST.read_text().replace("@ADE@", str(ade)).replace("@STATE@", str(STATE_DIR)))
     tmp.replace(dest)
     r = subprocess.run(["launchctl", "bootstrap", dom, str(dest)], capture_output=True, text=True)
     print(f"installed {dest} (script {ade / 'bin/codexbar-cpu-watch'})" if r.returncode == 0 else f"bootstrap failed: {r.stderr.strip()}")
