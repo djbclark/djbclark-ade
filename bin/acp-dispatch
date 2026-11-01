@@ -389,6 +389,7 @@ Exit 0 is still not success: verify the outcome (diff, tests, the report's conte
 from __future__ import annotations
 
 import argparse
+import atexit
 import fcntl
 import hashlib
 import json
@@ -621,6 +622,8 @@ LOAD_WAIT_DEFAULT = 1800       # seconds the load gate may wait (--load-wait / A
 LOAD_GATE_EXIT = 75            # EX_TEMPFAIL, what `load-watch admit` returns when still too hot
 LOAD_GATE_SUBPROCESS_GRACE = 180   # seconds past --load-wait before a hung load-watch is abandoned (and the gate fails open)
 LOAD_RETRY_TEXT = "machine too hot; retry later"
+RESERVATION_LOOK_S = 5.0          # how often a running dispatch looks for its countable acp-run process
+RESERVATION_MAX_HOLD_S = 600.0    # ...and how long it keeps the agent reservation if it never finds one
 LOAD_SCRUB_PREFIX = "LW_"      # every LW_* variable is dropped from load-watch's environment: its test hooks
                                # and its float()-at-import settings (LW_LOAD_PER_CORE=abc crashed it, failing open)
 LOG_ACTIVE_SEC = 5 * 60
@@ -3122,6 +3125,8 @@ def release_load_reservation(rec: dict | None = None) -> None:
     the one recorded in the job record's `load_gate` (a separate runner for an inline-admitted dispatch). Best effort:
     an unreleased reservation only holds capacity until its expiry (LW_RESERVE_S), which errs toward waiting."""
     rid, path = _LOAD_RESERVATION.pop("id", None), _LOAD_RESERVATION.pop("path", None)
+    if rid is None and rec is None:
+        return
     if not rid and rec:
         gate = rec.get("load_gate")
         rid = gate.get("reservation") if isinstance(gate, dict) else None
@@ -3133,6 +3138,31 @@ def release_load_reservation(rec: dict | None = None) -> None:
                        env={k: v for k, v in os.environ.items() if not k.startswith(LOAD_SCRUB_PREFIX)})
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def agent_countable(root_pid: int) -> bool:
+    """True once the process tree under `root_pid` holds the `acp-run` process load-watch counts (the `uv run --script`
+    wrapper `acp-run`'s shebang starts is not it): from then on the live count includes this agent."""
+    try:
+        r = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    kids: dict[int, list[tuple[int, list[str]]]] = {}
+    for ln in r.stdout.splitlines():
+        parts = ln.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            kids.setdefault(int(parts[1]), []).append((int(parts[0]), parts[2].split()))
+    todo, seen = [root_pid], {root_pid}
+    while todo:
+        for pid, argv in kids.get(todo.pop(), []):
+            if pid in seen:
+                continue
+            seen.add(pid)
+            todo.append(pid)
+            if (os.path.basename(argv[0]) != "uv"
+                    and any(os.path.basename(x) == "acp-run" for x in argv[:6])):
+                return True
+    return False
 
 
 def load_gate(wait: int, path: str | None = None, knobs: dict | None = None) -> tuple[bool, dict | None, str]:
@@ -3175,6 +3205,9 @@ def load_gate(wait: int, path: str | None = None, knobs: dict | None = None) -> 
                            f"({proc.stdout.strip()[:80]!r})")
         if info.get("reservation"):
             _LOAD_RESERVATION.update(id=info["reservation"], path=path)
+            if not _LOAD_RESERVATION.get("atexit"):   # every exit after admission (die(), an exception) gives it back
+                _LOAD_RESERVATION["atexit"] = "1"
+                atexit.register(release_load_reservation)
         return True, info, "ok"
     if proc.returncode == LOAD_GATE_EXIT:
         if info is None:
@@ -3962,7 +3995,11 @@ def execute_record(record: Path, tee: bool = False) -> int:
         proc = subprocess.Popen(shlex.split(rec["cmd"]), stdout=subprocess.PIPE if tee else fo,
                                 stderr=fe, stdin=subprocess.DEVNULL, text=tee)
         rec = update_record(record, pid=proc.pid, pid_start=proc_start(proc.pid), load_gate_pending=False)
-        release_load_reservation(rec)   # the live agent count takes over from the reservation
+        # the reservation is kept until the agent is COUNTABLE (acp-run under the uv wrapper, which can take long to
+        # start), then released so the live count takes over; also released when the agent ends, whichever is first
+        gate_rec = rec.get("load_gate")
+        held = bool(_LOAD_RESERVATION.get("id") or (isinstance(gate_rec, dict) and gate_rec.get("reservation")))
+        spawned_at, last_look = time.time(), 0.0
 
         def on_signal(signum, _frame):
             # a shutdown or launchd unloading the job: acp-run cancels the turn and stops the
@@ -3997,12 +4034,19 @@ def execute_record(record: Path, tee: bool = False) -> int:
                 except subprocess.TimeoutExpired:
                     if got and time.time() - got["at"] > SIGNAL_GRACE:
                         proc.kill()
+                    if held and time.time() - last_look >= RESERVATION_LOOK_S:
+                        last_look = time.time()
+                        if agent_countable(proc.pid) or last_look - spawned_at > RESERVATION_MAX_HOLD_S:
+                            release_load_reservation(rec)
+                            held = False
         except KeyboardInterrupt:
             proc.terminate()
             rc = proc.wait()
         finally:
             for s, handler in old.items():
                 signal.signal(s, handler)
+            if held:
+                release_load_reservation(rec)
         if copier:
             copier.join()
     os.replace(rec["final"] + ".tmp", rec["final"])

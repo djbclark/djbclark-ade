@@ -125,8 +125,9 @@ with the cap not yet reached. The count is one `ps`, an exact argv match of the 
 **Reservations:** an admission under the cap is recorded in `~/.local/state/load-watch/agent-reservations.json` (under an
 flock, the live `acp-run` count re-read inside the lock) and counted with the live agents until it is **released** or expires, so
 dispatchers that read 13 of 14 at the same moment cannot all be admitted, and a runner queued in `wait_for_capacity` (up to
-900 s) still holds its place. `admit --json` prints the `reservation` id; acp-dispatch runs `load-watch release ID` when its
-agent is spawned (the entry then lives 30 s more, until acp-run shows in `ps`) or when the launch is refused after admission.
+900 s) still holds its place. `admit --json` prints the `reservation` id; acp-dispatch runs `load-watch release ID` once the
+agent is countable (its process tree holds the `acp-run` process, not just the `uv run --script` wrapper; checked every 5 s, at most
+10 min; the entry then lives 30 s more), when the agent ends, or on any exit after admission (`die()`, a refusal, an exception).
 `LW_RESERVE_S` (1200 s, 0 = off) is only the backstop for a dispatcher that died; `--no-reserve` makes a human's
 `admit --max-agents` a pure check. acp-dispatch validates the knobs once (a churn or pageins limit of 0 is ignored with a
 warning, since admit exits 2 on it) and records them in the job record (`load_knobs`), so a `--detach --no-wait` runner under

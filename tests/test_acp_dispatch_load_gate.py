@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import textwrap
 import time
 import unittest
@@ -155,6 +156,37 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents", "release r-1"])
         self.assertEqual(self.record()["load_gate"]["reservation"], "r-1")
+
+    def test_a_die_after_admission_releases_the_reservation(self):
+        """Codex P2 on PR 210: refuse_kind() and every other die() after the gate used to leave the reservation to expire."""
+        ok = '{"status": "ok", "load1": 2.4, "per_core": 0.3, "cores": 8, "max_per_core": 1.5, "waited_s": 1, "reservation": "r-6"}'
+        script = Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"
+        code = ("import importlib.machinery, importlib.util, sys\n"
+                "l = importlib.machinery.SourceFileLoader('m', sys.argv[1]); sp = importlib.util.spec_from_loader('m', l)\n"
+                "m = importlib.util.module_from_spec(sp); l.exec_module(m)\n"
+                "assert m.load_gate(0, sys.argv[2])[0]\n"
+                "m.die('post-admission refusal')\n")
+        r = subprocess.run([sys.executable, "-c", code, str(script), str(self.lw)], capture_output=True, text=True,
+                           env={**os.environ, **self.gate_env(0, ok)})
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.calls(), ["admit --wait 0 --json --max-agents", "release r-6"])
+
+    def test_the_reservation_is_kept_until_the_agent_is_countable(self):
+        """Codex P2 on PR 210: a slow `uv run --script` start must not leave neither a reservation nor a counted agent."""
+        mod = self.load_module()
+        ps_lines = ["  10   1 /usr/bin/python3 /x/acp-dispatch execute job.json",
+                    "  11  10 /opt/uv run --quiet --script /Users/x/.local/bin/acp-run omp -C /w"]
+        orig = mod.subprocess.run
+        try:
+            mod.subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "\n".join(ps_lines) + "\n", "")
+            self.assertFalse(mod.agent_countable(10))                       # only the uv wrapper so far
+            ps_lines.append("  12  11 /Users/x/.cache/uv/environments-v2/acp-run-1/bin/python /Users/x/.local/bin/acp-run omp -C /w")
+            self.assertTrue(mod.agent_countable(10))
+            self.assertFalse(mod.agent_countable(99))                        # another tree's acp-run is not ours
+            mod.subprocess.run = lambda argv, **kw: (_ for _ in ()).throw(OSError("no ps"))
+            self.assertFalse(mod.agent_countable(10))
+        finally:
+            mod.subprocess.run = orig
 
     def test_release_uses_this_processes_admission_else_the_one_in_the_record(self):
         mod = self.load_module()
