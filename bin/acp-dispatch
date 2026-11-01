@@ -90,7 +90,7 @@ docs/dispatch-footer.md, and are appended to every brief.
 Contract (the same for ACP agents run here and for Claude Code Agent-tool sub-agents, which
 get the footer pasted into their prompt because the Agent tool cannot be driven from a script):
     report   $OUT/<name>-report.md     the deliverable; first line `STATUS: working` or
-                                        `BLOCKED: <question>`; last line `DONE`
+                                        `BLOCKED: <question>`; last line `DONE` (optionally followed by one `AC_DONE:` verdict line)
     done     <report>.done              touched last; waiters watch this, never the report
     record   $OUT/jobs/<name>.json      who launched it, every path, the exact waiter to re-arm
     $OUT     ~/.local/state/bigteam/<task>/ (default) or --out; never the session scratchpad,
@@ -2393,9 +2393,13 @@ MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", 
                                       "oct", "nov", "dec"), start=1)}
 MONTH_DATE_RE = re.compile(
     r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})"
-    r"(?:,?\s+(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\.?)?", re.IGNORECASE)
+    r"(?:,?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\.?)?", re.IGNORECASE)
 ISO_RESET_RE = re.compile(
     r"quotaResetTimeStamp:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))")
+# Copilot's 402 JSON carries the reset as a relative delay: `"retry_after_ms":726841922` (month end,
+# microsoft/vscode#343806). Inside a session-log event the same JSON is string-escaped
+# (`\"retry_after_ms\":60000`, quota_log_tail passes raw JSONL), so quotes may carry backslashes.
+RETRY_AFTER_MS_RE = re.compile(r"retry_after_ms(?:\\*\")?\s*[:=]\s*\\*\"?(\d{1,12})\b")
 PLAIN_RESET_RE = re.compile(
     r"limit will reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})(?:\s*(Z|[+-]\d{2}:?\d{2}))?", re.IGNORECASE)
 DURATION_UNITS = {
@@ -2465,6 +2469,9 @@ def parse_reset_datetime(text: str, when_match: re.Match | None,
     m = ISO_RESET_RE.search(text)
     if m:
         return datetime.fromisoformat(m.group(1))
+    m = RETRY_AFTER_MS_RE.search(text)
+    if m:
+        return now + timedelta(milliseconds=int(m.group(1)))
     m = PLAIN_RESET_RE.search(text)
     if m:
         stamped = _plain_reset_stamp(m.group(1) + (m.group(2) or ""), agent)
@@ -2477,6 +2484,8 @@ def parse_reset_datetime(text: str, when_match: re.Match | None,
     dated = _month_date(val)
     if dated:
         return dated
+    if prep == "on":
+        return None                  # `resets on November 1 at 12:00 AM` has no year: never the clock branch
     if prep == "at" or re.search(r"\b\d{1,2}(?::\d{2})?\s*[AP]M\b", val, re.IGNORECASE):
         m_clock = re.search(r"(\d{1,2})(?::(\d{2}))?\s*([AP]M)?", val, re.IGNORECASE)
         if m_clock:
@@ -2502,6 +2511,9 @@ def parse_reset_for_aiuse(text: str, when_match: re.Match | None,
     m_ts = ISO_RESET_RE.search(text)
     if m_ts:
         return "--resets-at", m_ts.group(1)
+    m_ms = RETRY_AFTER_MS_RE.search(text)
+    if m_ms:
+        return "--resets-in", f"{int(m_ms.group(1)) // 1000}s"
 
     m_plain = re.search(r"limit will reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\s*[A-Z]+|Z|[+-]\d{2}:?\d{2})?)", text, re.IGNORECASE)
     if m_plain:
@@ -2519,6 +2531,8 @@ def parse_reset_for_aiuse(text: str, when_match: re.Match | None,
     dated = _month_date(val)
     if dated:
         return "--resets-at", dated.isoformat()
+    if prep == "on":
+        return None
 
     # 2. Clock time (e.g. "at 8:51 PM", "at 20:51")
     if prep == "at" or re.search(r"\b\d{1,2}(?::\d{2})?\s*[AP]M\b", val, re.IGNORECASE):
@@ -2844,6 +2858,15 @@ def schedule_auto_resume(record_path: Path, rec: dict, stderr_text: str) -> None
                        f"{max_wait:g} h away; reroute instead of waiting")
         rec["auto_resume"]["far_reset"] = True
         return
+    if when is None and rec.get("agent") == "copilot":
+        # 2026-11-01 (PR 212 F1): Copilot's 402 `You have exceeded your monthly quota` names no reset
+        # and aiuse has no copilot pool; the quota resets monthly (retry_after_ms was 726841922 ms,
+        # 8.4 days, on 2026-10-23), so a 30-minute in-place resume only burns attempts on the same
+        # exhausted account. Treat it as a far reset: reroute.
+        off("skipped", "copilot quota stop names no reset time and Copilot quotas reset monthly; "
+                       "reroute instead of waiting")
+        rec["auto_resume"]["far_reset"] = True
+        return
     if when is None:
         when, source = now + timedelta(seconds=AUTO_RESUME_BACKOFF), "backoff"
     not_before = max(when + timedelta(seconds=AUTO_RESUME_MARGIN), now + timedelta(seconds=60))
@@ -2992,16 +3015,44 @@ def auth_hint(agent: str) -> str:
     return AUTH_HINTS.get(agent, f"{agent}: stored login expired, log in again")
 
 
+# GitHub Copilot's quota stops (2026-11-01), lower-cased substrings, each with its source:
+#  - the CLI's 402 `{"message":"You have no quota","code":"quota_exceeded"}` and "Quota exceeded.
+#    Upgrade to increase your limit" (github/copilot-cli#3431);
+#  - the current 402 `You have exceeded your monthly quota` and `{"errorType":"quota",...,
+#    "statusCode":402,"errorCode":"quota_exceeded"}` (microsoft/vscode#343806, 2026-10-23); seen live
+#    2026-11-01 as `Error: You have exceeded your monthly quota (Request ID: ...)` (bigteam fix-get);
+#  - premium-request billing "You have exceeded your premium request allowance/limit" (community
+#    discussions 165869, 158775);
+#  - the weekly cap "You've reached your weekly rate limit ... reset on April 19, 2026 at 9:00 PM"
+#    (copilot-cli#2742).
+# PROVISIONAL (usage-based billing, since 2026-06-01; the docs say only "If you exhaust your AI
+# credits" and the CLI's exact strings are unpublished): the `ai credits` phrases below. Each term
+# names the resource, so a bare "premium request" or "ai credits" (docs, code, agent text) never matches.
+COPILOT_QUOTA_TERMS = (
+    "you have no quota", "quota_exceeded", "quota exceeded. upgrade", "exceeded your monthly quota",
+    '"errortype":"quota"',
+    "exceeded your premium request", "premium request allowance", "premium request limit",
+    "weekly rate limit",
+    "used all of your ai credits", "exhausted your ai credits", "out of ai credits",
+    "ai credits are exhausted",
+)
+
+
 def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tuple[str | None, re.Match | None]:
     """Classify errors acp-run does not yet classify, including zcode 1310."""
     low = text.lower()
+    # the same error as a JSON string inside a session-log event has escaped quotes (`\"errortype\":
+    # \"quota\"`): match the terms against the unescaped text too
+    unescaped = re.sub(r'"\s*:\s*"', '":"', re.sub(r'\\+"', '"', low))   # and `"errortype": "quota"`
     # "Refreshes in 6 days and 4 hours" is agy's weekly-cap phrasing (2026-10-18) and plays the
     # same role as "Resets in"; both carry the when-phrase the reset parsers read.
-    when = re.search(r"(?:try again|resets?|refresh(?:es)?|retry|limit will reset) (at|in|after) ([^\n.\"'\\]{1,64})",
-                     text, re.IGNORECASE)
+    when = re.search(r"(?:try again|resets?|refresh(?:es)?|retry|limit will reset) "
+                     r"(at|in|after|on(?= (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)))"
+                     r" ([^\n.\"'\\]{1,64})", text, re.IGNORECASE)
     quota_terms = ("limit exhausted", "usage limit", "quota exhausted", "resource_exhausted",
-                   "individual quota reached", "rate limit exceeded", "insufficient quota")
-    if "[1310]" in low or any(term in low for term in quota_terms):
+                   "individual quota reached", "rate limit exceeded", "insufficient quota",
+                   *COPILOT_QUOTA_TERMS)
+    if "[1310]" in low or any(term in low or term in unescaped for term in quota_terms):
         return "quota", when
     # A stored login the agent cannot refresh: not transient, not an outage, and no retry or
     # reroute fixes it; the operator must log in again. zcode's z.ai coding-plan token exchange
@@ -3371,6 +3422,13 @@ def exit0_quota_note(rec: dict) -> tuple[str, str] | None:
 
 # ---------------------------------------------------------------- classify
 
+def report_finished(lines: list[str]) -> bool:
+    """Completion shape shared by classification and recovered-final-message delivery."""
+    nonblank = [line.strip() for line in lines if line.strip()]
+    return bool(nonblank) and (nonblank[-1] == "DONE" or
+        (len(nonblank) > 1 and nonblank[-2] == "DONE" and nonblank[-1].startswith("AC_DONE:")))
+
+
 def classify(report: Path, done: Path | None = None, finished: bool | None = None,
              pid: int | None = None) -> tuple[str, str]:
     """Return (status, detail) for one report.
@@ -3400,8 +3458,7 @@ def classify(report: Path, done: Path | None = None, finished: bool | None = Non
     # `AC_DONE: adv-e-152-delta APPROVE`, so the lead can grep it). That report is finished; counting
     # it `partial` made a complete verdict look unfinished (2026-10-30: adv-e-152-delta). Only the
     # exact two-line shape is accepted, so real trailing prose still reads as partial.
-    finished_by_verdict = last.startswith("AC_DONE:") and len(lines) > 1 and lines[-2].strip() == "DONE"
-    if last == "DONE" or finished_by_verdict:
+    if report_finished(lines):
         return "done", first if first.upper().startswith("STATUS:") else f"{len(text)} chars"
     return "partial", f"no DONE line yet; first line: {first[:120]}"
 
@@ -3615,7 +3672,7 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
             if not blocked:
                 lines.insert(0, "STATUS: recovered by acp-dispatch from the agent's final message "
                                 "(the agent did not write the report file)")
-            if lines[-1].strip() != "DONE" and not blocked:
+            if not report_finished(lines) and not blocked:
                 lines.append("DONE")
             write_atomic(report, "\n".join(lines) + "\n")
             rec["report_source"] = "final-message"
