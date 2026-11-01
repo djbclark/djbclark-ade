@@ -691,15 +691,26 @@ def _marker_tokens(text: str):
             yield "other", None, start
 
 
-def _top_level_marker_fields(text: str) -> list[tuple[str, str]]:
+def _top_level_marker_fields(text: str) -> tuple[list[tuple[str, str]], bool]:
     """Recover string pairs at object depth one, even with duplicate keys or trailing commas.
 
-    Nested containers and string values never provide marker fields. This is lexical
-    recovery, not JSON repair; strict parsing still decides validity and approval.
+    Return fields and whether their boundaries are readable. Trailing commas and
+    duplicate keys retain clear boundaries; broken strings/nesting do not. This
+    never repairs the JSON used to validate or approve a marker.
     """
     tokens = list(_marker_tokens(text))
+    # Trailing commas and duplicate keys have unambiguous field boundaries.
+    # Everything else must parse before we trust the recovered object depth.
+    trailing = {tokens[i][2] for i in range(len(tokens) - 1)
+                if tokens[i][0] == "," and tokens[i + 1][0] in ("}", "]")}
+    structural = "".join(c for i, c in enumerate(text) if i not in trailing)
+    try:
+        json.loads(structural)
+        certain = True
+    except (ValueError, RecursionError):
+        certain = False
     if not tokens or tokens[0][0] != "{":
-        return []
+        return [], certain
     fields = []
     stack = []
     i = 0
@@ -721,7 +732,7 @@ def _top_level_marker_fields(text: str) -> list[tuple[str, str]]:
             i += 3  # consume the value too: a string value cannot become another key
             continue
         i += 1
-    return fields
+    return fields, certain
 
 
 def adversary_verdict(body: str, head: str) -> dict:
@@ -836,11 +847,26 @@ def adversary_verdict(body: str, head: str) -> dict:
             continue
         # Discover the payload only inside this comment. Once JSON starts,
         # the existing JSON-aware scanner keeps delimiters in strings as content.
-        comment_end = body.find("-->", match.end())
-        payload = body[match.end():comment_end if comment_end >= 0 else len(body)]
-        container = next((token for token in _marker_tokens(payload) if token[0] in ("{", "[")), None)
-        js = match.end() + container[2] if container and container[0] == "{" else -1
-        next_start = body.find("<!--", match.end())
+        canonical_start = CANONICAL_START_RE.match(body, start)
+        payload_start = canonical_start.end() if canonical_start else match.end()
+        comment_end = body.find("-->", payload_start)
+        next_start = body.find("<!--", payload_start)
+        # Bound discovery at the next start too: thousands of empty starts must
+        # not repeatedly scan the remaining body. Allow the doubled-start typo.
+        limit = comment_end if comment_end >= 0 else len(body)
+        if next_start >= 0:
+            if (body[payload_start:next_start].strip()
+                    or not re.compile(r"<!--\s*\{").match(body, next_start)):
+                limit = min(limit, next_start)
+        payload = body[payload_start:limit]
+        # Only an actual root array is documentation; a prose [label] before an
+        # object is malformed syntax and cannot conceal its BLOCK.
+        first = payload.lstrip()
+        root_array = first.startswith("[")
+        if root_array:
+            _, root_array = _top_level_marker_fields(first)
+        offset = payload.find("{")
+        js = payload_start + offset if offset >= 0 and not root_array else -1
         if js < 0:
             continue
         if (next_start >= 0 and next_start < js
@@ -851,7 +877,11 @@ def adversary_verdict(body: str, head: str) -> dict:
             close = body.find("-->", js)
             je = close if close >= 0 else len(body)
         candidate = body[js:je]
-        fields = _top_level_marker_fields(candidate)
+        fields, certain = _top_level_marker_fields(candidate)
+        if not certain:
+            # Broken quoting or nesting makes depth unknowable. Fail closed,
+            # retaining exact head-value matching; valid metadata stays narrow.
+            fields += re.findall(r'"(verdict|head)"\s*:\s*"([^"\\]*)"', candidate, re.I)
         if not any(key == "verdict" and value.upper() == "BLOCK" for key, value in fields):
             continue
         quoted_heads = [value for key, value in fields if key == "head"]

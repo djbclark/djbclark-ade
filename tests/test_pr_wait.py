@@ -2704,3 +2704,48 @@ def test_structured_marker_field_values_are_never_promoted(shape, field, malform
     else:
         assert result["verdict"] == "APPROVE" and not result["malformed"]
         assert gate(body, required=False)[0]
+
+
+@pytest.mark.parametrize("payload", [
+    '{"note":"5" screen","verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","note":"5" screen","head":"H"}',
+    '[r5] {"verdict":"BLOCK","head":"H"}',
+    '5" {"verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","x":[1,"head":"H"}',
+    '{"note":"a\\","verdict":"BLOCK","head":"H"}',
+    '{"verdict":"APPROVE","head":"O","n":"<!-- adversary-verdict:v1"} {"verdict":"BLOCK","head":"H"}',
+    '{"verdict":"APPROVE","head":"H","note":"format: <!-- adversary-verdict:v1", BROKEN {"verdict":"BLOCK","head":"H"}}',
+])
+@pytest.mark.parametrize("context", ["fenced", "inline", "unclosed"])
+def test_uncertain_structure_cannot_hide_same_head_block(payload, context):
+    payload = payload.replace('"H"', json.dumps(ADV_HEAD)).replace('"O"', json.dumps(OTHER_HEAD))
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    wrappers = {"fenced": "\n```\n%s\n```", "inline": "\n`%s`", "unclosed": "\n```\n%s"}
+    body = marker("APPROVE") + wrappers[context] % candidate
+    result = adv(body)
+    assert result["verdict"] == "BLOCK" and result["malformed"]
+    assert not gate(body, required=False)[0]
+    assert not gate(body, required=True)[0]
+
+
+def test_valid_approve_history_cannot_supply_fallback_block():
+    payload = {"verdict": "APPROVE", "head": ADV_HEAD,
+               "history": [{"verdict": "BLOCK", "head": ADV_HEAD}]}
+    body = '<!-- adversary-verdict:v1 ' + json.dumps(payload) + ' -->'
+    result = adv(body)
+    assert result["verdict"] == "APPROVE" and not result["malformed"]
+    assert gate(body, required=True)[0]
+
+
+def test_many_empty_marker_starts_do_not_rescan_remaining_body(monkeypatch):
+    # Count scanner input, not wall time: repeated suffix scans are quadratic.
+    module = load_module().__dict__
+    original = module["_marker_tokens"]
+    scanned = []
+    def counted(text):
+        scanned.append(len(text))
+        yield from original(text)
+    monkeypatch.setitem(module, "_marker_tokens", counted)
+    body = marker("APPROVE") + "\n" + '<!-- adversary-verdict:v1 x ' * 2000
+    module["adversary_verdict"](body, ADV_HEAD)
+    assert sum(scanned) <= 4 * len(body)

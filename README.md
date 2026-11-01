@@ -391,8 +391,14 @@ On 2026-10-31 (PR 175), raw BLOCK rescue stopped interpreting marker starts insi
 parsed JSON strings as markers. Invalid outer candidates still permit nested same-head BLOCK rescue.
 
 On 2026-10-31 (PR 175), malformed BLOCK recovery began tracking object and array depth for both
-verdict and head fields. Nested metadata and root arrays cannot supply marker fields; duplicate
+verdict and head fields. With readable structure (including trailing commas), nested metadata
+and root arrays cannot supply marker fields; duplicate
 top-level keys remain visible. Strict JSON parsing still governs validity and APPROVE.
 Recovery also requires the head value itself to be a hexadecimal prefix (optionally shortened with
 an ellipsis, or carrying the existing `sha ` typo decoration); JSON encoded inside a string cannot
 provide a head through an embedded SHA mention.
+
+On 2026-10-31 (PR 175), broken quoting or nesting began triggering conservative BLOCK recovery:
+when field boundaries are uncertain, a BLOCK and an exact matching head value anywhere in the
+candidate hold the gate as malformed. Readable nested metadata remains documentation. Payload
+discovery stops at the next marker start, avoiding repeated scans of empty-marker suffixes.

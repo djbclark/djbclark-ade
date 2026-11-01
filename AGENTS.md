@@ -224,7 +224,12 @@ pull request here is expected to meet these; flag any it misses.
       describe this format without tripping its own gate: nothing in those two blanked shapes can
       approve, and a placeholder approves nothing. A BLOCK is never skipped this way (property 1), and
       a **live** BLOCK whose head is the placeholder is `malformed` rather than documentation; a BLOCK
-      in code that does not name this head is documentation too (the accepted limit in `_strip_code`).
+      in code that does not name this head is documentation too (the accepted limit in `_strip_code`). With readable
+      structure (including trailing commas), nested object/array fields, a root array, and a head
+      containing arbitrary prose (beyond the existing `sha ` recovery decoration) are documentation
+      in code too (2026-10-31, PR 175). Broken quoting or
+      nesting makes field boundaries uncertain: a recoverable BLOCK and matching head fail closed
+      as malformed rather than being dismissed as nested documentation.
    4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
       missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
       report a readable bad one.
