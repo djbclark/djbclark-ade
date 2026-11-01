@@ -1,0 +1,811 @@
+#!/usr/bin/env python3
+"""deadline - register a maximum run time before a long command or wait, and enforce it from outside. No model.
+
+    deadline start NAME --budget DUR --owner ID [--heartbeat DUR] [--grace DUR] [--pid PID] [--pgid PGID]
+                        [--on-expire kill|notify|reroute:RECORD|relay] [--checkpoint PATH] [--max-extend DUR] [--json]
+    deadline beat NAME [--checkpoint PATH] [--note TEXT]        heartbeat; records the latest checkpoint
+    deadline extend NAME --by DUR --reason TEXT                 only before expiry; total capped by --max-extend (default = budget); else exit 2
+    deadline done NAME [--rc N]                                 deregister
+    deadline ls [--json] [--agents]                             records (and, with --agents, the Paseo no-progress reading)
+    deadline sweep [--dry-run] [--json] [--no-agents] [--agents-now]    THE ENFORCER (launchd runs it every 60 s)
+    deadline run --budget DUR [--heartbeat DUR] [--grace DUR] [--name NAME] [--owner ID] [--on-expire ...] -- CMD...
+    deadline install [--ade DIR] [--dry-run] | uninstall        the launchd job (macOS)
+
+DUR is seconds (90, 1.5) or units (90s, 5m, 2h, 1h30m). Exit: 0 ok; 1 failed or unknown name; 2 refused (bad input, extension
+refused, name already live, install from a linked worktree); `run` returns the command's rc, or 124 when it stopped the command.
+
+Rule (docs/deadline.md): before any command or wait that may run longer than ~2 min, register a deadline, or use `deadline run`.
+
+Design, from prior art (2026-11-01; the rest of the reasoning is in docs/deadline.md):
+  * Temporal Start-To-Close + Heartbeat timeouts, a checkpoint carried in the heartbeat
+    (https://docs.temporal.io/design-patterns/long-running-activity): --budget is Start-To-Close, --heartbeat is the heartbeat
+    timeout, `beat --checkpoint PATH` is the heartbeat detail, and the recovery message names that checkpoint.
+  * systemd RuntimeMaxSec / WatchdogSec / EXTEND_TIMEOUT_USEC
+    (https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html): a hard budget, a liveness beat, and an
+    extension that the owner must request BEFORE expiry, with a reason, capped.
+  * Celery soft then hard time limit: SIGTERM to the process group, then SIGKILL after --grace.
+  * Enforce, never only notify (https://github.com/deepseek-ai/deepseek-harness/discussions/11258: a notify-only 60 s budget hung a
+    session 5.5 h): the default action is `kill`; `notify` is opt-in.
+  * Respect the DECLARED budget, no global staleness guess (https://github.com/Abilityai/trinity/issues/869: a watchdog killed
+    healthy runs): a command is stopped only by its own registered budget or heartbeat; the agent-session check only alerts.
+  * The enforcer lives outside what it watches: `sweep` runs from launchd, not from the agent whose command hangs; `run` is a
+    backstop like `timeout`, and a killed `run` is still caught by the sweep.
+This is the interim piece; the plan's B9 launchd watchdog is meant to absorb it, so it stays a small library plus CLI.
+
+Records: one JSON file per name in ~/.local/state/deadlines/ (DEADLINE_STATE_DIR overrides), written atomically; new fields are
+read with .get. A record is enforced against the process START TIME recorded at registration, so a recycled pid is never signalled.
+Test hooks: DEADLINE_NOW (epoch seconds), DEADLINE_RELAY, DEADLINE_HERMES_PING, DEADLINE_ACP_DISPATCH, DEADLINE_PASEO,
+DEADLINE_SETTLE_S (wait after a signal), DEADLINE_RUN_POLL (run loop tick), DEADLINE_AGENT_IDLE (default 30m),
+DEADLINE_AGENT_SCAN_EVERY (default 5m), DEADLINE_AGENT_REALERT (default 1h).
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+ADE = Path(__file__).resolve().parent.parent
+LABEL = "com.djbclark.deadline-sweep"
+TERMINAL = {"done", "lost", "expired"}
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+ACTIONS_PLAIN = {"kill", "notify", "relay"}
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("DEADLINE_STATE_DIR") or HOME / ".local/state/deadlines")
+
+
+def now() -> float:
+    v = os.environ.get("DEADLINE_NOW")
+    return float(v) if v else time.time()
+
+
+def fenv(key: str, default: float) -> float:
+    v = os.environ.get(key)
+    return parse_dur(v) if v else default
+
+
+def parse_dur(text: str | float | int) -> float:
+    s = str(text).strip().lower()
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return float(s)
+    parts = re.findall(r"(\d+(?:\.\d+)?)([smhd])", s)
+    if not parts or "".join(a + b for a, b in parts) != s.replace(" ", ""):
+        raise ValueError(f"bad duration {text!r} (use 90, 90s, 5m, 2h, 1h30m)")
+    return sum(float(a) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[u] for a, u in parts)
+
+
+def fmt_dur(sec: float | None) -> str:
+    if sec is None:
+        return "-"
+    neg = sec < 0
+    s = int(abs(sec))
+    out = f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
+    return ("-" if neg else "") + out
+
+
+# ---------- records ----------
+
+def rec_path(name: str) -> Path:
+    return state_dir() / f"{name}.json"
+
+
+def load(name: str) -> dict | None:
+    try:
+        d = json.loads(rec_path(name).read_text())
+    except FileNotFoundError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def save(rec: dict) -> None:
+    p = rec_path(rec["name"])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(rec, indent=1, sort_keys=True))
+    os.replace(tmp, p)
+
+
+class Locked:
+    """Per-record flock so a `sweep` and a `run` loop never advance the same record at once; non-blocking (a busy record is skipped)."""
+
+    def __init__(self, name: str, block: bool = False):
+        self.name, self.block, self.fd = name, block, None
+
+    def __enter__(self):
+        state_dir().mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(state_dir() / f".{self.name}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | (0 if self.block else fcntl.LOCK_NB))
+        except OSError:
+            os.close(self.fd)
+            self.fd = None
+        return self.fd is not None
+
+    def __exit__(self, *a):
+        if self.fd is not None:
+            os.close(self.fd)
+
+
+def all_records() -> list[tuple[str, dict | None]]:
+    """(name, record or None when the file is corrupt) for every record file."""
+    out = []
+    d = state_dir()
+    if d.is_dir():
+        for p in sorted(d.glob("*.json")):
+            if p.name.startswith(".") or p.name == "agents.json":
+                continue
+            try:
+                v = json.loads(p.read_text())
+                out.append((p.stem, v if isinstance(v, dict) and v.get("name") == p.stem else None))
+            except (OSError, ValueError):
+                out.append((p.stem, None))
+    return out
+
+
+# ---------- processes (macOS and Linux) ----------
+
+class ProcUnknown(Exception):
+    """ps itself failed: no conclusion about the process may be drawn this pass."""
+
+
+def _ps(args: list[str]) -> str:
+    try:
+        r = subprocess.run(["ps", *args], capture_output=True, text=True, timeout=15, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ProcUnknown(str(e))
+    return r.stdout
+
+
+def proc_info(pid: int) -> tuple[str, str] | None:
+    """(start time token, state letter) of a pid, or None when no such process."""
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        try:
+            rest = stat.read_text().rsplit(")", 1)[1].split()
+            return rest[19], rest[0]
+        except (OSError, IndexError):
+            return None
+    out = _ps(["-o", "lstart=,stat=", "-p", str(pid)]).strip()
+    if not out:
+        return None
+    toks = out.split()
+    return " ".join(toks[:-1]), toks[-1][:1]
+
+
+def group_members(pgid: int) -> list[int]:
+    """Live (non-zombie) pids in a process group."""
+    pids = []
+    for line in _ps(["-A", "-o", "pid=,pgid=,stat="]).splitlines():
+        t = line.split()
+        if len(t) >= 3 and t[1] == str(pgid) and not t[2].startswith("Z"):
+            pids.append(int(t[0]))
+    return pids
+
+
+def target_status(rec: dict) -> str:
+    """alive | gone | reused (same pid, different start time) | none (nothing registered to watch)."""
+    pid, pgid = rec.get("pid"), rec.get("pgid")
+    if not pid and not pgid:
+        return "none"
+    alive = False
+    if pid:
+        info = proc_info(int(pid))
+        if info and info[1] != "Z":
+            if rec.get("pid_start") and info[0] != rec["pid_start"]:
+                return "reused"
+            alive = True
+    if pgid and not alive:
+        leader = proc_info(int(pgid))
+        if leader and leader[1] != "Z" and rec.get("pgid_start") and leader[0] != rec["pgid_start"]:
+            return "reused"
+        alive = bool(group_members(int(pgid)))
+    return "alive" if alive else "gone"
+
+
+def signal_target(rec: dict, sig: int) -> str:
+    """Signal the group (or the lone pid) after re-checking identity; never our own group, pid 1 or a reused pid."""
+    if target_status(rec) != "alive":
+        return "not signalled: target not alive or reused"
+    pgid, pid = rec.get("pgid"), rec.get("pid")
+    try:
+        if pgid and int(pgid) > 1 and int(pgid) != os.getpgrp():
+            os.killpg(int(pgid), sig)
+            return f"signal {sig} to group {pgid}"
+        if pid and int(pid) > 1 and int(pid) != os.getpid():
+            os.kill(int(pid), sig)
+            return f"signal {sig} to pid {pid}"
+    except ProcessLookupError:
+        return "already gone"
+    except PermissionError as e:
+        return f"refused by the OS: {e}"
+    return "not signalled: unsafe target"
+
+
+def settle(rec: dict, secs: float) -> bool:
+    """Wait up to `secs` for the target to be gone; True when it is."""
+    end = time.monotonic() + secs
+    while True:
+        if target_status(rec) != "alive":
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.1)
+
+
+# ---------- notification and recovery ----------
+
+def sh(argv: list[str], text: str | None = None, timeout: float = 30, keep: int = 400) -> tuple[int, str]:
+    """(rc, combined output; the last `keep` chars, or all of stdout when keep == 0). Never raises."""
+    try:
+        r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, f"timeout after {timeout:g}s"
+    except OSError as e:
+        return 127, str(e)
+    if keep == 0:
+        return r.returncode, r.stdout or ""
+    return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()[-keep:]
+
+
+def tool(env_key: str, rel: str, which: str | None = None) -> list[str]:
+    exe = os.environ.get(env_key) or (shutil.which(which) if which else None) or str(ADE / rel)
+    return [exe] if os.access(exe, os.X_OK) else [sys.executable, exe]
+
+
+def hermes_ping(msg: str) -> str:
+    rc, out = sh(tool("DEADLINE_HERMES_PING", "bin/hermes-ping", "hermes-ping") + [msg], timeout=30)
+    return f"ping rc={rc}"
+
+
+def relay(owner: str, text: str) -> str:
+    if not owner or owner == "-":
+        return "relay skipped: no owner"
+    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
+    rc, out = sh(argv, text=text, timeout=60)
+    return f"relay rc={rc}: {out.splitlines()[-1] if out else ''}"[:200]
+
+
+def message(rec: dict, what: str) -> str:
+    n = now()
+    over = n - rec["started"] - rec["budget_s"] - rec.get("extended_s", 0)
+    cp = rec.get("checkpoint") or "none recorded"
+    return (f"deadline {rec['name']}: {what}. Budget {fmt_dur(rec['budget_s'])}"
+            f" (+{fmt_dur(rec.get('extended_s', 0))} extended), overrun {fmt_dur(over)}, reason {rec.get('reason', '?')},"
+            f" last checkpoint {cp}. Recover: read the checkpoint, rerun only the unfinished part under a new deadline.")
+
+
+def recover(rec: dict) -> dict:
+    """The on-expire recovery. Marked started BEFORE it runs and saved: at most once, even if this pass dies midway."""
+    rec["recovery"] = {"state": "started", "at": now()}
+    save(rec)
+    action = rec.get("on_expire") or "kill"
+    steps = []
+    killed = rec.get("stopped_by_us", False)
+    msg = message(rec, "stopped by the enforcer" if killed else "expired")
+    steps.append(hermes_ping(f"deadline {rec['name']} ({rec.get('owner')}): {rec.get('reason', 'expired')}; action {action}"))
+    if action == "notify":
+        steps.append(relay(rec.get("owner", "-"), msg))
+    elif action == "relay" or (action == "kill" and not killed):
+        steps.append(relay(rec.get("owner", "-"), msg))
+    elif action.startswith("reroute:"):
+        argv = tool("DEADLINE_ACP_DISPATCH", "bin/acp-dispatch") + [
+            "reroute", action.split(":", 1)[1], "--agent", "omp", "--model", "anthropic/claude-sonnet-5-5", "--detach", "--no-wait"]
+        rc, out = sh(argv, timeout=60)
+        steps.append(f"reroute rc={rc}: {out[-150:]}")
+    rec["recovery"] = {"state": "done", "at": now(), "outcome": steps}
+    return rec
+
+
+# ---------- the state machine: one pass over one record ----------
+
+def step(rec: dict, dry: bool = False) -> str:
+    """Advance one record; returns what was (or, in dry mode, would be) done. Caller holds the record lock."""
+    st = rec.get("state", "running")
+    if st in TERMINAL:
+        return f"{st}"
+    n = now()
+    settle_s = fenv("DEADLINE_SETTLE_S", 1.0)
+    ts = target_status(rec)
+    if st == "running":
+        if ts in ("gone", "reused"):
+            if dry:
+                return f"would mark lost ({ts})"
+            rec.update(state="lost", ended=n, reason=f"process {ts}" + (" (pid reuse: not signalled)" if ts == "reused" else ""))
+            rec["lost_notice"] = relay(rec.get("owner", "-"), message(rec, f"watched process is {ts} and was never marked done"))
+            save(rec)
+            return f"lost ({ts})"
+        reason = None
+        if n - rec["started"] > rec["budget_s"] + rec.get("extended_s", 0):
+            reason = "budget exceeded"
+        elif rec.get("heartbeat_s") and n - rec.get("last_beat", rec["started"]) > rec["heartbeat_s"]:
+            reason = f"no heartbeat for {fmt_dur(n - rec.get('last_beat', rec['started']))}"
+        if not reason:
+            return "ok"
+        if dry:
+            return f"would stop: {reason}"
+        rec["reason"] = reason
+        if (rec.get("on_expire") or "kill") == "notify" or ts == "none":
+            rec.update(state="expired", ended=n)
+            rec = recover(rec)
+            save(rec)
+            return f"expired ({reason}); not killed; recovery once"
+        out = signal_target(rec, signal.SIGTERM)
+        rec.update(state="stopping", soft_at=n, stopped_by_us=True)
+        save(rec)
+        if settle(rec, settle_s):
+            rec.update(state="expired", ended=n)
+            rec = recover(rec)
+            save(rec)
+            return f"stopped ({reason}): {out}; recovery once"
+        return f"soft stop ({reason}): {out}"
+    if st == "stopping":
+        if ts != "alive":
+            if dry:
+                return "would run recovery (target gone)"
+            rec.update(state="expired", ended=n)
+            rec = recover(rec)
+            save(rec)
+            return "target gone; recovery once"
+        if n - rec.get("soft_at", n) < rec.get("grace_s", 60):
+            return "stopping: within grace"
+        if dry:
+            return "would SIGKILL"
+        out = signal_target(rec, signal.SIGKILL)
+        rec["hard_at"] = n
+        save(rec)
+        settle(rec, max(settle_s, 2.0))
+        rec.update(state="expired", ended=n)
+        rec = recover(rec)
+        save(rec)
+        return f"hard kill: {out}; recovery once"
+    return f"unknown state {st}"
+
+
+def prune() -> None:
+    """Terminal records older than 7 days (by their own `ended`) are removed."""
+    for name, rec in all_records():
+        if rec and rec.get("state") in TERMINAL and now() - rec.get("ended", now()) > 7 * 86400:
+            rec_path(name).unlink(missing_ok=True)
+
+
+# ---------- Paseo agent no-progress check (alert only) ----------
+
+def paseo_cmd(*args: str) -> list[str]:
+    exe = os.environ.get("DEADLINE_PASEO") or shutil.which("paseo") or str(HOME / ".local/bin/paseo")
+    return [exe, *args]
+
+
+def agent_rows() -> tuple[list[dict], str | None]:
+    """[{id, short, name, idle_s | None, skip}], error. idle = age of `paseo inspect` UpdatedAt for a running agent."""
+    rc, out = sh(paseo_cmd("ls", "-g", "--json"), timeout=30, keep=0)
+    if rc != 0:
+        return [], f"paseo ls failed rc={rc}: {out[:120]}"
+    try:
+        agents = json.loads(out)
+    except ValueError:
+        return [], "paseo ls output unreadable"
+    running = [a for a in agents if isinstance(a, dict) and a.get("status") == "running" and a.get("id")]
+
+    def one(a: dict) -> dict:
+        row = {"id": a["id"], "short": a.get("shortId") or a["id"][:7], "name": a.get("name", ""), "idle_s": None, "skip": None}
+        rc, o = sh(paseo_cmd("inspect", a["id"], "--json"), timeout=20, keep=0)
+        try:
+            ts = json.loads(o).get("UpdatedAt") if rc == 0 else None
+            row["idle_s"] = now() - datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() if ts else None
+        except (ValueError, AttributeError, TypeError):
+            row["idle_s"] = None
+        if row["idle_s"] is None:
+            row["skip"] = "last activity unreadable (no UpdatedAt from paseo inspect)"
+        return row
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        return list(ex.map(one, running)), None
+
+
+def holds_deadline(agent_id: str) -> bool:
+    for _, rec in all_records():
+        if rec and rec.get("state", "running") not in TERMINAL:
+            o = str(rec.get("owner") or "")
+            if o and (o == agent_id or (len(o) >= 6 and agent_id.startswith(o))):
+                return True
+    return False
+
+
+def agent_check(force: bool, alert: bool = True) -> list[str]:
+    sf = state_dir() / "agents.json"
+    try:
+        st = json.loads(sf.read_text())
+    except (OSError, ValueError):
+        st = {}
+    n = now()
+    if alert and not force and n - st.get("last_scan", 0) < fenv("DEADLINE_AGENT_SCAN_EVERY", 300):
+        return []
+    rows, err = agent_rows()
+    lines = []
+    if err:
+        return [f"agents: {err}"]
+    idle_max = fenv("DEADLINE_AGENT_IDLE", 1800)
+    realert = fenv("DEADLINE_AGENT_REALERT", 3600)
+    alerted = st.get("alerted", {})
+    for r in rows:
+        if r["skip"] or r["idle_s"] <= idle_max or holds_deadline(r["id"]):
+            continue
+        if not alert:
+            continue
+        if n - alerted.get(r["id"], 0) < realert:
+            continue
+        mins = int(r["idle_s"] // 60)
+        text = (f"deadline: no progress for {mins} min; if you are blocked, say on what; "
+                "if a command hangs, stop it and record a deadline next time (`deadline run --budget DUR -- CMD`).")
+        p = hermes_ping(f"deadline: agent {r['name'] or r['short']} ({r['short']}) no progress for {mins} min")
+        rl = relay(r["id"], text)
+        alerted[r["id"]] = n
+        lines.append(f"agent {r['short']} idle {mins}m: {p}; {rl}")
+    if alert:
+        st.update(last_scan=n, alerted={k: v for k, v in alerted.items() if n - v < 7 * 86400})
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        tmp = sf.with_name(f".agents.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(st))
+        os.replace(tmp, sf)
+    return lines
+
+
+# ---------- commands ----------
+
+def die(msg: str, rc: int = 2) -> int:
+    print(f"deadline: {msg}", file=sys.stderr)
+    return rc
+
+
+def dur_arg(v: str) -> float:
+    try:
+        return parse_dur(v)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
+def check_action(v: str) -> str:
+    if v in ACTIONS_PLAIN or (v.startswith("reroute:") and len(v) > 8):
+        return v
+    raise argparse.ArgumentTypeError("--on-expire is kill, notify, relay or reroute:RECORD")
+
+
+def make_record(a, pid=None, pgid=None) -> dict:
+    n = now()
+    pid = pid if pid is not None else a.pid
+    pgid = pgid if pgid is not None else a.pgid
+    if pid and pgid is None:
+        try:
+            g = os.getpgid(pid)
+        except OSError:
+            g = None
+        pgid = g if g == pid else None   # a non-leader pid shares a group with its caller: signal the pid only
+    rec = {"name": a.name, "owner": a.owner, "pid": pid, "pgid": pgid, "started": n, "last_beat": n,
+           "budget_s": a.budget, "heartbeat_s": a.heartbeat, "grace_s": a.grace, "on_expire": a.on_expire,
+           "checkpoint": a.checkpoint, "max_extend_s": a.max_extend if a.max_extend is not None else a.budget,
+           "extended_s": 0, "extensions": [], "state": "running", "registrar_pid": os.getpid()}
+    try:
+        if pid:
+            info = proc_info(pid)
+            rec["pid_start"] = info[0] if info else None
+        if pgid:
+            info = proc_info(pgid)
+            rec["pgid_start"] = info[0] if info else None
+    except ProcUnknown:
+        pass
+    return rec
+
+
+def register(rec: dict) -> int:
+    if not NAME_RE.match(rec["name"]):
+        return die("name must match [A-Za-z0-9._-]{1,100}")
+    with Locked(rec["name"], block=True):
+        old = load(rec["name"])
+        if old and old.get("state", "running") not in TERMINAL:
+            return die(f"{rec['name']} is already registered and live (state {old.get('state')}); `deadline done` it first")
+        save(rec)
+    return 0
+
+
+def cmd_start(a) -> int:
+    rec = make_record(a)
+    rc = register(rec)
+    if rc == 0:
+        print(json.dumps(rec, sort_keys=True) if a.json else f"registered {a.name}: budget {fmt_dur(a.budget)}"
+              + (f", heartbeat {fmt_dur(a.heartbeat)}" if a.heartbeat else "") + f", on-expire {a.on_expire}")
+    return rc
+
+
+def cmd_beat(a) -> int:
+    with Locked(a.name, block=True):
+        rec = load(a.name)
+        if not rec:
+            return die(f"no deadline named {a.name}", 1)
+        if rec.get("state", "running") != "running":
+            return die(f"{a.name} is {rec.get('state')}: refused", 2)
+        rec["last_beat"] = now()
+        if a.checkpoint:
+            rec["checkpoint"] = a.checkpoint
+        if a.note:
+            rec["note"] = a.note
+        save(rec)
+    return 0
+
+
+def cmd_extend(a) -> int:
+    with Locked(a.name, block=True):
+        rec = load(a.name)
+        if not rec:
+            return die(f"no deadline named {a.name}", 1)
+        n = now()
+        end = rec["started"] + rec["budget_s"] + rec.get("extended_s", 0)
+        if rec.get("state", "running") != "running" or n > end:
+            return die(f"{a.name} is already past its budget or stopped: an extension must be asked for BEFORE expiry", 2)
+        cap = rec.get("max_extend_s", rec["budget_s"])
+        if rec.get("extended_s", 0) + a.by > cap:
+            return die(f"extension refused: {fmt_dur(rec.get('extended_s', 0))} used + {fmt_dur(a.by)} exceeds the {fmt_dur(cap)} cap", 2)
+        rec["extended_s"] = rec.get("extended_s", 0) + a.by
+        rec["extensions"].append({"at": n, "by": a.by, "reason": a.reason})
+        rec["last_beat"] = n
+        save(rec)
+    print(f"{a.name}: budget now {fmt_dur(rec['budget_s'] + rec['extended_s'])}, {fmt_dur(cap - rec['extended_s'])} of extension left")
+    return 0
+
+
+def cmd_done(a) -> int:
+    with Locked(a.name, block=True):
+        rec = load(a.name)
+        if not rec:
+            return die(f"no deadline named {a.name}", 1)
+        if rec.get("state", "running") == "running":
+            rec.update(state="done", ended=now(), rc=a.rc)
+            save(rec)
+        else:
+            print(f"{a.name} is already {rec.get('state')}; left as is")
+    return 0
+
+
+def describe(rec: dict) -> dict:
+    n = now()
+    left = rec["started"] + rec["budget_s"] + rec.get("extended_s", 0) - n
+    return {"name": rec["name"], "owner": rec.get("owner"), "pid": rec.get("pid"), "state": rec.get("state", "running"),
+            "elapsed_s": round(n - rec["started"]), "left_s": round(left),
+            "heartbeat_age_s": round(n - rec.get("last_beat", rec["started"])), "checkpoint": rec.get("checkpoint"),
+            "on_expire": rec.get("on_expire"), "reason": rec.get("reason")}
+
+
+def cmd_ls(a) -> int:
+    rows, bad = [], []
+    for name, rec in all_records():
+        (rows if rec else bad).append(describe(rec) if rec else name)
+    agents = None
+    if a.agents:
+        ar, err = agent_rows()
+        agents = {"error": err, "agents": [dict(r, holds_deadline=holds_deadline(r["id"])) for r in ar]}
+    if a.json:
+        print(json.dumps({"records": rows, "corrupt": bad, "agents": agents}, indent=1))
+        return 0
+    print(f"{'NAME':28} {'OWNER':14} {'PID':>7} {'ELAPSED':>8} {'LEFT':>8} {'BEAT':>8} STATE")
+    for r in rows:
+        print(f"{r['name'][:28]:28} {str(r['owner'] or '-')[:14]:14} {str(r['pid'] or '-'):>7} {fmt_dur(r['elapsed_s']):>8} "
+              f"{fmt_dur(r['left_s']):>8} {fmt_dur(r['heartbeat_age_s']):>8} {r['state']}")
+    for b in bad:
+        print(f"{b[:28]:28} corrupt record (ignored by the sweep)")
+    if agents:
+        print()
+        if agents["error"]:
+            print(f"agents: {agents['error']}")
+        for r in agents["agents"]:
+            idle = "skipped: " + r["skip"] if r["skip"] else f"idle {fmt_dur(r['idle_s'])}"
+            print(f"agent {r['short']:8} {r['name'][:40]:40} {idle}{'  (holds a deadline)' if r['holds_deadline'] else ''}")
+    return 0
+
+
+def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
+    results = []
+    for name, rec in all_records():
+        if rec is None:
+            results.append({"name": name, "action": "corrupt record skipped"})
+            continue
+        try:
+            with Locked(name) as got:
+                if not got:
+                    results.append({"name": name, "action": "busy (another enforcer holds it)"})
+                    continue
+                fresh = load(name) or rec
+                results.append({"name": name, "action": step(fresh, dry), "state": fresh.get("state")})
+        except Exception as e:   # one bad record never stops the pass
+            results.append({"name": name, "action": f"error: {type(e).__name__}: {e}"})
+    if not dry:
+        try:
+            prune()
+        except OSError:
+            pass
+    if agents:
+        try:
+            for line in agent_check(agents_now, alert=not dry):
+                results.append({"name": "(agents)", "action": line})
+        except Exception as e:
+            results.append({"name": "(agents)", "action": f"error: {type(e).__name__}: {e}"})
+    return results
+
+
+def cmd_sweep(a) -> int:
+    res = sweep_once(a.dry_run, not a.no_agents, a.agents_now)
+    if a.json:
+        print(json.dumps(res, indent=1))
+    else:
+        for r in res:
+            if r["action"] not in ("ok", "done", "lost", "expired") or a.dry_run:
+                print(f"{r['name']}: {r['action']}")
+    return 0
+
+
+def cmd_run(a) -> int:
+    cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
+    if not cmd:
+        return die("run needs a command after --")
+    a.name = a.name or f"run-{os.getpid()}-{int(time.time())}"
+    a.owner = a.owner or os.environ.get("PASEO_AGENT_ID") or "-"
+    a.pid = a.pgid = a.max_extend = a.checkpoint = None
+    try:
+        child = subprocess.Popen(cmd, start_new_session=True, env={**os.environ, "DEADLINE_NAME": a.name})
+    except OSError as e:
+        return die(f"cannot run {cmd[0]}: {e}", 127)
+    rec = make_record(a, pid=child.pid, pgid=child.pid)
+    if register(rec) != 0:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+        return 2
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, lambda sg, fr: os.killpg(child.pid, signal.SIGTERM) if child.poll() is None else None)
+    poll = fenv("DEADLINE_RUN_POLL", 0.5)
+    stopped = False
+    while True:
+        rc = child.poll()
+        with Locked(a.name, block=True):
+            cur = load(a.name) or rec
+            if rc is not None:
+                if cur.get("state") == "running":
+                    cur.update(state="done", ended=now(), rc=rc)
+                    save(cur)
+                elif cur.get("state") == "stopping":
+                    step(cur)   # target is gone: recovery once
+                return 124 if stopped else rc
+            step(cur)
+            if (load(a.name) or cur).get("state") in ("stopping", "expired"):
+                stopped = True
+        time.sleep(poll)
+
+
+def install_paths(a):
+    ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
+    return ade, ade / "config/launchd" / f"{LABEL}.plist", HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
+
+
+def is_linked_worktree(path: Path) -> bool:
+    rc1, gd = sh(["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-dir"])
+    rc2, cd = sh(["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    return rc1 == 0 and rc2 == 0 and gd != cd
+
+
+def cmd_install(a) -> int:
+    if sys.platform != "darwin" and not a.dry_run:
+        return die("launchd is macOS only", 69)
+    ade, tpl, dest = install_paths(a)
+    if not a.ade and is_linked_worktree(ADE):
+        return die(f"{ADE} is a linked worktree: install from the canonical checkout, or pass --ade DIR", 2)
+    if not (ade / "bin/deadline").is_file() or not tpl.is_file():
+        return die(f"no bin/deadline or {tpl.name} under {ade}", 2)
+    text = tpl.read_text().replace("__ADE__", str(ade)).replace("__HOME__", str(HOME))
+    if a.dry_run:
+        print(text)
+        return 0
+    state_dir().mkdir(parents=True, exist_ok=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    dom = f"gui/{os.getuid()}"
+    sh(["launchctl", "bootout", f"{dom}/{LABEL}"], timeout=30)
+    rc, out = sh(["launchctl", "bootstrap", dom, str(dest)], timeout=30)
+    if rc != 0:
+        return die(f"bootstrap failed: {out}", 1)
+    print(f"installed {LABEL} (every 60 s, no model) from {ade}; state {state_dir()}")
+    return 0
+
+
+def cmd_uninstall(a) -> int:
+    sh(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=30)
+    (HOME / "Library/LaunchAgents" / f"{LABEL}.plist").unlink(missing_ok=True)
+    print(f"removed {LABEL} (records kept at {state_dir()})")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="deadline", description=__doc__.split("\n")[0], epilog=__doc__.split("\n\n", 1)[1][:3000],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(s):
+        s.add_argument("--budget", type=dur_arg, required=True)
+        s.add_argument("--heartbeat", type=dur_arg)
+        s.add_argument("--grace", type=dur_arg, default=60.0)
+        s.add_argument("--on-expire", type=check_action, default="kill")
+
+    s = sub.add_parser("start", help="register a deadline")
+    s.add_argument("name")
+    common(s)
+    s.add_argument("--owner", required=True)
+    s.add_argument("--pid", type=int)
+    s.add_argument("--pgid", type=int)
+    s.add_argument("--checkpoint")
+    s.add_argument("--max-extend", type=dur_arg)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_start)
+
+    s = sub.add_parser("beat", help="heartbeat")
+    s.add_argument("name")
+    s.add_argument("--checkpoint")
+    s.add_argument("--note")
+    s.set_defaults(fn=cmd_beat)
+
+    s = sub.add_parser("extend", help="extend before expiry")
+    s.add_argument("name")
+    s.add_argument("--by", type=dur_arg, required=True)
+    s.add_argument("--reason", required=True)
+    s.set_defaults(fn=cmd_extend)
+
+    s = sub.add_parser("done", help="deregister")
+    s.add_argument("name")
+    s.add_argument("--rc", type=int, default=0)
+    s.set_defaults(fn=cmd_done)
+
+    s = sub.add_parser("ls", help="list")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--agents", action="store_true")
+    s.set_defaults(fn=cmd_ls)
+
+    s = sub.add_parser("sweep", help="the enforcer pass")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-agents", action="store_true")
+    s.add_argument("--agents-now", action="store_true", help="ignore the 5 min scan throttle")
+    s.set_defaults(fn=cmd_sweep)
+
+    s = sub.add_parser("run", help="register, run CMD in its own process group, deregister")
+    common(s)
+    s.add_argument("--name")
+    s.add_argument("--owner")
+    s.add_argument("cmd", nargs=argparse.REMAINDER)
+    s.set_defaults(fn=cmd_run)
+
+    for nm, fn in (("install", cmd_install), ("uninstall", cmd_uninstall)):
+        s = sub.add_parser(nm, help=f"{nm} the launchd sweep job")
+        if nm == "install":
+            s.add_argument("--ade", help="install from this checkout (required from a linked worktree)")
+            s.add_argument("--dry-run", action="store_true", help="print the plist, change nothing")
+        s.set_defaults(fn=fn)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
+    try:
+        return a.fn(a)
+    except ProcUnknown as e:
+        return die(f"ps failed: {e}", 1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

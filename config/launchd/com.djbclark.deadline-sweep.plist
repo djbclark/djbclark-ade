@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: `deadline install` replaces __ADE__ (the djbclark-ade checkout) and __HOME__. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.deadline-sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ADE__/bin/deadline</string>
+    <string>sweep</string>
+  </array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__HOME__/.local/state/deadlines/sweep.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.local/state/deadlines/sweep.log</string>
+</dict>
+</plist>

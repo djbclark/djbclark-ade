@@ -1,0 +1,280 @@
+"""Tests for bin/deadline: registered budgets enforced from outside. Hermetic: temp state dir, fake clock
+(DEADLINE_NOW), fake relay / hermes-ping / acp-dispatch / paseo, and real short-lived child processes for the kill path."""
+from __future__ import annotations
+
+import json
+import os
+import plistlib
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "bin" / "deadline"
+T0 = 1_800_000_000
+
+
+class Env:
+    def __init__(self, tmp: Path):
+        self.state = tmp / "state"
+        self.log = tmp / "calls.log"
+        self.tmp = tmp
+        self.children: list[subprocess.Popen] = []
+        for name, body in {
+            "relay": '#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n',
+            "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
+            "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\n',
+            "paseo": (f'#!{sys.executable}\nimport os, sys\n'
+                      'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
+                      'a = sys.argv[1:]\n'
+                      'if a[:3] == ["ls", "-g", "--json"]:\n'
+                      '    sys.stdout.write(open(os.environ["FAKE_PASEO_LS"]).read())\n'
+                      'elif a[0] == "inspect":\n'
+                      '    p = os.path.join(os.environ["FAKE_PASEO_DIR"], a[1] + ".json")\n'
+                      '    if not os.path.exists(p): sys.exit(1)\n'
+                      '    sys.stdout.write(open(p).read())\n'
+                      'else:\n    sys.exit(2)\n'),
+        }.items():
+            p = tmp / name
+            p.write_text(body)
+            p.chmod(0o755)
+        self.paseo_dir = tmp / "paseo-inspect"
+        self.paseo_dir.mkdir()
+        self.base = {
+            "DEADLINE_STATE_DIR": str(self.state), "DL_LOG": str(self.log), "DEADLINE_SETTLE_S": "0.3",
+            "DEADLINE_RELAY": str(tmp / "relay"), "DEADLINE_HERMES_PING": str(tmp / "ping"),
+            "DEADLINE_ACP_DISPATCH": str(tmp / "dispatch"), "DEADLINE_PASEO": str(tmp / "paseo"),
+            "FAKE_PASEO_LS": str(tmp / "ls.json"), "FAKE_PASEO_DIR": str(self.paseo_dir),
+        }
+        (tmp / "ls.json").write_text("[]")
+
+    def run(self, *args: str, now: float | None = T0, **extra) -> subprocess.CompletedProcess:
+        env = {**os.environ, **self.base, **{k: str(v) for k, v in extra.items()}}
+        env.pop("DEADLINE_NOW", None)
+        if now is not None:
+            env["DEADLINE_NOW"] = str(now)
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
+
+    def child(self, script: str = "trap '' TERM; sleep 60 & sleep 60; wait") -> subprocess.Popen:
+        c = subprocess.Popen(["sh", "-c", script], start_new_session=True)
+        self.children.append(c)
+        return c
+
+    def calls(self, kind: str) -> list[str]:
+        if not self.log.exists():
+            return []
+        return [ln for ln in self.log.read_text().splitlines() if ln.startswith(kind + " ")]
+
+    def record(self, name: str) -> dict:
+        return json.loads((self.state / f"{name}.json").read_text())
+
+    def group_alive(self, pgid: int) -> bool:
+        out = subprocess.run(["ps", "-A", "-o", "pgid=,stat="], capture_output=True, text=True).stdout
+        return any(ln.split()[0] == str(pgid) and not ln.split()[1].startswith("Z") for ln in out.splitlines() if ln.split())
+
+    def cleanup(self) -> None:
+        for c in self.children:
+            try:
+                os.killpg(c.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            c.wait()
+
+
+@pytest.fixture
+def env(tmp_path):
+    e = Env(tmp_path)
+    yield e
+    e.cleanup()
+
+
+def start(env: Env, name: str, *args: str, now: float = T0) -> subprocess.CompletedProcess:
+    return env.run("start", name, "--owner", "owner-1", *args, now=now)
+
+
+def test_budget_expiry_soft_then_hard_group_killed_recovery_once(env):
+    c = env.child()
+    time.sleep(0.3)   # let the shell start its background sleep
+    assert start(env, "job", "--budget", "10", "--grace", "5", "--pid", str(c.pid), "--on-expire", "relay").returncode == 0
+    assert env.run("sweep", "--no-agents", now=T0 + 5).stdout == ""
+    assert c.poll() is None
+    r = env.run("sweep", "--no-agents", now=T0 + 11)
+    assert "soft stop" in r.stdout and env.record("job")["state"] == "stopping"
+    assert c.poll() is None and env.group_alive(c.pid), "SIGTERM is ignored by the child, so it must still be alive inside the grace"
+    assert "within grace" in env.run("sweep", "--no-agents", now=T0 + 14).stdout
+    r = env.run("sweep", "--no-agents", now=T0 + 17)
+    assert "hard kill" in r.stdout
+    c.wait(timeout=5)
+    assert not env.group_alive(c.pid), "the whole process group must be dead, grandchildren included"
+    rec = env.record("job")
+    assert rec["state"] == "expired" and rec["recovery"]["state"] == "done"
+    assert len(env.calls("RELAY")) == 1 and "owner-1" in env.calls("RELAY")[0] and "budget exceeded" in env.log.read_text()
+    env.run("sweep", "--no-agents", now=T0 + 500)
+    assert len(env.calls("RELAY")) == 1, "recovery runs once"
+
+
+def test_polite_child_stops_on_sigterm_and_recovers_in_the_same_pass(env):
+    c = env.child("sleep 60")
+    assert start(env, "polite", "--budget", "10", "--pid", str(c.pid)).returncode == 0
+    r = env.run("sweep", "--no-agents", now=T0 + 11)
+    assert "stopped" in r.stdout and env.record("polite")["state"] == "expired"
+    assert len(env.calls("PING")) == 1 and env.calls("RELAY") == [], "kill action: Hermes ping, no owner relay when something was killed"
+    c.wait(timeout=5)
+
+
+def test_heartbeat_staleness_and_beat_carries_checkpoint(env):
+    c = env.child("sleep 60")
+    cp = str(env.tmp / "state.json")
+    assert start(env, "hb", "--budget", "1000", "--heartbeat", "30", "--pid", str(c.pid), "--on-expire", "relay").returncode == 0
+    assert env.run("sweep", "--no-agents", now=T0 + 20).stdout == ""
+    assert env.run("beat", "hb", "--checkpoint", cp, now=T0 + 25).returncode == 0
+    assert env.run("sweep", "--no-agents", now=T0 + 50).stdout == "", "25 s since the beat is inside the 30 s heartbeat"
+    r = env.run("sweep", "--no-agents", now=T0 + 60)
+    assert "no heartbeat" in r.stdout and env.record("hb")["state"] == "expired"
+    assert cp in env.log.read_text(), "the recovery message names the last checkpoint"
+    c.wait(timeout=5)
+
+
+def test_extension_allowed_capped_and_refused_after_expiry(env):
+    assert start(env, "ext", "--budget", "10", "--on-expire", "relay").returncode == 0
+    assert env.run("extend", "ext", "--by", "6", "--reason", "slow reviewer", now=T0 + 8).returncode == 0
+    assert env.run("sweep", "--no-agents", now=T0 + 12).stdout == "", "extended: 16 s budget"
+    r = env.run("extend", "ext", "--by", "6", "--reason", "again", now=T0 + 13)
+    assert r.returncode == 2 and "cap" in r.stderr, "cap defaults to the original budget (10 s): 6 + 6 refused"
+    assert env.run("extend", "ext", "--by", "4", "--reason", "fits", now=T0 + 13).returncode == 0
+    assert env.run("extend", "ext", "--by", "1", "--reason", "late", now=T0 + 25).returncode == 2, "past the 20 s budget: refused"
+    assert start(env, "late", "--budget", "10").returncode == 0
+    r = env.run("extend", "late", "--by", "1", "--reason", "too late", now=T0 + 11)
+    assert r.returncode == 2 and "BEFORE expiry" in r.stderr
+    env.run("sweep", "--no-agents", now=T0 + 30)
+    assert env.record("late")["state"] == "expired" and env.record("late")["extended_s"] == 0
+
+
+def test_pid_reuse_is_never_signalled(env):
+    c = env.child("sleep 60")
+    assert start(env, "reuse", "--budget", "10", "--pid", str(c.pid), "--on-expire", "relay").returncode == 0
+    p = env.state / "reuse.json"
+    rec = json.loads(p.read_text())
+    rec["pid_start"] = "a different start time"   # what a recycled pid would look like
+    rec["pgid_start"] = "a different start time"
+    p.write_text(json.dumps(rec))
+    r = env.run("sweep", "--no-agents", now=T0 + 50)
+    assert "lost (reused)" in r.stdout and env.record("reuse")["state"] == "lost"
+    assert c.poll() is None and env.group_alive(c.pid), "a process with another start time must survive"
+    assert len(env.calls("RELAY")) == 1 and "deadline reuse:" in env.log.read_text()
+
+
+def test_lost_process_notifies_owner_once(env):
+    c = env.child("sleep 60")
+    assert start(env, "gone", "--budget", "1000", "--pid", str(c.pid)).returncode == 0
+    os.killpg(c.pid, signal.SIGKILL)
+    c.wait()
+    assert "lost (gone)" in env.run("sweep", "--no-agents", now=T0 + 5).stdout
+    env.run("sweep", "--no-agents", now=T0 + 10)
+    assert len(env.calls("RELAY")) == 1 and env.record("gone")["state"] == "lost"
+
+
+def test_run_returns_rc_and_deregisters(env):
+    r = env.run("run", "--budget", "30", "--name", "quick", "--owner", "o", "--", "sh", "-c", "exit 3", now=None, DEADLINE_RUN_POLL="0.05")
+    assert r.returncode == 3
+    assert env.record("quick")["state"] == "done" and env.record("quick")["rc"] == 3
+
+
+def test_run_backstop_kills_group_and_returns_124(env):
+    t = time.monotonic()
+    r = env.run("run", "--budget", "1", "--grace", "1", "--name", "slow", "--owner", "o", "--on-expire", "relay", "--",
+                "sh", "-c", "trap '' TERM; sleep 60 & sleep 60; wait", now=None, DEADLINE_RUN_POLL="0.1")
+    assert r.returncode == 124 and time.monotonic() - t < 20
+    rec = env.record("slow")
+    assert rec["state"] == "expired" and rec["recovery"]["state"] == "done" and rec["hard_at"]
+    assert not env.group_alive(rec["pgid"])
+    assert len(env.calls("RELAY")) == 1
+
+
+def test_corrupt_record_does_not_stop_the_sweep(env):
+    env.state.mkdir(parents=True)
+    (env.state / "bad.json").write_text("{not json")
+    (env.state / "wrongname.json").write_text(json.dumps({"name": "other"}))
+    assert start(env, "good", "--budget", "5", "--on-expire", "relay").returncode == 0
+    r = env.run("sweep", "--no-agents", now=T0 + 10)
+    assert r.returncode == 0 and "bad: corrupt record skipped" in r.stdout
+    assert env.record("good")["state"] == "expired"
+    assert "corrupt" in env.run("ls").stdout
+
+
+def test_dry_run_changes_nothing(env):
+    assert start(env, "dry", "--budget", "5", "--on-expire", "relay").returncode == 0
+    r = env.run("sweep", "--dry-run", "--no-agents", now=T0 + 10)
+    assert "would stop" in r.stdout and env.record("dry")["state"] == "running" and env.calls("RELAY") == []
+
+
+def test_reroute_action_runs_acp_dispatch_once(env):
+    assert start(env, "rr", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10)
+    env.run("sweep", "--no-agents", now=T0 + 20)
+    d = env.calls("DISPATCH")
+    assert len(d) == 1 and "reroute /x/jobs/rec.json --agent omp --model anthropic/claude-sonnet-5-5 --detach --no-wait" in d[0]
+
+
+def test_duplicate_live_name_refused_and_terminal_name_reusable(env):
+    assert start(env, "dup", "--budget", "50").returncode == 0
+    assert start(env, "dup", "--budget", "50").returncode == 2
+    assert env.run("done", "dup").returncode == 0
+    assert start(env, "dup", "--budget", "50").returncode == 0
+    assert env.run("beat", "nope").returncode == 1
+
+
+def iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def test_agent_idle_alerts_once_per_hour_and_never_kills(env):
+    agents = [{"id": f"{c}" * 8 + "-0000", "shortId": c * 7, "name": f"agent {c}", "status": "running"} for c in "abcd"]
+    agents.append({"id": "eeeeeeee-0000", "shortId": "eeeeeee", "name": "idle one", "status": "idle"})
+    (env.tmp / "ls.json").write_text(json.dumps(agents))
+    upd = {"a": T0 - 40 * 60, "b": T0 - 5 * 60, "c": T0 - 90 * 60}   # d: no UpdatedAt at all
+    for c, ts in upd.items():
+        (env.paseo_dir / f"{c * 8}-0000.json").write_text(json.dumps({"UpdatedAt": iso(ts), "Status": "running"}))
+    (env.paseo_dir / "dddddddd-0000.json").write_text(json.dumps({"Status": "running"}))
+    # agent c holds a live deadline record: owner is its id
+    assert env.run("start", "cjob", "--owner", "cccccccc-0000", "--budget", "100000", now=T0).returncode == 0
+    r = env.run("sweep", "--agents-now", now=T0 + 1)
+    relays = env.calls("RELAY")
+    assert len(relays) == 1 and relays[0].startswith("RELAY aaaaaaaa-0000 --message-file -"), (relays, r.stdout, r.stderr)
+    assert len(env.calls("PING")) == 1 and "no progress for 40 min" in env.calls("PING")[0]
+    assert "if a command hangs, stop it" in env.log.read_text()
+    env.run("sweep", "--agents-now", now=T0 + 600)
+    assert len(env.calls("RELAY")) == 1, "at most once per agent per hour"
+    env.run("sweep", "--agents-now", now=T0 + 3700)   # an hour on: a is re-alerted, and b is now idle too
+    assert [ln.split()[1] for ln in env.calls("RELAY")] == ["aaaaaaaa-0000", "aaaaaaaa-0000", "bbbbbbbb-0000"]
+    assert not [ln for ln in env.calls("PASEO") if ln.split()[1] not in ("ls", "inspect")], "alert only: never stop, delete or send through paseo"
+    ls = env.run("ls", "--agents", now=T0 + 1).stdout
+    assert "skipped: last activity unreadable" in ls and "holds a deadline" in ls
+
+
+def test_agent_scan_is_throttled_without_force(env):
+    (env.tmp / "ls.json").write_text(json.dumps([{"id": "aaaaaaaa-0000", "shortId": "aaaaaaa", "name": "x", "status": "running"}]))
+    (env.paseo_dir / "aaaaaaaa-0000.json").write_text(json.dumps({"UpdatedAt": iso(T0 - 7200)}))
+    env.run("sweep", now=T0)
+    n = len(env.calls("PASEO"))
+    env.run("sweep", now=T0 + 60)
+    assert len(env.calls("PASEO")) == n, "second sweep inside 5 min must not call paseo again"
+
+
+def test_install_dry_run_renders_a_valid_plist(env, tmp_path):
+    ade = tmp_path / "ade"
+    (ade / "bin").mkdir(parents=True)
+    (ade / "config/launchd").mkdir(parents=True)
+    shutil.copy(SCRIPT, ade / "bin/deadline")
+    shutil.copy(ROOT / "config/launchd/com.djbclark.deadline-sweep.plist", ade / "config/launchd/")
+    r = env.run("install", "--ade", str(ade), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    p = plistlib.loads(r.stdout.encode())
+    assert p["Label"] == "com.djbclark.deadline-sweep" and p["StartInterval"] == 60
+    assert p["ProgramArguments"] == [f"{ade.resolve()}/bin/deadline", "sweep"] and "__" not in r.stdout
