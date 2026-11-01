@@ -27,7 +27,7 @@ class Env:
         self.tmp = tmp
         self.children: list[subprocess.Popen] = []
         for name, body in {
-            "relay": ('#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\necho "SENDER $RELAY_SENDER_NAME" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n'
+            "relay": ('#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\necho "SENDER $RELAY_SENDER_NAME" >> "$DL_LOG"\necho "PASEOID [$PASEO_AGENT_ID]" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n'
                       'if [ -f "$DL_RELAY_SLEEP" ]; then sleep "$(cat "$DL_RELAY_SLEEP")"; fi\n'
                       'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit "$(cat "$DL_RELAY_FAIL")"; fi\n'),
             "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
@@ -640,3 +640,79 @@ def test_recovery_io_runs_off_the_enforcement_pass(env):
             break
     rec = env.record("slowio")
     assert rec["recovery"]["state"] == "done" and rec["notice"]["done"] is True and len(env.calls("RELAY")) == 1
+
+
+# ---------- PR 223 local-review round 4: async agent alerts, no inherited session id, member-anchor reuse, worker bound to reg_id, cancellation ----------
+
+def test_agent_alerts_run_off_the_enforcement_pass(env):
+    (env.tmp / "ls.json").write_text(json.dumps([{"id": "aaaaaaaa-0000", "shortId": "aaaaaaa", "name": "idle", "status": "running"}]))
+    (env.paseo_dir / "aaaaaaaa-0000.json").write_text(json.dumps({"UpdatedAt": iso(T0 - 7200)}))
+    Path(env.base["DL_RELAY_SLEEP"]).write_text("3")
+    t = time.monotonic()
+    r = env.run("sweep", "--agents-now", now=T0, DEADLINE_INLINE_WORKER="0")
+    assert time.monotonic() - t < 2.5 and "alert queued" in r.stdout, "the sweep must not wait for the 3 s relay"
+    for _ in range(60):
+        time.sleep(0.25)
+        if env.calls("RELAY"):
+            break
+    assert len(env.calls("RELAY")) == 1 and len(env.calls("PING")) == 1
+
+
+def test_relay_never_inherits_the_callers_session_identity(env):
+    assert start(env, "ident", "--budget", "5", "--on-expire", "relay").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10, PASEO_AGENT_ID="agent-self-uuid", HERDR_PANE_ID="w1:p1", CLAUDE_CODE_SESSION_ID="sess-1")
+    log = env.log.read_text()
+    assert "PASEOID []" in log and "agent-self-uuid" not in log and "SENDER deadline" in log
+
+
+def test_a_recycled_member_anchor_does_not_confirm_the_group_gone(env, inproc):
+    dl = inproc
+    c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & exit 0"], start_new_session=True)
+    env.children.append(c)
+    c.wait()
+    time.sleep(0.3)
+    members = dl.group_members(c.pid)
+    assert len(members) == 2
+    rec = {"name": "member", "pid": members[0], "pgid": c.pid, "pid_start": "a recycled pid has another start", "pgid_start": None}
+    assert dl.target_status(rec) == "unverified", "other members live on: never reused/gone"
+    assert dl.settle(rec, 0.2) is False
+    # a recycled LEADER pid cannot coexist with its old group, so that stays `reused`
+    leader = {"name": "lead", "pid": c.pid + 100000, "pgid": c.pid + 100000, "pid_start": "x", "pgid_start": None}
+    assert dl.target_status(dict(leader, pid=os.getpid(), pgid=os.getpid())) == "reused"
+
+
+def test_worker_result_is_bound_to_its_registration(env, inproc, monkeypatch):
+    dl = inproc
+    a = {"name": "swap", "owner": "o", "state": "expired", "started": T0, "budget_s": 10, "reg_id": "A", "ended": T0,
+         "recovery": {"state": "started", "claimed": False, "ping": "p", "reroute": None}}
+    b = {"name": "swap", "owner": "o", "state": "running", "started": T0, "budget_s": 10, "reg_id": "B",
+         "recovery": {"state": "started", "claimed": False, "ping": "p2", "reroute": None},
+         "notice": {"text": "t", "attempts": 0, "done": False, "want": True}}
+    dl.save(a)
+    monkeypatch.setattr(dl, "hermes_ping", lambda msg: (dl.save(b), "ping")[1])   # the name is re-registered during the slow call
+    dl.work(dl.load("swap"), held=False)
+    cur = env.record("swap")
+    assert cur["reg_id"] == "B" and cur["recovery"]["state"] == "started" and cur["recovery"]["claimed"] is False
+    assert cur["notice"]["done"] is False and cur["notice"]["want"] is True
+
+
+def test_interrupting_run_starts_the_grace_and_ends_in_sigkill(env):
+    p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1000", "--grace", "1", "--name", "cancelme", "--owner", "o",
+                          "--on-expire", "relay", "--", "sh", "-c", "trap '' TERM; sleep 60"],
+                         env={**os.environ, **env.base, "DEADLINE_RUN_POLL": "0.1"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(60):
+            time.sleep(0.25)
+            if (env.state / "cancelme.json").exists() and env.record("cancelme").get("state") == "running" and env.record("cancelme").get("pgid"):
+                break
+        time.sleep(0.5)
+        pgid = env.record("cancelme")["pgid"]
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=20)
+        rec = env.record("cancelme")
+        assert p.returncode == 143 and rec["state"] == "expired" and rec["cancelled"] and rec["hard_at"], rec
+        assert not env.group_alive(pgid), "the TERM-ignoring command must get its SIGKILL after the grace"
+        assert env.calls("RELAY") == [] and env.calls("PING") == [], "a cancellation by the caller notifies nobody"
+    finally:
+        p.kill()
+        p.wait()

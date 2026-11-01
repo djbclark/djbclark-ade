@@ -109,3 +109,10 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
    interrupted in between, the pipe closes without "go" and the held child exits 111 without having run the command.
 9. A live pid vouches for its process group only while `getpgid(pid)` still equals the recorded group; a process that left it makes the target
    `unverified` (never signalled). A failed `ps` read (non-zero exit other than the normal "no such pid", or stderr text) is `ProcUnknown`, never "gone".
+10. The idle-agent alerts (ping + relay per agent) also go to a detached worker (`deadline _alert`), never inline in the enforcement pass. Workers
+    and every relay call run without any inherited session identity (`PASEO_AGENT_ID`, `HERDR_PANE_ID`, `CLAUDE_CODE_SESSION_ID`, `HERMES_SESSION_ID`
+    removed, `RELAY_SENDER_NAME=deadline` declared) and double-fork, so an owner that is the very agent that ran `deadline run` still receives its notice.
+11. A recycled NON-leader anchor pid never confirms its group gone: the group is re-checked (`unverified` while other members live). A worker's
+    result is merged only into the record carrying the `reg_id` it started from.
+12. Interrupting `deadline run` (SIGTERM, SIGINT, SIGHUP) is a bounded stop: the record goes to `stopping` (`cancelled`), the command's group gets SIGTERM, then
+    SIGKILL after `--grace` (a second signal escalates to SIGKILL at once). Nothing is announced or rerouted; `run` exits 128+signal.
