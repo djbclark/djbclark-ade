@@ -234,7 +234,7 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   as an old id). An ssh remote is only "another machine" when git's ssh is plain ssh: a
   `core.sshCommand`, `GIT_SSH` or `GIT_SSH_COMMAND` override, or a `ProxyCommand`/`ProxyJump` in
   the ssh config, keeps the checkout. Kept reasons name the remote and print its URL without
-  userinfo, query or helper-transport arguments.
+  userinfo, path, query or helper-transport arguments (network URLs as scheme, host and port only).
   Task-dir files outside checkouts (reports, `jobs/`) are never touched. Everything kept is
   listed with its reason. 2026-10-31 (earlier script version): 0.68 GB from 11 checkouts; 27 kept
   (no remote, uncommitted work, or ignored reports).

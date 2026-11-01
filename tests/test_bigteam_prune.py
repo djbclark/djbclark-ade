@@ -891,6 +891,8 @@ def test_ssh_proxy_routing_is_not_resolvable(prune, monkeypatch, directive):
     "https://alice:s3cr3t-token@nowhere.invalid/o/r.git?token=s3cr3t-token",
     "ext::sh -c s3cr3t-token",
     "alice:s3cr3t-token@weird/host",
+    "https::https://alice:s3cr3t-token@nowhere.invalid/o/r.git",
+    "https://nowhere.invalid/s3cr3t-token/r.git",
 ])
 def test_kept_reason_never_carries_credentials(prune, tmp_path, world, url, monkeypatch, capsys):
     c = make_clone(tmp_path, world)
@@ -904,7 +906,10 @@ def test_kept_reason_never_carries_credentials(prune, tmp_path, world, url, monk
 
 
 def test_redact_drops_userinfo_query_and_scp_user(prune):
-    assert prune.redact("https://u:p@host.example:8443/a/b.git?x=1#f") == "https://host.example:8443/a/b.git"
+    assert prune.redact("https://u:p@host.example:8443/a/b.git?x=1#f") == "https://host.example:8443/(path hidden)"
+    assert prune.redact("https::https://u:TOKEN@h/r.git") == "https::(arguments hidden)"
+    assert prune.redact("https://[::1]/x") == "https://[::1]/(path hidden)"
+    assert prune.redact("file:///a/%62t/b") == "file:///a/%62t/b"
     assert prune.redact("git@github.com:o/r.git") == "github.com:o/r.git"
     assert prune.redact("/plain/path") == "/plain/path"
     assert prune.redact("ext::sh -c tok") == "ext::(arguments hidden)"

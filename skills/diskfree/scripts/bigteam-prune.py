@@ -40,7 +40,7 @@ CLAIM, no unfinished or unreadable job record; the 7-day age is qualified once, 
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
 A linked worktree's HEAD reflog is read on both sides of every entry. An ssh remote counts as another machine only when
 git's ssh is plain ssh (no core.sshCommand, GIT_SSH, GIT_SSH_COMMAND, ProxyCommand or ProxyJump). Kept reasons print
-remote URLs without userinfo, query or helper-transport arguments.
+remote URLs without userinfo, path, query or helper-transport arguments (network URLs as scheme, host and port only).
 Every commit named by a root pseudo-ref in the git dir (ORIG_HEAD, FETCH_HEAD, REBASE_HEAD, ...) must also be on a
 remote (a linked worktree: or a branch or tag), and no directory below the checkout may be a git repository of its own
 (a `.git` entry or a bare repository), tracked or not.
@@ -336,18 +336,25 @@ def host_is_external(host, via_ssh, user=None, port=None):
 
 
 def redact(url):
-    """The URL without userinfo, query or fragment, so a diagnostic never carries a password or token."""
+    """A diagnostic form of a remote URL that never carries a password or token: helper transports (`x::arg`, checked
+    BEFORE ordinary URL parsing, since `https::https://user:TOKEN@h/r` parses as a URL with the token in its path) show
+    only the helper name; network URLs show scheme, host and port only (no userinfo, path, query or fragment); `file://`
+    and plain paths are shown as they are (they hold no credentials); scp-like URLs lose their user."""
+    head = url.split("/", 1)[0]
+    k = url.find("::")
+    if k > 0 and not head.startswith("[") and (url.find("://") < 0 or k < url.find("://")):
+        return url[:k] + "::(arguments hidden)"
     try:
         if "://" in url:
             p = urlsplit(url)
+            if p.scheme.lower() == "file":
+                return f"file://{p.netloc}{p.path}"
             host = p.hostname or ""
             if ":" in host:
                 host = f"[{host}]"
-            return f"{p.scheme}://{host}{':' + str(p.port) if p.port else ''}{p.path}"
+            return f"{p.scheme}://{host}{':' + str(p.port) if p.port else ''}/(path hidden)"
     except ValueError:
         return "(unparsable URL)"
-    if "::" in url.split("/", 1)[0]:
-        return url.split("::", 1)[0] + "::(arguments hidden)"  # a helper transport's argument may be a secret
     return re.sub(r"^[^@/]*@", "", url)
 
 
