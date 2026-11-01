@@ -88,7 +88,8 @@ calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s; on
 recalibrate with more; the first guess, 20000, sat below the load<10 median of 34k). Load and swap alone did not separate that spike from a calm hour.
 Runaway Chrome (operator 2026-10-25): the sample step tells the watcher (never kills) when one Google Chrome process
 (not "Chrome for Testing") has used LW_CHROME_CORES (0.9) or more for LW_CHROME_SUSTAIN_S (300), once an hour per pid, with its kind, the
-URL on its command line when it has one, and the Task Manager (Shift+Esc) advice.
+URL on its command line when it has one, and role-aware Task Manager (Shift+Esc) advice: match the pid and
+report the task; a browser/GPU alert does not identify a busy tab. Only an identified tab may be ended by the operator.
 Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default 25000, just above the calm tail)
 the per-core limit is --boost-per-core (default 2.0; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
 passes 1.5; at higher churn, or when churn cannot be read, the base limit holds. The result and `--json` `max_per_core` are the
@@ -1101,9 +1102,16 @@ def chrome_alert(st, t, table, dry):
         if t - since[str(pid)] < CHROME_SUSTAIN_S or key in cd and t - cd[key] < WATCHER_NOCPU_S:
             continue
         url = re.search(r"(https?://\S+)", cmd)
-        body = (f"Chrome {chrome_kind(cmd)} pid {pid} has used ~{cores:.1f} cores for {(t - since[str(pid)]) / 60:.0f}+ min"
+        kind = chrome_kind(cmd)
+        if kind == "tab renderer":
+            advice = (f"sort by CPU and match pid {pid} to its task. Only if the task is an identified tab and "
+                      "djbclark chooses, End process on that tab, then reload it.")
+        else:
+            advice = (f"sort by CPU and match pid {pid} to its task. Report the task name and CPU percentage; "
+                      f"a {kind} alert does not identify a busy tab. Do not end tabs based on this alert alone.")
+        body = (f"Chrome {kind} pid {pid} has used ~{cores:.1f} cores for {(t - since[str(pid)]) / 60:.0f}+ min"
                 + (f" (opened {url.group(1)[:80]})" if url else "") + ". Tell djbclark: Chrome Task Manager (Shift+Esc), "
-                "sort by CPU, End process on the busy tab, then reload it. Do not kill it yourself.")
+                + advice + " Do not kill, reload, or restart Chrome yourself.")
         if dry:
             print(f"load-watch: {body}")
             continue

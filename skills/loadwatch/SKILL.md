@@ -144,6 +144,11 @@ Verify against the processes themselves, not against memory or the brief's guess
    pageouts with low free memory, agents timing out). Still investigate and `ack` as usual; the exception
    only silences the "quit this app" advice.
 
+Chrome CPU alerts must match the alerted PID to its Task Manager row (2026-10-29). A Browser, GPU,
+or utility-process alert does not establish a busy tab: report the task name and CPU percentage
+without guessing a tab. A renderer can host a tab or extension; only an identified tab and the
+operator's choice justify ending/reloading that tab. Never kill or restart Chrome yourself.
+
 ## What this is not
 
 1. Not a scheduler. Never `/loop` or CronCreate a load check: it is a poll whose firings mostly find nothing

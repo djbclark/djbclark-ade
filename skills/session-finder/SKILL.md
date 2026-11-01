@@ -95,6 +95,16 @@ id>)`, from `paseo ls -g --background --json`, deduplicated on the Paseo agent i
 adds the archived agents as `ended` rows (`relay.py` never sends to one). No `paseo` CLI, or a failed or slow call
 (20 s): no Paseo rows, as before. `relay.py` takes a hex **prefix of 6 or more characters** of a Paseo agent id
 (`paseo ls`'s 7-character short id works); exactly one agent must match, else it refuses and lists the candidates.
+
+**A `closed` Paseo agent is sent to like an idle one (2026-10-31)**: Paseo reports `closed` for an agent whose runtime it
+collected (not archived, not failed); `paseo send` into it resumes the SAME persisted conversation. `relay.py` (`hard_stop`,
+`paseo_blocker`, the gate, `--why`, the deferred deliverer's poll) treats `closed` as idle and the result stays
+`accepted` until a witness shows the text; a failed send is a failure, never a delivery. `archived`, `error`, `initializing`
+and any other state are still refused. This is the path fleet-watch's `upr_relay` takes
+(`relay.py <agent uuid> <msg> --no-ack`) for a collected `watch` holder. `fleet.py` keeps the row's `status`/`paseo_state`
+as `closed`; relay maps it to idle when it sends. Not yet proven live: a `closed` agent that is a failed resume rather than a
+collected one would fail the `paseo send` (reported, exit 1).
+
 A working agent whose provider cannot steer (cline and every other ACP provider, which Paseo would interrupt and replace
 the running turn of) is **queued, not refused** (2026-10-24): `relay.py` writes a 0600 record under
 `~/.local/state/relay/deferred/`, starts a detached deliverer and **exits 0** with `queued: <id> ...` on stdout
@@ -482,9 +492,9 @@ escalated to the operator about silence that was a queue; two queued messages we
    `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--ack` (a second one is the delivery watch of the inner send), `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
    never dropped. `--status ID` is a query: combined with any other option or command (`--cancel`, `--retire`, a send) it is refused, exit 2, and nothing runs. A transcript-backed expectation whose
    transcript cannot be read reads `open (uncollected, ...)` even after a complete sweep.
-   **A closed Paseo agent that Paseo reports persistent is woken by a send** (`--why`: `closed: a send wakes it`, deliverable); this holds for automatic callers too (djbclark, 2026-10-31): a
-   watcher such as rumination-watch that falls back to a closed persistent seat sends to it, which resumes the stored session and starts a turn (at most one send per pass), and never treats it as absent.
-   An archived agent, or a closed one not reported persistent, is refused and says why.
+   **A closed Paseo agent (collected runtime, not archived) counts as idle and a send wakes it** (`--why`: `closed ... a send resumes the same conversation`, deliverable); this holds for automatic callers too
+   (djbclark, 2026-10-31): a watcher such as rumination-watch that falls back to a closed seat sends to it, which starts a turn (at most one send per pass), and never treats it as absent.
+   An archived agent, `error`, `initializing` and any other state are refused and say why.
    A transcript-backed `ack` is also read from an `api-request-blob` record (Claude Code logs an idle session's peer message only that way), but only a block that STARTS with the harness prefix
    `Another Claude session sent a message...` and only the envelope after it: reminders, hook output, nested memory, skill bodies, task notifications and compaction summaries count for nothing.
 
