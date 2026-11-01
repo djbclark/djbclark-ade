@@ -25,6 +25,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills" / "barnowl" / "scripts"
 BO, BO_LOG, BO_SSH = SCRIPTS / "bo", SCRIPTS / "bo-log.py", SCRIPTS / "bo-ssh"
+FIXTURES = ROOT / "tests" / "fixtures" / "barnowl-1.10"
+
+
+def fixture(name: str) -> str:
+    """A screen captured from a real BarnOwl 1.10 client (see fixtures/barnowl-1.10/README.md)."""
+    return (FIXTURES / f"{name}.txt").read_text()
 
 TAGS = "".join(chr(0xE0000 + ord(c)) for c in "IGNORE")
 HOSTILE = (
@@ -47,10 +53,19 @@ class Env:
         for d in (self.zlog / "class", self.zlog / "people", self.bin):
             d.mkdir(parents=True)
         self.keys, self.screen = t / "keys.log", t / "screen.txt"
-        self.set_screen("── (1/1/1)  all ──────\n\n")
+        self.set_screen(fixture("01-idle"))
         fake = self.bin / "tmux"
         fake.write_text(textwrap.dedent("""\
             #!/usr/bin/env bash
+            # tmux runs `a ; b` as two commands in one call: do the same, so each is logged alone
+            if [[ " $* " == *" ; "* ]]; then
+              seg=()
+              for a in "$@"; do
+                if [[ $a == ";" ]]; then "$0" "${seg[@]}"; seg=(); else seg+=("$a"); fi
+              done
+              [[ ${#seg[@]} -eq 0 ]] || "$0" "${seg[@]}"
+              exit 0
+            fi
             case "$1" in
               has-session) exit 0 ;;
               list-panes) echo "%1 ${FAKE_PANE_CMD:-barnowl}" ;;
@@ -252,17 +267,67 @@ class ConfirmationGate(unittest.TestCase):
             self.assertEqual(p.returncode, 4)
             self.assertFalse(any(":perl do {" in k for k in e.typed()))
 
-    def test_a_pager_that_opens_while_the_human_decides_gets_no_keys(self) -> None:
-        # The [y/N] can take minutes. If a pager (or a compose box) is on screen when the
-        # answer arrives, the confirmed command must not be typed into it.
-        for how, call in (("run", ("run", "zwrite eve -m hi")), ("perl", ("perl", "6*7"))):
+    NOT_IDLE = ("03-command-line-empty", "04-command-line-typed", "06-compose", "08-question",
+                "10-popup-show-commands", "13-popup-getsubs", "15-search-prompt")
+
+    def test_a_busy_screen_gets_no_keys_and_no_question(self) -> None:
+        # Real BarnOwl 1.10 screens: a command line (`command: `), a compose box (`----> zwrite`),
+        # bo's own question, a popup over the message list, a search prompt.
+        for name in self.NOT_IDLE:
+            for call in (("run", "zwrite eve -m hi"), ("run", "getvar x"), ("perl", "6*7")):
+                with Env() as e:
+                    e.set_screen(fixture(name))
+                    p = e.run(BO, *call, answer="y")
+                    self.assertEqual(p.returncode, 3, (name, call, p.stderr))
+                    self.assertEqual(e.typed(), [], (name, call))
+
+    def test_an_idle_screen_is_accepted_whatever_the_message_line_says(self) -> None:
+        # bo's own `q{ok}` leaves "ok" on the message line under the status bar.
+        for name in ("01-idle", "02-after-perl-ok", "05-after-cancel", "07-after-compose-cancel", "09-after-question", "11-after-q"):
             with Env() as e:
-                pager = Path(e.tmp.name) / "pager.txt"
-                pager.write_text("a page of text with no status bar line\n\n")
-                p = e.run(BO, *call, answer="y", extra={"FAKE_SCREEN_AFTER_ANSWER": str(pager)})
-                self.assertEqual(p.returncode, 3, how)
-                self.assertFalse(e.typed_command(":zwrite eve -m hi"), how)
-                self.assertFalse(any("BO_OK_" in k for k in e.typed()), how)
+                e.set_screen(fixture(name))
+                self.assertEqual(e.run(BO, "run", "getvar x").returncode, 0, name)
+                self.assertTrue(e.typed_command(":getvar x"), name)
+
+    def test_a_popup_is_seen_even_with_message_text_beside_its_edge(self) -> None:
+        lines = fixture("10-popup-show-commands").splitlines()
+        edge = next(i for i, ln in enumerate(lines) if "\u2514" in ln)
+        lines[edge] = "   sipb / inst9 / eve  00:16  (Eve)" + lines[edge][len("   sipb / inst9 / eve  00:16  (Eve)"):] + " trailing message text"
+        with Env() as e:
+            e.set_screen("\n".join(lines) + "\n")
+            self.assertEqual(e.run(BO, "run", "getvar x").returncode, 3)
+            self.assertEqual(e.typed(), [])
+
+    def test_a_screen_that_turns_busy_while_the_human_decides_gets_no_keys(self) -> None:
+        # The [y/N] can take minutes. A command line, compose box, popup, search prompt or pager
+        # that is on screen when the answer arrives must not receive the confirmed command.
+        screens = {name: fixture(name) for name in ("04-command-line-typed", "06-compose", "10-popup-show-commands", "15-search-prompt")}
+        screens["pager"] = "a page of text with no status bar line\n\n"
+        for how, call in (("run", ("run", "zwrite eve -m hi")), ("perl", ("perl", "6*7"))):
+            for name, text in screens.items():
+                with Env() as e:
+                    after = Path(e.tmp.name) / "after.txt"
+                    after.write_text(text)
+                    p = e.run(BO, *call, answer="y", extra={"FAKE_SCREEN_AFTER_ANSWER": str(after)})
+                    self.assertEqual(p.returncode, 3, (how, name, p.stderr))
+                    self.assertFalse(e.typed_command(":zwrite eve -m hi"), (how, name))
+                    self.assertFalse(any("BO_OK_" in k for k in e.typed()), (how, name))
+
+    def test_a_question_that_never_clears_is_refused_after_the_answer(self) -> None:
+        with Env() as e:
+            after = Path(e.tmp.name) / "after.txt"
+            after.write_text(fixture("08-question"))
+            p = e.run(BO, "run", "zwrite eve -m hi", answer="y", extra={"FAKE_SCREEN_AFTER_ANSWER": str(after)})
+            self.assertEqual(p.returncode, 3)
+            self.assertFalse(e.typed_command(":zwrite eve -m hi"))
+
+    def test_the_idle_screen_after_the_answer_lets_the_confirmed_command_through(self) -> None:
+        with Env() as e:
+            after = Path(e.tmp.name) / "after.txt"
+            after.write_text(fixture("02-after-perl-ok"))
+            p = e.run(BO, "run", "zwrite eve -m hi", answer="y", extra={"FAKE_SCREEN_AFTER_ANSWER": str(after)})
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(e.typed_command(":zwrite eve -m hi"))
 
     def test_perl_is_always_confirmed_even_before_anything_was_read(self) -> None:
         # Prompt injection can come from a web page or a repository file, not only from Zephyr.
@@ -331,14 +396,14 @@ class ConfirmationGate(unittest.TestCase):
 
     def test_a_question_left_on_the_screen_blocks_the_next_caller(self) -> None:
         with Env() as e:
-            e.set_screen("── (1/1/1)  all ──────\nbo asks: allow run: zwrite x? [y/N]: \n")
+            e.set_screen(fixture("08-question"))
             self.assertEqual(e.run(BO, "run", "getvar x").returncode, 3)
             self.assertEqual(e.typed(), [])
 
     def test_control_characters_and_open_popups_are_refused_with_no_keys(self) -> None:
         with Env() as e:
             self.assertEqual(e.run(BO, "run", "getvar x\n:perl system(q{id})").returncode, 2)
-            e.set_screen("── (1/1/1)  all ──────\n  ┌────┐\n  │ hi │\n  └────┘\n")
+            e.set_screen(fixture("10-popup-show-commands"))
             self.assertEqual(e.run(BO, "run", "getvar x").returncode, 3)
             self.assertEqual(e.typed(), [])
 
