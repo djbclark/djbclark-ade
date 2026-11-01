@@ -1582,7 +1582,7 @@ def is_acp_run(argv):
 
 def count_agents():
     """Live acp-run sessions machine-wide, from one `ps` (exact argv match, never pgrep/pkill -f). None when there
-    is no `ps` binary; ReadFailed when ps times out or exits non-zero."""
+    is no `ps` binary; ReadFailed when ps times out, exits non-zero or prints a table without this process in it."""
     try:
         r = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, timeout=10)
     except FileNotFoundError:
@@ -1591,7 +1591,11 @@ def count_agents():
         raise ReadFailed(f"ps: {e!r}") from e
     if r.returncode != 0:
         raise ReadFailed(f"ps exited {r.returncode}")
-    return sum(1 for ln in r.stdout.splitlines() if len(ln.split(None, 1)) == 2 and is_acp_run(ln.split(None, 1)[1].split()))
+    rows = [ln.split(None, 1) for ln in r.stdout.splitlines()]
+    rows = [p for p in rows if len(p) == 2 and p[0].isdigit()]
+    if str(os.getpid()) not in {p[0] for p in rows}:   # an empty or malformed table (this very process must be in it)
+        raise ReadFailed("ps printed no usable process table")
+    return sum(1 for p in rows if is_acp_run(p[1].split()))
 
 
 def admit_memory(fake_load, fake_churn, fake_mem, polls, max_agents=0):

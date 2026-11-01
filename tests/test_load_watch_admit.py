@@ -433,6 +433,7 @@ def test_agent_count_counts_only_acp_run_processes(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, stdout=PS_OUT, stderr="")
 
     monkeypatch.setattr(lw.subprocess, "run", run)
+    monkeypatch.setattr(lw.os, "getpid", lambda: 106)  # the table must contain this process (here the vim row)
     assert lw.count_agents() == 4  # 101, 103, 104, 110: not the uv wrapper, not a mention, not a lookalike
     assert calls == [["ps", "-axo", "pid=,args="]]
 
@@ -449,6 +450,17 @@ def test_ps_that_exists_but_fails_raises_and_an_absent_ps_does_not(monkeypatch):
             raise AssertionError(kw)
     fake_run(monkeypatch, lw, exc=FileNotFoundError("ps"))
     assert lw.count_agents() is None
+    # ps "succeeds" but prints nothing or garbage, or a table without this process: no count was taken (Codex P2, PR 210)
+    for out in ("", "ps: kvm error\n", "  1 /sbin/launchd\n  2 /usr/bin/python3 /x/acp-run omp\n", "garbage line\n"):
+        fake_run(monkeypatch, lw, stdout=out)
+        try:
+            lw.count_agents()
+        except lw.ReadFailed:
+            pass
+        else:
+            raise AssertionError(out)
+    fake_run(monkeypatch, lw, stdout=f"  {os.getpid()} python3 -m pytest\n")
+    assert lw.count_agents() == 0
 
 
 def test_is_acp_run_forms():
