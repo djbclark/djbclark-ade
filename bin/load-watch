@@ -1680,7 +1680,11 @@ def calm_note(t, calm):
             import fcntl
             fcntl.flock(lock, fcntl.LOCK_EX)
         except (ImportError, OSError):
-            pass
+            locked = False
+        else:
+            locked = True
+        if not locked and calm:
+            return None  # a calm reading that cannot be serialized could restore a superseded run: toward waiting
         s = calm_load()
         since, last = s.get("calm_since"), s.get("last_t")
         if _num(last) and t < last:

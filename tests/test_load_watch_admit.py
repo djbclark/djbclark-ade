@@ -843,3 +843,41 @@ def test_the_text_line_carries_the_reservation_id_so_it_can_be_released(tmp_path
     assert "reservation=" not in admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1, **res).stdout
     assert "reservation=" not in admit(tmp_path, "--wait", "0", "--max-agents", "2", load1=0.1, **res).stdout
     assert "reservation=" not in admit(tmp_path, "--wait", "0", load1=0.1, **res).stdout
+
+
+def test_calm_note_without_the_lock_may_reset_but_never_extend_the_run(tmp_path, monkeypatch):
+    """GitHub Codex thread on PR 210: the whole read-modify-write is serialized; when the lock cannot be taken a calm
+    reading is dropped (it could restore a superseded run) while a hot one still clears it."""
+    import fcntl
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    assert lw.calm_note(1000.0, True) == 1000.0
+    monkeypatch.setattr(fcntl, "flock", lambda *a, **k: (_ for _ in ()).throw(OSError("no lock")))
+    assert lw.calm_note(1010.0, True) is None
+    assert json.loads((tmp_path / "calm.json").read_text()) == {"calm_since": 1000.0, "last_t": 1000.0}   # untouched
+    assert lw.calm_note(1020.0, False) is None
+    assert json.loads((tmp_path / "calm.json").read_text()) == {"calm_since": None, "last_t": 1020.0}
+
+
+def test_concurrent_hot_and_calm_writers_never_leave_a_matured_run_after_a_hot_reading(tmp_path):
+    """The thread's race, with real processes: a calm writer that read an old calm_since before a hot reading landed
+    must not restore it. Whatever the interleaving, once any hot reading (newest timestamp) is recorded, calm_since
+    stays None until a later calm reading starts a NEW run."""
+    code = ("import importlib.machinery, importlib.util, sys\n"
+            "l = importlib.machinery.SourceFileLoader('m', sys.argv[1]); sp = importlib.util.spec_from_loader('m', l)\n"
+            "m = importlib.util.module_from_spec(sp); l.exec_module(m)\n"
+            "from pathlib import Path\n"
+            "m.STATE_DIR = Path(sys.argv[2])\n"
+            "t0 = float(sys.argv[3])\n"
+            "calm = sys.argv[4] == 'calm'\n"
+            "for i in range(20 if calm else 40):\n"
+            "    m.calm_note(t0 + i, calm or i < 20)\n")
+    (tmp_path / "calm.json").write_text(json.dumps({"calm_since": 1.0, "last_t": 1.0}))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LW_")}
+    ps = [subprocess.Popen([sys.executable, "-c", code, str(LW), str(tmp_path), "1000", kind], env=env)
+          for kind in ("calm", "hot", "calm", "hot")]
+    for p in ps:
+        assert p.wait(timeout=60) == 0
+    s = json.loads((tmp_path / "calm.json").read_text())
+    # the hot writers' last reading (t=1039) is the newest and only hot writers go that far: no calm one may survive it
+    assert s["last_t"] == 1039.0 and s["calm_since"] is None, s
