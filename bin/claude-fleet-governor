@@ -268,7 +268,10 @@ def read_snapshot(path: Path, at: datetime, now: datetime, stale_min: float) -> 
         return None
     stamp = parse_ts(data.get("collected_at")) if isinstance(data, dict) else None
     found: list[dict[str, Any]] = []
-    find_windows(data, found, None, stamp or at)
+    try:
+        find_windows(data, found, None, stamp or at)
+    except RecursionError:   # a nest json.loads parsed (Python 3.14 reads 32768 levels) that the recursive walker cannot
+        return None
     file_at = stamp or at
     ref = min(file_at, now)
     one: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}

@@ -1309,31 +1309,51 @@ class TestGateProfile(Base):
         self.assertEqual(self.nudges(), [])
 
 
-def _deep_json_raises(*_a, **_k):
-    # json.loads raises RecursionError on a deeply nested file under Python 3.13 and older, but 3.14 parses it: force the raise
-    raise RecursionError("maximum recursion depth exceeded")
+# A REAL nest, no monkeypatch: 400000 levels is past the limit of json.loads on every Python (3.14 parses 32768 but raises
+# RecursionError near 200000; 3.13 and older raise far sooner).
+JSON_TOO_DEEP = b"[" * 400000
 
 
 def test_a_guard_state_json_cannot_nest_deep_enough_to_read_is_ok_not_a_crash(tmp_path, monkeypatch):
     mod = _gov()
     guard = tmp_path / "quota-guard.json"
-    guard.write_bytes(b"[" * 32768 + b"]" * 32768)
+    guard.write_bytes(JSON_TOO_DEEP)
     monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(guard))
-    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
     assert mod.guard_level(mod.parse_ts("2026-10-23T14:00:00Z")) == "ok"
 
 
-def test_a_governor_state_file_that_json_cannot_nest_deep_enough_to_read_is_empty_not_a_crash(tmp_path, monkeypatch):
+def test_a_governor_state_file_that_json_cannot_nest_deep_enough_to_read_is_empty_not_a_crash(tmp_path):
     mod = _gov()
     state = tmp_path / "state.json"
-    state.write_bytes(b"[" * 32768 + b"]" * 32768)
-    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
+    state.write_bytes(JSON_TOO_DEEP)
     assert mod.read_state(state) == {}
 
 
-def test_a_snapshot_that_json_cannot_nest_deep_enough_to_read_is_no_reading_not_a_crash(tmp_path, monkeypatch):
+def test_a_snapshot_that_json_cannot_nest_deep_enough_to_read_is_no_reading_not_a_crash(tmp_path):
     mod = _gov()
     snap = tmp_path / "2026-10-23T125900.000000Z.json"
-    snap.write_bytes(b"[" * 32768 + b"]" * 32768)
-    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
+    snap.write_bytes(JSON_TOO_DEEP)
     assert mod.read_snapshot(snap, NOW, NOW, 30.0) is None
+
+
+def test_a_snapshot_json_parses_but_find_windows_cannot_walk_is_no_reading_not_a_crash(tmp_path):
+    """Adversary r1 F1 on PR 214: 5000 levels parse under Python 3.14 (and raise in json.loads on older Pythons); the
+    recursive walker `find_windows` then hit RecursionError outside the try."""
+    mod = _gov()
+    snap = tmp_path / "2026-10-23T125900.000000Z.json"
+    snap.write_bytes(b"[" * 5000 + b"]" * 5000)
+    assert mod.read_snapshot(snap, NOW, NOW, 30.0) is None
+
+
+def test_list_agents_reads_a_paseo_set_model_output_nested_too_deep_as_not_json(monkeypatch):
+    mod = _gov()
+    monkeypatch.setattr(mod, "run_cmd", lambda argv, timeout=0: (0, JSON_TOO_DEEP.decode()))
+    assert mod.list_agents() == (None, "paseo-set-model list: output is not JSON")
+
+
+class TestDeeplyNestedSnapshot(Base):
+    def test_check_with_a_newest_snapshot_nested_too_deep_for_the_walker_is_no_usable_snapshot_not_an_internal_error(self):
+        (self.e.snaps / snap_name(NOW)).write_bytes(b"[" * 5000 + b"]" * 5000)
+        r = self.e.run("check")
+        self.assertNotEqual(r.returncode, 12, r.stderr)
+        self.assertNotIn("RecursionError", r.stderr)
