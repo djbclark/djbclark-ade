@@ -87,12 +87,11 @@ to `command -v <tool>` then fails ("Requested utility `gtr` does not match execu
 tool (`exec tr "$@"` style, or GNU coreutils from the `gnu-coreutils` package if the image has it) instead of a symlink, the suite green on 26.04, then unpin. The
 pin comment in `.github/workflows/test.yml` says the same. GitHub retires an old image on its own schedule, so this is not optional forever.
 
-## Sibling `RecursionError` readers: governor and quota-guard (adversary r1 on PR 97, PR 98 merged 2026-10-28 as 1f56db3; djbclark ruled last in the queue)
+## `frontier_agent_gate._guard_state` keeps its own guard-state reader (adversary r1 on PR 214, 2026-11-01; optional, last in the queue)
 
-PR 98 made `ade_gates.read_guard_state` read a `RecursionError` from `json` as unreadable. Two readers of the same guard state files keep the exposure
-(Python 3.13 and older raise `RecursionError` on deeply nested JSON under the 64 KiB cap): `guard_level` in `bin/claude-fleet-governor` and `load_state` in
-`bin/claude-quota-guard`. Optionally make the hook call `g.read_guard_state()` instead of its own copy (r1 finding 2). Failing tests first, forcing
-`RecursionError` the way PR 98's test does (a real nest does not trip on Python 3.14); one adversary round; CHANGELOG `Fixed` line.
+`claude/hooks/frontier_agent_gate.py::_guard_state` reads the quota-guard state with its own copy that catches only `(OSError, ValueError)`; `ade_gates.read_guard_state`
+(PR 98) also reads a `RecursionError` as unreadable. Not exploitable today: `_judged` is wrapped in `except Exception`, so a deeply nested file there fails closed
+(asks), only with an uglier message. Make the hook call `g.read_guard_state()` instead of its own copy; failing test first (a real nest, 400000 levels), CHANGELOG `Fixed` line.
 
 ## Verified peer messaging, round 2: "always acknowledged", and the gaps found (djbclark, direct, 2026-10-25)
 

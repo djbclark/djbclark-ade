@@ -2050,3 +2050,33 @@ def test_the_frontier_advice_names_a_profile_only_when_one_is_the_source(rig, mo
     text = mod._advice("watch", "r", "available", None, standing, ["weekly"], 50.0, 15.0)
     assert text.startswith("1. Claude quota watch: Opus 5.5") and "(" not in text.splitlines()[0]
     assert mod._advice("watch", "r", "available", None, standing, ["weekly", "alert"], 50.0, 15.0) == mod._advice("watch", "r")
+
+
+# A REAL nest, no monkeypatch: 400000 levels is past the limit of json.loads on every Python (3.14 parses 32768 but raises
+# RecursionError near 200000; 3.13 and older raise far sooner).
+JSON_TOO_DEEP = "[" * 400000
+
+
+def test_a_state_file_that_json_cannot_nest_deep_enough_to_read_is_empty_not_a_crash(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    rig.state.parent.mkdir(parents=True, exist_ok=True)
+    rig.state.write_text(JSON_TOO_DEEP)
+    assert mod.load_state() == {}
+
+
+def test_a_snapshot_that_json_cannot_nest_deep_enough_to_read_is_unreadable_not_a_crash(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    rig.set_alerts([])
+    (rig.snaps / "2026-10-23T115900.000000Z.json").write_text(JSON_TOO_DEEP)
+    with pytest.raises(mod.Unreadable, match="2026-10-23T115900.000000Z.json"):
+        mod.read_snapshot()
+
+
+def test_aiuse_output_nested_too_deep_is_unreadable_at_exit_0_and_the_verdict_at_exit_3(rig, monkeypatch):
+    """Adversary r1 F2 on PR 214: `read_aiuse` caught only JSONDecodeError before; exit 3 keeps its verdict (an empty object)."""
+    mod = _load_guard_module(monkeypatch, rig)
+    rig.set_aiuse(JSON_TOO_DEEP, rc=0)
+    with pytest.raises(mod.Unreadable, match="invalid JSON"):
+        mod.read_aiuse()
+    rig.set_aiuse(JSON_TOO_DEEP, rc=3)
+    assert mod.read_aiuse() == (3, {})
