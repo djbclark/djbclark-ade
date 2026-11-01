@@ -100,6 +100,8 @@ Only set feature IDs returned by `inspect_provider`. For Codex fast mode, look f
 
 **`create_schedule`** — starts a new agent on a cron cadence. Required: `prompt`, `cron`, `provider`. Optional: `timezone`, `name`, `cwd`, `maxRuns`, `expiresIn`. Use when the recurring work should live in fresh agents.
 
+**A schedule run reads `succeeded` when its agent's turn ends, not when its work is done** (2026-11-01: a run delegated four slices, ended its turn, was marked succeeded and archived after 3 minutes; the deliverable was never written). So a scheduled prompt (1) names its deliverable or report path, (2) never delegates and stops: it does the work in its own turn, or waits for each slice's report and `.done` marker within a declared deadline (`acp-dispatch-wait`, bounded), and (3) checks that the deliverable exists before it ends, saying `NO OUTPUT: <why>` as its last line if it does not. Read a schedule's log with that in mind: `succeeded` alone proves nothing.
+
 **`create_heartbeat`** — sends you a prompt on a cron cadence. Required: `prompt`, `cron`. Optional: `timezone`, `name`, `maxRuns`, `expiresIn`. Use for reminders, PR/build babysitting, and status checks that should return to this conversation.
 
 **`delete_heartbeat`** stops it. MCP intentionally exposes no heartbeat update tool; delete and recreate when its task or cadence changes.

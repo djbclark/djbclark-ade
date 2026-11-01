@@ -395,6 +395,16 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
 2. **Unattended runs**: split by job kind. Paseo schedules only for runs that need judgment
    (`skillopt-night`, triage, reports); launchd (systemd on Linux) for monitors, collectors, record reaping
    and the watchdog. Schedules that keep worktrees need archive-on-finish turned off in the app first.
+   **A scheduled run's success is its output, not the end of its turn (amended 2026-11-01).** Paseo marks
+   a schedule run `succeeded` when the agent's turn ends, so a run that delegates and ends its turn reads as
+   a success with nothing produced (2026-11-01, reported by Dann Chat 4: schedule `9ebe3f69`, run
+   `a751f388` "succeeded" with four slices "running", agent archived after 3 minutes, the memo never
+   written, no slice reports). Every schedule therefore runs as a G1 job: its prompt declares the
+   deliverable or report path; the run counts as succeeded only when that output exists and validates
+   (report file plus `.done` marker, the `acp-dispatch` contract), a missing one is a distinct
+   `no-output` failure that alerts; and its agent is not archived while work it delegated is outstanding
+   (B4). Until G1: a scheduled agent never delegates and stops; it does the work in its turn, or waits for
+   each slice's `.done` within a declared deadline and checks its deliverable before it ends.
 3. **Second daemon**: use the **existing** vps-primary Paseo daemon (0.13.0, NixOS system service, connected
    to the Mac over the tailnet; 3.7 GiB RAM, 2 vCPU) for the one-task pilot and the dead-man check, after
    upgrading it to 0.14 and meeting D1.8's security prerequisites. Correction (lead 1e61c979, 2026-10-30):
