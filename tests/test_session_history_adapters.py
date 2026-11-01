@@ -331,6 +331,23 @@ class LiveLabelTests(unittest.TestCase):
                              f"cd '{proj}' && crush -D '{proj / '.crush'}' --session proj1")
             self.assertEqual(sh.resume_hint(mod.RESUME, "root1", ""), "crush -D ~/.local/share/crush-acp --session root1")
 
+    def test_install_renders_the_configured_index_directory_into_the_job(self) -> None:
+        plist = (ROOT / "launchd" / "com.djbclark.session-history-update.plist").read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            idx = Path(tmp) / "my <idx> & dir"
+            with mock.patch.dict(os.environ, {"SESSION_INDEX_DIR": str(idx)}):
+                spec = importlib.util.spec_from_file_location("t_sh_plist", SF / "session-history.py")
+                sh = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(sh)
+            out = sh.render_plist(plist, Path("/repo"))
+            self.assertNotIn("__", out)  # no placeholder left, comment included
+            import plistlib
+            d = plistlib.loads(out.encode())
+            self.assertEqual(d["EnvironmentVariables"]["SESSION_INDEX_DIR"], str(idx.resolve()))
+            self.assertEqual(d["StandardOutPath"], f"{idx.resolve()}/update.out")
+            self.assertEqual(d["StandardErrorPath"], f"{idx.resolve()}/update.err")
+            self.assertEqual(d["ProgramArguments"][3], "/repo/skills/session-finder/session-history.py")
+
 
 class SessionFindAllTests(unittest.TestCase):
     def test_session_index_dir_override_applies_to_session_find_too(self) -> None:
@@ -370,7 +387,7 @@ class SessionFindAllTests(unittest.TestCase):
         sf = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sf)
         row = {"agent": "codex", "id": "L1", "sid": "S-done", "status": "idle", "cwd": "/w", "title": "unrelated", "name": "n1",
-               "where": "", "focus": "", "finished": "done"}
+               "where": "", "focus": "", "finished": "done", "reach": "launch.py reply L1 \"<text>\""}
         running = {**row, "id": "L2", "sid": "S-run", "finished": "", "name": "n2"}
         hits = [{"agent": "codex", "sessionId": sid, "live": False, "title": "", "cwd": "/w", "snippet": "okapi", "resume": f"r {sid}"}
                 for sid in ("S-done", "S-run", "S-old")]
@@ -388,7 +405,7 @@ class SessionFindAllTests(unittest.TestCase):
         got = {r["sessionId"]: r for r in json.loads(out[-1])}
         self.assertEqual(sorted(got), ["S-done", "S-old"])  # the running one is not listed twice; the finished one is
         self.assertGreater(got["S-done"]["score"], 0)
-        self.assertEqual(got["S-done"]["match"], "okapi")
+        self.assertEqual(got["S-done"]["match"], "okapi")  # the history snippet, not the fleet's `launch.py reply` hint
         self.assertTrue(got["S-done"]["live"])  # still the fleet's row, with FINISHED set
         self.assertEqual(got["S-done"]["finished"], "done")
         self.assertEqual(got["S-old"]["status"], "ended")

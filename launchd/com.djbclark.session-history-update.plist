@@ -4,9 +4,9 @@
      (2026-10-31). Until then nothing refreshed it except a search: the first query after a quiet
      spell paid the catch-up (95 s for ~1,400 changed sessions) and `session-history.py` of any
      kind was the only writer. Every 10 minutes (and at login) this runs the same incremental pass
-     (`--update-only`: only sessions whose size/mtime fingerprint changed are re-read), niced and
-     at low IO priority. Installed by `session-history.py --install` (it fills in __REPO__),
-     removed by `session-history.py --uninstall`; `session-history.py --status` shows the lag. -->
+     (the update-only mode: only sessions whose size/mtime fingerprint changed are re-read), niced and
+     at low IO priority. Installed by `session-history.py` in install mode (it fills in the checkout and the index directory),
+     removed by its uninstall mode; its status mode shows the lag. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.djbclark.session-history-update</string>
@@ -20,6 +20,7 @@
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>SESSION_INDEX_DIR</key><string>__INDEX_DIR__</string>
     <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>
@@ -27,7 +28,7 @@
   <key>Nice</key><integer>10</integer>
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
-  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/session-index/update.out</string>
-  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/session-index/update.err</string>
+  <key>StandardOutPath</key><string>__INDEX_DIR__/update.out</string>
+  <key>StandardErrorPath</key><string>__INDEX_DIR__/update.err</string>
 </dict>
 </plist>

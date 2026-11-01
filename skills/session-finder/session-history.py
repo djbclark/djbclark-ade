@@ -140,6 +140,12 @@ def status() -> int:
 PLIST = "com.djbclark.session-history-update.plist"
 
 
+def render_plist(template: str, repo: Path) -> str:
+    """Fill in the job: the checkout it runs and the index directory it refreshes and logs to (SESSION_INDEX_DIR
+    of the installing shell, else the default), so the installed job and this command see the same database."""
+    return template.replace("__REPO__", escape(str(repo))).replace("__INDEX_DIR__", escape(str(INDEX_DIR)))
+
+
 def install(remove: bool) -> int:
     """Copy launchd/<PLIST> to ~/Library/LaunchAgents and (un)load it."""
     dest = Path.home() / "Library/LaunchAgents" / PLIST
@@ -168,7 +174,7 @@ def install(remove: bool) -> int:
     subprocess.run(["launchctl", "bootout", domain, str(dest)], check=False, capture_output=True)  # reinstall = replace
     dest.parent.mkdir(parents=True, exist_ok=True)  # a fresh account has no ~/Library/LaunchAgents yet
     tmp = dest.with_suffix(".tmp")
-    tmp.write_text((repo / "launchd" / PLIST).read_text().replace("__REPO__", escape(str(repo))))
+    tmp.write_text(render_plist((repo / "launchd" / PLIST).read_text(), repo))
     os.replace(tmp, dest)
     r = subprocess.run(["launchctl", "bootstrap", domain, str(dest)], check=False, capture_output=True, text=True)
     print(f"installed {dest}; bootstrap rc={r.returncode} {r.stderr.strip()}")

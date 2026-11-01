@@ -239,7 +239,7 @@ def main() -> int:
             row = exited.get(h["sessionId"])
             if row:
                 row["score"] = max(row["score"], max(1, 40 - i))
-                row["match"] = row["match"] or h.get("snippet", "")
+                row["match"] = h.get("snippet") or row["match"]  # why it matched, not the fleet's delivery hint
                 row["resume"] = h.get("resume", "")
                 continue
             rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,
