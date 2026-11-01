@@ -310,7 +310,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- `bin/acp-dispatch` classifies GitHub Copilot quota stops as `quota` (2026-11-01): the CLI's 402 `You have no quota` / `quota_exceeded`, `Quota exceeded. Upgrade to increase your limit`, `You have exceeded your premium request allowance/limit`, the `weekly rate limit` cap and AI-credit exhaustion wording, so a Copilot slice that runs out is rerouted (far reset) instead of retried as an agent error; the reset parser now reads `reset on April 19, 2026 at 9:00 PM` (#TBD).
+- `bin/acp-dispatch` classifies GitHub Copilot quota stops as `quota` (2026-11-01): the CLI's 402 `You have no quota` / `quota_exceeded`, `Quota exceeded. Upgrade to increase your limit`, `You have exceeded your premium request allowance/limit`, the `weekly rate limit` cap and AI-credit exhaustion wording, so a Copilot slice that runs out is rerouted (far reset) instead of retried as an agent error; the reset parser now reads `reset on April 19, 2026 at 9:00 PM` (#212).
 - Fixed `/bigteam` caller-discovery, commit-preparation, and single-run waiter checks, including unindexed scripts and GNU-safe source excerpts (#195).
 - Fixed `watch` handling of uncertain lifecycle reads, forced replacements after failed probes, watchers in background workspaces, and generation reuse after title-list failures (#195).
 - Fixed `watch up` replacing watchers after Paseo collected their idle runtimes; retained saved sessions without periodic model wake-ups, let real events resume them through the relay, and refused duplicate launches when daemon state was unknown (#192).
