@@ -1,15 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- codexbar-cpu-watch (bin/codexbar-cpu-watch): every 300 s one 3 s CPU sample of CodexBar's process tree
-     into ~/.local/state/codexbar-cpu-watch/samples.jsonl. No model, no pings. @ADE@ and @STATE@ are filled in
-     by `codexbar-cpu-watch install`; `uninstall` removes it. -->
+<!-- proc-cpu-watch (bin/proc-cpu-watch): every 300 s one 3 s CPU sample of the @TARGET@ process tree into
+     @STATE@/samples.jsonl. No model, no pings. @ADE@, @STATE@ and @TARGET@ are filled in by
+     `proc-cpu-watch install --target T`; `uninstall --target T` removes it. -->
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.djbclark.codexbar-cpu-watch</string>
+  <key>Label</key><string>com.djbclark.@TARGET@-cpu-watch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@ADE@/bin/codexbar-cpu-watch</string>
+    <string>@ADE@/bin/proc-cpu-watch</string>
     <string>sample</string>
+    <string>--target</string>
+    <string>@TARGET@</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

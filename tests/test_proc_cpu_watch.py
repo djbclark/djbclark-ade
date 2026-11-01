@@ -1,4 +1,4 @@
-"""bin/codexbar-cpu-watch: what is selected, what is logged (never a command line), how the log grows. No launchd."""
+"""bin/proc-cpu-watch: what is selected per target, what is logged (never a command line), how the log grows. No launchd."""
 import importlib.machinery
 import importlib.util
 import json
@@ -8,17 +8,42 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "codexbar-cpu-watch"
+SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "proc-cpu-watch"
+
+
+def load(tmp_path, monkeypatch, target):
+    monkeypatch.setenv("CBW_STATE_DIR", str(tmp_path / "state"))
+    loader = importlib.machinery.SourceFileLoader("proc_cpu_watch", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("proc_cpu_watch", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    mod.use_target(target)
+    return mod
 
 
 @pytest.fixture
 def cbw(tmp_path, monkeypatch):
-    monkeypatch.setenv("CBW_STATE_DIR", str(tmp_path / "state"))
-    loader = importlib.machinery.SourceFileLoader("codexbar_cpu_watch", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("codexbar_cpu_watch", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+    return load(tmp_path, monkeypatch, "codexbar")
+
+
+def test_targets_have_separate_state_and_labels(tmp_path, monkeypatch):
+    oc = load(tmp_path, monkeypatch, "opencode")
+    assert oc.STATE_DIR == tmp_path / "state" / "opencode-cpu-watch" and oc.LABEL == "com.djbclark.opencode-cpu-watch"
+    oc.use_target("codexbar")
+    assert oc.STATE_DIR == tmp_path / "state" / "codexbar-cpu-watch"
+
+
+def test_opencode_roots_are_the_serve_executable(tmp_path, monkeypatch):
+    oc = load(tmp_path, monkeypatch, "opencode")
+    procs = {
+        1: proc(1, 0, "opencode serve --hostname 127.0.0.1 --port 0"),
+        2: proc(2, 0, "/Users/x/.local/lib/node_modules/@opencode/cli/bin/opencode.exe serve --service"),
+        3: proc(3, 1, "/opt/homebrew/bin/bash -c gh run watch 1"),
+        4: proc(4, 0, "opencode run fix the bug"),
+        5: proc(5, 0, "omp --prompt run opencode serve please"),
+        6: proc(6, 0, "rg opencode serve /src"),
+    }
+    assert oc.tree(procs, me=-1) == {1, 2, 3}
 
 
 def proc(pid, ppid, cmd, cpu=0.0):
@@ -128,7 +153,7 @@ def test_install_refuses_a_linked_worktree(cbw, tmp_path, monkeypatch, capsys):
     wt = tmp_path / "wt"
     (wt / "bin").mkdir(parents=True)
     (wt / ".git").write_text("gitdir: /elsewhere\n")
-    (wt / "bin" / "codexbar-cpu-watch").write_text("")
+    (wt / "bin" / "proc-cpu-watch").write_text("")
     monkeypatch.setattr(cbw, "ADE", wt)
     monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
     calls = []
