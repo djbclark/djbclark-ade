@@ -2441,12 +2441,15 @@ def local_zone() -> tzinfo:
     """The machine's real zone (TZ, else the /etc/localtime link or file), never a fixed offset: an
     offset taken today is an hour off for a wake that lands after a DST change (2026-11-01
     fall-back). TZ may be `:America/New_York`, `America/New_York` or an absolute zone-file path
-    (`:/usr/share/zoneinfo/America/New_York`, 2026-11-01, Codex on PR 213). A fixed offset is the
-    last resort, when no zone can be loaded."""
-    zone = _zone_from_name((os.environ.get("TZ") or "").lstrip(":"))
-    if zone is None and not os.environ.get("TZ"):
-        zone = _zone_from_name("/etc/localtime")
-    return zone or datetime.now().astimezone().tzinfo or timezone.utc
+    (`:/usr/share/zoneinfo/America/New_York`, 2026-11-01, Codex on PR 213). A TZ that is set but
+    empty (or just `:`) is UTC, as libc reads it; only an unset TZ means /etc/localtime. A fixed
+    offset is the last resort, when no zone can be loaded."""
+    tz = os.environ.get("TZ")
+    if tz is not None:
+        name = tz.lstrip(":")
+        return _zone_from_name(name) or (timezone.utc if not name else
+                                         datetime.now().astimezone().tzinfo or timezone.utc)
+    return _zone_from_name("/etc/localtime") or datetime.now().astimezone().tzinfo or timezone.utc
 
 
 def now_utc() -> datetime:

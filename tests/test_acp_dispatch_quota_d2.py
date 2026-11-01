@@ -443,6 +443,21 @@ class TestWakeAcrossDst(QuotaBase):
                     self.assertEqual(wake_stamp(epoch("2026-11-01T07:22:00Z")), "11/01/26 02:20:00")
                     self.assertEqual(wake_stamp(epoch("2026-03-08T07:01:00Z")), "03/08/26 01:59:00")
 
+    def test_empty_tz_is_utc_and_unset_tz_is_the_machine_zone(self):
+        """libc reads TZ="" (and ":") as UTC; the /etc/localtime lookup is for an UNSET TZ only
+        (Codex local review, PR 213)."""
+        mod = runpy.run_path(str(SCRIPT))
+        wake_stamp = mod["wake_stamp"]
+        at = epoch("2026-11-01T06:01:00Z")
+        for form in ("", ":"):
+            with self.subTest(tz=form), mock.patch.dict(os.environ, {"TZ": form}):
+                self.assertEqual(mod["local_zone"]().utcoffset(None), timedelta(0))
+                self.assertEqual(wake_stamp(at), "11/01/26 05:59:00")
+        env = {k: v for k, v in os.environ.items() if k != "TZ"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                mod["os"].path, "realpath", return_value="/usr/share/zoneinfo/" + NY):
+            self.assertEqual(wake_stamp(at), "11/01/26 01:59:00")
+
     def test_clock_time_reset_is_local_wall_clock_across_the_change(self):
         mod = runpy.run_path(str(SCRIPT))
         prd, fc = mod["parse_reset_datetime"], mod["failure_class"]
