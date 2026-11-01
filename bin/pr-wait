@@ -855,8 +855,7 @@ def adversary_verdict(body: str, head: str) -> dict:
         # not repeatedly scan the remaining body. Allow the doubled-start typo.
         limit = comment_end if comment_end >= 0 else len(body)
         if next_start >= 0:
-            if (body[payload_start:next_start].strip()
-                    or not re.compile(r"<!--\s*\{").match(body, next_start)):
+            if not re.compile(r"<!--\s*\{").match(body, next_start):
                 limit = min(limit, next_start)
         payload = body[payload_start:limit]
         # Only an actual root array is documentation; a prose [label] before an
@@ -878,10 +877,16 @@ def adversary_verdict(body: str, head: str) -> dict:
             je = close if close >= 0 else len(body)
         candidate = body[js:je]
         fields, certain = _top_level_marker_fields(candidate)
+        fields = [(key.lower(), value) for key, value in fields]
         if not certain:
             # Broken quoting or nesting makes depth unknowable. Fail closed,
             # retaining exact head-value matching; valid metadata stays narrow.
-            fields += re.findall(r'"(verdict|head)"\s*:\s*"([^"\\]*)"', candidate, re.I)
+            for key, value in re.findall(
+                    r'"(verdict|head)"\s*:\s*("(?:[^"\\]|\\.)*")', candidate, re.I):
+                try:
+                    fields.append((key.lower(), json.loads(value, strict=False)))
+                except ValueError:
+                    continue
         if not any(key == "verdict" and value.upper() == "BLOCK" for key, value in fields):
             continue
         quoted_heads = [value for key, value in fields if key == "head"]
@@ -895,8 +900,6 @@ def adversary_verdict(body: str, head: str) -> dict:
             doc = json.loads(candidate, object_pairs_hook=_strict_object)
         except ValueError:
             doc = None
-        if doc is None and js <= next_start < je:
-            continue  # inspect the nested start itself, not an invalid outer quotation
         if ((start, js, je) in canonical and isinstance(doc, dict)
                 and doc.get("verdict") == "BLOCK" and isinstance(doc.get("head"), str)
                 and HEX40.fullmatch(doc["head"]) and not _head_matches(doc["head"], head)):

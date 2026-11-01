@@ -2707,6 +2707,17 @@ def test_structured_marker_field_values_are_never_promoted(shape, field, malform
 
 
 @pytest.mark.parametrize("payload", [
+    '{"verdict":"BLOCK","head":"H\n"}',
+
+    'see <!-- {"verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","head":"H","note":"<!--", oops}',
+    '{"verdict":"BLOCK","head":"H","note":"see <!-- x",}',
+    '{"note":"5" <!--","verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","head":"H","note":"format: <!-- adversary-verdict:v1 {...} -->",}',
+    '{"verdict":"BLOCK","head":"H","note":"format: <!-- adversary-verdict:v1 {...}",}',
+    '{"Verdict":"BLOCK","head":"H",}',
+    '{"note":"5" x","verdict":"\\u0042LOCK","head":"H"}',
+
     '{"note":"5" screen","verdict":"BLOCK","head":"H"}',
     '{"verdict":"BLOCK","note":"5" screen","head":"H"}',
     '[r5] {"verdict":"BLOCK","head":"H"}',
@@ -2718,7 +2729,7 @@ def test_structured_marker_field_values_are_never_promoted(shape, field, malform
 ])
 @pytest.mark.parametrize("context", ["fenced", "inline", "unclosed"])
 def test_uncertain_structure_cannot_hide_same_head_block(payload, context):
-    payload = payload.replace('"H"', json.dumps(ADV_HEAD)).replace('"O"', json.dumps(OTHER_HEAD))
+    payload = payload.replace('"H"', json.dumps(ADV_HEAD)).replace('H\n', ADV_HEAD + '\n').replace('"O"', json.dumps(OTHER_HEAD))
     candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
     wrappers = {"fenced": "\n```\n%s\n```", "inline": "\n`%s`", "unclosed": "\n```\n%s"}
     body = marker("APPROVE") + wrappers[context] % candidate

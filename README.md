@@ -402,3 +402,8 @@ On 2026-10-31 (PR 175), broken quoting or nesting began triggering conservative 
 when field boundaries are uncertain, a BLOCK and an exact matching head value anywhere in the
 candidate hold the gate as malformed. Readable nested metadata remains documentation. Payload
 discovery stops at the next marker start, avoiding repeated scans of empty-marker suffixes.
+
+On 2026-11-01 (PR 175), malformed BLOCK recovery retained candidates containing comment
+starts in notes or following prose, and decoded escaped string values and case variants of
+field names for fail-closed recovery. Repeated starts with unfinished JSON can still cause
+quadratic scanning; the empty-start bound does not bound that separate path.
