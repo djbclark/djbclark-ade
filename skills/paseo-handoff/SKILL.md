@@ -1,6 +1,6 @@
 ---
 name: paseo-handoff
-description: Hand off the current task to another agent running in Paseo, with full context. Use only when the user asks to hand off through Paseo ("/paseo-handoff", "hand this to a Paseo agent"); a plain "handoff" is the handoff skill (Tier 2 document), and an Orca hand-off is orca-cli.
+description: Hand off the current task to another agent running in Paseo, with full context. Use only when the user asks to hand off through Paseo ("/paseo-handoff", "hand this to a Paseo agent"); a plain "handoff" is the handoff skill (Tier 2 document). Orca hand-offs are retired (2026-10-31).
 user-invocable: true
 ---
 
@@ -83,9 +83,16 @@ Dann's. The Dann-specific reading, with commands and a dated seat map, is
    successor has answered at least one turn. Then `paseo archive <old-id>` — a **soft-delete** that
    interrupts only if the old agent is still running and returns `archivedAt`. Re-list and prove the
    old id left the active list; the transcript stays retrievable with `--include-archived`. Archive
-   the **agent**, never the workspace (a workspace archive takes every agent and terminal in it, and
-   until `docs/paseo-only-rearchitecture.md` D1.3/D2 gate can delete unpushed work). A seat that has
-   not written down what it learned has not handed off.
+   the **agent** first, never a workspace that still holds anything (a workspace archive takes every
+   agent and terminal in it, and until `docs/paseo-only-rearchitecture.md` D1.3/D2 gate can delete
+   unpushed work). **Then, whenever you archive or close an agent for any reason, check its
+   workspace:** if it now has no live agent (`paseo ls -g --background --json`, background agents
+   included, matched to the workspace through `~/.paseo/agents/*/<id>.json`; `paseo ls --workspace`
+   does not filter, 2026-11-01), no terminal (`paseo terminal ls --workspace <wks_id> --json`, scoped
+   to that workspace) and `isolation: local` (`paseo workspace ls --json`; never a worktree
+   workspace), archive it too with `paseo workspace archive <wks_id>`, so the sidebar does not fill
+   with empty workspaces (djbclark, 2026-11-01: six were left behind). Any doubt keeps it. A seat
+   that has not written down what it learned has not handed off.
 2. **Every sibling and child learns the successor's id, and the successor learns theirs** — both
    directions, on every handoff. A peer that does not know the id of the seat above or beside it
    cannot hand off to it, cannot relay to it, and cannot notice it was archived; that is a one-way

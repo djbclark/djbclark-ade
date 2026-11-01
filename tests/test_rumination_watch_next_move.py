@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -102,6 +103,17 @@ def test_a_working_seat_is_never_interrupted_however_much_is_declared(rw, monkey
     assert run_pass(rw, QUIET) == 0
     assert seat.sent == []
     assert nudged_on_disk(rw) == {}
+
+
+def test_a_closed_wakeable_seat_gets_the_nudge_that_resumes_it(rw, monkeypatch, tmp_path):
+    """Codex P2 (PR 177 round 5): relay reports a persistent closed seat as `closed`, deliverable; the next-move line is what wakes it, so the
+    gate must admit it (it stayed asleep indefinitely when only `idle` passed)."""
+    write_pointer(tmp_path, steps_body(3))
+    Probe(rw, monkeypatch, "closed")
+    seat = Seat(rw, monkeypatch, "delivered")
+    assert run_pass(rw, QUIET) == 10
+    assert len(seat.sent) == 1 and "next move: 3 declared step(s) still open" in seat.sent[0]
+    assert "next move" in nudged_on_disk(rw)
 
 
 @pytest.mark.parametrize("word", ["silent", "card:question", "card:slash_menu", "unreachable", "unknown", ""])
@@ -344,3 +356,41 @@ def test_a_stamp_from_the_future_or_with_no_finite_value_expires(rw, monkeypatch
     rw.STATE.write_text(json.dumps(state))
     assert run_pass(rw, QUIET) == 10, f"a {stamp} stamp must not outlast the cooldown"
     assert len(seat.sent) == 1
+
+
+@pytest.fixture(autouse=True)
+def isolated_watcher_environment(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    for key in list(os.environ):
+        if key.startswith("RW_") or key == "PASEO_AGENT_ID":
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("RW_NO_DEPLOY", "1")
+    real = subprocess.run
+    def guarded(argv, *args, **kwargs):
+        command = list(argv) if not isinstance(argv, str) else [argv]
+        if command[:3] == ["env", "-u", "PASEO_AGENT_ID"]:
+            command = command[3:]
+        git_read = {"rev-parse", "cat-file", "merge-base", "log", "status"}
+        git_cwd = Path(command[command.index("-C") + 1]).resolve() if "-C" in command else Path.cwd()
+        fixture_git = git_cwd.is_relative_to(tmp_path)
+        allowed = command and ((command[0] == "git" and
+                    (fixture_git or (command[3] if command[1:2] == ["-C"] else command[1]) in git_read)) or
+                  (Path(command[0]).name.startswith("python") and "-c" in command))
+        import shutil
+        executable = shutil.which(command[0]) if command else None
+        local_fixture = executable and Path(executable).resolve().is_relative_to(tmp_path)
+        python_fixture = (command and Path(command[0]).name.startswith("python") and
+                          any(Path(arg).is_absolute() and Path(arg).resolve().is_relative_to(tmp_path)
+                              for arg in command[1:]))
+        allowed = allowed or local_fixture or python_fixture
+        if not allowed:
+            raise AssertionError(f"unexpected external launcher: {command}")
+        return real(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", guarded)
+
+
+def test_next_move_guard_rejects_live_launcher_without_running_it():
+    import subprocess
+    with pytest.raises(AssertionError, match="unexpected external launcher"):
+        subprocess.run(["paseo", "agent", "inspect", "--json", "--", "fixture-id"])

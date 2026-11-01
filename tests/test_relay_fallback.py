@@ -84,11 +84,11 @@ class Harness(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
         os.environ["CODEX_HOME"] = str(self.tmp / "codex")
         os.environ["RELAY_DEFER_DIR"] = str(self.tmp / "relay" / "deferred")    # a spawn that escaped its stub still never reads the real queue
-        # The last two are stubbed by subclasses (they are live `paseo logs` / `paseo permit ls` calls): restoring them here stops one
-        # class's stub leaking into another module's tests (2026-10-30: the sender-row warning tests read timeline_base for real).
+        # The last one is stubbed by subclasses (a live `paseo permit ls` call): restoring it here stops one
+        # class's stub leaking into another module's tests.
         names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
                  "paseo_run", "paseo_inspect", "paseo_probe", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY", "DEFER_DIR", "DEFER_POLL",
-                 "spawn_deliverer", "own_cwd", "forced_tag", "timeline_base", "paseo_card_detail"]
+                 "spawn_deliverer", "own_cwd", "forced_tag", "paseo_card_detail"]
         saved = {n: getattr(relay, n) for n in names}
         saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record", "pane_procs", "ancestors", "transcript")}
         self.addCleanup(lambda: [setattr(relay, n, v) for n, v in saved.items()])
@@ -2827,7 +2827,6 @@ class TestDeferredSend(Harness):
         relay.paseo_probe = probe
         self.card_texts = [("", None)]    # `paseo permit ls` is a live CLI call: the harness answers it (text, whether the list names the agent)
         relay.paseo_card_detail = lambda agent: self.card_texts[0]
-        relay.timeline_base = lambda me: None    # the sender's own timeline (`paseo logs`) is a live CLI call too: tests/test_relay_paseo.py covers it
         relay.paseo_gate = lambda s: s.update(status="working" if (s.get("paseo") == AGENT and self.cur != "idle") or s.get("paseo") == OTHER else "idle")
 
         def send(s: dict[str, Any], text: str, wait: float) -> str:
@@ -3313,6 +3312,82 @@ class TestDeferredSend(Harness):
         relay.hosted_by = lambda a: a == SENDER
         rec = relay.rec_read(self.queue("hosted"))
         self.assertEqual((rec["sender_paseo"], rec["sender_ident"]), (SENDER, SENDER))
+
+    def nest_under_sender(self, inner: dict[str, Any]) -> None:
+        """A nested agent: this process runs under INNER (pid 5150), which the Paseo agent SENDER (hosted as pid 4242) started, and it
+        inherited SENDER's PASEO_AGENT_ID. `hosted_by(SENDER)` is true (an ancestor hosts it), as in life."""
+        outer = dict(self.sender, self=True)
+        relay.fleet.sessions = lambda: [*(dict(r, self=False) for r in self.rows if r is not self.sender), outer, dict(inner, self=True)]
+        for patcher in (mock.patch.object(relay.fleet, "ancestry", lambda: [5150, 4242]),
+                        mock.patch.object(relay.fleet, "_paseo_hosting_pids", lambda anc: {SENDER: 4242})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.as_agent(SENDER)
+        relay.hosted_by = lambda a: a == SENDER
+
+    def test_a_nested_agent_that_inherited_its_parents_paseo_id_is_queued_as_itself_not_as_the_parent(self) -> None:
+        """Review F2, 2026-10-30: `fleet.sender_row` picks the nearer process, but `hosted_by` is true for any ancestor, so the queued
+        record took the PARENT's Paseo id as sender and notice destination, and the deliverer sent as the parent."""
+        inner = sess(id="eeee5150", name="inner", agent="claude", transcript=str(self.tmp / "inner.jsonl"), pid=5150)
+        self.nest_under_sender(inner)
+        rec = relay.rec_read(self.queue("hosted"))
+        self.assertEqual((rec["sender_paseo"], rec["sender_ident"]), ("", "eeee5150"))
+        self.assertNotEqual(rec["sender_ident"], SENDER)
+        self.cur = "idle"
+        self.deliver_in(self.deliverer_env_of(dict(os.environ)), rec["id"])
+        self.assertEqual(self.sent_as, [None])    # the deliverer attributes the send to no Paseo agent, least of all the parent
+
+    def test_a_nested_agent_nothing_can_reach_is_refused_rather_than_given_its_parents_identity(self) -> None:
+        inner = sess(id="pid5150", name="", agent="codex", host="terminal", pid=5150, chan=None, reach="no channel: use its focus command")
+        self.nest_under_sender(inner)
+        rc, out, err = self.go()
+        self.assertEqual((rc, relay.rec_all()), (1, []), (out, err))
+        self.assertIn("nested under another Paseo agent", err)
+
+    def open_expectation(self, eid: str = "q1") -> None:
+        """A transcript-less question the TARGET row (cccccccc) asked of the caller (bbbbbbbb, the `self` sender): the caller owes `ack q1`."""
+        relay.atomic_json(relay.expect_dir() / f"{eid}.json", {
+            "id": eid, "state": "open", "created": time.time(), "acked": None, "within": 1800, "sender": "cccccccc", "sender_sid": "",
+            "sender_label": "peer-fb", "tx": None, "mark": 0, "sender_paseo": AGENT,
+            "target": {"id": "bbbbbbbb", "name": "alice", "paseo": SENDER, "sid8": "", "sid": "", "host": "paseo"}})
+
+    def deliver_queued(self, rid: str) -> None:
+        self.cur = "idle"
+        self.assertEqual(self.deliver_in(self.deliverer_env_of(dict(os.environ)), rid), 0)
+        self.assertEqual(relay.rec_read(rid)["state"], "delivered")
+
+    def test_an_ack_deferred_to_a_busy_paseo_recipient_closes_the_expectation_when_it_is_delivered(self) -> None:
+        """Adversary PR 173 B2b: the deliverer runs as no session, so `expect_resolve_by_relay` is blind in it. The verified caller is recorded at
+        enqueue and the expectation closes when the deliverer delivers (a Paseo agent keeps the text), not before."""
+        self.open_expectation()
+        self.as_agent(SENDER)
+        rid = self.queue("ack q1 yes, green", to=AGENT)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["ack_caller"]["id"], relay.expect_read("q1")["state"]), ("bbbbbbbb", "open"))    # queued is not delivered
+        self.deliver_queued(rid)
+        done = relay.expect_read("q1")
+        self.assertEqual((done["state"], done.get("acked_via")), ("acked", "relay"))
+
+    def test_a_deferred_ack_closes_nothing_for_a_caller_that_was_not_the_target(self) -> None:
+        self.open_expectation()
+        self.as_agent(SENDER)
+        rid = self.queue("ack q1 yes, green", to=AGENT)
+        self.patch_rec(rid, ack_caller={"id": "zzzzzzzz", "sid": "", "host": ""})    # a record is plain JSON: only the caller it names can answer
+        self.deliver_queued(rid)
+        self.assertEqual(relay.expect_read("q1")["state"], "open")
+        self.cur = "running"    # busy again, so the second text is queued too
+        rid = self.queue("ack q1 yes, green again", to=AGENT)
+        self.patch_rec(rid, ack_caller=None)    # an older record: no recorded caller
+        self.deliver_queued(rid)
+        self.assertEqual(relay.expect_read("q1")["state"], "open")
+
+    def test_a_deferred_ack_that_was_never_delivered_closes_nothing(self) -> None:
+        self.open_expectation()
+        self.as_agent(SENDER)
+        rid = self.queue("ack q1 yes, green", to=AGENT)
+        self.archived = True    # the target vanished: the record fails
+        relay.deliver(rid)
+        self.assertEqual((relay.rec_read(rid)["state"], relay.expect_read("q1")["state"]), ("failed", "open"))
 
     # ---- the failure notice -------------------------------------------------------------------------------------
 

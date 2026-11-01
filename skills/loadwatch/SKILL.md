@@ -15,7 +15,7 @@ description: >-
 Two halves that work together:
 
 1. **`~/src/djbclark-ade/bin/load-watch`** (launchd `com.djbclark.load-watch`, every 20 s, no model). It
-   samples load and `ps`, attributes sustained load (2.0 per core for 5 min) to agent sessions, writes a
+   samples load and `ps`, attributes sustained load (4.0 per core for 5 min; 2.0 until 2026-11-01) to agent sessions, writes a
    brief and relays it to the session it blames, guards launchd jobs (hangs, crash loops, CPU/memory), and
    pings Hermes. Its usage text is the reference for everything it does.
 2. **The watcher: this session.** `load-watch watcher set` registers one session. From then on, every
@@ -78,7 +78,7 @@ gtail -n 10 ~/.local/state/load-watch/guard.jsonl
 
 Investigate (section 3) when any of these holds. Otherwise report the numbers in one line and stop.
 
-1. The 1-minute load per core is above **1.5** (`admit` says `hot`; that is 12 on 8 cores; since 2026-10-25 the limit is **2.0** (16) while the compressor churn is at most 25k pages/s, `max_per_core` in `admit --json` is the one in force; the same limit
+1. The 1-minute load per core is above **2.5** (`admit` says `hot`; that is 20 on 8 cores, `bg`'s base since 2026-11-01, was 1.5; the limit is **4.0** (32) while the compressor churn is at most 25k pages/s (2.0 from 2026-10-25 to 2026-11-01; djbclark: 3.5 per core "is actually not too bad for this system", the real constraints are memory pressure and process churn), `max_per_core` in `admit --json` is the one in force; the same limit
    `bg` and `acp-dispatch` use) **and** the 5- or 15-minute average agrees. A 1-minute spike over a
    falling 15-minute average is agents starting up, not a problem: report it and move on.
 2. `status` shows a hot streak (`hot for N/300 s`), or `sample.log` has a `sustained load` line from the
@@ -143,6 +143,11 @@ Verify against the processes themselves, not against memory or the brief's guess
    and `ps`), or (b) load, memory pressure or CPU is visibly slowing the machine (stuck `U` processes, rising
    pageouts with low free memory, agents timing out). Still investigate and `ack` as usual; the exception
    only silences the "quit this app" advice.
+
+Chrome CPU alerts must match the alerted PID to its Task Manager row (2026-10-29). A Browser, GPU,
+or utility-process alert does not establish a busy tab: report the task name and CPU percentage
+without guessing a tab. A renderer can host a tab or extension; only an identified tab and the
+operator's choice justify ending/reloading that tab. Never kill or restart Chrome yourself.
 
 ## What this is not
 

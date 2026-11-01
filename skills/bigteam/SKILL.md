@@ -63,19 +63,17 @@ the slice **up** a tier, not down.
 
 ## Step 0 — another bigteam run may already be live
 
-Another session may be running its own fan-out right now (often the herdr tab
+Another session may be running its own fan-out right now (often the Paseo agent
 labelled `coord`). The two share every quota pool and possibly the checkout, so
 before slicing:
 
-1. **Look.** `herdr tab list` (a `coord` tab, or any tab whose agent is
-   `working` on a fan-out) and `ls -lt ~/.local/state/bigteam/` (task dirs
-   touched in the last hour). Read each live dir's `CLAIM`. In Orca (no
-   `HERDR_ENV`), `orca terminal list --json` gives every live terminal's
-   `title` (a `coord` one, or a title naming a fan-out) and `preview`;
-   `orca terminal read --terminal <handle>` shows what it is doing.
+1. **Look.** `paseo ls -g` (a `coord` agent, or any agent
+   `running` a fan-out) and `ls -lt ~/.local/state/bigteam/` (task dirs
+   touched in the last hour). Read each live dir's `CLAIM`. herdr and Orca
+   terminals are retired from djbclark-ade (2026-10-31): do not look there.
 2. **Claim.** Use a task name no live run uses, and write
-   `~/.local/state/bigteam/<task>/CLAIM` before dispatching: session (herdr
-   pane or Claude session id), repo, owned files, start time. Append `DONE`
+   `~/.local/state/bigteam/<task>/CLAIM` before dispatching: session (Paseo
+   agent id or Claude session id), repo, owned files, start time. Append `DONE`
    when you finish.
 3. **Never overlap files.** A file another live claim owns is not yours to
    slice, edit, stage or format. In a shared repo, commit only your own paths,
@@ -84,8 +82,8 @@ before slicing:
 4. **Pools are shared.** Re-probe `aiuse --available` right before each batch
    (the other run drains the same windows), leave headroom, and don't put both
    runs on a burst-limited pool at once (agy's ~60 requests/hour is machine-wide).
-5. **Hands off its panes.** Never reuse, close or message the other run's
-   tabs, panes, Orca terminals or agents. To coordinate, tell its session (`session-finder`).
+5. **Hands off its tabs.** Never reuse, close or message the other run's
+   Paseo tabs or agents. To coordinate, tell its session (`session-finder`).
 
 ## Step 1 — probe, never assume
 
@@ -480,6 +478,13 @@ has already been violated by a real agent on this machine:
   Read-only git is encouraged.
 - **No test suite, no repo-wide formatter or linter.** The orchestrator runs
   tests centrally. A stray `ruff --fix .` rewrites other agents' files.
+- **At most TWO test-running slices at once** (slices that run pytest or
+  builds, through `bg`). Further slices wait, or are told to run no tests and
+  leave them to the lead. 2026-10-31: five parallel pytest runs forked
+  thousands of short git processes and drove load to 222 (swap 7.9 of 9.2 GB)
+  on this 16 GB, 8-core Mac; the constraint here is memory pressure and
+  process churn, not the load average (`bg`'s base is 2.5 per core since
+  2026-11-01, `load-watch admit` allows 4.0 while compressor churn is low).
 - Leave changes **uncommitted**. The orchestrator commits, staged **by path** —
   `git add -A` in a shared checkout stages other sessions' in-flight work.
 - No package installs, no new directories, no scratch files inside the repo.
@@ -498,6 +503,11 @@ has already been violated by a real agent on this machine:
   live Codex runner, ran 98 s and sent a real `hermes-ping`). An adversary or
   review brief says "no live agent, no network, no notifications" in exactly
   those terms: fake runner pinned and checked, no `hermes-ping`, no fetch.
+- **Map callers before changing a return type or signature.** Use `graft callers SYMBOL --depth all`.
+  For a genuinely unindexed script, enumerate literal symbol references with scoped `rg -n -F SYMBOL PATH`;
+  inspect every hit, including dry-run, probe and error branches. The edit is complete only when every
+  caller handles the new result. Read-only source excerpts follow the machine CLI rules too: use Python
+  line slices or GNU `gsed` (2026-10-31: a missed dry-run caller printed a `None` generation).
 - **Verify before acting.** Findings handed to an agent were written by another
   AI. Tell it so, and tell it that reporting a finding as wrong is a better
   outcome than a confident wrong edit.
@@ -902,6 +912,11 @@ detached job follows the same contract (2026-10-08).
    not hand work to the next session on the assumption that a background task or
    waiter will still be there.
 
+**Single-run launchd waiters (macOS, verified 2026-10-31).** Bootstrap a plist with
+`RunAtLoad: true`, `KeepAlive: false`, and no interval keys. Verify the live job's
+properties lack `keepalive` before reporting it as one-shot: `launchctl submit`
+created keep-alive jobs on this Mac. Model slices still use `acp-dispatch`.
+
 **Why jobs are records on disk (investigation, 2026-10-08).** A Claude Code
 docs and local-process investigation found: background Bash tasks are
 children of the `claude` process and "automatically cleaned up when Claude Code
@@ -958,6 +973,9 @@ returned; do not guess a reset time.
   as its whole reply. Since 2026-10-14 nothing refuses a slice that leaves its
   files (acp-run runs yolo): the post-run `git status --short` / `git diff
   --stat` check in Step 4 is what catches it.
+- Inspect each preparation command's exit code before a dependent stage or
+  commit. A failed preparation stops that mutation until its resulting files
+  have been checked.
 - Read every diff yourself before committing. Agents are good and still get
   ordering, alphabetisation and scope wrong.
 - Run the checks centrally after the batch settles, **focused first**: lint
