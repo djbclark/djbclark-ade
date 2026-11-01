@@ -20,7 +20,7 @@ relay = fb.relay
 TRICKY = "run `touch /tmp/never` and $(echo gone) with \"quotes\", $HOME, 'single', stages: [pre-push], pass_filenames: true"
 
 
-class TestMessageFile(fb.Harness):
+class Base(fb.Harness):
     def setUp(self) -> None:
         super().setUp()
         self.typed: list[str] = []
@@ -43,6 +43,8 @@ class TestMessageFile(fb.Harness):
         p.write_bytes(content)
         return str(p)
 
+
+class TestMessageFile(Base):
     def test_a_file_is_delivered_verbatim_with_backticks_and_command_substitution(self) -> None:
         rc, _, err = self.send("peer-fb", "--message-file", self.file(TRICKY.encode() + b"\n"), "--wait", "2", "--via", "pane")
         self.assertEqual((rc, self.typed), (0, [TRICKY]), err)
@@ -88,3 +90,32 @@ class TestMessageFile(fb.Harness):
             rc, _, err = self.send("peer-fb", "--message-file", self.file(b"hi"), *argv)
             self.assertEqual(rc, 2, argv)
             self.assertIn("--message-file is used with a send", err, argv)
+
+    def test_a_multi_line_indented_file_is_folded_to_one_line_like_any_relay_text(self) -> None:
+        rc, _, err = self.send("peer-fb", "--message-file", self.file(b"a:\n    b: 1\n\n  c\n"), "--wait", "2", "--via", "pane")
+        self.assertEqual((rc, self.typed), (0, ["a: b: 1 c"]), err)
+
+    def test_a_leading_bom_is_not_part_of_the_message(self) -> None:
+        rc, _, err = self.send("peer-fb", "--message-file", self.file(b"\xef\xbb\xbfhello there friend\n"), "--wait", "2", "--via", "pane")
+        self.assertEqual((rc, self.typed), (0, ["hello there friend"]), err)
+
+
+class TestAckBeforeAFileSend(Base):
+    """`relay.py --ack PEER --message-file -` (local Codex review of #211): `-` looks like an option, so no positional was counted and PEER was read as
+    the id of an expectation to answer (the `--ack ID` verb) instead of the target of a send with the delivery watch on."""
+
+    def test_split_ack_verb_leaves_a_file_send_alone_and_still_reads_the_bare_verb(self) -> None:
+        for argv in (["--ack", "peer-fb", "--message-file", "-"], ["--ack", "peer-fb", "--message-file", "/tmp/m"],
+                     ["--ack", "peer-fb", "--message-file=/tmp/m"], ["--message-file", "-", "--ack", "peer-fb"]):
+            self.assertEqual(relay.split_ack_verb(argv), (None, argv), argv)
+        self.assertEqual(relay.split_ack_verb(["--ack", "d7-k7c3f"]), ("d7-k7c3f", []))
+        self.assertEqual(relay.split_ack_verb(["--ack", "d7-k7c3f", "--wait", "5"]), ("d7-k7c3f", ["--wait", "5"]))
+
+    def test_ack_then_target_then_message_file_sends_to_the_target(self) -> None:
+        for argv, stdin in ((["--ack", "peer-fb", "--message-file", "-"], TRICKY.encode() + b"\n"),
+                            (["--ack", "peer-fb", "--message-file", self.file(TRICKY.encode())], None),
+                            (["peer-fb", "--message-file", "-", "--ack"], TRICKY.encode())):
+            self.typed.clear()
+            _, _, err = self.send(*argv, "--wait", "1", "--via", "pane", stdin=stdin)
+            self.assertEqual(self.typed, [TRICKY], (argv, err))
+            self.assertNotIn("expectation", err, argv)
