@@ -2,7 +2,7 @@
 name: session-finder
 description: >-
   Find which agent session (any TUI, running or ended) is or was on a topic,
-  with its handoff chains, where it lives (herdr/Orca/tmux/Paseo/Ghostty) and how to
+  with its handoff chains, where it lives (Paseo, tmux or Ghostty; herdr and Orca are retired, 2026-10-31) and how to
   continue: message it, /baton from its handoff, resume it, or brief a clean
   agent. Use for "tell the agent doing X ...", "which session is on X", "did we
   ever look at X", "find the session where we did X", /session-finder-all, or
@@ -18,7 +18,7 @@ from local files, with no model tokens:
 ```bash
 S=~/src/djbclark-ade/skills/session-finder
 python3 -I $S/session-find.py <keyword>...       # running sessions, every TUI, ranked by keyword
-python3 -I $S/session-history.py <keyword>...    # every session of every agent, live or ended, full text
+python3 -I $S/session-history.py -- <keyword>...    # every session of every agent, live or ended, full text
 python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet itself
 python3 -I $S/launch.py --agent A --cwd DIR --model M [--baton] -p "..."   # start a session (ACP-first)
 python3 -I $S/launch.py wait <id> [--timeout S]  # block until THAT launch's turn ends
@@ -34,13 +34,21 @@ here (`/session-finder-all` loads this skill for it).
 
 1. `session-find.py` ranks **running** sessions: Claude ones by a per-session
    keyword index (title, name, cwd, prompts), every other TUI's by title, name and
-   cwd (`fleet.py` supplies them). 1–3 distinctive words. A hit shows agent, name,
+   cwd (`fleet.py` supplies them). **`--all` adds the ended sessions of every agent**
+   from the step-2 history index (2026-10-31; before, only ~160 Claude sessions from a
+   JSON keyword file). 1–3 distinctive words. A hit shows agent, name,
    status, `title:`, `where:` + `focus:` and, for Claude, the matching prompt.
    **`FINISHED (/handoff)`** on a hit means that session already handed off: do not
    message it (section 3b).
 2. `session-history.py` searches the full text of every agent's sessions (SQLite
    FTS5; first run indexes everything, 1–2 minutes, start it with
-   `run_in_background`). Ended hits print a `resume:` command. `--agent hermes`
+   `run_in_background`). **It searches live and ended sessions together: there is no
+   active-only mode** (running-only is step 1). Ended hits print a `resume:` command.
+   A launchd job (`session-history.py --install`, run from the primary checkout; `--uninstall` removes it; every 10 min, 2026-10-31) keeps the
+   index fresh, and every search also brings it up to date first, so a search is never
+   stale, only slower when the job is off. `--status` is the read-only lag report: last
+   full update, and per agent the sessions on disk not yet indexed or changed since.
+   `SESSION_INDEX_DIR=DIR` points both scripts at another index directory (tests). `--agent hermes`
    narrows to one agent. The same index holds every Basic Memory project's
    `todo/` notes (the `todo` skill's items): a hit prints as agent `todo`,
    `OPEN`/`closed`, `title: [open] main: <title>` and the note path; `--agent todo`
@@ -138,7 +146,7 @@ Paseo agents are "delivered", not "unverified"; the timeline is a delivery witne
 `sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
 the notice say "unverified", never "delivered". `--idle S`
 still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at
-most 24 h); `relay.py --pending [--text] [--json]` lists (the text only with `--text`), `--cancel ID` withdraws a queued
+most 24 h); `relay.py --pending [--text] [--json]` lists (the text only with `--text`; `--queued-only`, `--older-than S`, `--summary` narrow it, `--status ID` says what became of ONE record without changing it, see "How to tell what a message did"; `deferred.log` is capped at 1 MiB, then rotated to `.1` and `.2`), `--cancel ID` withdraws a queued
 one, `--retire ID --reason "..."` closes an expectation that will never be answered and records why (only an `open` one; state
 `retired`, the reason and evidence stay in the record and `--pending` shows them; the target cannot retire its own, it answers
 `ack ID`), `--sweep` re-arms records whose deliverer died (it also runs, cheaply, at the start of every relay: it only changes
@@ -357,7 +365,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 
 | Agent / host | Running session | Ended session |
 |---|---|---|
-| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (route ladder, best first, falls back by itself: keys into its herdr/Orca/tmux pane → Claude socket frame; queued while it works; the pane route is skipped on a typed draft, and an open question stops all routes; a dim/grey suggested prompt is not a draft). A Paseo-hosted one (`where: host=paseo agent=<id>`, or you were handed a `PASEO_AGENT_ID`): `relay.py <sid|name|agent-id> "<text>"` runs `paseo send --behavior steer -- <id> <text>` (its only route; any refusal from `paseo agent inspect` ends the run) with your own `PASEO_AGENT_ID` kept, so Paseo labels it an agent message from you (a caller that is not a Paseo agent gets a `[relay from <name>] ` prefix), never the operator's turn. It re-runs `paseo agent inspect` first and refuses an archived agent, a pending permission or question card (helm only lists a card of a Paseo agent that has no Claude transcript and presses no keys there: the Paseo UI, or `paseo permit allow|deny <agent> -- <request id>` per card, answers it), a status other than idle/running, and text starting with `/`; `--idle S` (finite, > 0) waits for idle first; no draft check, there is no input box. Exit 0 means "accepted" (the daemon's acknowledgement), or "delivered" once a Claude transcript shows the text (2026-10-20). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
+| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (route ladder, best first, falls back by itself: keys into its herdr/Orca/tmux pane → Claude socket frame; queued while it works; the pane route is skipped on a typed draft, and an open question stops all routes; a dim/grey suggested prompt is not a draft). A Paseo-hosted one (`where: host=paseo agent=<id>`, or you were handed a `PASEO_AGENT_ID`): `relay.py <sid|name|agent-id> "<text>"` runs `paseo send --behavior steer -- <id> <text>` (its only route; any refusal from `paseo agent inspect` ends the run) with your own `PASEO_AGENT_ID` kept, so Paseo labels it an agent message from you (a caller that is not a Paseo agent gets a `[relay from <name>] ` prefix), never the operator's turn. It re-runs `paseo agent inspect` first and refuses an archived agent, a pending permission or question card (helm only lists a card of a Paseo agent that has no Claude transcript and presses no keys there: the Paseo UI, or `paseo permit allow|deny <agent> -- <request id>` per card, answers it), a status other than idle, running or closed, a `closed` agent that Paseo does not report persistent (`Capabilities.Persistence`; a persistent, unarchived `closed` agent is sent to like an idle one: the send wakes it, 2026-10-31, `--why` says `closed: a send wakes it`), and text starting with `/`; `--idle S` (finite, > 0) waits for idle first; no draft check, there is no input box. Exit 0 means "accepted" (the daemon's acknowledgement), or "delivered" once a Claude transcript shows the text (2026-10-20). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | a headless `acp-dispatch` slice (including custom `--out` records and workers with no fleet row) | `relay.py /absolute/jobs/NAME.json "<text asking for ack NAME>" --via dispatch`; `queued` is not delivery; verify the named acknowledgement in the printed replies file | `acp-dispatch resume <record>` only for a new authorized task, never as a relay side effect |
 | an `acp-dispatch` / `acp-run claude` slice (headless) | Use `relay.py` with its fleet id or exact job-record path as in the previous row; verify a named acknowledgement in the replies file. Slices older than 051a269 lack the inbox-reading footer: reach them through their lead. | `acp-dispatch resume RECORD` only for a new authorized task |
@@ -368,7 +376,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 | codex, cursor, opencode, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:`. A herdr-idle agent whose agent API refuses input (`agent_not_ready: not an active named agent`, seen on a Crush pane 2026-10-25): `helm.py show <id>`, read the screen (empty input, nothing pending), then `helm.py send <id> --screen-fp <fp> "<text>"` (pane verbs; fresh-screen and pane checks, plus the pid where fleet knows it; never for a working, question, permission, plan, finished or self row). Without the flag an idle row still uses `agent prompt` | the `resume:` line session-history prints |
 | a TUI herdr does not detect (`zcode`, `muse`, a native Hermes TUI, …; listed from `pane process-info`, status `unknown`: never idle by itself, `helm.py send` refuses it) | `helm.py show <pane>` (prints the screen and `screen-fp`, both from one capture; none, and no send command, if herdr could not read the screen), read that screen, and only if it shows an idle, empty input (a dimmed suggestion is not a draft) and no pending question, approval or plan: `helm.py send <pane> --screen-fp <fp> "<text>"` (2026-10-25). Herdr has no agent entry for such a TUI (`herdr agent read` and `agent prompt` fail `agent_not_found`), so helm reads with `herdr pane read` and types with `pane send-text` then `pane send-keys enter`, after the second fingerprint check; a failed typing never presses Enter, is never retried and reports "unverified, do not resend". It is refused if the screen is unreadable or changed since (elapsed-time counters are ignored, so a turn that shows only as a ticking timer is not seen), is another pane or process, or the row is not such a TUI; nothing is inferred from the screen. `sent` is a submit, not a read: verify on screen (`helm.py show`) or by a named acknowledgement in the text | the `resume:` line session-history prints |
 | anything in Ghostty/iTerm/ssh with no channel | tell the operator the `where:` line | — |
-| a pane `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
+| a pane the retired `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
 
 Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
@@ -390,7 +398,7 @@ only where the message asks a question or requests action. An FYI that provably 
    `--expect-ack` and `--needs-reply` (exit 2); on any longer text the flag wins and the text is an ordinary one. `ack the PR and merge it` is no terminator: it goes the normal path with the first-contact footer (the peer answers `ack ID`, one extra message).
    **When the proof is not `delivered`, you handle it** (requester steps, never assume read):
    a. Exit **1**, or a link that fleet shows as `ONE-WAY`: the text did not land or was never answered. Re-send **once** by **another** route (`--via`; `--plan` lists them), never the same route twice.
-   b. Exit **3** (`unverified`), `queued`, or `accepted`: do **not** resend yet; read the target's transcript (or `relay.py --pending` for a deferred record) for the text first. Only a text that is absent is re-sent, by a different `--via`.
+   b. Exit **3** (`unverified`), `queued`, or `accepted`: do **not** resend yet; ask `relay.py --status ID` for a deferred record (see "How to tell what a message did") and read the target's transcript for the text first. Only a text that is absent is re-sent, by a different `--via`.
    c. An `OVERDUE ack ID` line from `--sweep`: ask for a named ack in a new message (`... please reply ack ID2`, with `--expect-ack ID2`).
    d. Still unproven after that: report to the operator with the exact line from `relay.py --pending` (or the `OVERDUE ack ID: ...` line); once it reads `ASSUMED LOST` (6 h past due), re-route your own expectation's work instead. Never assume read.
 2. **A question or an action request needs `--expect-ack ID`**: a `?` outside a URL, or `--needs-reply`, is refused (exit 2, nothing sent) without it
@@ -457,6 +465,46 @@ only where the message asks a question or requests action. An FYI that provably 
    not nudged, also under a first-contact footer, and an `FYI` text is silent even WITH a `?` (`FYI: load is 11, can you pause your build?`; only relay's reply footer overrides it). It only under-nudges and cannot loop. Slice A merged in #81 (`is_terminator` is on master); the hook sharing relay's `is_terminator` is the follow-up after this PR, not done here; docs/queue.md item 8 lists the 18 request texts that are its acceptance corpus. Accepted: a herdr pane id with no `(DIR)` counts `?`; two envelopes in one prompt (no harness writes it): only the first is read.
    `RELAY_PROSE_NUDGE_OFF=1` disables it. Registered in `agents/claude/settings.json.tmpl` under `Stop`; the live `~/.claude/settings.json` gets it only by the operator's install
    (docs/queue.md, "Verified peer messaging, round 2").
+
+### How to tell what a message did (2026-10-31)
+
+Measured 2026-10-30/31 by an agent relaying to a Paseo peer with a question card up: it concluded "delivered" and "queued" from the wrong source and
+escalated to the operator about silence that was a queue; two queued messages were destroyed by `--cancel` used as a state check. The questions and the commands:
+
+1. **What became of record ID?** `relay.py --status ID` (alias `--show`; `--json`): state, target, age, the deliverer's last look (state, why, when, and the pending card by id and tool),
+   every event of `deferred.log` for that id (queued, look, delivered, cancelled, expired, failed) and any expectation that shares the id. It **changes nothing** (no lock, no file, no
+   write) and never prints the text. Exit 0 when the record exists, 1 when it does not (also after the week-old prune: `delivered` records are removed seven days after they finish).
+   The `queued:` line a busy send prints names the id to ask about.
+2. **What is still open?** `relay.py --pending --queued-only` (queued and sending only; `--older-than S` for age; `--json` too), or `relay.py --pending --summary` for ONE line: counts by
+   state and the oldest non-final record with what holds it. Plain `--pending` lists every record (hundreds of `delivered` rows); never `tail` it for the open one. The filters
+   list message records only (expectations stay in plain `--pending`). Plain `--pending` output is unchanged: scripts parse it.
+3. **Why can the target not take it?** `relay.py --why TARGET`: two methods compared (card by kind and tool, a turn still running, silent, archived, gone).
+4. **`--cancel ID` is destructive. It is never a state check.** It answers "delivered: only a queued message can be cancelled" for a final record and WITHDRAWS a queued one. Use `--status`.
+5. **The five-minute rule, mechanically.** An agent that cannot get a message through with an ack within 5 minutes tells the operator. `relay.py --sweep` prints one line per
+   non-final record older than `--stuck-after S` (default 300): `STUCK 14m 20261030-211457-b98c64 -> [d2a505dd] blocked on card frm_18f85bead001xBPfK85BC2N2Gx (question: AskUserQuestion) [why: ...]`.
+   A watcher or a launchd job greps `^STUCK` (exit status stays 0). A STUCK line means **queued, not lost**: the text is waiting for its target, and `--status ID` shows when it
+   was last looked at; "no ack yet" and "never delivered" are no longer the same silence.
+6. **Is this expectation answered?** `relay.py --pending` runs the ack sweep first (bounded to 3 s; transcript reads only, since the Paseo timeline never closes an ack), so it prints
+   current state. A transcript-backed row it could not collect reads `open (uncollected, last swept 2026-10-31T09:12:03-04:00)` (`--json`: `"uncollected": true, "last_swept"`); run `relay.py --sweep`
+   to collect it. A fresh listing is byte-identical to before. The filtered views (`--queued-only`, `--older-than`, `--summary`) list messages and do not sweep. The per-send sweep
+   is the message half only: the ack half runs in `--sweep` and `--pending`, not at the start of every relay (two locks and a transcript read on every send).
+7. **How to answer an expectation** (2026-10-31). When a peer's text ends `[reply through relay.py to <id>: ack ID]` (or `--pending` lists `expect-ack ID` addressed to you), answer with
+   `relay.py --ack ID` (alone: no target, no text; valid when ID exists, is `open` and you are its target) or, written out, `relay.py <sender> "ack ID"`. Both are the ORDINARY send: the
+   sender sees the ack, the verified closer settles it when it is delivered, and a busy sender queues it; the `queued:` line then says `this text answers expectation ID, which closes only
+   when the queued message is delivered (or on relay.py --sweep), not now`. There is no local-only close. Refused with the form named: an unknown, settled or malformed ID (exit 1; 2 for a
+   malformed one) or a caller that is not the target. `--ack` after a target and text stays the delivery-watch flag. **An `ack ID` token that BEGINS ANY LINE** of a send from the
+   expectation's target to its sender closes it (a reply that ends `ack host-branch-durability-2` included); one quoted inside a line, or sent by a third party, closes nothing. That is the
+   relay-verified closer's rule, for a sender with NO transcript; a transcript-backed sender's `--sweep` (and `--pending`) still accepts the token anywhere in a line that carries the target's
+   relay header. Lines are those of the text AS YOU TYPED IT: relay folds the whitespace of what it sends (and stores), so it keeps the line starts of the argument for the closer, only the lines
+   that begin `ack ` (at most 40, each clipped to 120 characters), and a queued record keeps them as `ack_leads`.
+   `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--ack` (a second one is the delivery watch of the inner send), `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
+   never dropped. `--status ID` is a query: combined with any other option or command (`--cancel`, `--retire`, a send) it is refused, exit 2, and nothing runs. A transcript-backed expectation whose
+   transcript cannot be read reads `open (uncollected, ...)` even after a complete sweep.
+   **A closed Paseo agent (collected runtime, not archived) counts as idle and a send wakes it** (`--why`: `closed ... a send resumes the same conversation`, deliverable); this holds for automatic callers too
+   (djbclark, 2026-10-31): a watcher such as rumination-watch that falls back to a closed seat sends to it, which starts a turn (at most one send per pass), and never treats it as absent.
+   An archived agent, `error`, `initializing` and any other state are refused and say why.
+   A transcript-backed `ack` is also read from an `api-request-blob` record (Claude Code logs an idle session's peer message only that way), but only a block that STARTS with the harness prefix
+   `Another Claude session sent a message...` and only the envelope after it: reminders, hook output, nested memory, skill bodies, task notifications and compaction summaries count for nothing.
 
 
 ## Direct Herdr control and detached relay workers (2026-10-25)
@@ -536,15 +584,23 @@ never ask the operator to press Enter as the normal delivery path.
    `launches.jsonl`. A Claude session is `finished` when its last real prompt was
    `/handoff`, `/quit` or `/exit`. A session with child processes that are not its
    MCP/LSP servers is `busy-background` (`busy:` lists them): helm never audits
-   it, `herdr-tidy` never closes it.
+   it, and the retired `herdr-tidy` never closed it.
    Ended work (`fleet.py ended`): handoff chains, transcripts that ended on a
-   question, the `herdr-tidy` close ledger (`~/.local/state/session-finder/closed.jsonl`,
+   question, the retired `herdr-tidy`'s close ledger (`~/.local/state/session-finder/closed.jsonl`,
    `closed` items with resume commands) and herdr-sleeper journal entries whose
    pane is gone (`sleeping` items with the manual resume line).
-2. Claude keyword index: `~/.local/state/session-index/<sessionId>.json`, extended
-   from the byte offset last read. History: one adapter per agent in
+2. Claude keyword index (running sessions only, for step 1): `~/.local/state/session-index/<sessionId>.json`,
+   extended from the byte offset last read. History: one adapter per agent in
    `adapters/*.py` (contract in `adapters/README.md`), FTS5 at
    `~/.local/state/session-index/history.v2.sqlite`; a broken adapter is skipped.
+   Adapters (2026-10-31): agy, claude, cline, codex, copilot, crush, cursor, goose, grok, hermes, muse,
+   omp, opencode, qwen, zcode and todo. **No adapter, by decision** (djbclark, 2026-10-31): kiro, pi,
+   gemini, devin. A session that has left its agent's store stays in the index as history (`orphan`
+   in `--status`; never pruned). **Live labels:** claude, cline, copilot and muse report `live()`
+   exactly (`LIVE`). For every other agent a hit is `LIVE` when `fleet.py` has a running row carrying its
+   native id (hermes, some omp), `LIVE?` when that agent has a running fleet row in the same directory and
+   the session was touched in the last 10 minutes (most fleet rows, e.g. a Paseo-hosted codex, carry no
+   native id), else `ended`. `session-find.py` (fleet) stays the authority on what is running.
    `adapters/todo.py` is a document adapter: one entry per note under
    `<project>/todo/*.md` for every project in `~/.basic-memory/config.json`,
    split into one FTS row per `##` section, `live()` = `status: open`. A full
