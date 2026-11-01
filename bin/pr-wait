@@ -826,13 +826,13 @@ def adversary_verdict(body: str, head: str) -> dict:
     # starts too; only actual BLOCK fields plus a matching head trigger this
     # conservative fallback. Canonical valid markers retain their normal result.
     canonical = {(start, js, je) for start, js, je in _marker_spans(body, nested=True)}
-    # A successfully parsed marker's JSON strings are metadata, never new markers.
-    # Invalid outer candidates protect nothing: nested real BLOCKs must still be found.
+    # Readable recovery candidates (including trailing commas/duplicates) preserve
+    # every JSON string boundary. Broken quoting/nesting protects nothing: a real
+    # same-head BLOCK must remain recoverable from uncertain structure.
     quoted_strings = []
     for _start, js, je in canonical:
-        try:
-            json.loads(body[js:je], object_pairs_hook=_strict_object)
-        except ValueError:
+        _, certain = _top_level_marker_fields(body[js:je])
+        if not certain:
             continue
         quoted_strings.extend((js + token.start(), js + token.end()) for token in
                               re.finditer(r'"(?:[^"\\]|\\.)*"', body[js:je]))
@@ -896,8 +896,22 @@ def adversary_verdict(body: str, head: str) -> dict:
         if je < 0:
             close = body.find("-->", js)
             je = close if close >= 0 else len(body)
+        # A readable JSON prefix keeps its strings protected even when junk or
+        # another object follows before this comment closes. Recover that broken
+        # envelope as a whole, never by inventing a marker inside a note string.
+        prefix = body[js:je]
+        _, prefix_certain = _top_level_marker_fields(prefix)
+        if prefix_certain:
+            quoted_strings.extend((js + token.start(), js + token.end()) for token in
+                                  re.finditer(r'"(?:[^"\\]|\\.)*"', prefix))
+        close = body.find("-->", je)
+        if close >= 0 and body[je:close].strip():
+            je = close
         candidate = body[js:je]
         fields, certain = _top_level_marker_fields(candidate)
+        if certain:
+            quoted_strings.extend((js + token.start(), js + token.end()) for token in
+                                  re.finditer(r'"(?:[^"\\]|\\.)*"', candidate))
         fields = [(key.lower(), value) for key, value in fields]
         if not certain:
             # Broken quoting or nesting makes depth unknowable. Fail closed,

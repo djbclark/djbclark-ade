@@ -40,6 +40,29 @@ def load_guard(guard_path: Path):
     return ns["git_identity_guard"]
 
 
+def identity_exempt_roots():
+    roots = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders")]
+    if os.environ.get("TMPDIR"):
+        roots.append(Path(os.environ["TMPDIR"]))
+    return [root.resolve() for root in roots]
+
+
+def make_identity_fixture():
+    # Checkout location and TMPDIR cannot choose the enforcement test's root.
+    roots = identity_exempt_roots()
+    for parent in (Path.home(), Path("/var/tmp"), Path("/Users/Shared"), Path("/home")):
+        parent = parent.resolve()
+        if any(parent.is_relative_to(root) for root in roots):
+            continue
+        try:
+            fixture = Path(tempfile.mkdtemp(prefix=".identity-test-", dir=parent)).resolve()
+        except OSError:
+            continue
+        assert not any(fixture.is_relative_to(root) for root in roots)
+        return fixture
+    raise RuntimeError("No writable identity-fixture parent outside guard-exempt roots")
+
+
 class TestGitIdentityGuard(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="acp-git-id-"))
@@ -60,7 +83,9 @@ class TestGitIdentityGuard(unittest.TestCase):
             os.environ.clear()
             os.environ.update(os_env)
         # A repo outside the temp roots the guard exempts.
-        self.real = Path(tempfile.mkdtemp(prefix=".identity-test-", dir=SCRIPT.parents[2]))
+        self.real = make_identity_fixture()
+        for root in identity_exempt_roots():
+            self.assertFalse(self.real.is_relative_to(root), (self.real, root))
         self.addCleanup(shutil.rmtree, self.real, True)
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
@@ -82,6 +107,23 @@ class TestGitIdentityGuard(unittest.TestCase):
     def test_abandoned_identity_fixture_is_ignored(self):
         r = self.git(SCRIPT.parents[2], "check-ignore", "--no-index", ".identity-test-killed-run/artifact")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_fixture_outside_exempt_roots_when_checkout_is_temporary(self):
+        checkout = self.tmp / "checkout"
+        script = checkout / "tools/acp-run/acp-run"
+        script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, script)
+        nested = TestGitIdentityGuard("test_injected_config")
+        try:
+            with (mock.patch.dict(globals(), {"SCRIPT": script}),
+                  mock.patch.dict(os.environ, {"TMPDIR": str(self.tmp)}),
+                  mock.patch.object(Path, "home", return_value=self.tmp)):
+                nested.setUp()
+            roots = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders"), self.tmp]
+            for root in roots:
+                self.assertFalse(nested.real.resolve().is_relative_to(root.resolve()))
+        finally:
+            nested.doCleanups()
 
     def test_injected_config(self):
         self.assertEqual(self.env["ACP_RUN_GIT_EMAIL"], OPERATOR)

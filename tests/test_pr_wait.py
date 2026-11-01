@@ -2781,3 +2781,42 @@ def test_root_array_documentation_does_not_hide_following_block():
     example = '<!-- adversary-verdict:v1 ' + json.dumps([{"note": "<!-- -->", "head": ADV_HEAD, "verdict": "BLOCK"}]) + ' -->'
     body = marker("APPROVE") + "\n```\n" + example + "\n" + marker("BLOCK") + "\n```"
     assert adv(body)["verdict"] == "BLOCK" and not gate(body)[0]
+
+
+@pytest.mark.parametrize("context", ["fenced", "inline", "live", "blockquote", "indented"])
+@pytest.mark.parametrize("shape", ["trailing_comma", "quoted_marker", "nested_metadata", "quote_desync", "escaped_strings"])
+@pytest.mark.parametrize("verdict,head", [("APPROVE", ADV_HEAD), ("BLOCK", ADV_HEAD), ("BLOCK", OTHER_HEAD)])
+def test_marker_family_matrix(context, shape, verdict, head):
+    doc = {"verdict": verdict, "head": head, "note": "escaped \" \\ [ ]"}
+    if shape == "quoted_marker":
+        doc["note"] = "format: <!-- adversary-verdict:v1"
+    if shape in ("quoted_marker", "nested_metadata"):
+        doc["example"] = {"verdict": "BLOCK", "head": ADV_HEAD}
+    payload = json.dumps(doc)
+    if shape in ("trailing_comma", "quoted_marker", "nested_metadata"):
+        payload = payload[:-1] + ",}"
+    if shape == "quote_desync":
+        payload = '{"note":"5" screen",' + payload[1:]
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    candidate = {"fenced": "\n```\n%s\n```", "inline": "\n`%s`", "live": "\n%s",
+                 "blockquote": "\n> ```\n> %s\n> ```", "indented": "\n    %s"}[context] % candidate
+    body = marker("APPROVE") + candidate
+    result = adv(body)
+    live = context in ("live", "blockquote", "indented")
+    malformed = shape != "escaped_strings"
+    if verdict == "BLOCK" and head == ADV_HEAD:
+        assert result["verdict"] == "BLOCK" and result["matches_head"]
+        assert not gate(body, required=True)[0]
+        if malformed:
+            assert not gate(body, required=False)[0]
+    elif live and malformed:
+        assert result["malformed"] and not gate(body, required=False)[0]
+    else:
+        assert result["verdict"] == "APPROVE" and not result["malformed"]
+        assert gate(body, required=True)[0]
+
+
+def test_documentation_only_matrix_cannot_forge_approve():
+    for context in ("\n```\n%s\n```", "\n`%s`"):
+        body = context % marker("APPROVE")
+        assert not gate(body, required=True)[0]

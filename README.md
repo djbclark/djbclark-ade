@@ -409,3 +409,7 @@ On 2026-11-01 (PR 175), root-array documentation detection began finding the com
 array with string-aware boundaries before classifying it. Comment delimiters and marker
 format strings inside readable array examples remain documentation; a separate same-head
 BLOCK following the example still holds the gate.
+
+On 2026-11-01 (PR 175), all structurally readable recovery candidates preserve JSON
+string boundaries, including trailing-comma and duplicate-key documentation. Marker-format
+text inside their strings is metadata; broken quoting or nesting still fails closed.
