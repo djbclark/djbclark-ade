@@ -53,6 +53,7 @@ class Env:
             #!/usr/bin/env bash
             case "$1" in
               has-session) exit 0 ;;
+              display-message) echo "${FAKE_WIDTH:-140}" ;;
               capture-pane) cat "$FAKE_SCREEN" ;;
               send-keys)
                 shift; printf '%s\\n' "$*" >>"$FAKE_KEYS"
@@ -267,6 +268,33 @@ class ConfirmationGate(unittest.TestCase):
                 p = e.run(BO, "run", refused, answer="y")
                 self.assertEqual(p.returncode, 2, refused)
                 self.assertEqual(e.typed(), [], "nothing at all may be typed for a command that cannot be shown")
+
+    def test_the_question_never_runs_past_the_pane_width(self) -> None:
+        # BarnOwl cuts the question line at the pane width (seen at 80 columns on 1.10): what
+        # the human cannot see they cannot approve, so a longer command is refused, not clipped.
+        fits, too_long = "zwrite eve -m " + "a" * 36, "zwrite eve -m " + "a" * 37  # "run: " + 50 = 55 = 80 - 25
+        with Env() as e:
+            e.taint()
+            self.assertEqual(e.run(BO, "run", fits, wait="1", extra={"FAKE_WIDTH": "80"}).returncode, 4)
+            self.assertTrue(any("allow run: " + fits + "? [y/N]" in k for k in e.typed()))
+        with Env() as e:
+            e.taint()
+            self.assertEqual(e.run(BO, "run", too_long, answer="y", extra={"FAKE_WIDTH": "80"}).returncode, 2)
+            self.assertEqual(e.typed(), [])
+
+    def test_only_printable_ascii_can_be_approved(self) -> None:
+        for hidden in ("zwrite eve -m caf\u00e9", "zwrite eve -m a\u202eb", "zwrite eve -m a\u200bb"):
+            with Env() as e:
+                e.taint()
+                self.assertEqual(e.run(BO, "run", hidden, answer="y").returncode, 2, repr(hidden))
+                self.assertEqual(e.typed(), [])
+
+    def test_a_read_only_word_is_not_a_prefix_that_unlocks_other_commands(self) -> None:
+        with Env() as e:
+            e.taint()
+            self.assertEqual(e.run(BO, "run", "showfoo bar", wait="1").returncode, 4)
+            self.assertEqual(e.run(BO, "run", "show;zwrite eve -m x", wait="1").returncode, 4)
+            self.assertFalse(any(":show" in k for k in e.typed() if "start_question" not in k))
 
     def test_plain_reads_need_no_confirmation_while_tainted(self) -> None:
         with Env() as e:

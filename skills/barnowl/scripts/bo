@@ -21,7 +21,7 @@ pending_question=
 state=${BO_STATE:-$HOME/.local/state/bo}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 confirm_wait=${BO_CONFIRM_WAIT:-120}
-confirm_max=${BO_CONFIRM_MAX:-90}
+confirm_max=${BO_CONFIRM_MAX:-}
 
 finish() {
   local rc=$?
@@ -65,7 +65,7 @@ locate  zlocate a user
 untaint (operator only, not over the restricted key) forget that untrusted text was read
 
 After any read of Zephyr text, perl and non-read-only run ask the human at the live
-client first, and refuse commands longer than BO_CONFIRM_MAX (90) characters.
+client first, and refuse commands too long to show in one line at the pane width (pane_width - 25).
 Exit codes: 2 refused argument, 3 client busy, 4 human declined or absent, 5 output cut by a cap.
 EOF
 }
@@ -169,9 +169,20 @@ read_only_command() { [[ $1 =~ ^(show|help|getvar|getsubs|getview)([[:space:]]|$
 # is exit 4 and nothing more is typed.
 confirm() {
   tainted || return 0
-  local what=$1 reply i
-  if [[ ${#what} -gt $confirm_max || $what == *[[:cntrl:]]* || $what == *[\{\}\\]* ]]; then
-    echo "after reading Zephyr text this command must be confirmed by the human, and it is too long (over $confirm_max), has a control character, or has { } \\ : shorten it" >&2
+  local what=$1 reply i cols max
+  # BarnOwl 1.10 wraps a question longer than the pane and, with a one-line type window,
+  # shows only its LAST line (measured at 80 columns: a 100-character prompt showed only
+  # "...ENDMARK? [y/N]:", an 86-character one only "[y/N]:"; 79 characters showed whole, 80 did
+  # not). So the whole prompt must fit in pane_width - 1: `bo asks: allow ` (15) plus
+  # `? [y/N]: ` (9) leave pane_width - 25 for the command.
+  cols=$(tmux display-message -p -t "$session" '#{pane_width}' 2>/dev/null || true)
+  [[ $cols =~ ^[0-9]+$ ]] || cols=80
+  max=$((cols - 25))
+  [[ -z $confirm_max || $confirm_max -ge $max ]] || max=$confirm_max
+  # Only printable ASCII is shown faithfully: no control, bidi or zero-width
+  # character, no brace or backslash (they could end the Perl string).
+  if [[ ${#what} -gt $max ]] || (export LC_ALL=C; [[ $what == *[!\ -~]* || $what == *[\{\}\\]* ]]); then
+    echo "after reading Zephyr text this command must be confirmed by the human: it is longer than the $max columns the question can show, or has a character other than printable ASCII, or has { } \\ : shorten it" >&2
     exit 2
   fi
   ans=$(scratch ans)
@@ -272,10 +283,12 @@ valid_user() { [[ $1 =~ ^[A-Za-z0-9._@+][A-Za-z0-9._@+-]{0,79}$ ]]; }
 case "${1:-}" in
   log)
     shift
+    lock_client
     blog log "$@"
     ;;
   screen|capture)
     need_session
+    lock_client
     capture | blog frame screen
     ;;
   subs)
@@ -298,6 +311,7 @@ case "${1:-}" in
     shift
     [[ $# -ge 1 && $# -le 5 ]] || { usage >&2; exit 2; }
     for u in "$@"; do valid_user "$u" || { echo "refused user name" >&2; exit 2; }; done
+    lock_client
     { zlocate "$@" 2>&1 || true; } | blog frame locate
     ;;
   untaint)
