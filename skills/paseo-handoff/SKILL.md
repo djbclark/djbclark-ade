@@ -86,9 +86,10 @@ Dann's. The Dann-specific reading, with commands and a dated seat map, is
    the **agent** first, never a workspace that still holds anything (a workspace archive takes every
    agent and terminal in it, and until `docs/paseo-only-rearchitecture.md` D1.3/D2 gate can delete
    unpushed work). **Then, whenever you archive or close an agent for any reason, check its
-   workspace:** if it now has no live agent (`paseo ls -g --json`, matched to the workspace through
-   `~/.paseo/agents/*/<id>.json`; `paseo ls --workspace` does not filter, 2026-11-01), no terminal
-   (`paseo terminal ls`) and `isolation: local` (`paseo workspace ls --json`; never a worktree
+   workspace:** if it now has no live agent (`paseo ls -g --background --json`, background agents
+   included, matched to the workspace through `~/.paseo/agents/*/<id>.json`; `paseo ls --workspace`
+   does not filter, 2026-11-01), no terminal (`paseo terminal ls --workspace <wks_id> --json`, scoped
+   to that workspace) and `isolation: local` (`paseo workspace ls --json`; never a worktree
    workspace), archive it too with `paseo workspace archive <wks_id>`, so the sidebar does not fill
    with empty workspaces (djbclark, 2026-11-01: six were left behind). Any doubt keeps it. A seat
    that has not written down what it learned has not handed off.
