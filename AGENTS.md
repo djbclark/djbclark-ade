@@ -9,9 +9,8 @@ Copilot, Grok, Cursor, …).
 
 The agentic development environment (ADE) for this machine: one operator,
 many agent TUIs, herdr/Orca as the terminal fabric, ACP for agent-to-agent
-control; since 2026-10-08 also the git home of the orchestration and
-session-hygiene skills and tools. Two altitudes, verified by real runs on
-2026-08-23: the **micro graph** (Claude Code dynamic workflows, in-process
+control; also the git home of the orchestration and
+session-hygiene skills and tools. Two altitudes: the **micro graph** (Claude Code dynamic workflows, in-process
 fan-out) and the **macro graph** (an Orca task DAG across agent CLIs in their
 own worktrees). [README.md](README.md): architecture, how they compose, every skill.
 
@@ -23,14 +22,14 @@ Each doc carries its own summary.
 |---|---|
 | [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
 | [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
-| [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow since 2026-10-11) |
+| [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer |
 | [docs/orca-integration.md](docs/orca-integration.md) | macro-graph commands, live-run lessons; `orca skills get orchestration` is authoritative |
 | [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
-| [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20): assets, actors, entry points, ranked threats; read by Codex's security review |
-| [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard` and the claim registry (2026-10-24): commands, exit codes 0/2/77, claim lifecycle, refusal rules, override, integration status |
-| [docs/gates.md](docs/gates.md) | `config/gates.toml` and `bin/gate-profile` (2026-10-26): the Claude quota gates' numbers in git, floors, a temporary expiring `away` profile |
+| [docs/threat-model.md](docs/threat-model.md) | threat model: assets, actors, entry points, ranked threats; read by Codex's security review |
+| [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard` and the claim registry: commands, exit codes 0/2/77, claim lifecycle, refusal rules, override, integration status |
+| [docs/gates.md](docs/gates.md) | `config/gates.toml` and `bin/gate-profile`: the Claude quota gates' numbers in git, floors, a temporary expiring `away` profile |
 | [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
-| [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
+| [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge |
 | [docs/agent-sleep.md](docs/agent-sleep.md) | idle-agent sleep; run `bin/herdr-sleeper list` before calling a pane dead |
 | [docs/helm.md](docs/helm.md) | `/helm` ([skills/helm/](skills/helm/)): answer every waiting session from one window |
 | [docs/herdr-tidy.md](docs/herdr-tidy.md) | `/herdr-tidy`: close idle panes without losing anything |
@@ -41,7 +40,7 @@ Each doc carries its own summary.
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/](skills/), [docs/skills.md](docs/skills.md) | canonical copy of every hand-written skill: **edit and add skills here**, never via a TUI path; wrappers in [claude/commands/](claude/commands/) |
 | [skills/autorename/workspace-layout.md](skills/autorename/workspace-layout.md) | naming: -pw/-pt Paseo, -t/-p herdr; tab use |
-| [skills/paseo-handoff/](skills/paseo-handoff/SKILL.md) | tab lifecycle (2026-10-30): verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
+| [skills/paseo-handoff/](skills/paseo-handoff/SKILL.md) | tab lifecycle: verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
 | [tools/acp-run/](tools/acp-run/README.md) | the ACP client every launcher uses (`~/.local/bin/acp-run`) |
 | [bin/fleet-watch](bin/fleet-watch) | launchd fleet change notices to Hermes |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere |
@@ -69,31 +68,27 @@ Each doc carries its own summary.
    letter (`A.`, `B.`, …); its items are `A1`, `A2`, …, sub-items `A1a`.
    A reply with no headings uses `1.`, `2.`; question-card options are
    numbered too. Each item is labelled once; keep labels stable within a
-   conversation (operator, 2026-10-24).
+   conversation.
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.
 7. **Routing discipline**: route per `skills/model-routing/SKILL.md`
    *Routing policy* (`route_agent.py policy --md`), the one copy. The prepaid
    tier stays retired until an operator top-up; the `agent_stats.py burn`
-   alert (every 6h, 48h ahead) governs pool exhaustion: the blanket
-   clinepass rule was **retired 2026-08-24**. Watch the alert, not the rule.
-8. **Upstream every local change to someone else's source** (operator,
-   2026-10-24). A fork, vendored copy or local patch: in the same session,
+   alert (every 6h, 48h ahead) governs pool exhaustion; there is no blanket
+   clinepass rule. Watch the alert.
+8. **Upstream every local change to someone else's source**. A fork, vendored copy or local patch: in the same session,
    search the project's issues and PRs for a duplicate, tidy the change,
    consult a `frontier` agent if it helps, then open the issue/PR, so an
    upgrade never needs a merge. Nothing is version-pinned either: software
    tracks its latest release. Detail and exceptions:
    `site-private/memory/feedback_upstream_local_changes.md`.
 
-9. **All development happens in an exclusively claimed task workspace, never in a shared checkout** (operator, 2026-10-25, after the frontier consult in `docs/queue.md`
-   "An absolute ... worktree commandment"; it makes ruling 2 of the 2026-10-23 isolation design absolute). Every source edit, stage, commit, build, test and one-line docs
+9. **All development happens in an exclusively claimed task workspace, never in a shared checkout** (`docs/queue.md`, "An absolute ... worktree commandment"). Every source edit, stage, commit, build, test and one-line docs
    or queue change, in every repo, happens in a linked worktree (`git worktree add -b NAME ~/src/djbclark-ade-NAME-wt origin/master`, push there, `git worktree remove` it
    after the merge) or an independent cow pasture (`skills/cow-workspaces`), created from a recorded base. `~/src/<repo>` is a reference and integration checkout: it
-   may sit on another session's branch or carry its uncommitted edits (2026-10-24: three sessions collided; an L-D branch carried two foreign commits; 2026-10-25: an
-   unrelated session's edit sat in this checkout's tree), so nothing is edited or committed there. **One writer at a time per workspace**: a build slice, its repair slice and
+   may sit on another session's branch or carry its uncommitted edits, so nothing is edited or committed there. **One writer at a time per workspace**: a build slice, its repair slice and
    the adversary share it in turn, and only after the previous writer's processes have exited (a reviewer that runs tests is a writer). **Before dispatching a slice into a
-   workspace, run `git status` and `git log -3` and stop on an unresolved merge or rebase or a dirty tree you do not own** (2026-10-25: a slice was dispatched into a worktree
-   mid-merge; chaining the merge and the dispatch with `;` hid the conflict). **Exceptions, all named**: (a) read-only inspection; (b) a designated promoter's serialized,
+   workspace, run `git status` and `git log -3` and stop on an unresolved merge or rebase or a dirty tree you do not own**; never chain a merge and a dispatch with `;`, which hides a conflict. **Exceptions, all named**: (a) read-only inspection; (b) a designated promoter's serialized,
    clean, approved `git merge --ff-only` of a primary checkout or `~/ops` master to a published revision (no commit made there); (c) installs, runtime-health and
    non-repository maintenance under a claim on the real target (edit dotfiles and installed tools in their source repo workspace, then install by the normal path).
    No exception because a change is small. **Transitional, `~/ops` only**: until the ops-promotion pilot in the queue entry passes, the `~/ops` plain-`master`
@@ -102,19 +97,16 @@ Each doc carries its own summary.
    the shared-file conflicts; until those land this is the rule, not a guard. Another session's uncommitted edits in a shared checkout are migrated by their owner
    (through `relay.py`), never stashed or reset by you.
 
-10. **A message to another agent is not sent until it is sent through `session-finder/relay.py`, and not delivered until you have verified it** (operator, 2026-10-25:
-   "we always need to verify that the other agent got our message otherwise we may be on a broken one-way receive-only link"; the same day an agreement was written
-   only in a reply to the sender and never relayed back). Writing an answer in your own turn does not reach a peer; a relayed message from a peer is answered by `relay.py`
+10. **A message to another agent is not sent until it is sent through `session-finder/relay.py`, and not delivered until you have verified it**: an unverified link may be one-way. Writing an answer in your own turn does not reach a peer; a relayed message from a peer is answered by `relay.py`
    to that peer, not in prose. Read relay's status word: `delivered` is proof, `queued`, `accepted` or `unverified` is not. After a non-`delivered` status
    check the target's transcript or inbox for the text (`--wait S` blocks for it), ask for a named ack (`ack <your agent id>`), and re-send or switch route
    (`--via`) when none arrives. The first message to a new peer always asks for an ack, to prove the return path. A peer you cannot reach is reported to the operator,
    never assumed read. Checklist for the queue: `docs/queue.md`, "Verified peer messaging".
 
-11. **djbclark-ade is the lead's project; ask before changing code anywhere else** (operator, 2026-10-30: "You should ask me before you make changes to any code not
-   in your project, which is djbclark-ade."). The lead of this repo edits, commits and pushes in djbclark-ade (and its worktrees and pastures) on its own judgment
+11. **djbclark-ade is the lead's project; ask before changing code anywhere else**. The lead of this repo edits, commits and pushes in djbclark-ade (and its worktrees and pastures) on its own judgment
    under the orders above; agents it dispatches here act under the same grant, and ask through the lead for anything outside it. Changing **code or configuration** in
    another repository (`~/ops/*`, `sipb-agent-skills`, forgejo projects, third-party forks) or in installed files outside a repository (`~/.local/bin` scripts,
-   dotfiles, live plugin or service settings) waits for the operator's explicit yes for that change. Clarified by the operator the same day: (a) installing or
+   dotfiles, live plugin or service settings) waits for the operator's explicit yes for that change. Except: (a) installing or
    relinking djbclark-ade's own artifacts by their normal path (`skill-everywhere`, `ade update`) is part of this project; (b) memory notes and instruction-file
    upkeep keep the standing permission `~/AGENTS.md` gives them; (c) once a change to someone else's fork is approved, filing it upstream (order 8) is covered by
    that yes. Order 9 says how a permitted change is made; this order says whether it may be. Reading, reviewing and reporting on code elsewhere needs no
@@ -122,14 +114,14 @@ Each doc carries its own summary.
 
 ## Machine context
 
-- **`acp-run --list` is the agent registry** (since 2026-10-08):
+- **`acp-run --list` is the agent registry**:
   `bin/route_agent.py` discovers agents from it plus installed headless TUIs;
   Orca's roster is a GUI list only (docs/model-routing.md).
 - Ops-suite conventions live in `~/CLAUDE.md` and site-private and govern
   `~/ops`. In this repo every change lands on master **by PR only**: branch protection, enforced for admins too,
-  refuses a direct push (djbclark, 2026-10-31, after a session pushed 7961b261 straight to master); the lead merges
+  refuses a direct push; the lead merges
   with `gh pr merge --squash --match-head-commit`. Repo: `djbclark/djbclark-ade`.
-- Facts here carry snapshot dates; probes beat memory. When you verify a
+- Probes beat memory. Date volatile facts in the linked docs. When you verify a
   change, update the doc in the same breath (standing order 2).
 
 <!-- graft:start -->
@@ -176,12 +168,8 @@ no API key, $0).
 
 ## Code review (what a reviewer checks here)
 
-Readers as of 2026-10-20: Codex (`@codex review`; its Security Review runs with
-each code review; on PR 9 its automatic review on PR open answered "create an
-environment", the environment-catalog bug that also blocks task mentions),
-Cursor's Security Agent and Approval Agent checks, and the `adversary`
-sub-agent. A
-pull request here is expected to meet these; flag any it misses.
+Apply these checks during code, security and adversary reviews. Flag any a
+pull request misses.
 
 1. **The PR body carries the adversary's verdict as a MACHINE-READABLE MARKER**, naming the head it
    reviewed:
@@ -228,7 +216,7 @@ pull request here is expected to meet these; flag any it misses.
    4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
       missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
       report a readable bad one.
-   5. **The marker's JSON is delimited by its own braces, not by the first `<!--`** (2026-10-27): a
+   5. **The marker's JSON is delimited by its own braces, not by the first `<!--`**: a
       `note` may quote the format, and a body that documents the marker is not read as a second
       mistyped one. The marker's JSON must also be written where `pr-wait` reads it live — a marker
       whose JSON is partly inside a code span is **malformed**, never approved, because masking code
@@ -251,7 +239,7 @@ pull request here is expected to meet these; flag any it misses.
    `shlex.quote` or `shlex.join`.
 5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare
    `sed`) have a Linux path or use the GNU `g*` tool; CI runs `pytest` on
-   Linux, and on macOS only on request (a manual `Tests` dispatch with the `macos` input, 2026-10-29).
+   Linux, and on macOS only on request (a manual `Tests` dispatch with the `macos` input).
 6. **Records and state files change atomically** (temp file beside, then
    `os.replace`), and every new record field is read with `.get` so older
    records still load.
@@ -270,33 +258,25 @@ pull request here is expected to meet these; flag any it misses.
    review thread from an earlier head, security threads included: a finding stays open until its thread is
    resolved. GraphQL `reviewThreads.isResolved` is the authority, and the marker's
    `has_unresolved_findings` (per review) must agree with it (a disagreement is chased, never
-   read as a clean "0"). Case (2026-10-23): on PR 32 Codex left a P1 on head
-   3c40470, two pushes followed without the fix, the marker for the new head said
-   `has_unresolved_findings: true`, and a head-only filter read "0" past the open
-   P1. Check with `bin/pr-wait`: `merge_ready` (false with the reasons in `merge_blockers`) and
+   read as a clean "0"); a head-only filter misses a finding left open on an earlier head. Check with `bin/pr-wait`: `merge_ready` (false with the reasons in `merge_blockers`) and
    `PREFIX-open-findings.json`.
    Fixing a finding means fixing the code, then resolving its thread. Never select
    by time: a "newest `@codex review` comment" window is moved by Codex's own
-   receipts, which quote it (PR 12, 2026-10-20). GitHub re-anchors `commit_id` to the newest head when
-   the line is unchanged, so `commit_id` alone cannot tell old from new. A
-   waiter that filtered by a hard-coded timestamp missed two findings on
-   PR 10 (2026-10-20) and the PR merged past them. The state marker's exact
-   form (2026-10-20): `<!-- codex-review-state:v1 {"code_review":
+   receipts, which quote it. GitHub re-anchors `commit_id` to the newest head when
+   the line is unchanged, so `commit_id` alone cannot tell old from new; never filter by a hard-coded timestamp. The state marker's exact
+   form: `<!-- codex-review-state:v1 {"code_review":
    {"commit_sha":…,"status":"completed",…},"security_review":{…}} -->` on
    the comment that also carries `<!-- codex-pull-request-review-summary -->`;
    that comment is posted at request time and edited in place, so match the
    marker with its `:v1` suffix and read `code_review.commit_sha`, never the
    comment's `created_at`. Each inline finding ends with
-   `<!-- codex-code-review-finding:v1 -->`. A waiter whose regex lacked the
-   `:v1` suffix saw no state on PR 12 and ran its full 30 min.
-10. **The PR adds its line to `CHANGELOG.md` under `Unreleased`** (since 2026-10-20, djbclark:
-    "people should know what changes or new features are added"): one line per user-visible
+   `<!-- codex-code-review-finding:v1 -->`; a regex without the `:v1` suffix sees no state.
+10. **The PR adds its line to `CHANGELOG.md` under `Unreleased`**, so people know what changed: one line per user-visible
     change (a new or changed command, flag, skill, exit code, service or rule), in the past
     tense, ending with the PR number; `Added`, `Changed`, `Fixed`, `Removed` or `Security`.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.
-11. **Codex's review may be the LOCAL one** (2026-10-29, djbclark: "could we just switch to making codex reviews run locally in general"; GitHub's
-    Codex review hung on PRs 112 and 124, openai/codex#55890). `bin/local-review PR` runs `codex review --base <base sha>` in a clean detached
+11. **Codex's review may be the LOCAL one** (GitHub's Codex review can hang, openai/codex#55890). `bin/local-review PR` runs `codex review --base <base sha>` in a clean detached
     worktree at the exact head and files `~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (exit 0 clean, 1 findings, 3 failed); `bin/pr-wait PR
     --local-codex` then reads that file instead of waiting on the bot (implies `--no-codex`) and makes `merge_ready` need `clean` on THIS head, else the blocker
     is `local-codex-missing`, `-findings`, `-failed` or `-unreadable`, never `codex-skipped`. A push needs a new run: the head is the key, so another head's review
