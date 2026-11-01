@@ -84,6 +84,28 @@ quoting a chain, and update its snapshot if you change one.
 > checks `--model` before it detaches. Detail: `skills/bigteam/SKILL.md` (*agy Claude/GPT
 > pool*, item 3).
 >
+> **Update 2026-10-31 (operator): Gemini 4 Argon is a routable `frontier` model, FALLBACK ONLY: used when
+> codex `gpt-6-astra` OR Fable is short of quota, never while both have it.** Reachable through agy (`acp-run
+> agy --model gemini-4-argon --effort high`, 1M context; `agy models` lists `gemini-4-argon-{low,medium,high}`).
+> A tiny Argon call moved only its own window, so **aiuse schema 1.5 (aiuse PR 42) files it as its own pool
+> family `gemini_argon`** beside `gemini`; **this needs aiuse 1.5**. Before 1.5 the window sat inside family
+> `gemini` and a 4%-left Gemini weekly would hide Argon's 57%. djbclark-ade maps a model to its family in one
+> helper, `route_agent.antigravity_family` (`gemini-4-argon*` to `gemini_argon`, other `gemini-*` to `gemini`;
+> acp-dispatch calls it, and `bin/failover.py` carries the same prefix row because it cannot import
+> route_agent; aiuse's `semantics.model_pool_family` is prose in `aiuse schema`, not an importable function).
+> Service `antigravity-argon` (`config/routing.toml`, rank 5 in `frontier`, `pool = ["antigravity",
+> "gemini_argon"]`, `fallback_after = ["codex", "claude"]`) is skipped while every service it falls back
+> behind is usable: codex is short when the slice does not fit what acp-dispatch will demand of it for astra (per quota window, the 60% estimate floor until
+> 3 slices are measured, then their median; not the router's 15%; in tendcf and nix2cf only, a 20% repo override
+> from `[dispatch.repo_overrides]`, operator 2026-11-01, resolved from the `-C` directory's origin remote), claude is
+> short when the Fable sublimit is below `frontier1_min_left` (Argon then replaces the Opus downgrade).
+> It fails closed: no fresh reading of its window, or a frozen or stale one, means the planner never picks it
+> and `acp-dispatch` exits 5 naming the window. `acp-dispatch` enforces the fallback too (exit 2; the
+> `route-override` approval escapes it). Needs `--kind frontier` like astra and Fable; the item-1e frontier
+> allowance (claude, codex) does not cover it.
+> Gemini 4 Carbon is not reachable through agy yet (Google's staged rollout, 2026-10-28): recheck weekly.
+> Detail: `skills/model-routing/SKILL.md` item 1b.
+>
 > **Correction 2026-10-03: "route bulk work to antigravity first" has a limit
 > that `aiuse` cannot see.** The agy CLI has a per-login burst limit, roughly
 > **60 generation requests an hour** (inferred; Google publishes none). On
@@ -137,7 +159,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it) | Max-class | monthly sub | 5h + weekly; **Fable is a <=50% sublimit of the same weekly** (aiuse `max_share_of_parent_percent`), not a separate pool (corrected 2026-10-15) |
 | `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
 | `codex` | `codex` (v0.149) | ChatGPT Plus until 2026-10-18; **$100 plan (aiuse `prolite`) since 2026-10-19** | monthly sub | weekly (resets 2026-10-26; a 5-hour window may reappear) |
-| `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
+| `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly plus Gemini 4 Argon weekly** (its own pool family `gemini_argon` since aiuse 1.5; 2026-10-31: Gemini weekly 4% left, Argon 57%) |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |

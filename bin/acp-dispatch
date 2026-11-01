@@ -744,7 +744,8 @@ def frontier_judged(reason: str | None, service: str | None, model: str | None, 
     if reason is None:
         return None, None
     if not is_frontier_model(model) or service not in FRONTIER_POOLS:
-        return None, "frontier-reason recorded; the model is not a frontier model on the claude or codex pool"
+        return None, ("frontier-reason recorded; the model is not a frontier model on the claude or codex pool "
+                      f"(the allowance covers those two pools only; this is service {service or '?'})")
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import ade_gates
@@ -766,24 +767,18 @@ def frontier_judged(reason: str | None, service: str | None, model: str | None, 
         return None, f"frontier-reason recorded; frontier allowance not granted: gate unreadable ({type(e).__name__})"
 
 
+def binding_window_note(windows: dict) -> str:
+    """` (binding window: LABEL, N% left)` for the pool's tightest measured window, else "": a refusal names the
+    window that stopped it (Gemini 4 Argon weekly is not the Gemini weekly that is nearly gone, 2026-10-31)."""
+    known = {k: float(v) for k, v in (windows or {}).items() if v is not None}
+    if not known:
+        return ""
+    label = min(known, key=known.get)
+    return f" (binding window: {label}, {known[label]:.1f}% left)"
+
+
 def approved_tokens() -> set[str]:
     return {x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
-
-
-def _same_workload(row: dict, kind: str | None, effort: str | None, strict: bool = False) -> bool:
-    """Does a history row measure the same workload (kind and effort) as the request?  A field the
-    row does not carry (a pre-change record, read with .get) cannot contradict the request and
-    stays comparable; a recorded kind or effort that differs is a different workload: a medium-effort
-    `code` slice says nothing about a high-effort `judgment` one (adversary 7802361, A3).  `strict`
-    (a request whose kind has its own estimate floor, `codex:judgment`) requires the row to RECORD a
-    non-null kind and effort equal to the request's, and a request without one of them (no --effort,
-    a manual reroute) matches nothing: an unknown field is never equal to another unknown field, so
-    three legacy rows cannot release a floor that exists because no comparable slice was ever measured
-    (adversary bcdd223 A1, d13f2ed A1)."""
-    pairs = ((row.get("kind"), kind), (row.get("effort"), effort))
-    if strict:
-        return all(want is not None and have == want for have, want in pairs)
-    return all(have is None or have == want for have, want in pairs)
 
 
 def kind_floor_applies(service: str | None, kind: str | None) -> bool:
@@ -794,24 +789,10 @@ def kind_floor_applies(service: str | None, kind: str | None) -> bool:
 def _history_rows(paths: list[Path], agent: str, model: str | None, *,
                   skip_placeholders: bool, kind: str | None = None, effort: str | None = None,
                   strict: bool = False) -> list[tuple[float, dict]]:
-    """(mtime, row) for measured records matching agent×model×kind×effort, newest first."""
-    rows: list[tuple[float, dict]] = []
-    for path in paths:
-        try:
-            row = json.loads(path.read_text())
-            mtime = path.stat().st_mtime
-        except (OSError, ValueError, TypeError):
-            continue
-        if (row.get("agent") != agent or row.get("model") != model
-                or not _same_workload(row, kind, effort, strict)):
-            continue
-        if skip_placeholders and str(row.get("model") or "") in PLACEHOLDER_MODELS:
-            continue
-        if row.get("measured_usage_pct") is None and not row.get("measured_usage_windows"):
-            continue
-        rows.append((mtime, row))
-    rows.sort(key=lambda t: t[0], reverse=True)
-    return rows
+    """(mtime, row) for measured records matching agent×model×kind×effort, newest first (route_agent.history_rows, shared
+    with the planner's pool_fits)."""
+    return route_module().history_rows(paths, agent, model, skip_placeholders=skip_placeholders,
+                                       placeholder_models=PLACEHOLDER_MODELS, kind=kind, effort=effort, strict=strict)
 
 
 def session_finder_state() -> Path:
@@ -838,18 +819,41 @@ def measured_history(out: Path, agent: str, model: str | None, kind: str | None 
     return [], "brief-size default"
 
 
-def estimate_floor(model: str | None, service: str | None, kind: str | None) -> float:
-    """The estimate floor of a slice, 0.0 when none.  `SERVICE:frontier` floors a
-    [dispatch].frontier_models slice and wins over `SERVICE:KIND`, which floors that kind (codex's
-    judgment, 2026-10-25: no measurement yet) and wins over `SERVICE`, which floors every other slice
-    (codex's everyday models are not astra)."""
-    name = service or ""
-    floor = ESTIMATE_FLOOR.get(name, 0.0)
-    if kind and kind != "frontier":
-        floor = ESTIMATE_FLOOR.get(f"{name}:{kind}", floor)
-    if is_frontier_model(model):
-        floor = ESTIMATE_FLOOR.get(f"{name}:frontier", floor)
+REPO_FLOORS: dict[str, float] = {}   # [dispatch.repo_overrides.REPO.estimate_floor] of the repo this dispatch works in
+REPO_NAME: str | None = None
+
+
+def set_repo(directory: str | None) -> str | None:
+    """Resolve the repository of -C DIR and load its estimate-floor override (operator 2026-11-01); returns its name."""
+    global REPO_NAME
+    router = route_module()
+    REPO_NAME = router.repo_of(directory) if directory else None
+    REPO_FLOORS.clear()
+    REPO_FLOORS.update(router.repo_floors(REPO_NAME))
+    return REPO_NAME
+
+
+def _floor_lookup(table: dict[str, float], name: str, kind: str | None, model: str | None) -> float | None:
+    """The estimate floor `table` gives a slice, or None when it names none: `SERVICE:frontier` floors a
+    [dispatch].frontier_models slice and wins over `SERVICE:KIND`, which wins over `SERVICE`."""
+    floor = table.get(name)
+    if kind and kind != "frontier" and f"{name}:{kind}" in table:
+        floor = table[f"{name}:{kind}"]
+    if is_frontier_model(model) and f"{name}:frontier" in table:
+        floor = table[f"{name}:frontier"]
     return floor
+
+
+def estimate_floor_and_cap(model: str | None, service: str | None, kind: str | None) -> tuple[float, float | None]:
+    """(floor, cap) of a slice's estimate. The floor is `[dispatch.estimate_floor]` (0.0 when none); a repo override
+    (`REPO_FLOORS`, set by `set_repo`) replaces it for the slices it names and is then also the cap: the repo may use the
+    pool down to that percent even when measurements say more (operator 2026-11-01)."""
+    name = service or ""
+    over = _floor_lookup(REPO_FLOORS, name, kind, model)
+    if over is not None:
+        return over, over
+    base = _floor_lookup(ESTIMATE_FLOOR, name, kind, model)
+    return (base if base is not None else 0.0), None
 
 
 def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
@@ -860,19 +864,13 @@ def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
     rows, source = measured_history(out, agent, model, kind, effort, kind_floor_applies(service, kind))
     values = [float(r["measured_usage_pct"]) for r in rows
               if r.get("measured_usage_pct") is not None]
-    floor = estimate_floor(model, service, kind)
+    floor, cap = estimate_floor_and_cap(model, service, kind)
+    # one rule with the planner's pool_fits (route_agent.estimate_from_history): median of the measured slices, fewer than 3
+    # never beat the floor, no measurement is the brief-size default raised to the floor; a repo override caps it
     if values:
-        values.sort()
-        est = values[len(values) // 2]
-        # Fewer than 3 slices: do not let a single tiny measurement beat the floor.
-        if len(values) < 3 and floor:
-            est = max(est, floor)
-        return est, source
+        return route_module().estimate_from_history(values, floor, cap=cap), source
     size = len(prompt)
-    est = 3.0 if size <= 2000 else 7.0 if size <= 8000 else 12.0
-    if floor:
-        est = max(est, floor)
-    return est, "brief-size default"
+    return route_module().estimate_from_history([], floor, 3.0 if size <= 2000 else 7.0 if size <= 8000 else 12.0, cap), "brief-size default"
 
 
 def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None = None,
@@ -893,33 +891,13 @@ def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None 
     lower bound: one row's scalar can mix windows (the 70% above), which is what this path avoids.
     """
     rows, _ = measured_history(out, agent, model, kind, effort, kind_floor_applies(service, kind))
-    seen: dict[str, list[float]] = {}
-    for row in rows:
-        try:
-            for label, used in (row.get("measured_usage_windows") or {}).items():
-                seen.setdefault(label, []).append(float(used))
-        except (TypeError, ValueError, AttributeError):
-            pass
-    floor = estimate_floor(model, service, kind)
-    est = {label: (max(sorted(v)[len(v) // 2], floor) if floor and len(v) < 3 else sorted(v)[len(v) // 2])
-           for label, v in seen.items() if v}
-    if est and floor:
-        for label in labels:
-            est.setdefault(label, floor)
-    return est
+    floor, cap = estimate_floor_and_cap(model, service, kind)
+    return route_module().estimate_windows_from_rows(rows, floor, labels, cap)
 
 
 def window_fit(estimates: dict[str, float], windows: dict) -> tuple[str | None, bool]:
-    """(refusal reason or None, near-limit) comparing each window's estimate with its own remaining."""
-    near = False
-    for label, est in sorted(estimates.items()):
-        rem = windows.get(label)
-        if rem is None:
-            continue
-        if est > float(rem):
-            return f"estimated use {est:.1f}% > {float(rem):.1f}% left on {label}", near
-        near = near or est <= float(rem) <= est * 1.5
-    return None, near
+    """(refusal reason or None, near-limit) comparing each window's estimate with its own remaining (route_agent.window_fit)."""
+    return route_module().window_fit(estimates, windows)
 
 
 def inflight_cap(agent: str, service: str | None = None) -> int | None:
@@ -1148,7 +1126,7 @@ def reroute_command(rec: dict, record_path: Path) -> str | None:
         return None
     exclude = {svc} if (svc := record_service(rec)) else set()
     try:
-        choice = route_module().route(str(kind), exclude=exclude)
+        choice = route_module().route(str(kind), exclude=exclude, repo=route_module().repo_of(rec.get("dir")))
     except ValueError:
         return None
     if choice is None or not choice.model:
@@ -1598,6 +1576,9 @@ def reap_record(path: Path) -> tuple[str, str] | None:
 
 
 def record_paths(items: list[str]) -> list[Path]:
+    """Job record files under state roots (`ROOT/jobs/*.json` and `ROOT/*/jobs/*.json`) or listed .json files.
+    Kept here, not delegated: `reap` and `wait --once` read it and must not import route_agent (TestNoRoutingImport);
+    route_agent.record_paths is the identical rule and a test pins that they agree."""
     paths: list[Path] = []
     for item in items:
         p = Path(item).expanduser()
@@ -2365,11 +2346,9 @@ AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
     """Map acp agent and model to aiuse (provider, pool_family). None if unknown."""
     if agent == "agy":
-        if model and model.startswith(("claude-", "gpt-")):
-            return "antigravity", "claude_gpt"
-        if model and model.startswith("gemini-"):
-            return "antigravity", "gemini"
-        return None
+        # claude_gpt / gemini / gemini_argon: one table, route_agent.antigravity_family (aiuse schema 1.5)
+        family = route_module().antigravity_family(model)
+        return ("antigravity", family) if family else None
     if agent == "cursor":
         # `default` is Cursor's Auto pool (acp-run README, "Per-agent choices"); every
         # other id draws on the third-party pool. aiuse reports them as two windows that
@@ -2652,17 +2631,19 @@ def aiuse_reset_time(agent: str, model: str | None) -> datetime | None:
     for acct in _pool_entries(snap.get("accounts") or [], provider, None):
         if acct.get("error"):
             continue
-        for w in acct.get("windows") or []:
-            if family and w.get("pool_family") not in (None, family):
-                continue
+        own = [w for w in acct.get("windows") or [] if not family or w.get("pool_family") in (None, family)]
+        for w in own:
             left = w.get("headroom_percent", w.get("remaining_percent"))
             exhausted = w.get("state") == "exhausted" or (left is not None and float(left) <= 1.0)
             stamp = _parse_stamp(w.get("resets_at")) if exhausted else None
             if stamp and stamp > now:
                 stamps.append(stamp)
-        stamp = _parse_stamp(acct.get("available_at"))
-        if stamp and stamp > now:
-            stamps.append(stamp)
+        # the account's `available_at` is its earliest reset over ALL families: a pool whose own windows are listed
+        # (Argon vs Flash) is not woken by another family's reset (adversary F8)
+        if not (family and own):
+            stamp = _parse_stamp(acct.get("available_at"))
+            if stamp and stamp > now:
+                stamps.append(stamp)
     return min(stamps) if stamps else None
 
 
@@ -2696,6 +2677,10 @@ def pool_headroom_live(agent: str, model: str | None) -> tuple[float | None, str
                 left = min(windows) if windows else None
             if left is not None:
                 return float(left), f"aiuse {key}: {float(left):.1f}% left"
+    svc = route_module().BY_NAME.get(route_module().pool_service(provider, family))
+    if svc is not None and svc.fallback_after:
+        # aiuse lists only usable pools: a fallback-only pool that is absent is exhausted or frozen, never "go ahead" (F8)
+        return 0.0, "aiuse lists no usable row for the pool (exhausted, frozen or hidden)"
     return None, "pool not listed by aiuse"
 
 
@@ -4102,7 +4087,7 @@ def reroute_record(a: argparse.Namespace) -> int:
             die(f"--escalate: kind {old.get('kind')!r} has no rung above it (ladder: {ladder}); "
                 "at the top, re-plan by hand (route_agent.py plan)", 2)
         old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
-        choice = route_module().route(nxt, exclude={old_svc} if old_svc else set())
+        choice = route_module().route(nxt, exclude={old_svc} if old_svc else set(), repo=route_module().repo_of(old.get("dir")))
         if choice is None:
             die(f"--escalate: nothing eligible for --kind {nxt} excluding {old_svc or 'the failed'}"
                 f" pool; re-plan by hand (route_agent.py plan --kinds {nxt})", 2)
@@ -4163,6 +4148,7 @@ def reroute_record(a: argparse.Namespace) -> int:
 
 def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     load_policy()   # the [dispatch]-derived gates below are lazy since 2026-10-18
+    set_repo(getattr(a, "dir", None))   # the repo's [dispatch.repo_overrides] estimate floor (operator 2026-11-01)
     if a.timeout < 0 or (a.wait_timeout is not None and a.wait_timeout < 0):
         die("timeouts must be 0 or more")
     approved = approved_tokens()
@@ -4227,6 +4213,11 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             quota = router.load_snapshot()[0] if kind in svc.plenty_kinds else None
             if not svc.eligible(kind, quota) and not go_advisory and "route-override" not in approved:
                 refuse_kind(service or svc.name, kind)
+            if svc.fallback_after and "route-override" not in approved:
+                # a fallback-only pool (Gemini 4 Argon, operator 2026-10-31): the planner's predicate, enforced here too
+                why_not = router.fallback_block(svc, kind, router.load_snapshot()[0], repo=REPO_NAME)
+                if why_not:
+                    die(why_not)
         else:
             # Unknown agent/model: only [routing].default_profile kinds.
             if kind not in router.DEFAULT_PROFILE and "route-override" not in approved:
@@ -4331,6 +4322,13 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if gated is not None and not gated.eligible(kind, {gated.name: reading}):
         refuse_kind(service or gated.name, kind, {**route_module().load_snapshot()[0], gated.name: reading})
     windows = (reading or {}).get("windows") or {}
+    fb_svc = kind_service(a.agent, service)
+    # a fallback pool (Argon) with no fresh reading fails closed, like the planner: its window is named
+    no_reading = (fb_svc is not None and bool(fb_svc.fallback_after) and remaining is None and previous is None)
+    if no_reading and not a.dry_run:
+        return unavailable_record(
+            out, a, f"no fresh quota reading for {fb_svc.window or fb_svc.name}: a fallback-only pool is not used unmeasured",
+            "headroom", remaining, estimate, previous)
     if previous is not None:
         # A resume carries its prior per-window estimate so it still reserves for others.
         per_window = dict(previous.get("estimated_usage_windows") or {})
@@ -4368,8 +4366,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     checkpoint = bool(a.checkpoint or remaining is None or window_near or (
         not per_window and fit_remaining is not None and estimate <= fit_remaining <= estimate * 1.5))
     if not a.dry_run and a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
-        return unavailable_record(out, a, f"headroom {remaining:.1f}% < minimum {a.min_headroom:.1f}%",
-                                  "headroom", remaining, estimate, previous)
+        return unavailable_record(out, a, f"headroom {remaining:.1f}% < minimum {a.min_headroom:.1f}%"
+                                  f"{binding_window_note(windows)}", "headroom", remaining, estimate, previous)
     # class=inflight only when the slice would fit with zero reservation (F9).
     if not a.dry_run and not previous and busy and reserved_fit_fails and unreserved_ok:
         names = ", ".join(p.stem for p in busy[:5])
@@ -4382,8 +4380,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if not a.dry_run and per_window and window_refusal:
         return unavailable_record(out, a, window_refusal, "wont-fit", remaining, estimate, previous)
     if not a.dry_run and not per_window and fit_remaining is not None and estimate > fit_remaining:
-        return unavailable_record(out, a, f"estimated use {estimate:.1f}% > {fit_remaining:.1f}% left",
-                                  "wont-fit", remaining, estimate, previous)
+        return unavailable_record(out, a, f"estimated use {estimate:.1f}% > {fit_remaining:.1f}% left"
+                                  f"{binding_window_note(windows)}", "wont-fit", remaining, estimate, previous)
     cap = inflight_cap(a.agent, service)
     if not a.dry_run and not previous and cap is not None:
         if len(busy) >= cap:
@@ -4520,7 +4518,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         rec["reserved_usage_windows"] = reserved_win
         rec["inflight"] = [p.stem for p in busy]
         would = None
-        if a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
+        if no_reading:
+            would = "headroom"
+        elif a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
             would = "headroom"
         elif not previous and busy and reserved_fit_fails and unreserved_ok:
             would = "inflight"
@@ -4537,7 +4537,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                         f"({', '.join(p.stem for p in busy) or 'none'})")
             print(f"dry-run\t{a.name}\t{report}\nbrief: {brief}\ncmd: {rec['cmd']}{res_note}")
             if would:
-                print(f"would refuse: class={would}")
+                print(f"would refuse: class={would}{binding_window_note(windows) or (f' (no fresh reading for {fb_svc.window or fb_svc.name})' if no_reading else '')}")
         return 0
     write_record(record, rec)
 

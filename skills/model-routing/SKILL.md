@@ -240,6 +240,15 @@ busiest earlier hour had 68. One bigteam `claude-opus-5-5-high` review alone was
 `aiuse`/CodexBar launching `agy -p /usage` every few minutes adds CLI launches
 but no generation requests.
 
+**agy has a third pool, Gemini 4 Argon (2026-10-31).** Its own weekly window ("Gemini 4 Argon weekly")
+sits in the antigravity provider next to "Gemini 5-hour" and "Gemini weekly" but moves independently of
+them: on 2026-10-31 the Gemini weekly read 4% left and Argon 57%, and a tiny Argon call changed only
+Argon. **aiuse 1.5 gives it its own pool family `gemini_argon`** (older aiuse files it under `gemini`,
+where Argon would be misjudged by Flash's window; this needs 1.5). It is routed as the `antigravity-argon`
+frontier fallback (item 1b), never as Flash's pool: a `gemini-4-argon` slice is judged by the
+`gemini_argon` pool only, a `gemini-3.8-flash` slice never by it. Whether Argon shares the 5-hour window
+with Flash is not measured; the code does not count the 5-hour window against Argon.
+
 Rules for any agent that dispatches to agy:
 
 1. **Cap the calls.** No probe loops, no per-skill or per-TUI "do you see X"
@@ -641,6 +650,40 @@ method that runs the waves.
        it re-checks after the load wait, and the detached runner does too). Inside the gate it competes on the
        router's normal ranking (judgment r3, behind claude and omp; code r15, mechanical r12, bulk r20), one slice
        per wave; astra never takes an everyday kind.
+       **Gemini 4 Argon is the frontier FALLBACK** (operator 2026-10-31): `acp-run agy --model
+       gemini-4-argon --effort high` works (1M context; agy lists `gemini-4-argon-{low,medium,high}`),
+       service `antigravity-argon`, rank 5 in `frontier`, `fallback_after = ["codex", "claude"]`: it is used
+       when astra **or** Fable is short, not only when both are gone, and is skipped while both are usable.
+       Short (`route_agent.pool_usable`, the one predicate of planner and dispatch) means: the pool is
+       ineligible or not ready, claude is held by the governor, claude's Fable sublimit is below
+       `frontier1_min_left` (Argon then replaces the Opus downgrade), or the pool does not fit the slice
+       (`route_agent.pool_fits`, the arithmetic acp-dispatch applies: per quota window, each window's estimate against that
+       window's own remaining, else the scalar estimate against the tightest window; codex astra: the
+       `[dispatch.estimate_floor] "codex:frontier"` 60% until 3 astra slices are measured, then their median over the same
+       rows dispatch reads, kind and effort filtered, `estimate_windows_from_rows` and `window_fit` shared;
+       not the router's 15%; a pool absent from a fresh aiuse list reads 0).
+       **Repo override (operator 2026-11-01): in tendcf and nix2cf only, astra runs down to 20% of Codex quota left**
+       (`[dispatch.repo_overrides.REPO.estimate_floor] "codex:frontier" = 20.0`). The repo is resolved from acp-dispatch's
+       `-C DIR` (the planner's `--repo NAME`, default the cwd) through the `origin` remote, so a worktree like
+       `~/src/tendcf-foo-wt` counts. The override replaces the 60% floor and is also the cap on the estimate (a measured
+       median above 20 reads as 20, a smaller one stays), and it feeds the estimate, the in-flight reservation and the
+       fallback predicate alike, so Argon stays blocked there while astra has 20% left. Other repos keep 60. The planner's verdict assumes the slice runs with the effort `plan` prints (`--effort high`); a dispatch
+       without `--effort` reads other history rows and can estimate differently. An `exclude` or a wave cap is
+       never short, and a codex or claude pool with no reading counts as usable (only a reserve or a fallback
+       fails closed). The planner also hands no frontier slice to a pool under that floor, and a fallback gets
+       no burn-first bonus, so Argon never outranks a pool it sits behind that is not short. It fails closed: no fresh reading of the "Gemini 4 Argon weekly"
+       window, or a frozen or stale one, never routes (the planner skips it, `acp-dispatch` exits 5 naming
+       the window). `acp-dispatch` enforces the fallback as well, with the planner's own predicate
+       (`route_agent.fallback_block`; exit 2; `ACP_OPERATOR_APPROVED=route-override` escapes it). It is a
+       frontier model like the other two: only with `--kind frontier`, advisor role by default. aiuse 1.5
+       reports it as its own pool family `gemini_argon` (a tiny Argon call moved only that window,
+       2026-10-31), so route_agent, acp-dispatch and the auto-resume read an Argon model from that family
+       alone and every Gemini Flash model from `gemini` alone (one helper, `route_agent.antigravity_family`;
+       an Argon refusal names the window, e.g. "binding window: Gemini 4 Argon weekly"). The frontier allowance of
+       item 1e does not cover it (claude and codex only): a `--frontier-reason` is recorded with a note
+       saying so, and the gate is `--kind frontier`, the router's per-wave cap, and the in-flight quota
+       reservation. Gemini 4 Carbon is not reachable through agy yet (Google's staged rollout, 2026-10-28):
+       recheck weekly with `acp-run agy --info`.
    1c. **In-flight slices reserve quota, per service** (2026-10-18; it replaced
        the codex-only "one slice in flight" cap). Each running slice reserves
        its estimated quota on its service, and a fresh dispatch must fit what

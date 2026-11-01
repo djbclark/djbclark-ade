@@ -113,7 +113,9 @@ operator_gated = ["hermes", "cline"]
 fable_gated_efforts = ["xhigh", "max"]
 # Substring match on --model (case-insensitive): these only run with --kind frontier
 # (operator 2026-10-18; route-override does not skip this).
-frontier_models = ["gpt-6-astra", "fable"]
+# gemini-4-argon (operator 2026-10-31): reachable through agy, FALLBACK ONLY behind gpt-6-astra and
+# Fable. It has its own weekly window ("Gemini 4 Argon weekly"), see the `antigravity-argon` service.
+frontier_models = ["gpt-6-astra", "fable", "gemini-4-argon"]
 # Optional hard cap per service (or agent name via ACP_DISPATCH_INFLIGHT). Empty on
 # purpose: the in-flight quota reservation replaced `codex = 1` (operator 2026-10-18).
 # ACP_DISPATCH_INFLIGHT=name=N still overrides per run (service or agent name).
@@ -147,6 +149,21 @@ codex = 10.0
 claude = 8.0
 antigravity-claude = 15.0
 
+# Repo-scoped override of the floors above (operator djbclark, 2026-11-01: "For tendcf/nix2cf only, allow astra down to a
+# lower floor"): in these repositories astra counts as usable down to 20% of Codex quota left, so Argon (fallback behind
+# astra and Fable) stands in only below that. The repository is the last path part of the `origin` remote of acp-dispatch's -C directory
+# (a worktree such as ~/src/tendcf-foo-wt has its repository's remote; with no remote, the directory's name), or `route_agent.py plan --repo NAME` / the cwd.
+# The override REPLACES the `SERVICE:frontier` floor and is also its CAP: a measured median (3+ comparable slices) still
+# wins over the default floor everywhere, but here the estimate never exceeds 20 (a median of 70 is read as 20, a median
+# of 2 stays 2), for the scalar estimate, each window's estimate, the in-flight reservation and the fallback predicate.
+# Every other repository keeps the floors above. Accepted risk (adversary 2026-11-01 F4): the key is the NAME only, so any
+# checkout named tendcf or nix2cf gets it; the effect is quota policy on this machine, nothing more.
+[dispatch.repo_overrides.tendcf.estimate_floor]
+"codex:frontier" = 20.0
+
+[dispatch.repo_overrides.nix2cf.estimate_floor]
+"codex:frontier" = 20.0
+
 # The orchestrating (lead) session's own model (operator 2026-10-23; incident and rule in
 # skills/model-routing/SKILL.md "Lead / orchestrator sessions"). Everything above routes
 # dispatched slices; this is the session that dispatches them. `model` at `effort` by default,
@@ -154,6 +171,7 @@ antigravity-claude = 15.0
 # merges; djbclark 2026-10-23: Sonnet 5.5 at medium, high only for judgment turns; effort changes on
 # 5.5 keep the prompt cache). `pipeline_effort` is optional (default high). Never
 # Fable: that is the `fable-deep` sub-agent or a `frontier` slice. Printed by `route_agent.py policy`.
+
 [lead]
 model = "opus"
 effort = "high"
@@ -307,6 +325,29 @@ agent = "agy"
 # tier on hard agentic coding (Terminal-Bench 4.0 19.1% vs Sonnet 5.5's 70.6%, FrontierSWE v2
 # 19.6% vs 61.9%; benchlm.ai 2026-10-17) and strong only on saturated benchmarks.
 models = { bulk = "gemini-3.8-flash --effort medium", research = "gemini-3.8-flash --effort high", mechanical = "gemini-3.8-flash --effort low" }
+
+# agy's third pool: Gemini 4 Argon, frontier FALLBACK only (operator 2026-10-31). aiuse 1.5 reports its weekly window as
+# its own pool family `gemini_argon` (antigravity/gemini_argon, independent of the Flash `gemini` row), because a tiny
+# Argon call moved only that window; `pool` below is the ordinary mapping. The model -> family table is
+# route_agent.antigravity_family (`gemini-4-argon*` -> gemini_argon). Used only while codex OR claude is short of quota
+# for `frontier` (astra under its 60% estimate floor, or Fable's sublimit under frontier1_min_left, or either pool under
+# the router's 15%): `fallback_after` makes route() skip it otherwise and acp-dispatch refuse it (route-override
+# escapes), by the same predicate. A per-wave cap is not short. No fresh reading: never used. Rank 5 and no burn-first
+# bonus (route() gives a fallback none) keep it behind any pool it sits behind that is not short. Carbon (Google's staged rollout, 2026-10-28) is not reachable through agy yet; recheck weekly.
+[[service]]
+name = "antigravity-argon"
+cli = "agy (acp-run agy --model gemini-4-argon --effort high; frontier fallback behind gpt-6-astra and Fable)"
+good_at = { frontier = 5 }
+billing = "subscription"
+note = "Gemini 4 Argon on the Google AI Pro plan, 1M context; own weekly window; frontier fallback only (operator 2026-10-31)"
+judgment_tier = true
+pool = ["antigravity", "gemini_argon"]
+fallback_after = ["codex", "claude"]
+window = "Gemini 4 Argon weekly"
+max_parallel = 1
+access = "cli-only"
+agent = "agy"
+models = { frontier = "gemini-4-argon --effort high" }
 
 # opencode-zen-free is NOT a separate provider — it is the free subset of
 # opencode-zen's models. Kept as its own row because the free and paid
