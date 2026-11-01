@@ -1347,21 +1347,51 @@ def live_first(hits):
     return [s for s in hits if not s.get("finished")] or hits
 
 
+def same_session_rows(hits):
+    """Rows that are one session count once: rows sharing a session id or a Paseo agent id collapse to a single recipient (a send must
+    never go twice, and one session is never an ambiguity with itself; 2026-11-01: `relay.py d08a31c6-...` refused because fleet listed
+    one Paseo agent twice). The kept row is this very session's if any (so hard_stop still refuses it), else one with a usable channel,
+    else an unfinished one, else the first. Order of first appearance is kept; rows with neither id stay as they are, and two rows with
+    different session ids and different Paseo ids stay two (a short prefix matching two sessions is still an ambiguity)."""
+    parent = list(range(len(hits)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner = {}    # id key -> first row index holding it; a later row with the same key joins that row's group
+    for i, s in enumerate(hits):
+        ch = s.get("chan") or (None, None)
+        for key in (("sid", s.get("sid")), ("paseo", s.get("paseo")), ("paseo", ch[1] if ch[0] == "paseo" else None)):
+            if isinstance(key[1], str) and key[1]:
+                parent[root(i)] = root(owner.setdefault(key, i))
+    best = {}
+    for i, s in enumerate(hits):
+        r = root(i)
+        rank = (not s.get("self"), not s.get("chan"), bool(s.get("finished")), i)
+        if r not in best or rank < best[r][0]:
+            best[r] = (rank, i)
+    return [hits[i] for i in sorted(i for _, i in best.values())]
+
+
 def find(ident, ss):
     """Sessions IDENT names: exactly (id, name, session id, herdr pane, Paseo agent id), else by prefix: a session id
     of 8 or more characters, or a hex prefix of 6 or more characters of a Paseo agent id. The prefix kinds are
-    pooled and a row counts once, so two agents sharing a prefix are an ambiguity (the caller refuses it). The
+    pooled and a row counts once, so two agents sharing a prefix are an ambiguity (the caller refuses it); rows that are
+    one session (same session id or Paseo agent id) are one hit (`same_session_rows`). The
     name of a Paseo agent with no Claude registry row is its workspace title, generated from its first prompt
     ("/baton", "say hi"): it never matches by name, only by id or Paseo id (adversary, 2026-10-23)."""
     hits = [s for s in ss if ident in (s["id"], None if s.get("host") == "paseo" and not s.get("sid") else s["name"],
                                        s.get("sid"), pane_of(s), s.get("paseo"))]
     if hits:
-        return live_first(hits) if all(pane_of(s) == ident for s in hits) else hits
+        return same_session_rows(live_first(hits) if all(pane_of(s) == ident for s in hits) else hits)
     if len(ident) >= 8:
         hits = [s for s in ss if (s.get("sid") or "").startswith(ident)]
     if HEX_PREFIX.fullmatch(ident):
         hits += [s for s in ss if all(s is not h for h in hits) and isinstance(s.get("paseo"), str) and s["paseo"].startswith(ident)]
-    return hits
+    return same_session_rows(hits)
 
 
 def own_hermes_conversation(s):

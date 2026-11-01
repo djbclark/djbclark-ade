@@ -499,7 +499,7 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
     me = os.environ.get("CLAUDE_CODE_SESSION_ID")
     launch_panes = launch_panes or {}
     launch_sids = launch_sids or {}
-    out = []
+    out, live = [], {}
     for f in sorted((CLAUDE / "sessions").glob("*.json")):
         try:
             d = json.loads(f.read_text())
@@ -508,8 +508,16 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
         pid, sid = d.get("pid"), d.get("sessionId")
         if not sid or not alive(pid):
             continue
+        live.setdefault(sid, []).append(d)
+    for sid, entries in live.items():
+        # a resumed session can leave its older process alive beside the new one: two registry files, one session. One row,
+        # the entry updated last; it is this very session when ANY of the processes is an ancestor (2026-11-01: relay.py
+        # refused `d08a31c6-...` as ambiguous with itself)
+        d = max(entries, key=lambda e: (e.get("updatedAt") or 0, e.get("startedAt") or 0))
+        pid = d.get("pid")
+        mine = any(e.get("pid") in anc for e in entries)
         s = _rec(id=sid[:8], agent="claude", sid=sid, name=d.get("name") or "", cwd=d.get("cwd") or "",
-                 status=REG_STATUS.get(d.get("status"), "unknown"), self=(pid in anc or sid == me), pid=pid,
+                 status=REG_STATUS.get(d.get("status"), "unknown"), self=(mine or sid == me), pid=pid,
                  reach=claude_reach(d, sid))
         if sid in launch_sids:
             # a launch's ACP session id is Claude's own id (claude-agent-acp passes it as --session-id), so a
