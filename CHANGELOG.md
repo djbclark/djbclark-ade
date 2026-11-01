@@ -224,6 +224,7 @@ agent what changed and what is new. Entries end with the pull request number.
 - `herdr-tidy`: Orca host mode (`--host orca`, `/orca-tidy`) (#2).
 
 ### Changed
+- Raised the load rules for this 16 GB, 8-core Mac (2026-11-01, djbclark: 3.5 per core "is actually not too bad"): `load-watch admit`'s calm-churn boost default 2.0 -> 4.0 per core (`ADMIT_BOOST_PER_CORE`, `--boost-per-core`) and the watcher's sustained-load alert `LW_LOAD_PER_CORE` 2.0 -> 4.0; churn limits (25000 boost, 60000 max) and `LW_MIN_CORES` unchanged; docs quote `bg`'s base as 2.5 (changed in site-private); `skills/bigteam` caps a lead at two test-running slices at once, after five parallel pytest runs reached load 222 on 2026-10-31 (#200).
 - djbclark-ade `master` is PR-only (2026-10-31, djbclark): GitHub branch protection, enforced for admins, refuses a direct push, force push or deletion; AGENTS.md "Machine context" says so. Also merged the unbuilt "model tiers as data" design as `docs/model-tiers-design.md`, queued to build after D1 (#188).
 
 - `AGENTS.md` standing order 11 (2026-10-30, djbclark): djbclark-ade is the lead's project; a change to code or configuration in another repository or in installed files outside a repository waits for the operator's yes (own installs, memory notes and upstream filing of an approved change excepted), and findings there are reported as proposals (#170).
