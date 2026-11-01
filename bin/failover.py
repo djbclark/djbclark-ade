@@ -216,7 +216,9 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
         effort="set:effort", efforts=("low", "medium", "high"),
         note="Claude shared pool; Haiku or Sonnet only (Opus/Fable denied)"),
     Tui("agy", "acp", "agy", "Google", None, None,
-        pool_by_model=(("gemini-", "antigravity", "gemini"),
+        # first match wins: Argon draws its own window (aiuse schema 1.5; route_agent.antigravity_family is the model table)
+        pool_by_model=(("gemini-4-argon", "antigravity", "gemini_argon"),
+                       ("gemini-", "antigravity", "gemini"),
                        ("claude-", "antigravity", "claude_gpt"),
                        ("gpt-", "antigravity", "claude_gpt")),
         models=("gemini-3.8-flash", "claude-sonnet-5-5", "gpt-oss-120b-medium"),

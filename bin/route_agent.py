@@ -219,6 +219,13 @@ class Service:
     # Kinds that need a plentiful quota: eligible only while the pool's tightest window holds at
     # least PLENTY_MIN percent ([routing].plenty_min). Codex's everyday kinds (operator 2026-10-25).
     plenty_kinds: tuple[str, ...] = ()
+    # Services this one is a FALLBACK behind (Gemini 4 Argon behind codex and claude, operator 2026-10-31): it is used
+    # only while at least ONE named service is short (not usable: see pool_usable), never while all of them could take
+    # the kind, whatever its score. route() and acp-dispatch apply the same predicate (`fallback_block`). A per-wave
+    # cap or an `exclude` does not make a named service short. A fallback with no fresh reading fails closed.
+    fallback_after: tuple[str, ...] = ()
+    # The aiuse window label that bounds this pool, named in a refusal when its reading is missing ("Gemini 4 Argon weekly").
+    window: str = ""
 
     @property
     def acp_agent(self) -> str:
@@ -387,6 +394,7 @@ def _service_from_entry(entry: dict[str, Any]) -> Service:
         kwargs["pool"] = (a, b)
     kwargs["good_at"] = {str(k): int(v) for k, v in kwargs["good_at"].items()}
     kwargs["plenty_kinds"] = tuple(str(k) for k in kwargs.get("plenty_kinds") or ())
+    kwargs["fallback_after"] = tuple(str(k) for k in kwargs.get("fallback_after") or ())
     if "models" in kwargs and kwargs["models"] is not None:
         kwargs["models"] = {str(k): str(v) for k, v in kwargs["models"].items()}
     return Service(**kwargs)
@@ -476,6 +484,7 @@ def policy_public() -> dict[str, Any]:
             "models": dict(s.models), "reserve_floor": s.reserve_floor,
             "grant_days": s.grant_days, "ready_probe": s.ready_probe,
             "shares_pool": s.shares_pool, "plenty_kinds": list(s.plenty_kinds),
+            "fallback_after": list(s.fallback_after), "window": s.window,
         }
     return {
         "path": str(POLICY_PATH),
@@ -804,7 +813,10 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
 
             state = w.get("state")
             headroom = _pct(w.get("headroom_percent"))
-            if state == "exhausted" or (headroom is not None and headroom == 0):
+            if (state == "exhausted" or (headroom is not None and headroom == 0)
+                    or w.get("measurement_frozen") is True):
+                # a frozen window (flat while acp-run spent the pool, aiuse "not trusted for routing") reads exhausted,
+                # as aiuse's own `--available` does (2026-10-31, adversary F3)
                 remaining = 0.0
             elif is_old:
                 remaining = None
@@ -1413,9 +1425,257 @@ def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
             f"([routing].quality_max_rank_gap): keep queued until a reset" + note)
 
 
+def fable_short(info: dict[str, Any] | None) -> bool:
+    """Is the Fable sublimit of the claude pool reading below frontier1_min_left? Then a claude frontier slice would
+    be handed to Opus (suggest_model), so claude is short for `frontier`."""
+    fable = ((info or {}).get("sublimits") or {}).get("fable")
+    return fable is not None and fable < frontier_gate()["frontier1_min_left"]
+
+
+def estimate_from_history(values: list[float], floor: float, default: float = 3.0, cap: float | None = None) -> float:
+    """acp-dispatch's slice estimate (percent of a pool), the one rule `estimate_pct` and `pool_fits` share: the median of
+    the measured slices; fewer than 3 of them never beat the estimate floor; no measurement is the brief-size `default`
+    raised to the floor. `cap` (a repo override, `repo_floors`) is an upper bound on the result."""
+    if values:
+        est = sorted(values)[len(values) // 2]
+        if len(values) < 3 and floor:
+            est = max(est, floor)
+    else:
+        est = max(default, floor) if floor else default
+    return min(est, cap) if cap is not None else est
+
+
+def estimate_windows_from_rows(rows: list[dict[str, Any]], floor: float, labels: list[str] | tuple[str, ...] = (),
+                               cap: float | None = None) -> dict[str, float]:
+    """Median measured drop per quota window (label -> percent) from history rows, as acp-dispatch's
+    `estimate_windows` (adversary d13f2ed A2): a window with fewer than three comparable measurements is estimated at least
+    at the floor, and once any window is measured every label of the reading is too. `cap` bounds each estimate."""
+    seen: dict[str, list[float]] = {}
+    for row in rows:
+        try:
+            for label, used in (row.get("measured_usage_windows") or {}).items():
+                seen.setdefault(label, []).append(float(used))
+        except (TypeError, ValueError, AttributeError):
+            pass
+    est = {label: (max(sorted(v)[len(v) // 2], floor) if floor and len(v) < 3 else sorted(v)[len(v) // 2])
+           for label, v in seen.items() if v}
+    if est and floor:
+        for label in labels:
+            est.setdefault(label, floor)
+    if cap is not None:
+        est = {k: min(v, cap) for k, v in est.items()}
+    return est
+
+
+def window_fit(estimates: dict[str, float], windows: dict) -> tuple[str | None, bool]:
+    """(refusal reason or None, near-limit) comparing each window's estimate with its own remaining (acp-dispatch's check)."""
+    near = False
+    for label, est in sorted(estimates.items()):
+        rem = windows.get(label)
+        if rem is None:
+            continue
+        if est > float(rem):
+            return f"estimated use {est:.1f}% > {float(rem):.1f}% left on {label}", near
+        near = near or est <= float(rem) <= est * 1.5
+    return None, near
+
+
+def same_workload(row: dict, kind: str | None, effort: str | None, strict: bool = False) -> bool:
+    """Does a history row measure the same workload (kind and effort) as the request? A field the row does not carry cannot
+    contradict the request; `strict` (a kind with its own estimate floor) requires equal, recorded fields. Reached from
+    `history_rows`, which acp-dispatch's `_history_rows` and the planner's `frontier_rows` share (adversary 7802361 A3,
+    bcdd223 A1 and d13f2ed A1 are the cases behind the rule)."""
+    pairs = ((row.get("kind"), kind), (row.get("effort"), effort))
+    if strict:
+        return all(want is not None and have == want for have, want in pairs)
+    return all(have is None or have == want for have, want in pairs)
+
+
+def record_paths(items: list[str]) -> list[Path]:
+    """Job record files under state roots (`ROOT/jobs/*.json` and `ROOT/*/jobs/*.json`) or listed .json files."""
+    paths: list[Path] = []
+    for item in items:
+        p = Path(item).expanduser()
+        if p.is_dir():
+            paths += sorted(set(p.glob("jobs/*.json")) | set(p.glob("*/jobs/*.json")))
+        elif p.suffix == ".json":
+            paths.append(p)
+    return paths
+
+
+PLACEHOLDER_MODELS = frozenset({"m1"})   # test placeholders (acp-dispatch passes its own PLACEHOLDER_MODELS, the same set)
+
+
+def history_rows(paths: list[Path], agent: str, model: str | None, *, skip_placeholders: bool,
+                 placeholder_models: frozenset[str] = PLACEHOLDER_MODELS, kind: str | None = None,
+                 effort: str | None = None, strict: bool = False) -> list[tuple[float, dict]]:
+    """(mtime, row) for measured records matching agent x model x kind x effort, newest first (acp-dispatch's `_history_rows`)."""
+    rows: list[tuple[float, dict]] = []
+    for path in paths:
+        try:
+            row = json.loads(path.read_text())
+            mtime = path.stat().st_mtime
+        except (OSError, ValueError, TypeError):
+            continue
+        if (row.get("agent") != agent or row.get("model") != model
+                or not same_workload(row, kind, effort, strict)):
+            continue
+        if skip_placeholders and str(row.get("model") or "") in placeholder_models:
+            continue
+        if row.get("measured_usage_pct") is None and not row.get("measured_usage_windows"):
+            continue
+        rows.append((mtime, row))
+    rows.sort(key=lambda t: t[0], reverse=True)
+    return rows
+
+
+FRONTIER_HISTORY_MAX = 20           # acp-dispatch's machine-wide history window (measured_history)
+_FRONTIER_HISTORY_MEMO: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+FRONTIER_HISTORY_TTL = 30.0
+
+
+def frontier_rows(svc: Service) -> list[dict[str, Any]]:
+    """The newest machine-wide measured frontier slices on `svc`'s frontier model and configured effort, selected by
+    the same `history_rows` filter acp-dispatch's `measured_history` uses (the planner has no task of its own, so only
+    the machine-wide half). `ROUTE_AGENT_CALIBRATED_FLOOR=off` (the test suite) reads none."""
+    if os.environ.get("ROUTE_AGENT_CALIBRATED_FLOOR", "").strip().lower() in ("off", "0", "no", "false"):
+        return []
+    spec = (svc.models.get("frontier") or "").split()
+    if not spec:
+        return []
+    model = spec[0]
+    effort = spec[spec.index("--effort") + 1] if "--effort" in spec and spec.index("--effort") + 1 < len(spec) else None
+    agent = svc.agent or svc.name
+    key = (f"{ACP_DISPATCH_STATE}|{os.environ.get('SESSION_FINDER_STATE', '')}|{effort}", svc.name)
+    now = time.time()
+    hit = _FRONTIER_HISTORY_MEMO.get(key)
+    if hit and now - hit[0] < FRONTIER_HISTORY_TTL:
+        return list(hit[1])
+    sf = Path(os.environ.get("SESSION_FINDER_STATE") or (Path.home() / ".local/state/session-finder"))
+    rows = [r for _, r in history_rows(record_paths([str(ACP_DISPATCH_STATE), str(sf)]), agent, model,
+                                       skip_placeholders=True, kind="frontier", effort=effort)[:FRONTIER_HISTORY_MAX]]
+    _FRONTIER_HISTORY_MEMO[key] = (now, rows)
+    return list(rows)
+
+
+_REPO_MEMO: dict[str, str | None] = {}
+
+
+def repo_of(directory: str | os.PathLike[str] | None) -> str | None:
+    """Repository name of a working directory, lower case: the `origin` remote's last path part (a worktree such as
+    ~/src/tendcf-foo-wt has the remote of its repository), else the basename of the git common dir's parent, else None."""
+    if directory is None:
+        return None
+    key = str(Path(directory).expanduser().resolve())
+    if key in _REPO_MEMO:
+        return _REPO_MEMO[key]
+
+    def git(*argv: str) -> str:
+        try:
+            r = subprocess.run(["git", "-C", key, *argv], capture_output=True, text=True, timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+    name: str | None = None
+    url = git("remote", "get-url", "origin")
+    if url:
+        name = url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        name = name[:-4] if name.endswith(".git") else name
+    if not name:
+        common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
+        if common:
+            top = Path(common)
+            name = (top.parent if top.name == ".git" else top).name
+    name = name.lower() if name else None
+    _REPO_MEMO[key] = name
+    return name
+
+
+def repo_floors(repo: str | None) -> dict[str, float]:
+    """The `[dispatch.repo_overrides.REPO.estimate_floor]` table of `repo` (operator 2026-11-01), {} for any other repo."""
+    if not repo:
+        return {}
+    table = ((POLICY.get("dispatch") or {}).get("repo_overrides") or {}).get(str(repo).lower()) or {}
+    return {str(k): float(v) for k, v in (table.get("estimate_floor") or {}).items()}
+
+
+def frontier_floor(svc: Service, repo: str | None = None) -> tuple[float, float | None]:
+    """(estimate floor, cap) of a frontier slice on `svc` in `repo`: the `SERVICE:frontier` entry of
+    [dispatch.estimate_floor], replaced by the repo's override when it has one, which is also the cap (0.0, None: none)."""
+    base = float(((POLICY.get("dispatch") or {}).get("estimate_floor") or {}).get(f"{svc.name}:frontier", 0.0))
+    over = repo_floors(repo).get(f"{svc.name}:frontier")
+    return (over, over) if over is not None else (base, None)
+
+
+def pool_fits(svc: Service, kind: str, info: dict[str, Any], *, min_headroom: float = 15.0, repo: str | None = None) -> bool:
+    """Would acp-dispatch admit a `kind` slice onto `svc` given its reading `info` (remaining, windows)? The router floor,
+    and for `frontier` with a configured floor the same fit acp-dispatch applies: each window's measured estimate against
+    that window's own remaining when a window estimate applies, else the scalar estimate against the tightest window. Both
+    callers use the same rows, filters and arithmetic (`frontier_rows`, `estimate_from_history`,
+    `estimate_windows_from_rows`, `window_fit`). A task's own history is invisible to the planner (a slice sent from a task
+    with 3+ own measured slices can be estimated differently), as is a slice's in-flight reservation. The verdict also assumes the
+    slice is routed with the configured effort (`models.frontier`, `--effort high`): a dispatch without `--effort` filters the
+    history on no effort and can read other rows (2026-11-01 live: median 12 and a 5-hour estimate of 100, against 2 and 73),
+    so route with the effort `plan` prints."""
+    left = info.get("remaining")
+    if left is None:
+        return True
+    if left < max(min_headroom, svc.reserve_floor):
+        return False
+    if kind != "frontier":
+        return True
+    floor, cap = frontier_floor(svc, repo)
+    if not floor:
+        return True
+    rows = frontier_rows(svc)
+    windows = {k: v for k, v in (info.get("windows") or {}).items() if v is not None}
+    per_window = {k: v for k, v in estimate_windows_from_rows(rows, floor, list(windows), cap).items()
+                  if windows.get(k) is not None}
+    if per_window:
+        return window_fit(per_window, windows)[0] is None
+    pcts = [float(r["measured_usage_pct"]) for r in rows if r.get("measured_usage_pct") is not None]
+    return left >= estimate_from_history(pcts, floor, cap=cap)
+
+
+def pool_usable(svc: Service, kind: str, quota: dict[str, Any], *, min_headroom: float = 15.0, held: bool = False,
+                repo: str | None = None) -> bool:
+    """Could `svc` take `kind` now, by quota and readiness alone (not a wave cap or `exclude`)? Short means: ineligible,
+    not ready, claude held by the governor, claude's Fable sublimit under its floor (for `frontier`), or the pool's tightest
+    window not fitting the slice (`pool_fits`). A pool with no reading is usable unless it is a reserve or a fallback (fail closed)."""
+    info = (quota or {}).get(svc.name) or {}
+    if not svc.eligible(kind, quota) or not service_ready(svc) or (svc.name == "claude" and held):
+        return False
+    if svc.name == "claude" and kind == "frontier" and fable_short(info):
+        return False
+    left = info.get("remaining")
+    if left is None:
+        return not (svc.reserve_floor or svc.fallback_after)
+    return pool_fits(svc, kind, info, min_headroom=min_headroom, repo=repo)
+
+
+def fallback_block(svc: Service, kind: str, quota: dict[str, Any], *, services: dict[str, Service] | None = None,
+                   min_headroom: float = 15.0, held: bool | None = None, repo: str | None = None) -> str | None:
+    """Why `svc`, a fallback (`fallback_after`), may not take `kind` now: every service it sits behind is usable. None when it
+    may (some pool it sits behind is short, or it is no fallback). The one predicate of the planner (`route`) and of
+    acp-dispatch's fallback-only enforcement. `services` maps names to the services that exist (default: the whole policy,
+    a name not in it counts as short)."""
+    if not svc.fallback_after:
+        return None
+    known = BY_NAME if services is None else services
+    if held is None:
+        held = governor_hold() is not None and kind in GOVERNOR_HOLD_KINDS | {"judgment"}
+    ok = [n for n in svc.fallback_after
+          if n in known and pool_usable(known[n], kind, quota, min_headroom=min_headroom, held=held, repo=repo)]
+    if len(ok) < len(svc.fallback_after):
+        return None
+    return (f"{svc.name} is a fallback behind {', '.join(svc.fallback_after)} (operator 2026-10-31) and "
+            f"{', '.join(ok)} can take --kind {kind} now; use it only when one is short of quota, or "
+            f"ACP_OPERATOR_APPROVED=route-override")
+
+
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
-          exclude: frozenset[str] | set[str] = frozenset()) -> Choice | None:
+          exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
 
     Score = rank + (100 − remaining) × weight / 10, then pace/reset adjustments
@@ -1443,6 +1703,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         exclude = frozenset(exclude) | {"claude"}
     best = quality_best(kind, services, exclude, quota)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
+    by_name = {s.name: s for s in services}
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
     for svc in services:
@@ -1450,14 +1711,17 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
+        if fallback_block(svc, kind, quota, services=by_name, min_headroom=min_headroom,
+                          held=hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment"), repo=repo) is not None:
+            continue                       # a fallback: only while a pool it sits behind is short
         if gap is not None and best is not None and svc.rank_for(kind) - best.rank_for(kind) > gap:
             continue                       # outside the quality band: quota never buys this pool in
         info = quota.get(svc.name) or {}
         remaining = info.get("remaining")
-        if remaining is not None and remaining < max(min_headroom, svc.reserve_floor):
-            continue                       # too tight to hand work to, or a reserve at its floor
-        if remaining is None and svc.reserve_floor:
-            continue                       # a reserve with no fresh reading fails closed (review 2026-10-15)
+        if remaining is not None and not pool_fits(svc, kind, info, min_headroom=min_headroom, repo=repo):
+            continue                       # too tight to hand work to, a reserve at its floor, or (frontier) under the slice estimate acp-dispatch demands
+        if remaining is None and (svc.reserve_floor or svc.fallback_after):
+            continue                       # a reserve or a fallback with no fresh reading fails closed (review 2026-10-15; Argon 2026-10-31)
         # Lower is better. Rank encodes fitness; headroom pulls idle pools up
         # for bulk work and is only a tie-break for judgment, where capability
         # must dominate cost.
@@ -1481,14 +1745,15 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         if waste is not None:
             # Reserves keep their floor gate; never boost them to burn unused
             # quota (2026-10-18 review finding 6c).
-            if waste >= BURN_FIRST_WASTE_MIN and not svc.reserve_floor:
+            # A fallback (Argon) never outranks a usable pool it sits behind: no bonus either (adversary N1, 2026-11-01).
+            if waste >= BURN_FIRST_WASTE_MIN and not svc.reserve_floor and not svc.fallback_after:
                 rank -= BURN_FIRST_BONUS
                 if grant:
                     tags.append(f"burn before reset: {waste:.0f}% of the grant is ahead "
                                 "of an even spend and expires unspent otherwise")
                 else:
                     tags.append(f"would waste {waste:.0f}% at reset")
-        elif svc.burn_first and remaining is not None and remaining >= BURN_FIRST_MIN:
+        elif svc.burn_first and not svc.fallback_after and remaining is not None and remaining >= BURN_FIRST_MIN:
             # Static TOML fallback only when waste cannot be computed.
             rank -= BURN_FIRST_BONUS
         pace = info.get("pace_ratio")
@@ -1505,6 +1770,10 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                 tags.append(f"pace {pace_f:.1f}× (penalty {pen:g})")
         scored.append((rank, svc, remaining, tags))
 
+    if kind == "frontier" and fable_short(quota.get("claude")) and any(
+            "claude" in s.fallback_after for _, s, _, _ in scored):
+        # claude's frontier slot would be Opus (suggest_model) while its Fable sublimit is short: the fallback replaces that downgrade
+        scored = [row for row in scored if row[1].name != "claude"]
     if not scored:
         return None
     scored.sort(key=lambda t: (t[0], t[1].name))
@@ -1532,7 +1801,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
          min_headroom: float = 15.0,
-         exclude: frozenset[str] | set[str] = frozenset()
+         exclude: frozenset[str] | set[str] = frozenset(), repo: str | None = None
          ) -> list[tuple[str, Choice | None]]:
     """Assign each slice kind to a service for ONE wave, right now.
 
@@ -1550,7 +1819,7 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
         if kind == "frontier":
             gate = frontier_gate()
             skip = full | {n for n, k in frontier.items() if k >= frontier_per_wave(n, gate, quota)}
-        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip)
+        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip, repo=repo)
         if choice is not None:
             name = choice.service.name
             load[name] = load.get(name, 0) + 1
@@ -1845,6 +2114,20 @@ _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
 }
 
 
+def antigravity_family(model: str | None) -> str | None:
+    """aiuse pool_family an agy model draws on (schema 1.5): `gemini-4-argon*` -> `gemini_argon` (its own weekly window),
+    every other `gemini-*` -> `gemini` (Flash), `claude-*`/`gpt-*` -> `claude_gpt`; None for anything else. This is the
+    one code copy of the table `aiuse schema` publishes as prose under `semantics.model_pool_family` (a machine could
+    not read it): acp-dispatch's `map_agent_to_provider` calls this, and failover.py (which cannot import the router)
+    keeps a `pool_by_model` row that tests/test_argon_frontier.py checks against it."""
+    m = (model or "").lower()
+    if m.startswith(("claude-", "gpt-")):
+        return "claude_gpt"
+    if m.startswith("gemini-4-argon"):
+        return "gemini_argon"
+    return "gemini" if m.startswith("gemini-") else None
+
+
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
     """Map acp agent and model to aiuse (provider, pool_family). None if unknown.
 
@@ -1852,11 +2135,8 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     calibrate must not import acp-dispatch while that file is mid-edit.
     """
     if agent == "agy":
-        if model and model.startswith(("claude-", "gpt-")):
-            return "antigravity", "claude_gpt"
-        if model and model.startswith("gemini-"):
-            return "antigravity", "gemini"
-        return None
+        family = antigravity_family(model)
+        return ("antigravity", family) if family else None
     if agent == "cursor":
         if not model or model in ("default", "auto"):
             return "cursor", "auto"
@@ -2202,6 +2482,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--kind", required=True, choices=KINDS)
     r.add_argument("--json", action="store_true")
     r.add_argument("--min-headroom", type=float, default=15.0)
+    r.add_argument("--repo", help="repository the slice works in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
     r.add_argument("--brief", help="the slice's brief file: its kind is also asked of Jev and "
                    "GLiDE in shadow (site agent-choice); never changes the route")
     pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
@@ -2211,6 +2492,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma list of services to skip (just failed or spent); repeatable. "
                     "aiuse [disabled_services] are always skipped")
     pl.add_argument("--min-headroom", type=float, default=15.0)
+    pl.add_argument("--repo", help="repository the slices work in, for [dispatch.repo_overrides] (default: the cwd's origin remote)")
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
                     help="brief file per kind, in --kinds order (repeat; shadow-asks Jev and GLiDE)")
@@ -2262,7 +2544,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
         skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()}
         skip |= operator_disabled()
-        rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip)
+        rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip,
+                    repo=(args.repo or repo_of(os.getcwd())))
         if args.brief:
             if len(args.brief) != len(kinds):
                 parser.error("--brief must be given once per kind, in --kinds order")
@@ -2407,7 +2690,8 @@ def main(argv: list[str] | None = None) -> int:
         print(" * = discovered without a curated profile")
         return 0
 
-    choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled())
+    choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled(),
+                   repo=(args.repo or repo_of(os.getcwd())))
     if args.brief:
         shadow_kind(args.brief, args.kind, choice.service.name if choice else None)
     if choice is None:
