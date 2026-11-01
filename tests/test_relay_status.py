@@ -700,10 +700,10 @@ class TestAckVerbOptions(AckBase):
 
     def test_the_send_options_are_carried_into_the_ordinary_send(self) -> None:
         self.status = "idle"
-        rc, calls, err = self.seen("--ack", "q1", "--via", "paseo", "--steer", "--idle", "5", "--no-defer", "--defer-for", "60", "--wait", "3", "--no-ack", "--ack")
+        rc, calls, err = self.seen("--ack", "q1", "--via", "paseo", "--idle", "5", "--no-defer", "--defer-for", "60", "--wait", "3", "--no-ack", "--ack")
         inner = calls[-1]
         self.assertEqual((inner[0] == fb.AGENT, inner[1]), (True, "ack q1"), (rc, err))
-        for flag in ("--steer", "--no-defer", "--no-ack", "--ack"):    # a second --ack is the caller's explicit delivery watch: carried, never dropped (adversary r2 B1)
+        for flag in ("--no-defer", "--no-ack", "--ack"):    # a second --ack is the caller's explicit delivery watch: carried, never dropped (adversary r2 B1)
             self.assertIn(flag, inner)
         for flag, val in (("--via", "paseo"), ("--idle", "5.0"), ("--defer-for", "60.0"), ("--wait", "3.0")):
             self.assertEqual(inner[inner.index(flag) + 1], val, flag)

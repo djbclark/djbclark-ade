@@ -162,10 +162,14 @@ wrong-directory and no-route refusals are never deferred. Residual: `PASEO_AGENT
 environment value a same-user process can forge, as `HERDR_PANE_ID` is, and the bounds can be starved (100 records in all:
 a same-user process that mints sender keys fills the queue, never silently; one sender can fill one target's 20; a stuck
 deliverer holds its own record's notice until a later sweep). claude, codex, omp, opencode and pi
-can steer (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23), but Paseo replaces the running
-turn of even these when the provider declines the steer at that moment (while Claude or Codex compacts, a Codex review
-turn, an omp steer error), which relay cannot see beforehand: only **claude** is steered into a working agent by default;
-a working codex, omp, opencode or pi agent is queued unless `--steer` (or `--idle S`). A Paseo agent with no Claude
+can steer (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23): relay's `paseo send --behavior steer` queues the
+text **inside the running turn** (the daemon's `steerOrReplaceActiveTurn` "steered", re-read in the installed 0.15.0-beta.1 bundle
+2026-11-01: no interruption, the agent reads it at its next tool round), so a send to a **working** agent of those providers goes out at
+once, is never queued and never expires (2026-11-01: two records to a working omp agent sat queued for 6 h and expired while
+`paseo send` delivered the same text at once; `--steer` is gone, it is the default for all five). Residual, accepted: a provider can decline one
+steer (claude while it compacts, omp or pi on a slash line or a rejected steer, a Codex review turn) and Paseo then replaces the running
+turn, which relay cannot see beforehand; `--idle S` still waits for idle first. Only a provider that cannot steer (cline, ACP) is queued, and
+a record still unsent at its expiry is `expired` with "NOT DELIVERED ..." in the record, `deferred.log` and the sender's one notice. A Paseo agent with no Claude
 registry row is found by its id, Paseo id or hex prefix, never by its workspace title (titles come from its first
 prompt). A running one with a pending permission or question card shows as `blocked` (one `paseo permit ls --json`),
 `relay.py` refuses it, and helm lists it as a `permission` item with every card and its own
@@ -504,7 +508,7 @@ escalated to the operator about silence that was a queue; two queued messages we
    relay-verified closer's rule, for a sender with NO transcript; a transcript-backed sender's `--sweep` (and `--pending`) still accepts the token anywhere in a line that carries the target's
    relay header. Lines are those of the text AS YOU TYPED IT: relay folds the whitespace of what it sends (and stores), so it keeps the line starts of the argument for the closer, only the lines
    that begin `ack ` (at most 40, each clipped to 120 characters), and a queued record keeps them as `ack_leads`.
-   `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--ack` (a second one is the delivery watch of the inner send), `--steer`, `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
+   `relay.py --ack ID` carries `--wait`, `--json`, `--no-defer`, `--no-ack`, `--ack` (a second one is the delivery watch of the inner send), `--via`, `--defer-for` and `--idle` into its send; any other option (`--expect-ack`, `--pending`, `--text`, ...) is refused, exit 2,
    never dropped. `--status ID` is a query: combined with any other option or command (`--cancel`, `--retire`, a send) it is refused, exit 2, and nothing runs. A transcript-backed expectation whose
    transcript cannot be read reads `open (uncollected, ...)` even after a complete sweep.
    **A closed Paseo agent (collected runtime, not archived) counts as idle and a send wakes it** (`--why`: `closed ... a send resumes the same conversation`, deliverable); this holds for automatic callers too

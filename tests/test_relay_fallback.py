@@ -845,29 +845,16 @@ class TestHardStops(Harness):
         rc, _, err = self.run_main(pasess(agent="claude", status="working"))
         self.assertEqual((rc, sent), (0, ["claude"]), err)
 
-    def test_working_codex_omp_opencode_pi_agent_needs_steer_because_the_provider_can_decline_it(self) -> None:
-        """L4: Paseo replaces the running turn when the provider declines a steer (a review turn, an error); relay
-        cannot see that beforehand, so only an explicit --steer sends to a working agent of those providers."""
+    def test_working_codex_omp_opencode_pi_agent_is_steered_into_its_running_turn(self) -> None:
+        """2026-11-01: `paseo send --behavior steer` queues the text inside the running turn of a provider that can steer (the installed daemon's
+        steerOrReplaceActiveTurn "steered"), so relay sends at once and never waits for its turn to end."""
         relay.paseo_gate = lambda s: None
         sent: list[str] = []
         relay.send_paseo = lambda s, text, wait: sent.append(s["agent"]) or "accepted"
         for agent in ("codex", "omp", "opencode", "pi"):
             rc, _, err = self.run_main(pasess(agent=agent, status="working"), "--no-defer")
-            self.assertEqual(rc, 1, agent)
-            self.assertIn("replaces a running turn", err, agent)
-            self.assertIn("--steer", err, agent)
-        self.assertEqual(sent, [])
-        for agent in ("codex", "omp", "opencode", "pi"):
-            rc, _, err = self.run_main(pasess(agent=agent, status="working"), "--steer")
             self.assertEqual(rc, 0, (agent, err))
         self.assertEqual(sent, ["codex", "omp", "opencode", "pi"])
-
-    def test_steer_does_not_make_a_provider_without_steer_safe(self) -> None:
-        relay.paseo_gate = lambda s: None
-        relay.send_paseo = lambda s, text, wait: self.calls.append("send") or "accepted"
-        rc, _, err = self.run_main(pasess(agent="cline", status="working"), "--steer", "--no-defer")
-        self.assertEqual((rc, self.calls), (1, []))
-        self.assertIn("cannot steer", err)
 
     def test_idle_codex_agent_needs_no_steer_flag(self) -> None:
         relay.paseo_gate = lambda s: None
@@ -2920,16 +2907,19 @@ class TestDeferredSend(Harness):
         self.assertEqual((rc, self.sent, self.spawned, relay.rec_all()), (1, [], [], []))
         self.assertIn("cannot steer", err)
 
-    def test_every_non_steerable_provider_and_a_codex_without_steer_is_queued_but_steer_still_sends(self) -> None:
-        for agent in ("cline", "grok", "codex", "omp", "opencode", "pi"):
+    def test_a_working_steer_provider_is_sent_at_once_and_only_one_that_cannot_steer_is_queued(self) -> None:
+        """2026-11-01: two records to a working omp agent expired unsent after 6 h while `paseo send --behavior steer` would have queued the text
+        inside its running turn at once. claude, codex, omp, opencode and pi are sent to now; cline and every ACP provider still wait for idle."""
+        for agent in ("cline", "grok"):
             self.target["agent"] = agent
             rc, out, _ = self.go(text=f"for {agent}")
             self.assertEqual((rc, out.startswith("queued: ")), (0, True), agent)
-        self.assertEqual((len(relay.rec_all()), self.sent), (6, []))
-        self.target["agent"] = "codex"
-        rc, out, _ = self.go("--steer", text="steered")
-        self.assertEqual((rc, out.startswith("relayed to"), len(relay.rec_all())), (0, True, 6))
-        self.assertEqual(self.sent[-1][0], AGENT)
+        self.assertEqual((len(relay.rec_all()), self.sent), (2, []))
+        for agent in ("claude", "codex", "omp", "opencode", "pi"):
+            self.target["agent"] = agent
+            rc, out, _ = self.go(text=f"for {agent}")
+            self.assertEqual((rc, out.startswith("relayed to")), (0, True), (agent, out))
+        self.assertEqual((len(relay.rec_all()), [a for a, _t in self.sent]), (2, [AGENT] * 5))
 
     def test_refusals_that_are_not_busyness_are_never_deferred(self) -> None:
         relay.paseo_gate = lambda s: "its Paseo agent is archived (a send would unarchive it and start a turn)"
@@ -3103,6 +3093,36 @@ class TestDeferredSend(Harness):
         self.patch_rec(rid, expires=time.time() - 1)
         relay.deliver(rid)
         self.assertEqual([(a, "was expired" in t) for a, t in self.sent], [(SENDER, True)])
+
+    def test_a_record_for_a_working_steer_agent_is_sent_by_its_deliverer_at_once(self) -> None:
+        """A record queued behind a card (or before the 2026-11-01 rule) for an omp agent that is still running: the deliverer steers into its
+        running turn on its first look instead of waiting for an idle that may be hours away (it would sleep: Stalled)."""
+        rid = self.queue()
+        self.patch_rec(rid, target={**relay.rec_read(rid)["target"], "agent": "omp"})
+        self.target["agent"] = "omp"
+        relay.paseo_inspect = lambda agent: {"Id": agent, "Status": "running", "Provider": "omp", "Cwd": "/x", "Archived": False, "PendingPermissions": []}
+        with self.sleeps(0):
+            self.assertEqual(relay.deliver(rid), 0)
+        self.assertEqual((relay.rec_read(rid)["state"], [a for a, _t in self.messages()]), ("delivered", [AGENT]))
+
+    def test_a_record_for_a_working_agent_that_cannot_steer_waits_and_its_expiry_says_not_delivered_to_the_sender(self) -> None:
+        """cline and ACP providers: a send would interrupt the turn, so the record waits for idle; past its expiry the record, the log and the
+        notice say NOT DELIVERED (the old line, `working: it takes the text when its turn ends`, read as a delivery that never happened)."""
+        self.as_agent(SENDER)
+        rid = self.queue()
+        self.patch_rec(rid, expires=time.time() + 60)
+        relay.paseo_inspect = lambda agent: {"Id": agent, "Status": "running", "Provider": "cline", "Cwd": "/x", "Archived": False, "PendingPermissions": []}
+
+        def expire(_s: float) -> None:    # the one wait it takes: the expiry passes while the agent is still working
+            self.patch_rec(rid, expires=time.time() - 1)
+        with mock.patch.object(relay.time, "sleep", side_effect=expire):
+            relay.deliver(rid)
+        rec = relay.rec_read(rid)
+        self.assertEqual((rec["state"], self.messages()), ("expired", []))
+        self.assertIn("NOT DELIVERED", rec["outcome"])
+        self.assertIn("cline", rec["outcome"])
+        self.assertIn("NOT DELIVERED", self.log())
+        self.assertEqual([(a, "NOT DELIVERED" in t) for a, t in self.sent], [(SENDER, True)])
 
     # ---- order, duplicates, bounds ----------------------------------------------------------------------------
 

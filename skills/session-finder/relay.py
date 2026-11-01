@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
-    relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" | --message-file PATH|- [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
+    relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" | --message-file PATH|- [--wait S] [--idle S] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
                                            [--ack | --no-ack] [--expect-ack ID [--ack-within S]] [--needs-reply | --fyi]
     relay.py --pending [--text] [--json] | --cancel ID | --sweep | --retire ID --reason TEXT [--evidence TEXT]
         (the deferred messages and expected acks, below; --retire closes an expectation that will never be answered)
@@ -25,13 +25,17 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
   1. paseo     a Paseo-hosted agent (where: `host=paseo agent=<id>`; the only route for it): `paseo send
                --behavior steer -- <id> <text>`. The caller's own PASEO_AGENT_ID stays in the child's
                environment, so Paseo labels the message `kind="agent-message"` with the sender; a caller that is
-               not a Paseo agent prefixes the text with `[relay from <name>] `. Steer queues the text for the next
-               tool round on Claude, Codex, omp, opencode and pi (fleet.PASEO_STEER_PROVIDERS) unless the provider
-               declines the steer (compaction, a Codex review turn, an omp steer error): Paseo then replaces the running
-               turn. A send to a WORKING agent is therefore not made now for any provider but claude unless `--steer`
-               (a cline, grok or other ACP agent cannot steer at all, so `--steer` does not apply): it is queued and
-               delivered when the agent is idle (DEFERRED SEND, below; `--idle S` blocks for idle instead, `--no-defer`
-               refuses). A Paseo agent with no Claude registry row is found by its id, its Paseo id or a hex prefix of 6+
+               not a Paseo agent prefixes the text with `[relay from <name>] `. Steer queues the text INSIDE the running turn (the daemon's
+               steerOrReplaceActiveTurn "steered": no interruption, it reads the text at its next tool round) on Claude, Codex, omp, opencode and
+               pi (fleet.PASEO_STEER_PROVIDERS), so a send to a WORKING agent of those providers goes out at once and is never deferred or
+               expired (2026-11-01: two records to a working omp agent expired unsent after 6 h; the same text sent at once by `paseo send`
+               proved the daemon takes it). Residual risk, accepted: a steer provider can decline one steer (claude while it compacts, omp or
+               pi on a slash line or a rejected steer, a Codex review turn) and Paseo then replaces the running turn. A cline, grok or other ACP agent
+               cannot steer at all (a send would interrupt and replace its turn), so for those a send to a WORKING agent is queued and
+               delivered when the agent is idle (DEFERRED SEND, below; `--idle S` blocks for idle instead for any provider, `--no-defer`
+               refuses); a queued record that is still unsent at its expiry is `expired` "NOT DELIVERED ..." and the sender gets that notice.
+               The deliverer also sends a record at once when its target is a steer provider that is working (a record queued behind a
+               permission card, or before this rule). A Paseo agent with no Claude registry row is found by its id, its Paseo id or a hex prefix of 6+
                characters, never by its workspace title. Before any send
                `paseo agent inspect` must show the agent unarchived, with no pending permission or question, idle,
                running or closed, in the directory its process runs in; any refusal ends the run, whatever `--via` says.
@@ -139,7 +143,7 @@ a retry of text left in a box submits it and types nothing. A socket frame to a 
     names the file's absolute path.
 
 DEFERRED SEND (2026-10-24). When the only obstacle is that the target is WORKING (a Paseo agent whose provider cannot
-steer, or a codex/omp/opencode/pi one without --steer; a non-Claude pane TUI that is working), relay neither refuses
+steer: cline or any ACP one; a non-Claude pane TUI that is working), relay neither refuses
 nor blocks: it writes a 0600 record ~/.local/state/relay/deferred/<id>.json (id = timestamp + hash; text, target and its
 identity, sender label, sender ids, expiry, state queued|sending|delivered|failed|expired|cancelled), starts a detached
 `relay.py --deliver <id>` and EXITS 0 with `queued: <id> ...` (`"state":"queued","queued":true` with --json): a queued
@@ -202,7 +206,7 @@ still open), `--status ID` (alias `--show`) says what became of ONE record, chan
 any expectation of that id; exit 0 found, 1 not), `--cancel ID` withdraws a queued one: it DESTROYS a message still queued, so it is
 never a state check. Not deferred,
 still refused (exit 1): archived, wrong directory, no route, text starting with `/` or `!`; `--idle S`
-keeps its blocking meaning and wins; `--steer` is unchanged; `--no-defer` restores the refusal; `--plan` queues nothing.
+keeps its blocking meaning and wins; `--no-defer` restores the refusal; `--plan` queues nothing.
 A target BLOCKED ON A PERMISSION OR QUESTION CARD (a Paseo agent with a pending permission, a pane TUI showing a dialog; 2026-10-28, djbclark:
 "a backoff-retry scheme when we can't relay a message due to that") is deferred the same way, never refused: the text is queued, never
 typed into the card (a send would answer or replace it), and the deliverer looks again at CAPPED EXPONENTIAL INTERVALS WITH FULL JITTER
@@ -1306,21 +1310,23 @@ def forget(sid, text):
             _note(sid, None, "", 0, None)
 
 
-def paseo_steer_refusal(s, steer=False):
-    """Why a send to Paseo agent S must wait for it to go idle, or None. `paseo send --behavior steer` queues the text
-    only for a provider that can steer (fleet.PASEO_STEER_PROVIDERS); for any other (a cline agent, any ACP one)
-    Paseo interrupts the running turn and starts the text as a new one (steerOrReplaceActiveTurn "replaced",
-    read from the daemon bundle 2026-10-23), which would destroy the work in flight. A steer provider can decline
-    too (a Codex review turn, a server without turn/steer, an omp steer error) where this relay cannot see it, and
-    Paseo then replaces the turn the same way: only claude (fleet.PASEO_STEER_DEFAULT) is steered into a working agent
-    without STEER (`--steer`)."""
+def paseo_can_steer(provider):
+    """True when Paseo's daemon can inject a message into the RUNNING turn of a PROVIDER's agent (fleet.PASEO_STEER_PROVIDERS)."""
+    return (provider or "").lower() in fleet.PASEO_STEER_PROVIDERS
+
+
+def paseo_steer_refusal(s):
+    """Why a send to Paseo agent S must wait for it to go idle, or None. `paseo send --behavior steer` (what send_paseo always passes) queues
+    the text INSIDE the running turn of a provider that can steer (fleet.PASEO_STEER_PROVIDERS: claude, codex, omp, opencode, pi), with no
+    interruption (steerOrReplaceActiveTurn "steered", read from the installed daemon bundle 0.15.0-beta.1, 2026-11-01), so a working agent of
+    those providers is sent to at once and never waits for its turn to end (a turn can last for hours: 2026-11-01, two records to a working omp
+    agent expired unsent). For any other provider (a cline agent, any ACP one) Paseo interrupts the running turn and starts the text as a new
+    one ("replaced"), which would destroy the work in flight: that send waits for idle. Residual risk, accepted: a steer provider can decline
+    one steer (claude while it compacts; omp or pi on a slash line or a rejected steer; a Codex review turn) where this relay cannot see it,
+    and Paseo then replaces the turn the same way."""
     prov = (s.get("agent") or "").lower()
-    if s.get("status") == "idle" or prov in fleet.PASEO_STEER_DEFAULT or (steer and prov in fleet.PASEO_STEER_PROVIDERS):
+    if s.get("status") == "idle" or paseo_can_steer(prov):
         return None
-    if prov in fleet.PASEO_STEER_PROVIDERS:
-        return (f"its {prov} Paseo agent is {s.get('status')}: Paseo replaces a running turn when {prov} declines a steer "
-                "(a review turn, a steer error), which this relay cannot see beforehand (--idle S waits for it to go idle; "
-                "--steer sends anyway; unless --no-defer, relay queues it and delivers it when the agent is idle: `queued: <id>`, exit 0)")
     return (f"its {prov or 'unknown'} Paseo agent is {s.get('status')} and that provider cannot steer: a send would "
             "interrupt and replace its running turn (--idle S waits for it to go idle; unless --no-defer, relay queues it "
             "and delivers it when the agent is idle: `queued: <id>`, exit 0)")
@@ -2648,8 +2654,8 @@ def sweep_all():
 
 
 def target_poll(rec):
-    """('idle',), ('busy',), ('miss', why) (the target is not there), ('error', why) (it could not be asked: a daemon
-    restart) or ('fail', why) for the record's target."""
+    """('idle',), ('steer',) (a WORKING Paseo agent whose provider can steer: the send goes into its running turn now), ('busy',), ('miss', why)
+    (the target is not there), ('error', why) (it could not be asked: a daemon restart) or ('fail', why) for the record's target."""
     t = rec.get("target") or {}
     target_poll.look = None    # the diagnosis of this look (paseo_look / pane_look), filed on the record by the deliverer
     if t.get("paseo"):    # the Paseo agent id is the identity: inspect must name exactly that agent
@@ -2664,7 +2670,9 @@ def target_poll(rec):
         why = paseo_blocker(info)
         if why:
             return ("fail", why)
-        return ("idle",) if info.get("Status") in ("idle", "closed") else ("busy",)
+        if info.get("Status") in ("idle", "closed"):
+            return ("idle",)
+        return ("steer",) if paseo_can_steer(info.get("Provider")) else ("busy",)    # a working agent that can steer takes the text into its running turn now: never waited for
     s = next((x for x in fleet.sessions() if x.get("id") == t.get("id")), None)
     if s is None:
         return ("miss", "its session is gone")
@@ -2721,6 +2729,19 @@ def unverified_late(rid, rec, rc, line):
     the record, the log and the notice say the same thing. Nothing is resent; the notice is claimed once, so it is never doubled."""
     defer_log(rec, "unverified", f"the record was failed unverified while its send ran; the send returned rc={rc}: {line}")
     send_notice(rid)
+
+
+def busy_why(rec, look):
+    """Why a record still queued at its expiry (or filed as `last`) was not sent while its target kept working. A Paseo agent whose provider cannot
+    steer would have had its running turn interrupted and replaced by the send, so the text was held back for its idle and, past the expiry, is NOT
+    delivered: said so in words the sender cannot read as "the agent will take it" (2026-11-01: the old line, `working: it takes the text when its
+    turn ends`, was false for such a provider, and the sender read the expiry notice as a delivery)."""
+    t = rec.get("target") or {}
+    if t.get("paseo") and not paseo_can_steer(t.get("agent")):
+        return (f"NOT DELIVERED: its {t.get('agent') or 'unknown'} Paseo agent stayed working for the whole time and that provider cannot steer, so a send "
+                "would interrupt and replace its running turn; the text was held back for its idle and never sent. Resend when it is idle, or "
+                "deliberately interrupt it with `paseo send --behavior interrupt`")
+    return (look or {}).get("why") or "the target stayed busy"
 
 
 def deliver(rid):
@@ -2801,8 +2822,8 @@ def deliver(rid):
                 time.sleep(wait)
                 continue
             card_n = 0
-            if poll[0] != "idle":
-                last = poll[1] if poll[0] in ("miss", "error") else (look or {}).get("why") or "the target stayed busy"
+            if poll[0] not in ("idle", "steer"):
+                last = poll[1] if poll[0] in ("miss", "error") else busy_why(rec, look)
                 if poll[0] == "busy":
                     time.sleep(min(card_backoff(busy_n, cap=BUSY_BACKOFF_CAP), max(1.0, float(rec.get("expires") or 0) - time.time())))
                     busy_n += 1
@@ -4098,7 +4119,7 @@ def expect_view(now=None, uncollected=False, last_swept=None):
     return rows
 
 
-ACK_VERB_CARRIES = frozenset({"ack", "wait", "json", "no_defer", "steer", "no_ack", "via", "defer_for", "idle"})    # the send options `relay.py --ack ID` passes on to its ordinary send
+ACK_VERB_CARRIES = frozenset({"ack", "wait", "json", "no_defer", "no_ack", "via", "defer_for", "idle"})    # the send options `relay.py --ack ID` passes on to its ordinary send
 
 
 ACK_VALUE_OPTS = frozenset({"--wait", "--idle", "--via", "--defer-for", "--ack-within", "--expect-ack", "--deliver", "--cancel", "--retire", "--status", "--show",
@@ -4167,7 +4188,7 @@ def ack_verb(eid, a):
     if not (isinstance(to, str) and to):
         return refuse(1, "the expectation names no sender to answer")
     out = [to, f"ack {eid}", "--wait", str(a.wait)]
-    for flag, on in (("--json", a.json), ("--no-defer", a.no_defer), ("--steer", a.steer), ("--no-ack", a.no_ack), ("--ack", a.ack)):
+    for flag, on in (("--json", a.json), ("--no-defer", a.no_defer), ("--no-ack", a.no_ack), ("--ack", a.ack)):
         out += [flag] if on else []
     for flag, val in (("--via", a.via), ("--defer-for", a.defer_for), ("--idle", a.idle)):
         out += [flag, str(val)] if val is not None else []
@@ -4206,8 +4227,6 @@ def _main(argv=None, sweep=True):
                     "(exactly one of the two; empty: exit 2). REQUIRED for a message with code, backticks, `$` or quotes: a shell-quoted string would be executed or mangled by the caller's shell. "
                     "The text is then folded to one line like any text: one trailing newline is dropped and every whitespace run (newlines, indentation) becomes one space")
     ap.add_argument("--idle", type=float, metavar="S", help="a working Paseo agent or non-Claude pane TUI: wait up to S seconds for it to go idle first")
-    ap.add_argument("--steer", action="store_true", help="send to a WORKING codex, omp, opencode or pi Paseo agent as a steer anyway: "
-                    "Paseo replaces its running turn when the provider declines the steer (a review turn, an error); claude needs no flag")
     ap.add_argument("--via", choices=sorted(ROUTES), help="use only this route (default: the best, then fall back)")
     ap.add_argument("--plan", action="store_true", help="print the routes in order and send nothing")
     ap.add_argument("--json", action="store_true")
@@ -4517,7 +4536,7 @@ def _main(argv=None, sweep=True):
             print(f"relay: [{s['id']}] not sent: {card}; and it has no route", file=sys.stderr)
             return 1
         return defer_send(s, a, text, listed, card)
-    why = is_paseo and paseo_steer_refusal(s, a.steer)
+    why = is_paseo and paseo_steer_refusal(s)
     if why:
         BUSY["hit"] = True
         if defer_wanted(a, text, "paseo"):

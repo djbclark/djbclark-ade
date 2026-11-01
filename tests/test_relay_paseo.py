@@ -902,6 +902,17 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual((rc, out.startswith("queued: "), self.sends(), len(self.spawned)), (0, True, [], 1), err)
         self.assertEqual([p.name for p in relay.DEFER_DIR.glob("*.json")], [f"{self.spawned[0]}.json"])    # in the test's own queue
 
+    def test_a_working_steer_provider_gets_the_text_at_once_through_the_daemons_steer_queue(self) -> None:
+        """2026-11-01: omp (and codex, opencode, pi, claude) take a `--behavior steer` send into their RUNNING turn without an interrupt, so relay
+        sends now: no record, no deferral, no expiry. Only the steer behavior may be on the wire (`interrupt` would replace the turn)."""
+        for provider in ("omp", "codex", "opencode", "pi", "claude"):
+            os.environ.update(FAKE_PROVIDER=provider, FAKE_STATUS="running")
+            self.log.unlink(missing_ok=True)
+            rc, out, err = self.main([], AGENT, "ping", "--json", "--wait", "1")
+            self.assertEqual((rc, self.sends(), len(self.spawned)), (0, [f"send --no-wait --behavior steer --json -- {AGENT} ping"], 0), (provider, err))
+            self.assertEqual(json.loads(out)["result"], "accepted", provider)    # the daemon took it; no witness, so never claimed delivered
+        self.assertEqual(list(relay.DEFER_DIR.glob("*.json")), [])
+
     def test_working_non_steering_agent_needs_idle_and_then_waits_first(self) -> None:
         os.environ.update(FAKE_PROVIDER="cline", FAKE_STATUS="running")
         rc, _out, err = self.main([], AGENT, "ping", "--no-defer")

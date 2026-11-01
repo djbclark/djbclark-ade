@@ -46,9 +46,10 @@ with `--expect-ack`:
    queued (item 3) and delivered once the card is answered, the deliverer backing off between looks (5 s up to 2 min, jittered);
    a text is never typed into the card. `relay.py --why <ident>` says why a session cannot take a text right now (a picklist, a permission card,
    a turn still running, silent 15+ minutes, archived, gone) from two methods compared; `--pending` shows it per queued record. A send to a Paseo agent that
-   has no Claude transcript (codex, omp, opencode, cline) is now proven by its Paseo timeline too: "delivered", no longer "unverified". A send to a WORKING cline/grok/ACP agent or a WORKING codex, omp, opencode or pi Paseo agent is
-   not made at once, because Paseo replaces its running turn when the provider declines a steer: relay queues it (item 3).
-   `relay.py <ident> "x" --steer` sends a codex/omp/opencode/pi one anyway, `--idle S` waits for idle first and blocks
+   has no Claude transcript (codex, omp, opencode, cline) is now proven by its Paseo timeline too: "delivered", no longer "unverified". A send to a WORKING claude, codex, omp, opencode or pi Paseo agent goes out at once
+   (Paseo's steer queue puts the text inside its running turn, no interruption; there is no `--steer` flag any more, 2026-11-01), while a WORKING cline/grok/ACP agent cannot
+   steer, so a send would replace its turn: relay queues it (item 3) and a record unsent at its expiry says "NOT DELIVERED" to you.
+   `--idle S` waits for idle first and blocks
    (it wins over queueing), `--no-defer` refuses (exit 1) instead of queueing, `--defer-for S` sets how long a queued
    message may wait (default 6 h, at most 24 h; other flags: `--wait S`, `--via ROUTE`, `--plan`, `--json`). Do not work
    around a refusal with another channel; tell djbclark.
