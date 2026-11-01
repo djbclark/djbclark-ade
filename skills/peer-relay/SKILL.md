@@ -19,7 +19,9 @@ with `--expect-ack`:
     python3 -I ~/src/djbclark-ade/skills/session-finder/relay.py <ident> "<question or request>" --expect-ack <unique-id> [--ack]
 
 1. **One line of text.** Newlines are folded to spaces. For a long brief, write it to a file and relay one line that
-   names the file's absolute path.
+   names the file's absolute path. **A message containing code, backticks, `$`, quotes or newlines goes through `--message-file PATH` (`-` reads stdin)
+   or a Python argv list, never a shell-quoted string** (2026-11-01): your shell EXECUTES a backtick or `$( )` inside double quotes and the text silently
+   vanishes. `relay.py <ident> --message-file /abs/msg.txt` replaces the positional text (exactly one of the two; an empty file is exit 2; one trailing newline is dropped).
 2. **Find the ident first** when you do not have it: `python3 -I ~/src/djbclark-ade/skills/session-finder/session-find.py "<topic>"`
    (or `fleet.py list`). `relay.py <ident> "x" --plan` prints the routes it would try and sends nothing.
 3. **Read the exit code.** 0 = delivered, **or queued** when you used `--no-ack` or are a declared job (stdout `queued: <id> ...`: the peer is working and cannot take it

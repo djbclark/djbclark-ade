@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
-    relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
+    relay.py <id|name|sid|pane|paseo-agent-id|dispatch-record.json> "<text>" | --message-file PATH|- [--wait S] [--idle S] [--steer] [--no-defer] [--defer-for S] [--via ROUTE] [--plan] [--json]
                                            [--ack | --no-ack] [--expect-ack ID [--ack-within S]] [--needs-reply | --fyi]
     relay.py --pending [--text] [--json] | --cancel ID | --sweep | --retire ID --reason TEXT [--evidence TEXT]
         (the deferred messages and expected acks, below; --retire closes an expectation that will never be answered)
@@ -10,6 +10,12 @@
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it; a dispatch record is
                                            the exact path of an acp-dispatch job file, e.g. /x/jobs/a.json: route 2 below)
+
+MESSAGE TEXT NEVER GOES THROUGH A SHELL-QUOTED STRING WHEN IT HAS CODE (2026-11-01, a recurring harness failure): a message containing backticks, `$`, `$( )`,
+quotes or newlines goes through `--message-file PATH` (`-` reads stdin), or a Python argv list, never `"..."` in a shell: inside double quotes the caller's
+shell EXECUTES a backtick or `$( )` and silently drops its text (a lead's message lost `stages: [pre-push]`; an earlier one ran a command).
+`--message-file` replaces the positional text (exactly one of the two; an empty file is exit 2) and reads the file as UTF-8 without any shell step; one
+trailing newline is dropped, the rest is the message (it is then folded to one line like any text, below).
 
 The one way for an agent to message a peer (2026-10-23, djbclark: "automatically uses the best messaging option
 for any given situation, and tries to fall back itself before returning an error"). It picks the routes that fit
@@ -4191,6 +4197,8 @@ def _main(argv=None, sweep=True):
     ap.add_argument("ident", nargs="?")
     ap.add_argument("text", nargs="?")
     ap.add_argument("--wait", type=float, default=20, help="seconds to verify delivery (default 20; a hermes turn gets max(100, S))")
+    ap.add_argument("--message-file", metavar="PATH", help="read the message text from PATH (`-`: stdin), UTF-8, one trailing newline dropped, instead of the positional text "
+                    "(exactly one of the two; empty: exit 2). REQUIRED for a message with code, backticks, `$`, quotes or newlines: a shell-quoted string would be executed or mangled by the caller's shell")
     ap.add_argument("--idle", type=float, metavar="S", help="a working Paseo agent or non-Claude pane TUI: wait up to S seconds for it to go idle first")
     ap.add_argument("--steer", action="store_true", help="send to a WORKING codex, omp, opencode or pi Paseo agent as a steer anyway: "
                     "Paseo replaces its running turn when the provider declines the steer (a review turn, an error); claude needs no flag")
@@ -4258,6 +4266,9 @@ def _main(argv=None, sweep=True):
             print(f"relay: usage: relay.py --status ID [--json]; --status is a query and cannot be combined with {', '.join(others)}", file=sys.stderr)
             return 2
         return status_cmd(a.status, a.json)
+    if a.message_file is not None and (a.transfer_expectations is not None or a.retire is not None or a.deliver or a.pending or a.cancel or a.sweep or a.why):
+        print("relay: --message-file is used with a send: relay.py <id> --message-file PATH|-", file=sys.stderr)
+        return 2
     if a.transfer_expectations is not None:
         if a.ident is not None or a.text is not None or a.deliver or a.pending or a.cancel or a.sweep or a.plan or a.retire is not None:
             print("relay: --transfer-expectations cannot be combined with a send or another command", file=sys.stderr)
@@ -4312,8 +4323,24 @@ def _main(argv=None, sweep=True):
             print("relay: usage: relay.py --why <id> [--json]", file=sys.stderr)
             return 2
         return why_cmd(a.ident, a.json)
+    if a.message_file is not None:
+        if a.text is not None:
+            print("relay: give the message as the positional text or as --message-file, not both", file=sys.stderr)
+            return 2
+        try:
+            raw = sys.stdin.buffer.read() if a.message_file == "-" else Path(a.message_file).read_bytes()
+            a.text = raw.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"relay: cannot read --message-file {a.message_file}: {exc}", file=sys.stderr)
+            return 2
+        a.text = a.text.removesuffix("\n")    # one trailing newline: the editor's or `echo`'s, never the message's
+        if a.text.endswith("\r"):
+            a.text = a.text[:-1]
+        if not a.text.strip():
+            print(f"relay: --message-file {a.message_file} is empty", file=sys.stderr)
+            return 2
     if a.ident is None or a.text is None:
-        print("relay: usage: relay.py <id> \"<text>\" [options] | --ack EXPECTATION_ID | --pending [--json] [--queued-only] [--older-than S] [--summary] | --status ID | --cancel ID | --sweep [--stuck-after S] | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
+        print("relay: usage: relay.py <id> \"<text>\" | <id> --message-file PATH|- [options] (a message with code, backticks, $, quotes or newlines goes through --message-file, never a shell-quoted string) | --ack EXPECTATION_ID | --pending [--json] [--queued-only] [--older-than S] [--summary] | --status ID | --cancel ID | --sweep [--stuck-after S] | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
     if a.defer_for is not None and not (math.isfinite(a.defer_for) and a.defer_for > 0):
         print("relay: --defer-for must be a finite number of seconds > 0", file=sys.stderr)
