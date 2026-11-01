@@ -182,21 +182,30 @@ def changelog_at(repo, rev):
 FRAGMENT_DIR = "changelog.d"
 STALE_FRAGMENT_DAYS = 14
 _FOLD = []
+_FOLD_WHY = []
 
 
 def load_fold():
     """The changelog-fold module beside the running ade-update (code already being executed, like the
-    skill-everywhere helper: never one inside --repo), or None when that sibling is missing."""
+    skill-everywhere helper: never one inside --repo), or None when that sibling is missing or does not load
+    (a syntax error, a half-written file after a pull): the reason is in _FOLD_WHY and the update goes on without
+    fragments instead of crashing after the pull and link work."""
     if not _FOLD:
         mod = None
         cand = Path(__file__).resolve().parent / "changelog-fold"
-        if cand.is_file():
-            import importlib.machinery
-            import importlib.util
-            loader = importlib.machinery.SourceFileLoader("changelog_fold", str(cand))
-            spec = importlib.util.spec_from_loader("changelog_fold", loader)
-            mod = importlib.util.module_from_spec(spec)
-            loader.exec_module(mod)
+        if not cand.is_file():
+            _FOLD_WHY.append("no changelog-fold beside this ade-update")
+        else:
+            try:
+                import importlib.machinery
+                import importlib.util
+                loader = importlib.machinery.SourceFileLoader("changelog_fold", str(cand))
+                spec = importlib.util.spec_from_loader("changelog_fold", loader)
+                mod = importlib.util.module_from_spec(spec)
+                loader.exec_module(mod)
+            except Exception as e:  # noqa: BLE001 - any failure of the sibling must not abort the update
+                mod = None
+                _FOLD_WHY.append(f"changelog-fold beside this ade-update does not load ({type(e).__name__}: {str(e)[:80]})")
         _FOLD.append(mod)
     return _FOLD[0]
 
@@ -735,6 +744,10 @@ def update(rep, args, repo):
     if fold is not None:
         new_frags = fragment_entries_at(repo, target, fold)
         old_frags = fragment_entries_at(repo, base, fold) if base else []
+        # An entry that was a fragment at the base and is in CHANGELOG.md at the target was folded, not new: it was
+        # shown when the fragment was (otherwise the fold would re-announce it to every machine that saw it).
+        shown = {t for _, t in old_frags}
+        entries = [(h, t) for h, t in entries if t not in shown]
         entries += fragment_delta(old_frags, new_frags, old_text, new_text)
         stale = stale_fragments(repo, target)
     d["changelog"] = {"since": base, "to": target, "entries": [{"section": h, "text": t} for h, t in entries],
@@ -753,7 +766,7 @@ def update(rep, args, repo):
                 last = h
             rep.say(wrap_entry(t))
     if fold is None:
-        rep.say("changelog: changelog.d fragments not listed (no changelog-fold beside this ade-update)")
+        rep.say(f"changelog: changelog.d fragments not listed ({_FOLD_WHY[0]})")
     if stale:
         rep.say(f"changelog: {len(stale)} fragment(s) on {short(target)} older than {STALE_FRAGMENT_DAYS} days, not yet folded: "
                 + ", ".join(f"{n} ({a}d)" for n, a in stale) + " (the lead folds them: bin/changelog-fold in a fresh worktree, via a PR)")

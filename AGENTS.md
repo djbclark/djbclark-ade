@@ -126,8 +126,8 @@ Each doc carries its own summary.
   `bin/route_agent.py` discovers agents from it plus installed headless TUIs;
   Orca's roster is a GUI list only (docs/model-routing.md).
 - Ops-suite conventions live in `~/CLAUDE.md` and site-private and govern
-  `~/ops`. This repo is ordinary: commit to master, push to
-  `djbclark/djbclark-ade`.
+  `~/ops`. This repo is ordinary: work in a worktree (order 9), push
+  the branch and land it through a PR to `djbclark/djbclark-ade` master (PR-only since 2026-10-31).
 - Facts here carry snapshot dates; probes beat memory. When you verify a
   change, update the doc in the same breath (standing order 2).
 
@@ -296,7 +296,7 @@ pull request here is expected to meet these; flag any it misses.
     `CHANGELOG.md` is edited only by `bin/changelog-fold`, by ONE writer: the lead, at release time or when it chooses, in a fresh worktree from master
     (order 9), landing through a normal PR (master is PR-only since 2026-10-31); nobody else folds, so two folds never conflict. Nothing waits invisibly:
     `bin/ade-update` lists the entries of fragments present at its target and absent at its base (once, even when a fold moved them into `CHANGELOG.md`
-    meanwhile) and warns about a fragment on master older than 14 days. `bin/changelog-fold --check` and the suite validate fragments. Flag a PR that
+    meanwhile) and warns about a fragment older than 14 days on the revision it updates to (master's, on the canonical checkout). `bin/changelog-fold --check` and the suite validate fragments. Flag a PR that
     edits `CHANGELOG.md` by hand or adds a malformed fragment; an open PR that predates this rule moves its `CHANGELOG.md` hunk into its fragment at its next master merge.
     Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
     carries no entry.

@@ -1185,8 +1185,20 @@ def test_a_fragment_folded_between_base_and_target_shows_once(env):
     env.publish({"CHANGELOG.md": folded}, message="fold")
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
-    assert r.stdout.count("Fragment thing A (#10).") == 1  # once, through CHANGELOG.md
-    assert "changelog.d" not in r.stdout
+    assert "Fragment thing A" not in r.stdout  # run 1 already showed it as a fragment; the fold is not news
+    assert "0 entries" in r.stdout
+
+
+def test_a_fragment_added_and_folded_between_base_and_target_shows_once_through_changelog(env):
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-a.md": FRAG_A})
+    sh("git", "rm", "-q", "changelog.d/feat-a.md", cwd=env.seed)
+    folded = CHANGELOG_V2.replace("- First thing (#1).", "- Fragment thing A (#10).\n- First thing (#1).")
+    env.publish({"CHANGELOG.md": folded}, message="fold")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.count("Fragment thing A (#10).") == 1 and "changelog.d" not in r.stdout
 
 
 def test_an_entry_in_both_a_fragment_and_changelog_at_the_target_shows_once(env):
@@ -1244,3 +1256,14 @@ def test_fragments_are_not_listed_when_no_changelog_fold_sits_beside_ade_update(
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Fragment thing B" not in r.stdout and "fragments not listed" in r.stdout
+
+
+def test_a_changelog_fold_that_does_not_load_is_a_note_not_a_crash(env):  # adversary PR190 r2 A3
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    (env.bin / "changelog-fold").write_text("def broken(:\n")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Traceback" not in r.stderr and "does not load" in r.stdout
+    assert "Second thing" in r.stdout and env.state.read_text().strip() == env.head(env.machine)  # the rest still ran
