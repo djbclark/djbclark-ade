@@ -45,6 +45,8 @@ def prune(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("bigteam_prune", SCRIPT)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
+    for var in m.NET_ENV + ("GIT_SSH", "GIT_SSH_COMMAND"):  # the developer's own proxy settings must not leak in
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(m, "B", tmp_path / "bt")
     monkeypatch.setattr(m, "MIN_AGE", 0)
     (tmp_path / "bt").mkdir()
@@ -913,3 +915,91 @@ def test_redact_drops_userinfo_query_and_scp_user(prune):
     assert prune.redact("git@github.com:o/r.git") == "github.com:o/r.git"
     assert prune.redact("/plain/path") == "/plain/path"
     assert prune.redact("ext::sh -c tok") == "ext::(arguments hidden)"
+
+
+# ---- round 8 (local Codex review of 544e81f3) ---------------------------------------------------------------------
+
+
+def _blob_tag(c, name="report-tag", tree=False):
+    f = c / ".git" / "scratch-report"
+    f.write_text("the only copy of this report\n")
+    obj = g(c, "hash-object", "-w", str(f))
+    f.unlink()
+    if tree:
+        obj = subprocess.run(["git", "mktree"], cwd=c, input=f"100644 blob {obj}\tr.md\n", capture_output=True,
+                             text=True, env=_env(), check=True).stdout.strip()
+    g(c, "tag", name, obj)
+    return obj
+
+
+@pytest.mark.parametrize("tree", [False, True])
+def test_ref_to_a_blob_or_tree_keeps_the_clone(prune, tmp_path, world, tree):
+    c = make_clone(tmp_path, world)
+    _blob_tag(c, tree=tree)
+    assert g(c, "log", "--oneline", "--all", "--not", "--remotes") == ""  # the commit traversals cannot see it
+    assert g(c, "rev-list", "--reflog", "--not", "--remotes") == ""
+    ok, why = prune.safe(c)
+    assert not ok and "not a commit" in why
+    assert rm(prune, c)[0] is False
+
+
+def test_annotated_tag_of_a_pushed_commit_does_not_keep_a_clean_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    g(c, "tag", "-a", "-m", "release", "v1", "origin/main")
+    ok, why = prune.safe(c)
+    assert ok, why
+
+
+def test_tag_of_a_tag_on_an_unpushed_commit_keeps_the_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    commit(c, "new", "unpushed\n")
+    g(c, "tag", "-a", "-m", "one", "t1", "HEAD")
+    g(c, "tag", "-a", "-m", "two", "t2", "t1")
+    g(c, "reset", "-q", "--hard", "origin/main")
+    ok, why = prune.safe(c)
+    assert not ok and "not on a remote" in why
+
+
+@pytest.mark.parametrize("key,val", [
+    ("http.curloptResolve", "example.org:8080:127.0.0.1"),
+    ("http.https://example.org/.curloptResolve", "example.org:443:127.0.0.1"),
+    ("http.proxy", "http://127.0.0.1:3128"),
+    ("remote.web.proxy", "http://127.0.0.1:3128"),
+    ("core.gitProxy", "nc"),
+])
+def test_http_address_or_proxy_override_keeps_a_network_remote(prune, tmp_path, world, monkeypatch, key, val):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    g(c, "remote", "add", "web", "https://example.org:8080/o/r.git")
+    assert prune.local_remote_inside_root(c) is None  # external without the override
+    g(c, "config", key, val)
+    why = prune.local_remote_inside_root(c)
+    assert why and "cannot be resolved" in why
+
+
+@pytest.mark.parametrize("var", ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "GIT_PROXY_COMMAND"])
+def test_proxy_environment_keeps_a_network_remote(prune, tmp_path, world, monkeypatch, var):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    g(c, "remote", "add", "web", "https://example.org/o/r.git")
+    monkeypatch.setenv(var, "http://127.0.0.1:3128")
+    assert prune.local_remote_inside_root(c)
+
+
+def test_unrelated_http_config_does_not_keep_a_network_remote(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    g(c, "remote", "add", "web", "https://example.org/o/r.git")
+    g(c, "config", "http.postBuffer", "524288000")
+    assert prune.local_remote_inside_root(c) is None
+
+
+def test_file_url_authority_never_reaches_a_kept_reason(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    url = "file://alice:s3cr3t-token@somehost/repo"
+    assert "s3cr3t-token" not in prune.redact(url) and "alice" not in prune.redact(url)
+    g(c, "remote", "add", "fx", url)
+    why = prune.local_remote_inside_root(c)
+    assert why and "cannot be resolved" in why and "s3cr3t-token" not in why
+    ok, reason = prune.safe(c)
+    assert not ok and "s3cr3t-token" not in reason

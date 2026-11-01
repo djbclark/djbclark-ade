@@ -154,10 +154,17 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
    go, for real. Remove an arbitrary one with `cow-pasture remove <name>`, or
    `cow remove -y --force <project>/<name>` (the full project/name form; plain
    `cow remove` exits 0 having removed nothing on a bad name — `ls` after).
-   A pasture is removable when it has no unpushed commits (`git log @{u}..HEAD`
-   empty) and no uncommitted or untracked file that matters: an untracked file
-   that is generated (graft's `opencode.json` MCP config, `bin/graft/.cache`)
-   does not block it, and anything else is copied to `~/.local/state/` first
+   A pasture has its own independent `.git`, so HEAD being pushed is not
+   enough: it is removable only when ALL of these hold in the pasture
+   (`git log @{u}..HEAD` alone misses the rest): `git log --oneline --all --not
+   --remotes` is empty (every branch, tag and detached HEAD), `git rev-list
+   --reflog --not --remotes` is empty, `git stash list` is empty, `git
+   worktree list` lists only itself, no ref points at a blob or tree
+   (`git for-each-ref --format='%(objecttype) %(*objecttype) %(refname)'`),
+   and no uncommitted or untracked file matters: an untracked file that is
+   generated (graft's `opencode.json` MCP config, `bin/graft/.cache`) does not
+   block it, and anything else, or any pasture failing a check above, is
+   copied (or `tar`red) to `~/.local/state/` first
    (2026-10-31: 6 merged pastures removed this way; a stray third-party
    `SKILL.md` was archived, not lost). Run it only while `load-watch admit`
    says ok: removal is short but still churn.
@@ -230,7 +237,9 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   `.git` entry or a bare repository), and every commit named by a root pseudo-ref in the git dir
   (`ORIG_HEAD`, `FETCH_HEAD`, `REBASE_HEAD`, ...) must be on a remote too (a linked worktree: or on
   a branch or tag), because `reset` and an expired reflog leave those as the only reference.
-  A linked worktree's HEAD reflog is read on both sides of every entry (a commit may survive only
+  A clone with a ref (tag or other) pointing at a blob or tree is kept. An http(s), ftp or git remote is
+  "another machine" only when no proxy or address override applies (`http.curloptResolve`, `http.proxy`,
+  `remote.X.proxy`, `core.gitProxy`, `*_PROXY`, `GIT_PROXY_COMMAND`). A linked worktree's HEAD reflog is read on both sides of every entry (a commit may survive only
   as an old id). An ssh remote is only "another machine" when git's ssh is plain ssh: a
   `core.sshCommand`, `GIT_SSH` or `GIT_SSH_COMMAND` override, or a `ProxyCommand`/`ProxyJump` in
   the ssh config, keeps the checkout. Kept reasons name the remote and print its URL without
