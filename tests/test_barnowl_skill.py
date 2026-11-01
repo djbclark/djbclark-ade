@@ -53,7 +53,8 @@ class Env:
             #!/usr/bin/env bash
             case "$1" in
               has-session) exit 0 ;;
-              display-message) echo "${FAKE_WIDTH:-140}" ;;
+              list-panes) echo "%1 ${FAKE_PANE_CMD:-barnowl}" ;;
+              display-message) echo "${FAKE_ACTIVE:-1} 1 ${FAKE_ATTACHED:-1} ${FAKE_WIDTH:-140}" ;;
               capture-pane) cat "$FAKE_SCREEN" ;;
               send-keys)
                 shift; printf '%s\\n' "$*" >>"$FAKE_KEYS"
@@ -288,6 +289,20 @@ class ConfirmationGate(unittest.TestCase):
                 e.taint()
                 self.assertEqual(e.run(BO, "run", hidden, answer="y").returncode, 2, repr(hidden))
                 self.assertEqual(e.typed(), [])
+
+    def test_no_question_is_typed_where_a_human_cannot_see_it(self) -> None:
+        for env in ({"FAKE_ACTIVE": "0"}, {"FAKE_ATTACHED": "0"}):
+            with Env() as e:
+                e.taint()
+                self.assertEqual(e.run(BO, "run", "zwrite eve -m hi", answer="y", extra=env).returncode, 4, env)
+                self.assertEqual(e.typed(), [], env)
+
+    def test_keys_go_only_to_a_pane_that_runs_barnowl(self) -> None:
+        with Env() as e:  # the session's current window is the operator's shell
+            p = e.run(BO, "run", "getvar x", extra={"FAKE_PANE_CMD": "bash"})
+            self.assertEqual(p.returncode, 1)
+            self.assertEqual(e.typed(), [])
+            self.assertEqual(e.run(BO, "screen", extra={"FAKE_PANE_CMD": "bash"}).returncode, 1)
 
     def test_a_read_only_word_is_not_a_prefix_that_unlocks_other_commands(self) -> None:
         with Env() as e:

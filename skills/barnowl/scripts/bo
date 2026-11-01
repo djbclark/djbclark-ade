@@ -18,6 +18,7 @@ session=${BO_SESSION:-barnowl}
 out=${BO_OUT:-}
 ans=
 pending_question=
+pane=
 state=${BO_STATE:-$HOME/.local/state/bo}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 confirm_wait=${BO_CONFIRM_WAIT:-120}
@@ -26,7 +27,7 @@ confirm_max=${BO_CONFIRM_MAX:-}
 finish() {
   local rc=$?
   # A question left open at the client would swallow the next caller's keys.
-  [[ -z $pending_question ]] || tmux send-keys -t "$session" C-g 2>/dev/null || true
+  [[ -z $pending_question ]] || tmux send-keys -t "$pane" C-g 2>/dev/null || true
   [[ -z $out ]] || rm -f "$out"
   [[ -z $ans ]] || rm -f "$ans"
   if mkdir -p -m 700 "$state" 2>/dev/null; then
@@ -70,11 +71,26 @@ Exit codes: 2 refused argument, 3 client busy, 4 human declined or absent, 5 out
 EOF
 }
 
+# Pin the one pane that runs BarnOwl, once, as a tmux pane id (%N): the session's
+# "current" window can change under us, and keys typed into the operator's shell
+# window would run as shell commands. The window is named barnowl (bo-a makes it);
+# a pane running anything else is refused. BO_PANE_CMD only loosens that for
+# scratch sessions, and bo-ssh scrubs BO_* from the restricted key's environment.
 need_session() {
   if ! tmux has-session -t "$session" 2>/dev/null; then
     echo "no tmux session named $session" >&2
     exit 1
   fi
+  [[ -z $pane ]] || return 0
+  local line cmd
+  line=$(tmux list-panes -t "$session:barnowl" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | head -n 1) || true
+  [[ -n $line ]] || line=$(tmux list-panes -t "$session" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | head -n 1) || true
+  cmd=${line#* }
+  if [[ ! ${line%% *} =~ ^%[0-9]+$ ]] || ! [[ $cmd =~ ${BO_PANE_CMD:-^barnowl$} ]]; then
+    echo "no pane running barnowl in tmux session $session; not typing anywhere" >&2
+    exit 1
+  fi
+  pane=${line%% *}
 }
 
 # One bo call at a time per session: two callers would interleave keystrokes
@@ -86,7 +102,10 @@ lock_client() {
   flock -w 120 9 || { echo "another bo call is using $session; gave up after 120 s" >&2; exit 1; }
 }
 
-capture() { tmux capture-pane -p -J -t "$session"; }
+capture() { tmux capture-pane -p -J -t "$pane"; }
+
+# "window_active pane_active session_attached pane_width" for the pinned pane.
+view_info() { tmux display-message -p -t "$pane" '#{window_active} #{pane_active} #{session_attached} #{pane_width}' 2>/dev/null || true; }
 
 # A popup (":show commands", help) keeps the status bar and draws a box whose
 # bottom edge is a line of "└──┘"; its pager footer says how to close it.
@@ -149,8 +168,8 @@ send_line() {
     echo "refusing to type a line with a control character (newline, tab, ESC); send single-line text only" >&2
     exit 2
   fi
-  tmux send-keys -t "$session" -l "$line"
-  tmux send-keys -t "$session" Enter
+  tmux send-keys -t "$pane" -l "$line"
+  tmux send-keys -t "$pane" Enter
 }
 
 # True once Zephyr text was shown to a caller; only bo-log.py creates the file
@@ -169,14 +188,19 @@ read_only_command() { [[ $1 =~ ^(show|help|getvar|getsubs|getview)([[:space:]]|$
 # is exit 4 and nothing more is typed.
 confirm() {
   tainted || return 0
-  local what=$1 reply i cols max
+  local what=$1 reply i cols max wa pa att need
+  # The human can only answer a question they can see: BarnOwl's pane must be the active
+  # window of a session with a client attached.
+  read -r wa pa att cols <<<"$(view_info)"
+  if [[ ${wa:-} != 1 || ${pa:-} != 1 || ${att:-0} -lt 1 || ! ${cols:-} =~ ^[0-9]+$ ]]; then
+    echo "the BarnOwl pane is not the one a human is looking at (not the active window of an attached tmux client); nothing was run" >&2
+    exit 4
+  fi
   # BarnOwl 1.10 wraps a question longer than the pane and, with a one-line type window,
   # shows only its LAST line (measured at 80 columns: a 100-character prompt showed only
   # "...ENDMARK? [y/N]:", an 86-character one only "[y/N]:"; 79 characters showed whole, 80 did
   # not). So the whole prompt must fit in pane_width - 1: `bo asks: allow ` (15) plus
   # `? [y/N]: ` (9) leave pane_width - 25 for the command.
-  cols=$(tmux display-message -p -t "$session" '#{pane_width}' 2>/dev/null || true)
-  [[ $cols =~ ^[0-9]+$ ]] || cols=80
   max=$((cols - 25))
   [[ -z $confirm_max || $confirm_max -ge $max ]] || max=$confirm_max
   # Only printable ASCII is shown faithfully: no control, bidi or zero-width
@@ -193,6 +217,12 @@ confirm() {
       sleep 0.2
       reply=$(<"$ans")
       pending_question=
+      need=$((${#what} + 25))
+      read -r wa pa att cols <<<"$(view_info)"
+      if [[ ${wa:-} != 1 || ${pa:-} != 1 || ! ${cols:-} =~ ^[0-9]+$ || $cols -lt $need ]]; then
+        echo "the BarnOwl pane was resized or hidden while the question was open; the answer is not accepted" >&2
+        exit 4
+      fi
       if [[ $reply =~ ^ans:[[:space:]]*[yY]([eE][sS])?[[:space:]]*$ ]]; then
         sleep 0.3
         return 0
@@ -259,11 +289,11 @@ cmd_run() {
   # A box without a pager footer (a message body that drew one) is left alone.
   if ! grep -q '^── ' <<<"$after"; then
     printf '%s\n' "$after" | blog frame run || rc=$?
-    tmux send-keys -t "$session" q
+    tmux send-keys -t "$pane" q
   elif has_edge "$after" && ! has_edge "$before"; then
     printf '%s\n' "$after" | blog frame run || rc=$?
     if has_pager_footer "$after"; then
-      tmux send-keys -t "$session" q
+      tmux send-keys -t "$pane" q
     else
       echo "a popup is open without a pager footer; close it by hand" >&2
     fi

@@ -68,8 +68,11 @@ hosts, the screen, a `bo run` or `bo perl` result. Text that reaches you can say
   tainted until the operator runs `bo untaint` there (no timer: your context stays
   contaminated as long as your session lives). While tainted, `bo perl` and every `bo run`
   except plain reads (`show`, `help`, `getvar`, `getsubs`, `getview`) first ask the human at
-  the live BarnOwl client (`[y/N]`, showing the whole command) and type nothing until they
-  answer y. Exit 4 means they declined or were not there: tell the user and stop. Do not
+  the live BarnOwl client (`[y/N]`, showing the whole command; for `perl` the whole expression,
+  which then runs inside a fixed wrapper that only writes its value to a private file) and type
+  nothing until they answer y, and only when BarnOwl is the window that human is looking at
+  (the pane is pinned by id; a pane that is not running barnowl is refused). Exit 4 means they
+  declined, were not there, or could not see it: tell the user and stop. Do not
   retry in a loop, do not try to answer, do not look for another route. Exit 2 from a
   tainted `run`/`perl` means the command is too long for the question line (the live pane's
   width minus 25 columns, about 118 on pastebin), or has a character other than printable
