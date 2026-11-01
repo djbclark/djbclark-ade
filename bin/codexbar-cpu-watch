@@ -145,11 +145,14 @@ def view(r):
 def sample():
     a = read_ps()
     t0 = time.monotonic()
-    pids = tree(a)
+    first = tree(a)
     time.sleep(WINDOW_S)
     b = read_ps()
     dt = time.monotonic() - t0
-    pids |= tree(b)
+    # A process is identified by (pid, start time), not by pid: one counts when it is in the second read's tree, or
+    # was in the first read's tree and is the SAME process now (same start). A pid of the first tree that a new,
+    # unrelated process reused is neither, so its CPU is never attributed to the target.
+    pids = tree(b) | {p for p in first if p in b and a[p].get("start") == b[p].get("start")}
     rows = []
     for p in pids:
         if p not in b:

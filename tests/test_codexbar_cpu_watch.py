@@ -274,3 +274,24 @@ def test_install_changes_nothing_when_the_plist_cannot_be_built(cbw, tmp_path, m
     rc, calls, dest, _, _ = _install(cbw, tmp_path, monkeypatch, "ade")
     assert rc == 2 and not calls and not dest.exists()  # the old job was never booted out
     assert "nothing changed" in capsys.readouterr().err
+
+
+def test_a_reused_pid_outside_the_tree_is_not_counted(cbw, monkeypatch):
+    """A CodexBar child exits and an unrelated process takes its pid: its CPU is not CodexBar's (no false spike)."""
+    root = {"pid": 1, "ppid": 0, "rss_mb": 1, "cpu_s": 0.0, "start": "Sun Nov  1 09:00:00 2026",
+            "cmd": "/A/CodexBar.app/Contents/MacOS/CodexBar"}
+    first = {1: root, 7: {"pid": 7, "ppid": 1, "rss_mb": 1, "cpu_s": 1.0, "start": "Sun Nov  1 09:00:05 2026", "cmd": "node probe.js"}}
+    second = {1: root, 7: {"pid": 7, "ppid": 300, "rss_mb": 1, "cpu_s": 1.5, "start": "Sun Nov  1 12:00:00 2026", "cmd": "/usr/bin/unrelated"},
+              300: {"pid": 300, "ppid": 0, "rss_mb": 1, "cpu_s": 0.0, "start": "Sun Nov  1 08:00:00 2026", "cmd": "/usr/bin/zsh"}}
+    rec = _window(cbw, monkeypatch, first, second)
+    assert rec["total_pct"] == 0.0 and not rec["spike"] and [t["pid"] for t in rec["top"]] == [1]
+
+
+def test_a_child_reparented_away_from_the_tree_still_counts(cbw, monkeypatch):
+    """The same process (same pid and start) that left the tree because its parent exited is still counted."""
+    root = {"pid": 1, "ppid": 0, "rss_mb": 1, "cpu_s": 0.0, "start": "Sun Nov  1 09:00:00 2026",
+            "cmd": "/A/CodexBar.app/Contents/MacOS/CodexBar"}
+    child = {"pid": 7, "ppid": 1, "rss_mb": 1, "cpu_s": 1.0, "start": "Sun Nov  1 09:00:05 2026", "cmd": "node probe.js"}
+    orphan = dict(child, ppid=999, cpu_s=1.6)
+    rec = _window(cbw, monkeypatch, {1: root, 7: child}, {1: root, 7: orphan})
+    assert rec["total_pct"] == pytest.approx(20.0)
