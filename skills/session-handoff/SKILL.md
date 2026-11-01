@@ -142,8 +142,13 @@ it, reports the owner status in its resume plan and asks nothing.
    row's `sid`, `paseo`, `id` or herdr `pane`; or the row's `id` (8+ chars) is a prefix of S; or S (8+ chars; shorter
    free text such as `solo` never matches by containment) occurs inside the row's `sid` or `transcript`
    path (herdr omp rows carry a jsonl path). A match on a herdr pane id (`wN:pM`, reused after a pane
-   closes) also needs the row's `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to
-   codex, otherwise any); a row of another agent is not the owner and is read as no match. Also read
+   closes, even by the same provider) is weak: as ANOTHER session's owner it counts (a spurious question
+   is the safe direction), but as YOU it never does. A pane-only match to your own caller row is read as
+   no match, so exemption A does not fire on it (a new occupant of the pane would otherwise adopt a chain
+   whose live successor has not yet checkpointed); only your own `then: /baton` line (C1), the watch role
+   (C2) or a full-id match (`sid`, `paseo`, transcript) makes the chain yours. It also needs the row's
+   `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
+   another agent is not the owner and is read as no match. Also read
    `bin/watch status --json`: a `holder.target` that equals or is a prefix of S, or equals the matched
    row's full `paseo` id (S may be only the row's 8-character `id`), with `alive: true`, is a live owner
    even when the fleet row says `closed` (a closed Paseo watch holder is resumable by the next message).
