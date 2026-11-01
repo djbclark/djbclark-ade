@@ -226,6 +226,7 @@ agent what changed and what is new. Entries end with the pull request number.
 - `herdr-tidy`: Orca host mode (`--host orca`, `/orca-tidy`) (#2).
 
 ### Changed
+- The outer `timeout` of the six Claude hooks wrapped in `bin/hook-deadline` goes from 5 s to 20 s in `agents/claude/settings.json.tmpl` (2026-11-01, djbclark: permanent): at load 30-50 starting the wrapper alone outlasted 5 s, so Claude Code killed it first and printed "timed out after 5s" for `prior_art_nudge` and `quota_nudge` on every prompt. The timeout is only a backstop, so a 20 s ceiling adds no load; `tests/test_hook_deadline_timeouts.py` requires at least 15 s and above each inner deadline (#218).
 - Raised the load rules for this 16 GB, 8-core Mac (2026-11-01, djbclark: 3.5 per core "is actually not too bad"): `load-watch admit`'s calm-churn boost default 2.0 -> 4.0 per core (`ADMIT_BOOST_PER_CORE`, `--boost-per-core`) and the watcher's sustained-load alert `LW_LOAD_PER_CORE` 2.0 -> 4.0; churn limits (25000 boost, 60000 max) and `LW_MIN_CORES` unchanged; docs quote `bg`'s base as 2.5 (changed in site-private); `skills/bigteam` caps a lead at two test-running slices at once, after five parallel pytest runs reached load 222 on 2026-10-31 (#200).
 - djbclark-ade `master` is PR-only (2026-10-31, djbclark): GitHub branch protection, enforced for admins, refuses a direct push, force push or deletion; AGENTS.md "Machine context" says so. Also merged the unbuilt "model tiers as data" design as `docs/model-tiers-design.md`, queued to build after D1 (#188).
 
