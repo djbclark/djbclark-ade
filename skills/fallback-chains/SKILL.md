@@ -26,7 +26,7 @@ Before answering a fallback question, or after changing any chain:
 
 The web access chain has its own snapshot, `references/web-access.md`, with its own change list (its section 7). `scripts/check.py` does not cover it.
 
-A chain change means any of: Hermes `model`, `fallback_providers`, `auxiliary`, `cron`, or `moa`; a cron job pin; LiteLLM `router_settings.fallbacks`; `herdr-ai`'s default-model fallback; `acp-run`'s transport fallback; enabling or disabling `ai-model-switch`.
+A chain change means any of: Hermes `model`, `fallback_providers`, `auxiliary`, `cron`, or `moa`; a cron job pin; LiteLLM `router_settings.fallbacks`; `acp-run`'s transport fallback; enabling or disabling `ai-model-switch`.
 
 ## Quick reference
 
@@ -35,7 +35,7 @@ Re-read these. Extract provider, model, effort, and thinking only. Do not copy s
 1. `~/.hermes/config.yaml` — `model`, `fallback_providers`, `agent.reasoning_effort`, `auxiliary`, `cron`, `moa`.
 2. `~/.hermes/cron/jobs.json` — agent jobs: `provider`, `model`, `no_agent`, enabled. A pinned job does not walk `fallback_providers` (`cron/scheduler.py`).
 3. `~/.litellm/config.yaml` — `router_settings.fallbacks` and any per-hop `reasoning_effort`.
-4. `~/src/djbclark-ade/bin/herdr-ai` — `fallbacks` / `ask_model`. Default model only; an explicit model does not fall back.
+4. (`bin/herdr-ai`: retired from djbclark-ade 2026-10-31; nothing to read here.)
 5. `~/src/djbclark-ade/tools/acp-run/acp-run` — `fallback_cli`. Transport retry, not a model chain. `--no-fallback` disables it.
 6. `launchctl list | rg 'ai-model-switch|litellm'` — the switcher is a chain only if its plist is loaded. A `.disabled` plist is dormant. As of 2026-10-10 the script also refuses to write `model` or `fallback_providers`.
 7. `python3 ~/src/djbclark-ade/skills/fallback-chains/scripts/check.py` — query command. Exit 0 is clean. Exit 1 is a cycle, a same-vendor pair, MoA on with a missing preset, or a second writer.
@@ -51,7 +51,7 @@ Six live layers, not one system. The dated tables are in `references/inventory.m
 2. Hermes cron: unpinned agent jobs walk the fleet default then `fallback_providers`; a pin does not.
 3. Side routes: compression pin, MoA (configured, not the request path), unpinned `delegate_task`.
 4. LiteLLM `router_settings.fallbacks`, its own chains.
-5. `herdr-ai` default-model fallback, which then walks the matching LiteLLM chain.
+5. (`herdr-ai`'s default-model fallback: retired with `bin/herdr-ai` from djbclark-ade 2026-10-31; no longer a chain.)
 6. `acp-run` Claude transport fallback only.
 
 `route_agent.py` scores which agent to dispatch. It is not a failure chain.

@@ -52,7 +52,16 @@ Steps, in order:
    checkout (symlink state), not of upstream, and is not evaluated at the upstream revision.
 4. The CHANGELOG.md entries new since the revision recorded in the state file (parsed from
    `git show <rev>:CHANGELOG.md` at both revisions; an entry moved under a release heading is not
-   new), or every Unreleased entry when nothing is recorded. Then the new HEAD is written to the
+   new), or every Unreleased entry when nothing is recorded; plus the entries of `changelog.d/` fragments
+   (2026-10-31, parsed by the `changelog-fold` beside this script) present at the target and not at the
+   base, shown under "Unreleased (changelog.d) / ...", so an unfolded fragment loses nothing; an entry whose
+   text is already in either CHANGELOG.md or the base's fragments shows once, whichever place it is in. A
+   fragment that has sat on the target for more than 14 days prints a warning (the lead folds, AGENTS.md
+   code review rule 10; informational, no exit code). The parser is the `changelog-fold` beside this script, never
+   one inside a non-canonical --repo (not executed, `--check` included), and it is loaded after the repository is
+   validated. The state record is `<sha> fragments-v1` when the run listed fragments: a record without the marker
+   (written by the updater before fragments, or by hand) counts no fragment as already shown, so an install
+   upgraded by the old updater still gets its fragments once. Then the new HEAD is written to the
    state file (temp file beside, `os.replace`), unless a skill link stayed unresolved.
 
 Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (a link skill-everywhere leaves alone included, on the first run), CLAUDE.md or
@@ -174,6 +183,81 @@ def changelog_at(repo, rev):
     return out if rc == 0 else None
 
 
+FRAGMENT_DIR = "changelog.d"
+STALE_FRAGMENT_DAYS = 14
+STATE_MARK = "fragments-v1"  # second word of the state record: this run listed changelog.d fragments (the old updater never did)
+
+
+def load_fold(repo):
+    """(module, why): the changelog-fold beside the running ade-update (code already being executed, like the
+    skill-everywhere helper), compiled from source (no .pyc beside the script). (None, reason) when that sibling is
+    missing, does not load (a syntax error, a half-written file after a pull), or sits inside a NON-canonical
+    --repo: a checkout under inspection (a pasture, a second clone, an untrusted PR branch) never gets code
+    executed from it, `--check` included (Codex P1 on 3bd729f); the update then goes on without fragments."""
+    cand = Path(__file__).resolve().parent / "changelog-fold"
+    if not cand.is_file():
+        return None, "no changelog-fold beside this ade-update"
+    home = Path(repo).resolve()
+    if home != canonical_repo() and cand.resolve().is_relative_to(home):
+        return None, f"the changelog-fold beside this ade-update is inside {home}, which is not the canonical checkout; not executed"
+    try:
+        import types
+        mod = types.ModuleType("changelog_fold")
+        mod.__file__ = str(cand)
+        exec(compile(cand.read_text(encoding="utf-8"), str(cand), "exec"), mod.__dict__)
+    except Exception as e:  # noqa: BLE001 - any failure of the sibling must not abort the update
+        return None, f"changelog-fold beside this ade-update does not load ({type(e).__name__}: {str(e)[:80]})"
+    return mod, ""
+
+
+def fragment_files_at(repo, rev):
+    """[name] of the changelog.d/*.md fragments in the tree at `rev` (README.md and dotfiles are not fragments)."""
+    # -z: without it git quotes a name holding a newline, a quote or a non-ASCII byte ("a\\nb.md"), and the quoted
+    # text is no path; NUL-separated names are exact (Codex P2 on 05beee8).
+    rc, out, _ = git(repo, "ls-tree", "-z", "--name-only", rev, f"{FRAGMENT_DIR}/")
+    if rc != 0:
+        return []
+    names = [Path(f).name for f in out.split("\0") if f]
+    return sorted(n for n in names if n.endswith(".md") and n != "README.md" and not n.startswith("."))
+
+
+def fragment_entries_at(repo, rev, fold):
+    """[(heading, entry text)] of every valid fragment at `rev`; an unreadable or invalid one is skipped here
+    (changelog-fold --check is what refuses it)."""
+    entries = []
+    for name in fragment_files_at(repo, rev):
+        rc, text, _ = git(repo, "show", f"{rev}:{FRAGMENT_DIR}/{name}")
+        if rc != 0:
+            continue
+        sections, problems = fold.parse_fragment_text(name, text.lstrip("\ufeff"))
+        if problems:
+            continue
+        for heading, group in sections.items():
+            entries += [(f"Unreleased (changelog.d) / {heading}", fold.entry_body(e)) for e in group]
+    return entries
+
+
+def fragment_delta(old_frags, new_frags, old_text, new_text):
+    """Fragment entries at the target that are neither fragment entries at the base nor CHANGELOG.md entries at
+    either revision: an entry folded between the two revisions shows once, through CHANGELOG.md."""
+    seen = {t for _, t in old_frags} | {t for _, t in parse_changelog(old_text or "")} | {t for _, t in parse_changelog(new_text or "")}
+    return [(h, t) for h, t in new_frags if t not in seen]
+
+
+def stale_fragments(repo, rev, days=STALE_FRAGMENT_DAYS, now=None):
+    """[(name, age in days)] of the fragments at `rev` whose adding commit is more than `days` old."""
+    import time
+    now = time.time() if now is None else now
+    stale = []
+    for name in fragment_files_at(repo, rev):
+        rc, out, _ = git(repo, "log", "--diff-filter=A", "--format=%ct", "-1", rev, "--", f"{FRAGMENT_DIR}/{name}")
+        if rc == 0 and out.strip().isdigit():
+            age = (now - int(out.strip())) / 86400
+            if age > days:
+                stale.append((name, int(age)))
+    return stale
+
+
 def changelog_delta(old_text, new_text):
     """Entries in new_text whose text is not in old_text (old_text None: every entry in Unreleased)."""
     new = parse_changelog(new_text or "")
@@ -185,27 +269,33 @@ def changelog_delta(old_text, new_text):
 
 # --- state file ---------------------------------------------------------------------------
 
-def read_state(path, repo):
-    """The recorded commit, or None: absent, unreadable, malformed or unknown to this repo all mean none."""
+def read_state_record(path, repo):
+    """(commit, marked): the recorded commit, or None (absent, unreadable, malformed or unknown to this repo all
+    mean none), and whether the record carries STATE_MARK, i.e. the run that wrote it listed changelog.d fragments."""
     try:
         words = Path(path).read_text(errors="replace").split()
     except (OSError, ValueError):
-        return None
+        return None, False
     sha = words[0].lower() if words else ""
     if not SHA_RE.match(sha):
-        return None
+        return None, False
     rc, _, _ = git(repo, "cat-file", "-e", f"{sha}^{{commit}}")
-    return sha if rc == 0 else None
+    return (sha, STATE_MARK in words[1:]) if rc == 0 else (None, False)
 
 
-def write_state(path, sha):
+def read_state(path, repo):
+    """The recorded commit, or None."""
+    return read_state_record(path, repo)[0]
+
+
+def write_state(path, sha, fragments=False):
     """Temp file beside, fsync, os.replace: a reader sees the old record or the new one, never half."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(sha + "\n")
+            f.write(sha + (f" {STATE_MARK}" if fragments else "") + "\n")
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -490,6 +580,9 @@ def update(rep, args, repo):
     if rc != 0 or Path(top.strip()).resolve() != Path(repo).resolve():
         raise Stop(EXIT_ERROR, f"{repo} is not the top of a git work tree"
                    + (f" (it is inside {top.strip()})" if rc == 0 and top.strip() else ""))
+    # After the repository is validated and before the pull: the code that runs is the code that was here when the
+    # run started, never one just fetched.
+    fold, fold_why = load_fold(repo)
     head = git_out(repo, "rev-parse", "HEAD")
     branch = git_out(repo, "rev-parse", "--abbrev-ref", "HEAD")
     rc, upstream, _ = git(repo, "rev-parse", "--abbrev-ref", "@{u}")
@@ -653,14 +746,27 @@ def update(rep, args, repo):
         rep.say("  report-only: not the canonical checkout, so they are not counted and carry no fix (rows in --json)")
 
     # 4. changelog and state
-    base = read_state(state_path, repo)
+    base, marked = read_state_record(state_path, repo)
     new_text = changelog_at(repo, target)
     old_text = changelog_at(repo, base) if base else None
     entries = changelog_delta(old_text, new_text) if new_text is not None else []
-    d["changelog"] = {"since": base, "to": target, "entries": [{"section": h, "text": t} for h, t in entries]}
+    stale = []
+    if fold is not None:
+        new_frags = fragment_entries_at(repo, target, fold)
+        # A record without the marker was written by an updater that never listed fragments (the one before this
+        # change, or a hand-made file): the fragments at its revision were not shown, so none counts as seen.
+        old_frags = fragment_entries_at(repo, base, fold) if base and marked else []
+        # An entry that was a fragment at the base and is in CHANGELOG.md at the target was folded, not new: it was
+        # shown when the fragment was (otherwise the fold would re-announce it to every machine that saw it).
+        shown = {t for _, t in old_frags}
+        entries = [(h, t) for h, t in entries if t not in shown]
+        entries += fragment_delta(old_frags, new_frags, old_text, new_text)
+        stale = stale_fragments(repo, target)
+    d["changelog"] = {"since": base, "to": target, "entries": [{"section": h, "text": t} for h, t in entries],
+                    "stale_fragments": [{"name": n, "age_days": a} for n, a in stale]}
     if new_text is None:
         rep.say(f"changelog: no CHANGELOG.md at {short(target)}")
-    elif base == target:
+    elif base == target and (marked or fold is None):
         rep.say(f"changelog: already at the recorded revision {short(base)}; nothing new")
     else:
         since = f"new since {short(base)}" if base else "all Unreleased, no revision recorded"
@@ -671,21 +777,27 @@ def update(rep, args, repo):
                 rep.say(f"  {h}")
                 last = h
             rep.say(wrap_entry(t))
+    if fold is None:
+        rep.say(f"changelog: changelog.d fragments not listed ({fold_why})")
+    if stale:
+        rep.say(f"changelog: {len(stale)} fragment(s) on {short(target)} older than {STALE_FRAGMENT_DAYS} days, not yet folded: "
+                + ", ".join(f"{n} ({a}d)" for n, a in stale) + " (the lead folds them: bin/changelog-fold in a fresh worktree, via a PR)")
 
     unresolved_links = bool(d["skills"]["unresolved"]) or (script is None and not no_helper)
     state_note = f"state file {state_path}"
     if check:
-        rep.say(f"{state_note}: would record {short(target)}" if base != target else f"{state_note}: already {short(base)}")
+        rep.say(f"{state_note}: would record {short(target)}" if base != target or (fold is not None and not marked)
+                else f"{state_note}: already {short(base)}")
         d["state_written"] = False
     elif unresolved_links:
         rep.say(f"{state_note}: NOT updated (skill links unresolved; the changelog is shown again next run)")
         d["state_written"] = False
-    elif base == new_head:
+    elif base == new_head and (marked or fold is None):
         rep.say(f"{state_note}: already {short(base)}")
         d["state_written"] = False
     else:
         try:
-            write_state(state_path, new_head)
+            write_state(state_path, new_head, fragments=fold is not None)
         except OSError as e:
             d["state_written"] = False
             raise Stop(EXIT_ERROR, f"cannot write the state file {state_path}: {e}")

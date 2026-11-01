@@ -54,7 +54,7 @@ def test_admit_hot_with_wait_zero_is_a_pure_check(tmp_path):
 def test_admit_default_limit_is_one_and_a_half_per_core(tmp_path):
     assert admit(tmp_path, load1=CORES * 1.4).returncode == 0
     assert admit(tmp_path, load1=CORES * 1.6).returncode == 75
-    # bg's number, not the blame step's 2.0: a load that the blame step ignores is still too hot to start in
+    # the base alone, not the watcher's blame step: a faked load without a measured churn never boosts
     assert admit(tmp_path, load1=CORES * 1.9).returncode == 75
 
 
@@ -206,14 +206,21 @@ def test_admit_waits_out_a_churn_spike(tmp_path):
 
 
 def test_calm_boost_raises_the_limit_while_churn_is_low(tmp_path):
-    """2026-10-25: load 1.5-2.0 per core is admitted while the compressor is calm; the default base stays 1.5."""
+    """2026-11-01: load up to 4.0 per core (was 2.0 since 2026-10-25) is admitted while the compressor is calm; the default base stays 1.5."""
     calm = {"LW_FAKE_CHURN": "10000"}
     assert admit(tmp_path, load1=CORES * 1.9, **calm).returncode == 0
     rec = json.loads(admit(tmp_path, "--json", load1=CORES * 1.9, **calm).stdout)
-    assert rec["status"] == "ok" and rec["max_per_core"] == 2.0
-    assert admit(tmp_path, load1=CORES * 2.1, **calm).returncode == 75  # still above the boosted limit
-    # a caller that passes the base explicitly (bg does) still gets the boost
-    assert admit(tmp_path, "--max-per-core", "1.5", load1=CORES * 1.9, **calm).returncode == 0
+    assert rec["status"] == "ok" and rec["max_per_core"] == 4.0
+    assert admit(tmp_path, load1=CORES * 4.1, **calm).returncode == 75  # still above the boosted limit
+    # a caller that passes the base explicitly (bg does, 2.5 since 2026-11-01) still gets the boost
+    assert admit(tmp_path, "--max-per-core", "2.5", load1=CORES * 3.9, **calm).returncode == 0
+
+
+def test_admit_allows_3_9_per_core_at_low_churn_and_refuses_it_at_high_churn(tmp_path):
+    """2026-11-01: 3.9 per core is fine for this machine while the compressor is calm, not once it churns."""
+    assert admit(tmp_path, load1=CORES * 3.9, LW_FAKE_CHURN="10000").returncode == 0
+    assert admit(tmp_path, load1=CORES * 3.9, LW_FAKE_CHURN="30000").returncode == 75   # above the 25000 boost line
+    assert admit(tmp_path, load1=CORES * 3.9, LW_FAKE_CHURN="70000").returncode == 75   # above the 60000 hot line
 
 
 def test_calm_boost_off_when_churn_is_high_unreadable_or_disabled(tmp_path):
@@ -228,6 +235,6 @@ def test_calm_boost_off_when_churn_is_high_unreadable_or_disabled(tmp_path):
 
 def test_admit_limit_unit():
     lw = load_module()
-    assert lw.admit_limit(1.5, 20000) == 2.0 and lw.admit_limit(1.5, 25000) == 2.0
+    assert lw.admit_limit(1.5, 20000) == 4.0 and lw.admit_limit(1.5, 25000) == 4.0
     assert lw.admit_limit(1.5, 25001) == 1.5 and lw.admit_limit(1.5, None) == 1.5
-    assert lw.admit_limit(1.5, 0, boost=0) == 1.5 and lw.admit_limit(3.0, 0, boost=2.0) == 3.0
+    assert lw.admit_limit(1.5, 0, boost=0) == 1.5 and lw.admit_limit(5.0, 0, boost=4.0) == 5.0
