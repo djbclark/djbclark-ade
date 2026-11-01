@@ -2,7 +2,7 @@
 """Find which live Claude Code session is working on a topic.
 
     session-find.py ccc slowness            # rank live sessions by keyword match
-    session-find.py --all ccc               # include ended sessions (for /baton or a resume)
+    session-find.py --all ccc               # also ended sessions of every agent (full-text history; for /baton or a resume)
     session-find.py --json ccc              # machine-readable
     session-find.py --list                  # every live session, no query
     session-find.py --reindex               # rebuild every index from scratch
@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -25,10 +26,11 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nativeid import native_id  # noqa: E402
 import where as _where  # noqa: E402
 
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
-INDEX_DIR = Path.home() / ".local/state/session-index"
+INDEX_DIR = Path(os.environ.get("SESSION_INDEX_DIR") or Path.home() / ".local/state/session-index").expanduser().resolve()
 HANDOFFS = Path.home() / ".local/state/handoffs"
 MAX_PROMPTS = 60
 SNIPPET = 220
@@ -164,7 +166,7 @@ def handoff_hits(kws: list[str]) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("keywords", nargs="*")
-    ap.add_argument("--all", action="store_true", help="also search ended sessions already indexed")
+    ap.add_argument("--all", action="store_true", help="also search ended sessions of every agent (full-text history, session-history.py)")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--reindex", action="store_true")
@@ -194,6 +196,7 @@ def main() -> int:
         rows.append({"where": loc, "name": d.get("name"), "pid": d.get("pid"), "sessionId": sid, "status": d.get("status"),
                      "cwd": d.get("cwd"), "titles": ix["titles"], "score": s, "match": why,
                      "live": True, "self": sid == me, "agent": "claude", "finished": fin})
+    exited_ids = set()
     # every other TUI's running sessions (fleet.py): matched on title, name and cwd only; use
     # session-history.py for their full text
     try:
@@ -201,6 +204,8 @@ def main() -> int:
         for s in fleet.sessions():
             if s["agent"] == "claude" or s.get("host") == "hermes-gw" and not kws:
                 continue
+            if s.get("finished") or s.get("ended") or (s.get("launch") or {}).get("result") is not None:
+                exited_ids.add(native_id(s.get("sid") or s["id"]))  # an exited ACP launch stays in the fleet until it is archived
             head = " ".join([s.get("title", ""), s.get("name", ""), s.get("cwd", ""), s.get("agent", "")]).lower()
             sc = sum(50 for k in kws if k in head)
             rows.append({"where": {"where": s["where"], "focus": s["focus"]} if s.get("where") else None, "name": s.get("name") or s["id"],
@@ -209,15 +214,43 @@ def main() -> int:
                          "live": True, "self": s.get("self", False), "agent": s["agent"], "finished": s.get("finished", "")})
     except Exception as e:  # fleet is optional here
         print(f"fleet unavailable: {e}", file=sys.stderr)
-    if a.all:
-        for f in INDEX_DIR.glob("*.json"):
-            sid = f.stem
-            if sid in seen:
+    history_failed = False
+    if a.all and kws:
+        # ended sessions of every agent from the full-text history (session-history.py's SQLite
+        # index, which it brings up to date first); the older per-session JSON keyword index
+        # covered only the ~160 Claude sessions that had once been live while this script ran
+        # only a genuinely running session is dropped from the history hits: an exited launch still in the fleet
+        # keeps its row and takes the history hit's score and snippet (its title may not hold the keyword)
+        # (ids compared as the history adapters report them: an omp fleet row's id is a transcript path)
+        nid = native_id
+        live_ids = {nid(r["sessionId"]) for r in rows if nid(r["sessionId"]) not in exited_ids}
+        exited = {nid(r["sessionId"]): r for r in rows if nid(r["sessionId"]) in exited_ids}
+        try:
+            r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
+                                "--limit", "80", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
+            # the `--` matters: without it a keyword such as --rebuild is an option of the child (it deletes the index)
+            if r.returncode not in (0, 1):
+                raise ValueError(f"session-history.py exit {r.returncode}: {r.stderr.strip()[-300:]}")
+            found = json.loads(r.stdout) if r.stdout.strip() else []
+            if not isinstance(found, list):
+                raise ValueError("unexpected JSON from session-history.py")
+        except (subprocess.SubprocessError, ValueError) as e:
+            print(f"history search failed: {e}", file=sys.stderr)
+            history_failed = True
+            found = []
+        # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
+        found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
+        for i, h in enumerate(f for f in found if f["sessionId"] not in live_ids and not f.get("live")):
+            row = exited.get(h["sessionId"])
+            if row:
+                row["score"] = max(row["score"], max(1, 40 - i))
+                row["match"] = h.get("snippet") or row["match"]  # why it matched, not the fleet's delivery hint
+                row["resume"] = h.get("resume", "")
                 continue
-            ix = json.loads(f.read_text())
-            s, why = score(ix, kws, "", "")
-            rows.append({"name": None, "pid": None, "sessionId": sid, "status": "ended", "cwd": None,
-                         "titles": ix["titles"], "score": s, "match": why, "live": False, "self": False})
+            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,
+                         "titles": [h["title"]] if h.get("title") else [], "score": max(1, 40 - i), "match": h.get("snippet", ""),
+                         "live": False, "self": False, "agent": h.get("agent", ""), "finished": "",
+                         "where": None, "resume": h.get("resume", "")})
 
     if a.list:
         hits = rows
@@ -238,9 +271,12 @@ def main() -> int:
                 print(f"       where: {r['where']['where']}" + (f"   focus: {r['where']['focus']}" if r["where"]["focus"] else ""))
             if r["match"]:
                 print(f"       prompt: {r['match']}")
+            if r.get("resume"):
+                print(f"       resume: {r['resume']}")
         if kws and not hits:
             print("no live-session hit; handoff files:", handoff_hits(kws) or "none")
-    return 0 if hits else 1
+    # 1 means "searched, nothing found": a history search that could not run must not look like that
+    return 0 if hits else 2 if history_failed else 1
 
 
 if __name__ == "__main__":
