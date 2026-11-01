@@ -20,6 +20,7 @@ LIVE = "d2a505dd-8c93-4ba5-8684-e98a3865a1ae"
 
 
 def load(monkeypatch, tmp_path, registry: dict | None = None):
+    monkeypatch.delenv("RW_AUTO_SEAT", raising=False)
     loader = importlib.machinery.SourceFileLoader("rumination_watch", str(BIN / "rumination-watch"))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     rw = importlib.util.module_from_spec(spec)
@@ -1040,3 +1041,93 @@ def test_a_real_pass_deploys_first_and_a_dry_run_never_does(monkeypatch, tmp_pat
 
     assert rw._pass(quiet_pass(rw)) == 0
     assert len(calls) == 1, "a real pass must run the deploy exactly once, before anything else"
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_watcher_environment(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    for key in list(os.environ):
+        if key.startswith("RW_") or key == "PASEO_AGENT_ID":
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("RW_NO_DEPLOY", "1")
+    real = subprocess.run
+    def guarded(argv, *args, **kwargs):
+        command = list(argv) if not isinstance(argv, str) else [argv]
+        if command[:3] == ["env", "-u", "PASEO_AGENT_ID"]:
+            command = command[3:]
+        git_read = {"rev-parse", "cat-file", "merge-base", "log", "status"}
+        git_cwd = Path(command[command.index("-C") + 1]).resolve() if "-C" in command else Path.cwd()
+        fixture_git = git_cwd.is_relative_to(tmp_path)
+        allowed = command and ((command[0] == "git" and
+                    (fixture_git or (command[3] if command[1:2] == ["-C"] else command[1]) in git_read)) or
+                  (Path(command[0]).name.startswith("python") and "-c" in command))
+        import shutil
+        executable = shutil.which(command[0]) if command else None
+        local_fixture = executable and Path(executable).resolve().is_relative_to(tmp_path)
+        python_fixture = (command and Path(command[0]).name.startswith("python") and
+                          any(Path(arg).is_absolute() and Path(arg).resolve().is_relative_to(tmp_path)
+                              for arg in command[1:]))
+        allowed = allowed or local_fixture or python_fixture
+        if not allowed:
+            raise AssertionError(f"unexpected external launcher: {command}")
+        return real(argv, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", guarded)
+
+
+def test_relay_timeout_after_acceptance_is_unverified(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "owner_session", lambda: (LIVE, "registry"))
+    accepted = []
+    def timeout(argv, **kwargs):
+        accepted.append(argv)
+        raise rw.subprocess.TimeoutExpired(argv, kwargs["timeout"], output=b"accepted")
+    monkeypatch.setattr(rw.subprocess, "run", timeout)
+    assert rw.to_session("paid prompt") == "unverified"
+    assert len(accepted) == 1
+
+
+def test_target_loader_disables_inherited_auto_seat(monkeypatch, tmp_path):
+    monkeypatch.setenv("RW_AUTO_SEAT", "1")
+    rw = load(monkeypatch, tmp_path)
+    assert not rw.AUTO_SEAT
+
+
+def test_timed_out_send_is_not_retried_next_pass(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "STATE", rw.STATE_DIR / "state.json")
+    monkeypatch.setattr(rw, "owner_session", lambda: (LIVE, "registry"))
+    monkeypatch.setattr(rw, "why_blocked", lambda ident: ("idle", "ok"))
+    monkeypatch.setattr(rw, "survey", lambda: {"mail": ["new"], "jobs": [], "prs": [], "stale": None})
+    monkeypatch.setattr(rw, "to_djbclark", lambda text: True)
+    accepted = []
+    def timeout(argv, **kwargs):
+        accepted.append(argv)
+        raise rw.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+    monkeypatch.setattr(rw.subprocess, "run", timeout)
+    rw._pass(quiet_pass(rw))
+    rw._pass(quiet_pass(rw))
+    assert len(accepted) == 1
+    assert rw.load_state()["pending"] == []
+
+
+def test_fixture_keeps_deploy_safety_and_blocks_real_checkout_mutation(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    import pytest
+    assert os.environ["RW_NO_DEPLOY"] == "1"
+    with pytest.raises(AssertionError, match="unexpected external launcher"):
+        subprocess.run(["git", "-C", str(BIN.parent), "fetch", "origin"])
+
+
+def test_explicit_relay_report_with_rc124_is_not_timeout(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path)
+    fake_relay(tmp_path)
+    monkeypatch.setattr(rw, "owner_session", lambda: (LIVE, "registry"))
+    monkeypatch.setattr(rw, "run_split", lambda argv, timeout=20:
+                        (124, json.dumps({"id": LIVE, "result": "delivered"}), ""))
+    assert rw.to_session("line") == "delivered"
