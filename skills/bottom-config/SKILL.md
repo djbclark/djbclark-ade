@@ -83,3 +83,8 @@ To follow upstream: `git fetch upstream && git rebase upstream/main` in `~/src/b
 `ProcWidgetData::to_cell_text` (`process_data.rs`); option read in `src/options.rs`.
 Under 7 columns it falls back to the stock end-cut. Sorting and search still use the full
 command; only the drawn cell changes.
+
+Second fork change (`make_column` and `toggle_command` in `src/widgets/process_table.rs`): the
+Command column has no width cap (stock: 30% of the table, 50% after `P`). It takes whatever the
+columns before it leave, so put `command` LAST in `[processes] columns`; fewer narrow columns
+means a wider command. Stock `btm` still caps it and spreads the spare width evenly.
