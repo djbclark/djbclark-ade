@@ -1279,3 +1279,13 @@ def test_fragment_names_with_a_space_a_newline_or_non_ascii_are_read_exactly(env
     for w in names.values():
         assert f"{w} fragment" in r.stdout, r.stdout
     assert "4 entries" in r.stdout  # CHANGELOG's "Second thing" plus the three fragments
+
+
+def test_loading_changelog_fold_writes_no_bytecode_and_ignores_a_stale_cache(env):  # Codex P2 on 450a4ba, bin/ade-update:202-205 [INFERENCE: finding file absent]
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    env.publish({"changelog.d/feat-b.md": FRAG_B})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Fragment thing B (#12)." in r.stdout
+    assert not (env.bin / "__pycache__").exists()

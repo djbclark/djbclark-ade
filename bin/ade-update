@@ -197,12 +197,12 @@ def load_fold():
             _FOLD_WHY.append("no changelog-fold beside this ade-update")
         else:
             try:
-                import importlib.machinery
-                import importlib.util
-                loader = importlib.machinery.SourceFileLoader("changelog_fold", str(cand))
-                spec = importlib.util.spec_from_loader("changelog_fold", loader)
-                mod = importlib.util.module_from_spec(spec)
-                loader.exec_module(mod)
+                # Compile and exec the source: SourceFileLoader would write a .pyc beside the script (into bin/ of the
+                # checkout being updated) and trust a cached one; neither belongs in an update run.
+                import types
+                mod = types.ModuleType("changelog_fold")
+                mod.__file__ = str(cand)
+                exec(compile(cand.read_text(encoding="utf-8"), str(cand), "exec"), mod.__dict__)
             except Exception as e:  # noqa: BLE001 - any failure of the sibling must not abort the update
                 mod = None
                 _FOLD_WHY.append(f"changelog-fold beside this ade-update does not load ({type(e).__name__}: {str(e)[:80]})")
@@ -567,6 +567,7 @@ def update(rep, args, repo):
     d, check = rep.d, args.check
     state_path = os.path.expanduser(args.state)
 
+    load_fold()  # before the pull: the code that is running is the code that was here when the run started, never one just fetched
     # 1. the repo
     if git(repo, "rev-parse", "--git-dir")[0] != 0:
         raise Stop(EXIT_ERROR, f"{repo} is not a git checkout")
