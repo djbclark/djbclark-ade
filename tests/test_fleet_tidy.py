@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the safe-close pieces of session-finder/fleet.py, helm/helm.py and herdr-tidy/tidy.py.
+"""Tests for the safe-close pieces of session-finder/fleet.py and helm/helm.py (the herdr-tidy skill was retired from djbclark-ade 2026-10-31; fleet.py still reads its close ledger).
 
 Everything that touches herdr, ps, transcripts or the sleeper journal is stubbed at the module
 boundary, so these run without herdr and never read the live journal or ledger.
@@ -7,7 +7,6 @@ boundary, so these run without herdr and never read the live journal or ledger.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import tempfile
 import time
@@ -18,11 +17,9 @@ from typing import ClassVar
 ROOT = Path(__file__).resolve().parent.parent / "skills"
 sys.path.insert(0, str(ROOT / "session-finder"))
 sys.path.insert(0, str(ROOT / "helm"))
-sys.path.insert(0, str(ROOT / "herdr-tidy"))
 
 import fleet
 import helm
-import tidy
 
 
 class Patched(unittest.TestCase):
@@ -305,150 +302,6 @@ class TestHelm(unittest.TestCase):
                 "unlock": 8, "pane": "w1:p1", "why": "finished with /handoff", "resume": "cd /r && claude --resume s", "mb": 1.2}
         self.assertIn("CLOSED BY herdr-tidy", helm.render({**base, "kind": "closed"}))
         self.assertIn("SLEEPING PANE GONE", helm.render({**base, "kind": "sleeping", "id": "sleep:1"}))
-
-
-class TestTidyScreens(unittest.TestCase):
-    def test_claude_composer_states(self):
-        self.assertEqual(tidy.claude_composer(["x", "❯ ", "  ⏵⏵ bypass"]), ("empty", ""))
-        self.assertEqual(tidy.claude_composer(["x", "❯ close the two panes", "  ⏵⏵"]), ("draft", "close the two panes"))
-        self.assertEqual(tidy.claude_composer(["✻ Churned for 1d", "※ recap: …"]), ("unknown", ""))
-        self.assertEqual(tidy.claude_composer(['❯ Try "fix typecheck errors"', "  ⏵⏵"]), ("empty", ""))
-
-    def test_shell_prompt(self):
-        self.assertTrue(tidy.SHELL_PROMPT.search("djbclark@mac:~/src/stayturgid$"))
-        self.assertTrue(tidy.SHELL_PROMPT.search("djbclark@mac:~$ "))
-        self.assertFalse(tidy.SHELL_PROMPT.search("djbclark@mac:~/src/herdr$ claude"))
-
-    def test_tui_waiting(self):
-        self.assertTrue(tidy.TUI_WAITING.search("Question 1 of 1"))
-        self.assertTrue(tidy.TUI_WAITING.search("Resume? [y/N]"))
-        self.assertFalse(tidy.TUI_WAITING.search("done in 3s"))
-
-
-class TestTidyClassify(Patched):
-    """classify() with herdr, ps and the transcript stubbed at the fleet/tidy boundary."""
-
-    def pane(self, pid, **kw):
-        return {"pane_id": pid, "tab_id": pid.replace("p", "t"), "workspace_id": pid.split(":")[0], "label": kw.pop("label", ""),
-                "focused": kw.pop("focused", False), "agent": kw.pop("agent", None), **kw}
-
-    def setUp(self):
-        super().setUp()
-        self.procs = {}
-        self.screens = {}
-        self.tabs = {}
-        self.patch(fleet, "pane_procs", lambda pane: self.procs.get(pane, ([], 1)))
-        self.patch(fleet, "herdr_label", lambda kind, ident: self.tabs.get(ident, "x-t#1"))
-        self.patch(fleet, "background_work", lambda pid, table=None: [])
-        self.patch(fleet, "transcript", lambda sid: Path("/tx") if sid else None)
-        self.patch(tidy, "screen", lambda pane, lines=60: self.screens.get(pane, []))
-        self.patch(tidy, "chain_for", lambda cwd: "/chains/x/SESSION_LOG.md")
-        self.tx = {"size": 1200000, "finished": "", "asks": False, "last_text": "done.", "last_prompt": "x"}
-        self.patch(fleet, "parse", lambda path: dict(self.tx))
-
-    def classify(self, p, sess=None, journal=None, claims=None):
-        return tidy.classify(p, sess or {}, journal or {}, claims or [], {})
-
-    def test_focused_and_protected_panes_are_never_closed(self):
-        self.assertEqual(self.classify(self.pane("w1:p1", focused=True))["verdict"], "never")
-        self.tabs["w1:t2"] = "helm-relay-t#1"
-        it = self.classify(self.pane("w1:p2"))
-        self.assertEqual((it["cls"], it["verdict"]), ("orchestrator", "never"))
-        self.tabs["w1:t3"] = "coord#4"
-        self.assertEqual(self.classify(self.pane("w1:p3"))["verdict"], "never")
-
-    def test_live_claim_protects(self):
-        claims = [{"task": "sleeper-restore-flags", "session": "claude f821e18a (herdr w2E:p1 helm-relay)"}]
-        it = self.classify(self.pane("w2E:p1"), claims=claims)
-        self.assertEqual((it["cls"], it["verdict"]), ("claimed", "never"))
-
-    def test_popup_is_by_process_not_label(self):
-        self.procs["w3:p1"] = ([{"pid": 5, "name": "collie", "argv0": "collie", "argv": ["collie"], "cwd": ""}], 1)
-        self.assertEqual(self.classify(self.pane("w3:p1"))["cls"], "popup")
-        self.procs["w3:p2"] = ([{"pid": 6, "name": "bash", "argv0": "bash", "argv": ["-bash"], "cwd": ""}], 6)
-        self.screens["w3:p2"] = ["djbclark@mac:~$"]
-        self.assertEqual(self.classify(self.pane("w3:p2", label="collie-doctor-p"))["cls"], "shell")
-
-    def test_sleeping_stub_needs_a_replayable_journal_entry(self):
-        stub = [{"pid": 9, "name": "Python", "argv0": "Python", "argv": ["/x/Python", "/y/herdr-sleeper", "stub", "w4:p1", "u", "/s"], "cwd": ""}]
-        self.procs["w4:p1"] = (stub, 1)
-        self.screens["w4:p1"] = ["💤 slept", "  press Enter to resume (ctrl-c leaves a plain shell)"]
-        entry = {"uuid": "u-1", "kind": "claude", "phase": "asleep", "cwd": "/w", "argv": ["--dangerously-skip-permissions"], "title": "T"}
-        it = self.classify(self.pane("w4:p1", agent="sleeper"), journal={"w4:p1": entry})
-        self.assertEqual((it["cls"], it["verdict"]), ("sleeping", "close"))
-        self.assertEqual(it["resume"], "cd /w && claude --dangerously-skip-permissions --resume u-1")
-        self.assertEqual(it["journal"], entry)
-        self.assertEqual(self.classify(self.pane("w4:p1", agent="sleeper"))["verdict"], "leave")
-        self.assertEqual(self.classify(self.pane("w4:p1", agent="sleeper"), journal={"w4:p1": {**entry, "phase": "waking"}})["verdict"], "leave")
-        self.assertEqual(self.classify(self.pane("w4:p1", agent="sleeper"), journal={"w4:p1": {**entry, "kind": "devin"}})["verdict"], "leave")
-
-    def claude(self, pid, status="idle", screen_rows=("❯ ", "  ⏵⏵ bypass"), **kw):
-        self.screens[pid] = list(screen_rows)
-        return {pid: {"agent": "claude", "status": status, "sid": "s-1", "cwd": "/w", "transcript": "/tx", "title": "T",
-                      "chan": ("herdr", pid), "argv": ["--dangerously-skip-permissions"], **kw}}
-
-    def test_claude_states(self):
-        p = self.pane("w5:p1", agent="claude")
-        self.assertEqual(self.classify(p, self.claude("w5:p1"))["verdict"], "handoff-then-close")
-        self.assertEqual(self.classify(p, self.claude("w5:p1", status="working"))["verdict"], "leave")
-        it = self.classify(p, self.claude("w5:p1", status="busy-background", busy=["12 bash -c sleep"]))
-        self.assertEqual(it["verdict"], "leave")
-        self.assertIn("in flight", it["reason"])
-        self.assertEqual(self.classify(p, self.claude("w5:p1", status="blocked"))["verdict"], "leave")
-        it = self.classify(p, self.claude("w5:p1", screen_rows=("❯ /quit", "  ⏵⏵")))
-        self.assertEqual(it["verdict"], "leave")
-        self.assertIn("draft", it["reason"])
-        it = self.classify(p, self.claude("w5:p1", screen_rows=("✻ Churned", "※ recap")))
-        self.assertEqual(it["verdict"], "leave")
-        self.assertIn("composer", it["reason"])
-        self.tx["finished"] = "/handoff"
-        it = self.classify(p, self.claude("w5:p1"))
-        self.assertEqual((it["cls"], it["verdict"], it["handoff"]), ("claude-finished", "close", "/chains/x/SESSION_LOG.md"))
-        self.assertEqual(it["resume"], "cd /w && claude --dangerously-skip-permissions --resume s-1")
-        self.tx.update(finished="", asks=True, last_text="Want me to look at the diff?")
-        self.assertEqual(self.classify(p, self.claude("w5:p1"))["cls"], "claude-question")
-        self.tx.update(asks=False, last_text="", last_prompt="")
-        self.assertIn("fresh session", self.classify(p, self.claude("w5:p1"))["reason"])
-
-    def test_other_tuis(self):
-        p = self.pane("w6:p1", agent="cursor")
-        self.screens["w6:p1"] = ["Question 1 of 1", "  › [ ] (Recommended) refresh"]
-        sess = {"w6:p1": {"agent": "cursor", "status": "idle", "sid": "091d", "cwd": "/a", "chan": ("herdr", "w6:p1")}}
-        self.assertEqual(self.classify(p, sess)["verdict"], "leave")
-        self.screens["w6:p1"] = ["done.", "> "]
-        it = self.classify(p, sess)
-        self.assertEqual((it["cls"], it["verdict"], it["resume"]), ("cursor", "close", "cd /a && cursor-agent --resume 091d"))
-        sess["w6:p1"]["sid"] = None
-        self.assertEqual(self.classify(p, sess)["verdict"], "leave")
-        sess["w6:p1"].update(sid="x", agent="devin")
-        self.assertIn("no verified resume", self.classify(p, sess)["reason"])
-        sess["w6:p1"].update(agent="zcode", status="unknown")
-        self.assertIn("cannot tell idle", self.classify(p, sess)["reason"])
-
-    def test_shells(self):
-        bash = [{"pid": 7, "name": "bash", "argv0": "bash", "argv": ["-bash"], "cwd": ""}]
-        self.procs["w7:p1"] = (bash, 7)
-        self.screens["w7:p1"] = ["djbclark@mac:~/src/stayturgid$"]
-        self.assertEqual(self.classify(self.pane("w7:p1"))["verdict"], "close")
-        self.screens["w7:p1"] = ["djbclark@mac:~/src/herdr$ claude"]
-        self.assertIn("not a bare prompt", self.classify(self.pane("w7:p1"))["reason"])
-        self.screens["w7:p1"] = ["djbclark@mac:~$"]
-        self.procs["w7:p1"] = (bash + [{"pid": 8, "name": "vim", "argv0": "vim", "argv": ["vim"], "cwd": ""}], 7)
-        self.assertIn("foreground process", self.classify(self.pane("w7:p1"))["reason"])
-        self.procs["w7:p1"] = (None, None)
-        self.assertIn("could not read", self.classify(self.pane("w7:p1"))["reason"])
-
-
-class TestLedgerWrite(Patched):
-    def test_append_sets_private_modes(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.patch(fleet, "STATE_DIR", Path(tmp.name) / "sf")
-        self.patch(fleet, "CLOSED", Path(tmp.name) / "sf" / "closed.jsonl")
-        tidy.ledger_append({"id": "closed:t", "t": time.time()})
-        self.assertEqual(oct(os.stat(fleet.STATE_DIR).st_mode & 0o777), "0o700")
-        self.assertEqual(oct(os.stat(fleet.CLOSED).st_mode & 0o777), "0o600")
-        self.assertEqual(fleet.closed_ledger()[0]["id"], "closed:t")
-        tmp.cleanup()
 
 
 if __name__ == "__main__":

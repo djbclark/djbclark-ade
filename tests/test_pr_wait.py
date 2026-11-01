@@ -2353,9 +2353,10 @@ def test_d1_a_fenced_block_nested_in_an_invalid_outer_candidate_is_still_a_block
             + '} -->\n' + FENCE3 + "\n")
     r = adv(body)
     assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
-    assert not r["malformed"], r
+    # Round-6 fail-closed recovery retains the invalid outer candidate diagnostic.
+    assert r["malformed"], r
     ready, warnings = gate(body)
-    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+    assert not ready and warnings == ["adversary-malformed"], warnings
 
 
 def test_d1_quote_parity_across_the_scan_cannot_swallow_a_block() -> None:
