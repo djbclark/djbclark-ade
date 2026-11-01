@@ -123,12 +123,14 @@ Raise the cap when memory has headroom (the other gates still hold); lower it wh
 with the cap not yet reached. The count is one `ps`, an exact argv match of the process running the script named `acp-run`
 (never `pgrep -f`; `uv run --script` wrappers and mentions do not count).
 **Reservations:** an admission under the cap is recorded in `~/.local/state/load-watch/agent-reservations.json` (under an
-flock, the live `acp-run` count re-read inside the lock) and counted with the live agents for `LW_RESERVE_S` (90 s; 0 = off), so
-dispatchers that read 13 of 14 at the same moment cannot all be admitted. There is no release, so a launch counts twice for up
-to 90 s (toward waiting); `--no-reserve` makes a human's `admit --max-agents` a pure check. acp-dispatch validates the knobs once
-(a churn or pageins limit of 0 is ignored with a warning, since admit exits 2 on it) and records them in the job record
-(`load_knobs`), so a `--detach --no-wait` runner under launchd uses the same ones. An `admit` that exits 2 refuses the launch
-(exit 75), never admits it.
+flock, the live `acp-run` count re-read inside the lock) and counted with the live agents until it is **released** or expires, so
+dispatchers that read 13 of 14 at the same moment cannot all be admitted, and a runner queued in `wait_for_capacity` (up to
+900 s) still holds its place. `admit --json` prints the `reservation` id; acp-dispatch runs `load-watch release ID` when its
+agent is spawned (the entry then lives 30 s more, until acp-run shows in `ps`) or when the launch is refused after admission.
+`LW_RESERVE_S` (1200 s, 0 = off) is only the backstop for a dispatcher that died; `--no-reserve` makes a human's
+`admit --max-agents` a pure check. acp-dispatch validates the knobs once (a churn or pageins limit of 0 is ignored with a
+warning, since admit exits 2 on it) and records them in the job record (`load_knobs`), so a `--detach --no-wait` runner under
+launchd uses the same ones. An `admit` that exits 2 refuses the launch (exit 75), never admits it.
 Rates come from two `vm_stat` reads 2 s apart. **A reading that fails where the tool exists** (vm_stat or ps times out,
 exits non-zero, prints nonsense; likeliest exactly when the machine is starving) **refuses**: `refused=memory_unreadable` or
 `agents_unreadable`. Only an absent tool (no `vm_stat` and no `/proc/meminfo`, no `ps`) leaves its gate open, listed in

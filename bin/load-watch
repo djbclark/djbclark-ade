@@ -10,6 +10,7 @@
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
     load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]] [--no-reserve]
+    load-watch release RESERVATION           shorten an agent reservation `admit --max-agents --json` printed (its agent is spawned)
                      [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
@@ -92,7 +93,8 @@ does: a test run starts no agent, and gating it would starve the very sessions t
 machine-wide (one `ps`, exact argv match of the process running the script named acp-run, never pgrep/pkill -f) number
 N or more (bare --max-agents = 14, env LW_MAX_AGENTS, 0 = no cap: THE knob to tune how many acp-run slices may START);
 an admission under the cap is recorded as a reservation (agent-reservations.json, flock) counted with the live ones for
-LW_RESERVE_S (90) seconds so concurrent dispatchers cannot all pass at 13 of 14 (--no-reserve: a pure check; 0: off). A
+until `load-watch release ID` (acp-dispatch does it at spawn) or LW_RESERVE_S (1200), so concurrent dispatchers cannot all
+pass at 13 of 14 (--no-reserve: a pure check; 0: off). A
 vm_stat or ps that exists but fails, times out or prints nonsense refuses too (`memory_unreadable`, `agents_unreadable`):
 that is likeliest when the machine is starving. Only an absent tool (Linux without vm_stat, no /proc) leaves its gate open,
 listed in `unreadable`. Why, measured 2026-11-01 (load watcher d8891c91):
@@ -1449,11 +1451,14 @@ ADMIT_BOOST_CHURN_PAGES_S = ADMIT_CHURN_PAGES_S
 ADMIT_BOOST_CALM_S = _env_float("LW_BOOST_CALM_S", 600.0)
 # Agent reservations (Codex review of PR 210, 2026-11-01): two dispatchers that both read 13 of 14 live agents and
 # spend 2 s sampling memory would both be admitted before either launches. An admission under the cap is therefore
-# recorded (agent-reservations.json under an flock) and counted with the live acp-run processes for LW_RESERVE_S
-# seconds (default 90; 0 turns reservations off; `--no-reserve` makes one call a pure check). There is no release: a
-# reservation is also counted while the agent it admitted is already alive, so a launch is counted twice for up to
-# 90 s. That errs toward waiting, which is the point of the gate.
-ADMIT_RESERVE_S = _env_float("LW_RESERVE_S", 90.0)
+# recorded (agent-reservations.json under an flock, `{"r": [{"id", "until"}]}`) and counted with the live acp-run
+# processes until it is released or expires. acp-dispatch releases it (`load-watch release ID`) the moment its agent
+# is spawned (the live count takes over; the entry then lives RELEASE_GRACE_S more, covering the seconds before
+# acp-run shows in ps) or the launch is refused; the expiry, LW_RESERVE_S (default 1200: it must outlast the
+# dispatcher's own pre-spawn capacity wait of up to 900 s), is only the backstop for a dispatcher that died.
+# LW_RESERVE_S=0 turns reservations off; `--no-reserve` makes one call a pure check.
+ADMIT_RESERVE_S = _env_float("LW_RESERVE_S", 1200.0)
+RELEASE_GRACE_S = 30.0
 CALM_GAP_S = ADMIT_FRESH_S  # calm.json's last reading older than this: nobody watched in between, the clock restarts
 EX_TEMPFAIL = 75
 
@@ -1686,52 +1691,87 @@ def calm_note(t, calm):
     return since
 
 
-def reservations_active(now_t=None, ttl=None):
-    """Number of unexpired agent reservations (an unlocked read: it only reports; `agent_reserve` decides)."""
-    ttl = ADMIT_RESERVE_S if ttl is None else ttl
-    now_t = now() if now_t is None else now_t
+def _res_read():
     try:
-        ts = json.loads((STATE_DIR / "agent-reservations.json").read_text()).get("t", [])
-        return sum(1 for x in ts if _num(x) and 0 <= now_t - x < ttl) if ttl > 0 else 0
+        r = json.loads((STATE_DIR / "agent-reservations.json").read_text()).get("r", [])
+        return [x for x in r if isinstance(x, dict) and isinstance(x.get("id"), str) and _num(x.get("until"))]
     except (OSError, ValueError, AttributeError):
-        return 0
+        return []
+
+
+def reservations_active(now_t=None):
+    """Number of unexpired agent reservations (an unlocked read: it only reports; `agent_reserve` decides)."""
+    now_t = now() if now_t is None else now_t
+    return sum(1 for x in _res_read() if x["until"] > now_t)
+
+
+def _res_locked(fn):
+    """Run fn() holding the exclusive flock on agent-reservations.lock; None when the lock cannot be taken."""
+    try:
+        import fcntl
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(STATE_DIR / "agent-reservations.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return fn()
+    except (ImportError, OSError):
+        return None
+
+
+def _res_write(rows):
+    tmp = STATE_DIR / f"agent-reservations.json.tmp{os.getpid()}"
+    tmp.write_text(json.dumps({"r": rows}))
+    tmp.replace(STATE_DIR / "agent-reservations.json")
 
 
 def agent_reserve(cap, live, ttl):
-    """Atomically admit one more agent: under an flock, count the live acp-run processes (`live`, re-read by the
-    caller inside the lock via a callable, or a number) plus the unexpired reservations; at or above `cap` it refuses,
-    else it records a reservation. Returns None when reserved, else the refusal name (`agents` or
-    `agents_unreadable` when ps fails, `agents_reserve_failed` when the state cannot be written: fail toward waiting)."""
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        lock = open(STATE_DIR / "agent-reservations.lock", "a")
-    except OSError:
-        return "agents_reserve_failed"
-    with lock:
-        try:
-            import fcntl
-            fcntl.flock(lock, fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            return "agents_reserve_failed"
+    """Atomically admit one more agent: under an flock, count the live acp-run processes (`live`: a number, or a
+    callable re-read inside the lock) plus the unexpired reservations; at or above `cap` it refuses, else it records
+    a reservation. Returns (None, id) when reserved, else (refusal name, None): `agents`, `agents_unreadable` when ps
+    fails, `agents_reserve_failed` when the state cannot be written or locked (fail toward waiting)."""
+    def work():
         try:
             n = live() if callable(live) else live
         except ReadFailed:
-            return "agents_unreadable"
+            return "agents_unreadable", None
         t = now()
-        try:
-            old = json.loads((STATE_DIR / "agent-reservations.json").read_text()).get("t", [])
-        except (OSError, ValueError, AttributeError):
-            old = []
-        keep = [x for x in old if _num(x) and 0 <= t - x < ttl]
+        keep = [x for x in _res_read() if x["until"] > t]
         if (n or 0) + len(keep) >= cap:
-            return "agents"
+            return "agents", None
+        rid = f"{os.getpid()}-{int(t * 1000)}-{random.randrange(1 << 32):08x}"
         try:
-            tmp = STATE_DIR / f"agent-reservations.json.tmp{os.getpid()}"
-            tmp.write_text(json.dumps({"t": keep + [t]}))
-            tmp.replace(STATE_DIR / "agent-reservations.json")
+            _res_write(keep + [{"id": rid, "until": t + ttl}])
         except OSError:
-            return "agents_reserve_failed"
-    return None
+            return "agents_reserve_failed", None
+        return None, rid
+
+    out = _res_locked(work)
+    return out if out is not None else ("agents_reserve_failed", None)
+
+
+def release_reservation(rid):
+    """Shorten reservation `rid` to RELEASE_GRACE_S from now (its agent is spawned, or the launch was refused): the live
+    count takes over, and the grace covers the seconds before acp-run shows in ps. True when it was found."""
+    def work():
+        t = now()
+        rows, hit = [], False
+        for x in _res_read():
+            if x["id"] == rid:
+                hit, x = True, {"id": rid, "until": min(x["until"], t + RELEASE_GRACE_S)}
+            if x["until"] > t:
+                rows.append(x)
+        try:
+            _res_write(rows)
+        except OSError:
+            return False
+        return hit
+
+    return bool(_res_locked(work))
+
+
+def cmd_release(a):
+    ok = release_reservation(a.id)
+    print(f"released {a.id}" if ok else f"no reservation {a.id}")
+    return 0 if ok else 1
 
 
 def admit_refusals(per_core, limit, m, lim):
@@ -1778,6 +1818,8 @@ def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None):
         rec["agents"] = m["agents"]
         if m.get("reserved"):
             rec["reserved"] = m["reserved"]
+    if m.get("reservation") and not refused:
+        rec["reservation"] = m["reservation"]
     rec["max_agents"] = lim["max_agents"]
     cap_on = bool(lim["max_agents"])
     unreadable = [name for k, name in (("churn", "memory"), ("agents", "agents"))
@@ -1909,10 +1951,12 @@ def cmd_admit(a):
         refused = admit_refusals(per_core, limit, m, lim)
         if not refused and reserve_on:
             live = m["agents"] if (fake or fake_churn or any(fake_mem.values())) else count_agents
-            why = agent_reserve(lim["max_agents"], live, ADMIT_RESERVE_S)
+            why, rid = agent_reserve(lim["max_agents"], live, ADMIT_RESERVE_S)
             if why:
                 m["extra"] = [why]
                 refused = admit_refusals(per_core, limit, m, lim)
+            else:
+                m["reservation"] = rid
         if not refused or waited >= a.wait:
             break
         if waited >= next_note:
@@ -1972,6 +2016,8 @@ def main():
     p.add_argument("dir", nargs="?")
     p.add_argument("mode", nargs="?", choices=MODES)
     p.add_argument("text", nargs="?", metavar="CMD_OR_REASON")
+    p = sub.add_parser("release")
+    p.add_argument("id", metavar="RESERVATION", help="the `reservation` id an `admit --max-agents --json` printed")
     p = sub.add_parser("admit")
     p.add_argument("--max-per-core", type=float, default=ADMIT_PER_CORE, metavar="N",
                    help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g})")
@@ -2015,7 +2061,7 @@ def main():
         ap.print_usage(sys.stderr)
         return 2
     return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
-            "guard": cmd_guard, "watcher": cmd_watcher, "admit": cmd_admit, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+            "guard": cmd_guard, "watcher": cmd_watcher, "admit": cmd_admit, "release": cmd_release, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 
 if __name__ == "__main__":

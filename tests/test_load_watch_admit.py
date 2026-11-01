@@ -682,22 +682,40 @@ def test_concurrent_admissions_cannot_all_pass_under_the_cap(tmp_path):
     outs = [(p.communicate(timeout=30)[0], p.returncode) for p in procs]
     assert sorted(rc for _, rc in outs) == [0, 75, 75, 75, 75, 75], outs
     assert all(json.loads(o)["refused"] == ["agents"] for o, rc in outs if rc == 75)
-    assert len(json.loads((tmp_path / "state" / "agent-reservations.json").read_text())["t"]) == 1
+    assert len(json.loads((tmp_path / "state" / "agent-reservations.json").read_text())["r"]) == 1
+    assert sum("reservation" in json.loads(o) for o, rc in outs if rc == 0) == 1
 
 
-def test_reservations_count_with_live_agents_expire_and_can_be_skipped(tmp_path):
+def res_rows(tmp_path):
+    return json.loads((tmp_path / "state" / "agent-reservations.json").read_text())["r"]
+
+
+def test_reservations_count_with_live_agents_expire_release_and_can_be_skipped(tmp_path):
     f = tmp_path / "state" / "agent-reservations.json"
-    res = dict(LW_RESERVE_S="90", LW_FAKE_AGENTS="12")
-    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 0   # 12 + 0 < 14, reserves
-    r = admit(tmp_path, "--wait", "0", "--max-agents", "14", "--json", load1=0.1, **res)             # 12 + 1 < 14
-    assert r.returncode == 0, r.stdout
-    r = admit(tmp_path, "--wait", "0", "--max-agents", "14", "--json", load1=0.1, **res)             # 12 + 2 >= 14
+    res = dict(LW_RESERVE_S="1200", LW_FAKE_AGENTS="12")
+    first = admit(tmp_path, "--wait", "0", "--max-agents", "14", "--json", load1=0.1, **res)          # 12 + 0 < 14, reserves
+    assert first.returncode == 0 and json.loads(first.stdout)["reservation"]
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 0     # 12 + 1 < 14
+    r = admit(tmp_path, "--wait", "0", "--max-agents", "14", "--json", load1=0.1, **res)               # 12 + 2 >= 14
     rec = json.loads(r.stdout)
-    assert r.returncode == 75 and rec["refused"] == ["agents"] and rec["reserved"] == 2, rec
-    # a reservation older than LW_RESERVE_S no longer counts
-    f.write_text(json.dumps({"t": [time.time() - 100, time.time() - 95]}))
+    assert r.returncode == 75 and rec["refused"] == ["agents"] and rec["reserved"] == 2 and "reservation" not in rec, rec
+    # a reservation survives a long pre-spawn wait: still counted 10 minutes later (Codex P2: the old TTL was 90 s)
+    rows = res_rows(tmp_path)
+    f.write_text(json.dumps({"r": [{**x, "until": time.time() + 600} for x in rows]}))
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 75
+    # releasing one (its agent is spawned) shortens it to a grace period; once that is over it no longer counts
+    lwr = subprocess.run([sys.executable, str(LW), "release", rows[0]["id"]], capture_output=True, text=True,
+                         env=dict(os.environ, LW_STATE_DIR=str(tmp_path / "state")))
+    assert lwr.returncode == 0 and "released" in lwr.stdout, lwr
+    held = {x["id"]: x["until"] for x in res_rows(tmp_path)}
+    assert held[rows[0]["id"]] < time.time() + 31 and len(held) == 2
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 75   # grace still counts
+    f.write_text(json.dumps({"r": [{**x, "until": time.time() - 1} for x in rows]}))                 # expired: pruned on reserve
     assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 0
-    assert len(json.loads(f.read_text())["t"]) == 1                                                  # and are pruned
+    assert len(res_rows(tmp_path)) == 1
+    unknown = subprocess.run([sys.executable, str(LW), "release", "nope"], capture_output=True, text=True,
+                             env=dict(os.environ, LW_STATE_DIR=str(tmp_path / "state")))
+    assert unknown.returncode == 1
     # --no-reserve is a pure check: it records nothing; LW_RESERVE_S=0 turns reservations off
     before = f.read_text()
     assert admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1, **res).returncode == 0
@@ -706,26 +724,28 @@ def test_reservations_count_with_live_agents_expire_and_can_be_skipped(tmp_path)
         assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, LW_FAKE_AGENTS="12", LW_RESERVE_S="0").returncode == 0
     assert f.read_text() == before
     # no cap requested (bg): nothing is reserved, however many have been
-    f.write_text(json.dumps({"t": [time.time()] * 30}))
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_RESERVE_S="90", LW_FAKE_AGENTS="1").returncode == 0
-    assert len(json.loads(f.read_text())["t"]) == 30
+    f.write_text(json.dumps({"r": [{"id": "x", "until": time.time() + 600}] * 30}))
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_RESERVE_S="1200", LW_FAKE_AGENTS="1").returncode == 0
+    assert len(res_rows(tmp_path)) == 30
 
 
 def test_the_reservation_recounts_live_agents_inside_the_lock_and_fails_toward_waiting(tmp_path, monkeypatch):
     lw = load_module()
     monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
-    assert lw.agent_reserve(14, lambda: 13, 90) is None        # the count taken under the lock decides, not an earlier one
-    assert lw.agent_reserve(14, lambda: 13, 90) == "agents"
-    assert lw.agent_reserve(14, lambda: 12, 90) is None
+    why, rid = lw.agent_reserve(14, lambda: 13, 90)            # the count taken under the lock decides, not an earlier one
+    assert why is None and rid
+    assert lw.agent_reserve(14, lambda: 13, 90) == ("agents", None)
+    assert lw.agent_reserve(14, lambda: 12, 90)[0] is None
 
     def boom():
         raise lw.ReadFailed("ps timed out")
 
-    assert lw.agent_reserve(99, boom, 90) == "agents_unreadable"
+    assert lw.agent_reserve(99, boom, 90) == ("agents_unreadable", None)
     (tmp_path / "agent-reservations.json").unlink()
     monkeypatch.setattr(lw, "STATE_DIR", tmp_path / "file")
     (tmp_path / "file").write_text("x")                           # the state dir cannot be created
-    assert lw.agent_reserve(14, 0, 90) == "agents_reserve_failed"
+    assert lw.agent_reserve(14, 0, 90) == ("agents_reserve_failed", None)
+    assert lw.release_reservation("x") is False
 
 
 def test_a_hot_reading_resets_the_calm_clock_even_when_the_caller_disables_the_boost(tmp_path):

@@ -148,6 +148,29 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents=5 --min-free-mb=800.0"])
         self.assertEqual(Path(str(self.lw_args) + ".env").read_text().splitlines(), ["LW_BOOST_CALM_S=300"])
 
+    def test_the_reservation_is_released_when_the_agent_spawns(self):
+        """Codex P2 on PR 210: a reservation must outlive the pre-spawn wait, so it is held until released at the spawn."""
+        ok = '{"status": "ok", "load1": 2.4, "per_core": 0.3, "cores": 8, "max_per_core": 1.5, "waited_s": 1, "reservation": "r-1"}'
+        r = self.dispatch("--no-model-check", env=self.gate_env(0, ok))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents", "release r-1"])
+        self.assertEqual(self.record()["load_gate"]["reservation"], "r-1")
+
+    def test_release_uses_this_processes_admission_else_the_one_in_the_record(self):
+        mod = self.load_module()
+        calls = []
+        orig = mod.subprocess.run
+        mod.subprocess.run = lambda argv, **kw: calls.append(list(argv)[1:]) or subprocess.CompletedProcess(argv, 0, "", "")
+        try:
+            mod._LOAD_RESERVATION.update(id="r-2", path="/x/load-watch")
+            mod.release_load_reservation()
+            mod._LOAD_RESERVATION.clear()
+            mod.release_load_reservation({"load_gate": {"reservation": "r-3"}, "load_watch": "/y/load-watch"})
+            mod.release_load_reservation({"load_gate": {"state": "pending"}})      # nothing to release
+        finally:
+            mod.subprocess.run = orig
+        self.assertEqual(calls, [["release", "r-2"], ["release", "r-3"]])
+
     def test_a_refusal_names_the_gate_that_said_no(self):
         hot = ('{"status": "hot", "load1": 4.0, "per_core": 0.5, "cores": 8, "max_per_core": 1.5, "waited_s": 5, '
                '"refused": ["agents"], "agents": 14, "max_agents": 14}')
@@ -550,6 +573,21 @@ class TestPendingRunnersHoldTheCap(LoadGate):
                           env=self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="codex=1", **extra))
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         return str(self.out / "jobs" / "s1.json")
+
+    def test_runner_releases_its_reservation_when_the_cap_filled_during_the_wait(self):
+        ok = '{"status": "ok", "load1": 2.4, "per_core": 0.3, "cores": 8, "max_per_core": 1.5, "waited_s": 1, "reservation": "r-4"}'
+        path = self.deferred()
+        self.plant("started-meanwhile", started=time.time())
+        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, ok, ACP_DISPATCH_INFLIGHT="")})
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertEqual(self.calls()[-1], "release r-4")
+
+    def test_a_detached_runner_releases_its_reservation_at_the_spawn(self):
+        ok = '{"status": "ok", "load1": 2.4, "per_core": 0.3, "cores": 8, "max_per_core": 1.5, "waited_s": 1, "reservation": "r-5"}'
+        path = self.deferred()
+        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, ok, ACP_DISPATCH_INFLIGHT="")})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls()[-1], "release r-5")
 
     def test_runner_refuses_when_the_cap_filled_during_the_wait(self):
         path = self.deferred()

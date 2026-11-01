@@ -1217,6 +1217,7 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
                        remaining: float | None = None, estimate: float | None = None,
                        previous: dict | None = None, exit_code: int = UNAVAILABLE_EXIT,
                        extra: dict | None = None) -> int:
+    release_load_reservation()   # nothing starts: the capacity an admission held goes back
     jobs = out / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
@@ -3112,6 +3113,28 @@ def load_gate_knobs() -> tuple[list[str], dict[str, str]]:
     return flags, extra
 
 
+_LOAD_RESERVATION: dict[str, str] = {}   # {"id", "path"}: the agent reservation this process's admission holds
+
+
+def release_load_reservation(rec: dict | None = None) -> None:
+    """Hand the agent reservation `load-watch admit --max-agents` made for this launch back (its agent is spawned and
+    now counts as live, or the launch was refused): `load-watch release ID`. The id is this process's own admission, else
+    the one recorded in the job record's `load_gate` (a separate runner for an inline-admitted dispatch). Best effort:
+    an unreleased reservation only holds capacity until its expiry (LW_RESERVE_S), which errs toward waiting."""
+    rid, path = _LOAD_RESERVATION.pop("id", None), _LOAD_RESERVATION.pop("path", None)
+    if not rid and rec:
+        gate = rec.get("load_gate")
+        rid = gate.get("reservation") if isinstance(gate, dict) else None
+        path = rec.get("load_watch") or str(HERE / "load-watch")
+    if not rid or not path:
+        return
+    try:
+        subprocess.run([path, "release", str(rid)], check=False, capture_output=True, timeout=20,
+                       env={k: v for k, v in os.environ.items() if not k.startswith(LOAD_SCRUB_PREFIX)})
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def load_gate(wait: int, path: str | None = None, knobs: dict | None = None) -> tuple[bool, dict | None, str]:
     """Ask `load-watch admit --wait WAIT --json` whether a slice may start (never throttles anything).
     Returns (admitted, info, why): info is {"load1", "per_core", "waited_s"} when load-watch answered, or
@@ -3142,12 +3165,16 @@ def load_gate(wait: int, path: str | None = None, knobs: dict | None = None) -> 
         info = {"load1": data["load1"], "per_core": data["per_core"], "waited_s": data.get("waited_s", 0)}
         if isinstance(data.get("refused"), list):
             info["refused"] = [str(x) for x in data["refused"]]
+        if isinstance(data.get("reservation"), str) and data["reservation"]:
+            info["reservation"] = data["reservation"]
     except (IndexError, KeyError, TypeError, ValueError):
         info = None
     if proc.returncode == 0:
         if info is None:   # empty, non-JSON or schema-incompatible output (a wrapper that is not load-watch)
             return unknown("load-watch admit exited 0 with output the gate cannot read "
                            f"({proc.stdout.strip()[:80]!r})")
+        if info.get("reservation"):
+            _LOAD_RESERVATION.update(id=info["reservation"], path=path)
         return True, info, "ok"
     if proc.returncode == LOAD_GATE_EXIT:
         if info is None:
@@ -3876,6 +3903,7 @@ def refuse_headroom(record: Path, rec: dict, stale: str, **extra) -> int:
     """Finalize a detached record as unavailable/headroom (exit 5, nothing started): the plenty gate
     stamped at dispatch no longer holds. `finalize` leaves such a record alone."""
     print(f"acp-dispatch: {rec.get('name')}: {stale}", file=sys.stderr)
+    release_load_reservation(rec)
     update_record(record, load_gate_pending=False, status="unavailable", unavailable_class="headroom",
                   detail=stale, exit=UNAVAILABLE_EXIT, finished=time.time(), pid=None, **extra)
     return UNAVAILABLE_EXIT
@@ -3900,6 +3928,7 @@ def runner_load_gate(record: Path) -> int | None:
         full = runner_inflight_recheck(record, rec)
         if full:
             print(f"acp-dispatch: {rec.get('name')}: {full}", file=sys.stderr)
+            release_load_reservation()
             update_record(record, load_gate=info, load_gate_pending=False, status="unavailable",
                           unavailable_class="inflight", detail=full, exit=UNAVAILABLE_EXIT,
                           finished=time.time(), pid=None)
@@ -3933,6 +3962,7 @@ def execute_record(record: Path, tee: bool = False) -> int:
         proc = subprocess.Popen(shlex.split(rec["cmd"]), stdout=subprocess.PIPE if tee else fo,
                                 stderr=fe, stdin=subprocess.DEVNULL, text=tee)
         rec = update_record(record, pid=proc.pid, pid_start=proc_start(proc.pid), load_gate_pending=False)
+        release_load_reservation(rec)   # the live agent count takes over from the reservation
 
         def on_signal(signum, _frame):
             # a shutdown or launchd unloading the job: acp-run cancels the turn and stops the
