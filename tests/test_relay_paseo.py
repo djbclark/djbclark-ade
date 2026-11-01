@@ -619,14 +619,21 @@ class RelayPaseo(unittest.TestCase):
         self.assertEqual((rc, ": delivered;" in out), (0, True), err)
         self.timeline("[User] [relay from claude peer-long-name (d)] ack tok12", "[Thought] x")
         self.assertEqual(relay.timeline_messages(AGENT), [("", "[relay from claude peer-long-name (d)] ack tok12")])
-        self.assertEqual(self.sweep("tok12", "[User] [relay from claude peer-long-name (d)] ack tok12"), (1, "acked"))    # a non-Paseo peer's header names it
-        self.assertEqual(self.sweep("tok13", "[User] ack tok13 from peer-long-name"), (0, "open"))    # no header, no title: nothing says who
 
     def expectation(self, token: str, **kw: Any) -> None:
         relay.atomic_json(relay.expect_dir() / f"{token}.json", {
             "id": token, "state": "open", "created": time.time(), "acked": None, "within": 1800, "sender": "cccccccc", "sender_sid": "",
-            "sender_label": "me", "tx": None, "sender_paseo": CALLER, "mark": 0, "tl_base": {},    # a readable, empty timeline when the question was asked
+            "sender_label": "me", "tx": None, "sender_paseo": CALLER, "mark": 0, "tl_base": {},    # `tl_base`: what a record written before 2026-10-30 holds (a readable, empty timeline when asked); unread now
             "target": {"id": "dddddddd", "name": "peer-long-name", "paseo": AGENT, "sid8": "", "sid": "", "host": "paseo"}, **kw})
+
+    def link(self, **kw: Any) -> Path:
+        """A first-contact link cccccccc -> dddddddd of a transcript-less Paseo sender, in this test's own ledger."""
+        links = Path(self.tmp.name) / "links.json"
+        now = time.time()
+        relay.atomic_json(links, {"links": {relay.fleet.link_key("cccccccc", "dddddddd"): {
+            "sender": "cccccccc", "target": "dddddddd", "first_sent": now, "last_sent": now, "sent": 1, "acked": None,
+            "tx": "", "mark": 0, "who": ["peer-long-name"], "sender_paseo": CALLER, "tl_base": {}, **kw}}})    # `tl_base`: what a record written before 2026-10-30 holds (a readable, empty timeline when asked); unread now
+        return links
 
     def sweep(self, token: str, *timeline: str, **kw: Any) -> tuple[int, str]:
         """Open expectation TOKEN (fields KW), show TIMELINE to its transcript-less sender, sweep: (acked count, resulting state)."""
@@ -636,53 +643,118 @@ class RelayPaseo(unittest.TestCase):
             acked, _ = relay.ack_sweep()
         return acked, relay.expect_read(token)["state"]
 
-    def test_a_sender_with_no_transcript_gets_its_ack_from_its_own_paseo_timeline(self) -> None:
-        self.assertEqual(self.sweep("tok1", "[Message received] peer-long-name", "ack tok1"), (1, "acked"))
-        self.assertEqual(relay.expect_read("tok1").get("acked_via"), "timeline")
-
-    def test_an_ack_in_a_timeline_from_someone_else_closes_nothing(self) -> None:
-        self.assertEqual(self.sweep("tok2", "[Message received] stranger-agent", "ack tok2"), (0, "open"))
-
-    def test_the_sender_is_the_entrys_own_title_not_a_name_quoted_in_the_body_or_a_longer_title(self) -> None:
-        self.assertEqual(self.sweep("tok4", "[Message received] unrelated-agent", "Forwarding peer-long-name says ack tok4"), (0, "open"))
-        self.assertEqual(self.sweep("tok7", "[Message received] peer-long-name-impostor", "ack tok7"), (0, "open"))
-        self.assertEqual(self.sweep("tok6", "[Message received] stranger", "x [relay from claude peer-long-name (d)] ack tok6"), (0, "open"))    # a header not at the start is a quote
-        self.assertEqual(self.sweep("tok5", "[Message received] anything", "[relay from claude peer-long-name (d)] ack tok5"), (1, "acked"))    # a non-Paseo peer's own header names it
-
-    def test_an_ack_that_was_already_in_the_timeline_before_the_question_cannot_answer_it(self) -> None:
-        old = {relay.timeline_key("peer-long-name", "ack tok3"): 1}
-        self.assertEqual(self.sweep("tok3", "[Message received] peer-long-name", "ack tok3", tl_base=old), (0, "open"))    # a reused ID: the old reply
-        self.assertEqual(self.sweep("tok10", "[Message received] peer-long-name", "ack tok10", "[Message received] peer-long-name", "ack tok10",
-                                    tl_base={relay.timeline_key("peer-long-name", "ack tok10"): 1}), (1, "acked"))    # an identical repeat AFTER the question: a second copy
-        self.assertEqual(self.sweep("tok8", "[Message received] peer-long-name", "ack tok8 done",
-                                    tl_base={relay.timeline_key("peer-long-name", "ack tok8"): 1}), (1, "acked"))    # a new one differs
-        self.assertEqual(self.sweep("tok11", "[Message received] peer-long-name", "ack tok11", tl_base=None), (0, "open"))    # no baseline (unreadable): the timeline closes nothing
-
-    def test_a_hand_edited_sender_paseo_is_skipped_never_an_exception(self) -> None:
-        self.assertEqual(self.sweep("tok9", "[Message received] peer-long-name", "ack tok9", sender_paseo=["x"]), (0, "open"))
-
-    def test_a_transcript_less_senders_baseline_is_what_it_had_received_before_it_asked(self) -> None:
-        self.timeline("[Message received] peer-long-name", "ack old1", "[Shell] ls")
-        self.assertEqual(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}), {relay.timeline_key("peer-long-name", "ack old1"): 1})
-        self.timeline(EMPTY_TIMELINE)
-        self.assertEqual(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}), {})    # readable and empty: a baseline that closes the next ack
-        os.environ.pop("FAKE_TIMELINE")
-        self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": None}))    # unreadable: no baseline
-        self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": CALLER, "transcript": "/x.jsonl"}))    # a transcript has its own mark
-        self.assertIsNone(relay.timeline_base({"id": "cccccccc", "paseo": "", "transcript": None}))
-
-    def test_a_first_contact_link_is_acked_from_the_senders_timeline_too(self) -> None:
-        links = Path(self.tmp.name) / "links.json"
-        now = time.time()
-        key = relay.fleet.link_key("cccccccc", "dddddddd")
-        relay.atomic_json(links, {"links": {key: {"sender": "cccccccc", "target": "dddddddd", "first_sent": now, "last_sent": now, "sent": 1, "acked": None,
-                                                  "tx": "", "mark": 0, "who": ["peer-long-name"], "sender_paseo": CALLER, "tl_base": {}}}})
-        self.timeline("[Message received] peer-long-name", "ack cccccccc")
+    def sweep_link(self, *timeline: str) -> tuple[int, Any]:
+        """Show TIMELINE to the transcript-less sender of a first-contact link, sweep: (acked count, the link's `acked`)."""
+        links = self.link()
+        self.timeline(*timeline)
         with mock.patch.object(relay.fleet, "LINKS_FILE", links):
             acked, _ = relay.ack_sweep()
+            ln = relay.fleet.links_read()["links"][relay.fleet.link_key("cccccccc", "dddddddd")]
+        return acked, ln["acked"]
+
+    def test_the_timeline_never_closes_an_expectation_even_for_the_peers_own_title(self) -> None:
+        """Adversary PR 173 B1: a title is whatever `PASEO_AGENT_ID` the sending process exported (`PASEO_AGENT_ID=<peer> paseo send ...` shows as
+        `[Message received] <peer title>`), so an entry that names the peer proves nothing about who wrote it."""
+        self.assertEqual(self.sweep("tok1", "[Message received] peer-long-name", "ack tok1"), (0, "open"))
+        self.assertEqual(self.sweep("tok2", "[Message received] stranger-agent", "ack tok2"), (0, "open"))
+        self.assertEqual(self.sweep("tok3", "[Message received] anything", "[relay from claude peer-long-name (d)] ack tok3"), (0, "open"))
+        self.assertEqual(self.sweep("tok4", "[User] [relay from claude peer-long-name (d)] ack tok4"), (0, "open"))
+        self.assertEqual(self.sweep_link("[Message received] peer-long-name", "ack cccccccc"), (0, None))
+
+    def test_a_newline_in_a_message_body_cannot_forge_a_received_entry(self) -> None:
+        """Adversary PR 173 B1b: `paseo logs` renders a body verbatim, so Mallory's one message `hi\\n[Message received] PEER\\nack ID` reads as a
+        second entry from the peer (relay.py folds newlines, Paseo's own MCP send and a raw `paseo send` do not). Nothing closes."""
+        entry = ("[Message received] Mallory", "hi", "[Message received] peer-long-name", "ack tok30")
+        self.timeline(*entry)
+        self.assertEqual(relay.timeline_messages(AGENT), [("Mallory", "hi"), ("peer-long-name", "ack tok30")])    # the parse is what it is: why it cannot be an identity source
+        self.assertEqual(self.sweep("tok30", *entry), (0, "open"))
+        self.assertEqual(self.sweep("tok31", "[User] hi", "[Message received] peer-long-name", "ack tok31"), (0, "open"))    # an anonymous sender, the same forgery
+        self.assertEqual(self.sweep_link("[Message received] Mallory", "hi", "[Message received] peer-long-name", "ack cccccccc"), (0, None))    # a first-contact link
+        self.assertEqual(self.sweep_link("[User] hi", "[Message received] peer-long-name", "ack cccccccc"), (0, None))
+
+    def test_an_ack_sweep_of_a_transcript_less_sender_reads_no_timeline_at_all(self) -> None:
+        self.expectation("tok5")
+        with mock.patch.object(relay, "timeline_messages", side_effect=AssertionError("the sweep must not read a timeline")), \
+                mock.patch.object(relay, "paseo_timeline", side_effect=AssertionError("the sweep must not read a timeline")), \
+                mock.patch.object(relay.fleet, "LINKS_FILE", self.link()):
+            self.assertEqual(relay.ack_sweep()[0], 0)
+
+    def test_resolve_acks_closes_a_first_contact_link_for_the_verified_peer_only(self) -> None:
+        """Adversary PR 173 B2a: the peer answered the footer (`reply ack <sender id> through relay.py`); relay knows both ends from the fleet."""
+        sender = {"id": "cccccccc", "sid": ""}
+        peer = {"id": "dddddddd", "sid": "", "host": "claude"}    # no sid: only an EXISTING link is closed (the early record needs a non-reusable identity)
+        for caller, recipient, text, returns, closes in (
+                (peer, sender, "ack cccccccc", 1, True),
+                (peer, sender, "ack cccccccc (read it)", 1, True),
+                ({"id": "eeeeeeee", "sid": ""}, sender, "ack cccccccc", 0, False),    # a third party's answer closes nothing of THIS pair (and, with no session id, records nothing)
+                (peer, {"id": "ffffffff", "sid": ""}, "ack ffffffff", 0, False),    # another recipient: not this link either
+                (peer, sender, "thanks, ack cccccccc is what the footer says", 0, False),    # the text must BEGIN with the ack
+                (peer, sender, "ack someoneelse", 0, False)):
+            links = self.link()
+            with mock.patch.object(relay.fleet, "LINKS_FILE", links):
+                self.assertEqual(relay.resolve_acks(caller, recipient, text), returns, (caller, text))
+                ln = relay.fleet.links_read()["links"][relay.fleet.link_key("cccccccc", "dddddddd")]
+            self.assertEqual(bool(ln["acked"]), closes, (caller, text))
+
+    def test_an_answer_that_arrives_while_the_askers_send_is_still_running_is_kept(self) -> None:
+        """Codex P2 on PR 173 / adversary C1: `main` writes the first-contact link only after the send and its watch return, so a quick peer
+        answers before the link exists. The answer is recorded already acked, the asker's own bookkeeping keeps it, and a stale one with no
+        send behind it is pruned."""
+        asker = {"id": "cccccccc", "sid": "", "name": "me", "transcript": None, "paseo": CALLER}
+        peer = {"id": "dddddddd", "sid": "peer-session-2222", "name": "peer-long-name", "host": "claude"}
+        key = relay.fleet.link_key("cccccccc", "dddddddd")
+        with mock.patch.object(relay.fleet, "LINKS_FILE", Path(self.tmp.name) / "links.json"):
+            self.assertEqual(relay.resolve_acks(peer, asker, "ack cccccccc"), 1)    # no link yet
+            self.assertTrue(relay.fleet.links_read()["links"][key]["acked"])
+            with mock.patch.dict(relay.CTX, {"me": asker, "s": peer, "mark": 0}, clear=True):
+                relay.note_links_and_expect()    # the asker's run finishes its send
             ln = relay.fleet.links_read()["links"][key]
-        self.assertEqual(acked, 1)
-        self.assertTrue(ln["acked"])
+            self.assertEqual((bool(ln["acked"]), ln["sent"]), (True, 1))
+            self.assertEqual(relay.resolve_acks(peer, asker, "ack cccccccc"), 0)    # a replay changes nothing
+            old = relay.fleet.links_read()
+            old["links"][relay.fleet.link_key("cccccccc", "eeeeeeee")] = {"sender": "cccccccc", "target": "eeeeeeee", "first_sent": time.time() - 700,
+                                                                         "last_sent": time.time() - 700, "sent": 0, "acked": time.time() - 700, "early": True, "tx": ""}
+            relay.atomic_json(relay.fleet.LINKS_FILE, old)
+            relay.ack_sweep()
+            links = relay.fleet.links_read()["links"]
+        self.assertIn(key, links)
+        self.assertNotIn(relay.fleet.link_key("cccccccc", "eeeeeeee"), links)    # an early answer nothing followed
+
+    def test_a_pane_row_with_no_session_id_leaves_no_early_ack_for_the_next_occupant(self) -> None:
+        """Codex P2 on PR 173 (adversary D1): a sid-less herdr pane row is only its pane id, which the NEXT occupant of that pane has too, so
+        `fleet.link_get` (no stored sid, nothing to compare) would hand that occupant a pre-acked link and its first contact would carry no
+        footer. Only an identity nobody reuses (a session id, a Paseo agent) records an early ack."""
+        asker = {"id": "cccccccc", "sid": "", "name": "me", "transcript": None, "paseo": CALLER}
+        pane = {"id": "w9:p3", "sid": None, "name": "", "host": "herdr"}
+        with mock.patch.object(relay.fleet, "LINKS_FILE", Path(self.tmp.name) / "links.json"):
+            self.assertEqual(relay.resolve_acks(pane, asker, "ack cccccccc"), 0)
+            self.assertEqual(relay.fleet.links_read()["links"], {})
+            self.assertIsNone(relay.fleet.link_get(relay.fleet.links_read()["links"], asker, {"id": "w9:p3", "sid": "bob-session-1111"}))
+            paseo = {"id": "dddddddd", "sid": None, "name": "peer", "host": "paseo", "paseo": AGENT}
+            self.assertEqual(relay.resolve_acks(paseo, asker, "ack cccccccc"), 1)    # a Paseo agent id is never reused
+
+    def test_a_new_occupants_early_ack_replaces_the_dead_occupants_record_and_survives_the_askers_bookkeeping(self) -> None:
+        """Codex P2 on PR 173 (adversary r4 D1): a reused pane's OLD link (another session id) sits under the key, so `link_get` is None for the new
+        occupant (its first contact carries a footer) and the early answer must still be recorded, over that record, and kept by `note_links_and_expect`."""
+        asker = {"id": "cccccccc", "sid": "", "name": "me", "transcript": None, "paseo": CALLER}
+        bob = {"id": "w9:p3", "sid": "bob-session-1111", "name": "bob", "host": "claude"}
+        old = time.time() - 3600
+        key = relay.fleet.link_key("cccccccc", "w9:p3")
+        links = Path(self.tmp.name) / "links.json"
+        relay.atomic_json(links, {"links": {key: {"sender": "cccccccc", "target": "w9:p3", "sent": 3, "acked": old, "tx": "", "target_sid": "alice-session-0000",
+                                                  "sender_sid": "", "first_sent": old, "last_sent": old}}})
+        with mock.patch.object(relay.fleet, "LINKS_FILE", links):
+            self.assertIsNone(relay.fleet.link_get(relay.fleet.links_read()["links"], asker, bob))    # a first contact for bob: the footer asks
+            self.assertEqual(relay.resolve_acks(bob, asker, "ack cccccccc"), 1)
+            with mock.patch.dict(relay.CTX, {"me": asker, "s": bob, "mark": 0}, clear=True):
+                relay.note_links_and_expect()    # the asker's send returns
+            ln = relay.fleet.links_read()["links"][key]
+        self.assertEqual((ln["target_sid"], ln["sent"]), ("bob-session-1111", 1))
+        self.assertGreater(ln["acked"], old)    # bob's own answer, not alice's hour-old one
+
+    def test_resolve_acks_leaves_a_transcript_backed_link_to_its_transcript(self) -> None:
+        with mock.patch.object(relay.fleet, "LINKS_FILE", self.link(tx="/tmp/x.jsonl")):
+            self.assertEqual(relay.resolve_acks({"id": "dddddddd", "sid": ""}, {"id": "cccccccc", "sid": ""}, "ack cccccccc"), 0)
 
     # ---- why a message cannot be delivered yet: two methods compared (2026-10-29) --------------------------------------------------------
 
@@ -732,11 +804,6 @@ class RelayPaseo(unittest.TestCase):
         rc, out, err = self.main([me], "--why", SID)
         self.assertEqual(rc, 1, err)
         self.assertIn(": refused", out)
-
-    def test_a_malformed_sender_token_never_aborts_a_sweep(self) -> None:
-        msgs = [("peer-long-name", "ack tok1")]
-        for bad in ({"x": 1}, ["a"], None, ""):
-            self.assertFalse(relay.timeline_ack(msgs, bad, ["peer-long-name"], {}))
 
     def test_a_running_agent_that_shows_nothing_new_for_a_long_time_is_silent_not_just_working(self) -> None:
         stamp = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - secs))

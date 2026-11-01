@@ -618,6 +618,12 @@ uv tool install pyinilint
 uv tool install --python 3.14 crawl4ai
 crawl4ai-setup
 
+# AnyEvent (Perl; 2026-10-31) is a dependency of `~/src/barnowl`'s Goose module, and
+# its offline test `t/goose_confirm.t` skips without it. pastebin already has it
+# (the `barnowl` Debian package depends on libanyevent-perl); the Mac only needs it to
+# run that test. No root: a local lib, used as `PERL5LIB=$HOME/perl5/lib/perl5 perl t/goose_confirm.t`:
+PERL_MM_USE_DEFAULT=1 PERL_MM_OPT="INSTALL_BASE=$HOME/perl5" PERL_MB_OPT="--install_base $HOME/perl5" cpan -T AnyEvent
+
 # SkillOpt-Sleep (nightly skill learning from every agent's transcripts, §1.3
 # "SkillOpt-Sleep"); machine-wide, upstream main, unpinned (2026-10-24; PyPI 0.2.0
 # lacks the handoff backend and multi-skill fan-out):
