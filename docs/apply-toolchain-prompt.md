@@ -224,7 +224,7 @@ default. Do **not** enable them; plain subagents are enough here. Use them only
 if plain subagents prove insufficient, and then only with user approval and a
 backup of any settings file you change (§15).
 
-No external orchestrator (Herdr, Orca, BB, Ralph TUI, Beads) is used; Herdr, Orca and BB are retired from djbclark-ade (2026-10-31).
+No external orchestrator (Herdr, Orca, BB, Ralph TUI, Beads) is used for new work; Herdr, Orca and BB are retired from djbclark-ade (2026-10-31).
 
 ### 0.2 Working rules for orchestration
 
