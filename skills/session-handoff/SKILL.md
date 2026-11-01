@@ -136,8 +136,8 @@ it, reports the owner status in its resume plan and asks nothing.
 1. **Read** the canonical log's frontmatter `session_id` (S) and `writer`. `session_id` is not uniform
    (checked 2026-11-01 over 146 real logs under `~/.local/state/handoffs/chains/*/SESSION_LOG.md`): a
    claude transcript UUID, a Paseo agent UUID (any TUI: omp, codex, claude), a herdr pane id such as
-   `w36:p3`, or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id: it narrows
-   candidates in step 4 and matches nobody alone.
+   `w36:p3`, or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id, and can name
+   the PREVIOUS provider after a cross-provider handoff: it matches nobody and excludes nobody.
 2. **Match S to a row of `skills/session-finder/fleet.py --json`.** The row is the owner if S equals the
    row's `sid`, `paseo`, `id` or herdr `pane`; or the row's `id` (8+ chars) is a prefix of S; or S (8+ chars; shorter
    free text such as `solo` never matches by containment) occurs inside the row's `sid` or `transcript`
@@ -164,8 +164,11 @@ it, reports the owner status in its resume plan and asks nothing.
    exemption below applies, say so in the resume plan and **ask the operator before the first write**.
    To make that question concrete, list live rows other than you whose `cwd` (compare by `realpath`: a
    symlinked cwd such as `~/s/...` names the same directory) equals, is under or contains a
-   `workspaces[].dir` of the log and whose `agent` fits `writer` (`claude*` to claude, `omp*` to omp,
-   `codex` to codex, otherwise any); name them in the question. Never proceed on a silent "no owner found".
+   `workspaces[].dir` of the log, of ANY agent kind. Do not filter by `writer`: after a cross-provider
+   `--finish --successor` (claude to omp, real in `standalone-03ad`, `net-watch-ops`, `go-followups-20261025`)
+   the log still names the archived predecessor's provider until the successor's next checkpoint, so the
+   live successor would be excluded. `writer` only orders the list (same provider first). Name them in the
+   question. Never proceed on a silent "no owner found".
 5. **A live owner other than you:** relay ONE question to it through `session-finder/relay.py` (what may
    you resume, what overlaps) and ask the operator too; take no write action until the owner answers or
    the operator, told the owner is live, decides. Unanswered is not consent.
@@ -196,7 +199,7 @@ it, reports the owner status in its resume plan and asks nothing.
      id, `paseo` or herdr `pane` of the step 2 row (a herdr claude row's `id` is `sid[:8]`, while
      `launch.py` and `self-slash` log the pane id `wN:pM`, which only the row's `pane` field carries); or step 2 found no row at all for S and step 4's candidate list
      (live rows other than you and the line's owner, by realpath `cwd` within a `workspaces[].dir`,
-     `agent` fitting `writer`) is empty. S is not required to equal the owner: it is often free text or
+     of any agent kind) is empty. S is not required to equal the owner: it is often free text or
      stale (`omp-2026-10-31-tendcf-stage-d`; a log still naming an archived `6225c4a1`), but a bare
      `/baton` resolves its chain from the directory, so an unrelated live session's chain must never
      ride in on another owner's handover. A live step 2 row, or a candidate, that is neither you nor the
