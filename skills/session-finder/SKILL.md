@@ -103,6 +103,16 @@ id>)`, from `paseo ls -g --background --json`, deduplicated on the Paseo agent i
 adds the archived agents as `ended` rows (`relay.py` never sends to one). No `paseo` CLI, or a failed or slow call
 (20 s): no Paseo rows, as before. `relay.py` takes a hex **prefix of 6 or more characters** of a Paseo agent id
 (`paseo ls`'s 7-character short id works); exactly one agent must match, else it refuses and lists the candidates.
+
+**A `closed` Paseo agent is sent to like an idle one (2026-10-31)**: Paseo reports `closed` for an agent whose runtime it
+collected (not archived, not failed); `paseo send` into it resumes the SAME persisted conversation. `relay.py` (`hard_stop`,
+`paseo_blocker`, the gate, `--why`, the deferred deliverer's poll) treats `closed` as idle and the result stays
+`accepted` until a witness shows the text; a failed send is a failure, never a delivery. `archived`, `error`, `initializing`
+and any other state are still refused. This is the path fleet-watch's `upr_relay` takes
+(`relay.py <agent uuid> <msg> --no-ack`) for a collected `watch` holder. `fleet.py` keeps the row's `status`/`paseo_state`
+as `closed`; relay maps it to idle when it sends. Not yet proven live: a `closed` agent that is a failed resume rather than a
+collected one would fail the `paseo send` (reported, exit 1).
+
 A working agent whose provider cannot steer (cline and every other ACP provider, which Paseo would interrupt and replace
 the running turn of) is **queued, not refused** (2026-10-24): `relay.py` writes a 0600 record under
 `~/.local/state/relay/deferred/`, starts a detached deliverer and **exits 0** with `queued: <id> ...` on stdout
@@ -132,7 +142,7 @@ working, silent (running, nothing new for 15 min: hung or one long tool call), c
 hard stop: the caller's own session, a finished one); a
 disagreement between the methods is reported and the blocking reading wins. `--pending` shows each queued record's latest reason as `[why: ...]`. **Two
 witnesses for delivery (2026-10-29):** a Paseo target's transcript AND its own timeline (`paseo logs`), either proves, so codex, omp, opencode and cline
-Paseo agents are "delivered", not "unverified"; `--sweep` reads a transcript-less sender's own timeline for `ack ID`. A record
+Paseo agents are "delivered", not "unverified"; the timeline is a delivery witness only and never closes an ack (2026-10-30: it is rendered text, so a message body can fake an entry): a transcript-less sender's `--expect-ack` and first-contact link close only when the target answers through relay.py (`ack ID`, or `ack <sender id>` for a first contact) and that answer is delivered or goes to a route that keeps it, including an answer relay queued for a busy Paseo recipient. A record
 `sending` for 15 minutes is failed "unverified": a deliverer still alive stops, and when its send returns the log and
 the notice say "unverified", never "delivered". `--idle S`
 still blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at

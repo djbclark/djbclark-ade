@@ -176,6 +176,20 @@ class TestWhoRetires(Base):
         self.assertEqual(rc, 1, out + err)
         self.assertEqual(self.read("q-owed-sid")["state"], "open")
 
+    def test_a_nested_target_cannot_retire_its_own_expectation_under_an_outer_transcript_session(self) -> None:
+        """Review F1, 2026-10-30: the target (pid 5150, its own transcript) runs under an outer Claude (pid 4242, transcript). The outer
+        one used to win the sender choice, so the nested target looked like a third party and the guard let it retire."""
+        outer = {"id": "outer123", "agent": "claude", "self": True, "pid": 4242, "transcript": "/tmp/outer.jsonl", "name": "outer"}
+        inner = {"id": "aaaa1111", "agent": "claude", "self": True, "pid": 5150, "transcript": "/tmp/inner.jsonl", "name": "peer-fb"}
+        for rows in ([outer, inner], [inner, outer]):
+            with mock.patch.object(fleet, "sessions", lambda rows=rows: [dict(r) for r in rows]), \
+                    mock.patch.object(fleet, "ancestry", lambda: [5150, 4242]):
+                self.write(record("q-nested"))
+                rc, out, err = self.retire("q-nested", "--reason", "answered out of band")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("ack q-nested", err)
+            self.assertEqual(self.read("q-nested")["state"], "open")
+
     def test_another_session_may_still_retire_it(self) -> None:
         self.self_row(id="zzz99999")    # neither the sender (w9:p9) nor the target (aaaa1111)
         self.write(record("q-third-party"))

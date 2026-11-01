@@ -297,7 +297,7 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
     fleet's process scan lists a `pid*` row for an ancestor TUI BEFORE the Paseo row of the same agent (`fleet.py`
     `sessions`: `_proc_scan`, then `_paseo_rows`; `self = pid in ancestors`). A Paseo-hosted agent whose tools ran under a
     process fleet recognises therefore sent as `sender: pid19798`, `sender_paseo: ""`, `tl_base: null`: no transcript for
-    the `--ack` watch, no Paseo id for `timeline_ack`, so an `--expect-ack` could never close and its footer named a pid
+    the `--ack` watch, no Paseo id for `resolve_acks`, so an `--expect-ack` could never close and its footer named a pid
     (live 2026-10-29, an Antigravity agent). Every id here is fake; the process tree and the Paseo hosting probe are stubbed.
     """
 
@@ -350,7 +350,7 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
             self.assertIsNone(row.get("paseo"))
 
     def test_a_transcript_row_wins_over_the_pid_row_fleet_lists_first(self) -> None:
-        row = sess(id="cccccccc", agent="claude", name="alice", transcript="/tmp/me.jsonl", **{"self": True})
+        row = sess(id="cccccccc", agent="claude", name="alice", transcript="/tmp/me.jsonl", pid=19798, **{"self": True})    # the same process as the pid row
         self.assertEqual(relay.sender_row([self.pid_row(), row])["id"], "cccccccc")
 
     def test_a_lone_pid_row_is_still_the_sender(self) -> None:
@@ -370,8 +370,8 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
 
     def test_a_paseo_id_on_a_transcript_row_does_not_jump_the_fleet_order(self) -> None:
         """A transcript already proves an ack, so a Paseo id beside it is no second vote: `_claude_sessions` gives a
-        daemon-spawned Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), and neither `ack_proof_note` nor
-        `timeline_base` uses that id to prove an ack for a transcript row, so it adds nothing to the proof. Two transcript rows keep fleet's
+        daemon-spawned Claude both (`_where.lookup` -> `paseo_agent`, fleet.py:525-530), and `ack_proof_note` does not
+        use that id for a transcript row, so it adds nothing to the proof. Two transcript rows keep fleet's
         order whichever carries the id (local-review of 2026-10-30, wording corrected by adversary 4 F1)."""
         plain = sess(id="aaaaaaaa", agent="claude", transcript="/tmp/a.jsonl", **{"self": True})
         both = sess(id="bbbbbbbb", agent="claude", transcript="/tmp/b.jsonl", paseo=PASEO_AGENT, **{"self": True})
@@ -379,48 +379,77 @@ class TestTheRowThatCanProveAnAck(unittest.TestCase):
         self.assertEqual(relay.sender_row([both, plain])["id"], "bbbbbbbb")
         self.assertEqual(relay.sender_row([both, plain])["paseo"], PASEO_AGENT)
 
-    def test_a_transcript_row_still_beats_a_hosted_paseo_row(self) -> None:
-        """The transcript is the first vote and only an id proves the second, so the order between the two kinds is
-        unchanged by the tie rule above."""
-        tx = sess(id="cccccccc", agent="claude", transcript="/tmp/me.jsonl", **{"self": True})
+    def test_a_transcript_row_still_beats_a_hosted_paseo_row_of_the_same_process(self) -> None:
+        """At one depth the two rows stand for the same process, so the proof breaks the tie: the transcript is the first vote and
+        only an id proves the second."""
+        tx = sess(id="cccccccc", agent="claude", transcript="/tmp/me.jsonl", pid=19798, **{"self": True})
         self.assertEqual(relay.sender_row([self.paseo_row(), tx])["id"], "cccccccc")
         self.assertEqual(relay.sender_row([tx, self.paseo_row()])["id"], "cccccccc")
 
-    def test_the_note_is_silent_when_a_transcript_or_a_readable_timeline_can_prove_the_ack(self) -> None:
-        self.assertIsNone(relay.ack_proof_note({"transcript": "/tmp/me.jsonl"}, "build1", None))
-        self.assertIsNone(relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, "build1", {}))
-        self.assertIsNone(relay.ack_proof_note(None, "build1", None))
+    def test_a_nearer_process_is_the_sender_even_when_an_outer_session_holds_a_transcript(self) -> None:
+        """Review F1, 2026-10-30: an outer Claude (pid 4242, transcript) started this Codex (pid 5150). The caller is the Codex, so a
+        reply, its footer and the retirement self-check must name it: a transcript no longer outranks the process that runs relay."""
+        self.anc = [5150, 4242, 38148]
+        outer = sess(id="outer123", agent="claude", transcript="/tmp/outer.jsonl", pid=4242, **{"self": True})
+        inner = sess(id="pid5150", agent="codex", host="terminal", pid=5150, cwd="/work/here",
+                     reach="no channel: use its focus command", **{"self": True})
+        for rows in ([outer, inner], [inner, outer]):
+            self.assertEqual(relay.sender_row(rows)["id"], "pid5150", [r["id"] for r in rows])
+
+    def test_two_transcript_rows_are_told_apart_by_process_depth_not_fleets_order(self) -> None:
+        """An outer Claude (pid 4242) started this inner Claude (pid 5150): both hold a transcript, and the nearer one is the caller."""
+        self.anc = [5150, 4242, 38148]
+        outer = sess(id="outer123", agent="claude", transcript="/tmp/outer.jsonl", pid=4242, **{"self": True})
+        inner = sess(id="inner456", agent="claude", transcript="/tmp/inner.jsonl", pid=5150, **{"self": True})
+        for rows in ([outer, inner], [inner, outer]):
+            self.assertEqual(relay.sender_row(rows)["id"], "inner456", [r["id"] for r in rows])
+
+    def test_a_transcript_row_that_claims_no_process_of_ours_loses_to_one_that_does(self) -> None:
+        """A Claude row marked `self` only by an inherited CLAUDE_CODE_SESSION_ID (a pid that is no ancestor) is no process of ours."""
+        stamped = sess(id="stamped12", agent="claude", transcript="/tmp/s.jsonl", pid=999999, **{"self": True})
+        for rows in ([stamped, self.pid_row()], [self.pid_row(), stamped]):
+            self.assertEqual(relay.sender_row(rows)["id"], "pid19798", [r["id"] for r in rows])
+
+    def test_a_stamped_transcript_row_is_the_session_of_the_nearest_process_row_of_its_own_agent(self) -> None:
+        """PR 173 adversary B5: the registry's pid for this Claude session is no ancestor of ours (a wrapper or exec'd launcher), but its
+        session id is the one exported to this process, so it IS the `claude` the process scan found at the nearest depth, and the old
+        `ack pidNNNN` sender must not come back. A different agent's process row is another session: it still wins."""
+        stamped = sess(id="stamped12", agent="claude", sid="5e5510n0-1111-4222-8333-444455556666", transcript="/tmp/s.jsonl", pid=999999, **{"self": True})
+        claude_pid = sess(id="pid19798", agent="claude", host="terminal", pid=19798, reach="no channel: use its focus command", **{"self": True})
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": stamped["sid"]}):
+            for rows in ([stamped, claude_pid], [claude_pid, stamped]):
+                self.assertEqual(relay.sender_row(rows)["id"], "stamped12", [r["id"] for r in rows])
+            for rows in ([stamped, self.pid_row()], [self.pid_row(), stamped]):    # an `agy` process: not this session's agent
+                self.assertEqual(relay.sender_row(rows)["id"], "pid19798", [r["id"] for r in rows])
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "someone-elses"}):    # no id match: only a claim on no process
+            for rows in ([stamped, claude_pid], [claude_pid, stamped]):
+                self.assertEqual(relay.sender_row(rows)["id"], "pid19798", [r["id"] for r in rows])
+
+    def test_the_note_is_silent_when_a_transcript_or_a_keeping_route_can_close_the_ack(self) -> None:
+        self.assertIsNone(relay.ack_proof_note({"transcript": "/tmp/me.jsonl"}, "build1"))
+        self.assertIsNone(relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, "build1"))
+        self.assertIsNone(relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, None))
+        self.assertIsNone(relay.ack_proof_note(None, "build1"))
 
     def test_a_pid_row_is_told_the_expectation_may_not_close_on_its_own(self) -> None:
         """Adversary B3: the old text promised a relay-side close a `pid*` row can never reach (`docs/queue.md` item 9)."""
-        note = relay.ack_proof_note(self.pid_row(), "build1", None)
+        note = relay.ack_proof_note(self.pid_row(), "build1")
         self.assertIn("may not close on its own", note)
         self.assertIn("`relay.py --retire build1 --reason ...`", note)
         self.assertNotIn("`ack build1` through relay.py", note)
+        self.assertNotIn("timeline", note)
 
     def test_a_pid_rows_first_contact_cannot_mark_the_link_acked(self) -> None:
-        note = relay.ack_proof_note(self.pid_row(), None, None)
+        note = relay.ack_proof_note(self.pid_row(), None)
         self.assertIn("the reply to this first contact cannot mark the link acked", note)
-
-    def test_a_paseo_row_whose_timeline_could_not_be_read_is_told(self) -> None:
-        """Adversary B5: `timeline_base` returns None when the timeline is unreadable, and then closes nothing."""
-        note = relay.ack_proof_note({"transcript": None, "paseo": PASEO_AGENT}, "build1", None)
-        self.assertIn("its Paseo timeline could not be read", note)
-        self.assertIn("`ack build1` through relay.py", note)
-
-    def test_a_first_contact_link_with_no_readable_timeline_does_not_promise_an_ack(self) -> None:
-        """Codex P2, PR 162: a first-contact footer opens no expectation record, so `expect_resolve_by_relay` never sees the
-        reply; promising that `ack <id>` closes it would leave the link ONE-WAY and the operator waiting."""
-        note = relay.ack_proof_note({"id": "bbbbbbbb", "transcript": None, "paseo": PASEO_AGENT}, None, None)
-        self.assertIn("the reply to this first contact cannot mark the link acked", note)
-        self.assertNotIn("`ack bbbbbbbb` through relay.py", note)
 
     def test_a_sender_an_answer_can_reach_in_a_kept_route_is_not_told(self) -> None:
         """Codex P2, PR 162: `expect_resolve_by_relay` closes a transcript-less record when the target's `ack ID` arrives over
         a route that keeps the text (a Paseo agent, an ACP launch, a dispatch inbox), so such a sender must not be told that
-        nothing auto-closes it, nor sent to `--retire`."""
+        nothing auto-closes it, nor sent to `--retire`; the same keeping route closes its first-contact link (`resolve_acks`)."""
         for row in (sess(id="acp1234", agent="codex", host="acp"), sess(id="disp1234", agent="codex", dispatch_rec="/tmp/d.json")):
-            self.assertIsNone(relay.ack_proof_note(row, "build1", None), row["id"])
+            self.assertIsNone(relay.ack_proof_note(row, "build1"), row["id"])
+            self.assertIsNone(relay.ack_proof_note(row, None), row["id"])
 
     def test_fleet_list_annotates_links_from_the_row_relay_sends_as(self) -> None:
         """`fleet list` annotates links from the same row relay writes them for, so a Paseo sender's links show."""

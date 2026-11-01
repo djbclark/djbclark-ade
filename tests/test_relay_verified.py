@@ -692,6 +692,24 @@ class TestExpectWithoutTranscript(Base):
         self.reply(self.target, "[relay from claude cccccccc aka peer-fb (x)] ack build1 is what I was told")
         self.assertEqual(self.state(), "open")
 
+    def link_acked(self) -> Any:
+        return relay.fleet.links_read()["links"][relay.fleet.link_key("bbbbbbbb", "cccccccc")]["acked"]
+
+    def test_the_targets_ack_of_the_first_contact_footer_closes_the_link(self) -> None:
+        """Adversary PR 173 B2a: a transcript-less sender's first contact asks `reply ack <sender id> through relay.py`; the genuine peer's answer
+        through relay.py, identified by the fleet, marks the link both ways. The answer is not an expectation's id, so the question stays open."""
+        self.assertIsNone(self.link_acked())
+        rc, out, err = self.reply(self.target, "ack bbbbbbbb")
+        self.assertEqual(rc, 3, (out, err))
+        self.assertTrue(self.link_acked())
+        self.assertEqual(self.state(), "open")
+
+    def test_a_third_partys_or_a_quoted_first_contact_ack_leaves_the_link_one_way(self) -> None:
+        self.reply(self.mallory, "ack bbbbbbbb")    # not the peer this link is with
+        self.reply(self.target, "I will not ack bbbbbbbb until asked")    # does not begin with the ack
+        self.reply(self.target, "ack bbbbbbbb", "--no-ack")    # no watch ran: nothing proves the answer arrived
+        self.assertIsNone(self.link_acked())
+
     def test_a_text_that_does_not_begin_with_the_ack_closes_nothing(self) -> None:
         self.reply(self.target, "I will not ack build1 until the lint is green")
         self.assertEqual(self.state(), "open")
@@ -1613,7 +1631,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
     """A sender row with nothing relay can watch is told, at the send, that the ack will not come by itself (2026-10-30).
 
     fleet's `pid*` process row could be taken as the sender of a Paseo-hosted agent (a `self` row listed before the
-    agent's Paseo row): no transcript for the `--ack` watch and no Paseo id for `timeline_ack`. `sender_row` now prefers
+    agent's Paseo row): no transcript for the `--ack` watch and no Paseo id for `resolve_acks`. `sender_row` now prefers
     the row that can prove an ack, so the same send resolves to the Paseo row; a row still left with neither has nothing that
     can close its expectation (a `pid*` sender's answer comes back over a pane, or no route at all, so item 9's relay-side
     close cannot count it) and is told to `--retire` it. Every id here is fake.
@@ -1648,7 +1666,7 @@ class TestNoProofPathIsSaidAtSendTime(Base):
     def test_a_pid_sender_is_told_the_expectation_may_not_close_on_its_own(self) -> None:
         rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row()])
         self.assertEqual(rc, 0, err)
-        self.assertIn("relay: warning: pid19798 has no transcript and no Paseo timeline", err)
+        self.assertIn("relay: warning: pid19798 has no transcript, so this expectation may not close on its own", err)
         self.assertIn("may not close on its own", err)
         self.assertIn("`relay.py --retire build1 --reason ...`", err)
         self.assertNotIn("`ack build1` through relay.py", err)    # the close a pid row cannot reach (queue item 9)
@@ -1657,24 +1675,22 @@ class TestNoProofPathIsSaidAtSendTime(Base):
         """The failure this warns about, pinned as the record's own shape: nothing in it can be watched or closed."""
         self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row()])
         rec = json.loads((relay.expect_dir() / "build1.json").read_text())
-        self.assertEqual((rec["sender"], rec["sender_paseo"], rec["tl_base"]), ("pid19798", "", None))
+        self.assertEqual((rec["sender"], rec["sender_paseo"]), ("pid19798", ""))
 
     def test_a_paseo_hosting_the_sender_becomes_the_sender_and_its_record_can_close(self) -> None:
-        """The live defect end to end: the pid row is listed first, and the record is the Paseo row's, with a timeline baseline."""
-        with self.hosting(self.PASEO), \
-                mock.patch.object(relay, "timeline_messages", lambda pid: []):
+        """The live defect end to end: the pid row is listed first, and the record is the Paseo row's."""
+        with self.hosting(self.PASEO):
             rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row(), self.paseo_row()])
         self.assertEqual(rc, 0, err)
         rec = json.loads((relay.expect_dir() / "build1.json").read_text())
         self.assertEqual((rec["sender"], rec["sender_paseo"]), ("bbbbbbbb", self.PASEO))
-        self.assertEqual(rec["tl_base"], {})
+        self.assertNotIn("tl_base", rec)    # no timeline baseline any more: the timeline never closes an ack
         self.assertIn("bbbbbbbb", self.sent_texts[-1])    # the footer names the session, never the pid
         self.assertNotIn("has no transcript", err)
 
     def test_a_paseo_row_marked_self_only_by_an_inherited_id_changes_nothing(self) -> None:
         """Adversary B1: `_paseo_rows` marks a row `self` for an inherited `PASEO_AGENT_ID` alone; it must not become the sender."""
-        with self.hosting(None), \
-                mock.patch.object(relay, "timeline_messages", lambda pid: []):
+        with self.hosting(None):
             rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.pid_row(), self.paseo_row()])
         self.assertEqual(rc, 0, err)
         rec = json.loads((relay.expect_dir() / "build1.json").read_text())
@@ -1699,33 +1715,18 @@ class TestNoProofPathIsSaidAtSendTime(Base):
         self.assertEqual(rc, 0, err)
         self.assertNotIn("has no transcript", err)
 
-    def test_a_paseo_sender_with_a_readable_timeline_is_not_told(self) -> None:
-        """A transcript-less Paseo agent is watched through its timeline, so it needs no warning."""
+    def test_a_paseo_sender_is_not_told_because_its_answer_comes_back_into_the_paseo_agent(self) -> None:
+        """A transcript-less Paseo agent is closed by `resolve_acks` when the target answers through relay.py (a keeping route): no warning,
+        for an `--expect-ack` and for a first contact alike. The Paseo timeline plays no part (adversary PR 173 B1: it never closes an ack)."""
         with self.hosting(self.PASEO), \
-                mock.patch.object(relay, "timeline_messages", lambda pid: []):
+                mock.patch.object(relay, "timeline_messages", side_effect=AssertionError("no timeline is read for an ack")):
             rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.paseo_row()])
-        self.assertEqual(rc, 0, err)
-        self.assertNotIn("has no transcript", err)
-
-    def test_a_paseo_sender_whose_timeline_could_not_be_read_is_told(self) -> None:
-        """Adversary B5: `timeline_base` returns None when the timeline is unreadable, and then nothing closes the record."""
-        with self.hosting(self.PASEO), \
-                mock.patch.object(relay, "timeline_messages", lambda pid: None):
-            rc, _, err = self.go("is the build green?", "--expect-ack", "build1", rows=[self.paseo_row()])
-        self.assertEqual(rc, 0, err)
-        self.assertIn("its Paseo timeline could not be read", err)
-        self.assertIn("`ack build1` through relay.py", err)
-        self.assertEqual(json.loads((relay.expect_dir() / "build1.json").read_text())["tl_base"], None)
-
-    def test_a_paseo_first_contact_with_an_unreadable_timeline_promises_no_ack(self) -> None:
-        """Codex P2, PR 162: a first-contact footer opens no record, so no relay-side close can apply; the note must not say
-        an `ack` will settle the link (`ack_sweep` has no transcript and no baseline to read either)."""
-        with self.hosting(self.PASEO), \
-                mock.patch.object(relay, "timeline_messages", lambda pid: None):
+            self.assertEqual(rc, 0, err)
+            self.assertNotIn("has no transcript", err)
+            relay.fleet.LINKS_FILE.write_text(json.dumps({"links": {}}))
             rc, _, err = self.go("hello there friend", rows=[self.paseo_row()])
         self.assertEqual(rc, 0, err)
-        self.assertIn("the reply to this first contact cannot mark the link acked", err)
-        self.assertNotIn("`ack bbbbbbbb` through relay.py", err)
+        self.assertNotIn("has no transcript", err)
 
 
 class TestExpectAnsweredInsideABlockingSend(Base):
