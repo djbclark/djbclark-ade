@@ -27,13 +27,14 @@ class Env:
         self.tmp = tmp
         self.children: list[subprocess.Popen] = []
         for name, body in {
-            "relay": '#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n',
+            "relay": ('#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n'
+                      'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit 1; fi\n'),
             "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
             "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\n',
             "paseo": (f'#!{sys.executable}\nimport os, sys\n'
                       'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
                       'a = sys.argv[1:]\n'
-                      'if a[:3] == ["ls", "-g", "--json"]:\n'
+                      'if a[:4] == ["ls", "-g", "--background", "--json"]:\n'
                       '    sys.stdout.write(open(os.environ["FAKE_PASEO_LS"]).read())\n'
                       'elif a[0] == "inspect":\n'
                       '    p = os.path.join(os.environ["FAKE_PASEO_DIR"], a[1] + ".json")\n'
@@ -50,7 +51,7 @@ class Env:
             "DEADLINE_STATE_DIR": str(self.state), "DL_LOG": str(self.log), "DEADLINE_SETTLE_S": "0.3",
             "DEADLINE_RELAY": str(tmp / "relay"), "DEADLINE_HERMES_PING": str(tmp / "ping"),
             "DEADLINE_ACP_DISPATCH": str(tmp / "dispatch"), "DEADLINE_PASEO": str(tmp / "paseo"),
-            "FAKE_PASEO_LS": str(tmp / "ls.json"), "FAKE_PASEO_DIR": str(self.paseo_dir),
+            "FAKE_PASEO_LS": str(tmp / "ls.json"), "FAKE_PASEO_DIR": str(self.paseo_dir), "DL_RELAY_FAIL": str(tmp / "relay-fails"),
         }
         (tmp / "ls.json").write_text("[]")
 
@@ -425,3 +426,76 @@ def test_orphan_lock_files_are_pruned(env):
     (env.state / "tmp1.json").unlink()
     env.run("sweep", "--no-agents")
     assert not (env.state / ".tmp1.lock").exists()
+
+
+# ---------- PR 223 local-review round 1: group identity, notice delivery, name reservation, registration binding, background agents ----------
+
+def test_leaderless_group_is_anchored_on_a_live_member_and_never_trusted_bare(env):
+    c = subprocess.Popen(["sh", "-c", "sleep 60 & exit 0"], start_new_session=True)
+    env.children.append(c)
+    c.wait()   # the group leader is gone and reaped; its sleep lives on in the group
+    time.sleep(0.2)
+    assert env.group_alive(c.pid)
+    assert start(env, "leaderless", "--budget", "10", "--pgid", str(c.pid), "--on-expire", "relay").returncode == 0
+    rec = env.record("leaderless")
+    assert rec["pid"] and rec["pid"] != c.pid and rec["pid_start"] and rec["pgid_start"] is None, "anchored on a member's pid + start time"
+    os.kill(rec["pid"], signal.SIGKILL)   # the anchor dies; the group id could now be recycled by anything
+    time.sleep(0.3)
+    r = env.run("sweep", "--no-agents", now=T0 + 50)
+    assert "lost (unverified)" in r.stdout and env.record("leaderless")["state"] == "lost", "never trust a bare group id"
+
+
+def test_failed_owner_notice_is_retried_until_delivered_not_marked_done(env):
+    Path(env.base["DL_RELAY_FAIL"]).write_text("x")
+    assert start(env, "flaky", "--budget", "5", "--on-expire", "relay").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10)
+    rec = env.record("flaky")
+    assert rec["state"] == "expired" and rec["notice"]["done"] is False and rec["notice"]["attempts"] == 1
+    env.run("sweep", "--no-agents", now=T0 + 30)
+    assert len(env.calls("RELAY")) == 1, "retries are spaced 60 s * attempt"
+    Path(env.base["DL_RELAY_FAIL"]).unlink()
+    r = env.run("sweep", "--no-agents", now=T0 + 100)
+    assert "owner notice retry 2" in r.stdout and "delivered" in r.stdout
+    assert env.record("flaky")["notice"]["done"] is True and len(env.calls("RELAY")) == 2
+    env.run("sweep", "--no-agents", now=T0 + 1000)
+    assert len(env.calls("RELAY")) == 2, "delivered once: no more"
+
+
+def test_notice_retries_are_bounded(env):
+    Path(env.base["DL_RELAY_FAIL"]).write_text("x")
+    assert start(env, "never", "--budget", "5", "--on-expire", "relay").returncode == 0
+    for i in range(20):
+        env.run("sweep", "--no-agents", now=T0 + 10 + i * 1000)
+    assert len(env.calls("RELAY")) == 5 and env.record("never")["notice"]["attempts"] == 5
+
+
+def test_run_with_a_taken_name_never_starts_the_command(env):
+    assert start(env, "taken", "--budget", "100", "--on-expire", "notify").returncode == 0
+    mark = env.tmp / "ran"
+    r = env.run("run", "--budget", "30", "--name", "taken", "--", "sh", "-c", f"touch {mark}", now=None)
+    assert r.returncode == 2 and not mark.exists(), "an irreversible command must not run before the name is reserved"
+
+
+def test_old_run_cannot_finish_a_record_that_replaced_its_own(env):
+    p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--name", "rebind", "--owner", "o", "--on-expire", "notify",
+                          "--", "sh", "-c", "sleep 4"],
+                         env={**os.environ, **env.base, "DEADLINE_RUN_POLL": "0.1"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(40):
+            time.sleep(0.25)
+            if (env.state / "rebind.json").exists() and env.record("rebind")["state"] == "expired":
+                break
+        assert env.record("rebind")["state"] == "expired"   # announced only; the child still runs
+        assert start(env, "rebind", "--budget", "1000", "--on-expire", "notify", now=None).returncode == 0
+        new_id = env.record("rebind")["reg_id"]
+        p.wait(timeout=30)
+        rec = env.record("rebind")
+        assert rec["state"] == "running" and rec["reg_id"] == new_id, "the old run must not mark the new registration done"
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_agent_scan_includes_background_workspaces(env):
+    env.run("sweep", "--agents-now", now=T0)
+    assert any(ln == "PASEO ls -g --background --json" for ln in env.calls("PASEO"))

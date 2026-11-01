@@ -47,7 +47,8 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
    different start time is `lost` (pid reuse), never signalled. `start` refuses (exit 2) a pid that is not running or whose start time cannot be
    read, and a record that somehow has a pid but no start time is `lost (unverified)`, never signalled.
 2. The group is signalled only when the registered pid leads its own group (or `--pgid` was given and `--pid` is in it); otherwise only the pid.
-   Never pid 1, never the sweep's own group.
+   Never pid 1, never the sweep's own group. A `--pgid` whose leader has already exited is anchored on a live member (its pid and start time are
+   recorded as the record's pid); once that anchor is gone the record is `lost (unverified)`, because a bare group id could be recycled.
 3. A top-level agent session is the operator's: `start` refuses (exit 2) any `--pid` that is the caller's own parent or an ancestor, and any
    group that is the caller's group or session or contains the caller or an ancestor, so an agent cannot register its own TUI or shell
    for a kill. (Fails closed: if `ps` cannot be read, it refuses.)
@@ -65,7 +66,7 @@ and Linux has no systemd unit for the sweep (`install` is macOS launchd only; `s
 
 ## Agent-session no-progress check (alert only)
 
-Every sweep (throttled to one scan per 5 min) lists running Paseo agents (`paseo ls -g --json`) and reads each one's `UpdatedAt` from
+Every sweep (throttled to one scan per 5 min) lists running Paseo agents, background workspaces included (`paseo ls -g --background --json`), and reads each one's `UpdatedAt` from
 `paseo inspect ID --json` (the `paseo logs` timeline carries no timestamps; `UpdatedAt` moved on every observed turn of a live agent). An
 agent idle more than `DEADLINE_AGENT_IDLE` (default 30 min) that owns no live deadline record gets ONE `hermes-ping` and one relay, at most once
 per agent per hour (`agents.json` in the state dir). It is never stopped: only a registered budget stops a process. An agent whose last
@@ -83,3 +84,12 @@ This is the interim piece: the plan's B9 launchd watchdog absorbs it (`docs/pase
 
 `deadline install` writes `~/Library/LaunchAgents/com.djbclark.deadline-sweep.plist` from `config/launchd/` and bootstraps it. It refuses from a
 linked worktree unless `--ade DIR` names the canonical checkout. The lead installs it after review.
+
+## Delivery and ownership details (PR 223 review, 2026-11-01)
+
+1. The owner notice is tracked apart from the at-most-once kill and reroute: a relay that exits non-zero stays `notice.done = false` in the record and later
+   sweeps retry it (at most 5 times, 60 s x attempt apart; `deadline ls --json` shows it). Recovery is marked done when the kill and reroute ran, not
+   when the owner was reached.
+2. `deadline run` reserves its name (a `starting` placeholder, left alone by the sweep for 60 s) BEFORE it starts the command, so a refused name never
+   ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
+   cannot mark the new registration done.
