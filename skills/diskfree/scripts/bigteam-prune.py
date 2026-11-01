@@ -61,6 +61,7 @@ import fcntl
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -798,10 +799,16 @@ def take_lock():
 
 
 def size_kb(c):
+    """Size in KiB with `dust` (never du/find on these trees), niced, bounded to 120 s; 0 when unknown. Only called for
+    checkouts that are about to be removed: the size is informational and nothing depends on it."""
     try:
-        r = subprocess.run(["du", "-sk", str(c)], capture_output=True, text=True, timeout=300)
-        return int(r.stdout.split()[0])
-    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        r = subprocess.run(["nice", "-n", "19", "dust", "-d", "0", "-o", "b", "-j", str(c)], capture_output=True, text=True,
+                           timeout=120, cwd=tempfile.gettempdir(), stdin=subprocess.DEVNULL)
+        if r.returncode:
+            return 0
+        size = json.loads(r.stdout[r.stdout.index("{"):])["size"]
+        return int(size.rstrip("B")) // 1024
+    except (OSError, ValueError, KeyError, IndexError, TypeError, subprocess.TimeoutExpired):
         return 0
 
 
@@ -824,14 +831,14 @@ def main():
             continue
         for c in checkouts(d):
             ok, why = safe(c)
-            (plan if ok else kept).append((c, d, size_kb(c), why))
+            (plan if ok else kept).append((c, d, size_kb(c) if ok else 0, why))
     for c, d, size, why in plan:
         ok, res = remove(c, d, baseline) if apply else (True, "would remove")
         if ok and apply:
             freed += size
         print(f"{'REMOVED' if apply and ok else ('KEPT' if apply else 'PLAN')} {size/1024:7.1f} MB {c} ({res})")
     for c, d, size, why in kept:
-        print(f"KEEP    {size/1024:7.1f} MB {c} ({why})")
+        print(f"KEEP    {'':>10} {c} ({why})")
     print(f"{'freed' if apply else 'would free'}: {freed/1048576 if apply else sum(p[2] for p in plan)/1048576:.2f} GB; kept {len(kept)} checkout(s)")
     if lock is not None:
         os.close(lock)

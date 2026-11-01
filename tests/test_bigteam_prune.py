@@ -1147,3 +1147,57 @@ def test_unrelated_remote_config_is_not_a_helper(prune, tmp_path, world):
     g(c, "config", "remote.origin.tagopt", "--no-tags")
     g(c, "config", "remote.origin.prune", "true")
     assert prune.remote_with_helper(c) is None
+
+
+# ---- round 12 (GitHub Codex thread + local review of 2ccc596c) ---------------------------------------------------
+
+
+def test_sizes_are_measured_for_removal_candidates_only(prune, tmp_path, world, monkeypatch, capsys):
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    (b / "wip.txt").write_text("uncommitted\n")  # b is kept
+    seen = []
+    monkeypatch.setattr(prune, "size_kb", lambda c: seen.append(c) or 2048)
+    monkeypatch.setattr(sys, "argv", ["x"])
+    prune.main()
+    out = capsys.readouterr().out
+    assert seen == [a]
+    assert "PLAN" in out and "KEEP" in out and "would free: 0.00 GB; kept 1" in out
+
+
+def test_size_kb_uses_dust_not_du_and_parses_bytes(prune, tmp_path, monkeypatch):
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = ' \n{"size":"3145728B","name":"x","children":[]}\n'
+
+    monkeypatch.setattr(prune.subprocess, "run", lambda cmd, *a, **k: calls.append((cmd, k)) or R())
+    assert prune.size_kb(tmp_path) == 3072
+    cmd, kw = calls[0]
+    assert cmd[:3] == ["nice", "-n", "19"] and "dust" in cmd and "du" not in cmd
+    assert kw["timeout"] <= 120
+
+
+@pytest.mark.parametrize("failure", ["rc", "garbage", "missing", "timeout"])
+def test_size_kb_failures_are_zero_not_errors(prune, tmp_path, monkeypatch, failure):
+    class R:
+        returncode = 1 if failure == "rc" else 0
+        stdout = "not json" if failure == "garbage" else "{}"
+
+    def run(*a, **k):
+        if failure == "missing":
+            raise FileNotFoundError("dust")
+        if failure == "timeout":
+            raise prune.subprocess.TimeoutExpired("dust", 120)
+        return R()
+
+    monkeypatch.setattr(prune.subprocess, "run", run)
+    assert prune.size_kb(tmp_path) == 0
+
+
+def test_size_kb_real_dust_if_installed(prune, tmp_path):
+    if shutil.which("dust") is None:
+        pytest.skip("dust not installed")
+    (tmp_path / "f").write_bytes(b"x" * 200_000)
+    assert prune.size_kb(tmp_path) >= 100
