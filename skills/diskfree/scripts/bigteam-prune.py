@@ -38,6 +38,9 @@ a remote that is a local path outside the root, still counts. A repository borro
 dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
 CLAIM, no unfinished or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
+A linked worktree's HEAD reflog is read on both sides of every entry. An ssh remote counts as another machine only when
+git's ssh is plain ssh (no core.sshCommand, GIT_SSH, GIT_SSH_COMMAND, ProxyCommand or ProxyJump). Kept reasons print
+remote URLs without userinfo, query or helper-transport arguments.
 Every commit named by a root pseudo-ref in the git dir (ORIG_HEAD, FETCH_HEAD, REBASE_HEAD, ...) must also be on a
 remote (a linked worktree: or a branch or tag), and no directory below the checkout may be a git repository of its own
 (a `.git` entry or a bare repository), tracked or not.
@@ -190,6 +193,25 @@ def nested_repo(c):
     return None
 
 
+def reflog_ids(c):
+    """Every non-zero object id on either side of the worktree's own HEAD reflog entries (`<old> <new> <who>\\t<msg>`),
+    or None when the file cannot be read (a missing file is an empty reflog)."""
+    p = git_path(c, "logs/HEAD")
+    if p is None:
+        return None
+    ids = []
+    try:
+        for ln in p.read_text(errors="replace").splitlines():
+            for tok in ln.split(None, 2)[:2]:
+                if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tok) and set(tok) != {"0"}:
+                    ids.append(tok)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    return sorted(set(ids))
+
+
 def pseudo_ref_commits(gitdir):
     """The object ids held by root pseudo-refs in a git dir (ORIG_HEAD, FETCH_HEAD, REBASE_HEAD, ... any `*_HEAD`
     file; not HEAD itself), or None when one cannot be read. They survive a reflog expiry and a `reset`."""
@@ -272,10 +294,24 @@ def ssh_real_host(host, user=None, port=None):
         return None
     if r.returncode:
         return None
+    name = None
     for ln in r.stdout.splitlines():
-        if ln.lower().startswith("hostname ") and ln.split(None, 1)[1].strip():
-            return ln.split(None, 1)[1].strip()
-    return None
+        key, _sp, val = ln.partition(" ")
+        key, val = key.lower(), val.strip()
+        if key in ("proxycommand", "proxyjump") and val and val.lower() != "none":
+            return None  # traffic may be routed anywhere, this machine included: not resolvable
+        if key == "hostname" and val and name is None:
+            name = val
+    return name
+
+
+def ssh_overridden(c):
+    """True when git's ssh transport may differ from plain `ssh` (core.sshCommand, ssh.variant aside, GIT_SSH,
+    GIT_SSH_COMMAND in this process): `ssh -G` then says nothing about where git connects. Unreadable config counts."""
+    if os.environ.get("GIT_SSH") or os.environ.get("GIT_SSH_COMMAND"):
+        return True
+    rc, out = git(c, "config", "--get-all", "core.sshCommand")
+    return rc not in (0, 1) or bool(out.strip())
 
 
 def host_is_external(host, via_ssh, user=None, port=None):
@@ -299,7 +335,23 @@ def host_is_external(host, via_ssh, user=None, port=None):
     return not any(is_local_address(f, sa) for f, sa in addrs)
 
 
-def classify_url(url):
+def redact(url):
+    """The URL without userinfo, query or fragment, so a diagnostic never carries a password or token."""
+    try:
+        if "://" in url:
+            p = urlsplit(url)
+            host = p.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            return f"{p.scheme}://{host}{':' + str(p.port) if p.port else ''}{p.path}"
+    except ValueError:
+        return "(unparsable URL)"
+    if "::" in url.split("/", 1)[0]:
+        return url.split("::", 1)[0] + "::(arguments hidden)"  # a helper transport's argument may be a secret
+    return re.sub(r"^[^@/]*@", "", url)
+
+
+def classify_url(url, ssh_ok=True):
     """('remote', None) for a network URL positively to another host; ('path', [raw paths]) for something git reads from
     this machine (a plain path, `file://` with git's percent-decoding); ('unknown', None) for anything else: helper
     transports `x::y`, odd schemes, unparsable URLs, a host that is this machine or does not resolve. The caller keeps
@@ -316,6 +368,8 @@ def classify_url(url):
                 return "path", [parts.path, unquote(parts.path)]
             if scheme in NET_SCHEMES:
                 ssh = scheme in SSH_SCHEMES
+                if ssh and not ssh_ok:
+                    return "unknown", None
                 user, port = (unquote(parts.username), parts.port) if ssh and parts.username else (None, parts.port if ssh else None)
                 return ("remote", None) if host_is_external(parts.hostname or "", ssh, user, port) else ("unknown", None)
             return "unknown", None
@@ -323,6 +377,8 @@ def classify_url(url):
         if "::" in head and not head.startswith("["):
             return "unknown", None
         if ":" in head:  # scp-like [user@]host:path
+            if not ssh_ok:
+                return "unknown", None
             userhost = head.rsplit(":", 1)[0]
             user, _at, host = userhost.rpartition("@")
             host = host.strip("[]")
@@ -343,6 +399,7 @@ def local_remote_inside_root(c):
     if rc:
         return "unreadable"
     root = str(root_resolved())
+    ssh_ok = not ssh_overridden(c)
     for name in names.split():
         for extra in ((), ("--push",)):
             rc, urls = git(c, "remote", "get-url", "--all", *extra, name)
@@ -350,19 +407,19 @@ def local_remote_inside_root(c):
                 return "unreadable"
             for url in urls.splitlines():
                 url = url.strip()
-                kind, paths = classify_url(url)
+                kind, paths = classify_url(url, ssh_ok)
                 if kind == "remote":
                     continue
                 if kind == "unknown":
-                    return f"{url or '(empty)'} (cannot be resolved)"
+                    return f"remote {name}: {redact(url) or '(empty)'} (cannot be resolved)"
                 for path in paths:
                     try:
                         path = os.path.expanduser(path)
                         cands = {os.path.realpath(path), os.path.realpath(os.path.join(str(c), path))}
                     except (OSError, ValueError):
-                        return f"{url} (cannot be resolved)"
+                        return f"remote {name}: {redact(url)} (cannot be resolved)"
                     if any(cand == root or cand.startswith(root + os.sep) for cand in cands):
-                        return url
+                        return f"remote {name}: {redact(url)}"
     return None
 
 
@@ -498,11 +555,11 @@ def safe(c):
         rc, pw = git(c, "for-each-ref", "refs/worktree", "refs/bisect", "refs/rewritten")
         if rc or pw.strip():
             return False, "has per-worktree refs (refs/worktree, refs/bisect, refs/rewritten) or they are unreadable"
-        rc, hs = git(c, "log", "-g", "--format=%H", "HEAD")
-        if rc:
+        hs = reflog_ids(c)  # BOTH sides of every entry: after a partial expiry a commit may survive only as an old id
+        if hs is None:
             return False, "HEAD reflog unreadable"
-        if hs.split():
-            rc, un = git(c, "rev-list", "--stdin", "--not", "--remotes", "--branches", "--tags", stdin=hs)
+        if hs:
+            rc, un = git(c, "rev-list", "--stdin", "--not", "--remotes", "--branches", "--tags", stdin="\n".join(hs) + "\n")
             if rc or un.strip():
                 return False, f"{len(un.split())} commit(s) only in this worktree's HEAD reflog, on no remote, branch or tag (or unreadable)"
         rc, _sym = git(c, "symbolic-ref", "-q", "HEAD")

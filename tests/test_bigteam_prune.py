@@ -815,3 +815,96 @@ def test_orig_head_on_a_remote_does_not_keep_a_clean_clone(prune, tmp_path, worl
     (c / ".git/ORIG_HEAD").write_text(commit_sha + "\n")
     ok, why = prune.safe(c)
     assert ok, why
+
+
+# ---- round 6 (local Codex review of 10beb8da) ---------------------------------------------------------------------
+
+
+def test_linked_worktree_commit_surviving_only_as_an_old_reflog_id_is_kept(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    x = commit(wt, "x", "detached work\n")
+    g(wt, "checkout", "-q", "--detach", "origin/main")
+    log = prune.git_path(wt, "logs/HEAD")
+    lines = log.read_text().splitlines()
+    log.write_text(lines[-1] + "\n")  # partial expiry: only the entry whose OLD id is x remains
+    assert lines[-1].split()[0] == x and lines[-1].split()[1] != x
+    assert x not in g(wt, "log", "-g", "--format=%H", "HEAD")  # the new-id-only walk of before cannot see it
+    ok, why = prune.safe(wt)
+    assert not ok and "reflog" in why
+    assert prune.remove(wt, wt.parent, {wt.parent: wt.parent.stat().st_mtime})[0] is False
+
+
+def test_unreadable_worktree_reflog_keeps_it(prune, tmp_path, world, monkeypatch):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    monkeypatch.setattr(prune, "reflog_ids", lambda c: None)
+    ok, why = prune.safe(wt)
+    assert not ok and "reflog unreadable" in why
+
+
+def test_core_ssh_command_override_keeps_an_ssh_remote(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h, *a, **k: "external.example")
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    g(c, "remote", "add", "o", "git@external.example:o/r.git")
+    assert prune.local_remote_inside_root(c) is None  # without an override it is external
+    g(c, "config", "core.sshCommand", "ssh -oHostName=localhost")
+    why = prune.local_remote_inside_root(c)
+    assert why and "cannot be resolved" in why
+
+
+@pytest.mark.parametrize("var", ["GIT_SSH", "GIT_SSH_COMMAND"])
+def test_git_ssh_env_override_keeps_an_ssh_remote(prune, tmp_path, world, monkeypatch, var):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h, *a, **k: "external.example")
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    g(c, "remote", "add", "o", "ssh://external.example/o/r.git")
+    monkeypatch.setenv(var, "/usr/bin/ssh")
+    assert prune.local_remote_inside_root(c)
+
+
+def test_https_remote_is_not_affected_by_the_ssh_override(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    g(c, "remote", "add", "o", "https://external.example/o/r.git")
+    g(c, "config", "core.sshCommand", "ssh -oHostName=localhost")
+    assert prune.local_remote_inside_root(c) is None
+
+
+@pytest.mark.parametrize("directive", ["proxycommand nc localhost 22", "proxyjump jump.example"])
+def test_ssh_proxy_routing_is_not_resolvable(prune, monkeypatch, directive):
+    class R:
+        returncode = 0
+        stdout = f"hostname external.example\n{directive}\n"
+
+    monkeypatch.setattr(prune.subprocess, "run", lambda *a, **k: R())
+    assert prune.ssh_real_host("x") is None
+
+    class R2:
+        returncode = 0
+        stdout = "hostname external.example\nproxyjump none\n"
+
+    monkeypatch.setattr(prune.subprocess, "run", lambda *a, **k: R2())
+    assert prune.ssh_real_host("x") == "external.example"
+
+
+@pytest.mark.parametrize("url", [
+    "https://alice:s3cr3t-token@nowhere.invalid/o/r.git?token=s3cr3t-token",
+    "ext::sh -c s3cr3t-token",
+    "alice:s3cr3t-token@weird/host",
+])
+def test_kept_reason_never_carries_credentials(prune, tmp_path, world, url, monkeypatch, capsys):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: None)
+    g(c, "remote", "add", "cred", url)
+    why = prune.local_remote_inside_root(c)
+    assert why and "cred" in why
+    ok, reason = prune.safe(c)
+    assert not ok
+    assert "s3cr3t-token" not in why and "s3cr3t-token" not in reason
+
+
+def test_redact_drops_userinfo_query_and_scp_user(prune):
+    assert prune.redact("https://u:p@host.example:8443/a/b.git?x=1#f") == "https://host.example:8443/a/b.git"
+    assert prune.redact("git@github.com:o/r.git") == "github.com:o/r.git"
+    assert prune.redact("/plain/path") == "/plain/path"
+    assert prune.redact("ext::sh -c tok") == "ext::(arguments hidden)"

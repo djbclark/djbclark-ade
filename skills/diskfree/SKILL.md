@@ -230,6 +230,11 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   `.git` entry or a bare repository), and every commit named by a root pseudo-ref in the git dir
   (`ORIG_HEAD`, `FETCH_HEAD`, `REBASE_HEAD`, ...) must be on a remote too (a linked worktree: or on
   a branch or tag), because `reset` and an expired reflog leave those as the only reference.
+  A linked worktree's HEAD reflog is read on both sides of every entry (a commit may survive only
+  as an old id). An ssh remote is only "another machine" when git's ssh is plain ssh: a
+  `core.sshCommand`, `GIT_SSH` or `GIT_SSH_COMMAND` override, or a `ProxyCommand`/`ProxyJump` in
+  the ssh config, keeps the checkout. Kept reasons name the remote and print its URL without
+  userinfo, query or helper-transport arguments.
   Task-dir files outside checkouts (reports, `jobs/`) are never touched. Everything kept is
   listed with its reason. 2026-10-31 (earlier script version): 0.68 GB from 11 checkouts; 27 kept
   (no remote, uncommitted work, or ignored reports).
