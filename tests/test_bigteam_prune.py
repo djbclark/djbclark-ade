@@ -716,3 +716,102 @@ def test_claim_created_during_the_safety_scan_stops_the_deletion(prune, tmp_path
     ok, msg = prune.remove(c, task, baseline)
     assert not ok and "no longer eligible" in msg
     assert c.exists()
+
+
+# ---- round 5 (local Codex review of ffeb2f64) ---------------------------------------------------------------------
+
+
+def _expire_reflogs(repo):
+    g(repo, "reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all")
+
+
+def _nested_in_tracked_dir(tmp_path, world, bare=False):
+    """A clone whose tracked directory `docs` is also a git repository holding unpushed history of its own: every file
+    in it is tracked by the outer clone, so the outer `git status` sees nothing."""
+    c = make_clone(tmp_path, world)
+    (c / "docs").mkdir()
+    commit(c, "docs/page.md", "tracked\n")
+    g(c, "push", "-q", "origin", "HEAD:main")
+    if bare:
+        g(tmp_path, "init", "-q", "--bare", str(c / "docs/store.git"))
+        g(c, "add", "-f", "docs/store.git")
+        g(c, "commit", "-q", "-m", "track the bare repo")
+        g(c, "push", "-q", "origin", "HEAD:main")
+    else:
+        g(c / "docs", "init", "-q", "-b", "main")
+        g(c / "docs", "add", "-A")
+        g(c / "docs", "commit", "-q", "-m", "unpushed nested work")
+    assert g(c, "status", "--porcelain", "--ignored") == ""  # the outer status really cannot see it
+    return c
+
+
+def test_nested_repo_in_a_tracked_directory_keeps_the_clone(prune, tmp_path, world):
+    c = _nested_in_tracked_dir(tmp_path, world)
+    ok, why = prune.safe(c)
+    assert not ok and "nested git repository" in why
+    assert rm(prune, c)[0] is False
+    assert (c / "docs/.git").exists()
+
+
+def test_nested_bare_repo_in_a_tracked_directory_keeps_the_clone(prune, tmp_path, world):
+    c = _nested_in_tracked_dir(tmp_path, world, bare=True)
+    ok, why = prune.safe(c)
+    assert not ok and "nested bare repository" in why
+
+
+def test_nested_repo_checked_for_linked_worktrees_too(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    (wt / "d").mkdir()
+    commit(wt, "d/f", "x\n")
+    g(wt, "push", "-q", "origin", "HEAD:refs/heads/pushed")
+    g(wt, "fetch", "-q", "origin")
+    g(wt / "d", "init", "-q")
+    assert g(wt, "status", "--porcelain", "--ignored") == ""
+    ok, why = prune.safe(wt)
+    assert not ok and "nested" in why
+
+
+def test_orig_head_only_commit_keeps_the_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    lost = commit(c, "lost", "only ORIG_HEAD will remember this\n")
+    g(c, "reset", "-q", "--hard", "origin/main")
+    _expire_reflogs(c)
+    assert g(c, "rev-parse", "ORIG_HEAD") == lost
+    assert g(c, "log", "--oneline", "--all", "--not", "--remotes") == ""  # the older checks really pass
+    ok, why = prune.safe(c)
+    assert not ok and "pseudo-ref" in why
+    assert rm(prune, c)[0] is False
+
+
+def test_fetch_head_only_commit_keeps_the_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    other = tmp_path / "other"
+    g(tmp_path, "clone", "-q", str(world), str(other))
+    sha = commit(other, "o", "elsewhere\n")
+    g(other, "push", "-q", "origin", "HEAD:refs/heads/side")
+    g(c, "fetch", "-q", "origin", "side")  # fills FETCH_HEAD, creates no remote-tracking ref for it
+    g(c, "update-ref", "-d", "refs/remotes/origin/side")
+    assert sha in (c / ".git/FETCH_HEAD").read_text()
+    ok, why = prune.safe(c)
+    assert not ok and "pseudo-ref" in why
+
+
+def test_orig_head_only_commit_keeps_the_linked_worktree(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    lost = commit(wt, "lost", "x\n")
+    g(wt, "reset", "-q", "--hard", "origin/main")
+    _expire_reflogs(wt)
+    gd = Path(g(wt, "rev-parse", "--absolute-git-dir"))
+    assert (gd / "ORIG_HEAD").read_text().strip() == lost
+    ok, why = prune.safe(wt)
+    assert not ok and "pseudo-ref" in why
+    assert prune.pseudo_ref_commits(gd) == [lost]
+
+
+def test_orig_head_on_a_remote_does_not_keep_a_clean_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    g(c, "reset", "-q", "--hard", "origin/main")
+    commit_sha = g(c, "rev-parse", "HEAD")
+    (c / ".git/ORIG_HEAD").write_text(commit_sha + "\n")
+    ok, why = prune.safe(c)
+    assert ok, why

@@ -38,6 +38,9 @@ a remote that is a local path outside the root, still counts. A repository borro
 dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
 CLAIM, no unfinished or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
+Every commit named by a root pseudo-ref in the git dir (ORIG_HEAD, FETCH_HEAD, REBASE_HEAD, ...) must also be on a
+remote (a linked worktree: or a branch or tag), and no directory below the checkout may be a git repository of its own
+(a `.git` entry or a bare repository), tracked or not.
 Everything kept is printed with its reason.
 
 bigteam-prune.py [--apply]     (without --apply: dry run, prints the plan)
@@ -163,6 +166,44 @@ def scan(c):
         else:
             return True, ignored
     return False, ignored
+
+
+def nested_repo(c):
+    """A reason when anything below checkout c (tracked, ignored or otherwise) is a git repository of its own: a `.git`
+    entry or a bare repository's HEAD+objects+refs. `git status` never reports a nested repo that sits in an already
+    tracked directory, so the whole tree is walked. c's own `.git` is skipped; links are not followed; any read error
+    keeps the checkout."""
+    def fail(e):
+        raise e
+
+    try:
+        for root, dirs, files in os.walk(c, onerror=fail):
+            here = Path(root)
+            if here == c:
+                dirs[:] = [x for x in dirs if x != ".git"]
+            elif ".git" in dirs or ".git" in files:
+                return f"nested git repository at {here.relative_to(c)}"
+            if "HEAD" in files and "objects" in dirs and "refs" in dirs:
+                return f"nested bare repository at {here.relative_to(c)}"
+    except OSError as e:
+        return f"checkout tree unreadable ({e})"
+    return None
+
+
+def pseudo_ref_commits(gitdir):
+    """The object ids held by root pseudo-refs in a git dir (ORIG_HEAD, FETCH_HEAD, REBASE_HEAD, ... any `*_HEAD`
+    file; not HEAD itself), or None when one cannot be read. They survive a reflog expiry and a `reset`."""
+    out = []
+    try:
+        for e in Path(gitdir).iterdir():
+            if e.name != "HEAD" and re.fullmatch(r"[A-Z][A-Z_]*HEAD", e.name) and e.is_file():
+                for ln in e.read_text(errors="replace").splitlines():
+                    tok = ln.split(None, 1)[0] if ln.strip() else ""
+                    if tok:
+                        out.append(tok)
+    except OSError:
+        return None
+    return out
 
 
 def ignored_ok(c, rel):
@@ -438,6 +479,9 @@ def safe(c):
     why = odd_gitdir(gitdir)
     if why:
         return False, why
+    why = nested_repo(c)
+    if why:
+        return False, why
     rc, rem = git(c, "remote")
     if rc or not rem.split():
         return False, "no remote"
@@ -477,6 +521,15 @@ def safe(c):
         rc, un = git(c, "rev-list", "--reflog", "--not", "--remotes")
         if rc or un.strip():
             return False, f"{len(un.split())} reflog-only commit(s) not on a remote (or unreadable)"
+    pseudo = pseudo_ref_commits(gitdir)
+    if pseudo is None:
+        return False, "root pseudo-refs (ORIG_HEAD, FETCH_HEAD, ...) unreadable"
+    if pseudo:
+        # a linked worktree's branches and tags survive its removal; a clone keeps only what a remote has
+        keep_refs = ["--remotes", "--branches", "--tags"] if linked else ["--remotes"]
+        rc, un = git(c, "rev-list", "--stdin", "--not", *keep_refs, stdin="\n".join(pseudo) + "\n")
+        if rc or un.strip():
+            return False, "a root pseudo-ref (ORIG_HEAD, FETCH_HEAD, ...) holds a commit on no remote (or is unreadable)"
     note = ("; detached, no branch to keep" if detached else "; branch kept in main repo") if linked else ""
     return True, "clean; commits on a remote" + note
 

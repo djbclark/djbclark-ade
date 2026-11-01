@@ -226,6 +226,10 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   (`git clone --shared`) cannot be detected from the clone's side. `--apply` takes a lock
   (`bigteam-prune.lock` beside the root; exit 3 when another run holds it); a clone whose
   `rmtree` fails part way is left half deleted (it was clean and pushed) and reported KEPT.
+  No directory anywhere below a checkout, tracked or not, may be a git repository of its own (a
+  `.git` entry or a bare repository), and every commit named by a root pseudo-ref in the git dir
+  (`ORIG_HEAD`, `FETCH_HEAD`, `REBASE_HEAD`, ...) must be on a remote too (a linked worktree: or on
+  a branch or tag), because `reset` and an expired reflog leave those as the only reference.
   Task-dir files outside checkouts (reports, `jobs/`) are never touched. Everything kept is
   listed with its reason. 2026-10-31 (earlier script version): 0.68 GB from 11 checkouts; 27 kept
   (no remote, uncommitted work, or ignored reports).
