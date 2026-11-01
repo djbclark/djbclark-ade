@@ -1320,7 +1320,22 @@ class TestCodexEverydayKinds(unittest.TestCase):
             c = r.route(kind, quota=low)          # an installed unprofiled agent may still take bulk
             self.assertNotEqual(c.service.name if c else None, "codex", kind)
         self.assertTrue(self.codex().eligible("code", self.drained(codex={"remaining": r.PLENTY_MIN})))
-        self.assertEqual(r.route("frontier", quota=low).service.name, "codex")
+        self.assertTrue(self.codex().eligible("frontier", low))      # frontier stays codex's below the constant ...
+        at_floor = self.drained(codex={"remaining": 60.0})            # ... but the planner hands it a slice only at the astra estimate floor
+        self.assertEqual(r.route("frontier", quota=at_floor).service.name, "codex")
+        self.assertIsNone(r.route("frontier", quota=low))             # uncalibrated, 49% is below what dispatch will demand
+        # the positive control (adversary R4): the plenty gate (50) does not reach frontier inside route(); with a
+        # calibrated history (median 20) the planner hands codex a frontier slice at 49
+        state = Path(tempfile.mkdtemp(prefix="route-hist-"))
+        (state / "task" / "jobs").mkdir(parents=True)
+        for k in range(3):
+            (state / "task" / "jobs" / f"s{k}.json").write_text(json.dumps(
+                {"agent": "codex", "model": "gpt-6-astra", "kind": "frontier", "effort": "high", "measured_usage_pct": 20.0}))
+        r._FRONTIER_HISTORY_MEMO.clear()
+        self.addCleanup(r._FRONTIER_HISTORY_MEMO.clear)
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_CALIBRATED_FLOOR": "on", "SESSION_FINDER_STATE": str(state / "sf")}), \
+                mock.patch.object(r, "ACP_DISPATCH_STATE", state):
+            self.assertEqual(r.route("frontier", quota=low).service.name, "codex")
 
     def test_astra_is_frontier_only_in_the_profile(self):
         models = self.codex().models
