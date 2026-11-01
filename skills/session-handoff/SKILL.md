@@ -183,15 +183,15 @@ it, reports the owner status in its resume plan and asks nothing.
      session in that directory): you need a later line of that owner naming `<your id>` = your caller
      row's Paseo id (step 3). The `is top-level` line is not enough, because the owner can still fail after
      it (`agent open` failed, no Desktop process) and keep writing: wait for the owner's TERMINAL line,
-     Paseo `finish: archived <owner id> (successor <your id>)` or `finish: archive refused ... successor
-     <your id> left running`, herdr `successor: claude is up in <your pane>`. Real terminal lines
+     Paseo `finish: archived <owner id> (successor <your id>)` (a `finish: archive refused` line is NOT a
+     terminal line: the owner was busy again and may be mid-turn, so it goes through the ask), herdr `successor: claude is up in <your pane>`. Real terminal lines
      arrive 2-4 s after `is top-level` (about 25-30 s after `starting`); if it is absent, re-read for up
      to 60 s from `starting`, then ask. Never admit on cwd alone.
   2. **No failure line voids it.** Any later line of that owner containing `NOT archived` (every Paseo
      `successor_fail` line ends with it, including `successor path aborted; NOT archived`) or `stays
-     usable` (every herdr `launch.py` failure line ends `the old pane is untouched and stays usable`), or a
-     `finish: archive refused` line that does not name `<your id>`, voids the `starting` line before it,
-     because the owner then believes the handover failed and keeps writing.
+     usable` (every herdr `launch.py` failure line ends `the old pane is untouched and stays usable`), or any
+     `finish: archive refused` line of that owner, voids the `starting` line before it,
+     because the owner then believes the handover failed or is still working, and keeps writing.
   3. **No third party.** The line must be tied to THIS chain. Either the line's owner id is S or the
      id, `paseo` or herdr `pane` of the step 2 row (a herdr claude row's `id` is `sid[:8]`, while
      `launch.py` and `self-slash` log the pane id `wN:pM`, which only the row's `pane` field carries); or step 2 found no row at all for S and step 4's candidate list
@@ -212,8 +212,9 @@ it, reports the owner status in its resume plan and asks nothing.
   the owner to be idle, before `starting`; the archive itself is refused, exit 8, if the owner is busy
   again), so the owner normally still reads live while its successor reads the chain: that is the
   handover. A predecessor that ran `--finish --successor` stops writing once its successor is verified
-  (top-level, or `is up`), even when the archive is refused and leaves it running; on a failure line
-  (`NOT archived`, "this session stays usable") it is still the writer. A `launch.py start --baton`
+  and it is archived (or, on herdr, `is up`); when the archive is refused it may be mid-turn and is still
+  a writer, and on a failure line (`NOT archived`, "this session stays usable") it is still the writer.
+  A `launch.py start --baton`
   start writes no such line, so it goes through the ask.
 - **C. Your own chain after `/clear` or `/new`, no live other owner:** one of: (1) the newest `then:
   /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, (2) you
