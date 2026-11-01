@@ -36,6 +36,12 @@ EXTRA_MODES = textwrap.dedent("""\
               echo "acp-run: FAILED quota: quota exhausted. Refreshes in 6 days and 4 hours" >&2
               echo "acp-run: agent=agy stop=error secs=50.0 tools=5 fail=quota" >&2
               exit 1;;
+      quota_copilot_monthly)  # copilot as seen 2026-11-01 (bigteam fix-get): no reset text at all
+              printf 'STATUS: working\\n' > "$report"
+              echo "acp-run: FAILED quota: quota exhausted: Error: You have exceeded your monthly quota (Request ID: FBD4:1B828:16C3141:1CFD4D4:6AE77302)" >&2
+              echo "acp-run: usage limit stopped session S1; after the reset continue it with: acp-run copilot --resume S1" >&2
+              echo "acp-run: agent=copilot stop=end_turn secs=8.1 tools=0 fail=quota" >&2
+              exit 1;;
       quota_exit0_log)  # the real agy event (acp-resume-hardening, 2026-10-18): exit 0,
               # report partial, 429 only in the session log — acp-run's stderr names no quota
               printf 'STATUS: working\\n' > "$report"
@@ -307,8 +313,7 @@ class TestCopilotQuotaClass(unittest.TestCase):
 
     def test_ai_credits_exhausted(self):
         for text in ("You've used all of your AI credits for this month.",
-                     "Your AI credits are exhausted; set a budget for additional usage.",
-                     "Budget limit reached. Additional usage is capped."):
+                     "Your AI credits are exhausted; set a budget for additional usage."):
             self.assertEqual(self.cls(text), "quota", text)
 
     def test_bare_resource_names_do_not_match(self):
@@ -333,6 +338,35 @@ class TestCopilotQuotaClass(unittest.TestCase):
         self.assertEqual(tail, "")
         self.assertNotEqual(self.cls(tail), "quota")
 
+    def test_current_monthly_quota_wording_and_error_json(self):   # microsoft/vscode#343806
+        for text in ("Payment required error: 402 You have exceeded your monthly quota",
+                     "Error: You have exceeded your monthly quota (Request ID: FBD4:1B828)",
+                     '{"errorType":"quota","statusCode":402}'):
+            self.assertEqual(self.mod["failure_class"](text, 1)[0], "quota", text)
+
+    def test_retry_after_ms_is_the_reset(self):
+        text = ('{"errorType":"quota","message":"You have exceeded your monthly quota","statusCode":402,'
+                '"errorCode":"quota_exceeded","retry_after_ms":726841922}')
+        now = datetime(2026, 10, 23, 12, 0).astimezone()
+        prd, prfa = self.mod["parse_reset_datetime"], self.mod["parse_reset_for_aiuse"]
+        when = self.mod["failure_class"](text, 1)[1]
+        self.assertEqual(prd(text, when, now), now + timedelta(milliseconds=726841922))
+        self.assertEqual(prfa(text, when), ("--resets-in", "726841s"))
+
+    def test_on_phrases_need_a_dated_month_and_never_read_the_clock(self):
+        fc, prd = self.mod["failure_class"], self.mod["parse_reset_datetime"]
+        now = datetime(2026, 11, 1, 1, 0).astimezone()
+        # no month name after `on`: not a reset phrase at all (was a global `retry on failure` match)
+        self.assertIsNone(fc("FAILED transient: will retry on failure", 1)[1])
+        # a month day without a year is not a clock time (was today/tomorrow 12:00, a wrong near reset)
+        text = "quota exceeded. upgrade: resets on November 1 at 12:00 AM"
+        self.assertEqual(fc(text, 1)[0], "quota")
+        self.assertIsNone(prd(text, fc(text, 1)[1], now))
+        self.assertIsNone(self.mod["parse_reset_for_aiuse"](text, fc(text, 1)[1]))
+
+    def test_budget_limit_reached_is_not_a_quota_term(self):
+        self.assertNotEqual(self.mod["failure_class"]("organization budget limit reached", 1)[0], "quota")
+
 
 class TestFarResetSkips(QuotaBase):
     """Item 2: a reset beyond auto_resume_max_wait_hours is rerouted, not scheduled."""
@@ -350,6 +384,30 @@ class TestFarResetSkips(QuotaBase):
         self.assertEqual(c.returncode, 3, c.stdout)
         self.assertIn("reroute now:", c.stdout)
         self.assertIn("--agent zcode --model m1", c.stdout)         # top code route minus agy's pool
+
+    def test_copilot_monthly_quota_without_reset_is_far_and_rerouted(self):
+        # fix-get's record shape (2026-11-01): quota NO-REPORT, exit 1, no reset text, aiuse has no
+        # copilot pool; it used to schedule a 30 min back-off resume on Copilot, three times
+        r = self.dispatch_agent("copilot", "m1", "--kind", "code", mode="quota_copilot_monthly",
+                                env={"ACP_OPERATOR_APPROVED": "route-override"})
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        rec = self.record()
+        self.assertIn("NO-REPORT: quota (copilot, m1)", rec["failure"])
+        ar = rec["auto_resume"]
+        self.assertEqual((ar["state"], ar.get("far_reset")), ("skipped", True))
+        self.assertNotEqual(ar.get("reset_source"), "backoff")
+        self.assertIn("reroute instead of waiting", ar["detail"])
+        self.assertEqual(self.launchctl(), [])                      # nothing sat in launchd
+        c = run(["check", str(self.record_path())], env=self.base_env())
+        self.assertEqual(c.returncode, 3, c.stdout)
+        self.assertIn("reroute now:", c.stdout)
+        self.assertNotIn("--agent copilot", c.stdout)               # the stopped pool is excluded
+
+    def test_non_copilot_without_reset_still_resumes_in_place(self):
+        r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_copilot_monthly")
+        ar = self.record()["auto_resume"]
+        self.assertEqual(ar["state"], "scheduled", r.stdout + r.stderr)
+        self.assertEqual(ar["reset_source"], "backoff")
 
     def test_the_rule_is_agent_general_zcode_weekly(self):
         r = self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_far")
