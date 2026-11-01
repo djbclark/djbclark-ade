@@ -195,6 +195,7 @@ def main() -> int:
         rows.append({"where": loc, "name": d.get("name"), "pid": d.get("pid"), "sessionId": sid, "status": d.get("status"),
                      "cwd": d.get("cwd"), "titles": ix["titles"], "score": s, "match": why,
                      "live": True, "self": sid == me, "agent": "claude", "finished": fin})
+    exited_ids = set()
     # every other TUI's running sessions (fleet.py): matched on title, name and cwd only; use
     # session-history.py for their full text
     try:
@@ -202,6 +203,8 @@ def main() -> int:
         for s in fleet.sessions():
             if s["agent"] == "claude" or s.get("host") == "hermes-gw" and not kws:
                 continue
+            if s.get("finished") or s.get("ended") or (s.get("launch") or {}).get("result") is not None:
+                exited_ids.add(s.get("sid") or s["id"])  # an exited ACP launch stays in the fleet until it is archived
             head = " ".join([s.get("title", ""), s.get("name", ""), s.get("cwd", ""), s.get("agent", "")]).lower()
             sc = sum(50 for k in kws if k in head)
             rows.append({"where": {"where": s["where"], "focus": s["focus"]} if s.get("where") else None, "name": s.get("name") or s["id"],
@@ -214,7 +217,10 @@ def main() -> int:
         # ended sessions of every agent from the full-text history (session-history.py's SQLite
         # index, which it brings up to date first); the older per-session JSON keyword index
         # covered only the ~160 Claude sessions that had once been live while this script ran
-        live_ids = {r["sessionId"] for r in rows}
+        # only a genuinely running session is dropped from the history hits: an exited launch still in the fleet
+        # keeps its row and takes the history hit's score and snippet (its title may not hold the keyword)
+        live_ids = {r["sessionId"] for r in rows if r["sessionId"] not in exited_ids}
+        exited = {r["sessionId"]: r for r in rows if r["sessionId"] in exited_ids}
         try:
             r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
                                 "--limit", "80", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
@@ -230,6 +236,12 @@ def main() -> int:
         # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
         found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
         for i, h in enumerate(f for f in found if f["sessionId"] not in live_ids and not f.get("live")):
+            row = exited.get(h["sessionId"])
+            if row:
+                row["score"] = max(row["score"], max(1, 40 - i))
+                row["match"] = row["match"] or h.get("snippet", "")
+                row["resume"] = h.get("resume", "")
+                continue
             rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,
                          "titles": [h["title"]] if h.get("title") else [], "score": max(1, 40 - i), "match": h.get("snippet", ""),
                          "live": False, "self": False, "agent": h.get("agent", ""), "finished": "",

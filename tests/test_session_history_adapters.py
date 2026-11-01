@@ -294,6 +294,43 @@ class LiveLabelTests(unittest.TestCase):
             (s,) = list(mod.sessions())
             self.assertEqual(s["load"](), ("", "Crush chat", [("user", "hello crush")]))
 
+    def test_crush_indexes_project_databases_with_their_project_and_resume_command(self) -> None:
+        def make_db(path: Path, sid: str, text: str) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            db = sqlite3.connect(path)
+            db.executescript("CREATE TABLE sessions(id, title, message_count, updated_at);"
+                             "CREATE TABLE messages(id, session_id, role, parts, created_at);")
+            db.execute("INSERT INTO sessions VALUES(?,?,1,1790000000)", (sid, "t " + sid))
+            db.execute("INSERT INTO messages VALUES('m',?,'user',?,1)", (sid, json.dumps([{"type": "text", "data": {"text": text}}])))
+            db.commit()
+            db.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            share = home / ".local/share"
+            make_db(share / "crush-acp/crush.db", "root1", "shared database text")
+            proj = home / "src/my proj"
+            make_db(proj / ".crush/crush.db", "proj1", "project local text")
+            gone = home / "src/gone"  # registered, database absent
+            (share / "crush-acp/projects.json").write_text(json.dumps({"projects": [
+                {"path": str(proj), "data_dir": str(proj / ".crush")}, {"path": str(gone), "data_dir": str(gone / ".crush")}]}))
+            (share / "crush").mkdir()
+            (share / "crush/projects.json").write_text(json.dumps({"projects": [  # the shared database again, and the project again
+                {"path": str(home / "src/other"), "data_dir": str(share / "crush-acp")},
+                {"path": str(proj), "data_dir": str(proj / ".crush")}]}))
+            mod = load("crush", home)
+            found = {s["sid"]: s for s in mod.sessions()}
+            self.assertEqual(sorted(found), ["proj1", "root1"])  # each database once, the missing one skipped
+            self.assertEqual(found["root1"]["key"], "crush:root1")
+            self.assertEqual(found["proj1"]["load"](), (str(proj), "t proj1", [("user", "project local text")]))
+            self.assertEqual(found["root1"]["load"]()[0], "")
+            sh_spec = importlib.util.spec_from_file_location("t_sh_crush", SF / "session-history.py")
+            sh = importlib.util.module_from_spec(sh_spec)
+            sh_spec.loader.exec_module(sh)
+            self.assertEqual(sh.resume_hint(mod.RESUME, "proj1", str(proj)),
+                             f"cd '{proj}' && crush -D '{proj / '.crush'}' --session proj1")
+            self.assertEqual(sh.resume_hint(mod.RESUME, "root1", ""), "crush -D ~/.local/share/crush-acp --session root1")
+
 
 class SessionFindAllTests(unittest.TestCase):
     def test_session_index_dir_override_applies_to_session_find_too(self) -> None:
@@ -326,6 +363,35 @@ class SessionFindAllTests(unittest.TestCase):
         (argv,) = calls
         self.assertEqual(argv[-2:], ["--", "--rebuild"])
         self.assertGreaterEqual(int(argv[argv.index("--limit") + 1]), 60)  # live rows are dropped after the cap
+
+    def test_a_finished_launch_still_in_the_fleet_keeps_its_history_hit(self) -> None:
+        """A finished ACP launch stays in fleet.sessions() until archived; its transcript-only keyword hit was dropped as 'live'."""
+        spec = importlib.util.spec_from_file_location("t_session_find_fin", SF / "session-find.py")
+        sf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sf)
+        row = {"agent": "codex", "id": "L1", "sid": "S-done", "status": "idle", "cwd": "/w", "title": "unrelated", "name": "n1",
+               "where": "", "focus": "", "finished": "done"}
+        running = {**row, "id": "L2", "sid": "S-run", "finished": "", "name": "n2"}
+        hits = [{"agent": "codex", "sessionId": sid, "live": False, "title": "", "cwd": "/w", "snippet": "okapi", "resume": f"r {sid}"}
+                for sid in ("S-done", "S-run", "S-old")]
+
+        def fake_run(argv, **kw):  # noqa: ANN001
+            return subprocess.CompletedProcess(argv, 0, json.dumps(hits), "")
+
+        fleet = mock.Mock(sessions=lambda: [row, running])
+        out = []
+        with mock.patch.object(sf, "live_sessions", return_value=[]), mock.patch.object(sf.subprocess, "run", fake_run), \
+                mock.patch.dict(sys.modules, {"fleet": fleet}), \
+                mock.patch.object(sys, "argv", ["session-find.py", "--all", "--json", "--", "okapi"]), \
+                mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
+            self.assertEqual(sf.main(), 0)
+        got = {r["sessionId"]: r for r in json.loads(out[-1])}
+        self.assertEqual(sorted(got), ["S-done", "S-old"])  # the running one is not listed twice; the finished one is
+        self.assertGreater(got["S-done"]["score"], 0)
+        self.assertEqual(got["S-done"]["match"], "okapi")
+        self.assertTrue(got["S-done"]["live"])  # still the fleet's row, with FINISHED set
+        self.assertEqual(got["S-done"]["finished"], "done")
+        self.assertEqual(got["S-old"]["status"], "ended")
 
 
 if __name__ == "__main__":
