@@ -2,8 +2,10 @@
 the clean pushed clone and linked worktree that must go. Hermetic: fixture repos under tmp_path with a bare 'remote'."""
 import importlib.util
 import os
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -466,6 +468,7 @@ def test_file_url_with_foreign_host_or_helper_transport_cannot_be_resolved_and_i
 def test_ordinary_network_remotes_do_not_keep_a_clone(prune, tmp_path, world, url, monkeypatch):
     c = make_clone(tmp_path, world)
     monkeypatch.setattr(prune, "ssh_real_host", lambda h: h)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])  # TEST-NET-3
     g(c, "remote", "add", "gh", url)
     assert prune.local_remote_inside_root(c) is None
 
@@ -573,3 +576,91 @@ def test_claim_appearing_between_two_removals_keeps_the_second(prune, tmp_path, 
     out = capsys.readouterr().out
     assert out.count("REMOVED") == 1 and "no longer eligible" in out
     assert sum(p.exists() for p in (a, b)) == 1
+
+
+# ---- round 4b (local Codex review of fffecb8e) -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url", ["ssh://alias/x", "alias:work/x"])
+def test_ssh_alias_that_cannot_be_resolved_keeps_the_clone(prune, tmp_path, world, url, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h: None)  # ssh -G failed, timed out or printed no hostname
+    g(c, "remote", "add", "al", url)
+    why = prune.local_remote_inside_root(c)
+    assert why and "cannot be resolved" in why
+
+
+def test_ssh_real_host_is_none_when_ssh_fails(prune, monkeypatch):
+    class R:
+        returncode = 255
+        stdout = ""
+
+    monkeypatch.setattr(prune.subprocess, "run", lambda *a, **k: R())
+    assert prune.ssh_real_host("x") is None
+
+    def boom(*a, **k):
+        raise prune.subprocess.TimeoutExpired("ssh", 10)
+
+    monkeypatch.setattr(prune.subprocess, "run", boom)
+    assert prune.ssh_real_host("x") is None
+
+
+def test_remote_host_with_this_machines_lan_address_is_kept(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    lan = (socket.AF_INET, ("192.0.2.77", 0))
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h: h)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [lan])
+    monkeypatch.setattr(prune, "is_local_address", lambda fam, sa: sa[0] == "192.0.2.77")
+    g(c, "remote", "add", "ts", "ssh://me@tailnet-host/work/x")
+    assert prune.local_remote_inside_root(c)
+
+
+def test_remote_host_that_does_not_resolve_is_kept(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: None)
+    g(c, "remote", "add", "x", "https://nowhere.invalid/o/r.git")
+    assert prune.local_remote_inside_root(c)
+
+
+def test_is_local_address_uses_the_interfaces(prune):
+    assert prune.is_local_address(socket.AF_INET, ("127.0.0.1", 0)) is True
+    assert prune.is_local_address(socket.AF_INET, ("0.0.0.0", 0)) is True
+    assert prune.is_local_address(socket.AF_INET, ("203.0.113.9", 0)) is False  # TEST-NET-3: not an interface
+
+
+def _age(prune, c, days=10):
+    """Make the checkout and its task dir look `days` old (every activity timestamp the script reads)."""
+    old = time.time() - days * 86400
+    for name in ("index", "HEAD", "logs/HEAD", "FETCH_HEAD"):
+        p = prune.git_path(c, name)
+        if p is not None and p.exists():
+            os.utime(p, (old, old))
+    os.utime(c, (old, old))
+    os.utime(c.parent, (old, old))
+
+
+def test_second_checkout_in_a_task_survives_the_age_rule_after_the_first_removal(prune, tmp_path, world, monkeypatch, capsys):
+    monkeypatch.setattr(prune, "MIN_AGE", 7 * 86400)
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    _age(prune, a)
+    _age(prune, b)
+    assert prune.finished_dir(a.parent)
+    monkeypatch.setattr(sys, "argv", ["x", "--apply"])
+    prune.main()
+    out = capsys.readouterr().out
+    assert not a.exists() and not b.exists(), out
+    assert out.count("REMOVED") == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_unreadable_jobs_dir_keeps_the_task(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    jobs = c.parent / "jobs"
+    jobs.mkdir()
+    jobs.chmod(0)
+    try:
+        assert prune.unclaimed_and_jobs_done(c.parent) is False
+        assert prune.finished_dir(c.parent) is False
+    finally:
+        jobs.chmod(0o755)

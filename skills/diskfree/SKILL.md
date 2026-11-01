@@ -204,8 +204,9 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   rebase, merge, cherry-pick, revert or bisect is in progress, it has submodules, a tracked file
   is marked assume-unchanged or skip-worktree, it has no remote, a remote URL is, or might
   be, a path inside the bigteam root (`file://` URLs are percent-decoded as git does, scp-like and
-  ssh hosts resolved with `ssh -G`, a URL naming this machine or one the script cannot fully
-  resolve counts; sibling checkouts that fetch each other would count each other's unpushed
+  ssh hosts resolved with `ssh -G`; only a host that resolves to addresses none of which is this
+  machine's counts as another machine, so a local name, an alias or name that does not resolve, or
+  a URL the script cannot fully resolve keeps the checkout; sibling checkouts that fetch each other would count each other's unpushed
   commits as pushed), the git dir holds anything beyond git's standard entries (a note, a
   custom hook, an LFS store, a customised `info/exclude`; `.git/config` is neither judged nor
   preserved), or `git status --porcelain=v1 -z --ignored` (untracked files forced on, submodules

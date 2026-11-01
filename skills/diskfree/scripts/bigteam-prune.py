@@ -16,8 +16,10 @@ old, with no CLAIM file (a CLAIM that records DONE still blocks) and no unfinish
   - at least one remote is configured, and no remote URL (fetch or push, insteadOf applied) is, or might be, a path
     inside the bigteam root (sibling checkouts that fetch each other would count each other's unpushed commits as "on
     a remote"): `file://` URLs are percent-decoded as git does, scp-like `host:path` and ssh hosts are resolved with
-    `ssh -G`, a URL naming this machine keeps the checkout, and a URL the script cannot fully resolve (`x::y` helper
-    transports, odd schemes, `file://otherhost/...`) keeps it too;
+    `ssh -G`; only a host that resolves to addresses none of which is this machine's (loopback, or an interface
+    address, tested by binding) counts as another machine; anything else (a local name, an alias `ssh -G` cannot
+    resolve, a name that does not resolve, `x::y` helper transports, odd schemes, `file://otherhost/...`) keeps the
+    checkout;
   - an IGNORED path is only allowed when it is a known generated directory (node_modules .venv venv __pycache__
     .pytest_cache .mypy_cache .ruff_cache) holding no nested git repository and no unreadable subdirectory and no bare repository (HEAD+objects+refs) anywhere inside; any other
     ignored file or directory (a report, an `out.rc`, a database, a scratch repo, anything under `.cache`) keeps the
@@ -34,12 +36,13 @@ old, with no CLAIM file (a CLAIM that records DONE still blocks) and no unfinish
 a remote that is a local path outside the root, still counts. A repository borrowing objects from a clone
 (`git clone --shared`, objects/info/alternates) cannot be detected from the clone's side. Right before each deletion the task
 dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
-CLAIM, no unfinished job record) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
+CLAIM, no unfinished or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
 Everything kept is printed with its reason.
 
 bigteam-prune.py [--apply]     (without --apply: dry run, prints the plan)
 """
+import errno
 import json
 import os
 import ipaddress
@@ -116,15 +119,17 @@ def finished_dir(d):
 
 
 def unclaimed_and_jobs_done(d):
+    """No CLAIM and every jobs/*.json finished. Directory-read errors propagate to the except and keep the task."""
     try:
         if os.path.lexists(d / "CLAIM"):
             return False
         jobs = d / "jobs"
         if jobs.is_symlink():
             return False
-        for j in jobs.glob("*.json") if jobs.is_dir() else []:
-            if not json.loads(j.read_text()).get("finished"):
-                return False
+        if os.path.lexists(jobs):
+            for j in sorted(os.listdir(jobs)):
+                if j.endswith(".json") and not json.loads((jobs / j).read_text()).get("finished"):
+                    return False
     except (OSError, ValueError, AttributeError):
         return False
     return True
@@ -190,38 +195,72 @@ SSH_SCHEMES = {"ssh", "git+ssh", "ssh+git"}
 NET_SCHEMES = {"http", "https", "ftp", "ftps", "git"} | SSH_SCHEMES
 
 
-def host_is_local(host):
-    host = host.strip("[]").lower()
-    if host in LOCAL_HOSTS:
-        return True
+def resolve_addrs(host):
+    """[(family, sockaddr)] for host, or None when it does not resolve (the caller then cannot call it external)."""
     try:
-        if ipaddress.ip_address(host).is_loopback or ipaddress.ip_address(host).is_unspecified:
+        return [(f, sa) for f, _t, _p, _c, sa in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)] or None
+    except (OSError, UnicodeError):
+        return None
+
+
+def is_local_address(family, sockaddr):
+    """True when the address belongs to one of this machine's interfaces: loopback, unspecified, or one a socket can
+    bind to (only a local address binds). An unexpected error counts as local (fail closed)."""
+    try:
+        ip = ipaddress.ip_address(str(sockaddr[0]).split("%")[0])
+        if ip.is_loopback or ip.is_unspecified:
             return True
     except ValueError:
-        pass
-    mine = {socket.gethostname().lower(), socket.getfqdn().lower()}
-    mine |= {m.split(".")[0] for m in mine}
-    return host in mine
+        return True
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            s.bind((sockaddr[0], 0) + tuple(sockaddr[2:]))
+    except OSError as e:
+        return e.errno != errno.EADDRNOTAVAIL
+    return True
 
 
 def ssh_real_host(host):
-    """The HostName `ssh -G` resolves an alias to (config only, no connection); the alias itself if that fails."""
+    """The HostName `ssh -G` resolves an alias to (config only, no connection); None when it cannot be established
+    (ssh missing, failing, timing out or printing no hostname), which keeps the checkout."""
     try:
         r = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=10, env=git_env(), stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
-        return host
+        return None
     if r.returncode:
-        return host
+        return None
     for ln in r.stdout.splitlines():
-        if ln.lower().startswith("hostname "):
+        if ln.lower().startswith("hostname ") and ln.split(None, 1)[1].strip():
             return ln.split(None, 1)[1].strip()
-    return host
+    return None
+
+
+def host_is_external(host, via_ssh):
+    """True only when host is positively another machine: not empty, not a local name, (for ssh) the alias resolved,
+    the name resolves, and no resolved address is one of this machine's. Anything else is not 'external'."""
+    host = host.strip("[]").lower()
+    if not host:
+        return False
+    if via_ssh:
+        host = ssh_real_host(host)
+        if host is None:
+            return False
+        host = host.strip("[]").lower()
+    mine = {socket.gethostname().lower(), socket.getfqdn().lower()}
+    mine |= {m.split(".")[0] for m in mine}
+    if host in LOCAL_HOSTS or host in mine:
+        return False
+    addrs = resolve_addrs(host)
+    if not addrs:
+        return False
+    return not any(is_local_address(f, sa) for f, sa in addrs)
 
 
 def classify_url(url):
-    """('remote', None) for a network URL to another host; ('path', [raw paths]) for something git reads from this
-    machine (a plain path, `file://` with git's percent-decoding, a local host); ('unknown', None) for anything this
-    script cannot fully resolve (helper transports `x::y`, odd schemes, unparsable URLs): the caller keeps the clone."""
+    """('remote', None) for a network URL positively to another host; ('path', [raw paths]) for something git reads from
+    this machine (a plain path, `file://` with git's percent-decoding); ('unknown', None) for anything else: helper
+    transports `x::y`, odd schemes, unparsable URLs, a host that is this machine or does not resolve. The caller keeps
+    the clone on 'unknown'."""
     if not url:
         return "unknown", None
     try:
@@ -233,19 +272,16 @@ def classify_url(url):
                     return "unknown", None
                 return "path", [parts.path, unquote(parts.path)]
             if scheme in NET_SCHEMES:
-                host = parts.hostname or ""
-                if scheme in SSH_SCHEMES and host:
-                    host = ssh_real_host(host)
-                return ("unknown", None) if host_is_local(host) else ("remote", None)
+                return ("remote", None) if host_is_external(parts.hostname or "", scheme in SSH_SCHEMES) else ("unknown", None)
             return "unknown", None
         head = url.split("/", 1)[0]
         if "::" in head and not head.startswith("["):
             return "unknown", None
         if ":" in head:  # scp-like [user@]host:path
-            host = head.rsplit(":", 1)[0].rsplit("@", 1)[-1]
-            if len(host.strip("[]")) <= 1:
+            host = head.rsplit(":", 1)[0].rsplit("@", 1)[-1].strip("[]")
+            if len(host) <= 1:
                 return "unknown", None  # a drive letter or nonsense
-            return ("unknown", None) if host_is_local(ssh_real_host(host.strip("[]"))) else ("remote", None)
+            return ("remote", None) if host_is_external(host, True) else ("unknown", None)
         return "path", [url]
     except ValueError:
         return "unknown", None
@@ -452,8 +488,8 @@ def task_still_eligible(c, task, baseline):
             return False, "task dir changed since planning"
     except (OSError, RuntimeError):
         return False, "task dir unreadable"
-    if not finished_dir(task):
-        return False, "task dir is claimed, has an unfinished job or is too recent"
+    if not unclaimed_and_jobs_done(task):  # the age was qualified at planning; the mtime check above guards it since
+        return False, "task dir is claimed or has an unfinished or unreadable job record"
     return True, ""
 
 
