@@ -103,7 +103,12 @@ Verify against the processes themselves, not against memory or the brief's guess
    Finder (61%) and a semgrep hook (130%), so a watcher reported "nothing heavy" during a load of 50 (`type -a ps`
    tells). And `%cpu` from `ps` is a decaying average: measure a window with
    `/usr/bin/top -l 2 -s 5 -o cpu -n 30 -stats pid,command,cpu,th,state,time` (read the second sample) and add
-   `kernel_task` plus the `sys` share: high `sys` with a busy `kernel_task` is memory compression, not a build.
+   `kernel_task` plus the `sys` share. High `sys` with a busy `kernel_task` is a lead, not a diagnosis: confirm
+   memory compression before calling it that, with `load-watch admit --json` (`mem_churn_pages_s`) or two
+   `vm_stat` reads a few seconds apart (Compressions, Decompressions and Pageins deltas). `kernel_task` also takes
+   CPU on purpose to cool the machine (`pmset -g therm` then shows a thermal or performance warning level; with none
+   it prints "No thermal warning level has been recorded") and for other kernel work, and none of these rules out a
+   build or test: still read the process list below for one.
    Then `/bin/ps -axo pid,ppid,%cpu,state,etime,time,command -r | ghead -20` for parents and ages. Map each heavy
    process to a session: `~/src/djbclark-ade/skills/session-finder/fleet.py list`, and `fleet.py show <id>`.
 2. **Load without CPU:** processes in state `U` (stuck in disk or network wait, unkillable: the AFS case on
