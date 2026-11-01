@@ -273,6 +273,67 @@ class TestResetFormatsD2(unittest.TestCase):
                          datetime.fromisoformat("2026-10-19T04:22:46+02:00"))
 
 
+class TestCopilotQuotaClass(unittest.TestCase):
+    """2026-11-01: GitHub Copilot's quota stops classify as `quota` (so far_reset says reroute)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mod = runpy.run_path(str(SCRIPT))
+
+    def cls(self, text: str) -> str | None:
+        return self.mod["failure_class"](text, 1)[0]
+
+    def test_cli_402_no_quota(self):         # github/copilot-cli#3431
+        self.assertEqual(self.cls('Model call failed: {"message":"You have no quota","code":"quota_exceeded"}'), "quota")
+        self.assertEqual(self.cls("Execution failed: 402 You have no quota"), "quota")
+
+    def test_cli_quota_exceeded_upgrade(self):
+        self.assertEqual(self.cls("Quota exceeded. Upgrade to increase your limit: https://github.com/features/copilot/plans"),
+                         "quota")
+
+    def test_premium_request_allowance_and_limit(self):   # community discussions 165869, 158775
+        self.assertEqual(self.cls("You have exceeded your premium request allowance. We have automatically "
+                                  "switched you to GPT-4.1"), "quota")
+        self.assertEqual(self.cls("You have exceeded your premium request limit, and do not currently have "
+                                  "overages enabled."), "quota")
+
+    def test_weekly_rate_limit_names_its_reset(self):     # github/copilot-cli#2742
+        text = ("You've reached your weekly rate limit. Please wait for your limit to reset on "
+                "April 19, 2026 at 9:00 PM or switch to auto model to continue.")
+        cls, when = self.mod["failure_class"](text, 1)
+        self.assertEqual(cls, "quota")
+        self.assertEqual(self.mod["parse_reset_datetime"](text, when),
+                         datetime(2026, 4, 19, 21, 0).astimezone())
+
+    def test_ai_credits_exhausted(self):
+        for text in ("You've used all of your AI credits for this month.",
+                     "Your AI credits are exhausted; set a budget for additional usage.",
+                     "Budget limit reached. Additional usage is capped."):
+            self.assertEqual(self.cls(text), "quota", text)
+
+    def test_bare_resource_names_do_not_match(self):
+        for text in ("each prompt uses one premium request", "AI credits draw down your budget",
+                     "monthly premium requests reset on the 1st", "weekly report written"):
+            self.assertNotEqual(self.cls(text), "quota", text)
+
+    def test_agent_text_about_premium_requests_is_not_a_stop(self):
+        # a slice that greps or writes about Copilot quota: message chunks and completed tool output
+        # are skipped by quota_log_tail, so exit0 detection never sees them
+        import tempfile
+        lines = [
+            {"kind": "update", "data": {"sessionUpdate": "agent_message_chunk", "content": {
+                "text": "You have exceeded your premium request allowance is the new term"}}},
+            {"kind": "update", "data": {"sessionUpdate": "tool_call_update", "status": "completed",
+                                        "rawOutput": 'bin/acp-dispatch: "you have no quota" quota_exceeded'}},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "s.jsonl"
+            log.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+            tail = self.mod["quota_log_tail"](log)
+        self.assertEqual(tail, "")
+        self.assertNotEqual(self.cls(tail), "quota")
+
+
 class TestFarResetSkips(QuotaBase):
     """Item 2: a reset beyond auto_resume_max_wait_hours is rerouted, not scheduled."""
 
