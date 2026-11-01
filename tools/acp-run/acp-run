@@ -825,6 +825,26 @@ def ro_segment(words, cwd, depth):
     return name in RO_PLAIN
 
 
+def ro_unquoted_meta(cmd):
+    """True when the command line has a shell metacharacter outside quotes that the word parser cannot
+    see: a glob (`*?[`), brace list, a word-initial tilde or history `!`, or a backslash. A glob expands to file names
+    chosen by the reviewed tree, so `git grep foo *` meets a file called `--open-files-in-pager=rm` as an
+    option (Codex review of PR 208). Quoted text (`rg 'a.*b'`) is literal."""
+    quote, prev = None, " "
+    for ch in cmd:
+        was, prev = prev, ch
+        if quote:
+            if ch == quote:
+                quote = None
+            elif ch == "\\" and quote == '"':  # an escape inside double quotes would hide the closing quote
+                return True
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "*?[]{}!\\" or (ch == "~" and (was.isspace() or was in "=:")):  # `HEAD~1` is no tilde
+            return True
+    return False
+
+
 def readonly_command(cmd, cwd=None, depth=0):
     """True when a shell command line only reads files and the network: commands from a short list (cat,
     ls, rg, git log/show/diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect
@@ -832,7 +852,7 @@ def readonly_command(cmd, cwd=None, depth=0):
     RO_TRUSTED_DIRS, no long option that runs a program (abbreviations included). git runs only where
     `cwd` (and each -C) finds an ordinary repository (ro_git_dir_ok). `git status` and `describe --dirty`
     may refresh `.git/index`, a cache, not content. A guess is a refusal."""
-    if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd):
+    if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd) or ro_unquoted_meta(cmd):
         return False
     try:
         toks = ro_words(cmd)
