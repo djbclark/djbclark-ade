@@ -50,7 +50,7 @@ def identity_exempt_roots():
 def make_identity_fixture():
     # Checkout location and TMPDIR cannot choose the enforcement test's root.
     roots = identity_exempt_roots()
-    for parent in (Path.home(), Path("/var/tmp"), Path("/Users/Shared"), Path("/home")):
+    for parent in (Path("/var/tmp"), Path("/Users/Shared"), Path.home(), Path("/home")):
         parent = parent.resolve()
         if any(parent.is_relative_to(root) for root in roots):
             continue

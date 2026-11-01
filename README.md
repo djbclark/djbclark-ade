@@ -410,6 +410,8 @@ array with string-aware boundaries before classifying it. Comment delimiters and
 format strings inside readable array examples remain documentation; a separate same-head
 BLOCK following the example still holds the gate.
 
-On 2026-11-01 (PR 175), all structurally readable recovery candidates preserve JSON
-string boundaries, including trailing-comma and duplicate-key documentation. Marker-format
-text inside their strings is metadata; broken quoting or nesting still fails closed.
+On 2026-11-01 (PR 175 round 9), recovery returned to the approved parser. String
+protection remains strict: trailing-comma documentation quoting a marker start can
+report a malformed BLOCK from nested metadata. This fail-closed limit is documented
+beside `_strip_code`'s C1 limits and in AGENTS.md item 1; recovery does not protect
+readable prefixes of broken envelopes or extend them into following markers.

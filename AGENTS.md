@@ -249,7 +249,11 @@ pull request here is expected to meet these; flag any it misses.
       containing arbitrary prose (beyond the existing `sha ` recovery decoration) are documentation
       in code too (2026-10-31, PR 175). Broken quoting or
       nesting makes field boundaries uncertain: a recoverable BLOCK and matching head fail closed
-      as malformed rather than being dismissed as nested documentation.
+      as malformed rather than being dismissed as nested documentation. A known fail-closed
+      limit (2026-11-01, PR 175 round 9): trailing-comma documentation whose note quotes
+      a marker start and whose nested metadata names a same-head BLOCK can report a
+      malformed BLOCK. String protection remains strict; this limit cannot approve a
+      PR or hide a same-head BLOCK.
    4. **`malformed` and `adversary-fetch-failed` always block**, with or without the opt-in — a
       missing, other-head or BLOCK marker is reported only. Fail closed on an unreadable verdict;
       report a readable bad one.
