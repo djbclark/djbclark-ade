@@ -26,18 +26,21 @@ READS = [
     OBSERVED,
     "rg -n 'foo' src | head -50",
     "git log --oneline -5",
-    "git -C /tmp/repo diff HEAD~1 -- a.py",
+    "git -C {REPO}/sub diff HEAD~1 -- a.py",
+    "git -C sub log -2",
+    "git log --oneline -3 -- README.md",
+    "git grep -n foo -- src",
+    "git diff --stat",
+    "git show HEAD:README.md",
+    "tail -n 20 build.log",
     "sed -n '1,200p' file.txt",
     "cat a.txt b.txt 2>/dev/null",
     "ls -la && git status --short",
-    "graft ask 'how does x work' --source",
     "/opt/homebrew/bin/bash -lc 'rg -n needle .'",
     "find . -name '*.py'",
     "/usr/bin/git log -3",
     "rtk git log -1",
     "sed -n '3,5p' file.txt",
-    "fd -H pattern src",
-    "file -b README.md",
 ]
 WRITES = [
     "rm -rf build",
@@ -83,7 +86,40 @@ WRITES = [
     "rg --hostname-bin=/tmp/x foo",
     "rg --hostname-bin /tmp/x foo",
     "rtk /tmp/evil/cat x",
+    # adversary PR 208 round 2: git grep runs the pager (abbreviated or grouped), fd -x attached values,
+    # file --comp, a bare repository committed in the tree, graft writes graft/
+    "git grep --open=rm foo",
+    "git grep --open-files=rm foo",
+    "git grep --o=rm foo",
+    "git grep -nOrm foo",
+    "git grep -lO foo",
+    "git diff --out=p.txt",
+    "git log --ext=x",
+    "git diff --ex x",
+    "fd -x/bin/rm . dir",
+    "fd -X/bin/rm",
+    "fd -x=rm",
+    "fd -Hx/bin/rm .",
+    "fd -H pattern src",
+    "file --comp -m m",
+    "file --compil -m m",
+    "file -b README.md",
+    "graft ask x",
+    "graft map",
+    "graft skeleton f.py",
+    "rg --hostn=/tmp/x foo",
+    "rg --pr=./x foo",
+    "tail -f app.log",
+    "tail -F app.log",
+    "tail --follow app.log",
+    "git -C {REPO}/evil diff HEAD~1 HEAD",
+    "git -C evil status",
+    "git -C {NOREPO} log",
+    "git -C {REPO}/evil/objects log",
 ]
+# the same commands judged with cwd inside the bare repository, and with no cwd at all
+EVIL_CWD = ["git diff", "git log", "git status"]
+OUTSIDE_CWD = ["git log", "git -C . diff"]
 
 
 def probe() -> dict[str, object]:
@@ -92,14 +128,31 @@ def probe() -> dict[str, object]:
         loader = importlib.machinery.SourceFileLoader("acp_run", sys.argv[1])
         mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("acp_run", loader))
         loader.exec_module(mod)
+        import os, tempfile
         cases = json.load(sys.stdin)
+        tmp = tempfile.mkdtemp(prefix="ro-denial-")
+        REPO, NOREPO = os.path.join(tmp, "repo"), os.path.join(tmp, "norepo")
+        os.makedirs(os.path.join(REPO, ".git")); os.makedirs(os.path.join(REPO, "sub"))
+        os.makedirs(os.path.join(REPO, "evil", "objects")); os.makedirs(os.path.join(REPO, "evil", "refs"))
+        for f in ("HEAD", "config"):
+            open(os.path.join(REPO, "evil", f), "w").write("x")
+        os.makedirs(NOREPO)
+        fix = lambda c: c.replace("{REPO}", REPO).replace("{NOREPO}", NOREPO)
         out = {}
-        out["reads"] = [mod.readonly_command(c) for c in cases["reads"]]
-        out["writes"] = [mod.readonly_command(c) for c in cases["writes"]]
+        out["reads"] = [mod.readonly_command(fix(c), REPO) for c in cases["reads"]]
+        out["writes"] = [mod.readonly_command(fix(c), REPO) for c in cases["writes"]]
+        out["evil_cwd"] = [mod.readonly_command(c, os.path.join(REPO, "evil")) for c in cases["evil_cwd"]]
+        out["no_cwd"] = [mod.readonly_command(c, None) for c in cases["outside_cwd"]]
+        out["norepo_cwd"] = [mod.readonly_command(c, NOREPO) for c in cases["outside_cwd"]]
+        out["cat_no_cwd"] = mod.readonly_command("cat a.txt", None)
+        out["tool_cwd"] = [mod.tool_cwd(types.SimpleNamespace(raw_input={"cwd": REPO})),
+                           mod.tool_cwd(types.SimpleNamespace(raw_input={"cwd": "rel"})),
+                           mod.tool_cwd(types.SimpleNamespace(raw_input=None))]
+        out["repo"] = REPO
 
         def call(command, kind="execute"):
             return types.SimpleNamespace(kind=kind, title="Run command", tool_call_id="t1",
-                                         raw_input={"command": command})
+                                         raw_input={"command": command, "cwd": REPO})
         def opt(oid, kind):
             return types.SimpleNamespace(option_id=oid, kind=kind, name=oid)
         CODEX = [opt("allow_once", "allow_once"), opt("accept_execpolicy_amendment", "allow_always"),
@@ -156,7 +209,8 @@ def probe() -> dict[str, object]:
         """)
     r = subprocess.run(
         ["uv", "run", "--quiet", "--with", "agent-client-protocol>=0.9,<1.0", "python", "-I", "-c", code,
-         str(SCRIPT)], input=json.dumps({"reads": READS, "writes": WRITES}), check=False,
+         str(SCRIPT)], input=json.dumps({"reads": READS, "writes": WRITES, "evil_cwd": EVIL_CWD,
+                                                   "outside_cwd": OUTSIDE_CWD}), check=False,
         capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr)
@@ -178,6 +232,15 @@ class TestReadOnlyDenial(unittest.TestCase):
     def test_anything_that_writes_or_runs_code_is_not(self):
         for cmd, ok in zip(WRITES, self.res["writes"], strict=True):
             self.assertFalse(ok, cmd)
+
+    def test_git_in_a_bare_repository_committed_in_the_tree_or_outside_any_repo_is_refused(self):
+        self.assertEqual(self.res["evil_cwd"], [False] * 3)
+        self.assertEqual(self.res["no_cwd"], [False] * 2)
+        self.assertEqual(self.res["norepo_cwd"], [False] * 2)
+        self.assertTrue(self.res["cat_no_cwd"])
+
+    def test_the_requests_own_cwd_decides(self):
+        self.assertEqual(self.res["tool_cwd"], [self.res["repo"], None, None])
 
     def test_the_observed_curl_is_allowed_under_read_only(self):
         r = self.res["observed_read_only"]
