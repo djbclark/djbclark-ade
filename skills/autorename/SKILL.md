@@ -2,18 +2,18 @@
 name: autorename
 description: >-
   Rename the current session (what /rename does) to a short derived title and
-  name its own tab (the Paseo tab, or the herdr tab label); nothing else. Use for
+  name its own tab (the Paseo tab; the herdr tab label still works until the plan's D4/D6 drain); nothing else. Use for
   /autorename, "name this session", the autorename_nudge hook, and as the last
-  step of /handoff. Also owns the full herdr layout pass (`/autorename all`, herdr
-  only): reorganize or clean up herdr workspaces, tabs and panes.
+  step of /handoff. `/autorename all` (the herdr layout pass) is RETIRED
+  (2026-10-31): herdr is retired from djbclark-ade except its two Paseo bridges and the live paths in AGENTS.md.
 ---
 
 # autorename — title the session from what you know
 
 Canonical copy: `~/src/djbclark-ade/skills/autorename/` (git: `~/src/djbclark-ade`; moved
 from `~/ops/site-djbclark/skills/autorename` on 2026-10-08); every TUI links to it directly
-(skill-everywhere). Its sibling for the other end of a
-session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
+(skill-everywhere). Its former sibling for the other end of a
+session's life, closing idle herdr panes, was the `herdr-tidy` skill, retired from djbclark-ade 2026-10-31.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
@@ -46,22 +46,25 @@ started with `acp`, `-p` or `--print`) and chats titled with `/rename` (verified
 live 2026-10-10). Before that fix, the Claude-format output was silently
 dropped in cursor sessions and the once-per-session marker was used up.
 
-## Arguments: `/autorename all` is the full herdr reorganization
+## Arguments: `/autorename all` is RETIRED (refuse it)
+
+**If the argument is `all`, `reorg` or `layout` (with or without a workspace name), do NOT run the pass.** Reply exactly
+`autorename all is retired from djbclark-ade (2026-10-31)` and stop, in every host (Paseo, herdr or none), and make no
+`herdr_place.py` call. The paragraphs and numbered steps of this section and section 3 that follow are a **record of the
+retired herdr layout pass, not instructions**; their code stays in `herdr_place.py` until the plan's D4/D6 drain
+(`docs/paseo-only-rearchitecture.md`), which is not a reason to run it. The no-argument path below is the live one.
 
 The skill receives whatever follows the command. **With no argument it titles this
 session and names this agent's own tab, and nothing else** (steps 1 and 2 below; djbclark,
 2026-10-30): in Paseo the agent's tab (`<topic>-pt`, which is the agent's name), in herdr
 the tab label (`<topic>-t`). It never renames a workspace and never moves a tab. With
 **`all`** (synonyms `reorg`, `layout`; optionally followed by one workspace name or id to
-limit the pass to it) it does the whole from-first-principles layout pass over herdr
-instead: create and rename workspaces, and move tabs and panes between them. Rename a
-tab only when its label is a single digit. Keep every other tab label, and keep every
-pane label that already has a name. **`all` is herdr only.** First, before any
-`herdr_place.py` call: if this session is a Paseo agent (`$PASEO_AGENT_ID` is set, or you know you
-were started by Paseo: a Codex tool shell strips that variable), reply exactly `autorename all is not
-yet supported in Paseo` and stop (nobody has looked into what Paseo supports for this;
-`herdr_place.py config` also refuses when the variable is set, exit 2). Otherwise, outside herdr
-(`HERDR_ENV` not `1`), say so and stop.
+limit the pass to it) it was the from-first-principles layout pass over herdr
+(retired: see the refusal above; do not run it). Record of what it did: create and rename
+workspaces, and move tabs and panes between them; rename a tab only when its label is a
+single digit; keep every other tab label and every pane label that already has a name.
+`herdr_place.py config` still refuses inside a Paseo agent (exit 2), but the refusal above
+comes first and applies in every host.
 
 1. Read the operator's special-workspace list (`herdr_place.py config`, file
    `~/.config/autorename/workspaces.conf`: names, hints, top-of-herdr order) and follow
@@ -78,7 +81,7 @@ yet supported in Paseo` and stop (nobody has looked into what Paseo supports for
    after another**, only after that work is finished: one question, apply the
    answer, re-count tabs, then the next question. Do not combine them into one
    question, and do not ask while sure moves are still pending.
-   The plan never closes a pane or tab (herdr-tidy owns closing; the one
+   The plan never closes a pane or tab (closing is not autorename's job; the one
    exception is the untouched default shell of a workspace the pass just
    created, and only after a real tab is already in it) and never touches the
    `coord` panes. Helm tabs are placed in the `helm` workspace like any other.
@@ -270,7 +273,7 @@ Re-check if the live label ever lags the rename in Orca. zcode needs no step eit
 so the tab label below carries the name.
 
 Not part of `/autorename` without an argument, nor of the nudge hook or `/handoff` (djbclark, 2026-10-30). Use it
-when the operator asks to move or sort a tab, and within `/autorename all`.
+when the operator asks to move or sort a tab (herdr only; `/autorename all` itself is retired).
 
 ```bash
 python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py check
@@ -327,7 +330,7 @@ chat id, a Grok session id, or a zcode `sess_…` id) and move it with
 `HERDR_PANE_ID=<its pane> herdr_place.py move ... --no-focus`
 so the operator's view doesn't jump; `herdr pane list --workspace <id>` maps
 `agent_session.value` to pane ids. A Paseo-hosted agent cannot do this: `move` refuses there
-(exit 1), as `/autorename all` does; it is not yet supported in Paseo.
+(exit 1); it is not supported in Paseo.
 
 To re-arrange **many** workspaces, tabs and panes at once (a full pass or one
 workspace; sleeping panes included), follow

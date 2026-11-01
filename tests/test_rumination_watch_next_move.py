@@ -105,6 +105,17 @@ def test_a_working_seat_is_never_interrupted_however_much_is_declared(rw, monkey
     assert nudged_on_disk(rw) == {}
 
 
+def test_a_closed_wakeable_seat_gets_the_nudge_that_resumes_it(rw, monkeypatch, tmp_path):
+    """Codex P2 (PR 177 round 5): relay reports a persistent closed seat as `closed`, deliverable; the next-move line is what wakes it, so the
+    gate must admit it (it stayed asleep indefinitely when only `idle` passed)."""
+    write_pointer(tmp_path, steps_body(3))
+    Probe(rw, monkeypatch, "closed")
+    seat = Seat(rw, monkeypatch, "delivered")
+    assert run_pass(rw, QUIET) == 10
+    assert len(seat.sent) == 1 and "next move: 3 declared step(s) still open" in seat.sent[0]
+    assert "next move" in nudged_on_disk(rw)
+
+
 @pytest.mark.parametrize("word", ["silent", "card:question", "card:slash_menu", "unreachable", "unknown", ""])
 def test_only_idle_passes_the_gate(rw, monkeypatch, tmp_path, word):
     write_pointer(tmp_path, steps_body(2))

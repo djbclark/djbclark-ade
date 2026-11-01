@@ -6,6 +6,7 @@ from pathlib import Path
 
 AGENT = "codex"
 RESUME = "codex resume {sid}"
+ROOT_ENV = ("CODEX_HOME",)  # variables that move this adapter's store (carried into the scheduled job)
 HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 SKIP_PREFIX = ("<environment_context", "<user_instructions", "<INSTRUCTIONS", "<permissions", "<collaboration_mode",
                "<skills_instructions", "<recommended_skills", "# AGENTS.md instructions", "<turn_aborted")
