@@ -48,13 +48,6 @@ to `command -v <tool>` then fails ("Requested utility `gtr` does not match execu
 tool (`exec tr "$@"` style, or GNU coreutils from the `gnu-coreutils` package if the image has it) instead of a symlink, the suite green on 26.04, then unpin. The
 pin comment in `.github/workflows/test.yml` says the same. GitHub retires an old image on its own schedule, so this is not optional forever.
 
-## Sibling `RecursionError` readers: governor and quota-guard (adversary r1 on PR 97, PR 98 merged 2026-10-28 as 1f56db3; djbclark ruled last in the queue)
-
-PR 98 made `ade_gates.read_guard_state` read a `RecursionError` from `json` as unreadable. Two readers of the same guard state files keep the exposure
-(Python 3.13 and older raise `RecursionError` on deeply nested JSON under the 64 KiB cap): `guard_level` in `bin/claude-fleet-governor` and `load_state` in
-`bin/claude-quota-guard`. Optionally make the hook call `g.read_guard_state()` instead of its own copy (r1 finding 2). Failing tests first, forcing
-`RecursionError` the way PR 98's test does (a real nest does not trip on Python 3.14); one adversary round; CHANGELOG `Fixed` line.
-
 ## Verified peer messaging, round 2: "always acknowledged", and the gaps found (djbclark, direct, 2026-10-25)
 
 djbclark, 2026-10-25, after seeing this relayed text from djbclark-ade-8d: "ack from djbclark-ade-8d (430f45ba), no reply needed beyond this": he wanted it so that **things always need an acknowledgement, and when none arrives the requesting agent has to handle that**; is the missing part just later in the implementation, or a flaw in what already landed? Answer (2026-10-25): mostly rollout and wiring, plus one design scoping that needs his ruling. Builds on "Verified peer messaging" (PR 74, merged 6f54e89; AGENTS.md standing order 10). Nothing below is started.
