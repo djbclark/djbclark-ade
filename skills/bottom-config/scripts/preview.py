@@ -16,10 +16,10 @@ must already exist and parse as TOML: bottom writes a default config to any
 """
 
 import argparse
-import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -48,24 +48,24 @@ def main() -> int:
         print(f"refusing to start: {args.config} is not a readable TOML file ({exc})", file=sys.stderr)
         return 2
 
-    socket = f"btm-preview-{os.getpid()}"
+    sock_dir = Path(tempfile.mkdtemp(prefix="btm-preview-"))
 
     def tmux(*targs: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["tmux", "-L", socket, "-f", "/dev/null", *targs],
+            ["tmux", "-S", str(sock_dir / "sock"), "-f", "/dev/null", *targs],
             capture_output=True,
             text=True,
             check=False,
         )
 
     cmd = [str(args.bin), "-C", str(args.config), "-e", "--default_widget_type", "proc", *args.extra]
-    started = tmux(
-        "new-session", "-d", "-s", "preview", "-x", str(args.width), "-y", str(args.height), *cmd
-    )
-    if started.returncode != 0:
-        print(started.stderr.strip(), file=sys.stderr)
-        return 2
     try:
+        started = tmux(
+            "new-session", "-d", "-s", "preview", "-x", str(args.width), "-y", str(args.height), *cmd
+        )
+        if started.returncode != 0:
+            print(started.stderr.strip(), file=sys.stderr)
+            return 2
         time.sleep(args.seconds)
         if args.keys:
             tmux("send-keys", "-t", "preview", *list(args.keys))
@@ -77,6 +77,7 @@ def main() -> int:
         print(shot.stdout, end="")
     finally:
         tmux("kill-server")
+        shutil.rmtree(sock_dir, ignore_errors=True)
     return 0
 
 

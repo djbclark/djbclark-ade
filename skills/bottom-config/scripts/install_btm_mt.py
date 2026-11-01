@@ -60,12 +60,23 @@ def main() -> int:
         binary = Path(tmp) / "btm"
         run("xattr", "-c", str(binary))
         binary.chmod(0o755)
-        version = run(str(binary), "--version").strip()
+        try:
+            version = run(str(binary), "--version", timeout=30).strip()
+        except subprocess.TimeoutExpired:
+            sys.exit("the downloaded binary did not answer --version within 30 s; nothing installed")
 
-        staged = args.dest.with_name(f".{args.dest.name}.tmp")
-        staged.write_bytes(binary.read_bytes())
-        staged.chmod(0o755)
-        os.replace(staged, args.dest)
+        with tempfile.NamedTemporaryFile(
+            dir=args.dest.parent, prefix=f".{args.dest.name}.", delete=False
+        ) as staged:
+            staged_path = Path(staged.name)
+            try:
+                staged.write(binary.read_bytes())
+                staged.flush()
+                staged_path.chmod(0o755)
+                os.replace(staged_path, args.dest)
+            except BaseException:
+                staged_path.unlink(missing_ok=True)
+                raise
     print(f"installed {args.dest}: {version}, commit {sha}, run {run_id}")
     return 0
 

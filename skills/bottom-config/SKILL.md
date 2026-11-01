@@ -47,7 +47,7 @@ problems, 2 = unreadable input. It needs `uv` (it carries its own `jsonschema` d
    It runs `btm-mt` in its own private tmux server (the user's tmux is never touched) and
    prints the screen. It refuses a `--config` that does not exist or is not valid TOML,
    because bottom writes a default config to any `-C` path it cannot read. Make the draft
-   with `draft=$(mktemp -t btm-draft).toml`; copy it over the live config only when it
+   with `d=$(mktemp -d) && draft=$d/draft.toml`; copy it over the live config only when it
    looks right, and run the validator on it first. Keys in the process table: `P`
    name/command, `t` or `F5` tree, `e` expand widget; more in
    `~/src/bottom/docs/content/usage/widgets/process.md`.
