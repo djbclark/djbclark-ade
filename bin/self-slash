@@ -71,7 +71,7 @@
 # the same herdr workspace and cwd, starts a real claude TUI there (`herdr agent start --kind claude -- --model M
 # --effort E`, never acp-run: an acp-run session cannot take /new, /compact or a handoff), prompts /baton, and checks
 # that the pane runs claude with another session id.  The old pane is left idle, never closed or exited
-# (herdr-tidy closes it); any failure exits 11 and leaves it usable.  --title, --workspace and --keep-workspace
+# (nothing closes it automatically); any failure exits 11 and leaves it usable.  --title, --workspace and --keep-workspace
 # are Paseo's and exit 2 here.  SELF_SLASH_LAUNCH replaces the launch.py command (tests).
 # Workspaces (djbclark, 2026-10-23): the successor always lands in an EXISTING workspace, `paseo run
 # --workspace <id>` (default this agent's, --workspace ID picks another), never --new-workspace and
@@ -1376,7 +1376,7 @@ fi
 if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -z "$successor" ]; then finish_paseo; fi
 # herdr --finish --successor claude/MODEL: launch.py's `successor` waits for idle, opens a tab in this pane's
 # workspace, starts a real claude TUI there on the model asked, prompts /baton and checks it; exit 11 on any
-# failure.  The old pane is left idle for herdr-tidy, never closed or exited.
+# failure.  The old pane is left idle (nothing closes it automatically), never closed or exited.
 if [ "$finish" = 1 ] && [ "$host" = herdr ] && [ -n "$successor" ]; then
   launch_cmd=(python3 "$(dirname "$(grealpath "$0")")/../skills/session-finder/launch.py")
   [ -z "${SELF_SLASH_LAUNCH:-}" ] || launch_cmd=("$SELF_SLASH_LAUNCH")

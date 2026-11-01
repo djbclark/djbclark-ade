@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Fold changelog.d/*.md fragments into CHANGELOG.md's `## Unreleased` (2026-10-31).
+
+A pull request adds `changelog.d/<branch>.md` (branch name, `/` replaced by `-`) instead of editing
+the shared CHANGELOG.md, so merges stop conflicting on that one block (AGENTS.md, code review rule 10).
+ONE writer runs this tool: the lead, at release time or when it chooses, in a fresh worktree from master,
+and the fold lands through a normal PR (master is PR-only). `bin/ade-update` lists unfolded fragments, so
+nothing is invisible while they wait, and warns about a fragment on master older than 14 days.
+
+usage: changelog-fold [--check] [--repo DIR]
+
+  (no flag)  validate every fragment, merge them into CHANGELOG.md's Unreleased subsections, write
+             CHANGELOG.md atomically (temp file beside it, then os.replace), then delete the folded
+             fragments. Nothing is written or deleted when any fragment is invalid.
+  --check    validate the fragments only; write and delete nothing.
+  --repo DIR repository root holding CHANGELOG.md and changelog.d/ (default: the checkout this script is in).
+
+A fragment holds `### Added|Changed|Fixed|Removed|Security` headings, each followed by `- ` entries
+(continuation lines indented), and every entry ends with `(#N)` (an optional final period is allowed).
+README.md and dotfiles in changelog.d/ are not fragments; any other non-`.md` file is an error.
+
+Merge rules: fragments are taken in file-name order; under each heading the new entries go at the top
+of that subsection (the file is newest first), in that order, ahead of the existing entries; a missing
+subsection is created in Keep a Changelog order (Added, Changed, Deprecated, Removed, Fixed, Security);
+an entry whose text is already anywhere in CHANGELOG.md (any section) is skipped, so a run killed between the write and the
+deletions can be run again without duplicating anything. No fragments: nothing happens (idempotent).
+
+exit codes: 0 folded, nothing to fold, or --check passed; 1 a fragment is invalid (all problems are
+printed, nothing is written or deleted); 2 usage error, --repo not a directory, or CHANGELOG.md missing or
+unreadable (checked first, --check included).
+"""
+import argparse
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+EXIT_OK, EXIT_INVALID, EXIT_USAGE = 0, 1, 2
+
+HEADINGS = ("Added", "Changed", "Fixed", "Removed", "Security")
+ORDER = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
+ENTRY_END = re.compile(r"\(#\d+\)\.?$")
+
+
+def rank(name: str) -> int:
+    return ORDER.index(name) if name in ORDER else len(ORDER)
+
+
+def fragment_files(frag_dir: Path):
+    """(sorted fragment paths, [problems]) for changelog.d/."""
+    files, problems = [], []
+    for p in sorted(frag_dir.iterdir(), key=lambda q: q.name):
+        if p.name.startswith(".") or p.name == "README.md":
+            continue
+        if p.is_file() and p.suffix == ".md":
+            files.append(p)
+        else:
+            problems.append(f"{p.name}: not a fragment (only <branch>.md files belong in changelog.d/)")
+    return files, problems
+
+
+def parse_fragment(path: Path):
+    """({heading: [entry lines list, ...]}, [problems]) of one fragment file."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")  # a BOM from an editor is not part of the first line
+    except (OSError, UnicodeDecodeError) as e:
+        return {}, [f"{path.name}: unreadable ({e})"]
+    return parse_fragment_text(path.name, text)
+
+
+def parse_fragment_text(label: str, text: str):
+    """({heading: [entry lines list, ...]}, [problems]); an entry is its list of source lines. `label` (the file name) labels
+    problems (bin/ade-update calls this with a fragment read from a git revision)."""
+    problems, sections = [], {}
+    cur_heading, cur_entry = None, None
+
+    def close_entry():
+        nonlocal cur_entry
+        if cur_entry is not None and not ENTRY_END.search(" ".join(l.strip() for l in cur_entry)):
+            problems.append(f"{label}: entry does not end with (#N): {cur_entry[0][:70]!r}")
+        cur_entry = None
+
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.startswith("### "):
+            close_entry()
+            name = line[4:].strip()
+            if name not in HEADINGS:
+                problems.append(f"{label}:{n}: heading {name!r} is not one of {', '.join(HEADINGS)}")
+                cur_heading = None
+            else:
+                cur_heading = name
+                sections.setdefault(name, [])
+        elif line.startswith("#"):
+            close_entry()
+            problems.append(f"{label}:{n}: only `### <{'|'.join(HEADINGS)}>` headings are allowed")
+            cur_heading = None
+        elif not line.strip():
+            close_entry()
+        elif line.startswith("- "):
+            close_entry()
+            if cur_heading is None:
+                problems.append(f"{label}:{n}: entry before any valid heading")
+            else:
+                cur_entry = [line]
+                sections[cur_heading].append(cur_entry)
+        elif line[0] in " \t" and cur_entry is not None:
+            cur_entry.append(line)
+        else:
+            close_entry()
+            problems.append(f"{label}:{n}: line is neither a heading, a `- ` entry nor its indented continuation")
+    close_entry()
+    for name, entries in sections.items():
+        if not entries:
+            problems.append(f"{label}: heading {name!r} has no entries")
+    if not sections and not problems:
+        problems.append(f"{label}: empty fragment (no heading, no entries)")
+    return sections, problems
+
+
+def entry_text(lines) -> str:
+    return " ".join(l.strip() for l in lines)
+
+
+def entry_body(lines) -> str:
+    """The entry's text as bin/ade-update's CHANGELOG parser reads it (no leading `- `, wrapped lines joined)."""
+    return entry_text(lines)[2:].strip()
+
+
+def merge(changelog: str, fragments):
+    """(new CHANGELOG text, entries added, duplicates skipped). `fragments` is [(name, sections)] in order."""
+    lines = changelog.split("\n")
+    start = next((i for i, l in enumerate(lines) if l.startswith("## Unreleased")), None)
+    if start is None:
+        first = next((i for i, l in enumerate(lines) if l.startswith("## ")), None)
+        at = len(lines) if first is None else first
+        while at > 0 and not lines[at - 1].strip():
+            at -= 1
+        lines[at:at] = ["", "## Unreleased"]
+        start = at + 1
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+
+    region = lines[start + 1:end]
+    first_sub = next((i for i, l in enumerate(region) if l.startswith("### ")), len(region))
+    pre, subs = region[:first_sub], []  # subs: [name, body lines]
+    for l in region[first_sub:]:
+        if l.startswith("### "):
+            subs.append([l[4:].strip(), []])
+        else:
+            subs[-1][1].append(l)
+
+    combined = {}  # heading -> entries of every fragment, in fragment order
+    for _, sections in fragments:
+        for heading, entries in sections.items():
+            combined.setdefault(heading, []).extend(entries)
+    # Every `- ` entry anywhere in the file, not only the current subsection: a rerun after a crash between the
+    # write and the deletions must not add an entry again even when a release has since moved it under a dated heading.
+    present = {entry_text(e) for e in _entries_of(lines)}
+    added = skipped = 0
+    for heading in sorted(combined, key=rank):
+        entries = combined[heading]
+        sub = next((s for s in subs if s[0] == heading), None)
+        if sub is None:
+            sub = [heading, [""]]
+            later = next((i for i, s in enumerate(subs) if rank(s[0]) > rank(heading)), len(subs))
+            if later == len(subs) and subs and subs[-1][1] and subs[-1][1][-1].strip():
+                subs[-1][1].append("")  # keep a blank line between the old last subsection and the new one
+            subs.insert(later, sub)
+        fresh = []
+        for e in entries:
+            if entry_text(e) in present:
+                skipped += 1
+            else:
+                fresh.append(e)
+                present.add(entry_text(e))
+        added += len(fresh)
+        body = sub[1]
+        lead = 0
+        while lead < len(body) and not body[lead].strip():
+            lead += 1
+        new_lines = [l for e in fresh for l in e]
+        if not body[lead:]:  # a new or empty subsection: blank, entries, blank
+            sub[1] = [""] + new_lines + [""]
+        else:
+            sub[1] = body[:lead] + new_lines + body[lead:]
+
+    rebuilt = list(pre)
+    for s in subs:
+        rebuilt.append(f"### {s[0]}")
+        rebuilt.extend(s[1])
+    if end == len(lines):
+        while rebuilt and not rebuilt[-1].strip():
+            rebuilt.pop()
+        rebuilt.append("")  # file ends with exactly one newline
+    out = lines[:start + 1] + rebuilt + lines[end:]
+    return "\n".join(out), added, skipped
+
+
+def _entries_of(body):
+    cur = None
+    for l in body:
+        if l.startswith("- "):
+            if cur:
+                yield cur
+            cur = [l]
+        elif cur is not None and l.strip() and l[0] in " \t":
+            cur.append(l)
+        else:
+            if cur:
+                yield cur
+            cur = None
+    if cur:
+        yield cur
+
+
+def atomic_write(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=".CHANGELOG.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # the new file is on disk before the fragments are unlinked
+        os.chmod(tmp, path.stat().st_mode & 0o777)
+        os.replace(tmp, path)
+        dfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv) -> int:
+    ap = argparse.ArgumentParser(prog="changelog-fold", description="Fold changelog.d/*.md into CHANGELOG.md's Unreleased "
+                                 "(exit 0 ok, 1 invalid fragment, 2 usage or missing CHANGELOG.md).")
+    ap.add_argument("--check", action="store_true", help="validate fragments only; write and delete nothing")
+    ap.add_argument("--repo", default=str(Path(__file__).resolve().parent.parent), help="repository root")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return EXIT_OK if e.code == 0 else EXIT_USAGE
+    repo = Path(args.repo)
+    changelog, frag_dir = repo / "CHANGELOG.md", repo / "changelog.d"
+    if not repo.is_dir() or not changelog.is_file():  # a typo in --repo must not read as "no fragments"
+        print(f"changelog-fold: {changelog} not found (is --repo the repository root?)", file=sys.stderr)
+        return EXIT_USAGE
+    if not frag_dir.is_dir():
+        print(f"changelog-fold: no fragments ({frag_dir} does not exist)")
+        return EXIT_OK
+    files, problems = fragment_files(frag_dir)
+    parsed = []
+    for p in files:
+        sections, probs = parse_fragment(p)
+        problems += probs
+        parsed.append((p.name, sections))
+    if problems:
+        for pr in problems:
+            print(f"changelog-fold: {pr}", file=sys.stderr)
+        print(f"changelog-fold: {len(problems)} problem(s); nothing written or deleted", file=sys.stderr)
+        return EXIT_INVALID
+    if not files:
+        print("changelog-fold: no fragments; nothing to fold")
+        return EXIT_OK
+    if args.check:
+        print(f"changelog-fold: {len(files)} fragment(s) valid")
+        return EXIT_OK
+    try:
+        text = changelog.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"changelog-fold: cannot read {changelog}: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    new_text, added, skipped = merge(text, parsed)
+    if new_text != text:
+        atomic_write(changelog, new_text)
+    for p in files:
+        p.unlink()
+    note = f", {skipped} already present and skipped" if skipped else ""
+    print(f"changelog-fold: folded {len(files)} fragment(s), {added} entr{'y' if added == 1 else 'ies'} added{note}")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -161,27 +161,17 @@ an explicit fresh human decision per run (keys come from
 `~/.config/codexbar/config.json`). **Operator decision 2026-08-23: the
 prepaid tier is retired for now** — revisit only on an explicit top-up.
 
-## Orca's roster is a GUI list, not the registry
+## The registry is `acp-run --list`
 
 **Since 2026-10-08 the registry is `acp-run --list`** (plus the installed
-non-ACP headless TUIs, now only muse); `bin/route_agent.py` reads Orca's
-roster only with `ROUTE_AGENT_INCLUDE_ORCA=1`, and even then intersected
-with installed binaries, because 12 of its 28 enabled names were not
-installed here. The roster still matters for Orca's own macro-graph
-dispatch, described below as it stood on 2026-08-23.
-
-Nearly every TUI above is configured *inside Orca*
-(`~/Library/Application Support/orca/profiles/local-default/orca-data.json`
-→ `settings`): `agentDefaultArgs` lists ~25 launchable agents — claude,
-claude-agent-teams, openclaude, codex, gemini, antigravity, aider, amp,
-kiro, autohand, cline, command-code, continue, cursor, kimi,
-mistral-vibe, qwen-code, rovo, hermes, copilot, grok, devin, ante, trae
-(+ goose via env) — each preconfigured with its auto-approve/yolo flag for
-worktree use. `disabledTuiAgents` = gemini, goose, devin. Orca also holds
-the claude and codex managed-account switchers and per-provider usage
-tracking. Practical upshot: the macro graph can dispatch to any enabled
-agent in this roster via `worker-start --agent <name>`, far beyond the
-seven group-address CLIs.
+non-ACP headless TUIs, now only muse). Orca's agent roster, once read by
+`bin/route_agent.py` only with `ROUTE_AGENT_INCLUDE_ORCA=1` (intersected with
+installed binaries, because 12 of its 28 enabled names were not installed
+here), is retired from djbclark-ade (2026-10-31): do not route through it.
+Orca stays installed and configured on the machine, untouched; the flag's
+code path goes away with the plan's D-phase sweep. The 2026-08-23 description
+of the roster and its macro-graph `worker-start --agent <name>` dispatch was
+removed from this page (git history has it).
 
 ## What's going to waste (aiuse history, 76 snapshots)
 
