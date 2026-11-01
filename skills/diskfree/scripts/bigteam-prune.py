@@ -38,7 +38,7 @@ a remote that is a local path outside the root, still counts. A repository borro
 dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
 CLAIM, no unfinished, resume-pending or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
-A clone with a ref, a root pseudo-ref (FETCH_HEAD, ORIG_HEAD, ...) or a linked worktree's reflog entry pointing at a
+A remote configured with `vcs`, `uploadpack` or `receivepack` keeps the checkout. A clone with a ref, a root pseudo-ref (FETCH_HEAD, ORIG_HEAD, ...) or a linked worktree's reflog entry pointing at a
 blob, a tree or a missing object is kept. An http(s), ftp or git remote counts as another machine only
 when no proxy or address override applies (http.curloptResolve, http.proxy, remote.X.proxy, core.gitProxy, *_PROXY,
 GIT_PROXY_COMMAND). A linked worktree's HEAD reflog is read on both sides of every entry. An ssh remote counts as another machine only when
@@ -248,23 +248,36 @@ def non_commit_ids(c, ids):
     return [i for i, ln in zip(ids, lines) if ln.strip() != "commit"]
 
 
-def reflog_ids(c):
-    """Every non-zero object id on either side of the worktree's own HEAD reflog entries (`<old> <new> <who>\\t<msg>`),
-    or None when the file cannot be read (a missing file is an empty reflog)."""
-    p = git_path(c, "logs/HEAD")
+def _log_file_ids(p, ids):
+    for ln in p.read_text(errors="replace").splitlines():
+        for tok in ln.split(None, 2)[:2]:
+            if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tok) and set(tok) != {"0"}:
+                ids.add(tok)
+
+
+def reflog_ids(c, every_ref=False):
+    """Every non-zero object id on either side of reflog entries (`<old> <new> <who>\\t<msg>`): the worktree's own
+    HEAD reflog, or with every_ref=True every reflog file of the git dir (HEAD, branches, tags, remote-tracking refs,
+    stash). None when a file cannot be read (a missing file or directory is an empty reflog)."""
+    p = git_path(c, "logs" if every_ref else "logs/HEAD")
     if p is None:
         return None
-    ids = []
+    ids = set()
     try:
-        for ln in p.read_text(errors="replace").splitlines():
-            for tok in ln.split(None, 2)[:2]:
-                if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tok) and set(tok) != {"0"}:
-                    ids.append(tok)
+        if not every_ref:
+            _log_file_ids(p, ids)
+        else:
+            def fail(e):
+                raise e
+
+            for root, _dirs, files in os.walk(p, onerror=fail):
+                for f in files:
+                    _log_file_ids(Path(root) / f, ids)
     except FileNotFoundError:
         return []
     except OSError:
         return None
-    return sorted(set(ids))
+    return sorted(ids)
 
 
 def pseudo_ref_commits(gitdir):
@@ -475,6 +488,23 @@ def classify_url(url, ssh_ok=True, net_ok=True):
         return "unknown", None
 
 
+REMOTE_HELPER_KEYS = re.compile(r"^remote\.(.+)\.(vcs|uploadpack|receivepack)$", re.IGNORECASE)
+
+
+def remote_with_helper(c):
+    """The name of a remote whose config selects another transport (`remote.X.vcs` makes git run `git-remote-<vcs>`;
+    `uploadpack`/`receivepack` run a program of the user's choosing), or None. The URL says nothing about where such a
+    remote really reads from. Unreadable config counts."""
+    rc, out = git(c, "config", "--list", "-z")
+    if rc:
+        return "(config unreadable)"
+    for entry in out.split("\0"):
+        m = REMOTE_HELPER_KEYS.match(entry.split("\n", 1)[0])
+        if m:
+            return m.group(1)
+    return None
+
+
 def local_remote_inside_root(c):
     """A reason when a remote of c (fetch or push URL, insteadOf applied) is, or might be, a path inside the bigteam
     root, else None. Sibling checkouts that fetch each other would otherwise each count the other's unpushed commits as
@@ -484,6 +514,9 @@ def local_remote_inside_root(c):
     if rc:
         return "unreadable"
     root = str(root_resolved())
+    helper = remote_with_helper(c)
+    if helper:
+        return f"remote {helper}: configured with a custom helper or program (vcs, uploadpack, receivepack) (cannot be resolved)"
     ssh_ok = not ssh_overridden(c)
     net_ok = not net_overridden(c)
     for name in names.split():
@@ -670,6 +703,10 @@ def safe(c):
         why = non_commit_refs(c)
         if why:
             return False, why
+        rl = reflog_ids(c, every_ref=True)  # rev-list --reflog skips blobs and trees: type-check every reflog id
+        bad = None if rl is None else non_commit_ids(c, rl)
+        if bad is None or bad:
+            return False, "a reflog names an object that is not a commit (or is missing, or unreadable)"
     pseudo = pseudo_ref_commits(gitdir)
     if pseudo is None:
         return False, "root pseudo-refs (ORIG_HEAD, FETCH_HEAD, ...) unreadable"

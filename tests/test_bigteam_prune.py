@@ -1100,3 +1100,50 @@ def test_linked_worktree_reflog_naming_a_blob_keeps_it(prune, tmp_path, world):
     log.write_text(f"{first[1]} {blob} t <t@t> 1700000000 +0000\tmanual: blob\n")
     ok, why = prune.safe(wt)
     assert not ok and "not a commit" in why
+
+
+# ---- round 11 (local Codex review of 2c699f44) --------------------------------------------------------------------
+
+
+def test_blob_held_only_by_a_tag_reflog_keeps_the_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    f = c / "scratch-report"
+    f.write_text("the only copy of this report\n")
+    blob = g(c, "hash-object", "-w", str(f))
+    f.unlink()
+    g(c, "update-ref", "--create-reflog", "refs/tags/report", blob)
+    g(c, "update-ref", "refs/tags/report", g(c, "rev-parse", "origin/main"))  # the tag moves; the blob stays in its reflog
+    assert g(c, "for-each-ref", "--format=%(objecttype)", "refs/tags/report") == "commit"
+    assert g(c, "log", "--oneline", "--all", "--not", "--remotes") == ""
+    assert g(c, "rev-list", "--reflog", "--not", "--remotes") == ""  # the older checks cannot see it
+    ok, why = prune.safe(c)
+    assert not ok and "reflog" in why
+    assert rm(prune, c)[0] is False
+
+
+def test_reflog_ids_every_ref_reads_both_sides_and_all_files(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    ids = prune.reflog_ids(c, every_ref=True)
+    assert ids and all(len(i) == 40 for i in ids)
+    assert g(c, "rev-parse", "origin/main") in ids
+
+
+@pytest.mark.parametrize("key", ["vcs", "uploadpack", "receivepack"])
+def test_remote_with_a_custom_helper_keeps_the_clone(prune, tmp_path, world, key):
+    c = make_clone(tmp_path, world)
+    g(c, "remote", "add", "web", "https://example.org/o/r.git")
+    monkey_ok = prune.remote_with_helper(c)
+    assert monkey_ok is None
+    g(c, "config", f"remote.web.{key}", "sibling" if key == "vcs" else "/usr/bin/env")
+    assert prune.remote_with_helper(c) == "web"
+    why = prune.local_remote_inside_root(c)
+    assert why and "cannot be resolved" in why and "web" in why
+    ok, reason = prune.safe(c)
+    assert not ok
+
+
+def test_unrelated_remote_config_is_not_a_helper(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    g(c, "config", "remote.origin.tagopt", "--no-tags")
+    g(c, "config", "remote.origin.prune", "true")
+    assert prune.remote_with_helper(c) is None
