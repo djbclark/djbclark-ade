@@ -28,6 +28,7 @@ class Env:
         self.children: list[subprocess.Popen] = []
         for name, body in {
             "relay": ('#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\necho "SENDER $RELAY_SENDER_NAME" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n'
+                      'if [ -f "$DL_RELAY_SLEEP" ]; then sleep "$(cat "$DL_RELAY_SLEEP")"; fi\n'
                       'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit "$(cat "$DL_RELAY_FAIL")"; fi\n'),
             "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
             "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\n',
@@ -52,6 +53,7 @@ class Env:
             "DEADLINE_RELAY": str(tmp / "relay"), "DEADLINE_HERMES_PING": str(tmp / "ping"),
             "DEADLINE_ACP_DISPATCH": str(tmp / "dispatch"), "DEADLINE_PASEO": str(tmp / "paseo"),
             "FAKE_PASEO_LS": str(tmp / "ls.json"), "FAKE_PASEO_DIR": str(self.paseo_dir), "DL_RELAY_FAIL": str(tmp / "relay-fails"),
+            "DL_RELAY_SLEEP": str(tmp / "relay-sleep"), "DEADLINE_INLINE_WORKER": "1",
         }
         (tmp / "ls.json").write_text("[]")
 
@@ -364,7 +366,7 @@ def test_run_returns_124_when_the_sweep_did_the_stopping(env, inproc):
 
 def test_start_refuses_a_pid_whose_start_time_cannot_be_read(env):
     r = start(env, "ghost", "--budget", "10", "--pid", "999999")
-    assert r.returncode == 2 and "not running" in r.stderr
+    assert r.returncode == 2 and ("not running" in r.stderr or "refusing to register" in r.stderr)
     assert not (env.state / "ghost.json").exists()
 
 
@@ -455,7 +457,7 @@ def test_failed_owner_notice_is_retried_until_delivered_not_marked_done(env):
     assert len(env.calls("RELAY")) == 1, "retries are spaced 60 s * attempt"
     Path(env.base["DL_RELAY_FAIL"]).unlink()
     r = env.run("sweep", "--no-agents", now=T0 + 100)
-    assert "owner notice retry 2" in r.stdout and "delivered" in r.stdout
+    assert "owner notice retry 2" in r.stdout
     assert env.record("flaky")["notice"]["done"] is True and len(env.calls("RELAY")) == 2
     env.run("sweep", "--no-agents", now=T0 + 1000)
     assert len(env.calls("RELAY")) == 2, "delivered once: no more"
@@ -582,3 +584,59 @@ def test_prune_never_deletes_a_name_that_was_registered_again_meanwhile(env, inp
     monkeypatch.setattr(dl, "all_records", lambda: [("ancient", old2)])
     dl.prune()
     assert not (env.state / "ancient.json").exists(), "a genuinely old terminal record is still pruned"
+
+
+# ---------- PR 223 local-review round 3: anchor left its group, ps failures, startup handshake, async recovery ----------
+
+def test_a_live_anchor_that_left_the_group_does_not_vouch_for_it(env, inproc):
+    dl = inproc
+    c = env.child("sleep 60")   # its own session: pgid == its pid
+    time.sleep(0.2)
+    rec = {"name": "left", "owner": "o", "pid": c.pid, "pgid": 987654, "pid_start": dl.proc_info(c.pid)[0], "pgid_start": None,
+           "started": T0, "budget_s": 10, "state": "running"}
+    assert dl.target_status(rec) == "unverified"
+    outcome, text = dl.signal_target(rec, signal.SIGKILL)
+    assert outcome == "failed" and c.poll() is None, "never killpg an id the anchor no longer belongs to"
+
+
+def test_a_failed_ps_read_is_unknown_not_gone(env, inproc, monkeypatch):
+    dl = inproc
+
+    def fake(rc, out="", err=""):
+        return lambda *a, **k: subprocess.CompletedProcess(a[0], rc, out, err)
+
+    monkeypatch.setattr(dl.subprocess, "run", fake(2, "", "ps: Operation not permitted"))
+    for call in (lambda: dl.proc_info(424242), lambda: dl.group_members(424242), lambda: dl.ancestors()):
+        with pytest.raises(dl.ProcUnknown):
+            call()
+    monkeypatch.setattr(dl.subprocess, "run", fake(1, "", ""))   # `ps -p PID` for a pid that does not exist
+    assert dl.proc_info(424242) is None
+    monkeypatch.setattr(dl.subprocess, "run", fake(1, "", "ps: illegal option"))
+    with pytest.raises(dl.ProcUnknown):
+        dl.proc_info(424242)
+
+
+def test_run_that_dies_before_the_release_never_runs_the_command(env):
+    mark = env.tmp / "must-not-exist"
+    r = env.run("run", "--budget", "30", "--name", "handshake", "--owner", "o", "--", "sh", "-c", f"touch {mark}; sleep 30",
+                now=None, DEADLINE_TEST_ABORT_BEFORE_GO="1")
+    assert r.returncode == 9
+    time.sleep(1.5)   # the waiting child sees EOF on the pipe and exits 111
+    assert not mark.exists()
+    ps = subprocess.run(["ps", "-A", "-o", "command="], capture_output=True, text=True).stdout
+    assert str(mark) not in ps, "the held child must be gone, not left waiting"
+
+
+def test_recovery_io_runs_off_the_enforcement_pass(env):
+    Path(env.base["DL_RELAY_SLEEP"]).write_text("3")
+    assert start(env, "slowio", "--budget", "5", "--on-expire", "relay").returncode == 0
+    t = time.monotonic()
+    r = env.run("sweep", "--no-agents", now=T0 + 10, DEADLINE_INLINE_WORKER="0")
+    assert time.monotonic() - t < 2.5, "the sweep must not wait for the 3 s relay"
+    assert "expired" in r.stdout
+    for _ in range(60):
+        time.sleep(0.25)
+        if env.record("slowio").get("recovery", {}).get("state") == "done":
+            break
+    rec = env.record("slowio")
+    assert rec["recovery"]["state"] == "done" and rec["notice"]["done"] is True and len(env.calls("RELAY")) == 1

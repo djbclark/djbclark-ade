@@ -186,11 +186,15 @@ class ProcUnknown(Exception):
     """ps itself failed: no conclusion about the process may be drawn this pass."""
 
 
-def _ps(args: list[str]) -> str:
+def _ps(args: list[str], absent_rc: tuple[int, ...] = ()) -> str:
+    """ps stdout. A failed read raises ProcUnknown: a non-zero exit is only accepted when it is in `absent_rc` (`ps -p PID` exits 1
+    with no output and no error text for a pid that does not exist) and stderr is empty; anything else is a failure, not "gone"."""
     try:
         r = subprocess.run(["ps", *args], capture_output=True, text=True, timeout=15, env={**os.environ, "LC_ALL": "C"})
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ProcUnknown(str(e))
+    if (r.returncode != 0 and r.returncode not in absent_rc) or (r.stderr or "").strip() or (r.returncode != 0 and (r.stdout or "").strip()):
+        raise ProcUnknown(f"ps exited {r.returncode}: {(r.stderr or '').strip()[:100]}")
     return r.stdout
 
 
@@ -203,7 +207,7 @@ def proc_info(pid: int) -> tuple[str, str] | None:
             return rest[19], rest[0]
         except (OSError, IndexError):
             return None
-    out = _ps(["-o", "lstart=,stat=", "-p", str(pid)]).strip()
+    out = _ps(["-o", "lstart=,stat=", "-p", str(pid)], absent_rc=(1,)).strip()
     if not out:
         return None
     toks = out.split()
@@ -235,6 +239,16 @@ def target_status(rec: dict) -> str:
             if info[0] != rec["pid_start"]:
                 return "reused"
             alive = True
+            if pgid:
+                # A live pid vouches for its group only while it is still IN it: a process that left (setpgid/setsid) says nothing about
+                # whether the recorded group id has since been recycled.
+                try:
+                    if os.getpgid(int(pid)) != int(pgid):
+                        return "unverified"
+                except ProcessLookupError:
+                    alive = False
+                except OSError:
+                    return "unverified"
     if pgid and not alive:
         if not rec.get("pgid_start"):
             # a group with no recorded leader start: an empty group is gone whatever its id; a populated one could be a recycled id
@@ -362,34 +376,88 @@ def relay(owner: str, text: str) -> str:
 NOTICE_TRIES = 5
 
 
-def notify(rec: dict, text: str) -> str:
-    """Tell the owner and REMEMBER whether it arrived: a failed relay stays pending in rec["notice"] and later sweeps retry it
-    (at most NOTICE_TRIES times, 60 s * attempt apart), separately from the at-most-once kill and reroute."""
-    rec["notice"] = {"text": text, "attempts": 0, "done": False}
-    return attempt_notice(rec)
-
-
-def attempt_notice(rec: dict) -> str:
-    nt = rec["notice"]
-    nt["attempts"] += 1
-    nt["last"] = now()
-    rc, summary = relay_rc(rec.get("owner", "-"), nt["text"])
-    nt["done"] = rc == 0
-    nt["result"] = summary
-    return summary
+def notify(rec: dict, text: str) -> None:
+    """Order an owner notice (the caller saves the record and calls spawn_worker). The notice is TRACKED in rec["notice"]: a relay
+    that is not delivery-proven stays pending and later sweeps re-order it (at most NOTICE_TRIES, 60 s * attempt apart), separately
+    from the at-most-once kill and reroute."""
+    rec["notice"] = {"text": text, "attempts": 0, "done": False, "want": True}
 
 
 def retry_notice(rec: dict, dry: bool) -> str | None:
     nt = rec.get("notice")
     if not isinstance(nt, dict) or nt.get("done") or nt.get("attempts", 0) >= NOTICE_TRIES:
         return None
-    if now() - nt.get("last", 0) < 60 * max(nt.get("attempts", 1), 1):
+    last = nt.get("last", 0)
+    if now() - last < 60 * max(nt.get("attempts", 1), 1) or (nt.get("inflight") and now() - last < 300):
         return None
     if dry:
         return "would retry the owner notice"
-    summary = attempt_notice(rec)
+    nxt = nt.get("attempts", 0) + 1
+    nt.update(want=True, inflight=False)
     save(rec)
-    return f"owner notice retry {nt['attempts']}/{NOTICE_TRIES}: {'delivered' if nt['done'] else 'failed (' + summary + ')'}"
+    spawn_worker(rec)
+    return f"owner notice retry {nxt}/{NOTICE_TRIES} queued"
+
+
+def spawn_worker(rec: dict) -> None:
+    """Hand the slow I/O (hermes-ping, relay up to 90 s, reroute up to 120 s) to a detached `deadline _work NAME`, so the 60 s
+    enforcement pass never waits behind it: later records and SIGKILL escalations stay on schedule. The caller has saved `rec` and
+    holds its lock, so the worker (which takes the lock) starts after the pass has finished with the record. DEADLINE_INLINE_WORKER=1
+    runs it inline instead (tests)."""
+    if os.environ.get("DEADLINE_INLINE_WORKER") == "1":
+        work(rec, held=True)
+        return
+    try:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_work", rec["name"]], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass   # the order stays in the record; retry_notice re-orders a notice, a recovery is at-most-once by design
+
+
+def work(rec: dict, held: bool = False) -> None:
+    """Execute the orders in a record: the recovery's ping and reroute (once: `claimed` is saved before they run) and a wanted owner
+    notice. The slow calls run OUTSIDE the record lock; the results are merged back under it."""
+    import contextlib
+    name = rec["name"]
+
+    def locked():
+        return contextlib.nullcontext(True) if held else Locked(name, block=True)
+
+    job = {}
+    with locked():
+        cur = rec if held else load(name)
+        if not cur:
+            return
+        rv, nt = cur.get("recovery"), cur.get("notice")
+        if isinstance(rv, dict) and rv.get("state") == "started" and not rv.get("claimed"):
+            rv["claimed"] = True
+            job["recovery"] = (rv.get("ping"), rv.get("reroute"))
+        if isinstance(nt, dict) and nt.get("want") and not nt.get("done") and not nt.get("inflight") and nt.get("attempts", 0) < NOTICE_TRIES:
+            nt.update(want=False, inflight=True, attempts=nt.get("attempts", 0) + 1, last=now())
+            job["notice"] = (cur.get("owner", "-"), nt["text"])
+        if not job:
+            return
+        save(cur)
+    steps, notice_result = [], None
+    if "recovery" in job:
+        ping, reroute = job["recovery"]
+        if ping:
+            steps.append(hermes_ping(ping))
+        if reroute:
+            argv = tool("DEADLINE_ACP_DISPATCH", "bin/acp-dispatch") + ["reroute", reroute, "--escalate", "--detach", "--no-wait"]
+            rc, out = sh_nokill(argv, wait=120)
+            steps.append(f"reroute rc={rc}: {out[-150:]}")
+    if "notice" in job:
+        notice_result = relay_rc(*job["notice"])
+    with locked():
+        cur = rec if held else load(name)
+        if not cur:
+            return
+        if "recovery" in job and isinstance(cur.get("recovery"), dict):
+            cur["recovery"].update(state="done", at=now(), outcome=steps)
+        if notice_result and isinstance(cur.get("notice"), dict):
+            cur["notice"].update(inflight=False, done=notice_result[0] == 0, result=notice_result[1])
+        save(cur)
 
 
 def message(rec: dict, what: str) -> str:
@@ -402,28 +470,25 @@ def message(rec: dict, what: str) -> str:
 
 
 def recover(rec: dict) -> dict:
-    """The on-expire recovery. Marked started BEFORE it runs and saved: at most once, even if this pass dies midway.
-    A stop that FAILED (`kill_failed`) always tells the owner, whatever the action, and never reroutes: the work is still running."""
-    rec["recovery"] = {"state": "started", "at": now()}
-    save(rec)
+    """The on-expire recovery ORDER. Marked started BEFORE anything runs and saved: at most once, even if the pass dies midway. The
+    ping, relay and reroute run in the detached worker (spawn_worker). A stop that FAILED (`kill_failed`) always tells the owner,
+    whatever the action, and never reroutes: the work is still running."""
     action = rec.get("on_expire") or "kill"
-    steps = []
     killed = rec.get("stopped_by_us", False)
     failed = rec.get("kill_failed", False)
     if failed:
         msg = message(rec, f"COULD NOT BE STOPPED, the process is still running ({rec.get('kill_detail', '?')})")
     else:
         msg = message(rec, "stopped by the enforcer" if killed else "expired")
-    steps.append(hermes_ping(f"deadline {rec['name']} ({rec.get('owner')}): "
-                             + (f"KILL FAILED ({rec.get('kill_detail', '?')})" if failed else f"{rec.get('reason', 'expired')}; action {action}")))
+    rec["recovery"] = {
+        "state": "started", "at": now(), "claimed": False,
+        "ping": f"deadline {rec['name']} ({rec.get('owner')}): "
+                + (f"KILL FAILED ({rec.get('kill_detail', '?')})" if failed else f"{rec.get('reason', 'expired')}; action {action}"),
+        "reroute": action.split(":", 1)[1] if action.startswith("reroute:") and not failed else None}
     if failed or action in ("notify", "relay") or (action == "kill" and not killed):
-        steps.append(notify(rec, msg))
-    elif action.startswith("reroute:"):
-        argv = tool("DEADLINE_ACP_DISPATCH", "bin/acp-dispatch") + [
-            "reroute", action.split(":", 1)[1], "--escalate", "--detach", "--no-wait"]
-        rc, out = sh_nokill(argv, wait=120)
-        steps.append(f"reroute rc={rc}: {out[-150:]}")
-    rec["recovery"] = {"state": "done", "at": now(), "outcome": steps}
+        notify(rec, msg)
+    save(rec)
+    spawn_worker(rec)
     return rec
 
 
@@ -481,6 +546,7 @@ def step(rec: dict, dry: bool = False) -> str:
             rec.update(state="lost", ended=n, reason=why)
             notify(rec, message(rec, f"watched process is {ts} and was never marked done"))
             save(rec)
+            spawn_worker(rec)
             return f"lost ({ts})"
         reason = None
         if n - rec["started"] > rec["budget_s"] + rec.get("extended_s", 0):
@@ -939,25 +1005,32 @@ def cmd_run(a) -> int:
             if cur and cur.get("reg_id") == reg_id and cur.get("state") == "starting":
                 rec_path(a.name).unlink(missing_ok=True)
 
+    # Startup handshake: the command is exec'd only AFTER its record (with the pid and start time) is saved. Until then it sits in `read`
+    # on a pipe; if this process dies or is interrupted first, the pipe closes without "go" and the child exits 111 without having run it.
+    box = {"child": None}
+
+    def forward(sg, fr):
+        c = box["child"]
+        try:
+            if c is not None and c.poll() is None:
+                os.killpg(c.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, forward)
+    r_fd, w_fd = os.pipe()
+    wrapper = ["sh", "-c", f'read -r go <&{r_fd} || exit 111; [ "$go" = go ] || exit 111; exec {r_fd}<&-; exec "$@"', "sh", *cmd]
     try:
-        child = subprocess.Popen(cmd, start_new_session=True, env={**os.environ, "DEADLINE_NAME": a.name})
+        child = subprocess.Popen(wrapper, start_new_session=True, pass_fds=(r_fd,), env={**os.environ, "DEADLINE_NAME": a.name})
     except OSError as e:
+        os.close(r_fd)
+        os.close(w_fd)
         release()
         return die(f"cannot run {cmd[0]}: {e}", 127)
+    os.close(r_fd)
+    box["child"] = child
     rec, err = make_record(a, pid=child.pid, pgid=child.pid, kind="run", fresh_child=True)
-    if err:   # "not running" while poll() still says None: the child is exiting right now (zombie not yet reapable)
-        try:
-            child.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
-    if err and child.poll() is not None:
-        # it finished before it could be registered: nothing left to bound; keep an audit record of the finished run
-        with Locked(a.name, block=True):
-            cur = load(a.name)
-            if cur and cur.get("reg_id") == reg_id:
-                save({"name": a.name, "owner": a.owner, "state": "done", "started": cur["started"], "budget_s": a.budget,
-                      "ended": now(), "rc": child.returncode, "reg_id": reg_id, "kind": "run", "on_expire": a.on_expire})
-        return exit_code(child.returncode)
     if rec:
         rec["reg_id"] = reg_id
         with Locked(a.name, block=True):
@@ -966,24 +1039,19 @@ def cmd_run(a) -> int:
                 save(rec)
             else:
                 err = "the reserved name was taken over before the command was registered"
-    if err:
+    if err or child.poll() is not None:   # refused, or interrupted before the command started: it never ran
+        os.close(w_fd)
         try:
             os.killpg(child.pid, signal.SIGKILL)
         except OSError:
             pass
         child.wait()
         release()
-        return die(err, 2)
-
-    def forward(sg, fr):
-        try:
-            if child.poll() is None:
-                os.killpg(child.pid, signal.SIGTERM)
-        except OSError:
-            pass
-
-    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(s, forward)
+        return die(err or "interrupted before the command started", 2 if err else 130)
+    if os.environ.get("DEADLINE_TEST_ABORT_BEFORE_GO"):   # test hook: die as if killed between registration and release
+        os._exit(9)
+    os.write(w_fd, b"go\n")   # the record is persisted and enforceable: let the command run
+    os.close(w_fd)
     poll = fenv("DEADLINE_RUN_POLL", 0.5)
     while True:
         with Locked(a.name, block=True):
@@ -1049,6 +1117,13 @@ def cmd_install(a) -> int:
     return 0
 
 
+def cmd_work(a) -> int:
+    rec = load(a.name)
+    if rec:
+        work(rec)
+    return 0
+
+
 def cmd_uninstall(a) -> int:
     sh(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=30)
     (HOME / "Library/LaunchAgents" / f"{LABEL}.plist").unlink(missing_ok=True)
@@ -1060,6 +1135,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="deadline", description=__doc__.split("\n")[0], epilog=__doc__.split("\n\n", 1)[1][:3000],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("_work", help=argparse.SUPPRESS)   # internal: the detached ping/relay/reroute worker
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_work)
 
     def common(s):
         s.add_argument("--budget", type=dur_arg, required=True)

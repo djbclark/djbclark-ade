@@ -102,3 +102,10 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
    recovery itself before returning 124.
 6. Lock files are unlinked by `prune` only while it holds them; every acquirer re-checks that its locked inode is still the file on disk and retries
    otherwise, so two registrars never hold different inodes of "the same" lock. Terminal records are deleted under their lock after a fresh reload.
+7. Recovery I/O (hermes-ping, owner relay up to 90 s, reroute up to 120 s) runs in a detached `deadline _work NAME` process, never inside the 60 s
+   enforcement pass: the record is saved with the recovery order (`recovery.claimed` makes it at-most-once, and the worker claims it under the record lock
+   before any call) and later records and SIGKILL escalations stay on schedule. `DEADLINE_INLINE_WORKER=1` runs the worker inline (tests).
+8. `deadline run` starts its command behind a handshake: the command is exec'd only after its record (pid and start time) is persisted. If `run` dies or is
+   interrupted in between, the pipe closes without "go" and the held child exits 111 without having run the command.
+9. A live pid vouches for its process group only while `getpgid(pid)` still equals the recorded group; a process that left it makes the target
+   `unverified` (never signalled). A failed `ps` read (non-zero exit other than the normal "no such pid", or stderr text) is `ProcUnknown`, never "gone".
