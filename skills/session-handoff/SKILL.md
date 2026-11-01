@@ -139,7 +139,7 @@ it, reports the owner status in its resume plan and asks nothing.
    `w36:p3`, or free text (`solo`, `omp-...-stage-d`). `writer` is a TUI name, never an id: it narrows
    candidates in step 4 and matches nobody alone.
 2. **Match S to a row of `skills/session-finder/fleet.py --json`.** The row is the owner if S equals the
-   row's `sid`, `paseo` or `id`; or the row's `id` (8+ chars) is a prefix of S; or S (8+ chars; shorter
+   row's `sid`, `paseo`, `id` or herdr `pane`; or the row's `id` (8+ chars) is a prefix of S; or S (8+ chars; shorter
    free text such as `solo` never matches by containment) occurs inside the row's `sid` or `transcript`
    path (herdr omp rows carry a jsonl path). A match on a herdr pane id (`wN:pM`, reused after a pane
    closes) also needs the row's `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to
@@ -185,7 +185,8 @@ it, reports the owner status in its resume plan and asks nothing.
      `finish: archive refused` line that does not name `<your id>`, voids the `starting` line before it,
      because the owner then believes the handover failed and keeps writing.
   3. **No third party.** The line must be tied to THIS chain. Either the line's owner id is S or the
-     id/`paseo` of the step 2 row; or step 2 found no row at all for S and step 4's candidate list
+     id, `paseo` or herdr `pane` of the step 2 row (a herdr claude row's `id` is `sid[:8]`, while
+     `launch.py` and `self-slash` log the pane id `wN:pM`, which only the row's `pane` field carries); or step 2 found no row at all for S and step 4's candidate list
      (live rows other than you and the line's owner, by realpath `cwd` within a `workspaces[].dir`,
      `agent` fitting `writer`) is empty. S is not required to equal the owner: it is often free text or
      stale (`omp-2026-10-31-tendcf-stage-d`; a log still naming an archived `6225c4a1`), but a bare
@@ -206,12 +207,14 @@ it, reports the owner status in its resume plan and asks nothing.
   (top-level, or `is up`), even when the archive is refused and leaves it running; on a failure line
   (`NOT archived`, "this session stays usable") it is still the writer. A `launch.py start --baton`
   start writes no such line, so it goes through the ask.
-- **C. Your own chain after `/clear` or `/new`, no live other owner:** the newest `then: /baton` line for
-  your id in `~/.local/state/self-slash.log` follows a handoff of this chain, you hold the watch role the
-  chain belongs to (`bin/watch status`), or the operator named the chain (`/baton PATH`, `--dir
-  .../chains/<key>`) and its `workspaces[].dir` includes your cwd. C only waives the no-match question of
-  step 4 (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match
-  to a live row that is not you.
+- **C. Your own chain after `/clear` or `/new`, no live other owner:** one of: (1) the newest `then:
+  /baton` line for your id in `~/.local/state/self-slash.log` follows a handoff of this chain, (2) you
+  hold the watch role the chain belongs to (`bin/watch status`), both affirmative evidence that the
+  chain is yours; or (3) the operator named the chain (`/baton PATH`, `--dir .../chains/<key>`) and its
+  `workspaces[].dir` includes your cwd, which is only naming. C waives the no-match question of step 4
+  (a claude's old transcript sid matches no row after `/clear`); it never overrides a step 2 match to a
+  live row that is not you, and (3) never applies while step 4 lists a live candidate other than you
+  (a stale or free-text S can hide a live owner working in the same workspace): that case asks.
 
 **Reconciling with `baton`'s "Which chain".** A pointer resolved only by directory whose owner is another
 live session is not yours: say so and look further, no question. A chain that is otherwise yours (queued by
