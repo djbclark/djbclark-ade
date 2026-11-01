@@ -333,7 +333,9 @@ ACP_DISPATCH_NO_LOAD_GATE=1 skips it; ACP_DISPATCH_LOAD_WATCH names another bina
 every LW_* variable is dropped from the environment it gets except these, passed as admit flags: LW_MAX_AGENTS ->
 --max-agents (the cap on live acp-run slices; admit applies it ONLY to callers that pass the flag, and acp-dispatch always
 does, `bg` never: a test run starts no agent), LW_MIN_FREE_MB, LW_MAX_COMPRESSOR_S, LW_MAX_PAGEINS_S, and LW_BOOST_CALM_S
-as an environment variable; a bad value is warned about and ignored). admit polls every 15 s while the
+as an environment variable; a bad value, or a churn/pageins limit of 0 (admit refuses it), is warned about and ignored; the
+validated knobs are recorded in the job record (`load_knobs`) so a detached runner under launchd uses them; an admit that
+exits 2 refuses the launch, never admits it). admit polls every 15 s while the
 per-core load is above 1.5, staggers 5-30 s once it drops, and the dispatch records `load_gate:
 {load1, per_core, waited_s}`. The gate runs BEFORE the pool reading, in-flight reservation, headroom
 and cap checks, so those are evaluated against the machine as it is after admission, not a snapshot
@@ -3068,8 +3070,9 @@ def resolve_load_watch(path: str) -> str:
     return str(Path(expanded).resolve())
 
 
-LOAD_KNOBS = (("LW_MAX_AGENTS", "--max-agents", True), ("LW_MIN_FREE_MB", "--min-free-mb", False),
-              ("LW_MAX_COMPRESSOR_S", "--max-mem-churn", False), ("LW_MAX_PAGEINS_S", "--max-pageins", False))
+# (env var, admit flag, integer, smallest value admit accepts): load-watch exits 2 for a churn or pageins limit of 0
+LOAD_KNOBS = (("LW_MAX_AGENTS", "--max-agents", True, 0), ("LW_MIN_FREE_MB", "--min-free-mb", False, 0),
+              ("LW_MAX_COMPRESSOR_S", "--max-mem-churn", False, 1), ("LW_MAX_PAGEINS_S", "--max-pageins", False, 1))
 
 
 def load_gate_knobs() -> tuple[list[str], dict[str, str]]:
@@ -3077,10 +3080,12 @@ def load_gate_knobs() -> tuple[list[str], dict[str, str]]:
     callers that START agents, so acp-dispatch always passes `--max-agents` (bare = load-watch's default 14, or
     LW_MAX_AGENTS from our own environment; 0 = no cap), plus LW_MIN_FREE_MB, LW_MAX_COMPRESSOR_S and
     LW_MAX_PAGEINS_S as their flags and LW_BOOST_CALM_S as an environment variable. A value that is not a finite
-    number at or above 0 (an integer for the cap) is warned about and ignored, never passed on."""
+    number at or above admit's own minimum (0, but 1 for the churn and pageins limits, which admit refuses with exit
+    2 at 0; an integer for the cap) is warned about and ignored, never passed on. The result is what the dispatch
+    records (`load_knobs`) for a detached runner, which has none of our environment."""
     flags: list[str] = []
     cap_given = False
-    for var, flag, integer in LOAD_KNOBS:
+    for var, flag, integer, low in LOAD_KNOBS:
         raw = os.environ.get(var, "").strip()
         if not raw:
             continue
@@ -3088,8 +3093,8 @@ def load_gate_knobs() -> tuple[list[str], dict[str, str]]:
             val = int(raw) if integer else float(raw)
         except ValueError:
             val = -1
-        if val < 0 or (not integer and not math.isfinite(val)):
-            print(f"acp-dispatch: warning: ignoring {var}={raw!r} (need a number, 0 or more)", file=sys.stderr)
+        if val < low or (not integer and not math.isfinite(val)):
+            print(f"acp-dispatch: warning: ignoring {var}={raw!r} (need a number, {low} or more)", file=sys.stderr)
             continue
         flags.append(f"{flag}={val}")
         cap_given = cap_given or flag == "--max-agents"
@@ -3107,7 +3112,7 @@ def load_gate_knobs() -> tuple[list[str], dict[str, str]]:
     return flags, extra
 
 
-def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, str]:
+def load_gate(wait: int, path: str | None = None, knobs: dict | None = None) -> tuple[bool, dict | None, str]:
     """Ask `load-watch admit --wait WAIT --json` whether a slice may start (never throttles anything).
     Returns (admitted, info, why): info is {"load1", "per_core", "waited_s"} when load-watch answered, or
     {"load1": None, "per_core": None, "waited_s": 0, "error": why} when it could not (missing, crashed, timed
@@ -3123,7 +3128,10 @@ def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, st
     if not Path(path).exists():
         return unknown(f"{path} not found")
     env = {k: v for k, v in os.environ.items() if not k.startswith(LOAD_SCRUB_PREFIX)}
-    flags, extra_env = load_gate_knobs()
+    if isinstance(knobs, dict) and isinstance(knobs.get("flags"), list) and isinstance(knobs.get("env"), dict):
+        flags, extra_env = [str(x) for x in knobs["flags"]], {str(k): str(v) for k, v in knobs["env"].items()}
+    else:
+        flags, extra_env = load_gate_knobs()
     try:
         proc = subprocess.run([path, "admit", "--wait", str(wait), "--json", *flags], check=False, stdout=subprocess.PIPE,
                               stderr=None, text=True, timeout=wait + LOAD_GATE_SUBPROCESS_GRACE, env={**env, **extra_env})
@@ -3147,6 +3155,11 @@ def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, st
         why_refused = f" refused={','.join(info['refused'])}" if info.get("refused") else ""
         return False, info, (f"{LOAD_RETRY_TEXT}: load1={info['load1']} per_core={info['per_core']}{why_refused} "
                              f"after waiting {info['waited_s']}s of the {wait}s --load-wait budget; not launched")
+    if proc.returncode == 2:   # admit refused its own arguments: failing open here would bypass every guard
+        info = info or {"load1": None, "per_core": None, "waited_s": 0}
+        info["refused"] = ["admit_usage"]
+        return False, info, (f"{LOAD_RETRY_TEXT}: load-watch admit exited 2 (it refused its arguments {' '.join(flags)}); "
+                             "not launched, fix the LW_* settings")
     return unknown(f"load-watch admit exited {proc.returncode}")
 
 
@@ -3882,7 +3895,7 @@ def runner_load_gate(record: Path) -> int | None:
         return None
     wait = int(rec.get("load_gate_wait") or 0)
     update_record(record, gate=f"waiting-load: up to {wait}s for load-watch admit")
-    admitted, info, why = load_gate(wait, rec.get("load_watch"))
+    admitted, info, why = load_gate(wait, rec.get("load_watch"), rec.get("load_knobs"))
     if admitted:
         full = runner_inflight_recheck(record, rec)
         if full:
@@ -4548,6 +4561,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if gate_deferred:
         # the launchd runner has none of this process's environment or load_policy(): hand it the resolved values
         rec["load_gate_pending"], rec["load_gate_wait"] = True, gate_wait
+        knob_flags, knob_env = load_gate_knobs()   # validated now, in the dispatcher's environment (launchd has none)
+        rec["load_knobs"] = {"flags": knob_flags, "env": knob_env}
         rec["inflight_cap"], rec["state_root"] = cap, str(STATE_ROOT)
         if os.environ.get("ACP_DISPATCH_LOAD_WATCH"):
             # absolute: the runner's cwd is not ours, and a relative path there reads as "missing" and fails open

@@ -105,7 +105,8 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents=0"])
         for var, bad in (("LW_MAX_AGENTS", "many"), ("LW_MAX_AGENTS", "-3"), ("LW_MAX_AGENTS", "2.5"),
-                         ("LW_MIN_FREE_MB", "nan"), ("LW_MAX_PAGEINS_S", "-1"), ("LW_BOOST_CALM_S", "x")):
+                         ("LW_MIN_FREE_MB", "nan"), ("LW_MAX_PAGEINS_S", "-1"), ("LW_BOOST_CALM_S", "x"),
+                         ("LW_MAX_COMPRESSOR_S", "0"), ("LW_MAX_PAGEINS_S", "0")):  # admit exits 2 at 0
             mod = self.load_module()
             with self.subTest(var=var, bad=bad):
                 old = os.environ.get(var)
@@ -116,6 +117,36 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
                     os.environ.pop(var, None) if old is None else os.environ.__setitem__(var, old)
                 self.assertEqual(flags, ["--max-agents"])      # nothing bad is passed on; the cap still asked for
                 self.assertEqual(extra, {})
+
+    def test_an_admit_that_exits_2_refuses_the_launch_instead_of_failing_open(self):
+        """Codex P2 on PR 210: admit exit 2 (it rejected its arguments) used to be `unknown` = start anyway."""
+        r = self.dispatch("--no-model-check", env=self.gate_env(2, ""))
+        self.assertEqual(r.returncode, 75, r.stderr + r.stdout)
+        self.assertIn("exited 2", r.stdout)
+        self.assertFalse((self.out / "s1-report.md").exists())          # acp-run never ran
+        self.assertEqual(self.record()["unavailable_class"], "load")
+        r = self.dispatch("--no-model-check", name="s2", env=self.gate_env(1, ""))   # a crash (exit 1) still warns and starts
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+    def test_a_detached_runner_uses_the_knobs_validated_at_dispatch(self):
+        """Codex P2 on PR 210: launchd's runner has none of the dispatcher's environment."""
+        env = self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="codex=1", LW_MAX_AGENTS="5", LW_MIN_FREE_MB="800",
+                            LW_MAX_COMPRESSOR_S="0", LW_BOOST_CALM_S="300")
+        r = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        path = str(self.out / "jobs" / "s1.json")
+        self.assertEqual(self.record()["load_knobs"],
+                         {"flags": ["--max-agents=5", "--min-free-mb=800.0"], "env": {"LW_BOOST_CALM_S": "300"}})
+        # the runner's own environment has no LW_ variables at all
+        runner_env = {**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="")}
+        for k in ("LW_MAX_AGENTS", "LW_MIN_FREE_MB", "LW_MAX_COMPRESSOR_S", "LW_BOOST_CALM_S"):
+            runner_env.pop(k, None)
+        Path(str(self.lw_args)).unlink(missing_ok=True)
+        Path(str(self.lw_args) + ".env").unlink(missing_ok=True)
+        r = run(["execute", path], env=runner_env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents=5 --min-free-mb=800.0"])
+        self.assertEqual(Path(str(self.lw_args) + ".env").read_text().splitlines(), ["LW_BOOST_CALM_S=300"])
 
     def test_a_refusal_names_the_gate_that_said_no(self):
         hot = ('{"status": "hot", "load1": 4.0, "per_core": 0.5, "cores": 8, "max_per_core": 1.5, "waited_s": 5, '

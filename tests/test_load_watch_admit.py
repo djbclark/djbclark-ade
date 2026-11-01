@@ -16,7 +16,7 @@ CORES = os.cpu_count() or 1
 
 def admit(tmp_path, *args, load1=None, **env):
     e = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
-             LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_BOOST_CALM_S="0")  # 0: the hysteresis has its own tests
+             LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_BOOST_CALM_S="0", LW_RESERVE_S="0")  # 0: the hysteresis has its own tests
     for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS", "LW_MIN_FREE_MB",
               "LW_MAX_COMPRESSOR_S", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS"):
         e.pop(k, None)
@@ -27,7 +27,7 @@ def admit(tmp_path, *args, load1=None, **env):
                           timeout=30)
 
 
-LIMIT_ENV = ("LW_MAX_COMPRESSOR_S", "LW_MIN_FREE_MB", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS", "LW_BOOST_CALM_S")
+LIMIT_ENV = ("LW_MAX_COMPRESSOR_S", "LW_MIN_FREE_MB", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS", "LW_BOOST_CALM_S", "LW_RESERVE_S")
 
 
 def load_module():
@@ -671,3 +671,71 @@ def test_calm_note_serialises_on_a_lock(tmp_path, monkeypatch):
     finally:
         holder.wait(timeout=10)
     assert json.loads((tmp_path / "calm.json").read_text()) == {"calm_since": None, "last_t": 1000.0}
+
+
+def test_concurrent_admissions_cannot_all_pass_under_the_cap(tmp_path):
+    """Codex P2 on PR 210: with 13 of 14 agents alive, simultaneous dispatchers must not all be admitted."""
+    env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
+               LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_RESERVE_S="90", LW_FAKE_LOAD1="0.1", LW_FAKE_AGENTS="13")
+    procs = [subprocess.Popen([sys.executable, str(LW), "admit", "--wait", "0", "--max-agents", "--json"], env=env,
+                              stdout=subprocess.PIPE, text=True) for _ in range(6)]
+    outs = [(p.communicate(timeout=30)[0], p.returncode) for p in procs]
+    assert sorted(rc for _, rc in outs) == [0, 75, 75, 75, 75, 75], outs
+    assert all(json.loads(o)["refused"] == ["agents"] for o, rc in outs if rc == 75)
+    assert len(json.loads((tmp_path / "state" / "agent-reservations.json").read_text())["t"]) == 1
+
+
+def test_reservations_count_with_live_agents_expire_and_can_be_skipped(tmp_path):
+    f = tmp_path / "state" / "agent-reservations.json"
+    res = dict(LW_RESERVE_S="90", LW_FAKE_AGENTS="12")
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 0   # 12 + 0 < 14, reserves
+    r = admit(tmp_path, "--wait", "0", "--max-agents", "14", "--json", load1=0.1, **res)             # 12 + 1 < 14
+    assert r.returncode == 0, r.stdout
+    r = admit(tmp_path, "--wait", "0", "--max-agents", "14", "--json", load1=0.1, **res)             # 12 + 2 >= 14
+    rec = json.loads(r.stdout)
+    assert r.returncode == 75 and rec["refused"] == ["agents"] and rec["reserved"] == 2, rec
+    # a reservation older than LW_RESERVE_S no longer counts
+    f.write_text(json.dumps({"t": [time.time() - 100, time.time() - 95]}))
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 0
+    assert len(json.loads(f.read_text())["t"]) == 1                                                  # and are pruned
+    # --no-reserve is a pure check: it records nothing; LW_RESERVE_S=0 turns reservations off
+    before = f.read_text()
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1, **res).returncode == 0
+    assert f.read_text() == before
+    for _ in range(3):
+        assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, LW_FAKE_AGENTS="12", LW_RESERVE_S="0").returncode == 0
+    assert f.read_text() == before
+    # no cap requested (bg): nothing is reserved, however many have been
+    f.write_text(json.dumps({"t": [time.time()] * 30}))
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_RESERVE_S="90", LW_FAKE_AGENTS="1").returncode == 0
+    assert len(json.loads(f.read_text())["t"]) == 30
+
+
+def test_the_reservation_recounts_live_agents_inside_the_lock_and_fails_toward_waiting(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    assert lw.agent_reserve(14, lambda: 13, 90) is None        # the count taken under the lock decides, not an earlier one
+    assert lw.agent_reserve(14, lambda: 13, 90) == "agents"
+    assert lw.agent_reserve(14, lambda: 12, 90) is None
+
+    def boom():
+        raise lw.ReadFailed("ps timed out")
+
+    assert lw.agent_reserve(99, boom, 90) == "agents_unreadable"
+    (tmp_path / "agent-reservations.json").unlink()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path / "file")
+    (tmp_path / "file").write_text("x")                           # the state dir cannot be created
+    assert lw.agent_reserve(14, 0, 90) == "agents_reserve_failed"
+
+
+def test_a_hot_reading_resets_the_calm_clock_even_when_the_caller_disables_the_boost(tmp_path):
+    """Codex P2 on PR 210: a `--boost-per-core 0` caller used to skip calm_note, so its hot reading was lost."""
+    f = calm_file(tmp_path, 3600)
+    r = admit(tmp_path, "--wait", "0", "--boost-per-core", "0", load1=0.1, LW_FAKE_CHURN="1000", LW_FAKE_FREE_MB="100")
+    assert r.returncode == 75
+    assert json.loads(f.read_text())["calm_since"] is None
+    # nothing measured (a faked load alone, or a plain caller): no observation, the clock is untouched
+    f2 = calm_file(tmp_path, 3600)
+    before = f2.read_text()
+    admit(tmp_path, "--wait", "0", "--boost-per-core", "0", load1=0.1)
+    assert f2.read_text() == before

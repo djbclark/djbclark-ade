@@ -9,7 +9,7 @@
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
-    load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]]
+    load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]] [--no-reserve]
                      [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
@@ -90,7 +90,9 @@ second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-bac
 with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (acp-dispatch does; `bg` never
 does: a test run starts no agent, and gating it would starve the very sessions the cap counts), the live `acp-run` slices
 machine-wide (one `ps`, exact argv match of the process running the script named acp-run, never pgrep/pkill -f) number
-N or more (bare --max-agents = 14, env LW_MAX_AGENTS, 0 = no cap: THE knob to tune how many acp-run slices may START). A
+N or more (bare --max-agents = 14, env LW_MAX_AGENTS, 0 = no cap: THE knob to tune how many acp-run slices may START);
+an admission under the cap is recorded as a reservation (agent-reservations.json, flock) counted with the live ones for
+LW_RESERVE_S (90) seconds so concurrent dispatchers cannot all pass at 13 of 14 (--no-reserve: a pure check; 0: off). A
 vm_stat or ps that exists but fails, times out or prints nonsense refuses too (`memory_unreadable`, `agents_unreadable`):
 that is likeliest when the machine is starving. Only an absent tool (Linux without vm_stat, no /proc) leaves its gate open,
 listed in `unreadable`. Why, measured 2026-11-01 (load watcher d8891c91):
@@ -1445,6 +1447,13 @@ ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' 
 ADMIT_BOOST_PER_CORE = 4.0
 ADMIT_BOOST_CHURN_PAGES_S = ADMIT_CHURN_PAGES_S
 ADMIT_BOOST_CALM_S = _env_float("LW_BOOST_CALM_S", 600.0)
+# Agent reservations (Codex review of PR 210, 2026-11-01): two dispatchers that both read 13 of 14 live agents and
+# spend 2 s sampling memory would both be admitted before either launches. An admission under the cap is therefore
+# recorded (agent-reservations.json under an flock) and counted with the live acp-run processes for LW_RESERVE_S
+# seconds (default 90; 0 turns reservations off; `--no-reserve` makes one call a pure check). There is no release: a
+# reservation is also counted while the agent it admitted is already alive, so a launch is counted twice for up to
+# 90 s. That errs toward waiting, which is the point of the gate.
+ADMIT_RESERVE_S = _env_float("LW_RESERVE_S", 90.0)
 CALM_GAP_S = ADMIT_FRESH_S  # calm.json's last reading older than this: nobody watched in between, the clock restarts
 EX_TEMPFAIL = 75
 
@@ -1677,6 +1686,54 @@ def calm_note(t, calm):
     return since
 
 
+def reservations_active(now_t=None, ttl=None):
+    """Number of unexpired agent reservations (an unlocked read: it only reports; `agent_reserve` decides)."""
+    ttl = ADMIT_RESERVE_S if ttl is None else ttl
+    now_t = now() if now_t is None else now_t
+    try:
+        ts = json.loads((STATE_DIR / "agent-reservations.json").read_text()).get("t", [])
+        return sum(1 for x in ts if _num(x) and 0 <= now_t - x < ttl) if ttl > 0 else 0
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def agent_reserve(cap, live, ttl):
+    """Atomically admit one more agent: under an flock, count the live acp-run processes (`live`, re-read by the
+    caller inside the lock via a callable, or a number) plus the unexpired reservations; at or above `cap` it refuses,
+    else it records a reservation. Returns None when reserved, else the refusal name (`agents` or
+    `agents_unreadable` when ps fails, `agents_reserve_failed` when the state cannot be written: fail toward waiting)."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        lock = open(STATE_DIR / "agent-reservations.lock", "a")
+    except OSError:
+        return "agents_reserve_failed"
+    with lock:
+        try:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            return "agents_reserve_failed"
+        try:
+            n = live() if callable(live) else live
+        except ReadFailed:
+            return "agents_unreadable"
+        t = now()
+        try:
+            old = json.loads((STATE_DIR / "agent-reservations.json").read_text()).get("t", [])
+        except (OSError, ValueError, AttributeError):
+            old = []
+        keep = [x for x in old if _num(x) and 0 <= t - x < ttl]
+        if (n or 0) + len(keep) >= cap:
+            return "agents"
+        try:
+            tmp = STATE_DIR / f"agent-reservations.json.tmp{os.getpid()}"
+            tmp.write_text(json.dumps({"t": keep + [t]}))
+            tmp.replace(STATE_DIR / "agent-reservations.json")
+        except OSError:
+            return "agents_reserve_failed"
+    return None
+
+
 def admit_refusals(per_core, limit, m, lim):
     """Names of the gates that refuse: load, compressor, free_mem, pageins, agents, and `memory_unreadable` /
     `agents_unreadable` (vm_stat or ps exists but the read failed or timed out: that is likeliest exactly when the
@@ -1691,12 +1748,13 @@ def admit_refusals(per_core, limit, m, lim):
         out.append("free_mem")
     if m["pageins_s"] is not None and m["pageins_s"] > lim["max_pageins"]:
         out.append("pageins")
-    if lim["max_agents"] and m["agents"] is not None and m["agents"] >= lim["max_agents"]:
+    if lim["max_agents"] and m["agents"] is not None and m["agents"] + m.get("reserved", 0) >= lim["max_agents"]:
         out.append("agents")
     if "memory" in m["failed"]:
         out.append("memory_unreadable")
     if "agents" in m["failed"] and lim["max_agents"]:
         out.append("agents_unreadable")
+    out.extend(x for x in m.get("extra", []) if x not in out)  # refusals decided at the reservation step
     return out
 
 
@@ -1718,6 +1776,8 @@ def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None):
         rec["max_pageins_s"] = lim["max_pageins"]
     if m["agents"] is not None:
         rec["agents"] = m["agents"]
+        if m.get("reserved"):
+            rec["reserved"] = m["reserved"]
     rec["max_agents"] = lim["max_agents"]
     cap_on = bool(lim["max_agents"])
     unreadable = [name for k, name in (("churn", "memory"), ("agents", "agents"))
@@ -1811,16 +1871,21 @@ def cmd_admit(a):
         return 2
     if fake and not fake_churn:
         boost = 0  # a faked load with no faked churn reads churn 0 (not a measurement): never boosts
+    measured = not fake or bool(fake_churn) or any(fake_mem.values())  # a defaulted fake reading is not an observation
+    reserve_on = bool(lim["max_agents"]) and ADMIT_RESERVE_S > 0 and not getattr(a, "no_reserve", False)
 
     def read(polls):
         load1, cores, per_core = admit_reading(fake, polls)
         m = admit_memory(fake, fake_churn, fake_mem, polls, lim["max_agents"])
+        if lim["max_agents"]:
+            m["reserved"] = reservations_active() if reserve_on else 0
         calm_for = None
-        if boost and boost > a.max_per_core:
+        if measured:  # every real reading feeds the shared clock, boost or not (a hot one must reset it for everyone)
             t = now()
             # judged with the module defaults only: one caller's loose flags must not start the shared calm clock for others
             since = calm_note(t, memory_calm(m["churn"], m["free_mb"], m["pageins_s"]))
-            calm_for = (t - since) if since is not None else None
+            if boost and boost > a.max_per_core:
+                calm_for = (t - since) if since is not None else None
         # the boost needs an unbroken calm run of at least ADMIT_BOOST_CALM_S (churn None: no boost either)
         limit = admit_limit(a.max_per_core, m["churn"] if calm_for is not None and calm_for >= ADMIT_BOOST_CALM_S else None,
                             boost, boost_churn)
@@ -1842,6 +1907,12 @@ def cmd_admit(a):
             polls += 1
             waited = time.monotonic() - start
         refused = admit_refusals(per_core, limit, m, lim)
+        if not refused and reserve_on:
+            live = m["agents"] if (fake or fake_churn or any(fake_mem.values())) else count_agents
+            why = agent_reserve(lim["max_agents"], live, ADMIT_RESERVE_S)
+            if why:
+                m["extra"] = [why]
+                refused = admit_refusals(per_core, limit, m, lim)
         if not refused or waited >= a.wait:
             break
         if waited >= next_note:
@@ -1915,6 +1986,10 @@ def main():
                    help=f"and fewer than N `acp-run` agent sessions are alive machine-wide. OFF unless given (0 = off), because "
                         f"only a caller that STARTS agents (acp-dispatch) may be gated by it; `bg` test runs must never be. "
                         f"Bare `--max-agents` means {ADMIT_MAX_AGENTS} (env LW_MAX_AGENTS; 0 there = off)")
+    p.add_argument("--no-reserve", action="store_true",
+                   help=f"with --max-agents, do not record a reservation for an admission (a pure check); otherwise an "
+                        f"admission counts as one agent for LW_RESERVE_S ({ADMIT_RESERVE_S:g}) seconds, so concurrent "
+                        f"dispatchers cannot all be admitted under the cap")
     p.add_argument("--boost-per-core", type=float, default=ADMIT_BOOST_PER_CORE, metavar="N",
                    help=f"while churn is at most --boost-max-churn, admit up to N per core instead "
                         f"(default {ADMIT_BOOST_PER_CORE:g}; 0 turns the boost off)")

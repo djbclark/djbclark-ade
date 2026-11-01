@@ -122,6 +122,13 @@ prints `refused=agents` (or the other gate) in acp-dispatch's exit-75 line and i
 Raise the cap when memory has headroom (the other gates still hold); lower it when `vm_stat` shows free memory under 600 MB
 with the cap not yet reached. The count is one `ps`, an exact argv match of the process running the script named `acp-run`
 (never `pgrep -f`; `uv run --script` wrappers and mentions do not count).
+**Reservations:** an admission under the cap is recorded in `~/.local/state/load-watch/agent-reservations.json` (under an
+flock, the live `acp-run` count re-read inside the lock) and counted with the live agents for `LW_RESERVE_S` (90 s; 0 = off), so
+dispatchers that read 13 of 14 at the same moment cannot all be admitted. There is no release, so a launch counts twice for up
+to 90 s (toward waiting); `--no-reserve` makes a human's `admit --max-agents` a pure check. acp-dispatch validates the knobs once
+(a churn or pageins limit of 0 is ignored with a warning, since admit exits 2 on it) and records them in the job record
+(`load_knobs`), so a `--detach --no-wait` runner under launchd uses the same ones. An `admit` that exits 2 refuses the launch
+(exit 75), never admits it.
 Rates come from two `vm_stat` reads 2 s apart. **A reading that fails where the tool exists** (vm_stat or ps times out,
 exits non-zero, prints nonsense; likeliest exactly when the machine is starving) **refuses**: `refused=memory_unreadable` or
 `agents_unreadable`. Only an absent tool (no `vm_stat` and no `/proc/meminfo`, no `ps`) leaves its gate open, listed in
@@ -132,7 +139,7 @@ waiting, and `--max-pageins` / `LW_MAX_PAGEINS_S` raises it.
 
 Hysteresis: the 4.0 per-core calm boost applies only after the machine has stayed calm (churn at most the compressor
 limit, free memory above the floor, pageins under their limit) for `LW_BOOST_CALM_S` (600 s) without a break. Any hot
-reading by `admit` or by the 20 s sampler resets the clock (`~/.local/state/load-watch/calm.json`); `status` shows
+reading by `admit` (whatever its own `--boost-per-core`) or by the 20 s sampler resets the clock (`~/.local/state/load-watch/calm.json`); `status` shows
 `calm boost: calm for N/600 s` and `admit --json` carries `calm_for_s`.
 
 ## 3. Investigate
