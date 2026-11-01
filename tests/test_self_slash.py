@@ -381,6 +381,32 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertFalse(any(c.startswith("send") for c in self.paseo_calls()))
         self.assertFalse(self.log.exists())
 
+    def test_one_element_list_around_the_inspect_record_is_read_like_the_record(self) -> None:
+        # bin/rumination-watch accepts the same wrapper ("CLI versions may wrap it in a list").
+        r = self.run_ss("/compact x", FAKE_OLD_JSON='[{"Id":"test-agent","Provider":"claude"}]')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.wait_log("sent /compact x")
+
+    def test_wrapped_record_that_is_not_one_claude_record_for_this_agent_fails_closed(self) -> None:
+        two = '[{"Id":"test-agent","Provider":"claude"},{"Id":"test-agent","Provider":"claude"}]'
+        for record in ('[{"Id":"test-agent","Provider":"omp"}]', '[{"Id":"other","Provider":"claude"}]', "[]", two):
+            with self.subTest(record=record):
+                r = self.run_ss("/new", FAKE_OLD_JSON=record)
+                self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertFalse(any(c.startswith("send") for c in self.paseo_calls()))
+        self.assertFalse(self.log.exists())
+
+    def test_leading_whitespace_command_is_refused_and_never_sent(self) -> None:
+        # The slash-command check refuses it (exit 2) before the provider gate; the gate also strips leading
+        # whitespace before matching, so the two cannot disagree even if that check is ever relaxed.
+        for provider in ("omp", "claude"):
+            for argv in ((" /clear",), ("\t/compact focus",), ("--then", " /context", "/compact x")):
+                with self.subTest(provider=provider, argv=argv):
+                    r = self.run_ss(*argv, FAKE_OLD_PROVIDER=provider)
+                    self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(any(c.startswith("send") for c in self.paseo_calls()))
+        self.assertFalse(self.log.exists())
+
     def test_new_is_sent_as_clear_then_one_baton(self) -> None:
         r = self.run_ss("/new")
         self.assertEqual(r.returncode, 0, r.stderr)
