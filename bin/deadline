@@ -793,8 +793,11 @@ def dur_arg(v: str) -> float:
 
 
 def check_action(v: str) -> str:
-    if v in ACTIONS_PLAIN or (v.startswith("reroute:") and len(v) > 8):
+    if v in ACTIONS_PLAIN:
         return v
+    if v.startswith("reroute:") and len(v) > 8:
+        # resolved NOW, against the registering shell's directory: the sweep runs from launchd with another working directory
+        return "reroute:" + str(Path(v[8:]).expanduser().resolve())
     raise argparse.ArgumentTypeError("--on-expire is kill, notify, relay or reroute:RECORD")
 
 
@@ -989,7 +992,7 @@ def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
             pass
     if agents:
         try:
-            for line in agent_check(agents_now, alert=not dry):
+            for line in agent_dispatch(agents_now, dry):
                 results.append({"name": "(agents)", "action": line})
         except Exception as e:
             results.append({"name": "(agents)", "action": f"error: {type(e).__name__}: {e}"})
@@ -998,7 +1001,8 @@ def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
 
 def quiet(action: str) -> bool:
     """Actions a 60 s sweep must not log every minute (the launchd log would grow forever)."""
-    return (action in ("ok", "done", "lost", "expired") or action.startswith(("stopping: within grace", "busy", "kill-failed: still alive")))
+    return (action in ("ok", "done", "lost", "expired", "agent scan queued")
+            or action.startswith(("stopping: within grace", "busy", "kill-failed: still alive")))
 
 
 def trim_log() -> None:
@@ -1110,12 +1114,17 @@ def cmd_run(a) -> int:
                                    reason=f"cancelled by signal {cancel['sig']}")
                         signal_target(cur, signal.SIGTERM)
                         save(cur)
-                    elif mine and cancel["n"] >= 2 and not cancel["killed"] and cur.get("state") == "stopping":
-                        signal_target(cur, signal.SIGKILL)
-                        cancel["killed"] = True
-                    elif not mine and not cancel["fwd"]:
-                        os.killpg(child.pid, signal.SIGTERM)
-                        cancel["fwd"] = True
+                    elif mine and cur.get("state") == "stopping":
+                        if cancel["n"] >= 2 and not cancel["killed"]:
+                            signal_target(cur, signal.SIGKILL)
+                            cancel["killed"] = True
+                    else:   # the record is terminal (e.g. a notify-only deadline expired), foreign or kill-failed: bounded stop of the child itself
+                        if "t0" not in cancel:
+                            os.killpg(child.pid, signal.SIGTERM)
+                            cancel["t0"] = time.monotonic()
+                        elif not cancel["killed"] and (cancel["n"] >= 2 or time.monotonic() - cancel["t0"] >= a.grace):
+                            os.killpg(child.pid, signal.SIGKILL)
+                            cancel["killed"] = True
                 except (ProcUnknown, OSError):
                     pass
             if rc is not None:
@@ -1134,6 +1143,8 @@ def cmd_run(a) -> int:
                 if settled:
                     if mine and cur.get("cancelled"):
                         return 128 + int(cur.get("cancel_sig", signal.SIGTERM))
+                    if cancel["n"]:
+                        return 128 + cancel["sig"]
                     return 124 if mine and cur.get("stopped_by_us") else exit_code(rc)
             elif mine:
                 try:
@@ -1188,6 +1199,49 @@ def detach() -> bool:
     return True
 
 
+def agent_dispatch(force: bool, dry: bool) -> list[str]:
+    """Hand the agent scan (`paseo ls` plus up to 25 `paseo inspect`, tens of seconds when they time out) to a detached `deadline
+    _agents`, so it never delays the enforcement pass. The throttle is applied here and `last_scan` is stamped at dispatch."""
+    if dry:
+        return []
+    if os.environ.get("DEADLINE_INLINE_WORKER") == "1":
+        return agent_check(force, alert=True)
+    sf = state_dir() / "agents.json"
+    try:
+        st = json.loads(sf.read_text())
+    except (OSError, ValueError):
+        st = {}
+    n = now()
+    if not force and n - st.get("last_scan", 0) < fenv("DEADLINE_AGENT_SCAN_EVERY", 300):
+        return []
+    st["last_scan"] = n
+    tmp = sf.with_name(f".agents.{os.getpid()}.tmp")
+    sf.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(st))
+    os.replace(tmp, sf)
+    try:
+        p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_agents"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, env=clean_env())
+        p.wait(timeout=10)   # double-forks at once (cmd_agents)
+    except (OSError, subprocess.TimeoutExpired):
+        return ["agent scan could not be started"]
+    return ["agent scan queued"]
+
+
+def cmd_agents(a) -> int:
+    if os.environ.get("DEADLINE_INLINE_WORKER") != "1" and not detach():
+        return 0
+    os.environ["DEADLINE_INLINE_WORKER"] = "1"   # this process IS the detached worker: send the alerts from here
+    state_dir().mkdir(parents=True, exist_ok=True)
+    fd = os.open(state_dir() / ".agents.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 0   # another scan is still running
+    agent_check(True, alert=True)
+    return 0
+
+
 def cmd_alert(a) -> int:
     if os.environ.get("DEADLINE_INLINE_WORKER") != "1" and not detach():
         return 0
@@ -1224,6 +1278,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("_alert", help=argparse.SUPPRESS)   # internal: the detached idle-agent alert sender (JSON on stdin)
     s.set_defaults(fn=cmd_alert)
+
+    s = sub.add_parser("_agents", help=argparse.SUPPRESS)   # internal: the detached agent no-progress scan
+    s.set_defaults(fn=cmd_agents)
 
     def common(s):
         s.add_argument("--budget", type=dur_arg, required=True)

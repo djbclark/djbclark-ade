@@ -116,3 +116,7 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     result is merged only into the record carrying the `reg_id` it started from.
 12. Interrupting `deadline run` (SIGTERM, SIGINT, SIGHUP) is a bounded stop: the record goes to `stopping` (`cancelled`), the command's group gets SIGTERM, then
     SIGKILL after `--grace` (a second signal escalates to SIGKILL at once). Nothing is announced or rerouted; `run` exits 128+signal.
+13. The agent scan (`paseo ls` + `paseo inspect` per running agent) runs in a detached `deadline _agents` worker (throttled to one per 5 min, stamped at
+    dispatch, one scan at a time by a lock), never inside the enforcement pass; `deadline ls --agents` still reads it synchronously.
+    `--on-expire reroute:PATH` stores PATH resolved against the registering shell's directory. Interrupting `deadline run` after a notify-only
+    expiry still stops the command (SIGTERM, then SIGKILL after `--grace`).

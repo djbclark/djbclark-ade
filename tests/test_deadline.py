@@ -32,7 +32,7 @@ class Env:
                       'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit "$(cat "$DL_RELAY_FAIL")"; fi\n'),
             "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
             "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\n',
-            "paseo": (f'#!{sys.executable}\nimport os, sys\n'
+            "paseo": (f'#!{sys.executable}\nimport os, sys, time\ntime.sleep(float(os.environ.get("FAKE_PASEO_SLEEP") or 0))\n'
                       'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
                       'a = sys.argv[1:]\n'
                       'if a[:4] == ["ls", "-g", "--background", "--json"]:\n'
@@ -650,7 +650,7 @@ def test_agent_alerts_run_off_the_enforcement_pass(env):
     Path(env.base["DL_RELAY_SLEEP"]).write_text("3")
     t = time.monotonic()
     r = env.run("sweep", "--agents-now", now=T0, DEADLINE_INLINE_WORKER="0")
-    assert time.monotonic() - t < 2.5 and "alert queued" in r.stdout, "the sweep must not wait for the 3 s relay"
+    assert time.monotonic() - t < 2.5, "the sweep must not wait for the 3 s relay"
     for _ in range(60):
         time.sleep(0.25)
         if env.calls("RELAY"):
@@ -716,3 +716,50 @@ def test_interrupting_run_starts_the_grace_and_ends_in_sigkill(env):
     finally:
         p.kill()
         p.wait()
+
+
+# ---------- PR 223 local-review round 5: cancel after a notify-only expiry, absolute reroute paths, agent scan off the pass ----------
+
+def test_interrupting_run_after_a_notify_only_expiry_still_stops_the_command(env):
+    p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--grace", "1", "--name", "notifycancel", "--owner", "o",
+                          "--on-expire", "notify", "--", "sh", "-c", "trap '' TERM; sleep 60"],
+                         env={**os.environ, **env.base, "DEADLINE_RUN_POLL": "0.1"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(80):
+            time.sleep(0.25)
+            if (env.state / "notifycancel.json").exists() and env.record("notifycancel").get("state") == "expired":
+                break
+        rec = env.record("notifycancel")
+        assert rec["state"] == "expired" and env.group_alive(rec["pgid"]), "announce-only: the command keeps running"
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=20)
+        assert p.returncode == 143 and not env.group_alive(rec["pgid"]), "the interrupt must end the TERM-ignoring command"
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_reroute_path_is_resolved_at_registration(env, inproc, monkeypatch, tmp_path):
+    dl = inproc
+    monkeypatch.chdir(tmp_path)
+    got = dl.check_action("reroute:jobs/task.json")
+    assert got == "reroute:" + str((tmp_path / "jobs/task.json").resolve())
+    assert dl.check_action("reroute:~/x.json").startswith("reroute:/")
+
+
+def test_agent_scan_runs_off_the_enforcement_pass(env):
+    (env.tmp / "ls.json").write_text(json.dumps([{"id": "aaaaaaaa-0000", "shortId": "aaaaaaa", "name": "idle", "status": "running"}]))
+    (env.paseo_dir / "aaaaaaaa-0000.json").write_text(json.dumps({"UpdatedAt": iso(T0 - 7200)}))
+    t = time.monotonic()
+    r = env.run("sweep", "--agents-now", now=T0, DEADLINE_INLINE_WORKER="0", FAKE_PASEO_SLEEP="3")
+    assert time.monotonic() - t < 2.5, "paseo ls/inspect (3 s each here) must not run inside the sweep"
+    assert r.returncode == 0
+    for _ in range(80):
+        time.sleep(0.25)
+        if env.calls("RELAY"):
+            break
+    assert len(env.calls("RELAY")) == 1
+    n = len(env.calls("PASEO"))
+    r = env.run("sweep", now=T0 + 60, DEADLINE_INLINE_WORKER="0")   # throttled: stamped at dispatch, no new scan inside 5 min
+    time.sleep(1)
+    assert len(env.calls("PASEO")) == n
