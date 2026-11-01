@@ -3,9 +3,7 @@
 
 Zephyr text (bodies, instances, zsigs, hosts, the live screen) is written by other
 people. This program turns it into JSON lines an agent can read without hidden
-characters, terminal escapes or forgeable framing, and it records that untrusted
-text was just shown (the taint that makes `bo` ask the human before it types
-anything that changes the client).
+characters, terminal escapes or forgeable framing.
 
     bo-log.py log (--user U | --class C) [--instance I] [--from P] [--grep TEXT]
                   [--since W] [--until W] [--last N] [--new] [--mark]
@@ -16,12 +14,12 @@ Every stdout byte is printable ASCII or a newline (JSON with ensure_ascii), and 
 attacker string sits inside a JSON string literal, so a body can never be read as a
 record boundary. Sanitizing removes the covert channels (tag-block "ASCII smuggling",
 zero-width and bidi characters, ANSI/OSC escapes, length bombs); it does not and cannot
-remove plain English instructions. That is what the taint and the confirmation are for.
-Nothing here uses a regular expression on log text (--grep is a literal substring), so
-no pattern can make it run long.
+remove plain English instructions. That is what the human confirmation in `bo` is for.
+Nothing here uses a regular expression on log text (--grep is a literal substring) and
+header lines are split with plain string operations, so no content can make it run long.
 
 Exit: 0 ok, 1 runtime failure (a fixed reason code, never a raw exception), 2 refused
-argument, 5 ok but output cut by a cap.
+argument, 5 ok but cut by a cap: the output cap, or the 8 MiB read window (`history_cut`).
 """
 from __future__ import annotations
 
@@ -132,12 +130,6 @@ def dump(obj: object) -> str:
     return json.dumps(obj, ensure_ascii=True, separators=(",", ":"))
 
 
-def touch_taint() -> None:
-    d = state_dir()
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    (d / "tainted").touch()
-
-
 def preface(kind: str) -> str:
     return dump({"bo": kind, "v": 1, "untrusted": True, "note": NOTE})
 
@@ -167,6 +159,47 @@ def parse_when(s: str, now: datetime) -> datetime | None:
     return None
 
 
+HEADER_MAX = 2048  # real header lines are short; a longer one is body text
+
+
+def class_line(line: str) -> tuple[str, str, str] | None:
+    """'Class: X Instance: Y[ Opcode: Z]' -> (X, Y, Z). Plain string splits: linear time."""
+    if len(line) > HEADER_MAX or not line.startswith("Class: "):
+        return None
+    cls, sep, rest = line[7:].partition(" Instance: ")
+    if not sep:
+        return None
+    inst, _, op = rest.partition(" Opcode: ")
+    return cls, inst, op
+
+
+def time_line(line: str) -> tuple[datetime | None, str]:
+    """'Time: Wkd Mon DD HH:MM:SS YYYY[ Host: H]' -> (claimed time or None, host)."""
+    body, _, host = line[6:HEADER_MAX].partition(" Host: ")
+    p = body.split()
+    if len(p) == 5 and p[1] in MONTHS:
+        try:
+            h, m, s = (int(x) for x in p[3].split(":"))
+            return datetime(int(p[4]), MONTHS[p[1]], int(p[2]), h, m, s), host
+        except ValueError:
+            pass
+    return None, host
+
+
+def from_line(line: str) -> tuple[str, str, str] | None:
+    """'From: Zsig <user>' or 'To: ...' -> (direction word, zsig, user)."""
+    if len(line) > HEADER_MAX:
+        return None
+    for tag in ("From: ", "To: "):
+        if line.startswith(tag):
+            rest = line[len(tag):]
+            zsig, sep, who = rest.partition(" <")
+            if sep and rest.endswith(">"):
+                return tag[:-2], zsig, who[:-1]
+            return tag[:-2], "", rest
+    return None
+
+
 def parse_entries(raw: bytes, file_tag: str, base: int = 0) -> list[dict]:
     """Split a BarnOwl log into entries, each with its byte span (start, end) in the file.
 
@@ -183,27 +216,20 @@ def parse_entries(raw: bytes, file_tag: str, base: int = 0) -> list[dict]:
     cur: dict | None = None
     i = 0
     while i < len(text):
-        m = re.match(r"^Class: (.*?) Instance: (.*?)(?: Opcode: (.*))?$", text[i])
+        m = class_line(text[i])
         if m and i + 1 < len(text) and text[i + 1].startswith("Time: "):
             if cur is not None:
                 cur["end"] = offsets[i]
-            cur = {"class": m.group(1), "instance": m.group(2), "opcode": m.group(3) or "",
+            cur = {"class": m[0], "instance": m[1], "opcode": m[2],
                    "time": None, "host": "", "from": "", "zsig": "", "dir": "in", "body": [],
                    "start": offsets[i], "end": pos}
             entries.append(cur)
-            t = re.match(r"^Time: \w+ (\w+) +(\d+) (\d+):(\d+):(\d+) (\d+)(?: Host: (.*))?$", text[i + 1])
-            if t and t.group(1) in MONTHS:
-                try:
-                    cur["time"] = datetime(int(t.group(6)), MONTHS[t.group(1)], int(t.group(2)),
-                                           int(t.group(3)), int(t.group(4)), int(t.group(5)))
-                except ValueError:
-                    pass
-                cur["host"] = t.group(7) or ""
+            cur["time"], cur["host"] = time_line(text[i + 1])
             i += 2
-            f = re.match(r"^(From|To): (.*?)(?: <(.*)>)?$", text[i]) if i < len(text) else None
+            f = from_line(text[i]) if i < len(text) else None
             if f:
-                cur["dir"] = "out" if f.group(1) == "To" else "in"
-                cur["zsig"], cur["from"] = (f.group(2), f.group(3)) if f.group(3) is not None else ("", f.group(2))
+                cur["dir"] = "out" if f[0] == "To" else "in"
+                cur["zsig"], cur["from"] = f[1], f[2]
                 i += 1
             if i < len(text) and text[i] == "":
                 i += 1
@@ -220,8 +246,8 @@ def parse_entries(raw: bytes, file_tag: str, base: int = 0) -> list[dict]:
     return entries
 
 
-def read_log(kind: str, name: str) -> tuple[bytes, str, int, str]:
-    """Read the last READ_MAX bytes of one log; returns (data, tag, offset of data, file signature).
+def read_log(kind: str, name: str) -> tuple[bytes, str, int, str, bool]:
+    """Read the last READ_MAX bytes of one log: (data, tag, offset of data, file signature, history cut).
 
     A symlink, a FIFO or any non-regular file is refused without being read.
     """
@@ -248,9 +274,9 @@ def read_log(kind: str, name: str) -> tuple[bytes, str, int, str]:
     if start:  # begin at the first whole entry, never mid-body
         k = data.find(b"\nClass: ")
         if k < 0:
-            return b"", "%s/%s" % (kind, name), st.st_size, sig
+            return b"", "%s/%s" % (kind, name), st.st_size, sig, True
         data, start = data[k + 1:], start + k + 1
-    return data, "%s/%s" % (kind, name), start, sig
+    return data, "%s/%s" % (kind, name), start, sig, bool(start)
 
 
 def load_marks() -> dict:
@@ -292,7 +318,7 @@ def cmd_log(a: argparse.Namespace) -> int:
     needle = a.grep.lower() if a.grep else None
     kind = "people" if a.user else "class"
     try:
-        raw, tag, base, sig = read_log(kind, name)
+        raw, tag, base, sig, history_cut = read_log(kind, name)
     except OSError:
         return fail("no such log")
     entries = parse_entries(raw, tag, base)
@@ -317,7 +343,6 @@ def cmd_log(a: argparse.Namespace) -> int:
     more = len(sel) > last
     sel = sel[:last] if a.new else sel[-last:]  # --new pages forward from the oldest unread
     want_body = a.bodies or a.bodies_all
-    touch_taint()
     out = [preface("log")]
     size, truncated, matched, delivered = len(out[0]), False, 0, []
     for e in sel:
@@ -351,12 +376,12 @@ def cmd_log(a: argparse.Namespace) -> int:
         delivered.append(e)
         size += len(line) + 1
     out.append(dump({"t": "end", "records": len(delivered), "matched": matched,
-                     "truncated": truncated, "more": more or truncated, "tainted": True}))
+                     "truncated": truncated, "more": more or truncated, "history_cut": history_cut}))
     print("\n".join(out))
     if a.mark and delivered:
         marks[tag] = {"off": max(e["end"] for e in delivered), "sig": sig}
         save_marks(marks)
-    return 5 if truncated else 0
+    return 5 if truncated or history_cut else 0
 
 
 def cmd_frame(a: argparse.Namespace) -> int:
@@ -375,14 +400,10 @@ def cmd_frame(a: argparse.Namespace) -> int:
     while lines and len(dump({"t": "text", "lines": lines})) + FOOTER_RESERVE > OUT_MAX:
         lines.pop()
         truncated = True
-    # subs and file are what the operator subscribed to, not other people's text.
-    tainting = a.kind not in ("subs", "file")
-    if tainting:
-        touch_taint()
     print(preface(a.kind))
     print(dump({"t": "text", "lines": lines}))
     print(dump({"t": "end", "lines": len(lines), "dropped": dropped, "clipped": clipped,
-                "truncated": truncated, "tainted": tainting}))
+                "truncated": truncated}))
     return 5 if truncated else 0
 
 

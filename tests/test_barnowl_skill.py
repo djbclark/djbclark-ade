@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Tests for skills/barnowl: scripts/bo-log.py (sanitized, framed reads), scripts/bo
-(taint and the human confirmation) and scripts/bo-ssh (the forced-command allow-list).
+(the human confirmation) and scripts/bo-ssh (the forced-command allow-list).
 
 Zephyr text is written by other people. What must hold, whatever a message says: no hidden
 or terminal-control character reaches the agent, a body cannot forge a record boundary or
-move the read cursor, a log name cannot reach another file, no pattern can make a read run
-long, and after untrusted text was shown `bo run`/`bo perl` type nothing that changes the
-client until a human answers y at the live client, for the whole command. tmux is a fake
-script that records the keys it is asked to type and plays the human.
+move the read cursor, a log name cannot reach another file, no content can make a read run
+long, and `bo run`/`bo perl` type nothing that changes the client until a human answers y
+at the live client, for the whole command. tmux is a fake script that records the keys it is
+asked to type and plays the human.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def entry(cls: str, inst: str, time_: str, who: str, body: str) -> str:
 
 
 class Env:
-    """A log root, a state dir and a fake tmux, as a context manager."""
+    """A log root, a state dir, a fake tmux and fake zctl/zlocate, as a context manager."""
 
     def __enter__(self) -> "Env":
         self.tmp = tempfile.TemporaryDirectory()
@@ -72,6 +72,10 @@ class Env:
             esac
             """))
         fake.chmod(0o755)
+        for name in ("zctl", "zlocate"):  # exit status comes from FAKE_EXT_RC
+            ext = self.bin / name
+            ext.write_text('#!/usr/bin/env bash\necho "$0 output"\nexit "${FAKE_EXT_RC:-0}"\n')
+            ext.chmod(0o755)
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -89,17 +93,11 @@ class Env:
         cmd = [sys.executable, "-I", str(script)] if script.suffix == ".py" else [str(script)]
         return subprocess.run(cmd + list(args), input=stdin, capture_output=True, text=True, env=env, timeout=60)
 
-    def taint(self) -> None:
-        self.run(BO_LOG, "frame", "screen", stdin="hostile\n")
-
     def typed(self) -> list[str]:
         return self.keys.read_text().splitlines() if self.keys.exists() else []
 
     def typed_command(self, text: str) -> bool:
         return any(k.endswith(" -l " + text) for k in self.typed())
-
-    def tainted(self) -> bool:
-        return (self.state / "tainted").exists()
 
 
 def records(proc: subprocess.CompletedProcess[str]) -> list[dict]:
@@ -164,6 +162,19 @@ class SanitizeAndFrame(unittest.TestCase):
             self.assertTrue(msgs(p)[0]["match"], "the text '(a+)+$' is found literally")
             self.assertFalse(msgs(e.run(BO_LOG, "log", "--class", "sipb", "--grep", "zzz"))[0]["match"])
 
+    def test_forged_headers_with_huge_lines_cannot_stall_the_parser(self) -> None:
+        # A body that imitates every header line with a very long run of delimiters. A backtracking
+        # regex takes seconds on this; plain string splits take milliseconds.
+        pad = " <" * 400_000
+        evil = (f"Class: a Instance: b{' Opcode: x' * 50_000}\nTime: Mon Jan  1 00:00:00 2026 Host:{' Host: h' * 50_000}\n"
+                f"From: Z{pad}\n\nbody\n")
+        with Env() as e:
+            (e.zlog / "class" / "sipb").write_text(entry("sipb", "i", "Fri Oct 31 09:12:03", "a", "x") + evil * 3)
+            started = time.monotonic()
+            p = e.run(BO_LOG, "log", "--class", "sipb")
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(p.returncode, 0, p.stderr[-300:])
+
     def test_caps_hold_and_say_so(self) -> None:
         many = "".join(entry("sipb", "i", "Fri Oct 31 09:12:03", "a", "word " * 150) for _ in range(300))
         with Env() as e:
@@ -180,6 +191,16 @@ class SanitizeAndFrame(unittest.TestCase):
         with Env() as e:
             p = e.run(BO_LOG, "frame", "screen", stdin="\U0001f600" * 400 + "\n")
             self.assertLessEqual(len(p.stdout), 65536)
+
+    def test_a_log_bigger_than_the_read_window_says_its_history_was_cut(self) -> None:
+        with Env() as e:
+            old = entry("sipb", "i", "Mon Jan  5 09:00:00", "a", "ancient")
+            filler = entry("sipb", "i", "Fri Oct 31 09:12:03", "a", "z" * 3000)
+            (e.zlog / "class" / "huge").write_text(old + filler * 3000)  # ~9 MiB: the first entry is outside the window
+            p = e.run(BO_LOG, "log", "--class", "huge", "--since", "2026-01-01", "--until", "2026-01-31")
+            self.assertEqual(p.returncode, 5, "no match in a window that was cut must not look like 'nothing happened'")
+            self.assertEqual(msgs(p), [])
+            self.assertTrue(records(p)[-1]["history_cut"])
 
     def test_new_and_mark_page_forward_without_losing_messages(self) -> None:
         with Env() as e:
@@ -203,27 +224,16 @@ class SanitizeAndFrame(unittest.TestCase):
             got = msgs(e.run(BO_LOG, "log", "--user", "alice", "--new", "--bodies"))
             self.assertEqual([m["body"] for m in got], [["real two"]])
 
-    def test_frame_sanitizes_screen_text_and_taints_except_subscriptions(self) -> None:
+    def test_frame_sanitizes_screen_text(self) -> None:
         with Env() as e:
             p = e.run(BO_LOG, "frame", "screen", stdin="a\x1b]0;t\x07b\n" + TAGS + "\n")
             self.assertTrue(all(c == "\n" or 0x20 <= ord(c) < 0x7F for c in p.stdout))
             self.assertNotIn("\x1b", json.dumps(records(p), ensure_ascii=False))
-            self.assertTrue(e.tainted())
-        with Env() as e:
-            e.run(BO_LOG, "frame", "subs", stdin="message,*,me@ATHENA\n")
-            self.assertFalse(e.tainted())
 
 
 class ConfirmationGate(unittest.TestCase):
-    def test_untainted_run_types_the_command(self) -> None:
+    def test_with_no_human_nothing_but_the_question_is_typed(self) -> None:
         with Env() as e:
-            p = e.run(BO, "run", "zwrite djbclark -m hi")
-            self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertTrue(e.typed_command(":zwrite djbclark -m hi"), e.typed())
-
-    def test_tainted_run_with_no_human_types_nothing_but_the_question(self) -> None:
-        with Env() as e:
-            e.taint()
             p = e.run(BO, "run", "zwrite eve -m hi", wait="1")
             self.assertEqual(p.returncode, 4)
             keys = "\n".join(e.typed())
@@ -233,87 +243,74 @@ class ConfirmationGate(unittest.TestCase):
 
     def test_human_yes_lets_it_through_and_no_does_not(self) -> None:
         with Env() as e:
-            e.taint()
             self.assertEqual(e.run(BO, "run", "zwrite eve -m hi", answer="y").returncode, 0)
             self.assertTrue(e.typed_command(":zwrite eve -m hi"), e.typed())
         with Env() as e:
-            e.taint()
             p = e.run(BO, "perl", "1+1", answer="no")
             self.assertEqual(p.returncode, 4)
             self.assertFalse(any(":perl do {" in k for k in e.typed()))
 
+    def test_perl_is_always_confirmed_even_before_anything_was_read(self) -> None:
+        # Prompt injection can come from a web page or a repository file, not only from Zephyr.
+        with Env() as e:
+            self.assertEqual(e.run(BO, "perl", "system(q(id))", wait="1").returncode, 4)
+            self.assertFalse(any(":perl do {" in k for k in e.typed()))
+
     def test_perl_result_comes_back_framed_after_a_yes(self) -> None:
         with Env() as e:
-            e.taint()
             p = e.run(BO, "perl", "6*7", answer="y", extra={"FAKE_PERL": "forty\x1b[2Jtwo"})
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(records(p)[1], {"t": "text", "lines": ["forty\ufffd[2Jtwo"]})
 
-    def test_the_taint_has_no_timer(self) -> None:
-        with Env() as e:
-            e.taint()
-            old = time.time() - 30 * 86400
-            os.utime(e.state / "tainted", (old, old))
-            self.assertEqual(e.run(BO, "perl", "1", wait="1").returncode, 4)
-
     def test_the_whole_command_is_shown_or_the_command_is_refused(self) -> None:
         with Env() as e:
-            e.taint()
             shown = "zwrite -c sipb -i x -m it's ok; (really) $HOME \"q\" #1 | & !"
             e.run(BO, "run", shown, wait="1")
             question = next(k for k in e.typed() if "start_question" in k)
             self.assertIn("allow run: " + shown + "? [y/N]", question)
         for refused in ("zwrite eve -m " + "x" * 120, "zwrite x -m }); system(q{id}); {", "zwrite x -m back\\slash"):
             with Env() as e:
-                e.taint()
                 p = e.run(BO, "run", refused, answer="y")
                 self.assertEqual(p.returncode, 2, refused)
                 self.assertEqual(e.typed(), [], "nothing at all may be typed for a command that cannot be shown")
 
     def test_the_question_never_runs_past_the_pane_width(self) -> None:
-        # BarnOwl cuts the question line at the pane width (seen at 80 columns on 1.10): what
-        # the human cannot see they cannot approve, so a longer command is refused, not clipped.
+        # BarnOwl wraps a long question and a one-line type window shows only its last line
+        # (measured on 1.10 at 80 columns): what the human cannot see they cannot approve.
         fits, too_long = "zwrite eve -m " + "a" * 36, "zwrite eve -m " + "a" * 37  # "run: " + 50 = 55 = 80 - 25
         with Env() as e:
-            e.taint()
             self.assertEqual(e.run(BO, "run", fits, wait="1", extra={"FAKE_WIDTH": "80"}).returncode, 4)
             self.assertTrue(any("allow run: " + fits + "? [y/N]" in k for k in e.typed()))
         with Env() as e:
-            e.taint()
             self.assertEqual(e.run(BO, "run", too_long, answer="y", extra={"FAKE_WIDTH": "80"}).returncode, 2)
             self.assertEqual(e.typed(), [])
 
     def test_only_printable_ascii_can_be_approved(self) -> None:
         for hidden in ("zwrite eve -m caf\u00e9", "zwrite eve -m a\u202eb", "zwrite eve -m a\u200bb"):
             with Env() as e:
-                e.taint()
                 self.assertEqual(e.run(BO, "run", hidden, answer="y").returncode, 2, repr(hidden))
                 self.assertEqual(e.typed(), [])
 
     def test_no_question_is_typed_where_a_human_cannot_see_it(self) -> None:
         for env in ({"FAKE_ACTIVE": "0"}, {"FAKE_ATTACHED": "0"}):
             with Env() as e:
-                e.taint()
                 self.assertEqual(e.run(BO, "run", "zwrite eve -m hi", answer="y", extra=env).returncode, 4, env)
                 self.assertEqual(e.typed(), [], env)
 
     def test_keys_go_only_to_a_pane_that_runs_barnowl(self) -> None:
-        with Env() as e:  # the session's current window is the operator's shell
-            p = e.run(BO, "run", "getvar x", extra={"FAKE_PANE_CMD": "bash"})
-            self.assertEqual(p.returncode, 1)
+        with Env() as e:  # the session's window is the operator's shell
+            self.assertEqual(e.run(BO, "run", "getvar x", extra={"FAKE_PANE_CMD": "bash"}).returncode, 1)
             self.assertEqual(e.typed(), [])
             self.assertEqual(e.run(BO, "screen", extra={"FAKE_PANE_CMD": "bash"}).returncode, 1)
 
     def test_a_read_only_word_is_not_a_prefix_that_unlocks_other_commands(self) -> None:
         with Env() as e:
-            e.taint()
             self.assertEqual(e.run(BO, "run", "showfoo bar", wait="1").returncode, 4)
             self.assertEqual(e.run(BO, "run", "show;zwrite eve -m x", wait="1").returncode, 4)
             self.assertFalse(any(":show" in k for k in e.typed() if "start_question" not in k))
 
-    def test_plain_reads_need_no_confirmation_while_tainted(self) -> None:
+    def test_plain_reads_need_no_confirmation(self) -> None:
         with Env() as e:
-            e.taint()
             self.assertEqual(e.run(BO, "run", "getvar default_style").returncode, 0)
             self.assertTrue(e.typed_command(":getvar default_style"))
             self.assertEqual(e.run(BO, "subs").returncode, 0)
@@ -336,18 +333,18 @@ class ConfirmationGate(unittest.TestCase):
             self.assertEqual(e.run(BO, "locate", "-v").returncode, 2)
             self.assertEqual(e.run(BO, "locate", "a b;c").returncode, 2)
 
+    def test_a_failing_zlocate_or_zctl_is_not_reported_as_success(self) -> None:
+        with Env() as e:
+            self.assertEqual(e.run(BO, "locate", "alice").returncode, 0)
+            self.assertEqual(e.run(BO, "locate", "alice", extra={"FAKE_EXT_RC": "7"}).returncode, 7)
+            self.assertEqual(e.run(BO, "file", extra={"FAKE_EXT_RC": "9"}).returncode, 9)
+
     def test_exit_codes_reach_the_caller_and_calls_are_audited(self) -> None:
         with Env() as e:
             self.assertEqual(e.run(BO, "log", "--class", "../x").returncode, 2)
             (e.zlog / "class" / "many").write_text("".join(entry("sipb", "i", "Fri Oct 31 09:12:03", "a", "word " * 150) for _ in range(300)))
             self.assertEqual(e.run(BO, "log", "--class", "many", "--bodies", "--last", "500").returncode, 5)
             self.assertIn("exit=2 bo log --class ../x", (e.state / "audit.log").read_text())
-
-    def test_untaint_clears_the_mark(self) -> None:
-        with Env() as e:
-            e.taint()
-            self.assertEqual(e.run(BO, "untaint").returncode, 0)
-            self.assertFalse(e.tainted())
 
 
 class ForcedCommand(unittest.TestCase):
@@ -366,7 +363,6 @@ class ForcedCommand(unittest.TestCase):
             (e.zlog / "class" / "bo-fixture-only").write_text(entry("a", "b", "Fri Oct 31 09:12:03", "x", "hi"))
             p = self.ssh("bo log --class bo-fixture-only", BO_ZLOG=str(e.zlog), BO_STATE=str(e.state))
             self.assertEqual(records(p)[-1], {"t": "error", "reason": "no such log"})
-            self.assertFalse(e.tainted())
 
 
 if __name__ == "__main__":

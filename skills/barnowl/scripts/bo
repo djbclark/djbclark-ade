@@ -4,12 +4,10 @@
 # on this machine fails looking for a WindowGram port; do not use it.
 #
 # Everything that prints Zephyr text goes through bo-log.py: sanitized, framed
-# JSON lines, and the first such read marks this machine "tainted" (a file in
-# $BO_STATE). While tainted, `perl` and every `run` that is not a plain read first
-# ask the human at the live client ([y/N], showing the whole command) and type
-# nothing until they answer y; this script cannot answer for them. Only the
-# operator clears the mark, with `bo untaint` on this machine (the restricted ssh
-# key cannot run it). See SKILL.md, "Reading Zephyr text".
+# JSON lines. `perl` and every `run` that is not a plain read first ask the human at
+# the live client ([y/N], showing the whole command) and type nothing until they
+# answer y; this script cannot answer for them, and the restricted ssh key cannot
+# type into the client. See SKILL.md, "Reading Zephyr text".
 set -euo pipefail
 umask 077
 
@@ -63,10 +61,10 @@ file    subscriptions saved in ~/.zephyr.subs (zctl list)
 run     type a BarnOwl command into the live client and print what came back
 perl    evaluate one Perl expression inside BarnOwl and print its value
 locate  zlocate a user
-untaint (operator only, not over the restricted key) forget that untrusted text was read
 
-After any read of Zephyr text, perl and non-read-only run ask the human at the live
-client first, and refuse commands too long to show in one line at the pane width (pane_width - 25).
+bo asks the human at the live client first, always, for perl and for run of anything but a
+plain read (show|help|getvar|getsubs|getview), and refuses a command too long to show in
+one line at the pane width (pane_width - 25).
 Exit codes: 2 refused argument, 3 client busy, 4 human declined or absent, 5 output cut by a cap.
 EOF
 }
@@ -174,12 +172,7 @@ send_line() {
   tmux send-keys -t "$pane" Enter
 }
 
-# True once Zephyr text was shown to a caller; only bo-log.py creates the file
-# and only `bo untaint` (operator, local) removes it. There is no timer: the
-# agent's context stays contaminated for as long as its session lives.
-tainted() { [[ -e $state/tainted ]]; }
-
-# Commands that only look. They need no confirmation even while tainted.
+# Commands that only look. They need no confirmation.
 read_only_command() { [[ $1 =~ ^(show|help|getvar|getsubs|getview)([[:space:]]|$) ]]; }
 
 # Ask the human at the live client and wait. The question shows the WHOLE command:
@@ -189,7 +182,6 @@ read_only_command() { [[ $1 =~ ^(show|help|getvar|getsubs|getview)([[:space:]]|$
 # a file BarnOwl writes from the question's callback. No answer, or anything but y/yes,
 # is exit 4 and nothing more is typed.
 confirm() {
-  tainted || return 0
   local what=$1 reply i cols max wa pa att cmd need
   # The human can only answer a question they can see: BarnOwl's pane must be the active
   # window of a session with a client attached.
@@ -260,8 +252,8 @@ print_marked() {
   sed "/^BO_OK_${nonce}\$/d" "$out" | blog frame "$kind"
 }
 
-# perl_eval EXPR KIND GATED: GATED=1 asks the human first while tainted. Only
-# the caller's own `perl` is gated; `subs` runs a fixed expression.
+# perl_eval EXPR KIND GATED: GATED=1 asks the human first, always: arbitrary Perl runs as the
+# operator inside the client. Only `subs` runs ungated, a fixed expression of ours.
 perl_eval() {
   local expr=$1 kind=$2 gated=$3
   guard_idle
@@ -309,6 +301,17 @@ cmd_run() {
   return "$rc"
 }
 
+# Run an external command, frame its output, and keep ITS exit status (a missing or
+# failing zctl/zlocate must not look like a successful empty read).
+external_framed() {
+  local kind=$1 o rc=0 fr=0
+  shift
+  o=$("$@" 2>&1) || rc=$?
+  printf '%s\n' "$o" | blog frame "$kind" || fr=$?
+  [[ $rc -eq 0 ]] || return "$rc"
+  return "$fr"
+}
+
 # A user name for zlocate: no leading dash, no shell or option surprises.
 valid_user() { [[ $1 =~ ^[A-Za-z0-9._@+][A-Za-z0-9._@+-]{0,79}$ ]]; }
 
@@ -327,7 +330,7 @@ case "${1:-}" in
     perl_eval 'BarnOwl::zephyr_getsubs()' subs 0
     ;;
   file)
-    { zctl list 2>&1 || true; } | blog frame file
+    external_framed file zctl list
     ;;
   run)
     shift
@@ -344,11 +347,7 @@ case "${1:-}" in
     [[ $# -ge 1 && $# -le 5 ]] || { usage >&2; exit 2; }
     for u in "$@"; do valid_user "$u" || { echo "refused user name" >&2; exit 2; }; done
     lock_client
-    { zlocate "$@" 2>&1 || true; } | blog frame locate
-    ;;
-  untaint)
-    rm -f "$state/tainted"
-    echo "untainted: run/perl no longer ask until Zephyr text is read again"
+    external_framed locate zlocate "$@"
     ;;
   -h|--help|help|"")
     usage
