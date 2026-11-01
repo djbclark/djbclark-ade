@@ -419,6 +419,30 @@ class TestWakeAcrossDst(QuotaBase):
             self.assertEqual(mod["now_utc"](), datetime(2026, 11, 1, 4, 30, tzinfo=timezone.utc))
             self.assertEqual(mod["now_utc"]().utcoffset(), timedelta(0))
 
+    def test_local_zone_resolves_every_tz_form_to_the_real_zone(self):
+        """TZ=:/usr/share/zoneinfo/America/New_York is valid, and ZoneInfo(key) rejects a path: the
+        fallback froze today's offset, so a wake after the change was an hour wrong (Codex, PR 213).
+        Every spelling of the same zone, and a copied zone file outside any zoneinfo directory, must
+        give the DST-aware zone."""
+        import tempfile
+        import zoneinfo
+        zone_file = next((Path(root) / NY for root in zoneinfo.TZPATH if (Path(root) / NY).is_file()), None)
+        if zone_file is None:
+            self.skipTest("no system zoneinfo file for " + NY)
+        mod = runpy.run_path(str(SCRIPT))
+        wake_stamp = mod["wake_stamp"]
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "localtime-copy"
+            copy.write_bytes(zone_file.read_bytes())
+            forms = [NY, ":" + NY, str(zone_file), ":" + str(zone_file), str(copy), ":" + str(copy)]
+            for form in forms:
+                with self.subTest(tz=form), mock.patch.dict(os.environ, {"TZ": form}):
+                    # 06:01Z on the fall-back day is 01:01 EST, a wake 2 min earlier is 01:59 EDT;
+                    # a fixed offset taken on either side of the change gets one of these wrong
+                    self.assertEqual(wake_stamp(epoch("2026-11-01T06:01:00Z")), "11/01/26 01:59:00")
+                    self.assertEqual(wake_stamp(epoch("2026-11-01T07:22:00Z")), "11/01/26 02:20:00")
+                    self.assertEqual(wake_stamp(epoch("2026-03-08T07:01:00Z")), "03/08/26 01:59:00")
+
     def test_clock_time_reset_is_local_wall_clock_across_the_change(self):
         mod = runpy.run_path(str(SCRIPT))
         prd, fc = mod["parse_reset_datetime"], mod["failure_class"]
