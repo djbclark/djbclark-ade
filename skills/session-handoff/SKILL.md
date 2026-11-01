@@ -144,15 +144,19 @@ it, reports the owner status in its resume plan and asks nothing.
    path (herdr omp rows carry a jsonl path). A match on a herdr pane id (`wN:pM`, reused after a pane
    closes) also needs the row's `agent` to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to
    codex, otherwise any); a row of another agent is not the owner and is read as no match. Also read
-   `bin/watch status --json`: a `holder.target` that equals or is a prefix of S, with `alive: true`, is a
-   live owner even when the fleet row says `closed` (a closed Paseo watch holder is resumable by the next
-   message).
+   `bin/watch status --json`: a `holder.target` that equals or is a prefix of S, or equals the matched
+   row's full `paseo` id (S may be only the row's 8-character `id`), with `alive: true`, is a live owner
+   even when the fleet row says `closed` (a closed Paseo watch holder is resumable by the next message).
 3. **Live** means the row's `status` is neither `closed` nor `ended` and its `ended`, `archived` and `finished` fields are all
    empty or false (`idle`, `working`, `blocked`, `busy-background` and `unknown` are live), or the watch
-   exception above. **You** are the owner when the row's `self` is true or S equals `$PASEO_AGENT_ID`
-   (herdr and terminal sessions have no Paseo id: use `self`); after `/clear` or `/new` the same agent keeps
-   its Paseo id, so its own chain reads as you, and a claude's old transcript sid that no row carries
-   reads as no match (step 4, covered by exemption C).
+   exception above. **You** are the owner only when the row is YOUR caller row: with exactly one `self`
+   row that is it; with several (a parent agent that launched you is also marked `self`, and an inherited
+   `$PASEO_AGENT_ID` marks its row `self` on its own) take the row `fleet.py`'s `sender_row` picks (the
+   nearest process of yours), and if you cannot tell, you are not the owner. S equal to `$PASEO_AGENT_ID`
+   counts only when that variable is your own, not inherited from a parent (herdr and terminal sessions
+   have no Paseo id: use the caller row's `self`). After `/clear` or `/new` the same agent keeps its Paseo
+   id, so its own chain reads as you, and a claude's old transcript sid that no row carries reads as no
+   match (step 4, covered by exemption C).
 4. **No match is not proof of absence: fail closed.** Treat the owner as possibly live and, unless an
    exemption below applies, say so in the resume plan and **ask the operator before the first write**.
    To make that question concrete, list live rows other than you whose `cwd` (compare by `realpath`: a
@@ -165,7 +169,7 @@ it, reports the owner status in its resume plan and asks nothing.
 
 **Exemptions (resume without asking; state which one in the resume plan):**
 
-- **A. S identifies you** (step 3: `self` true, or S equals `$PASEO_AGENT_ID`): the chain is yours.
+- **A. S identifies you** (step 3: S matches YOUR caller row, resolved as step 3 says, or equals your own, non-inherited `$PASEO_AGENT_ID`): the chain is yours.
 - **B. You are the named successor**, even while the owner still reads live. Evidence, all read from
   `~/.local/state/self-slash.log`, whose `successor: starting` line is written before the successor's
   first prompt runs. B holds only when ALL of these are true:
@@ -173,15 +177,16 @@ it, reports the owner status in its resume plan and asks nothing.
      successor: starting ...` newer than the log's `updated_at` (compare both in local time: the log's
      stamps are naive local time, `updated_at` carries an offset). On herdr its `pane <pane>` is your own
      pane (a unique token). On Paseo the line alone does NOT name you (its `cwd` is shared by every
-     session in that directory): you need a later line of that owner naming `<your id>` =
-     `$PASEO_AGENT_ID`. The `is top-level` line is not enough, because the owner can still fail after
+     session in that directory): you need a later line of that owner naming `<your id>` = your caller
+     row's Paseo id (step 3). The `is top-level` line is not enough, because the owner can still fail after
      it (`agent open` failed, no Desktop process) and keep writing: wait for the owner's TERMINAL line,
      Paseo `finish: archived <owner id> (successor <your id>)` or `finish: archive refused ... successor
      <your id> left running`, herdr `successor: claude is up in <your pane>`. Real terminal lines
      arrive 2-4 s after `is top-level` (about 25-30 s after `starting`); if it is absent, re-read for up
      to 60 s from `starting`, then ask. Never admit on cwd alone.
-  2. **No failure line voids it.** Any later line of that owner containing `NOT archived` (every
-     `successor_fail` line ends with it, including `successor path aborted; NOT archived`), or a
+  2. **No failure line voids it.** Any later line of that owner containing `NOT archived` (every Paseo
+     `successor_fail` line ends with it, including `successor path aborted; NOT archived`) or `stays
+     usable` (every herdr `launch.py` failure line ends `the old pane is untouched and stays usable`), or a
      `finish: archive refused` line that does not name `<your id>`, voids the `starting` line before it,
      because the owner then believes the handover failed and keeps writing.
   3. **No third party.** The line must be tied to THIS chain. Either the line's owner id is S or the
