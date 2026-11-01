@@ -168,23 +168,30 @@ it, reports the owner status in its resume plan and asks nothing.
 - **A. S identifies you** (step 3: `self` true, or S equals `$PASEO_AGENT_ID`): the chain is yours.
 - **B. You are the named successor**, even while the owner still reads live. Evidence, all read from
   `~/.local/state/self-slash.log`, whose `successor: starting` line is written before the successor's
-  first prompt runs (the `finish: archived ... (successor <id>)` line comes only after the owner is
-  archived, so a successor that reads at once never sees it). B holds only when ALL of these are true:
-  1. **A `starting` line names you.** A line `<host> <owner id>: successor: starting ...` newer than the
-     log's `updated_at` (compare both in local time: the log's stamps are naive local time, `updated_at`
-     carries an offset). On herdr its `pane <pane>` is your own pane (a unique token). On Paseo the line
-     alone does NOT name you (its `cwd` is shared by every session in that directory): you need the later
-     line `<host> <owner id>: successor: <your id> is top-level ...` with `<your id>` = `$PASEO_AGENT_ID`.
-     It appears 20-35 s after `starting`; if it is absent, re-read for up to 60 s from `starting`, then
-     ask. Never admit on cwd alone.
-  2. **No failure line voids it.** A later line of that owner starting `successor: ` that is a failure
-     (`paseo run failed`, `printed no single agent object`, `NOT archived`, `AGENT_CREATE_FAILED`, a
-     refusal) voids the `starting` line before it, because the owner then believes the handover failed
-     and keeps writing.
-  3. **No third party.** Either the line's owner id is S or the id/`paseo` of the step 2 row, or step 2
-     found no live row other than that owner and you. S is not required to equal the owner: it is often
-     free text or stale (`omp-2026-10-31-tendcf-stage-d`; a log still naming an archived `6225c4a1`). A
-     live step 2 row that is neither you nor the line's owner still goes through the ask.
+  first prompt runs. B holds only when ALL of these are true:
+  1. **A `starting` line names you, and the owner's terminal line is in.** A line `<host> <owner id>:
+     successor: starting ...` newer than the log's `updated_at` (compare both in local time: the log's
+     stamps are naive local time, `updated_at` carries an offset). On herdr its `pane <pane>` is your own
+     pane (a unique token). On Paseo the line alone does NOT name you (its `cwd` is shared by every
+     session in that directory): you need a later line of that owner naming `<your id>` =
+     `$PASEO_AGENT_ID`. The `is top-level` line is not enough, because the owner can still fail after
+     it (`agent open` failed, no Desktop process) and keep writing: wait for the owner's TERMINAL line,
+     Paseo `finish: archived <owner id> (successor <your id>)` or `finish: archive refused ... successor
+     <your id> left running`, herdr `successor: claude is up in <your pane>`. Real terminal lines
+     arrive 2-4 s after `is top-level` (about 25-30 s after `starting`); if it is absent, re-read for up
+     to 60 s from `starting`, then ask. Never admit on cwd alone.
+  2. **No failure line voids it.** Any later line of that owner containing `NOT archived` (every
+     `successor_fail` line ends with it, including `successor path aborted; NOT archived`), or a
+     `finish: archive refused` line that does not name `<your id>`, voids the `starting` line before it,
+     because the owner then believes the handover failed and keeps writing.
+  3. **No third party.** The line must be tied to THIS chain. Either the line's owner id is S or the
+     id/`paseo` of the step 2 row; or step 2 found no row at all for S and step 4's candidate list
+     (live rows other than you and the line's owner, by realpath `cwd` within a `workspaces[].dir`,
+     `agent` fitting `writer`) is empty. S is not required to equal the owner: it is often free text or
+     stale (`omp-2026-10-31-tendcf-stage-d`; a log still naming an archived `6225c4a1`), but a bare
+     `/baton` resolves its chain from the directory, so an unrelated live session's chain must never
+     ride in on another owner's handover. A live step 2 row, or a candidate, that is neither you nor the
+     line's owner still goes through the ask.
   4. **The handoff exists.** The log's `latest_handoff` is not `none` and names an existing file under
      any `workspaces[].dir` of the log (real handoffs are written to the workspace repo's
      `docs/handoffs/`) or under `~/ops/site-private-djbclark/`. Compare directories by `realpath`.
@@ -192,11 +199,13 @@ it, reports the owner status in its resume plan and asks nothing.
   The title is NOT evidence (`self-slash` truncates the default `<owner's name> → <model>` and `--title`
   replaces it), and neither is the first prompt: an operator-typed or relayed `/baton PATH` naming the
   chain proves only that the operator named it, and goes through the ask. `self-slash` starts and
-  verifies the successor first and archives the owner only afterwards (it waits up to 900 s for the owner
-  to be idle), so the owner normally still reads live while its successor reads the chain: that is the
-  handover. A predecessor that ran `--finish --successor` stops writing at once (an archive can be
-  refused and leave it running). A `launch.py start --baton` start writes no such line, so it goes
-  through the ask.
+  verifies the successor first and archives the owner only afterwards (it first waits up to 900 s for
+  the owner to be idle, before `starting`; the archive itself is refused, exit 8, if the owner is busy
+  again), so the owner normally still reads live while its successor reads the chain: that is the
+  handover. A predecessor that ran `--finish --successor` stops writing once its successor is verified
+  (top-level, or `is up`), even when the archive is refused and leaves it running; on a failure line
+  (`NOT archived`, "this session stays usable") it is still the writer. A `launch.py start --baton`
+  start writes no such line, so it goes through the ask.
 - **C. Your own chain after `/clear` or `/new`, no live other owner:** the newest `then: /baton` line for
   your id in `~/.local/state/self-slash.log` follows a handoff of this chain, you hold the watch role the
   chain belongs to (`bin/watch status`), or the operator named the chain (`/baton PATH`, `--dir
