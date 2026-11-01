@@ -65,6 +65,12 @@ read.
    (sidecars land next to the pointer, not the canonical file) — sidecars
    newer than the canonical `updated_at` are unplanned-compaction
    checkpoints that supersede the log's recency.
+   **Then check the owner:** read the log's frontmatter `session_id` and `writer` and look them up in
+   `skills/session-finder/fleet.py --json` (and `bin/watch status`). A LIVE writer other than you means the
+   chain is not yours: relay one question to that owner (what to resume, what overlaps), make no write
+   (no PR edits, merges, thread resolves, Tier 1 writes) until it answers, and tell the operator; an
+   operator's "continue" does not replace asking the owner (2026-10-31: a resumed chain merged PR 173
+   ahead of the PR it had to land with).
 3. Staleness check: for every workspace listed, compare `head_sha` to
    actual `git rev-parse HEAD` in its `dir`. Any mismatch (or dirty-state
    drift) demotes the file from briefing to lead for that workspace —
