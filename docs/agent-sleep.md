@@ -1,4 +1,8 @@
-# Sleeping idle agents — Orca hibernation and `herdr-sleeper`
+# Sleeping idle agents — `herdr-sleeper` (herdr retired from djbclark-ade 2026-10-31; a record)
+
+> **Retired from djbclark-ade (2026-10-31).** No skill or doc here recommends herdr or Orca, though a few live code paths still reach them until D4/D6 (listed in AGENTS.md); the `plugins/herdr-sleeper`
+> plugin stays only until the plan's D4/D6 drain (`autorename`'s `relocate-pane.sh` still calls it). Nothing here is a
+> recommended route. The tools stay installed and configured on the machine, untouched.
 
 Status 2026-09-26. Probes beat this page; re-run the commands.
 
@@ -13,42 +17,13 @@ fifteen lived in Herdr panes (`herdr agent list`), most idle 5–6 hours.
 Probes: `ps -eo rss,comm | gawk '$2 ~ /claude/ {s+=$1;n++} END {print n, s/1024/1024 " GB"}'`,
 `sysctl vm.swapusage`, `orca diagnostics memory --json`.
 
-## Orca: Agent hibernation (built in, GUI)
+## Orca: Agent hibernation (retired from djbclark-ade 2026-10-31)
 
-Orca ships exactly this feature; docs at
-<https://www.onorca.dev/docs/agents/hibernation>.
-
-1. **Automatic.** Settings → **Experimental** → toggle **Agent hibernation**;
-   under it, **Hibernate after** (labelled "Sleep after" in the bundle) sets
-   the idle window: default 30 min, range 1 min – 24 h. On this machine it is
-   **enabled at 2 h** (`settings.agentHibernationIdleMs = 7200000` in
-   `~/Library/Application Support/orca/profiles/local-default/orca-data.json`).
-   Operator target is 12 h — change it in that settings pane.
-2. **Manual.** Right-click a worktree card in the sidebar → **Sleep**, or
-   **Sleep with Descendants (N)** when nested children exist. Multi-select
-   works ("Close all active panels in the selected workspaces to free up
-   memory and CPU").
-3. **Finding slept worktrees.** Sidebar filter menu → show/hide sleeping
-   workspaces; assignable shortcut **Toggle Sleeping Workspaces** under
-   Settings → Shortcuts (no default binding).
-4. **Waking.** Open the worktree. Orca relaunches the agent with the same
-   resume flags it uses for session history (`claude --resume <id>`,
-   `codex resume <id>`, …), the original argv, and the captured private env.
-   Nothing to click.
-5. **Eligibility (all must hold):** agent `done`; not in the active worktree
-   or any worktree rendering a foreground terminal; no keystrokes since done;
-   a resumable agent (Claude, Codex, Gemini, Antigravity, OpenCode, Pi, MiMo,
-   Droid, Grok, Devin, OMP — *not* Cursor, Hermes, Copilot, Trae); idle ≥
-   window; no mobile session driving it; no unsettled orchestration Dispatch;
-   no live subagent roster. A worktree's panes hibernate together as a unit.
-6. **Not scriptable.** "sleep" appears once in the 236-command CLI schema —
-   as prose in `orca terminal close`'s notes. `orca terminal close --worktree
-   <sel> --all` frees the same memory but *deletes the resume records*
-   (destructive substitute). Upstream: **stablyai/orca#22571** "Expose
-   worktree sleep as a CLI command" (open, 2026-09-23, names the runtime
-   methods `runtime.sleepManagedWorktree` / `sleepTerminalsForWorktree`);
-   **#3693** "Auto-Sleep inactive workspaces" (open since 2026-05-30; the
-   hibernation feature answers it).
+Orca's built-in agent hibernation (Settings → Experimental → Agent hibernation,
+per-worktree **Sleep**, wake by opening the worktree) was described here;
+Orca is retired from djbclark-ade, the section was removed, and git history
+has it. Orca stays installed and configured on the machine, untouched. Its
+upstream asks (stablyai/orca#22571, #3693) are in `docs/upstream-issues.md`.
 
 ## Herdr: no sleep — the `djbclark.herdr-sleeper` plugin supplies the policy
 
@@ -57,9 +32,9 @@ linked with `herdr plugin link`), and it owns sleeping duty; the launchd job
 is retired: booted out, and its plist moved to `~/Library/LaunchAgents/disabled/` on 2026-10-05
 after it had reloaded itself at a login and run alongside the plugin (bootout alone does not stick).
 Restore with `mv ~/Library/LaunchAgents/disabled/dev.herdr.sleeper.plist ~/Library/LaunchAgents/ &&
-launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.herdr.sleeper.plist`. The standalone `bin/herdr-sleeper` remains as the reference
-implementation (byte-identical to the fork branch's `scripts/herdr-sleeper/`)
-and its legacy journal was adopted once, on first startup.
+launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.herdr.sleeper.plist`. The standalone `bin/herdr-sleeper` that was the reference
+implementation was removed from this repo on 2026-10-31 (its history is kept under "History" below);
+its legacy journal was adopted once, on first startup.
 
 The plugin keeps every fail-closed rule of the standalone script (77 unit
 tests ported and extended) and adds what only a plugin can do, adopting the
@@ -110,7 +85,7 @@ idle clocks persist in `idle.json`. 156 unit tests (Python 3.9 + 3.14), branch c
   (41 traps with Herdr file:line evidence); upstream asks posted on
   [#631](https://github.com/herdrdev/herdr/discussions/631#discussioncomment-18769271).
 
-## History: the standalone `bin/herdr-sleeper`
+## History: the standalone `bin/herdr-sleeper` (removed from djbclark-ade 2026-10-31; git history has the script and its tests)
 
 Herdr (0.7.5-preview) has no sleep/suspend. It does track, per pane, the
 Claude **session UUID** (`agent_session.value`, from the official Claude
