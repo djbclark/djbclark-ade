@@ -487,9 +487,21 @@ def claude_reach(d, sid):
     return RELAY.format(id=sid[:8]) + " (no messaging socket: SendMessage cannot reach it)"
 
 
-def _merge_inner(launch, d, sid, pid):
+def row_pids(s):
+    """Every live process a row stands for: `pids` (a Claude session whose registry holds several live processes of one session id,
+    newest entry first) else `pid`. Process-scan suppression and caller-depth resolution use all of them, so collapsing the registry
+    entries to one row never turns the caller's own older process into a transcript-less `pidNNN` sender (local review, PR 225)."""
+    out = [p for p in (s.get("pids") or []) if isinstance(p, int)]
+    if isinstance(s.get("pid"), int) and s["pid"] not in out:
+        out.insert(0, s["pid"])
+    return out
+
+
+def _merge_inner(launch, d, sid, pid, pids=None):
     """The Claude Code that claude-agent-acp runs inside one of our ACP launches: one session, not two."""
     launch["sid"], launch["transcript"], launch["pid"] = sid, str(transcript(sid) or ""), pid
+    if pids and len(pids) > 1:
+        launch["pids"] = list(pids)
     launch["underlying"] = {"name": d.get("name") or "", "status": REG_STATUS.get(d.get("status"), "unknown")}
     if launch["status"] == "working" and REG_STATUS.get(d.get("status")) == "blocked":
         launch["status"] = "blocked"    # e.g. an AskUserQuestion inside the ACP session
@@ -499,7 +511,7 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
     me = os.environ.get("CLAUDE_CODE_SESSION_ID")
     launch_panes = launch_panes or {}
     launch_sids = launch_sids or {}
-    out = []
+    out, live = [], {}
     for f in sorted((CLAUDE / "sessions").glob("*.json")):
         try:
             d = json.loads(f.read_text())
@@ -508,13 +520,22 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
         pid, sid = d.get("pid"), d.get("sessionId")
         if not sid or not alive(pid):
             continue
+        live.setdefault(sid, []).append(d)
+    for sid, entries in live.items():
+        # a resumed session can leave its older process alive beside the new one: two registry files, one session. One row,
+        # the entry updated last; it is this very session when ANY of the processes is an ancestor (2026-11-01: relay.py
+        # refused `d08a31c6-...` as ambiguous with itself)
+        d = max(entries, key=lambda e: (e.get("updatedAt") or 0, e.get("startedAt") or 0))
+        pid = d.get("pid")
+        pids = [pid] + [e["pid"] for e in entries if e is not d]    # every live process of the session, the one listed first
+        mine = any(p in anc for p in pids)
         s = _rec(id=sid[:8], agent="claude", sid=sid, name=d.get("name") or "", cwd=d.get("cwd") or "",
-                 status=REG_STATUS.get(d.get("status"), "unknown"), self=(pid in anc or sid == me), pid=pid,
+                 status=REG_STATUS.get(d.get("status"), "unknown"), self=(mine or sid == me), pid=pid,
                  reach=claude_reach(d, sid))
         if sid in launch_sids:
             # a launch's ACP session id is Claude's own id (claude-agent-acp passes it as --session-id), so a
             # detached (--host none) launch, which has no pane to match on, is still recognised
-            _merge_inner(launch_sids[sid], d, sid, pid)
+            _merge_inner(launch_sids[sid], d, sid, pid, pids)
             continue
         a = agents_by_sid.get(sid)
         env = _where.env_of(pid) if (_where and not a) else {}
@@ -522,7 +543,7 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
         if not pane and not a and launch_panes:
             pane = _acp_pane_of(pid)   # claude-agent-acp scrubs the env; the acp-run ancestor still has the pane id
         if pane in launch_panes:
-            _merge_inner(launch_panes[pane], d, sid, pid)
+            _merge_inner(launch_panes[pane], d, sid, pid, pids)
             continue
         if a:
             used.add(a["pane_id"])
@@ -546,6 +567,8 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
             s["finished"] = tx["finished"]
             if not s["title"] and tx["last_prompt"]:
                 s["title"] = clip(STRIP.sub(" ", tx["last_prompt"]), 70)
+        if len(pids) > 1:
+            s["pids"] = pids
         out.append(s)
     return out
 
@@ -1099,7 +1122,7 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
     out += launched
     tuis, shells = _pane_only(panes, used)
     out += tuis
-    known_pids = {s["pid"] for s in out if s.get("pid")}
+    known_pids = {p for s in out for p in row_pids(s)}
     out += _proc_scan(known_pids, used | {a["pane_id"] for a in panes}, anc)
     out += _hermes_gateway()
     have = {s["paseo"] for s in out if s.get("paseo")} | {s["chan"][1] for s in out if (s.get("chan") or ("",))[0] == "paseo"}
@@ -1162,7 +1185,7 @@ def mark_busy(s, table):
     if s.get("host") in ("acp", "hermes-gw") or s.get("status") in ("shell", "working"):
         s.setdefault("busy", [])
         return
-    s["busy"] = background_work(s.get("pid"), table) or []
+    s["busy"] = [w for p in row_pids(s) for w in background_work(p, table) or []]
     if s["busy"] and s.get("status") in ("idle", "unknown", "blocked"):
         s["status"] = "busy-background"
 
@@ -1522,11 +1545,13 @@ def sender_row(ss):
         """The row's process as seen from here: 0 for this process's direct parent, larger further up, None when the row
         stands for no process of ours (an id an inherited `PASEO_AGENT_ID` merely stamps on it). A transcript row is placed by
         its own `pid` (a daemon-spawned Claude also carries a Paseo id, which is no second process)."""
-        pid = hosting().get(x["paseo"]) if x.get("paseo") and not x.get("transcript") else x.get("pid")
-        try:
-            return depth.get(int(pid))
-        except (TypeError, ValueError):
-            return None
+        if x.get("paseo") and not x.get("transcript"):
+            try:
+                return depth.get(int(hosting().get(x["paseo"])))
+            except (TypeError, ValueError):
+                return None
+        near = [depth[p] for p in row_pids(x) if p in depth]    # a session with several live processes: its nearest one
+        return min(near) if near else None
 
     def key(x):
         """Which SESSION is the caller comes first (the nearest process of ours: an outer Claude that started this Codex is
@@ -1556,8 +1581,12 @@ def nearer_than_paseo_host(row, agent_id):
     depth = {pid: i for i, pid in enumerate(anc)}
     hosting = _paseo_hosting_pids(anc)
     try:
-        own = hosting.get(row["paseo"]) if row.get("paseo") and not row.get("transcript") else row.get("pid")
-        mine, host = depth.get(int(own)), depth.get(int(hosting.get(agent_id)))
+        if row.get("paseo") and not row.get("transcript"):
+            own = depth.get(int(hosting.get(row["paseo"])))
+        else:
+            near = [depth[p] for p in row_pids(row) if p in depth]
+            own = min(near) if near else None
+        mine, host = own, depth.get(int(hosting.get(agent_id)))
     except (TypeError, ValueError):
         return False
     return mine is not None and host is not None and mine < host
