@@ -258,3 +258,167 @@ def test_unfinished_job_record_and_claim_keep_the_dir(prune, tmp_path, world):
     assert not prune.finished_dir(c2.parent)
     c3 = make_clone(tmp_path, world, task="c")
     assert prune.finished_dir(c3.parent)
+
+
+# ---- round 3 -------------------------------------------------------------------------------------------------------
+
+
+def make_main_with_worktree(tmp_path, remote, branch=None):
+    """A main repository OUTSIDE the bigteam root with a linked worktree inside it; returns (main, worktree)."""
+    main = tmp_path / "mainrepo"
+    g(tmp_path, "clone", "-q", str(remote), str(main))
+    d = tmp_path / "bt" / "task1"
+    d.mkdir(parents=True, exist_ok=True)
+    wt = d / "wt"
+    if branch:
+        g(main, "worktree", "add", "-q", "-b", branch, str(wt))
+    else:
+        g(main, "worktree", "add", "-q", "--detach", str(wt), "origin/main")
+    return main, wt
+
+
+def test_linked_worktree_detached_reflog_only_commit_is_kept(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    x = commit(wt, "x", "detached work\n")
+    g(wt, "checkout", "-q", "--detach", "origin/main")
+    ok, why = prune.safe(wt)
+    assert not ok and "reflog" in why
+    assert prune.remove(wt)[0] is False
+    assert wt.exists()
+    assert x  # the commit is only in the worktree's HEAD reflog
+
+
+def test_linked_worktree_with_per_worktree_ref_is_kept(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    y = commit(wt, "y", "kept on a worktree ref\n")
+    g(wt, "update-ref", "refs/worktree/keep", y)
+    g(wt, "checkout", "-q", "--detach", "origin/main")
+    ok, why = prune.safe(wt)
+    assert not ok and "per-worktree refs" in why
+    assert prune.remove(wt)[0] is False
+    assert wt.exists()
+
+
+def test_clean_detached_linked_worktree_is_removed_and_says_no_branch(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    ok, why = prune.safe(wt)
+    assert ok, why
+    assert "detached" in why and "branch kept" not in why
+    assert prune.remove(wt) == (True, "worktree removed")
+
+
+def test_linked_worktree_commit_kept_on_its_branch_is_removed(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world, branch="worker")
+    commit(wt, "w", "on a branch, pushed\n")
+    g(wt, "push", "-q", "origin", "worker")
+    ok, why = prune.safe(wt)
+    assert ok, why
+
+
+def test_siblings_that_are_each_others_remote_are_both_kept(prune, tmp_path, world):
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    commit(a, "z", "only here\n")
+    g(b, "remote", "add", "a", str(a))
+    g(b, "fetch", "-q", "a")
+    g(b, "merge", "-q", "--ff-only", "a/main")
+    g(a, "remote", "add", "b", str(b))
+    g(a, "fetch", "-q", "b")
+    for c in (a, b):
+        ok, why = prune.safe(c)
+        assert not ok and "local path inside the bigteam root" in why
+
+
+@pytest.mark.parametrize("style", ["file", "relative"])
+def test_local_path_remote_inside_root_is_kept_in_any_spelling(prune, tmp_path, world, style):
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    url = f"file://{a}" if style == "file" else "../a"
+    g(b, "remote", "add", "sib", url)
+    ok, why = prune.safe(b)
+    assert not ok and "local path inside the bigteam root" in why
+
+
+def test_remote_path_outside_root_still_counts(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    assert prune.local_remote_inside_root(c) is None
+
+
+def test_ignored_report_under_dot_cache_is_kept(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    commit(c, ".gitignore", ".cache/\n")
+    g(c, "push", "-q", "origin", "HEAD:main")
+    (c / ".cache").mkdir()
+    (c / ".cache/adv-report.md").write_text("findings\n")
+    ok, why = prune.safe(c)
+    assert not ok and "ignored" in why
+
+
+@pytest.mark.parametrize("what", ["note", "hook", "exclude", "lfs", "config.worktree"])
+def test_unusual_git_dir_content_keeps_the_clone(prune, tmp_path, world, what):
+    c = make_clone(tmp_path, world)
+    gd = c / ".git"
+    if what == "note":
+        (gd / "NOTES.md").write_text("notes\n")
+    elif what == "hook":
+        (gd / "hooks/pre-push").write_text("#!/bin/sh\n")
+    elif what == "exclude":
+        (gd / "info/exclude").write_text("*.secret\n")
+    elif what == "lfs":
+        (gd / "lfs").mkdir()
+    else:
+        (gd / "config.worktree").write_text("[core]\n")
+    ok, why = prune.safe(c)
+    assert not ok and "git dir" in why
+    assert prune.remove(c)[0] is False
+    assert c.exists()
+
+
+def test_linked_worktree_git_dir_note_is_kept(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    gd = Path(g(wt, "rev-parse", "--absolute-git-dir"))
+    (gd / "NOTES.md").write_text("notes\n")
+    ok, why = prune.safe(wt)
+    assert not ok and "git dir" in why
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_unreadable_dir_inside_generated_dir_keeps_the_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    commit(c, ".gitignore", "node_modules/\n")
+    g(c, "push", "-q", "origin", "HEAD:main")
+    hidden = c / "node_modules/a/hidden"
+    hidden.mkdir(parents=True)
+    hidden.chmod(0)
+    try:
+        assert prune.ignored_ok(c, "node_modules/") is False
+    finally:
+        hidden.chmod(0o755)
+
+
+def test_failed_rmtree_is_reported_not_counted(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+
+    def boom(path):
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(prune.shutil, "rmtree", boom)
+    ok, msg = prune.remove(c)
+    assert ok is False and "half deleted" in msg
+
+
+def test_second_apply_is_refused_while_the_lock_is_held(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    fd = prune.take_lock()
+    assert fd is not None
+    try:
+        monkeypatch.setattr(sys, "argv", ["x", "--apply"])
+        with pytest.raises(SystemExit) as e:
+            prune.main()
+        assert e.value.code == 3
+        assert c.exists()
+    finally:
+        os.close(fd)
+    fd = prune.take_lock()
+    assert fd is not None  # released: a later run may take it
+    os.close(fd)

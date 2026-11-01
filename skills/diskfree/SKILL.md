@@ -201,20 +201,30 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   for every git call, and git must report the checkout as its own top level. A checkout is kept
   when anything in it changed in the last 7 days (dir, index, HEAD, HEAD reflog, `FETCH_HEAD`), a
   rebase, merge, cherry-pick, revert or bisect is in progress, it has submodules, a tracked file
-  is marked assume-unchanged or skip-worktree, it has no remote, or
-  `git status --porcelain=v1 -z --ignored` (untracked files forced on, submodules never ignored,
-  whatever the repo's config says) lists anything but ignored paths. An **ignored** path only
-  passes when it is a known generated directory (`node_modules .venv venv __pycache__
-  .pytest_cache .mypy_cache .ruff_cache .cache .gradle`) with no nested git repo; any other
-  ignored file (a report, `out.rc`, a database, a scratch repo) keeps the checkout. It removes a
-  **linked worktree** with `git worktree remove` (no `--force`) from its main repository (its
-  branch stays there) when its HEAD is on a remote-tracking branch, and a **clone** only when
-  `git worktree list` shows no other worktree, it has no stash, and nothing in any ref (branches,
-  tags, notes, a detached HEAD) or reflog is missing from the remote-tracking refs. "On a remote"
-  means the local remote-tracking refs, which are never fetched: a branch deleted upstream, or a
-  remote that is a local path, still counts. Task-dir files outside checkouts (reports, `jobs/`)
-  are never touched. Everything kept is listed with its reason. 2026-10-31 (earlier script
-  version): 0.68 GB from 11 checkouts; 27 kept (no remote, uncommitted work, or ignored reports).
+  is marked assume-unchanged or skip-worktree, it has no remote, a remote URL is a local path
+  inside the bigteam root (sibling checkouts that fetch each other would count each other's
+  unpushed commits as pushed), the git dir holds anything beyond git's standard entries (a note, a
+  custom hook, an LFS store, a customised `info/exclude`; `.git/config` is neither judged nor
+  preserved), or `git status --porcelain=v1 -z --ignored` (untracked files forced on, submodules
+  never ignored, whatever the repo's config says) lists anything but ignored paths. An **ignored**
+  path only passes when it is a known generated directory (`node_modules .venv venv __pycache__
+  .pytest_cache .mypy_cache .ruff_cache`) with no nested git repo and no unreadable
+  subdirectory; any other ignored file (a report, `out.rc`, a database, a scratch repo, anything
+  under `.cache`) keeps the checkout. It removes a **linked worktree** with `git worktree remove`
+  (no `--force`) from its main repository (its branch stays there) when its HEAD is on a
+  remote-tracking branch, it has no `refs/worktree`, `refs/bisect` or `refs/rewritten` ref, and
+  nothing in its HEAD reflog is missing from the remote, branch and tag refs (removal deletes the
+  worktree's reflog and per-worktree refs), and a **clone** only when `git worktree list` shows
+  no other worktree, it has no stash, and nothing in any ref (branches, tags, notes, a detached
+  HEAD) or reflog is missing from the remote-tracking refs. "On a remote" means the local
+  remote-tracking refs, which are never fetched: a branch deleted upstream, or a remote that is a
+  local path outside the root, still counts. A repository borrowing objects from a clone
+  (`git clone --shared`) cannot be detected from the clone's side. `--apply` takes a lock
+  (`bigteam-prune.lock` beside the root; exit 3 when another run holds it); a clone whose
+  `rmtree` fails part way is left half deleted (it was clean and pushed) and reported KEPT.
+  Task-dir files outside checkouts (reports, `jobs/`) are never touched. Everything kept is
+  listed with its reason. 2026-10-31 (earlier script version): 0.68 GB from 11 checkouts; 27 kept
+  (no remote, uncommitted work, or ignored reports).
 
 ## 8. Close out
 
