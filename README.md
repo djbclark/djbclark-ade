@@ -373,3 +373,46 @@ A live heterogeneous macro-graph dispatch has also completed: one claude
 worker plus one codex worker under a single Run, both tasks settled
 `completed`, with failure/recovery lessons recorded in the Orca integration
 doc (removed from djbclark-ade 2026-10-31 with Orca; see git history).
+
+Adversary markers read by `bin/pr-wait` (2026-10-30): JSON notes may contain Markdown backticks
+when the JSON as written is valid. Malformed same-head BLOCK markers in code fail closed, including
+near-miss version spelling, duplicate keys, decorated heads and trailing text. APPROVE still requires
+a live canonical marker with valid JSON and the full head.
+
+On 2026-10-31 (PR 175), malformed BLOCK rescue began matching the marker's head fields, excluding
+revision mentions in notes, and accepting a doubled comment start for same-head BLOCK detection.
+
+On 2026-10-31 (PR 175), raw BLOCK rescue stopped looking for a JSON payload at a comment's closing
+`-->`. Standalone JSON after a closed documentation marker cannot supply that marker's verdict.
+
+On 2026-10-31 (PR 175), raw BLOCK rescue stopped interpreting marker starts inside successfully
+parsed JSON strings as markers. Invalid outer candidates still permit nested same-head BLOCK rescue.
+
+On 2026-10-31 (PR 175), malformed BLOCK recovery began tracking object and array depth for both
+verdict and head fields. With readable structure (including trailing commas), nested metadata
+and root arrays cannot supply marker fields; duplicate
+top-level keys remain visible. Strict JSON parsing still governs validity and APPROVE.
+Recovery also requires the head value itself to be a hexadecimal prefix (optionally shortened with
+an ellipsis, or carrying the existing `sha ` typo decoration); JSON encoded inside a string cannot
+provide a head through an embedded SHA mention.
+
+On 2026-10-31 (PR 175), broken quoting or nesting began triggering conservative BLOCK recovery:
+when field boundaries are uncertain, a BLOCK and an exact matching head value anywhere in the
+candidate hold the gate as malformed. Readable nested metadata remains documentation. Payload
+discovery stops at the next marker start, avoiding repeated scans of empty-marker suffixes.
+
+On 2026-11-01 (PR 175), malformed BLOCK recovery retained candidates containing comment
+starts in notes or following prose, and decoded escaped string values and case variants of
+field names for fail-closed recovery. Repeated starts with unfinished JSON can still cause
+quadratic scanning; the empty-start bound does not bound that separate path.
+
+On 2026-11-01 (PR 175), root-array documentation detection began finding the complete
+array with string-aware boundaries before classifying it. Comment delimiters and marker
+format strings inside readable array examples remain documentation; a separate same-head
+BLOCK following the example still holds the gate.
+
+On 2026-11-01 (PR 175 round 9), recovery returned to the approved parser. String
+protection remains strict: trailing-comma documentation quoting a marker start can
+report a malformed BLOCK from nested metadata. This fail-closed limit is documented
+beside `_strip_code`'s C1 limits and in AGENTS.md item 1; recovery does not protect
+readable prefixes of broken envelopes or extend them into following markers.
