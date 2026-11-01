@@ -212,10 +212,12 @@ def load_fold():
 
 def fragment_files_at(repo, rev):
     """[name] of the changelog.d/*.md fragments in the tree at `rev` (README.md and dotfiles are not fragments)."""
-    rc, out, _ = git(repo, "ls-tree", "--name-only", rev, f"{FRAGMENT_DIR}/")
+    # -z: without it git quotes a name holding a newline, a quote or a non-ASCII byte ("a\\nb.md"), and the quoted
+    # text is no path; NUL-separated names are exact (Codex P2 on 05beee8).
+    rc, out, _ = git(repo, "ls-tree", "-z", "--name-only", rev, f"{FRAGMENT_DIR}/")
     if rc != 0:
         return []
-    names = [Path(l).name for l in out.splitlines() if l]
+    names = [Path(f).name for f in out.split("\0") if f]
     return sorted(n for n in names if n.endswith(".md") and n != "README.md" and not n.startswith("."))
 
 

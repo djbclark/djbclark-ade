@@ -1267,3 +1267,15 @@ def test_a_changelog_fold_that_does_not_load_is_a_note_not_a_crash(env):  # adve
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Traceback" not in r.stderr and "does not load" in r.stdout
     assert "Second thing" in r.stdout and env.state.read_text().strip() == env.head(env.machine)  # the rest still ran
+
+
+def test_fragment_names_with_a_space_a_newline_or_non_ascii_are_read_exactly(env):  # Codex P2 on 05beee8 (ls-tree -z)
+    env.state.parent.mkdir(parents=True)
+    env.state.write_text(env.first + "\n")
+    names = {"feat with space.md": "Spaced", "feat\nnewline.md": "Newlined", "feat-\u00e9.md": "Accented"}
+    env.publish({f"changelog.d/{n}": f"### Added\n\n- {w} fragment (#{20 + i}).\n" for i, (n, w) in enumerate(names.items())})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    for w in names.values():
+        assert f"{w} fragment" in r.stdout, r.stdout
+    assert "4 entries" in r.stdout  # CHANGELOG's "Second thing" plus the three fragments
