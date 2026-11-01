@@ -102,3 +102,8 @@ in `src/widgets/process_table/process_data.rs` draw it (the separator uses the t
 command, and the `cwd=` keyword (e.g. `cwd=~/src/bottom`) matches the working directory as shown
 (`src/widgets/process_table/query*`). Docs: `docs/content/configuration/config-file/processes.md`,
 "Split Command", and `docs/content/usage/widgets/process.md` (search keywords).
+
+Second fork change (`make_column` and `toggle_command` in `src/widgets/process_table.rs`): the
+Command column has no width cap (stock: 30% of the table, 50% after `P`). It takes whatever the
+columns before it leave, so put `command` LAST in `[processes] columns`; fewer narrow columns
+means a wider command. Stock `btm` still caps it and spreads the spare width evenly.
