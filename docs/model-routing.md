@@ -61,7 +61,7 @@ quoting a chain, and update its snapshot if you change one.
 > `api-only` work first, else `code`/`bulk` slices so the credits are spent before
 > each monthly expiry); never an all-vendor fan-out; (6) the context window is a per-slice choice (`--context`),
 > default unless a whole-corpus read; (7) compaction is automatic
-> (`autoCompactWindow` 400000 in `~/.claude/settings.json`; herdr/Orca sessions
+> (`autoCompactWindow` 400000 in `~/.claude/settings.json`; Paseo sessions (herdr/Orca hosts: retired from djbclark-ade 2026-10-31)
 > compact earlier via `self-slash`; a topic change runs the `handoff` skill then
 > `/new`). Snapshot numbers below are older and only illustrate the shape.
 >
@@ -134,20 +134,20 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 
 | aiuse provider | CLI / TUI on this machine | Plan | Billing | Windows |
 |---|---|---|---|---|
-| `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it) | Max-class | monthly sub | 5h + weekly; **Fable is a <=50% sublimit of the same weekly** (aiuse `max_share_of_parent_percent`), not a separate pool (corrected 2026-10-15) |
+| `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Paseo and ralph-tui drive it; Orca retired from djbclark-ade 2026-10-31) | Max-class | monthly sub | 5h + weekly; **Fable is a <=50% sublimit of the same weekly** (aiuse `max_share_of_parent_percent`), not a separate pool (corrected 2026-10-15) |
 | `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
 | `codex` | `codex` (v0.149) | ChatGPT Plus until 2026-10-18; **$100 plan (aiuse `prolite`) since 2026-10-19** | monthly sub | weekly (resets 2026-10-26; a 5-hour window may reappear) |
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
-| `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
-| `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
+| `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in the retired Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
+| `clinepass` | Cline TUI (was Orca agent `cline`; Orca retired from djbclark-ade 2026-10-31) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3 (bulk), GPT-6 Luna (mechanical); never a code slice (djbclark 2026-10-30); DeepSeek V4.1 Flash is the main-loop substrate model only | $40/month | subscription shared allowance | 5h + weekly + monthly |
 | `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
 | `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
 | `deepseek` | gated `opencode-ralph-tui-deepseek` | prepaid | **prepaid balance** | balance |
-| `devin` | `devin` (v3000.5.20) — **disabled in Orca's TUI roster**, so its 100%-unused windows are deliberate dormancy | ? | sub (ACUs) | daily + weekly |
+| `devin` | `devin` (v3000.5.20) — **disabled in the retired Orca's TUI roster** (retired from djbclark-ade 2026-10-31), so its 100%-unused windows are deliberate dormancy | ? | sub (ACUs) | daily + weekly |
 | `alibaba` / `alibabatokenplan` / `qwencloud` | `bl` (Bailian, v1.17.1; bailian-* skills) | **ID verification pending, expected live ~2026-08-26** | token plan + PAYG | — until verified |
 | `muse` | the Muse service (own account via gmail; `opencode-go/muse-spark-1.2-contributor` surfaces its models) | ? | ? | ? |
 | (not in aiuse) | `opencode` provider `sipb` — MIT SIPB-hosted models (ollama-style: qwen3-coder:30b, deepseek-r1:32b, gemma…). **For agent/coding use, only `qwen3.6:35b-a3b-q4_K_M` runs tasks reliably** — deepseek-r1:32b fabricates success, qwq:32b truncates every agent-sized stream, exaone-deep:32b/gemma3:27b return the over-long `null`; see forgejo.mit.edu/djbclark/sipb-llms `report/REPORT.md` §3.1 | MIT affiliation | free | none |
@@ -309,7 +309,7 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   sublimit of at most 50% of the shared Claude weekly and bills the 5-hour
   window too (corrected 2026-10-15).
 - **Claude Sonnet 5** — default agentic-coding workhorse; best harness
-  integration (workflows, skills, Orca, this repo).
+  integration (workflows, skills, Paseo, this repo).
 - **Claude Haiku 4.5 @ low** — mechanical fan-out nodes: extract,
   classify, reformat.
 - **Codex (gpt-6-astra @ high for frontier; 2026-10-18)** — the second frontier pool,
@@ -442,7 +442,7 @@ The governor's and the guard's numbers live in `config/gates.toml` and a tempora
    Probe agy **once** and reuse the answer: every `agy -p` is a generation request
    against its hourly burst budget (see the 2026-10-03 correction).
 6. **Context hygiene:** Claude Code compacts by itself at 400k
-   (`autoCompactWindow`); herdr/Orca sessions compact earlier at a natural
+   (`autoCompactWindow`); Paseo sessions compact earlier at a natural
    boundary via `self-slash`; a topic change runs the `handoff` skill then
    `/new`. Nothing here asks the operator.
 
@@ -487,7 +487,7 @@ from them.
 Claude Code weekly window hit 100% at 17:07Z, 2.6 days before its reset, and every
 orchestrating session stopped, which stopped every other pool too; an `aiuse` `conserve`
 alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%: the
-`adversary` Agent-tool sub-agent, judgment slices, Orca workers) and Fable 5.1 (~30%: the
+`adversary` Agent-tool sub-agent, judgment slices) and Fable 5.1 (~30%: the
 lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
 and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
 at medium when it only drives a pipeline, high only for a judgment turn; djbclark 2026-10-23), never Fable; adversary rounds go to `acp-dispatch
@@ -533,7 +533,7 @@ memory is updated under a flock.
 
 - zai GLM lite is consumed by the `zcode` TUI.
 - `muse` is the Muse service itself (own account).
-- Devin is dormant deliberately (also disabled in Orca's roster).
+- Devin is dormant deliberately (also disabled in the retired Orca's roster).
 - Bailian is awaiting ID verification, expected live ~2026-08-26.
 - Prepaid tier retired until an explicit top-up.
 - MIT Claude account is gone forever; removed from cswap 2026-08-23.

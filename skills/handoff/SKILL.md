@@ -272,7 +272,7 @@ python3 ~/src/djbclark-ade/skills/autorename/autorename.py --auto "<title>"
 ```
 
 It keeps a title the operator set by hand. It works in Claude Code, zcode, Grok,
-cursor-agent, OpenCode, Codex in a herdr pane, and omp (once its bridge extension is
+cursor-agent, OpenCode, Codex (the herdr-pane route is retired from djbclark-ade 2026-10-31), and omp (once its bridge extension is
 installed and omp restarted), and exits 2 without harm where it finds no supported
 session; in that case skip it silently. Add its one-line result to the report.
 
@@ -290,11 +290,11 @@ then start a baton and continue running without human intervention"). Run
 ```
 
 **once**, and end the turn at once (no further tool call, no question). On Paseo that sends `/clear`
-to this same agent and then exactly one `/baton` into the fresh session; on herdr and Orca it sends
+to this same agent and then exactly one `/baton` into the fresh session; on herdr and Orca (retired from djbclark-ade 2026-10-31; `self-slash` keeps those branches until D6, never start them for new work) it sends
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
 
-On a **Codex** pane (herdr reports the pane's agent as `codex`) the same command sends the built-in `/new` and then
+On a **Codex** pane (the host reports the pane's agent as `codex`) the same command sends the built-in `/new` and then
 `$baton`: Codex invokes a skill with `$`, and `/baton` there is plain text that starts nothing (2026-10-25). Nothing
 changes in how you call it; `self-slash` chooses the spelling and `--dry-run` prints the text it will send. If you give
 `--then` yourself on Codex, single-quote the `$` so the shell keeps it: `--then '$baton /path/SESSION_LOG.md'` (the
@@ -310,14 +310,14 @@ never substitute an agent discovered through an unrelated client's shared hub.
 a fresh context, the command above: no new process, and its name, model, effort, mode, pane or workspace are
 kept (verified live on herdr, Orca and Paseo); (b) a NEW process only when something cannot change in place (a
 model change, a quota-guard downgrade, a wedged agent), the `--finish --successor` form below, which means the
-same on Paseo and herdr: wait for idle, a new top-level agent in the SAME workspace and cwd on the model asked,
+same on Paseo (and on herdr, retired from djbclark-ade 2026-10-31 and live until D6): wait for idle, a new top-level agent in the SAME workspace and cwd on the model asked,
 first prompt `/baton`, verified (status idle, running or initializing) before anything is retired, exit 11 and
 nothing retired on any failure; detached jobs move only through the successor's first action, `/baton`'s re-arm
 (it re-points each record's `owner` and restarts the waiter); (c) the
 old agent is retired only after that check: Paseo archives it, herdr (retired from djbclark-ade 2026-10-31; its `herdr-tidy` is gone) leaves its pane idle and
 never closes it (djbclark rule: no throwing away work). **The new agent is always a real TUI, never an ACP
 session, when the operator is expected to read and answer it (djbclark, 2026-10-25: an `acp-run` pane shows only
-"⚙ Terminal" lines and failed commands, no transcript to read or steer).** On herdr that is `herdr tab create
+"⚙ Terminal" lines and failed commands, no transcript to read or steer).** On herdr (retired from djbclark-ade 2026-10-31; `launch.py` keeps this host branch until D6, never start it for new work) that is `herdr tab create
 --workspace "$HERDR_WORKSPACE_ID" --cwd DIR --no-focus`, `herdr agent start NAME --kind claude --pane PANE --
 <yolo, --model, --effort>`, then `herdr agent prompt NAME "<brief>"`; `launch.py start --baton` and
 `launch.py successor` do exactly that (claude and codex; yolo is `--dangerously-skip-permissions` /
@@ -334,7 +334,7 @@ run that command instead of this step, once; the rest of this section is for a s
 or unreadable file means no), a Claude Code lead of any model, Sonnet and Opus included, never runs plain
 `self-slash "/new"` (that stays on the exhausted subscription) and never a Claude successor. On Paseo, while
 `aiuse --available --json` lists omp, run the guard advice's own command (the omp successor with
-`--thinking high`); on herdr or Orca (`self-slash` refuses an omp successor there) write the handoff, then
+`--thinking high`); on herdr or Orca (retired from djbclark-ade 2026-10-31; `self-slash` refuses an omp successor there) write the handoff, then
 start omp by hand in a new pane or tab. With omp not listed, a codex or grok successor the same way (agy is
 reached only by `acp-run agy` slices, home rule 29, never as a successor; `acp-run` sessions are never handoff
 hops). **At `critical` this paragraph replaces every Claude path in the rest of Step 9:** the Fable branch
@@ -349,7 +349,7 @@ nothing to it), else codex with `--mode full-access`, or grok. Only (c), an oper
 decides for itself at any level. The `[quota-guard critical]` line is printed once per session and compaction
 can drop it, so the state file, not the line, is what you test.
 
-**Successor on another model (Paseo and herdr; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
+**Successor on another model (Paseo; herdr is retired from djbclark-ade 2026-10-31 and its branch lives until D6; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
 Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 medium when pipeline-driving).** Use this
 form **instead of** `self-slash "/new"` when (a) this session's model is Fable and the level is below `critical` (any `claude-fable-*`,
 `[1m]` suffix or not; check the model line in your own context, or `paseo agent inspect <your id>`
@@ -378,8 +378,8 @@ chain lists the repo as a side workspace** (another chain owns `<repo>/<task>/SE
 `--baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md` so its first prompt names the chain. **The
 pre-handoff transcript survives only in the handoff document and the archived agent's log** (Archived
 agents in the Paseo UI); put anything the operator must read there and in the hermes-ping. On
-Orca there is no successor form (exit 2): write the handoff, then tell the operator to
-relaunch `claude --model <m>` in the pane. **On herdr** the same command takes `claude/MODEL` only
+Orca (retired from djbclark-ade 2026-10-31) there is no successor form (exit 2): write the handoff, then tell the operator to
+relaunch `claude --model <m>` in the pane. **On herdr** (retired from djbclark-ade 2026-10-31, live until D6) the same command takes `claude/MODEL` only
 (`--thinking` becomes `claude --effort`, `--mode` `--permission-mode`, `--baton PATH` as on Paseo;
 `--title`, `--workspace` and `--keep-workspace` exit 2): it runs `skills/session-finder/launch.py successor`, which
 waits for this pane's agent to be idle, opens a tab named `<old tab>-<model>-t` in the same herdr workspace and
@@ -399,7 +399,7 @@ top-level, runs the model asked and is idle, running or initializing.
 (`paseo run --workspace <id>`, this agent's by default, `--workspace ID` for another), never a new
 workspace or window (`--new-workspace`) unless the operator asks. Keep an explicit `--title` short: the
 sidebar shows only its first words (the default is the old name cut to 24 characters plus
-`opus-5-5`). A Paseo workspace name ends in `-pw` (herdr tabs end `-t`, panes `-p`); `self-slash`
+`opus-5-5`). A Paseo workspace name ends in `-pw` (herdr's `-t`/`-p` naming is retired 2026-10-31); `self-slash`
 creates and renames none, so name any workspace you make by hand that way. After the old agent is
 archived, `self-slash` also archives its workspace, but only when that is PROVEN no longer needed
 (`paseo workspace archive` archives every agent in it, kills its terminals and deletes a Paseo-owned
@@ -422,8 +422,8 @@ handoff document, the Tier 1 pointer and the hermes-ping (`~/.local/bin/hermes-p
 step's `self-slash`), not only into the final message.
 
 If `self-slash` refuses (exit 7: the 30-minute gap check or a lifecycle already queued; or a draft
-on the input line; or exit 3 outside herdr, Orca and Paseo, or on Paseo without a usable `paseo`
-CLI), do not retry or loop: tell the operator the handoff is written and stop. In herdr or Orca say
+on the input line; or exit 3 outside Paseo (and the herdr and Orca hosts that live until D6), or on Paseo without a usable `paseo`
+CLI), do not retry or loop: tell the operator the handoff is written and stop. In herdr or Orca (retired from djbclark-ade 2026-10-31) say
 `/new` is ready. On Paseo `/new` typed into the composer reaches Claude as plain text and does
 nothing (only self-slash's mapping to `/clear` works), so say instead: once this agent is idle,
 send `/clear`, then `/baton` (or run `~/src/djbclark-ade/bin/self-slash "/new"` again after the

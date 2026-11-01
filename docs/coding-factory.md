@@ -1,5 +1,8 @@
 # Unattended coding factory — evaluation and the improved prompt (2026-09-21)
 
+> **Retired from djbclark-ade (2026-10-31):** Orca (the orchestration and worker-dispatch layer named in this 2026-09-21 evaluation) is retired from djbclark-ade;
+> it stays installed on the Mac, untouched. Wherever this record names Orca as the dispatcher or in the roster, dispatch now goes through `acp-run`/`acp-dispatch` and Paseo.
+
 The operator pasted a prompt titled *"Implement OpenHands coding factory
 (solo OSS, no human coding/merging)"* and asked three things: improve it,
 compare it with what this machine already runs, and look at other systems.
@@ -9,7 +12,7 @@ This doc is the answer. Everything in it was probed or fetched on
 **Verdict in one paragraph.** The prompt describes four layers: chat front
 door → GitHub Issue trigger → sandboxed coder → CI-gated auto-merge. This
 machine already has the first (Hermes, live on Telegram/Signal) and the
-third (nine coding CLIs on PATH, Orca to dispatch them) and has *none* of
+third (nine coding CLIs on PATH, Orca (retired 2026-10-31) to dispatch them) and has *none* of
 the second or fourth: nothing listens to issue events, and no repo has
 branch protection, rulesets or auto-merge enabled. OpenHands would add a
 hosted trigger plus a sandboxed runner, at the cost of a new vendor, a
@@ -28,7 +31,7 @@ below is written that way: vendor-selected in Phase 0, not baked in.
 | System of record | GitHub Issues (`gh` authed as djbclark, scopes `repo, workflow`) | Live, but nothing *listens* to issue events. |
 | Trigger (issue → agent) | none | **Gap.** Hermes cron polls things; no webhook/label trigger exists. Hermes cron does support webhook-fired jobs, so the gap is wiring, not capability. |
 | Coders | claude, codex, copilot CLI 1.0.86, cursor-agent, devin, opencode, grok, agy on PATH; ~25 agents in Orca's roster | Live. OpenHands, gemini, droid, amp, kilo, jules are **not** installed. |
-| Orchestration | **Orca** macro-graph (task DAG, `worker_done`, heterogeneous fleet verified); Claude Code dynamic workflows | Live. Coordinator is an agent session, not an event: Orca has **no** GitHub-webhook or issue trigger (open upstream requests #11040, #12400, #20646). Cow-pasture dispatch still stalls on Claude's trust dialog. |
+| Orchestration | **Orca** macro-graph (task DAG, `worker_done`, heterogeneous fleet verified; retired from djbclark-ade 2026-10-31, replaced by Paseo and `acp-dispatch`); Claude Code dynamic workflows | Live (as of 2026-09-21). Coordinator is an agent session, not an event: Orca has **no** GitHub-webhook or issue trigger (open upstream requests #11040, #12400, #20646). Cow-pasture dispatch still stalls on Claude's trust dialog. |
 | Continuous controller | **Ralph TUI + beads** | **Dormant.** Binary absent from PATH and `~/.bun/bin`; its four controller workspaces lived under `~/src/ops-worktrees/`, deleted 2026-08-23. Config survives at `~/.config/ralph-tui/`. README's "third altitude" claim needs this caveat. |
 | Workspaces | `bin/cow-pasture` (APFS CoW, secrets scrubbed) | Live. |
 | CI | stayturgid: `collection-build`; Shizuku fork: Android CI + Build App; site-djbclark: monitor-only workflows, **no test CI**; djbclark-ade: none | Partial. |

@@ -9,6 +9,11 @@ description: >-
   any relay to a session whose name you don't know.
 ---
 
+> **Retired from djbclark-ade (2026-10-31):** herdr (bar the `herdr4paseo`/`paseo4herdr` bridges) and Orca. Paseo is the only harness. The herdr and Orca
+> passages below (pane routes in `fleet.py`/`relay.py`, `launch.py --host herdr|orca`, the "Direct Herdr control" and "Codex messages in Herdr" sections) describe
+> code paths that stay until the plan's D4/D6 drain (`docs/paseo-only-rearchitecture.md`; `AGENTS.md` lists exactly what is still live). They are a reference for
+> that code, not a route to start for new work: use Paseo (`paseo run`, `relay.py` to a Paseo agent).
+
 # session-finder — which session, where, and how the work continues
 
 Canonical copy: `~/src/djbclark-ade/skills/session-finder/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI links it directly (skill-everywhere).
@@ -449,7 +454,7 @@ only where the message asks a question or requests action. An FYI that provably 
    (docs/queue.md, "Verified peer messaging, round 2").
 
 
-## Direct Herdr control and detached relay workers (2026-10-25)
+## Direct Herdr control and detached relay workers (2026-10-25; herdr part retired from djbclark-ade 2026-10-31, code live until D4/D6)
 
 For direct Herdr control, follow the upstream `herdr` skill's caller-context
 boundary. A precondition must gate execution: check its exit status in a
@@ -484,7 +489,7 @@ identity and delivery themselves. Do not add a `HERDR_ENV` requirement to
 those workers or weaken their target and delivery checks. Use the canonical
 relay from outside Herdr when coordinating an explicitly requested peer.
 
-## Codex messages in Herdr (2026-10-25)
+## Codex messages in Herdr (2026-10-25; retired from djbclark-ade 2026-10-31, code live until D4/D6)
 
 `self-slash` also supports Codex's shaded `›` composer. It preserves multiline
 drafts, waits for Herdr to report `idle` or `done`, and submits through the

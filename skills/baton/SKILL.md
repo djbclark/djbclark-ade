@@ -21,7 +21,7 @@ shows `then: /baton` and `sent /baton`), not a request for anything else.
 **Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
 `$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed
 into a Codex composer is just text and starts nothing (seen live 2026-10-25, three Enters later it still sat in the
-composer). `self-slash` picks the spelling from the provider herdr reports for the pane, so in a Codex pane the
+composer). `self-slash` picks the spelling from the provider the host reports for the pane (Paseo; herdr's report is a retired-from-djbclark-ade-2026-10-31 path that lives until D6), so in a Codex pane the
 follow-up above is `$baton`, and a `--then "/baton PATH"` is rewritten once to `$baton PATH`. The same skill answers
 to either spelling; treat `$baton PATH` exactly like `/baton PATH`. Never write `$baton` for a Claude pane.
 
@@ -33,7 +33,7 @@ archive, keep working); never write another handoff automatically.
 
 A `/baton` can arrive three ways: typed by the operator, queued by `self-slash "/new"` (the same agent, fresh
 context), or as the first prompt of a successor another session started (`self-slash --finish --successor` on
-Paseo or herdr, `launch.py start --baton`). Treat all three alike. Since 2026-10-25 a successor the operator will
+Paseo, `launch.py start --baton`; the herdr route is retired from djbclark-ade 2026-10-31). Treat all three alike. Since 2026-10-25 a successor the operator will
 talk to is a real TUI (an `acp-run` pane has no readable transcript); a session that does turn out to be an
 `acp-run` client (`ACP_RUN_AGENT=1`) cannot use `self-slash` (exit 9), so it ends with a document-only handoff.
 
@@ -51,7 +51,7 @@ its own archive. First run `bin/watch status` and read `~/.local/state/self-slas
 agent (`$PASEO_AGENT_ID`) holds a watch role, or the newest `then: /baton` line for it follows a handoff
 naming a chain, resume THAT chain (`session-handoff` chain discovery, `--dir .../chains/<key>`). A
 directory-resolved pointer whose owner is another live session is not yours: say so and look further.
-On Paseo, `self-slash --finish` refuses a watch holder (exit 12; `--successor` is allowed, and the guard fails open if `watch status` fails or takes over 20 s); herdr and Orca watchers are not guarded.
+On Paseo, `self-slash --finish` refuses a watch holder (exit 12; `--successor` is allowed, and the guard fails open if `watch status` fails or takes over 20 s); herdr and Orca watchers (retired from djbclark-ade 2026-10-31) are not guarded.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,

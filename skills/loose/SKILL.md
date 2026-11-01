@@ -230,7 +230,7 @@ reports.
 **Never offer or run finish for a session that holds a watch role** (`bin/watch status` names the
 holder; the load, CFEngine and Paseo watchers are such sessions). on Paseo `self-slash --finish` refuses them with
 exit 12 (2026-10-25: a /baton-resumed load watcher queued its own archive; it fails open if `watch status` fails, and
-herdr/Orca watchers are not guarded, so check `bin/watch status` yourself there). Offer handoff and continue, or
+herdr/Orca watchers are retired from djbclark-ade 2026-10-31 and not guarded; check `bin/watch status` yourself if one exists). Offer handoff and continue, or
 keep working; to end it, hand the role over first.
 
 A built-in like `/quit` is not a skill, but you can queue it yourself (operator,
@@ -238,7 +238,7 @@ A built-in like `/quit` is not a skill, but you can queue it yourself (operator,
 finish, write the final results as the last message so they stay readable, finish
 everything first (commits pushed, no pending reads), then run
 `~/src/djbclark-ade/bin/self-slash --finish` as the last action and end the turn
-at once. On herdr and Orca that is the old `/quit`; on Paseo `/quit` does nothing
+at once. On Paseo `/quit` does nothing
 (it reaches Claude as plain text, seen twice 2026-10-20), so `--finish` waits for
 idle and archives this agent without `--force` (it stays under "Archived agents",
 and the operator can still read the final message). djbclark, 2026-10-20: "if there
@@ -249,10 +249,9 @@ offer the finish prompt again once it is written.
 `/compact` works the same way, but only when the context prompt's compact tier
 fires (+140k since the start or last compaction, or 217k total) or he picked it, never just
 because context looks large: each compaction costs ~150k+ token-equivalents
-(`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session in a herdr pane or an
-Orca terminal (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
+(`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session on Paseo (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`; the herdr and Orca host branches of `self-slash` are retired from djbclark-ade 2026-10-31 and live only until D6), write down
 what the next turn needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"`
-and end the turn at once. `self-slash` refuses outside herdr and Orca, or when his
+and end the turn at once. `self-slash` refuses outside its hosts (see AGENTS.md for what remains), or when his
 input box holds a draft; then ask him to type it. Grok Bot: skip (G6).
 
 ## Silent mode, before a handoff
@@ -265,7 +264,7 @@ prompts, no Rule 4 question in that case. Grok Bot has no `handoff` skill
 ## On Grok Bot (added 2026-10-23)
 
 Grok Bot runs the same audit on its own Linux box (`HOME=/home/box`). It has no
-herdr, Orca, Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
+Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
 
 - **G1 Repos.** `~/src/<repo>` is `/home/box/src/<repo>` (also check `/workspace`,
   the scratch dir, and any worktree you added: `git worktree list`). Remote
