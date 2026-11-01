@@ -87,8 +87,8 @@ skill's snapshot in the same turn.
 - Orca's agent roster + per-agent launch flags (Orca is retired from djbclark-ade, 2026-10-31;
   the file stays on the Mac, untouched, and is still the record of these flags):
   `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
-  → `settings.agentDefaultArgs` / `disabledTuiAgents`. Dispatch itself goes through
-  `acp-run`/`acp-dispatch` and Paseo, which reach any enabled agent.
+  → `settings.agentDefaultArgs` / `disabledTuiAgents`. Nearly every TUI
+  is configured inside Orca; macro-graph dispatch reaches any enabled one (Orca retired; dispatch now goes through `acp-run`/`acp-dispatch`).
 - **`bin/claude-quota-guard`** (2026-10-23, the incident in *Routing policy* item 12) —
   turns the Claude reading into a level a session acts on, instead of an alert nobody
   reads. `check` (the default; launchd runs it every 15 minutes after
@@ -827,8 +827,8 @@ method that runs the waves.
     hint. Check `acp-run <agent> --info` before committing to an id.
 11. **Context hygiene is part of cost.** Claude Code compacts a session by
     itself at 400k tokens (`autoCompactWindow` in `~/.claude/settings.json`,
-    2026-10-15; the PreCompact hook writes the Tier 1 checkpoint). In a Paseo
-    agent compact earlier, at a natural boundary, with
+    2026-10-15; the PreCompact hook writes the Tier 1 checkpoint). In a herdr
+    pane or Orca terminal (retired from djbclark-ade 2026-10-31; `self-slash` keeps those hosts until D6) or a Paseo agent compact earlier, at a natural boundary, with
     `self-slash "/compact <focus>"`; on a topic change run the `handoff` skill,
     then `self-slash "/new"`, which also sends `/baton` into the fresh session
     (2026-10-19). Never ask the operator to do either unless `self-slash`

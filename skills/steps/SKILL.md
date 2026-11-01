@@ -203,7 +203,7 @@ The card has no header chip, no per-option description, no `helpText` and no
    need his explicit OK: an option he picks counts only if its label names that
    exact action (which commit to which branch, which message to whom).
 6. **Not on Grok Bot:** `/compact` and `self-slash` (section 3.5). Grok Bot has
-   no Paseo host and manages its own context; if he picks
+   no herdr, Orca or Paseo host and manages its own context; if he picks
    `/compact`, say in one line that it does not apply there and go on.
 
 ## 3. Act, then move on

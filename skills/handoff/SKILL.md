@@ -272,7 +272,7 @@ python3 ~/src/djbclark-ade/skills/autorename/autorename.py --auto "<title>"
 ```
 
 It keeps a title the operator set by hand. It works in Claude Code, zcode, Grok,
-cursor-agent, OpenCode, Codex (the herdr-pane route is retired from djbclark-ade 2026-10-31), and omp (once its bridge extension is
+cursor-agent, OpenCode, Codex in a herdr pane (herdr retired from djbclark-ade 2026-10-31; that code path lives until D4/D6), and omp (once its bridge extension is
 installed and omp restarted), and exits 2 without harm where it finds no supported
 session; in that case skip it silently. Add its one-line result to the report.
 
@@ -294,7 +294,7 @@ to this same agent and then exactly one `/baton` into the fresh session; on herd
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
 
-On a **Codex** pane (the host reports the pane's agent as `codex`) the same command sends the built-in `/new` and then
+On a **Codex** pane (herdr reports the pane's agent as `codex`; only a herdr pane is treated as Codex, herdr being retired from djbclark-ade 2026-10-31 with this branch alive until D6) the same command sends the built-in `/new` and then
 `$baton`: Codex invokes a skill with `$`, and `/baton` there is plain text that starts nothing (2026-10-25). Nothing
 changes in how you call it; `self-slash` chooses the spelling and `--dry-run` prints the text it will send. If you give
 `--then` yourself on Codex, single-quote the `$` so the shell keeps it: `--then '$baton /path/SESSION_LOG.md'` (the
@@ -399,7 +399,7 @@ top-level, runs the model asked and is idle, running or initializing.
 (`paseo run --workspace <id>`, this agent's by default, `--workspace ID` for another), never a new
 workspace or window (`--new-workspace`) unless the operator asks. Keep an explicit `--title` short: the
 sidebar shows only its first words (the default is the old name cut to 24 characters plus
-`opus-5-5`). A Paseo workspace name ends in `-pw` (herdr's `-t`/`-p` naming is retired 2026-10-31); `self-slash`
+`opus-5-5`). A Paseo workspace name ends in `-pw` (herdr tabs end `-t`, panes `-p`; herdr retired from djbclark-ade 2026-10-31); `self-slash`
 creates and renames none, so name any workspace you make by hand that way. After the old agent is
 archived, `self-slash` also archives its workspace, but only when that is PROVEN no longer needed
 (`paseo workspace archive` archives every agent in it, kills its terminals and deletes a Paseo-owned

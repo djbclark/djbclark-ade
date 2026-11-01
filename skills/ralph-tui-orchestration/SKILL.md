@@ -268,7 +268,7 @@ here.
 
 ## Orchestrating a controller through Herdr (retired from djbclark-ade, 2026-10-31)
 
-Herdr is retired from djbclark-ade; drive a controller from another session
-through Paseo (`paseo send`, `skills/peer-relay`). The herdr composer
+Herdr is retired from djbclark-ade; reach a controller session from another
+session through `relay.py` (`skills/peer-relay`; never hand-roll `paseo send`). The herdr composer
 gotchas (`herdr agent prompt` leaving text unsubmitted, the `send-keys enter`
 workaround) are kept as history in `model-routing`'s *Herdr-hosted TUIs* list.

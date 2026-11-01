@@ -251,7 +251,7 @@ fires (+140k since the start or last compaction, or 217k total) or he picked it,
 because context looks large: each compaction costs ~150k+ token-equivalents
 (`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session on Paseo, or still in a herdr pane or Orca terminal (those two hosts retired from djbclark-ade 2026-10-31, live until D6) (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
 what the next turn needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"`
-and end the turn at once. `self-slash` refuses outside its hosts (see AGENTS.md for what remains), or when his
+and end the turn at once. `self-slash` refuses outside a Paseo agent (and the herdr and Orca hosts that live until D6), or when his
 input box holds a draft; then ask him to type it. Grok Bot: skip (G6).
 
 ## Silent mode, before a handoff
@@ -264,7 +264,7 @@ prompts, no Rule 4 question in that case. Grok Bot has no `handoff` skill
 ## On Grok Bot (added 2026-10-23)
 
 Grok Bot runs the same audit on its own Linux box (`HOME=/home/box`). It has no
-Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
+herdr, Orca, Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
 
 - **G1 Repos.** `~/src/<repo>` is `/home/box/src/<repo>` (also check `/workspace`,
   the scratch dir, and any worktree you added: `git worktree list`). Remote
