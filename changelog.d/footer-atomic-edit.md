@@ -1,0 +1,3 @@
+### Added
+
+- Item 20 of the shared dispatch footer (`docs/dispatch-footer.md`, appended by `acp-dispatch` to every brief): a script or config another process may be running or reading (`~/ops/*/bin`, `~/.local/bin`, a launchd job's script, an installed hook or skill script) is never edited in place; the new version is written to a temp file beside its `realpath`, checked (`bash -n`, `python3 -m py_compile`, `plutil -lint`) and `mv -f`'d over it. An in-place edit of the live `bg` and `bg-offload` on 2026-11-01 broke every `bg` start for about two hours. A brief footed before this item is still cut as generated (#228)

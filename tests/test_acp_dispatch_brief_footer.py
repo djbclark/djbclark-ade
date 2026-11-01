@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from test_acp_dispatch import Base, run
+from test_acp_dispatch import Base, FOOTER, run
 
 
 class TestBriefFooter(Base):
@@ -190,6 +190,26 @@ class TestFooterMatchesTheTemplate(Base):
         r, sent = self.second(copy)
         self.assertEqual(sent.count("## Delivery contract (shared footer"), 1, sent)
         self.assertIn("stripped", r.stderr)
+
+    def test_the_footer_without_the_atomic_edit_item_is_still_generated(self):
+        # item 20 (2026-11-01) is new: a footer written before it, or a brief that already carries the
+        # current one, is cut as generated; an edited copy of it survives.
+        self.assertRegex(FOOTER.read_text(), r"(?m)^20\. Never edit in place .*`mv -f`")
+        copy = self.footed_copy()
+        self.assertIn("\n20. Never edit in place", copy.read_text())
+        r, sent = self.second(copy)
+        self.assertEqual(sent.count("## Delivery contract (shared footer"), 1, sent)
+        self.assertNotIn("nothing was stripped", r.stderr)
+        old = self.tmp / "old.md"
+        _ = old.write_text("".join(ln for ln in copy.read_text().splitlines(keepends=True) if not ln.startswith("20. ")))
+        r, sent = self.second(old, "third")
+        self.assertEqual(sent.count("## Delivery contract (shared footer"), 1, sent)
+        self.assertNotIn("nothing was stripped", r.stderr)
+        edited = self.tmp / "edited.md"
+        _ = edited.write_text(copy.read_text().replace("Never edit in place", "Always edit in place"))
+        r, sent = self.second(edited, "fourth")
+        self.assertIn("Always edit in place", sent)
+        self.assertIn("nothing was stripped", r.stderr)
 
     def test_a_near_miss_footer_is_matched_in_linear_time(self):
         import time
