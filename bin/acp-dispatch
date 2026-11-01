@@ -4684,6 +4684,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             if would:
                 print(f"would refuse: class={would}")
         return 0
+    if a.detach and _LOAD_RESERVATION.get("path"):
+        # the runner releases through the binary that admitted (an override included): recorded BEFORE it is runnable
+        rec["load_watch"] = _LOAD_RESERVATION["path"]
     write_record(record, rec)
 
     if a.detach:
@@ -4696,8 +4699,6 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         r = subprocess.run(sub, check=False, capture_output=True, text=True)
         if r.returncode != 0:
             die(f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}", 1)
-        if _LOAD_RESERVATION.get("path"):   # the runner releases through the binary that admitted (an override included)
-            rec = update_record(record, load_watch=_LOAD_RESERVATION["path"])
         transfer_load_reservation()   # the runner owns the agent reservation now (it releases it from the record)
         if a.no_wait:
             print(f"detached\t{a.name}\t{report}\nrecord: {record}\n{rearm_hint(rec)}\nrearm: {rec['rearm']}")

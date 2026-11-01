@@ -204,12 +204,15 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         """Codex P2 on PR 210: with --detach (but not --no-wait) the caller's exit must not shorten the reservation."""
         ok = '{"status": "ok", "load1": 2.4, "per_core": 0.3, "cores": 8, "max_per_core": 1.5, "waited_s": 1, "reservation": "r-7"}'
         lc = self.tmp / "launchctl-submit-only"
-        lc.write_text("#!/bin/bash\nexit 0\n")                                  # accepts the submit, runs nothing
+        seen = self.tmp / "record-at-submit.json"
+        # accepts the submit, runs nothing, but snapshots the job record as the runner would see it at that moment
+        lc.write_text(f'#!/bin/bash\ncp "{self.out}/jobs/s1.json" "{seen}"\nexit 0\n')
         lc.chmod(0o755)
         r = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--wait-timeout", "1",
                           env=self.gate_env(0, ok, ACP_DISPATCH_LAUNCHCTL=str(lc)))
         self.assertIn(r.returncode, (0, 124), r.stderr + r.stdout)
         self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])   # no release by the caller
+        self.assertEqual(json.loads(seen.read_text())["load_watch"], str(self.lw.resolve()))   # already there at submit time
         self.assertEqual(self.record()["load_gate"]["reservation"], "r-7")           # the runner finds it here
         self.assertEqual(self.record()["load_watch"], str(self.lw.resolve()))        # and the binary that admitted it
         mod = self.load_module()
