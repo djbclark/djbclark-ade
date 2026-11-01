@@ -48,6 +48,12 @@ to `command -v <tool>` then fails ("Requested utility `gtr` does not match execu
 tool (`exec tr "$@"` style, or GNU coreutils from the `gnu-coreutils` package if the image has it) instead of a symlink, the suite green on 26.04, then unpin. The
 pin comment in `.github/workflows/test.yml` says the same. GitHub retires an old image on its own schedule, so this is not optional forever.
 
+## `frontier_agent_gate._guard_state` keeps its own guard-state reader (adversary r1 on PR 214, 2026-11-01; optional, last in the queue)
+
+`claude/hooks/frontier_agent_gate.py::_guard_state` reads the quota-guard state with its own copy that catches only `(OSError, ValueError)`; `ade_gates.read_guard_state`
+(PR 98) also reads a `RecursionError` as unreadable. Not exploitable today: `_judged` is wrapped in `except Exception`, so a deeply nested file there fails closed
+(asks), only with an uglier message. Make the hook call `g.read_guard_state()` instead of its own copy; failing test first (a real nest, 400000 levels), CHANGELOG `Fixed` line.
+
 ## Verified peer messaging, round 2: "always acknowledged", and the gaps found (djbclark, direct, 2026-10-25)
 
 djbclark, 2026-10-25, after seeing this relayed text from djbclark-ade-8d: "ack from djbclark-ade-8d (430f45ba), no reply needed beyond this": he wanted it so that **things always need an acknowledgement, and when none arrives the requesting agent has to handle that**; is the missing part just later in the implementation, or a flaw in what already landed? Answer (2026-10-25): mostly rollout and wiring, plus one design scoping that needs his ruling. Builds on "Verified peer messaging" (PR 74, merged 6f54e89; AGENTS.md standing order 10). Nothing below is started.
