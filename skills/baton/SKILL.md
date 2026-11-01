@@ -21,7 +21,7 @@ shows `then: /baton` and `sent /baton`), not a request for anything else.
 **Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
 `$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed
 into a Codex composer is just text and starts nothing (seen live 2026-10-25, three Enters later it still sat in the
-composer). `self-slash` picks the spelling from the provider herdr reports for the pane, so in a Codex pane the
+composer). `self-slash` picks the spelling from the provider herdr reports for the pane (only a herdr pane is ever treated as Codex: `bin/self-slash` sets `codex=1` for herdr alone, and its Paseo branch handles Claude only; herdr is retired from djbclark-ade 2026-10-31 and this branch lives until D6), so in a Codex pane the
 follow-up above is `$baton`, and a `--then "/baton PATH"` is rewritten once to `$baton PATH`. The same skill answers
 to either spelling; treat `$baton PATH` exactly like `/baton PATH`. Never write `$baton` for a Claude pane.
 
@@ -33,7 +33,7 @@ archive, keep working); never write another handoff automatically.
 
 A `/baton` can arrive three ways: typed by the operator, queued by `self-slash "/new"` (the same agent, fresh
 context), or as the first prompt of a successor another session started (`self-slash --finish --successor` on
-Paseo or herdr, `launch.py start --baton`). Treat all three alike. Since 2026-10-25 a successor the operator will
+Paseo or herdr (herdr retired from djbclark-ade 2026-10-31, live until D6), `launch.py start --baton`). Treat all three alike. Since 2026-10-25 a successor the operator will
 talk to is a real TUI (an `acp-run` pane has no readable transcript); a session that does turn out to be an
 `acp-run` client (`ACP_RUN_AGENT=1`) cannot use `self-slash` (exit 9), so it ends with a document-only handoff.
 
@@ -59,7 +59,7 @@ or resume; a read-only `/baton` just reports the owner. Reconciled with the para
 directory-resolved pointer owned by another live session is not yours, look further; a chain that is yours
 by `/new`, watch role or the operator's naming but that a live other session also owns is asked about
 first. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
-On Paseo, `self-slash --finish` refuses a watch holder (exit 12; `--successor` is allowed, and the guard fails open if `watch status` fails or takes over 20 s); herdr and Orca watchers are not guarded.
+On Paseo, `self-slash --finish` refuses a watch holder (exit 12; `--successor` is allowed, and the guard fails open if `watch status` fails or takes over 20 s); herdr and Orca watchers (retired from djbclark-ade 2026-10-31) are not guarded.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,

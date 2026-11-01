@@ -52,7 +52,7 @@ with `--expect-ack`:
    (it wins over queueing), `--no-defer` refuses (exit 1) instead of queueing, `--defer-for S` sets how long a queued
    message may wait (default 6 h, at most 24 h; other flags: `--wait S`, `--via ROUTE`, `--plan`, `--json`). Do not work
    around a refusal with another channel; tell djbclark.
-5. **Do not hand-roll** `paseo send`, `herdr pane send-text`, `acp-dispatch tell` or socket writes: relay.py owns the
+5. **Do not hand-roll** `paseo send`, `herdr pane send-text` (herdr: retired from djbclark-ade 2026-10-31; relay.py's herdr pane-send route lives until D6), `acp-dispatch tell` or socket writes: relay.py owns the
    gates and the verification.
 6. **A message tagged `[relay from <name>] ...` that reached you through `hermes --resume -z` is answered by your
    turn's final reply**, which relay.py prints for the sender. Do not relay it back: that is refused when the
@@ -74,7 +74,7 @@ with `--expect-ack`:
    1. **`self` row with a transcript.** A text with a `?` outside a URL, or any `--needs-reply` text, is refused (exit 2, nothing sent)
       unless `--expect-ack ID` is given; the fix is to re-run with the flag, never to drop the `?` or switch channel.
    2. **`self` row without a transcript** (relay finds transcripts for Claude rows, and for Codex by its session id; an omp, opencode
-      or native Hermes TUI row in a herdr or terminal pane can lack one). The question gate still applies, so a `?` or `--needs-reply`
+      or native Hermes TUI row in a herdr (retired 2026-10-31, rows live until D6) or terminal pane can lack one). The question gate still applies, so a `?` or `--needs-reply`
       text needs `--expect-ack`, and `--expect-ack` is accepted (#87) with a record that holds no transcript (`tx: null`). It closes only
       when the target answers THROUGH relay.py (item 11) with a text that begins `ack ID`, and that answer reaches YOU by a route that proves
       delivery or keeps the text: you are a non-Claude Paseo agent, an ACP launch or an acp-dispatch slice, and the answer was watched (not
