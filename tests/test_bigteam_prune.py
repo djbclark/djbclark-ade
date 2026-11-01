@@ -2,6 +2,7 @@
 the clean pushed clone and linked worktree that must go. Hermetic: fixture repos under tmp_path with a bare 'remote'."""
 import importlib.util
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -1041,3 +1042,61 @@ def test_task_with_a_quota_stopped_job_awaiting_resume_is_kept(prune, tmp_path, 
     task = c.parent
     ok, msg = prune.remove(c, task, {task: task.stat().st_mtime})
     assert not ok and "no longer eligible" in msg and c.exists()
+
+
+# ---- round 10 (local Codex review of 9dc5c423) --------------------------------------------------------------------
+
+
+def _fetch_blob_into_fetch_head(tmp_path, c, tree=False):
+    """FETCH_HEAD becomes the only reference to a blob (or tree), the temporary source repository being removed."""
+    src = tmp_path / "tmp-src"
+    g(tmp_path, "init", "-q", "-b", "main", str(src))
+    (src / "r.md").write_text("the only copy of this report\n")
+    obj = g(src, "hash-object", "-w", "r.md")
+    if tree:
+        obj = subprocess.run(["git", "mktree"], cwd=src, input=f"100644 blob {obj}\tr.md\n", capture_output=True,
+                             text=True, env=_env(), check=True).stdout.strip()
+    g(src, "tag", "report", obj)
+    g(c, "fetch", "-q", "--no-tags", str(src), "refs/tags/report")
+    shutil.rmtree(src)
+    assert g(c, "rev-parse", "FETCH_HEAD") == obj
+    return obj
+
+
+@pytest.mark.parametrize("tree", [False, True])
+def test_fetch_head_naming_only_a_blob_or_tree_keeps_the_clone(prune, tmp_path, world, tree):
+    c = make_clone(tmp_path, world)
+    _fetch_blob_into_fetch_head(tmp_path, c, tree)
+    assert g(c, "for-each-ref") .count("refs/") >= 1  # ordinary refs are all commits
+    assert g(c, "rev-list", "--reflog", "--not", "--remotes") == ""
+    ok, why = prune.safe(c)
+    assert not ok and "not a commit" in why
+    assert rm(prune, c)[0] is False
+
+
+def test_orig_head_naming_a_missing_object_keeps_the_clone(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    (c / ".git/ORIG_HEAD").write_text("1" * 40 + "\n")
+    ok, why = prune.safe(c)
+    assert not ok
+
+
+def test_non_commit_ids_peels_tags_and_flags_the_rest(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    commit_id = g(c, "rev-parse", "origin/main")
+    g(c, "tag", "-a", "-m", "x", "ann", commit_id)
+    tag_obj = g(c, "rev-parse", "ann")
+    blob = g(c, "rev-parse", "origin/main:README")
+    assert prune.non_commit_ids(c, [commit_id, tag_obj]) == []
+    assert prune.non_commit_ids(c, [commit_id, blob, "2" * 40]) == [blob, "2" * 40]
+    assert prune.non_commit_ids(c, []) == []
+
+
+def test_linked_worktree_reflog_naming_a_blob_keeps_it(prune, tmp_path, world):
+    main, wt = make_main_with_worktree(tmp_path, world)
+    blob = g(wt, "rev-parse", "origin/main:README")
+    log = prune.git_path(wt, "logs/HEAD")
+    first = log.read_text().splitlines()[0].split()
+    log.write_text(f"{first[1]} {blob} t <t@t> 1700000000 +0000\tmanual: blob\n")
+    ok, why = prune.safe(wt)
+    assert not ok and "not a commit" in why

@@ -38,7 +38,8 @@ a remote that is a local path outside the root, still counts. A repository borro
 dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
 CLAIM, no unfinished, resume-pending or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
-A clone with a ref pointing at a blob or tree is kept. An http(s), ftp or git remote counts as another machine only
+A clone with a ref, a root pseudo-ref (FETCH_HEAD, ORIG_HEAD, ...) or a linked worktree's reflog entry pointing at a
+blob, a tree or a missing object is kept. An http(s), ftp or git remote counts as another machine only
 when no proxy or address override applies (http.curloptResolve, http.proxy, remote.X.proxy, core.gitProxy, *_PROXY,
 GIT_PROXY_COMMAND). A linked worktree's HEAD reflog is read on both sides of every entry. An ssh remote counts as another machine only when
 git's ssh is plain ssh (no core.sshCommand, GIT_SSH, GIT_SSH_COMMAND, ProxyCommand or ProxyJump). Kept reasons print
@@ -233,6 +234,18 @@ def non_commit_refs(c):
             continue
         return f"ref {name!r} points at a {peeled or typ} object, not a commit (its content is on no remote)"
     return None
+
+
+def non_commit_ids(c, ids):
+    """The ids (of `ids`) that do not peel to a commit: a blob, a tree, a tag of one, or an object that is missing.
+    rev-list succeeds with empty output for those, so a commit traversal cannot vouch for them. None when git fails."""
+    if not ids:
+        return []
+    rc, out = git(c, "cat-file", "--batch-check=%(objecttype)", stdin="".join(f"{i}^{{commit}}\n" for i in ids))
+    lines = out.splitlines()
+    if rc or len(lines) != len(ids):
+        return None
+    return [i for i, ln in zip(ids, lines) if ln.strip() != "commit"]
 
 
 def reflog_ids(c):
@@ -632,6 +645,9 @@ def safe(c):
         if hs is None:
             return False, "HEAD reflog unreadable"
         if hs:
+            bad = non_commit_ids(c, hs)
+            if bad is None or bad:
+                return False, "this worktree's HEAD reflog names an object that is not a commit (or is missing)"
             rc, un = git(c, "rev-list", "--stdin", "--not", "--remotes", "--branches", "--tags", stdin="\n".join(hs) + "\n")
             if rc or un.strip():
                 return False, f"{len(un.split())} commit(s) only in this worktree's HEAD reflog, on no remote, branch or tag (or unreadable)"
@@ -658,6 +674,9 @@ def safe(c):
     if pseudo is None:
         return False, "root pseudo-refs (ORIG_HEAD, FETCH_HEAD, ...) unreadable"
     if pseudo:
+        bad = non_commit_ids(c, pseudo)
+        if bad is None or bad:
+            return False, "a root pseudo-ref (ORIG_HEAD, FETCH_HEAD, ...) names an object that is not a commit (or is missing)"
         # a linked worktree's branches and tags survive its removal; a clone keeps only what a remote has
         keep_refs = ["--remotes", "--branches", "--tags"] if linked else ["--remotes"]
         rc, un = git(c, "rev-list", "--stdin", "--not", *keep_refs, stdin="\n".join(pseudo) + "\n")
