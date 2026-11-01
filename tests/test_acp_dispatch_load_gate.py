@@ -211,6 +211,7 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         self.assertIn(r.returncode, (0, 124), r.stderr + r.stdout)
         self.assertEqual(self.calls(), ["admit --wait 1800 --json --max-agents"])   # no release by the caller
         self.assertEqual(self.record()["load_gate"]["reservation"], "r-7")           # the runner finds it here
+        self.assertEqual(self.record()["load_watch"], str(self.lw.resolve()))        # and the binary that admitted it
         mod = self.load_module()
         mod._LOAD_RESERVATION.update(id="x", path="/p")
         mod.transfer_load_reservation()

@@ -771,3 +771,18 @@ def test_a_hot_reading_resets_the_calm_clock_even_when_the_caller_disables_the_b
     before = f2.read_text()
     admit(tmp_path, "--wait", "0", "--boost-per-core", "0", load1=0.1)
     assert f2.read_text() == before
+
+
+def test_an_older_observation_arriving_late_does_not_break_the_calm_run(tmp_path, monkeypatch):
+    """Codex P2 on PR 210: the sampler stamps before it reads and admit after, so their writes can arrive out of order."""
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    f = tmp_path / "calm.json"
+    assert lw.calm_note(1000.0, True) == 1000.0
+    assert lw.calm_note(1030.0, True) == 1000.0               # a newer reading first
+    assert lw.calm_note(1020.0, True) == 1000.0               # the older calm one: the run is unbroken, last_t stays
+    assert json.loads(f.read_text()) == {"calm_since": 1000.0, "last_t": 1030.0}
+    assert lw.calm_note(1025.0, False) is None                # an older HOT one still clears it, without moving last_t back
+    assert json.loads(f.read_text()) == {"calm_since": None, "last_t": 1030.0}
+    assert lw.calm_note(1010.0, True) is None                 # a stale calm reading cannot restart a cleared run
+    assert lw.calm_note(1040.0, True) == 1040.0

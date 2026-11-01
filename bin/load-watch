@@ -1682,7 +1682,13 @@ def calm_note(t, calm):
             pass
         s = calm_load()
         since, last = s.get("calm_since"), s.get("last_t")
-        if not calm:
+        if _num(last) and t < last:
+            # an older observation arriving after a newer one (the sampler stamps before it reads, admit after): a calm
+            # one changes nothing and never moves last_t back; a hot one still clears the run
+            if calm:
+                return since if _num(since) else None
+            since, t = None, last
+        elif not calm:
             since = None
         elif not (_num(since) and _num(last) and 0 <= t - last <= CALM_GAP_S and since <= t):
             since = t
