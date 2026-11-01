@@ -90,7 +90,7 @@ docs/dispatch-footer.md, and are appended to every brief.
 Contract (the same for ACP agents run here and for Claude Code Agent-tool sub-agents, which
 get the footer pasted into their prompt because the Agent tool cannot be driven from a script):
     report   $OUT/<name>-report.md     the deliverable; first line `STATUS: working` or
-                                        `BLOCKED: <question>`; last line `DONE`
+                                        `BLOCKED: <question>`; last line `DONE` (optionally followed by one `AC_DONE:` verdict line)
     done     <report>.done              touched last; waiters watch this, never the report
     record   $OUT/jobs/<name>.json      who launched it, every path, the exact waiter to re-arm
     $OUT     ~/.local/state/bigteam/<task>/ (default) or --out; never the session scratchpad,
@@ -3416,6 +3416,13 @@ def exit0_quota_note(rec: dict) -> tuple[str, str] | None:
 
 # ---------------------------------------------------------------- classify
 
+def report_finished(lines: list[str]) -> bool:
+    """Completion shape shared by classification and recovered-final-message delivery."""
+    nonblank = [line.strip() for line in lines if line.strip()]
+    return bool(nonblank) and (nonblank[-1] == "DONE" or
+        (len(nonblank) > 1 and nonblank[-2] == "DONE" and nonblank[-1].startswith("AC_DONE:")))
+
+
 def classify(report: Path, done: Path | None = None, finished: bool | None = None,
              pid: int | None = None) -> tuple[str, str]:
     """Return (status, detail) for one report.
@@ -3445,8 +3452,7 @@ def classify(report: Path, done: Path | None = None, finished: bool | None = Non
     # `AC_DONE: adv-e-152-delta APPROVE`, so the lead can grep it). That report is finished; counting
     # it `partial` made a complete verdict look unfinished (2026-10-30: adv-e-152-delta). Only the
     # exact two-line shape is accepted, so real trailing prose still reads as partial.
-    finished_by_verdict = last.startswith("AC_DONE:") and len(lines) > 1 and lines[-2].strip() == "DONE"
-    if last == "DONE" or finished_by_verdict:
+    if report_finished(lines):
         return "done", first if first.upper().startswith("STATUS:") else f"{len(text)} chars"
     return "partial", f"no DONE line yet; first line: {first[:120]}"
 
@@ -3660,7 +3666,7 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
             if not blocked:
                 lines.insert(0, "STATUS: recovered by acp-dispatch from the agent's final message "
                                 "(the agent did not write the report file)")
-            if lines[-1].strip() != "DONE" and not blocked:
+            if not report_finished(lines) and not blocked:
                 lines.append("DONE")
             write_atomic(report, "\n".join(lines) + "\n")
             rec["report_source"] = "final-message"

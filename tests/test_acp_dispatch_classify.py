@@ -30,13 +30,19 @@ class Classify(unittest.TestCase):
         cls.mod = runpy.run_path(str(SCRIPT))
 
     def report(self, text: str) -> Path:
-        tmp = Path(tempfile.mkdtemp(prefix="classify-"))
+        tmpdir = tempfile.TemporaryDirectory(prefix="classify-")
+        self.addCleanup(tmpdir.cleanup)
+        tmp = Path(tmpdir.name)
         path = tmp / "slice-report.md"
         path.write_text(text)
         return path
 
     def classify(self, text: str) -> tuple[str, str]:
         return self.mod["classify"](self.report(text), finished=True)
+
+    def test_recovery_recognizes_existing_verdict_completion(self):
+        self.assertTrue(self.mod["report_finished"](["STATUS: complete", "DONE", "AC_DONE: x APPROVE"]))
+        self.assertFalse(self.mod["report_finished"](["DONE", "AC_DONE: x", "still working"]))
 
     def test_a_plain_done_report_is_done(self):
         self.assertEqual(self.classify("STATUS: working\n\n# Report\n\nsome work\n\nDONE\n")[0], "done")

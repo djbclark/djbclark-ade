@@ -62,6 +62,7 @@ FAKE = textwrap.dedent("""\
       writes)   printf 'STATUS: working\\nfound it\\nDONE\\n' > "$report"; echo "written: $report"; exit 0;;
       slow)     sleep 2; printf 'STATUS: working\\nfound it\\nDONE\\n' > "$report"; exit 0;;
       stdout)   echo "the whole answer in the final message"; exit 0;;
+      verdict_stdout) printf 'STATUS: complete\\nDONE\\nAC_DONE: slice APPROVE\\n'; exit 0;;
       blocked)  printf 'BLOCKED: do I own ~/opt/cfengine-dev?\\n' > "$report"; echo "BLOCKED: do I own ~/opt/cfengine-dev?"; exit 0;;
       partial)  printf 'STATUS: working\\nhalf\\n' > "$report"; echo "written: $report"; exit 0;;
       nothing)  exit 0;;
@@ -613,6 +614,13 @@ class TestDispatch(Base):
     def test_bad_perm_is_usage(self):
         r = self.dispatch("--perm", "yolo")
         self.assertEqual(r.returncode, 2)
+
+    def test_recovered_verdict_keeps_one_done_before_verdict(self):
+        r = self.dispatch(mode="verdict_stdout")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = Path(self.record()["report"]).read_text()
+        self.assertEqual(text.splitlines()[-2:], ["DONE", "AC_DONE: slice APPROVE"])
+        self.assertEqual(text.splitlines().count("DONE"), 1)
 
     def test_stdout_only_is_recovered_with_a_warning(self):
         r = self.dispatch(mode="stdout")

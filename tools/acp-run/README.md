@@ -941,3 +941,12 @@ Go model selection through `--set model=...` is refused. Unknown Go models fail
 closed until classified. This does not restrict other providers' models.
 `acp-dispatch` supplies the flag only for an explicit bounded advisory role.
 See [context hygiene](../../docs/context-hygiene.md) for native V2 compaction.
+
+Identity-guard corrections (2026-10-30): the hook command shell-quotes its path. Nested launches verify
+the inherited hook configuration and reinstall missing pairs instead of trusting the email marker alone.
+Credential-bearing counted keys remain refused for every agent: converting them to PARAMETERS would
+make them readable to agents that filter KEY names, so this conservative transport rule is shared.
+
+On 2026-10-31 (PR 175), the identity-hook exemption began requiring the exact expected guard path
+and its canonical shell quoting. A path containing shell syntax followed by `/../` cannot gain an
+exemption through lexical path normalization.

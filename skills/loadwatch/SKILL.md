@@ -89,7 +89,7 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
    `vm_stat` compressor delta each 20 s; it is sent when churn stays above the `admit` limit for 180 s
    (`LW_CHURN_SUSTAIN_S`), to you at most hourly and to Hermes every 6 h. `admit` already holds new
    `bg`/`acp-dispatch` work, so the churn is from running or bypass work: find the top memory users with
-   `ps -axo pid,rss,command -m | head` (not only the CPU list in the line), then section 3 as usual. The
+   `/bin/ps -axo pid,rss,command -m | head` (not only the CPU list in the line), then section 3 as usual. The
    alert opens no incident and kills nothing; the Standing exceptions below only change the advice (the line
    says so when Grok, Chrome or WindowServer is in its top 3), never whether you investigate.
 
@@ -97,8 +97,20 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
 
 Verify against the processes themselves, not against memory or the brief's guess (standing order 4).
 
-1. **Who uses the CPU:** `ps -axo pid,ppid,%cpu,state,command -r | ghead -20`. Map each heavy process to a
-   session: `~/src/djbclark-ade/skills/session-finder/fleet.py list`, and `fleet.py show <id>`.
+1. **Who uses the CPU: call `/bin/ps` and `/usr/bin/top` by full path, never bare `ps`/`top`.** In some agent
+   harnesses (omp, 2026-11-01) bare `ps` and `top` are shell builtins with wrong numbers: builtin `ps` showed 11 s
+   of CPU and ~0% for an `opencode serve` that `/bin/ps` showed at 7 min 42 s and 60%, and it hid `mds` (87%),
+   Finder (61%) and a semgrep hook (130%), so a watcher reported "nothing heavy" during a load of 50 (`type -a ps`
+   tells). And `%cpu` from `ps` is a decaying average: measure a window with
+   `/usr/bin/top -l 2 -s 5 -o cpu -n 30 -stats pid,command,cpu,th,state,time` (read the second sample) and add
+   `kernel_task` plus the `sys` share. High `sys` with a busy `kernel_task` is a lead, not a diagnosis: confirm
+   memory compression before calling it that, with `load-watch admit --json` (`mem_churn_pages_s`) or two
+   `vm_stat` reads a few seconds apart (Compressions, Decompressions and Pageins deltas). `kernel_task` also takes
+   CPU on purpose to cool the machine (`pmset -g therm` then shows a thermal or performance warning level; with none
+   it prints "No thermal warning level has been recorded") and for other kernel work, and none of these rules out a
+   build or test: still read the process list below for one.
+   Then `/bin/ps -axo pid,ppid,%cpu,state,etime,time,command -r | ghead -20` for parents and ages. Map each heavy
+   process to a session: `~/src/djbclark-ade/skills/session-finder/fleet.py list`, and `fleet.py show <id>`.
 2. **Load without CPU:** processes in state `U` (stuck in disk or network wait, unkillable: the AFS case on
    2026-10-18), swap (`sysctl vm.swapusage`), and processes runnable at background priority (2026-10-18's
    load 110 was orphaned scans). `sample.log`'s `sustained load` line already counts all three.
