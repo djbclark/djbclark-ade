@@ -194,21 +194,24 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
 - `~/.local/state/bigteam` (11 GB, 2026-10-31): task dirs of finished fan-outs, holding reports
   that docs and memory cite, plus repo checkouts. With the operator's go, run
   `scripts/bigteam-prune.py` (dry run; `--apply` to act). It deletes directories, so every check
-  fails closed: any error or doubt keeps the checkout, and safety is re-checked right before each
-  deletion. It only touches real task dirs (a symlink, or anything resolving outside the root, is
+  fails closed: any error or doubt keeps the checkout, and right before each deletion the task dir
+  is re-judged (still a real dir, untouched since planning, no `CLAIM`, no unfinished job) and the
+  checkout's safety is re-checked. It only touches real task dirs (a symlink, or anything resolving outside the root, is
   skipped) a week or more old by the dir's own mtime, with no unfinished job record and no `CLAIM`
   file (a `CLAIM` that records DONE still blocks). All `GIT_*` environment variables are cleared
   for every git call, and git must report the checkout as its own top level. A checkout is kept
   when anything in it changed in the last 7 days (dir, index, HEAD, HEAD reflog, `FETCH_HEAD`), a
   rebase, merge, cherry-pick, revert or bisect is in progress, it has submodules, a tracked file
-  is marked assume-unchanged or skip-worktree, it has no remote, a remote URL is a local path
-  inside the bigteam root (sibling checkouts that fetch each other would count each other's
-  unpushed commits as pushed), the git dir holds anything beyond git's standard entries (a note, a
+  is marked assume-unchanged or skip-worktree, it has no remote, a remote URL is, or might
+  be, a path inside the bigteam root (`file://` URLs are percent-decoded as git does, scp-like and
+  ssh hosts resolved with `ssh -G`, a URL naming this machine or one the script cannot fully
+  resolve counts; sibling checkouts that fetch each other would count each other's unpushed
+  commits as pushed), the git dir holds anything beyond git's standard entries (a note, a
   custom hook, an LFS store, a customised `info/exclude`; `.git/config` is neither judged nor
   preserved), or `git status --porcelain=v1 -z --ignored` (untracked files forced on, submodules
   never ignored, whatever the repo's config says) lists anything but ignored paths. An **ignored**
   path only passes when it is a known generated directory (`node_modules .venv venv __pycache__
-  .pytest_cache .mypy_cache .ruff_cache`) with no nested git repo and no unreadable
+  .pytest_cache .mypy_cache .ruff_cache`) with no nested git repo (a `.git` entry or a bare repository's HEAD+objects+refs) and no unreadable
   subdirectory; any other ignored file (a report, `out.rc`, a database, a scratch repo, anything
   under `.cache`) keeps the checkout. It removes a **linked worktree** with `git worktree remove`
   (no `--force`) from its main repository (its branch stays there) when its HEAD is on a

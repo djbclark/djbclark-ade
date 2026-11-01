@@ -25,6 +25,12 @@ def g(cwd, *args, env=None):
     return r.stdout.strip()
 
 
+def rm(prune, c):
+    """prune.remove with the task dir (the checkout's parent) judged eligible right now."""
+    task = c.parent
+    return prune.remove(c, task, {task: task.stat().st_mtime})
+
+
 def commit(repo, name, text="x\n", msg=None):
     (Path(repo) / name).write_text(text)
     g(repo, "add", "-A")
@@ -81,7 +87,7 @@ def test_clean_pushed_linked_worktree_is_removed_and_branch_kept(prune, tmp_path
     g(main, "worktree", "add", "-q", "-b", "worker", str(wt))
     ok, why = prune.safe(wt)
     assert ok, why
-    assert prune.remove(wt) == (True, "worktree removed")
+    assert rm(prune, wt) == (True, "worktree removed")
     assert not wt.exists()
     assert "worker" in g(main, "branch", "--list", "worker")
 
@@ -92,7 +98,7 @@ def test_detached_head_commit_is_kept(prune, tmp_path, world):
     commit(c, "secret", "detached work\n")
     ok, why = prune.safe(c)
     assert not ok and "not on a remote" in why
-    assert prune.remove(c)[0] is False
+    assert rm(prune, c)[0] is False
     assert c.exists()
 
 
@@ -130,7 +136,7 @@ def test_clone_with_external_worktree_is_kept(prune, tmp_path, world):
     g(c, "worktree", "add", "-q", "-b", "other", str(ext))
     ok, why = prune.safe(c)
     assert not ok and "worktrees" in why
-    assert prune.remove(c)[0] is False
+    assert rm(prune, c)[0] is False
     assert c.exists() and ext.exists()
 
 
@@ -143,7 +149,7 @@ def test_ignored_report_with_odd_name_is_kept(prune, tmp_path, world, fname):
     assert g(c, "status", "--porcelain", "--ignored")  # git does list it (quoted); the script must still see it
     ok, why = prune.safe(c)
     assert not ok and "ignored" in why
-    assert prune.remove(c)[0] is False
+    assert rm(prune, c)[0] is False
     assert (c / fname).exists()
 
 
@@ -173,7 +179,7 @@ def test_untracked_file_seen_despite_show_untracked_no(prune, tmp_path, world):
     assert g(c, "status", "--porcelain") == ""  # the config really hides it
     ok, why = prune.safe(c)
     assert not ok and "untracked" in why
-    assert prune.remove(c)[0] is False
+    assert rm(prune, c)[0] is False
 
 
 def test_submodule_checkout_is_kept(prune, tmp_path, world):
@@ -283,7 +289,7 @@ def test_linked_worktree_detached_reflog_only_commit_is_kept(prune, tmp_path, wo
     g(wt, "checkout", "-q", "--detach", "origin/main")
     ok, why = prune.safe(wt)
     assert not ok and "reflog" in why
-    assert prune.remove(wt)[0] is False
+    assert rm(prune, wt)[0] is False
     assert wt.exists()
     assert x  # the commit is only in the worktree's HEAD reflog
 
@@ -295,7 +301,7 @@ def test_linked_worktree_with_per_worktree_ref_is_kept(prune, tmp_path, world):
     g(wt, "checkout", "-q", "--detach", "origin/main")
     ok, why = prune.safe(wt)
     assert not ok and "per-worktree refs" in why
-    assert prune.remove(wt)[0] is False
+    assert rm(prune, wt)[0] is False
     assert wt.exists()
 
 
@@ -304,7 +310,7 @@ def test_clean_detached_linked_worktree_is_removed_and_says_no_branch(prune, tmp
     ok, why = prune.safe(wt)
     assert ok, why
     assert "detached" in why and "branch kept" not in why
-    assert prune.remove(wt) == (True, "worktree removed")
+    assert rm(prune, wt) == (True, "worktree removed")
 
 
 def test_linked_worktree_commit_kept_on_its_branch_is_removed(prune, tmp_path, world):
@@ -370,7 +376,7 @@ def test_unusual_git_dir_content_keeps_the_clone(prune, tmp_path, world, what):
         (gd / "config.worktree").write_text("[core]\n")
     ok, why = prune.safe(c)
     assert not ok and "git dir" in why
-    assert prune.remove(c)[0] is False
+    assert rm(prune, c)[0] is False
     assert c.exists()
 
 
@@ -403,7 +409,7 @@ def test_failed_rmtree_is_reported_not_counted(prune, tmp_path, world, monkeypat
         raise OSError("disk says no")
 
     monkeypatch.setattr(prune.shutil, "rmtree", boom)
-    ok, msg = prune.remove(c)
+    ok, msg = rm(prune, c)
     assert ok is False and "half deleted" in msg
 
 
@@ -422,3 +428,148 @@ def test_second_apply_is_refused_while_the_lock_is_held(prune, tmp_path, world, 
     fd = prune.take_lock()
     assert fd is not None  # released: a later run may take it
     os.close(fd)
+
+
+# ---- round 4 (local Codex review of c7bccd76: three P1s) --------------------------------------------------------
+
+
+def _siblings_with_remote(prune, tmp_path, world, url_for):
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    commit(a, "z", "only here\n")
+    g(b, "remote", "add", "sib", url_for(a))
+    return a, b
+
+
+def test_percent_encoded_file_url_remote_inside_root_is_kept(prune, tmp_path, world):
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    # git decodes %XX in file:// URLs: .../%62t/... is .../bt/... (the encoded spelling does not exist on disk)
+    enc = str(a).replace("/bt/", "/%62t/")
+    assert enc != str(a)
+    g(b, "remote", "add", "sib", f"file://{enc}")
+    assert "%62t" in (prune.local_remote_inside_root(b) or "")
+    ok, why = prune.safe(b)
+    assert not ok and "bigteam root" in why
+
+
+def test_file_url_with_foreign_host_or_helper_transport_cannot_be_resolved_and_is_kept(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    for url in ("file://somehost/tmp/x", "ext::sh -c true", "weird://x/y", "hg::file:///tmp/x"):
+        g(c, "remote", "add", "odd", url)
+        why = prune.local_remote_inside_root(c)
+        assert why and "cannot be resolved" in why, url
+        g(c, "remote", "remove", "odd")
+
+
+@pytest.mark.parametrize("url", ["https://github.com/o/r.git", "git@github.com:o/r.git", "ssh://git@github.com/o/r.git"])
+def test_ordinary_network_remotes_do_not_keep_a_clone(prune, tmp_path, world, url, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h: h)
+    g(c, "remote", "add", "gh", url)
+    assert prune.local_remote_inside_root(c) is None
+
+
+@pytest.mark.parametrize("url", ["ssh://localhost/tmp/x", "me@localhost:tmp/x", "git://127.0.0.1/x", "http://[::1]/x"])
+def test_network_urls_to_this_machine_are_kept(prune, tmp_path, world, url, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h: h)
+    g(c, "remote", "add", "loc", url)
+    assert prune.local_remote_inside_root(c)
+
+
+def test_ssh_alias_resolving_to_this_machine_is_kept(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h: "localhost")
+    g(c, "remote", "add", "alias", "myalias:work/x")
+    assert prune.local_remote_inside_root(c)
+
+
+def test_bare_repository_inside_generated_dir_keeps_the_checkout(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    commit(c, ".gitignore", "node_modules/\n")
+    g(c, "push", "-q", "origin", "HEAD:main")
+    bare = c / "node_modules/cache/scratch.git"
+    bare.parent.mkdir(parents=True)
+    g(tmp_path, "init", "-q", "--bare", str(bare))
+    ok, why = prune.safe(c)
+    assert not ok and "ignored" in why
+    assert rm(prune, c)[0] is False
+    assert bare.exists()
+
+
+def test_bare_repository_as_the_generated_dir_itself_keeps_the_checkout(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    commit(c, ".gitignore", "venv/\n")
+    g(c, "push", "-q", "origin", "HEAD:main")
+    g(tmp_path, "init", "-q", "--bare", str(c / "venv"))
+    assert prune.ignored_ok(c, "venv/") is False
+
+
+def _planned(prune, tmp_path, world):
+    c = make_clone(tmp_path, world)
+    task = c.parent
+    baseline = {task: task.stat().st_mtime}
+    return c, task, baseline
+
+
+def test_claim_added_after_planning_stops_the_deletion(prune, tmp_path, world):
+    c, task, baseline = _planned(prune, tmp_path, world)
+    (task / "CLAIM").write_text("working\n")
+    ok, msg = prune.remove(c, task, baseline)
+    assert not ok and "no longer eligible" in msg
+    assert c.exists()
+
+
+def test_unfinished_job_added_after_planning_stops_the_deletion(prune, tmp_path, world):
+    c, task, baseline = _planned(prune, tmp_path, world)
+    (task / "jobs").mkdir()
+    (task / "jobs/j.json").write_text("{}")
+    ok, msg = prune.remove(c, task, baseline)
+    assert not ok and "no longer eligible" in msg
+    assert c.exists()
+
+
+def test_task_dir_touched_after_planning_stops_the_deletion(prune, tmp_path, world):
+    c, task, baseline = _planned(prune, tmp_path, world)
+    (task / "new-notes.txt").write_text("someone is here\n")
+    ok, msg = prune.remove(c, task, baseline)
+    assert not ok and "changed since planning" in msg
+    assert c.exists()
+
+
+def test_task_dir_turned_into_a_symlink_after_planning_stops_the_deletion(prune, tmp_path, world):
+    c, task, baseline = _planned(prune, tmp_path, world)
+    moved = tmp_path / "moved"
+    task.rename(moved)
+    task.symlink_to(moved)
+    ok, msg = prune.remove(c, task, baseline)
+    assert not ok and "no longer eligible" in msg
+    assert (moved / "clone").exists()
+
+
+def test_two_checkouts_in_one_task_are_both_removed(prune, tmp_path, world, monkeypatch, capsys):
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    monkeypatch.setattr(sys, "argv", ["x", "--apply"])
+    prune.main()
+    assert not a.exists() and not b.exists()
+    assert capsys.readouterr().out.count("REMOVED") == 2
+
+
+def test_claim_appearing_between_two_removals_keeps_the_second(prune, tmp_path, world, monkeypatch, capsys):
+    a = make_clone(tmp_path, world, task="t1", name="a")
+    b = make_clone(tmp_path, world, task="t1", name="b")
+    real = prune._remove
+
+    def remove_then_claim(c):
+        res = real(c)
+        (c.parent / "CLAIM").write_text("a session just started here\n")
+        return res
+
+    monkeypatch.setattr(prune, "_remove", remove_then_claim)
+    monkeypatch.setattr(sys, "argv", ["x", "--apply"])
+    prune.main()
+    out = capsys.readouterr().out
+    assert out.count("REMOVED") == 1 and "no longer eligible" in out
+    assert sum(p.exists() for p in (a, b)) == 1

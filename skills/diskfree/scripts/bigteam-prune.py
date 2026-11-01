@@ -13,10 +13,13 @@ old, with no CLAIM file (a CLAIM that records DONE still blocks) and no unfinish
     FETCH_HEAD), and no rebase, merge, cherry-pick, revert, bisect or sequencer is in progress;
   - `git status --porcelain=v1 -z --ignored=matching` run with untracked files forced on and submodules never ignored
     lists nothing but ignored paths; no tracked file is marked assume-unchanged or skip-worktree; no submodule;
-  - at least one remote is configured, and no remote URL is a local path inside the bigteam root (sibling checkouts
-    that fetch each other would count each other's unpushed commits as "on a remote");
+  - at least one remote is configured, and no remote URL (fetch or push, insteadOf applied) is, or might be, a path
+    inside the bigteam root (sibling checkouts that fetch each other would count each other's unpushed commits as "on
+    a remote"): `file://` URLs are percent-decoded as git does, scp-like `host:path` and ssh hosts are resolved with
+    `ssh -G`, a URL naming this machine keeps the checkout, and a URL the script cannot fully resolve (`x::y` helper
+    transports, odd schemes, `file://otherhost/...`) keeps it too;
   - an IGNORED path is only allowed when it is a known generated directory (node_modules .venv venv __pycache__
-    .pytest_cache .mypy_cache .ruff_cache) holding no nested git repository and no unreadable subdirectory; any other
+    .pytest_cache .mypy_cache .ruff_cache) holding no nested git repository and no unreadable subdirectory and no bare repository (HEAD+objects+refs) anywhere inside; any other
     ignored file or directory (a report, an `out.rc`, a database, a scratch repo, anything under `.cache`) keeps the
     checkout;
   - the git dir holds only git's standard entries (a note, a custom hook, an LFS store, a customised info/exclude in
@@ -29,8 +32,9 @@ old, with no CLAIM file (a CLAIM that records DONE still blocks) and no unfinish
     detached HEAD too) or reflog is missing from the remote-tracking refs.
 "On a remote" means the local remote-tracking refs; they are never fetched or verified, so a branch deleted upstream, or
 a remote that is a local path outside the root, still counts. A repository borrowing objects from a clone
-(`git clone --shared`, objects/info/alternates) cannot be detected from the clone's side. Safety is re-checked right
-before each deletion; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
+(`git clone --shared`, objects/info/alternates) cannot be detected from the clone's side. Right before each deletion the task
+dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
+CLAIM, no unfinished job record) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
 Everything kept is printed with its reason.
 
@@ -38,13 +42,16 @@ bigteam-prune.py [--apply]     (without --apply: dry run, prints the plan)
 """
 import json
 import os
+import ipaddress
 import shutil
+import socket
 import fcntl
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 B = Path.home() / ".local/state/bigteam"
 MIN_AGE = 7 * 86400
@@ -101,7 +108,16 @@ def task_dirs():
 
 def finished_dir(d):
     try:
-        if time.time() - d.stat().st_mtime < MIN_AGE or os.path.lexists(d / "CLAIM"):
+        if time.time() - d.stat().st_mtime < MIN_AGE:
+            return False
+    except OSError:
+        return False
+    return unclaimed_and_jobs_done(d)
+
+
+def unclaimed_and_jobs_done(d):
+    try:
+        if os.path.lexists(d / "CLAIM"):
             return False
         jobs = d / "jobs"
         if jobs.is_symlink():
@@ -145,9 +161,9 @@ def scan(c):
 
 
 def ignored_ok(c, rel):
-    """An ignored path is expendable only when it is a real generated directory with no nested git repository and no
-    unreadable subdirectory (a nested repo could hide there). Generic names like .cache are not on the list: an agent
-    may write a report under them."""
+    """An ignored path is expendable only when it is a real generated directory with no nested git repository (a `.git`
+    entry, or a bare repository's HEAD+objects+refs) and no unreadable subdirectory (a nested repo could hide there).
+    Generic names like .cache are not on the list: an agent may write a report under them."""
     rel = rel.rstrip("/")
     if rel.rsplit("/", 1)[-1] not in GENERATED:
         return False
@@ -159,18 +175,87 @@ def ignored_ok(c, rel):
         raise e
 
     try:
-        for _root, dirs, files in os.walk(p, onerror=fail):
+        for root, dirs, files in os.walk(p, onerror=fail):
             if ".git" in dirs or ".git" in files:
                 return False
+            if "HEAD" in files and "objects" in dirs and "refs" in dirs:
+                return False  # a bare repository: its commits are invisible to the outer checkout's checks
     except OSError:
         return False
     return True
 
 
+LOCAL_HOSTS = {"", "localhost", "localhost.localdomain", "0.0.0.0", "::", "::1"}
+SSH_SCHEMES = {"ssh", "git+ssh", "ssh+git"}
+NET_SCHEMES = {"http", "https", "ftp", "ftps", "git"} | SSH_SCHEMES
+
+
+def host_is_local(host):
+    host = host.strip("[]").lower()
+    if host in LOCAL_HOSTS:
+        return True
+    try:
+        if ipaddress.ip_address(host).is_loopback or ipaddress.ip_address(host).is_unspecified:
+            return True
+    except ValueError:
+        pass
+    mine = {socket.gethostname().lower(), socket.getfqdn().lower()}
+    mine |= {m.split(".")[0] for m in mine}
+    return host in mine
+
+
+def ssh_real_host(host):
+    """The HostName `ssh -G` resolves an alias to (config only, no connection); the alias itself if that fails."""
+    try:
+        r = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=10, env=git_env(), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return host
+    if r.returncode:
+        return host
+    for ln in r.stdout.splitlines():
+        if ln.lower().startswith("hostname "):
+            return ln.split(None, 1)[1].strip()
+    return host
+
+
+def classify_url(url):
+    """('remote', None) for a network URL to another host; ('path', [raw paths]) for something git reads from this
+    machine (a plain path, `file://` with git's percent-decoding, a local host); ('unknown', None) for anything this
+    script cannot fully resolve (helper transports `x::y`, odd schemes, unparsable URLs): the caller keeps the clone."""
+    if not url:
+        return "unknown", None
+    try:
+        if "://" in url:
+            parts = urlsplit(url)
+            scheme = parts.scheme.lower()
+            if scheme == "file":
+                if parts.netloc.lower() not in ("", "localhost"):
+                    return "unknown", None
+                return "path", [parts.path, unquote(parts.path)]
+            if scheme in NET_SCHEMES:
+                host = parts.hostname or ""
+                if scheme in SSH_SCHEMES and host:
+                    host = ssh_real_host(host)
+                return ("unknown", None) if host_is_local(host) else ("remote", None)
+            return "unknown", None
+        head = url.split("/", 1)[0]
+        if "::" in head and not head.startswith("["):
+            return "unknown", None
+        if ":" in head:  # scp-like [user@]host:path
+            host = head.rsplit(":", 1)[0].rsplit("@", 1)[-1]
+            if len(host.strip("[]")) <= 1:
+                return "unknown", None  # a drive letter or nonsense
+            return ("unknown", None) if host_is_local(ssh_real_host(host.strip("[]"))) else ("remote", None)
+        return "path", [url]
+    except ValueError:
+        return "unknown", None
+
+
 def local_remote_inside_root(c):
-    """The first remote URL of c that is a local path resolving inside the bigteam root, else None. Sibling checkouts
-    that fetch each other would otherwise each count the other's unpushed commits as 'on a remote'. Fails closed: a
-    remote list that cannot be read counts as local."""
+    """A reason when a remote of c (fetch or push URL, insteadOf applied) is, or might be, a path inside the bigteam
+    root, else None. Sibling checkouts that fetch each other would otherwise each count the other's unpushed commits as
+    'on a remote'. git's own URL rules are followed (`file://` percent-decoding, scp-like `host:path`); a URL the
+    script cannot fully resolve counts as local. Fails closed: an unreadable remote list counts as local."""
     rc, names = git(c, "remote")
     if rc:
         return "unreadable"
@@ -182,11 +267,18 @@ def local_remote_inside_root(c):
                 return "unreadable"
             for url in urls.splitlines():
                 url = url.strip()
-                if not url or (("://" in url) and not url.startswith("file://")):
+                kind, paths = classify_url(url)
+                if kind == "remote":
                     continue
-                path = url[len("file://"):] if url.startswith("file://") else url
-                for cand in {os.path.realpath(path), os.path.realpath(os.path.join(str(c), path))}:
-                    if cand == root or cand.startswith(root + os.sep):
+                if kind == "unknown":
+                    return f"{url or '(empty)'} (cannot be resolved)"
+                for path in paths:
+                    try:
+                        path = os.path.expanduser(path)
+                        cands = {os.path.realpath(path), os.path.realpath(os.path.join(str(c), path))}
+                    except (OSError, ValueError):
+                        return f"{url} (cannot be resolved)"
+                    if any(cand == root or cand.startswith(root + os.sep) for cand in cands):
                         return url
     return None
 
@@ -347,12 +439,45 @@ def safe(c):
     return True, "clean; commits on a remote" + note
 
 
-def remove(c):
-    """(removed, message). Re-checks safety right before deleting. A clone that fails part way through rmtree is left
-    half deleted, but it passed safe(), so every commit in it is on a remote and nothing in it was a report."""
+def task_still_eligible(c, task, baseline):
+    """(ok, why): the task dir that held c at planning time is still a real, unclaimed, finished task dir nobody has
+    touched since. Its mtime must equal the planning-time value (our own earlier removals update it through
+    `baseline`), so a new CLAIM, job record or any new entry makes it differ. Fails closed."""
+    try:
+        if task.is_symlink() or not task.is_dir() or task.resolve().parent != root_resolved():
+            return False, "task dir is no longer a real directory under the root"
+        if not c.resolve().is_relative_to(task.resolve()):
+            return False, "checkout is not inside its task dir"
+        if task not in baseline or task.stat().st_mtime != baseline[task]:
+            return False, "task dir changed since planning"
+    except (OSError, RuntimeError):
+        return False, "task dir unreadable"
+    if not finished_dir(task):
+        return False, "task dir is claimed, has an unfinished job or is too recent"
+    return True, ""
+
+
+def remove(c, task, baseline):
+    """(removed, message). Re-checks the task's eligibility and the checkout's safety right before deleting. A clone
+    that fails part way through rmtree is left half deleted, but it passed safe(), so every commit in it is on a
+    remote and nothing in it was a report."""
+    ok, why = task_still_eligible(c, task, baseline)
+    if not ok:
+        return False, f"no longer eligible: {why}"
     ok, why = safe(c)
     if not ok:
         return False, f"no longer safe: {why}"
+    try:
+        res = _remove(c)
+    finally:
+        try:
+            baseline[task] = task.stat().st_mtime  # our own removal changes the task dir's mtime
+        except OSError:
+            baseline.pop(task, None)
+    return res
+
+
+def _remove(c):
     if (c / ".git").is_file():  # a linked worktree: remove through its main repository
         rc, common = git(c, "rev-parse", "--path-format=absolute", "--git-common-dir")
         if rc:
@@ -402,20 +527,25 @@ def main():
             print("another bigteam-prune --apply holds the lock (or it cannot be taken); nothing done", file=sys.stderr)
             sys.exit(3)
     plan, kept, freed = [], [], 0
+    baseline = {}  # task dir -> its mtime when it was judged finished
     for d in task_dirs():
         if not finished_dir(d):
             continue
+        try:
+            baseline[d] = d.stat().st_mtime
+        except OSError:
+            continue
         for c in checkouts(d):
             ok, why = safe(c)
-            (plan if ok else kept).append((c, size_kb(c), why))
-    for c, size, why in plan:
-        ok, res = remove(c) if apply else (True, "would remove")
+            (plan if ok else kept).append((c, d, size_kb(c), why))
+    for c, d, size, why in plan:
+        ok, res = remove(c, d, baseline) if apply else (True, "would remove")
         if ok and apply:
             freed += size
         print(f"{'REMOVED' if apply and ok else ('KEPT' if apply else 'PLAN')} {size/1024:7.1f} MB {c} ({res})")
-    for c, size, why in kept:
+    for c, d, size, why in kept:
         print(f"KEEP    {size/1024:7.1f} MB {c} ({why})")
-    print(f"{'freed' if apply else 'would free'}: {freed/1048576 if apply else sum(s for _, s, _ in plan)/1048576:.2f} GB; kept {len(kept)} checkout(s)")
+    print(f"{'freed' if apply else 'would free'}: {freed/1048576 if apply else sum(p[2] for p in plan)/1048576:.2f} GB; kept {len(kept)} checkout(s)")
     if lock is not None:
         os.close(lock)
 
