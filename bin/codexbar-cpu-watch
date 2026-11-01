@@ -6,26 +6,33 @@
     codexbar-cpu-watch install [--ade DIR]       the launchd job (launchd/com.djbclark.codexbar-cpu-watch.plist)
     codexbar-cpu-watch uninstall
 
-A sample takes two `ps` reads WINDOW_S apart over CodexBar's process tree (every process whose executable
-is inside a `CodexBar.app/Contents/{MacOS,Helpers}/CodexBar*`, plus all their descendants, e.g. the
+A sample takes two `ps` reads WINDOW_S apart over CodexBar's process tree (every process whose argv[0], the
+first whitespace-free token of its command line, is a `.../CodexBar.app/Contents/{MacOS,Helpers}/CodexBar*`, plus all their descendants, e.g. the
 codex/claude probes it spawns) and turns the CPU-time delta into percent of one core. One JSON line per
 sample goes to ~/.local/state/codexbar-cpu-watch/samples.jsonl: total_pct, the top processes, and (on a spike,
 total at or above SPIKE_PCT) up to 15 of them.
 
-Privacy (adversary round 1, PR 202): a command line can carry a token, so no command line is ever stored. A
-process is logged as pid, percent, RSS, a short NAME (the executable's basename, plus the script's basename
-for node/python/bash-style interpreters) and its FLAG NAMES (`--port`, never `--port 1234` or `--token=x`;
-only `--word` or a single letter). The state dir is 0700 and every file in it 0600.
+Privacy (adversary rounds 1-2, PR 202): a command line can carry a token, so no command line is ever stored. A
+process is logged as pid, percent, RSS, a short NAME and its FLAG NAMES. The NAME is the executable's basename;
+for node/python/bash-style interpreters it adds the script's basename only when the script is the token right
+after argv[0] or ends in a script suffix (.js .mjs .cjs .ts .py .sh .rb .pl), so an option's separate value
+(`node --require sk-X app.js`) is never taken for the script: then the NAME is the interpreter alone. FLAG NAMES
+are `--word` or a single letter with any `=value` cut (`--port`, never `--port 1234` or `--token=x`). Known
+limit: a positional VALUE that itself looks like a flag (`--password --hunter2pw`) is logged as a flag name.
+Root matching reads argv[0], which a process sets itself (`exec -a`, a copied binary): it attributes, it does
+not authenticate; an app path containing a space is not matched (fails closed). The state dir is 0700 and
+every file in it 0600.
 
 Limits, all by design: it is a point sample every 5 minutes, so a spike shorter than the gap between samples
 can be missed; a process that is born AND exits inside the 3 s window (a probe CodexBar spawns and reaps) is
 not seen, so total_pct is a floor; on Linux procps TIME has whole-second resolution, so a 3 s window moves in
-33% steps. The log appends one line per sample (O_APPEND, no read of the old content) and rotates to
-samples.jsonl.1 past CBW_MAX_MB. launchd.out/err are emptied past 1 MB.
+33% steps. The log appends one line per sample (O_APPEND, no read of the old content) under an flock that also
+covers the rotation to samples.jsonl.1 past CBW_MAX_MB. launchd.out/err are emptied past 1 MB, failed samples included.
 
 Env: CBW_STATE_DIR, CBW_WINDOW_S (default 3), CBW_SPIKE_PCT (default 50), CBW_MAX_MB (default 5).
 """
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -46,10 +53,12 @@ WINDOW_S = float(os.environ.get("CBW_WINDOW_S", "3"))
 SPIKE_PCT = float(os.environ.get("CBW_SPIKE_PCT", "50"))
 MAX_BYTES = int(float(os.environ.get("CBW_MAX_MB", "5")) * 1024 * 1024)
 LAUNCHD_MAX_BYTES = 1024 * 1024
-# The executable, not any argument: an agent whose prompt mentions CodexBar is not a root.
-ROOT_RE = re.compile(r"^/(?:[^\n]*?/)?CodexBar\.app/Contents/(?:MacOS|Helpers)/CodexBar\w*(?:\s|$)")
+# argv[0] only: no whitespace may precede the app path, so an argument naming the app (`/usr/bin/vim
+# /x/CodexBar.app/...`) never makes its process a root.
+ROOT_RE = re.compile(r"^/[^\s]*?CodexBar\.app/Contents/(?:MacOS|Helpers)/CodexBar\w*(?:\s|$)")
 INTERPRETERS = {"node", "bash", "sh", "zsh", "uv", "env", "ruby", "perl", "deno", "bun"}
 SAFE_WORD = re.compile(r"[\w./~+-]+")
+SCRIPT_SUFFIX = (".js", ".mjs", ".cjs", ".ts", ".py", ".sh", ".rb", ".pl")
 FLAG_NAME = re.compile(r"--[A-Za-z][\w-]{0,40}|-[A-Za-z]")
 
 
@@ -66,16 +75,19 @@ def cputime_s(text):
 
 
 def label(cmd):
-    """A short name for a command line: executable basename (+ script basename for an interpreter). Never an argument value."""
+    """A short name for a command line: executable basename (+ script basename for an interpreter). Never an argument value.
+
+    The script is the first non-option token, taken only when it comes right after argv[0] or ends in a script
+    suffix; otherwise it may be an option's separate value, and the name is the interpreter alone."""
     toks = cmd.split()
     if not toks:
         return "?"
     name = os.path.basename(toks[0])
     if name in INTERPRETERS or re.fullmatch(r"[Pp]ython[\d.]*", name):
-        for t in toks[1:]:
+        for i, t in enumerate(toks[1:], start=1):
             if t.startswith("-"):
                 continue
-            if SAFE_WORD.fullmatch(t):
+            if SAFE_WORD.fullmatch(t) and (i == 1 or t.endswith(SCRIPT_SUFFIX)):
                 name = f"{name} {os.path.basename(t)}"
             break
     return name[:40]
@@ -170,19 +182,24 @@ def tidy_launchd_logs():
 
 
 def append(rec):
-    """One O_APPEND write of one line: concurrent writers never lose or tear a sample; no read of old content."""
+    """One O_APPEND write of one line; rotation and write under one flock, so two writers never lose history."""
     ensure_private_dir()
+    lock = os.open(STATE_DIR / ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        if LOG.stat().st_size > MAX_BYTES:
-            os.replace(LOG, LOG.with_name(LOG.name + ".1"))
-    except FileNotFoundError:
-        pass
-    fd = os.open(LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        os.write(fd, (json.dumps(rec, separators=(",", ":")) + "\n").encode())
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            if LOG.stat().st_size > MAX_BYTES:
+                os.replace(LOG, LOG.with_name(LOG.name + ".1"))
+        except FileNotFoundError:
+            pass
+        fd = os.open(LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, (json.dumps(rec, separators=(",", ":")) + "\n").encode())
+        finally:
+            os.close(fd)
     finally:
-        os.close(fd)
+        os.close(lock)
     tidy_launchd_logs()
 
 
@@ -190,8 +207,10 @@ def cmd_sample(a):
     try:
         rec = sample()
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
-        # No record: a failed ps must not read as "CodexBar is not running".
+        # No record: a failed ps must not read as "CodexBar is not running". launchd.err still gets its cap.
         print(f"codexbar-cpu-watch: sample failed: {e}", file=sys.stderr)
+        if STATE_DIR.is_dir():
+            tidy_launchd_logs()
         return 1
     append(rec)
     if a.verbose:
@@ -221,8 +240,19 @@ def read_tail(max_bytes=1 << 20):
     return recs
 
 
+def num(v, default=0.0):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+
 def fmt_proc(t):
-    return f"{t.get('pct', 0)}% pid {t.get('pid', '-')} {t.get('name') or str(t.get('cmd', ''))[:40]} {' '.join(t.get('flags') or [])}".rstrip()
+    """Only the fields this tool writes: a legacy `cmd` (round-1 records) is never printed."""
+    flags = [f for f in (t.get("flags") or []) if isinstance(f, str)]
+    return f"{num(t.get('pct'))}% pid {t.get('pid', '-')} {t.get('name') or '?'} {' '.join(flags)}".rstrip()
+
+
+def procs_of(r, key):
+    v = r.get(key)
+    return [t for t in v if isinstance(t, dict)] if isinstance(v, list) else []
 
 
 def cmd_report(a):
@@ -230,21 +260,25 @@ def cmd_report(a):
         print("no samples yet")
         return 1
     recs = read_tail()
-    spikes = sum(1 for r in recs if r.get("spike"))
+    spikes = sum(1 for r in recs if r.get("spike") is True)
     print(f"{len(recs)} samples scanned, {spikes} at or above {SPIKE_PCT:g}%  (log: {LOG})")
     for r in recs[-a.n:]:
-        top = (r.get("top") or [{}])[0]
-        mark = "SPIKE" if r.get("spike") else "     "
-        print(f"{r.get('ts', '?')} {mark} {r.get('total_pct', 0):6.1f}%  {r.get('procs', 0):2d} procs  top: {fmt_proc(top)[:90]}")
-        if r.get("spike"):
-            for t in (r.get("tree") or [])[:5]:
+        top = (procs_of(r, "top") or [{}])[0]
+        spike = r.get("spike") is True
+        mark = "SPIKE" if spike else "     "
+        print(f"{r.get('ts', '?')} {mark} {num(r.get('total_pct')):6.1f}%  {int(num(r.get('procs'))):2d} procs  top: {fmt_proc(top)[:90]}")
+        if spike:
+            for t in procs_of(r, "tree")[:5]:
                 print(f"      ppid {t.get('ppid', '-')}  {t.get('rss_mb', '?')} MB  {fmt_proc(t)[:110]}")
     return 0
 
 
-def is_linked_worktree(path):
-    """A linked worktree or pasture has a .git FILE; the primary checkout has a directory."""
-    return (path / ".git").is_file()
+def disposable_checkout(path):
+    """True for a checkout that will be removed: a linked worktree (.git is a FILE) or a cow pasture (under ~/.cow,
+    which has its own .git directory). The primary checkout is neither."""
+    path = Path(path).resolve()
+    cow = (HOME / ".cow").resolve()
+    return (path / ".git").is_file() or path == cow or cow in path.parents
 
 
 def cmd_install(a):
@@ -259,9 +293,9 @@ def cmd_install(a):
         print(f"removed {dest}")
         return 0
     ade = Path(a.ade).expanduser().resolve() if a.ade else ADE
-    if not a.ade and is_linked_worktree(ade):
-        print(f"codexbar-cpu-watch: {ade} is a linked worktree that will be removed; run install from the primary "
-              "checkout, or pass --ade DIR", file=sys.stderr)
+    if not a.ade and disposable_checkout(ade):
+        print(f"codexbar-cpu-watch: {ade} is a linked worktree or cow pasture that will be removed; run install from "
+              "the primary checkout, or pass --ade DIR", file=sys.stderr)
         return 2
     if not (ade / "bin" / "codexbar-cpu-watch").is_file():
         print(f"codexbar-cpu-watch: {ade}/bin/codexbar-cpu-watch not found", file=sys.stderr)

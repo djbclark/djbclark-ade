@@ -40,6 +40,10 @@ def test_tree_roots_are_the_executable_not_any_argument(cbw):
         5: proc(5, 4, "node /x/child-of-agent.js"),
         6: proc(6, 0, "vim /src/CodexBar/CodexBar.app/Contents/MacOS/CodexBar"),
         7: proc(7, 0, "/Users/x/src/CodexBar/CodexBar.app/Contents/MacOS/CodexBar"),
+        8: proc(8, 0, "/usr/bin/vim /src/CodexBar/CodexBar.app/Contents/MacOS/CodexBar"),
+        9: proc(9, 0, "/usr/bin/codesign -dv /Applications/CodexBar.app/Contents/MacOS/CodexBar"),
+        10: proc(10, 0, "/opt/homebrew/bin/omp --prompt /x/CodexBar.app/Contents/Helpers/CodexBarCLI"),
+        11: proc(11, 9, "/usr/bin/child-of-codesign"),
     }
     assert cbw.tree(procs, me=-1) == {1, 2, 3, 7}
 
@@ -58,7 +62,19 @@ def test_no_secret_reaches_the_record(cbw):
     assert not any("SECRET" in f for f in flags)
     assert cbw.label("node /home/u/tool/server.js --x") == "node server.js"
     assert cbw.label("bash -c TOKEN=abc123 run") == "bash"
-    assert cbw.label("/opt/Python -I /a/b/acp-run omp --k v") == "Python acp-run"
+    assert cbw.label("/opt/Python -I /a/b/s1_agy.py scan") == "Python s1_agy.py"
+
+
+@pytest.mark.parametrize("cmd", [
+    "node --require sk-SECRET server.js",
+    "node --token sk-SECRET server.js",
+    "python3 --key sk-SECRET script.py",
+    "uv --directory sk-SECRET run",
+    "env -u sk-SECRET cmd",
+    "/opt/Python -I sk-SECRET-acp-run omp",
+])
+def test_an_option_value_is_never_taken_for_the_script(cbw, cmd):
+    assert "SECRET" not in cbw.label(cmd)
 
 
 def test_sample_record_holds_no_command_line(cbw, monkeypatch):
@@ -99,7 +115,30 @@ def test_oversized_launchd_log_is_emptied_and_made_private(cbw, monkeypatch):
     assert out.stat().st_size == 0 and stat.S_IMODE(out.stat().st_mode) == 0o600
 
 
-def test_failed_ps_makes_no_record(cbw, monkeypatch, capsys):
+def test_failed_or_slow_ps_makes_no_record(cbw, monkeypatch, capsys):
+    """The real read_ps path: a non-zero rc or a timeout fails the sample, writes no record, says why."""
+    import subprocess
+
+    class A:
+        verbose = False
+    monkeypatch.setattr(cbw.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="1 0 10 0:00.10 x\n", stderr=""))
+    assert cbw.cmd_sample(A()) == 1
+
+    def slow(*a, **k):
+        raise subprocess.TimeoutExpired(a[0], 30)
+    monkeypatch.setattr(cbw.subprocess, "run", slow)
+    assert cbw.cmd_sample(A()) == 1
+    assert not cbw.LOG.exists()
+    err = capsys.readouterr().err
+    assert "ps failed (rc=1)" in err and "timed out" in err
+
+
+def test_failed_sample_still_caps_launchd_err(cbw, monkeypatch):
+    monkeypatch.setattr(cbw, "LAUNCHD_MAX_BYTES", 100)
+    cbw.STATE_DIR.mkdir(parents=True)
+    err = cbw.STATE_DIR / "launchd.err"
+    err.write_text("e" * 500)
+
     def boom():
         raise RuntimeError("ps failed (rc=1)")
     monkeypatch.setattr(cbw, "read_ps", boom)
@@ -107,21 +146,23 @@ def test_failed_ps_makes_no_record(cbw, monkeypatch, capsys):
     class A:
         verbose = False
     assert cbw.cmd_sample(A()) == 1
-    assert not cbw.LOG.exists()
+    assert err.stat().st_size == 0
 
 
 def test_report_skips_torn_and_old_shaped_lines(cbw, capsys):
     cbw.STATE_DIR.mkdir(parents=True)
     good = {"ts": "t", "total_pct": 80.0, "procs": 2, "spike": True,
             "top": [{"pid": 1, "pct": 80.0, "name": "CodexBar", "flags": ["--port"]}], "tree": [{"pid": 1, "pct": 80.0, "ppid": 0, "rss_mb": 5, "name": "CodexBar", "flags": []}]}
-    old = {"ts": "t0", "total_pct": 1.0, "procs": 1, "top": [{"pid": 2, "pct": 1.0, "cmd": "/old/CodexBar"}]}
-    cbw.LOG.write_text(json.dumps(old) + "\n" + '{"ts": "torn' + "\n" + "[1,2]\n" + json.dumps(good) + "\n")
+    old = {"ts": "t0", "total_pct": 1.0, "procs": 1, "top": [{"pid": 2, "pct": 1.0, "cmd": "/old/LEGACYCMD --token x"}]}
+    foreign = {"ts": "t1", "total_pct": "lots", "procs": None, "spike": True, "top": [1, "x"], "tree": "nope"}
+    cbw.LOG.write_text(json.dumps(old) + "\n" + '{"ts": "torn' + "\n" + "[1,2]\n" + json.dumps(foreign) + "\n" + json.dumps(good) + "\n")
 
     class A:
         n = 10
     assert cbw.cmd_report(A()) == 0
     out = capsys.readouterr().out
-    assert "2 samples scanned, 1 at or above" in out and "SPIKE" in out and "CodexBar --port" in out
+    assert "3 samples scanned, 2 at or above" in out and "CodexBar --port" in out
+    assert "LEGACYCMD" not in out
 
 
 def test_install_refuses_a_linked_worktree(cbw, tmp_path, monkeypatch, capsys):
@@ -139,3 +180,24 @@ def test_install_refuses_a_linked_worktree(cbw, tmp_path, monkeypatch, capsys):
         ade = None
     assert cbw.cmd_install(A()) == 2
     assert not calls and "linked worktree" in capsys.readouterr().err
+
+
+def test_install_refuses_a_cow_pasture(cbw, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cbw, "HOME", tmp_path)
+    past = tmp_path / ".cow" / "pastures" / "djbclark-ade" / "p1"
+    (past / "bin").mkdir(parents=True)
+    (past / ".git").mkdir()
+    (past / "bin" / "codexbar-cpu-watch").write_text("")
+    primary = tmp_path / "src" / "djbclark-ade"
+    (primary / ".git").mkdir(parents=True)
+    assert cbw.disposable_checkout(past) and not cbw.disposable_checkout(primary)
+    monkeypatch.setattr(cbw, "ADE", past)
+    monkeypatch.setattr(cbw.shutil, "which", lambda n: "/bin/true")
+    calls = []
+    monkeypatch.setattr(cbw.subprocess, "run", lambda *a, **k: calls.append(a))
+
+    class A:
+        cmd = "install"
+        ade = None
+    assert cbw.cmd_install(A()) == 2
+    assert not calls and "cow pasture" in capsys.readouterr().err
