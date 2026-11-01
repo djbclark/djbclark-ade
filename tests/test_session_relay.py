@@ -172,8 +172,51 @@ class TestRelayRules(unittest.TestCase):
                 for k, v in saved.items():
                     setattr(fleet, k, v)
             self.assertEqual([(s["sid"], s["pid"]) for s in out], [(self.SID, 95867), ("eeeeeeee-0000", 7)])    # the newest entry wins
+            self.assertEqual(out[0]["pids"], [95867, 68029])    # and the row still names every process it stands for
+            self.assertNotIn("pids", out[1])
             self.assertTrue(out[0]["self"])    # any process of the session being an ancestor makes it this session
             self.assertFalse(out[1]["self"])
+
+    def test_collapsed_row_keeps_its_older_process_out_of_the_process_scan(self) -> None:
+        # else the older process comes back from _proc_scan as a transcript-less `pidNNN` row (local review, PR 225)
+        names = ("herdr_json", "_launched", "_claude_sessions", "_other_herdr", "_pane_only", "_proc_scan", "_hermes_gateway",
+                 "_paseo_rows", "proc_table", "mark_busy", "ancestors")
+        saved = {k: getattr(fleet, k) for k in names}
+        seen: list[set[int]] = []
+        try:
+            fleet.herdr_json = lambda *a: {}
+            fleet._launched = lambda used: []
+            fleet._claude_sessions = lambda *a, **k: [fleet._rec(id="c795c830", sid=self.SID, pid=95867, pids=[95867, 68029])]
+            fleet._other_herdr = lambda *a: []
+            fleet._pane_only = lambda *a: ([], [])
+            fleet._proc_scan = lambda known, *a: seen.append(set(known)) or []
+            fleet._hermes_gateway = lambda: []
+            fleet._paseo_rows = lambda *a: []
+            fleet.proc_table = lambda: {}
+            fleet.mark_busy = lambda *a: None
+            fleet.ancestors = lambda: set()
+            fleet.sessions()
+        finally:
+            for k, v in saved.items():
+                setattr(fleet, k, v)
+        self.assertEqual(seen, [{95867, 68029}])
+
+    def test_sender_row_places_a_collapsed_row_by_its_nearest_process(self) -> None:
+        reg = sess(id="c795c830", sid=self.SID, pid=95867, pids=[95867, 68029], transcript="/t.jsonl", self=True)
+        scan = sess(id="pid68029", sid=None, pid=68029, transcript=None, chan=None, self=True)
+        with mock.patch.object(fleet, "ancestry", lambda: [68029, 1]):    # the caller runs under the OLDER process
+            self.assertIs(fleet.sender_row([scan, reg]), reg)
+        self.assertEqual(fleet.row_pids(reg), [95867, 68029])
+        self.assertEqual(fleet.row_pids(scan), [68029])
+
+    def test_busy_and_pid_check_cover_every_process_of_a_collapsed_row(self) -> None:
+        row = sess(id="c795c830", pid=95867, pids=[95867, 68029], host="terminal", chan=None, status="idle")
+        table = {95867: (1, "claude"), 68029: (1, "claude"), 70001: (68029, "sleep 600")}
+        fleet.mark_busy(row, table)
+        self.assertEqual(row["status"], "busy-background")    # the older process's background job counts
+        self.assertEqual(relay.pid_check(row, 68029), "same")
+        self.assertEqual(relay.pid_check(row, 95867), "same")
+        self.assertEqual(relay.pid_check(row, 1234), "changed")
 
     def test_find_by_herdr_pane_reaches_a_launch_row_and_prefers_the_unfinished_one(self) -> None:
         # a launch row has its pane only in chan; a reused pane lists the finished first launch too (2026-10-25)

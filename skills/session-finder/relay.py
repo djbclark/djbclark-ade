@@ -2947,7 +2947,7 @@ def pid_check(s, pid):
     (another TUI holds the pane id now). Membership, not a re-pick: tool children come and go. Every herdr row is judged so,
     fleet's own pid included; a row outside herdr (no pane to read) is judged by equality with fleet's pid."""
     if s.get("pid") and not (s.get("chan") or (None,))[0] == "herdr":
-        return "same" if s["pid"] == pid else "changed"
+        return "same" if pid in fleet.row_pids(s) else "changed"
     procs = herdr_pane_procs(s)
     if procs is None:
         return "error"
