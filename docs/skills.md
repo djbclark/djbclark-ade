@@ -28,22 +28,26 @@ the same skills through their own skills dir (`skill-everywhere`, README beside 
 **Not here, on purpose.** `1password` is private by decision and stays a real
 directory in `~/ops/site-private/skills/` (this repo is public).
 `tell-chief-of-staff` moved here on 2026-10-14 (operator ruling: public).
-Tool-managed skills (bailian-*, composio-cli, herdr, orca-*,
+Tool-managed skills (bailian-*, composio-cli,
 sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
+(The Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration` and the
+`computer-use` stub were removed from the machine on 2026-10-31; Orca and herdr are retired from djbclark-ade but stay installed and configured on the machine, untouched.)
 
 **Since when, and the rule.** This repo has been the canonical git copy of the
-orchestration and session-hygiene skills since 2026-10-08 (`herdr-tidy` and
-`autorename` joined that day) and of every hand-written skill since 2026-10-09.
+orchestration and session-hygiene skills since 2026-10-08 (`autorename` joined
+that day) and of every hand-written skill since 2026-10-09.
 **A new skill always goes here** (operator standing rule, 2026-10-09). **Edit a
 skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
-`/resume`, `/herdr-tidy` and `/orca-tidy` are thin Claude command wrappers in
-[`claude/commands/`](../claude/commands/).
+`/resume` and `/paseo-screen` are thin Claude command wrappers in
+[`claude/commands/`](../claude/commands/). The `herdr-tidy` and `reorg-orca`
+skills (and their `/herdr-tidy`, `/orca-tidy` wrappers) were retired from
+djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 
 ## Sessions and handoffs
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `autorename` | Titles the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex (in a herdr pane) or omp session like `/rename` and names its own tab (the Paseo tab, or the herdr tab label); with no argument it never renames a workspace or moves a tab (2026-10-30). `/autorename all` is herdr-only and refused in a Paseo-hosted agent (`herdr_place.py config` exits 2). omp needs the `omp-bridge.ts` extension symlinked into `~/.omp/agent/extensions/` and an omp restart. A once-per-session nudge asks for that title (Claude Code and zcode on UserPromptSubmit, Grok on Stop in `~/.grok/hooks/autorename.json`, cursor-agent via the `~/.claude/settings.json` hook it also loads, as `beforeSubmitPrompt`; Grok discards UserPromptSubmit context, hence Stop). Also owns the full herdr layout pass (`workspace-layout.md`). | `/autorename`; `/autorename all` runs the full herdr reorg (create and rename workspaces, move tabs; rename a tab only when its label is a single digit); "name this session". Special workspaces and their top-of-herdr order come from `~/.config/autorename/workspaces.conf`. Runs by itself as the last step of `/handoff`. |
+| `autorename` | Titles the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex (in a herdr pane) or omp session like `/rename` and names its own tab (the Paseo tab, or the herdr tab label); with no argument it never renames a workspace or moves a tab (2026-10-30). `/autorename all` is retired (2026-10-31) and refused in every host; `herdr_place.py` stays until the D4/D6 drain. omp needs the `omp-bridge.ts` extension symlinked into `~/.omp/agent/extensions/` and an omp restart. A once-per-session nudge asks for that title (Claude Code and zcode on UserPromptSubmit, Grok on Stop in `~/.grok/hooks/autorename.json`, cursor-agent via the `~/.claude/settings.json` hook it also loads, as `beforeSubmitPrompt`; Grok discards UserPromptSubmit context, hence Stop). `workspace-layout.md` is the record of the retired herdr layout pass. | `/autorename`; `/autorename all` is retired (2026-10-31) and refused in every host; it used to run the full herdr reorg (create and rename workspaces, move tabs; rename a tab only when its label is a single digit); "name this session". Special workspaces and their top-of-herdr order come from `~/.config/autorename/workspaces.conf`. Runs by itself as the last step of `/handoff`. |
 | `handoff` | Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation; its last step (9) clears this session with `self-slash "/new"`, which queues one `/baton` into the fresh session, or, on Paseo when the session runs on Fable, the quota guard says tight/critical or the operator asks for another model, runs `self-slash --finish --successor claude/claude-opus-5-5 --thinking high` (Sonnet 5.5 when the guard says tight; plain `/new` when the session already runs on the target model), a new agent that starts with `/baton` (2026-10-23) (skipped for a doc-only handoff, and never run by a sub-agent or dispatched slice, 2026-10-20). On Paseo the pre-`/clear` transcript is not kept by `paseo logs` once `/baton` runs (2026-10-20; UI unverified), so what the operator must read goes into the handoff document, the Tier 1 pointer and the hermes-ping. | `/handoff`; "do a handoff"; before ending a long session. |
 | `session-handoff` | Reads and writes the Tier 1 pointer (`SESSION_LOG.md`) for any git repo. | Runs at session start and end; "update session log". |
 | `baton` | Resumes a workspace from its Tier 1 pointer. | `/baton` or `/resume` at the start of a session. |
@@ -57,7 +61,6 @@ skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
 | `teach` | Walks today's one or two install-or-use items (mods, skills, built-ins, installed plugins) from the rollout checklist, one prompt at a time, and ticks them off. | `/teach`, `/teach 5`, `/teach list`; the 04:14 Hermes ping. |
 | `session-finder` | Finds which session is or ever was on a topic, where it lives, and how to continue it. | `/session-finder`, `/session-finder-all` (adds ended sessions); "tell the agent doing X ...". |
 | `helm` | Answers every waiting session of every TUI from one window. | `/helm`, `/helm-all`, `/helm auto`; "what needs me". |
-| `herdr-tidy` | Closes idle herdr panes safely and writes a ledger with the resume command. | `/herdr-tidy`, `/orca-tidy`; "which panes can I close". |
 
 ## Orchestration and routing
 
@@ -65,7 +68,7 @@ skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
 |---|---|---|
 | `bigteam` | Fans a prompt out across the agent TUIs with free quota: probes pools, slices the work, dispatches, integrates. | `/bigteam <prompt>`; "parallelize this". |
 | `model-routing` | Picks vendor x model x effort for a kind of work and reads `aiuse` pools. | Load before big multi-agent runs or when a quota window is tight. |
-| `fallback-chains` | Dated inventory of every failure chain (Hermes, cron, LiteLLM, herdr-ai, acp-run) plus the not-started single-system backlog, and the web search/fetch failover ladder (`web-get`) with its pause rule. | Load when asked about fallback chains; re-read live config and update the snapshot if it drifted. |
+| `fallback-chains` | Dated inventory of every failure chain (Hermes, cron, LiteLLM, acp-run) plus the not-started single-system backlog, and the web search/fetch failover ladder (`web-get`) with its pause rule. | Load when asked about fallback chains; re-read live config and update the snapshot if it drifted. |
 | `effort-routing` | Matches this session's own reasoning effort to the stretch of work. | Load when starting rote edits or dispatching subagents. |
 | `cow-workspaces` | Isolated workspaces as APFS copy-on-write pastures (`bin/cow-pasture`). | "give this agent its own workspace"; parallel work on a checkout under `~/src`. |
 | `dialogue` | Runs a multi-model dialogue (for example Grok, Fable, Astra) that produces one artifact with a final-word model: fixed rounds through pinned routes, footers with point ids and dissent, a final-word state-file gate, noise strip and protocol lint. | "have the models chat about it and write X"; "three-model dialogue". Script: `skills/dialogue/scripts/dialogue.py`. |
@@ -101,8 +104,8 @@ skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
 | `aws-rules` | Upstream AWS Agent Toolkit working rules plus the local setup facts (`aws-agent` profile, `us-east-1`, `AWS_MCP_PROXY_PROFILES`). | Load only when a task touches an AWS account; never always-on. |
 | `sudo-secretspec` | (Part of the sudo-secretspec project — canonical files live in `~/src/sudo-secretspec` (github.com/frdminc/sudo-secretspec, also the brew tap); this dir is a symlink, like `forgejo-ci`. The brew-installed copy under `/opt/homebrew` is ignored by the TUIs.) Use the privilege-separated `sudo-secretspec` client for managed credentials — declare, set, rotate, read, delete, or inject a secret into a child process — instead of touching a secret store directly; also covers the deliberately-not-exposed boundary and what must be asked of the operator. | "need an API key/token/password via secretspec"; "rotate that credential"; `sudo-secretspec --help`. |
 | `setup-modern-cli` | The replacement tables for the classic Unix tools — `cat`/`ls`/`find`/`grep`/`sed`/`awk`/`sort`/`join`/`cut`/`tr`/`wc`/`du`/`df`/`ps`/`diff`/`curl`/JSON/YAML/archives and the rest — split into **agent-safe** (non-interactive), **structured/stream data** (`mlr` for awk/sed/sort/join) and **human-interactive** (TUIs/fuzzy finders, never called from an agent), plus the BSD-vs-GNU portability answer (`gsort`/`gsed`/`uu-*`), the search ladder, token discipline, and the footguns. Entry file is short; the tables and the measured benchmark numbers are in `skills/setup-modern-cli/references/`. | Load before shell work in a repo, or when setting up a machine/repo toolchain; "modern CLI tools", "faster grep/find". |
-| `reorg-orca` | Reorganizes a cluttered Orca setup from the CLI and says which moves Orca cannot do yet. | "tidy my Orca workspaces". For herdr use `autorename`. |
 | `paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin` | Paseo (github.com/getpaseo/paseo), vendored from upstream `skills/` (Apache-2.0; `skills/paseo/UPSTREAM.md`): operate the Paseo daemon (projects, workspaces, agents, schedules) through its CLI, a Paseo advisor or two-agent committee, a hand-off to a Paseo agent, product help, plugin authoring. Advisor/committee/handoff fire only on explicit Paseo requests (local patch). Daemons on port 7263 on the Mac, vps-primary and get (site-djbclark `docs/paseo.md`). | "/paseo-handoff", "run this in Paseo", "Paseo plugin", "why is Paseo not connecting". |
+| `paseo-screen` | The one screen-control tool (2026-10-31): looks at and drives the host Mac's GUI through the Paseo plugin `paseo-screen` (`paseo plugin add kevguy/screen`; viewer "Screen · mac"; RPCs `screen.status`, `screen.frame`, `screen.input`). Replaces the retired Orca `orca computer` / `computer-use` route. Verified 2026-10-30: live desktop at about 10 fps, a keyboard chord delivered; not verified: clicks, drags, clipboard, multiple displays. Safety rules inside (look before clicking, never mid-typing, exposure to paired clients, the off switch `paseo plugin disable paseo-screen`). Stays enabled when idle (operator). | `/paseo-screen`; "drive the desktop app", "take a screenshot of the screen", "verify it in the app window". |
 | `siyuan`, `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown` | SiYuan notes, vendored from `zhiluop/siyuan-skills` (MIT; see `skills/_shared/UPSTREAM.md`, written in Chinese): core concepts, API, templates and flashcards; web-article import; Excalidraw diagrams saved as SVG assets; SiYuan-flavored Markdown and image insertion. Pair with the SiYuan MCP ([mcp-servers.md](mcp-servers.md)); the scripts read `~/.claude/siyuan.json`. | "import this article into SiYuan", "draw a flowchart in SiYuan", SiYuan block, template or flashcard questions. |
 
 ## Disabled skills

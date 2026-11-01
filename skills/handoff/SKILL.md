@@ -314,7 +314,7 @@ same on Paseo and herdr: wait for idle, a new top-level agent in the SAME worksp
 first prompt `/baton`, verified (status idle, running or initializing) before anything is retired, exit 11 and
 nothing retired on any failure; detached jobs move only through the successor's first action, `/baton`'s re-arm
 (it re-points each record's `owner` and restarts the waiter); (c) the
-old agent is retired only after that check: Paseo archives it, herdr leaves its pane idle for `herdr-tidy` and
+old agent is retired only after that check: Paseo archives it, herdr (retired from djbclark-ade 2026-10-31; its `herdr-tidy` is gone) leaves its pane idle and
 never closes it (djbclark rule: no throwing away work). **The new agent is always a real TUI, never an ACP
 session, when the operator is expected to read and answer it (djbclark, 2026-10-25: an `acp-run` pane shows only
 "⚙ Terminal" lines and failed commands, no transcript to read or steer).** On herdr that is `herdr tab create
