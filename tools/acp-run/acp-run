@@ -696,15 +696,27 @@ RO_GIT = frozenset({
     "show-ref", "describe", "shortlog", "merge-base", "grep", "diff-tree", "name-rev"})
 RO_GRAFT = frozenset({"ask", "grep", "skeleton", "callers", "map"})
 # arguments that make an otherwise reading command write or run another program
-RO_BAD_ARGS = ("--output", "--pre", "--exec", "--open-files-in-pager", "--ext-diff")
+RO_BAD_ARGS = ("--output", "--pre", "--exec", "--open-files-in-pager", "--ext-diff", "--hostname-bin")
 RO_FIND_BAD = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
 RO_OPERATORS = ("|", "&&", "||", ";")
+# Where a program given by path may live (a bare name resolves through PATH). A repository under review
+# is untrusted input: `./evil/cat` or `/tmp/evil/git` must not pass for `cat` or `git` (adversary PR 208).
+RO_TRUSTED_DIRS = frozenset({"/usr/bin", "/bin", "/opt/homebrew/bin"})
 
 
 def ro_words(script):
     lex = shlex.shlex(script, posix=True, punctuation_chars=True)
     lex.whitespace_split = True
+    lex.commenters = ""  # bash starts a comment only at a word's start; readonly_command refuses `#` anyway
     return list(lex)
+
+
+def ro_program(word):
+    """The program name of a command word: a bare name, or a path whose directory is in RO_TRUSTED_DIRS;
+    None for any other path."""
+    if "/" not in word:
+        return word
+    return os.path.basename(word) if os.path.dirname(word) in RO_TRUSTED_DIRS else None
 
 
 def ro_curl(args):
@@ -727,15 +739,18 @@ def ro_curl(args):
 def ro_segment(words, depth):
     """True when one simple command only reads."""
     while words:
-        if words[0] == "rtk":  # the output compactor wrapper
+        prog = ro_program(words[0])
+        if prog == "rtk":  # the output compactor wrapper; the command after it is judged on its own
             words = words[1:]
-        elif words[0] == "timeout" and len(words) > 2 and re.fullmatch(r"\d+(\.\d+)?[smh]?", words[1]):
+        elif prog == "timeout" and len(words) > 2 and re.fullmatch(r"\d+(\.\d+)?[smh]?", words[1]):
             words = words[2:]
         else:
             break
     if not words:
         return False
-    name, args = os.path.basename(words[0]), words[1:]
+    name, args = ro_program(words[0]), words[1:]
+    if name is None:
+        return False
     if name in ("bash", "sh", "zsh"):
         return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], depth + 1)
     if name == "git":
@@ -751,18 +766,23 @@ def ro_segment(words, depth):
         return ro_curl(args)
     if name == "find":
         return not RO_FIND_BAD.intersection(args)
-    if name == "sed":
-        return len(args) >= 3 and args[0] == "-n" and bool(re.fullmatch(r"\d+(,(\d+|\$))?p", args[1]))
-    if name == "fd":
-        return not any(x in ("-x", "-X") for x in args)
+    if name == "sed":  # GNU sed takes options anywhere: everything after the script must be a file name
+        return (len(args) >= 3 and args[0] == "-n" and bool(re.fullmatch(r"\d+(,(\d+|\$))?p", args[1]))
+                and not any(x.startswith("-") for x in args[2:]))
+    if name == "fd":  # clap accepts grouped short flags: -Hx is -H -x
+        return not any(re.fullmatch(r"-[A-Za-z]*[xX][A-Za-z0-9]*", x) for x in args)
+    if name == "file":
+        return not any(x == "--compile" or re.fullmatch(r"-[A-Za-z]*C[A-Za-z]*", x) for x in args)
     return name in RO_PLAIN
 
 
 def readonly_command(cmd, depth=0):
-    """True when a shell command line only reads: commands from a short list (cat, ls, rg, git log/show/
-    diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect to /dev/null, no
-    expansion, no other redirect. A guess is a refusal."""
-    if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`]", cmd):
+    """True when a shell command line only reads files and the network: commands from a short list (cat,
+    ls, rg, git log/show/diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect
+    to /dev/null, no expansion, no comment, no other redirect, a program only by bare name or from
+    RO_TRUSTED_DIRS. `git status` and `describe --dirty` may refresh `.git/index`, a cache, not content.
+    A guess is a refusal."""
+    if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd):
         return False
     try:
         toks = ro_words(cmd)
@@ -799,10 +819,11 @@ def tool_command(tool_call):
 def denial_continue_text(perm, denial):
     """The prompt that continues a session whose turn ended on a refused tool call."""
     what = " ".join((denial.get("command") or denial.get("tool") or "a tool call").split())[:300]
+    how = ("answer from what you already have, with no tools" if perm == "deny" else
+           "go on with reading tools only (file reads, rg, git log/show/diff, listing)")
     return (f"acp-run refused this tool call because this run is --perm {perm}: {what}\n"
-            "It was not run and it will not be allowed, so do not retry it or ask again. Nothing was "
-            "lost: continue the task you were given with reading tools only (file reads, rg, git "
-            "log/show/diff, listing) and finish with your normal report. If the refused call was "
+            f"It was not run and it will not be allowed, so do not retry it or ask again. Nothing was "
+            f"lost: {how} and finish with your normal report. If the refused call was "
             "needed for a finding, say in the report which part could not be checked.")
 
 
@@ -3283,7 +3304,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
     ):
         prompt = [TextContentBlock(type="text", text=current_text)]
         finished, failure, code = False, None, None
-        denial_turns, denial_limit = 0, getattr(client, "denial_continues", 0)
+        denial_turns, denial_limit, keep_text = 0, getattr(client, "denial_continues", 0), False
         for attempt in range(a.prompt_retries + 1 + denial_limit):
             # Retry only before any side effect (acpx: no retry once the
             # turn touched anything), with acpx's 1 s * 2^n, max 10 s backoff.
@@ -3294,7 +3315,9 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             if attempt and client.cancelled:  # cancelled during the backoff
                 out["stop_reason"], finished = "cancelled", True
                 break
-            client.text, client.denial = [], None
+            if not keep_text:  # a denial continuation adds to the reply: earlier turns' words stay judged
+                client.text = []
+            client.denial, keep_text = None, False
             if client.err_path:
                 try:
                     client.err_mark = os.path.getsize(client.err_path)
@@ -3373,6 +3396,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                         and (deadline is None or deadline - time.monotonic() > 30)):
                     # codex ends the turn on the only refusal it offers: tell the agent and go on
                     denial_turns += 1
+                    keep_text = True
                     client.rec("prompt_response", dump(resp))
                     client.rec("denial_continue", {"n": denial_turns, **denial})
                     print(f"acp-run: the turn ended at a refused tool ({denial['tool']}); continuing in the"

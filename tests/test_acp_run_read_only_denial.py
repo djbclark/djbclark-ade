@@ -33,6 +33,11 @@ READS = [
     "graft ask 'how does x work' --source",
     "/opt/homebrew/bin/bash -lc 'rg -n needle .'",
     "find . -name '*.py'",
+    "/usr/bin/git log -3",
+    "rtk git log -1",
+    "sed -n '3,5p' file.txt",
+    "fd -H pattern src",
+    "file -b README.md",
 ]
 WRITES = [
     "rm -rf build",
@@ -58,6 +63,26 @@ WRITES = [
     "curl -fsSL https://a.example https://b.example",
     "python3 -c 'print(1)'",
     "",
+    # adversary PR 208 round 1: each of these wrote or ran code for real in the probe
+    "cat a#;rm x",
+    "cat a#; touch /tmp/x",
+    "bash -lc 'ls x#; touch /tmp/x'",
+    "fd -Hx rm",
+    "fd -Ix touch {}.pwn",
+    "fd -X rm",
+    "sed -n 1p -i f",
+    "sed -n 1p --in-place f",
+    "sed -n 1p -e 'w /tmp/x' f",
+    "./evil/cat README.md",
+    "/tmp/evil/git log",
+    "../x/rg foo",
+    "/opt/homebrew/bin/../../tmp/cat x",
+    "/tmp/bash -lc 'ls'",
+    "file -C -m magic",
+    "file --compile -m magic",
+    "rg --hostname-bin=/tmp/x foo",
+    "rg --hostname-bin /tmp/x foo",
+    "rtk /tmp/evil/cat x",
 ]
 
 
@@ -94,6 +119,7 @@ def probe() -> dict[str, object]:
         out["continues"] = [mod.RunClient(io.StringIO(), p, "/tmp").denial_continues
                             for p in ("read-only", "deny", "all")]
         out["fallback_text"] = mod.denial_continue_text("read-only", {"command": "curl https://x", "tool": "t"})
+        out["deny_text"] = mod.denial_continue_text("deny", {"command": "curl https://x", "tool": "t"})
 
         # the turn loop: a turn that ends `cancelled` on a refusal that can only end it continues in the
         # same session; one that ends on a refusal that kept the turn alive, or on an operator cancel, does not
@@ -101,10 +127,11 @@ def probe() -> dict[str, object]:
             c = mod.RunClient(io.StringIO(), "read-only", "/tmp")
             if limit is not None:
                 c.denial_continues = limit
-            prompts = []
+            prompts, texts = [], []
             n = [0]
             async def prompt(session_id, prompt):
                 prompts.append(prompt[0].text)
+                c.text.append(f"words of turn {n[0] + 1}. ")
                 stop = stops[min(n[0], len(stops) - 1)]
                 n[0] += 1
                 if stop == "cancelled" and denial:
@@ -116,7 +143,8 @@ def probe() -> dict[str, object]:
                                       wrapup_grace=0)
             res = {}
             r = await mod.prompt_turn(a, conn, types.SimpleNamespace(session_id="s"), c, "brief", res)
-            return {"prompts": prompts, "stop": res.get("stop_reason"), "finished": r[0], "code": r[2]}
+            return {"prompts": prompts, "stop": res.get("stop_reason"), "finished": r[0], "code": r[2],
+                    "text": "".join(c.text)}
         END = {"tool": "Run command", "command": "curl https://x", "option": "cancel", "ends_turn": True}
         ALIVE = dict(END, option="decline", ends_turn=False)
         out["loop_continues"] = asyncio.run(turns(END))
@@ -185,6 +213,15 @@ class TestReadOnlyDenial(unittest.TestCase):
         self.assertEqual(r["prompts"][0], "brief")
         self.assertIn("curl https://x", r["prompts"][1])
         self.assertEqual((r["stop"], r["finished"], r["code"]), ("end_turn", True, None))
+
+    def test_the_reply_keeps_the_words_of_every_turn(self):
+        self.assertEqual(self.res["loop_continues"]["text"], "words of turn 1. words of turn 2. ")
+        self.assertEqual(self.res["loop_no_denial"]["text"], "words of turn 1. ")
+
+    def test_a_deny_run_is_not_told_to_use_tools(self):
+        self.assertNotIn("reading tools", self.res["deny_text"])
+        self.assertIn("no tools", self.res["deny_text"])
+        self.assertIn("reading tools", self.res["fallback_text"])
 
     def test_a_kept_alive_refusal_or_an_operator_cancel_or_no_refusal_does_not_continue(self):
         for name in ("loop_keepalive", "loop_operator", "loop_no_denial"):
