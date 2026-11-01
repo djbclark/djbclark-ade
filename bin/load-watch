@@ -94,7 +94,7 @@ machine-wide (one `ps`, exact argv match of the process running the script named
 N or more (bare --max-agents = 14, env LW_MAX_AGENTS, 0 = no cap: THE knob to tune how many acp-run slices may START);
 an admission under the cap is recorded as a reservation (agent-reservations.json, flock) counted with the live ones for
 until `load-watch release ID` (acp-dispatch does it at spawn) or LW_RESERVE_S (1200), so concurrent dispatchers cannot all
-pass at 13 of 14 (--no-reserve: a pure check; 0: off). A
+pass at 13 of 14 (--no-reserve: records none but still counts the held ones; LW_RESERVE_S=0: off). A
 vm_stat or ps that exists but fails, times out or prints nonsense refuses too (`memory_unreadable`, `agents_unreadable`):
 that is likeliest when the machine is starving. Only an absent tool (Linux without vm_stat, no /proc) leaves its gate open,
 listed in `unreadable`. Why, measured 2026-11-01 (load watcher d8891c91):
@@ -1924,13 +1924,13 @@ def cmd_admit(a):
     if fake and not fake_churn:
         boost = 0  # a faked load with no faked churn reads churn 0 (not a measurement): never boosts
     measured = not fake or bool(fake_churn) or any(fake_mem.values())  # a defaulted fake reading is not an observation
-    reserve_on = bool(lim["max_agents"]) and ADMIT_RESERVE_S > 0 and not getattr(a, "no_reserve", False)
+    reserve_on = bool(lim["max_agents"]) and ADMIT_RESERVE_S > 0 and not getattr(a, "no_reserve", False)  # records one
 
     def read(polls):
         load1, cores, per_core = admit_reading(fake, polls)
         m = admit_memory(fake, fake_churn, fake_mem, polls, lim["max_agents"])
         if lim["max_agents"]:
-            m["reserved"] = reservations_active() if reserve_on else 0
+            m["reserved"] = reservations_active() if ADMIT_RESERVE_S > 0 else 0   # counted whenever the cap is evaluated, reserving or not
         calm_for = None
         if measured:  # every real reading feeds the shared clock, boost or not (a hot one must reset it for everyone)
             t = now()

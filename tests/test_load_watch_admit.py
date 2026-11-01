@@ -786,3 +786,22 @@ def test_an_older_observation_arriving_late_does_not_break_the_calm_run(tmp_path
     assert json.loads(f.read_text()) == {"calm_since": None, "last_t": 1030.0}
     assert lw.calm_note(1010.0, True) is None                 # a stale calm reading cannot restart a cleared run
     assert lw.calm_note(1040.0, True) == 1040.0
+
+
+def test_no_reserve_still_counts_the_reservations_others_hold(tmp_path):
+    """Codex P2 on PR 210: a pure capacity check at 13 live + 1 reserved with cap 14 must say no."""
+    f = tmp_path / "state" / "agent-reservations.json"
+    f.parent.mkdir()
+    f.write_text(json.dumps({"r": [{"id": "held", "until": time.time() + 600}]}))
+    res = dict(LW_RESERVE_S="1200", LW_FAKE_AGENTS="13")
+    before = f.read_text()
+    r = admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", "--json", load1=0.1, **res)
+    rec = json.loads(r.stdout)
+    assert r.returncode == 75 and rec["refused"] == ["agents"] and rec["reserved"] == 1, rec
+    assert f.read_text() == before                                   # and it records nothing
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "15", "--no-reserve", load1=0.1, **res).returncode == 0
+    f.write_text(json.dumps({"r": [{"id": "old", "until": time.time() - 1}]}))
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1, **res).returncode == 0  # expired
+    f.write_text(before)
+    assert admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1,
+                 LW_RESERVE_S="0", LW_FAKE_AGENTS="13").returncode == 0                                          # reservations off
