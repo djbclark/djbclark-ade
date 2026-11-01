@@ -1003,3 +1003,41 @@ def test_file_url_authority_never_reaches_a_kept_reason(prune, tmp_path, world):
     assert why and "cannot be resolved" in why and "s3cr3t-token" not in why
     ok, reason = prune.safe(c)
     assert not ok and "s3cr3t-token" not in reason
+
+
+# ---- round 9 (local Codex review of d832fcb9) ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rec,done", [
+    ({"finished": 1.0, "status": "done"}, True),
+    ({"finished": 1.0, "status": "partial", "auto_resume": None}, True),
+    ({"finished": 1.0, "status": "no-report", "auto_resume": {"state": "exhausted"}}, True),
+    ({"finished": 1.0, "status": "resume-scheduled"}, False),
+    ({"finished": 1.0, "status": "running"}, False),
+    ({"finished": 1.0, "status": "blocked"}, False),
+    ({"finished": 1.0, "status": "partial", "auto_resume": {"state": "scheduled"}}, False),
+    ({"finished": 1.0, "status": "partial", "auto_resume": {"state": "waiting-headroom"}}, False),
+    ({"finished": 1.0, "status": "partial", "auto_resume": {"state": "resuming"}}, False),
+    ({"finished": 1.0, "status": "done", "restart_resume": {"state": "resuming"}}, False),
+    ({"finished": 1.0, "status": "done", "auto_resume": {"attempt": 1}}, False),
+    ({"finished": 1.0, "status": "done", "auto_resume": "scheduled"}, False),
+    ({"status": "done"}, False),
+    ({"finished": None, "status": "done"}, False),
+    (["not", "a", "dict"], False),
+])
+def test_job_record_done_requires_no_pending_resume(prune, rec, done):
+    assert prune.job_record_done(rec) is done
+
+
+def test_task_with_a_quota_stopped_job_awaiting_resume_is_kept(prune, tmp_path, world):
+    import json as _json
+    c = make_clone(tmp_path, world)
+    (c.parent / "jobs").mkdir()
+    (c.parent / "jobs/ok.json").write_text(_json.dumps({"finished": 1.0, "status": "done"}))
+    assert prune.finished_dir(c.parent)
+    (c.parent / "jobs/resume.json").write_text(_json.dumps(
+        {"finished": 1.0, "status": "resume-scheduled", "auto_resume": {"state": "scheduled", "attempt": 1}}))
+    assert not prune.finished_dir(c.parent)
+    task = c.parent
+    ok, msg = prune.remove(c, task, {task: task.stat().st_mtime})
+    assert not ok and "no longer eligible" in msg and c.exists()

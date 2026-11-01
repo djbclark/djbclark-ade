@@ -36,7 +36,7 @@ old, with no CLAIM file (a CLAIM that records DONE still blocks) and no unfinish
 a remote that is a local path outside the root, still counts. A repository borrowing objects from a clone
 (`git clone --shared`, objects/info/alternates) cannot be detected from the clone's side. Right before each deletion (and again after the safety scan) the task
 dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
-CLAIM, no unfinished or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
+CLAIM, no unfinished, resume-pending or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
 A clone with a ref pointing at a blob or tree is kept. An http(s), ftp or git remote counts as another machine only
 when no proxy or address override applies (http.curloptResolve, http.proxy, remote.X.proxy, core.gitProxy, *_PROXY,
@@ -126,8 +126,30 @@ def finished_dir(d):
     return unclaimed_and_jobs_done(d)
 
 
+# bin/acp-dispatch job records: `finished` is set even for a quota-stopped job whose auto-resume is still pending
+# (AUTO_RESUME_PENDING there), so a record is only complete when it is finished AND nothing is scheduled or running.
+PENDING_RESUME = ("scheduled", "waiting-headroom", "resuming")
+ACTIVE_STATUS = ("running", "resume-scheduled", "blocked", "resuming", "scheduled", "waiting-headroom")
+
+
+def job_record_done(rec):
+    """True only for a job record that is finished with no resume pending. Anything unexpected counts as not done."""
+    if not isinstance(rec, dict) or not rec.get("finished"):
+        return False
+    if str(rec.get("status", "")).lower() in ACTIVE_STATUS:
+        return False
+    for key in ("auto_resume", "restart_resume"):
+        ar = rec.get(key)
+        if ar in (None, "", {}):
+            continue
+        if not isinstance(ar, dict) or ar.get("state") in PENDING_RESUME or not isinstance(ar.get("state"), str):
+            return False
+    return True
+
+
 def unclaimed_and_jobs_done(d):
-    """No CLAIM and every jobs/*.json finished. Directory-read errors propagate to the except and keep the task."""
+    """No CLAIM and every jobs/*.json a finished record with no resume pending. Directory-read errors propagate to the
+    except and keep the task."""
     try:
         if os.path.lexists(d / "CLAIM"):
             return False
@@ -136,7 +158,7 @@ def unclaimed_and_jobs_done(d):
             return False
         if os.path.lexists(jobs):
             for j in sorted(os.listdir(jobs)):
-                if j.endswith(".json") and not json.loads((jobs / j).read_text()).get("finished"):
+                if j.endswith(".json") and not job_record_done(json.loads((jobs / j).read_text())):
                     return False
     except (OSError, ValueError, AttributeError):
         return False

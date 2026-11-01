@@ -204,7 +204,7 @@ pasture shares them with APFS `clonefile(2)` (measured: 36.5 GB logical in
   fails closed: any error or doubt keeps the checkout, and right before each deletion the task dir
   is re-judged (still a real dir, untouched since planning, no `CLAIM`, no unfinished job) and the
   checkout's safety is re-checked. It only touches real task dirs (a symlink, or anything resolving outside the root, is
-  skipped) a week or more old by the dir's own mtime, with no unfinished job record and no `CLAIM`
+  skipped) a week or more old by the dir's own mtime, with no unfinished job record (finished with an auto-resume still `scheduled`, `waiting-headroom` or `resuming`, or a `running`, `resume-scheduled` or `blocked` status, is unfinished) and no `CLAIM`
   file (a `CLAIM` that records DONE still blocks). All `GIT_*` environment variables are cleared
   for every git call, and git must report the checkout as its own top level. A checkout is kept
   when anything in it changed in the last 7 days (dir, index, HEAD, HEAD reflog, `FETCH_HEAD`), a
