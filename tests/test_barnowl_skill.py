@@ -63,6 +63,8 @@ class Env:
                   if [[ -n ${FAKE_ANSWER:-} ]]; then
                     p=$(sed -E 's/.*q\\{>\\}, q\\{([^}]*)\\}.*/\\1/' <<<"$*"); printf 'ans:%s\\n' "$FAKE_ANSWER" >"$p"
                   fi
+                  # the screen the human's answer leaves behind (a pager opened while they decided)
+                  if [[ -n ${FAKE_SCREEN_AFTER_ANSWER:-} ]]; then cp "$FAKE_SCREEN_AFTER_ANSWER" "$FAKE_SCREEN"; fi
                 elif [[ $* == *BO_OK_* ]]; then
                   # BarnOwl evaluating bo's :perl wrapper: write the value and the marker
                   p=$(sed -E 's/.*q\\{>\\}, q\\{([^}]*)\\}.*/\\1/' <<<"$*")
@@ -249,6 +251,18 @@ class ConfirmationGate(unittest.TestCase):
             p = e.run(BO, "perl", "1+1", answer="no")
             self.assertEqual(p.returncode, 4)
             self.assertFalse(any(":perl do {" in k for k in e.typed()))
+
+    def test_a_pager_that_opens_while_the_human_decides_gets_no_keys(self) -> None:
+        # The [y/N] can take minutes. If a pager (or a compose box) is on screen when the
+        # answer arrives, the confirmed command must not be typed into it.
+        for how, call in (("run", ("run", "zwrite eve -m hi")), ("perl", ("perl", "6*7"))):
+            with Env() as e:
+                pager = Path(e.tmp.name) / "pager.txt"
+                pager.write_text("a page of text with no status bar line\n\n")
+                p = e.run(BO, *call, answer="y", extra={"FAKE_SCREEN_AFTER_ANSWER": str(pager)})
+                self.assertEqual(p.returncode, 3, how)
+                self.assertFalse(e.typed_command(":zwrite eve -m hi"), how)
+                self.assertFalse(any("BO_OK_" in k for k in e.typed()), how)
 
     def test_perl_is_always_confirmed_even_before_anything_was_read(self) -> None:
         # Prompt injection can come from a web page or a repository file, not only from Zephyr.

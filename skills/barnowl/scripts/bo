@@ -133,6 +133,13 @@ type_window() {
 guard_idle() {
   need_session
   lock_client
+  check_idle
+}
+
+# The screen checks alone. Run again after a human's [y/N] (up to confirm_wait seconds):
+# a pager, a compose box or a command line that opened during the wait would receive the
+# keys the answer releases.
+check_idle() {
   # Keys sent while a pager or popup is open land in it, not the command line.
   # No status-bar line means a full-screen page; a popup draws the box above.
   # Either is refused; a message body that draws such a box is a harmless
@@ -257,7 +264,7 @@ print_marked() {
 perl_eval() {
   local expr=$1 kind=$2 gated=$3
   guard_idle
-  [[ $gated -eq 0 ]] || confirm "perl: $expr"
+  [[ $gated -eq 0 ]] || { confirm "perl: $expr"; check_idle; }
   # A private output file and marker per call: concurrent callers, and text on
   # the screen, can neither see nor forge each other's.
   [[ -n $out ]] || out=$(scratch out)
@@ -273,7 +280,7 @@ perl_eval() {
 cmd_run() {
   local cmd=$1 before after rc=0
   guard_idle
-  read_only_command "$cmd" || confirm "run: $cmd"
+  read_only_command "$cmd" || { confirm "run: $cmd"; check_idle; }
   before=$(capture)
   send_line ":${cmd}"
   sleep 0.5
