@@ -310,7 +310,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- Fixed the sibling `RecursionError` readers of #98 (2026-11-01): `guard_level`, `read_state`, `read_snapshot` and the `paseo-set-model list` read in `bin/claude-fleet-governor`, and `load_state`, `read_snapshot` and the aiuse output read in `bin/claude-quota-guard`, treat a deeply nested JSON file as unreadable (the usual fail-safe: level `ok`, empty state, no reading, or the existing unreadable exit 10) instead of crashing (#TBD).
+- Fixed the sibling `RecursionError` readers of #98 (2026-11-01): `guard_level`, `read_state`, `read_snapshot` and the `paseo-set-model list` read in `bin/claude-fleet-governor`, and `load_state`, `read_snapshot` and the aiuse output read in `bin/claude-quota-guard`, treat a deeply nested JSON file as unreadable (the usual fail-safe: level `ok`, empty state, no reading, or the existing unreadable exit 10) instead of crashing (#214).
 - Fixed `/bigteam` caller-discovery, commit-preparation, and single-run waiter checks, including unindexed scripts and GNU-safe source excerpts (#195).
 - Fixed `watch` handling of uncertain lifecycle reads, forced replacements after failed probes, watchers in background workspaces, and generation reuse after title-list failures (#195).
 - Fixed `watch up` replacing watchers after Paseo collected their idle runtimes; retained saved sessions without periodic model wake-ups, let real events resume them through the relay, and refused duplicate launches when daemon state was unknown (#192).
