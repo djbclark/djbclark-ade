@@ -27,8 +27,8 @@ class Env:
         self.tmp = tmp
         self.children: list[subprocess.Popen] = []
         for name, body in {
-            "relay": ('#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n'
-                      'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit 1; fi\n'),
+            "relay": ('#!/bin/sh\necho "RELAY $@" >> "$DL_LOG"\necho "SENDER $RELAY_SENDER_NAME" >> "$DL_LOG"\ncat >> "$DL_LOG"\necho >> "$DL_LOG"\n'
+                      'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit "$(cat "$DL_RELAY_FAIL")"; fi\n'),
             "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
             "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\n',
             "paseo": (f'#!{sys.executable}\nimport os, sys\n'
@@ -431,7 +431,7 @@ def test_orphan_lock_files_are_pruned(env):
 # ---------- PR 223 local-review round 1: group identity, notice delivery, name reservation, registration binding, background agents ----------
 
 def test_leaderless_group_is_anchored_on_a_live_member_and_never_trusted_bare(env):
-    c = subprocess.Popen(["sh", "-c", "sleep 60 & exit 0"], start_new_session=True)
+    c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & exit 0"], start_new_session=True)
     env.children.append(c)
     c.wait()   # the group leader is gone and reaped; its sleep lives on in the group
     time.sleep(0.2)
@@ -446,7 +446,7 @@ def test_leaderless_group_is_anchored_on_a_live_member_and_never_trusted_bare(en
 
 
 def test_failed_owner_notice_is_retried_until_delivered_not_marked_done(env):
-    Path(env.base["DL_RELAY_FAIL"]).write_text("x")
+    Path(env.base["DL_RELAY_FAIL"]).write_text("1")
     assert start(env, "flaky", "--budget", "5", "--on-expire", "relay").returncode == 0
     env.run("sweep", "--no-agents", now=T0 + 10)
     rec = env.record("flaky")
@@ -462,7 +462,7 @@ def test_failed_owner_notice_is_retried_until_delivered_not_marked_done(env):
 
 
 def test_notice_retries_are_bounded(env):
-    Path(env.base["DL_RELAY_FAIL"]).write_text("x")
+    Path(env.base["DL_RELAY_FAIL"]).write_text("3")   # 3 = unverified under --ack: not delivery proof
     assert start(env, "never", "--budget", "5", "--on-expire", "relay").returncode == 0
     for i in range(20):
         env.run("sweep", "--no-agents", now=T0 + 10 + i * 1000)
@@ -499,3 +499,86 @@ def test_old_run_cannot_finish_a_record_that_replaced_its_own(env):
 def test_agent_scan_includes_background_workspaces(env):
     env.run("sweep", "--agents-now", now=T0)
     assert any(ln == "PASEO ls -g --background --json" for ln in env.calls("PASEO"))
+
+
+# ---------- PR 223 local-review round 2: survivors after the leader, unverifiable stops, relay sender + proof, lock inodes, prune race ----------
+
+def test_run_keeps_enforcing_until_the_group_is_stopped_after_the_leader_exits(env):
+    # the leader dies on SIGTERM; a grandchild ignores it and must still get its SIGKILL and the recovery from `run` itself
+    r = env.run("run", "--budget", "1", "--grace", "1", "--name", "orphans", "--owner", "o", "--on-expire", "relay", "--",
+                "sh", "-c", "(trap '' TERM; sleep 60) & wait", now=None, DEADLINE_RUN_POLL="0.1")
+    assert r.returncode == 124
+    rec = env.record("orphans")
+    assert rec["state"] == "expired" and rec["hard_at"] and rec["recovery"]["state"] == "done"
+    assert not env.group_alive(rec["pgid"]), "no survivor of the process group may outlive `run`"
+    assert len(env.calls("RELAY")) == 1
+
+
+def test_an_unverifiable_target_is_never_a_confirmed_stop(env, inproc, monkeypatch):
+    dl = inproc
+    monkeypatch.setattr(dl, "target_status", lambda r: "unverified")
+    assert dl.settle({}, 0.2) is False
+    rec = {"name": "anchorless", "owner": "owner-1", "pid": 4242, "pgid": 4242, "pid_start": "x", "started": T0 - 100, "last_beat": T0 - 100,
+           "budget_s": 10, "grace_s": 5, "on_expire": "reroute:/x/jobs/r.json", "state": "stopping", "soft_at": T0 - 1, "stopped_by_us": True}
+    dl.save(rec)
+    out = dl.step(rec)
+    assert "KILL FAILED" in out and rec["state"] == "kill-failed" and env.calls("DISPATCH") == [], "no reroute while survivors may run"
+    assert "identity can no longer be verified" in env.log.read_text()
+    assert dl.step(rec) == "kill-failed: still alive (unverifiable)"
+
+
+def test_an_empty_group_with_no_leader_start_is_gone_not_unverified(env, inproc):
+    dl = inproc
+    assert dl.target_status({"pid": None, "pgid": 987654, "pgid_start": None}) == "gone"
+
+
+def test_owner_relay_declares_a_sender_and_asks_for_delivery_proof(env):
+    assert start(env, "proof", "--budget", "5", "--on-expire", "relay").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10)
+    log = env.log.read_text()
+    assert "RELAY owner-1 --message-file - --ack --wait 20" in log and "SENDER deadline" in log
+    p = __import__("plistlib").loads((ROOT / "config/launchd/com.djbclark.deadline-sweep.plist").read_text().replace("__HOME__", "/h").replace("__ADE__", "/a").encode())
+    assert p["EnvironmentVariables"]["RELAY_SENDER_NAME"] == "deadline-sweep", "a launchd job has no session: relay.py would refuse it with exit 4"
+
+
+def test_waiting_registrar_never_holds_a_lock_on_an_unlinked_inode(env, inproc):
+    import threading
+    dl = inproc
+    path = env.state / ".racer.lock"
+    a = dl.Locked("racer")
+    assert a.__enter__() is True
+    got = {}
+
+    def waiter():
+        b = dl.Locked("racer", block=True)
+        got["ok"] = b.__enter__()
+        got["same"] = os.fstat(b.fd).st_ino == os.stat(path).st_ino
+        got["lock"] = b
+        got["third"] = dl.Locked("racer").__enter__()   # a third party must now be excluded by b
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    time.sleep(0.4)   # b is blocked on the old inode
+    path.unlink()     # prune removes the lock file while holding it
+    a.__exit__()
+    t.join(timeout=10)
+    assert got["ok"] and got["same"], "b must end up holding the lock file that is on disk"
+    assert got["third"] is False
+    got["lock"].__exit__()
+
+
+def test_prune_never_deletes_a_name_that_was_registered_again_meanwhile(env, inproc, monkeypatch):
+    dl = inproc
+    old = {"name": "reborn", "owner": "o", "state": "done", "started": T0 - 20 * 86400, "budget_s": 10, "ended": T0 - 10 * 86400}
+    dl.save(old)
+    stale = dl.all_records()
+    new = {"name": "reborn", "owner": "o", "state": "running", "started": T0, "budget_s": 100, "on_expire": "notify", "reg_id": "new"}
+    dl.save(new)   # re-registered after the scan, before the unlink
+    monkeypatch.setattr(dl, "all_records", lambda: stale)
+    dl.prune()
+    assert env.record("reborn")["state"] == "running" and env.record("reborn")["reg_id"] == "new"
+    old2 = dict(old, name="ancient")
+    dl.save(old2)
+    monkeypatch.setattr(dl, "all_records", lambda: [("ancient", old2)])
+    dl.prune()
+    assert not (env.state / "ancient.json").exists(), "a genuinely old terminal record is still pruned"

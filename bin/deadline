@@ -132,20 +132,32 @@ def save(rec: dict) -> None:
 
 
 class Locked:
-    """Per-record flock so a `sweep` and a `run` loop never advance the same record at once; non-blocking (a busy record is skipped)."""
+    """Per-record flock so a `sweep` and a `run` loop never advance the same record at once; non-blocking (a busy record is skipped).
+    The lock file may be unlinked by `prune` (while it holds the lock): after every acquisition the held inode is compared with the
+    one on disk, and a waiter that got an unlinked inode retries on the new file, so two registrars can never hold "the same" lock."""
 
     def __init__(self, name: str, block: bool = False):
         self.name, self.block, self.fd = name, block, None
 
     def __enter__(self):
         state_dir().mkdir(parents=True, exist_ok=True)
-        self.fd = os.open(state_dir() / f".{self.name}.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | (0 if self.block else fcntl.LOCK_NB))
-        except OSError:
-            os.close(self.fd)
-            self.fd = None
-        return self.fd is not None
+        path = state_dir() / f".{self.name}.lock"
+        for _ in range(50):
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | (0 if self.block else fcntl.LOCK_NB))
+            except OSError:
+                os.close(fd)
+                return False
+            try:
+                same = os.fstat(fd).st_ino == os.stat(path).st_ino
+            except OSError:
+                same = False   # unlinked under us
+            if same:
+                self.fd = fd
+                return True
+            os.close(fd)
+        return False
 
     def __exit__(self, *a):
         if self.fd is not None:
@@ -225,7 +237,8 @@ def target_status(rec: dict) -> str:
             alive = True
     if pgid and not alive:
         if not rec.get("pgid_start"):
-            return "unverified"   # a group with no recorded leader start: a recycled group id could not be told apart
+            # a group with no recorded leader start: an empty group is gone whatever its id; a populated one could be a recycled id
+            return "unverified" if group_members(int(pgid)) else "gone"
         leader = proc_info(int(pgid))
         if leader and leader[1] != "Z" and leader[0] != rec["pgid_start"]:
             return "reused"
@@ -272,10 +285,11 @@ def ancestors() -> set[int]:
 
 
 def settle(rec: dict, secs: float) -> bool:
-    """Wait up to `secs` for the target to be gone; True when it is."""
+    """Wait up to `secs` for the target to be CONFIRMED gone; True when it is. `unverified` (identity lost, survivors possible)
+    is not a confirmation."""
     end = time.monotonic() + secs
     while True:
-        if target_status(rec) != "alive":
+        if target_status(rec) in ("gone", "reused"):
             return True
         if time.monotonic() >= end:
             return False
@@ -325,11 +339,20 @@ def hermes_ping(msg: str) -> str:
 
 
 def relay_rc(owner: str, text: str) -> tuple[int, str]:
+    """Send to the owner with delivery proof requested (`--ack`: exit 0 only when delivered, 1 not delivered, 3 unverified). The
+    sender is declared (RELAY_SENDER_NAME) so a launchd job, which has no session identity, is not refused with exit 4."""
     if not owner or owner == "-":
         return 0, "relay skipped: no owner"
-    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-"]
-    rc, out = sh(argv, text=text, timeout=60)
-    return rc, f"relay rc={rc}: {out.splitlines()[-1] if out else ''}"[:200]
+    argv = tool("DEADLINE_RELAY", "skills/session-finder/relay.py") + [owner, "--message-file", "-", "--ack", "--wait", "20"]
+    try:
+        r = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=90,
+                           env={**os.environ, "RELAY_SENDER_NAME": os.environ.get("RELAY_SENDER_NAME") or "deadline"})
+    except subprocess.TimeoutExpired:
+        return 124, "relay timeout after 90s"
+    except OSError as e:
+        return 127, str(e)
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    return r.returncode, f"relay rc={r.returncode}: {out.splitlines()[-1] if out else ''}"[:200]
 
 
 def relay(owner: str, text: str) -> str:
@@ -488,12 +511,17 @@ def step(rec: dict, dry: bool = False) -> str:
             return f"stopped ({reason}): {text}; recovery once"
         return f"soft stop ({reason}): {text}"
     if st == "stopping":
-        if ts != "alive":
+        if ts in ("gone", "reused"):
             if dry:
                 return "would run recovery (target gone)"
             rec = recover(finish(rec, "expired", n))
             save(rec)
             return "target gone; recovery once"
+        if ts == "unverified":
+            if dry:
+                return "would mark kill-failed (identity lost while stopping)"
+            return stop_failed(rec, n, "the target's identity can no longer be verified (its anchor exited) while stopping: "
+                                       "survivors can be neither confirmed stopped nor signalled")
         if n - rec.get("soft_at", n) < rec.get("grace_s", 60):
             return "stopping: within grace"
         if dry:
@@ -508,10 +536,12 @@ def step(rec: dict, dry: bool = False) -> str:
         save(rec)
         return f"hard kill: {text}; recovery once"
     if st == "kill-failed":
-        if ts != "alive":
+        if ts in ("gone", "reused"):
             if not dry:
                 save(finish(rec, "expired", n, kill_note="target gone later; the owner was told of the failed stop"))
             return "kill-failed: target gone later"
+        if ts == "unverified":
+            return "kill-failed: still alive (unverifiable)"
         if dry:
             return "would retry SIGKILL"
         outcome, text = signal_target(rec, signal.SIGKILL)
@@ -523,16 +553,20 @@ def step(rec: dict, dry: bool = False) -> str:
 
 
 def prune() -> None:
-    """Terminal records older than 7 days (by their own `ended`) are removed; so are orphan lock files, and quarantined
-    corrupt records after 7 days (by mtime)."""
+    """Terminal records older than 7 days (by their own `ended`) are removed, each under its lock after a fresh reload (a name
+    re-registered meanwhile is never deleted); so are orphan lock files (unlinked while the lock is held; see Locked) and
+    quarantined corrupt records after 7 days (by mtime)."""
     d = state_dir()
     for name, rec in all_records():
         if rec and rec.get("state") in TERMINAL and now() - rec.get("ended", now()) > 7 * 86400:
-            rec_path(name).unlink(missing_ok=True)
+            with Locked(name) as got:
+                cur = load(name) if got else None
+                if cur and cur.get("state") in TERMINAL and now() - cur.get("ended", now()) > 7 * 86400:
+                    rec_path(name).unlink(missing_ok=True)
     for p in d.glob(".*.lock"):
         if not (d / (p.name[1:-5] + ".json")).exists():
             with Locked(p.name[1:-5]) as got:   # only when no one holds it
-                if got:
+                if got and not (d / (p.name[1:-5] + ".json")).exists():
                     p.unlink(missing_ok=True)
     for p in d.glob("*.corrupt"):
         try:
@@ -911,6 +945,11 @@ def cmd_run(a) -> int:
         release()
         return die(f"cannot run {cmd[0]}: {e}", 127)
     rec, err = make_record(a, pid=child.pid, pgid=child.pid, kind="run", fresh_child=True)
+    if err:   # "not running" while poll() still says None: the child is exiting right now (zombie not yet reapable)
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
     if err and child.poll() is not None:
         # it finished before it could be registered: nothing left to bound; keep an audit record of the finished run
         with Locked(a.name, block=True):
@@ -953,18 +992,21 @@ def cmd_run(a) -> int:
             # Only the record THIS run registered may be advanced or saved: a terminal name can be re-registered while this child lives on.
             mine = bool(cur and cur.get("reg_id") == reg_id)
             if rc is not None:
+                settled = True
                 if mine:
                     if cur.get("state") == "running":
                         cur.update(state="done", ended=now(), rc=rc)
                         save(cur)
                     else:
                         try:
-                            step(cur)   # stopping: the target is gone, recovery once
+                            step(cur)   # the leader is gone: SIGKILL after the grace and recovery are still due while the group has survivors
                         except ProcUnknown:
-                            pass
+                            settled = False
                         cur = load(a.name) or cur
-                return 124 if mine and cur.get("stopped_by_us") else exit_code(rc)
-            if mine:
+                        settled = settled and cur.get("state") != "stopping"
+                if settled:
+                    return 124 if mine and cur.get("stopped_by_us") else exit_code(rc)
+            elif mine:
                 try:
                     step(cur)
                 except ProcUnknown:

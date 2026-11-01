@@ -93,3 +93,12 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
 2. `deadline run` reserves its name (a `starting` placeholder, left alone by the sweep for 60 s) BEFORE it starts the command, so a refused name never
    ran the command; and it only advances or finishes the record carrying its own `reg_id`, so an old `run` whose terminal name was registered again
    cannot mark the new registration done.
+3. The owner relay asks for delivery proof (`relay.py ... --ack --wait 20`: exit 0 only when delivered; 1 not delivered and 3 unverified stay pending and
+   are retried) and declares its sender (`RELAY_SENDER_NAME`, `deadline-sweep` in the launchd plist, `deadline` otherwise), since a launchd job has no
+   session identity and relay.py refuses an unidentified sender with exit 4.
+4. A stop is confirmed only when the target is `gone` (or its pid was recycled). `unverified` (a leaderless group whose anchor exited while other
+   members may still run) is never a confirmed stop: the record goes to `kill-failed`, the owner is told, nothing is rerouted. An empty group is `gone`.
+5. `deadline run` keeps enforcing after its command's leader exits: while the process group has survivors it sends SIGKILL after the grace and runs the
+   recovery itself before returning 124.
+6. Lock files are unlinked by `prune` only while it holds them; every acquirer re-checks that its locked inode is still the file on disk and retries
+   otherwise, so two registrars never hold different inodes of "the same" lock. Terminal records are deleted under their lock after a fresh reload.
