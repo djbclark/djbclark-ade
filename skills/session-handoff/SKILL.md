@@ -155,7 +155,8 @@ it, reports the owner status in its resume plan and asks nothing.
    reads as no match (step 4, covered by exemption C).
 4. **No match is not proof of absence: fail closed.** Treat the owner as possibly live and, unless an
    exemption below applies, say so in the resume plan and **ask the operator before the first write**.
-   To make that question concrete, list live rows other than you whose `cwd` equals or contains a
+   To make that question concrete, list live rows other than you whose `cwd` (compare by `realpath`: a
+   symlinked cwd such as `~/s/...` names the same directory) equals, is under or contains a
    `workspaces[].dir` of the log and whose `agent` fits `writer` (`claude*` to claude, `omp*` to omp,
    `codex` to codex, otherwise any); name them in the question. Never proceed on a silent "no owner found".
 5. **A live owner other than you:** relay ONE question to it through `session-finder/relay.py` (what may
@@ -168,18 +169,34 @@ it, reports the owner status in its resume plan and asks nothing.
 - **B. You are the named successor**, even while the owner still reads live. Evidence, all read from
   `~/.local/state/self-slash.log`, whose `successor: starting` line is written before the successor's
   first prompt runs (the `finish: archived ... (successor <id>)` line comes only after the owner is
-  archived, so a successor that reads at once never sees it): a line `<host> <owner id>: successor:
-  starting ...` whose owner id is S or the id of the row matched in step 2 (`paseo` or `id`), newer than
-  the log's `updated_at`, and that names you: on Paseo its `cwd` equals yours and the later line
-  `successor: <your id> is top-level` carries your id when present; on herdr its `pane <pane>` is your own
-  pane. The log's `latest_handoff` (resolved against `~/ops/site-private-djbclark/`; `none` or an
-  unresolvable path fails B) must name a handoff file that exists. The title is NOT evidence (`self-slash`
-  truncates the default `<owner's name> → <model>` and `--title` replaces it), and neither is the first
-  prompt: an operator-typed or relayed `/baton PATH` naming the chain proves only that the operator named
-  it, and goes through the ask. `self-slash` starts and verifies the successor first and archives the
-  owner only afterwards (it waits up to 900 s for the owner to be idle), so the owner normally still reads
-  live while its successor reads the chain: that is the handover, not a conflict. A `launch.py start
-  --baton` start writes no such line, so it goes through the ask.
+  archived, so a successor that reads at once never sees it). B holds only when ALL of these are true:
+  1. **A `starting` line names you.** A line `<host> <owner id>: successor: starting ...` newer than the
+     log's `updated_at` (compare both in local time: the log's stamps are naive local time, `updated_at`
+     carries an offset). On herdr its `pane <pane>` is your own pane (a unique token). On Paseo the line
+     alone does NOT name you (its `cwd` is shared by every session in that directory): you need the later
+     line `<host> <owner id>: successor: <your id> is top-level ...` with `<your id>` = `$PASEO_AGENT_ID`.
+     It appears 20-35 s after `starting`; if it is absent, re-read for up to 60 s from `starting`, then
+     ask. Never admit on cwd alone.
+  2. **No failure line voids it.** A later line of that owner starting `successor: ` that is a failure
+     (`paseo run failed`, `printed no single agent object`, `NOT archived`, `AGENT_CREATE_FAILED`, a
+     refusal) voids the `starting` line before it, because the owner then believes the handover failed
+     and keeps writing.
+  3. **No third party.** Either the line's owner id is S or the id/`paseo` of the step 2 row, or step 2
+     found no live row other than that owner and you. S is not required to equal the owner: it is often
+     free text or stale (`omp-2026-10-31-tendcf-stage-d`; a log still naming an archived `6225c4a1`). A
+     live step 2 row that is neither you nor the line's owner still goes through the ask.
+  4. **The handoff exists.** The log's `latest_handoff` is not `none` and names an existing file under
+     any `workspaces[].dir` of the log (real handoffs are written to the workspace repo's
+     `docs/handoffs/`) or under `~/ops/site-private-djbclark/`. Compare directories by `realpath`.
+
+  The title is NOT evidence (`self-slash` truncates the default `<owner's name> → <model>` and `--title`
+  replaces it), and neither is the first prompt: an operator-typed or relayed `/baton PATH` naming the
+  chain proves only that the operator named it, and goes through the ask. `self-slash` starts and
+  verifies the successor first and archives the owner only afterwards (it waits up to 900 s for the owner
+  to be idle), so the owner normally still reads live while its successor reads the chain: that is the
+  handover. A predecessor that ran `--finish --successor` stops writing at once (an archive can be
+  refused and leave it running). A `launch.py start --baton` start writes no such line, so it goes
+  through the ask.
 - **C. Your own chain after `/clear` or `/new`, no live other owner:** the newest `then: /baton` line for
   your id in `~/.local/state/self-slash.log` follows a handoff of this chain, you hold the watch role the
   chain belongs to (`bin/watch status`), or the operator named the chain (`/baton PATH`, `--dir
