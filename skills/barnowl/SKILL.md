@@ -19,7 +19,7 @@ name and its summary string). The installed client on pastebin is BarnOwl built 
 [djbclark/barnowl-debian](https://forgejo.mit.edu/djbclark/barnowl-debian/releases)); Debian's own is 1.10.
 `~/src/barnowl` is **not** the client source: it is djbclark's modules repo
 (forgejo.mit.edu/djbclark/barnowl): `Goose`, `HistoryLoad`, `InstanceStyle`, `Theme`
-(colours; style `themed`) and the `bo-a` launcher. A real client for testing them is built by
+(colours; style `themed`; added 2026-11-01) and the `bo-a` launcher. Since 2026-11-01 a real client for testing them is built by
 `~/src/barnowl/t/live/local/run.sh` (local podman VM, never the live pastebin session).
 
 Inside BarnOwl the user has `:goose <request>` (plain English, from the
