@@ -51,6 +51,11 @@ problems, 2 = unreadable input. It needs `uv` (it carries its own `jsonschema` d
    looks right, and run the validator on it first. Keys in the process table: `P`
    name/command, `t` or `F5` tree, `e` expand widget; more in
    `~/src/bottom/docs/content/usage/widgets/process.md`.
+   "This size terminal"? An agent shell has no tty (`stty`/`tput` fail or say 80x24). In herdr:
+   `herdr pane list` gives `viewport_rows`; the width is the longest line of
+   `herdr pane read <pane_id> --source visible` (count characters, not bytes). Preview at
+   that size; `preview.py` always expands the process widget (`-e`), so it cannot show the
+   whole layout. For that, start `btm-mt -C FILE` in your own private `tmux -S` server.
 5. Config that only `btm-mt` understands goes under a comment saying so; stock `btm` must
    still start with the file (it does: unknown keys are ignored).
 
@@ -83,3 +88,8 @@ To follow upstream: `git fetch upstream && git rebase upstream/main` in `~/src/b
 `ProcWidgetData::to_cell_text` (`process_data.rs`); option read in `src/options.rs`.
 Under 7 columns it falls back to the stock end-cut. Sorting and search still use the full
 command; only the drawn cell changes.
+
+Second fork change (`make_column` and `toggle_command` in `src/widgets/process_table.rs`): the
+Command column has no width cap (stock: 30% of the table, 50% after `P`). It takes whatever the
+columns before it leave, so put `command` LAST in `[processes] columns`; fewer narrow columns
+means a wider command. Stock `btm` still caps it and spreads the spare width evenly.
