@@ -16,7 +16,7 @@ old, with no CLAIM file (a CLAIM that records DONE still blocks) and no unfinish
   - at least one remote is configured, and no remote URL (fetch or push, insteadOf applied) is, or might be, a path
     inside the bigteam root (sibling checkouts that fetch each other would count each other's unpushed commits as "on
     a remote"): `file://` URLs are percent-decoded as git does, scp-like `host:path` and ssh hosts are resolved with
-    `ssh -G`; only a host that resolves to addresses none of which is this machine's (loopback, or an interface
+    `ssh -G` for the URL's own user and port; only a host that resolves to addresses none of which is this machine's (loopback, or an interface
     address, tested by binding) counts as another machine; anything else (a local name, an alias `ssh -G` cannot
     resolve, a name that does not resolve, `x::y` helper transports, odd schemes, `file://otherhost/...`) keeps the
     checkout;
@@ -34,7 +34,7 @@ old, with no CLAIM file (a CLAIM that records DONE still blocks) and no unfinish
     detached HEAD too) or reflog is missing from the remote-tracking refs.
 "On a remote" means the local remote-tracking refs; they are never fetched or verified, so a branch deleted upstream, or
 a remote that is a local path outside the root, still counts. A repository borrowing objects from a clone
-(`git clone --shared`, objects/info/alternates) cannot be detected from the clone's side. Right before each deletion the task
+(`git clone --shared`, objects/info/alternates) cannot be detected from the clone's side. Right before each deletion (and again after the safety scan) the task
 dir is re-judged (still a real dir under the root, mtime unchanged since planning apart from our own removals, no
 CLAIM, no unfinished or unreadable job record; the 7-day age is qualified once, at planning) and the checkout's safety is re-checked; a clone that fails part way through rmtree is left half deleted (it was clean and pushed).
 `--apply` takes an exclusive lock (`bigteam-prune.lock` beside the root) and exits 3 when another run holds it.
@@ -220,11 +220,13 @@ def is_local_address(family, sockaddr):
     return True
 
 
-def ssh_real_host(host):
-    """The HostName `ssh -G` resolves an alias to (config only, no connection); None when it cannot be established
-    (ssh missing, failing, timing out or printing no hostname), which keeps the checkout."""
+def ssh_real_host(host, user=None, port=None):
+    """The HostName `ssh -G` resolves an alias to (config only, no connection), for the remote user and port the URL
+    names (a `Match user git` block can route the same host elsewhere); None when it cannot be established (ssh
+    missing, failing, timing out or printing no hostname), which keeps the checkout."""
+    cmd = ["ssh", "-G"] + (["-l", user] if user else []) + (["-p", str(port)] if port else []) + ["--", host]
     try:
-        r = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=10, env=git_env(), stdin=subprocess.DEVNULL)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=git_env(), stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode:
@@ -235,14 +237,14 @@ def ssh_real_host(host):
     return None
 
 
-def host_is_external(host, via_ssh):
+def host_is_external(host, via_ssh, user=None, port=None):
     """True only when host is positively another machine: not empty, not a local name, (for ssh) the alias resolved,
     the name resolves, and no resolved address is one of this machine's. Anything else is not 'external'."""
     host = host.strip("[]").lower()
     if not host:
         return False
     if via_ssh:
-        host = ssh_real_host(host)
+        host = ssh_real_host(host, user, port)
         if host is None:
             return False
         host = host.strip("[]").lower()
@@ -272,16 +274,20 @@ def classify_url(url):
                     return "unknown", None
                 return "path", [parts.path, unquote(parts.path)]
             if scheme in NET_SCHEMES:
-                return ("remote", None) if host_is_external(parts.hostname or "", scheme in SSH_SCHEMES) else ("unknown", None)
+                ssh = scheme in SSH_SCHEMES
+                user, port = (unquote(parts.username), parts.port) if ssh and parts.username else (None, parts.port if ssh else None)
+                return ("remote", None) if host_is_external(parts.hostname or "", ssh, user, port) else ("unknown", None)
             return "unknown", None
         head = url.split("/", 1)[0]
         if "::" in head and not head.startswith("["):
             return "unknown", None
         if ":" in head:  # scp-like [user@]host:path
-            host = head.rsplit(":", 1)[0].rsplit("@", 1)[-1].strip("[]")
+            userhost = head.rsplit(":", 1)[0]
+            user, _at, host = userhost.rpartition("@")
+            host = host.strip("[]")
             if len(host) <= 1:
                 return "unknown", None  # a drive letter or nonsense
-            return ("remote", None) if host_is_external(host, True) else ("unknown", None)
+            return ("remote", None) if host_is_external(host, True, user or None) else ("unknown", None)
         return "path", [url]
     except ValueError:
         return "unknown", None
@@ -503,6 +509,9 @@ def remove(c, task, baseline):
     ok, why = safe(c)
     if not ok:
         return False, f"no longer safe: {why}"
+    ok, why = task_still_eligible(c, task, baseline)  # safe() runs many subprocesses: a CLAIM may have appeared meanwhile
+    if not ok:
+        return False, f"no longer eligible: {why}"
     try:
         res = _remove(c)
     finally:

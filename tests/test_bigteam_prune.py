@@ -467,7 +467,7 @@ def test_file_url_with_foreign_host_or_helper_transport_cannot_be_resolved_and_i
 @pytest.mark.parametrize("url", ["https://github.com/o/r.git", "git@github.com:o/r.git", "ssh://git@github.com/o/r.git"])
 def test_ordinary_network_remotes_do_not_keep_a_clone(prune, tmp_path, world, url, monkeypatch):
     c = make_clone(tmp_path, world)
-    monkeypatch.setattr(prune, "ssh_real_host", lambda h: h)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h, *a, **k: h)
     monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])  # TEST-NET-3
     g(c, "remote", "add", "gh", url)
     assert prune.local_remote_inside_root(c) is None
@@ -476,14 +476,14 @@ def test_ordinary_network_remotes_do_not_keep_a_clone(prune, tmp_path, world, ur
 @pytest.mark.parametrize("url", ["ssh://localhost/tmp/x", "me@localhost:tmp/x", "git://127.0.0.1/x", "http://[::1]/x"])
 def test_network_urls_to_this_machine_are_kept(prune, tmp_path, world, url, monkeypatch):
     c = make_clone(tmp_path, world)
-    monkeypatch.setattr(prune, "ssh_real_host", lambda h: h)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h, *a, **k: h)
     g(c, "remote", "add", "loc", url)
     assert prune.local_remote_inside_root(c)
 
 
 def test_ssh_alias_resolving_to_this_machine_is_kept(prune, tmp_path, world, monkeypatch):
     c = make_clone(tmp_path, world)
-    monkeypatch.setattr(prune, "ssh_real_host", lambda h: "localhost")
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h, *a, **k: "localhost")
     g(c, "remote", "add", "alias", "myalias:work/x")
     assert prune.local_remote_inside_root(c)
 
@@ -584,7 +584,7 @@ def test_claim_appearing_between_two_removals_keeps_the_second(prune, tmp_path, 
 @pytest.mark.parametrize("url", ["ssh://alias/x", "alias:work/x"])
 def test_ssh_alias_that_cannot_be_resolved_keeps_the_clone(prune, tmp_path, world, url, monkeypatch):
     c = make_clone(tmp_path, world)
-    monkeypatch.setattr(prune, "ssh_real_host", lambda h: None)  # ssh -G failed, timed out or printed no hostname
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h, *a, **k: None)  # ssh -G failed, timed out or printed no hostname
     g(c, "remote", "add", "al", url)
     why = prune.local_remote_inside_root(c)
     assert why and "cannot be resolved" in why
@@ -608,7 +608,7 @@ def test_ssh_real_host_is_none_when_ssh_fails(prune, monkeypatch):
 def test_remote_host_with_this_machines_lan_address_is_kept(prune, tmp_path, world, monkeypatch):
     c = make_clone(tmp_path, world)
     lan = (socket.AF_INET, ("192.0.2.77", 0))
-    monkeypatch.setattr(prune, "ssh_real_host", lambda h: h)
+    monkeypatch.setattr(prune, "ssh_real_host", lambda h, *a, **k: h)
     monkeypatch.setattr(prune, "resolve_addrs", lambda h: [lan])
     monkeypatch.setattr(prune, "is_local_address", lambda fam, sa: sa[0] == "192.0.2.77")
     g(c, "remote", "add", "ts", "ssh://me@tailnet-host/work/x")
@@ -617,7 +617,7 @@ def test_remote_host_with_this_machines_lan_address_is_kept(prune, tmp_path, wor
 
 def test_remote_host_that_does_not_resolve_is_kept(prune, tmp_path, world, monkeypatch):
     c = make_clone(tmp_path, world)
-    monkeypatch.setattr(prune, "resolve_addrs", lambda h: None)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h, *a, **k: None)
     g(c, "remote", "add", "x", "https://nowhere.invalid/o/r.git")
     assert prune.local_remote_inside_root(c)
 
@@ -664,3 +664,55 @@ def test_unreadable_jobs_dir_keeps_the_task(prune, tmp_path, world):
         assert prune.finished_dir(c.parent) is False
     finally:
         jobs.chmod(0o755)
+
+
+# ---- round 4c (local Codex review of 7a1d7c33) ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url,want", [
+    ("git@github.com:o/r.git", ["-l", "git", "--", "github.com"]),
+    ("ssh://deploy@example.org:2222/o/r.git", ["-l", "deploy", "-p", "2222", "--", "example.org"]),
+    ("example.org:o/r.git", ["--", "example.org"]),
+])
+def test_ssh_lookup_carries_the_remote_user_and_port(prune, tmp_path, world, url, want, monkeypatch):
+    seen = []
+
+    class R:
+        returncode = 0
+        stdout = "hostname example.org\n"
+
+    monkeypatch.setattr(prune.subprocess, "run", lambda cmd, *a, **k: seen.append(cmd) or R())
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    assert prune.classify_url(url) == ("remote", None)
+    cmd = seen[0]
+    assert cmd[:2] == ["ssh", "-G"]
+    assert cmd[2:] == want
+
+
+def test_user_routed_ssh_host_that_lands_on_this_machine_is_kept(prune, monkeypatch):
+    # `Match user git` + `HostName localhost`: the lookup is only external when the user is not passed through
+    def fake(host, user=None, port=None):
+        return "localhost" if user == "git" else host
+
+    monkeypatch.setattr(prune, "ssh_real_host", fake)
+    monkeypatch.setattr(prune, "resolve_addrs", lambda h: [(socket.AF_INET, ("203.0.113.9", 0))])
+    assert prune.classify_url("git@github.com:o/r.git") == ("unknown", None)
+    assert prune.classify_url("ssh://git@github.com/o/r.git") == ("unknown", None)
+    assert prune.classify_url("github.com:o/r.git") == ("remote", None)
+
+
+def test_claim_created_during_the_safety_scan_stops_the_deletion(prune, tmp_path, world, monkeypatch):
+    c = make_clone(tmp_path, world)
+    task = c.parent
+    baseline = {task: task.stat().st_mtime}
+    real_safe = prune.safe
+
+    def safe_then_claim(x):
+        res = real_safe(x)
+        (task / "CLAIM").write_text("a session just started here\n")
+        return res
+
+    monkeypatch.setattr(prune, "safe", safe_then_claim)
+    ok, msg = prune.remove(c, task, baseline)
+    assert not ok and "no longer eligible" in msg
+    assert c.exists()
