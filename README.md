@@ -408,3 +408,8 @@ On 2026-11-01 (PR 175), malformed BLOCK recovery retained candidates containing 
 starts in notes or following prose, and decoded escaped string values and case variants of
 field names for fail-closed recovery. Repeated starts with unfinished JSON can still cause
 quadratic scanning; the empty-start bound does not bound that separate path.
+
+On 2026-11-01 (PR 175), root-array documentation detection began finding the complete
+array with string-aware boundaries before classifying it. Comment delimiters and marker
+format strings inside readable array examples remain documentation; a separate same-head
+BLOCK following the example still holds the gate.

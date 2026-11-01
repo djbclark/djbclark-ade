@@ -863,7 +863,28 @@ def adversary_verdict(body: str, head: str) -> dict:
         first = payload.lstrip()
         root_array = first.startswith("[")
         if root_array:
-            _, root_array = _top_level_marker_fields(first)
+            # Comment delimiters inside array strings are JSON content. Find
+            # the complete root before judging whether its structure is readable.
+            array_start = payload_start + len(payload) - len(first)
+            stack = []
+            array_end = -1
+            for kind, _value, offset in _marker_tokens(body[array_start:]):
+                if kind in ("{", "["):
+                    stack.append(kind)
+                elif kind in ("}", "]"):
+                    if not stack or stack[-1] != {"}": "{", "]": "["}[kind]:
+                        break
+                    stack.pop()
+                    if not stack:
+                        array_end = array_start + offset + 1
+                        break
+            root_array = False
+            if array_end >= 0 and body[array_end:].lstrip().startswith("-->"):
+                array_text = body[array_start:array_end]
+                _, root_array = _top_level_marker_fields(array_text)
+                if root_array:
+                    quoted_strings.extend((array_start + token.start(), array_start + token.end())
+                                          for token in re.finditer(r'"(?:[^"\\]|\\.)*"', array_text))
         offset = payload.find("{")
         js = payload_start + offset if offset >= 0 and not root_array else -1
         if js < 0:

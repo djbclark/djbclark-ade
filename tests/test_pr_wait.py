@@ -2760,3 +2760,23 @@ def test_many_empty_marker_starts_do_not_rescan_remaining_body(monkeypatch):
     body = marker("APPROVE") + "\n" + '<!-- adversary-verdict:v1 x ' * 2000
     module["adversary_verdict"](body, ADV_HEAD)
     assert sum(scanned) <= 4 * len(body)
+
+
+@pytest.mark.parametrize("note", ["<!--", "-->", "<!-- adversary-verdict:v1", "quote \" and [ ] <!-- -->"])
+@pytest.mark.parametrize("trailing_comma", [False, True])
+@pytest.mark.parametrize("context", ["fenced", "inline"])
+def test_root_array_comment_delimiters_remain_documentation(note, trailing_comma, context):
+    payload = json.dumps([{"note": note, "verdict": "BLOCK", "head": ADV_HEAD}])
+    if trailing_comma:
+        payload = payload[:-1] + ",]"
+    example = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    code = "\n```\n" + example + "\n```" if context == "fenced" else "\n`" + example + "`"
+    body = marker("APPROVE") + code
+    assert adv(body)["verdict"] == "APPROVE" and not adv(body)["malformed"]
+    assert gate(body, required=False)[0] and gate(body, required=True)[0]
+
+
+def test_root_array_documentation_does_not_hide_following_block():
+    example = '<!-- adversary-verdict:v1 ' + json.dumps([{"note": "<!-- -->", "head": ADV_HEAD, "verdict": "BLOCK"}]) + ' -->'
+    body = marker("APPROVE") + "\n```\n" + example + "\n" + marker("BLOCK") + "\n```"
+    assert adv(body)["verdict"] == "BLOCK" and not gate(body)[0]
