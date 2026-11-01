@@ -1,0 +1,317 @@
+#!/usr/bin/env -S python3 -I
+"""paseo-watchdog (DRAFT, not installed anywhere): outside supervision of a Paseo daemon (plan B9, D1.7).
+
+  paseo-watchdog [--once] [--home PATH] [--host ENDPOINT] [--base-url URL | --no-health] [--state-dir DIR]
+                 [--paseo PATH] [--allow-restart] [--restart-cmd ARGV...] [--no-reconcile | --reconcile-cmd ARGV...]
+                 [--assert-b43] [--b43-only] [--expect-plugin ID] [--heartbeat-cmd ARGV...]
+                 [--ping-cmd ARGV...] [--dry-run] [--json]
+
+Per pass: GET <base-url>/api/health (5 s) and `timeout 20 paseo ls --json`; healthy only when both pass.
+2 consecutive misses: alert once and capture diagnostics first (`sample`, daemon.log eventLoopDelay lines, load).
+3 consecutive misses: restart only with --allow-restart, load average below the core count, the last restart
+over 30 minutes old, and the B4.3 assertion passing (adversary r7 V1: the assertion runs BEFORE any restart).
+The B4.3 assertion (janitor settings, herald deleteHelpers, optional ade-gate running) also runs every pass.
+
+Exit: 0 healthy, 1 miss or alert condition this pass, 2 usage or isolation refusal, 77 cannot run (--b43-only).
+Contract proved by tests/paseo-acceptance/d1-07-watchdog-fire.sh and d1-07c-watchdog-soak.sh (second daemon only).
+Pings go through `hermes-ping` as an argv list. Nothing here reads a secret or uses a shell.
+"""
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import urllib.request
+
+LIVE_HOME = os.path.expanduser("~/.paseo")
+HEALTH_TIMEOUT = 5
+RPC_TIMEOUT = 20
+ALERT_AFTER = 2
+RESTART_AFTER = 3
+RESTART_MIN_GAP = 30 * 60
+B43_REALERT = 6 * 3600
+JANITOR_KEYS = ("archiveChildren", "deleteChildren", "deleteMain")
+
+
+def now():
+    return int(time.time())
+
+
+def run(argv, timeout):
+    """Run argv with a timeout, killing the whole process group on expiry. Returns (rc, stdout, stderr)."""
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out, err
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.communicate()
+        return 124, "", "timeout"
+    except OSError as e:
+        return 127, "", str(e)
+
+
+def atomic_write(path, text):
+    tmp = path + ".tmp.%d" % os.getpid()
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def load_state(path):
+    try:
+        with open(path) as f:
+            s = json.load(f)
+        return s if isinstance(s, dict) else {}
+    except (OSError, ValueError):
+        return {}  # unreadable state means zero misses, never a licence to restart
+
+
+def paseo_argv(a, *rest):
+    argv = [a.paseo]
+    if a.home:
+        argv += ["--home", a.home]
+    if a.host:
+        argv += ["--host", a.host]
+    return argv + list(rest)
+
+
+def probe_health(a):
+    try:
+        with urllib.request.urlopen(a.base_url.rstrip("/") + "/api/health", timeout=HEALTH_TIMEOUT) as r:
+            return json.load(r).get("status") == "ok"
+    except Exception:
+        return False
+
+
+def probe_rpc(a):
+    rc, out, _ = run(paseo_argv(a, "ls", "--json"), RPC_TIMEOUT)
+    if rc != 0:
+        return False
+    try:
+        return isinstance(json.loads(out), list)
+    except ValueError:
+        return False
+
+
+def find_keys(obj, names, found):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in names:
+                found[k] = v
+            find_keys(v, names, found)
+    elif isinstance(obj, list):
+        for v in obj:
+            find_keys(v, names, found)
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def daemon_home(a):
+    return a.home or os.environ.get("PASEO_HOME") or LIVE_HOME
+
+
+def b43_assertion(a):
+    """Returns a list of problems; empty means the B4.3 assertion passes. None means it could not run."""
+    rc, out, _ = run(paseo_argv(a, "plugin", "ls", "--json"), RPC_TIMEOUT)
+    if rc != 0:
+        return None
+    try:
+        plugins = json.loads(out) if out.strip() else None
+    except ValueError:
+        return ["plugin ls output unparseable"]
+    if plugins is None:
+        # V4: empty output is acceptable only on a 0.13 daemon, which has no plugins to run
+        rc2, ver, _ = run(paseo_argv(a, "status", "--json"), RPC_TIMEOUT)
+        v = ""
+        try:
+            v = str(json.loads(ver).get("daemonVersion", ""))
+        except ValueError:
+            pass
+        if v.startswith("0.13"):
+            return []
+        return ["plugin ls empty on daemon %s" % (v or "unknown")]
+    if not isinstance(plugins, list):
+        return ["plugin ls not a list"]
+    ids = {p.get("id"): p for p in plugins if isinstance(p, dict)}
+    problems = []
+    home = daemon_home(a)
+    jan = ids.get("session-janitor")
+    if jan and jan.get("enabled"):
+        found = {}
+        for path in [os.path.join(home, "config.json")] + [
+                os.path.join(home, "plugin-data", d, f)
+                for d in ("session-janitor", "paseo-session-janitor")
+                for f in ("config.json", "settings.json", "state.json")]:
+            data = read_json(path)
+            if data is not None:
+                find_keys(data, set(JANITOR_KEYS), found)
+        for k in JANITOR_KEYS:
+            if found.get(k) is not False:  # absent means the destructive default, true
+                problems.append("session-janitor %s is not explicitly false" % k)
+    if "herald" in ids:  # V2: only hosts whose list shows herald; enabled or not
+        cfg = read_json(os.path.join(home, "plugin-data", "herald", "config.json"))
+        flag = cfg.get("cleanup", {}).get("deleteHelpers") if isinstance(cfg, dict) else None
+        if flag is not False:
+            problems.append("herald cleanup.deleteHelpers is not exactly false")
+    if a.expect_plugin:
+        p = ids.get(a.expect_plugin)
+        if not p or p.get("status") != "running":
+            problems.append("plugin %s is not running" % a.expect_plugin)
+    return problems
+
+
+def ping(a, text):
+    if a.dry_run:
+        print("DRY ping:", text)
+        return
+    argv = a.ping_cmd or [os.path.expanduser("~/.local/bin/hermes-ping")]
+    run(argv + ["paseo-watchdog: " + text], 30)
+
+
+def diagnostics(a, state_dir):
+    d = os.path.join(state_dir, "diag", time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+    if a.dry_run:
+        return d
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    home = daemon_home(a)
+    pid = None
+    try:
+        with open(os.path.join(home, "paseo.pid")) as f:
+            pid = f.read().split()[0]
+    except (OSError, IndexError):
+        pass
+    if pid and pid.isdigit():
+        _, out, _ = run(["sample", pid, "5"] if sys.platform == "darwin" else ["ps", "-o", "pid,stat,pcpu,rss", "-p", pid], 30)
+        atomic_write(os.path.join(d, "sample.txt"), out)
+    try:
+        with open(os.path.join(home, "daemon.log"), errors="replace") as f:
+            lines = [l for l in f.readlines()[-2000:] if "eventLoopDelay" in l][-200:]
+        atomic_write(os.path.join(d, "eventloop.txt"), "".join(lines))
+    except OSError:
+        pass
+    _, out, _ = run(["uptime"], 5)
+    atomic_write(os.path.join(d, "load.txt"), out)
+    return d
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--home")
+    ap.add_argument("--host")
+    ap.add_argument("--base-url", default="http://127.0.0.1:7263")
+    ap.add_argument("--no-health", action="store_true", help="daemon without an HTTP listener (Unix socket): the RPC probe alone decides")
+    ap.add_argument("--state-dir", default=os.path.expanduser("~/.local/state/ade/watchdog"))
+    ap.add_argument("--paseo", default="paseo")
+    ap.add_argument("--allow-restart", action="store_true")
+    ap.add_argument("--restart-cmd", nargs="+")
+    ap.add_argument("--no-reconcile", action="store_true")
+    ap.add_argument("--reconcile-cmd", nargs="+")
+    ap.add_argument("--assert-b43", action="store_true")
+    ap.add_argument("--b43-only", action="store_true")
+    ap.add_argument("--expect-plugin")
+    ap.add_argument("--heartbeat-cmd", nargs="+")
+    ap.add_argument("--ping-cmd", nargs="+")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+
+    live = os.path.realpath(daemon_home(a)) == os.path.realpath(LIVE_HOME)
+    if a.allow_restart and live and os.environ.get("ADE_WATCHDOG_LIVE") != "1":
+        print("refusing --allow-restart against the live home without ADE_WATCHDOG_LIVE=1", file=sys.stderr)
+        return 2
+
+    if a.b43_only:
+        p = b43_assertion(a)
+        print(json.dumps({"b43": "cannot-run" if p is None else ("ok" if not p else "alert"), "problems": p or []}))
+        return 77 if p is None else (1 if p else 0)
+
+    os.makedirs(a.state_dir, mode=0o700, exist_ok=True)
+    spath = os.path.join(a.state_dir, "state.json")
+    st = load_state(spath)
+    misses = int(st.get("consecutiveMisses", 0))
+    rpc = probe_rpc(a)
+    health = rpc if a.no_health else probe_health(a)
+    ok = health and rpc
+    load1 = os.getloadavg()[0]
+    cores = os.cpu_count() or 1
+    reason = "ok" if ok else ("rpc-starved" if health else ("health-down" if rpc else "both-down"))
+    actions = []
+    b43 = b43_assertion(a)  # every pass, and before any restart below
+    if b43:
+        last = st.get("b43AlertedAt", 0)
+        if now() - last > B43_REALERT or st.get("b43Problems") != b43:
+            ping(a, "B4.3 assertion failed: " + "; ".join(b43))
+            st["b43AlertedAt"], st["b43Problems"] = now(), b43
+            actions.append("alert-b43")
+    else:
+        st.pop("b43Problems", None)
+
+    if ok:
+        if st.get("alerted"):
+            ping(a, "paseo daemon recovered (%s)" % reason)
+            actions.append("recovered-ping")
+        st.update(consecutiveMisses=0, lastOkAt=now(), alerted=False, lastReason="ok")
+    else:
+        misses += 1
+        st.update(consecutiveMisses=misses, lastReason=reason, lastLoad=load1)
+        if misses >= ALERT_AFTER and not st.get("alerted"):
+            d = diagnostics(a, a.state_dir)
+            ping(a, "paseo daemon %s for %d passes (load %.1f/%d cores); diagnostics %s" % (reason, misses, load1, cores, d))
+            st["alerted"] = True
+            actions.append("alert+diagnostics")
+        if misses >= RESTART_AFTER:
+            why = []
+            if not a.allow_restart:
+                why.append("restart not enabled")
+            if load1 >= cores:
+                why.append("load %.1f >= %d cores" % (load1, cores))
+            if now() - int(st.get("lastRestartAt", 0)) < RESTART_MIN_GAP:
+                why.append("restarted under 30 minutes ago")
+            if b43 is None or b43:
+                why.append("B4.3 assertion failed or unreadable")
+            if not (a.no_reconcile or a.reconcile_cmd):
+                why.append("no reconcile command and no --no-reconcile")
+            if why:
+                if st.get("lastNoRestartReason") != why:
+                    ping(a, "not restarting: " + "; ".join(why))
+                    st["lastNoRestartReason"] = why
+                actions.append("no-restart")
+            elif a.dry_run:
+                actions.append("would-restart")
+            else:
+                run(a.restart_cmd or paseo_argv(a, "restart"), 120)
+                st["lastRestartAt"], st["consecutiveMisses"] = now(), 0
+                if a.reconcile_cmd:
+                    run(a.reconcile_cmd, 300)
+                actions.append("restarted")
+
+    if a.heartbeat_cmd and not a.dry_run:
+        payload = json.dumps({"kind": "heartbeat", "ts": now(), "health": health, "rpc": rpc, "misses": st.get("consecutiveMisses", 0)})
+        try:
+            subprocess.run(a.heartbeat_cmd, input=payload, text=True, timeout=30, capture_output=True)
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # a failed heartbeat write never changes the probe verdict
+
+    if not a.dry_run:
+        atomic_write(spath, json.dumps(st))
+    rec = {"ok": ok, "reason": reason, "health": health, "rpc": rpc, "misses": st.get("consecutiveMisses", 0),
+           "load1": round(load1, 2), "cores": cores, "b43": b43, "actions": actions}
+    print(json.dumps(rec) if a.json else " ".join("%s=%s" % kv for kv in rec.items()))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

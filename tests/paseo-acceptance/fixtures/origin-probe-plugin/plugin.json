@@ -1,0 +1,7 @@
+{
+  "id": "origin-probe",
+  "name": "origin-probe",
+  "version": "0.0.1",
+  "main": "index.js",
+  "note": "DRAFT: manifest field names UNVERIFIED, mirror what `paseo plugin init` generates"
+}

@@ -1,0 +1,69 @@
+#!/usr/bin/env -S python3 -I
+"""deadman-check (DRAFT, runs on vps-primary from a systemd timer every 5 minutes; plan D1.9).
+
+Holds no Mac credential and never calls the Mac. Reads $DEADMAN_DIR/heartbeat.json and sleep.json.
+Pages (via --ping-cmd, default hermes-ping) when: the heartbeat is stale (--stale-min, default 15) with no current
+sleep marker; the latest heartbeat reports health or rpc false; or a current sleep marker is older than
+--max-sleep-hours (default 72). A sleep marker counts only while newer than the last heartbeat. Rate-limited via
+$DEADMAN_DIR/paged.json (re-page after --repage-min, default 60); a recovery page follows.
+Exit 0 ok, 1 paged, 2 usage. --now TS overrides the clock (tests).
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+D = os.environ.get("DEADMAN_DIR", os.path.expanduser("~/deadman"))
+
+
+def rj(name):
+    try:
+        with open(os.path.join(D, name)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stale-min", type=int, default=15)
+    ap.add_argument("--max-sleep-hours", type=int, default=72)
+    ap.add_argument("--repage-min", type=int, default=60)
+    ap.add_argument("--now", type=int)
+    ap.add_argument("--ping-cmd", nargs="+", default=["hermes-ping"])
+    a = ap.parse_args()
+    now = a.now if a.now is not None else int(time.time())
+    hb, sl = rj("heartbeat.json"), rj("sleep.json")
+    last = hb["ts"] if isinstance(hb, dict) and type(hb.get("ts")) is int else 0
+    sleeping = isinstance(sl, dict) and type(sl.get("ts")) is int and sl["ts"] >= last
+    problem = None
+    if hb is None:
+        problem = "no heartbeat file"
+    elif hb.get("health") is False or hb.get("rpc") is False:
+        problem = "Mac daemon reports failing (health=%s rpc=%s)" % (hb.get("health"), hb.get("rpc"))
+    elif now - last > a.stale_min * 60 and not sleeping:
+        problem = "heartbeat stale %d min, no sleep marker" % ((now - last) // 60)
+    elif sleeping and now - sl["ts"] > a.max_sleep_hours * 3600:
+        problem = "Mac asleep over %d h" % a.max_sleep_hours
+    paged = rj("paged.json") or {}
+    if problem:
+        if now - int(paged.get("ts", 0)) >= a.repage_min * 60 or paged.get("problem") != problem:
+            subprocess.run(a.ping_cmd + ["deadman: " + problem], timeout=30)
+            os.makedirs(D, mode=0o700, exist_ok=True)
+            tmp = os.path.join(D, "paged.json.tmp")
+            with open(tmp, "w") as f:
+                json.dump({"ts": now, "problem": problem}, f)
+            os.replace(tmp, os.path.join(D, "paged.json"))
+        print("PAGE:", problem)
+        return 1
+    if paged:
+        subprocess.run(a.ping_cmd + ["deadman: recovered"], timeout=30)
+        os.unlink(os.path.join(D, "paged.json"))
+    print("ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

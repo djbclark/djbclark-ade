@@ -1,0 +1,61 @@
+#!/usr/bin/env -S python3 -I
+"""write-heartbeat (DRAFT, runs on vps-primary as the forced command of the Mac's dedicated ssh key; plan D1.9).
+
+authorized_keys: restrict,from="<Mac tailnet IP>",command="/path/write-heartbeat" ssh-ed25519 ...
+Ignores SSH_ORIGINAL_COMMAND. Reads at most 4 KB of JSON from stdin and replaces exactly two files atomically
+under $DEADMAN_DIR (default ~/deadman): heartbeat.json and sleep.json.
+  {"kind":"heartbeat","ts":<int>,"health":bool,"rpc":bool,"misses":<int>}
+  {"kind":"sleep","ts":<int>}      writes sleep.json
+  {"kind":"wake","ts":<int>}       removes sleep.json
+A heartbeat removes a sleep marker older than itself (a failed wake hook cannot silence the check).
+Exit 0 written, 1 rejected input.
+"""
+import json
+import os
+import sys
+
+D = os.environ.get("DEADMAN_DIR", os.path.expanduser("~/deadman"))
+
+
+def atomic(path, obj):
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
+
+def main():
+    raw = sys.stdin.read(4097)
+    if len(raw) > 4096:
+        return 1
+    try:
+        m = json.loads(raw)
+        kind, ts = m["kind"], m["ts"]
+        if kind not in ("heartbeat", "sleep", "wake") or type(ts) is not int or ts < 0:
+            return 1
+        if kind == "heartbeat" and not (type(m.get("health")) is bool and type(m.get("rpc")) is bool):
+            return 1
+    except (ValueError, KeyError, TypeError):
+        return 1
+    os.makedirs(D, mode=0o700, exist_ok=True)
+    sleep_path = os.path.join(D, "sleep.json")
+    if kind == "heartbeat":
+        atomic(os.path.join(D, "heartbeat.json"), {"ts": ts, "health": m["health"], "rpc": m["rpc"], "misses": int(m.get("misses", 0))})
+        try:
+            with open(sleep_path) as f:
+                if json.load(f).get("ts", 0) <= ts:
+                    os.unlink(sleep_path)
+        except (OSError, ValueError):
+            pass
+    elif kind == "sleep":
+        atomic(sleep_path, {"ts": ts})
+    else:
+        try:
+            os.unlink(sleep_path)
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
