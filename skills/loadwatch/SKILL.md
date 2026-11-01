@@ -78,13 +78,13 @@ gtail -n 10 ~/.local/state/load-watch/guard.jsonl
 
 Investigate (section 3) when any of these holds. Otherwise report the numbers in one line and stop.
 
-1. The 1-minute load per core is above **2.5** (`admit` says `hot`; that is 20 on 8 cores, `bg`'s base since 2026-11-01, was 1.5; the limit is **4.0** (32) while the compressor churn is at most 25k pages/s (2.0 from 2026-10-25 to 2026-11-01; djbclark: 3.5 per core "is actually not too bad for this system", the real constraints are memory pressure and process churn), `max_per_core` in `admit --json` is the one in force; the same limit
+1. The 1-minute load per core is above **2.5** (`admit` says `hot`; that is 20 on 8 cores, `bg`'s base since 2026-11-01, was 1.5; the limit is **4.0** (32) while the compressor churn is at most 20k pages/s and the machine has been calm for 10 minutes (§2a; 25k and no hysteresis until 2026-11-01; 2.0 from 2026-10-25 to 2026-11-01; djbclark: 3.5 per core "is actually not too bad for this system", the real constraints are memory pressure and process churn), `max_per_core` in `admit --json` is the one in force; the same limit
    `bg` and `acp-dispatch` use) **and** the 5- or 15-minute average agrees. A 1-minute spike over a
    falling 15-minute average is agents starting up, not a problem: report it and move on.
 2. `status` shows a hot streak (`hot for N/300 s`), or `sample.log` has a `sustained load` line from the
    last hour.
 3. An incident has no `ack`, or `guard.jsonl` shows a trip or a `disabled` event from the last day.
-4. A `load-watch: compressor churn ~Nk pages/s for 3+ min (limit 60k); top: ...` line arrived (2026-10-23;
+4. A `load-watch: compressor churn ~Nk pages/s for 3+ min (limit 20k); top: ...` line arrived (2026-10-23, limit 60k until 2026-11-01;
    `status` shows `compressor churn` and the `churn` / `churn-watcher` cooldowns). The sample step reads the
    `vm_stat` compressor delta each 20 s; it is sent when churn stays above the `admit` limit for 180 s
    (`LW_CHURN_SUSTAIN_S`), to you at most hourly and to Hermes every 6 h. `admit` already holds new
@@ -92,6 +92,34 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
    `ps -axo pid,rss,command -m | head` (not only the CPU list in the line), then section 3 as usual. The
    alert opens no incident and kills nothing; the Standing exceptions below only change the advice (the line
    says so when Grok, Chrome or WindowServer is in its top 3), never whether you investigate.
+
+## 2a. The admit memory gates and the agent cap (2026-11-01)
+
+Why: the load watcher's d8891c91 measured a sustained load of 35-70 on this 8-core, 16 GB Mac that was **memory
+starvation, not CPU**: ~64 MB free, ~12k compressions+decompressions/s, ~1760 pageins/s, kernel_task 57% and sys 25-39% of
+CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3). The 4.0 calm boost let a slice start in every brief dip
+and each start pushed memory back over: an oscillation. So `load-watch admit` (what `bg` and `acp-dispatch` call) fails
+toward waiting: it refuses (exit 75) while **any** of these holds, and `--json` / the line name each in `refused`:
+
+| gate (`refused` name) | default | flag | env |
+|---|---|---|---|
+| free + speculative memory below the floor (`free_mem`) | 600 MB | `--min-free-mb` | `LW_MIN_FREE_MB` |
+| compressions + decompressions per second above (`compressor`) | 20000 (was 60000) | `--max-mem-churn` | `LW_MAX_COMPRESSOR_S` |
+| pageins per second above (`pageins`) | 1000 | `--max-pageins` | `LW_MAX_PAGEINS_S` |
+| live `acp-run` sessions machine-wide at or above the cap (`agents`) | 14 | `--max-agents` | `LW_MAX_AGENTS` (0 = off) |
+
+**`LW_MAX_AGENTS` is the knob djbclark tunes**: how many agent sessions may run at once. Raise it when memory has
+headroom (the other gates still hold), lower it when `vm_stat` shows free memory under 600 MB with the cap not yet
+reached. The count is one `ps`, an exact argv match of the process running the script named `acp-run` (never `pgrep -f`).
+Rates come from two `vm_stat` reads 2 s apart. A reading that cannot be taken (no `vm_stat`; Linux reads `/proc/meminfo`
+MemAvailable and `/proc/vmstat` pswpin+pswpout and pgmajfault) leaves its gate open and is listed in `unreadable`.
+`acp-dispatch` drops every `LW_*` variable from the environment it gives `admit`, so the env knobs bind a direct
+`load-watch admit` or `bg` call only; a dispatcher run uses the defaults until that scrub passes these five through.
+
+Hysteresis: the 4.0 per-core calm boost applies only after the machine has stayed calm (churn at most the compressor
+limit, free memory above the floor, pageins under their limit) for `LW_BOOST_CALM_S` (600 s) without a break. Any hot
+reading by `admit` or by the 20 s sampler resets the clock (`~/.local/state/load-watch/calm.json`); `status` shows
+`calm boost: calm for N/600 s` and `admit --json` carries `calm_for_s`.
 
 ## 3. Investigate
 

@@ -9,7 +9,8 @@
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
-    load-watch admit [--max-per-core N] [--max-mem-churn N] [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
+    load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents N]
+                     [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
                                             the one session told about every spike (`loadwatch` skill)
@@ -81,22 +82,36 @@ launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] 
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
 load drops below the threshold sleeps a random 5-30 s, never past --wait (so queued dispatchers do not all start together)
 and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
-it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"):
-`admit` also reads the compressor churn (macOS `vm_stat` Compressions + Decompressions over 0.5 s, pages/s) and
-is hot when it exceeds --max-mem-churn (default 60000, calibrated 2026-10-23 from 215 ten-second samples:
-calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s; one session's data, so
-recalibrate with more; the first guess, 20000, sat below the load<10 median of 34k). Load and swap alone did not separate that spike from a calm hour.
+it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"; tightened 2026-11-01):
+`admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: free + speculative
+memory is below --min-free-mb (default 600, env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
+exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 2026-11-01); pageins exceed --max-pageins per
+second (default 1000, env LW_MAX_PAGEINS_S); or the live `acp-run` sessions machine-wide (one `ps`, exact argv match of the
+process running the script named acp-run, never pgrep/pkill -f) number --max-agents or more (default 14, env LW_MAX_AGENTS,
+0 = no cap: THE knob to tune how many agent sessions may run at once). Why, measured 2026-11-01 (load watcher d8891c91):
+load 35-70 on this 8-core, 16 GB Mac was memory starvation, not CPU: ~64 MB free, ~12k compressions+decompressions/s,
+~1760 pageins/s, kernel_task 57% and sys 25-39% of CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3); the
+4.0 calm boost let a slice start in every brief dip and each start pushed memory back over. The 2026-10-23 calibration of
+the churn line (215 ten-second samples: calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s) set
+60000; 2026-11-01 showed starvation at 12k, so it is 20000. Load and swap alone did not separate that spike from a calm hour.
 Runaway Chrome (operator 2026-10-25): the sample step tells the watcher (never kills) when one Google Chrome process
 (not "Chrome for Testing") has used LW_CHROME_CORES (0.9) or more for LW_CHROME_SUSTAIN_S (300), once an hour per pid, with its kind, the
 URL on its command line when it has one, and role-aware Task Manager (Shift+Esc) advice: match the pid and
 report the task; a browser/GPU alert does not identify a busy tab. Only an identified tab may be ended by the operator.
-Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default 25000, just above the calm tail)
+Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default = the compressor limit, 20000; 25000 until 2026-11-01)
 the per-core limit is --boost-per-core (default 4.0, was 2.0 until 2026-11-01; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
-passes its base; at higher churn, or when churn cannot be read, the base limit holds. The result and `--json` `max_per_core` are the
+passes its base; at higher churn, or when churn cannot be read, the base limit holds. Hysteresis (2026-11-01): the boost
+applies only after the machine has stayed calm (churn at most the boost line, free memory above the floor, pageins under
+their limit) for LW_BOOST_CALM_S (600) seconds without a break; any hot reading, by `admit` or by the 20 s `sample` step,
+resets the clock (calm.json in the state dir, written atomically; a gap over 120 s between readings also restarts it; the
+result's `calm_for_s` and `status` show the run). The result and `--json` `max_per_core` are the
 limit in force. Swap is not the signal (86-92% in calm hours too). The result and the `--json`
-record carry `mem_churn_pages_s`; where `vm_stat` is unavailable (Linux) the gate never blocks. Test hooks (acp-dispatch scrubs them from the environment it
-gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll with the last value repeating),
-LW_FAKE_CHURN (the same for churn; with only LW_FAKE_LOAD1 set, churn reads 0),
+record carry `mem_churn_pages_s`, `free_mb`, `pageins_s`, `agents` and `refused` (the names of the gates that said no: load,
+compressor, free_mem, pageins, agents); a reading that cannot be taken is listed in `unreadable` and its gate stays open
+(Linux reads /proc/meminfo MemAvailable and /proc/vmstat pswpin+pswpout and pgmajfault as the equivalents). Test hooks
+(acp-dispatch scrubs them from the environment it gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll
+with the last value repeating), LW_FAKE_CHURN, LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_AGENTS (the same for each reading;
+a faked load leaves the readings it does not fake healthy: churn 0, 8192 MB free, 0 pageins, 0 agents),
 LW_ADMIT_POLL_S (15, floored at 1), LW_ADMIT_STAGGER_S ("5,30" min,max; 0 <= min <= max <= 60). A state.json
 that is not a dict with numeric `t` and `hot_since` counts as no state. Non-finite --wait or --max-per-core: exit 2.
 Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage; `admit` also 75 (still too hot).
@@ -1023,6 +1038,26 @@ def churn_read(st, t):
     return rate
 
 
+def sample_calm(st, t, churn, dry):
+    """Feed the calm-boost hysteresis (calm.json) one 20 s reading, so a quiet half hour in which nobody called
+    `admit` still counts. Calm = churn known and at most the boost line, free memory above the floor, pageins
+    under their limit; a reading that cannot be taken is not calm. Pageins are a delta against the previous
+    sample (st['pagein_prev'], .get so an older state.json loads). LW_FAKE_COMPRESSOR (tests) skips vm_stat."""
+    calm = False
+    if churn is not None and churn <= ADMIT_BOOST_CHURN_PAGES_S:
+        if os.environ.get("LW_FAKE_COMPRESSOR", "").strip():
+            calm = True
+        else:
+            snap = vm_snapshot()
+            if snap is not None:
+                prev, prev_t = st.get("pagein_prev"), st.get("pagein_prev_t")
+                st["pagein_prev"], st["pagein_prev_t"] = snap["pageins"], t
+                if _num(prev) and _num(prev_t) and 0 < t - prev_t < MAX_GAP_S and snap["pageins"] >= prev:
+                    calm = memory_calm(churn, snap["free_mb"], (snap["pageins"] - prev) / (t - prev_t))
+    if not dry:
+        calm_note(t, calm)
+
+
 def churn_top(table, n=3):
     """The n commands using the most cores in this ps table, same-named ones summed: [(label, cores, matches the
     Grok/Chrome/WindowServer standing exception)]."""
@@ -1129,7 +1164,7 @@ def cmd_sample(a):
     gap = t - st.get("t", 0)
     st["t"] = t
     try:  # a churn problem must never stop load sampling
-        churn_read(st, t)
+        sample_calm(st, t, churn_read(st, t), a.dry_run)
     except Exception as e:  # noqa: BLE001
         log(f"churn read error: {e!r}")
     # Time, not a sample count (2026-10-18: under a load-60 stall launchd ran us every 3-7 minutes, so 15
@@ -1263,6 +1298,9 @@ def cmd_status(a):
     if st.get("churn_pages_s") is not None:
         print(f"  compressor churn {st['churn_pages_s'] / 1000:.0f}k pages/s (admit limit {ADMIT_CHURN_PAGES_S / 1000:g}k)"
               + (f", above it for {now() - st['churn_since']:.0f}/{CHURN_SUSTAIN_S:.0f} s" if st.get("churn_since") else ""))
+    cs = calm_load().get("calm_since")
+    if _num(cs):
+        print(f"  calm boost: calm for {now() - cs:.0f}/{ADMIT_BOOST_CALM_S:g} s (the {ADMIT_BOOST_PER_CORE:g}/core boost applies after that; any hot reading resets it)")
     for k, v in st.get("cooldown", {}).items():
         print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k in ('nocpu-watcher', 'churn-watcher') else COOLDOWN_S))}")
     return 0
@@ -1359,62 +1397,167 @@ def cmd_ci_only(a):
 
 ADMIT_PER_CORE = 1.5  # admit's own default base; `bg` passes its own (2.5 since 2026-11-01). LOAD_PER_CORE (4.0) is only the blame step
 ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machine now
+
+
+def _env_float(name, default, lo=0.0):
+    """A finite number >= lo from the environment, else `default` (a typo must not crash the launchd sampler)."""
+    try:
+        v = float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+    return v if math.isfinite(v) and v >= lo else default
+
+
 # Memory gate (operator 2026-10-23): load alone cannot tell a busy host from a thrashing one (the 2026-10-23
 # spike was load 42-74 with kern.memorystatus_level 37% and swap 86-92%, the same swap a calm hour shows).
 # What it did show was compressor churn. Calibrated 2026-10-23 from 215 ten-second samples (10:20-10:52):
-# load<10 p50 34k, 10-25 p50 49k, >=25 p50 80k and p90 108k pages/s; the calm tail read 11-22k. 60000 sits above
-# calm and the mid-load median and below the thrash median. Still ONE session's data: recalibrate with more.
-ADMIT_CHURN_PAGES_S = 60000
+# load<10 p50 34k, 10-25 p50 49k, >=25 p50 80k and p90 108k pages/s; the calm tail read 11-22k. The limit was 60000.
+# 2026-11-01 (load watcher d8891c91, measured): a sustained load of 35-70 on this 8-core, 16 GB Mac was memory
+# starvation, not CPU: ~64 MB free, ~12k compressions+decompressions/s, ~1760 pageins/s, kernel_task 57% and sys
+# 25-39% of the CPU, 31+ live agent processes (omp 20, copilot 11, claude 8, agy 3). The 4.0 calm boost let a slice
+# start in every brief dip and each start pushed memory back over: an oscillation. So admit now fails toward
+# WAITING: a free-memory floor, a lower compressor limit (12k/s was already starving, 20000 is the line), a pageins
+# limit and a cap on live `acp-run` sessions, all env-tunable; a reading that cannot be taken is said so, never guessed.
+ADMIT_CHURN_PAGES_S = _env_float("LW_MAX_COMPRESSOR_S", 20000.0, 1.0)
+ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", 600.0)
+ADMIT_PAGEINS_S = _env_float("LW_MAX_PAGEINS_S", 1000.0, 1.0)
+ADMIT_MAX_AGENTS = int(_env_float("LW_MAX_AGENTS", 14, 0))  # 0 = no cap
+ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' deltas are the per-second rates
 # Calm boost (operator 2026-10-25, "make the change" after a load of 12-14 with no UI lag): while the compressor is
 # calm the per-core limit rises from ADMIT_PER_CORE to ADMIT_BOOST_PER_CORE. The signal is churn, not swap: swap sat
-# at 86-92% in calm hours too (above), so a swap condition would almost never boost. 25000 is just above the calm
-# tail (11-22k) and well below the thrash median (80k); one session's data, recalibrate. A churn that cannot be read
+# at 86-92% in calm hours too (above), so a swap condition would almost never boost. A churn that cannot be read
 # (no vm_stat) never boosts.
 # 2026-11-01 (operator): the boost limit rose from 2.0 to 4.0 per core. A load of 3.5 per core "is actually not too bad for
 # this system"; the real constraint on this 16 GB, 8-core Mac is memory pressure (compressor churn, swap) and process churn
-# (2026-10-31: five parallel pytest runs forked thousands of short git processes, load 222, swap 7.9/9.2 GB). The churn limits
-# (25000 boost, 60000 max) are what guard against that and are unchanged.
+# (2026-10-31: five parallel pytest runs forked thousands of short git processes, load 222, swap 7.9/9.2 GB).
+# Same day, hysteresis: the boost applies only after the machine has been calm (churn at most the boost line, free
+# memory above the floor, pageins under their limit) for LW_BOOST_CALM_S (600) seconds without a break; any hot
+# reading, by `admit` or by the 20 s sampler, resets the clock (calm.json in the state dir). The boost line now
+# equals the compressor limit: churn between 20k and 25k used to boost and is now refused outright.
 ADMIT_BOOST_PER_CORE = 4.0
-ADMIT_BOOST_CHURN_PAGES_S = 25000
-ADMIT_CHURN_WINDOW_S = 0.5
+ADMIT_BOOST_CHURN_PAGES_S = ADMIT_CHURN_PAGES_S
+ADMIT_BOOST_CALM_S = _env_float("LW_BOOST_CALM_S", 600.0)
+CALM_GAP_S = ADMIT_FRESH_S  # calm.json's last reading older than this: nobody watched in between, the clock restarts
 EX_TEMPFAIL = 75
+
+
+def _fake_list(name):
+    raw = os.environ.get(name, "").strip()
+    return [float(x) for x in raw.split(",") if x.strip()] if raw else []
 
 
 def _fake_loads():
     """LW_FAKE_LOAD1 (tests): one load, or a comma list read one per poll with the last value repeating."""
-    raw = os.environ.get("LW_FAKE_LOAD1", "").strip()
-    return [float(x) for x in raw.split(",") if x.strip()] if raw else []
+    return _fake_list("LW_FAKE_LOAD1")
 
 
 def _fake_churn():
     """LW_FAKE_CHURN (tests): pages/s, or a comma list read one per poll with the last value repeating."""
-    raw = os.environ.get("LW_FAKE_CHURN", "").strip()
-    return [float(x) for x in raw.split(",") if x.strip()] if raw else []
+    return _fake_list("LW_FAKE_CHURN")
+
+
+def _fake_memory():
+    """LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_AGENTS (tests): each a number or a comma list, one per poll, last repeating."""
+    return {k: _fake_list(env) for k, env in (("free_mb", "LW_FAKE_FREE_MB"), ("pageins_s", "LW_FAKE_PAGEINS"),
+                                              ("agents", "LW_FAKE_AGENTS"))}
+
+
+def _vm_stat_snapshot():
+    """{free_mb, compress, pageins} from macOS `vm_stat` (free = Pages free + Pages speculative; compress =
+    Compressions + Decompressions, cumulative pages), or None."""
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        v = {m.group(1): int(m.group(2)) for m in
+             re.finditer(r"^(Pages free|Pages speculative|Pageins|Compressions|Decompressions):\s+(\d+)", out, re.M)}
+        ps = re.search(r"page size of (\d+) bytes", out)
+        page = int(ps.group(1)) if ps else (os.sysconf("SC_PAGE_SIZE") or 16384)
+        if not all(k in v for k in ("Pages free", "Pageins", "Compressions", "Decompressions")):
+            return None
+        return {"free_mb": (v["Pages free"] + v.get("Pages speculative", 0)) * page / 1048576,
+                "compress": v["Compressions"] + v["Decompressions"], "pageins": v["Pageins"]}
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _proc_snapshot():
+    """The Linux equivalents (2026-11-01, not measured on a starving host): free = MemAvailable (else MemFree) in
+    /proc/meminfo, compress = pswpin + pswpout (swap pages moved) and pageins = pgmajfault in /proc/vmstat."""
+    try:
+        mem = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(MemAvailable|MemFree):\s+(\d+) kB",
+                                                                (Path("/proc/meminfo")).read_text(), re.M)}
+        vm = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(pswpin|pswpout|pgmajfault) (\d+)",
+                                                               (Path("/proc/vmstat")).read_text(), re.M)}
+        free_kb = mem.get("MemAvailable", mem.get("MemFree"))
+        if free_kb is None or not all(k in vm for k in ("pswpin", "pswpout", "pgmajfault")):
+            return None
+        return {"free_mb": free_kb / 1024, "compress": vm["pswpin"] + vm["pswpout"], "pageins": vm["pgmajfault"]}
+    except (OSError, ValueError):
+        return None
+
+
+def vm_snapshot():
+    return _vm_stat_snapshot() or _proc_snapshot()
 
 
 def _compressor_pages():
-    """Compressions + Decompressions from vm_stat (a macOS counter), or None where it is unavailable."""
+    """Compressions + Decompressions (cumulative), or None where unreadable."""
+    s = vm_snapshot()
+    return s["compress"] if s else None
+
+
+def is_acp_run(argv):
+    """True for the process that IS an acp-run session: argv[0] or the script right after a python interpreter is
+    named exactly `acp-run`. `uv run --script .../acp-run` (argv[0] `uv`, whose python child is the session) and
+    anything that merely mentions acp-run in an argument do not match, so each session counts once."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) == "acp-run":
+        return True
+    if not re.fullmatch(r"python[\d.]*", os.path.basename(argv[0])):
+        return False
+    script = next((x for x in argv[1:] if not x.startswith("-")), "")
+    return os.path.basename(script) == "acp-run"
+
+
+def count_agents():
+    """Live acp-run sessions machine-wide, from one `ps` (exact argv match, no pgrep/pkill -f), or None."""
     try:
-        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
-        vals = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(Compressions|Decompressions):\s+(\d+)", out, re.M)}
-        return vals["Compressions"] + vals["Decompressions"] if len(vals) == 2 else None
-    except (OSError, subprocess.TimeoutExpired, KeyError, ValueError):
+        r = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
         return None
+    if r.returncode != 0:
+        return None
+    n = 0
+    for ln in r.stdout.splitlines():
+        parts = ln.split(None, 1)
+        if len(parts) == 2 and parts[0] != str(os.getpid()) and is_acp_run(parts[1].split()):
+            n += 1
+    return n
 
 
-def admit_churn(fake_load, fake_churn, polls):
-    """Compressor churn in pages/s now, or None when it cannot be read (then it never blocks). Tests that fake
-    the load get 0 unless they fake the churn too, so a busy host cannot change their answer."""
-    if fake_churn:
-        return fake_churn[min(polls, len(fake_churn) - 1)]
-    if fake_load:
-        return 0.0
-    a = _compressor_pages()
-    if a is None:
-        return None
-    time.sleep(ADMIT_CHURN_WINDOW_S)
-    b = _compressor_pages()
-    return None if b is None else max(0.0, (b - a) / ADMIT_CHURN_WINDOW_S)
+def admit_memory(fake_load, fake_churn, fake_mem, polls):
+    """One memory reading: {churn, free_mb, pageins_s, agents}, each None when it cannot be read (said so in the
+    record, never guessed). Real mode reads vm_stat twice ADMIT_MEM_WINDOW_S apart. Test hooks: tests that fake the
+    load (or any reading) get a healthy default for the readings they do not fake, so a busy host cannot change
+    their answer."""
+    def pick(vals, default):
+        return vals[min(polls, len(vals) - 1)] if vals else default
+
+    if fake_load or fake_churn or any(fake_mem.values()):
+        return {"churn": pick(fake_churn, 0.0), "free_mb": pick(fake_mem["free_mb"], 8192.0),
+                "pageins_s": pick(fake_mem["pageins_s"], 0.0), "agents": int(pick(fake_mem["agents"], 0))}
+    m = {"churn": None, "free_mb": None, "pageins_s": None, "agents": count_agents()}
+    a = vm_snapshot()
+    if a is not None:
+        t0 = time.monotonic()
+        time.sleep(ADMIT_MEM_WINDOW_S)
+        b = vm_snapshot()
+        if b is not None:
+            dt = time.monotonic() - t0
+            dt = dt if dt > 0 else ADMIT_MEM_WINDOW_S
+            m.update(churn=max(0.0, (b["compress"] - a["compress"]) / dt), free_mb=b["free_mb"],
+                     pageins_s=max(0.0, (b["pageins"] - a["pageins"]) / dt))
+    return m
 
 
 def admit_reading(fake, polls):
@@ -1432,18 +1575,84 @@ def admit_limit(base, churn, boost=ADMIT_BOOST_PER_CORE, boost_churn=ADMIT_BOOST
     return base
 
 
-def admit_ok(per_core, limit, churn, churn_limit):
-    """Load per core within the limit and the compressor not thrashing (churn None: unreadable, never blocks)."""
-    return per_core <= limit and (churn is None or churn <= churn_limit)
+def memory_calm(churn, free_mb, pageins_s, boost_churn=None, min_free=None, max_pageins=None):
+    """True when every memory reading is known and under its line (a reading that is None is never calm)."""
+    boost_churn = ADMIT_BOOST_CHURN_PAGES_S if boost_churn is None else boost_churn
+    min_free = ADMIT_MIN_FREE_MB if min_free is None else min_free
+    max_pageins = ADMIT_PAGEINS_S if max_pageins is None else max_pageins
+    return (churn is not None and free_mb is not None and pageins_s is not None
+            and churn <= boost_churn and free_mb >= min_free and pageins_s <= max_pageins)
 
 
-def admit_record(load1, cores, per_core, limit, waited, churn=None, churn_limit=ADMIT_CHURN_PAGES_S):
+def calm_load():
+    try:
+        s = json.loads((STATE_DIR / "calm.json").read_text())
+        return s if isinstance(s, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def calm_note(t, calm):
+    """Record one reading in calm.json (atomic) and return calm_since: the time of the first reading of the current
+    unbroken calm run, or None. A hot reading clears it; so does a gap over CALM_GAP_S since the last reading
+    (nobody saw the machine in between, so calm was not observed)."""
+    s = calm_load()
+    since, last = s.get("calm_since"), s.get("last_t")
+    if not calm:
+        since = None
+    elif not (_num(since) and _num(last) and 0 <= t - last <= CALM_GAP_S and since <= t):
+        since = t
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_DIR / f"calm.json.tmp{os.getpid()}"
+        tmp.write_text(json.dumps({"calm_since": since, "last_t": t}))
+        tmp.replace(STATE_DIR / "calm.json")
+    except OSError:
+        pass  # an unwritable state dir only means the boost never accrues: fail toward waiting
+    return since
+
+
+def admit_refusals(per_core, limit, m, lim):
+    """Names of the gates that refuse: load, compressor, free_mem, pageins, agents. An unreadable reading (None)
+    never refuses (fail open, reported as `unreadable`); the agent cap 0 is off."""
+    out = []
+    if per_core > limit:
+        out.append("load")
+    if m["churn"] is not None and m["churn"] > lim["churn"]:
+        out.append("compressor")
+    if m["free_mb"] is not None and m["free_mb"] < lim["min_free_mb"]:
+        out.append("free_mem")
+    if m["pageins_s"] is not None and m["pageins_s"] > lim["max_pageins"]:
+        out.append("pageins")
+    if lim["max_agents"] and m["agents"] is not None and m["agents"] >= lim["max_agents"]:
+        out.append("agents")
+    return out
+
+
+def admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for=None):
     """The admit result fields; adds the watcher's streak and hot_for_s when its state.json is fresh."""
-    rec = {"status": "ok" if admit_ok(per_core, limit, churn, churn_limit) else "hot", "load1": round(load1, 2),
+    refused = admit_refusals(per_core, limit, m, lim)
+    rec = {"status": "hot" if refused else "ok", "load1": round(load1, 2),
            "per_core": round(per_core, 2), "cores": cores, "max_per_core": limit, "waited_s": int(waited)}
-    if churn is not None:
-        rec["mem_churn_pages_s"] = int(churn)
-        rec["max_mem_churn_pages_s"] = churn_limit
+    if refused:
+        rec["refused"] = refused
+    if m["churn"] is not None:
+        rec["mem_churn_pages_s"] = int(m["churn"])
+        rec["max_mem_churn_pages_s"] = lim["churn"]
+    if m["free_mb"] is not None:
+        rec["free_mb"] = int(m["free_mb"])
+        rec["min_free_mb"] = lim["min_free_mb"]
+    if m["pageins_s"] is not None:
+        rec["pageins_s"] = int(m["pageins_s"])
+        rec["max_pageins_s"] = lim["max_pageins"]
+    if m["agents"] is not None:
+        rec["agents"] = m["agents"]
+    rec["max_agents"] = lim["max_agents"]
+    unreadable = [name for k, name in (("churn", "memory"), ("agents", "agents")) if m[k] is None]
+    if unreadable:
+        rec["unreadable"] = unreadable
+    if calm_for is not None:
+        rec["calm_for_s"] = int(calm_for)
     rec.update(watcher_fields())
     return rec
 
@@ -1472,10 +1681,26 @@ def admit_line(rec):
     line = f"admit {rec['status']} load1={rec['load1']:g} per_core={rec['per_core']:.2f} cores={rec['cores']}"
     if "mem_churn_pages_s" in rec:
         line += f" mem_churn={rec['mem_churn_pages_s']}"
+    if "free_mb" in rec:
+        line += f" free_mb={rec['free_mb']}"
+    if "pageins_s" in rec:
+        line += f" pageins={rec['pageins_s']}"
+    if "agents" in rec:
+        line += f" agents={rec['agents']}"
+    if "unreadable" in rec:
+        line += " unreadable=" + ",".join(rec["unreadable"]) + " (gate open: reading failed)"
     if rec["status"] == "hot":
-        line += f" max_per_core={rec['max_per_core']:g}"
-        if rec.get("mem_churn_pages_s", 0) > rec.get("max_mem_churn_pages_s", ADMIT_CHURN_PAGES_S):
+        line += " refused=" + ",".join(rec["refused"])
+        if "load" in rec["refused"]:
+            line += f" max_per_core={rec['max_per_core']:g}"
+        if "compressor" in rec["refused"]:
             line += f" max_mem_churn={rec['max_mem_churn_pages_s']:g}"
+        if "free_mem" in rec["refused"]:
+            line += f" min_free_mb={rec['min_free_mb']:g}"
+        if "pageins" in rec["refused"]:
+            line += f" max_pageins={rec['max_pageins_s']:g}"
+        if "agents" in rec["refused"]:
+            line += f" max_agents={rec['max_agents']}"
     if "hot_for_s" in rec:
         line += f" streak={rec['streak']} hot_for_s={rec['hot_for_s']}"
     if rec["waited_s"]:
@@ -1485,22 +1710,24 @@ def admit_line(rec):
 
 def cmd_admit(a):
     """May new work start now? Only ever decides; never kills, throttles or signals anything."""
-    churn_limit = getattr(a, "max_mem_churn", ADMIT_CHURN_PAGES_S)
-    if (not (math.isfinite(a.wait) and math.isfinite(a.max_per_core) and math.isfinite(churn_limit))
-            or a.wait < 0 or a.max_per_core <= 0 or churn_limit <= 0):
-        print("load-watch admit: --wait must be a finite number, 0 or more, and --max-per-core and "
-              "--max-mem-churn finite and above 0", file=sys.stderr)
+    lim = {"churn": getattr(a, "max_mem_churn", ADMIT_CHURN_PAGES_S), "min_free_mb": getattr(a, "min_free_mb", ADMIT_MIN_FREE_MB),
+           "max_pageins": getattr(a, "max_pageins", ADMIT_PAGEINS_S), "max_agents": getattr(a, "max_agents", ADMIT_MAX_AGENTS)}
+    if (not (math.isfinite(a.wait) and math.isfinite(a.max_per_core) and all(math.isfinite(v) for v in lim.values()))
+            or a.wait < 0 or a.max_per_core <= 0 or lim["churn"] <= 0 or lim["max_pageins"] <= 0
+            or lim["min_free_mb"] < 0 or lim["max_agents"] < 0):
+        print("load-watch admit: --wait must be a finite number, 0 or more, --max-per-core, --max-mem-churn and "
+              "--max-pageins finite and above 0, --min-free-mb and --max-agents 0 or more", file=sys.stderr)
         return 2
     try:
         lo, hi = (float(x) for x in os.environ.get("LW_ADMIT_STAGGER_S", "5,30").split(","))
         poll = float(os.environ.get("LW_ADMIT_POLL_S", "15"))
-        fake, fake_churn = _fake_loads(), _fake_churn()
+        fake, fake_churn, fake_mem = _fake_loads(), _fake_churn(), _fake_memory()
         if not (math.isfinite(lo) and math.isfinite(hi) and math.isfinite(poll) and 0 <= lo <= hi <= 60
-                and all(math.isfinite(x) for x in fake + fake_churn)):
+                and all(math.isfinite(x) for x in fake + fake_churn + sum(fake_mem.values(), []))):
             raise ValueError("out of range")
     except ValueError:
-        print("load-watch admit: bad LW_FAKE_LOAD1, LW_FAKE_CHURN, LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S (finite, stagger "
-              "0 <= min <= max <= 60)", file=sys.stderr)
+        print("load-watch admit: bad LW_FAKE_LOAD1, LW_FAKE_CHURN, LW_FAKE_FREE_MB, LW_FAKE_PAGEINS, LW_FAKE_AGENTS, "
+              "LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S (finite, stagger 0 <= min <= max <= 60)", file=sys.stderr)
         return 2
     poll = max(1.0, poll)  # never a busy loop on a machine that is already hot
     boost = getattr(a, "boost_per_core", ADMIT_BOOST_PER_CORE)
@@ -1511,35 +1738,49 @@ def cmd_admit(a):
         return 2
     if fake and not fake_churn:
         boost = 0  # a faked load with no faked churn reads churn 0 (not a measurement): never boosts
-    limit = a.max_per_core
+
+    def read(polls):
+        load1, cores, per_core = admit_reading(fake, polls)
+        m = admit_memory(fake, fake_churn, fake_mem, polls)
+        calm_for = None
+        if boost and boost > a.max_per_core:
+            t = now()
+            since = calm_note(t, memory_calm(m["churn"], m["free_mb"], m["pageins_s"], boost_churn, lim["min_free_mb"],
+                                             lim["max_pageins"]))
+            calm_for = (t - since) if since is not None else None
+        # the boost needs an unbroken calm run of at least ADMIT_BOOST_CALM_S (churn None: no boost either)
+        limit = admit_limit(a.max_per_core, m["churn"] if calm_for is not None and calm_for >= ADMIT_BOOST_CALM_S else None,
+                            boost, boost_churn)
+        return load1, cores, per_core, m, limit, calm_for
+
     start, polls, next_note = time.monotonic(), 0, 60.0
     while True:
-        load1, cores, per_core = admit_reading(fake, polls)
-        churn = admit_churn(fake, fake_churn, polls)
-        limit = admit_limit(a.max_per_core, churn, boost, boost_churn)
+        load1, cores, per_core, m, limit, calm_for = read(polls)
         polls += 1
         waited = time.monotonic() - start
-        if admit_ok(per_core, limit, churn, churn_limit) and polls > 1:
+        if not admit_refusals(per_core, limit, m, lim) and polls > 1:
             # the load fell while we waited: stagger so queued dispatchers do not all start in the same second,
             # then look again (someone else may have started in the meantime)
             # (never past the --wait budget: deferred records and rearm timeouts only budget that much)
             left = a.wait - waited
             if left > 0:
                 time.sleep(min(random.uniform(lo, hi), left))
-            load1, cores, per_core = admit_reading(fake, polls)
-            churn = admit_churn(fake, fake_churn, polls)
-            limit = admit_limit(a.max_per_core, churn, boost, boost_churn)
+            load1, cores, per_core, m, limit, calm_for = read(polls)
             polls += 1
             waited = time.monotonic() - start
-        if admit_ok(per_core, limit, churn, churn_limit) or waited >= a.wait:
+        refused = admit_refusals(per_core, limit, m, lim)
+        if not refused or waited >= a.wait:
             break
         if waited >= next_note:
-            print(f"load-watch admit: waiting, load1={load1:g} per_core={per_core:.2f} (limit {limit:g})"
-                  + (f" mem_churn={churn:.0f} (limit {churn_limit:g})" if churn is not None else "")
+            print(f"load-watch admit: waiting, refused={','.join(refused)} load1={load1:g} per_core={per_core:.2f} (limit {limit:g})"
+                  + (f" mem_churn={m['churn']:.0f} (limit {lim['churn']:g})" if m["churn"] is not None else "")
+                  + (f" free_mb={m['free_mb']:.0f} (floor {lim['min_free_mb']:g})" if m["free_mb"] is not None else "")
+                  + (f" pageins={m['pageins_s']:.0f} (limit {lim['max_pageins']:g})" if m["pageins_s"] is not None else "")
+                  + (f" agents={m['agents']} (cap {lim['max_agents']})" if m["agents"] is not None else "")
                   + f", {int(waited)}s of {a.wait:g}s", file=sys.stderr)
             next_note += 60.0
         time.sleep(max(0.0, min(poll, a.wait - waited)))
-    rec = admit_record(load1, cores, per_core, limit, waited, churn, churn_limit)
+    rec = admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for)
     print(json.dumps(rec) if a.json else admit_line(rec))
     return 0 if rec["status"] == "ok" else EX_TEMPFAIL
 
@@ -1591,8 +1832,15 @@ def main():
     p.add_argument("--max-per-core", type=float, default=ADMIT_PER_CORE, metavar="N",
                    help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g})")
     p.add_argument("--max-mem-churn", type=float, default=ADMIT_CHURN_PAGES_S, metavar="N",
-                   help=f"and compressor churn (pages compressed + decompressed per second) is at most N "
-                        f"(default {ADMIT_CHURN_PAGES_S:g}, calibrated 2026-10-23)")
+                   help=f"and compressor churn (pages compressed + decompressed per second, sampled over ~{ADMIT_MEM_WINDOW_S:g} s) "
+                        f"is at most N (default {ADMIT_CHURN_PAGES_S:g}, env LW_MAX_COMPRESSOR_S; was 60000 until 2026-11-01)")
+    p.add_argument("--min-free-mb", type=float, default=ADMIT_MIN_FREE_MB, metavar="N",
+                   help=f"and free+speculative memory is at least N MB (default {ADMIT_MIN_FREE_MB:g}, env LW_MIN_FREE_MB)")
+    p.add_argument("--max-pageins", type=float, default=ADMIT_PAGEINS_S, metavar="N",
+                   help=f"and pageins per second are at most N (default {ADMIT_PAGEINS_S:g}, env LW_MAX_PAGEINS_S)")
+    p.add_argument("--max-agents", type=int, default=ADMIT_MAX_AGENTS, metavar="N",
+                   help=f"and fewer than N `acp-run` agent sessions are alive machine-wide (default {ADMIT_MAX_AGENTS}, "
+                        f"env LW_MAX_AGENTS; 0 turns the cap off)")
     p.add_argument("--boost-per-core", type=float, default=ADMIT_BOOST_PER_CORE, metavar="N",
                    help=f"while churn is at most --boost-max-churn, admit up to N per core instead "
                         f"(default {ADMIT_BOOST_PER_CORE:g}; 0 turns the boost off)")
