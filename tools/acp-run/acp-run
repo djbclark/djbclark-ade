@@ -47,6 +47,16 @@ The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
+A --perm read-only run also allows an execute request that only reads (cat, ls, rg, git log/show/
+diff, a plain curl GET, joined with | && ; only; readonly_command; never fd, file or graft, which
+execute or write). The allow-list is the only barrier for such a request, so it refuses `#`, any
+program path outside /usr/bin, /bin and /opt/homebrew/bin, any long option that is or abbreviates one
+that runs a program, `git` unless the request's cwd (and each -C) finds an ordinary repository (a bare one
+committed in the reviewed tree runs its own config). codex-acp offers a refusal that keeps
+the turn alive ("decline") only sometimes: for a network escalation it offers just "cancel", which ends the
+turn as stop=cancelled. acp-run prefers a keep-alive refusal, and when only "cancel" exists it continues the
+same session (up to 3 times, "denial_continue" log rows) with a prompt that says the call was refused and to
+finish with reading tools. Each refusal prints `acp-run: refused (<kind>): <command>` on stderr.
 Under --perm deny (without --interactive) opencode, agy, crush and grok start without
 the user's plugins, MCP servers and hooks, as claude and zcode do: a per-run temp
 config (opencode: OPENCODE_CONFIG_DIR holding only provider/model keys, project
@@ -671,6 +681,234 @@ READONLY_AGENTS = ("claude", "codex", "opencode", "zcode")
 # doing its job, not an escape (2026-10-19: `graft ask` tripped a research slice in 14 s, exit
 # 77). A permission request for an execute is still refused (decide()).
 READONLY_UNASKED_KINDS = {"codex": ("execute",)}
+
+# --perm read-only and a command the agent asks to run (2026-10-31: two gpt-6-astra review slices were
+# cancelled at their first permission request, 60 s in). codex's read-only mode runs reading commands
+# inside its sandbox without asking, so a request means the command needs more than the sandbox gives,
+# in practice the network: `curl -fsSL https://raw.githubusercontent.com/...`. codex-acp then offers
+# allow_once, an execpolicy amendment and a single reject_once, "cancel", whose codex decision ends the
+# whole turn (`decline`, "No, continue without running it", is offered only when the app-server lists it).
+# So: a command that only reads (below) is allowed, and a refusal that can only end the turn is followed
+# by a continuation prompt in the same session (prompt_turn; RunClient.denial_continues).
+DENIAL_CONTINUES = 3
+TURN_ENDING_OPTION_IDS = frozenset({"cancel", "abort"})  # codex-acp's reject_once ids that end the turn
+# Programs that have no option which runs another program or writes (a harmless option list, so only
+# `tail -f`-style hangs are excluded below). `fd`, `file` and `graft` are NOT here: fd -x runs any command
+# (grouped and attached forms), `file --comp` writes a magic.mgc, `graft ask|map` writes a graft/ tree into
+# the reviewed worktree (adversary PR 208 round 2).
+RO_PLAIN = frozenset({
+    "cat", "ls", "head", "tail", "wc", "rg", "grep", "egrep", "fgrep", "stat", "pwd", "nl",
+    "diff", "cmp", "du", "basename", "dirname", "realpath", "readlink", "which", "true"})
+RO_GIT = frozenset({
+    "log", "show", "diff", "status", "blame", "ls-files", "ls-tree", "rev-parse", "rev-list", "cat-file",
+    "show-ref", "describe", "shortlog", "merge-base", "grep", "diff-tree", "name-rev"})
+# Long options that run another program or write a file. getopt_long and git's parse-options accept any
+# unique prefix (`--open=rm` is `--open-files-in-pager=rm`), so an argument is refused when its name is a
+# prefix of one of these or begins with one (ro_long_bad). Short groups with an attached value (`-nOrm`)
+# are refused for git by ro_short_bad.
+RO_BAD_LONG = ("--output", "--pre", "--exec", "--open-files-in-pager", "--ext-diff", "--hostname-bin")
+RO_FIND_BAD = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
+RO_OPERATORS = ("|", "&&", "||", ";")
+# Where a program given by path may live (a bare name resolves through PATH). A repository under review
+# is untrusted input: `./evil/cat` or `/tmp/evil/git` must not pass for `cat` or `git` (adversary PR 208).
+RO_TRUSTED_DIRS = frozenset({"/usr/bin", "/bin", "/opt/homebrew/bin"})
+
+
+def ro_long_bad(args):
+    """True when an argument before `--` names (or abbreviates, or extends) a long option that runs a program."""
+    for x in args:
+        if x == "--":
+            return False  # everything after it is a path
+        if x.startswith("--"):
+            name = x.split("=", 1)[0]
+            if any(b.startswith(name) or name.startswith(b) for b in RO_BAD_LONG):
+                return True
+    return False
+
+
+def ro_short_bad(args):
+    """True when a short-flag group before `--` carries `O` (git grep -O<pager>, also grouped: -nOrm)."""
+    for x in args:
+        if x == "--":
+            return False
+        if re.fullmatch(r"-[^-].*", x) and "O" in x:
+            return True
+    return False
+
+
+def ro_git_dir_ok(base):
+    """True when git run in `base` finds an ordinary repository, not a bare one committed inside the tree
+    under review: git looks in each directory, from `base` up, for `.git` and then for a directory that is
+    itself a repository (HEAD, objects/, refs/), and runs the config of whichever it meets first
+    (diff.external, core.fsmonitor, gpg.program). A tree without `.git` anywhere above is refused."""
+    d = os.path.realpath(base)
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        if all(os.path.exists(os.path.join(d, n)) for n in ("HEAD", "objects", "refs")):
+            return False
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def ro_words(script):
+    lex = shlex.shlex(script, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    lex.commenters = ""  # bash starts a comment only at a word's start; readonly_command refuses `#` anyway
+    return list(lex)
+
+
+def ro_program(word):
+    """The program name of a command word: a bare name, or a path whose directory is in RO_TRUSTED_DIRS;
+    None for any other path."""
+    if "/" not in word:
+        return word
+    return os.path.basename(word) if os.path.dirname(word) in RO_TRUSTED_DIRS else None
+
+
+def ro_curl(args):
+    """A plain GET: only -f/-s/-S/-L bundles, a numeric --max-time, and one http(s) URL."""
+    urls, i = 0, 0
+    while i < len(args):
+        t = args[i]
+        if re.fullmatch(r"-[fsSL]+", t):
+            pass
+        elif t in ("-m", "--max-time", "--connect-timeout") and i + 1 < len(args) and re.fullmatch(r"\d+", args[i + 1]):
+            i += 1
+        elif re.fullmatch(r"https?://[^\s'\"]+", t):
+            urls += 1
+        else:
+            return False
+        i += 1
+    return urls == 1
+
+
+def ro_segment(words, cwd, depth):
+    """True when one simple command only reads. `cwd` is the directory the request runs in (git is
+    judged by the repository it would find there; None refuses git)."""
+    while words:
+        prog = ro_program(words[0])
+        if prog == "rtk":  # the output compactor wrapper; the command after it is judged on its own
+            words = words[1:]
+        elif prog == "timeout" and len(words) > 2 and re.fullmatch(r"\d+(\.\d+)?[smh]?", words[1]):
+            words = words[2:]
+        else:
+            break
+    if not words:
+        return False
+    name, args = ro_program(words[0]), words[1:]
+    if name is None:
+        return False
+    if name in ("bash", "sh", "zsh"):
+        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], cwd, depth + 1)
+    if name == "git":
+        base = cwd
+        while len(args) >= 2 and args[0] == "-C":
+            base = os.path.join(base, args[1]) if base else None
+            args = args[2:]
+        return (bool(args) and args[0] in RO_GIT and base is not None and not ro_long_bad(args[1:])
+                and not ro_short_bad(args[1:]) and ro_git_dir_ok(base))
+    if ro_long_bad(args):
+        return False
+    if name == "curl":
+        return ro_curl(args)
+    if name == "find":
+        return not RO_FIND_BAD.intersection(args)
+    if name == "sed":  # GNU sed takes options anywhere: everything after the script must be a file name
+        return (len(args) >= 3 and args[0] == "-n" and bool(re.fullmatch(r"\d+(,(\d+|\$))?p", args[1]))
+                and not any(x.startswith("-") for x in args[2:]))
+    if name == "tail":  # -f/-F/--follow never ends
+        return not any(re.fullmatch(r"-[^-]*[fF].*", x) or x.startswith("--f") or x.startswith("--pid")
+                       for x in args)
+    return name in RO_PLAIN
+
+
+def ro_unquoted_meta(cmd):
+    """True when the command line has a shell metacharacter outside quotes that the word parser cannot
+    see: a glob (`*?[`), brace list, a word-initial tilde or history `!`, or a backslash. A glob expands to file names
+    chosen by the reviewed tree, so `git grep foo *` meets a file called `--open-files-in-pager=rm` as an
+    option (Codex review of PR 208). Quoted text (`rg 'a.*b'`) is literal."""
+    quote, prev = None, " "
+    for ch in cmd:
+        was, prev = prev, ch
+        if quote:
+            if ch == quote:
+                quote = None
+            elif ch == "\\" and quote == '"':  # an escape inside double quotes would hide the closing quote
+                return True
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "*?[]{}!\\" or (ch == "~" and (was.isspace() or was in "=:")):  # `HEAD~1` is no tilde
+            return True
+    return False
+
+
+def readonly_command(cmd, cwd=None, depth=0):
+    """True when a shell command line only reads files and the network: commands from a short list (cat,
+    ls, rg, git log/show/diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect
+    to /dev/null, no expansion, no comment, no other redirect, a program only by bare name or from
+    RO_TRUSTED_DIRS, no long option that runs a program (abbreviations included). git runs only where
+    `cwd` (and each -C) finds an ordinary repository (ro_git_dir_ok). `git status` and `describe --dirty`
+    may refresh `.git/index`, a cache, not content. A guess is a refusal."""
+    if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd) or ro_unquoted_meta(cmd):
+        return False
+    try:
+        toks = ro_words(cmd)
+    except ValueError:
+        return False
+    segs, i = [[]], 0
+    while i < len(toks):
+        t = toks[i]
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        if t in RO_OPERATORS:
+            segs.append([])
+        elif (t in (">", ">>") and nxt == "/dev/null") or (t == ">&" and nxt in ("1", "2")):
+            if segs[-1] and segs[-1][-1] in ("1", "2"):
+                segs[-1].pop()
+            i += 1
+        elif re.fullmatch(r"[();<>|&]+", t):
+            return False
+        else:
+            segs[-1].append(t)
+        i += 1
+    segs = [s for s in segs if s]
+    return bool(segs) and all(ro_segment(s, cwd, depth) for s in segs)
+
+
+def tool_cwd(tool_call):
+    """The directory an execute tool call runs in (rawInput.cwd), else None."""
+    raw = getattr(tool_call, "raw_input", None)
+    cwd = raw.get("cwd") if isinstance(raw, dict) else None
+    return cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+
+
+def tool_command(tool_call):
+    """The shell command line of an execute tool call (rawInput.command), else None."""
+    raw = getattr(tool_call, "raw_input", None)
+    cmd = raw.get("command") if isinstance(raw, dict) else None
+    if isinstance(cmd, list):
+        cmd = shlex.join(str(c) for c in cmd)
+    return cmd if isinstance(cmd, str) else None
+
+
+def denial_continue_text(perm, denial):
+    """The prompt that continues a session whose turn ended on a refused tool call."""
+    what = " ".join((denial.get("command") or denial.get("tool") or "a tool call").split())[:300]
+    how = ("answer from what you already have, with no tools" if perm == "deny" else
+           "go on with reading tools only (file reads, rg, git log/show/diff, listing)")
+    return (f"acp-run refused this tool call because this run is --perm {perm}: {what}\n"
+            f"It was not run and it will not be allowed, so do not retry it or ask again. Nothing was "
+            f"lost: {how} and finish with your normal report. If the refused call was "
+            "needed for a finding, say in the report which part could not be checked.")
+
+
+# claude-agent-acp's notice when the model declines a request and the session continues on another
+# (2026-10-31: "claude-fable-5-1 declined this request (cyber); retried with claude-opus-4-8."); the
+# chunk is the whole message. acp-run logs it as a `fallback` row so acp-dispatch records who answered.
+MODEL_FALLBACK_RE = re.compile(
+    r"\s*\*\*Model fallback:\*\*\s*(\S+) declined this request \(([^)]*)\); retried with (\S+?)\.(?:\s|$)")
 
 
 def tripwire_exempt_kinds(agent, perm, extra=""):
@@ -1972,6 +2210,11 @@ class RunClient(Client):
         self.requested, self.tool_kinds, self.tripped = set(), {}, None
         self.exempt_kinds = frozenset()  # --tripwire-exempt-kinds
         self.started_unasked = {}  # tool_call_id -> (monotonic start, title)
+        # the last permission refusal of the current prompt (tool, command, option id, whether the agent
+        # ends its turn on it): turn_loop continues the session when that turn ends `cancelled`
+        self.denial = None
+        self.fallback = None  # {"from", "reason", "to"} once the agent switched models mid-session
+        self.denial_continues = DENIAL_CONTINUES if perm in RESTRICTED_PERMS else 0
 
     def rec(self, kind, data):
         row = {"t": round(time.time(), 3), "kind": kind, "data": data}
@@ -1996,7 +2239,10 @@ class RunClient(Client):
         # main() maps the deprecated scoped:/ask to "all" before this runs.
         # --perm read-only answers yes to read, search and fetch tools and no to the rest.
         if self.perm == "read-only":
-            return infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None)) in READONLY_KINDS
+            kind = infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None))
+            return kind in READONLY_KINDS or (
+                kind == "execute"
+                and readonly_command(tool_command(tool_call), tool_cwd(tool_call) or os.path.abspath(self.root)))
         return self.perm != "deny"
 
     def check_tripwire(self, update):
@@ -2056,9 +2302,17 @@ class RunClient(Client):
         )
         ok = self.decide(tool_call)
         allow = next((o for o in options if o.kind == "allow_once"), None)
-        reject = next((o for o in options if o.kind == "reject_once"), None)
+        rejects = [o for o in options if o.kind == "reject_once"]
+        # a refusal that leaves the turn alive ("decline") before one that ends it ("cancel")
+        reject = next((o for o in rejects if o.option_id not in TURN_ENDING_OPTION_IDS), rejects[0] if rejects else None)
         granted = ok and allow is not None
         pick = allow if granted else reject
+        if not granted:
+            what = getattr(tool_call, "title", None) or kind or str(tid)
+            cmd = tool_command(tool_call)
+            self.denial = {"tool": what, "command": cmd, "option": pick.option_id if pick else None,
+                           "ends_turn": bool(pick and pick.option_id in TURN_ENDING_OPTION_IDS)}
+            print(f"acp-run: refused ({kind}): {' '.join((cmd or what).split())[:200]}", file=sys.stderr)
         self.rec(
             "permission",
             {
@@ -2099,6 +2353,12 @@ class RunClient(Client):
             # it is UI chrome, not the answer.
             if str(dump(update).get("messageId") or "").startswith("turninfo_"):
                 return
+            fb = MODEL_FALLBACK_RE.match(update.content.text)
+            if fb and not self.fallback:
+                self.fallback = {"from": fb.group(1), "reason": fb.group(2), "to": fb.group(3)}
+                self.rec("fallback", self.fallback)
+                print(f"acp-run: model fallback: {fb.group(1)} declined ({fb.group(2)}); answered by"
+                      f" {fb.group(3)}", file=sys.stderr)
             self.text.append(update.content.text)
             if self.live:
                 self.write(update.content.text)
@@ -3123,17 +3383,20 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
     ):
         prompt = [TextContentBlock(type="text", text=current_text)]
         finished, failure, code = False, None, None
-        for attempt in range(a.prompt_retries + 1):
+        denial_turns, denial_limit, keep_text = 0, getattr(client, "denial_continues", 0), False
+        for attempt in range(a.prompt_retries + 1 + denial_limit):
             # Retry only before any side effect (acpx: no retry once the
             # turn touched anything), with acpx's 1 s * 2^n, max 10 s backoff.
             can_retry = (
-                attempt < a.prompt_retries
+                attempt - denial_turns < a.prompt_retries
                 and client.tools == client.allowed == client.denied == 0
             )
             if attempt and client.cancelled:  # cancelled during the backoff
                 out["stop_reason"], finished = "cancelled", True
                 break
-            client.text = []
+            if not keep_text:  # a denial continuation adds to the reply: earlier turns' words stay judged
+                client.text = []
+            client.denial, keep_text = None, False
             if client.err_path:
                 try:
                     client.err_mark = os.path.getsize(client.err_path)
@@ -3206,6 +3469,19 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                     code = EXIT_TRIPWIRE
                     break
                 out["stop_reason"] = resp.stop_reason
+                denial = getattr(client, "denial", None)
+                if (resp.stop_reason == "cancelled" and denial and denial["ends_turn"]
+                        and not client.cancelled and denial_turns < denial_limit
+                        and (deadline is None or deadline - time.monotonic() > 30)):
+                    # codex ends the turn on the only refusal it offers: tell the agent and go on
+                    denial_turns += 1
+                    keep_text = True
+                    client.rec("prompt_response", dump(resp))
+                    client.rec("denial_continue", {"n": denial_turns, **denial})
+                    print(f"acp-run: the turn ended at a refused tool ({denial['tool']}); continuing in the"
+                          f" same session {denial_turns}/{denial_limit}", file=sys.stderr)
+                    prompt = [TextContentBlock(type="text", text=denial_continue_text(a.perm, denial))]
+                    continue
                 client.rec("prompt_response", dump(resp))
                 quota = (resp.field_meta or {}).get("quota")
                 if quota:  # e.g. codex-acp/Gemini _meta.quota: keep for --json
@@ -4720,6 +4996,8 @@ async def run(a, log, err, log_path):
             bits.append(f"tokens={tok}")
         if cost is not None:
             bits.append(f"cost=${cost:.4f}")
+        if getattr(client, "fallback", None):
+            bits.append(f"fallback={client.fallback['to']}")
         if "wrapup" in out:
             bits.append(f"wrapup={out['wrapup'].split(':')[0]}")
         if "verify" in out:

@@ -1918,6 +1918,29 @@ def applied_model(rec: dict) -> str | None:
     return model
 
 
+def model_fallback(rec: dict) -> dict | None:
+    """{"from", "reason", "to"} of the model switch acp-run logged as a `fallback` row (the session's
+    model declined the request and another answered, 2026-10-31: Fable's cyber safeguard, answered by
+    claude-opus-4-8), else None. Old logs have no row."""
+    found = None
+    try:
+        with Path(rec["log"]).open() as log:
+            for line in log:
+                if '"fallback"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                data = row.get("data") or {}
+                if row.get("kind") == "fallback" and data.get("to"):
+                    found = {"from": str(data.get("from") or ""), "reason": str(data.get("reason") or ""),
+                             "to": str(data["to"])}
+    except (FileNotFoundError, KeyError, TypeError, OSError):
+        pass
+    return found
+
+
 # `wait --once` (2026-10-18): the cheap rearm waiter's probe. EX_TEMPFAIL, like cron's temporary
 # failure, so the shell loop can tell "still running" from every terminal outcome.
 WAIT_RUNNING_EXIT = 75
@@ -3263,6 +3286,32 @@ def transient_pool_starved(agent: str, model: str | None) -> float | None:
     return float(remaining)
 
 
+# A `stop=cancelled` turn names its real cause: a refused permission (acp-run prints each refusal as
+# `acp-run: refused (<kind>): <what>`) or, for a run that went on for about an hour, the long foreground
+# command the footer's item 10 warns about. 2026-10-31: a 60 s gpt-6-astra slice was blamed on the hour.
+CANCELLED_HOUR_SECS = 3000
+
+
+def cancelled_note(text: str, timed_out: bool = False) -> str:
+    m = re.search(r"stop=cancelled secs=([\d.]+)(?: tools=\d+)?(?: perm=\d+\+/(\d+)-)?", text)
+    secs = float(m.group(1)) if m else None
+    denied = int(m.group(2) or 0) if m else 0
+    if timed_out:
+        # acp-run's own --timeout cancels the turn, and the agent answers `cancelled` (exit 124)
+        after = f" at {secs:.0f} s" if secs is not None else ""
+        return f" [stop=cancelled by acp-run's --timeout{after}; the denied permissions, if any, are not the cause]"
+    if denied:
+        refused = re.findall(r"^acp-run: refused \(([^)]*)\): (.+)$", text, re.M)
+        what = f"{refused[-1][0]}: {refused[-1][1]}" if refused else "the session log's permission rows name it"
+        return (f" [stop=cancelled after a denied permission ({what}); the agent ended its turn on the "
+                "refusal, not on a time limit; whether the slice needs that tool is for the lead to decide]")
+    if secs is not None and secs >= CANCELLED_HOUR_SECS:
+        return (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
+                " is a known cause, see dispatch-footer item 10]")
+    after = f" after {secs:.0f} s" if secs is not None else ""
+    return f" [stop=cancelled{after} with no denied permission: not a time limit, see the session log]"
+
+
 def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
                  reply: str = "", fallback: str | None = None) -> str | None:
     """The NO-REPORT line for an agent that stopped without DONE/BLOCKED because acp-run failed,
@@ -3306,8 +3355,7 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
         extra = ("; the reply was tool calls printed as text because the agent had no tools: a slice that"
                  " must read needs --perm read-only (--perm deny gives it none)")
     if "stop=cancelled" in text and not extra:
-        extra = (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
-                 " is a known cause, see dispatch-footer item 10]")
+        extra = cancelled_note(text, timed_out=cls == "timeout" or rc == 124)
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
             f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
 
@@ -3559,6 +3607,11 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         b, a_ = (str(x or "")[:8] for x in rec["head_moved_during_run"])
         moved = f"HEAD moved during the run ({b} -> {a_}, a lead commit; the tree is unchanged)"
         det = f"{det}; {moved}" if det else moved
+    if rec.get("answered_model"):
+        asked = rec.get("fallback_from") or rec.get("model_applied") or rec.get("model") or "?"
+        answered = (f"ANSWERED BY {rec['answered_model']}, not {asked}"
+                    f" (model fallback: {rec.get('fallback_reason') or 'declined'})")
+        det = f"{det}; {answered}" if det else answered
     msgs = inbox_messages(path)
     if msgs:
         answered = sum(1 for m in msgs if m[0] in answered_ids(path))
@@ -3629,6 +3682,10 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
         rec["report_source"] = "agent"
     rec.update(finished=finished_at or time.time(), exit=rc, pid=None)
     rec["model_applied"] = applied_model(rec) or rec.get("model_applied")
+    swap = model_fallback(rec)
+    if swap:
+        rec["answered_model"], rec["fallback_from"], rec["fallback_reason"] = (
+            swap["to"], swap["from"], swap["reason"])
     if rec.get("role") == "advise" and rec.get("advisor_tree_before"):
         after_tree = advisor_tree_snap(Path(rec.get("dir") or "."))
         rec["advisor_tree_after"] = after_tree

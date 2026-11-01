@@ -667,7 +667,8 @@ class TestAdversaryFindings(CloudBase):
         self.assertEqual(json.loads(rec_path.read_text())["repolls"], 1)
         self.run_json("run-1.json", "FINISHED", result="ok", git=REAL_BRANCHES)
         for _ in range(150):                              # the background poller finalizes it
-            if json.loads(rec_path.read_text()).get("finished"):
+            # finalize writes the record, then touches .done: wait for the last of the two
+            if json.loads(rec_path.read_text()).get("finished") and (self.out / "s1-report.md.done").exists():
                 break
             time.sleep(0.2)
         rec = json.loads(rec_path.read_text())
