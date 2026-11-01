@@ -2050,3 +2050,24 @@ def test_the_frontier_advice_names_a_profile_only_when_one_is_the_source(rig, mo
     text = mod._advice("watch", "r", "available", None, standing, ["weekly"], 50.0, 15.0)
     assert text.startswith("1. Claude quota watch: Opus 5.5") and "(" not in text.splitlines()[0]
     assert mod._advice("watch", "r", "available", None, standing, ["weekly", "alert"], 50.0, 15.0) == mod._advice("watch", "r")
+
+
+def _deep_json_raises(*_a, **_k):
+    # json.loads raises RecursionError on a deeply nested file under Python 3.13 and older, but 3.14 parses it: force the raise
+    raise RecursionError("maximum recursion depth exceeded")
+
+
+def test_a_state_file_that_json_cannot_nest_deep_enough_to_read_is_empty_not_a_crash(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    rig.state.parent.mkdir(parents=True, exist_ok=True)
+    rig.state.write_bytes(b"[" * 32768 + b"]" * 32768)
+    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
+    assert mod.load_state() == {}
+
+
+def test_a_snapshot_that_json_cannot_nest_deep_enough_to_read_is_unreadable_not_a_crash(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    rig.set_alerts([])
+    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
+    with pytest.raises(mod.Unreadable, match="2026-10-23T115900.000000Z.json"):
+        mod.read_snapshot()

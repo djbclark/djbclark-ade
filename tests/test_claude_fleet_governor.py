@@ -1307,3 +1307,33 @@ class TestGateProfile(Base):
         self.profile(until=(NOW + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.run_gov("run", now=NOW + timedelta(hours=2))
         self.assertEqual(self.nudges(), [])
+
+
+def _deep_json_raises(*_a, **_k):
+    # json.loads raises RecursionError on a deeply nested file under Python 3.13 and older, but 3.14 parses it: force the raise
+    raise RecursionError("maximum recursion depth exceeded")
+
+
+def test_a_guard_state_json_cannot_nest_deep_enough_to_read_is_ok_not_a_crash(tmp_path, monkeypatch):
+    mod = _gov()
+    guard = tmp_path / "quota-guard.json"
+    guard.write_bytes(b"[" * 32768 + b"]" * 32768)
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(guard))
+    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
+    assert mod.guard_level(mod.parse_ts("2026-10-23T14:00:00Z")) == "ok"
+
+
+def test_a_governor_state_file_that_json_cannot_nest_deep_enough_to_read_is_empty_not_a_crash(tmp_path, monkeypatch):
+    mod = _gov()
+    state = tmp_path / "state.json"
+    state.write_bytes(b"[" * 32768 + b"]" * 32768)
+    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
+    assert mod.read_state(state) == {}
+
+
+def test_a_snapshot_that_json_cannot_nest_deep_enough_to_read_is_no_reading_not_a_crash(tmp_path, monkeypatch):
+    mod = _gov()
+    snap = tmp_path / "2026-10-23T125900.000000Z.json"
+    snap.write_bytes(b"[" * 32768 + b"]" * 32768)
+    monkeypatch.setattr(mod.json, "loads", _deep_json_raises)
+    assert mod.read_snapshot(snap, NOW, NOW, 30.0) is None
