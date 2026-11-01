@@ -147,9 +147,12 @@ it, reports the owner status in its resume plan and asks nothing.
    `bin/watch status --json`: a `holder.target` that equals or is a prefix of S, or equals the matched
    row's full `paseo` id (S may be only the row's 8-character `id`), with `alive: true`, is a live owner
    even when the fleet row says `closed` (a closed Paseo watch holder is resumable by the next message).
-3. **Live** means the row's `status` is neither `closed` nor `ended` and its `ended`, `archived` and `finished` fields are all
-   empty or false (`idle`, `working`, `blocked`, `busy-background` and `unknown` are live), or the watch
-   exception above. **You** are the owner only when the row is YOUR caller row: with exactly one `self`
+3. **Live** means the row's `status` is neither `closed` nor `ended` and its `ended` and `archived` fields are
+   both empty or false (`idle`, `working`, `blocked`, `busy-background` and `unknown` are live), or the
+   watch exception above applies. `finished` is only a transcript hint (the last prompt was `/handoff` or
+   a quit) and is NEVER evidence that the session stopped: a session executing `/handoff` still writes and
+   commits, so a `working` row with `finished: /handoff` stays live (a stale hermes row with `finished:
+   done` costs one question, the safe direction). **You** are the owner only when the row is YOUR caller row: with exactly one `self`
    row that is it; with several (a parent agent that launched you is also marked `self`, and an inherited
    `$PASEO_AGENT_ID` marks its row `self` on its own) take the row `fleet.py`'s `sender_row` picks (the
    nearest process of yours), and if you cannot tell, you are not the owner. S equal to `$PASEO_AGENT_ID`
