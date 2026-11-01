@@ -71,6 +71,8 @@ Exit codes: 2 refused argument, 3 client busy, 4 human declined or absent, 5 out
 EOF
 }
 
+is_bo_cmd() { [[ $1 =~ ${BO_PANE_CMD:-^barnowl$} ]]; }
+
 # Pin the one pane that runs BarnOwl, once, as a tmux pane id (%N): the session's
 # "current" window can change under us, and keys typed into the operator's shell
 # window would run as shell commands. The window is named barnowl (bo-a makes it);
@@ -82,11 +84,11 @@ need_session() {
     exit 1
   fi
   [[ -z $pane ]] || return 0
-  local line cmd
-  line=$(tmux list-panes -t "$session:barnowl" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | head -n 1) || true
-  [[ -n $line ]] || line=$(tmux list-panes -t "$session" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | head -n 1) || true
+  local line cmd pat=${BO_PANE_CMD:-^barnowl$}
+  line=$(tmux list-panes -t "$session:barnowl" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | awk -v p="$pat" '$2 ~ p { print; exit }') || true
+  [[ -n $line ]] || line=$(tmux list-panes -t "$session" -F '#{pane_id} #{pane_current_command}' 2>/dev/null | awk -v p="$pat" '$2 ~ p { print; exit }') || true
   cmd=${line#* }
-  if [[ ! ${line%% *} =~ ^%[0-9]+$ ]] || ! [[ $cmd =~ ${BO_PANE_CMD:-^barnowl$} ]]; then
+  if [[ ! ${line%% *} =~ ^%[0-9]+$ ]] || ! is_bo_cmd "$cmd"; then
     echo "no pane running barnowl in tmux session $session; not typing anywhere" >&2
     exit 1
   fi
@@ -104,8 +106,8 @@ lock_client() {
 
 capture() { tmux capture-pane -p -J -t "$pane"; }
 
-# "window_active pane_active session_attached pane_width" for the pinned pane.
-view_info() { tmux display-message -p -t "$pane" '#{window_active} #{pane_active} #{session_attached} #{pane_width}' 2>/dev/null || true; }
+# "window_active pane_active session_attached pane_width pane_current_command" for the pinned pane.
+view_info() { tmux display-message -p -t "$pane" '#{window_active} #{pane_active} #{session_attached} #{pane_width} #{pane_current_command}' 2>/dev/null || true; }
 
 # A popup (":show commands", help) keeps the status bar and draws a box whose
 # bottom edge is a line of "└──┘"; its pager footer says how to close it.
@@ -188,11 +190,11 @@ read_only_command() { [[ $1 =~ ^(show|help|getvar|getsubs|getview)([[:space:]]|$
 # is exit 4 and nothing more is typed.
 confirm() {
   tainted || return 0
-  local what=$1 reply i cols max wa pa att need
+  local what=$1 reply i cols max wa pa att cmd need
   # The human can only answer a question they can see: BarnOwl's pane must be the active
   # window of a session with a client attached.
-  read -r wa pa att cols <<<"$(view_info)"
-  if [[ ${wa:-} != 1 || ${pa:-} != 1 || ${att:-0} -lt 1 || ! ${cols:-} =~ ^[0-9]+$ ]]; then
+  read -r wa pa att cols cmd <<<"$(view_info)"
+  if [[ ${wa:-} != 1 || ${pa:-} != 1 || ${att:-0} -lt 1 || ! ${cols:-} =~ ^[0-9]+$ ]] || ! is_bo_cmd "${cmd:-}"; then
     echo "the BarnOwl pane is not the one a human is looking at (not the active window of an attached tmux client); nothing was run" >&2
     exit 4
   fi
@@ -218,8 +220,8 @@ confirm() {
       reply=$(<"$ans")
       pending_question=
       need=$((${#what} + 25))
-      read -r wa pa att cols <<<"$(view_info)"
-      if [[ ${wa:-} != 1 || ${pa:-} != 1 || ! ${cols:-} =~ ^[0-9]+$ || $cols -lt $need ]]; then
+      read -r wa pa att cols cmd <<<"$(view_info)"
+      if [[ ${wa:-} != 1 || ${pa:-} != 1 || ! ${cols:-} =~ ^[0-9]+$ || $cols -lt $need ]] || ! is_bo_cmd "${cmd:-}"; then
         echo "the BarnOwl pane was resized or hidden while the question was open; the answer is not accepted" >&2
         exit 4
       fi

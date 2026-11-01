@@ -54,7 +54,7 @@ class Env:
             case "$1" in
               has-session) exit 0 ;;
               list-panes) echo "%1 ${FAKE_PANE_CMD:-barnowl}" ;;
-              display-message) echo "${FAKE_ACTIVE:-1} 1 ${FAKE_ATTACHED:-1} ${FAKE_WIDTH:-140}" ;;
+              display-message) echo "${FAKE_ACTIVE:-1} 1 ${FAKE_ATTACHED:-1} ${FAKE_WIDTH:-140} ${FAKE_PANE_CMD:-barnowl}" ;;
               capture-pane) cat "$FAKE_SCREEN" ;;
               send-keys)
                 shift; printf '%s\\n' "$*" >>"$FAKE_KEYS"
