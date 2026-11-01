@@ -325,3 +325,20 @@ G3's provider table (T4), G2.8's create-origin answer (T11).
 10. Should CI run `shellcheck` over `tests/paseo-acceptance/` and `bin/paseo-watchdog`, and is a Python selftest under `bg bin/pytest` wanted for the watchdog logic?
 11. Which repos go in `config/paseo-teardown-repos`, and is `config/ade-providers.toml` the right home for G3's steer/queue table?
 12. May tab probe T10 run on the live daemon in a drained window with one throwaway agent, or only against Desktop attached to the second daemon?
+
+### Decisions (2026-11-01)
+
+Answered by djbclark in a `/steps` walk (E2, E3, E4, E6, E8, E9, E12); the rest decided by the lead (1e61c979) under standing rules.
+
+1. Unix socket under `$TMPDIR`: no port claim is needed for a socket (lead; the ports registry covers TCP binds).
+2. All providers with quota that day, cheapest model each, about one short turn each (djbclark). Copilot is skipped while its monthly quota is exhausted.
+3. Alert-only until the watchdog's soak has passed once on the isolated daemon; a hang pages djbclark until then (djbclark).
+4. Restart path: `paseo restart` first; if the daemon is not healthy after it, relaunch the Desktop app (quit Paseo.app, open it). D1 verifies `paseo restart` on the Desktop-managed daemon once, in a drained window with djbclark's yes (djbclark).
+5. vps-primary upgrades to the latest released Paseo at the time, as everything tracks latest (lead; `~/AGENTS.md` item 5).
+6. Delegated to the lead (djbclark: "do whatever you want here; I don't need to review; test several things; consult a frontier model"): the lead picks the pilot user's name and drafts and deploys the NixOS change in `~/ops` after trying options and a `frontier` consult. This is djbclark's yes under order 11 for that change; deploys still run only from the pushed branch head (`~/AGENTS.md` item 36).
+7. A fact to find, not a decision: D1 locates where `session-janitor` reads `archiveChildren`, `deleteChildren` and `deleteMain` (its source), and the lead sets them before D2 (lead).
+8. `herdr-harness` stays enabled; the plan text is amended to match (djbclark; plan table and section A8.2 changed in this branch).
+9. Install `sleepwatcher` (brew), tracking latest, with the hook scripts in D1, and add it to `docs/apply-toolchain-prompt.md` (djbclark).
+10. Yes to `shellcheck` in CI over `tests/paseo-acceptance/` and `bin/paseo-watchdog`, and a hermetic Python selftest for the watchdog logic run through `bg bin/pytest` (lead).
+11. The lead drafts the teardown repo list in `config/paseo-teardown-repos` and keeps G3's table in `config/ade-providers.toml`; both are reviewed in the D1 PR (lead).
+12. Tab probe T10 runs only against Desktop attached to the isolated second daemon, never the live daemon (djbclark).

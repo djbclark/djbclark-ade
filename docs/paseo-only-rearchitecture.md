@@ -39,7 +39,7 @@ this plan wins where they disagree about the future, they win about today. Sourc
    1. **`herdr4paseo`** (tab `herdr4paseo-t`): Herdr attaches to running Paseo agents, as an **attach
       client** that shows and drives an agent Paseo hosts. A modified tuios may do the same.
    2. **`paseo4herdr`** (tab `paseo4herdr-t`; fork https://github.com/djbclark/paseo4herdr, checkout
-      `~/src/paseo4herdr`; formerly the `paseo-herdr` plugin, installed disabled today as `herdr-harness`):
+      `~/src/paseo4herdr`; formerly the `paseo-herdr` plugin, installed and enabled as `herdr-harness`, which djbclark keeps enabled, 2026-11-01):
       Paseo reaches terminals that Herdr hosts.
 
    **These two are the only Herdr integration.** Herdr agents do not talk to Paseo agents: no messaging,
@@ -148,7 +148,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | `skills/session-finder/{relay.py,fleet.py,launch.py,where.py,prompt_line.py,nested_pty.py,adapters/}` | relay.py in 44 files | non-Paseo routes RETIRE in D4; relay.py and fleet.py in D6, once no watcher calls them | `send_agent_prompt` with B2's states; G3 for delivery and deferred send |
 | herdr as a harness (`bin/herdr-*`, herdr docs and skills, `-t/-p` naming, panes hosting agents, pane typing) | 139 files | RETIRE | Paseo workspaces; naming `-pw` only |
 | `herdr4paseo` (A8.1) | own project | KEEP, edge case | one A8 bridges doc and skill |
-| `paseo4herdr` (A8.2), plugin `herdr-harness` (installed, disabled) | own project | KEEP, edge case | same doc and skill |
+| `paseo4herdr` (A8.2), plugin `herdr-harness` (installed, enabled; djbclark 2026-11-01) | own project | KEEP, edge case | same doc and skill |
 | tuios as an attach client (A8.1) | — | DECIDE: only if modified for it | same doc and skill |
 | Orca (`docs/orca-integration.md`, `skills/orca-cli`, `skills/reorg-orca`, `orca-reorg-watch`, worker-start) | 103 files | RETIRE | Paseo workspaces and subagents |
 | Superset/Paradev skills | 10 files | RETIRE (evaluation concluded 2026-10-29) | none |
