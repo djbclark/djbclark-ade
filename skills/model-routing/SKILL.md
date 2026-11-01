@@ -800,14 +800,24 @@ method that runs the waves.
    (`NEVER_ROUTE` in `route_agent.py`; it stays in Hermes's chain as its
    lifeline; aiuse `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
    integrating what is in flight, because orchestration runs from it.
-   **Exception (djbclark, 2026-11-01):** when djbclark says the Copilot allowance is about to be lost (its
-   counters reset on the 1st of each month, 00:00 UTC, and unused allowance never carries over), the floor and
-   the `github`-only limit are lifted for that day: dispatch with `ACP_OPERATOR_APPROVED=route-override acp-dispatch
-   copilot --model claude-sonnet-5.5 --kind <kind>`, or open a Paseo tab on provider `copilot`. Best value there:
-   `claude-sonnet-5.5` for code and judgment, `gpt-6.1-terra` for bulk, `kimi-k3` for a second opinion; never
-   `gemini-3.8-flash` (14x per prompt) or `auto`. One long autonomous prompt beats many short ones (per-prompt
-   billing: tool calls inside a turn are free). The usual concurrency caps do not apply to Copilot slices; the
-   `load-watch admit` gate still does, because the limit is local memory.
+   **Exception (djbclark, 2026-11-01):** on a day djbclark says the Copilot allowance is about to be lost (its
+   counters reset on the 1st of each month, 00:00 UTC, and unused allowance never carries over; GitHub docs
+   "Usage-based billing for individuals", read 2026-11-01), the floor, the `github`-only limit and the concurrency
+   caps (`max_parallel = 1`) are lifted until 00:00 UTC on the 1st, and no longer: dispatch with
+   `ACP_OPERATOR_APPROVED=route-override acp-dispatch copilot --model claude-sonnet-5.5 --kind <kind>`, or open a
+   Paseo tab on provider `copilot`. The `load-watch admit` gate still applies, because the limit is local memory.
+   **Included allowance only, never money:** Copilot has billed per token since 2026-06-01 (input, cached input
+   and output tokens priced per model, converted to AI credits at 1 credit = $0.01; GitHub docs "Usage-based billing
+   for individuals", read 2026-11-01); a prompt with many tool-call turns is many model calls, so tool calls are NOT
+   free, and long turns on big contexts cost more, cached input less. Usage past the allowance is charged to the
+   payment method unless a Bundled AI credits budget of $0 with "Stop usage when budget limit is reached" is set.
+   Before the first dispatch check the usage dashboard for what is left and confirm that $0 stop is set; stop
+   dispatching when the allowance is spent; never run on purchased credits (item 7 still binds). Best value by
+   token price (GitHub docs "Models and pricing", read 2026-11-01, per M tokens in/out): `claude-sonnet-5.5`
+   ($2/$10) for code and judgment, `gpt-6.1-terra` ($1/$5) for bulk, `kimi-k3` ($3/$15) for a second opinion;
+   `gemini-3.8-flash` ($0.75/$3.75, promotional through 2026-12-31) is cheap but scores 19.7% on Terminal-Bench 4.0
+   (item 14), so bulk only, never code. Avoid `auto` (its model, and so its price, is not chosen by you). Prices
+   change: re-read the docs page before relying on these.
 7. **Never:** **hermes** as a delegation target (the operator's own assistant;
    `acp-run` and `acp-dispatch` refuse it by an approval gate); **cline**,
    uninstalled 2026-10-17 and gated the same way (Hermes's ClinePass pool is
@@ -876,20 +886,33 @@ method that runs the waves.
     Sonnet: pass `model: "opus"` in the call for a judgment sub-agent; pinned
     definitions keep theirs; the built-in Explore and Plan agents ignore it.
 14. **Cost tiers by kind of work** (operator, 2026-11-01, after a proposed "cheap model as the daily driver" plan
-    was checked against the evidence). Decide the tier from the kind of task, up front; never "escalate after the
-    cheap tier fails twice": a weak model's failures are often silent (the code passes and is wrong).
+    was checked against the evidence). Decide the tier from the kind of task, up front; for code, no cheap-first
+    cascade from tier 2 to tier 1 ("escalate after the cheap tier fails twice"): a weak model's failures are often
+    silent (the code passes and is wrong). Within the Claude ladder (4c.4, 4e: Sonnet, then Opus on a verified
+    failed check) the evidence-based climb still applies; this item does not repeal it.
     | Tier | Work | Models, in order of value |
     |---|---|---|
-    | 1, most work | code, tests, refactors, glue, configs | Sonnet 5.5 (claude subscription, omp, Copilot when ruled), GPT-6.1 Sol (codex: best score per dollar) |
-    | 2 | bulk, mechanical edits, docs, large reading | GLM-5.3-Flash (zai), Gemini Flash (agy), `gpt-6-luna`; DeepSeek V4.1 Flash only for non-code bulk, reviewed by a stronger model |
-    | 3 | judgment, architecture, every review | Opus 5.5 at high; frontier models (astra, Fable; Argon as their fallback) only through `--kind frontier` |
+    | 1, most work | code, tests, refactors, glue, configs | Sonnet 5.5 (claude subscription, omp, Copilot when ruled), GPT-6.1 Sol (codex: best score per dollar among the models above 50% on Terminal-Bench, see below) |
+    | 2, never code, output reviewed by a stronger model | bulk, docs, large reading, mechanical edits that a check proves | GLM-5.3-Flash (zai), Gemini 3.8 Flash (agy), `gpt-6-luna`, DeepSeek V4.1 Flash (non-code bulk only) |
+    | 3 | judgment, architecture; reviews default here | Opus 5.5 at high; frontier models (astra, Fable) only through `--kind frontier` |
+    Tier 3 is a default, not a ban elsewhere: item 13 drops the `adversary` to Sonnet when `claude-quota-guard` is
+    tight, and `AGENTS.md` "Code review" (adversary marker on the PR body, local Codex review) governs which
+    reviews a PR needs. Gemini 4 Argon is an advisor (agy research, `config/go-model-policy.json`), not a routed
+    frontier fallback: `dispatch.frontier_models` is `gpt-6-astra` and `fable` only.
     **Never code on DeepSeek V4.1 Flash** (djbclark 2026-10-30: no `code` on opencode-go). Evidence: Terminal-Bench 4.0
     (Vals AI, 2026-10-29, pass/fail on long real terminal tasks): Opus 5.5 65.2%, Sonnet 5.5 64.1%, GPT-6.1 Sol 55.1%,
-    GPT-6.1 Terra 49.5%, GLM 5.3 38.9%, GLM 5.3 Flash 37.4%, DeepSeek V4.1 Flash 19.7% (its 1017 build 31.8%); and the
-    2026-10-30 review of Flash-written code in this repo found four BLOCKs (a credential leak, a forged-ack hole, a crash,
-    duplicate paid turns). "Cheapest per token" matters only once the flat subscriptions run out: inside a
-    subscription's quota a strong model costs nothing extra. Every code change still gets an independent review
-    (item 13). `config/routing.toml` already ranks this way; this item is the reason, not new numbers.
+    GPT-6.1 Terra 49.5%, GLM 5.3 38.9%, GLM 5.3 Flash 37.4%, DeepSeek V4.1 Flash 19.7% (its 1017 build 31.8%), Gemini
+    3.8 Flash 19.7%, GPT-6 Luna 13.6%. Vals cost per test: Sol $1.72 at 55.1%, Terra $2.16, Kimi K3.1 Pro $4.57, Opus
+    $13.20, Sonnet $16.51; DeepSeek V4.1 Flash is cheaper ($0.50) but at 19.7%, so "best per dollar" holds only among
+    the models above 50%. The 2026-10-30 review of this repo's code (reports under
+    `~/.local/state/bigteam/deepseek-review-2026-10-30/`, PRs 171, 172, 174) found four BLOCKs (a credential leak, a
+    `NameError` crash, a disabled pool chosen as primary, and a forged-ack hole in `relay.py` that predates the
+    Flash-written code) and a MAJOR duplicate paid send: weak-model code needs strong review. "Cheapest per token"
+    matters only once the flat subscriptions run out: inside a subscription's quota a strong model costs nothing
+    extra. `config/routing.toml` ranks the tiers this way (`bin/route_agent.py policy --md`); other code routes in it
+    (agy-claude Opus burn-first, zai GLM-5.3 38.9%, alibaba qwen3.8-max 34.3%, clinepass, the unpinned opencode-zen,
+    openrouter and deepseek pools) are overflow behind tier 1 or burn-first, not tier-1 choices. This item is the
+    reason, not new numbers.
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and
 `config/routing.toml` is the source of truth: the kinds, each service's
