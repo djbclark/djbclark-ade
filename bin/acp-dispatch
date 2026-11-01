@@ -2397,8 +2397,9 @@ MONTH_DATE_RE = re.compile(
 ISO_RESET_RE = re.compile(
     r"quotaResetTimeStamp:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))")
 # Copilot's 402 JSON carries the reset as a relative delay: `"retry_after_ms":726841922` (month end,
-# microsoft/vscode#343806)
-RETRY_AFTER_MS_RE = re.compile(r"retry_after_ms\"?\s*[:=]\s*\"?(\d{1,12})\b")
+# microsoft/vscode#343806). Inside a session-log event the same JSON is string-escaped
+# (`\"retry_after_ms\":60000`, quota_log_tail passes raw JSONL), so quotes may carry backslashes.
+RETRY_AFTER_MS_RE = re.compile(r"retry_after_ms(?:\\*\")?\s*[:=]\s*\\*\"?(\d{1,12})\b")
 PLAIN_RESET_RE = re.compile(
     r"limit will reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})(?:\s*(Z|[+-]\d{2}:?\d{2}))?", re.IGNORECASE)
 DURATION_UNITS = {
@@ -3040,6 +3041,9 @@ COPILOT_QUOTA_TERMS = (
 def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tuple[str | None, re.Match | None]:
     """Classify errors acp-run does not yet classify, including zcode 1310."""
     low = text.lower()
+    # the same error as a JSON string inside a session-log event has escaped quotes (`\"errortype\":
+    # \"quota\"`): match the terms against the unescaped text too
+    unescaped = re.sub(r'"\s*:\s*"', '":"', re.sub(r'\\+"', '"', low))   # and `"errortype": "quota"`
     # "Refreshes in 6 days and 4 hours" is agy's weekly-cap phrasing (2026-10-18) and plays the
     # same role as "Resets in"; both carry the when-phrase the reset parsers read.
     when = re.search(r"(?:try again|resets?|refresh(?:es)?|retry|limit will reset) "
@@ -3048,7 +3052,7 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
     quota_terms = ("limit exhausted", "usage limit", "quota exhausted", "resource_exhausted",
                    "individual quota reached", "rate limit exceeded", "insufficient quota",
                    *COPILOT_QUOTA_TERMS)
-    if "[1310]" in low or any(term in low for term in quota_terms):
+    if "[1310]" in low or any(term in low or term in unescaped for term in quota_terms):
         return "quota", when
     # A stored login the agent cannot refresh: not transient, not an outage, and no retry or
     # reroute fixes it; the operator must log in again. zcode's z.ai coding-plan token exchange

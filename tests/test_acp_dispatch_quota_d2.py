@@ -353,6 +353,23 @@ class TestCopilotQuotaClass(unittest.TestCase):
         self.assertEqual(prd(text, when, now), now + timedelta(milliseconds=726841922))
         self.assertEqual(prfa(text, when), ("--resets-in", "726841s"))
 
+    def test_error_json_inside_a_session_log_event_reads_the_same(self):
+        # quota_log_tail hands the parsers raw JSONL, so the error's JSON is string-escaped there
+        import tempfile
+        for body in ('{"errorType":"quota","statusCode":402,"retry_after_ms":60000}',
+                     '{\n  "errorType": "quota",\n  "statusCode": 402,\n  "retry_after_ms": 60000\n}'):
+            ev = {"kind": "update", "data": {"content": "Agent run failed: " + body}}
+            with tempfile.TemporaryDirectory() as d:
+                log = Path(d) / "s.jsonl"
+                log.write_text(json.dumps(ev) + "\n")
+                text = self.mod["quota_log_tail"](log)
+            self.assertIn('\\"', text)                    # really escaped
+            cls, when = self.mod["failure_class"](text, 0)
+            self.assertEqual(cls, "quota", text)
+            now = datetime(2026, 11, 1, 12, 0).astimezone()
+            self.assertEqual(self.mod["parse_reset_datetime"](text, when, now), now + timedelta(seconds=60))
+            self.assertEqual(self.mod["parse_reset_for_aiuse"](text, when), ("--resets-in", "60s"))
+
     def test_on_phrases_need_a_dated_month_and_never_read_the_clock(self):
         fc, prd = self.mod["failure_class"], self.mod["parse_reset_datetime"]
         now = datetime(2026, 11, 1, 1, 0).astimezone()
