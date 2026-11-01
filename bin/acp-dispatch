@@ -3148,6 +3148,32 @@ def transfer_load_reservation() -> None:
     _LOAD_RESERVATION.pop("path", None)
 
 
+_RENEWED_AT: list[float] = [0.0]
+RESERVATION_RENEW_S = 60.0   # a held agent reservation is renewed this often while its dispatch waits or starts
+
+
+def renew_load_reservation(rec: dict | None = None, force: bool = False) -> None:
+    """Keep this launch's agent reservation alive (`load-watch renew ID`) at most once per RESERVATION_RENEW_S: the
+    waits before the spawn (wait_for_capacity, up to ACP_DISPATCH_GATE_MAX) and the start-up before the agent is countable
+    can outlast LW_RESERVE_S, and a lapsed reservation would leave neither it nor a counted agent. The id is this
+    process's own admission, else the job record's. Best effort; never raises."""
+    if not force and time.monotonic() - _RENEWED_AT[0] < RESERVATION_RENEW_S:
+        return
+    rid, path = _LOAD_RESERVATION.get("id"), _LOAD_RESERVATION.get("path")
+    if not rid and rec:
+        gate = rec.get("load_gate")
+        rid = gate.get("reservation") if isinstance(gate, dict) else None
+        path = rec.get("load_watch") or str(HERE / "load-watch")
+    if not rid or not path:
+        return
+    _RENEWED_AT[0] = time.monotonic()
+    try:
+        subprocess.run([path, "renew", str(rid)], check=False, capture_output=True, timeout=20,
+                       env={k: v for k, v in os.environ.items() if not k.startswith(LOAD_SCRUB_PREFIX)})
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def adopt_load_reservation(rec: dict) -> None:
     """A detached runner whose dispatcher admitted inline (--detach without --no-wait) never calls load_gate(), so it
     adopts the reservation id and admitting binary from the job record and registers the exit-time release itself,
@@ -3924,8 +3950,10 @@ def wait_for_capacity(record: Path) -> None:
         return
     update_record(record, gate=f"waiting: {why}")
     print(f"acp-dispatch: holding start, {why} (up to {cap}s)", file=sys.stderr)
+    renew_rec = json.loads(record.read_text())
     while why and time.monotonic() - start < cap:
         time.sleep(GATE_POLL_S)
+        renew_load_reservation(renew_rec)   # a long hold must not let the agent reservation lapse
         why = machine_overloaded()
     waited = int(time.monotonic() - start)
     update_record(record, gate=f"waited {waited}s" + (f", started anyway: {why}" if why else ""))
@@ -4065,6 +4093,7 @@ def execute_record(record: Path, tee: bool = False) -> int:
                         proc.kill()
                     if held and time.time() - last_look >= RESERVATION_LOOK_S:
                         last_look = time.time()
+                        renew_load_reservation(rec)
                         if agent_countable(proc.pid) or last_look - spawned_at > RESERVATION_MAX_HOLD_S:
                             release_load_reservation(rec)
                             held = False

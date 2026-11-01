@@ -10,6 +10,7 @@
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
     load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]] [--no-reserve]
+    load-watch renew RESERVATION             extend an agent reservation by LW_RESERVE_S from now (a dispatcher still waiting)
     load-watch release RESERVATION           shorten an agent reservation `admit --max-agents --json` printed (its agent is spawned)
                      [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
@@ -1778,6 +1779,34 @@ def release_reservation(rid):
     return bool(_res_locked(work))
 
 
+def renew_reservation(rid):
+    """Push reservation `rid` out to LW_RESERVE_S from now (never shortening it): a dispatcher that is still waiting for
+    capacity, or for its agent to become countable, keeps its place however long that takes. False when it is gone
+    (released or expired: a reservation that lapsed is not resurrected, the dispatcher is told so)."""
+    def work():
+        t = now()
+        rows, hit = [], False
+        for x in _res_read():
+            if x["until"] <= t:
+                continue
+            if x["id"] == rid:
+                hit, x = True, {"id": rid, "until": max(x["until"], t + ADMIT_RESERVE_S)}
+            rows.append(x)
+        try:
+            _res_write(rows)
+        except OSError:
+            return False
+        return hit
+
+    return bool(_res_locked(work))
+
+
+def cmd_renew(a):
+    ok = renew_reservation(a.id)
+    print(f"renewed {a.id}" if ok else f"no reservation {a.id}")
+    return 0 if ok else 1
+
+
 def cmd_release(a):
     ok = release_reservation(a.id)
     print(f"released {a.id}" if ok else f"no reservation {a.id}")
@@ -2026,6 +2055,8 @@ def main():
     p.add_argument("dir", nargs="?")
     p.add_argument("mode", nargs="?", choices=MODES)
     p.add_argument("text", nargs="?", metavar="CMD_OR_REASON")
+    p = sub.add_parser("renew")
+    p.add_argument("id", metavar="RESERVATION", help="extend an agent reservation by LW_RESERVE_S from now")
     p = sub.add_parser("release")
     p.add_argument("id", metavar="RESERVATION", help="the `reservation` id an `admit --max-agents --json` printed")
     p = sub.add_parser("admit")
@@ -2071,7 +2102,7 @@ def main():
         ap.print_usage(sys.stderr)
         return 2
     return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
-            "guard": cmd_guard, "watcher": cmd_watcher, "admit": cmd_admit, "release": cmd_release, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+            "guard": cmd_guard, "watcher": cmd_watcher, "admit": cmd_admit, "release": cmd_release, "renew": cmd_renew, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 
 if __name__ == "__main__":

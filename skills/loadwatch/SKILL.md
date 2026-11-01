@@ -131,7 +131,7 @@ agent is countable (its process tree holds the `acp-run` process, not just the `
 process hands the reservation to the detached runner after a successful launchctl submit (the id stays in the job record's
 `load_gate.reservation`) and does not release it on its own exit, so a `--wait-timeout` expiry cannot shorten it while the runner is
 still waiting for capacity; the countable check also looks at the spawned process itself, not only its children.
-`LW_RESERVE_S` (1200 s, 0 = off) is only the backstop for a dispatcher that died; `--no-reserve` records none but still counts those held (a pure capacity check)
+The dispatch also runs `load-watch renew ID` every 60 s while it waits for capacity or for its agent to become countable (each renewal extends the entry by `LW_RESERVE_S`, never shortens it, never revives a lapsed one), so waits longer than `LW_RESERVE_S` (`ACP_DISPATCH_GATE_MAX`) keep the place. `LW_RESERVE_S` (1200 s, 0 = off) is only the backstop for a dispatcher that died; `--no-reserve` records none but still counts those held (a pure capacity check)
 `admit --max-agents` a pure check. acp-dispatch validates the knobs once (a churn or pageins limit of 0 is ignored with a
 warning, since admit exits 2 on it) and records them in the job record (`load_knobs`), so a `--detach --no-wait` runner under
 launchd uses the same ones. An `admit` that exits 2 refuses the launch (exit 75), never admits it.

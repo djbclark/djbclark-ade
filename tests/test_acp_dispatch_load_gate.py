@@ -12,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import types
 import unittest
 from pathlib import Path
 from typing import override
@@ -207,6 +208,42 @@ class TestLoadGateAgentCapAndKnobs(LoadGate):
         r = run(["execute", str(path)], env={**self.base_env(), **self.gate_env(0, ok, ACP_DISPATCH_INFLIGHT="")})
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.calls(), ["release r-8"])
+
+    def test_a_long_capacity_wait_renews_the_reservation(self):
+        """Codex P2 on PR 210: wait_for_capacity can hold longer than LW_RESERVE_S; the reservation must be renewed."""
+        mod = self.load_module()
+        record = self.tmp / "rec.json"
+        record.write_text(json.dumps({"load_gate": {"reservation": "r-9"}, "load_watch": str(self.lw)}))
+        states = iter(["busy", "busy", "busy", None])
+        clock = [0.0]
+
+        def monotonic():
+            clock[0] += 70                                                              # each look is 70 s later
+            return clock[0]
+
+        env = {**os.environ, "FAKE_LW_ARGS": str(self.lw_args), "FAKE_LW_RC": "0", "FAKE_LW_OUT": "",
+               "ACP_DISPATCH_GATE_MAX": "900", "ACP_DISPATCH_NO_GATE": ""}
+        with (patch.dict(os.environ, env), patch.object(mod, "machine_overloaded", lambda: next(states)),
+              patch.object(mod, "update_record", lambda *a, **k: {}), patch.object(mod, "time", types.SimpleNamespace(
+                  sleep=lambda s: None, monotonic=monotonic, time=time.time))):
+            mod._RENEWED_AT[0] = -1e9
+            mod.wait_for_capacity(record)
+        renews = [c for c in self.calls() if c.startswith("renew ")]
+        self.assertGreaterEqual(len(renews), 2, self.calls())
+        self.assertEqual(set(renews), {"renew r-9"})
+
+    def test_renew_is_rate_limited_and_silent_without_a_reservation(self):
+        mod = self.load_module()
+        env = {**os.environ, "FAKE_LW_ARGS": str(self.lw_args), "FAKE_LW_RC": "0", "FAKE_LW_OUT": ""}
+        with patch.dict(os.environ, env):
+            mod.renew_load_reservation({"load_gate": {"state": "pending"}})           # nothing to renew
+            self.assertEqual(self.calls(), [])
+            rec = {"load_gate": {"reservation": "r-10"}, "load_watch": str(self.lw)}
+            mod.renew_load_reservation(rec)
+            mod.renew_load_reservation(rec)                                            # within RESERVATION_RENEW_S
+            self.assertEqual(self.calls(), ["renew r-10"])
+            mod.renew_load_reservation(rec, force=True)
+            self.assertEqual(self.calls(), ["renew r-10", "renew r-10"])
 
     def test_agent_countable_checks_the_root_process_itself(self):
         """Codex P2 on PR 210: a directly executed `acp-run` (Python shebang via --acp-run) IS the root pid."""

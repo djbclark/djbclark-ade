@@ -805,3 +805,25 @@ def test_no_reserve_still_counts_the_reservations_others_hold(tmp_path):
     f.write_text(before)
     assert admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1,
                  LW_RESERVE_S="0", LW_FAKE_AGENTS="13").returncode == 0                                          # reservations off
+
+
+def test_renew_extends_a_live_reservation_and_never_resurrects_or_shortens(tmp_path):
+    """Codex P2 on PR 210: a dispatcher still waiting for capacity must keep its place beyond LW_RESERVE_S."""
+    f = tmp_path / "state" / "agent-reservations.json"
+    f.parent.mkdir()
+    now = time.time()
+    f.write_text(json.dumps({"r": [{"id": "soon", "until": now + 30}, {"id": "far", "until": now + 5000},
+                                   {"id": "dead", "until": now - 5}]}))
+    env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_RESERVE_S="1200")
+
+    def renew(rid):
+        return subprocess.run([sys.executable, str(LW), "renew", rid], capture_output=True, text=True, env=env)
+
+    r = renew("soon")
+    assert r.returncode == 0 and "renewed" in r.stdout, r
+    rows = {x["id"]: x["until"] for x in json.loads(f.read_text())["r"]}
+    assert rows["soon"] >= now + 1190 and rows["far"] == now + 5000 and "dead" not in rows   # never shortened; expired pruned
+    assert renew("far").returncode == 0
+    assert {x["id"]: x["until"] for x in json.loads(f.read_text())["r"]}["far"] == now + 5000
+    assert renew("dead").returncode == 1 and renew("nope").returncode == 1                    # a lapsed one stays gone
+    assert "dead" not in {x["id"] for x in json.loads(f.read_text())["r"]}
