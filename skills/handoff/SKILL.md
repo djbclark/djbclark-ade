@@ -302,6 +302,8 @@ legacy `--then "/baton /path"` is rewritten once, keeping every byte of the path
 once, never with extra Enters, and counts as sent only when that Codex session's rollout holds the exact message;
 otherwise the waiter exits 8 and logs `NOT confirmed delivered`: report that, never type it again.
 
+**A Codex (or any non-Claude) agent on Paseo cannot use that command.** `bin/self-slash`'s `paseo_check_builtin` refuses `/new`, `/clear`, `/reset` and `/compact` there unless the Paseo provider is `claude` (exit 7, nothing sent: "daemon clear/compact is unproved"), and Codex syntax (`$baton`) is only ever produced for a herdr pane. On Paseo such an agent writes the handoff, then uses the refusal's own pointer, `self-slash --finish --successor PROVIDER/MODEL` (the successor form below), or tells the operator the handoff is written and stops.
+
 If Codex tool commands lack host variables, `self-slash` refuses Cline hub discovery rather than choosing another agent.
 Verify the current Codex thread against the host and its parent-process identity before restoring host variables for a lifecycle call;
 never substitute an agent discovered through an unrelated client's shared hub.
