@@ -310,6 +310,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- Follow-ups to #126 and #127 that no review round had filed (2026-11-01): `claude/hooks/context_size_nudge.py` no longer says the hook "runs only at prompt submit" (it also runs on `PostToolUse`) and names in-process agent-team teammates beside sub-agents where the `agent_id` guard skips them; `docs/context-hygiene.md` names the owner of the live `~/.claude/settings.json` hand-edit (the merging lead session); `skills/handoff` Step 9's partial-handoff recipe spells out the codex and grok model, mode and first prompt (`$baton PATH` for codex) at quota-guard `critical`, and says the exit-4 note is for claude only (#TBD).
 - Fixed `/bigteam` caller-discovery, commit-preparation, and single-run waiter checks, including unindexed scripts and GNU-safe source excerpts (#195).
 - Fixed `watch` handling of uncertain lifecycle reads, forced replacements after failed probes, watchers in background workspaces, and generation reuse after title-list failures (#195).
 - Fixed `watch up` replacing watchers after Paseo collected their idle runtimes; retained saved sessions without periodic model wake-ups, let real events resume them through the relay, and refused duplicate launches when daemon state was unknown (#192).

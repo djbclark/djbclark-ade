@@ -345,7 +345,10 @@ refusal retry or a by-hand start reruns the guard advice's command (omp, else co
 partial-handoff recipe is the exception to "the guard advice's command": it keeps `paseo-new-seat` (the
 `--finish --successor` form archives the session it keeps) with `--provider omp --model
 anthropic/claude-sonnet-5-5 --thinking high` and no `--mode` (omp has its own default; a claude mode id means
-nothing to it), else codex with `--mode full-access`, or grok. Only (c), an operator-asked model change, still
+nothing to it), else codex with `--provider codex --model gpt-6.1-sol --mode full-access` and the first prompt
+`'$baton PATH'` (single-quoted: a Codex skill is `$baton`, `/baton` is Claude's spelling), or grok with
+`--provider grok --model grok-4.7`, no `--mode` (`paseo provider ls` lists none for grok) and the first prompt
+`Resume from the handoff at PATH: read it, then continue the work.` (no skill syntax is verified for grok). Only (c), an operator-asked model change, still
 decides for itself at any level. The `[quota-guard critical]` line is printed once per session and compaction
 can drop it, so the state file, not the line, is what you test.
 
@@ -456,7 +459,8 @@ session, and `/handoff paseo` when this session is the one being handed on:
 ```
 
 The `wks_` id is `workspaceId` in `$PASEO_HOME/agents/*/<your agent id>.json` (`~/.paseo` when unset). Exit 4 with `"mode":"bypassPermissions","modeApplied":true`
-is fine for claude (the shield is for auto-accept; this mode is already yolo). Verify as above, and `paseo logs <new id>` shows the
+is fine for claude only (the shield is for auto-accept; this mode is already yolo); an exit 4 on an omp, codex or grok seat is not covered by that note: check the new agent's
+mode with `paseo agent inspect <new id> --json` before calling it fine. Verify as above, and `paseo logs <new id>` shows the
 `/baton` was read. Skip Step 8's autorename for a partial handoff: it would rename the session the operator keeps using.
 
 **Document only:** skip this step when a skill that clears the session itself runs the handoff, when
