@@ -71,7 +71,7 @@
 # the same herdr workspace and cwd, starts a real claude TUI there (`herdr agent start --kind claude -- --model M
 # --effort E`, never acp-run: an acp-run session cannot take /new, /compact or a handoff), prompts /baton, and checks
 # that the pane runs claude with another session id.  The old pane is left idle, never closed or exited
-# (herdr-tidy closes it); any failure exits 11 and leaves it usable.  --title, --workspace and --keep-workspace
+# (nothing closes it automatically); any failure exits 11 and leaves it usable.  --title, --workspace and --keep-workspace
 # are Paseo's and exit 2 here.  SELF_SLASH_LAUNCH replaces the launch.py command (tests).
 # Workspaces (djbclark, 2026-10-23): the successor always lands in an EXISTING workspace, `paseo run
 # --workspace <id>` (default this agent's, --workspace ID picks another), never --new-workspace and
@@ -546,7 +546,9 @@ fi
 # Also called immediately before a send, after idle, including an explicit --then command.
 paseo_check_builtin() {
   [ "$host" = paseo ] || return 0
-  case "$1" in /new|/clear|/reset|/compact|/new[[:space:]]*|/clear[[:space:]]*|/reset[[:space:]]*|/compact[[:space:]]*) ;;
+  # Match the command with leading whitespace stripped, so the gate and a trimming parser cannot disagree.
+  local cmd="${1#"${1%%[![:space:]]*}"}"
+  case "$cmd" in /new|/clear|/reset|/compact|/new[[:space:]]*|/clear[[:space:]]*|/reset[[:space:]]*|/compact[[:space:]]*) ;;
     *) return 0;; esac
   local provider
   provider=$(python3 - "$paseo_cli" "$pane" <<'PY_PROVIDER'
@@ -558,6 +560,10 @@ try:
     r = subprocess.run([sys.argv[1], "agent", "inspect", sys.argv[2], "--json"],
                        env=env, capture_output=True, text=True, timeout=20, check=True)
     row = json.loads(r.stdout)
+    # Inspect serializes structured agent data; CLI versions may wrap it in a one-element list
+    # (bin/rumination-watch accepts the same). The Id check below still binds the record to this agent.
+    if isinstance(row, list) and len(row) == 1:
+        row = row[0]
     if not isinstance(row, dict) or row.get("Id") != sys.argv[2]:
         raise ValueError("wrong agent record")
     provider = row.get("Provider")
@@ -1370,7 +1376,7 @@ fi
 if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -z "$successor" ]; then finish_paseo; fi
 # herdr --finish --successor claude/MODEL: launch.py's `successor` waits for idle, opens a tab in this pane's
 # workspace, starts a real claude TUI there on the model asked, prompts /baton and checks it; exit 11 on any
-# failure.  The old pane is left idle for herdr-tidy, never closed or exited.
+# failure.  The old pane is left idle (nothing closes it automatically), never closed or exited.
 if [ "$finish" = 1 ] && [ "$host" = herdr ] && [ -n "$successor" ]; then
   launch_cmd=(python3 "$(dirname "$(grealpath "$0")")/../skills/session-finder/launch.py")
   [ -z "${SELF_SLASH_LAUNCH:-}" ] || launch_cmd=("$SELF_SLASH_LAUNCH")

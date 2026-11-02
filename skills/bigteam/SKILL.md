@@ -63,19 +63,17 @@ the slice **up** a tier, not down.
 
 ## Step 0 — another bigteam run may already be live
 
-Another session may be running its own fan-out right now (often the herdr tab
+Another session may be running its own fan-out right now (often the Paseo agent
 labelled `coord`). The two share every quota pool and possibly the checkout, so
 before slicing:
 
-1. **Look.** `herdr tab list` (a `coord` tab, or any tab whose agent is
-   `working` on a fan-out) and `ls -lt ~/.local/state/bigteam/` (task dirs
-   touched in the last hour). Read each live dir's `CLAIM`. In Orca (no
-   `HERDR_ENV`), `orca terminal list --json` gives every live terminal's
-   `title` (a `coord` one, or a title naming a fan-out) and `preview`;
-   `orca terminal read --terminal <handle>` shows what it is doing.
+1. **Look.** `paseo ls -g` (a `coord` agent, or any agent
+   `running` a fan-out) and `ls -lt ~/.local/state/bigteam/` (task dirs
+   touched in the last hour). Read each live dir's `CLAIM`. herdr and Orca
+   terminals are retired from djbclark-ade (2026-10-31): do not look there.
 2. **Claim.** Use a task name no live run uses, and write
-   `~/.local/state/bigteam/<task>/CLAIM` before dispatching: session (herdr
-   pane or Claude session id), repo, owned files, start time. Append `DONE`
+   `~/.local/state/bigteam/<task>/CLAIM` before dispatching: session (Paseo
+   agent id or Claude session id), repo, owned files, start time. Append `DONE`
    when you finish.
 3. **Never overlap files.** A file another live claim owns is not yours to
    slice, edit, stage or format. In a shared repo, commit only your own paths,
@@ -84,8 +82,8 @@ before slicing:
 4. **Pools are shared.** Re-probe `aiuse --available` right before each batch
    (the other run drains the same windows), leave headroom, and don't put both
    runs on a burst-limited pool at once (agy's ~60 requests/hour is machine-wide).
-5. **Hands off its panes.** Never reuse, close or message the other run's
-   tabs, panes, Orca terminals or agents. To coordinate, tell its session (`session-finder`).
+5. **Hands off its tabs.** Never reuse, close or message the other run's
+   Paseo tabs or agents. To coordinate, tell its session (`session-finder`).
 
 ## Step 1 — probe, never assume
 
@@ -490,7 +488,7 @@ has already been violated by a real agent on this machine:
 - Leave changes **uncommitted**. The orchestrator commits, staged **by path** —
   `git add -A` in a shared checkout stages other sessions' in-flight work.
 - No package installs, no new directories, no scratch files inside the repo.
-- **Launch no agents.** No herdr panes, `acp-run`/`acp-dispatch` or Agent
+- **Launch no agents.** No Paseo agents or herdr panes (herdr: retired from djbclark-ade 2026-10-31, `launch.py --host herdr` lives until D6), `acp-run`/`acp-dispatch` or Agent
   calls of its own: only the orchestrator decides and dispatches what comes
   next. ("Hand off the way this was handed to you" was once read as that.)
 - **A review or probe that exercises `acp-dispatch` pins the runner and checks
@@ -1053,7 +1051,7 @@ Whenever a prompt contains separable, discrete work, or the context-size hook
 has fired, slice it and send it out at the minimum spec that does it well; a
 single lookup goes to a minimum-spec Agent sub-agent instead (`effort-routing`).
 The orchestrator's own context is also a cost: Claude Code compacts it by itself
-at 300k tokens (`autoCompactWindow`, verified 2026-10-25), and in a herdr pane, Orca terminal or Paseo agent the
+at 300k tokens (`autoCompactWindow`, verified 2026-10-25), and in a herdr pane, Orca terminal (both retired from djbclark-ade 2026-10-31; `self-slash` keeps those hosts until D6) or Paseo agent the
 orchestrator compacts earlier at a wave boundary with `self-slash "/compact
 <focus>"`, or runs the `handoff` skill then `self-slash "/new"` on a topic change
 (the fresh session gets `/baton` from self-slash itself, 2026-10-19), without

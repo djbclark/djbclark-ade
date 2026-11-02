@@ -17,7 +17,7 @@ via a direct skill-everywhere link (`~/src/djbclark-ade/skills/model-routing`),
 so there is nothing to keep in sync.
 
 The canonical, dated matrix lives at
-`~/orca/projects/djbclark-ade/docs/model-routing.md` (repo
+`~/src/djbclark-ade/docs/model-routing.md` (repo
 djbclark/djbclark-ade). Read it first; this skill carries the stable
 method, not the volatile numbers.
 
@@ -84,10 +84,11 @@ skill's snapshot in the same turn.
 - `codex login status`; `opencode models`; `bl quota list`;
   `curl -s localhost:4000/v1/models` (LiteLLM/ClinePass);
   `agy --version`; `devin --version`; `copilot --version`.
-- Orca's agent roster + per-agent launch flags:
+- Orca's agent roster + per-agent launch flags (Orca is retired from djbclark-ade, 2026-10-31;
+  the file stays on the Mac, untouched, and is still the record of these flags):
   `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
   → `settings.agentDefaultArgs` / `disabledTuiAgents`. Nearly every TUI
-  is configured inside Orca; macro-graph dispatch reaches any enabled one.
+  is configured inside Orca; macro-graph dispatch reaches any enabled one (Orca retired; dispatch now goes through `acp-run`/`acp-dispatch`).
 - **`bin/claude-quota-guard`** (2026-10-23, the incident in *Routing policy* item 12) —
   turns the Claude reading into a level a session acts on, instead of an alert nobody
   reads. `check` (the default; launchd runs it every 15 minutes after
@@ -130,8 +131,8 @@ skill's snapshot in the same turn.
   under a flock. A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
   starts no new Claude Code subscription work until the reset (Agent-tool sub-agents of a Claude Code
-  session included) and hands off, to an omp successor on Paseo or an omp started by hand on herdr and
-  Orca, while `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares
+  session included) and hands off, to an omp successor on Paseo or an omp started by hand (on herdr and Orca too, retired from djbclark-ade 2026-10-31; `bin/claude-quota-guard` still prints that advice until D6), while
+  `aiuse --available --json` lists omp (omp is off the subscription's dollar pool but shares
   the Claude weekly rate window, so every weekly window exhausted gates it: then a codex or grok successor).
   `critical` never stops a session on codex, grok, agy, zai or opencode, nor one on omp while aiuse lists
   it (2026-10-29: idle omp sessions had read the old "hand off, stop" line as applying to them).
@@ -315,7 +316,7 @@ Rules for any agent that dispatches to agy:
   `acp-run grok --model grok-4.7`),
   zai GLM coding plan (via the zcode TUI; an everyday pool), clinepass (Cline
   windows; feeds hermes via LiteLLM :4000; never delegated, aiuse-disabled),
-  devin (disabled in Orca on purpose).
+  devin (disabled in the retired Orca on purpose).
 - **Never a delegation target**: hermes (the operator's assistant; gated in
   acp-run/acp-dispatch since 2026-10-15).
 - **OpenCode Go Plus subscription**: one shared monthly allowance, not free fan-out.
@@ -503,15 +504,16 @@ is subject to the burst budget in "agy has a burst limit" above.
 
 **Security-sensitive PR that Codex will not or cannot review** (no Daybreak access, a business-only Codex program; djbclark 2026-10-24; `memory/feedback_security_prs_codex_refuses_go_open_weight.md`): review the diff with a frontier open-weight model unlikely to refuse, and once its findings are fixed drop the Codex retry (retry only if another agent investigating the failure wants the PR as a test case). First choice `acp-dispatch zcode --kind code --role advise --model GLM-5.3 --effort high`, second opinion `opencode-go/kimi-k3` or `opencode-go/deepseek-v4-pro`. Pass the diff as a file in the brief, review read-only, and quote the verdict in the PR body like an `adversary` verdict. First used on getpaseo/paseo PR 7817 (GLM-5.3 found two real defects Codex never reached).
 
-**Authority for launch flags:** Orca's roster,
+**Authority for launch flags:** the retired Orca's roster (retired from djbclark-ade 2026-10-31;
+the file stays on the Mac),
 `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
 → `settings.agentDefaultArgs`. That map is what actually works on this
 machine for every enabled TUI (codex `--dangerously-bypass-approvals-and-sandbox`,
 antigravity `--dangerously-skip-permissions`, copilot/cursor `--yolo`,
 grok `--permission-mode bypassPermissions`, …). Read it instead of guessing
 flags. Standing rule (frontier-ai-review-stack memory): prefer a TUI's
-official headless mode, or a maintained orchestrator (Orca
-`worker-start --agent <name>`, see the `orchestration` skill), over a
+official headless mode, or a maintained orchestrator (`acp-run`/`acp-dispatch`,
+Paseo `paseo run`), over a
 hand-rolled subprocess wrapper.
 
 When a direct one-shot call is still the right tool (a single review of a
@@ -563,7 +565,7 @@ Rules that fall out of this:
   while they read it. For a second round after fixes, tell them what the
   first round found and fixed, so they verify rather than repeat.
 
-Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
+Herdr-hosted TUIs (retired from djbclark-ade, 2026-10-31; history only, verified 2026-09-26; do not start herdr for new work, use Paseo):
 
 - `herdr workspace create` returns before the pane's shell is up;
   `herdr agent start` a moment later fails `agent_pane_busy: … is not an
@@ -573,7 +575,7 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
 - `herdr pane read` prints plain text; every other command prints one JSON
   envelope, `{"error":…}` **with exit 0** on failure — parse the envelope.
 - `herdr agent prompt <target> "/exit"` cleanly ends a Claude session and
-  returns the pane to its shell; `bin/herdr-sleeper` in djbclark-ade
+  returns the pane to its shell; the `herdr-sleeper` plugin in djbclark-ade
   builds on this (see docs/agent-sleep.md). Never `/exit` a pane whose
   composer holds unsent text: the draft dies with the process.
 - A prompt can land unsubmitted (`agent_prompt_stalled`, or the text sits on
@@ -841,8 +843,7 @@ method that runs the waves.
    back by themselves when their window resets; keep no private skip list.
 9. **Levers:** `acp-run <agent> --model M [--effort L] [--context SIZE] [--mode M]`
    (`--info` lists the ids); `acp-dispatch` takes the same three flags; Claude
-   workflows `agent(..., {model, effort})`; Orca `worker-start --agent <TUI>
-   --model --effort`; the per-CLI headless forms only where no ACP route exists
+   workflows `agent(..., {model, effort})`; `paseo run` for Paseo agents; the per-CLI headless forms only where no ACP route exists
    (muse) or as a fallback.
    For dispatch report paths use `--out DIR --name NAME` (writes
    `DIR/NAME-report.md`); `--report PATH` belongs only to `acp-dispatch footer`,
@@ -853,7 +854,7 @@ method that runs the waves.
 11. **Context hygiene is part of cost.** Claude Code compacts a session by
     itself at 400k tokens (`autoCompactWindow` in `~/.claude/settings.json`,
     2026-10-15; the PreCompact hook writes the Tier 1 checkpoint). In a herdr
-    pane or Orca terminal compact earlier, at a natural boundary, with
+    pane or Orca terminal (retired from djbclark-ade 2026-10-31; `self-slash` keeps those hosts until D6) or a Paseo agent compact earlier, at a natural boundary, with
     `self-slash "/compact <focus>"`; on a topic change run the `handoff` skill,
     then `self-slash "/new"`, which also sends `/baton` into the fresh session
     (2026-10-19). Never ask the operator to do either unless `self-slash`
@@ -866,7 +867,7 @@ method that runs the waves.
     pool too. `aiuse` had carried a `conserve` alert for provider `claude` since 06:02Z
     ("projected to run out ~1 day before reset (34% left)"); nothing read it, nothing
     pinged and no session downshifted. The burn was Opus 5.5 (~53%: the `adversary`
-    Agent-tool sub-agent is `model: opus`, judgment slices, Orca workers) and Fable 5.1
+    Agent-tool sub-agent is `model: opus`, judgment slices, Orca workers (Orca since retired from djbclark-ade, 2026-10-31)) and Fable 5.1
     (~30%: the lead session itself ran on Fable), mostly cache re-reads of 150-200k
     contexts. So: **a lead that does judgment work runs on Opus 5.5 at high; a lead that
     only drives a pipeline (PR loops, waiters, merges) runs on Sonnet 5.5 at medium

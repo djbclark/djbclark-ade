@@ -1,0 +1,3 @@
+### Changed
+
+- Swept docs and skill bodies for the 2026-10-31 retirement of herdr (bar its two bridges), Orca and BB from djbclark-ade: the `bigteam`, `diskfree`, `cfenginewatch`, `steps`, `loose`, `baton`, `peer-relay`, `ralph-tui-orchestration`, `model-routing` and `handoff` skills no longer route through them (or mark the passage `retired from djbclark-ade (2026-10-31)` where the `self-slash`/`launch.py` host branches live until D4/D6); `session-finder`, `helm` (and `auto.md`), `autorename/workspace-layout.md`, `docs/helm.md` and `docs/coding-factory.md` carry a retirement banner pointing at `AGENTS.md` for what is still live; `docs/model-routing.md`, `agents/README.md` and `zcode/commands/autorename.md` corrected; no code changed (#219).

@@ -266,10 +266,9 @@ hand in prose. The incident above stays as the concrete example of *why*
 prose-sequenced steps are risky; the fix itself lives in that skill, not
 here.
 
-## Orchestrating a controller through Herdr
+## Orchestrating a controller through Herdr (retired from djbclark-ade, 2026-10-31)
 
-If you're driving a controller from a separate orchestrator session via
-Herdr (the `herdr` skill for the CLI), expect `herdr agent prompt` to
-intermittently leave text unsubmitted in the composer. The check and the
-`send-keys enter` workaround, with the other pane gotchas, are in
-`model-routing`'s *Herdr-hosted TUIs* list.
+Herdr is retired from djbclark-ade; reach a controller session from another
+session through `relay.py` (`skills/peer-relay`; never hand-roll `paseo send`). The herdr composer
+gotchas (`herdr agent prompt` leaving text unsubmitted, the `send-keys enter`
+workaround) are kept as history in `model-routing`'s *Herdr-hosted TUIs* list.

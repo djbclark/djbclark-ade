@@ -40,9 +40,9 @@ $FW upstream --relay-test              # one line must arrive in this session
 ```
 
 1. An empty or missing target registers the calling session: `$PASEO_AGENT_ID` first (a Paseo agent is
-   reached with `paseo send --behavior steer`), else `$CLAUDE_CODE_SESSION_ID`, else `$HERDR_PANE_ID`.
+   reached with `paseo send --behavior steer`), else `$CLAUDE_CODE_SESSION_ID`, else `$HERDR_PANE_ID` (herdr: retired from djbclark-ade 2026-10-31; the code path stays until D4/D6, do not start it for new work).
    The second argument is the name `--relay-status` shows; leave both off for a nameless registration.
-   For another session pass its id or herdr pane as the target.
+   For another session pass its id (a Paseo agent id) or its herdr pane (retired from djbclark-ade 2026-10-31) as the target.
 2. If the output says `replaced ...`, the old watcher was told (`told the old watcher`) or not
    (`could not reach the old watcher`: it had already ended, which is fine). Say which session it was.
 3. `--relay-test` exits 0 only when the channel accepted the line; fleet-watch has no sender relay.py can identify, so relay.py never queues its line (a working watcher that cannot take it now is "not sent: ... deferring needs an identifiable sender", exit 1: try again when the watcher is idle; checked 2026-10-24); it then shows up here as a message

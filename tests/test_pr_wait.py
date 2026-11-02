@@ -2353,9 +2353,10 @@ def test_d1_a_fenced_block_nested_in_an_invalid_outer_candidate_is_still_a_block
             + '} -->\n' + FENCE3 + "\n")
     r = adv(body)
     assert r["verdict"] == "BLOCK" and r["matches_head"] and r["conflict"], r
-    assert not r["malformed"], r
+    # Round-6 fail-closed recovery retains the invalid outer candidate diagnostic.
+    assert r["malformed"], r
     ready, warnings = gate(body)
-    assert not ready and warnings == ["adversary-stale-or-blocked"], warnings
+    assert not ready and warnings == ["adversary-malformed"], warnings
 
 
 def test_d1_quote_parity_across_the_scan_cannot_swallow_a_block() -> None:
@@ -2556,3 +2557,373 @@ def test_local_codex_retries_while_the_bot_comments_cannot_be_read(world: World)
     world.route(f"repos/{REPO}/issues/{PR}/comments", fail("gh: boom"))
     r = world.run("--local-codex", "--json", "--timeout", "3")
     assert r.returncode != 0 or json.loads(r.stdout)["merge_ready"] is False
+
+
+def test_approve_note_backticks_are_json_content():
+    body = '<!-- adversary-verdict:v1 ' + json.dumps({"verdict": "APPROVE", "head": ADV_HEAD, "note": "fixed `x`"}) + ' -->'
+    assert adv(body)["malformed"] is False
+    assert gate(body)[0] is True
+
+
+@pytest.mark.parametrize("broken", [
+    marker("BLOCK").replace('} -->', '} round2 -->'),
+    marker("BLOCK").replace('{', '{"head":"' + ADV_HEAD + '",'),
+    marker("BLOCK").replace(ADV_HEAD, 'sha ' + ADV_HEAD),
+    marker("BLOCK").replace(':v1', ':V1'),
+    marker("BLOCK").replace(':v1', ': v1'),
+    marker("BLOCK").replace('BLOCK', 'block'),
+    marker("BLOCK").replace(ADV_HEAD, ADV_HEAD[:6]),
+])
+def test_typo_block_in_code_cannot_hide(broken):
+    body = marker("APPROVE") + '\n```\n' + broken + '\n```'
+    assert adv(body)["verdict"] == "BLOCK"
+    assert adv(body)["malformed"] is True
+    assert gate(body, required=False)[0] is False
+
+
+def test_null_code_review_contradicted_by_resolved_this_head_finding(world):
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", explicit_null=True)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([finding(91, "2026-10-23T10:00:00Z", original=HEAD)]))
+    world.route("graphql", gql(thread(91, resolved=True, oid=HEAD)))
+    world.run()
+    assert world.file("summary")["merge_blockers"] == ["marker-unverified"]
+
+
+def test_null_security_review_checks_review_id_anchor(world):
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=null_review())]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(92, pull_request_review_id=777)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/reviews", ok([{"id": 777, "commit_id": HEAD}]))
+    world.route("graphql", gql(thread(92, resolved=True)))
+    world.run()
+    assert world.file("summary")["merge_blockers"] == ["security-marker-unverified"]
+
+
+@pytest.mark.parametrize("old_head", ["1234567", "1234567" * 5 + "12345"])
+def test_fenced_other_head_block_note_cannot_name_current_head(old_head):
+    # Adversary c4: only the head field identifies the reviewed revision.
+    doc = {"verdict": "BLOCK", "head": old_head, "note": "fixed in " + ADV_HEAD[:7]}
+    body = marker("APPROVE") + "\n```\n<!-- adversary-verdict:v1 " + json.dumps(doc) + " -->\n```"
+    result = adv(body)
+    assert result["verdict"] == "APPROVE" and not result["malformed"]
+    assert gate(body)[0] is True
+
+
+def test_doubled_start_cannot_hide_same_head_block():
+    broken = '<!-- adversary-verdict:v1 <!-- ' + json.dumps({"verdict": "BLOCK", "head": ADV_HEAD}) + ' -->'
+    body = marker("APPROVE") + "\n```\n" + broken + "\n```"
+    result = adv(body)
+    assert result["verdict"] == "BLOCK" and result["malformed"]
+    assert gate(body, required=False)[0] is False
+
+
+@pytest.mark.parametrize("values", [(ADV_HEAD, OTHER_HEAD), (OTHER_HEAD, ADV_HEAD)])
+def test_duplicate_head_fields_cannot_hide_current_head(values):
+    payload = '{"verdict":"BLOCK","head":"' + values[0] + '","head":"' + values[1] + '"}'
+    body = marker("APPROVE") + "\n```\n<!-- adversary-verdict:v1 " + payload + " -->\n```"
+    assert adv(body)["verdict"] == "BLOCK"
+    assert gate(body, required=False)[0] is False
+
+
+@pytest.mark.parametrize("start", ["<!-- adversary-verdict:v1 -->", "<!-- adversary-verdict:V1 -->"])
+def test_closed_marker_cannot_borrow_standalone_block_json(start):
+    unrelated = json.dumps({"verdict": "BLOCK", "head": ADV_HEAD})
+    body = marker("APPROVE") + "\n```\n" + start + "\n" + unrelated + "\n```"
+    result = adv(body)
+    assert result["verdict"] == "APPROVE" and not result["malformed"]
+    assert gate(body, required=False)[0] is True
+
+
+def test_closed_marker_does_not_hide_a_separate_same_head_block():
+    body = marker("APPROVE") + "\n```\n<!-- adversary-verdict:v1 -->\n" + marker("BLOCK") + "\n```"
+    result = adv(body)
+    assert result["verdict"] == "BLOCK" and result["matches_head"] and result["conflict"]
+    assert gate(body)[0] is False
+
+
+@pytest.mark.parametrize("verdict", ["APPROVE", "BLOCK"])
+def test_marker_start_in_json_string_cannot_borrow_metadata_object(verdict):
+    doc = {"verdict": verdict, "head": ADV_HEAD,
+           "note": "format: <!-- adversary-verdict:v1",
+           "example": {"verdict": "BLOCK", "head": ADV_HEAD}}
+    result = adv('<!-- adversary-verdict:v1 ' + json.dumps(doc) + ' -->')
+    assert result["verdict"] == verdict
+    assert result["malformed"] is False
+
+
+def test_quoted_marker_start_does_not_hide_real_block_after_valid_marker():
+    doc = {"verdict": "APPROVE", "head": ADV_HEAD,
+           "note": "format: <!-- adversary-verdict:v1",
+           "example": {"verdict": "BLOCK", "head": ADV_HEAD}}
+    body = '<!-- adversary-verdict:v1 ' + json.dumps(doc) + ' -->\n' + marker("BLOCK")
+    assert adv(body)["verdict"] == "BLOCK"
+    assert gate(body)[0] is False
+
+
+@pytest.mark.parametrize("shape", ["object", "array", "string", "pairs_array", "root_array"])
+@pytest.mark.parametrize("field", ["head", "verdict"])
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("context", ["live", "fenced", "inline"])
+def test_nested_fields_never_supply_a_marker_verdict(shape, field, malformed, context):
+    nested = {"verdict": "BLOCK", "head": ADV_HEAD}
+    extra = {"object": nested, "array": [nested], "string": json.dumps(nested),
+             "pairs_array": list(nested.items()), "root_array": [nested]}[shape]
+    doc = {"verdict": "BLOCK" if field == "head" else "APPROVE",
+           "head": OTHER_HEAD if field == "head" else ADV_HEAD, "example": extra}
+    payload = json.dumps(extra if shape == "root_array" else doc)
+    if malformed:
+        payload = payload[:-1] + "," + payload[-1]
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    if context == "fenced": candidate = "\n```\n" + candidate + "\n```"
+    elif context == "inline": candidate = "\n`" + candidate + "`"
+    body = marker("APPROVE") + "\n" + candidate
+    result = adv(body)
+    if context == "live" and (malformed or shape == "root_array"):
+        assert result["malformed"] and not gate(body, required=False)[0]
+    else:
+        assert result["verdict"] == "APPROVE" and not result["malformed"]
+        assert gate(body, required=False)[0]
+
+
+@pytest.mark.parametrize("shape", ["object", "array", "string", "pairs_array"])
+@pytest.mark.parametrize("field", ["head", "verdict"])
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("context", ["live", "fenced", "inline"])
+def test_structured_marker_field_values_are_never_promoted(shape, field, malformed, context):
+    nested = {"verdict": "BLOCK", "head": ADV_HEAD}
+    value = {"object": nested, "array": [nested], "string": json.dumps(nested),
+             "pairs_array": list(nested.items())}[shape]
+    doc = {"verdict": "BLOCK", "head": ADV_HEAD, field: value}
+    payload = json.dumps(doc)
+    if malformed: payload = payload[:-1] + ",}"
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    if context == "fenced": candidate = "\n```\n" + candidate + "\n```"
+    elif context == "inline": candidate = "\n`" + candidate + "`"
+    body = marker("APPROVE") + "\n" + candidate
+    result = adv(body)
+    if context == "live":
+        assert result["malformed"] and not gate(body, required=False)[0]
+    else:
+        assert result["verdict"] == "APPROVE" and not result["malformed"]
+        assert gate(body, required=False)[0]
+
+
+@pytest.mark.parametrize("payload", [
+    '{"verdict":"BLOCK","head":"H\n"}',
+
+    'see <!-- {"verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","head":"H","note":"<!--", oops}',
+    '{"verdict":"BLOCK","head":"H","note":"see <!-- x",}',
+    '{"note":"5" <!--","verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","head":"H","note":"format: <!-- adversary-verdict:v1 {...} -->",}',
+    '{"verdict":"BLOCK","head":"H","note":"format: <!-- adversary-verdict:v1 {...}",}',
+    '{"Verdict":"BLOCK","head":"H",}',
+    '{"note":"5" x","verdict":"\\u0042LOCK","head":"H"}',
+
+    '{"note":"5" screen","verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","note":"5" screen","head":"H"}',
+    '[r5] {"verdict":"BLOCK","head":"H"}',
+    '5" {"verdict":"BLOCK","head":"H"}',
+    '{"verdict":"BLOCK","x":[1,"head":"H"}',
+    '{"note":"a\\","verdict":"BLOCK","head":"H"}',
+    '{"verdict":"APPROVE","head":"O","n":"<!-- adversary-verdict:v1"} {"verdict":"BLOCK","head":"H"}',
+    '{"verdict":"APPROVE","head":"H","note":"format: <!-- adversary-verdict:v1", BROKEN {"verdict":"BLOCK","head":"H"}}',
+])
+@pytest.mark.parametrize("context", ["fenced", "inline", "unclosed"])
+def test_uncertain_structure_cannot_hide_same_head_block(payload, context):
+    payload = payload.replace('"H"', json.dumps(ADV_HEAD)).replace('H\n', ADV_HEAD + '\n').replace('"O"', json.dumps(OTHER_HEAD))
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    wrappers = {"fenced": "\n```\n%s\n```", "inline": "\n`%s`", "unclosed": "\n```\n%s"}
+    body = marker("APPROVE") + wrappers[context] % candidate
+    result = adv(body)
+    assert result["verdict"] == "BLOCK" and result["malformed"]
+    assert not gate(body, required=False)[0]
+    assert not gate(body, required=True)[0]
+
+
+def test_valid_approve_history_cannot_supply_fallback_block():
+    payload = {"verdict": "APPROVE", "head": ADV_HEAD,
+               "history": [{"verdict": "BLOCK", "head": ADV_HEAD}]}
+    body = '<!-- adversary-verdict:v1 ' + json.dumps(payload) + ' -->'
+    result = adv(body)
+    assert result["verdict"] == "APPROVE" and not result["malformed"]
+    assert gate(body, required=True)[0]
+
+
+def test_many_empty_marker_starts_do_not_rescan_remaining_body(monkeypatch):
+    # Count scanner input, not wall time: repeated suffix scans are quadratic.
+    module = load_module().__dict__
+    original = module["_marker_tokens"]
+    scanned = []
+    def counted(text):
+        scanned.append(len(text))
+        yield from original(text)
+    monkeypatch.setitem(module, "_marker_tokens", counted)
+    body = marker("APPROVE") + "\n" + '<!-- adversary-verdict:v1 x ' * 2000
+    module["adversary_verdict"](body, ADV_HEAD)
+    assert sum(scanned) <= 4 * len(body)
+
+
+@pytest.mark.parametrize("note", ["<!--", "-->", "<!-- adversary-verdict:v1", "quote \" and [ ] <!-- -->"])
+@pytest.mark.parametrize("trailing_comma", [False, True])
+@pytest.mark.parametrize("context", ["fenced", "inline"])
+def test_root_array_comment_delimiters_remain_documentation(note, trailing_comma, context):
+    payload = json.dumps([{"note": note, "verdict": "BLOCK", "head": ADV_HEAD}])
+    if trailing_comma:
+        payload = payload[:-1] + ",]"
+    example = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    code = "\n```\n" + example + "\n```" if context == "fenced" else "\n`" + example + "`"
+    body = marker("APPROVE") + code
+    assert adv(body)["verdict"] == "APPROVE" and not adv(body)["malformed"]
+    assert gate(body, required=False)[0] and gate(body, required=True)[0]
+
+
+def test_root_array_documentation_does_not_hide_following_block():
+    example = '<!-- adversary-verdict:v1 ' + json.dumps([{"note": "<!-- -->", "head": ADV_HEAD, "verdict": "BLOCK"}]) + ' -->'
+    body = marker("APPROVE") + "\n```\n" + example + "\n" + marker("BLOCK") + "\n```"
+    assert adv(body)["verdict"] == "BLOCK" and not gate(body)[0]
+
+
+@pytest.mark.parametrize("context", ["fenced", "inline", "live", "blockquote", "indented"])
+@pytest.mark.parametrize("shape", ["trailing_comma", "quoted_marker", "nested_metadata", "quote_desync", "escaped_strings"])
+@pytest.mark.parametrize("verdict,head", [("APPROVE", ADV_HEAD), ("BLOCK", ADV_HEAD), ("BLOCK", OTHER_HEAD)])
+def test_marker_family_matrix(context, shape, verdict, head):
+    doc = {"verdict": verdict, "head": head, "note": "escaped \" \\ [ ]"}
+    if shape == "quoted_marker":
+        doc["note"] = "format: <!-- adversary-verdict:v1"
+    if shape in ("quoted_marker", "nested_metadata"):
+        doc["example"] = {"verdict": "BLOCK", "head": ADV_HEAD}
+    payload = json.dumps(doc)
+    if shape in ("trailing_comma", "quoted_marker", "nested_metadata"):
+        payload = payload[:-1] + ",}"
+    if shape == "quote_desync":
+        payload = '{"note":"5" screen",' + payload[1:]
+    candidate = '<!-- adversary-verdict:v1 ' + payload + ' -->'
+    candidate = {"fenced": "\n```\n%s\n```", "inline": "\n`%s`", "live": "\n%s",
+                 "blockquote": "\n> ```\n> %s\n> ```", "indented": "\n    %s"}[context] % candidate
+    body = marker("APPROVE") + candidate
+    result = adv(body)
+    live = context in ("live", "blockquote", "indented")
+    malformed = shape != "escaped_strings"
+    if verdict == "BLOCK" and head == ADV_HEAD:
+        assert result["verdict"] == "BLOCK" and result["matches_head"]
+        assert not gate(body, required=True)[0]
+        if malformed:
+            assert not gate(body, required=False)[0]
+    elif (live and malformed) or shape == "quoted_marker":
+        # Accepted fail-closed limit: trailing-comma note start can borrow metadata.
+        assert result["malformed"] and not gate(body, required=False)[0]
+    else:
+        assert result["verdict"] == "APPROVE" and not result["malformed"]
+        assert gate(body, required=True)[0]
+
+
+def test_documentation_only_matrix_cannot_forge_approve():
+    for context in ("\n```\n%s\n```", "\n`%s`"):
+        body = context % marker("APPROVE")
+        assert not gate(body, required=True)[0]
+
+
+_MATRIX_CONTEXTS = {"fenced": "\n```\n%s\n```", "inline": "\n`%s`", "live": "\n%s",
+                    "blockquote": "\n> ```\n> %s\n> ```", "indented": "\n    %s",
+                    "tilde": "\n~~~\n%s\n~~~", "four_ticks": "\n````\n%s\n````",
+                    "unclosed_fence": "\n```\n%s", "broken_inline": "\n`\n%s\n`"}
+_MATRIX_HEADS = [("APPROVE", ADV_HEAD), ("BLOCK", ADV_HEAD), ("BLOCK", OTHER_HEAD),
+                 ("BLOCK", ADV_HEAD[:7]), ("BLOCK", ADV_HEAD[:9] + "…"),
+                 ("BLOCK", ADV_HEAD[:9] + "..."), ("APPROVE", ADV_HEAD[:7]),
+                 ("BLOCK", OTHER_HEAD[:7]), ("APPROVE", "<40-hex>"), ("BLOCK", "<40-hex>")]
+
+
+@pytest.mark.parametrize("context", _MATRIX_CONTEXTS)
+@pytest.mark.parametrize("shape", ["valid", "trailing_comma", "quoted_marker", "nested_metadata", "quote_desync",
+                                   "escaped_strings", "escaped_keys", "root_array", "near_miss", "unclosed_start",
+                                   "backtick_inside", "backtick_outside"])
+@pytest.mark.parametrize("verdict,head", _MATRIX_HEADS)
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_complete_marker_safety_matrix(context, shape, verdict, head, position):
+    doc = {"verdict": verdict, "head": head}
+    if shape == "quoted_marker":
+        doc.update(note="format: <!-- adversary-verdict:v1", example={"verdict": "BLOCK", "head": ADV_HEAD})
+    elif shape == "nested_metadata":
+        doc["example"] = {"verdict": "BLOCK", "head": ADV_HEAD}
+    elif shape == "escaped_strings":
+        doc["note"] = 'quote " slash \\ [ ]'
+    elif shape == "backtick_inside":
+        doc["note"] = "a `quoted` word"
+    payload = json.dumps([doc] if shape == "root_array" else doc)
+    if shape in ("trailing_comma", "quoted_marker"):
+        payload = payload[:-1] + ",}"
+    if shape == "quote_desync":
+        payload = '{"note":"5" screen",' + payload[1:]
+    if shape == "escaped_keys":
+        payload = payload.replace('"verdict"', '"\\u0076erdict"').replace('"head"', '"\\u0068ead"')
+    if shape == "backtick_outside":
+        payload = payload[:-1] + "`}"  # never repair invalid raw JSON by stripping code
+    start = "<!-- adversary-verdict:V1 " if shape == "near_miss" else "<!-- adversary-verdict:v1 "
+    candidate = start + payload + ("" if shape == "unclosed_start" else " -->")
+    wrapped = _MATRIX_CONTEXTS[context] % candidate
+    # Keep the baseline live even for an unterminated candidate fence.
+    before = wrapped + ("\n```" if context == "unclosed_fence" else "") + "\n" + marker("APPROVE")
+    body = before if position == "before" else marker("APPROVE") + wrapped
+    result = adv(body)
+    live = context in ("live", "blockquote", "indented", "broken_inline")
+    invalid = shape in ("trailing_comma", "quoted_marker", "quote_desync", "near_miss", "unclosed_start", "backtick_outside")
+    same_block = verdict == "BLOCK" and (head == ADV_HEAD or head.startswith(ADV_HEAD[:7]))
+    unusable_head = (verdict == "APPROVE" and head == ADV_HEAD[:7]) or (verdict == "BLOCK" and head in (OTHER_HEAD[:7], "<40-hex>"))
+    known_limit = shape == "quoted_marker"
+    for required in (False, True):
+        ready, _ = gate(body, required=required)
+        if same_block and shape != "root_array" and not (shape == "near_miss" and live):
+            assert result["verdict"] == "BLOCK" and result["matches_head"]
+            assert not ready if (required or invalid) else ready
+        elif known_limit or (live and (invalid or unusable_head or shape == "root_array")):
+            assert result["malformed"] and not ready
+        else:
+            assert result["verdict"] == "APPROVE" and not result["malformed"] and ready
+
+
+@pytest.mark.parametrize("key", ["verdict", "head"])
+@pytest.mark.parametrize("context", _MATRIX_CONTEXTS)
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_round9_broken_envelope_cannot_hide_escaped_key_block(key, context, position):
+    inner = json.dumps({"}": 1, "verdict": "BLOCK", "head": ADV_HEAD})
+    inner = inner.replace('"' + key + '"', '"\\u%04x%s"' % (ord(key[0]), key[1:]))
+    broken = '<!-- adversary-verdict:v1 {"note":"<!-- adversary-verdict:v1 ' + inner + ' -->'
+    wrapped = _MATRIX_CONTEXTS[context] % broken
+    before = wrapped + ("\n```" if context == "unclosed_fence" else "") + "\n" + marker("APPROVE")
+    body = before if position == "before" else marker("APPROVE") + wrapped
+    result = adv(body)
+    assert result["verdict"] == "BLOCK" and result["matches_head"]
+    assert not gate(body, required=True)[0]
+    assert gate(body, required=False)[0] == (not result["malformed"])
+
+
+@pytest.mark.parametrize("head", ["<40-hex>", OTHER_HEAD])
+@pytest.mark.parametrize("context", ["fenced", "inline"])
+def test_round9_unclosed_documentation_cannot_borrow_following_approve(head, context):
+    example = '<!-- adversary-verdict:v1 ' + json.dumps({"verdict": "BLOCK", "head": head})
+    body = _MATRIX_CONTEXTS[context] % example + "\n" + marker("APPROVE")
+    assert adv(body)["verdict"] == "APPROVE" and not adv(body)["malformed"]
+    for required in (False, True):
+        assert gate(body, required=required)[0]
+
+
+def test_trailing_comma_string_boundary_limit_is_only_fail_closed():
+    doc = {"verdict": "APPROVE", "head": ADV_HEAD, "note": "format: <!-- adversary-verdict:v1",
+           "example": {"verdict": "BLOCK", "head": ADV_HEAD}}
+    example = '<!-- adversary-verdict:v1 ' + json.dumps(doc)[:-1] + ',} -->'
+    body = marker("APPROVE") + _MATRIX_CONTEXTS["fenced"] % example
+    assert adv(body)["verdict"] == "BLOCK" and adv(body)["malformed"]
+    for required in (False, True):
+        assert not gate(body, required=required)[0]
+        assert not gate(_MATRIX_CONTEXTS["fenced"] % example, required=required)[0]
+
+
+@pytest.mark.parametrize("context", _MATRIX_CONTEXTS)
+@pytest.mark.parametrize("head", [ADV_HEAD, ADV_HEAD[:7], "<40-hex>"])
+def test_documentation_approve_matrix_respects_documented_c1_limits(context, head):
+    body = _MATRIX_CONTEXTS[context] % marker("APPROVE", head)
+    expected = head == ADV_HEAD and context in ("live", "blockquote", "indented", "broken_inline")
+    assert gate(body, required=True)[0] == expected
+    # Report-only can ignore a missing verdict; malformed live short heads cannot pass.
+    report_ready = not (head == ADV_HEAD[:7] and context in ("live", "blockquote", "indented", "broken_inline"))
+    assert gate(body, required=False)[0] == report_ready

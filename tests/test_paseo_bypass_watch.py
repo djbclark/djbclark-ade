@@ -212,7 +212,7 @@ def test_default_and_auto_seats_are_flipped_once_and_verified(w: World, mode: st
     assert len(w.mode_calls()) == 1  # handled: never touched again
 
 
-@pytest.mark.parametrize("mode", ["plan", "acceptEdits", "bypassPermissions", "someFutureMode"])
+@pytest.mark.parametrize("mode", ["plan", "acceptEdits", "bypassPermissions", "someFutureMode", "Auto", "DEFAULT", "autoSomething"])
 def test_only_default_and_auto_modes_are_acted_on(w: World, mode: str):
     w.set_agents({"aaa-1": agent("deliberate", mode=mode)})
     assert w.run().returncode == 0
@@ -270,6 +270,16 @@ def test_a_later_plan_sticks_even_after_a_failed_set(w: World):
     assert len(w.mode_calls()) == 1  # the retry re-checked the mode and left plan alone
     assert w.mode_of("aaa-1") == "plan"
     assert w.handled()["aaa-1"]["result"] == "recorded"
+
+
+def test_an_auto_seat_whose_set_exits_0_but_still_reads_auto_fails_the_verify(w: World):
+    w.set_agents({"aaa-1": agent("liar", mode="auto")}, noop_mode=["aaa-1"])
+    r = w.run("--json")
+    assert r.returncode == 0
+    assert json.loads(r.stdout.splitlines()[-1])["set"] == []
+    assert "reads mode 'auto' after the set" in r.stderr
+    assert "aaa-1" not in w.handled()
+    assert json.loads(w.state.read_text())["attempts"] == {"aaa-1": 1}
 
 
 def test_a_set_that_exits_0_but_leaves_the_mode_is_not_recorded_as_set(w: World):

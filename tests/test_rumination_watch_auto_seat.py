@@ -389,7 +389,7 @@ CREATED = "66666666-7777-4888-9999-aaaaaaaaaaaa"
 
 
 def direct_probe_world(monkeypatch, tmp_path, response, ident=ABSENT, relay_state=None,
-                       switch="1"):
+                       switch="1", relay_deliverable=False):
     """Real why_blocked + run_split, with a fake relay and a fake Paseo executable.
 
     `relay_state=None` means relay.py cannot diagnose the id (a no-match, exit 2), which is the
@@ -408,7 +408,7 @@ def direct_probe_world(monkeypatch, tmp_path, response, ident=ABSENT, relay_stat
     else:
         reply = json.dumps({"id": ident[:8], "name": "seat", "state": relay_state,
                             "why": f"its Paseo agent is {relay_state}, not idle or running",
-                            "deliverable": False, "agree": True, "evidence": []})
+                            "deliverable": relay_deliverable, "agree": True, "evidence": []})
         relay.write_text("import sys\nprint(" + repr(reply) + ")\nsys.exit(1)\n")
     cli = tmp_path / "paseo"
     calls = tmp_path / "paseo.calls"
@@ -445,6 +445,12 @@ elif args == ['agent', 'inspect', '--json', '--', {ident!r}]:
         # Exactly what `paseo agent inspect` printed for a real closed agent on 2026-10-30.
         print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'closed',
                           'UpdatedAt': '2026-10-30T13:44:07.592Z'}}))
+    if mode == 'closed-persistent':
+        print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'closed', 'Capabilities': {{'Persistence': True}},
+                          'UpdatedAt': '2026-10-31T13:44:07.592Z'}}))
+    if mode == 'closed-nonpersistent':
+        print(json.dumps({{'Id': {ident!r}, 'Archived': False, 'Status': 'closed', 'Capabilities': {{'Persistence': False}},
+                          'UpdatedAt': '2026-10-31T13:44:07.592Z'}}))
     if mode == 'archived':
         print(json.dumps({{'Id': {ident!r}, 'Archived': True, 'Status': 'idle'}}))
     if mode == 'archived-string':
@@ -555,6 +561,38 @@ def test_54_a_closed_seat_is_not_even_probed_with_the_switch_off(monkeypatch, tm
     assert rw.pages
 
 
+def test_57_a_closed_persistent_seat_is_asleep_not_absent_and_never_replaced(monkeypatch, tmp_path):
+    """djbclark, 2026-10-31: automatic watchers SHOULD wake closed seats. relay.py calls such a seat `closed`, deliverable (a send wakes it):
+    it is not `gone`, so no successor is started over it; and even when relay is stale and still says `refused`, its record (Persistence true)
+    does not prove it absent (adversary PR 177 r4 B2)."""
+    for relay_state, deliverable in (("closed", True), ("refused", False)):
+        (tmp_path / relay_state).mkdir()
+        rw = direct_probe_world(monkeypatch, tmp_path / relay_state, "closed-persistent", relay_state=relay_state, relay_deliverable=deliverable)
+        state = rw.why_blocked(ABSENT)[0]
+        assert state == ("closed" if deliverable else "refused"), relay_state
+        run_pass(rw)
+        calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()] if rw.probe_calls.exists() else []
+        assert all(args[0] != "run" for args in calls), relay_state
+        assert not rw.load_state().get("seated"), relay_state
+
+
+def test_58_a_closed_seat_relay_cannot_wake_is_gone_when_the_record_says_not_persistent(monkeypatch, tmp_path):
+    for response in ("closed-nonpersistent", "closed"):    # Persistence false, and Persistence unreported
+        (tmp_path / response).mkdir()
+        rw = direct_probe_world(monkeypatch, tmp_path / response, response, relay_state="closed", relay_deliverable=False)
+        state, why = rw.why_blocked(ABSENT)
+        assert state == "gone", response
+        assert "closed and cannot be woken" in why, response
+        run_pass(rw)
+        calls = [json.loads(line) for line in rw.probe_calls.read_text().splitlines()]
+        assert sum(args[0] == "run" for args in calls) == 1, response
+
+
+def test_59_a_closed_seat_that_relay_can_wake_counts_as_deliverable_for_the_watcher(monkeypatch, tmp_path):
+    rw = load(monkeypatch, tmp_path, switch="1")
+    assert "closed" in rw.DELIVERABLE_WHY and "closed" in rw.HEALTHY_WORDS
+
+
 def test_55_a_closed_seat_named_by_a_non_uuid_is_never_proved_absent(monkeypatch, tmp_path):
     rw = direct_probe_world(monkeypatch, tmp_path, "closed", ident="closed-seat",
                             relay_state="refused")
@@ -635,14 +673,11 @@ def test_30_timeout_and_expired_window_cannot_duplicate_with_old_registry_gone(m
     assert "gone" in rw.pages[0]
 
 
-@pytest.mark.parametrize("row", [
-    {"id": NEW, "name": "renamed", "cwd": "/entity"},
-    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/other-repo"},
-    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/entity"},
-])
-def test_lost_start_never_adopts_by_title_or_clears_on_absence(monkeypatch, tmp_path, row):
+def test_lost_start_never_adopts_by_title_or_clears_on_absence(monkeypatch, tmp_path):
+    # One row, the strongest adoption bait (title and cwd both match): a listing never reconciles a lost start,
+    # and name/cwd variations hit the same path because no candidate key exists to compare against.
     rw = lost_id(monkeypatch, tmp_path)
-    rw.enum_rc, rw.enum_body = 0, json.dumps([row])
+    rw.enum_rc, rw.enum_body = 0, json.dumps([{"id": NEW, "name": "test-role (auto-seat)", "cwd": "/entity"}])
     run_pass(rw)
     run_pass(rw)
     assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]

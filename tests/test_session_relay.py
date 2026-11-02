@@ -121,6 +121,103 @@ class TestRelayRules(unittest.TestCase):
         self.assertEqual([s["id"] for s in relay.find("ffff0000-99", ss)], ["ffff0000"])
         self.assertEqual(relay.find("nope", ss), [])
 
+    PID = "d08a31c6-a58b-418d-b66c-ca765e0d2e68"
+    SID = "c795c830-5d18-4251-acce-971e1d34dd82"
+
+    def twice(self) -> list[dict[str, Any]]:
+        """One Paseo session listed twice (2026-11-01: two live claude processes of one resumed session), beside two other sessions."""
+        row = dict(id="c795c830", name="history", sid=self.SID, host="paseo", chan=("paseo", self.PID), paseo=self.PID, status="idle")
+        return [sess(**row, pid=68029), sess(id="aaaa1111", name="a", sid="aaaa1111-0001", paseo="aaaa1111-1111-4111-8111-111111111111",
+                                             host="paseo", chan=("paseo", "aaaa1111-1111-4111-8111-111111111111")),
+                sess(**row, pid=95867)]
+
+    def test_find_full_paseo_id_or_sid_of_a_listed_twice_session_is_one_recipient(self) -> None:
+        for ident in (self.PID, self.SID, "c795c830", self.PID[:8], self.SID[:12]):
+            got = relay.find(ident, self.twice())
+            self.assertEqual([(s["id"], s["pid"]) for s in got], [("c795c830", 68029)], ident)
+
+    def test_find_same_session_collapses_to_the_row_with_a_channel_and_keeps_self(self) -> None:
+        bare = sess(id="c795c830", name="h", sid=self.SID, paseo=self.PID, chan=None, host="paseo")
+        good = sess(id="c795c830", name="h", sid=self.SID, paseo=self.PID, chan=("paseo", self.PID), host="paseo")
+        self.assertIs(relay.find(self.PID, [bare, good])[0], good)
+        me = dict(good, self=True)
+        self.assertIs(relay.find(self.SID, [good, me])[0], me)    # still refused later by hard_stop: never sent to this very session
+
+    def test_find_short_prefix_of_two_different_sessions_is_still_ambiguous(self) -> None:
+        p1, p2 = "d08a31c6-a58b-418d-b66c-ca765e0d2e68", "d08a31c6-ffff-4fff-8fff-ffffffffffff"
+        ss = [sess(id="c795c830", sid=self.SID, paseo=p1, chan=("paseo", p1), host="paseo"),
+              sess(id="c795c830", sid=self.SID, paseo=p1, chan=("paseo", p1), host="paseo"),
+              sess(id="bbbb2222", name="b", sid="bbbb2222-0002", paseo=p2, chan=("paseo", p2), host="paseo")]
+        self.assertEqual(sorted(s["id"] for s in relay.find("d08a31c6", ss)), ["bbbb2222", "c795c830"])
+
+    def test_find_row_bridging_a_sid_and_a_paseo_id_joins_both_into_one_session(self) -> None:
+        a = sess(id="c795c830", sid=self.SID, paseo=None, chan=None, host="terminal")
+        b = sess(id="c795c830", sid=None, paseo=self.PID, chan=("paseo", self.PID), host="paseo")
+        c = sess(id="c795c830", sid=self.SID, paseo=self.PID, chan=("paseo", self.PID), host="paseo")
+        self.assertEqual(len(relay.find("c795c830", [a, b, c])), 1)
+
+    def test_claude_registry_with_two_live_processes_of_one_session_gives_one_row(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            (Path(t) / "sessions").mkdir()
+            for pid, upd in ((68029, 100), (95867, 200)):
+                _ = (Path(t) / "sessions" / f"{pid}.json").write_text(
+                    json.dumps({"pid": pid, "sessionId": self.SID, "name": "h", "status": "idle", "cwd": t, "updatedAt": upd}))
+            _ = (Path(t) / "sessions" / "7.json").write_text(
+                json.dumps({"pid": 7, "sessionId": "eeeeeeee-0000", "name": "other", "status": "idle", "cwd": t}))
+            saved = {k: getattr(fleet, k) for k in ("CLAUDE", "alive", "transcript", "_where")}
+            try:
+                fleet.CLAUDE, fleet.alive, fleet.transcript, fleet._where = Path(t), (lambda pid: True), (lambda sid: None), None
+                out = fleet._claude_sessions({}, set(), {68029})    # the OLD process is this one's ancestor
+            finally:
+                for k, v in saved.items():
+                    setattr(fleet, k, v)
+            self.assertEqual([(s["sid"], s["pid"]) for s in out], [(self.SID, 95867), ("eeeeeeee-0000", 7)])    # the newest entry wins
+            self.assertEqual(out[0]["pids"], [95867, 68029])    # and the row still names every process it stands for
+            self.assertNotIn("pids", out[1])
+            self.assertTrue(out[0]["self"])    # any process of the session being an ancestor makes it this session
+            self.assertFalse(out[1]["self"])
+
+    def test_collapsed_row_keeps_its_older_process_out_of_the_process_scan(self) -> None:
+        # else the older process comes back from _proc_scan as a transcript-less `pidNNN` row (local review, PR 225)
+        names = ("herdr_json", "_launched", "_claude_sessions", "_other_herdr", "_pane_only", "_proc_scan", "_hermes_gateway",
+                 "_paseo_rows", "proc_table", "mark_busy", "ancestors")
+        saved = {k: getattr(fleet, k) for k in names}
+        seen: list[set[int]] = []
+        try:
+            fleet.herdr_json = lambda *a: {}
+            fleet._launched = lambda used: []
+            fleet._claude_sessions = lambda *a, **k: [fleet._rec(id="c795c830", sid=self.SID, pid=95867, pids=[95867, 68029])]
+            fleet._other_herdr = lambda *a: []
+            fleet._pane_only = lambda *a: ([], [])
+            fleet._proc_scan = lambda known, *a: seen.append(set(known)) or []
+            fleet._hermes_gateway = lambda: []
+            fleet._paseo_rows = lambda *a: []
+            fleet.proc_table = lambda: {}
+            fleet.mark_busy = lambda *a: None
+            fleet.ancestors = lambda: set()
+            fleet.sessions()
+        finally:
+            for k, v in saved.items():
+                setattr(fleet, k, v)
+        self.assertEqual(seen, [{95867, 68029}])
+
+    def test_sender_row_places_a_collapsed_row_by_its_nearest_process(self) -> None:
+        reg = sess(id="c795c830", sid=self.SID, pid=95867, pids=[95867, 68029], transcript="/t.jsonl", self=True)
+        scan = sess(id="pid68029", sid=None, pid=68029, transcript=None, chan=None, self=True)
+        with mock.patch.object(fleet, "ancestry", lambda: [68029, 1]):    # the caller runs under the OLDER process
+            self.assertIs(fleet.sender_row([scan, reg]), reg)
+        self.assertEqual(fleet.row_pids(reg), [95867, 68029])
+        self.assertEqual(fleet.row_pids(scan), [68029])
+
+    def test_busy_and_pid_check_cover_every_process_of_a_collapsed_row(self) -> None:
+        row = sess(id="c795c830", pid=95867, pids=[95867, 68029], host="terminal", chan=None, status="idle")
+        table = {95867: (1, "claude"), 68029: (1, "claude"), 70001: (68029, "sleep 600")}
+        fleet.mark_busy(row, table)
+        self.assertEqual(row["status"], "busy-background")    # the older process's background job counts
+        self.assertEqual(relay.pid_check(row, 68029), "same")
+        self.assertEqual(relay.pid_check(row, 95867), "same")
+        self.assertEqual(relay.pid_check(row, 1234), "changed")
+
     def test_find_by_herdr_pane_reaches_a_launch_row_and_prefers_the_unfinished_one(self) -> None:
         # a launch row has its pane only in chan; a reused pane lists the finished first launch too (2026-10-25)
         launch1 = sess(id="2026-a", name="baton", sid="2026-a", host="acp", chan=("herdr", "w2N:p14"), finished="done")
