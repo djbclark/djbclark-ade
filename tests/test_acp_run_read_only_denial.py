@@ -33,6 +33,9 @@ READS = [
     "git diff --stat",
     "git show HEAD:README.md",
     "tail -n 20 build.log",
+    "git log --pretty=oneline -3",
+    "git log --pretty=format:%h -2",
+    "git ls-files --exclude-standard",
     "rg 'a.*b|c?' src",
     "rg \"fo[o]\" src",
     "git grep -n 'fn (main|run)' -- src",
@@ -110,8 +113,6 @@ WRITES = [
     "graft ask x",
     "graft map",
     "graft skeleton f.py",
-    "rg --hostn=/tmp/x foo",
-    "rg --pr=./x foo",
     # a glob expands to names chosen by the reviewed tree (a file called --open-files-in-pager=rm)
     "git grep foo *",
     "git grep foo -- *.py",
@@ -121,6 +122,14 @@ WRITES = [
     "cat [ab].txt",
     "rg x \\*",
     "echo hi!",
+    # a bare `--` can be an option's value, so it never ends the scan
+    "rg -e -- --pre=rm .",
+    "rg -e -- --pre rm .",
+    "rg --hostname-bin=x -- y",
+    "git grep -e -- --open=rm foo",
+    "git grep -e -- -Orm foo",
+    "git grep -- --open=rm foo",
+    "git log -- --output=x",
     "tail -f app.log",
     "tail -F app.log",
     "tail --follow app.log",
@@ -161,6 +170,23 @@ def probe() -> dict[str, object]:
                            mod.tool_cwd(types.SimpleNamespace(raw_input={"cwd": "rel"})),
                            mod.tool_cwd(types.SimpleNamespace(raw_input=None))]
         out["repo"] = REPO
+        # a `.git` file: only a linked worktree / submodule gitdir outside the tree passes
+        def gitfile(name, target):
+            d = os.path.join(tmp, name); os.makedirs(d)
+            open(os.path.join(d, ".git"), "w").write("gitdir: " + target + "\\n")
+            return d
+        wt = os.path.join(tmp, "main", ".git", "worktrees", "w"); os.makedirs(wt)
+        evil_dir = os.path.join(tmp, "hostile"); os.makedirs(evil_dir)
+        inside = os.path.join(tmp, "gf-in"); os.makedirs(os.path.join(inside, "x"))
+        open(os.path.join(inside, ".git"), "w").write("gitdir: ./x\\n")
+        junk = os.path.join(tmp, "gf-junk"); os.makedirs(junk)
+        open(os.path.join(junk, ".git"), "w").write("junk")
+        out["gitfile"] = {
+            "worktree": mod.readonly_command("git log", gitfile("gf-ok", wt)),
+            "hostile_dir": mod.readonly_command("git log", gitfile("gf-evil", evil_dir)),
+            "inside_tree": mod.readonly_command("git log", inside),
+            "dangling": mod.readonly_command("git log", gitfile("gf-gone", os.path.join(tmp, "nope", ".git", "worktrees", "w"))),
+            "not_a_gitfile": mod.readonly_command("git log", junk)}
 
         def call(command, kind="execute"):
             return types.SimpleNamespace(kind=kind, title="Run command", tool_call_id="t1",
@@ -250,6 +276,10 @@ class TestReadOnlyDenial(unittest.TestCase):
         self.assertEqual(self.res["no_cwd"], [False] * 2)
         self.assertEqual(self.res["norepo_cwd"], [False] * 2)
         self.assertTrue(self.res["cat_no_cwd"])
+
+    def test_a_gitfile_passes_only_for_a_worktree_gitdir_outside_the_tree(self):
+        self.assertEqual(self.res["gitfile"], {"worktree": True, "hostile_dir": False, "inside_tree": False,
+                                               "dangling": False, "not_a_gitfile": False})
 
     def test_the_requests_own_cwd_decides(self):
         self.assertEqual(self.res["tool_cwd"], [self.res["repo"], None, None])

@@ -36,7 +36,8 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    allow-list: cat, ls, rg, git log/show/diff, a plain `curl` GET, joined by `|` `&&` `;`;
    it runs outside codex's sandbox, so the list refuses `#`, program paths outside
    `/usr/bin` `/bin` `/opt/homebrew/bin`, long options that run a program (prefixes
-   included), and `git` unless the request's cwd finds an ordinary repository). When codex's
+   included, `--` is no stop), unquoted globs, braces, `~` and backslashes, and `git` unless the request's cwd finds an
+   ordinary repository; a `curl` GET can carry read data in its URL, as WebFetch can). When codex's
    only refusal option is `cancel` (it ends the turn), acp-run continues the same session up to 3 times.
    claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
    WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no

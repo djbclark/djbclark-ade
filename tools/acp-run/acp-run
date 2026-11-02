@@ -702,11 +702,15 @@ RO_PLAIN = frozenset({
 RO_GIT = frozenset({
     "log", "show", "diff", "status", "blame", "ls-files", "ls-tree", "rev-parse", "rev-list", "cat-file",
     "show-ref", "describe", "shortlog", "merge-base", "grep", "diff-tree", "name-rev"})
-# Long options that run another program or write a file. getopt_long and git's parse-options accept any
-# unique prefix (`--open=rm` is `--open-files-in-pager=rm`), so an argument is refused when its name is a
-# prefix of one of these or begins with one (ro_long_bad). Short groups with an attached value (`-nOrm`)
-# are refused for git by ro_short_bad.
-RO_BAD_LONG = ("--output", "--pre", "--exec", "--open-files-in-pager", "--ext-diff", "--hostname-bin")
+# Long options that run another program or write a file, per option grammar. getopt_long and git's
+# parse-options accept any unique prefix (`--open=rm` is `--open-files-in-pager=rm`), so for them an
+# argument is refused when its name is a prefix of one of these or begins with one; rg does not abbreviate,
+# so its two are exact (`git log --pretty=oneline` stays allowed: --pre is rg's option, not git's).
+# Every argument is scanned, `--` included: a bare `--` can be an option's VALUE (`rg -e -- --pre=rm`), and
+# a path that really starts with one of these names is refused instead. Short groups with an attached value
+# (`-nOrm`) are refused for git by ro_short_bad.
+RO_BAD_LONG = ("--output", "--exec", "--open-files-in-pager", "--ext-diff")
+RO_BAD_LONG_RG = ("--pre", "--hostname-bin")
 RO_FIND_BAD = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
 RO_OPERATORS = ("|", "&&", "||", ";")
 # Where a program given by path may live (a bare name resolves through PATH). A repository under review
@@ -714,37 +718,56 @@ RO_OPERATORS = ("|", "&&", "||", ";")
 RO_TRUSTED_DIRS = frozenset({"/usr/bin", "/bin", "/opt/homebrew/bin"})
 
 
-def ro_long_bad(args):
-    """True when an argument before `--` names (or abbreviates, or extends) a long option that runs a program."""
+def ro_long_bad(args, name=None):
+    """True when an argument names (or, for abbreviating parsers, abbreviates or extends) a long option
+    that runs a program. `name` is the program: rg matches exactly, every other program by prefix."""
     for x in args:
-        if x == "--":
-            return False  # everything after it is a path
-        if x.startswith("--"):
-            name = x.split("=", 1)[0]
-            if any(b.startswith(name) or name.startswith(b) for b in RO_BAD_LONG):
+        if x.startswith("--") and x != "--":  # a bare `--` names no option; its neighbours are still scanned
+            opt = x.split("=", 1)[0]
+            if name == "rg":
+                if any(opt.startswith(b) for b in RO_BAD_LONG_RG):
+                    return True
+            elif any(b.startswith(opt) or opt.startswith(b) for b in RO_BAD_LONG):
                 return True
     return False
 
 
 def ro_short_bad(args):
-    """True when a short-flag group before `--` carries `O` (git grep -O<pager>, also grouped: -nOrm)."""
-    for x in args:
-        if x == "--":
-            return False
-        if re.fullmatch(r"-[^-].*", x) and "O" in x:
-            return True
-    return False
+    """True when a short-flag group carries `O` (git grep -O<pager>, also grouped: -nOrm); `--` included."""
+    return any(re.fullmatch(r"-[^-].*", x) and "O" in x for x in args)
+
+
+def ro_gitfile_ok(path, worktree):
+    """True for a `.git` file (a linked worktree or submodule) whose `gitdir:` target is a real
+    `<repo>/.git/worktrees/<n>` or `.git/modules/...` directory outside the tree it sits in. A gitfile that
+    points inside the tree, or anywhere else, could name a hostile git dir (a tree that came by archive or
+    copy, not through git, can carry one)."""
+    try:
+        with open(path) as f:
+            first = f.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if not first.startswith("gitdir:"):
+        return False
+    target = os.path.realpath(os.path.join(worktree, first[len("gitdir:"):].strip()))
+    inside = target == worktree or target.startswith(worktree.rstrip(os.sep) + os.sep)
+    return (not inside and os.path.isdir(target)
+            and re.search(r"/\.git/(worktrees|modules)/[^/]", target + "/") is not None)
 
 
 def ro_git_dir_ok(base):
     """True when git run in `base` finds an ordinary repository, not a bare one committed inside the tree
     under review: git looks in each directory, from `base` up, for `.git` and then for a directory that is
     itself a repository (HEAD, objects/, refs/), and runs the config of whichever it meets first
-    (diff.external, core.fsmonitor, gpg.program). A tree without `.git` anywhere above is refused."""
+    (diff.external, core.fsmonitor, gpg.program). A tree without `.git` anywhere above is refused; a `.git`
+    file must pass ro_gitfile_ok."""
     d = os.path.realpath(base)
     while True:
-        if os.path.lexists(os.path.join(d, ".git")):
+        dotgit = os.path.join(d, ".git")
+        if os.path.isdir(dotgit):
             return True
+        if os.path.isfile(dotgit):
+            return ro_gitfile_ok(dotgit, d)
         if all(os.path.exists(os.path.join(d, n)) for n in ("HEAD", "objects", "refs")):
             return False
         parent = os.path.dirname(d)
@@ -808,9 +831,9 @@ def ro_segment(words, cwd, depth):
         while len(args) >= 2 and args[0] == "-C":
             base = os.path.join(base, args[1]) if base else None
             args = args[2:]
-        return (bool(args) and args[0] in RO_GIT and base is not None and not ro_long_bad(args[1:])
+        return (bool(args) and args[0] in RO_GIT and base is not None and not ro_long_bad(args[1:], "git")
                 and not ro_short_bad(args[1:]) and ro_git_dir_ok(base))
-    if ro_long_bad(args):
+    if ro_long_bad(args, name):
         return False
     if name == "curl":
         return ro_curl(args)
@@ -849,9 +872,10 @@ def readonly_command(cmd, cwd=None, depth=0):
     """True when a shell command line only reads files and the network: commands from a short list (cat,
     ls, rg, git log/show/diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect
     to /dev/null, no expansion, no comment, no other redirect, a program only by bare name or from
-    RO_TRUSTED_DIRS, no long option that runs a program (abbreviations included). git runs only where
+    RO_TRUSTED_DIRS, no long option that runs a program (abbreviations included, `--` is not a stop), git runs only where
     `cwd` (and each -C) finds an ordinary repository (ro_git_dir_ok). `git status` and `describe --dirty`
-    may refresh `.git/index`, a cache, not content. A guess is a refusal."""
+    may refresh `.git/index`, a cache, not content; a plain `curl` GET can carry what the agent read in its
+    query string, as the already-allowed WebFetch tool can. A guess is a refusal."""
     if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd) or ro_unquoted_meta(cmd):
         return False
     try:
