@@ -482,7 +482,9 @@ VM_STAT = """\
 Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                                3969.
 Pages active:                            300000.
+Pages inactive:                           2000.
 Pages speculative:                        1000.
+Pages purgeable:                           500.
 Pageins:                                 50000.
 Compressions:                           700000.
 Decompressions:                         300000.
@@ -499,11 +501,30 @@ def fake_run(monkeypatch, lw, **kw):
     monkeypatch.setattr(lw.subprocess, "run", run)
 
 
-def test_vm_stat_snapshot_parses_free_plus_speculative(monkeypatch):
+def test_vm_stat_snapshot_counts_available_memory(monkeypatch):
     lw = load_module()
     fake_run(monkeypatch, lw, stdout=VM_STAT)
     s = lw.vm_snapshot()
-    assert s == {"free_mb": (3969 + 1000) * 16384 / 1048576, "compress": 1000000, "pageins": 50000}
+    assert s == {"free_mb": (3969 + 1000 + 2000 + 500) * 16384 / 1048576, "compress": 1000000, "pageins": 50000}
+
+
+def test_reclaimable_inactive_memory_is_not_read_as_starvation(monkeypatch):
+    """2026-11-01 regression: free + speculative was 82 MB while 3.84 GB was inactive; the 600 MB floor refused every
+    launch on an idle machine. Available memory must count inactive and purgeable pages, like Linux MemAvailable."""
+    lw = load_module()
+    page = 16384
+    real = VM_STAT.replace("Pages free:                                3969.", f"Pages free:                                {72 * 1048576 // page}.") \
+                  .replace("Pages speculative:                        1000.", f"Pages speculative:                        {10 * 1048576 // page}.") \
+                  .replace("Pages inactive:                           2000.", f"Pages inactive:                           {3840 * 1048576 // page}.") \
+                  .replace("Pages purgeable:                           500.", f"Pages purgeable:                           {26 * 1048576 // page}.")
+    fake_run(monkeypatch, lw, stdout=real)
+    assert lw.vm_snapshot()["free_mb"] > lw.ADMIT_MIN_FREE_MB
+
+
+def test_a_vm_stat_without_inactive_or_purgeable_still_parses(monkeypatch):
+    lw = load_module()
+    fake_run(monkeypatch, lw, stdout=VM_STAT.replace("Pages inactive:                           2000.\n", "").replace("Pages purgeable:                           500.\n", ""))
+    assert lw.vm_snapshot()["free_mb"] == (3969 + 1000) * 16384 / 1048576
 
 
 def test_vm_stat_that_exists_but_fails_raises_and_an_absent_one_does_not(monkeypatch):
