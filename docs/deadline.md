@@ -120,3 +120,7 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     dispatch, one scan at a time by a lock), never inside the enforcement pass; `deadline ls --agents` still reads it synchronously.
     `--on-expire reroute:PATH` stores PATH resolved against the registering shell's directory. Interrupting `deadline run` after a notify-only
     expiry still stops the command (SIGTERM, then SIGKILL after `--grace`).
+14. Cancelling `deadline run` keeps going until the whole process group is gone (also after the leader exited, bounded 10 s after SIGKILL), and
+    a cancellation during an expiry stop is recorded (`cancelled`, grace clock kept) so no recovery or reroute runs. A terminal name whose owner notice
+    is undelivered (retries left) or whose recovery order is unfinished cannot be registered again until settled (work untouched for 30 min no longer
+    pins it). Corrupt records are quarantined only after a fresh read under their lock.

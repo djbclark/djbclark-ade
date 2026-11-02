@@ -763,3 +763,79 @@ def test_agent_scan_runs_off_the_enforcement_pass(env):
     r = env.run("sweep", now=T0 + 60, DEADLINE_INLINE_WORKER="0")   # throttled: stamped at dispatch, no new scan inside 5 min
     time.sleep(1)
     assert len(env.calls("PASEO")) == n
+
+
+# ---------- PR 223 local-review round 6: cancel survivors, cancel while stopping, pending notices vs name reuse, quarantine under lock ----------
+
+def test_cancel_after_notify_only_expiry_kills_a_grandchild_that_outlives_the_leader(env):
+    p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--grace", "1", "--name", "orphancancel", "--owner", "o",
+                          "--on-expire", "notify", "--", "sh", "-c", "(trap '' TERM; sleep 60) & wait"],
+                         env={**os.environ, **env.base, "DEADLINE_RUN_POLL": "0.1"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(80):
+            time.sleep(0.25)
+            if (env.state / "orphancancel.json").exists() and env.record("orphancancel").get("state") == "expired":
+                break
+        pgid = env.record("orphancancel")["pgid"]
+        assert env.group_alive(pgid)
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=25)
+        assert p.returncode == 143 and not env.group_alive(pgid), "no survivor of the group may outlive the cancelled run"
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_cancel_during_an_expiry_stop_is_recorded_and_suppresses_recovery(env):
+    p = subprocess.Popen([sys.executable, str(SCRIPT), "run", "--budget", "1", "--grace", "2", "--name", "cancelstop", "--owner", "o",
+                          "--on-expire", "relay", "--", "sh", "-c", "trap '' TERM; sleep 60"],
+                         env={**os.environ, **env.base, "DEADLINE_RUN_POLL": "0.1"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(80):
+            time.sleep(0.2)
+            if (env.state / "cancelstop.json").exists() and env.record("cancelstop").get("state") == "stopping":
+                break
+        assert env.record("cancelstop")["state"] == "stopping"
+        soft = env.record("cancelstop")["soft_at"]
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=25)
+        rec = env.record("cancelstop")
+        assert rec["cancelled"] and rec["soft_at"] == soft, "the grace clock is not restarted"
+        assert env.calls("RELAY") == [] and env.calls("PING") == [], "a cancelled run triggers no recovery"
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_a_pending_owner_notice_blocks_reuse_of_the_name_until_settled(env):
+    Path(env.base["DL_RELAY_FAIL"]).write_text("1")
+    assert start(env, "pend", "--budget", "5", "--on-expire", "relay").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10)
+    assert env.record("pend")["state"] == "expired" and env.record("pend")["notice"]["done"] is False
+    r = start(env, "pend", "--budget", "50", "--on-expire", "notify", now=T0 + 11)
+    assert r.returncode == 2 and "settle" in r.stderr and env.record("pend")["state"] == "expired"
+    Path(env.base["DL_RELAY_FAIL"]).unlink()
+    env.run("sweep", "--no-agents", now=T0 + 100)
+    assert env.record("pend")["notice"]["done"] is True
+    assert start(env, "pend", "--budget", "50", "--on-expire", "notify", now=T0 + 101).returncode == 0
+    # work untouched for 30 min never pins a name (a crashed worker)
+    Path(env.base["DL_RELAY_FAIL"]).write_text("1")
+    assert start(env, "pend2", "--budget", "5", "--on-expire", "relay").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10)
+    assert start(env, "pend2", "--budget", "50", "--on-expire", "notify", now=T0 + 10 + 1900).returncode == 0
+
+
+def test_quarantine_rechecks_under_the_lock(env, inproc):
+    dl = inproc
+    env.state.mkdir(parents=True, exist_ok=True)
+    good = {"name": "raced", "owner": "o", "state": "running", "started": T0, "budget_s": 100, "on_expire": "notify", "reg_id": "x"}
+    dl.save(good)   # registered validly after the scan saw it corrupt
+    assert dl.quarantine("raced").startswith("ok (") and env.record("raced")["reg_id"] == "x"
+    assert not (env.state / "raced.json.corrupt").exists()
+    (env.state / "broken.json").write_text("{nope")
+    assert "quarantined" in dl.quarantine("broken") and (env.state / "broken.json.corrupt").exists()
+    held = dl.Locked("busy1")
+    assert held.__enter__()
+    (env.state / "busy1.json").write_text("{nope")
+    assert dl.quarantine("busy1").startswith("busy") and (env.state / "busy1.json").exists()
+    held.__exit__()

@@ -686,12 +686,24 @@ def prune() -> None:
 
 
 def quarantine(name: str) -> str:
-    """Move a corrupt record aside (NAME.json.corrupt) so it is reported once, not every minute; `ls` still lists it."""
-    try:
-        os.replace(rec_path(name), state_dir() / f"{name}.json.corrupt")
-        return "corrupt record quarantined as .json.corrupt (reported once)"
-    except OSError as e:
-        return f"corrupt record (could not quarantine: {e})"
+    """Move a corrupt record aside (NAME.json.corrupt) so it is reported once, not every minute; `ls` still lists it. Done under the
+    record lock after a fresh read: a name registered validly since the scan is never moved."""
+    with Locked(name) as got:
+        if not got:
+            return "busy (another enforcer holds it)"
+        try:
+            v = json.loads(rec_path(name).read_text())
+            if valid(v) and v.get("name") == name:
+                return "ok (re-registered since the scan)"
+        except FileNotFoundError:
+            return "ok (gone since the scan)"
+        except (OSError, ValueError):
+            pass
+        try:
+            os.replace(rec_path(name), state_dir() / f"{name}.json.corrupt")
+            return "corrupt record quarantined as .json.corrupt (reported once)"
+        except OSError as e:
+            return f"corrupt record (could not quarantine: {e})"
 
 
 # ---------- Paseo agent no-progress check (alert only) ----------
@@ -866,8 +878,23 @@ def register(rec: dict) -> int:
         old = load(rec["name"])
         if old and old.get("state", "running") not in TERMINAL:
             return die(f"{rec['name']} is already registered and live (state {old.get('state')}); `deadline done` it first")
+        if old and pending_work(old):
+            return die(f"{rec['name']} still has an owner notice or recovery order to settle (up to ~30 min); use another name or wait")
         save(rec)
     return 0
+
+
+def pending_work(old: dict) -> bool:
+    """A terminal record whose owner notice is not yet delivered (and still has retries) or whose recovery order is unfinished: reusing
+    its name would overwrite that work. Bounded: work untouched for 30 min no longer blocks (a crashed worker must not pin a name)."""
+    n = now()
+    nt, rv = old.get("notice"), old.get("recovery")
+    if isinstance(nt, dict) and not nt.get("done") and nt.get("attempts", 0) < NOTICE_TRIES \
+            and n - nt.get("last", old.get("ended", n)) < 1800:
+        return True
+    if isinstance(rv, dict) and rv.get("state") == "started" and n - rv.get("at", n) < 1800:
+        return True
+    return False
 
 
 def cmd_start(a) -> int:
@@ -1002,7 +1029,7 @@ def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
 def quiet(action: str) -> bool:
     """Actions a 60 s sweep must not log every minute (the launchd log would grow forever)."""
     return (action in ("ok", "done", "lost", "expired", "agent scan queued")
-            or action.startswith(("stopping: within grace", "busy", "kill-failed: still alive")))
+            or action.startswith(("stopping: within grace", "busy", "kill-failed: still alive", "ok (")))
 
 
 def trim_log() -> None:
@@ -1107,24 +1134,31 @@ def cmd_run(a) -> int:
             cur = load(a.name)
             # Only the record THIS run registered may be advanced or saved: a terminal name can be re-registered while this child lives on.
             mine = bool(cur and cur.get("reg_id") == reg_id)
-            if cancel["n"] and rc is None:
+            if cancel["n"]:
                 try:
-                    if mine and cur.get("state") == "running":
+                    st = cur.get("state") if mine else None
+                    if mine and st == "running":
                         cur.update(state="stopping", soft_at=now(), stopped_by_us=True, cancelled=True, cancel_sig=cancel["sig"],
                                    reason=f"cancelled by signal {cancel['sig']}")
                         signal_target(cur, signal.SIGTERM)
                         save(cur)
-                    elif mine and cur.get("state") == "stopping":
+                    elif mine and st == "stopping":
+                        if not cur.get("cancelled"):   # an expiry stop was already under way: record the cancellation, keep its grace clock
+                            cur.update(cancelled=True, cancel_sig=cancel["sig"])
+                            save(cur)
                         if cancel["n"] >= 2 and not cancel["killed"]:
                             signal_target(cur, signal.SIGKILL)
                             cancel["killed"] = True
-                    else:   # the record is terminal (e.g. a notify-only deadline expired), foreign or kill-failed: bounded stop of the child itself
+                    elif rc is None or group_members(child.pid):
+                        # terminal (e.g. notify-only expired), foreign or kill-failed record: bounded stop of the child's group itself,
+                        # also after the leader exited while a grandchild survives
                         if "t0" not in cancel:
                             os.killpg(child.pid, signal.SIGTERM)
                             cancel["t0"] = time.monotonic()
                         elif not cancel["killed"] and (cancel["n"] >= 2 or time.monotonic() - cancel["t0"] >= a.grace):
                             os.killpg(child.pid, signal.SIGKILL)
                             cancel["killed"] = True
+                            cancel["tk"] = time.monotonic()
                 except (ProcUnknown, OSError):
                     pass
             if rc is not None:
@@ -1140,6 +1174,13 @@ def cmd_run(a) -> int:
                             settled = False
                         cur = load(a.name) or cur
                         settled = settled and cur.get("state") != "stopping"
+                if settled and cancel["n"]:
+                    try:
+                        survivors = bool(group_members(child.pid))
+                    except ProcUnknown:
+                        survivors = True
+                    if survivors and not (cancel.get("tk") and time.monotonic() - cancel["tk"] > 10):
+                        settled = False   # keep cancelling until the whole group is gone (bounded: 10 s after SIGKILL)
                 if settled:
                     if mine and cur.get("cancelled"):
                         return 128 + int(cur.get("cancel_sig", signal.SIGTERM))
