@@ -608,10 +608,9 @@ def step(rec: dict, dry: bool = False) -> str:
     st = rec.get("state", "running")
     if st in TERMINAL or st == "kill-failed":
         retried = retry_notice(rec, dry)
-        if retried:
-            return retried
         if st in TERMINAL:
-            return f"{st}"
+            return retried or f"{st}"
+        # kill-failed is live enforcement: the notice retry is queued (detached) and the SIGKILL retry below still runs this pass
     n = now()
     if st == "starting":   # a `deadline run` has reserved the name and is about to start its command
         if n - rec["started"] > 60:
@@ -1289,7 +1288,9 @@ def cmd_install(a) -> int:
         return die(f"{ADE} is a linked worktree: install from the canonical checkout, or pass --ade DIR", 2)
     if not (ade / "bin/deadline").is_file() or not tpl.is_file():
         return die(f"no bin/deadline or {tpl.name} under {ade}", 2)
-    text = tpl.read_text().replace("__ADE__", str(ade)).replace("__HOME__", str(HOME))
+    sd = state_dir().expanduser().resolve()
+    text = (tpl.read_text().replace("__ADE__", str(ade)).replace("__HOME__", str(HOME))
+            .replace("__STATE__", str(sd)))   # the job sweeps, and logs into, the state dir this install was run with
     if a.dry_run:
         print(text)
         return 0

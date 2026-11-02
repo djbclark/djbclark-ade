@@ -136,3 +136,5 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     persisted but before the command was released removes that record (the command never ran: no lost-process notice).
 18. On Linux the process identity token is `<boot_id>:<start tick>` (`/proc/sys/kernel/random/boot_id`), so a record from before a reboot never matches a
     new process with the same pid and tick. macOS `ps -o lstart=` is an absolute time and needs no boot id.
+19. `deadline install` renders the state directory it was run with (`DEADLINE_STATE_DIR` or the default) into the job's environment and log paths, so the job
+    sweeps the same records the registrations wrote. A `kill-failed` record queues its notice retry and still retries SIGKILL in the same pass.

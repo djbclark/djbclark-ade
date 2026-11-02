@@ -952,3 +952,38 @@ def test_linux_identity_token_carries_the_boot_id(env, inproc, monkeypatch):
     assert a[0].count(":") >= 1 and a[0].startswith(dl.boot_id() + ":")
     monkeypatch.setattr(dl, "boot_id", lambda: "another-boot")
     assert dl.proc_info(os.getpid())[0] != a[0], "the same pid and start tick after a reboot must not match"
+
+
+# ---------- PR 223 local-review round 11: kill retries continue past a notice retry, install keeps the state dir ----------
+
+def test_a_notice_retry_does_not_skip_the_sigkill_retry_of_a_kill_failed_record(env, inproc, monkeypatch):
+    dl = inproc
+    rec = {"name": "kf", "owner": "o", "pid": 4242, "pgid": None, "pid_start": "x", "started": T0 - 100, "last_beat": T0 - 100, "budget_s": 10,
+           "grace_s": 5, "on_expire": "relay", "state": "kill-failed", "kill_failed": True,
+           "notice": {"text": "t", "attempts": 1, "done": False, "last": T0 - 1000}}
+    dl.save(rec)
+    sent = []
+    monkeypatch.setattr(dl, "target_status", lambda r: "alive")
+    monkeypatch.setattr(dl, "signal_target", lambda r, s: (sent.append(s), ("sent", "ok"))[1])
+    monkeypatch.setattr(dl, "settle", lambda r, secs: True)
+    out = dl.step(rec)
+    assert sent == [signal.SIGKILL] and rec["state"] == "expired" and "killed on retry" in out
+    assert rec["notice"]["attempts"] == 2, "the notice retry was still queued and ran (inline worker)"
+    # a terminal record only retries its notice
+    done = {"name": "tr", "owner": "o", "state": "expired", "started": T0, "budget_s": 1, "ended": T0,
+            "notice": {"text": "t", "attempts": 1, "done": False, "last": T0 - 1000}}
+    dl.save(done)
+    assert "owner notice retry" in dl.step(done)
+
+
+def test_install_renders_the_configured_state_dir_into_env_and_log_paths(env, tmp_path):
+    ade = tmp_path / "ade"
+    (ade / "bin").mkdir(parents=True)
+    (ade / "config/launchd").mkdir(parents=True)
+    shutil.copy(SCRIPT, ade / "bin/deadline")
+    shutil.copy(ROOT / "config/launchd/com.djbclark.deadline-sweep.plist", ade / "config/launchd/")
+    r = env.run("install", "--ade", str(ade), "--dry-run")
+    p = plistlib.loads(r.stdout.encode())
+    sd = str(env.state.resolve())
+    assert p["EnvironmentVariables"]["DEADLINE_STATE_DIR"] == sd
+    assert p["StandardOutPath"] == p["StandardErrorPath"] == f"{sd}/sweep.log" and "__" not in r.stdout
