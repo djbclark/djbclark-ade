@@ -1212,6 +1212,13 @@ class TestDeadlines(ProtocolBase):
         self.assertEqual(w.returncode, 5, w.stderr)
         self.assertIn("was not picked up", w.stderr)
 
+    def test_a_reply_file_whose_header_names_another_id_is_not_pickup(self) -> None:
+        """Review of 4f2e3e98: ade-1--coding-1.md saying re=ade-2 is another message's, so exit 5 still comes."""
+        self.cli("send", "task")
+        self.drop("ade-1--coding-1.md", f"[coding -> claude-code] id=coding-1 re=ade-2 nonce={self.nonce()}\nx\nDONE\n")
+        w = self.cli("wait", "ade-1", "--timeout", "5", "--ack-timeout", "0.5")
+        self.assertEqual(w.returncode, 5, w.stderr)
+
     def test_a_route_that_goes_down_after_one_read_counts_as_unchecked_again(self) -> None:
         """246 review 4: ssh read once, then down: a claim there cannot be seen, so no exit 5 from git alone."""
         self.cli("send", "task")
@@ -1738,6 +1745,19 @@ class TestAdversaryR1(TransportBase):
         self.assertFalse((self.to_dir / "ade-1.md").exists(), "a truncated message was published")
         self.assertEqual([p.name for p in self.to_dir.iterdir()], [], "a temp file was left in the drop")
         self.assertTrue(self.in_origin("to-coding/ade-1.md"), "the send should have fallen back to git")
+
+    def test_a_failed_push_whose_commit_cannot_be_rolled_back_is_uncertain(self) -> None:
+        """Review of 4f2e3e98: the commit left behind would be published by a later send, so 'not stored' is false."""
+        self.ssh_down.write_text("")
+        real_git = shutil.which("git")
+        wrapper = Path(self.tmp.name) / "bin/git"
+        wrapper.write_text(f'#!/bin/sh\ncase " $* " in *" push "*) exit 1;; *" reset "*) exit 1;; esac\n'
+                           f'exec "{real_git}" "$@"\n')
+        wrapper.chmod(0o755)
+        Hook.status = 500
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("delivery uncertain", r.stderr)
 
     def test_a_git_push_that_cannot_be_checked_is_uncertain_not_failed(self) -> None:
         """Review of c9c751c7: a lost push ack plus a failing fetch must not be reported as 'nothing stored'."""

@@ -775,8 +775,10 @@ class Git:
                 if published is None:  # the remote cannot be asked: the push may have landed. Keep the commit (a later
                     # send publishes it, which is harmless: the caller was told the message MAY be stored) and say so
                     raise UncertainPut(f"git: push of {rel} failed and the remote cannot be checked") from None
-                with contextlib.suppress(TransportError):
+                try:
                     self._git("reset", "--quiet", "--hard", f"{self.remote}/{self.branch}")
+                except TransportError:  # the commit stays, so a later send would publish it: not "not stored"
+                    raise UncertainPut(f"git: push of {rel} failed and its local commit could not be rolled back") from None
                 raise
 
     def _published(self, rel: str, content: str) -> bool | None:
@@ -1257,6 +1259,11 @@ def prune_seen(name: str, listed: list[str]) -> None:
     update_json("seen.json", m)
 
 
+# refusals that prove a file was read and belongs to another message (not unreadable, not half-written): such a file is
+# never evidence that the waited-for message was picked up
+FOREIGN_REFUSALS = ("nonce mismatch", "no nonce", "the header says re=")
+
+
 def note_foreign(name: str, fname: str) -> None:
     def m(d: dict) -> None:
         f = d.get(f"{name}#foreign")
@@ -1398,7 +1405,7 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
                     settled = (rc == 0 and final) or (rc != 0 and msg != "empty reply")
                 if rc:
                     print(f"coding-bot: {what} {t.name}:{fname} not filed: {msg}", file=sys.stderr)
-                if rc and (msg.startswith("nonce mismatch") or msg.startswith("no nonce")):
+                if rc and msg.startswith(FOREIGN_REFUSALS):
                     note_foreign(t.name, fname)  # read and shown to be another message's: not pickup evidence
                     if evidence is not None:
                         evidence.discard(f"{t.name}:{fname}")
