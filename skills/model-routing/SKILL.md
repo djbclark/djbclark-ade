@@ -823,7 +823,10 @@ method that runs the waves.
    https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing, read 2026-11-01; $ per M
    tokens in/out): `claude-sonnet-5.5` (64.1%, $2/$10; $16.51 per test) for code and judgment, `gpt-6.1-terra`
    (49.5%, $1/$5; $2.16 per test) for bulk and for an advisory second opinion (weaker than Sonnet, so never a gate;
-   Copilot lists no Opus or Sol). `kimi-k3` (17.2% on Vals, $3/$15, $12.48 per test) and `gemini-3.8-flash` (19.7%,
+   djbclark's account is offered no Opus, Fable, Sol or Astra on Copilot). Those ids are the ones `acp-run copilot
+   --info` listed on 2026-11-02 (CLI 1.0.105; `tools/acp-run/README.md` copilot section): `pick_config` rejects an id
+   the CLI does not offer, so run `acp-run copilot --info` before dispatching and use an offered id, not a price-page
+   id. `kimi-k3` (17.2% on Vals, $3/$15, $12.48 per test) and `gemini-3.8-flash` (19.7%,
    $0.75/$3.75 promotional through 2026-12-31, but $8.65 per test: cheap per token, not per task) score below the
    tier-2 bar of item 14: never code, never a review or gate; `gemini-3.8-flash` for bulk that a stronger model
    reviews, `kimi-k3` for diversity only. Avoid `auto` (its model, and so its price, is not chosen by you). Prices
