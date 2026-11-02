@@ -132,13 +132,14 @@ while stack:
         for e in it:
             if e.is_symlink():
                 t = os.readlink(e.path)
-                hit = os.path.normpath(os.path.join(d, t))
+                raw = os.path.join(d, t)
+                # Judge where writes land as well as the spelled target: resolving the raw join
+                # catches an alias of the source (/tmp -> /private/tmp) and a route through
+                # another link (nm -> up/proj/node_modules where up -> the source's parent).
+                hits = {os.path.normpath(raw), os.path.realpath(raw)}
                 rel = os.path.relpath(e.path, pasture)
-                if inside(hit, pasture):  # the in-pasture target is scanned in its own right
-                    continue
-                # Judge the resolved target too: a link reaching the source through another
-                # symlink (/tmp -> /private/tmp, an alias of the source) writes into the source.
-                hits = {hit, os.path.realpath(hit)}
+                if all(inside(h, pasture) for h in hits):
+                    continue  # an in-pasture target is scanned in its own right
                 if any(inside(h, r) for h in hits for r in chain) or (
                         rel not in tracked and any(inside(h, r) for h in hits for r in others)):
                     bad.append(rel + " -> " + t)

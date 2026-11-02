@@ -154,6 +154,20 @@ def test_check_reports_a_link_that_reaches_the_source_through_an_alias(tmp_path)
     assert r.stdout == f"node_modules/via-alias -> {alias}/node_modules/@scope\n"
 
 
+def test_check_reports_a_link_routed_through_another_link(tmp_path):
+    src, cow, bin_dir = setup(tmp_path)
+    r = run(tmp_path, cow, bin_dir, "create", "feat", "--source", str(src), "--no-trust")
+    assert r.returncode == 0, r.stderr
+    path = tmp_path / "pastures" / "feat"
+    # `up` points at the source's parent, not into the source, so it is not flagged itself;
+    # `nm` spells an in-pasture path but writes through `up` into the source.
+    os.symlink(src.resolve().parent, path / "up")
+    os.symlink(f"up/{src.name}/node_modules", path / "nm")
+    r = run(tmp_path, cow, bin_dir, "check", str(path))
+    assert r.returncode == 1
+    assert r.stdout == f"nm -> up/{src.name}/node_modules\n"
+
+
 def test_check_clean_pasture_and_unknown_path(tmp_path):
     src, cow, bin_dir = setup(tmp_path)
     r = run(tmp_path, cow, bin_dir, "create", "feat", "--source", str(src), "--no-trust")
