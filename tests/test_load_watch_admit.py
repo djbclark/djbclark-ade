@@ -261,14 +261,14 @@ def refused(r):
 
 
 def test_free_memory_floor_refuses_below_and_passes_at_the_boundary(tmp_path):
-    low = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="599.9")
+    low = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="299.9")
     assert low.returncode == 75, low.stderr
     rec = json.loads(low.stdout)
-    assert rec["refused"] == ["free_mem"] and rec["free_mb"] == 599 and rec["min_free_mb"] == 600
+    assert rec["refused"] == ["free_mem"] and rec["free_mb"] == 299 and rec["min_free_mb"] == 300
     assert "refused=free_mem" in admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="64").stdout
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="600").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="300").returncode == 0
     # tunable by flag and env
-    assert admit(tmp_path, "--wait", "0", "--min-free-mb", "300", load1=0.1, LW_FAKE_FREE_MB="400").returncode == 0
+    assert admit(tmp_path, "--wait", "0", "--min-free-mb", "100", load1=0.1, LW_FAKE_FREE_MB="200").returncode == 0
     assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="1500", LW_MIN_FREE_MB="2000").returncode == 75
 
 
@@ -317,7 +317,7 @@ def test_every_gate_is_reported_together_and_each_alone_decides(tmp_path):
     assert refused(r) == ["load", "compressor", "free_mem", "pageins", "agents"]
     line = admit(tmp_path, "--wait", "0", "--max-agents", load1=CORES * 9, LW_FAKE_CHURN="50000", LW_FAKE_FREE_MB="64",
                  LW_FAKE_PAGEINS="1760", LW_FAKE_AGENTS="31").stdout
-    for part in ("mem_churn=50000", "free_mb=64", "pageins=1760", "agents=31", "max_mem_churn=20000", "min_free_mb=600",
+    for part in ("mem_churn=50000", "free_mb=64", "pageins=1760", "agents=31", "max_mem_churn=20000", "min_free_mb=300",
                  "max_pageins=1000", "max_agents=14"):
         assert part in line, line
 
@@ -482,10 +482,14 @@ VM_STAT = """\
 Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                                3969.
 Pages active:                            300000.
+Pages inactive:                           2000.
 Pages speculative:                        1000.
+Pages purgeable:                           500.
 Pageins:                                 50000.
 Compressions:                           700000.
 Decompressions:                         300000.
+File-backed pages:                        1500.
+Anonymous pages:                        301500.
 """
 
 
@@ -499,11 +503,47 @@ def fake_run(monkeypatch, lw, **kw):
     monkeypatch.setattr(lw.subprocess, "run", run)
 
 
-def test_vm_stat_snapshot_parses_free_plus_speculative(monkeypatch):
+def test_vm_stat_snapshot_counts_free_file_backed_and_purgeable(monkeypatch):
     lw = load_module()
     fake_run(monkeypatch, lw, stdout=VM_STAT)
     s = lw.vm_snapshot()
-    assert s == {"free_mb": (3969 + 1000) * 16384 / 1048576, "compress": 1000000, "pageins": 50000}
+    assert s == {"free_mb": (3969 + 1500 + 500) * 16384 / 1048576, "compress": 1000000, "pageins": 50000}
+
+
+def mb_pages(mb, page=16384):
+    return mb * 1048576 // page
+
+
+def vm_stat_with(**mb):
+    """VM_STAT with some counters replaced by megabyte amounts (keys: free, spec, inactive, purgeable, file, anon)."""
+    names = {"free": "Pages free", "spec": "Pages speculative", "inactive": "Pages inactive", "purgeable": "Pages purgeable",
+             "file": "File-backed pages", "anon": "Anonymous pages"}
+    out = VM_STAT
+    for key, value in mb.items():
+        out = re.sub(rf"^{re.escape(names[key])}:\s+\d+\.$", f"{names[key]}: {mb_pages(value)}.", out, flags=re.M)
+    return out
+
+
+def test_file_cache_is_available_memory_on_an_idle_mac(monkeypatch):
+    """2026-11-01 regression: free + speculative read 82 MB on an idle Mac with ~3.1 GB of file cache, and the 600 MB floor
+    refused every launch for ~1.5 h. File-backed pages are dropped at no cost, so they count as available."""
+    lw = load_module()
+    fake_run(monkeypatch, lw, stdout=vm_stat_with(free=77, spec=530, inactive=3662, file=3103, anon=5269, purgeable=27))
+    assert lw.vm_snapshot()["free_mb"] > lw.ADMIT_MIN_FREE_MB
+
+
+def test_anonymous_inactive_memory_is_not_counted_as_available(monkeypatch):
+    """Adversary F1 on PR 230: the inactive queue holds anonymous pages, which can only be reclaimed by compressing or
+    swapping. A host with little free memory, little file cache and a large (anonymous) inactive queue is short of memory."""
+    lw = load_module()
+    fake_run(monkeypatch, lw, stdout=vm_stat_with(free=60, spec=20, inactive=4000, file=150, anon=9000, purgeable=5))
+    assert lw.vm_snapshot()["free_mb"] < lw.ADMIT_MIN_FREE_MB
+
+
+def test_a_vm_stat_without_file_backed_pages_falls_back_to_free_plus_speculative(monkeypatch):
+    lw = load_module()
+    fake_run(monkeypatch, lw, stdout=VM_STAT.replace("File-backed pages:                        1500.\n", ""))
+    assert lw.vm_snapshot()["free_mb"] == (3969 + 1000) * 16384 / 1048576
 
 
 def test_vm_stat_that_exists_but_fails_raises_and_an_absent_one_does_not(monkeypatch):
@@ -598,7 +638,7 @@ def test_real_path_computes_rates_over_the_two_second_sample(tmp_path, monkeypat
     assert rc == 0, rec
     assert rec["mem_churn_pages_s"] == 20000 and rec["pageins_s"] == 1000 and rec["free_mb"] == 700 and rec["agents"] == 13
     assert sleeps == [lw.ADMIT_MEM_WINDOW_S] and lw.ADMIT_MEM_WINDOW_S == 2.0
-    over = {"free_mb": 599.0, "compress": 1000 + 2 * 20002, "pageins": 100 + 2 * 1002}
+    over = {"free_mb": lw.ADMIT_MIN_FREE_MB - 1, "compress": 1000 + 2 * 20002, "pageins": 100 + 2 * 1002}
     rc, rec, _ = real_admit(lw, monkeypatch, capsys, [a, over], 14, tmp_path)
     assert rc == 75 and rec["refused"] == ["compressor", "free_mem", "pageins", "agents"]
 

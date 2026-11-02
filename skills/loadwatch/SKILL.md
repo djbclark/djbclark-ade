@@ -103,7 +103,7 @@ toward waiting: it refuses (exit 75) while **any** of these holds, and `--json` 
 
 | gate (`refused` name) | default | flag | env |
 |---|---|---|---|
-| free + speculative memory below the floor (`free_mem`) | 600 MB | `--min-free-mb` | `LW_MIN_FREE_MB` |
+| available memory below the floor (`free_mem`): macOS free + file-backed + purgeable pages, Linux MemAvailable | 300 MB (600 MB until 2026-11-01) | `--min-free-mb` | `LW_MIN_FREE_MB` |
 | compressions + decompressions per second above (`compressor`) | 20000 (was 60000) | `--max-mem-churn` | `LW_MAX_COMPRESSOR_S` |
 | pageins per second above (`pageins`) | 1000 | `--max-pageins` | `LW_MAX_PAGEINS_S` |
 | live `acp-run` slices machine-wide at or above the cap (`agents`), **only for a caller that passes `--max-agents`** | 14 (bare `--max-agents`) | `--max-agents [N]` | `LW_MAX_AGENTS` (0 = off) |
@@ -119,7 +119,7 @@ acp-dispatch drops every other `LW_*` variable (test hooks and import-time setti
 `LW_MIN_FREE_MB`, `LW_MAX_COMPRESSOR_S` and `LW_MAX_PAGEINS_S` itself and passes them to `admit` as flags (`--max-agents=N` ...),
 and passes `LW_BOOST_CALM_S` through as an environment variable; a bad value is warned about and ignored. A refusal
 prints `refused=agents` (or the other gate) in acp-dispatch's exit-75 line and in `load_gate.refused` of the record.
-Raise the cap when memory has headroom (the other gates still hold); lower it when `vm_stat` shows free memory under 600 MB
+Raise the cap when memory has headroom (the other gates still hold); lower it when `admit` shows available memory under 300 MB
 with the cap not yet reached. The count is one `ps`, an exact argv match of the process running the script named `acp-run`
 (never `pgrep -f`; `uv run --script` wrappers and mentions do not count).
 **Reservations:** an admission under the cap is recorded in `~/.local/state/load-watch/agent-reservations.json` (under an
