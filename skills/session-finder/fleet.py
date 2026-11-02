@@ -206,15 +206,36 @@ ANCESTOR_SELF = [True]   # relay.as_caller(scrub=True) sets False: a notice send
 _ANC_PANE = [None]       # set by sessions(): the herdr pane an ancestor of this process runs in, when HERDR_PANE_ID is unset
 
 
+def _ancestor_panes(anc):
+    """The herdr panes named by the environments of ANC (a set; empty when this process's own HERDR_PANE_ID is set, a notice sender
+    hides its ancestry, or there is no where.py)."""
+    if os.environ.get("HERDR_PANE_ID") or not ANCESTOR_SELF[0] or not _where:
+        return set()
+    return {_where.env_of(pid).get("HERDR_PANE_ID") for pid in anc} - {None, ""}
+
+
 def ancestor_pane(anc):
     """The herdr pane this process runs in, read from an ancestor's environment, or None. Codex's `shell_environment_policy
     inherit = "core"` (this machine's ~/.codex/config.toml) strips HERDR_PANE_ID from the shell Codex runs a command in, but
     the `codex` TUI process above that shell keeps it. Used only when this process's own HERDR_PANE_ID is unset; ancestors
     naming two different panes name none (nothing is guessed)."""
-    if os.environ.get("HERDR_PANE_ID") or not ANCESTOR_SELF[0] or not _where:
-        return None
-    panes = {_where.env_of(pid).get("HERDR_PANE_ID") for pid in anc} - {None, ""}
+    panes = _ancestor_panes(anc)
     return panes.pop() if len(panes) == 1 else None
+
+
+def self_pane_by_process(rows, anc):
+    """The herdr pane of ROWS (herdr rows with a `pane`) whose foreground processes or shell are an ancestor of this process, else None.
+    The environment names a pane only as it was when the process started: herdr renumbers a pane that is moved to another workspace
+    or tab (2026-11-02, live: an omp in pane w20:p3 had HERDR_PANE_ID=w2F:p2X, a pane that no longer exists, so no row matched and
+    relay refused with "cannot tell who is sending"). A process-tree match needs no environment. Asked only after the environment
+    named a pane no row matched, so a caller outside herdr never pays one `herdr pane process-info` per pane."""
+    for s in rows:
+        if s.get("host") != "herdr" or not s.get("pane"):
+            continue
+        procs, shell = pane_procs(s["pane"])
+        if ({p.get("pid") for p in procs or []} | {shell}) & anc:
+            return s["pane"]
+    return None
 
 
 def short(path):
@@ -1109,7 +1130,8 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
     (test/trial launches their starter drives; helm should ignore them, hcom trial 6g). include_archived adds
     the archived Paseo agents as `ended` rows (fleet.py --all)."""
     anc = ancestors()
-    _ANC_PANE[0] = ancestor_pane(anc)
+    named = {os.environ["HERDR_PANE_ID"]} if os.environ.get("HERDR_PANE_ID") else _ancestor_panes(anc)
+    _ANC_PANE[0] = next(iter(named)) if len(named) == 1 and not os.environ.get("HERDR_PANE_ID") else None
     agents = herdr_json("agent", "list").get("agents") or []
     panes = herdr_json("pane", "list").get("panes") or []
     by_sid = {(a.get("agent_session") or {}).get("value"): a for a in agents if a.get("agent_session")}
@@ -1131,6 +1153,11 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
         out += shells
     if not include_marked:
         out = [s for s in out if not s.get("mark")]
+    if named and ANCESTOR_SELF[0] and not any(s.get("self") and s.get("host") == "herdr" for s in out):
+        pane = self_pane_by_process([s for s in out if s.get("host") == "herdr"], anc)
+        for s in out:
+            if pane and s.get("pane") == pane and s.get("host") == "herdr":
+                s["self"] = True
     table = proc_table()
     for s in out:
         mark_busy(s, table)

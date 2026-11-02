@@ -218,6 +218,20 @@ record. A caller with no identifiable sender is still refused (with the card rea
 Warp's orchestration (a BLOCKED run state, durable per-agent inboxes, events instead of polling), Claude Code's mailbox (a message is
 queued until a safe boundary; queued is not read), A2A's input-required task state, Azure Service Bus deferral (set the message aside,
 keep it in the store, deliver later), AWS "Exponential Backoff And Jitter" (Brooker, 2015).
+CARD ALERT (2026-11-02, agent f111c672: a relay to it sat queued 184 min behind a question card, and its reply to the lead sat behind a card too, with nobody told the
+blocker was a card only djbclark can answer). The deliverer starts a `card_since` clock on the record at the first look that finds a card and clears it when no card is
+there; once the message has waited behind a card for `RELAY_CARD_ALERT_S` seconds (default 1800; 0 = off) it sends ONE `hermes-ping` (`RELAY_HERMES_PING` overrides the
+binary; never `hermes send`) naming the target (id, name, Paseo agent), the card (id, kind, tool; never its text), the sender and the message id. The claim is written to
+card-alerts.json beside deferred.log under the state lock BEFORE the ping, keyed by target + card ids (a pane dialog has no id: its state word), so two deliverers or a
+later record behind the same card never ping twice, and a DIFFERENT card on the same target is a new alert. The ping runs in its own process group under a 45 s limit; a
+failure is logged (`card-alert-failed` in deferred.log), never fatal to the message, and retried no sooner than 10 min later, at most 3 tries. `--pending` shows
+`[card alert: pinged 14m ago]` or `[card alert: PING FAILED, try N ...]` (`card_alert` in --json), and `card-alert` lines are in `--status`'s events.
+BUSY ALERT (2026-11-02, the same session: f111c672 stayed "working" for hours inside long blocking `wait` calls, so the lead's messages sat queued and it finally read
+them from the deferred folder by hand). A text for a target that is merely WORKING is deferred until it is idle, and an agent inside a blocking wait never idles: it is deaf as
+well as silent. After `RELAY_BUSY_ALERT_S` seconds (default 1800; 0 = off) of waiting the deliverer sends ONE notice back to the sender (through relay, as a failure notice
+goes; never for a `kind: notice` record) and ONE `hermes-ping` naming target, sender, message id and age, once per message (the same card-alerts.json claim and retry
+rule as the card alert; the notice is claimed once on the record whether or not the ping works); `--pending` shows `[busy alert: pinged 31m ago]`. It NEVER steers on its own: a steer a
+target declines replaces the running turn (lost work). A sender whose message matters re-sends it with `--steer` to an omp, codex, opencode or claude target, knowing that risk.
 WHY IT CANNOT BE DELIVERED YET (2026-10-29, djbclark: "be able to tell why a message can't be delivered yet (eg picklist vs tab hung etc)"). `relay.py --why
 IDENT [--json]` names the obstacle by TWO methods compared (diagnose), exit 0 when it can take a text now, 1 when something is in the way. A Paseo agent:
 its API (`paseo agent inspect`: status, archived, pending cards BY TOOL, last update), its card text (`paseo permit ls`) and its timeline (`paseo logs`: the
@@ -294,7 +308,9 @@ from a session to a peer appends "[first contact from <id>: reply `ack <id>` thr
 THE SENDER HEADER (2026-10-25): a relayed text (not a Paseo agent's own message, which Paseo labels) starts `[relay from KIND ID (DIR)]`, or
 `[relay from KIND ID aka NAME (DIR)]` for a named session: KIND the agent (codex, claude, ...), ID what `relay.py ID "..."` takes (a herdr pane
 id such as w2F:p45, a session id prefix, a Paseo agent id), DIR the directory it runs in (its worktree's name). The sender comes from the
-sending PROCESS: fleet's `self` row (HERDR_PANE_ID, else the pane an ancestor process runs in), PASEO_AGENT_ID (else the agent the Paseo
+sending PROCESS: fleet's `self` row (HERDR_PANE_ID, else the pane an ancestor process runs in, else, when that names a pane herdr no longer has, the pane whose
+foreground or shell process is an ancestor: herdr renumbers a pane that is moved, and a process keeps the id it started with: 2026-11-02, an omp in w20:p3 had
+HERDR_PANE_ID=w2F:p2X and was refused with exit 4; `fleet.self_pane_by_process`), PASEO_AGENT_ID (else the agent the Paseo
 daemon hosts above it), CLAUDE_CODE_SESSION_ID, `hermes SID8` (a relay Hermes starts itself: the last 8 characters of its HERMES_SESSION_ID), a label
 declared in RELAY_SENDER_NAME. A Codex tool shell keeps none of these variables
 (this machine's `shell_environment_policy inherit = "core"`), which is why the `codex` process above it is read. Only when nothing resolves
@@ -2472,6 +2488,178 @@ def note_look(rid, rec, look):
         defer_log(rec, "look", f"{filed['state']}: {obstacle_text(filed) or filed['why']}")
 
 
+# A message that sat behind a question or permission card for CARD_ALERT_S (2026-11-02, agent f111c672: a relay to it waited 184 min behind a card,
+# and its reply to the lead sat behind a card too; nobody was told the blocker was a card waiting for djbclark). The deliverer sends ONE
+# `hermes-ping` per card and target: the claim is written to card-alerts.json beside deferred.log under the state lock BEFORE the ping, so two
+# deliverers never both send it, and a later record behind the same card finds the claim. A failed ping is logged, never fatal, and retried
+# after CARD_ALERT_RETRY, at most CARD_ALERT_TRIES times. `RELAY_CARD_ALERT_S` (seconds, default 1800; 0 or less turns it off) and
+# `RELAY_HERMES_PING` (the binary) are read at call time.
+CARD_ALERT_DEFAULT = 1800
+CARD_ALERT_TIMEOUT = 45      # the ping runs inside the deliverer: bounded, its whole process group killed at the limit
+CARD_ALERT_RETRY = 600
+CARD_ALERT_TRIES = 3
+CARD_ALERT_KEEP = 7 * 86400  # claims older than this are dropped
+
+
+def card_alert_after():
+    """Seconds a message must have waited behind a card before the ping (RELAY_CARD_ALERT_S), 0 when off; garbage means the default."""
+    raw = os.environ.get("RELAY_CARD_ALERT_S")
+    if raw is None or not raw.strip():
+        return CARD_ALERT_DEFAULT
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return CARD_ALERT_DEFAULT
+
+
+def card_alerts_path():
+    return DEFER_DIR.parent / "card-alerts.json"
+
+
+def card_alerts_read():
+    try:
+        data = json.loads(card_alerts_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def card_alerts_write(data):
+    """Atomic, 0600: a temp file beside, then os.replace (the caller holds the state lock)."""
+    fd, tmp = tempfile.mkstemp(dir=card_alerts_path().parent, prefix=".tmp-card-alerts-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+        os.replace(tmp, card_alerts_path())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def card_alert_key(rec, look):
+    """Target plus the pending card ids of the look (sorted); a pane dialog has no id, so its state word stands in."""
+    ids = sorted(str(c.get("id")) for c in (look.get("cards") if isinstance(look, dict) else None) or [] if isinstance(c, dict) and c.get("id"))
+    return f"{target_key(rec)}|{','.join(ids) or str((look or {}).get('state') or 'card')}"
+
+
+def card_alert_ping(text):
+    """Run hermes-ping with TEXT (argv list, stdin closed, own process group, CARD_ALERT_TIMEOUT); (ok, why). Never raises."""
+    binary = os.environ.get("RELAY_HERMES_PING") or shutil.which("hermes-ping") or str(Path.home() / ".local/bin/hermes-ping")
+    try:
+        proc = subprocess.Popen([binary, text], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+    except OSError as e:
+        return False, f"cannot run {binary}: {e}"
+    try:
+        _out, err = proc.communicate(timeout=CARD_ALERT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=5)
+        return False, f"timed out after {CARD_ALERT_TIMEOUT}s"
+    except Exception as e:    # noqa: BLE001  # a ping must never take the deliverer down
+        return False, f"{type(e).__name__}: {e}"
+    return proc.returncode == 0, "" if proc.returncode == 0 else f"rc={proc.returncode} {' '.join((err or '').split())[:120]}"
+
+
+def card_alert_text(rid, rec, look, waited):
+    t = rec.get("target") or {}
+    return (f"relay: {target_label(rec)} (agent {clean_text(t.get('paseo') or t.get('id'), 40) or '?'}) has had a message queued behind a card for "
+            f"{int(waited) // 60}m; {clean_text(obstacle_text(look) or 'blocked on a question or permission card', 160)}. Message {rid} from "
+            f"{clean_text(rec.get('sender'), 60) or '?'} waits there and expires in "
+            f"{max(0, int(float(rec.get('expires') or 0) - time.time())) // 60}m. Only you can answer the card (helm.py answer, or the Paseo UI).")
+
+
+def card_alert_step(rid, rec, look):
+    """One call per deliverer look that found the target on a card: starts the card clock on the record (`card_since`), and once the message has
+    waited card_alert_after() seconds sends the ONE ping for this card and target, filing `card_alert` on the record for `--pending`. Never raises."""
+    try:
+        after, now = card_alert_after(), time.time()
+        if not after:
+            return
+        since = float(rec.get("card_since") or 0)
+        if not since:
+            transition(rid, ("queued",), card_since=now)
+            return
+        if now - since < after:
+            return
+        alert_once(rid, rec, card_alert_key(rec, look), "card_alert", "card-alert", card_alert_text(rid, rec, look, now - since))
+    except Exception as e:    # noqa: BLE001  # an alert is never worth a lost message
+        defer_log(rec, "card-alert-error", f"{type(e).__name__}: {e}")
+
+
+def alert_once(rid, rec, key, field, event, text):
+    """The ONE ping for KEY: the claim is written to card-alerts.json under the state lock before the ping (a later look, a second deliverer or a
+    later record behind the same card finds it and stays quiet; a failed ping is retried no sooner than CARD_ALERT_RETRY later, at most CARD_ALERT_TRIES
+    times), the outcome is filed on record RID as FIELD for `--pending` and logged as EVENT. The ok of the ping, None when KEY was already told."""
+    now = time.time()
+    with state_lock():
+        data = card_alerts_read()
+        ent = data.get(key) if isinstance(data.get(key), dict) else None
+        told = bool(ent and (ent.get("ok") or int(ent.get("tries") or 0) >= CARD_ALERT_TRIES or now < float(ent.get("retry_at") or 0)))
+        if not told:
+            tries = int((ent or {}).get("tries") or 0) + 1
+            data[key] = {"at": now, "rid": rid, "tries": tries, "ok": False, "retry_at": now + CARD_ALERT_RETRY}
+            data = {k: v for k, v in data.items() if isinstance(v, dict) and now - float(v.get("at") or 0) < CARD_ALERT_KEEP}
+            card_alerts_write(data)
+    if told:    # transition takes the state lock itself (not re-entrant): never inside the block above
+        if not isinstance(rec.get(field), dict):
+            transition(rid, ("queued",), **{field: {"at": ent.get("at"), "ok": bool(ent.get("ok")), "by": ent.get("rid"), "tries": ent.get("tries")}})
+        return None
+    ok, why = card_alert_ping(text)
+    with state_lock():
+        data = card_alerts_read()
+        if isinstance(data.get(key), dict):
+            data[key]["ok"] = ok
+            card_alerts_write(data)
+    transition(rid, ("queued",), **{field: {"at": now, "ok": ok, "by": rid, "tries": tries}})
+    defer_log(rec, event if ok else event + "-failed", f"{key} try {tries}" + (f": {why}" if why else ""))
+    return ok
+
+
+def busy_alert_after():
+    """Seconds a message may wait for a merely WORKING target before the alert (RELAY_BUSY_ALERT_S, default 1800), 0 when off."""
+    raw = os.environ.get("RELAY_BUSY_ALERT_S")
+    if raw is None or not raw.strip():
+        return CARD_ALERT_DEFAULT
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return CARD_ALERT_DEFAULT
+
+
+def busy_alert_step(rid, rec):
+    """One call per deliverer look that found the target WORKING (not on a card): once the message is busy_alert_after() seconds old, ONE notice back to
+    the sender (through relay, as a failure notice goes, a `kind: notice` never gets one) and ONE hermes-ping naming target, sender, message id and age,
+    filed on the record as `busy_alert` for `--pending`. Never steers: a steer a target declines replaces its running turn. Never raises."""
+    try:
+        after, now = busy_alert_after(), time.time()
+        age = now - float(rec.get("created") or now)
+        if not after or age < after:
+            return
+        t = rec.get("target") or {}
+        mins = int(age) // 60
+        text = (f"relay: {target_label(rec)} (agent {clean_text(t.get('paseo') or t.get('id'), 40) or '?'}) has been WORKING for {mins}m and has not taken a queued "
+                f"message: {rid} from {clean_text(rec.get('sender'), 60) or '?'}. A target inside a long blocking wait never goes idle, so it cannot receive it; "
+                f"it expires in {max(0, int(float(rec.get('expires') or 0) - now)) // 60}m.")
+        claimed = (rec.get("sender_ident") and rec.get("kind") != "notice"
+                   and transition(rid, ("queued",), when=lambda r: not r.get("busy_notice"), busy_notice=now) is not None)    # once, whether or not the ping works
+        alert_once(rid, rec, f"busy|{rid}", "busy_alert", "busy-alert", text)
+        if claimed:
+            notice = (f"relay: your message to {target_label(rec)} ({rid}) has waited {mins}m: the target is still working, so it is queued, not delivered. "
+                      "If it matters, re-send it with --steer (it interrupts a turn in progress on omp, codex, opencode and claude: the running turn may be replaced "
+                      "and its work lost); otherwise it goes out once the target is idle, or expires.")
+            try:
+                rc, line = run_captured([rec["sender_ident"], notice, "--wait", "5", "--no-ack"], "relay", scrub=True, notice=True)
+            except Exception as e:    # noqa: BLE001  # a notice never breaks the deliverer
+                rc, line = 1, str(e)
+            defer_log(rec, "busy-notice", f"rc={rc} {line}")
+    except Exception as e:    # noqa: BLE001
+        defer_log(rec, "busy-alert-error", f"{type(e).__name__}: {e}")
+
+
 def sender_key(rec):
     """Who queued a record: its sender's id (a Paseo agent id or a fleet id), else its label."""
     return rec.get("sender_ident") or rec.get("sender") or ""
@@ -2826,14 +3014,18 @@ def deliver(rid):
                 note_look(rid, rec, look)    # kind and tool only: the card's own text (a tool input) stays in `--why`, never on a record, in a log or in a notice
             if poll[0] == "card":
                 last = (look or {}).get("why") or "the target stayed blocked on a permission or question card"
+                card_alert_step(rid, rec, look or {})    # the one ping to the operator once the message has waited behind this card for card_alert_after()
                 wait = min(card_backoff(card_n), max(1.0, float(rec.get("expires") or 0) - time.time()))
                 card_n += 1
                 time.sleep(wait)
                 continue
             card_n = 0
+            if rec.get("card_since"):
+                transition(rid, ("queued",), card_since=0)    # the card is gone: the next one starts its own clock
             if poll[0] != "idle":
                 last = poll[1] if poll[0] in ("miss", "error") else (look or {}).get("why") or "the target stayed busy"
                 if poll[0] == "busy":
+                    busy_alert_step(rid, rec)    # a working target that has not taken the text for busy_alert_after(): one notice to the sender and one ping
                     time.sleep(min(card_backoff(busy_n, cap=BUSY_BACKOFF_CAP), max(1.0, float(rec.get("expires") or 0) - time.time())))
                     busy_n += 1
                 else:
@@ -3096,7 +3288,14 @@ def queue_view(r, now, show_text=False):
     return {"id": r["id"], "state": r.get("state"), "target": r.get("target"), "sender": r.get("sender"),
             "age_s": int(now - float(r.get("created") or now)), "expires_in": int(float(r.get("expires") or now) - now),
             "outcome": r.get("outcome") or "", **({"look": r["look"]} if isinstance(r.get("look"), dict) else {}),
+            **({"card_alert": card_alert_view(r["card_alert"], now)} if isinstance(r.get("card_alert"), dict) else {}),
+            **({"busy_alert": card_alert_view(r["busy_alert"], now)} if isinstance(r.get("busy_alert"), dict) else {}),
             **({"text_preview": fleet.clip(r.get("text") or "", 60)} if show_text else {})}
+
+
+def card_alert_view(ca, now):
+    """The card alert filed on a record as {"ok", "age_s", "by"}: whether the one hermes-ping went out, how long ago, and which record sent it."""
+    return {"ok": bool(ca.get("ok")), "age_s": int(now - float(ca.get("at") or now)), "by": ca.get("by") or "", "tries": int(ca.get("tries") or 0)}
 
 
 def held_by(v):
@@ -3161,6 +3360,9 @@ def pending_cmd(as_json, show_text=False, queued_only=False, older_than=None, su
         print(f"{v['id']}  {v['state']:<9} {target_label({'target': v['target']})}  from {v['sender'] or '?'}  {v['age_s'] // 60}m old"
               + (f"  {v['outcome']}" if v["outcome"] else "")
               + (f"  [why: {v['look']['why']}]" if v["state"] == "queued" and isinstance(v.get("look"), dict) and v["look"].get("why") else "")
+              + "".join(f"  [{name} alert: {'pinged' if v[f'{name}_alert']['ok'] else 'PING FAILED, try ' + str(v[f'{name}_alert']['tries'])} "
+                        f"{v[f'{name}_alert']['age_s'] // 60}m ago]" for name in ("card", "busy")
+                        if v["state"] == "queued" and isinstance(v.get(f"{name}_alert"), dict))
               + (f"  | {v['text_preview']}" if show_text else ""))
     for e in ([] if as_json else expects):
         if e["state"] == "retired":

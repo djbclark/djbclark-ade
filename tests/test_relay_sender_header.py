@@ -22,6 +22,7 @@ PANE = "w2F:p45"
 WORKTREE = "djbclark-ade-baseline-ci-fixtures-wt"
 PASEO_AGENT = "eeeeeeee-0000-4000-8000-000000000005"
 REAL_FORCED_TAG = relay.forced_tag
+REAL_SESSIONS = fleet.sessions
 
 
 def codex_row(**kw: Any) -> dict[str, Any]:
@@ -154,6 +155,72 @@ class TestAncestorPane(fb.Harness):
                     row = fleet._rec(id=PANE, agent="codex")
                     fleet._from_herdr(row, agent)
                     self.assertEqual(row["self"], expect)
+
+
+class TestStalePaneEnvironment(fb.Harness):
+    """2026-11-02, live: an omp in herdr pane w20:p3 (cwd ~/src/bottom) had HERDR_PANE_ID=w2F:p2X in its environment, a pane id from before the pane
+    was moved, so no fleet row matched and relay refused with "cannot tell who is sending" (exit 4). The pane's own foreground processes
+    (`herdr pane process-info`) name the omp pid, which is an ancestor of the caller: that proves the pane without the environment. Fake ids only."""
+
+    OMP_PID, SHELL_PID, STALE = 39593, 1790, "w2F:p2X"
+    NOW_PANE = "w20:p3"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.envs: dict[int, dict[str, str]] = {self.OMP_PID: {"HERDR_PANE_ID": self.STALE}, self.SHELL_PID: {"HERDR_PANE_ID": self.STALE}}
+        self.asked: list[str] = []
+        self.procs = {self.NOW_PANE: ([{"pid": self.OMP_PID, "name": "omp", "argv": ["omp"], "argv0": "omp", "cwd": ""}], self.SHELL_PID),
+                      "w36:p3": ([{"pid": 96028, "name": "omp", "argv": ["omp"], "argv0": "omp", "cwd": ""}], 37472)}
+        agent = lambda pane: {"pane_id": pane, "tab_id": pane.split(":")[0] + ":t3", "workspace_id": pane.split(":")[0], "agent": "omp",  # noqa: E731
+                              "agent_status": "idle", "cwd": "/Users/djbclark/src/bottom"}
+        self.agents = [agent(self.NOW_PANE), agent("w36:p3")]
+
+        def pane_procs(pane: str) -> Any:
+            self.asked.append(pane)
+            return self.procs.get(pane, (None, None))
+        patches = [mock.patch.object(fleet, "herdr_json", lambda *a: {"agents": self.agents, "panes": []}),
+                   mock.patch.object(fleet, "pane_procs", pane_procs),
+                   mock.patch.object(fleet, "herdr_label", lambda kind, ident: ident),
+                   mock.patch.object(fleet, "_launched", lambda used: []),
+                   mock.patch.object(fleet, "_claude_sessions", lambda *a: []),
+                   mock.patch.object(fleet, "_pane_only", lambda *a: ([], [])),
+                   mock.patch.object(fleet, "_proc_scan", lambda *a: []),
+                   mock.patch.object(fleet, "_hermes_gateway", lambda: []),
+                   mock.patch.object(fleet, "_paseo_rows", lambda *a: []),
+                   mock.patch.object(fleet, "proc_table", lambda: {}),
+                   mock.patch.object(fleet, "mark_busy", lambda s, table: None),
+                   mock.patch.object(fleet._where, "env_of", lambda pid: self.envs.get(pid, {}))]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        fleet.ancestors = lambda: {self.SHELL_PID, self.OMP_PID, 5}
+        relay.own_cwd = lambda: "/Users/djbclark/src/bottom"
+        self.addCleanup(fleet._ANC_PANE.__setitem__, 0, None)
+
+    def test_an_omp_whose_environment_names_a_pane_that_no_longer_exists_still_resolves_as_the_sender(self) -> None:
+        rows = REAL_SESSIONS()
+        self.assertEqual([s["id"] for s in rows if s.get("self")], [self.NOW_PANE])
+        self.assertEqual(relay.sender_name(rows), f"omp {self.NOW_PANE} (bottom)")
+
+    def test_a_pane_whose_processes_are_not_above_the_caller_is_not_the_sender(self) -> None:
+        self.procs[self.NOW_PANE] = ([{"pid": 77777, "name": "omp"}], 77778)
+        rows = REAL_SESSIONS()
+        self.assertEqual([s["id"] for s in rows if s.get("self")], [])
+
+    def test_a_pane_the_environment_names_correctly_is_found_without_asking_herdr_for_processes(self) -> None:
+        self.envs = {self.OMP_PID: {"HERDR_PANE_ID": self.NOW_PANE}}
+        rows = REAL_SESSIONS()
+        self.assertEqual(([s["id"] for s in rows if s.get("self")], self.asked), ([self.NOW_PANE], []))
+
+    def test_a_caller_with_no_pane_in_its_environment_never_pays_a_process_probe_per_pane(self) -> None:
+        self.envs = {}
+        rows = REAL_SESSIONS()
+        self.assertEqual(([s["id"] for s in rows if s.get("self")], self.asked), ([], []))
+
+    def test_a_notice_sender_hides_its_ancestry_so_the_process_probe_does_not_run(self) -> None:
+        with relay.as_caller("relay", scrub=True):
+            rows = REAL_SESSIONS()
+        self.assertEqual(([s["id"] for s in rows if s.get("self")], self.asked), ([], []))
 
 
 class TestStoredLabel(fb.Harness):

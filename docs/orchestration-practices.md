@@ -125,6 +125,30 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    edit or failed commit must never be followed by a push or a review brief
    claiming the edit landed. Match only your own changelog entry, since other
    agents may also have pending PR-number placeholders.
+5. **Never block on a job longer than about 2 minutes unless the next step
+   depends on its result (2026-11-02).** An agent sat 10+ minutes in a blocking
+   `wait` on `gh pr checks --watch` with nothing depending on it, and the
+   operator had to interrupt. **Why it is worse than idle: an agent inside a
+   long blocking wait never goes idle, so it cannot receive any relayed
+   message** (`relay.py` defers a text to a working target until it is idle):
+   it is deaf as well as silent. On 2026-11-02 the lead's messages sat queued
+   for hours behind such waits and were read from relay's deferred folder by
+   hand. Do other work; if there is none, end the turn with a status line (what
+   runs, where its log is, what to check next) and let the result wake you.
+6. **Never wait on CI** (`gh pr checks --watch`, `gh run watch`). Report
+   "CI running" with the run URL and stop: `bin/pr-wait` and the lead read CI,
+   and a merge-ready decision needs no agent parked on it.
+7. **One progress line per round in a fix-and-review loop**: the head sha and
+   the finding count (`round 3: head 1a2b3c4, 2 findings`). A long serial
+   loop that prints nothing looks the same as a hang to a human reading the
+   pane.
+8. **A reply that cannot be delivered because its target waits on a question
+   or permission card is the operator's to unblock** (2026-11-02: a relay
+   waited 184 minutes behind a card, and the target's own reply to the lead
+   sat behind one too). `relay.py` defers the text behind the card as before,
+   and now sends ONE `hermes-ping` naming target, card, sender and message id
+   once it has waited 30 minutes (`RELAY_CARD_ALERT_S`, 0 = off). Report the
+   message as queued behind a card and move on; do not retry or poll it.
 
 ## 6. Checks: focused first, full suite before commit
 
