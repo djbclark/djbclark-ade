@@ -1,0 +1,101 @@
+---
+name: greptile
+description: Greptile (app.greptile.com) on this machine: run AI code reviews of a local branch with the Greptile CLI using the API key held in sudo-secretspec, read review status in scripts, and pick the right official Greptile skill for PR comment loops. Use when the user mentions Greptile, greptile.com, a Greptile review or score, @greptileai, or wants a second AI code review of a branch or PR.
+---
+
+# Greptile
+
+Greptile is an AI code-review service (repository graph, PR comments, a 0-5 confidence score). On this machine it is
+used through three surfaces; pick by task:
+
+| Task | Use |
+|---|---|
+| Review the current local branch before pushing | the Greptile CLI, below |
+| Fix the Greptile comments on an open PR, check its status checks and description | the official skill `check-pr` |
+| Loop: trigger a Greptile review, fix, re-review until 5/5 and zero comments | the official skill `greploop` |
+| Run a CLI review and summarize it (official wording) | the official skill `cli-review` |
+| Greptile MCP tools (custom context, comment search, reports) | not configured here; see MCP below |
+
+The three official skills come from [greptileai/skills](https://github.com/greptileai/skills) (MIT), installed unmodified
+with `npx skills add greptileai/skills -g` into `~/.agents/skills` (2026-11-01). Update them with `npx skills update`; never
+edit them in place.
+
+## Authentication: the key stays in sudo-secretspec
+
+The API key is `GREPTILE_API_KEY` in `sudo-secretspec` (stored 2026-11-01). The CLI reads that exact environment variable,
+so run every CLI command under `sudo-secretspec run`:
+
+```bash
+GREPTILE_NO_UPDATE_CHECK=1 sudo-secretspec run --reason "greptile review" -- greptile whoami
+# Signed in as djbclark@gmail.com (via GREPTILE_API_KEY)   organization: Freedom Included
+```
+
+1. **Never** `greptile login --api-key`: it writes a second copy of the key to `~/.greptile/`, outside the audited store.
+   Never pass the key as an argument (Greptile's docs say the same).
+2. `greptile login` (browser OAuth) is for a human's interactive use; agents use the key under `run`.
+3. If `whoami` fails under `run`, check the key's presence with the sudo-secretspec skill's length check; never print it.
+4. `GREPTILE_NO_UPDATE_CHECK=1` keeps the CLI from checking for updates on every run. The CLI is installed with
+   `brew install greptileai/tap/greptile` and tracks latest (`brew upgrade greptile`).
+
+## Review a local branch
+
+Run from the repository root of a branch with committed changes (uncommitted changes are ignored; the base is the default branch):
+
+```bash
+GREPTILE_NO_UPDATE_CHECK=1 sudo-secretspec run --reason "greptile review" -- greptile review --agent
+```
+
+| Flag | Effect |
+|---|---|
+| `--agent` (= `--text`) | plain-text findings for an agent; also the default when piped |
+| `--json` | machine-readable findings |
+| `-b, --branch BASE` | base branch other than the default |
+| `--instructions "TEXT"` | like an `@greptile TEXT` comment: focus the review |
+| `--resume` | continue the latest unfinished review |
+| `--plus` / `--apex` | higher review tier: **3 / 10 credits** instead of Base (prepaid credits). Use only when the user asks |
+| `--include PATHS` | send files the CLI held back as possibly sensitive; only after checking they hold no secret |
+
+A review takes minutes. Run it in the background with a time limit, and register the limit with `bin/deadline` once that
+tool is installed (`deadline run --budget 20m -- ...`).
+
+Check a commit's review in a hook or script; read the exit code, not the text:
+
+```bash
+sudo-secretspec run --reason "greptile status" -- greptile review status [--commit SHA] [--json]
+```
+
+| Exit | Meaning |
+|---|---|
+| 0 | completed review exists |
+| 1 | no review, signed out, or no `origin` |
+| 2 | invalid command, not a git repo, or unresolvable commit |
+| 3 | review still running |
+| 4 | latest review failed |
+| 5 | latest review cancelled |
+
+Other commands: `greptile review show [ID]` (reopen; lists recent reviews when piped), `greptile config [PATH]` (the
+effective review config: `.greptile/` folders, dashboard settings, org rules).
+
+## How Greptile relates to this repo's gates
+
+A Greptile review is an extra signal. It does not replace djbclark-ade's merge gates (adversary verdict marker, clean
+`bin/local-review`, `pr-wait` merge_ready; AGENTS.md "Code review"). Treat its findings like any reviewer's: fix real ones,
+say why for rejected ones.
+
+## MCP
+
+The Greptile MCP server is `https://api.greptile.com/mcp` (HTTP) and authenticates **only by OAuth** in the client
+(`claude mcp login greptile`, `codex mcp login greptile`). Do not configure the API key as a bearer header: Greptile's docs
+say a static `Authorization` header can block the OAuth sign-in. Adding the MCP server to a client is a toolchain change:
+ask djbclark first (`~/AGENTS.md` item 5).
+
+## Docs
+
+Index of every page (append `.md` to any page URL for raw Markdown): https://www.greptile.com/docs/llms.txt. Most useful:
+[CLI](https://www.greptile.com/docs/code-review/greptile-cli.md),
+[review tiers](https://www.greptile.com/docs/code-review/review-tiers.md),
+[.greptile/ config](https://www.greptile.com/docs/code-review/greptile-config.md),
+[MCP tools](https://www.greptile.com/docs/mcp/tools.md),
+[billing](https://www.greptile.com/docs/account/billing-seats.md).
+The older REST API reference (`docs.greptile.com/api-reference/...`: index, query and search repositories) now redirects to
+the overview (checked 2026-11-01): do not build new tooling on it; use the CLI or MCP.
