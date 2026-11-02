@@ -1401,6 +1401,9 @@ class Choice:
     alternatives: list[str] = field(default_factory=list)
     model: str = ""                 # "<model> [--effort L]" for acp-run
     kind: str = ""                  # required by acp-dispatch (2026-10-18)
+    # Set only when the service is repo-scoped and the caller's SEAT, not its repo, admitted it: the printed dispatch line then
+    # starts with ROUTE_SEAT=<seat>, because acp-dispatch derives the repo from -C and has no other way to learn the seat.
+    seat: str = ""
 
     @property
     def dispatch(self) -> str:
@@ -1408,13 +1411,14 @@ class Choice:
         agent = self.service.acp_agent
         extra = DISPATCH_EXTRA.get(agent, "")
         kind = f" --kind {self.kind}" if self.kind else ""
+        prefix = f"ROUTE_SEAT={shlex.quote(self.seat)} " if self.seat else ""
         if self.model:
             # Quote only the model id: suggest_model may append " --effort …".
             # zcode ids contain a backslash (builtin:zai-coding-plan\GLM-5.3).
             parts = self.model.split(None, 1)
             model = shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")
-            return f"acp-dispatch {agent} --model {model}{extra}{kind}"
-        return f"acp-dispatch {agent} --model <id from: acp-run {agent} --info>{kind}"
+            return f"{prefix}acp-dispatch {agent} --model {model}{extra}{kind}"
+        return f"{prefix}acp-dispatch {agent} --model <id from: acp-run {agent} --info>{kind}"
 
 
 # DISPATCH_EXTRA comes from [dispatch].extra in config/routing.toml.
@@ -1905,7 +1909,9 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
-                  kind=kind)
+                  kind=kind,
+                  seat=((seat or "").lower() if best.scope_block(repo, None) is not None and best.scope_block(None, seat) is None
+                        else ""))
 
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,

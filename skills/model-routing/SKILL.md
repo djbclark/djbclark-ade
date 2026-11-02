@@ -165,7 +165,9 @@ either list is eligible only for a caller whose repo (`route_agent.repo_of`: the
 worktree resolves to its repo; `--repo` overrides) or seat (`--seat`, else `$ROUTE_SEAT`) is on it, and is
 skipped as repo-scoped everywhere else: never a primary and never an alternative in `route`/`plan`, and
 `acp-dispatch` exits 2 (also for a Go advisory and a resume) even with `ACP_OPERATOR_APPROVED=route-override`,
-as with the cost gate. An unknown repo and no seat is out of scope. The Hermes seat sets `ROUTE_SEAT=hermes`.
+as with the cost gate. An unknown repo and no seat is out of scope. The Hermes seat sets `ROUTE_SEAT=hermes`;
+`acp-dispatch` keeps the seat in the job record, so an auto-resume or a reroute stays admitted, and a dispatch line
+that only the seat admitted is printed as `ROUTE_SEAT=hermes acp-dispatch ...`.
 `route_agent.py policy --md` prints the scope. This narrows the rules above (no code on opencode-go still
 holds in the scoped repo); the same two keys scope any other service, and cline/clinepass can be admitted by
 config alone once djbclark rules on its re-enable (its `never_route` / `operator_gated` entries are unchanged).

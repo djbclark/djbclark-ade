@@ -135,6 +135,13 @@ class TestPlanCli(unittest.TestCase):
         self.assertEqual(self.plan_names(env={"ROUTE_SEAT": "hermes"}), ["opencode-go"])
         self.assertEqual(self.plan_names(env={"ROUTE_SEAT": "dann"}), [None])
 
+    def test_the_dispatch_line_carries_the_seat_only_when_the_seat_admitted_it(self):
+        for kind in SCOPED_KINDS:
+            by_seat = r.route(kind, quota=ONLY_GO, repo=OTHER_REPO, seat="hermes")
+            self.assertTrue(by_seat.dispatch.startswith("ROUTE_SEAT=hermes acp-dispatch opencode "), by_seat.dispatch)
+            by_repo = r.route(kind, quota=ONLY_GO, repo=SCOPED_REPO, seat="hermes")
+            self.assertTrue(by_repo.dispatch.startswith("acp-dispatch opencode "), by_repo.dispatch)
+
 
 class TestDispatchScope(Base):
     @override
@@ -177,6 +184,27 @@ class TestDispatchScope(Base):
     def test_the_hermes_seat_dispatches_from_any_repo(self):
         r_ = self.go(self.repo, env={"ROUTE_SEAT": "hermes"})
         self.assertEqual(r_.returncode, 0, r_.stderr)
+
+    def test_the_seat_is_kept_in_the_record_and_survives_a_resume_without_the_env(self):
+        self.go(self.repo, env={"ROUTE_SEAT": "hermes", "FAKE_MODE": "timeout_wrapup"})
+        self.assertEqual(self.record()["seat"], "hermes")
+        self.assertEqual(self.record()["session_id"], "fake-session")
+        env = {k: v for k, v in os.environ.items() if k != "ROUTE_SEAT"} | self.base_env()
+        resumed = subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"),
+                                  "resume", str(self.out / "jobs" / "s1.json"), "--timeout", "0"],
+                                 check=False, capture_output=True, text=True, env=env)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(self.record()["seat"], "hermes")
+
+    def test_an_opencode_model_of_another_pool_is_not_scoped_as_go(self):
+        self.assertIn("repo-scoped", self.go(self.repo, "--dry-run").stderr)   # the Go model, from another repo
+        other = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"), "opencode",
+             "--model", "opencode-zen-free/big-free", "--name", "s2", "-p", "x", "-C", str(self.repo), "--out", str(self.out),
+             "--acp-run", str(self.fake), "--kind", "bulk", "--no-model-check", "--no-preflight", "--dry-run"],
+            check=False, capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items() if k != "ROUTE_SEAT"} | self.base_env())
+        self.assertNotIn("repo-scoped", other.stderr)
 
     def test_a_service_without_an_allow_list_is_unaffected(self):
         r_ = run(["zcode", "--model", "m1", "--name", "s1", "-p", "x", "-C", str(self.repo), "--out", str(self.out),
