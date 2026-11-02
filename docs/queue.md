@@ -1075,17 +1075,19 @@ orchestrator (claude sonnet, high), Jev `pick-seat`/`stuck-check`/`merge-gate` s
 the workspace adapter (cow + worktree). Pilot repo `djbclark-ade`, allowlist of small
 non-security tasks.
 
-## A read-only codex advisor ends on its first refused escalation (found 2026-10-19)
+## A read-only codex advisor ends on its first refused escalation (found 2026-10-19; fixed 2026-11-02)
 
-Under `acp-run codex --perm read-only` a shell command that needs network or writes is an
-escalation request; acp-run refuses it (correct) and codex-acp then ends the turn with
+Under `acp-run codex --perm read-only` a shell command that needs network or writes was an
+escalation request; acp-run refused it (correct) and codex-acp then ended the turn with
 `stopReason: cancelled` (exit 1, no report; `sf-research-codex2`: 520 s, 47 tools, 5.0M tokens
-lost when it asked to run `gh api repos/... rulesets`). Claude under read-only simply gets no
-Bash tool and carries on. Candidates: (1) on a refused request under `--perm read-only`, acp-run
-sends one follow-up prompt ("that command was refused; continue without it") instead of ending;
-(2) the read-only brief footer tells codex that any escalation ends the run; (3) both. Until
-decided, codex advisory reads run `--perm all` with the advisor tree check as the guard (as on
-2026-10-19 for sf-research-codex3).
+lost when it asked to run `gh api repos/... rulesets`; again tendcf v5-s1, 2026-11-02, 113 s, `gh run view`).
+Cause, verified 2026-11-02: codex-acp's `read-only` mode is approvalPolicy `on-request` plus a read-only
+sandbox, sent with every turn (a `CODEX_CONFIG` `approval_policy` is overridden), and the only reject
+option codex offers for a sandbox-blocked retry is its `cancel`, which aborts the turn. Fix: acp-run
+starts codex through `tools/acp-run/codex-never-ask-shim.cjs` (as `CODEX_PATH`), which forces
+approvalPolicy `never`, so the blocked command fails inside the sandbox and the model sees it; a turn
+codex still cancels after a refused request fails as `escalation-abort` and `acp-dispatch` names it.
+Codex advisory reads may run `--perm read-only` again.
 
 ## self-slash cannot drive omp (found 2026-10-13, needs an operator decision)
 

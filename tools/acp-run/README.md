@@ -39,7 +39,15 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
    WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no
    MCP servers, mode `default`); codex the `read-only` mode (its sandbox runs shell commands
-   unasked, so an unasked `execute` does not trip there, 2026-10-19); opencode a
+   unasked, so an unasked `execute` does not trip there, 2026-10-19) and it never asks: the
+   mode's own policy is `on-request`, sent with every turn, and a command the sandbox blocked
+   became a permission request whose only reject option makes codex abort the whole turn
+   (`stopReason: cancelled`, no report; found 2026-10-19, fixed 2026-11-02), so `codex-never-ask-shim.cjs`
+   (started as `CODEX_PATH` in front of the real `codex app-server`) forces `approvalPolicy: never`
+   and a blocked command fails inside the sandbox where the model sees it (a
+   `CODEX_CONFIG` `approval_policy` cannot do this: codex-acp overrides it on every turn). If a codex
+   turn still ends `cancelled` after a refused request, the run fails as `FAILED escalation-abort`
+   (exit 1) and `acp-dispatch` names it; opencode a
    `permission` block (`OPENCODE_CONFIG_CONTENT`) allowing read, glob, grep, list,
    webfetch, websearch and denying the rest; zcode `plan` mode with the backend session
    limited to Read, Glob, Grep, LS, WebFetch and WebSearch and Bash, Write, Edit and the

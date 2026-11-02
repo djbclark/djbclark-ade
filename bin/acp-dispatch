@@ -438,7 +438,7 @@ CODEX_READONLY_NOTE = """
 **This run is read-only (`--perm read-only`).** Your only tool is a shell in a read-only sandbox: read
 with `rg`, `cat`, `ls` and `git diff`, `git log` and `git show`, and run shell commands freely (the sandbox
 runs them without asking). You cannot change anything: you have no way to write `{report}` or create its
-`.done` marker, so do not try, and a write attempt stops the run. Put the whole report, in the shape the
+`.done` marker, so do not try (a shell write or network call fails inside the sandbox; a file-edit tool call stops the run). Put the whole report, in the shape the
 delivery contract describes, in your final message instead: an `acp-run` final message is not cut at
 4,000 characters, and acp-dispatch saves it to the report path and marks it done for you. This overrides
 items 1, 2 and 7 of the delivery contract.
@@ -3633,9 +3633,19 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
     if cls == "fake-tool-calls":
         extra = ("; the reply was tool calls printed as text because the agent had no tools: a slice that"
                  " must read needs --perm read-only (--perm deny gives it none)")
-    if "stop=cancelled" in text and not extra:
-        extra = (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
-                 " is a known cause, see dispatch-footer item 10]")
+    if cls == "escalation-abort" and not extra:
+        extra = ("; the agent ended the turn after acp-run refused one of its permission requests"
+                 " (codex aborts the whole turn on any rejected escalation; since 2026-11-02 codex under"
+                 " --perm read-only never asks, so this is --perm deny or an older acp-run)")
+    elif "stop=cancelled" in text and not extra:
+        denied = re.search(r"\bperm=\d+\+/([1-9]\d*)-", text)
+        if denied:
+            # acp-run before 2026-11-02 printed no escalation-abort class, only perm=0+/N-
+            extra = (f" [stop=cancelled with {denied.group(1)} permission request(s) refused: the agent aborted"
+                     " the turn on a rejected escalation (codex does), not a long foreground command]")
+        else:
+            extra = (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
+                     " is a known cause, see dispatch-footer item 10]")
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
             f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
 

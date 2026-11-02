@@ -39,7 +39,9 @@ the agent's file tools to access paths outside -C (e.g. bigteam report folders).
     read-only        the agent may read (tool kinds read, search, fetch) and nothing else:
                      what an advisory review needs (claude, codex, opencode, zcode; every
                      other agent is refused with exit 2); any other tool call trips the
-                     tripwire (exit 77)
+                     tripwire (exit 77). codex runs its read-only sandbox (no writes, no
+                     network) and NEVER asks: a command the sandbox blocks fails inside it and the
+                     model sees the failure (codex ends the whole turn on any refused escalation)
 acp-run runs yolo for every agent (operator 2026-10-14): there is no other
 permission-gating policy. The old --perm scoped:PATHS and --perm ask are still
 accepted but deprecated: they print one warning on stderr and run as --perm all.
@@ -639,7 +641,10 @@ DENY_ENV = {
 # Only agents with a verified equivalent are listed; main() refuses the rest with exit 2.
 #   claude   session/new _meta (READONLY_META): only the read-only built-in tools, the other
 #            options as under deny; mode "default".
-#   codex    the "read-only" session mode (codex-acp 2.2.2 `--info`: sandbox read-only).
+#   codex    the "read-only" session mode (codex-acp 2.2.2 `--info`: sandbox read-only), with
+#            codex-never-ask-shim.cjs as CODEX_PATH forcing approvalPolicy "never" (2026-11-02):
+#            the mode's on-request policy turned a sandbox-blocked command into a permission
+#            request, and refusing it made codex abort the whole turn (codex_never_ask_shim).
 #   opencode OPENCODE_CONFIG_CONTENT permission block: read/glob/grep/list/webfetch/websearch
 #            allow, everything else deny (schema https://opencode.ai/config.json).
 #   zcode    plan mode, plus the backend session's toolDenylist (the mutating tools) and
@@ -865,6 +870,45 @@ def zcode_denylist_shim(deny_dir, env, perm):
         (shim_dir / "provider").symlink_to(provider)
     env["ZCODE_ACP_RUN_REAL_BIN"] = str(Path(real).resolve())
     env["ZCODE_BIN"] = str(shim_dir / "zcode.cjs")
+
+
+CODEX_SHIM = Path(__file__).resolve().with_name("codex-never-ask-shim.cjs")
+
+
+def codex_real_bin(acp_cmd, env):
+    """The real `codex app-server` entry codex-acp would start: CODEX_PATH when the caller set one,
+    else the @openai/codex/bin/codex.js that codex-acp bundles, found by walking up from the
+    codex-acp on PATH (npm puts it in the package's own node_modules or a parent's). None if neither
+    exists."""
+    if env.get("CODEX_PATH"):
+        return env["CODEX_PATH"]
+    which = shutil.which(acp_cmd[0], path=env.get("PATH"))
+    if not which:
+        return None
+    for d in Path(os.path.realpath(which)).parents:
+        entry = d / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+        if entry.is_file():
+            return str(entry)
+    return None
+
+
+def codex_never_ask_shim(acp_cmd, env):
+    """Make codex's --perm read-only never ASK (2026-11-02). codex-acp's "read-only" mode is
+    approvalPolicy on-request plus a read-only sandbox, sent with every turn, and a command the
+    sandbox blocks then becomes a permission request whose only reject option (codex's `cancel`)
+    ends the whole turn with no report. codex-never-ask-shim.cjs, started as CODEX_PATH, forces
+    approvalPolicy "never" in the requests codex-acp sends, so a blocked command fails inside the
+    sandbox and the model sees the failure; the sandbox is untouched. Raises ConfigError, never runs
+    unguarded, if the real codex entry or the shim is missing."""
+    real = codex_real_bin(acp_cmd, env)
+    if not real or not Path(real).exists():
+        raise ConfigError("--perm read-only for codex needs the real codex entry (codex-acp's bundled "
+                          "@openai/codex/bin/codex.js) to put its never-ask shim in front, and none was "
+                          "found: set CODEX_PATH to it")
+    if not CODEX_SHIM.is_file() or not os.access(CODEX_SHIM, os.X_OK):
+        raise ConfigError(f"--perm read-only for codex needs {CODEX_SHIM} (executable), which is missing")
+    env["ACP_RUN_REAL_CODEX"] = str(Path(real).resolve())
+    env["CODEX_PATH"] = str(CODEX_SHIM)
 
 
 # --perm deny (not --interactive) also starts opencode and agy WITHOUT the user's
@@ -1667,6 +1711,7 @@ FAILURE_TEXT = {
     "tripwire": "a tool ran without a permission request under --perm deny or read-only",
     "config": "a requested model, effort or context was not applied",
     "fake-tool-calls": "the reply is tool calls printed as text, not an answer",
+    "escalation-abort": "the agent ended the turn (stop=cancelled) after a rejected permission request",
 }
 # A reply made of pseudo tool-call markup. A model that has no tools (--perm deny gives claude none)
 # and was told to read files prints the calls it would have made as text and ends its turn
@@ -1876,6 +1921,20 @@ def reply_failure(text, tools, stderr="", perm=None):
     return None
 
 
+def escalation_abort(stop_reason, cancelled, denied, last_denied):
+    """("escalation-abort", message) for a turn the AGENT ended with stop=cancelled (we sent no
+    session/cancel) after acp-run refused a permission request, else None. codex answers a refused
+    escalation by aborting the whole turn, report and all (2026-11-02, tendcf v5-s1: a read-only
+    review's refused `gh run view` ended it after 113 s, and acp-dispatch blamed a one-hour
+    foreground command). Named here so the run's failure says what happened."""
+    if stop_reason != "cancelled" or cancelled or not denied:
+        return None
+    what = f" (last: {last_denied!r})" if last_denied else ""
+    return "escalation-abort", (
+        f"{FAILURE_TEXT['escalation-abort']}: {denied} request(s) refused under the run's --perm{what};"
+        " codex aborts the turn on any rejected escalation, so no reply was written")
+
+
 def select_exit(stop_reason, text, tools, allowed, denied, perm, failure):
     """(exit code, error message or None) for a turn that finished (no ACP
     error, no timeout)."""
@@ -1972,6 +2031,7 @@ class RunClient(Client):
         self.requested, self.tool_kinds, self.tripped = set(), {}, None
         self.exempt_kinds = frozenset()  # --tripwire-exempt-kinds
         self.started_unasked = {}  # tool_call_id -> (monotonic start, title)
+        self.last_denied = None  # title of the tool call whose permission request was refused last
 
     def rec(self, kind, data):
         row = {"t": round(time.time(), 3), "kind": kind, "data": data}
@@ -2073,6 +2133,7 @@ class RunClient(Client):
             self.allowed += 1
         else:
             self.denied += 1
+            self.last_denied = getattr(tool_call, "title", None) or kind
         if pick is None:
             raise RequestError.invalid_params(
                 {"reason": "acp-run answers only with allow_once/reject_once options"}
@@ -3220,6 +3281,12 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                     else "",
                     getattr(a, "perm", None),
                 )
+                failure = client.last_failure = failure or escalation_abort(
+                    resp.stop_reason,
+                    getattr(client, "cancelled", False),
+                    getattr(client, "denied", 0),
+                    getattr(client, "last_denied", None),
+                )
                 if not (can_retry and failure and failure[0] == "transient"):
                     finished = True
                     break
@@ -4305,6 +4372,8 @@ async def run(a, log, err, log_path):
                 deny_dir = zcode_readonly_settings()
                 env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
                 zcode_denylist_shim(deny_dir, env, "read-only")
+            elif a.agent == "codex":
+                codex_never_ask_shim(cmd, env)
         elif a.perm == "deny":
             env.update(DENY_ENV.get(a.agent, {}))
             if a.agent == "zcode":
