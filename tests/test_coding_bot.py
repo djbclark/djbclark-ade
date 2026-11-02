@@ -708,7 +708,7 @@ class TestTransportSend(TransportBase):
         self.ssh_down.write_text("")
         r = self.cli("send", "task one")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("transport ssh:", r.stderr)
+        self.assertRegex(r.stderr, r"(transport|heartbeat probe on) ssh:")  # the liveness probe may meet the outage first
         self.assertTrue(self.in_origin("to-coding/ade-1.md"))
         self.assertEqual(Hook.seen[0]["body"]["paths"], ["git"])
         h = self.health()["ssh"]
@@ -1088,6 +1088,39 @@ class TestHeartbeat(ProtocolBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess(time.monotonic() - t0, 10, "the heartbeat probe waited on the down fallback")
 
+    def test_the_liveness_probe_reads_only_the_heartbeat_not_the_reply_backlog(self) -> None:
+        """246 review 2: before a send, only heartbeat.md is read; pending replies wait for sync/wait."""
+        self.cli("send", "--force", "earlier task")
+        for k in range(1, 6):
+            self.drop(f"ade-1--coding-{k}.md", f"[coding -> claude-code] id=coding-{k} re=ade-1\npartial {k}\n")
+        self.stale_health(7200)
+        self.heartbeat_ssh(1)
+        r = self.cli("send", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.inbox_records(), [], "the liveness probe drained the reply backlog")
+        self.assertTrue(time.time() - 300 < self.health()["bot_heartbeat"] < time.time())
+
+    def test_the_heartbeat_is_not_read_once_the_waited_answer_is_filed(self) -> None:
+        """246 review 2: a heartbeat read must not delay a waiter's ready answer."""
+        self.cli("send", "task")
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            read: list[str] = []
+            nonce = self.nonce()
+
+            class Fake:
+                name = "ssh"
+
+                def list_files(self) -> list[str]:
+                    return ["ade-1--coding-1.md", "heartbeat.md"]
+
+                def read(self, name: str) -> str:
+                    read.append(name)
+                    return f"[coding -> claude-code] id=coding-1 re=ade-1 nonce={nonce}\nok\nDONE"
+
+            mod.poll_transports([Fake()], prefer="ade-1")
+            self.assertEqual(read, ["ade-1--coding-1.md"])
+
 
 class TestDeadlines(ProtocolBase):
     WAIT = ("--timeout", "20", "--ack-timeout", "0.5")
@@ -1187,7 +1220,7 @@ class TestSweepBootstrap(Base):
         for needle in ('"Agent sweep"', "every 15 minutes", "heartbeat.md", '"Agent inbound"', "claim-<id>.md",
                        "nonce=<nonce>", "already handled", "Do NOT paste the webhook URL"):
             self.assertIn(needle, pasted)
-        self.assertEqual(pasted.count("Step 4, claim it before any work"), 1, "the routine instruction is quoted once")
+        self.assertEqual(pasted.count("Step 4, take the task exclusively"), 1, "the routine instruction is quoted once")
         for raw in ("{id}", "{sender}", "{nonce}"):
             self.assertNotIn(raw, pasted)
 
