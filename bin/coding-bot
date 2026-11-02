@@ -546,9 +546,10 @@ def clipboard_or_3(what: str, text: str) -> int:
 
 # ---------------------------------------------------------------- drop transports (ssh drop dir, git mailbox)
 class TransportError(Exception):
-    def __init__(self, msg: str, rc: int | None = None) -> None:
+    def __init__(self, msg: str, rc: int | None = None, stderr: str = "") -> None:
         super().__init__(msg)
         self.rc = rc  # the command's exit status, when it ran and failed
+        self.stderr = stderr  # its whole stderr (never printed: read only to classify the failure)
 
 
 class DeadlineError(TransportError):
@@ -630,7 +631,7 @@ def _finish(proc: subprocess.Popen, argv: list[str], stdin: str | None, timeout:
     r = subprocess.CompletedProcess(argv, proc.returncode, out, err)
     if r.returncode != 0:
         first = next((ln for ln in r.stderr.splitlines() if ln.strip()), "")
-        raise TransportError(f"{argv[0]} exited {r.returncode}: {clean(first)[:120]}", r.returncode)
+        raise TransportError(f"{argv[0]} exited {r.returncode}: {clean(first)[:120]}", r.returncode, r.stderr)
     return r.stdout
 
 
@@ -692,6 +693,16 @@ class Ssh:
             if e.rc not in (None, 255):  # ssh itself fails with 255; anything else is the remote `head` on this file
                 raise FileError(str(e), e.rc) from None
             raise
+
+
+# git push stderr that proves nothing was taken: the remote refused the update, or no connection was ever made
+_PUSH_REFUSED = re.compile(r"\[(?:remote )?rejected\]|Could not resolve host|Connection refused|Permission denied|"
+                           r"Authentication failed|Repository not found|does not appear to be a git repository|"
+                           r"No such file or directory|Host key verification failed", re.I)
+
+
+def push_refused(e: TransportError) -> bool:
+    return e.rc is not None and bool(_PUSH_REFUSED.search(e.stderr))
 
 
 class UncertainPut(TransportError):
@@ -856,15 +867,15 @@ class Git:
                 try:
                     self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
                 except TransportError as e:  # the bot pushed a reply meanwhile: rebase once and retry
-                    cut_push = e.rc is None
+                    cut_push = not push_refused(e)
                     stage = "sync"
                     self.sync_branch()
                     stage = "push"
                     self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
             except TransportError as e:
-                # a push cut off (timed out, killed: no exit status) may still land, e.g. behind a slow pre-receive hook,
-                # however the remote looks right now; only a push git itself refused is a definite "no"
-                cut_push = cut_push or (stage == "push" and e.rc is None)
+                # a push that failed in flight (timed out, a proxy's 504, a dropped connection) may still land, e.g. behind
+                # a slow pre-receive hook, however the remote looks right now; only an explicit refusal is a definite "no"
+                cut_push = cut_push or (stage == "push" and not push_refused(e))
                 # "not stored" must be true: either the push did land (seen on the remote) or the local commit goes, so a
                 # later send can never publish this message behind the sender's back
                 published = self._published(rel, content)

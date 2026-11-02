@@ -1913,6 +1913,23 @@ class TestAdversaryR1(TransportBase):
             with self.assertRaises(mod.UncertainPut):
                 git.put("ade-1", "[claude-code -> coding] id=ade-1 nonce=00\n\ntask\n")
 
+    def test_a_push_that_failed_in_flight_is_uncertain_but_a_refused_one_is_not(self) -> None:
+        """Review of b597d6a5: a proxy's 504 may hide a push that still lands; a [rejected] update surely did not."""
+        self.ssh_down.write_text("")
+        real_git = shutil.which("git")
+        wrapper = Path(self.tmp.name) / "bin/git"
+        with mock.patch.dict(os.environ, self.env):
+            mod = TestAtomicState.load(self)
+            git = next(t for t in mod.build_transports(mod.load_config()) if t.name == "git")
+            for n, (stderr, uncertain) in enumerate([("error: RPC failed; HTTP 504 curl 22", True),
+                                                     ("To origin\n ! [remote rejected] HEAD -> main (hook declined)", False)]):
+                wrapper.write_text(f'#!/bin/sh\ncase " $* " in *" push "*) printf "%s\\n" "{stderr}" >&2; exit 1;; esac\n'
+                                   f'exec "{real_git}" "$@"\n')
+                wrapper.chmod(0o755)
+                with self.assertRaises(mod.TransportError) as cm:
+                    git.put(f"ade-{n + 1}", f"[claude-code -> coding] id=ade-{n + 1} nonce=00\n\ntask\n")
+                self.assertIs(isinstance(cm.exception, mod.UncertainPut), uncertain, stderr)
+
     def test_a_git_push_that_cannot_be_checked_is_uncertain_not_failed(self) -> None:
         """Review of c9c751c7: a lost push ack plus a failing fetch must not be reported as 'nothing stored'."""
         self.ssh_down.write_text("")
