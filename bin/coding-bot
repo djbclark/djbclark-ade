@@ -909,8 +909,13 @@ def heartbeat_gate(force: bool) -> int:
 
     hb = last()
     if hb is None or time.time() - hb > stale_s:
-        if ts := build_transports(load_config()):
-            poll_transports(ts)
+        # one transport at a time, cheapest first, and stop as soon as a fresh heartbeat is in: a healthy primary must
+        # not wait behind a slow or down fallback
+        for t in ordered(build_transports(load_config())):
+            poll_transports([t])
+            hb = last()
+            if hb is not None and time.time() - hb <= stale_s:
+                break
         hb = last()
     if hb is None:
         print("coding-bot: no bot heartbeat has been seen yet; sending without the liveness check", file=sys.stderr)
@@ -1156,7 +1161,7 @@ def file_id(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-def poll_transports(ts: list, force: bool = False, prefer: str | None = None) -> int:
+def poll_transports(ts: list, force: bool = False, prefer: str | None = None, read_ok: set | None = None) -> int:
     """List each transport's bot files in numeric order: file the replies and claims not seen before and read the
     heartbeat (at most every HEARTBEAT_READ_EVERY_S per transport: the file is rewritten in place, so it is never marked
     seen). A transport in backoff is skipped unless `force`. A file is marked seen only once it is settled: a claim, a
@@ -1211,6 +1216,8 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None) ->
             print(f"coding-bot: transport {t.name}: {clean(str(e))[:120]}", file=sys.stderr)
             continue
         note_ok(t.name, time.monotonic() - t0, put=False)
+        if read_ok is not None:
+            read_ok.add(t.name)  # this transport's files were actually listed and read
     return new
 
 
@@ -1325,11 +1332,12 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                 # route needs to be checked (the next step polls the other one)
                 share = (deadline - now) / max(1, len(ts))
                 PROBE[:] = [now + max(1.0, share)]
+                read_ok: set[str] = set()
                 try:
-                    poll_transports([due], prefer=rid)
+                    poll_transports([due], prefer=rid, read_ok=read_ok)
                 finally:
                     PROBE.clear()
-                polled.add(due.name)
+                polled |= read_ok  # a transport skipped (backoff) or failed is still unchecked: no "not picked up" yet
                 nxt[due.name] = time.monotonic() + every * (1 if due.name == "ssh" else 3)
                 continue  # look at the inbox again at once
             time.sleep(min(0.5, max(0.05, min(deadline, ack_deadline or deadline) - time.monotonic())))

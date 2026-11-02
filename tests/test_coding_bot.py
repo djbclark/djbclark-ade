@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1074,6 +1075,19 @@ class TestHeartbeat(ProtocolBase):
         self.assertIn("no bot heartbeat has been seen yet", r.stderr)
         self.assertEqual(len(Hook.seen), 1)
 
+    def test_a_fresh_heartbeat_on_the_first_transport_skips_probing_the_other(self) -> None:
+        """246 review: the liveness probe stops once a fresh heartbeat is in; a down git must not delay the send."""
+        self.stale_health(7200)
+        self.heartbeat_ssh(1)
+        real_git = shutil.which("git")
+        slow = Path(self.tmp.name) / "bin/git"  # only a fetch is slow: `project()`'s rev-parse still answers at once
+        slow.write_text(f'#!/bin/sh\ncase " $* " in *" fetch "*) exec sleep 30;; esac\nexec "{real_git}" "$@"\n')
+        slow.chmod(0o755)
+        t0 = time.monotonic()
+        r = self.cli("send", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(time.monotonic() - t0, 10, "the heartbeat probe waited on the down fallback")
+
 
 class TestDeadlines(ProtocolBase):
     WAIT = ("--timeout", "20", "--ack-timeout", "0.5")
@@ -1090,6 +1104,18 @@ class TestDeadlines(ProtocolBase):
         self.assertRegex(ping, rf"\A{project}: coding-bot ade-1 not picked up after \d+ min\Z")
         self.assertEqual(self.cli("wait", "ade-1", *self.WAIT).returncode, 5)
         self.assertEqual(len(self.pings()), 1, "a second wait pinged again")
+
+    def test_a_transport_in_backoff_is_not_counted_as_checked_for_not_picked_up(self) -> None:
+        """246 review: with ssh in backoff its claim cannot be seen, so exit 5 must not be declared from git alone."""
+        self.cli("send", "task")
+        self.claim_ssh("ade-1", self.nonce())
+        far = time.time() + 600
+        h = self.health()
+        h.setdefault("ssh", {}).update(fails=3, down_until=far)
+        (self.state / "health.json").write_text(json.dumps(h))
+        w = self.cli("wait", "ade-1", "--timeout", "2", "--ack-timeout", "0.5")
+        self.assertEqual(w.returncode, 124, w.stderr)
+        self.assertNotIn("was not picked up", w.stderr)
 
     def test_claimed_but_never_answered_is_124_and_pings_once_under_its_own_kind(self) -> None:
         self.cli("send", "task")
