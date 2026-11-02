@@ -105,3 +105,19 @@ def own_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> str 
     if raw.isdigit() and int(raw) > 1 and anc and int(raw) not in anc:
         return None
     return registered_session_id(lambda: anc) or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip() or None
+
+
+def owner_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> str:
+    """The session id to record or compare as an OWNER (claims, job records, handoff listings): the registry's when CLAUDE_PID is a proven ancestor, else
+    CLAUDE_CODE_SESSION_ID as is, else "". Unlike own_session_id it never vetoes the env var: an orphaned background job (`nohup`, `setsid`, a tmux server
+    started from a Claude shell) is reparented to launchd, so its CLAUDE_PID is no ancestor, yet its env pair is correct and its work belongs to that
+    session. Only a /baton successor's inherited stale id is corrected (adversary, PR 248 r1b A1). One writer and one reader of an owner use this, so
+    they agree (A2)."""
+    return registered_session_id(ancestors) or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+
+
+if __name__ == "__main__":
+    # `python3 claude_identity.py`: the owner id for a shell script (skills/baton, skills/handoff), "" and exit 1 when there is none.
+    _sid = owner_session_id()
+    print(_sid)
+    raise SystemExit(0 if _sid else 1)

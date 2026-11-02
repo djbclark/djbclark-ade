@@ -226,6 +226,8 @@ class TestCardAlert(Base):
         inherits its card clock, so the same dialog is not told twice (local-review round 2)."""
         first = self.queue("first message to the peer")
         second = self.queue("second message to the peer")
+        for r in (first, second):    # a herdr pane target: only a pane dialog has no id (a Paseo card always has one)
+            self.patch_rec(r, target={"id": "w2N:pZ", "name": "pane-peer"})
         look = {"state": "card:picker", "why": "blocked on a question or permission prompt", "at": time.time()}
         long_ago = time.time() - 20000
         # the filed `look` is as old as the dialog (note_look files only a CHANGED look): the episode must not depend on its `at`
@@ -240,6 +242,33 @@ class TestCardAlert(Base):
         self.assertEqual(relay.rec_read(second)["card_since"], long_ago)
         relay.card_alert_step(second, relay.rec_read(second), look)
         self.assertEqual(len(self.ping_lines()), 1, self.ping_lines())
+
+    def test_a_daemon_restart_between_two_card_looks_does_not_restart_the_card_clock(self) -> None:
+        """r1b A4: a miss or an error says nothing about the card; only a look that saw the target idle or busy clears the clock."""
+        rid = self.queue()
+        seen: list[Any] = []
+        good = relay.paseo_probe
+
+        def restart() -> None:
+            relay.paseo_probe = lambda agent: (None, "error")    # the next look cannot ask
+            self.patch_rec(rid, card_since=time.time() - 1000)
+
+        def back() -> None:
+            seen.append(relay.rec_read(rid).get("card_since"))
+            relay.paseo_probe = good
+        self.drive(rid, [restart, back, self.nothing])
+        self.assertTrue(seen[0] and time.time() - seen[0] > 900, seen)    # still the old clock after the failed look
+        relay.paseo_probe = good
+
+    def test_a_paseo_look_without_a_card_id_never_alerts_and_never_claims(self) -> None:
+        """r1b A5b: a Paseo card always has an id; a look that names none (inspect and permit ls disagreeing) would key a second claim for it."""
+        rid = self.queue()
+        self.patch_rec(rid, card_since=time.time() - 100000)
+        relay.card_alert_step(rid, relay.rec_read(rid), {"state": "card:unknown", "why": "a card may have just appeared"})
+        self.assertEqual(self.ping_lines(), [])
+        self.assertFalse(relay.card_alerts_path().exists())
+        relay.card_alert_step(rid, relay.rec_read(rid), {"state": "card:question", "cards": [{"id": CARD_ID, "tool": "AskUserQuestion", "kind": "question"}]})
+        self.assertEqual(len(self.ping_lines()), 1)
 
     def test_a_garbage_threshold_means_the_default(self) -> None:
         for raw, expect in (("abc", 1800), ("", 1800), ("-5", 0), ("0", 0), ("90", 90)):

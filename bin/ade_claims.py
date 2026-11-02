@@ -432,9 +432,19 @@ def _own_claude_session_id() -> Optional[str]:
         if helper not in sys.path:
             sys.path.insert(0, helper)
         import claude_identity  # type: ignore[import-not-found]
-        return claude_identity.own_session_id()
+        return claude_identity.owner_session_id() or None
     except ImportError:
         return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
+def _owner_session_arg(given: Optional[str]) -> Optional[str]:
+    """--owner-session as the creator passed it, except that the raw $CLAUDE_CODE_SESSION_ID (what the skills pass) becomes the registry's id when they
+    differ: a /baton successor inherits its predecessor's, and a claim recorded under it would be refused to its own creator by caller_ident (PR 248 r1b
+    A2). Any other value is kept as given."""
+    raw = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if given and raw and given == raw:
+        return _own_claude_session_id() or given
+    return given
 
 
 def caller_ident(env: Optional[dict[str, str]] = None) -> Optional[str]:
@@ -2269,7 +2279,7 @@ def _cli(argv: Sequence[str]) -> int:
     try:
         if a.cmd == "new":
             c = make_claim(id=a.id, path=a.path, branch=a.branch, base_sha=a.base_sha, repo_origin=a.repo_origin,
-                           owner_record=a.owner_record, owner_session=a.owner_session, owner_agent=a.owner_agent,
+                           owner_record=a.owner_record, owner_session=_owner_session_arg(a.owner_session), owner_agent=a.owner_agent,
                            owner_model=a.owner_model, lead=a.lead, allow=a.allow, role=a.role, purpose=a.purpose,
                            created_by=a.created_by, inherited_dirt_patch=a.inherited_dirt_patch)
             if not a.no_pointer and find_workspace(a.path) is None:

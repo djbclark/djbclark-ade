@@ -136,6 +136,48 @@ class TestAutorenameAndAdeClaimsShareIt(Base):
         self.assertEqual(mod.caller_ident(), LIVE)
         self.assertEqual(mod.caller_ident({"CLAUDE_CODE_SESSION_ID": STALE}), STALE)    # an explicit mapping is read as given
 
+    def ade_claims(self) -> Any:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ade_claims_t2", Path(__file__).resolve().parent.parent / "bin" / "ade_claims.py")
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(mod)
+        os.environ.pop("ADE_CLAIM_ID", None)
+        os.environ.pop("PASEO_AGENT_ID", None)
+        return mod
+
+    def test_an_orphaned_background_job_keeps_the_owner_its_correct_env_pair_names(self) -> None:
+        """PR 248 adversary r1b A1: `nohup sh -c 'git push' &` from a Claude Bash call is reparented to launchd, so CLAUDE_PID is no ancestor, yet its
+        CLAUDE_CODE_SESSION_ID is right. caller_ident must not drop it (the owner's push was refused 77)."""
+        mod = self.ade_claims()
+        os.environ["CLAUDE_CODE_SESSION_ID"] = LIVE
+        self.ancestors = [86395]    # reparented: the Claude (222) is no ancestor
+        self.assertEqual(mod.caller_ident(os.environ), LIVE)
+        self.assertEqual(cid.owner_session_id(), LIVE)
+        self.register()    # even with a valid registry file for 222, a non-ancestor is not proof: the env pair stands
+        self.assertEqual(mod.caller_ident(os.environ), LIVE)
+
+    def test_a_successor_creating_its_claim_with_the_inherited_env_id_is_recorded_and_checked_under_its_own(self) -> None:
+        """r1b A2: `new --owner-session "$CLAUDE_CODE_SESSION_ID"` and the guard's caller_ident must agree in the /baton-successor case."""
+        mod = self.ade_claims()
+        self.register()
+        self.assertEqual(mod._owner_session_arg(STALE), LIVE)    # the raw env id becomes the registry's
+        self.assertEqual(mod._owner_session_arg("some-other-session"), "some-other-session")    # any other value is kept
+        self.assertEqual(mod._owner_session_arg(None), None)
+        self.assertEqual(mod.caller_ident(os.environ), LIVE)
+
+    def test_the_owner_helper_is_a_script_for_the_skills(self) -> None:
+        script = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder" / "claude_identity.py")
+        env = {"PATH": os.environ["PATH"], "CLAUDE_CODE_SESSION_ID": STALE}
+        def run(env: dict[str, str]) -> tuple[int, str]:    # Popen: the Base patches subprocess.run itself (one shared module object)
+            proc = subprocess.Popen([sys.executable, script], stdout=subprocess.PIPE, text=True, env=env)
+            out, _ = proc.communicate()
+            return proc.returncode, out.strip()
+        self.assertEqual(run(env), (0, STALE))    # no CLAUDE_PID: the env var
+        self.assertEqual(run({"PATH": os.environ["PATH"]}), (1, ""))
+
     def test_autorename_uses_the_same_helper(self) -> None:
         import importlib.util
         spec = importlib.util.spec_from_file_location("autorename_t", Path(__file__).resolve().parent.parent / "skills/autorename/autorename.py")

@@ -225,7 +225,7 @@ binary; never `hermes send`) naming the target (id, name, Paseo agent), the card
 card-alerts.json beside deferred.log under the state lock BEFORE the ping, keyed by target + card ids (a pane dialog has no id: its state word), so two deliverers or a
 later record behind the same card never ping twice, and a DIFFERENT card on the same target is a new alert. The ping runs in its own process group under a 45 s limit; a
 failure is logged (`card-alert-failed` in deferred.log), never fatal to the message, and retried no sooner than 10 min later, at most 3 tries. `--pending` shows
-`[card alert: pinged 14m ago]` or `[card alert: PING FAILED, try N ...]` (`card_alert` in --json), and `card-alert` lines are in `--status`'s events.
+`[card alert: pinged 14m ago]` or `[card alert: PING FAILED, try N ...]` (`card_alert` in --json), and `card-alert` lines are in `--status`'s events. Known limit: a Paseo card is told by its id, but a herdr pane dialog has none, so its claim is scoped to the episode (a deliverer's card clock, inherited by the next queued record while a look saw the dialog within the last 10 minutes); a dialog that outlives a gap longer than that between two records is told again.
 BUSY ALERT (2026-11-02, the same session: f111c672 stayed "working" for hours inside long blocking `wait` calls, so the lead's messages sat queued and it finally read
 them from the deferred folder by hand). A text for a target that is merely WORKING is deferred until it is idle, and an agent inside a blocking wait never idles: it is deaf as
 well as silent. After `RELAY_BUSY_ALERT_S` seconds (default 1800; 0 = off) of waiting the deliverer sends ONE notice back to the sender (through relay, as a failure notice
@@ -2603,6 +2603,8 @@ def card_alert_step(rid, rec, look):
         if now - since < after:
             return
         keys, has_ids = card_alert_keys(rec, look)
+        if not has_ids and (rec.get("target") or {}).get("paseo"):
+            return    # a Paseo card always has an id: a look without one (the `permit ls` / `inspect` disagreement) would key a second claim for the same card, so wait for the look that names it (r1b A5b)
         alert_once(rid, rec, keys, "card_alert", "card-alert", card_alert_text(rid, rec, look, now - since), fresh_after=0.0 if has_ids else since)
     except Exception as e:    # noqa: BLE001  # an alert is never worth a lost message
         defer_log(rec, "card-alert-error", f"{type(e).__name__}: {e}")
@@ -3047,8 +3049,8 @@ def deliver(rid):
                 time.sleep(wait)
                 continue
             card_n = 0
-            if rec.get("card_since"):
-                transition(rid, ("queued",), card_since=0)    # the card is gone: the next one starts its own clock
+            if rec.get("card_since") and poll[0] in ("idle", "busy"):    # the card is gone (a look that SAW the target without one); a miss or an error (a daemon restart) says nothing about the card, and clearing on it would restart the clock at every restart (PR 248 r1b A4)
+                transition(rid, ("queued",), card_since=0)
             if poll[0] != "idle":
                 last = poll[1] if poll[0] in ("miss", "error") else (look or {}).get("why") or "the target stayed busy"
                 if poll[0] == "busy":

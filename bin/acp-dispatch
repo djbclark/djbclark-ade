@@ -809,6 +809,20 @@ def _history_rows(paths: list[Path], agent: str, model: str | None, *,
                                        placeholder_models=PLACEHOLDER_MODELS, kind=kind, effort=effort, strict=strict)
 
 
+def owner_session_id() -> str:
+    """The Claude session that owns a dispatch record: the registry's id when CLAUDE_PID is a proven ancestor (a /baton successor inherits its
+    predecessor's CLAUDE_CODE_SESSION_ID), else the env var as before; the same resolver as ade_claims and the handoff listing, so an owner is written
+    and read the same way. The raw env var when the helper is missing."""
+    try:
+        helper = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder")
+        if helper not in sys.path:
+            sys.path.insert(0, helper)
+        import claude_identity
+        return claude_identity.owner_session_id()
+    except ImportError:
+        return os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+
+
 def session_finder_state() -> Path:
     """session-finder's launch state root (env SESSION_FINDER_STATE); same as fleet.STATE_DIR."""
     return Path(os.environ.get("SESSION_FINDER_STATE",
@@ -4840,7 +4854,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         "name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
         "task": a.task, "out": str(out), "brief": str(brief), "report": str(report), "done": str(done),
         "final": str(final), "stderr": str(stderr), "log": str(log), "record": str(record),
-        "owner": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "started": time.time(),
+        "owner": owner_session_id(), "started": time.time(),
         "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record, wait_timeout),
         "detached": bool(a.detach), "status": "running", "pid": None, "exit": None, "finished": None,
         "report_source": None, "lead": a.lead,
@@ -5451,7 +5465,7 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         "name": a.name, "agent": a.agent, "model": a.model, "dir": str(repo), "task": a.task, "out": str(out),
         "brief": str(brief), "report": str(report), "done": str(done), "final": str(final),
         "stderr": str(stderr), "log": str(log), "record": str(record),
-        "owner": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "started": time.time(),
+        "owner": owner_session_id(), "started": time.time(),
         "cmd": " ".join(shlex.quote(c) for c in ["python3", str(self_path), "execute", str(record)]),
         "rearm": rearm_cmd(done, record, wait_timeout), "detached": bool(a.detach), "status": "running",
         "pid": None, "exit": None, "finished": None, "report_source": None, "lead": a.lead,
