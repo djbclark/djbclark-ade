@@ -634,7 +634,11 @@ class TransportBase(Base):
             f"[ -e '{self.ssh_down}' ] && {{ echo 'ssh: connect failed' >&2; exit 255; }}\n"
             f"[ -e '{self.ssh_hang}' ] && exec sleep 30\n"
             f"[ -e '{self.ssh_slow}' ] && sleep \"$(cat '{self.ssh_slow}')\"\n"
-            'for last; do :; done\nexec sh -c "$last"\n')
+            'for last; do :; done\n'
+            # lost ack: the put really happens, then the connection "breaks"; with .blind the check cannot get through
+            f'case "$last" in *" ln "*) [ -e \'{root}/ssh.lostack\' ] && {{ sh -c "$last"; exit 255; }};; esac\n'
+            f'case "$last" in "head -c"*) [ -e \'{root}/ssh.blind\' ] && exit 255;; esac\n'
+            'exec sh -c "$last"\n')
         fake_ssh.chmod(0o755)
         self.origin, self.mailbox, self.bot = root / "origin.git", root / "mailbox", root / "bot-clone"
         self.git(root, "init", "--bare", "-q", "-b", "main", str(self.origin))
@@ -1693,6 +1697,25 @@ class TestAdversaryR1(TransportBase):
         self.cli("send", "second task")
         self.assertTrue(self.in_origin("to-coding/ade-2.md"))
         self.assertFalse(self.in_origin("to-coding/ade-1.md"), "the failed message was published by a later send")
+
+    def test_a_put_whose_ack_was_lost_but_landed_counts_as_stored(self) -> None:
+        """Review of c65e0025: a broken connection after the `ln` is checked, not declared 'not stored'."""
+        (Path(self.tmp.name) / "ssh.lostack").write_text("")
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Hook.seen[-1]["body"]["paths"], ["ssh"])
+        self.assertFalse(self.in_origin("to-coding/ade-1.md"), "a second copy went to git")
+
+    def test_an_unverifiable_put_is_uncertain_not_failed(self) -> None:
+        (Path(self.tmp.name) / "ssh.lostack").write_text("")
+        (Path(self.tmp.name) / "ssh.blind").write_text("")
+        self.cfg["git"]["remote"] = "no-such-remote"
+        self.write_cfg()
+        Hook.status = 500
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("delivery uncertain", r.stderr)
+        self.assertEqual(next(x for x in self.outbox() if x.get("result_for") == "ade-1")["stored"], "uncertain")
 
     def test_a_duplicate_check_runs_under_the_inbox_lock(self) -> None:
         """A7: `append(..., unless=...)` decides under the lock, so two pollers cannot both file one reply."""

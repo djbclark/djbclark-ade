@@ -52,6 +52,8 @@ never supersedes a final reply the bot numbered higher (coding-K order, compared
 
 A send whose message is stored in a transport but whose doorbell failed (after two retries on a 429, a 5xx or no answer)
 is a send: exit 0 with a warning, and `ask` keeps waiting; the bot's sweep picks the message up. Never send it again.
+So is one whose ssh connection broke mid-write when a check could not tell whether it landed ("delivery uncertain"): exit 0
+with a warning; `wait` exits 5 if nothing ever picks it up.
 
 Exit codes (acp-dispatch's where they overlap): 0 ok, 1 webhook failed and the message is stored nowhere, 2 usage or refused text, 3 clipboard
 tool unavailable, 4 the bot answered BLOCKED, 5 not picked up (no claim or reply within --ack-timeout), 6 the bot's
@@ -201,16 +203,18 @@ nonce equals the body's nonce exactly; a file with another nonce is someone else
 BLOCKED: message file does not match. If the body has NO `paths` field, `text` IS the whole message: use it as is, with the \
 body's nonce. If the body is missing, take the newest file in either place that has no claim file and no reply file yet, \
 with the nonce from its own first line. If you find nothing, reply BLOCKED: no message found.
-Step 3, skip what is already handled: if claim-<id>.md or any <id>--coding-*.md already exists in {DROP_DIR}/from-coding/ \
-or in from-coding/ of the git mailbox (git pull first), another run has it. Post "already handled <id>" in this chat and \
-stop; write nothing.
+Step 3, skip what is already handled: if a claim-<id>.md or an <id>--coding-*.md whose first line carries THIS message's \
+nonce already exists in {DROP_DIR}/from-coding/ or in from-coding/ of the git mailbox (git pull first), another run has \
+it: post "already handled <id>" in this chat and stop; write nothing. Files for the same id with ANOTHER nonce belong to an \
+older message that reused the id: ignore them (and write your files under new names: a claim file that exists with another \
+nonce is left alone, and your claim goes into claim-<id>.md only if that name is free, else into your reply alone).
 Step 4, take the task exclusively before any work, because a webhook run and the sweep can reach the same message at once: \
-run `mkdir -p {LOCK_DIR} && mkdir {LOCK_DIR}/<id>` on this computer (the second mkdir fails if the folder already exists, \
+run `mkdir -p {LOCK_DIR} && mkdir {LOCK_DIR}/<id>-<nonce>` on this computer (the second mkdir fails if the folder already exists, \
 so exactly one run can succeed, whichever route the message came by), and on success write the current UTC time into \
-{LOCK_DIR}/<id>/taken. If the mkdir fails, another run has the task, UNLESS that run died: if there is still no \
-claim-<id>.md and no <id>--coding-*.md anywhere, try to take over a lock more than 2 hours old with this ONE command, \
+{LOCK_DIR}/<id>-<nonce>/taken. If the mkdir fails, another run has the task, UNLESS that run died: if there is still no \
+claim-<id>.md and no <id>--coding-*.md with this nonce anywhere, try to take over a lock more than 2 hours old with this ONE command, \
 which serializes every takeover and re-checks the age inside it (so a lock another run just took is never taken again): \
-`flock {LOCK_DIR}/.reclaim sh -c 'd={LOCK_DIR}/<id>; [ -n "$(find "$d" -maxdepth 0 -mmin +120)" ] && mv "$d" "$d.stale-$$" \
+`flock {LOCK_DIR}/.reclaim sh -c 'd={LOCK_DIR}/<id>-<nonce>; [ -n "$(find "$d" -maxdepth 0 -mmin +120)" ] && mv "$d" "$d.stale-$$" \
 && mkdir "$d"'`. If it exits 0 you hold the task; otherwise post "already handled <id>" and stop. Only after you hold the \
 task, write one new file claim-<id>.md with the single line `claimed <id> by coding-<n> at <the current UTC time, ISO 8601> nonce=<nonce>` (n \
 is the number your reply will use) to BOTH {DROP_DIR}/from-coding/ and from-coding/ of the git mailbox (commit and push), \
@@ -627,8 +631,21 @@ class Ssh:
         # written to a dot file, then hard-linked to its name: the bot never reads half a message, and `ln` (unlike `mv`)
         # fails when the name exists, so a colliding id never replaces someone else's message
         t = f"{d}/.{f}.$$.tmp"
-        run_cmd(self._argv(f"umask 022; cat > {t} && ln {t} {d}/{f}; rc=$?; rm -f {t}; exit $rc"), stdin=content,
-                timeout=SSH_TIMEOUT_S)
+        try:
+            run_cmd(self._argv(f"umask 022; cat > {t} && ln {t} {d}/{f}; rc=$?; rm -f {t}; exit $rc"), stdin=content,
+                    timeout=SSH_TIMEOUT_S)
+        except DeadlineError:
+            raise
+        except TransportError as e:
+            if e.rc not in (None, 255):
+                raise  # the remote command itself said no (the name exists, a full disk): nothing was stored
+            # the connection broke: the `ln` may have landed. Look once; if we cannot tell, say so instead of "not stored"
+            try:
+                landed = run_cmd(self._argv(f"head -c {len(content.encode()) + 1} -- {d}/{f}"), timeout=SSH_TIMEOUT_S) == content
+            except TransportError:
+                raise UncertainPut(f"{e}; whether {f} landed is unknown") from None
+            if not landed:
+                raise
 
     def list_files(self) -> list[str]:
         """The reply, claim and heartbeat files in from_dir. A plain listing, filtered here: a pipeline with `|| true`
@@ -648,6 +665,10 @@ class Ssh:
             if e.rc not in (None, 255):  # ssh itself fails with 255; anything else is the remote `head` on this file
                 raise FileError(str(e), e.rc) from None
             raise
+
+
+class UncertainPut(TransportError):
+    """The connection broke mid-put and a check could not tell whether the message landed: it may still run."""
 
 
 class OversizeReply(TransportError):
@@ -915,11 +936,12 @@ def ordered(ts: list, now: float | None = None) -> list:
     return up + down
 
 
-def put_message(ts: list, mid: str, content: str) -> tuple[str | None, float, list[str]]:
-    """Write the message through the first transport that takes it: (name or None, seconds, failure notes). A transport
-    in backoff is not tried at all (its backoff ending is what lets it compete again), so a full outage costs no
-    connection timeouts and the caller falls back to the webhook at once."""
+def put_message(ts: list, mid: str, content: str) -> tuple[str | None, float, list[str], str | None]:
+    """Write the message through the first transport that takes it: (name or None, seconds, failure notes, the name of a
+    transport where it MAY have landed). A transport in backoff is not tried at all (its backoff ending is what lets it
+    compete again), so a full outage costs no connection timeouts and the caller falls back to the webhook at once."""
     notes: list[str] = []
+    uncertain: str | None = None
     health, now = read_json("health.json"), time.time()
     for t in ordered(ts, now):
         if in_backoff(t.name, health, now):
@@ -929,13 +951,15 @@ def put_message(ts: list, mid: str, content: str) -> tuple[str | None, float, li
         try:
             t.put(mid, content)
         except TransportError as e:
+            if isinstance(e, UncertainPut):
+                uncertain = t.name
             note_fail(t.name, str(e))
             notes.append(f"{t.name}: {clean(str(e))[:120]}")
             continue
         secs = time.monotonic() - t0
         note_ok(t.name, secs)
-        return t.name, secs, notes
-    return None, 0.0, notes
+        return t.name, secs, notes, uncertain
+    return None, 0.0, notes, uncertain
 
 
 def message_file(a: argparse.Namespace, mid: str, text: str, nonce: str | None = None) -> str:
@@ -1013,7 +1037,7 @@ def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None,
         return gate, ""
     # Record first: the id is allocated under the lock, and a send that dies mid-flight still shows.
     mid = append("outbox.jsonl", {**base, "via": "webhook"}, number=ID_PREFIX)
-    via, secs, notes = put_message(build_transports(load_config()), mid, message_file(a, mid, text, nonce))
+    via, secs, notes, uncertain = put_message(build_transports(load_config()), mid, message_file(a, mid, text, nonce))
     payload = {k: base[k] for k in ("from", "project", "re", "nonce")} | {"id": mid}
     if via:
         payload["text"] = (f"New message {mid} from {a.sender} ({project()}). Read {mid}.md ({via}); "
@@ -1024,9 +1048,15 @@ def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None,
     ok, detail = ring(url, key, payload)
     where = f" via {via} {secs:.1f}s" if via else ""
     append("outbox.jsonl", {"result_for": mid, "ok": ok, "detail": detail + where, "put": via, "put_s": round(secs, 2),
-                            "put_failures": notes, "stored": bool(via)})
+                            "put_failures": notes, "stored": True if via else ("uncertain" if uncertain else False)})
     for n in notes:
         print(f"coding-bot: transport {n}", file=sys.stderr)
+    if not ok and not via and uncertain:
+        # it may be sitting in the drop, where the sweep would find it: telling the caller "nothing stored" invites a second
+        # copy of the task under another id. `wait` reports exit 5 if nothing ever picks it up.
+        print(f"{mid}: delivery uncertain: the {uncertain} connection broke mid-write and the doorbell failed ({detail}). "
+              f"Do NOT send it again; `coding-bot wait {mid}` (exit 5 means it was never picked up).", file=sys.stderr)
+        return 0, mid
     if not ok and via:
         # the message is stored durably and the bot's 15-minute sweep will pick it up: that is a send, not a failure.
         # Sending it again would run the task twice under two ids.
