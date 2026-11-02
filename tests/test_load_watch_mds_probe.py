@@ -147,6 +147,15 @@ def test_mds_peers_runs_sudo_n_on_the_helper_only_and_filters_its_output():
     assert _peers_with(boom) is None
 
 
+def test_a_long_mds_cooldown_survives_the_prune():
+    lw = load_module()
+    day = 24 * 3600.0
+    lw.COOLDOWN_S, lw.MDS_COOLDOWN_S = 6 * 3600.0, day  # LW_MDS_COOLDOWN_S above LW_COOLDOWN_H
+    kept = lw.prune_cooldowns({"mds": 0.0, "nocpu": 0.0, "churn": 5 * 3600.0}, 7 * 3600.0)
+    assert kept == {"mds": 0.0, "churn": 5 * 3600.0}  # mds held for its own day, the others for COOLDOWN_S
+    assert "mds" not in lw.prune_cooldowns({"mds": 0.0}, day + 1)
+
+
 def test_status_prints_the_mds_cooldown_as_thirty_minutes():
     lw = load_module()
     src = LW.read_text()

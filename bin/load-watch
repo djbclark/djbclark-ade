@@ -1229,6 +1229,12 @@ def mds_probe(st, t, table, dry):
     log(line)
     cd["mds"] = t
 
+def prune_cooldowns(cd, t):
+    """Drop cooldown stamps older than their hold: COOLDOWN_S, or longer for a key whose own hold is longer
+    (the mds probe's LW_MDS_COOLDOWN_S can exceed LW_COOLDOWN_H; pruned early it would log again at once)."""
+    own = {"mds": MDS_COOLDOWN_S}
+    return {k: v for k, v in cd.items() if t - v < max(COOLDOWN_S, own.get(k, 0))}
+
 def cmd_sample(a):
     st = load_state()
     t = now()
@@ -1262,7 +1268,7 @@ def cmd_sample(a):
         st["samples"] = [x for x in st.get("samples", []) if x["t"] >= t - SUSTAIN_S] + [{"t": t, "d": d}]
         st["streak"] = st.get("streak", 0) + 1
     st["load1"] = load1
-    st["cooldown"] = {k: v for k, v in st.get("cooldown", {}).items() if t - v < COOLDOWN_S}
+    st["cooldown"] = prune_cooldowns(st.get("cooldown", {}), t)
     try:
         churn_alert(st, t, table, a.dry_run)
     except Exception as e:  # noqa: BLE001
