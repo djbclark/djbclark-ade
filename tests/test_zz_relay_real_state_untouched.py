@@ -30,3 +30,14 @@ def test_the_links_ledger_never_points_at_the_real_state() -> None:
     import fleet  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
     real = conftest.REAL_RELAY_DIR.resolve()
     assert real not in (fleet.LINKS_FILE.resolve(), *fleet.LINKS_FILE.resolve().parents)
+
+
+def test_a_freshly_loaded_relay_keeps_its_question_ledger_and_operator_token_out_of_the_real_state() -> None:
+    sys.path.insert(0, str(SF))
+    spec = importlib.util.spec_from_file_location("relay_guard_probe_asks", SF / "relay.py")
+    assert spec and spec.loader
+    relay = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(relay)
+    real = conftest.REAL_RELAY_DIR.resolve()
+    for path in (relay.ask_root(), relay.operator_token_path()):
+        assert real not in (path.resolve(), *path.resolve().parents)

@@ -398,6 +398,32 @@ Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
 bypass a permission denial; grok is excluded (2026-10-06).
 
+## The question ledger: `--ask`, `--inbox`, `--answer`, `--withdraw` (2026-11-02, operator: "Ledger, then Paseo Decisions screen")
+
+A decision for a lead is a RECORD the lead reads when it chooses, never text typed into its turn. A lead on a card or in a turn cannot be sent text, so every reply to it
+queued (cap 20) and the only way to free the queue was `--cancel`, which destroys the text. One 0600 file per question, `~/.local/state/relay/asks/q-YYYYMMDD-HHMMSS-xxxxxx.json`
+(`asks` is a sibling of the deferred directory, so `RELAY_DEFER_DIR` moves it), written atomically under `.ask.lock`; `asks.log` beside it holds one line per event, never the question.
+Fields: `v` 1, `id`, `project` (the asker's cwd basename), `from` {ident, label, paseo, fleet}, `to` {id, paseo, name}, `question`, `options` (2 to 6, each at most 200 characters), `recommend`
+(1-based, 0 none), `created`, `expires` (6 h; `--defer-for S`, at most 24 h), `state` (`open` | `seen` | `answered` | `withdrawn` | `expired`), `seen_at`, `seen_by`,
+`answer` {pick, text, note, by, via, at, delivery} (null until answered), `nudge` (the wake-up record's id), `nonce` (a per-question secret, `secrets.token_urlsafe(16)`).
+
+1. `relay.py --ask LEAD "question" | --message-file PATH|- --option A --option B [--recommend N] [--defer-for S] [--json]`: writes the record, opens your `--expect-ack` under the same id
+   (so `--sweep` says OVERDUE and ASSUMED LOST as for any peer question), and queues ONE wake-up text to the lead (`kind: nudge`, collapsed per target, outside the per-target, per-sender
+   and total caps, no failure notice). A card on the lead does not stop it: nothing is typed into the lead. Exit 2: no identifiable sender, this session, fewer than 2 or more than 6 options, an
+   option over 200 or a question over 2000 characters, or a send option (`--no-defer`, `--plan`, `--idle`, `--steer`, `--via`, `--expect-ack`, `--fyi`, `--needs-reply`, `--ack`, `--no-ack`). Never wait or poll for the answer.
+2. `relay.py --inbox [--wait S] [--all] [--json]` (the lead): its questions oldest first, in full; `open` becomes `seen` (`seen_by` = your id). A withdrawn one is shown once. `--all` adds the last day's finished ones, read
+   only. `--wait S` returns at once when an `open` question exists, else polls every 5 s; exit 0 something printed, 1 nothing, 124 timed out. `--json` is a list of records without their nonce. A caller with no session
+   reads every question and changes nothing.
+3. `relay.py --answer q-ID N [--note TEXT]`: the addressed lead, or the operator: `--nonce X --operator-token-file PATH [--via-label L]` (the record's nonce AND a file holding the operator token,
+   `~/.local/state/relay/operator.token`, 0600, made by relay on the first question; a caller with no session is NOT the operator). `answered` is written first (the commit point); the asker then gets the line
+   `ack q-ID pick N: <option text>[ — note]` through the ordinary send path (queued when it is working; an operator's goes out as `[relay from operator]`). Exit 0 delivered or handed to its route unproven (a Paseo agent has no transcript to prove it), 1 queued or failed (the
+   answer stays in the record: `--inbox --all`), 2 not allowed, unknown id or N outside 1..options (nothing written), 10 already answered (prints the first answer), 11 withdrawn or expired. The asker acts only on a line whose id and
+   option text match its open question; the first `ack q-ID` wins.
+4. `relay.py --withdraw q-ID`: the asker only (exit 2 otherwise); it retires the asker's expectation.
+5. `--cancel ID` refuses (exit 2) a queued record addressed to the caller; `--pending` lists questions as `kind: ask` rows (never the question, except as `--text`'s clipped preview); `--sweep` expires live ones
+   past `expires` and prunes final ones after a week (`asks: N expired, M pruned`).
+
+
 ## Verified peer messaging (2026-10-25, standing order 10; docs/queue.md "Verified peer messaging")
 
 Proof, not conversation: delivery proof (the text reached the target's transcript) is mechanical and needs no reply; a reply is required

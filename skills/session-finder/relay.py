@@ -7,6 +7,12 @@
         (the deferred messages and expected acks, below; --retire closes an expectation that will never be answered)
     relay.py --transfer-expectations OLD_SENDER [--id TOKEN ...] [--json]
         (settles old acks before transfer; exit 1 with missing for explicit tokens not transferred, even if acked)
+    relay.py --ask LEAD "<question>" | --message-file PATH|- --option A --option B [--option ...] [--recommend N] [--defer-for S] [--json]
+    relay.py --inbox [--wait S] [--all] [--json]  |  --answer Q-ID N [--note TEXT] [--nonce X --operator-token-file PATH [--via-label L]]  |  --withdraw Q-ID
+        (the question ledger, 2026-11-02: a decision for a lead is a record under ~/.local/state/relay/asks/, never text typed into its turn; the lead reads it with
+        --inbox and answers with --answer, and the asker gets `ack Q-ID pick N: <option>`. --ask exit 2 refused; --inbox exit 0 printed, 1 nothing, 124 timed out;
+        --answer exit 0 delivered or handed to its route unproven, 1 queued or failed (the answer stays recorded), 2 not allowed or no such option, 10 already answered,
+        11 withdrawn or expired. Only the addressed lead, or the operator with the question's nonce AND the operator token file, answers. Detail: skills/session-finder/SKILL.md)
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it; a dispatch record is
                                            the exact path of an acp-dispatch job file, e.g. /x/jobs/a.json: route 2 below)
@@ -327,12 +333,14 @@ import contextlib
 import datetime
 import fcntl
 import hashlib
+import hmac
 import io
 import json
 import math
 import os
 import random
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -342,6 +350,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import uuid
 from pathlib import Path
 
@@ -2355,6 +2364,20 @@ NOTICE_LIFE = 3600         # a failure notice is deferred for an hour at most
 DEFER_SENDING_MAX = 15 * 60    # a record `sending` this long is failed "unverified": it must not block its target's queue
 DEFER_PER_TARGET, DEFER_PER_SENDER, DEFER_TOTAL = 20, 20, 100    # queued or sending records; over a bound a send is refused
 DEFER_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
+# ---- the question ledger (2026-11-02, the operator: "Ledger, then Paseo Decisions screen") ---------------------------------
+# A decision for a lead is a RECORD the lead reads when it chooses (`--inbox`), never text typed into its turn: a lead on a card or in a
+# turn cannot be sent text, so every reply to it queued (cap 20) until it reached a state it never reaches while leading.
+# the ledger directory is `ask_root()`: a sibling of the deferred directory, derived at call time so RELAY_DEFER_DIR and a test's pinned DEFER_DIR move it
+ASK_ID = re.compile(r"q-\d{8}-\d{6}-[0-9a-f]{6}")
+ASK_OPTIONS = (2, 6)       # fewest and most options of one question
+ASK_OPTION_MAX, ASK_QUESTION_MAX = 200, 2000
+ASK_FINAL = ("answered", "withdrawn", "expired")
+ASK_LIVE = ("open", "seen")
+ASK_RECORD_VERSION = 1
+ASK_ANSWER_EXITS = {"answered": 10, "withdrawn": 11, "expired": 11}    # the exit of `--answer` on a question that is no longer open (helm.py's ANSWERED/CHANGED codes)
+NUDGE_TEXT = "inbox: a question is waiting for you. Run: relay.py --inbox"
+OPERATOR_LABEL = "operator"
+VIA_LABEL_OK = re.compile(r"[A-Za-z0-9._-]{1,40}")
 DEFER_FINAL = ("delivered", "failed", "expired", "cancelled")
 UNVERIFIED_WHY = "unverified, do not resend; check its pane"
 MALFORMED_SHAPE_WHY = "the record's stored shape.expect is malformed, so it was not re-sent: requeue the message"
@@ -2362,6 +2385,8 @@ LABEL_OK = re.compile(rf"[\u2026A-Za-z0-9._:() -]{{1,{LABEL_MAX}}}")    # what s
 BUSY = {"hit": False}      # main sets it when it refuses because the target is busy (the deliverer then keeps waiting)
 SENDER_OVERRIDE = [None]   # the label a deliverer sends under (the one stored in the record)
 NOTICE = [False]           # set while a failure notice is sent: a busy target may take it as a `kind: notice` record (defer_send)
+NUDGE = [False]            # set while an ask's wake-up text is queued: a `kind: nudge` record, one per target, outside every cap (defer_send)
+OPERATOR = [False]         # set while the operator's answer to an ask is sent: a queued copy goes out under the label `operator`, with no session behind it (defer_send)
 # A target blocked on a permission or question card (2026-10-28, djbclark: "a backoff-retry scheme when we can't relay a message due to
 # that"): the text is queued like a busy target's, never typed into the card, and the deliverer looks again at capped exponential
 # intervals with full jitter (Marc Brooker, AWS Architecture Blog, "Exponential Backoff And Jitter", 2015): a card waits for a
@@ -2757,25 +2782,26 @@ def defer_log(rec, state, why=""):
 
 
 @contextlib.contextmanager
-def as_caller(label, scrub=False, notice=False):
+def as_caller(label, scrub=False, notice=False, operator=False):
     """Send under the stored sender LABEL; SCRUB also hides every id of the session, so a notice to the original
     sender is not refused as 'that is this session' and is not labelled as that agent's own message; NOTICE lets a
-    busy target take the text as a `kind: notice` record (defer_send)."""
+    busy target take the text as a `kind: notice` record (defer_send); OPERATOR lets a busy target take the operator's answer to an
+    ask as a record under the label `operator` (defer_send)."""
     saved = {k: os.environ.pop(k) for k in SELF_IDS if scrub and k in os.environ}
-    SENDER_OVERRIDE[0], NOTICE[0] = label, notice
+    SENDER_OVERRIDE[0], NOTICE[0], OPERATOR[0] = label, notice, operator
     fleet.ANCESTOR_SELF[0] = not scrub    # a scrubbed sender is nobody's child either: no ancestor's pane or Paseo agent is its own
     try:
         yield
     finally:
-        SENDER_OVERRIDE[0], NOTICE[0] = None, False
+        SENDER_OVERRIDE[0], NOTICE[0], OPERATOR[0] = None, False, False
         fleet.ANCESTOR_SELF[0] = True
         os.environ.update(saved)
 
 
-def run_captured(argv, sender, scrub=False, notice=False):
+def run_captured(argv, sender, scrub=False, notice=False, operator=False):
     """(rc, last line of its output) of a relay run of ARGV inside this process, as SENDER."""
     out, err = io.StringIO(), io.StringIO()
-    with as_caller(sender, scrub, notice), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    with as_caller(sender, scrub, notice, operator), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         rc = main(argv, sweep=False)
     lines = [ln for ln in (err.getvalue() + out.getvalue()).splitlines() if ln.strip()]
     return rc, fleet.clip(lines[-1].strip(), 400) if lines else ""
@@ -2809,8 +2835,8 @@ def send_notice(rid):
 
 
 def owes_notice(rec):
-    """A failed or expired record owes its sender a notice, unless it is itself a notice (never a notice loop) or its sender is unknown."""
-    return bool(rec.get("sender_ident")) and rec.get("kind") != "notice"
+    """A failed or expired record owes its sender a notice, unless it is itself a notice or a nudge (never a notice loop) or its sender is unknown."""
+    return bool(rec.get("sender_ident")) and rec.get("kind") not in ("notice", "nudge")
 
 
 def finish(rid, state, why, allowed=("queued", "sending"), notify="now"):
@@ -3209,7 +3235,7 @@ def resolve_deferred_ack(rec):
     caller is the one recorded at ENQUEUE (`ack_caller`: the fleet's `self` row of the process that queued it), never a name read from the text.
     A record without it (an older one, a notice) resolves nothing. Best effort: the message is out, so a failure here never changes its outcome."""
     t, c = rec.get("target"), rec.get("ack_caller")
-    if rec.get("kind") == "notice" or not (isinstance(t, dict) and isinstance(c, dict) and t.get("paseo") and isinstance(t.get("id"), str)
+    if rec.get("kind") in ("notice", "nudge") or not (isinstance(t, dict) and isinstance(c, dict) and t.get("paseo") and isinstance(t.get("id"), str)
                                            and isinstance(c.get("id"), str) and isinstance(rec.get("text"), str)):
         return
     try:
@@ -3227,6 +3253,30 @@ def queued_acks(text, s, me, leads=None):
     return [r["id"] for r in expect_snapshot() if r.get("state") == "open" and r.get("sender") == s["id"]
             and same_sid(r.get("sender_sid"), s.get("sid")) and acks(r["id"], leads) and is_target_of(r, me)]
 
+def sender_identity(listed):
+    """(me, sender_paseo, ident, hops, label, unreachable) of the session this process runs in, as `defer_send` records it (and `--ask`, `--withdraw` and `--answer`
+    name it: one identity path, never a second read of the environment). ME is the row `sender_row` chose (`{}` for none), SENDER_PASEO the verified Paseo id
+    (hosted by Paseo, or the row's own), IDENT the id a notice or an answer reaches it by, LABEL the sender label, UNREACHABLE true for a nested agent that has no
+    channel, transcript or Paseo id of its own (it is refused, not given its parent's name)."""
+    own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+    me = sender_row(listed) or {}    # the row that can prove an ack, not fleet's first `self` one (a `pid*` process row)
+    verified = own if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own) else ""
+    unreachable = False
+    if verified and fleet.nearer_than_paseo_host(me, verified):
+        # `hosted_by` is true for ANY ancestor: a nested agent (Codex started by an `omp` Paseo agent) inherits its parent's id, and the
+        # row `sender_row` chose is the nearer process. The record names that caller (label, footer, notice destination and Paseo
+        # attribution alike), never its parent (review F2, 2026-10-30); a caller nothing can reach is refused, not given the parent's name.
+        verified = ""
+        unreachable = not (UUID.fullmatch(me.get("paseo") or "") or me.get("chan") or me.get("transcript"))
+    sender_paseo = verified or (me.get("paseo") if UUID.fullmatch(me.get("paseo") or "") else "") or ""
+    ident = sender_paseo or me.get("id") or ""
+    hops = hermes_hops()
+    label = sender_name(listed)
+    if hermes_forged(label, hops):
+        label = "unknown"    # a session merely NAMED like a Hermes relay is not one: the deliverer would refuse the label (and now refuses `unknown` too: exit 4)
+    return me, sender_paseo, ident, hops, label, unreachable
+
+
 
 def defer_send(s, a, text, listed, why):
     """Queue TEXT for session S (exit 0, `queued: ID ...`), or collapse into an identical queued one of the same sender;
@@ -3236,29 +3286,19 @@ def defer_send(s, a, text, listed, why):
     failure notice (NOTICE) is the one exception: a `kind: notice` record that owes no notice, with its own cap and life.
     The record also keeps the shape TEXT was queued under (`shape`: expect, fyi, needs_reply), so the deliverer's re-send
     can say with `--requeued` that it is one and not judge the text again."""
-    notice = NOTICE[0]
-    if notice:
+    notice, nudge, operator = NOTICE[0], NUDGE[0], OPERATOR[0]
+    kind = "notice" if notice else "nudge" if nudge else ""
+    if notice or nudge:    # a system text: sent as `relay`, no session behind it, so a failure tells nobody (the ask record, not the nudge, is the truth)
         sender_paseo, ident, hops, label = "", "", 0, "relay"
+    elif operator:    # the operator's answer to an ask: no session behind it either; it goes out under the label `operator`
+        sender_paseo, ident, hops, label = "", "", 0, OPERATOR_LABEL
     else:
-        own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
-        me = sender_row(listed) or {}    # the row that can prove an ack, not fleet's first `self` one (a `pid*` process row)
-        verified = own if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own) else ""
-        if verified and fleet.nearer_than_paseo_host(me, verified):
-            # `hosted_by` is true for ANY ancestor: a nested agent (Codex started by an `omp` Paseo agent) inherits its parent's id, and the
-            # row `sender_row` chose is the nearer process. The record names that caller (label, footer, notice destination and Paseo
-            # attribution alike), never its parent (review F2, 2026-10-30); a caller nothing can reach is refused, not given the parent's name.
-            verified = ""
-            if not (UUID.fullmatch(me.get("paseo") or "") or me.get("chan") or me.get("transcript")):
-                print(f"relay: [{s['id']}] not sent: {why}; deferring needs a sender that can be told if the send fails, and "
-                      f"[{me.get('id')}] (nested under another Paseo agent) has no channel, transcript or Paseo id of its own. "
-                      "Retry with --idle S, or --no-defer for the plain refusal", file=sys.stderr)
-                return 1
-        sender_paseo = verified or (me.get("paseo") if UUID.fullmatch(me.get("paseo") or "") else "") or ""
-        ident = sender_paseo or me.get("id") or ""
-        hops = hermes_hops()
-        label = sender_name(listed)
-        if hermes_forged(label, hops):
-            label = "unknown"    # a session merely NAMED like a Hermes relay is not one: the deliverer would refuse the label (and now refuses `unknown` too: exit 4)
+        me, sender_paseo, ident, hops, label, unreachable = sender_identity(listed)
+        if unreachable:
+            print(f"relay: [{s['id']}] not sent: {why}; deferring needs a sender that can be told if the send fails, and "
+                  f"[{me.get('id')}] (nested under another Paseo agent) has no channel, transcript or Paseo id of its own. "
+                  "Retry with --idle S, or --no-defer for the plain refusal", file=sys.stderr)
+            return 1
         if not ident:
             print(f"relay: [{s['id']}] not sent: " + (f"{why}; deferring" if card_why(why) else "that session is busy and cannot take it now; deferring")
                   + " needs an identifiable sender "
@@ -3276,16 +3316,18 @@ def defer_send(s, a, text, listed, why):
     life = NOTICE_LIFE if notice else min(a.defer_for if a.defer_for is not None else DEFER_FOR, DEFER_MAX)
     key = agent or s["id"]
     full = 0
-    caller = {} if notice else (CTX.get("caller") or CTX.get("me") or {})
+    caller = {} if (notice or nudge or operator) else (CTX.get("caller") or CTX.get("me") or {})
     ack_caller = {"id": caller.get("id"), "sid": caller.get("sid") or "", "host": caller.get("host") or ""} if isinstance(caller.get("id"), str) else None
     with state_lock():
-        live = [r for r in rec_all() if r.get("state") in ("queued", "sending") and (r.get("kind") == "notice") == notice]
-        leads = [] if notice else list(CTX.get("leads") or [])
-        dup = None if notice else next((r for r in live if target_key(r) == key and r.get("text") == text and sender_key(r) == ident
-                                        and list(r.get("ack_leads") or []) == leads    # the folded text is equal, but the lines the closer reads may not be: a reply that ENDS `ack q1` is not the single line that merely contains it
-                                        and float(r.get("expires") or 0) > now), None)
+        live = [r for r in rec_all() if r.get("state") in ("queued", "sending") and (r.get("kind") or "") == kind]
+        leads = [] if (notice or nudge) else list(CTX.get("leads") or [])
+        dup = (None if notice else    # a nudge collapses per TARGET: one wake-up text is enough for any number of questions
+               next((r for r in live if target_key(r) == key and float(r.get("expires") or 0) > now), None) if nudge else
+               next((r for r in live if target_key(r) == key and r.get("text") == text and sender_key(r) == ident
+                     and list(r.get("ack_leads") or []) == leads    # the folded text is equal, but the lines the closer reads may not be: a reply that ENDS `ack q1` is not the single line that merely contains it
+                     and float(r.get("expires") or 0) > now), None))
         if dup is None:
-            caps = (((len(live), DEFER_NOTICES),) if notice else
+            caps = (() if nudge else ((len(live), DEFER_NOTICES),) if notice else    # a nudge has no cap of its own: a live one is the duplicate above
                     ((sum(target_key(r) == key for r in live), DEFER_PER_TARGET),
                      (sum(sender_key(r) == ident for r in live), DEFER_PER_SENDER), (len(live), DEFER_TOTAL)))
             for n, cap in caps:
@@ -3294,11 +3336,11 @@ def defer_send(s, a, text, listed, why):
             rid = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + hashlib.sha256(
                 (uuid.uuid4().hex + text).encode()).hexdigest()[:6]
             dup = {"id": rid, "target": {"id": s["id"], "paseo": agent, "name": s.get("name") or "", **tok},
-                   "text": text, "sender": label, "sender_ident": ident, "sender_paseo": sender_paseo, "kind": "notice" if notice else "", "ack_caller": ack_caller,
+                   "text": text, "sender": label, "sender_ident": ident, "sender_paseo": sender_paseo, "kind": kind, "ack_caller": ack_caller,
                    "shape": {"expect": getattr(a, "expect_ack", None) or "", "fyi": bool(getattr(a, "fyi", False)),
                              "needs_reply": bool(getattr(a, "needs_reply", False))},
                    "hops": hops, "created": now, "expires": now + life, "state": "queued", "outcome": "", "pid": 0, "notice": "",
-                   "ack_leads": [] if notice else (CTX.get("leads") or [])}    # the closing line starts of the text AS TYPED (relay folds its whitespace; `ack_leads` caps and clips them): `resolve_deferred_ack` reads them
+                   "ack_leads": [] if (notice or nudge) else (CTX.get("leads") or [])}    # the closing line starts of the text AS TYPED (relay folds its whitespace; `ack_leads` caps and clips them): `resolve_deferred_ack` reads them
             rec_write(dup)
             fresh = True
         else:
@@ -3409,9 +3451,10 @@ def pending_cmd(as_json, show_text=False, queued_only=False, older_than=None, su
     else:
         complete, last_swept = pending_sweep()    # H3: an answered expectation is collected before it is listed; one that could not be is marked
         expects = expect_view(uncollected=not complete, last_swept=last_swept)    # rows with "kind": "expect" (the message rows have no `kind`): --json lists both
+    asks = [] if filtered else ask_view(now, show_text)    # rows with "kind": "ask": the question ledger (`--ask`); the question itself only as the clipped --text preview
     if as_json:
-        print(json.dumps(view + expects, ensure_ascii=False))
-    elif not view and not expects:
+        print(json.dumps(view + expects + asks, ensure_ascii=False))
+    elif not view and not expects and not asks:
         print("no matching deferred messages" if filtered else "no deferred messages")
     for v in ([] if as_json else view):
         print(f"{v['id']}  {v['state']:<9} {target_label({'target': v['target']})}  from {v['sender'] or '?'}  {v['age_s'] // 60}m old"
@@ -3432,6 +3475,9 @@ def pending_cmd(as_json, show_text=False, queued_only=False, older_than=None, su
               f"from {e['sender'] or '?'}  {e['age_s'] // 60}m old (reply due within {e['within_s'] // 60}m)"
               + (f"  -> assumed lost ({REROUTE_AFTER_S // 3600}h past due): the sender re-routes its own work once, never call it read" if e["assumed_lost"]
                  else "  -> escalate to the operator: no ack" if e["overdue"] else ""))
+    for k in ([] if as_json else asks):
+        print(f"ask {k['id']}  {k['state']:<9} {target_label({'target': k['to']})}  from {k['from'] or '?'}  {k['age_s'] // 60}m old  {k['options']} options"
+              + (f"  | {k['question_preview']}" if show_text else ""))
     return 0
 
 
@@ -3559,6 +3605,17 @@ def cancel_cmd(rid):
         print(f"relay: no deferred message {rid!r} (relay.py --pending lists them; an expectation id is closed with "
               f"--retire ID --reason \"...\", never --cancel)", file=sys.stderr)
         return 1
+    peek = rec_read(rid)
+    if peek is not None and peek.get("state") == "queued":    # a message ADDRESSED TO THE CALLER is read when it is delivered, never destroyed by its reader (2026-11-02: a lead cancelled the replies owed to it)
+        try:
+            me = sender_row(fleet.sessions())
+        except Exception:    # noqa: BLE001 - no identity, no refusal: the operator in a shell keeps `--cancel`
+            me = None
+        tgt = peek.get("target") if isinstance(peek.get("target"), dict) else {}
+        if me and me.get("id") and ((me.get("paseo") and me.get("paseo") == tgt.get("paseo")) or me["id"] == tgt.get("id")):    # ids only: a session id is no identity here (pane TUIs of one conversation share it)
+            print(f"relay: {rid} is addressed to you: a queued message is read when it is delivered (end your turn so the deliverer can send it); "
+                  "only its sender, or the operator from a shell, cancels it", file=sys.stderr)
+            return 2
     with state_lock():
         rec = rec_read(rid)
         state = rec.get("state") if rec else None
@@ -3573,6 +3630,455 @@ def cancel_cmd(rid):
         return 1
     defer_log(rec, "cancelled")
     print(f"cancelled: {rid}")
+    return 0
+
+
+# ---- the question ledger: --ask, --inbox, --answer, --withdraw -------------------------------------------------------------
+# One 0600 record per question under `asks/` beside the deferred directory. The state change under `.ask.lock` is the commit point of
+# every transition; `asks.log` holds one line per event and never the question.
+
+def ask_root():
+    """The ledger directory: a sibling of the deferred directory, so RELAY_DEFER_DIR (and every test's pinned DEFER_DIR) moves both."""
+    return DEFER_DIR.parent / "asks"
+
+
+def ask_dir():
+    d = ask_root()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.suppress(OSError):
+        os.chmod(d, 0o700)
+    return d
+
+
+def ask_path(qid):
+    return ask_root() / f"{qid}.json"
+
+
+def ask_read(qid):
+    """The question record QID as a dict, or None (a malformed id, missing, unreadable or a symlink). Every field is read with .get by the callers."""
+    if not ASK_ID.fullmatch(qid or ""):
+        return None
+    try:
+        with os.fdopen(os.open(ask_path(qid), os.O_RDONLY | os.O_NOFOLLOW)) as fh:
+            r = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return r if isinstance(r, dict) and r.get("id") == qid else None
+
+
+def ask_write(rec):
+    """Atomic: a 0600 temp file beside the record, then os.replace."""
+    fd, tmp = tempfile.mkstemp(dir=ask_dir(), prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(rec, fh, ensure_ascii=False)
+        os.replace(tmp, ask_path(rec["id"]))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def ask_all():
+    """Every question record, oldest first (created, then id). Reads only: it never makes the directory."""
+    d = ask_root()
+    if not d.is_dir():
+        return []
+    rows = [r for p in d.glob("q-*.json") if ASK_ID.fullmatch(p.stem) for r in [ask_read(p.stem)] if r]
+    return sorted(rows, key=lambda r: (_num(r.get("created")), r["id"]))
+
+
+def ask_lock():
+    """Every state change of any question holds this short-lived lock."""
+    return _flock(ask_dir() / ".ask.lock")
+
+
+def ask_log(rec, event, why=""):
+    """One line per event in asks.log beside the ledger directory: `STAMP ID EVENT from=.. to=.. WHY`, never the question."""
+    stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    frm, to = rec.get("from") if isinstance(rec.get("from"), dict) else {}, rec.get("to") if isinstance(rec.get("to"), dict) else {}
+    line = f"{stamp} {rec.get('id')} {event} from={frm.get('ident') or ''} to={to.get('paseo') or to.get('id') or ''} {' '.join(str(why).split())[:200]}\n"
+    log = ask_root().parent / "asks.log"
+    with contextlib.suppress(OSError):
+        log_rotate(log)
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a") as fh:
+            fh.write(line)
+
+
+def ask_transition(qid, allowed, **changes):
+    """Apply CHANGES to question QID when its state is one of ALLOWED, under the ledger lock; the record, or None."""
+    with ask_lock():
+        rec = ask_read(qid)
+        if rec is None or rec.get("state") not in allowed:
+            return None
+        rec.update(changes)
+        ask_write(rec)
+        return rec
+
+
+def ask_fold(text):
+    """TEXT as one safe line: control characters and terminal escapes removed, every whitespace run one space (the fold a message gets)."""
+    return " ".join(CONTROL.sub(" ", str(text or "")).split())
+
+
+def operator_token_path():
+    return ask_root().parent / "operator.token"
+
+
+def read_token(path):
+    """The stripped start of the token file PATH ("" when it cannot be read: a symlink, a missing or a non-UTF-8 file)."""
+    try:
+        with os.fdopen(os.open(Path(path).expanduser(), os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8") as fh:
+            return fh.read(512).strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def operator_token():
+    """The operator token, a random secret in a 0600 file relay creates on first use. Whoever can read the file speaks for the operator."""
+    p = operator_token_path()
+    tok = read_token(p)
+    if tok:
+        return tok
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tok = secrets.token_urlsafe(32)
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        return read_token(p)    # another relay made it first
+    with os.fdopen(fd, "w") as fh:
+        fh.write(tok + "\n")
+    return tok
+
+
+def operator_proves(path):
+    """True when the token file PATH holds the operator token (constant-time compare)."""
+    given, real = read_token(path), operator_token()
+    return bool(given) and bool(real) and hmac.compare_digest(given.encode(), real.encode())
+
+
+def ask_age(rec, now):
+    return int(now - _num(rec.get("created"), now))
+
+
+def ask_view(now, show_text=False):
+    """The question records as `--pending` rows: kind `ask`, state, who asked whom, age, how many options; the question only as a clipped preview when SHOW_TEXT."""
+    rows = []
+    for r in ask_all():
+        frm, to = r.get("from") if isinstance(r.get("from"), dict) else {}, r.get("to") if isinstance(r.get("to"), dict) else {}
+        rows.append({"kind": "ask", "id": r["id"], "state": r.get("state"), "from": frm.get("label") or "", "to": {"id": to.get("id"), "paseo": to.get("paseo"), "name": to.get("name")},
+                     "age_s": ask_age(r, now), "expires_in": int(_num(r.get("expires"), now) - now), "options": len(r.get("options") or []),
+                     **({"question_preview": fleet.clip(str(r.get("question") or ""), 60)} if show_text else {})})
+    return rows
+
+
+def ask_sweep(now=None):
+    """The sweep rule of the ledger: a live question past its expiry becomes `expired` (the asker's expectation going OVERDUE is its signal), a final one older
+    than DEFER_KEEP is deleted. Counts. One record a hand edit broke is skipped."""
+    now = now or time.time()
+    n = {"expired": 0, "pruned": 0}
+    for r in ask_all():
+        try:
+            if r.get("state") in ASK_LIVE and now > _num(r.get("expires")):
+                done = ask_transition(r["id"], ASK_LIVE, state="expired", finished=now)
+                if done is not None:
+                    ask_log(done, "expired")
+                    n["expired"] += 1
+            elif r.get("state") in ASK_FINAL and now - _num(r.get("finished"), _num(r.get("created"))) > DEFER_KEEP:
+                ask_path(r["id"]).unlink()
+                n["pruned"] += 1
+        except (ValueError, TypeError, OSError):
+            continue
+    return n
+
+
+def ask_refuse(why):
+    print(f"relay: {why}", file=sys.stderr)
+    return 2
+
+
+def ask_cmd(a, question):
+    """`relay.py --ask LEAD "question" --option A --option B [--recommend N] [--defer-for S] [--json]`: write the question record (exit 0), open the asker's
+    expectation under the same id, and queue ONE wake-up text for the lead (a `kind: nudge` record, collapsed per target, outside every cap). Nothing
+    else is ever typed into the lead. Exit 2: no identifiable sender, a target that is this session or cannot be messaged, fewer than 2 or more than 6
+    options, an option over 200 characters, a question over 2000, or an option of the send commands that means nothing here."""
+    for flag, on in (("--no-defer", a.no_defer), ("--plan", a.plan), ("--idle", a.idle is not None), ("--steer", a.steer), ("--via", a.via is not None),
+                     ("--expect-ack", a.expect_ack is not None), ("--needs-reply", a.needs_reply), ("--fyi", a.fyi), ("--ack", a.ack), ("--no-ack", a.no_ack)):
+        if on:
+            return ask_refuse(f"--ask writes a record and types nothing, so it takes no {flag}")
+    if a.defer_for is not None and not (math.isfinite(a.defer_for) and a.defer_for > 0):
+        return ask_refuse("--defer-for must be a finite number of seconds > 0")
+    question = ask_fold(question)
+    options = [ask_fold(o) for o in a.option]
+    if not question:
+        return ask_refuse("--ask needs the question text")
+    if len(question) > ASK_QUESTION_MAX or any(len(o) > ASK_OPTION_MAX for o in options):
+        return ask_refuse(f"the question is at most {ASK_QUESTION_MAX} characters and each option at most {ASK_OPTION_MAX}")
+    if not ASK_OPTIONS[0] <= len(options) <= ASK_OPTIONS[1] or not all(options):
+        return ask_refuse(f"--ask takes {ASK_OPTIONS[0]} to {ASK_OPTIONS[1]} non-empty --option values, one per choice (got {len(options)})")
+    recommend = a.recommend or 0
+    if not 0 <= recommend <= len(options):
+        return ask_refuse(f"--recommend N is 1..{len(options)} (the option number), or 0 for none")
+    listed = fleet.sessions()
+    me, sender_paseo, ident, _hops, label, unreachable = sender_identity(listed)
+    if SENDER_OVERRIDE[0] or unreachable or not (ident and me.get("id")) or label == "unknown":
+        return ask_refuse("not asked: --ask needs a session the answer can reach (its own Paseo id or fleet row), and this caller has none")
+    target = a.ask
+    hits = find(target, listed)
+    if not hits and not UUID.fullmatch(target):
+        hits = find_herdr_agent(target, listed)
+    if not hits and UUID.fullmatch(target):
+        hits = [x for x in [paseo_session(target)] if x]
+    if len(hits) != 1:
+        return ask_refuse(f"{'no session(s) match' if not hits else str(len(hits)) + ' sessions match'} {target!r} (fleet.py list shows ids and names)")
+    s = hits[0]
+    stop = hard_stop(s)    # a card is no obstacle: nothing is typed into the lead. This session, a finished one and a Hermes conversation of the caller are.
+    if (stop and not card_why(stop)) or same_session(me, {"id": s["id"], "paseo": s.get("paseo") or ""}):
+        return ask_refuse(f"[{s['id']}] not asked: {stop or 'that is this session'}")
+    agent = s["chan"][1] if (s.get("chan") or (None,))[0] == "paseo" else s.get("paseo") or ""
+    now = time.time()
+    qid = "q-" + time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + hashlib.sha256((uuid.uuid4().hex + question).encode()).hexdigest()[:6]
+    tx_me = Path(me["transcript"]) if me.get("transcript") else None
+    mark = tx_me.stat().st_size if tx_me and tx_me.is_file() else 0
+    if not expect_reserve(qid, me["id"]):    # the id is the expectation id: a clash is a fresh id away, and never silent
+        return ask_refuse(f"not asked: expectation {qid} is already open")
+    CTX["reserved"] = (qid, me["id"])    # main releases it when nothing was written
+    expect_stamp(qid, me, s, mark, None)
+    rec = {"v": ASK_RECORD_VERSION, "id": qid, "project": ask_fold(Path(me.get("cwd") or own_cwd() or "").name)[:40],
+           "from": {"ident": ident, "label": label, "paseo": sender_paseo, "fleet": me["id"]},
+           "to": {"id": s["id"], "paseo": agent, "name": s.get("name") or ""}, "question": question, "options": options, "recommend": recommend,
+           "created": now, "expires": now + min(a.defer_for if a.defer_for is not None else DEFER_FOR, DEFER_MAX), "state": "open",
+           "seen_at": 0, "seen_by": "", "answer": None, "nudge": "", "nonce": secrets.token_urlsafe(16)}
+    with ask_lock():
+        ask_write(rec)
+    ask_log(rec, "asked", f"{len(options)} options")
+    with contextlib.suppress(Exception):
+        operator_token()    # the operator's token file exists from the first question on
+    CTX.update(me=me, s=s, expect=qid, within=None, terminator=False, text=question, leads=[], mark=mark, sent=True)    # main opens the expectation and records the link
+    nudge, nudge_state = "", ""
+    ns = types.SimpleNamespace(defer_for=None, expect_ack=None, fyi=False, needs_reply=False, json=True, ack=False, wait=0)
+    out, err = io.StringIO(), io.StringIO()
+    NUDGE[0] = True
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            nrc = defer_send(s, ns, NUDGE_TEXT, listed, "inbox nudge")
+    except Exception as e:    # noqa: BLE001 - the record is the truth: a failed wake-up never undoes the question
+        nrc, err = 1, io.StringIO(f"{type(e).__name__}: {e}")
+    finally:
+        NUDGE[0] = False
+    if nrc == 0:
+        with contextlib.suppress(ValueError, IndexError, KeyError):
+            info = json.loads([ln for ln in out.getvalue().splitlines() if ln.startswith("{")][-1])
+            nudge = info["record"]
+            nudge_state = "already queued" if info.get("duplicate_of") else "queued"
+    if nudge:
+        ask_transition(qid, ASK_LIVE, nudge=nudge)
+    else:
+        nudge_state = "not queued: " + (([ln for ln in err.getvalue().splitlines() if ln.strip()] or ["unknown"])[-1].strip()[:200])
+    CTX["accepted"] = False
+    if a.json:
+        print(json.dumps({"id": qid, "state": "open", "to": rec["to"], "expires_in": int(rec["expires"] - now), "nudge": nudge, "nudge_state": nudge_state}, ensure_ascii=False))
+    else:
+        print(f"asked: {qid} (nudge {nudge_state}); the answer arrives as `ack {qid} pick N: <option>`; `relay.py --withdraw {qid}` takes it back")
+    return 0
+
+
+def ask_row(r, now):
+    """One record as the dict `--inbox --json` prints: the record without its nonce (a secret only the operator's screen reads, never an agent), plus age and time left."""
+    return {**{k: v for k, v in r.items() if k != "nonce"}, "age_s": ask_age(r, now), "expires_in": int(_num(r.get("expires"), now) - now)}
+
+
+def ask_show(r, now):
+    frm = r.get("from") if isinstance(r.get("from"), dict) else {}
+    ans = r.get("answer") if isinstance(r.get("answer"), dict) else {}
+    rec_n = int(_num(r.get("recommend")))
+    print(f"{r['id']}  {r.get('state')}  from {ask_fold(frm.get('label')) or '?'}" + (f" [{ask_fold(r.get('project'))}]" if r.get("project") else "")
+          + f"  {ask_age(r, now) // 60}m old")
+    print(f"  Q: {ask_fold(r.get('question'))}")
+    for i, o in enumerate((ask_fold(o) for o in (r.get("options") or [])), 1):
+        print(f"  {i}. {o}" + ("  (recommended)" if i == rec_n else ""))
+    if r.get("state") == "answered":
+        print(f"  answered: pick {ans.get('pick')} by {ask_fold(ans.get('by'))}" + (f" via {ask_fold(ans.get('via'))}" if ans.get("via") else "")
+              + (f" -- {ask_fold(ans.get('note'))}" if ans.get("note") else "") + f"; delivery: {ask_fold(ans.get('delivery')) or 'pending'}")
+    elif r.get("state") == "withdrawn":
+        print("  WITHDRAWN by its asker: do not put it to the operator")
+    elif r.get("state") in ASK_LIVE:
+        print(f"  answer: relay.py --answer {r['id']} N [--note TEXT]")
+
+
+def inbox_cmd(a, wait_s):
+    """`relay.py --inbox [--wait S] [--all] [--json]`: the questions addressed to this session, oldest first, in full; an `open` one becomes `seen` (the witness that
+    the lead read it). A withdrawn one is shown once, so it is not put to the operator. `--all` adds the last day's answered, withdrawn and expired ones, read only.
+    WAIT_S: return at once when an `open` question exists, else poll every DEFER_POLL seconds for one, exit 124 when none came in time (the committed state is
+    read before parking, so no wake-up is lost). A caller with no session (the operator in a shell) reads every question and changes nothing.
+    Exit 0 when something was printed, 1 when nothing, 124 on a timeout. Never the nonce."""
+    listed = fleet.sessions()
+    me, _sp, ident, _h, label, _u = sender_identity(listed)
+    reader = me if me.get("id") else None
+
+    def mine():
+        return [r for r in ask_all() if reader is None or same_session(reader, r.get("to"))]
+    deadline = None if not wait_s else time.time() + wait_s
+    while wait_s and not any(r.get("state") == "open" for r in mine()):
+        if time.time() >= deadline:
+            print(f"relay: no question arrived within {wait_s:g}s", file=sys.stderr)
+            return 124
+        time.sleep(DEFER_POLL)
+    now, shown = time.time(), []
+    for r in mine():
+        st = r.get("state")
+        if st == "open" and reader is not None:
+            r = ask_transition(r["id"], ("open",), state="seen", seen_at=now, seen_by=ident or label) or ask_read(r["id"]) or r
+            ask_log(r, "seen", f"by {ident}")
+        elif st == "withdrawn" and reader is not None and not r.get("withdrawn_seen"):
+            r = ask_transition(r["id"], ("withdrawn",), withdrawn_seen=True) or r
+        elif st in ASK_FINAL and not (a.all and now - _num(r.get("finished"), _num(r.get("created"))) < 86400):
+            continue
+        shown.append(r)
+    if a.json:
+        print(json.dumps([ask_row(r, now) for r in shown], ensure_ascii=False))
+    elif not shown:
+        print("inbox: nothing waiting")
+    for r in ([] if a.json else shown):
+        ask_show(r, now)
+    return 0 if shown else 1
+
+
+def answer_authority(rec, a, listed):
+    """(by, via, why): who may answer RECORD. The addressed lead (a verified session of the record's `to`; a nonce, when given, must match) or the operator (the
+    record's nonce AND `--operator-token-file` holding the operator token); `by` is the lead's ident or `operator`, VIA the `--via-label` of an operator answer.
+    Anyone else: by None and the reason."""
+    nonce = rec.get("nonce") if isinstance(rec.get("nonce"), str) else ""
+    nonce_ok = a.nonce is not None and bool(nonce) and hmac.compare_digest(a.nonce.encode(), nonce.encode())
+    if a.operator_token_file is not None:
+        if not (nonce_ok and operator_proves(a.operator_token_file)):
+            return None, "", "the operator proof was refused (the nonce or the token does not match)"
+        if a.via_label is not None and not VIA_LABEL_OK.fullmatch(a.via_label):
+            return None, "", "--via-label is 1-40 characters of letters, digits, `.`, `_`, `-`"
+        return OPERATOR_LABEL, a.via_label or "", ""
+    if a.nonce is not None and not nonce_ok:
+        return None, "", "the nonce does not match"
+    me, _sp, ident, _h, _l, _u = sender_identity(listed)
+    if me.get("id") and ident and same_session(me, rec.get("to")):
+        return ident, "", ""
+    return None, "", "only the addressed lead, or the operator (the question's nonce and --operator-token-file), answers a question"
+
+
+def expect_settle(eid, how):
+    """Close the open (or reserved) expectation EID as acked through HOW: the operator's answer is the answer the asker's expectation waited for."""
+    with contextlib.suppress(Exception), _flock(defer_dir() / ".expect.lock"):
+        old = expect_read(eid)
+        if old and old.get("state") in ("open", "reserved"):
+            atomic_json(expect_dir() / f"{eid}.json", {**old, "state": "acked", "acked": time.time(), "acked_via": how})
+
+
+def send_answer_line(asker, line, operator):
+    """(rc, the whole text it printed, one line) of the ordinary relay run that sends LINE to the asker: as the lead (this process's own identity), or under the label
+    `operator` with no session behind it. The run is its own: its link, expectation and ack bookkeeping are done when it returns, and this run's CTX is put back."""
+    saved = dict(CTX)
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.ExitStack() as stack:
+            if operator:
+                stack.enter_context(as_caller(OPERATOR_LABEL, scrub=True, operator=True))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            rc = main([asker, line, "--fyi"], sweep=False)
+    finally:
+        CTX.clear()
+        CTX.update(saved)
+    return rc, " ".join((err.getvalue() + "\n" + out.getvalue()).split())
+
+
+def answer_cmd(a):
+    """`relay.py --answer q-ID N [--note TEXT] [--nonce X --operator-token-file PATH [--via-label L]] [--json]`. Exit 2: not allowed to answer (see answer_authority),
+    an unknown id or an N outside 1..options (nothing written); 10: already answered (its answer is printed); 11: withdrawn or expired; else the delivery of the
+    asker's line `ack q-ID pick N: <option>[ -- note]` (sent through the normal send path, queued when the asker is working): 0 delivered, 1 queued or not proven.
+    `answered` is written first under the ledger lock: that is the commit point, and a second answer finds it."""
+    qid, pick_txt = a.answer, a.ident
+    if a.text is not None or pick_txt is None or not re.fullmatch(r"\d{1,3}", pick_txt):
+        return ask_refuse("usage: relay.py --answer q-ID N [--note TEXT] (N is the option number)")
+    rec = ask_read(qid)
+    if rec is None:
+        return ask_refuse(f"no question {qid!r} (relay.py --inbox lists the ones addressed to you)")
+    by, via, why = answer_authority(rec, a, fleet.sessions())
+    if by is None:
+        return ask_refuse(f"not answered: {why}")
+    note = ask_fold(a.note)
+    if len(note) > 300:
+        return ask_refuse("--note is at most 300 characters")
+    n, now = int(pick_txt), time.time()
+    with ask_lock():
+        rec = ask_read(qid) or rec
+        st = rec.get("state")
+        if st in ASK_LIVE and now > _num(rec.get("expires")):
+            rec.update(state="expired", finished=now)    # the sweep has not run: the clock decides
+            ask_write(rec)
+            st = "expired"
+        if st not in ASK_LIVE:
+            earlier = rec.get("answer") if isinstance(rec.get("answer"), dict) else {}
+            if a.json:
+                print(json.dumps({"id": qid, "state": st, "answer": earlier or None}, ensure_ascii=False))
+            elif st == "answered":
+                print(f"relay: {qid} is already answered: pick {earlier.get('pick')} ({ask_fold(earlier.get('text'))}) by {ask_fold(earlier.get('by'))}", file=sys.stderr)
+            else:
+                print(f"relay: {qid} is {st}: it is not put to the operator and not answered", file=sys.stderr)
+            return ASK_ANSWER_EXITS.get(st, 11)
+        options = rec.get("options") if isinstance(rec.get("options"), list) else []
+        if not 1 <= n <= len(options):
+            return ask_refuse(f"{n} is not an option of {qid} (1..{len(options)})")
+        text_opt = str(options[n - 1])
+        rec.update(state="answered", finished=now,
+                   answer={"pick": n, "text": text_opt, "note": note, "by": by, **({"via": via} if via else {}), "at": now, "delivery": ""})
+        ask_write(rec)
+    ask_log(rec, "answered", f"pick {n} by {by}")
+    frm = rec.get("from") if isinstance(rec.get("from"), dict) else {}
+    asker = frm.get("ident") or frm.get("paseo") or frm.get("fleet") or ""
+    line = f"ack {qid} pick {n}: {text_opt}" + (f" \u2014 {note}" if note else "")
+    operator = by == OPERATOR_LABEL
+    if operator:
+        expect_settle(qid, "ask-operator")    # the answer the asker's expectation waited for exists now, delivered or not
+    rc, said = send_answer_line(asker, line, operator)
+    m = re.search(r"queued: (\d{8}-\d{6}-[0-9a-f]{6})", said)
+    if m:
+        delivery, ok = m.group(1), False
+    elif rc == 0:
+        delivery, ok = "delivered", True
+    elif rc == 3:    # the route took it and could not prove it was read (a Paseo agent has no transcript to watch): handed over, never resent
+        delivery, ok = "unverified: " + said[-200:], True
+    else:
+        delivery, ok = "failed: " + said[-200:], False
+    done = ask_transition(qid, ("answered",), answer={**(rec.get("answer") or {}), "delivery": delivery})
+    ask_log(done or rec, "delivery", delivery)
+    if a.json:
+        print(json.dumps({"id": qid, "state": "answered", "pick": n, "text": text_opt, "by": by, "delivery": delivery}, ensure_ascii=False))
+    else:
+        print(f"answered: {qid} pick {n}: {text_opt}; the asker's line was "
+              + ("delivered" if delivery == "delivered" else f"handed to its route, not proven read: do not resend ({delivery})" if ok
+                 else f"not delivered yet ({delivery}); the answer stays in the record (relay.py --inbox --all)"))
+    return 0 if ok else 1
+
+
+def withdraw_cmd(a):
+    """`relay.py --withdraw q-ID`: the asker takes its question back (open or seen -> withdrawn); the lead's next `--inbox` shows it once, so it is not put to the
+    operator. Exit 2 for anyone but the asker or an unknown id; 10 already answered; 11 already withdrawn or expired."""
+    rec = ask_read(a.withdraw)
+    if rec is None:
+        return ask_refuse(f"no question {a.withdraw!r}")
+    me, _sp, ident, _h, _l, _u = sender_identity(fleet.sessions())
+    frm = rec.get("from") if isinstance(rec.get("from"), dict) else {}
+    if not (me.get("id") and ident and ident == frm.get("ident")):
+        return ask_refuse(f"not withdrawn: only the session that asked {a.withdraw} takes it back")
+    done = ask_transition(a.withdraw, ASK_LIVE, state="withdrawn", finished=time.time(), withdrawn_seen=False)
+    if done is None:
+        st = (ask_read(a.withdraw) or {}).get("state")
+        print(f"relay: {a.withdraw} is {st}", file=sys.stderr)
+        return ASK_ANSWER_EXITS.get(st, 11)
+    ask_log(done, "withdrawn")
+    with contextlib.suppress(Exception), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        retire_cmd(a.withdraw, "the question was withdrawn by its asker", by=ident)    # an OVERDUE page for a question nobody is waiting on would be noise
+    print(f"withdrawn: {a.withdraw}")
     return 0
 
 
@@ -4391,7 +4897,8 @@ ACK_VERB_CARRIES = frozenset({"ack", "wait", "json", "no_defer", "steer", "no_ac
 
 
 ACK_VALUE_OPTS = frozenset({"--wait", "--idle", "--via", "--defer-for", "--ack-within", "--expect-ack", "--deliver", "--cancel", "--retire", "--status", "--show",
-                            "--reason", "--evidence", "--transfer-expectations", "--id", "--older-than", "--stuck-after"})    # options that take the next token as a value
+                            "--reason", "--evidence", "--transfer-expectations", "--id", "--older-than", "--stuck-after", "--ask", "--answer", "--withdraw", "--option",
+                            "--recommend", "--note", "--nonce", "--operator-token-file", "--via-label"})    # options that take the next token as a value
 
 
 def ack_form(eid="ID"):
@@ -4486,6 +4993,67 @@ def main(argv=None, sweep=True):
     return rc
 
 
+def read_message_file(a):
+    """Read `--message-file` into a.text (UTF-8, a BOM dropped, one trailing newline dropped): None on success, else the exit code after the refusal."""
+    try:
+        raw = sys.stdin.buffer.read() if a.message_file == "-" else Path(a.message_file).read_bytes()
+        a.text = raw.decode("utf-8-sig")    # a BOM from a Windows editor is not part of the message
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"relay: cannot read --message-file {a.message_file}: {exc}", file=sys.stderr)
+        return 2
+    a.text = a.text.removesuffix("\n")    # one trailing newline: the editor's or `echo`'s, never the message's
+    if a.text.endswith("\r"):
+        a.text = a.text[:-1]
+    if not a.text.strip():
+        print(f"relay: --message-file {a.message_file} is empty", file=sys.stderr)
+        return 2
+    return None
+
+
+def ledger_dispatch(a, wait_given):
+    """The question-ledger commands (`--ask`, `--inbox`, `--answer`, `--withdraw`): their exit code, or None when A names none. They are exclusive with each
+    other and with every other command, and their options mean nothing without one."""
+    chosen = [n for n, on in (("--ask", a.ask is not None), ("--inbox", a.inbox), ("--answer", a.answer is not None), ("--withdraw", a.withdraw is not None)) if on]
+    opts = [n for n, on in (("--option", bool(a.option)), ("--recommend", a.recommend is not None), ("--all", a.all), ("--note", a.note is not None),
+                            ("--nonce", a.nonce is not None), ("--operator-token-file", a.operator_token_file is not None), ("--via-label", a.via_label is not None)) if on]
+    if not chosen:
+        if opts:
+            return ask_refuse(f"{', '.join(opts)} is used with --ask, --inbox or --answer")
+        return None
+    others = [n for n, on in (("--transfer-expectations", a.transfer_expectations is not None), ("--retire", a.retire is not None), ("--deliver", bool(a.deliver)),
+                              ("--pending", a.pending), ("--cancel", bool(a.cancel)), ("--sweep", a.sweep), ("--why", a.why)) if on]
+    if len(chosen) > 1 or others:
+        return ask_refuse(f"{chosen[0]} cannot be combined with {', '.join(chosen[1:] + others) or 'another command'}")
+    allowed = {"--ask": {"--option", "--recommend"}, "--inbox": {"--all"}, "--answer": {"--note", "--nonce", "--operator-token-file", "--via-label"}, "--withdraw": set()}[chosen[0]]
+    if [o for o in opts if o not in allowed]:
+        return ask_refuse(f"{', '.join(o for o in opts if o not in allowed)} does not go with {chosen[0]}")
+    if chosen[0] != "--ask" and a.message_file is not None:
+        return ask_refuse("--message-file is used with a send or with --ask")
+    if chosen[0] == "--ask":
+        if a.message_file is not None:
+            if a.text is not None or a.ident is not None:
+                return ask_refuse("give the question as the positional text or as --message-file, not both")
+            rc = read_message_file(a)
+            if rc is not None:
+                return rc
+            return ask_cmd(a, a.text)
+        given = [x for x in (a.ident, a.text) if x is not None]
+        if len(given) != 1:
+            return ask_refuse("usage: relay.py --ask LEAD \"question\" | --message-file PATH|- --option A --option B [--recommend N] [--defer-for S] [--json]")
+        return ask_cmd(a, given[0])
+    if chosen[0] == "--inbox":
+        if a.ident is not None or a.text is not None:
+            return ask_refuse("usage: relay.py --inbox [--wait S] [--all] [--json]")
+        if wait_given and not (math.isfinite(a.wait) and a.wait >= 0):
+            return ask_refuse("--wait must be a finite number of seconds >= 0")
+        return inbox_cmd(a, a.wait if wait_given else None)
+    if chosen[0] == "--answer":
+        return answer_cmd(a)
+    if a.ident is not None or a.text is not None:
+        return ask_refuse("usage: relay.py --withdraw q-ID")
+    return withdraw_cmd(a)
+
+
 def _main(argv=None, sweep=True):
     ap = argparse.ArgumentParser(prog="relay.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("ident", nargs="?")
@@ -4539,6 +5107,22 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--needs-reply", action="store_true", help="the text requests action or a reply without asking a question: --expect-ack is then required")
     ap.add_argument("--fyi", action="store_true", help="the text has a `?` but needs no reply: send without --expect-ack")
     ap.add_argument("--ack-within", type=float, metavar="S", help=f"seconds before an unanswered --expect-ack is OVERDUE (default {EXPECT_WITHIN})")
+    ap.add_argument("--ask", metavar="LEAD", help="write a question record for LEAD (a picklist: --option A --option B, 2 to 6) instead of typing into its turn; the question is the "
+                    "positional text or --message-file. Opens an expectation under the question's id and queues ONE wake-up text for the lead. The answer comes back as "
+                    "`ack q-ID pick N: <option>`. Exit 2 on a refusal (no identifiable sender, this session, fewer than 2 options)")
+    ap.add_argument("--option", action="append", default=[], metavar="TEXT", help="with --ask: one choice, at most 200 characters (repeatable, 2 to 6, in the order shown)")
+    ap.add_argument("--recommend", type=int, metavar="N", help="with --ask: the 1-based number of the recommended option")
+    ap.add_argument("--inbox", action="store_true", help="the questions addressed to this session, in full (an `open` one becomes `seen`); with --wait S wait up to S seconds for a "
+                    "new one (exit 124 on a timeout); exit 0 something printed, 1 nothing. --json: a list of records")
+    ap.add_argument("--all", action="store_true", help="with --inbox: also the last day's answered, withdrawn and expired questions, read only")
+    ap.add_argument("--answer", metavar="QID", help="answer question QID with the option number given as the positional N (`relay.py --answer q-ID 2`): only the addressed lead, or the "
+                    "operator (--nonce and --operator-token-file). Exit 0 delivered, 1 queued or not proven (the answer is recorded), 2 refused, 10 already answered, 11 withdrawn or expired")
+    ap.add_argument("--note", metavar="TEXT", help="with --answer: a remark of at most 300 characters that rides on the answer line")
+    ap.add_argument("--nonce", metavar="X", help="with --answer: the question's nonce (required of the operator, optional for the lead; never printed by --inbox)")
+    ap.add_argument("--operator-token-file", metavar="PATH", help="with --answer: a file holding the operator token (~/.local/state/relay/operator.token, made 0600 by relay on first use): "
+                    "with the question's --nonce it answers as the operator")
+    ap.add_argument("--via-label", metavar="LABEL", help="with an operator --answer: the surface that carried it (1-40 of letters, digits, `.`, `_`, `-`), kept in the record")
+    ap.add_argument("--withdraw", metavar="QID", help="the asker takes question QID back (the lead sees it once as withdrawn, so it is not put to the operator)")
     eid, argv = split_ack_verb(sys.argv[1:] if argv is None else list(argv))    # `--ack ID` alone is the verb (H2); `--ack` after a target and text is the delivery watch
     a = ap.parse_args(argv)
     t0 = time.time()
@@ -4561,6 +5145,10 @@ def _main(argv=None, sweep=True):
             print(f"relay: usage: relay.py --status ID [--json]; --status is a query and cannot be combined with {', '.join(others)}", file=sys.stderr)
             return 2
         return status_cmd(a.status, a.json)
+    wait_given = any(t == "--wait" or t.startswith("--wait=") for t in argv)    # `--wait` has a default for a send; `--inbox` waits only when it is given
+    rc = ledger_dispatch(a, wait_given)
+    if rc is not None:
+        return rc
     if a.message_file is not None and (a.transfer_expectations is not None or a.retire is not None or a.deliver or a.pending or a.cancel or a.sweep or a.why):
         print("relay: --message-file is used with a send: relay.py <id> --message-file PATH|-", file=sys.stderr)
         return 2
@@ -4601,6 +5189,9 @@ def _main(argv=None, sweep=True):
     if a.sweep:
         n = sweep_all()
         print("swept: " + ", ".join(f"{v} {k}" for k, v in n.items()))
+        if ask_root().is_dir():
+            k = ask_sweep()
+            print(f"asks: {k['expired']} expired, {k['pruned']} pruned")
         acked, overdue = ack_sweep()
         print(f"acks: {acked} resolved, {len(overdue)} overdue")
         for r in overdue:    # the escalation hook: a caller that pages the operator greps these lines (or --pending --json: "overdue": true)
@@ -4622,18 +5213,9 @@ def _main(argv=None, sweep=True):
         if a.text is not None:
             print("relay: give the message as the positional text or as --message-file, not both", file=sys.stderr)
             return 2
-        try:
-            raw = sys.stdin.buffer.read() if a.message_file == "-" else Path(a.message_file).read_bytes()
-            a.text = raw.decode("utf-8-sig")    # a BOM from a Windows editor is not part of the message
-        except (OSError, UnicodeDecodeError) as exc:
-            print(f"relay: cannot read --message-file {a.message_file}: {exc}", file=sys.stderr)
-            return 2
-        a.text = a.text.removesuffix("\n")    # one trailing newline: the editor's or `echo`'s, never the message's
-        if a.text.endswith("\r"):
-            a.text = a.text[:-1]
-        if not a.text.strip():
-            print(f"relay: --message-file {a.message_file} is empty", file=sys.stderr)
-            return 2
+        rc = read_message_file(a)
+        if rc is not None:
+            return rc
     if a.message_file is None and a.text is not None and a.text.strip() == "-":
         # `relay.py ID - < file` read as "send the text '-'": the peer got an empty-looking message while relay said delivered
         # (2026-11-02). Only --message-file reads stdin.
@@ -4713,6 +5295,7 @@ def _main(argv=None, sweep=True):
     if sweep and DEFER_DIR.is_dir():    # after the refusal: a relay that is not sent touches no record
         with contextlib.suppress(Exception):    # cheap and best effort: never in the way of a relay
             sweep_all()
+            ask_sweep()
     if not a.plan:
         if me is not None and not me.get("transcript"):    # fleet's herdr row of a Codex session has its id but no transcript: find its rollout by that exact id (Codex P1, PR 74); any other agent is left as it is
             with contextlib.suppress(Exception):
