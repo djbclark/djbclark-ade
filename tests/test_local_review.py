@@ -106,6 +106,7 @@ case "${FAKE_LW_MODE:-admit}" in
   peer) python3 - <<'PY'
 import json, os, time
 d = json.load(open(os.environ["FAKE_PEER_DOC"]))
+d["base_ref"] = os.environ.get("FAKE_PEER_BASE", d["base_ref"])
 d["finished_ts"] = time.time()    # a peer review that finished while this run waited for the gate
 open(os.environ["FAKE_PEER_TARGET"], "w").write(json.dumps(d, indent=1) + "\n")
 PY
@@ -672,3 +673,14 @@ def test_a_hung_gate_is_abandoned_after_its_grace_and_the_review_starts(world: W
     r = world.run("--load-wait", "0", env={"FAKE_LW_MODE": "hang", "LOCAL_REVIEW_LOAD_GRACE": "1"}, timeout=40)
     assert r.returncode == 0, r.stderr
     assert world.codex_log.exists() and "error" in world.doc()["load_gate"]
+
+
+def test_a_peers_result_for_another_base_branch_is_not_reused(world: World) -> None:
+    assert world.run(mode="findings").returncode == 1
+    peer_doc = world.tmp / "peer.json"
+    peer_doc.write_text(world.stem().with_suffix(".json").read_text())
+    world.codex_log.unlink()
+    r = world.run(mode="clean", env={"FAKE_LW_MODE": "peer", "FAKE_PEER_DOC": str(peer_doc), "FAKE_PEER_BASE": "main",
+                                      "FAKE_PEER_TARGET": str(world.stem().with_suffix(".json"))})
+    assert r.returncode == 0 and world.codex_log.exists()    # reviewed afresh against the PR's own base
+    assert (world.doc()["result"], world.doc()["base_ref"]) == ("clean", "master")

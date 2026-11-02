@@ -391,7 +391,7 @@ def main(argv: list[str]) -> int:
     if lock_fd is None:
         return die(f"another local-review for {head[:12]} is running (see {sd / f'lock-{stem}'})", EXIT_DUP)
 
-    peer = reviewed_while_waiting(result_path, a.repo, a.pr, head, invoked)
+    peer = reviewed_while_waiting(result_path, a.repo, a.pr, head, base, invoked)
     if peer is not None:    # the lock is ours, so that run is over and its verdict is final: report it, rewrite nothing, start no codex
         print(f"local-review: note: {head[:12]} was reviewed while this run waited (finished {peer.get('finished')}); reporting that result, not reviewing again", file=sys.stderr)
         try:
@@ -632,16 +632,16 @@ def finish(doc: dict, result_path: Path, t0: float, as_json: bool, usage_error: 
     return report(doc, result_path, as_json)
 
 
-def reviewed_while_waiting(result_path: Path, repo: str, pr: int, head: str, since: float) -> dict | None:
-    """The FINAL result another run filed for this head at or after SINCE (the moment this run was invoked), else None. Taken under the lock: a run that
+def reviewed_while_waiting(result_path: Path, repo: str, pr: int, head: str, base: str, since: float) -> dict | None:
+    """The FINAL result another run filed for this head AND this base branch (a retargeted PR keeps no old verdict, as `pr-wait` reads it) at or after SINCE (the moment this run was invoked), else None. Taken under the lock: a run that
     waited at the load gate must not review again what a peer finished meanwhile (a second codex spend in the very storm the gate calms, and its `in progress`
-    record would hide the peer's verdict from `pr-wait`). An `in progress` record (no `finished_ts`), an older result, another head or an unreadable file
+    record would hide the peer's verdict from `pr-wait`). An `in progress` record (no `finished_ts`), an older result, another head or base or an unreadable file
     is None, so the review runs."""
     try:
         doc = json.loads(result_path.read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(doc, dict) or doc.get("schema") != SCHEMA or (doc.get("repo"), doc.get("pr"), doc.get("head")) != (repo, pr, head):
+    if not isinstance(doc, dict) or doc.get("schema") != SCHEMA or (doc.get("repo"), doc.get("pr"), doc.get("head"), doc.get("base_ref")) != (repo, pr, head, base):
         return None
     ts = doc.get("finished_ts")
     if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not doc.get("finished") or ts < since:
