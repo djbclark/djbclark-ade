@@ -6,7 +6,10 @@ PATH is cut down so the host's real `sudo-secretspec` (and its real secrets) is 
 """
 from __future__ import annotations
 
+import errno
 import http.server
+import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -17,6 +20,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import override
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent.parent / "bin/coding-bot"
 KEY = "k3y-0123456789abcdef-NOT-A-REAL-KEY"
@@ -446,6 +450,89 @@ class TestReplyHandling(Base):
         w = self.cli("wait", "ade-1", "--timeout", "2")
         self.assertIn("corrected answer", w.stdout)
         self.assertNotIn("stale answer", w.stdout)
+
+
+class TestCredentialsViaRun(Base):
+    """Credentials come only through `sudo-secretspec run` (never `get`), and nothing else it injects survives."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        fake = Path(self.tmp.name) / "bin"
+        self.log, self.child_env = Path(self.tmp.name) / "ss.log", Path(self.tmp.name) / "clip-env.txt"
+        (fake / "sudo-secretspec").write_text(
+            "#!/bin/sh\necho \"$@\" >> '" + str(self.log) + "'\n"
+            'if [ "$1" = run ]; then\n  shift; while [ "$1" != -- ]; do shift; done; shift\n'
+            '  if [ -n "$FAKE_SUPPLY" ]; then export CODING_BOT_WEBHOOK_URL="$FAKE_URL" '
+            'CODING_BOT_WEBHOOK_KEY="' + KEY + '" DECOY_SECRET=hunter2-decoy; fi\n  exec "$@"\nfi\nexit 99\n')
+        (fake / "clip-env").write_text("#!/bin/sh\nenv > '" + str(self.child_env) + "'\ncat > '" + str(self.pasteboard) + "'\n")
+        for f in ("sudo-secretspec", "clip-env"):
+            (fake / f).chmod(0o755)
+        self.clip_env = str(fake / "clip-env")
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_missing_credentials_come_from_one_run_never_a_get(self) -> None:
+        r = self.cli("send", "task", hook=False, FAKE_SUPPLY="1", FAKE_URL=self.url)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([h["auth"] for h in Hook.seen], [f"Bearer {KEY}"])
+        calls = self.calls()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertTrue(calls[0].startswith("run "), calls)
+
+    def test_no_other_secret_and_neither_credential_reaches_a_child_process(self) -> None:
+        r = self.cli("prompt", "task", hook=False, FAKE_SUPPLY="1", FAKE_URL=self.url, CLIP=self.clip_env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        env = self.child_env.read_text()
+        for leaked in ("DECOY_SECRET", "hunter2-decoy", "CODING_BOT_WEBHOOK_KEY", KEY, "CODING_BOT_WEBHOOK_URL"):
+            self.assertNotIn(leaked, env)
+        self.assertIn("CODING_BOT_STATE=", env)  # its own settings and PATH survive
+
+    def test_a_run_that_supplies_nothing_is_not_retried_and_the_tool_degrades_to_clipboard(self) -> None:
+        st = self.cli("status", hook=False)
+        self.assertIn("CODING_BOT_WEBHOOK_KEY: not set", st.stdout)
+        self.assertEqual(len(self.calls()), 1, "a loop: run was started more than once")
+
+    def test_commands_that_need_no_credentials_never_start_run(self) -> None:
+        self.cli("send", "task", hook=False, FAKE_SUPPLY="1", FAKE_URL=self.url)
+        self.log.unlink()
+        for args in (("inbox",), ("wait", "ade-1", "--timeout", "0"), ("bootstrap",), ("deliver", "--re", "ade-1")):
+            self.cli(*args, hook=False, stdin="x\nDONE")
+        self.assertEqual(self.calls(), [])
+
+
+class TestAtomicState(Base):
+    """A crash or a full disk during a write leaves the previous file whole, not a partial record."""
+
+    def load(self):  # the script has no .py suffix: load it by path; importing runs no main
+        loader = importlib.machinery.SourceFileLoader("coding_bot_under_test", str(SCRIPT))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        with mock.patch.object(sys, "dont_write_bytecode", True):
+            loader.exec_module(mod)
+        return mod
+
+    def test_a_failed_replace_keeps_the_old_bytes_leaves_no_temp_file_and_the_next_write_works(self) -> None:
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = self.load()
+            self.assertEqual(mod.append("outbox.jsonl", {"x": 1}, number="ade"), "ade-1")
+            before = (self.state / "outbox.jsonl").read_bytes()
+            with mock.patch.object(os, "replace", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+                with self.assertRaises(OSError):
+                    mod.append("outbox.jsonl", {"x": 2}, number="ade")
+            self.assertEqual((self.state / "outbox.jsonl").read_bytes(), before)
+            self.assertEqual([p.name for p in self.state.iterdir() if p.name.endswith(".tmp")], [])
+            self.assertEqual(mod.append("outbox.jsonl", {"x": 3}, number="ade"), "ade-2")
+
+    def test_a_failed_write_while_building_the_temp_file_also_keeps_the_old_file(self) -> None:
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = self.load()
+            mod.append("inbox.jsonl", {"re": "ade-1"})
+            before = (self.state / "inbox.jsonl").read_bytes()
+            with mock.patch.object(os, "fsync", side_effect=OSError(errno.EIO, "I/O error")):
+                with self.assertRaises(OSError):
+                    mod.append("inbox.jsonl", {"re": "ade-2"})
+            self.assertEqual((self.state / "inbox.jsonl").read_bytes(), before)
+            self.assertEqual([p.name for p in self.state.iterdir() if p.name.endswith(".tmp")], [])
 
 
 if __name__ == "__main__":
