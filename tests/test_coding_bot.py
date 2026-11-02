@@ -317,6 +317,38 @@ class TestStateFiles(Base):
             self.assertNotIn("Traceback", r.stderr, args)
         self.assertEqual(self.cli("wait", "ade-1", "--timeout", "0.2").returncode, 124)
 
+    def test_unicode_line_separators_in_a_task_or_reply_do_not_split_a_record(self) -> None:
+        seps = "a\u2028b\u2029c\x0bd\x1ce\u0085f"
+        self.cli("send", f"task {seps}")
+        self.cli("deliver", "--re", "ade-1", stdin=f"{seps} answer\nDONE")
+        r = self.cli("send", "next")
+        self.assertEqual(Hook.seen[-1]["body"]["id"], "ade-2")
+        self.assertNotIn("skipped", r.stderr)
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertNotIn("skipped", w.stderr)
+        self.assertIn("\u2028", w.stdout)
+        self.assertEqual(Hook.seen[0]["body"]["text"], f"task {seps}")
+
+    def test_a_torn_multibyte_tail_does_not_stop_the_next_write(self) -> None:
+        self.cli("send", "one")
+        with open(self.state / "outbox.jsonl", "ab") as f:
+            f.write('{"id": "ade-2", "text": "\u20ac'.encode()[:-1])  # cut inside the 3-byte euro sign
+        r = self.cli("send", "two")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Hook.seen[-1]["body"]["id"], "ade-2")
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_the_same_reply_text_may_answer_two_different_tasks(self) -> None:
+        self.cli("send", "one")
+        self.cli("send", "two")
+        a = self.cli("deliver", "--re", "ade-1", stdin="ok\nDONE")
+        b = self.cli("deliver", "--re", "ade-2", stdin="ok\nDONE")
+        self.assertIn("reply filed", a.stdout)
+        self.assertIn("reply filed", b.stdout)
+        self.assertEqual(self.cli("wait", "ade-2", "--timeout", "2").returncode, 0)
+        self.assertIn("already filed", self.cli("deliver", "--re", "ade-2", stdin="ok\nDONE").stdout)
+
 
 class TestArguments(Base):
     """F4, F5, F7 and header-injection: bad input is refused with exit 2."""

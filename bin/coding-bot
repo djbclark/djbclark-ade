@@ -187,13 +187,14 @@ def open_state(name: str):
     os.chmod(d, 0o700)
     fd = os.open(d / name, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
     os.chmod(d / name, 0o600)
-    return os.fdopen(fd, "a+", encoding="utf-8")
+    # errors="replace": a crash can leave a torn multibyte character at the tail; it must not stop the next write.
+    return os.fdopen(fd, "a+", encoding="utf-8", errors="replace")
 
 
 def parse(raw: str, name: str) -> list[dict]:
     """The records of a JSONL file; a torn or garbled line is skipped and reported, never fatal."""
     out, bad = [], 0
-    for line in raw.splitlines():
+    for line in raw.split("\n"):  # NOT splitlines(): it also splits at U+2028, U+0085, \x0b ... inside a JSON string
         if not line.strip():
             continue
         try:
@@ -223,7 +224,7 @@ def append(name: str, rec: dict, *, number: str | None = None) -> str:
             mid = f"{number}-{max(used, default=0) + 1}"
             rec = {"id": mid, **rec}
         f.write(("\n" if raw and not raw.endswith("\n") else "")
-                + json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **rec}, ensure_ascii=False) + "\n")
+                + json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **rec}) + "\n")  # ASCII-only: one record, one line
         f.flush()
         os.fsync(f.fileno())
         return mid
@@ -376,7 +377,7 @@ def cmd_bootstrap(_: argparse.Namespace) -> int:
 
 
 def last_line(text: str) -> str:
-    return next((ln.strip() for ln in reversed(text.splitlines()) if ln.strip()), "")
+    return next((ln.strip() for ln in reversed(text.split("\n")) if ln.strip()), "")
 
 
 def cmd_deliver(a: argparse.Namespace) -> int:
@@ -399,7 +400,7 @@ def cmd_deliver(a: argparse.Namespace) -> int:
         return fail(f"deliver: {rid} is not in the outbox ({state_dir() / 'outbox.jsonl'})")
     sha = hashlib.sha256(text.encode()).hexdigest()
     filed = records("inbox.jsonl")
-    if any(r.get("sha") == sha for r in filed):
+    if any(r.get("re") == rid and r.get("sha") == sha for r in filed):  # the same text may answer another task
         print(f"{rid}: this reply is already filed")
         return 0
     terminal = bool(TERMINAL.match(last_line(text)))
@@ -445,7 +446,7 @@ def cmd_ask(a: argparse.Namespace) -> int:
 
 def cmd_inbox(a: argparse.Namespace) -> int:
     for r in records("inbox.jsonl")[-a.n:] if a.n > 0 else []:
-        first = clean(next((ln for ln in str(r.get("text", "")).splitlines() if ln.strip()), ""))
+        first = clean(next((ln for ln in str(r.get("text", "")).split("\n") if ln.strip()), ""))
         print(f"{r.get('ts', '?')} re={r.get('re', '?')} {'final' if r.get('terminal') else 'partial'} {first[:100]}")
     return 0
 
