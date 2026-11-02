@@ -16,17 +16,21 @@
 # ACP_DISPATCH_WAIT_TICK / ACP_DISPATCH_WAIT_PASS (seconds) and ACP_DISPATCH_BIN are test seams.
 #
 # Deadline (2026-11-02, docs/deadline.md): unless --no-deadline, DEADLINE_NAME is already set (it runs under a caller's `deadline run`) or
-# bin/deadline is unusable, this waiter registers itself as `dispatch-wait-<record name>` and runs under `deadline run` (budget: the record's
-# `wait_timeout` or 60 min, whichever is shorter, plus 60 s; heartbeat every pass; owner $PASEO_AGENT_ID or none = Hermes is told). Past the
-# budget the enforcer kills THIS waiter's own process group (exit 124): a waiter holds no work and the slice keeps running, so re-arm with the same
-# line. The registered copy costs one resident `deadline run` Python process (the price of an enforced bound); a deadline problem (tool missing,
-# crashing, name already live) is one stderr warning and the wait goes on unregistered. DEADLINE_BIN is a test seam.
+# bin/deadline is unusable, this waiter registers itself as `dispatch-wait-<record name>-<pid>` and runs under `deadline run` (budget: the record's
+# `wait_timeout` read at arm time, at most 2 h = the longest a lead's tool can hold a waiter (acp-dispatch TOOL_TIMEOUT_MAX_S), 2 h when 0/unreadable,
+# plus 60 s; heartbeat every pass; owner $PASEO_AGENT_ID or none = Hermes is told). Past the budget the enforcer kills THIS waiter's own process
+# group and the waiter exits 76, NOT 124: 124 means the record's wait_timeout passed (the slice timed out), 76 means only the waiter's deadline
+# stopped it while THE SLICE KEEPS RUNNING (a longer wait_timeout, `acp-dispatch extend`, a quota auto-resume pending): re-arm with the same line,
+# never re-task. The registered copy costs one resident `deadline run` Python process (the price of an enforced bound); a deadline problem (tool
+# missing, crashing) is one stderr warning and the wait goes on unregistered. Signals: the supervisor starts `deadline run` in its own process
+# group (set -m), so a signal to the whole caller group reaches it once, via the trap; a SIGKILLed supervisor leaves no orphan, the inner copy ends
+# (143) when it notices the supervisor is gone (every 10 s tick). DEADLINE_BIN is a test seam.
 #
 # Exit: `wait --once`'s verdict — loops on 75 (EX_TEMPFAIL, still running); on 0 execs
 # `acp-dispatch check RECORD` and exits with its code (0 done, 1 partial, 3 no-report,
 # 4 BLOCKED, 5 pool unavailable, 75 machine too hot: nothing ran, re-dispatch later: that final 75 is
 # `check`'s, not "still running"); 124 (the record's wait_timeout) and any unexpected exit pass
-# straight through.
+# straight through; 76 the waiter's own deadline stopped it (the slice is still running: re-arm).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 dispatch=${ACP_DISPATCH_BIN:-$here/acp-dispatch}
@@ -41,6 +45,7 @@ marker=${2:?usage: acp-dispatch-wait [--no-deadline] RECORD DONE}
 
 # --- own deadline: run this same script under `deadline run` (see the header), or fall through and wait here ---
 dl_name=
+dl_sup=
 dl_bin=${DEADLINE_BIN:-$here/deadline}
 dl_warned=0
 dl_warn() { [ "$dl_warned" -eq 0 ] && echo "acp-dispatch-wait: warning: $1" >&2; dl_warned=1; }
@@ -50,38 +55,59 @@ if [ "$nodl" -eq 0 ]; then
     if [ -n "${DEADLINE_WAIT_MARK:-}" ] && [ "$DEADLINE_NAME" = "${DEADLINE_WAIT_NAME:-}" ]; then
       : > "$DEADLINE_WAIT_MARK" 2>/dev/null
       dl_name=$DEADLINE_NAME
+      dl_sup=${DEADLINE_WAIT_SUPERVISOR:-}
     fi
+    # never inherited by what this waiter starts: a descendant must neither beat this record nor think it is the supervised copy
+    unset DEADLINE_WAIT_NAME DEADLINE_WAIT_MARK DEADLINE_WAIT_SUPERVISOR
   elif [ ! -x "$dl_bin" ]; then
     dl_warn "no usable deadline tool ($dl_bin): waiting without a deadline"
   else
     name=$(basename "$record" .json)
-    name="dispatch-wait-${name//[!A-Za-z0-9._-]/-}"; name=${name:0:100}
-    budget=3600
+    name="dispatch-wait-${name//[!A-Za-z0-9._-]/-}"; name="${name:0:80}-$$"   # the pid: two waiters on one record never refuse each other
+    budget=7200
     wt=$(ggrep -Eo '"wait_timeout"[[:space:]]*:[[:space:]]*[0-9]+' "$record" 2>/dev/null | ggrep -Eo '[0-9]+$' | head -n 1)
     [ -n "$wt" ] && [ "$wt" -gt 0 ] && [ "$wt" -lt "$budget" ] && budget=$wt
-    mark=$(mktemp -u "${TMPDIR:-/tmp}/deadline-wait.XXXXXX")
-    DEADLINE_WAIT_NAME=$name DEADLINE_WAIT_MARK=$mark "$dl_bin" run --name "$name" --budget $((budget + 60)) --heartbeat 600 \
-      --on-expire kill -- "$here/$(basename "$0")" "$record" "$marker" &
-    child=$!
-    sig=0
-    trap 'sig=1; kill -TERM "$child" 2>/dev/null' TERM INT HUP   # forwarded once; `deadline run` then stops the waiter's group
-    while :; do
-      wait "$child"; rc=$?
-      kill -0 "$child" 2>/dev/null || break   # a trapped signal interrupts `wait` while the child lives
-    done
-    trap - TERM INT HUP
-    if [ -e "$mark" ] || [ "$sig" -eq 1 ]; then rm -f "$mark"; exit "$rc"; fi   # a signal ends it even if the wait never began
-    rm -f "$mark"
-    dl_warn "the deadline tool did not run the wait (exit $rc): waiting without a deadline"
+    mark_dir=$(mktemp -d "${TMPDIR:-/tmp}/deadline-wait.XXXXXX") || mark_dir=
+    if [ -z "$mark_dir" ]; then
+      dl_warn "cannot make a private directory: waiting without a deadline"
+    else
+      mark=$mark_dir/started
+      set -m   # `deadline run` gets its own process group: a group-wide signal reaches it once (our trap), never twice (no skipped grace)
+      DEADLINE_WAIT_NAME=$name DEADLINE_WAIT_MARK=$mark DEADLINE_WAIT_SUPERVISOR=$$ "$dl_bin" run --name "$name" --budget $((budget + 60)) \
+        --heartbeat 600 --on-expire kill -- "$here/$(basename "$0")" "$record" "$marker" </dev/null &
+      child=$!
+      set +m
+      sig=0
+      trap 'sig=1; kill -TERM "$child" 2>/dev/null' TERM INT HUP   # forwarded once; `deadline run` then stops the waiter's group
+      while :; do
+        wait "$child"; rc=$?
+        kill -0 "$child" 2>/dev/null || break   # a trapped signal interrupts `wait` while the child lives
+      done
+      trap - TERM INT HUP
+      started=0; [ -e "$mark" ] && started=1
+      rm -rf "$mark_dir"
+      if [ "$started" -eq 1 ] || [ "$sig" -eq 1 ]; then   # a signal ends it even if the wait never began
+        if [ "$rc" -eq 124 ] && [ "$sig" -eq 0 ] \
+           && ggrep -Eq '"state"[[:space:]]*:[[:space:]]*"expired"' "${DEADLINE_STATE_DIR:-$HOME/.local/state/deadlines}/$name.json" 2>/dev/null; then
+          echo "acp-dispatch-wait: this waiter's own deadline stopped it (exit 76, NOT a slice timeout): the slice is still running, re-arm with the same line" >&2
+          exit 76
+        fi
+        exit "$rc"
+      fi
+      dl_warn "the deadline tool did not run the wait (exit $rc): waiting without a deadline"
+    fi
   fi
 fi
 # heartbeat: only the registration this process made, at most once per pass (a Python start each time)
 dl_beat() { [ -n "$dl_name" ] && [ -x "$dl_bin" ] && "$dl_bin" beat "$dl_name" >/dev/null 2>&1 </dev/null; return 0; }
+# the supervisor was SIGKILLed (nothing could stop us): end rather than run on orphaned
+dl_orphan() { [ -n "$dl_sup" ] && ! kill -0 "$dl_sup" 2>/dev/null && { echo "acp-dispatch-wait: supervisor pid $dl_sup is gone; stopping the wait" >&2; exit 143; }; return 0; }
 tick=${ACP_DISPATCH_WAIT_TICK:-10}
 pass=${ACP_DISPATCH_WAIT_PASS:-60}
 since=$pass
 was=0
 while :; do
+  dl_orphan
   if [ -e "$marker" ] || ggrep -Eq '"finished"[[:space:]]*:[[:space:]]*[-0-9]' "$record" 2>/dev/null; then
     [ "$was" -eq 0 ] && since=$pass
     was=1

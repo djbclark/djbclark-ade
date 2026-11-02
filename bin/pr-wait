@@ -144,7 +144,7 @@ and a process start identity (Linux: /proc/<pid>/stat starttime, immune to wall-
 `ps -o lstart=`); a dead pid, or a live pid whose identity differs (pid reuse), is stale and taken over
 under a takeover guard that holds its taker's pid and start and is broken by liveness.
 Deadline (2026-11-02, docs/deadline.md): unless --no-deadline, DEADLINE_NAME is already set (the wait runs under a caller's `deadline run`),
-or bin/deadline is unusable, this wait registers itself as `pr-wait-<PR>` and runs under `deadline run` (budget min(--timeout, 60 min) + 60 s,
+or bin/deadline is unusable, this wait registers itself as `pr-wait-<repo>-<PR>-<pid>` and runs under `deadline run` (budget min(--timeout, 60 min) + 60 s,
 heartbeat every poll, owner $PASEO_AGENT_ID or none = Hermes is told). When the budget passes, the enforcer kills THIS waiter's own process
 group (exit 124): a waiter holds no work, so nothing is lost; run it again. A deadline problem (tool missing, crashing, name already taken)
 is one stderr warning and the wait goes on unregistered.
@@ -1828,7 +1828,7 @@ def build_parser() -> Parser:
     p.add_argument("--timeout", type=number, default=3600, help="seconds before giving up (default 3600)")
     p.add_argument("--interval", type=number, default=30, help="seconds between polls (default 30)")
     p.add_argument("--no-deadline", action="store_true",
-                   help="do not register this wait with bin/deadline (default: registered as pr-wait-<PR>, budget min(--timeout, 60 min) + 60 s, "
+                   help="do not register this wait with bin/deadline (default: registered as pr-wait-<repo>-<PR>-<pid>, budget min(--timeout, 60 min) + 60 s, "
                         "owner $PASEO_AGENT_ID, heartbeat per poll; on expiry the waiter's own process group is killed, exit 124)")
     p.add_argument("--codex-stuck", type=number, default=2700, help="seconds before a non-terminal Codex "
                    "review is reported stuck (default 2700)")
@@ -1873,7 +1873,7 @@ def self_deadline(a: argparse.Namespace, argv: list[str]) -> int | None:
         _DW = deadline_wait
         # class budget 60 min (B9), or --timeout when shorter, plus a margin; heartbeat: a poll plus its gh calls, never under 5 min
         return deadline_wait.supervised(
-            "pr-wait", deadline_wait.safe_name("pr-wait", a.pr), deadline_wait.budget_for(a.timeout, 3600),
+            "pr-wait", deadline_wait.safe_name("pr-wait", f"{a.repo.replace('/', '__').lower()[:60]}-{a.pr}-{os.getpid()}"), deadline_wait.budget_for(a.timeout, 3600),
             max(300.0, 4 * a.interval + 120), str(Path(__file__).resolve()), argv, opt_out=a.no_deadline)
     except ImportError as e:
         print(f"pr-wait: warning: deadline_wait unavailable ({e}): waiting without a deadline", file=sys.stderr)

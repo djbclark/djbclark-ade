@@ -63,15 +63,17 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
 
 `bin/pr-wait`, `bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
 wait by default, through `deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). A waiter holds no work, so on expiry the action is `kill` of
-**its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it; `acp-dispatch-wait` re-arms with the same line).
-The one exception is `load-watch admit`: its callers (`acp-dispatch`, `local-review`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
+**its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it).
+Two exceptions. `acp-dispatch-wait` exits **76**, never 124: 124 already means "the record's `wait_timeout` passed" (the slice timed out), and a lead that
+read a deadline stop as that would re-task a slice that is still running; 76 means only the waiter was stopped, so re-arm with the same line. It tells the
+two apart by the record's state (`expired`) after `deadline run` returns 124. And `load-watch admit`: its callers (`acp-dispatch`, `local-review`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
 answered as **exit 75, "still too hot"** (with a stderr line), the answer the wait would have given had it run out.
 
 |waiter|name|budget|heartbeat|
 |---|---|---|---|
-|`pr-wait PR`|`pr-wait-<PR>`|min(`--timeout`, 60 min) + 60 s|before every `gh` call and per poll; timeout 5 min or 4 polls + 2 min if longer|
+|`pr-wait PR`|`pr-wait-<repo>-<PR>-<pid>`|min(`--timeout`, 60 min) + 60 s|before every `gh` call and per poll; timeout 5 min or 4 polls + 2 min if longer|
 |`load-watch admit --wait S`|`admit-wait-<pid>`|min(S, 30 min) + 60 s (the admission class maximum)|per poll; timeout 5 min|
-|`acp-dispatch-wait RECORD DONE`|`dispatch-wait-<record file name>`|min(the record's `wait_timeout`, 60 min) + 60 s (60 min when 0 or unreadable)|per 60 s pass; timeout 10 min|
+|`acp-dispatch-wait RECORD DONE`|`dispatch-wait-<record file name>-<pid>`|min(the record's `wait_timeout` read at arm time, 2 h) + 60 s (2 h when 0 or unreadable; 2 h is the longest a lead's tool holds a waiter, so a longer slice is covered by re-arming on 76)|per 60 s pass; timeout 10 min|
 
 The 60 s margin lets the waiter's own timeout path (it writes its result files) finish before the enforcer can fire; a registered waiter therefore
 never outlives its own `--timeout`/`--wait` by more than the margin plus the sweep's worst overrun (about two minutes). Owner: the caller's
@@ -82,13 +84,20 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
    waits. `bin/deadline` is unchanged, and `done` on every exit path (success, failure, signals: the supervisor forwards SIGTERM/SIGINT/SIGHUP
    once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the shared code for the two Python waiters; `acp-dispatch-wait` does the
    same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait` was bash-only by design on
-   2026-10-18; `--no-deadline` restores that).
+   2026-10-18; `--no-deadline` restores that; whether this waiter should be opt-in is the operator's call).
+   Names carry the supervisor's pid, so a second waiter for the same PR (another repo, a new head) or record (a re-arm) is never refused as "name already live".
 2. **Opt out and nesting.** `--no-deadline` on each. A waiter started under `deadline run` (env `DEADLINE_NAME` set, even empty) does not register
-   again and does not beat the caller's record; the inner copy of a supervised waiter sees the same variable, which is also what stops a loop.
+   again and does not beat the caller's record; the inner copy of a supervised waiter sees the same variable, which is also what stops a loop. The inner
+   copy removes `DEADLINE_WAIT_NAME/MARK/SUPERVISOR` from its environment on entry (it keeps its identity in process state), so what it starts
+   inherits only `DEADLINE_NAME`: its waiters skip registration and can neither beat this record nor touch the start mark.
 3. **Never costs the wait.** The inner copy touches `$DEADLINE_WAIT_MARK` on its way in. If the supervised run never got there (the deadline tool is
    missing or not executable, crashed, or refused: the name is already live) the supervisor warns ONCE on stderr and waits in its own process,
    unregistered. A failing heartbeat (3 misses in a row) is one warning and no more beats; the wait goes on. Test seams: `DEADLINE_BIN`,
-   `DEADLINE_WAIT_BEAT_EVERY`.
+   `DEADLINE_WAIT_BEAT_EVERY`. The start mark lives in a private `mkdtemp` directory (0700), removed on every path.
+   **Signals.** SIGTERM/INT/HUP to the supervisor stop the wait with the bounded stop of `deadline run`; the bash supervisor starts `deadline run` in its
+   own process group (`set -m`), so a signal sent to the whole caller group reaches it once, never twice (a second signal means SIGKILL without grace).
+   `done` holds for every *catchable* exit; a SIGKILLed supervisor cannot stop its child, so the supervised copy checks the supervisor's pid on every
+   poll (beat; the bash waiter every 10 s tick) and ends itself with 143: no orphaned wait, no stale `pr-wait` duplicate-guard lock. The enforcer still bounds it.
 4. **Tests** (`tests/test_deadline_wrappers.py`) run each waiter against a temp `DEADLINE_STATE_DIR`; `tests/conftest.py` exports an empty
    `DEADLINE_NAME` so no other test registers in the real state directory.
 

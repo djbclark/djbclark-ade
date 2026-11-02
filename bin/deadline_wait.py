@@ -11,6 +11,12 @@ again: that is also the rule for a waiter started under a caller's own `deadline
 $DEADLINE_WAIT_MARK on its way in: if the supervised run never reached it (the deadline tool is missing, crashed, or refused the name) the
 supervisor warns once on stderr and waits in-process, unregistered. A deadline problem never costs the wait.
 
+Lifecycle. `done` on every CATCHABLE exit (normal end, failure, SIGTERM/INT/HUP to the supervisor). A SIGKILLed supervisor cannot stop its child: the
+supervised copy checks the supervisor's pid on every poll/beat (ENV_SUP) and ends itself (exit 143), so an uncatchable kill leaves no orphaned wait
+(and no stale pr-wait duplicate-guard lock). The supervised copy removes ENV_NAME/ENV_MARK/ENV_SUP from its environment on entry: its descendants
+can neither beat this record nor mistake themselves for the supervised copy. Names carry the supervisor's pid, so two waiters for one PR/record
+(another repo, a new head, a re-arm) never refuse each other's registration.
+
 Budget. The class budget of docs/paseo-only-rearchitecture.md B9 (pr-wait 60 min, admission wait at most 30 min) or the waiter's own timeout,
 whichever is shorter, plus MARGIN_S: the waiter's own timeout path (it writes its result files) must finish before the enforcer can fire.
 """
@@ -19,6 +25,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -29,12 +36,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 MARGIN_S = 60.0
 ENV_NAME = "DEADLINE_WAIT_NAME"     # the name this waiter chose for its own registration
-ENV_MARK = "DEADLINE_WAIT_MARK"     # file the supervised copy creates once it is running
+ENV_MARK = "DEADLINE_WAIT_MARK"     # file (inside a private directory) the supervised copy creates once it is running
+ENV_SUP = "DEADLINE_WAIT_SUPERVISOR"  # pid of the supervisor: the supervised copy ends when it is gone (a SIGKILLed supervisor leaves no orphan)
 BEAT_EVERY_S = float(os.environ.get("DEADLINE_WAIT_BEAT_EVERY") or 10.0)   # a Python start per beat: at most one per 10 s (the env is a test seam)
 BEAT_GIVE_UP = 3                    # consecutive failed beats before one warning and no more tries
 
 _warned: set[str] = set()
 _beat = {"last": 0.0, "fails": 0, "off": False}
+_inner: dict = {}   # set in the supervised copy only: {"name", "sup"}. Module state, NOT environment: its descendants must not inherit it
 
 
 def warn(tool: str, msg: str) -> None:
@@ -65,8 +74,13 @@ def supervised(tool: str, name: str, budget_s: float, heartbeat_s: float, script
     if opt_out:
         return None
     if "DEADLINE_NAME" in os.environ:   # set (even empty): under `deadline run`, or already supervised, or a failed registration
-        mark = os.environ.get(ENV_MARK)
-        if mark and os.environ["DEADLINE_NAME"] == os.environ.get(ENV_NAME):
+        mark = os.environ.pop(ENV_MARK, None)
+        mine = os.environ.pop(ENV_NAME, None)
+        sup = os.environ.pop(ENV_SUP, None)
+        if mark and mine and os.environ["DEADLINE_NAME"] == mine:
+            # this is the supervised copy. The three variables were just removed from the environment: a descendant started by this waiter
+            # inherits only DEADLINE_NAME (which makes ITS waiters skip registration) and can never beat this record or touch this mark
+            _inner.update(name=mine, sup=int(sup) if sup and sup.isdigit() else 0)
             try:
                 Path(mark).touch()
             except OSError:
@@ -76,9 +90,12 @@ def supervised(tool: str, name: str, budget_s: float, heartbeat_s: float, script
     if path is None:
         warn(tool, "no usable deadline tool (bin/deadline or $DEADLINE_BIN): waiting without a deadline")
         return None
-    fd, mark = tempfile.mkstemp(prefix="deadline-wait-")
-    os.close(fd)
-    os.unlink(mark)   # absent until the supervised copy creates it
+    try:
+        mark_dir = tempfile.mkdtemp(prefix="deadline-wait-")   # 0700: nobody else can pre-create or symlink the mark
+    except OSError as e:
+        warn(tool, f"cannot make a private directory ({e}): waiting without a deadline")
+        return None
+    mark = os.path.join(mark_dir, "started")   # absent until the supervised copy creates it
     exe = [script] if os.access(script, os.X_OK) else [sys.executable, script]
     cmd = [path, "run", "--name", name, "--budget", str(max(1, math.ceil(budget_s))), "--heartbeat", str(max(1, math.ceil(heartbeat_s))),
            "--on-expire", "kill", "--", *exe, *argv]
@@ -86,8 +103,10 @@ def supervised(tool: str, name: str, budget_s: float, heartbeat_s: float, script
     sys.stderr.flush()
     try:
         # its own session: a terminal or group signal reaches only this supervisor, which forwards it ONCE (no double signal)
-        child = subprocess.Popen(cmd, env={**os.environ, ENV_NAME: name, ENV_MARK: mark}, start_new_session=True)
+        child = subprocess.Popen(cmd, env={**os.environ, ENV_NAME: name, ENV_MARK: mark, ENV_SUP: str(os.getpid())},
+                                 start_new_session=True)
     except OSError as e:
+        shutil.rmtree(mark_dir, ignore_errors=True)
         warn(tool, f"cannot start {path} ({e}): waiting without a deadline")
         return None
 
@@ -107,10 +126,7 @@ def supervised(tool: str, name: str, budget_s: float, heartbeat_s: float, script
         for s, h in old.items():
             signal.signal(s, h)
     started = os.path.exists(mark)
-    try:
-        os.unlink(mark)
-    except OSError:
-        pass
+    shutil.rmtree(mark_dir, ignore_errors=True)
     if got and not started:   # cancelled before the wait began: the caller asked it to stop, so it must not wait in this process
         return 128 + got[0]
     if not started:   # `deadline run` ended without ever starting the wait: nothing waited, so wait here
@@ -119,12 +135,29 @@ def supervised(tool: str, name: str, budget_s: float, heartbeat_s: float, script
     return 128 - rc if rc < 0 else rc
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def beat() -> None:
     """Heartbeat of this waiter's own record, from its poll loop. Only when this process is the supervised copy of a registration it made
-    (DEADLINE_NAME equals the name it chose): a waiter nested under someone else's `deadline run` does not beat that record. Throttled, bounded,
+    (`_inner`): a waiter nested under someone else's `deadline run`, or a descendant of the supervised copy, does not beat that record. Also the
+    liveness check of the supervisor (every call, unthrottled). Throttled, bounded,
     and a failing tool is one warning, never a stop."""
-    name = os.environ.get("DEADLINE_NAME")
-    if not name or name != os.environ.get(ENV_NAME) or _beat["off"]:
+    name = _inner.get("name")
+    if not name:
+        return
+    sup = _inner.get("sup")
+    if sup and not pid_alive(sup):   # the supervisor was killed without a chance to stop us: end the wait, do not run on orphaned
+        print(f"{os.path.basename(sys.argv[0])}: supervisor pid {sup} is gone; stopping the wait", file=sys.stderr, flush=True)
+        raise SystemExit(143)
+    if _beat["off"]:
         return
     t = time.monotonic()
     if t - _beat["last"] < BEAT_EVERY_S:
