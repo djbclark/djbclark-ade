@@ -640,6 +640,28 @@ crawl4ai-setup
 # run that test. No root: a local lib, used as `PERL5LIB=$HOME/perl5/lib/perl5 perl t/goose_confirm.t`:
 PERL_MM_USE_DEFAULT=1 PERL_MM_OPT="INSTALL_BASE=$HOME/perl5" PERL_MB_OPT="--install_base $HOME/perl5" cpan -T AnyEvent
 
+# VSCodium (2026-11-02, djbclark): VS Code without Microsoft telemetry; extensions come
+# from Open VSX. ANSI Colors shows text with terminal colour codes in colour (a Ghostty
+# Shift+Cmd+C copy, a `tmux capture-pane -e` dump; "ANSI Text: Open Preview" hides the
+# codes). Claude Code is the sidebar on the Claude subscription; Continue gives Cmd+I
+# in-place edits on the Anthropic API key. Start VSCodium with `codium-ai`
+# (djbclark-ade bin/), which passes that key from sudo-secretspec as
+# CONTINUE_ANTHROPIC_API_KEY (never ANTHROPIC_API_KEY: the Claude Code extension would
+# switch to paid API use); started from the Dock, Continue has no key.
+brew install --cask vscodium
+for e in iliazeus.vscode-ansi anthropic.claude-code continue.continue; do codium --install-extension "$e"; done
+ln -sfn ~/src/djbclark-ade/bin/codium-ai ~/.local/bin/codium-ai
+S="$HOME/Library/Application Support/VSCodium/User/settings.json"
+[ -e "$S" ] || { mkdir -p "$(dirname "$S")"; printf '%s\n' '{' '  "files.defaultLanguage": "ansi"' '}' > "$S"; }
+grep -q '^ *- *name: Claude Sonnet' ~/.continue/config.yaml 2>/dev/null || { mkdir -p ~/.continue; printf '%s\n' \
+  'name: Main Config' 'version: 1.0.0' 'schema: v1' 'models:' \
+  '  - name: Claude Sonnet 5.5' '    provider: anthropic' '    model: claude-sonnet-5-5' \
+  '    apiKey: ${{ secrets.CONTINUE_ANTHROPIC_API_KEY }}' '    roles: [chat, edit, apply]' > ~/.continue/config.yaml; }
+# Ghostty: Shift+Cmd+C copies with the colour codes kept (Cmd+C stays plain text + HTML,
+# which keeps colours in TextEdit); then reload Ghostty's config (Shift+Cmd+,):
+G="$HOME/Library/Application Support/com.mitchellh.ghostty/config"
+mkdir -p "$(dirname "$G")"; grep -q 'copy_to_clipboard:vt' "$G" 2>/dev/null || printf '\n%s\n' 'keybind = super+shift+c=copy_to_clipboard:vt' >> "$G"
+
 # SkillOpt-Sleep (nightly skill learning from every agent's transcripts, §1.3
 # "SkillOpt-Sleep"); machine-wide, upstream main, unpinned (2026-10-24; PyPI 0.2.0
 # lacks the handoff backend and multi-skill fan-out):

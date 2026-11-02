@@ -1,0 +1,29 @@
+#!/bin/sh
+# codium-ai [codium args...]: start VSCodium with Continue's Claude API key in its
+# environment as CONTINUE_ANTHROPIC_API_KEY (read from sudo-secretspec, never written
+# to disk; ~/.continue/config.yaml refers to it as ${{ secrets.CONTINUE_ANTHROPIC_API_KEY }}).
+# Not ANTHROPIC_API_KEY: under that name the Claude Code extension would switch from
+# the Claude subscription to paid API use.
+# A running VSCodium does not get new environment variables, so it is quit first.
+set -eu
+if pgrep -x VSCodium >/dev/null; then
+  osascript -e 'tell application "VSCodium" to quit'
+  i=0
+  while pgrep -x VSCodium >/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -gt 80 ]; then
+      echo "codium-ai: VSCodium did not quit (unsaved changes?); quit it and run codium-ai again" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+fi
+key=$(sudo-secretspec get ANTHROPIC_API_KEY --reason "VSCodium Continue extension (codium-ai)")
+if [ -z "$key" ]; then
+  echo "codium-ai: ANTHROPIC_API_KEY is empty in sudo-secretspec" >&2
+  exit 1
+fi
+CONTINUE_ANTHROPIC_API_KEY=$key
+export CONTINUE_ANTHROPIC_API_KEY
+unset key
+exec /opt/homebrew/bin/codium "$@"
