@@ -624,22 +624,10 @@ class Git:
         rel = f"to-coding/{mid}.md"
         with self.locked():
             self.sync_branch()
-            target = self._target(rel)
-            if target.exists():
-                if target.read_text(encoding="utf-8", errors="replace") != content:
-                    raise TransportError(f"{rel} already exists with other content")
-            else:
-                fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{mid}.", suffix=".tmp")
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        f.write(content)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(tmp, target)
-                except BaseException:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(tmp)
-                    raise
+            try:
+                self._write(mid, rel, content)
+            except OSError as e:  # an unwritable folder or a full disk is this route failing, not a crash
+                raise TransportError(f"git: could not write {rel} ({e.strerror or type(e).__name__})") from None
             self._git("add", "--", rel)
             self._git("commit", "--quiet", "-m", f"{mid}: message to coding", "--", rel)
             try:
@@ -647,6 +635,24 @@ class Git:
             except TransportError:  # the bot pushed a reply meanwhile: rebase once and retry
                 self.sync_branch()
                 self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
+
+    def _write(self, mid: str, rel: str, content: str) -> None:
+        target = self._target(rel)
+        if target.exists():
+            if target.read_text(encoding="utf-8", errors="replace") != content:
+                raise TransportError(f"{rel} already exists with other content")
+            return
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{mid}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+            raise
 
     def list_replies(self) -> list[str]:
         with self.locked():
@@ -951,18 +957,20 @@ def mark_seen(name: str, fname: str) -> None:
     update_json("seen.json", m)
 
 
-def poll_transports(ts: list, force: bool = False) -> int:
+def poll_transports(ts: list, force: bool = False, prefer: str | None = None) -> int:
     """List each transport's reply files and file the ones not seen before; a transport in backoff is skipped unless
     `force`. A file is marked seen only once it is settled: a final reply (filed or a duplicate) or a permanent refusal.
     An empty or unfinished one (no DONE/BLOCKED last line) is read again next time, so a reply caught mid-write is never
-    lost. Returns how many replies were newly filed."""
+    lost. The files of `prefer` (the id a `wait` is for) are read first, so older unfinished replies to other ids can
+    never use up a poll's time before it. Returns how many replies were newly filed."""
     new, health, now = 0, read_json("health.json"), time.time()
     for t in ts:
         if not force and in_backoff(t.name, health, now):
             continue
         t0 = time.monotonic()
         try:
-            names = sorted(t.list_replies(), key=reply_order)
+            names = sorted(t.list_replies(),
+                           key=lambda n: (REPLY_FILE.fullmatch(n).group(1) != prefer, reply_order(n)))
             done = read_json("seen.json").get(t.name, [])
             for fname in names:
                 if fname in done:
@@ -1033,7 +1041,7 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                 share = (deadline - now) / max(1, len(ts))
                 PROBE[:] = [now + max(1.0, share)]
                 try:
-                    poll_transports([due])
+                    poll_transports([due], prefer=rid)
                 finally:
                     PROBE.clear()
                 nxt[due.name] = time.monotonic() + every * (1 if due.name == "ssh" else 3)

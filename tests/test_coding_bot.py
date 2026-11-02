@@ -1053,6 +1053,39 @@ class TestRound5(TransportBase):
             self.assertFalse(marker.exists())
 
 
+class TestRound6(TransportBase):
+    def test_an_unwritable_mailbox_folder_falls_back_instead_of_crashing(self) -> None:
+        self.ssh_down.write_text("")
+        self.cli("send", "first")  # creates to-coding/ through git
+        folder = self.mailbox / "to-coding"
+        folder.chmod(0o555)
+        self.addCleanup(folder.chmod, 0o755)
+        self.set_health("ssh", fails=0, down_until=0)  # let ssh compete again; it is still down
+        r = self.cli("send", "second")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("could not write", r.stderr)
+        self.assertEqual(Hook.seen[-1]["body"]["text"], "second")
+
+    def test_the_waited_for_ids_files_are_read_before_older_unfinished_ones(self) -> None:
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            read: list[str] = []
+
+            class Fake:
+                name = "ssh"
+
+                def list_replies(self) -> list[str]:
+                    return [f"ade-1--coding-{k}.md" for k in range(1, 6)] + ["ade-2--coding-1.md"]
+
+                def read(self, name: str) -> str:
+                    read.append(name)
+                    return "still writing" if name.startswith("ade-1-") else "[coding -> x] id=coding-1 re=ade-2\nok\nDONE"
+
+            mod.poll_transports([Fake()], prefer="ade-2")
+            self.assertEqual(read[0], "ade-2--coding-1.md")
+
+
 class TestHostileReplyIds(Base):
     def test_an_absurdly_long_bot_id_cannot_crash_wait(self) -> None:
         """Review round 3: a header id beyond Python's int-conversion limit must not be stored as a bot number."""
