@@ -1025,6 +1025,34 @@ class TestRound4(TransportBase):
         self.assertNotIn("ade-1--coding-1.md not filed", self.cli("sync").stderr, "the bad file was retried")
 
 
+class TestRound5(TransportBase):
+    def test_a_busy_git_clone_lock_is_given_up_at_the_polls_share(self) -> None:
+        import fcntl
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            g = mod.Git(self.cfg["git"])
+            with g.locked():  # another process's transaction holds the clone
+                pass
+            lock = next(self.state.glob("git-*.lock"))
+            fd = os.open(lock, os.O_RDWR)
+            self.addCleanup(os.close, fd)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            mod.PROBE[:] = [time.monotonic() + 0.6]
+            t0 = time.monotonic()
+            with self.assertRaises(mod.DeadlineError):
+                g.list_files() if hasattr(g, "list_files") else g.list_replies()
+            self.assertLess(time.monotonic() - t0, 3, "the lock wait ignored the poll's share")
+
+    def test_no_command_starts_once_the_polls_share_is_spent(self) -> None:
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            marker = Path(self.tmp.name) / "started"
+            mod.PROBE[:] = [time.monotonic() + 0.1]
+            with self.assertRaises(mod.DeadlineError):
+                mod.run_cmd(["sh", "-c", f"touch '{marker}'"], timeout=20)
+            self.assertFalse(marker.exists())
+
+
 class TestHostileReplyIds(Base):
     def test_an_absurdly_long_bot_id_cannot_crash_wait(self) -> None:
         """Review round 3: a header id beyond Python's int-conversion limit must not be stored as a bot number."""

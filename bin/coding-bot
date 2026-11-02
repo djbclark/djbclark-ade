@@ -488,7 +488,9 @@ def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float) -> str
             raise DeadlineError(f"{argv[0]}: no time left before the wait deadline")
         by_wait, timeout = left < timeout, min(timeout, left)
     if PROBE and PROBE[0] - now < timeout:
-        timeout, by_wait = max(0.5, PROBE[0] - now), True
+        if PROBE[0] - now < 0.5:
+            raise DeadlineError(f"{argv[0]}: this poll's share of the wait is used up")
+        timeout, by_wait = PROBE[0] - now, True
     try:
         r = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
@@ -567,15 +569,16 @@ class Git:
                        os.O_RDWR | os.O_CREAT, 0o600)
         try:
             limit = time.monotonic() + GIT_TIMEOUT_S
-            if DEADLINE:
-                limit = min(limit, DEADLINE[0])
+            for cap in (DEADLINE, PROBE):  # never wait for the lock past the wait, or past this poll's share of it
+                if cap:
+                    limit = min(limit, cap[0])
             while True:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
                     if time.monotonic() >= limit:
-                        raise (DeadlineError if DEADLINE else TransportError)("git: mailbox clone busy") from None
+                        raise (DeadlineError if DEADLINE or PROBE else TransportError)("git: mailbox clone busy") from None
                     time.sleep(0.1)
             yield
         finally:
