@@ -159,6 +159,18 @@ passing an unsupported `--context`. Never use raw `opencode run` to bypass this
 guard, or switch a live main loop to a costly model. Native UI choices are not
 a server-side spending limit. `route-override` does not bypass the cost gate.
 
+**Repo scope (djbclark 2026-11-02): only the `techno-euphora` project and the Hermes seat may route to
+opencode-go.** `config/routing.toml` gives a `[[service]]` `allow_repos` / `allow_seats`; a service with
+either list is eligible only for a caller whose repo (`route_agent.repo_of`: the `origin` remote's name, so a
+worktree resolves to its repo; `--repo` overrides) or seat (`--seat`, else `$ROUTE_SEAT`) is on it, and is
+skipped as repo-scoped everywhere else: never a primary and never an alternative in `route`/`plan`, and
+`acp-dispatch` exits 2 (also for a Go advisory and a resume) even with `ACP_OPERATOR_APPROVED=route-override`,
+as with the cost gate. An unknown repo and no seat is out of scope. The Hermes seat sets `ROUTE_SEAT=hermes`.
+`route_agent.py policy --md` prints the scope. This narrows the rules above (no code on opencode-go still
+holds in the scoped repo); the same two keys scope any other service, and cline/clinepass can be admitted by
+config alone once djbclark rules on its re-enable (its `never_route` / `operator_gated` entries are unchanged).
+Hermes's own provider chain (`hermes-chain`) and the substrate chain are seat constructs, not scoped by repo.
+
 Use the native V2 Go context plugin and `docs/context-hygiene.md` for early
 nudges, safe-point compaction, cooldowns and durable boundary handoffs. Automatic
 compaction is not permission to clear a parent or abandon running work. Do not

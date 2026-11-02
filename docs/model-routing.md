@@ -109,6 +109,14 @@ quoting a chain, and update its snapshot if you change one.
 > Gemini 4 Carbon is not reachable through agy yet (Google's staged rollout, 2026-10-28): recheck weekly.
 > Detail: `skills/model-routing/SKILL.md` item 1b.
 >
+> **Repo scope (djbclark 2026-11-02).** `opencode-go` carries `allow_repos = ["techno-euphora"]` and
+> `allow_seats = ["hermes"]` in `config/routing.toml`: it routes only when the caller's repo (the `origin`
+> remote's name of the `-C` directory or cwd; `--repo` overrides) or seat (`--seat`, else `$ROUTE_SEAT`) is on
+> the list. Elsewhere `route`/`plan` skip it as repo-scoped (no primary, no alternative) and `acp-dispatch`
+> exits 2, `route-override` included. Any `[[service]]` can take the same two keys, so cline/clinepass can be
+> added by config alone when djbclark rules on it. `route_agent.py policy --md` shows the scope.
+> Detail: `skills/model-routing/SKILL.md` ("OpenCode Go cost guard").
+>
 > **Correction 2026-10-03: "route bulk work to antigravity first" has a limit
 > that `aiuse` cannot see.** The agy CLI has a per-login burst limit, roughly
 > **60 generation requests an hour** (inferred; Google publishes none). On

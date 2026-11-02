@@ -374,6 +374,12 @@ billing = "subscription"
 note = "Go Plus shares one monthly allowance; bulk and mechanical only, never code; costly models require bounded read-only advice (config/go-model-policy.json)"
 agent = "opencode"
 models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low" }
+# Repo scope (djbclark 2026-11-02): only the techno-euphora project and the Hermes seat may route to this pool. Elsewhere the
+# service is skipped as repo-scoped: never a primary or an alternative in route/plan, and acp-dispatch refuses it, route-override
+# included. The repo is `route_agent.repo_of` (origin remote's name, a worktree resolves to its repo; `--repo` overrides); the seat
+# is `--seat` / $ROUTE_SEAT. The same two keys on any [[service]] scope it (cline/clinepass: its re-enable is separate, not here).
+allow_repos = ["techno-euphora"]
+allow_seats = ["hermes"]
 
 [[service]]
 name = "zai"

@@ -98,7 +98,7 @@ def test_bounded_advisor_dry_run_is_allowed_without_inference(tmp_path):
                              "--out", str(tmp_path / "jobs"),
                              "--acp-run", str(ROOT / "tools/acp-run/acp-run")], capture_output=True, text=True,
                             timeout=20, check=False,
-                            env={**os.environ, "HOME": str(tmp_path)})
+                            env={**os.environ, "HOME": str(tmp_path), "ROUTE_SEAT": "hermes"})   # opencode-go is repo-scoped (2026-11-02)
     assert result.returncode == 0, result.stderr
     assert "--go-advisory" in result.stdout
 
