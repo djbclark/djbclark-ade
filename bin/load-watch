@@ -87,7 +87,7 @@ and re-checks. `--json` prints one JSON object with the same fields. It only dec
 it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"; tightened 2026-11-01):
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: available memory (free +
 file-backed + purgeable pages: memory freed without compressing or swapping, like Linux MemAvailable's file-cache
-term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default 600, env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
+term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default 300, operator 2026-11-01; 600 before; env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
 exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 2026-11-01); pageins exceed --max-pageins per
 second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work can trip it
 with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (acp-dispatch does; `bg` never
@@ -1433,7 +1433,7 @@ def _env_float(name, default, lo=0.0):
 # WAITING: a free-memory floor, a lower compressor limit (12k/s was already starving, 20000 is the line), a pageins
 # limit and a cap on live `acp-run` sessions, all env-tunable; a reading that cannot be taken is said so, never guessed.
 ADMIT_CHURN_PAGES_S = _env_float("LW_MAX_COMPRESSOR_S", 20000.0, 1.0)
-ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", 600.0)
+ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", 300.0)  # djbclark 2026-11-01, with the available-memory measure (PR 230)
 ADMIT_PAGEINS_S = _env_float("LW_MAX_PAGEINS_S", 1000.0, 1.0)
 ADMIT_MAX_AGENTS = int(_env_float("LW_MAX_AGENTS", 14, 0))  # 0 = no cap
 ADMIT_MEM_WINDOW_S = 2.0  # vm_stat is read twice this far apart; the counters' deltas are the per-second rates

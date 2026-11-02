@@ -261,14 +261,14 @@ def refused(r):
 
 
 def test_free_memory_floor_refuses_below_and_passes_at_the_boundary(tmp_path):
-    low = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="599.9")
+    low = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_FREE_MB="299.9")
     assert low.returncode == 75, low.stderr
     rec = json.loads(low.stdout)
-    assert rec["refused"] == ["free_mem"] and rec["free_mb"] == 599 and rec["min_free_mb"] == 600
+    assert rec["refused"] == ["free_mem"] and rec["free_mb"] == 299 and rec["min_free_mb"] == 300
     assert "refused=free_mem" in admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="64").stdout
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="600").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="300").returncode == 0
     # tunable by flag and env
-    assert admit(tmp_path, "--wait", "0", "--min-free-mb", "300", load1=0.1, LW_FAKE_FREE_MB="400").returncode == 0
+    assert admit(tmp_path, "--wait", "0", "--min-free-mb", "100", load1=0.1, LW_FAKE_FREE_MB="200").returncode == 0
     assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="1500", LW_MIN_FREE_MB="2000").returncode == 75
 
 
@@ -317,7 +317,7 @@ def test_every_gate_is_reported_together_and_each_alone_decides(tmp_path):
     assert refused(r) == ["load", "compressor", "free_mem", "pageins", "agents"]
     line = admit(tmp_path, "--wait", "0", "--max-agents", load1=CORES * 9, LW_FAKE_CHURN="50000", LW_FAKE_FREE_MB="64",
                  LW_FAKE_PAGEINS="1760", LW_FAKE_AGENTS="31").stdout
-    for part in ("mem_churn=50000", "free_mb=64", "pageins=1760", "agents=31", "max_mem_churn=20000", "min_free_mb=600",
+    for part in ("mem_churn=50000", "free_mb=64", "pageins=1760", "agents=31", "max_mem_churn=20000", "min_free_mb=300",
                  "max_pageins=1000", "max_agents=14"):
         assert part in line, line
 
@@ -638,7 +638,7 @@ def test_real_path_computes_rates_over_the_two_second_sample(tmp_path, monkeypat
     assert rc == 0, rec
     assert rec["mem_churn_pages_s"] == 20000 and rec["pageins_s"] == 1000 and rec["free_mb"] == 700 and rec["agents"] == 13
     assert sleeps == [lw.ADMIT_MEM_WINDOW_S] and lw.ADMIT_MEM_WINDOW_S == 2.0
-    over = {"free_mb": 599.0, "compress": 1000 + 2 * 20002, "pageins": 100 + 2 * 1002}
+    over = {"free_mb": lw.ADMIT_MIN_FREE_MB - 1, "compress": 1000 + 2 * 20002, "pageins": 100 + 2 * 1002}
     rc, rec, _ = real_admit(lw, monkeypatch, capsys, [a, over], 14, tmp_path)
     assert rc == 75 and rec["refused"] == ["compressor", "free_mem", "pageins", "agents"]
 
