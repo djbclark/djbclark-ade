@@ -233,10 +233,11 @@ this chat.
 SWEEP_INSTRUCTION = f"""\
 This is the scheduled sweep, every 15 minutes. There is no webhook body.
 Step 1: run git pull in {MAILBOX_DIR}.
-Step 2: for every file to-coding/ade-<number>.md in the git mailbox and in {DROP_DIR}/to-coding/ (ignore dot files) that \
-has no claim-<id>.md and no <id>--coding-*.md in from-coding/ of EITHER place, handle it exactly as the routine "Agent \
-inbound" does from its Step 3 on: claim it first (Step 4), then do the task, then reply. Skip every id that already has a \
-claim or a reply. Use the nonce in the message file's first line.
+Step 2: for every file to-coding/ade-<number>.md in the git mailbox and in {DROP_DIR}/to-coding/ (ignore dot files), take \
+the nonce from its first line, and handle it exactly as the routine "Agent inbound" does from its Step 3 on (claim it \
+first, Step 4, then do the task, then reply) UNLESS a claim-<id>.md or an <id>--coding-*.md whose first line carries THAT \
+nonce exists in from-coding/ of either place. Files for the same id with another nonce belong to an older message that \
+reused the id: they do not count.
 Step 3, always, even when there was nothing to do: write heartbeat.md, one line holding the current UTC time in ISO 8601 \
 (for example 2026-11-02T10:15:00Z), replacing the old file (write a dot-named temporary file, then rename it), to BOTH \
 {DROP_DIR}/from-coding/ and from-coding/ of the git mailbox (commit and push), whichever works.
@@ -766,18 +767,26 @@ class Git:
             except TransportError:
                 # "not stored" must be true: either the push did land (seen on the remote) or the local commit goes, so a
                 # later send can never publish this message behind the sender's back
-                if self._published(rel, content):
+                published = self._published(rel, content)
+                if published:
                     return
+                if published is None:  # the remote cannot be asked: the push may have landed. Keep the commit (a later
+                    # send publishes it, which is harmless: the caller was told the message MAY be stored) and say so
+                    raise UncertainPut(f"git: push of {rel} failed and the remote cannot be checked") from None
                 with contextlib.suppress(TransportError):
                     self._git("reset", "--quiet", "--hard", f"{self.remote}/{self.branch}")
                 raise
 
-    def _published(self, rel: str, content: str) -> bool:
+    def _published(self, rel: str, content: str) -> bool | None:
+        """True: the remote has the message; False: it surely does not; None: the remote cannot be asked."""
         try:
             self._git("fetch", "--quiet", self.remote, self.branch)
+        except TransportError:
+            return None
+        try:
             return self._git("cat-file", "blob", f"{self.remote}/{self.branch}:{rel}") == content
         except TransportError:
-            return False
+            return False  # fetched, and the file is not there
 
     def _write(self, mid: str, rel: str, content: str) -> None:
         target = self._target(rel)
@@ -1227,8 +1236,9 @@ def prune_seen(name: str, listed: list[str]) -> None:
     keep = set(listed)
     cur = read_json("seen.json")
     stale = [n for n in cur.get(name, []) if n not in keep] if isinstance(cur.get(name), list) else []
-    p = cur.get(f"{name}#partial")
-    if not stale and not (isinstance(p, dict) and any(n not in keep for n in p)):
+    p, fo = cur.get(f"{name}#partial"), cur.get(f"{name}#foreign")
+    if (not stale and not (isinstance(p, dict) and any(n not in keep for n in p))
+            and not (isinstance(fo, list) and any(n not in keep for n in fo))):
         return  # nothing to forget: no write
 
     def m(d: dict) -> None:
@@ -1236,6 +1246,18 @@ def prune_seen(name: str, listed: list[str]) -> None:
             d[name] = [n for n in d[name] if n in keep]
         if isinstance(d.get(f"{name}#partial"), dict):
             d[f"{name}#partial"] = {n: v for n, v in d[f"{name}#partial"].items() if n in keep}
+        if isinstance(d.get(f"{name}#foreign"), list):
+            d[f"{name}#foreign"] = [n for n in d[f"{name}#foreign"] if n in keep]
+    update_json("seen.json", m)
+
+
+def note_foreign(name: str, fname: str) -> None:
+    def m(d: dict) -> None:
+        f = d.get(f"{name}#foreign")
+        if not isinstance(f, list):
+            f = d[f"{name}#foreign"] = []
+        if fname not in f:
+            f.append(fname)
     update_json("seen.json", m)
 
 
@@ -1333,8 +1355,10 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
         try:
             names = sorted(t.list_files(), key=lambda n: scan_order(n, file_id(n), prefer))
             if evidence is not None and prefer:
-                # a claim or reply file for the waited id is proof of pickup even if it cannot be read
-                evidence.update(f"{t.name}:{n}" for n in names if file_id(n) == prefer)
+                # a claim or reply file for the waited id is proof of pickup even if it cannot be read, unless it was read
+                # and shown to belong to another message (another nonce: an older message that reused the id)
+                foreign = set(read_json("seen.json").get(f"{t.name}#foreign", []))
+                evidence.update(f"{t.name}:{n}" for n in names if file_id(n) == prefer and n not in foreign)
             done_early = False
             prune_seen(t.name, names)
             seen = read_json("seen.json")
@@ -1368,6 +1392,10 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
                     settled = (rc == 0 and final) or (rc != 0 and msg != "empty reply")
                 if rc:
                     print(f"coding-bot: {what} {t.name}:{fname} not filed: {msg}", file=sys.stderr)
+                if rc and (msg.startswith("nonce mismatch") or msg.startswith("no nonce")):
+                    note_foreign(t.name, fname)  # read and shown to be another message's: not pickup evidence
+                    if evidence is not None:
+                        evidence.discard(f"{t.name}:{fname}")
                 if settled:
                     mark_seen(t.name, fname)
                 elif not cm:

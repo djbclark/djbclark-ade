@@ -1204,6 +1204,14 @@ class TestDeadlines(ProtocolBase):
         self.assertEqual(w.returncode, 124, w.stderr)
         self.assertNotIn("was not picked up", w.stderr)
 
+    def test_a_claim_left_by_an_older_message_with_the_same_id_is_not_pickup(self) -> None:
+        """Review of c9c751c7: a claim read and shown to carry another nonce is not evidence: exit 5 still comes."""
+        self.cli("send", "task")
+        self.claim_ssh("ade-1", "0" * 16)
+        w = self.cli("wait", "ade-1", "--timeout", "5", "--ack-timeout", "0.5")
+        self.assertEqual(w.returncode, 5, w.stderr)
+        self.assertIn("was not picked up", w.stderr)
+
     def test_a_route_that_goes_down_after_one_read_counts_as_unchecked_again(self) -> None:
         """246 review 4: ssh read once, then down: a claim there cannot be seen, so no exit 5 from git alone."""
         self.cli("send", "task")
@@ -1711,6 +1719,20 @@ class TestAdversaryR1(TransportBase):
         (Path(self.tmp.name) / "ssh.blind").write_text("")
         self.cfg["git"]["remote"] = "no-such-remote"
         self.write_cfg()
+        Hook.status = 500
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("delivery uncertain", r.stderr)
+        self.assertEqual(next(x for x in self.outbox() if x.get("result_for") == "ade-1")["stored"], "uncertain")
+
+    def test_a_git_push_that_cannot_be_checked_is_uncertain_not_failed(self) -> None:
+        """Review of c9c751c7: a lost push ack plus a failing fetch must not be reported as 'nothing stored'."""
+        self.ssh_down.write_text("")
+        real_git, mark = shutil.which("git"), Path(self.tmp.name) / "pushed.mark"
+        wrapper = Path(self.tmp.name) / "bin/git"
+        wrapper.write_text(f'#!/bin/sh\ncase " $* " in *" push "*) touch \'{mark}\'; exit 1;; '
+                           f'*" fetch "*) [ -e \'{mark}\' ] && exit 1;; esac\nexec "{real_git}" "$@"\n')
+        wrapper.chmod(0o755)
         Hook.status = 500
         r = self.cli("send", "task")
         self.assertEqual(r.returncode, 0, r.stderr)
