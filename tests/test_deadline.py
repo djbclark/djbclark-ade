@@ -31,7 +31,7 @@ class Env:
                       'if [ -f "$DL_RELAY_SLEEP" ]; then sleep "$(cat "$DL_RELAY_SLEEP")"; fi\n'
                       'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit "$(cat "$DL_RELAY_FAIL")"; fi\n'),
             "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
-            "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\nif [ -f "$DL_DISPATCH_FAIL" ]; then echo "no eligible route" >&2; exit 3; fi\n',
+            "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\nif [ -f "$DL_DISPATCH_SLEEP" ]; then sleep "$(cat "$DL_DISPATCH_SLEEP")"; fi\nif [ -f "$DL_DISPATCH_FAIL" ]; then echo "no eligible route" >&2; exit 3; fi\n',
             "paseo": (f'#!{sys.executable}\nimport os, sys, time\ntime.sleep(float(os.environ.get("FAKE_PASEO_SLEEP") or 0))\n'
                       'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
                       'a = sys.argv[1:]\n'
@@ -53,7 +53,7 @@ class Env:
             "DEADLINE_RELAY": str(tmp / "relay"), "DEADLINE_HERMES_PING": str(tmp / "ping"),
             "DEADLINE_ACP_DISPATCH": str(tmp / "dispatch"), "DEADLINE_PASEO": str(tmp / "paseo"),
             "FAKE_PASEO_LS": str(tmp / "ls.json"), "FAKE_PASEO_DIR": str(self.paseo_dir), "DL_RELAY_FAIL": str(tmp / "relay-fails"),
-            "DL_RELAY_SLEEP": str(tmp / "relay-sleep"), "DL_DISPATCH_FAIL": str(tmp / "dispatch-fails"), "DEADLINE_INLINE_WORKER": "1",
+            "DL_RELAY_SLEEP": str(tmp / "relay-sleep"), "DL_DISPATCH_FAIL": str(tmp / "dispatch-fails"), "DL_DISPATCH_SLEEP": str(tmp / "dispatch-sleep"), "DEADLINE_INLINE_WORKER": "1",
         }
         (tmp / "ls.json").write_text("[]")
 
@@ -1054,3 +1054,15 @@ def test_a_failed_reroute_notifies_the_owner_and_the_operator_without_a_second_d
     assert len(env.calls("DISPATCH")) == 1, "the dispatch is at-most-once"
     ls = json.loads(env.run("ls", "--json").stdout)["records"][0]
     assert "reroute rc=3" in ls["recovery"][-1] and ls["notice_done"] is True
+
+
+def test_a_slow_reroute_is_pending_not_a_failure(env):
+    Path(env.base["DL_DISPATCH_SLEEP"]).write_text("4")
+    assert start(env, "rrslow", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10, DEADLINE_REROUTE_WAIT="1")
+    rec = env.record("rrslow")
+    assert rec["recovery"]["state"] == "done" and "still running" in rec["recovery"]["outcome"][-1]
+    log = env.log.read_text()
+    assert "OUTCOME IS UNKNOWN" in log and "reroute FAILED" not in log and "nothing replaced it" not in log
+    assert [p for p in env.calls("PING") if "UNKNOWN" in p] and len(env.calls("DISPATCH")) == 1
+    time.sleep(4)   # the dispatch was not killed: it finished on its own

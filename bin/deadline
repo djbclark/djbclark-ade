@@ -526,16 +526,18 @@ def work(rec: dict, held: bool = False) -> None:
         if not job:
             return
         save(cur)
-    steps, notice_result, reroute_failed = [], None, None
+    steps, notice_result, reroute_failed, reroute_pending = [], None, None, None
     if "recovery" in job:
         ping, reroute = job["recovery"]
         if ping:
             steps.append(hermes_ping(ping))
         if reroute:
             argv = tool("DEADLINE_ACP_DISPATCH", "bin/acp-dispatch") + ["reroute", reroute, "--escalate", "--detach", "--no-wait"]
-            rc, out = sh_nokill(argv, wait=120)
+            rc, out = sh_nokill(argv, wait=float(os.environ.get("DEADLINE_REROUTE_WAIT") or 900))   # the worker is detached: it may wait long
             steps.append(f"reroute rc={rc}: {out[-150:]}")
-            if rc != 0:
+            if rc == 124 and out.startswith("still running"):
+                reroute_pending = f"still running after the wait: {out[-100:]}"   # outcome UNKNOWN, not a failure
+            elif rc != 0:
                 reroute_failed = f"rc={rc}: {out[-150:]}"
     if "notice" in job:
         notice_result = relay_rc(*job["notice"])
@@ -547,7 +549,13 @@ def work(rec: dict, held: bool = False) -> None:
             cur["recovery"].update(state="done", at=now(), outcome=steps)
         escalate = None
         requeue = False
-        if reroute_failed:
+        if reroute_pending:
+            # neither success nor failure is known: say exactly that, and do NOT claim nothing replaced the work (another reroute could race it)
+            if not isinstance(cur.get("notice"), dict) or cur["notice"].get("done"):
+                notify(cur, message(cur, f"stopped; its automatic reroute is still running and its OUTCOME IS UNKNOWN ({reroute_pending}); check `acp-dispatch` before rerouting again"))
+                requeue = True
+            escalate = f"deadline {cur.get('name')} ({cur.get('owner')}): reroute outcome UNKNOWN (still running); do not reroute again until checked"
+        elif reroute_failed:
             # the work is stopped and no replacement exists: a TRACKED owner notice (retried until delivered) plus an operator ping;
             # the at-most-once reroute itself is never repeated (recovery is already claimed)
             if not isinstance(cur.get("notice"), dict) or cur["notice"].get("done"):

@@ -144,3 +144,5 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     advances only the record it re-reads under the lock; one deleted since its snapshot is skipped, never resurrected from the stale copy.
 22. A failed automatic reroute (`acp-dispatch reroute` exits non-zero) is never silent: the worker queues a tracked owner notice (retried like any other) and
     pings the operator once; the dispatch itself stays at-most-once. `deadline ls --json` shows the recovery outcome and whether the owner notice was delivered.
+23. A reroute still running when the worker's wait ends (`DEADLINE_REROUTE_WAIT`, default 900 s; the worker is detached) is reported as outcome UNKNOWN, never as a
+    failure: the owner notice and operator ping say so and tell the reader to check `acp-dispatch` before rerouting again. The dispatch is never killed.
