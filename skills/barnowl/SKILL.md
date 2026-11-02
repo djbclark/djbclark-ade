@@ -181,18 +181,26 @@ own tmux session, never in the `barnowl` one.
 
 1. **Source and launcher.** `~/src/snipe` is a clone of
    [asedeno/snipe](https://github.com/asedeno/snipe) (the maintained fork, 39 commits ahead
-   of `1ts-org/snipe`, which has been dormant since 2020). `~/.local/bin/snipe` runs its venv;
-   that directory is not on PATH for non-login ssh.
+   of `1ts-org/snipe`, which has been dormant since 2020). The checkout is on branch
+   `roost-offline` of [djbclark/snipe](https://github.com/djbclark/snipe): upstream plus two
+   commits ([asedeno/snipe#3](https://github.com/asedeno/snipe/pull/3)) so that roost retries
+   with a 10 s to 5 minute backoff when `roost-api` is unreachable. Without them the roost task
+   dies on the first connection error and posts a traceback. Start it with
+   `ssh pastebin.xvm.mit.edu`, then `tmux new -As snipe snipe`; `~/.local/bin/snipe` runs the
+   venv and is not on PATH for non-login ssh.
 2. **Python 3.11 on purpose.** The venv is `~/src/snipe/venv`, built by uv on Python 3.11. The
    `Markdown<3.3` pin crashes at import on Python 3.12 and newer, and pastebin's system Python
-   is 3.13. The port is [asedeno/snipe#2](https://github.com/asedeno/snipe/pull/2) (`Markdown>=3.4`;
-   379 of 379 tests pass on 3.11 and 3.13). When it is merged and pulled, the venv can move to the
-   system Python.
+   is 3.13. The port is [asedeno/snipe#2](https://github.com/asedeno/snipe/pull/2) (`Markdown>=3.4.1`;
+   3.4.0 itself crashes at import; 379 of 379 tests pass on 3.11 and 3.13). It is not on pastebin's
+   branch. When it is merged and pulled, the venv can move to the system Python.
 3. **Subscriptions.** Roost keeps them on its server. Snipe reads the same `~/.zephyr.subs` as
    BarnOwl; `R l` (accept the default file) pushes it. Not done as of 2026-11-02:
    `roost-api.mit.edu` (18.25.132.160) was unreachable from pastebin and from the Mac (the web page
    `roost.mit.edu` was up), so account state and the subscription load are unverified. Re-check
-   with `curl -4 -m 10 -I https://roost-api.mit.edu/` from pastebin before anything else.
+   with `curl -4 -m 10 -I https://roost-api.mit.edu/` from pastebin before anything else. While
+   it is down snipe stays up, shows `[roost DISCONNECTED]` and one "cannot reach ... retrying in
+   Ns" message (checked by hand 2026-11-02). Recovery once the API returns is expected from the
+   retry loop but not yet observed; `R R` forces a reconnect.
 4. **Signup is the human's.** A first roost signup asks the user to accept that the server stores
    their messages permanently. An agent explains it and never answers it.
 5. **Auth** is the user's Kerberos ticket through `libgssapi_krb5`. Read from the code; untested
