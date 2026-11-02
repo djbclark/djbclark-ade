@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.12 (2026-10-31). Supersedes 5.11, 5.10, 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.13 (2026-11-02). Supersedes 5.12, 5.11, 5.10, 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -116,6 +116,11 @@ They are in the §1.2 install line, the §1.3 utilities table, and the skill's
 `references/replacements.md`; the "Not installed, and why" table there records
 what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
+
+What changed in 5.13 (2026-11-02, djbclark): §1.2 installs **VSCodium** with the ANSI Colors, Claude Code and
+Continue extensions, the `bin/codium-ai` launcher (Continue's Anthropic key from `sudo-secretspec`, kept out of
+integrated terminals), and a Ghostty ⇧⌘C binding that copies with terminal colour codes kept. Existing VSCodium,
+Continue and Ghostty settings are never overwritten.
 
 What changed in 5.12 (2026-10-31, operator ruling): herdr (except the `herdr4paseo` and `paseo4herdr`
 bridges), Orca and BB are retired from djbclark-ade (they stay installed and configured on djbclark's computer, untouched), and Paseo is the only harness. The BB agent workspace block is removed;
@@ -647,16 +652,24 @@ PERL_MM_USE_DEFAULT=1 PERL_MM_OPT="INSTALL_BASE=$HOME/perl5" PERL_MB_OPT="--inst
 # in-place edits on the Anthropic API key. Start VSCodium with `codium-ai`
 # (djbclark-ade bin/), which passes that key from sudo-secretspec as
 # CONTINUE_ANTHROPIC_API_KEY (never ANTHROPIC_API_KEY: the Claude Code extension would
-# switch to paid API use); started from the Dock, Continue has no key.
+# switch to paid API use); started from the Dock, Continue has no key. Every extension,
+# and anything an extension starts, can read the key; integrated terminals and tasks do
+# not get it (settings below). Continue also loads a folder's own `.continue/` blocks,
+# which can use the key, so open untrusted folders with plain `codium`.
+# Existing files are never overwritten: a line that finds one prints what to add.
 brew install --cask vscodium
 for e in iliazeus.vscode-ansi anthropic.claude-code continue.continue; do codium --install-extension "$e"; done
 ln -sfn ~/src/djbclark-ade/bin/codium-ai ~/.local/bin/codium-ai
 S="$HOME/Library/Application Support/VSCodium/User/settings.json"
-[ -e "$S" ] || { mkdir -p "$(dirname "$S")"; printf '%s\n' '{' '  "files.defaultLanguage": "ansi"' '}' > "$S"; }
-grep -q '^ *- *name: Claude Sonnet' ~/.continue/config.yaml 2>/dev/null || { mkdir -p ~/.continue; printf '%s\n' \
+if [ -e "$S" ]; then grep -q 'CONTINUE_ANTHROPIC_API_KEY' "$S" || echo "add to $S: \"files.defaultLanguage\": \"ansi\", \"terminal.integrated.env.osx\": {\"CONTINUE_ANTHROPIC_API_KEY\": null}"
+else mkdir -p "$(dirname "$S")"; printf '%s\n' '{' '  "files.defaultLanguage": "ansi",' \
+  '  "terminal.integrated.env.osx": { "CONTINUE_ANTHROPIC_API_KEY": null }' '}' > "$S"; fi
+C="$HOME/.continue/config.yaml"
+if [ -e "$C" ]; then grep -q 'CONTINUE_ANTHROPIC_API_KEY' "$C" || echo "add to $C under models: a claude-sonnet-5-5 anthropic model with apiKey \${{ secrets.CONTINUE_ANTHROPIC_API_KEY }}"
+else mkdir -p "$(dirname "$C")"; printf '%s\n' \
   'name: Main Config' 'version: 1.0.0' 'schema: v1' 'models:' \
   '  - name: Claude Sonnet 5.5' '    provider: anthropic' '    model: claude-sonnet-5-5' \
-  '    apiKey: ${{ secrets.CONTINUE_ANTHROPIC_API_KEY }}' '    roles: [chat, edit, apply]' > ~/.continue/config.yaml; }
+  '    apiKey: ${{ secrets.CONTINUE_ANTHROPIC_API_KEY }}' '    roles: [chat, edit, apply]' > "$C"; fi
 # Ghostty: Shift+Cmd+C copies with the colour codes kept (Cmd+C stays plain text + HTML,
 # which keeps colours in TextEdit); then reload Ghostty's config (Shift+Cmd+,):
 G="$HOME/Library/Application Support/com.mitchellh.ghostty/config"
@@ -903,6 +916,7 @@ config and hooks; `--agents claude` does not, and `--no-global` skips them.
 | `bash_habits_gate.py` (Claude Code PreToolUse, Codex PreToolUse, Cursor beforeShellExecution; added 2026-10-18) | https://github.com/djbclark/djbclark-ade (`claude/hooks/bash_habits_gate.py`) | `ln -s ~/src/djbclark-ade/claude/hooks/bash_habits_gate.py ~/.claude/hooks/`, then (back each file up first, §15): add `python3 "$HOME/.claude/hooks/bash_habits_gate.py"` to `PreToolUse` with matcher `Bash` in `~/.claude/settings.json`; `{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"$HOME/src/djbclark-ade/claude/hooks/bash_habits_gate.py\" --codex", "timeout": 10}]}` to `PreToolUse` in `~/.codex/hooks.json` (needs `[features] hooks = true`); `{"command": "python3 \"$HOME/src/djbclark-ade/claude/hooks/bash_habits_gate.py\" --cursor", "timeout": 10}` to `beforeShellExecution` in `~/.cursor/hooks.json` | Denies bare `sed` (BSD on macOS; `gsed` is the rule, `/usr/bin/sed` passes) and a pipeline ending in a display filter (`tail`, `head`, `cut`, `wc`, ...) whose status `&&`, `||` or a following `$?` reads (a refused `git merge --ff-only ... | tail -2 && git push` still pushed, 2026-10-18), unless `pipefail`/`PIPESTATUS` is used; denies a GNU-only option on a bare BSD tool (`chmod --reference`, `cp --parents`, `ls --group-directories-first`, `date -d`, `stat -c`, `find -printf`, `grep -P`, ..., each probed; names the `g*` tool; `/bin/x` and `g*` pass); denies recursive `grep`/`ggrep` (`-r`/`-R`; use `rg -n -l PAT PATH`, or `plocate -i NAME` for a filename when the nightly db is fresh enough, 2026-10-22); warns on `sudo -n` without `-k` (a cached ticket makes it pass anything). Quoted text, heredoc bodies and comments do not count; fails open; `BASH_HABITS_GATE_OFF=1` disables it |
 | `kiro-cli` (added 2026-10-25; optional agent TUI) | https://kiro.dev/docs/cli/ | `brew install --cask kiro-cli`, then `kiro-cli login`. Add the `kiro-cli()` function from site-djbclark's `shell/bashrc` (tier 2, between Kiro's own pre and post blocks): it adds `--trust-all-tools` after `chat` or `acp`. Do NOT run `kiro-cli integrations install input-method`: it polls forever on macOS 27 (aws/amazon-q-developer-cli#3916) and nothing here needs it | YOLO agent TUI; `acp-run kiro` dispatches `kiro-cli acp --trust-all-tools`; never routed by `route_agent.py` |
 | `zcode-key-auth` (added 2026-10-18; zcode machines only) | https://github.com/djbclark/djbclark-ade (`bin/zcode-key-auth`, Node) | Make a Coding Plan API key at https://z.ai/manage-apikey/apikey-list and store it with `sudo-secretspec set ZAI_CODING_PLAN_API_KEY`; run `zcode login` once (it creates the account identity), then `~/src/djbclark-ade/bin/zcode-key-auth apply` and `zcode-key-auth install` (copies `launchd/com.djbclark.zcode-key-auth.plist` to `~/Library/LaunchAgents/`; `uninstall` reverses) | zcode's z.ai login otherwise dies about a day after each `zcode login` (zai-org/feedback#1001). This puts the account provider on its `manual` auth-source with the API key, the desktop app's mode, which never expires; the launchd job re-checks every 6 h and pings only on a repair. **Never run `zcode login` after `apply`**: it writes `oauth` back. Verify: `sudo-secretspec run --reason check -- zcode-key-auth status` prints `match=true`. |
+| `codium-ai` (added 2026-11-02; machines with VSCodium) | https://github.com/djbclark/djbclark-ade (`bin/codium-ai`, sh) | `ln -sfn ~/src/djbclark-ade/bin/codium-ai ~/.local/bin/codium-ai` (§1.2 VSCodium block) | Starts VSCodium with Continue's Anthropic key from `sudo-secretspec get ANTHROPIC_API_KEY` as `CONTINUE_ANTHROPIC_API_KEY` (not `ANTHROPIC_API_KEY`, which would move the Claude Code extension off the subscription). Refuses while VSCodium runs unless `--restart`. Every extension and its child processes can read the key; integrated terminals and tasks cannot (`terminal.integrated.env.osx`). Open untrusted folders with plain `codium`: Continue loads a folder's own `.continue/` blocks |
 
 Register the MCP servers in user scope (back up `~/.claude.json` and the other
 clients' configs first, §15), never in a committed `.mcp.json` when a key is

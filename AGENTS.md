@@ -273,8 +273,9 @@ pull request here is expected to meet these; flag any it misses.
    (`bg bin/pytest -q tests/test_x.py`: the bare `python3` has no pytest); CI runs `pytest` directly.
 3. **Secrets only via `sudo-secretspec run`**: a key never appears in argv, a
    log, a tracked file or a test fixture. The one place a key is written is a
-   third-party tool's own credential store (`bin/zcode-key-auth`); presence
-   is proved by length or hash, never by printing the value.
+   third-party tool's own credential store (`bin/zcode-key-auth`); `bin/codium-ai`
+   uses `get` instead of `run` so that VSCodium receives one key, not every declared
+   secret; presence is proved by length or hash, never by printing the value.
 4. **`subprocess` gets argv lists, never `shell=True`** (sole exception:
    acp-run's `--verify`, an operator-supplied command). Where a shell string
    is unavoidable (launchd runner scripts, text typed into a pane, printed
