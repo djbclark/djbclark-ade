@@ -1401,8 +1401,9 @@ class Choice:
     alternatives: list[str] = field(default_factory=list)
     model: str = ""                 # "<model> [--effort L]" for acp-run
     kind: str = ""                  # required by acp-dispatch (2026-10-18)
-    # Set only when the service is repo-scoped and the caller's SEAT, not its repo, admitted it: the printed dispatch line then
-    # starts with ROUTE_SEAT=<seat>, because acp-dispatch derives the repo from -C and has no other way to learn the seat.
+    # The caller's seat (lower case), when it has one: the printed dispatch line then starts with ROUTE_SEAT=<seat>, because
+    # acp-dispatch derives the repo from -C and has no other way to learn the seat (a repo-scoped pool admitted by the seat, and
+    # a later reroute or auto-resume of any slice that may land on one).
     seat: str = ""
 
     @property
@@ -1910,8 +1911,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
                   kind=kind,
-                  seat=((seat or "").lower() if best.scope_block(repo, None) is not None and best.scope_block(None, seat) is None
-                        else ""))
+                  seat=(seat or "").lower())
 
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,

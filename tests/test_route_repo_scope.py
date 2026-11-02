@@ -135,12 +135,14 @@ class TestPlanCli(unittest.TestCase):
         self.assertEqual(self.plan_names(env={"ROUTE_SEAT": "hermes"}), ["opencode-go"])
         self.assertEqual(self.plan_names(env={"ROUTE_SEAT": "dann"}), [None])
 
-    def test_the_dispatch_line_carries_the_seat_only_when_the_seat_admitted_it(self):
+    def test_the_dispatch_line_carries_the_callers_seat_and_only_that(self):
         for kind in SCOPED_KINDS:
-            by_seat = r.route(kind, quota=ONLY_GO, repo=OTHER_REPO, seat="hermes")
+            by_seat = r.route(kind, quota=ONLY_GO, repo=OTHER_REPO, seat="Hermes")
             self.assertTrue(by_seat.dispatch.startswith("ROUTE_SEAT=hermes acp-dispatch opencode "), by_seat.dispatch)
-            by_repo = r.route(kind, quota=ONLY_GO, repo=SCOPED_REPO, seat="hermes")
+            by_repo = r.route(kind, quota=ONLY_GO, repo=SCOPED_REPO)
             self.assertTrue(by_repo.dispatch.startswith("acp-dispatch opencode "), by_repo.dispatch)
+        unscoped = r.route("code", quota={k: v for k, v in GO_BEST.items() if k != "opencode-go"}, repo=OTHER_REPO, seat="hermes")
+        self.assertTrue(unscoped.dispatch.startswith("ROUTE_SEAT=hermes acp-dispatch "), unscoped.dispatch)
 
 
 class TestDispatchScope(Base):
