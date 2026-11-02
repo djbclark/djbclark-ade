@@ -1228,7 +1228,12 @@ Addendum 2026-11-02: overwritten again 2026-11-01 21:33:38 by the installed Pase
 `SKILL.md` hash `f52ce024…` equals the app's bundled `paseo-advisor/SKILL.md`). Fable consult (`frontier`,
 2026-11-02): the smallest fix that keeps upstream's linked-update test is to let startup maintenance
 (`autoUpdateInstalledSkills`) skip skill dirs that link outside Paseo's own skill roots, leaving explicit
-install/update/save unchanged.
+install/update/save unchanged. Sent as https://github.com/getpaseo/paseo/pull/8542 (fork branch
+`fix/startup-skill-sync-skips-linked-checkouts`, refs #7700; regression test fails on main, passes on the fix;
+evidence comment https://github.com/getpaseo/paseo/issues/7700#issuecomment-6569914366). Its QA notes that
+`controller.test.ts` "renames an untouched staged deletion back with its inode and mode" fails on upstream main under
+Node 26 (`livePaths.map(lstat)` passes the index as options); upstream CI uses Node 22. Filed 2026-11-02:
+https://github.com/getpaseo/paseo/issues/8572.
 
 
 ## 18. zcode-acp — `ZCODE_DISALLOWED_TOOLS` / `--disallowed-tools` never reaches the backend session (filed 2026-10-25: https://github.com/william0wang/zcode-acp/issues/340)

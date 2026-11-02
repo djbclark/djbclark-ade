@@ -80,12 +80,17 @@ It takes the fork branch's head commit, requires a successful *push* run for exa
 commit (it refuses and installs nothing otherwise), downloads that artifact into a private
 temp dir, checks the binary runs, and replaces `~/.local/bin/btm-mt` atomically. Do not
 replace it by hand with "the newest run": `gh run list --branch` also lists other people's
-PR runs.
+PR runs. Every push to the branch (docs-only too) must pass for the head to be installable. If
+the macOS job ends "cancelled" with "The job was not acquired by Runner of type hosted" (GitHub
+macOS capacity, seen twice on 2026-11-02), rerun it: `gh run rerun <run-id> --failed --repo
+djbclark/bottom`.
 
 To follow upstream: `git fetch upstream && git rebase upstream/main` in `~/src/bottom`
 (the conflict hot spot is `src/widgets/process_table/process_data.rs`), push with
-`--force-with-lease`, wait for CI, reinstall. Do not file anything upstream: its
-`AI_POLICY.md` requires human-written issue and PR text.
+`--force-with-lease`, wait for CI, reinstall. Upstream: agents never file or post there, because
+its `AI_POLICY.md` requires issue, PR and reply text written by a human. djbclark files in his own
+words from the fact sheets in the fork's `fork-notes/` (#2297 filed 2026-11-02; its fix branch
+`fix/hidden-column-alignment` is based on upstream `main`; feature requests come after).
 
 ## Where the change lives
 
@@ -93,5 +98,7 @@ To follow upstream: `git fetch upstream && git rebase upstream/main` in `~/src/b
 when the key is on (it also turns on per-process cwd reads); `split_widths`/`split_line`
 in `src/widgets/process_table/process_data.rs` draw it (the separator uses the theme's
 `selected_border_colour`); grouping and expansion are in `get_normal_data`
-(`src/widgets/process_table.rs`). Sorting uses the joined text; search still matches the
-full command. Docs: `docs/content/configuration/config-file/processes.md`, "Split Command".
+(`src/widgets/process_table.rs`). Sorting uses the joined text; plain search matches the full
+command, and the `cwd=` keyword (e.g. `cwd=~/src/bottom`) matches the working directory as shown
+(`src/widgets/process_table/query*`). Docs: `docs/content/configuration/config-file/processes.md`,
+"Split Command", and `docs/content/usage/widgets/process.md` (search keywords).

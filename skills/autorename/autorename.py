@@ -43,7 +43,11 @@ A skill cannot invoke the built-in /rename, so this writes what it writes:
 
 The session id comes from OPENCODE_SESSION_ID when this process is OpenCode,
 GROK_SESSION_ID when it is a Grok agent (`GROK_AGENT=1`), else
-CLAUDE_CODE_SESSION_ID, else this process's own file descriptors, which zcode
+CLAUDE_CODE_SESSION_ID (overridden by the `sessionId` in `~/.claude/sessions/<CLAUDE_PID>.json`,
+the registry file of the Claude Code process that owns this shell: a session started from
+another session's environment, as /baton and /handoff do, keeps the predecessor's id in the
+variable; a nested unregistered Claude keeps its own id, never its parent's), else
+this process's own file descriptors, which zcode
 points at its exec-log path ~/.zcode/cli/exec/<sess-id>/call-*.log (zcode sets
 no session id env var). CURSOR_CONVERSATION_ID (with `CURSOR_AGENT=1`) wins
 when cursor-agent is the nearest agent process above this one; agent env vars
@@ -63,6 +67,7 @@ Exit 0 = renamed or deliberately skipped (stdout says which); 2 = cannot run.
 
 from __future__ import annotations
 import argparse
+import calendar
 import fcntl
 import json
 import os
@@ -75,10 +80,12 @@ import time
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 MARK = '"type":"custom-title"'
 MAX_LEN = 80
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
+CLAUDE_SID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 
 def clean(title: str) -> str:
@@ -89,10 +96,67 @@ def clean(title: str) -> str:
 
 # ---------------------------------------------------------------- Claude Code
 
+def claude_config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+
+
 def find_transcript(sid: str) -> Path | None:
-    root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
+    root = claude_config_dir() / "projects"
     hits = sorted(root.glob(f"*/{sid}.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     return hits[0] if hits else None
+
+
+def _proc_start_matches(pid: int, recorded: Any) -> bool:
+    """False only when the registry's `procStart` provably names another process than the live `pid`: a
+    crashed Claude leaves its file behind and the pid can be reused. Claude Code writes `procStart` as
+    `ps -o lstart= -p PID` under `LC_ALL=C TZ=UTC`; this runs the same command, so both stamps are UTC and
+    no local-time conversion (DST's repeated hour) is involved. A missing or unparsable stamp, or a
+    failing `ps`, proves nothing, so the pid alone stands."""
+    if not isinstance(recorded, str) or not recorded.strip():
+        return True
+    fmt = "%a %b %d %H:%M:%S %Y"
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=10, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+        if not out:
+            return True
+        live = calendar.timegm(time.strptime(" ".join(out.split()), fmt))
+        was = calendar.timegm(time.strptime(" ".join(recorded.split()), fmt))
+    except (OSError, ValueError, OverflowError, subprocess.TimeoutExpired):
+        return True
+    return abs(live - was) <= 5
+
+
+def registered_claude_session_id() -> str | None:
+    """The session id of the Claude Code process that owns this shell, from its own registry file.
+
+    A running Claude Code writes `<config>/sessions/<pid>.json` with its current `sessionId`.
+    `CLAUDE_CODE_SESSION_ID` in a tool shell is not reliable: a session started from another
+    session's environment (a Paseo agent launched by /baton or /handoff from a shell inside the
+    predecessor, `--fork-session`, upstream issue 81304) keeps the PREDECESSOR's id there, and its
+    transcript is then missing or belongs to another session.
+
+    Anchor: `CLAUDE_PID`, which Claude Code sets in every child shell next to `CLAUDE_CODE_SESSION_ID`
+    to its own pid, so a nested Claude (a `claude -p` or ACP child) names ITSELF. It counts only when it
+    is an ancestor of this process, has a registry file whose `pid` and `procStart` match, and holds a
+    uuid `sessionId`. Never "the nearest ancestor with a file": that skips an unregistered nested
+    Claude and renames its parent's session (adversary, PR 259). None means: use the env var."""
+    raw = os.environ.get("CLAUDE_PID", "")
+    if not raw.isdigit() or int(raw) <= 1:
+        return None
+    pid = int(raw)
+    if pid not in ancestor_pids():
+        return None
+    try:
+        data = json.loads((claude_config_dir() / "sessions" / f"{pid}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("pid") != pid:
+        return None
+    sid = data.get("sessionId")
+    if not (isinstance(sid, str) and CLAUDE_SID_RE.fullmatch(sid)):
+        return None
+    return sid if _proc_start_matches(pid, data.get("procStart")) else None
 
 
 def current_title(transcript: Path) -> str | None:
@@ -410,8 +474,8 @@ def cursor_apply_after_exit(sid: str, pid: int, expect: str, title: str) -> int:
     return 0
 
 
-def nearest_agent_proc() -> tuple[str, int] | None:
-    """(kind, pid) of the closest agent process above this one; kind is an AGENT_COMMS value."""
+def _proc_table() -> dict[int, tuple[int, str]] | None:
+    """pid -> (ppid, command basename) for every process, or None when ps fails."""
     try:
         out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True,
                              text=True, timeout=10).stdout
@@ -422,6 +486,27 @@ def nearest_agent_proc() -> tuple[str, int] | None:
         parts = line.split(None, 2)
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
             procs[int(parts[0])] = (int(parts[1]), Path(parts[2].strip()).name)
+    return procs
+
+
+def ancestor_pids() -> list[int]:
+    """Pids above this process, nearest first."""
+    procs = _proc_table()
+    chain: list[int] = []
+    pid = os.getppid()
+    for _ in range(64):
+        if procs is None or pid not in procs or pid <= 1:
+            break
+        chain.append(pid)
+        pid = procs[pid][0]
+    return chain
+
+
+def nearest_agent_proc() -> tuple[str, int] | None:
+    """(kind, pid) of the closest agent process above this one; kind is an AGENT_COMMS value."""
+    procs = _proc_table()
+    if procs is None:
+        return None
     pid = os.getppid()
     for _ in range(64):
         if pid not in procs or pid <= 1:
@@ -662,7 +747,7 @@ def session_id() -> str | None:
     if grok and (os.environ.get("GROK_AGENT") == "1" or not claude):
         return grok
     if claude:
-        return claude
+        return registered_claude_session_id() or claude
     if opencode:
         return opencode
     if codex:

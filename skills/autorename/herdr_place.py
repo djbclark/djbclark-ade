@@ -12,6 +12,8 @@ gathers the facts (`check`), the agent asks the operator, this script does the m
     herdr_place.py label [L | --from-title] [--force]   # label THIS tab (a bare number otherwise)
     HERDR_PANE_ID=<other pane> CLAUDE_CODE_SESSION_ID=<its session> \
         herdr_place.py move ... --no-focus        # sort another session's tab
+    (`CLAUDE_CODE_SESSION_ID` is for a caller that is NOT itself a Claude Code shell: inside one, `autorename.session_id()` answers
+     with the caller's own registry id from `CLAUDE_PID`, which beats the variable, 2026-11-02; use `autorename.py --session-id` to act for another session.)
     GROK_SESSION_ID=<id> GROK_AGENT=1 herdr_place.py label --from-title   # a Grok session
 
 herdr has no tab-to-workspace move, so `move` moves every pane of the current
