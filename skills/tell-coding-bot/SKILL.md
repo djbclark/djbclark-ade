@@ -1,6 +1,6 @@
 ---
 name: tell-coding-bot
-description: Talk to the operator's cloud Grok Bot "Coding" from any project, the way you call acp-run or hermes: `coding-bot ask "<task>"` (webhook push, blocks for the reply) or a clipboard prompt the operator pastes into it. Use when the operator says "tell the Coding bot", "ask Coding", "hand this to the Coding bot", "give the Coding bot a prompt", or a task needs a real browser session or web-page UI interaction this session cannot do.
+description: Talk to the operator's cloud Grok Bot "Coding" from any project, the way you call acp-run or hermes, with `coding-bot ask "<task>"` (webhook push that blocks for the reply) or a clipboard prompt the operator pastes into it. Use when the operator says "tell the Coding bot", "ask Coding", "hand this to the Coding bot", "give the Coding bot a prompt", or a task needs a real browser session or web-page UI interaction this session cannot do.
 ---
 
 # Any project <-> Grok Bot "Coding"
