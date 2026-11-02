@@ -758,9 +758,11 @@ class Git:
                 self._write(mid, rel, content)
             except OSError as e:  # an unwritable folder or a full disk is this route failing, not a crash
                 raise TransportError(f"git: could not write {rel} ({e.strerror or type(e).__name__})") from None
-            self._git("add", "--", rel)
-            self._git("commit", "--quiet", "-m", f"{mid}: message to coding", "--", rel)
             try:
+                # add and commit sit inside the recovery too: a commit that lands and then times out (a slow hook) must
+                # be rolled back or reported uncertain like a failed push
+                self._git("add", "--", rel)
+                self._git("commit", "--quiet", "-m", f"{mid}: message to coding", "--", rel)
                 try:
                     self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
                 except TransportError:  # the bot pushed a reply meanwhile: rebase once and retry
@@ -976,6 +978,9 @@ def put_message(ts: list, mid: str, content: str) -> tuple[str | None, float, li
 
 
 def message_file(a: argparse.Namespace, mid: str, text: str, nonce: str | None = None) -> str:
+    # newlines canonical (\n only): every read-back (`run_cmd`'s text mode) normalizes CR and CRLF, so a stored message
+    # must already be in that form, or a delivery check would call a message that landed absent
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     return f"{header(a.sender, mid, a.re, nonce)}\nproject: {project()}\n\n{text}\n"
 
 

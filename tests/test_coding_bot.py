@@ -1759,6 +1759,30 @@ class TestAdversaryR1(TransportBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("delivery uncertain", r.stderr)
 
+    def test_a_commit_that_lands_then_fails_is_rolled_back(self) -> None:
+        """Review of 1374eccd: a commit that updated HEAD and then failed (a slow hook) must not be published later."""
+        self.ssh_down.write_text("")
+        real_git = shutil.which("git")
+        wrapper = Path(self.tmp.name) / "bin/git"
+        wrapper.write_text(f'#!/bin/sh\ncase " $* " in *" commit "*) "{real_git}" "$@"; exit 1;; esac\n'
+                           f'exec "{real_git}" "$@"\n')
+        wrapper.chmod(0o755)
+        self.cli("send", "first task")
+        self.assertEqual(self.git(self.mailbox, "rev-parse", "HEAD"), self.git(self.mailbox, "rev-parse", "origin/main"))
+        wrapper.unlink()
+        self.set_health("git", fails=0, down_until=0)
+        self.cli("send", "second task")
+        self.assertTrue(self.in_origin("to-coding/ade-2.md"))
+        self.assertFalse(self.in_origin("to-coding/ade-1.md"), "the failed message was published by a later send")
+
+    def test_a_crlf_message_whose_ack_was_lost_is_still_recognised_as_landed(self) -> None:
+        """Review of 1374eccd: the read-back normalizes newlines, so the stored message must already be canonical."""
+        (Path(self.tmp.name) / "ssh.lostack").write_text("")
+        r = self.cli("send", "line one\r\nline two\rline three")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Hook.seen[-1]["body"]["paths"], ["ssh"], r.stderr)
+        self.assertNotIn(b"\r", (self.to_dir / "ade-1.md").read_bytes())
+
     def test_a_git_push_that_cannot_be_checked_is_uncertain_not_failed(self) -> None:
         """Review of c9c751c7: a lost push ack plus a failing fetch must not be reported as 'nothing stored'."""
         self.ssh_down.write_text("")
