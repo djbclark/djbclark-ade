@@ -273,6 +273,18 @@ class TestKeyNeverLeaves(Base):
             self.assertNotIn("evil.example", out)
             self.assertNotIn("secret-path", out)
 
+    def test_a_malformed_url_is_never_quoted_in_output_or_the_outbox(self) -> None:
+        port = self.server.server_port
+        for bad in (f"http://127.0.0.1:{port}/secret path", f"http://127.0.0.1:{port}/secret\x7fpath",
+                    "http://127.0.0.1:99999/secret-path", "http://[::1/secret-path", "http://127.0.0.1:1/secret-path"):
+            r = self.cli("send", "hello", CODING_BOT_WEBHOOK_URL=bad)
+            self.assertEqual(r.returncode, 1, (bad, r.stdout, r.stderr))
+            self.assertNotIn("Traceback", r.stderr)
+            st = self.cli("status", CODING_BOT_WEBHOOK_URL=bad)
+            for out in (r.stdout + r.stderr, st.stdout + st.stderr):
+                self.assertNotIn("secret", out, bad)
+        self.assertNotIn("secret", (self.state / "outbox.jsonl").read_text())
+
     def test_a_server_that_never_answers_is_cut_off_at_the_total_deadline(self) -> None:
         Hook.delay = 4.0
         t0 = time.monotonic()
@@ -373,6 +385,17 @@ class TestArguments(Base):
         self.cli("send", "task")
         r = self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\n" + big + "\nDONE")
         self.assertEqual(r.returncode, 2)
+        self.assertFalse((self.state / "inbox.jsonl").exists())
+
+    def test_the_size_limit_applies_to_the_raw_input_not_to_what_is_left_after_stripping(self) -> None:
+        pad = " " * 100_000
+        r = self.cli("send", "-", stdin=pad + "real task")  # a bounded read would cut this to "r" and accept it
+        self.assertEqual((r.returncode, Hook.seen), (2, []), r.stderr)
+        self.assertIn("over", r.stderr)
+        self.cli("send", "task")
+        d = self.cli("deliver", "--re", "ade-1", stdin=pad + "answer\nDONE")
+        self.assertEqual(d.returncode, 2)
+        self.assertIn("over", d.stderr)
         self.assertFalse((self.state / "inbox.jsonl").exists())
 
     def test_the_operators_clip_wins_over_another_clip_on_path(self) -> None:

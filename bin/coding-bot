@@ -167,7 +167,10 @@ def channel() -> tuple[str | None, str | None]:
 
 def check_url(url: str) -> str | None:
     """None when url may receive the key, else the reason it may not (never the URL: it is a secret)."""
-    u = urllib.parse.urlsplit(url)
+    try:
+        u = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "the webhook URL is not a valid URL"
     if u.scheme == "https" and u.hostname in WEBHOOK_HOSTS:
         return None
     if u.scheme == "http" and u.hostname in LOOPBACK:
@@ -266,11 +269,12 @@ def fail(msg: str, code: int = 2) -> int:
 
 
 def task_text(arg: str, secrets: tuple[str | None, ...]) -> str | int:
-    text = (sys.stdin.read(MAX_TEXT + 1) if arg == "-" else arg).strip()
+    raw = sys.stdin.read(MAX_TEXT + 1) if arg == "-" else arg
+    if len(raw) > MAX_TEXT:  # the raw size, before stripping can shrink it
+        return fail(f"refused: the text is over {MAX_TEXT} characters; send a summary or a pointer")
+    text = raw.strip()
     if not text:
         return fail("empty message")
-    if len(text) > MAX_TEXT:
-        return fail(f"refused: the text is over {MAX_TEXT} characters; send a summary or a pointer")
     if SECRET_SHAPES.search(text) or any(s and len(s) >= 8 and s in text for s in secrets):
         return fail("refused: the text contains something shaped like a credential; remove it and send again")
     return text
@@ -299,27 +303,34 @@ def _deadline(signum, frame):  # noqa: ANN001
 
 
 def webhook_post(url: str, key: str, payload: dict) -> tuple[bool, str]:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), method="POST",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}",
-                 "User-Agent": "coding-bot/1.0"})
+    """One POST. Every failure is reported by kind only: an exception's text can quote the URL (a secret)."""
     # 30 s is per socket operation; the alarm makes it a total deadline (a trickling server cannot hold us).
     old = signal.signal(signal.SIGALRM, _deadline)
     signal.setitimer(signal.ITIMER_REAL, TOTAL_DEADLINE_S)
     try:
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), method="POST",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}",
+                     "User-Agent": "coding-bot/1.0"})
         with OPENER.open(req, timeout=30) as resp:
             body = resp.read(2000).decode(errors="replace")
             try:
                 run = json.loads(body).get("runUuid")
             except (ValueError, AttributeError):
                 run = None
-            return True, f"HTTP {resp.status}" + (f" runUuid={run}" if isinstance(run, str) else "")
+            return True, f"HTTP {resp.status}" + (f" runUuid={clean(run)}" if isinstance(run, str) else "")
     except urllib.error.HTTPError as e:
         return False, f"webhook rejected: HTTP {e.code}"
     except Timeout:
         return False, f"webhook unreachable: no answer in {TOTAL_DEADLINE_S:g}s"
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return False, f"webhook unreachable: {clean(str(getattr(e, 'reason', e)))}"
+    except urllib.error.URLError as e:
+        why = e.reason
+        return False, "webhook unreachable: " + (clean(why.strerror) if isinstance(why, OSError) and why.strerror
+                                                  else type(why).__name__)
+    except OSError as e:
+        return False, "webhook unreachable: " + (clean(e.strerror) if e.strerror else type(e).__name__)
+    except Exception as e:  # noqa: BLE001  (a malformed URL raises ValueError/InvalidURL quoting itself)
+        return False, f"webhook failed: {type(e).__name__}"
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
@@ -381,14 +392,14 @@ def last_line(text: str) -> str:
 
 
 def cmd_deliver(a: argparse.Namespace) -> int:
-    text = paste() if a.clipboard else sys.stdin.read(MAX_TEXT + 1)
-    if text is None:
+    raw = paste() if a.clipboard else sys.stdin.read(MAX_TEXT + 1)
+    if raw is None:
         return fail("deliver: could not read the clipboard", 3)
-    text = clean(text).strip()
+    if len(raw) > MAX_TEXT:  # the raw size, before cleaning or stripping can shrink it
+        return fail(f"deliver: the reply is over {MAX_TEXT} characters; not filed")
+    text = clean(raw).strip()
     if not text:
         return fail("deliver: empty reply")
-    if len(text) > MAX_TEXT:
-        return fail(f"deliver: the reply is over {MAX_TEXT} characters; not filed")
     m = REPLY_HEADER.match(text)  # the header must be the reply's first line, not a quotation further down
     if a.re and m and m.group(2) and m.group(2) != a.re:
         return fail(f"deliver: the header says re={m.group(2)} but --re says {a.re}")
