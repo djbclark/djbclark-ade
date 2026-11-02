@@ -134,10 +134,13 @@ while stack:
                 t = os.readlink(e.path)
                 hit = os.path.normpath(os.path.join(d, t))
                 rel = os.path.relpath(e.path, pasture)
-                if inside(hit, pasture):
+                if inside(hit, pasture):  # the in-pasture target is scanned in its own right
                     continue
-                if any(inside(hit, r) for r in chain) or (
-                        rel not in tracked and any(inside(hit, r) for r in others)):
+                # Judge the resolved target too: a link reaching the source through another
+                # symlink (/tmp -> /private/tmp, an alias of the source) writes into the source.
+                hits = {hit, os.path.realpath(hit)}
+                if any(inside(h, r) for h in hits for r in chain) or (
+                        rel not in tracked and any(inside(h, r) for h in hits for r in others)):
                     bad.append(rel + " -> " + t)
             elif e.is_dir(follow_symlinks=False) and e.path != os.path.join(pasture, ".git"):
                 stack.append(e.path)

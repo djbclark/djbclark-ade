@@ -141,6 +141,19 @@ def test_check_reports_links_into_the_source_and_its_source(tmp_path):
     assert "node_modules/@scope" in r.stdout
 
 
+def test_check_reports_a_link_that_reaches_the_source_through_an_alias(tmp_path):
+    src, cow, bin_dir = setup(tmp_path)
+    r = run(tmp_path, cow, bin_dir, "create", "feat", "--source", str(src), "--no-trust")
+    assert r.returncode == 0, r.stderr
+    path = tmp_path / "pastures" / "feat"
+    alias = tmp_path / "source-alias"
+    os.symlink(src.resolve(), alias)
+    os.symlink(f"{alias}/node_modules/@scope", path / "node_modules" / "via-alias")
+    r = run(tmp_path, cow, bin_dir, "check", str(path))
+    assert r.returncode == 1
+    assert r.stdout == f"node_modules/via-alias -> {alias}/node_modules/@scope\n"
+
+
 def test_check_clean_pasture_and_unknown_path(tmp_path):
     src, cow, bin_dir = setup(tmp_path)
     r = run(tmp_path, cow, bin_dir, "create", "feat", "--source", str(src), "--no-trust")
