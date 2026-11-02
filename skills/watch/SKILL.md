@@ -5,13 +5,21 @@ description: >-
   machine load) has one live registered watcher agent, all in one shared `watch` Paseo workspace and titled `watch <domain> <n>`, starting only missing ones,
   with model, effort and context chosen from quota and recent event load. Idempotent. Use for /watch, "start
   the watchers", "bring up the watchers", "make sure the watchers are running". Not for becoming a watcher
-  yourself.
+  yourself. `/watch lead`: contact every running agent and unblock it (helm's lead mode, `skills/helm/lead.md`).
 ---
 
 # watch: make sure each watcher domain has a live watcher
 
 `~/src/djbclark-ade/bin/watch` is the engine (no model; usage text and header are the reference);
 `config/watch.toml` is the table, one row per domain. This skill is the operator pressing the button.
+
+## `/watch lead`
+
+`/watch lead` does not run `bin/watch`. It is an alias for helm's lead mode (operator, 2026-11-02). The session contacts every
+running agent in Paseo and herdr and finds out what each needs to continue or to be safe to quit. It unblocks what rules and
+probes settle, puts the rest to the operator as one batch of picklists, and stops nothing in flight. Agents send their questions
+to the lead through `relay.py` instead of raising cards. Read `~/src/djbclark-ade/skills/helm/lead.md` whole and follow it.
+The spec lives only there, so the two skills cannot drift.
 
 ## Run
 

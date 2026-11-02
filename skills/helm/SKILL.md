@@ -6,7 +6,9 @@ description: >-
   at a time and sends the answer back; "all" adds ended sessions with open work.
   Use for /helm, /helm-all, "take the helm", "what needs me", "what is open
   anywhere", "what did we leave hanging". `/helm auto` works the backlog
-  unattended while the operator is away.
+  unattended while the operator is away. `/helm lead` (alias `/watch lead`)
+  contacts every running agent, unblocks what it can, and becomes the one
+  place agents send picklist questions instead of raising cards.
 ---
 
 # helm — every waiting session, one prompt at a time
@@ -265,12 +267,20 @@ wave at a time, quota re-probed before each; integrate from messages, `STATE.md`
 always current; never publish for a live worker; compact only via `self-slash`
 after `STATE.md` is written. The queue's own items stay parked for the operator.
 
+## 9. Lead mode (`/helm lead`, `/watch lead`)
+
+Relay mode turned around (operator, 2026-11-02). Instead of waiting for cards, the helm session contacts every running agent
+in Paseo and herdr. It asks each one what it needs to continue or to be safe to quit, and tells it to ask the lead through
+`relay.py` with picklists instead of raising cards. It answers what rules and probes settle, asks the operator one batched prompt
+for the rest, and relays each pick back. It never stops anything in flight. The spec is [lead.md](lead.md); read it whole first.
+
 ## What this is not
 
 1. Not an orchestrator in relay mode: it starts no work (`bigteam`, `launch.py`
    do). Auto mode (section 8) is the one exception, and only on the
    operator's explicit go.
 2. Not an auto-responder. agent-deck's conductor answers routine questions
-   itself; helm deliberately does not.
+   itself; helm deliberately does not. Lead mode (section 9) answers only
+   what written rules or a probe settle, and says which.
 3. Not a status feed. Periodic status is `fleet-watch`, which also sends the
    "new session waiting" notice (section 5).
