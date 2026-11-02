@@ -895,6 +895,19 @@ class ProtocolBase(TransportBase):
 
 
 class TestNonce(ProtocolBase):
+    def test_a_header_with_reordered_fields_still_has_its_nonce_and_re_checked(self) -> None:
+        """246 review 7: `id=coding-1 nonce=bad re=ade-1` does not match the strict header, but its nonce counts."""
+        self.cli("send", "task")
+        bad = self.cli("deliver", "--re", "ade-1", stdin="[coding -> claude-code] id=coding-1 nonce=0000 re=ade-1\nx\nDONE")
+        self.assertEqual(bad.returncode, 2, bad.stdout)
+        self.assertIn("nonce mismatch", bad.stderr)
+        other = self.cli("deliver", "--re", "ade-1", stdin="[coding -> claude-code] id=coding-1 nonce=x re=ade-9\nx\nDONE")
+        self.assertIn("header says re=ade-9", other.stderr)
+        good = self.cli("deliver", "--re", "ade-1",
+                        stdin=f"[coding -> claude-code] id=coding-1 nonce={self.nonce()} re=ade-1\nok\nDONE")
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertEqual(self.cli("wait", "ade-1", "--timeout", "2").returncode, 0)
+
     def test_every_message_carries_its_own_nonce_in_the_file_the_payload_the_outbox_and_the_prompt(self) -> None:
         self.cli("send", "one")
         self.cli("send", "two")

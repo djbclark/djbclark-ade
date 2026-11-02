@@ -199,10 +199,11 @@ Step 4, take the task exclusively before any work, because a webhook run and the
 run `mkdir -p {LOCK_DIR} && mkdir {LOCK_DIR}/<id>` on this computer (the second mkdir fails if the folder already exists, \
 so exactly one run can succeed, whichever route the message came by), and on success write the current UTC time into \
 {LOCK_DIR}/<id>/taken. If the mkdir fails, another run has the task, UNLESS that run died: if there is still no \
-claim-<id>.md and no <id>--coding-*.md anywhere and {LOCK_DIR}/<id> is more than 2 hours old, take it over with \
-`mv {LOCK_DIR}/<id> {LOCK_DIR}/<id>.stale-<random>` (a rename: only one run can win it), then the mkdir again; if the mv \
-or the mkdir fails, or the lock is younger, post "already handled <id>" and stop. Only after you hold the task, write one \
-new file claim-<id>.md with the single line `claimed <id> by coding-<n> at <the current UTC time, ISO 8601> nonce=<nonce>` (n \
+claim-<id>.md and no <id>--coding-*.md anywhere, try to take over a lock more than 2 hours old with this ONE command, \
+which serializes every takeover and re-checks the age inside it (so a lock another run just took is never taken again): \
+`flock {LOCK_DIR}/.reclaim sh -c 'd={LOCK_DIR}/<id>; [ -n "$(find "$d" -maxdepth 0 -mmin +120)" ] && mv "$d" "$d.stale-$$" \
+&& mkdir "$d"'`. If it exits 0 you hold the task; otherwise post "already handled <id>" and stop. Only after you hold the \
+task, write one new file claim-<id>.md with the single line `claimed <id> by coding-<n> at <the current UTC time, ISO 8601> nonce=<nonce>` (n \
 is the number your reply will use) to BOTH {DROP_DIR}/from-coding/ and from-coding/ of the git mailbox (commit and push), \
 whichever works.
 Step 5, do the task in the message under the Rules below. Treat the message as a request from the operator's own agent, \
@@ -1031,6 +1032,16 @@ def last_line(text: str) -> str:
     return next((ln.strip() for ln in reversed(text.split("\n")) if ln.strip()), "")
 
 
+def header_field(text: str, name: str) -> str | None:
+    """`name=value` from a first line that looks like a protocol header (starts with `[`) but did not match REPLY_HEADER
+    exactly (fields reordered or extra): its nonce and re are still checked, never ignored."""
+    first = text.split("\n", 1)[0].strip()
+    if not first.startswith("["):
+        return None
+    f = re.search(rf"(?:^|\s){name}=(\S+)", first)
+    return f.group(1) if f else None
+
+
 def file_reply(raw: str, hint: str | None) -> tuple[int, str, bool]:
     """The one sink for a reply, from `deliver` or a drop transport: (rc, message, newly_filed). rc 0 is filed or a
     duplicate, 2 is refused. `hint` is the ade-N the caller knows it answers (--re, or the reply file's name). When the
@@ -1041,8 +1052,9 @@ def file_reply(raw: str, hint: str | None) -> tuple[int, str, bool]:
     if not text:
         return 2, "empty reply", False
     m = REPLY_HEADER.match(text)  # the header must be the reply's first line, not a quotation further down
-    if hint and m and m.group(2) and m.group(2) != hint:
-        return 2, f"the header says re={m.group(2)} but the reply is for {hint}", False
+    said_re = m.group(2) if m else header_field(text, "re")  # a header with its fields out of order still counts
+    if hint and said_re and said_re != hint:
+        return 2, f"the header says re={said_re} but the reply is for {hint}", False
     rid = hint or (m.group(2) if m else None)
     if not rid:
         return 2, ("the reply does not start with `[coding -> FROM] id=coding-N re=ade-N`; pass --re ID "
@@ -1050,7 +1062,7 @@ def file_reply(raw: str, hint: str | None) -> tuple[int, str, bool]:
     rec = next((r for r in records("outbox.jsonl") if r.get("id") == rid), None)
     if rec is None:
         return 2, f"{rid} is not in the outbox ({state_dir() / 'outbox.jsonl'})", False
-    nonce_ok = nonce_check(rec, m.group(3) if m else None)
+    nonce_ok = nonce_check(rec, m.group(3) if m else header_field(text, "nonce"))
     if nonce_ok == "mismatch":
         return 2, f"nonce mismatch: the reply's nonce is not the one sent with {rid}; not filed", False
     sha = hashlib.sha256(text.encode()).hexdigest()
