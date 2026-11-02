@@ -1483,7 +1483,7 @@ def window_fit(estimates: dict[str, float], windows: dict) -> tuple[str | None, 
 def same_workload(row: dict, kind: str | None, effort: str | None, strict: bool = False) -> bool:
     """Does a history row measure the same workload (kind and effort) as the request? A field the row does not carry cannot
     contradict the request; `strict` (a kind with its own estimate floor) requires equal, recorded fields. Reached from
-    `history_rows`, which acp-dispatch's `_history_rows` and the planner's `frontier_rows` share (adversary 7802361 A3,
+    `history_rows`, which acp-dispatch's `_history_rows` and the planner's `kind_rows` share (adversary 7802361 A3,
     bcdd223 A1 and d13f2ed A1 are the cases behind the rule)."""
     pairs = ((row.get("kind"), kind), (row.get("effort"), effort))
     if strict:
@@ -1506,10 +1506,8 @@ def record_paths(items: list[str]) -> list[Path]:
 PLACEHOLDER_MODELS = frozenset({"m1"})   # test placeholders (acp-dispatch passes its own PLACEHOLDER_MODELS, the same set)
 
 
-def history_rows(paths: list[Path], agent: str, model: str | None, *, skip_placeholders: bool,
-                 placeholder_models: frozenset[str] = PLACEHOLDER_MODELS, kind: str | None = None,
-                 effort: str | None = None, strict: bool = False) -> list[tuple[float, dict]]:
-    """(mtime, row) for measured records matching agent x model x kind x effort, newest first (acp-dispatch's `_history_rows`)."""
+def load_history(paths: list[Path]) -> list[tuple[float, dict]]:
+    """(mtime, row) of every readable record under `paths` that carries a measurement; the unfiltered half of `history_rows`."""
     rows: list[tuple[float, dict]] = []
     for path in paths:
         try:
@@ -1517,45 +1515,96 @@ def history_rows(paths: list[Path], agent: str, model: str | None, *, skip_place
             mtime = path.stat().st_mtime
         except (OSError, ValueError, TypeError):
             continue
-        if (row.get("agent") != agent or row.get("model") != model
-                or not same_workload(row, kind, effort, strict)):
-            continue
-        if skip_placeholders and str(row.get("model") or "") in placeholder_models:
+        if not isinstance(row, dict):
             continue
         if row.get("measured_usage_pct") is None and not row.get("measured_usage_windows"):
             continue
         rows.append((mtime, row))
-    rows.sort(key=lambda t: t[0], reverse=True)
     return rows
 
 
+def select_history(rows: list[tuple[float, dict]], agent: str, model: str | None, *, skip_placeholders: bool,
+                   placeholder_models: frozenset[str] = PLACEHOLDER_MODELS, kind: str | None = None,
+                   effort: str | None = None, strict: bool = False) -> list[tuple[float, dict]]:
+    """The `load_history` rows matching agent x model x kind x effort, newest first."""
+    out = [(mtime, row) for mtime, row in rows
+           if row.get("agent") == agent and row.get("model") == model and same_workload(row, kind, effort, strict)
+           and not (skip_placeholders and str(row.get("model") or "") in placeholder_models)]
+    out.sort(key=lambda t: t[0], reverse=True)
+    return out
+
+
+def history_rows(paths: list[Path], agent: str, model: str | None, *, skip_placeholders: bool,
+                 placeholder_models: frozenset[str] = PLACEHOLDER_MODELS, kind: str | None = None,
+                 effort: str | None = None, strict: bool = False) -> list[tuple[float, dict]]:
+    """(mtime, row) for measured records matching agent x model x kind x effort, newest first (acp-dispatch's `_history_rows`)."""
+    return select_history(load_history(paths), agent, model, skip_placeholders=skip_placeholders,
+                          placeholder_models=placeholder_models, kind=kind, effort=effort, strict=strict)
+
+
 FRONTIER_HISTORY_MAX = 20           # acp-dispatch's machine-wide history window (measured_history)
-_FRONTIER_HISTORY_MEMO: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+_FRONTIER_HISTORY_MEMO: dict[str, tuple[float, list[tuple[float, dict]]]] = {}   # state roots -> (read at, load_history rows)
 FRONTIER_HISTORY_TTL = 30.0
 
 
-def frontier_rows(svc: Service) -> list[dict[str, Any]]:
-    """The newest machine-wide measured frontier slices on `svc`'s frontier model and configured effort, selected by
-    the same `history_rows` filter acp-dispatch's `measured_history` uses (the planner has no task of its own, so only
-    the machine-wide half). `ROUTE_AGENT_CALIBRATED_FLOOR=off` (the test suite) reads none."""
+def is_frontier_model(model: str | None) -> bool:
+    """acp-dispatch's `is_frontier_model`: a [dispatch].frontier_models token is a substring of the model."""
+    low = (model or "").lower()
+    return bool(low) and any(str(tok).lower() in low for tok in (POLICY.get("dispatch") or {}).get("frontier_models") or [])
+
+
+def floor_lookup(table: dict[str, float], name: str, kind: str | None, frontier_model: bool) -> float | None:
+    """The estimate floor `table` gives a slice of service `name`, or None when it names none: `SERVICE:frontier` floors a
+    [dispatch].frontier_models slice and wins over `SERVICE:KIND`, which wins over `SERVICE`. The one lookup of the planner
+    (`estimate_floor`) and of acp-dispatch (`estimate_floor_and_cap`)."""
+    floor = table.get(name)
+    if kind and kind != "frontier" and f"{name}:{kind}" in table:
+        floor = table[f"{name}:{kind}"]
+    if frontier_model and f"{name}:frontier" in table:
+        floor = table[f"{name}:frontier"]
+    return floor
+
+
+def kind_floor_applies(floors: dict[str, float], name: str, kind: str | None) -> bool:
+    """Is there an estimate floor for exactly this service's kind (`SERVICE:KIND`, kind not frontier)? Then history is matched strictly."""
+    return bool(kind) and kind != "frontier" and f"{name}:{kind}" in floors
+
+
+def base_floors() -> dict[str, float]:
+    """[dispatch.estimate_floor] as floats (acp-dispatch's ESTIMATE_FLOOR)."""
+    return {str(k): float(v) for k, v in ((POLICY.get("dispatch") or {}).get("estimate_floor") or {}).items()}
+
+
+def planned_spec(svc: Service, kind: str, info: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(model, effort) `plan` would hand acp-dispatch for `kind` on `svc` (`suggest_model`: claude's frontier slot is Opus while
+    Fable is short); None for a part the profile does not name."""
+    try:
+        spec = suggest_model(svc, kind, info).split()
+    except ValueError:
+        return None, None
+    effort = spec[spec.index("--effort") + 1] if "--effort" in spec and spec.index("--effort") + 1 < len(spec) else None
+    return (spec[0] if spec else None), effort
+
+
+def kind_rows(svc: Service, kind: str, info: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """The newest machine-wide measured slices of `kind` on the model and effort `plan` would hand acp-dispatch for `svc`, selected
+    by the same filter acp-dispatch's `measured_history` uses (the planner has no task of its own, so only the machine-wide
+    half). `ROUTE_AGENT_CALIBRATED_FLOOR=off` (the test suite) reads none. The record files are read once per state root and
+    30 s, for every service and kind."""
     if os.environ.get("ROUTE_AGENT_CALIBRATED_FLOOR", "").strip().lower() in ("off", "0", "no", "false"):
         return []
-    spec = (svc.models.get("frontier") or "").split()
-    if not spec:
-        return []
-    model = spec[0]
-    effort = spec[spec.index("--effort") + 1] if "--effort" in spec and spec.index("--effort") + 1 < len(spec) else None
-    agent = svc.agent or svc.name
-    key = (f"{ACP_DISPATCH_STATE}|{os.environ.get('SESSION_FINDER_STATE', '')}|{effort}", svc.name)
+    info = info or {}
+    sf = Path(os.environ.get("SESSION_FINDER_STATE") or (Path.home() / ".local/state/session-finder"))
+    key = f"{ACP_DISPATCH_STATE}|{sf}"
     now = time.time()
     hit = _FRONTIER_HISTORY_MEMO.get(key)
-    if hit and now - hit[0] < FRONTIER_HISTORY_TTL:
-        return list(hit[1])
-    sf = Path(os.environ.get("SESSION_FINDER_STATE") or (Path.home() / ".local/state/session-finder"))
-    rows = [r for _, r in history_rows(record_paths([str(ACP_DISPATCH_STATE), str(sf)]), agent, model,
-                                       skip_placeholders=True, kind="frontier", effort=effort)[:FRONTIER_HISTORY_MAX]]
-    _FRONTIER_HISTORY_MEMO[key] = (now, rows)
-    return list(rows)
+    if not hit or now - hit[0] >= FRONTIER_HISTORY_TTL:
+        hit = (now, load_history(record_paths([str(ACP_DISPATCH_STATE), str(sf)])))
+        _FRONTIER_HISTORY_MEMO[key] = hit
+    model, effort = planned_spec(svc, kind, info)
+    chosen = select_history(hit[1], svc.agent or svc.name, model, skip_placeholders=True, kind=kind, effort=effort,
+                            strict=kind_floor_applies(base_floors(), svc.name, kind))
+    return [r for _, r in chosen[:FRONTIER_HISTORY_MAX]]
 
 
 _REPO_MEMO: dict[str, str | None] = {}
@@ -1599,35 +1648,38 @@ def repo_floors(repo: str | None) -> dict[str, float]:
     return {str(k): float(v) for k, v in (table.get("estimate_floor") or {}).items()}
 
 
-def frontier_floor(svc: Service, repo: str | None = None) -> tuple[float, float | None]:
-    """(estimate floor, cap) of a frontier slice on `svc` in `repo`: the `SERVICE:frontier` entry of
-    [dispatch.estimate_floor], replaced by the repo's override when it has one, which is also the cap (0.0, None: none)."""
-    base = float(((POLICY.get("dispatch") or {}).get("estimate_floor") or {}).get(f"{svc.name}:frontier", 0.0))
-    over = repo_floors(repo).get(f"{svc.name}:frontier")
-    return (over, over) if over is not None else (base, None)
+def estimate_floor(svc: Service, kind: str, info: dict[str, Any], repo: str | None = None) -> tuple[float, float | None]:
+    """(estimate floor, cap) of a `kind` slice on `svc` in `repo`, by the lookup acp-dispatch's `estimate_floor_and_cap` uses
+    (`floor_lookup`, on the model `plan` would hand it): [dispatch.estimate_floor], replaced by the repo's override when that
+    names the slice, which is then also the cap. (0.0, None): no floor, whatever the service or kind."""
+    model, _ = planned_spec(svc, kind, info)
+    frontier = is_frontier_model(model)
+    over = floor_lookup(repo_floors(repo), svc.name, kind, frontier)
+    if over is not None:
+        return over, over
+    base = floor_lookup(base_floors(), svc.name, kind, frontier)
+    return (base if base is not None else 0.0), None
 
 
 def pool_fits(svc: Service, kind: str, info: dict[str, Any], *, min_headroom: float = 15.0, repo: str | None = None) -> bool:
-    """Would acp-dispatch admit a `kind` slice onto `svc` given its reading `info` (remaining, windows)? The router floor,
-    and for `frontier` with a configured floor the same fit acp-dispatch applies: each window's measured estimate against
-    that window's own remaining when a window estimate applies, else the scalar estimate against the tightest window. Both
-    callers use the same rows, filters and arithmetic (`frontier_rows`, `estimate_from_history`,
-    `estimate_windows_from_rows`, `window_fit`). A task's own history is invisible to the planner (a slice sent from a task
-    with 3+ own measured slices can be estimated differently), as is a slice's in-flight reservation. The verdict also assumes the
-    slice is routed with the configured effort (`models.frontier`, `--effort high`): a dispatch without `--effort` filters the
-    history on no effort and can read other rows (2026-11-01 live: median 12 and a 5-hour estimate of 100, against 2 and 73),
-    so route with the effort `plan` prints."""
+    """Would acp-dispatch admit a `kind` slice onto `svc` given its reading `info` (remaining, windows)? The router floor, and
+    for EVERY service and kind (floor or none, measured or not) the same fit acp-dispatch applies: each window's measured
+    estimate against that window's own remaining when a window estimate applies, else the scalar estimate against the tightest
+    window. Both callers use the same rows, filters, floor lookup and arithmetic (`kind_rows`, `estimate_floor`,
+    `estimate_from_history`, `estimate_windows_from_rows`, `window_fit`); there is no early return for a service without a
+    floor, so measured history binds an unfloored pool too. Unmeasured, the planner's estimate is acp-dispatch's smallest
+    brief-size default (3%, raised to the floor): it has no brief. A task's own history is invisible to the planner (a slice
+    sent from a task with 3+ own measured slices can be estimated differently), as is a slice's in-flight reservation. The
+    verdict also assumes the slice is routed with the model and effort `plan` prints (`models.KIND`, `--effort high`): a
+    dispatch without `--effort` filters the history on no effort and can read other rows (2026-11-01 live: median 12 and a
+    5-hour estimate of 100, against 2 and 73), so route with the effort `plan` prints."""
     left = info.get("remaining")
     if left is None:
         return True
     if left < max(min_headroom, svc.reserve_floor):
         return False
-    if kind != "frontier":
-        return True
-    floor, cap = frontier_floor(svc, repo)
-    if not floor:
-        return True
-    rows = frontier_rows(svc)
+    floor, cap = estimate_floor(svc, kind, info, repo)
+    rows = kind_rows(svc, kind, info)
     windows = {k: v for k, v in (info.get("windows") or {}).items() if v is not None}
     per_window = {k: v for k, v in estimate_windows_from_rows(rows, floor, list(windows), cap).items()
                   if windows.get(k) is not None}

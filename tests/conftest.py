@@ -36,7 +36,7 @@ os.environ.setdefault("ACP_DISPATCH_REAP_MIN_INTERVAL", "0")
 # Off in tests so the suite never depends on, or spawns, the host's real aiuse;
 # test_route_agent.py's TestQuotaFromAiuseAvailable turns it on per test.
 os.environ.setdefault("ROUTE_AGENT_AIUSE", "off")
-# route_agent.pool_fits reads the machine's measured astra slices (frontier_rows) for codex's frontier estimate, as acp-dispatch's
+# route_agent.pool_fits reads the machine's measured astra slices (kind_rows) for every service and kind's estimate, as acp-dispatch's
 # estimate_pct does (2026-11-01). Off in tests so no result depends on the host's dispatch history;
 # test_argon_frontier.py turns it on per test against a temp state root.
 os.environ.setdefault("ROUTE_AGENT_CALIBRATED_FLOOR", "off")

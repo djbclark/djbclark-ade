@@ -8,6 +8,7 @@ Gemini (Flash) weekly is nearly exhausted and Argon is not, and the reverse.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -684,6 +685,87 @@ class ArgonRouting(unittest.TestCase):
         q["codex"]["pace_ratio"] = 1.6
         self.assertEqual(self.names(q, exclude=frozenset({"codex"})), "antigravity-argon")
 
+    def test_a_short_fable_sublimit_estimates_the_opus_slice_plan_hands_out_from_opus_history(self):
+        """The slice plan prints for a short Fable is Opus (suggest_model), so its estimate is Opus's history, never Fable's."""
+        claude_svc = next(s for s in ra.SERVICES if s.name == "claude")
+        base = {"agent": "claude", "kind": "frontier", "effort": "high"}
+        self.calibrated(*[{**base, "model": "opus", "measured_usage_pct": 90.0}] * 3, *[{**base, "model": "fable", "measured_usage_pct": 5.0}] * 3)
+        short = {"remaining": 80.0, "windows": {}, "sublimits": {"fable": 5.0}}
+        roomy = {"remaining": 80.0, "windows": {}, "sublimits": {"fable": 40.0}}
+        self.assertFalse(ra.pool_fits(claude_svc, "frontier", short))      # Opus slices measured 90%
+        self.assertTrue(ra.pool_fits(claude_svc, "frontier", roomy))       # Fable slices measured 5%
+
+    ARGON_ROW = {"agent": "agy", "model": "gemini-4-argon", "kind": "frontier", "effort": "high"}
+
+    def test_measured_argon_history_binds_although_argon_has_no_configured_floor(self):
+        """Codex review of PR 224, round 7 (P2): three Argon slices measured at 50%, 20% left, codex exhausted, Fable short.
+        pool_fits returned early for a pool with no estimate floor, so the planner picked Argon and dropped the usable Opus
+        downgrade, and acp-dispatch then refused the slice (exit 5)."""
+        argon = next(s for s in ra.SERVICES if s.name == "antigravity-argon")
+        self.assertEqual(ra.estimate_floor(argon, "frontier", {}), (0.0, None))             # no configured floor
+        self.calibrated(*[{**self.ARGON_ROW, "measured_usage_pct": 50.0}] * 3)
+        q = self.quota(codex=0.0, claude=80.0, argon=20.0, fable=5.0)
+        self.assertFalse(ra.pool_fits(argon, "frontier", q["antigravity-argon"]))
+        c = self.pick(q)
+        self.assertEqual((c.service.name, c.model), ("claude", "opus --effort high"))      # the Opus downgrade stays
+        self.assertEqual(self.names(self.quota(codex=0.0, claude=80.0, argon=60.0, fable=5.0)), "antigravity-argon")
+        self.assertEqual(self.names(self.quota(codex=0.0, claude=0.0, argon=20.0)), None)  # nothing fits: queued, not Argon
+
+    @contextlib.contextmanager
+    def state(self, rows: list[dict]):
+        """A temp dispatch state root holding exactly `rows` as job records, the planner's history switched on and pointed at it."""
+        with tempfile.TemporaryDirectory(prefix="argon-agree-") as d:
+            tmp = Path(d)
+            (tmp / "task" / "jobs").mkdir(parents=True)
+            for k, row in enumerate(rows):
+                (tmp / "task" / "jobs" / f"s{k}.json").write_text(json.dumps(row))
+            ra._FRONTIER_HISTORY_MEMO.clear()
+            with mock.patch.dict(os.environ, {"ROUTE_AGENT_CALIBRATED_FLOOR": "on", "SESSION_FINDER_STATE": str(tmp / "sf")}), \
+                    mock.patch.object(ra, "ACP_DISPATCH_STATE", tmp):
+                yield tmp
+            ra._FRONTIER_HISTORY_MEMO.clear()
+
+    @staticmethod
+    def dispatch_admits(tmp: Path, svc, kind: str, model: str, effort: str | None, left: float, windows: dict) -> bool:
+        """acp-dispatch's admission arithmetic (estimate_pct, estimate_windows, window_fit) for a slice of `kind` on `svc`."""
+        agent = svc.agent or svc.name
+        with mock.patch.object(acpd, "STATE_ROOT", tmp), mock.patch.dict(os.environ, {"SESSION_FINDER_STATE": str(tmp / "sf")}), \
+                mock.patch.dict(acpd.REPO_FLOORS, {}, clear=True):
+            est, _ = acpd.estimate_pct(tmp / "other-task", agent, model, "brief", None, svc.name, kind, effort)
+            per = {k: v for k, v in acpd.estimate_windows(tmp / "other-task", agent, model, kind, effort, svc.name,
+                                                           list(windows)).items() if windows.get(k) is not None}
+        if left < max(15.0, svc.reserve_floor):
+            return False
+        return acpd.window_fit(per, windows)[0] is None if per else est <= left
+
+    def test_the_planner_and_dispatch_estimate_alike_for_every_service_and_kind(self):
+        """Round 7: one estimate for every service and kind: floor or no floor, measured (scalar or per window), fewer than three
+        measurements, unmeasured. A pool the planner picked must be one acp-dispatch admits."""
+        acpd.load_policy()
+        unfloored_bound = floored_bound = 0
+        for svc in ra.SERVICES:
+            for kind in svc.models:
+                model, effort = ra.planned_spec(svc, kind, {"remaining": 50.0, "windows": {}})
+                if model is None:
+                    continue
+                base = {"agent": svc.agent or svc.name, "model": model, "kind": kind, "effort": effort}
+                histories = {"unmeasured": [], "scalar": [{**base, "measured_usage_pct": 40.0}] * 3,
+                             "fewer-than-three": [{**base, "measured_usage_pct": 2.0}] * 2,
+                             "window": [{**base, "measured_usage_windows": {"W": 30.0}}] * 3}
+                for name, rows in histories.items():
+                    with self.state(rows) as tmp:
+                        floor, _ = ra.estimate_floor(svc, kind, {"remaining": 50.0, "windows": {}})
+                        for left in (14.0, 16.0, 25.0, 31.0, 41.0, 61.0, 100.0):
+                            windows = {"W": left} if name == "window" else {}
+                            got = ra.pool_fits(svc, kind, {"remaining": left, "windows": windows})
+                            self.assertEqual(got, self.dispatch_admits(tmp, svc, kind, model, effort, left, windows),
+                                             (svc.name, kind, name, left, floor))
+                            if name == "scalar" and not got and left >= max(15.0, svc.reserve_floor):
+                                unfloored_bound += not floor
+                                floored_bound += bool(floor)
+        self.assertTrue(unfloored_bound, "measured history never bound a pool without a floor: the comparison is vacuous")
+        self.assertTrue(floored_bound)
+
 
 class ArgonSpawnRecheck(ArgonDispatchBase):
     """Codex review of PR 224, round 6: the fallback-only gate and the pool's own quota are judged again right before the
@@ -772,6 +854,49 @@ class ArgonSpawnRecheck(ArgonDispatchBase):
         rc, launched = self.execute(path, wait=lambda record: self.set_world(*self.accounts(argon_weekly=None)))
         self.assertEqual((rc, launched), (5, []))
         self.assertIn("not used unmeasured", json.loads(path.read_text())["detail"])
+
+    def overridden(self) -> Path:
+        """Argon dispatched under route-override while codex and claude are usable: eligibility is skipped, so the record carries
+        no `fallback_gate` stamp, yet it is a fallback pool and carries its `min_headroom`."""
+        r = self.agy(ARGON, accounts=self.accounts(codex_left=90.0), env={"ACP_OPERATOR_APPROVED": "route-override"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = self.out / "jobs" / "s1.json"
+        rec = json.loads(path.read_text())
+        self.assertNotIn("fallback_gate", rec)
+        self.assertEqual(rec["min_headroom"], 10.0)
+        return path
+
+    def test_a_route_override_argon_whose_reading_disappears_during_the_wait_is_refused_at_the_spawn(self):
+        """Codex review of PR 224, round 7 (P2): route-override skips ELIGIBILITY (which pool may be used), never the measurement.
+        The same missing reading is refused at dispatch even with the override."""
+        initial = self.agy(ARGON, accounts=self.accounts(argon_weekly=None), env={"ACP_OPERATOR_APPROVED": "route-override"})
+        self.assertEqual(initial.returncode, 5, initial.stderr)
+        initial_detail = json.loads((self.out / "jobs" / "s1.json").read_text())["detail"]
+        self.assertIn("no fresh quota reading for Gemini 4 Argon weekly", initial_detail)
+        (self.out / "jobs" / "s1.json").unlink()
+        path = self.overridden()
+        rc, launched = self.execute(path, wait=lambda record: self.set_world(*self.accounts(codex_left=90.0, argon_weekly=None)))
+        self.assertEqual((rc, launched), (5, []))                         # the dispatch-time exit
+        rec = json.loads(path.read_text())
+        self.assertEqual((rec["status"], rec["unavailable_class"]), ("unavailable", "headroom"))   # and class
+        self.assertIn("no fresh quota reading for Gemini 4 Argon weekly", rec["detail"])
+        self.assertIn("not used unmeasured", rec["detail"])
+
+    def test_a_route_override_argon_window_drained_during_the_wait_is_refused_at_the_spawn(self):
+        path = self.overridden()
+        rc, launched = self.execute(path, wait=lambda record: self.set_world(*self.accounts(codex_left=90.0, argon_weekly=0.0)))
+        self.assertEqual((rc, launched), (5, []))
+        self.assertIn("Gemini 4 Argon weekly", json.loads(path.read_text())["detail"])
+
+    def test_route_override_still_lets_argon_run_while_the_primaries_are_usable(self):
+        """The override skips only eligibility: primaries recovered or not, a measured, fitting Argon is not refused at the spawn."""
+        path = self.overridden()
+        rec = json.loads(path.read_text())
+        with mock.patch.dict(os.environ, {"AIUSE_SNAPSHOT": str(self.tmp / "latest.json"), **NO_GOVERNOR}):
+            self.set_world(*self.accounts(codex_left=90.0))
+            self.assertIsNone(acpd.spawn_refusal(rec))
+            self.set_world(*self.accounts(codex_left=30.0))
+            self.assertIsNone(acpd.spawn_refusal(rec))
 
 
 if __name__ == "__main__":

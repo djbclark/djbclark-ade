@@ -95,7 +95,7 @@ quoting a chain, and update its snapshot if you change one.
 > route_agent; aiuse's `semantics.model_pool_family` is prose in `aiuse schema`, not an importable function).
 > Service `antigravity-argon` (`config/routing.toml`, rank 5 in `frontier`, `pool = ["antigravity",
 > "gemini_argon"]`, `fallback_after = ["codex", "claude"]`) is skipped while every service it falls back
-> behind is usable: codex is short when the slice does not fit what acp-dispatch will demand of it for astra (per quota window, the 60% estimate floor until
+> behind is usable: codex is short when the slice does not fit what acp-dispatch will demand of it for astra (one estimate for every service and kind, measured history binding a pool with no floor too; per quota window, the 60% estimate floor until
 > 3 slices are measured, then their median; not the router's 15%; in tendcf and nix2cf only, a 20% repo override
 > from `[dispatch.repo_overrides]`, operator 2026-11-01, resolved from the `-C` directory's origin remote), claude is
 > short when the Fable sublimit is below `frontier1_min_left` (Argon then replaces the Opus downgrade).

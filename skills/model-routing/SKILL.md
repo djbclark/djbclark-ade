@@ -662,7 +662,9 @@ method that runs the waves.
        (`route_agent.pool_fits`, the arithmetic acp-dispatch applies: per quota window, each window's estimate against that
        window's own remaining, else the scalar estimate against the tightest window; codex astra: the
        `[dispatch.estimate_floor] "codex:frontier"` 60% until 3 astra slices are measured, then their median over the same
-       rows dispatch reads, kind and effort filtered, `estimate_windows_from_rows` and `window_fit` shared;
+       rows dispatch reads, kind and effort filtered, `estimate_windows_from_rows` and `window_fit` shared; the same
+       estimate for EVERY service and kind (a pool with no floor, Argon included, is bound by its measured history
+       too; unmeasured, the brief-size default's 3%) on the model and effort `plan` prints (Opus's history while Fable is short);
        not the router's 15%; a pool absent from a fresh aiuse list reads 0).
        **Repo override (operator 2026-11-01): in tendcf and nix2cf only, astra runs down to 20% of Codex quota left**
        (`[dispatch.repo_overrides.REPO.estimate_floor] "codex:frontier" = 20.0`). The repo is resolved from acp-dispatch's
