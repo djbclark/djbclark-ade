@@ -1,6 +1,6 @@
 ---
-name: paseo-handoff
-description: Hand off the current task to another agent running in Paseo, with full context. Use only when the user asks to hand off through Paseo ("/paseo-handoff", "hand this to a Paseo agent"); a plain "handoff" is the handoff skill (Tier 2 document). Orca hand-offs are retired (2026-10-31).
+name: ade-paseo-handoff
+description: Hand off the current task to another agent running in Paseo, with full context. Use only when the user asks to hand off through Paseo ("/ade-paseo-handoff", "hand this to a Paseo agent"); a plain "handoff" is the handoff skill (Tier 2 document). Orca hand-offs are retired (2026-10-31).
 user-invocable: true
 ---
 
@@ -12,13 +12,13 @@ Transfer the current task — context, decisions, failed attempts, constraints �
 
 ## Prerequisites
 
-Read the **paseo** skill. Use `list_profiles` and read configured profiles' `notes` when that MCP tool is exposed. In a terminal-only session without Paseo MCP, use the CLI fallback in **paseo** instead; do not invent a `paseo profile` command or treat an unavailable tool as an absent profile catalog.
+Read the **ade-paseo** skill. Use `list_profiles` and read configured profiles' `notes` when that MCP tool is exposed. In a terminal-only session without Paseo MCP, use the CLI fallback in **ade-paseo** instead; do not invent a `paseo profile` command or treat an unavailable tool as an absent profile catalog.
 
 **Check execution mode first (2026-10-27).** Plan Mode permits inspection only: no handoff writes, claims, launches or peer notices. Say that mode is the blocker and retain the selected destination. When Default mode resumes and the operator says “go”, continue without asking again.
 
 ## Parsing arguments
 
-1. **Agent profile** — explicit profile name first; otherwise choose the profile whose `notes` best match the work. Materialize it into `create_agent` as described by the **paseo** skill. If no profile fits, use Paseo's provider discovery fallback.
+1. **Agent profile** — explicit profile name first; otherwise choose the profile whose `notes` best match the work. Materialize it into `create_agent` as described by the **ade-paseo** skill. If no profile fits, use Paseo's provider discovery fallback.
 2. **Isolation** — "in a worktree" / "worktree" → create a workspace with `isolation: "worktree"`, using a short branch name derived from the task. **Interim rule (2026-10-30, `docs/paseo-only-rearchitecture.md` D0.3; local patch 2 in `skills/paseo/UPSTREAM.md`):** until that plan's D1.3 and D2 gate have passed, archiving a Paseo worktree workspace can delete unpushed work. So run `git worktree add` first (AGENTS.md order 9), then create the `isolation: "local"` workspace at that worktree's path, so the agent never starts in the shared checkout; tell the user why.
 3. **Task description** — anything else the user said.
 
@@ -79,7 +79,7 @@ Dann's. The Dann-specific reading, with commands and a dated seat map, is
 1. **Archive the old tab once the successor is verifiably up.** *"Whenever you verifiably open a
    successor tab, you can close the old tab."* Verification is, in this order: `paseo inspect <id>
    --json` reports `ParentAgentId: null` (a parented agent runs, answers and is invisible in the tab
-   list — see the **paseo** skill); the `Cwd`, provider and model are the ones intended; and the
+   list — see the **ade-paseo** skill); the `Cwd`, provider and model are the ones intended; and the
    successor has answered at least one turn. Then `paseo archive <old-id>` — a **soft-delete** that
    interrupts only if the old agent is still running and returns `archivedAt`. Re-list and prove the
    old id left the active list; the transcript stays retrievable with `--include-archived`. Archive

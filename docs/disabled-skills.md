@@ -164,8 +164,8 @@ in `~/.claude/settings.json` does hold, whatever re-links the folder:
 1. `"off"` (gone for the model and from `/`): the nine `bailian-*` skills,
    and `composio-cli` (its plugin is off too; /doctor 2026-10-18).
 2. `"user-invocable-only"` (you can still type `/name`; the model no longer
-   sees the description): `paseo`, `paseo-advisor`, `paseo-committee`,
-   `paseo-handoff`, `paseo-help`, `paseo-plugin`, the five `ralph-tui-*`,
+   sees the description): `ade-paseo`, `ade-paseo-advisor`, `ade-paseo-committee`,
+   `ade-paseo-handoff`, `ade-paseo-help`, `ade-paseo-plugin` (unprefixed until 2026-11-02), the five `ralph-tui-*`,
    `siyuan`, `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown`,
    `skillopt-sleep`, `skillopt-sleep-learned`, `terminus-kira`, `reorg-orca`,
    `setup-modern-cli`, `teach`. None was invoked by the Skill tool in the 14

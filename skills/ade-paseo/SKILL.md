@@ -1,5 +1,5 @@
 ---
-name: paseo
+name: ade-paseo
 description: Paseo reference for managing projects, workspaces, workspace scripts, agents, schedules, and heartbeats.
 ---
 
@@ -143,8 +143,8 @@ paseo run --no-wait --workspace <workspace-id> --provider <provider/model> --thi
 paseo inspect <returned-agent-id> --json
 ```
 
-Pass arguments as an argv list when building this command programmatically. `inspect` JSON currently uses capitalized keys such as `Id`, `Provider`, `Model`, `Mode`, `Cwd` and `ParentAgentId`; do not assume the lowercase keys from `paseo ls`. Verify the returned workspace and placement before reporting success. This creates a real Paseo agent, not an ACP slice. Keep default parentage; never call detach to manufacture independence. See **paseo-handoff** for durable chain pointers and verified peer notices.
+Pass arguments as an argv list when building this command programmatically. `inspect` JSON currently uses capitalized keys such as `Id`, `Provider`, `Model`, `Mode`, `Cwd` and `ParentAgentId`; do not assume the lowercase keys from `paseo ls`. Verify the returned workspace and placement before reporting success. This creates a real Paseo agent, not an ACP slice. Keep default parentage; never call detach to manufacture independence. See **ade-paseo-handoff** for durable chain pointers and verified peer notices.
 
 Discover the root command roster before probing subcommands; obey the machine's rule against `--help` on live-service subcommands.
 
-For product questions, setup, logs, version problems, or troubleshooting, use the **paseo-help** skill.
+For product questions, setup, logs, version problems, or troubleshooting, use the **ade-paseo-help** skill.

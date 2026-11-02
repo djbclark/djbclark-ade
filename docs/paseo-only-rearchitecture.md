@@ -37,11 +37,11 @@ herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's 
    communication with ClinePass and OpenCode Go support as a hard requirement (TUICommander 87.4,
    Superset 56). Known weakness: one Node event loop per daemon (section B9, risk H2).
 6. **Fan-out during the migration:** Paseo-native subagents (`paseo run` / `create_agent`) and the
-   `/paseo-handoff`, `/paseo-advisor`, `/paseo-committee` skills; not `/bigteam` until D5 rewrites it.
+   `/ade-paseo-handoff`, `/ade-paseo-advisor`, `/ade-paseo-committee` skills; not `/bigteam` until D5 rewrites it.
    Exception until D5: `acp-dispatch` stays the dispatcher for frontier consults and adversary reviews,
    because its quota gates are the only ones that exist today (H4). Until D1.3 and D2's gate have both
    passed, fan-out uses `isolation: local` workspaces only, and task worktrees come from `git worktree add`
-   (order 9), whatever a skill such as `/paseo-handoff` offers (D0.3).
+   (order 9), whatever a skill such as `/ade-paseo-handoff` offers (D0.3).
 7. **Fable and codex astra take part in the re-architecting** (djbclark, 2026-10-29); this overrides the
    routing-policy line that reserves them for `frontier` consults. Both consulted on v0 (section I).
 8. **Herdr bridges and attach clients stay, for edge cases** (djbclark, 2026-10-30): two projects, each
@@ -276,7 +276,7 @@ ops-promotion pilot passes.
       cow pasture clean and pushed, or its owner named; bigteam inboxes drained.
    3. **No Paseo worktree fan-out before the preserve point exists**: until D1.3 and D2's gate have both
       passed, Paseo workspaces created for work use `isolation: local`, task worktrees come from
-      `git worktree add` (order 9), and `session-janitor` stays disabled (B4.3). `skills/paseo-handoff`
+      `git worktree add` (order 9), and `session-janitor` stays disabled (B4.3). `skills/ade-paseo-handoff`
       carries a pointer to this rule.
 1. **Contracts and safety net.** Each probe is a repeatable script under `tests/paseo-acceptance/` with an
    **expected outcome and a named consequence if it fails**; D2 starts only when every consequence is

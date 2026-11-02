@@ -1,6 +1,6 @@
 ---
-name: paseo-advisor
-description: Spin up a single Paseo agent as an advisor — a second opinion on the current task, run through the Paseo daemon. Use only when the user asks for it through Paseo ("/paseo-advisor", "ask a Paseo advisor"); a plain "second opinion" goes through acp-run or the dialogue skill.
+name: ade-paseo-advisor
+description: Spin up a single Paseo agent as an advisor — a second opinion on the current task, run through the Paseo daemon. Use only when the user asks for it through Paseo ("/ade-paseo-advisor", "ask a Paseo advisor"); a plain "second opinion" goes through acp-run or the dialogue skill.
 user-invocable: true
 argument-hint: "[--profile <name>] <question or topic>"
 ---
@@ -13,7 +13,7 @@ Single agent. Reads the situation you're in. Gives a judgment. You decide what t
 
 ## Prerequisites
 
-Read the **paseo** skill. Call `list_profiles` before choosing the advisor. Do not create the advisor until you have read the configured profiles and their `notes`.
+Read the **ade-paseo** skill. Call `list_profiles` before choosing the advisor. Do not create the advisor until you have read the configured profiles and their `notes`.
 
 ## Picking the advisor
 
@@ -21,7 +21,7 @@ Read the **paseo** skill. Call `list_profiles` before choosing the advisor. Do n
 2. **Otherwise** choose the profile whose `notes` best fit the question. Match the actual work: design and approach, audit and review, or research and root-cause analysis.
 3. **Contrast helps.** When several profiles fit, prefer a different provider family from your own so the second opinion is genuinely fresh.
 
-Materialize the selected profile into `create_agent` as described by the **paseo** skill. If no profile fits, use Paseo's provider discovery fallback.
+Materialize the selected profile into `create_agent` as described by the **ade-paseo** skill. If no profile fits, use Paseo's provider discovery fallback.
 
 ## The briefing
 
@@ -42,9 +42,9 @@ This is analysis only. Do NOT edit, create, or delete any files. Do NOT write co
 
 If `$ARGUMENTS` contains another skill reference — `/unslop`, `/unslop-risk`, `$unslop`, etc. — the user is asking the advisor to run that skill against the current task. Examples:
 
-- `/paseo-advisor /unslop` → advisor runs `/unslop` on the current diff.
-- `/paseo-advisor /unslop-risk` → advisor does an unslop-risk review.
-- `/paseo-advisor $diagnose this build failure` → advisor invokes `/diagnose`.
+- `/ade-paseo-advisor /unslop` → advisor runs `/unslop` on the current diff.
+- `/ade-paseo-advisor /unslop-risk` → advisor does an unslop-risk review.
+- `/ade-paseo-advisor $diagnose this build failure` → advisor invokes `/diagnose`.
 
 Parse the forwarded skill name out of `$ARGUMENTS` (`/<name>` or `$<name>`). In the briefing, tell the advisor explicitly:
 
