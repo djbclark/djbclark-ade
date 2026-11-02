@@ -987,3 +987,32 @@ def test_install_renders_the_configured_state_dir_into_env_and_log_paths(env, tm
     sd = str(env.state.resolve())
     assert p["EnvironmentVariables"]["DEADLINE_STATE_DIR"] == sd
     assert p["StandardOutPath"] == p["StandardErrorPath"] == f"{sd}/sweep.log" and "__" not in r.stdout
+
+
+# ---------- PR 223 local-review round 12: anchor captured at registration, exhausted notice retries escalate once ----------
+
+def test_start_captures_a_member_anchor_so_a_reaped_leader_does_not_make_it_lost(env):
+    c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & wait"], start_new_session=True)
+    env.children.append(c)
+    time.sleep(0.4)
+    assert start(env, "anch", "--budget", "10", "--pid", str(c.pid), "--on-expire", "relay").returncode == 0
+    rec = env.record("anch")
+    assert rec["anchor"]["pid"] != c.pid and rec["anchor"]["start"], "a member is anchored at registration"
+    os.kill(c.pid, signal.SIGKILL)   # the leader dies and is reaped before the first sweep; its two sleeps live on
+    c.wait()
+    time.sleep(0.3)
+    r = env.run("sweep", "--no-agents", now=T0 + 50)
+    assert "lost" not in r.stdout and env.record("anch")["state"] in ("stopping", "expired"), r.stdout
+    time.sleep(1)
+    env.run("sweep", "--no-agents", now=T0 + 200)
+    assert not env.group_alive(c.pid), "the surviving members are enforced"
+
+
+def test_exhausted_owner_notice_retries_escalate_to_the_operator_once(env):
+    Path(env.base["DL_RELAY_FAIL"]).write_text("1")
+    assert start(env, "unreach", "--budget", "5", "--on-expire", "relay").returncode == 0
+    for i in range(20):
+        env.run("sweep", "--no-agents", now=T0 + 10 + i * 1000)
+    pings = [p for p in env.calls("PING") if "NOT reached" in p]
+    assert len(pings) == 1 and "unreach" in pings[0]
+    assert env.record("unreach")["notice"]["escalated"] is True

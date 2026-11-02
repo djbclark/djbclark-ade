@@ -138,3 +138,5 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     new process with the same pid and tick. macOS `ps -o lstart=` is an absolute time and needs no boot id.
 19. `deadline install` renders the state directory it was run with (`DEADLINE_STATE_DIR` or the default) into the job's environment and log paths, so the job
     sweeps the same records the registrations wrote. A `kill-failed` record queues its notice retry and still retries SIGKILL in the same pass.
+20. `start` records a live non-leader member as the group's anchor at registration (not only on the first pass), so a leader that exits before the first
+    sweep does not turn the registration into `lost`. When the owner stays unreachable through all 5 notice attempts, one Hermes ping says so (`notice.escalated`).

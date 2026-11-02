@@ -538,9 +538,16 @@ def work(rec: dict, held: bool = False) -> None:
             return   # the name was registered again while the slow calls ran: the result belongs to the old registration
         if "recovery" in job and isinstance(cur.get("recovery"), dict):
             cur["recovery"].update(state="done", at=now(), outcome=steps)
+        escalate = None
         if notice_result and isinstance(cur.get("notice"), dict):
-            cur["notice"].update(inflight=False, done=notice_result[0] == 0, result=notice_result[1])
+            nt = cur["notice"]
+            nt.update(inflight=False, done=notice_result[0] == 0, result=notice_result[1])
+            if not nt["done"] and nt.get("attempts", 0) >= NOTICE_TRIES and not nt.get("escalated"):
+                nt["escalated"] = True   # once: the owner stayed unreachable through every retry
+                escalate = f"deadline {cur.get('name')} ({cur.get('owner')}): owner NOT reached after {NOTICE_TRIES} notice attempts ({notice_result[1][:80]}); last state {cur.get('state')}"
         save(cur)
+    if escalate:
+        hermes_ping(escalate)
 
 
 def message(rec: dict, what: str) -> str:
@@ -921,6 +928,11 @@ def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool =
            "checkpoint": a.checkpoint, "max_extend_s": a.max_extend if a.max_extend is not None else a.budget,
            "extended_s": 0, "extensions": [], "state": "running", "kind": kind,
            "registrar_pid": os.getpid(), "registrar_start": reg[0] if reg else None, "reg_id": uuid.uuid4().hex}
+    if pgid:
+        try:
+            refresh_anchor(rec)   # a verified member NOW, while the leader's identity is still readable: the leader may exit before the first pass
+        except ProcUnknown:
+            pass
     return rec, None
 
 
