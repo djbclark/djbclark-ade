@@ -1449,6 +1449,16 @@ class TestTransportRobustness(TransportBase):
             self.assertIn("could not record its pid", str(cm.exception))
             self.assertLess(time.monotonic() - t0, 5, "the child was waited for instead of killed")
 
+    def test_an_oversize_reply_is_refused_once_not_fetched_every_poll(self) -> None:
+        """Review of 6416564f: a capped read ends before DONE; the refusal must still be final."""
+        self.cli("send", "task")
+        mod_max = 100_000
+        (self.from_dir / "ade-1--coding-1.md").write_text(f"{self.reply_header('ade-1')}\n" + "x" * (5 * mod_max) + "\nDONE\n")
+        self.cli("sync")
+        before = self.ssh_calls()
+        self.cli("sync")
+        self.assertEqual(self.ssh_calls() - before, 1, "the oversize file was read again")
+
     def test_wait_started_after_the_ack_deadline_still_gets_full_polls(self) -> None:
         """Review of d199f325: past the ack deadline, a slow listing gets its full share, so a claim there is found."""
         self.cli("send", "task")

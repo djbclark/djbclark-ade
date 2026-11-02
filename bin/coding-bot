@@ -1244,7 +1244,7 @@ def file_reply(raw: str, hint: str | None, *, from_drop: bool = False) -> tuple[
     named for the id proves nothing: ids restart, mailboxes are shared, anyone with write access can pre-write one); from
     `deliver` (the operator's paste) it is filed with `nonce_ok: false`."""
     if len(raw) > MAX_TEXT:  # the raw size, before cleaning or stripping can shrink it
-        return 2, f"the reply is over {MAX_TEXT} characters; not filed", False
+        return 2, OVERSIZE_REFUSAL.format(MAX_TEXT), False
     text = clean(raw).strip()
     if not text:
         return 2, "empty reply", False
@@ -1356,6 +1356,7 @@ def prune_seen(name: str, listed: list[str]) -> None:
 
 # refusals that prove a file was read and belongs to another message (not unreadable, not half-written): such a file is
 # never evidence that the waited-for message was picked up
+OVERSIZE_REFUSAL = "the reply is over {} characters; not filed"
 FOREIGN_REFUSALS = ("nonce mismatch", "no nonce", "the header says re=")
 
 
@@ -1504,7 +1505,9 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
                     rc, msg, filed = file_reply(raw, REPLY_FILE.fullmatch(fname).group(1), from_drop=True)
                     new += filed
                     final = bool(TERMINAL.match(last_line(clean(raw).strip())))
-                settled = final
+                # an oversize reply is refused for good: more of it can only make it bigger (and a capped read may end
+                # before its DONE line, so it would otherwise look unfinished and be fetched again every poll)
+                settled = final or (rc != 0 and msg == OVERSIZE_REFUSAL.format(MAX_TEXT))
                 if rc:
                     print(f"coding-bot: {what} {t.name}:{fname} not filed: {msg}", file=sys.stderr)
                 if rc and settled and msg.startswith(FOREIGN_REFUSALS):
