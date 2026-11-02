@@ -18,7 +18,7 @@ these with the companion's data, as a `modify_` merge and never a symlink, becau
 
 `[shell_environment_policy]` in `codex/config.toml.tmpl` decides which variables a Codex tool command gets. It is
 `inherit = "all"` (operator ruling, 2026-10-25: a tool keeps the launching terminal's environment, which restores the
-Herdr pane ids `HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`, the routing paths `HERDR_SOCKET_PATH
+Herdr (retired from djbclark-ade 2026-10-31; the variables still pass through under `inherit = "all"`) pane ids `HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`, the routing paths `HERDR_SOCKET_PATH
 HERDR_BIN_PATH`, and multiplexer and runtime variables such as `TERM`, `TMUX` and `SSH_AUTH_SOCK`), with Codex's default
 `KEY`/`SECRET`/`TOKEN` name exclusions kept on (`ignore_default_excludes = false`) and the `set` keys applied after
 them. There is no `include_only` allowlist: an arbitrary terminal environment reaches tools by decision. Outside Herdr

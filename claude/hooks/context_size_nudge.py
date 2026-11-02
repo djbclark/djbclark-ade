@@ -13,8 +13,8 @@ History:
   transcript-check limit. Settings registration remains operator-gated.
 - 2026-10-29: PostToolUse is in agents/claude/settings.json.tmpl (the live settings get the
   entry by hand once this code is on the shared checkout); PostToolUse calls from a
-  sub-agent (agent_id set) are ignored; the mid-task note has one cadence sentence for
-  both events (the prompt-only text became false once PostToolUse ran), built from
+  sub-agent or in-process teammate (agent_id set) are ignored; the mid-task note has one
+  cadence sentence for both events (the prompt-only text became false once PostToolUse ran), built from
   POST_TOOL_CHECK_SECONDS instead of a hard-coded 20 s.
 - 2026-08-03: built after a session grew to 670k+ tokens unnoticed.
 - 2026-08-23: reworded to "never suggest a wrap-up" (continuous operation).
@@ -124,8 +124,9 @@ EARLY_GROWTH = 32_000   # 2026-10-25: delegate earlier; this alone never compact
 AUTO_COMPACT_WINDOW = 300_000
 AUTO_COMPACT_BUFFER = 33_000
 AUTO_COMPACT_WALL = AUTO_COMPACT_WINDOW - AUTO_COMPACT_BUFFER
-# Level 2 (the hard tier) must fire with headroom before that wall: the hook runs only at
-# prompt submit, and the agent still needs several tool rounds plus the handoff itself.
+# Level 2 (the hard tier) must fire with headroom before that wall: the hook runs at prompt
+# submit and, rate-limited, between tool rounds, and the agent still needs several tool rounds
+# plus the handoff itself.
 # 2026-10-28: ASK_GROWTH 200k fired at floor+200k = 235-271k (median floor 71k: past the
 # wall, never), leaving 0-20k, and ASK_TOTAL 300k sat above the wall and never fired.
 ASK_HEADROOM = 50_000
@@ -788,6 +789,8 @@ def main():
     # transcript_path plus an agent_id (absent on the main thread). Its additionalContext would
     # reach the sub-agent, and stamping the parent's level, boundary and throttle would spend the
     # top-level session's one-shot notes there (PR 127 adversary r1, B1): leave it to the main thread.
+    # agent_id also marks an in-process agent-team teammate (hooks reference), skipped the same
+    # way: whether its hook input carries its own session_id and transcript is not documented.
     if event == "PostToolUse" and data.get("agent_id"):
         return
     transcript_path = data.get("transcript_path") or ""

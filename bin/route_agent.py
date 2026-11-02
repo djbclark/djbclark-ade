@@ -1797,9 +1797,12 @@ def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> tuple[int, str]:
         return (SUBSTRATE_EXIT_CANNOT_LIST,
                 f"cannot list agents (rc={proc.returncode}): {proc.stderr.strip()[:200]}")
     try:
-        agents = [a for a in json.loads(proc.stdout) if isinstance(a, dict)]
+        data = json.loads(proc.stdout)
     except (json.JSONDecodeError, TypeError):
         return SUBSTRATE_EXIT_CANNOT_LIST, "cannot parse paseo-set-model list output"
+    if not isinstance(data, list):
+        return SUBSTRATE_EXIT_CANNOT_LIST, "paseo-set-model list output is not a JSON list"
+    agents = [a for a in data if isinstance(a, dict)]
     match = [a for a in agents if str(a.get("id", "")) == agent]
     if not match:
         match = [a for a in agents if str(a.get("id", "")).startswith(agent)]

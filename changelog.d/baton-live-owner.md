@@ -1,0 +1,3 @@
+### Changed
+
+- `session-handoff`'s Reader protocol gained an **Owner check** (2026-11-01, djbclark; `/baton` points to it): before the first write or resume of a chain, its log's `session_id` is matched to a `fleet.py --json` row (`sid`, `paseo`, `id`, id prefix or transcript path) or a live `bin/watch` holder; a live owner other than you, or no match at all, is asked about first (the owner via `relay.py`, or the operator), with exemptions for your own chain, the named successor and your own chain after `/clear` or `/new`. A `/baton` after `/clear` had resumed the lead's live chain and merged PR 173 ahead of PR 177 (2026-10-31). ; every helper it runs is called by absolute path from `~/src/djbclark-ade`, never a cwd-relative script (#201)

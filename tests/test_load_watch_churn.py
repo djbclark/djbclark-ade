@@ -103,7 +103,7 @@ def test_churn_held_for_the_sustain_time_fires_once(tmp_path, monkeypatch):
     assert fired_at == T0 + STEP + at.lw.CHURN_SUSTAIN_S  # exactly when the streak reaches LW_CHURN_SUSTAIN_S
     assert len(at.sent) == 1 and len(at.pinged()) == 1  # one line each, not one per sample
     msg = at.sent[0]
-    assert "compressor churn ~120k pages/s for 3+ min (limit 60k)" in msg
+    assert "compressor churn ~120k pages/s for 3+ min (limit 20k)" in msg
     assert "top: cc1 -O2 2.5 cores, python3 -m 1.0 cores, sh 0.2 cores" in msg
     assert "Admit already holds new bg/acp-dispatch work; this is running or bypass work." in msg
     assert "Do not kill or SIGSTOP without djbclark. Investigate per the loadwatch skill." in msg

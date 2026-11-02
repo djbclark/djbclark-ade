@@ -2529,6 +2529,13 @@ class TestApplySubstrate(unittest.TestCase):
         self.assertEqual(self._apply("ab1", list_rc=1)[0], r.SUBSTRATE_EXIT_CANNOT_LIST)
         self.assertEqual(self._apply("ab1", agents="not json")[0], r.SUBSTRATE_EXIT_CANNOT_LIST)
 
+    def test_valid_json_that_is_not_a_list_exits_7_not_3(self):
+        for body in ({"id": "ab1-full-id", "provider": "opencode"}, '"ab1-full-id"', "null", 7):
+            rc, msg, calls = self._apply("ab1", agents=body)
+            self.assertEqual(rc, r.SUBSTRATE_EXIT_CANNOT_LIST, body)
+            self.assertIn("not a JSON list", msg)
+            self.assertEqual([c[1] for c in calls], ["list"])
+
     def test_no_usable_primary_never_touches_paseo(self):
         rc, _, calls = self._apply("ab1", chain=[])
         self.assertEqual(rc, r.SUBSTRATE_EXIT_NONE_USABLE)

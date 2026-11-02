@@ -1,5 +1,9 @@
 # Workspace, tab and pane layout: the from-first-principles re-arrangement
 
+> **Retired from djbclark-ade (2026-10-31):** this whole file is the record of the herdr workspace/tab/pane layout pass, which is **not instructions**:
+> `/autorename all` is retired in every host, and herdr (bar its two Paseo bridges) is retired. The single-session Paseo naming (`-pw`/`-pt`, principle 10)
+> is the live part. The herdr commands and `herdr_place.py` code stay until the plan's D4/D6 drain; never start a layout pass.
+
 Operator request, 2026-10-08: "a one-time from-first-principles re-arrangement
 and re-name of all herdr workspaces, tabs, and panes". This file is the
 procedure so it can be repeated (a full pass, or one workspace) without

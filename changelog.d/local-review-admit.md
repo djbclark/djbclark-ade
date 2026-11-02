@@ -1,0 +1,2 @@
+### Changed
+- `bin/local-review` asked `load-watch admit --wait` before starting Codex (`--load-wait SECONDS`, default 1800, env `LOCAL_REVIEW_LOAD_WAIT`; `--no-load-gate` skipped it, and the same LW_* thresholds acp-dispatch passes were passed through); a machine still too hot after the wait exited 75 and that run filed no result; a gate that could not run warned and the review started; a run that waited reported a peer's final result for the head instead of reviewing it again; the result recorded `load_gate` (#242)

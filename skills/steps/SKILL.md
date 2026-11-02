@@ -220,10 +220,9 @@ The card has no header chip, no per-option description, no `helpText` and no
 5. **If he picks `/compact`** (or the context prompt's compact tier, +140k since
    the start or last compaction or 217k total, fires mid-walk with nobody at the keyboard; he
    pre-approved it standing, 2026-10-09; never compact earlier, it costs more
-   than it saves, 2026-10-10), a Claude session in a herdr pane, an
-   Orca terminal or a Paseo agent queues it itself: note the remaining queue, run
+   than it saves, 2026-10-10), a Paseo agent queues it itself (herdr and Orca hosts: retired from djbclark-ade 2026-10-31; `self-slash` still has those branches until D6, do not start them for new work): note the remaining queue, run
    `~/src/djbclark-ade/bin/self-slash "/compact <focus: the open items>"`, and
-   end the turn at once. Outside those three hosts, or if it refuses (a draft in
+   end the turn at once. Outside Paseo (and the herdr/Orca hosts that live until D6), or if it refuses (a draft in
    his input box), ask him to type it. Grok Bot: does not apply (2d.6).
 
 ## 4. Keep going until nothing is left

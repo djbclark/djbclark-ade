@@ -1216,13 +1216,19 @@ about duplicate Codex entries and non-default homes).
 `~/.claude/skills/<n>` and `~/.agents/skills/<n>`. `assertManagedPathsStayInsideSkill` lstat-checks every segment
 below the skill dir but never the skill dir itself, so a symlinked skill dir is written through into the user's own
 checkout; `syncDirectoryFiles` also updates without comparing the on-disk hash with the manifest (deletes do).
-Reproduced with the shipped 0.13.0-beta.1 `syncSkills` in a throwaway directory. Our workaround is the skill
-selection in docs/skill-everywhere.md section 3a.
+Reproduced with the shipped 0.13.0-beta.1 `syncSkills` in a throwaway directory. Our workaround since 2026-11-02 is
+the `ade-` prefix on the vendored skills (docs/skill-everywhere.md section 3a); the empty skill selection alone did
+not hold.
 Addendum 2026-10-24: the setting is per daemon home, while every daemon syncs into the one real `~/.agents/skills`
 and `~/.claude/skills`. A second daemon with another home (Paseo's own `scripts/dev-daemon.sh`, home
 `.dev/paseo-home`, no selection) rewrote the symlinked skills at 09:26:49 and 10:05:46 EDT. Suggest to upstream: the
 sync skips a skill dir that is a symlink, or dev homes default to no skill sync. Posted on #7700 2026-10-24: https://github.com/getpaseo/paseo/issues/7700#issuecomment-6386655547.
 Draft PR opened 2026-10-24 (refs #7700, not closes): https://github.com/getpaseo/paseo/pull/7817, branch `fix/dev-home-skill-selection` on the fork, one commit b2836f723 (`scripts/dev-home.sh` seeds the skill selection in dev homes, new `scripts/dev-home.test.mjs`: 3 of 4 tests fail on upstream main, all pass on the fix). macOS arm64 only; the end-to-end dev-daemon run was posted as a PR comment and the PR was marked ready for review on djbclark's instruction (2026-10-24, reported by the workspace-colors session).
+Addendum 2026-11-02: overwritten again 2026-11-01 21:33:38 by the installed Paseo 0.15.0-beta.1 bundle (manifest
+`SKILL.md` hash `f52ce024…` equals the app's bundled `paseo-advisor/SKILL.md`). Fable consult (`frontier`,
+2026-11-02): the smallest fix that keeps upstream's linked-update test is to let startup maintenance
+(`autoUpdateInstalledSkills`) skip skill dirs that link outside Paseo's own skill roots, leaving explicit
+install/update/save unchanged.
 
 
 ## 18. zcode-acp — `ZCODE_DISALLOWED_TOOLS` / `--disallowed-tools` never reaches the backend session (filed 2026-10-25: https://github.com/william0wang/zcode-acp/issues/340)

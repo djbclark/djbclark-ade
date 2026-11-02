@@ -79,6 +79,7 @@ one of the two roots.
 | Antigravity (`agy`) | `~/.gemini/antigravity-cli/skills` (agy CLI 1.2.16; links are followed). Verified with `/skills` in interactive agy. Headless `agy -p` answers never mention user skills, not even the installer's bailian ones, so check agy interactively. `~/.gemini/config/skills` and `~/.gemini/antigravity/skills` are not read by the CLI |
 | omp / oh-my-pi (`omp`) | `~/.omp/agent/skills` (native, highest skill priority; added 2026-10-13). omp also reads `~/.agents/skills`, but de-duplicates by `realpath`, so the second link does not list a skill twice. omp ignores `~/.claude/skills` unless `claude` is in its `enabledProviders`. Prove it with `omp -p --no-title "<step 3 prompt>"` from a scratch dir. |
 | Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced (only a link to a regular file inside the skill; a skill holding any other link, one that leaves the skill, dangles or names a directory or special file, is refused: `--check` reports `unsafe source symlink`; link mode copies nothing, leaves any existing copy alone and exits 1; 2026-10-23),  a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. `SKILL_EVERYWHERE_NO_COPY=1` skips this target (`ade-update` sets it for a non-canonical `--repo`, which is report-only and may be an untrusted PR branch), so a report-only run prints no `grokbot` row and renders nothing. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, agy, cline and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
+| `/btww` (side question, 2026-11-01) | Skill `btww` **names the TUI's native side-question command, or says it has none; it never answers the question** (a skill is an ordinary turn, so it cannot be non-interrupting or off-transcript). Native: Claude `/btw`, Codex `/side`, agy `/btw`, Cursor `/btw`, Grok `/btw`, omp `/btw`, Hermes `/btw`, Copilot `/btw` (alias `/ask`), opencode `/btw`, Qwen `/btw`, Muse `/side` (alias `/btw`); none in zcode, Cline, goose or Grok Bot; Devin not installed. All first-party: the third-party `copilot-btw` and `opencode-btw` plugins are not needed. Real aliases: omp `omp/commands/btww.md` (`side: true`, linked to `~/.omp/agent/commands/btww.md`), Hermes CLI `quick_commands.btww` alias to `btw` (`~/.hermes/config.yaml`, template `agents/hermes/config.yaml.tmpl`). zcode: `zcode/commands/btww.md`. Claude cannot alias a built-in. Details: `skills/btww/SKILL.md`. |
 
 `aiuse --json` providers with no TUI of their own (alibaba, deepseek,
 openrouter, litellm, opencode-zen, clinepass, grok) are API pools behind the
@@ -142,39 +143,32 @@ to run `reload-plugins` the same way. Claude Code slash wrappers live in
 `~/src/djbclark-ade/claude/commands/` and are symlinked directly into
 `~/.claude/commands/`.
 
-## 3a. Paseo overwrites its six skills unless told not to (2026-10-23)
+## 3a. Paseo's skill sync and our vendored Paseo skills (2026-10-23, renamed 2026-11-02)
 
-Paseo's daemon syncs its bundled skills (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`,
-`paseo-help`, `paseo-plugin`) into `~/.claude/skills` and `~/.agents/skills` at **every start**
-(`orchestrationSkills.autoUpdate()`), overwriting whatever it finds. Those two paths are directory links into this
-repo, so the write landed here: our narrowed descriptions (`skills/paseo/UPSTREAM.md`) were replaced by upstream's,
-with a `.paseo-managed-files.json` beside each (markers dated 2026-10-19 12:16, the daemon start).
+**Our six vendored Paseo skills carry an `ade-` prefix** (`ade-paseo`, `ade-paseo-advisor`, `ade-paseo-committee`,
+`ade-paseo-handoff`, `ade-paseo-help`, `ade-paseo-plugin`) **so Paseo never touches them.** Paseo owns skills by
+name: every name in its bundle (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`,
+`paseo-plugin`) is compared in `~/.agents/skills/<name>` and `~/.claude/skills/<name>` with its bundled copy, and a
+difference is "drift" that the daemon's startup sync and any skills install, update or save rewrite. Under the old
+unprefixed names those entries were directory links into this repo, so each rewrite landed here (2026-10-19, twice on
+2026-10-24 by the dev daemon, and 2026-11-01 21:33:38 with the installed 0.15.0-beta.1 bundle; manifests
+`.paseo-managed-files.json` beside each). A name Paseo does not ship is invisible to all of its code paths, in every
+build and every Paseo home.
 
-**The fix is Paseo's own skill selection, not a different link layout.** `~/.paseo/config.json` carries
-`agents.skills.selection = {"mode": "custom", "skills": []}` (set 2026-10-23, applied with `paseo reload`; backup
-`~/.local/state/paseo-backups/config-2026-10-23-pre-skill-selection.json`). With nothing selected, the start-up
-sync only plans deletions and never applies them, so it writes nothing; with `{"mode": "all"}` (the default) it
-overwrites. Checked with the shipped `operations.js` against the real directories, not by a daemon restart (a restart
-would end this machine's Paseo agents).
-
-1. Paseo's settings screen now shows the six skills as drift ("to be removed"). Do not save the selection there and
-   never confirm the removal: it deletes our directory links (not the repo files). Re-link with
-   `skill-everywhere paseo paseo-advisor paseo-committee paseo-handoff paseo-help paseo-plugin`.
-2. A key set with `"skills"` at the top level of `config.json` is rejected by `paseo reload` (and would stop a
-   restart): the persisted path is `agents.skills.selection`.
-3. Re-vendoring a newer Paseo bundle is done by hand (`skills/paseo/UPSTREAM.md`).
-4. Tried and dropped: a real directory holding per-file symlinks makes Paseo's sync throw before writing (verified),
-   but Cursor's loader rejects a `SKILL.md` symlink that resolves outside its skills root (codex `gpt-6-astra`
-   review, 2026-10-23, verified in the installed Cursor source) and Cursor reads `~/.claude/skills` here; a settings
-   save also stages deletions before it reaches the guard.
-5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), `docs/upstream-issues.md` item 10.
-6. **Every Paseo daemon with its own home needs the same setting** (found 2026-10-24). The selection lives in each
-   home's `config.json`, but every daemon syncs into the one real `~/.agents/skills` and `~/.claude/skills`. The Paseo
-   dev daemon (`scripts/dev-daemon.sh` in `~/src/paseo`, home `.dev/paseo-home`, no selection, so mode `all`) rewrote
-   the five vendored skills at 09:26:49 and 10:05:46 EDT on 2026-10-24, after the main daemon had been restarted onto
-   0.13.0-beta.1 (09:57) with the setting in place. The main daemon was never the second writer; the 09:57 restart was
-   not needed. Seed `agents.skills.selection = {"mode":"custom","skills":[]}` in every dev or test home before
-   starting its daemon.
+1. **Keep every Paseo home's selection empty**: `agents.skills.selection = {"mode":"custom","skills":[]}` in
+   `~/.paseo/config.json` and in every dev or test home before its daemon starts (`~/src/paseo/.dev/paseo-home` has
+   it). With `{"mode":"all"}` (the default) Paseo installs its own unprefixed copies beside ours, and their broad
+   triggers ("handoff", "second opinion", "stuck") compete with the narrowed ones. The persisted path is
+   `agents.skills.selection`; a top-level `"skills"` key is rejected by `paseo reload`.
+2. With an empty selection Paseo's settings screen lists any leftover unprefixed copies as "to be removed"; after
+   the rename that removal is harmless (they are not ours).
+3. Re-vendoring a newer Paseo bundle is done by hand (`skills/ade-paseo/UPSTREAM.md`), keeping the prefix.
+4. Tried and dropped before the rename: the empty selection alone (it is per Paseo home, while every home writes the
+   one real `$HOME` skill dirs), and a real directory holding per-file symlinks (Paseo's sync throws before writing,
+   but Cursor's loader rejects a `SKILL.md` symlink that resolves outside its skills root, codex `gpt-6-astra` review
+   2026-10-23).
+5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), #7853, `docs/upstream-issues.md`
+   item 10.
 
 ## 4. When the table is wrong
 

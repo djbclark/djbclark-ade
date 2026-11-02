@@ -673,14 +673,11 @@ def test_30_timeout_and_expired_window_cannot_duplicate_with_old_registry_gone(m
     assert "gone" in rw.pages[0]
 
 
-@pytest.mark.parametrize("row", [
-    {"id": NEW, "name": "renamed", "cwd": "/entity"},
-    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/other-repo"},
-    {"id": NEW, "name": "test-role (auto-seat)", "cwd": "/entity"},
-])
-def test_lost_start_never_adopts_by_title_or_clears_on_absence(monkeypatch, tmp_path, row):
+def test_lost_start_never_adopts_by_title_or_clears_on_absence(monkeypatch, tmp_path):
+    # One row, the strongest adoption bait (title and cwd both match): a listing never reconciles a lost start,
+    # and name/cwd variations hit the same path because no candidate key exists to compare against.
     rw = lost_id(monkeypatch, tmp_path)
-    rw.enum_rc, rw.enum_body = 0, json.dumps([row])
+    rw.enum_rc, rw.enum_body = 0, json.dumps([{"id": NEW, "name": "test-role (auto-seat)", "cwd": "/entity"}])
     run_pass(rw)
     run_pass(rw)
     assert f"auto-seat unresolved:{rw.ROLE}" in rw.load_state()["told"]

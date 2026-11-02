@@ -13,12 +13,12 @@ control; since 2026-10-08 also the git home of the orchestration and
 session-hygiene skills and tools. Two altitudes, verified by real runs on
 2026-08-23: the **micro graph** (Claude Code dynamic workflows, in-process
 fan-out) and the **macro graph** (a task DAG across agent CLIs in their
-own worktrees; it was run through Orca, which is now retired from djbclark-ade: run the same shape with Paseo workspaces and agents (`skills/paseo`, `skills/bigteam`; plan: `docs/paseo-only-rearchitecture.md`). Its Orca command reference, `docs/orca-integration.md`, was removed 2026-10-31 (git history has it) and no Paseo DAG runbook is written yet).
+own worktrees; it was run through Orca, which is now retired from djbclark-ade: run the same shape with Paseo workspaces and agents (`skills/ade-paseo`, `skills/bigteam`; plan: `docs/paseo-only-rearchitecture.md`). Its Orca command reference, `docs/orca-integration.md`, was removed 2026-10-31 (git history has it) and no Paseo DAG runbook is written yet).
 [README.md](README.md): architecture, how they compose, every skill.
 
 > **Retired as of 2026-10-31 (operator ruling).** herdr (except the two edge-case bridges `herdr4paseo` and
 > `paseo4herdr`), Orca and BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) are retired **from djbclark-ade**, and
-> **Paseo is the only harness**: new work goes through Paseo (`paseo run`, `bin/paseo-new-seat`, the `paseo` skills). They stay installed and configured on
+> **Paseo is the only harness**: new work goes through Paseo (`paseo run`, `bin/paseo-new-seat`, the `ade-paseo*` skills). They stay installed and configured on
 > djbclark's computer, untouched ("mostly removed from djbclark-ade, not from my computer"); machine-side uninstall is NOT planned, and never touch their config.
 > **What is gone (2026-10-31):** `skills/herdr-tidy`, `skills/reorg-orca` and their `/herdr-tidy`, `/orca-tidy` wrappers, `bin/herdr-ai`, `bin/herdr-jump`,
 > `bin/herdr-sleeper` (the plugin copy `plugins/herdr-sleeper/herdr-sleeper` stays), `bin/orca-reorg-watch`, `docs/orca-integration.md`, `docs/herdr-tidy.md`, `docs/herdr-ai.md`, `docs/herdr-jump.md` and the vendored Orca guide (git history has them; the operator's machine symlink `~/.local/bin/herdr-sleeper` pointed into the removed `bin/herdr-sleeper` and may dangle: his to fix, order 11). **What is still live, on purpose,
@@ -54,7 +54,7 @@ Each doc carries its own summary.
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/](skills/), [docs/skills.md](docs/skills.md) | canonical copy of every hand-written skill: **edit and add skills here**, never via a TUI path; wrappers in [claude/commands/](claude/commands/) |
 | [skills/autorename/workspace-layout.md](skills/autorename/workspace-layout.md) | naming: -pw/-pt Paseo; tab use (the herdr -t/-p scheme is retired, 2026-10-31) |
-| [skills/paseo-handoff/](skills/paseo-handoff/SKILL.md) | tab lifecycle (2026-10-30): verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
+| [skills/ade-paseo-handoff/](skills/ade-paseo-handoff/SKILL.md) | tab lifecycle (2026-10-30): verify the successor's `ParentAgentId` is null, archive the predecessor, tell every sibling and child the new id |
 | [skills/paseo-screen/](skills/paseo-screen/SKILL.md) | THE screen-control tool (2026-10-31): the Paseo plugin `paseo-screen`; look before clicking, safety rules |
 | [tools/acp-run/](tools/acp-run/README.md) | the ACP client every launcher uses (`~/.local/bin/acp-run`) |
 | [bin/fleet-watch](bin/fleet-watch) | launchd fleet change notices to Hermes |
@@ -334,7 +334,7 @@ pull request here is expected to meet these; flag any it misses.
     carries no entry.
 11. **Codex's review may be the LOCAL one** (2026-10-29, djbclark: "could we just switch to making codex reviews run locally in general"; GitHub's
     Codex review hung on PRs 112 and 124, openai/codex#55890). `bin/local-review PR` runs `codex review --base <base sha>` in a clean detached
-    worktree at the exact head and files `~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (exit 0 clean, 1 findings, 3 failed); `bin/pr-wait PR
+    worktree at the exact head and files `~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (exit 0 clean, 1 findings, 2 refused, 3 failed, 4 a run for that head is alive, **75 the load gate still refused after `--load-wait`: this run started nothing and filed nothing, so `pr-wait --local-codex` keeps reading what was filed for that head before (`local-codex-missing` if nothing); run it again later**); `bin/pr-wait PR
     --local-codex` then reads that file instead of waiting on the bot (implies `--no-codex`) and makes `merge_ready` need `clean` on THIS head, else the blocker
     is `local-codex-missing`, `-findings`, `-failed` or `-unreadable`, never `codex-skipped`. A push needs a new run: the head is the key, so another head's review
     is never read. Any finding of any priority blocks (fix the code, run it again); a clean local result plus CI plus the adversary verdict is a

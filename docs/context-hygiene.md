@@ -45,11 +45,16 @@ As of 2026-10-29, `claude/hooks/context_size_nudge.py` supports both
 (`agents/README.md`), so the live `~/.claude/settings.json` gets the same entry by hand,
 after this code is on the shared checkout the hook symlink points at (the sub-agent guard
 below must be live first); until then the live file runs the hook on prompt submit only.
+Owner of that live edit: the lead session that merges the PR (it makes the edit in the
+merge step and records it in the PR; a fast-forward without it leaves the hard-tier text
+claiming a cadence the live file does not run). As of 2026-11-01 the live file has the
+`PostToolUse` entry.
 PostToolUse checks read the transcript at most once every `POST_TOOL_CHECK_SECONDS`
 seconds per session; a wall-clock rollback permits a fresh check. A PostToolUse call
-that carries an `agent_id` (a sub-agent's tool call: Claude Code fires the same hooks
-with the parent's `session_id` and transcript) is ignored before the throttle stamp, so
-it cannot spend the top-level session's one-shot notes. Unrelated or non-string event
+that carries an `agent_id` (a sub-agent's or an in-process agent-team teammate's tool
+call; for a sub-agent Claude Code fires the same hooks with the parent's `session_id` and
+transcript) is ignored before the throttle stamp, so it cannot spend the top-level
+session's one-shot notes; a long-lived teammate therefore gets no PostToolUse nudge. Unrelated or non-string event
 names are ignored; an omitted event name keeps the UserPromptSubmit default.
 Each emitted early, ask, embedded mid-task or boundary note appends a JSON line to
 `~/.claude/state/context-nudge-log.jsonl`, including UTC timestamp, session ID,

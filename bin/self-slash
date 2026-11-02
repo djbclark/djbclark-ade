@@ -546,7 +546,9 @@ fi
 # Also called immediately before a send, after idle, including an explicit --then command.
 paseo_check_builtin() {
   [ "$host" = paseo ] || return 0
-  case "$1" in /new|/clear|/reset|/compact|/new[[:space:]]*|/clear[[:space:]]*|/reset[[:space:]]*|/compact[[:space:]]*) ;;
+  # Match the command with leading whitespace stripped, so the gate and a trimming parser cannot disagree.
+  local cmd="${1#"${1%%[![:space:]]*}"}"
+  case "$cmd" in /new|/clear|/reset|/compact|/new[[:space:]]*|/clear[[:space:]]*|/reset[[:space:]]*|/compact[[:space:]]*) ;;
     *) return 0;; esac
   local provider
   provider=$(python3 - "$paseo_cli" "$pane" <<'PY_PROVIDER'
@@ -558,6 +560,10 @@ try:
     r = subprocess.run([sys.argv[1], "agent", "inspect", sys.argv[2], "--json"],
                        env=env, capture_output=True, text=True, timeout=20, check=True)
     row = json.loads(r.stdout)
+    # Inspect serializes structured agent data; CLI versions may wrap it in a one-element list
+    # (bin/rumination-watch accepts the same). The Id check below still binds the record to this agent.
+    if isinstance(row, list) and len(row) == 1:
+        row = row[0]
     if not isinstance(row, dict) or row.get("Id") != sys.argv[2]:
         raise ValueError("wrong agent record")
     provider = row.get("Provider")

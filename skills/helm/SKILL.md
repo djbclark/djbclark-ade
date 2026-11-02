@@ -11,6 +11,10 @@ description: >-
 
 # helm — every waiting session, one prompt at a time
 
+> **Retired from djbclark-ade (2026-10-31):** herdr (bar its two Paseo bridges) and Orca are no longer routes. Where this skill mentions a herdr pane/tab,
+> `herdr agent start`, the Orca/tmux channels or the herdr-sleeper journal, it describes `helm.py`/`fleet.py` code that stays until the plan's D4/D6 drain
+> (`AGENTS.md` lists what is live); do not start herdr for new work. The Paseo path (section 6 item 2) is the current one.
+
 Canonical copy: `~/src/djbclark-ade/skills/helm/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI links it directly (skill-everywhere).
 Design and prior art: `~/src/djbclark-ade/docs/helm.md`.
 
@@ -115,7 +119,7 @@ Hermes; never numbered prose). One item per call.
    prints the `acp-dispatch resume <record>` command to run after the reset
    (2026-10-18). `wait --auto-audit` then sends `/loose` as its next turn
    (`$L audit`) and, once that audited result has been shown, closes the
-   session and its herdr tab (`$L close`) so tabs do not pile up (operator,
+   session and its herdr tab (`$L close`; herdr: retired from djbclark-ade 2026-10-31) so tabs do not pile up (operator,
    2026-10-08). Offer `$L reply` for a follow-up before the close happens.
 6. **`finished`** — a running Claude session whose last prompt was `/handoff`
    or `/quit`. It is not audited and not messaged. Offer: Start a /baton session
@@ -171,8 +175,8 @@ means new prompts from other sessions are missed.
 2. **Hermes's own open approvals** (Claude side): `permissions_list_open` on
    the `hermes` MCP server lists them, `permissions_respond` answers. Check
    once per round and relay them the same way.
-3. **Collie**: the helm pane is an ordinary herdr pane, so its prompts are
-   answerable from the phone with nothing extra.
+3. **Collie** (a phone web UI for herdr panes only; herdr is retired from djbclark-ade 2026-10-31): it answers a helm
+   pane that runs in herdr. Nothing in this repo shows Collie covering a Paseo agent; a helm session hosted on Paseo is answered in the Paseo UI or app.
 4. **Notices**: `fleet-watch` (launchd, every 5 minutes, no model) calls
    `helm.py brief` and sends one Hermes line when a session starts waiting or
    asks a new question. Nothing is sent when one is answered.

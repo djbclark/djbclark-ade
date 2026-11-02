@@ -1,5 +1,9 @@
 # helm — every waiting agent session, answered from one window
 
+> **Retired from djbclark-ade (2026-10-31), a design record from 2026-10-06 to 2026-10-08:** herdr (bar its two Paseo bridges) and Orca are no longer
+> routes; Paseo is the only harness. The herdr/Orca/Collie/herdr-tidy/herdr-sleeper mechanics below are what `helm.py` and `fleet.py` were built and verified against,
+> and the code that still reaches them stays until the plan's D4/D6 drain (`AGENTS.md` lists it). Do not start herdr or Orca for new work.
+
 **Built 2026-10-06.** Skill and script: [`skills/helm/`](../skills/helm/) in
 this repo (`SKILL.md`, `helm.py`; moved here from `~/ops/site-djbclark/skills/helm/`,
 now a symlink, on 2026-10-08), linked into every TUI by `skill-everywhere`. This page

@@ -1,5 +1,5 @@
 ---
-name: paseo
+name: ade-paseo
 description: Paseo reference for managing projects, workspaces, workspace scripts, agents, schedules, and heartbeats.
 ---
 
@@ -100,6 +100,8 @@ Only set feature IDs returned by `inspect_provider`. For Codex fast mode, look f
 
 **`create_schedule`** — starts a new agent on a cron cadence. Required: `prompt`, `cron`, `provider`. Optional: `timezone`, `name`, `cwd`, `maxRuns`, `expiresIn`. Use when the recurring work should live in fresh agents.
 
+**A schedule run reads `succeeded` when its agent's turn ends, not when its work is done** (2026-11-01: a run delegated four slices, ended its turn, was marked succeeded and archived after 3 minutes; the deliverable was never written). So a scheduled prompt (1) names a deliverable or report path that is fresh for each run (put the date and time or the run id in it, never a fixed path a previous run already filled), (2) never delegates and stops: it does the work in its own turn, or waits for each slice's report and `.done` marker within a declared deadline (`acp-dispatch-wait`, bounded), and (3) checks that THIS run's deliverable exists before it ends (a file at a reused path may be the last run's); if it does not, a last line `NO OUTPUT: <why>` helps the reader (advisory: nothing parses it, success is only the deliverable). Upstream: getpaseo/paseo#6189. Read a schedule's log with that in mind: `succeeded` alone proves nothing.
+
 **`create_heartbeat`** — sends you a prompt on a cron cadence. Required: `prompt`, `cron`. Optional: `timezone`, `name`, `maxRuns`, `expiresIn`. Use for reminders, PR/build babysitting, and status checks that should return to this conversation.
 
 **`delete_heartbeat`** stops it. MCP intentionally exposes no heartbeat update tool; delete and recreate when its task or cadence changes.
@@ -141,8 +143,8 @@ paseo run --no-wait --workspace <workspace-id> --provider <provider/model> --thi
 paseo inspect <returned-agent-id> --json
 ```
 
-Pass arguments as an argv list when building this command programmatically. `inspect` JSON currently uses capitalized keys such as `Id`, `Provider`, `Model`, `Mode`, `Cwd` and `ParentAgentId`; do not assume the lowercase keys from `paseo ls`. Verify the returned workspace and placement before reporting success. This creates a real Paseo agent, not an ACP slice. Keep default parentage; never call detach to manufacture independence. See **paseo-handoff** for durable chain pointers and verified peer notices.
+Pass arguments as an argv list when building this command programmatically. `inspect` JSON currently uses capitalized keys such as `Id`, `Provider`, `Model`, `Mode`, `Cwd` and `ParentAgentId`; do not assume the lowercase keys from `paseo ls`. Verify the returned workspace and placement before reporting success. This creates a real Paseo agent, not an ACP slice. Keep default parentage; never call detach to manufacture independence. See **ade-paseo-handoff** for durable chain pointers and verified peer notices.
 
 Discover the root command roster before probing subcommands; obey the machine's rule against `--help` on live-service subcommands.
 
-For product questions, setup, logs, version problems, or troubleshooting, use the **paseo-help** skill.
+For product questions, setup, logs, version problems, or troubleshooting, use the **ade-paseo-help** skill.

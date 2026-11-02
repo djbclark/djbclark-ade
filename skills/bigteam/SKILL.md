@@ -488,7 +488,7 @@ has already been violated by a real agent on this machine:
 - Leave changes **uncommitted**. The orchestrator commits, staged **by path** —
   `git add -A` in a shared checkout stages other sessions' in-flight work.
 - No package installs, no new directories, no scratch files inside the repo.
-- **Launch no agents.** No herdr panes, `acp-run`/`acp-dispatch` or Agent
+- **Launch no agents.** No Paseo agents or herdr panes (herdr: retired from djbclark-ade 2026-10-31, `launch.py --host herdr` lives until D6), `acp-run`/`acp-dispatch` or Agent
   calls of its own: only the orchestrator decides and dispatches what comes
   next. ("Hand off the way this was handed to you" was once read as that.)
 - **A review or probe that exercises `acp-dispatch` pins the runner and checks
@@ -832,7 +832,7 @@ count. With no server push stamp (no CI app) it leans toward posting; the cap of
 <base sha>` in a clean detached worktree at the PR's exact head, kills it after `--timeout` (default 1500 s), and files
 `~/.local/state/local-review/<owner>__<name>-pr<N>-<head>.json` (counts by P0-P3, findings' titles; the full text stays in the `.out` beside it). Exit 0 clean, 1
 findings, 2 usage, 3 failed (codex missing, timeout, non-zero exit, no final message, a head that moved, a final message that is not the transcript's own, one that reads as a refusal or ends in a question, a transcript that does not show the pinned base, a read-only sandbox and an `exec` block, or an unparseable final message: never "clean"), 4 a run
-for that head is alive. Then `bin/pr-wait PR --local-codex` replaces the bot's marker with that file (implies `--no-codex`): `merge_ready` needs `clean` on this
+for that head is alive, 75 the load gate (`load-watch admit --wait`, `--load-wait S`, default 1800, env `LOCAL_REVIEW_LOAD_WAIT`; `--no-load-gate` skips it) still refused (2026-11-01): codex was not started and this run files nothing, so `pr-wait --local-codex` keeps reading what was filed for that head before (`local-codex-missing` if nothing, never a `-failed` made by this run); run it again later. A run that waited at the gate and finds a peer's final result for the head, filed after it was invoked, reports that result instead of reviewing again. Then `bin/pr-wait PR --local-codex` replaces the bot's marker with that file (implies `--no-codex`): `merge_ready` needs `clean` on this
 head, else `local-codex-missing`, `local-codex-findings`, `local-codex-failed` or `local-codex-unreadable`. Run it after every push (it takes 2-6 minutes and about 0.3% of
 the weekly Codex quota), fix every finding, and quote the summary line in the PR body. A finding in `.cursor/hooks.json` or `.claude/settings.json` that the review
 worktree itself dirtied (the graft hook) is listed under `ignored_generated` and not counted. A PR whose author is neither the repository owner nor the authenticated gh user is refused (exit 2) unless `--allow-untrusted`, because the PR's own diff and AGENTS.md can steer the reviewing model; `pr-wait --local-codex` accepts a result filed that way as the operator's call.
@@ -1051,7 +1051,7 @@ Whenever a prompt contains separable, discrete work, or the context-size hook
 has fired, slice it and send it out at the minimum spec that does it well; a
 single lookup goes to a minimum-spec Agent sub-agent instead (`effort-routing`).
 The orchestrator's own context is also a cost: Claude Code compacts it by itself
-at 300k tokens (`autoCompactWindow`, verified 2026-10-25), and in a herdr pane, Orca terminal or Paseo agent the
+at 300k tokens (`autoCompactWindow`, verified 2026-10-25), and in a herdr pane, Orca terminal (both retired from djbclark-ade 2026-10-31; `self-slash` keeps those hosts until D6) or Paseo agent the
 orchestrator compacts earlier at a wave boundary with `self-slash "/compact
 <focus>"`, or runs the `handoff` skill then `self-slash "/new"` on a topic change
 (the fresh session gets `/baton` from self-slash itself, 2026-10-19), without
