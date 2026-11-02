@@ -557,12 +557,26 @@ def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float) -> str
             raise DeadlineError(f"{argv[0]}: this poll's share of the wait is used up")
         timeout, by_wait = PROBE[0] - now, True
     try:
-        r = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-    except subprocess.TimeoutExpired:
-        raise (DeadlineError if by_wait else TransportError)(f"{argv[0]} timed out after {timeout:g}s") from None
+        # its own process group, so a timeout kills the whole tree (git pull's fetch, a rebase) before the caller lets go
+        # of the clone lock, not just the top process
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                errors="replace", env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, start_new_session=True)
     except OSError as e:
         raise TransportError(f"{argv[0]}: {e.strerror or type(e).__name__}") from None
+    try:
+        out, err = proc.communicate(stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise (DeadlineError if by_wait else TransportError)(f"{argv[0]} timed out after {timeout:g}s") from None
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
+    r = subprocess.CompletedProcess(argv, proc.returncode, out, err)
     if r.returncode != 0:
         first = next((ln for ln in r.stderr.splitlines() if ln.strip()), "")
         raise TransportError(f"{argv[0]} exited {r.returncode}: {clean(first)[:120]}", r.returncode)
@@ -590,10 +604,9 @@ class Ssh:
                 timeout=SSH_TIMEOUT_S)
 
     def list_files(self) -> list[str]:
-        """The reply, claim and heartbeat files in from_dir."""
-        d = shlex.quote(self.c["from_dir"])
-        out = run_cmd(self._argv(f"cd {d} && {{ ls -1 | grep -E '^(ade-[0-9]+--coding-[0-9]+|claim-ade-[0-9]+|heartbeat)[.]md$' "
-                                 "|| true; }"), timeout=SSH_TIMEOUT_S)
+        """The reply, claim and heartbeat files in from_dir. A plain listing, filtered here: a pipeline with `|| true`
+        would turn an unreadable folder into "no files"."""
+        out = run_cmd(self._argv(f"cd {shlex.quote(self.c['from_dir'])} && ls -1A"), timeout=SSH_TIMEOUT_S)
         return [n for n in out.split("\n") if bot_file(n)]
 
     def read(self, name: str) -> str:
@@ -690,22 +703,10 @@ class Git:
         rel = f"to-coding/{mid}.md"
         with self.locked():
             self.sync_branch()
-            target = self._target(rel)
-            if target.exists():
-                if target.read_text(encoding="utf-8", errors="replace") != content:
-                    raise TransportError(f"{rel} already exists with other content")
-            else:
-                fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{mid}.", suffix=".tmp")
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        f.write(content)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(tmp, target)
-                except BaseException:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(tmp)
-                    raise
+            try:
+                self._write(mid, rel, content)
+            except OSError as e:  # an unwritable folder or a full disk is this route failing, not a crash
+                raise TransportError(f"git: could not write {rel} ({e.strerror or type(e).__name__})") from None
             self._git("add", "--", rel)
             self._git("commit", "--quiet", "-m", f"{mid}: message to coding", "--", rel)
             try:
@@ -713,6 +714,24 @@ class Git:
             except TransportError:  # the bot pushed a reply meanwhile: rebase once and retry
                 self.sync_branch()
                 self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
+
+    def _write(self, mid: str, rel: str, content: str) -> None:
+        target = self._target(rel)
+        if target.exists():
+            if target.read_text(encoding="utf-8", errors="replace") != content:
+                raise TransportError(f"{rel} already exists with other content")
+            return
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{mid}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+            raise
 
     def list_files(self) -> list[str]:
         """The reply, claim and heartbeat files in from-coding/."""
@@ -1124,19 +1143,27 @@ def file_heartbeat(raw: str) -> str | None:
 HEARTBEAT_READ_AT: dict[str, float] = {}
 
 
-def poll_transports(ts: list, force: bool = False) -> int:
+def file_id(name: str) -> str | None:
+    """The ade-N a bot file belongs to (a reply or a claim), or None (the heartbeat)."""
+    m = re.match(r"(?:claim-)?(ade-\d{1,9})", name)
+    return m.group(1) if m else None
+
+
+def poll_transports(ts: list, force: bool = False, prefer: str | None = None) -> int:
     """List each transport's bot files in numeric order: file the replies and claims not seen before and read the
     heartbeat (at most every HEARTBEAT_READ_EVERY_S per transport: the file is rewritten in place, so it is never marked
     seen). A transport in backoff is skipped unless `force`. A file is marked seen only once it is settled: a claim, a
     final reply (filed or a duplicate) or a permanent refusal. An empty or unfinished reply (no DONE/BLOCKED last line) is
-    read again next time, so a reply caught mid-write is never lost. Returns how many replies were newly filed."""
+    read again next time, so a reply caught mid-write is never lost. The files of `prefer` (the id a `wait` is for) are
+    read first, so older unfinished replies to other ids can never use up a poll's time before it. Returns how many
+    replies were newly filed."""
     new, health, now = 0, read_json("health.json"), time.time()
     for t in ts:
         if not force and in_backoff(t.name, health, now):
             continue
         t0 = time.monotonic()
         try:
-            names = sorted(t.list_files(), key=reply_order)
+            names = sorted(t.list_files(), key=lambda n: (file_id(n) != prefer, reply_order(n)))
             done = read_json("seen.json").get(t.name, [])
             for fname in names:
                 if fname == HEARTBEAT_FILE or fname in done:
@@ -1160,6 +1187,8 @@ def poll_transports(ts: list, force: bool = False) -> int:
                     print(f"coding-bot: {what} {t.name}:{fname} not filed: {msg}", file=sys.stderr)
                 if settled:
                     mark_seen(t.name, fname)
+                if prefer and rc == 0 and not cm and final and file_id(fname) == prefer:
+                    break  # the waited-for answer is filed: hand back to the waiter before reading other ids
             if HEARTBEAT_FILE in names and time.monotonic() - HEARTBEAT_READ_AT.get(t.name, -1e9) >= HEARTBEAT_READ_EVERY_S:
                 HEARTBEAT_READ_AT[t.name] = time.monotonic()
                 try:
@@ -1290,7 +1319,7 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                 share = (deadline - now) / max(1, len(ts))
                 PROBE[:] = [now + max(1.0, share)]
                 try:
-                    poll_transports([due])
+                    poll_transports([due], prefer=rid)
                 finally:
                     PROBE.clear()
                 polled.add(due.name)

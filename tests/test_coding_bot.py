@@ -1388,6 +1388,82 @@ class TestRound5(TransportBase):
             self.assertFalse(marker.exists())
 
 
+class TestRound6(TransportBase):
+    def test_an_unwritable_mailbox_folder_falls_back_instead_of_crashing(self) -> None:
+        self.ssh_down.write_text("")
+        self.cli("send", "first")  # creates to-coding/ through git
+        folder = self.mailbox / "to-coding"
+        folder.chmod(0o555)
+        self.addCleanup(folder.chmod, 0o755)
+        self.set_health("ssh", fails=0, down_until=0)  # let ssh compete again; it is still down
+        r = self.cli("send", "second")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("could not write", r.stderr)
+        self.assertEqual(Hook.seen[-1]["body"]["text"], "second")
+
+    def test_the_waited_for_ids_files_are_read_before_older_unfinished_ones(self) -> None:
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            read: list[str] = []
+
+            class Fake:
+                name = "ssh"
+
+                def list_files(self) -> list[str]:
+                    return [f"ade-1--coding-{k}.md" for k in range(1, 6)] + ["ade-2--coding-1.md"]
+
+                def read(self, name: str) -> str:
+                    read.append(name)
+                    return "still writing" if name.startswith("ade-1-") else "[coding -> x] id=coding-1 re=ade-2\nok\nDONE"
+
+            mod.poll_transports([Fake()], prefer="ade-2")
+            self.assertEqual(read[0], "ade-2--coding-1.md")
+
+
+class TestRound7(TransportBase):
+    def test_a_timed_out_command_takes_its_whole_process_tree_with_it(self) -> None:
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            pidfile = Path(self.tmp.name) / "grandchild.pid"
+            with self.assertRaises(mod.TransportError):
+                mod.run_cmd(["sh", "-c", f"sleep 30 & echo $! > '{pidfile}'; wait"], timeout=1)
+            pid = int(pidfile.read_text())
+            time.sleep(0.2)
+            with self.assertRaises(ProcessLookupError, msg="the grandchild outlived the timeout"):
+                os.kill(pid, 0)
+
+    def test_a_poll_stops_once_the_waited_for_final_reply_is_filed(self) -> None:
+        self.cli("send", "one")
+        self.cli("send", "two")
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            read: list[str] = []
+
+            class Fake:
+                name = "ssh"
+
+                def list_files(self) -> list[str]:
+                    return ["ade-1--coding-1.md", "ade-1--coding-2.md", "ade-2--coding-3.md"]
+
+                def read(self, name: str) -> str:
+                    read.append(name)
+                    n = name.split("--coding-")[1].split(".")[0]
+                    rid = name.split("--")[0]
+                    return f"[coding -> claude-code] id=coding-{n} re={rid}\nanswer\nDONE"
+
+            mod.poll_transports([Fake()], prefer="ade-2")
+            self.assertEqual(read, ["ade-2--coding-3.md"])
+
+    def test_an_unreadable_ssh_reply_folder_is_a_route_failure_not_an_empty_inbox(self) -> None:
+        self.cli("send", "task")
+        self.from_dir.chmod(0o300)
+        self.addCleanup(self.from_dir.chmod, 0o755)
+        s = self.cli("sync")
+        self.assertIn("transport ssh", s.stderr)
+        self.assertEqual(self.health()["ssh"]["fails"], 1)
+
+
 class TestHostileReplyIds(Base):
     def test_an_absurdly_long_bot_id_cannot_crash_wait(self) -> None:
         """Review round 3: a header id beyond Python's int-conversion limit must not be stored as a bot number."""
