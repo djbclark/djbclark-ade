@@ -633,8 +633,10 @@ class Ssh:
         # fails when the name exists, so a colliding id never replaces someone else's message
         t = f"{d}/.{f}.$$.tmp"
         try:
-            run_cmd(self._argv(f"umask 022; cat > {t} && ln {t} {d}/{f}; rc=$?; rm -f {t}; exit $rc"), stdin=content,
-                    timeout=SSH_TIMEOUT_S)
+            # a connection that drops mid-upload can hand `cat` an early EOF: only the full byte count is published
+            size = len(content.encode())
+            run_cmd(self._argv(f"umask 022; cat > {t} && n=$(wc -c < {t}) && [ $n -eq {size} ] && ln {t} {d}/{f}; "
+                               f"rc=$?; rm -f {t}; exit $rc"), stdin=content, timeout=SSH_TIMEOUT_S)
         except DeadlineError:
             raise
         except TransportError as e:
@@ -1065,12 +1067,14 @@ def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None,
         # copy of the task under another id. `wait` reports exit 5 if nothing ever picks it up.
         print(f"{mid}: delivery uncertain: the {uncertain} connection broke mid-write and the doorbell failed ({detail}). "
               f"Do NOT send it again; `coding-bot wait {mid}` (exit 5 means it was never picked up).", file=sys.stderr)
+        print(f"{mid}: delivery uncertain ({uncertain}); doorbell failed", file=receipts)
         return 0, mid
     if not ok and via:
         # the message is stored durably and the bot's 15-minute sweep will pick it up: that is a send, not a failure.
         # Sending it again would run the task twice under two ids.
         print(f"{mid}: stored in {via}{where}; the doorbell failed ({detail}), so the bot's sweep picks it up within about "
               f"15 minutes. Do NOT send it again; `coding-bot wait {mid}`.", file=sys.stderr)
+        print(f"{mid}: stored{where}; doorbell failed", file=receipts)
         return 0, mid
     print(f"{mid}: {detail}{where}", file=receipts if ok else sys.stderr)
     return (0 if ok else 1), mid

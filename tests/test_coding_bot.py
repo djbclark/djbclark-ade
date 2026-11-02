@@ -1646,6 +1646,7 @@ class TestAdversaryR1(TransportBase):
         r = self.cli("send", "task")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Do NOT send it again", r.stderr)
+        self.assertTrue(r.stdout.startswith("ade-1: stored via ssh"), "send must still print the id on stdout")
         self.assertEqual(len(Hook.seen), 3, "a 5xx doorbell is tried three times in all")
         self.assertTrue((self.to_dir / "ade-1.md").exists())
         env = dict(self.env, CODING_BOT_WEBHOOK_URL=self.url, CODING_BOT_WEBHOOK_KEY=KEY)
@@ -1723,7 +1724,20 @@ class TestAdversaryR1(TransportBase):
         r = self.cli("send", "task")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("delivery uncertain", r.stderr)
+        self.assertTrue(r.stdout.startswith("ade-1: delivery uncertain"), r.stdout)
         self.assertEqual(next(x for x in self.outbox() if x.get("result_for") == "ade-1")["stored"], "uncertain")
+
+    def test_a_truncated_upload_is_never_published(self) -> None:
+        """Review of 3b0fd022: a dropped connection can give `cat` an early EOF; the short file must not be linked."""
+        fake = Path(self.tmp.name) / "bin/ssh"
+        src = fake.read_text()
+        # the "network" delivers only the first 20 bytes, then a clean EOF
+        fake.write_text(src.replace('exec sh -c "$last"', 'head -c 20 | sh -c "$last"; exit $?', 1))
+        r = self.cli("send", "a task long enough to be cut in the middle")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.to_dir / "ade-1.md").exists(), "a truncated message was published")
+        self.assertEqual([p.name for p in self.to_dir.iterdir()], [], "a temp file was left in the drop")
+        self.assertTrue(self.in_origin("to-coding/ade-1.md"), "the send should have fallen back to git")
 
     def test_a_git_push_that_cannot_be_checked_is_uncertain_not_failed(self) -> None:
         """Review of c9c751c7: a lost push ack plus a failing fetch must not be reported as 'nothing stored'."""
