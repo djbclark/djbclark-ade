@@ -1168,6 +1168,38 @@ def chrome_alert(st, t, table, dry):
             log(body)
 
 
+MDS_CORES = float(os.environ.get("LW_MDS_CORES", "0.5"))
+MDS_SUSTAIN_S = float(os.environ.get("LW_MDS_SUSTAIN_S", "120"))
+MDS_COOLDOWN_S = float(os.environ.get("LW_MDS_COOLDOWN_S", "1800"))
+MDS_RE = re.compile(r"(^|/)mds(\s|$)")  # the metadata server, not mds_stores or mdworker
+FINDER_RE = re.compile(r"/Finder\.app/Contents/MacOS/Finder(\s|$)")
+
+
+def mds_probe(st, t, table, dry):
+    """Record who is busy while Spotlight's mds is (2026-11-01: mds sat at 25-70% for hours; the cause was Finder
+    re-listing /private/tmp, found only by hand with `sample` and `fs_usage`, both root). Needs no root: once mds
+    has used MDS_CORES or more for MDS_SUSTAIN_S, log one line per MDS_COOLDOWN_S with mds, Finder and the six
+    busiest other processes. A log line only: it pings nobody and signals nothing. XPC client pids (`lsmp`)
+    need root, so Finder's share is the cheap tell: a busy Finder with a busy mds is the 2026-11-01 pattern."""
+    mds = sum(c for _pp, _uid, c, cmd in table.values() if MDS_RE.search(cmd))
+    if mds < MDS_CORES:
+        st.pop("mds_hot", None)
+        return
+    since = st.setdefault("mds_hot", t)
+    cd = st["cooldown"]
+    if t - since < MDS_SUSTAIN_S or t - cd.get("mds", -MDS_COOLDOWN_S) < MDS_COOLDOWN_S:
+        return
+    finder = sum(c for _pp, _uid, c, cmd in table.values() if FINDER_RE.search(cmd))
+    others = sorted(((c, pid, cmd) for pid, (_pp, _uid, c, cmd) in table.items() if not MDS_RE.search(cmd)), reverse=True)[:6]
+    top = "; ".join(f"{pid} {c:.2f} {' '.join(os.path.basename(w) for w in cmd.split()[:2])[:50]}" for c, pid, cmd in others)
+    line = (f"mds probe: mds {mds:.2f} cores for {(t - since) / 60:.0f}+ min, Finder {finder:.2f}; top others: {top}")
+    if dry:
+        print(f"load-watch: {line}")
+        return
+    log(line)
+    cd["mds"] = t
+
+
 def cmd_sample(a):
     st = load_state()
     t = now()
@@ -1210,6 +1242,10 @@ def cmd_sample(a):
         chrome_alert(st, t, table, a.dry_run)
     except Exception as e:  # noqa: BLE001
         log(f"chrome alert error: {e!r}")
+    try:
+        mds_probe(st, t, table, a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        log(f"mds probe error: {e!r}")
     if a.verbose:
         print(f"load {load1:.1f}/{ncpu} hot={hot} streak={st['streak']}")
     if hot and t - st["hot_since"] >= SUSTAIN_S:
