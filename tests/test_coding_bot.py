@@ -1680,6 +1680,20 @@ class TestAdversaryR1(TransportBase):
         self.cli("sync")
         self.assertNotIn("ade-1--coding-1.md", json.loads((self.state / "seen.json").read_text()).get("ssh", []))
 
+    def test_a_message_whose_git_push_failed_is_never_published_by_a_later_send(self) -> None:
+        """Review of 045cff2e: 'not stored' must be true, or a later push publishes the task behind the sender's back."""
+        self.ssh_down.write_text("")
+        self.git(self.mailbox, "remote", "set-url", "--push", "origin", str(Path(self.tmp.name) / "no-such.git"))
+        r = self.cli("send", "first task")
+        self.assertEqual(Hook.seen[-1]["body"]["text"], "first task", "with git failed, the doorbell carries the text")
+        self.assertEqual(self.git(self.mailbox, "rev-parse", "HEAD"), self.git(self.mailbox, "rev-parse", "origin/main"),
+                         r.stderr)
+        self.git(self.mailbox, "remote", "set-url", "--push", "origin", str(self.origin))
+        self.set_health("git", fails=0, down_until=0)
+        self.cli("send", "second task")
+        self.assertTrue(self.in_origin("to-coding/ade-2.md"))
+        self.assertFalse(self.in_origin("to-coding/ade-1.md"), "the failed message was published by a later send")
+
     def test_a_duplicate_check_runs_under_the_inbox_lock(self) -> None:
         """A7: `append(..., unless=...)` decides under the lock, so two pollers cannot both file one reply."""
         with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):

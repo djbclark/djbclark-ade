@@ -194,12 +194,13 @@ This fired because the operator's agent sent a message. The webhook body is JSON
 plus "nonce" (and "paths"); it may be empty or missing.
 Step 1, always first: post a visible message in this chat: "Webhook run received", then id, from, project, re, nonce and \
 the text (or "no body arrived"), and append the same lines to /home/box/agent-data/shared/agent-webhook/agent-inbound/received.log.
-Step 2, find the message. If the body has a `paths` field, `text` is only a short ping and the full message is a file named \
-<id>.md in {DROP_DIR}/to-coding/ and/or in to-coding/ of the git mailbox (run git pull in {MAILBOX_DIR} first): read the \
-first one that exists; its first line is `[<from> -> coding] id=<id> nonce=<nonce> ...`, and that nonce wins over the \
-body. If the body has NO `paths` field, `text` IS the whole message: use it as is, with the body's nonce. If the body is \
-missing, take the newest file in either place that has no claim file and no reply file yet. If you find nothing, reply \
-BLOCKED: no message found.
+Step 2, find the message. If the body has a `paths` field, `text` is only a short ping and the full message is the file \
+<id>.md in the place `paths` names: "ssh" means {DROP_DIR}/to-coding/, "git" means to-coding/ of the git mailbox (run git \
+pull in {MAILBOX_DIR} first). Its first line is `[<from> -> coding] id=<id> nonce=<nonce> ...`: use the file ONLY if that \
+nonce equals the body's nonce exactly; a file with another nonce is someone else's message, so leave it and reply \
+BLOCKED: message file does not match. If the body has NO `paths` field, `text` IS the whole message: use it as is, with the \
+body's nonce. If the body is missing, take the newest file in either place that has no claim file and no reply file yet, \
+with the nonce from its own first line. If you find nothing, reply BLOCKED: no message found.
 Step 3, skip what is already handled: if claim-<id>.md or any <id>--coding-*.md already exists in {DROP_DIR}/from-coding/ \
 or in from-coding/ of the git mailbox (git pull first), another run has it. Post "already handled <id>" in this chat and \
 stop; write nothing.
@@ -736,10 +737,26 @@ class Git:
             self._git("add", "--", rel)
             self._git("commit", "--quiet", "-m", f"{mid}: message to coding", "--", rel)
             try:
-                self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
-            except TransportError:  # the bot pushed a reply meanwhile: rebase once and retry
-                self.sync_branch()
-                self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
+                try:
+                    self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
+                except TransportError:  # the bot pushed a reply meanwhile: rebase once and retry
+                    self.sync_branch()
+                    self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
+            except TransportError:
+                # "not stored" must be true: either the push did land (seen on the remote) or the local commit goes, so a
+                # later send can never publish this message behind the sender's back
+                if self._published(rel, content):
+                    return
+                with contextlib.suppress(TransportError):
+                    self._git("reset", "--quiet", "--hard", f"{self.remote}/{self.branch}")
+                raise
+
+    def _published(self, rel: str, content: str) -> bool:
+        try:
+            self._git("fetch", "--quiet", self.remote, self.branch)
+            return self._git("cat-file", "blob", f"{self.remote}/{self.branch}:{rel}") == content
+        except TransportError:
+            return False
 
     def _write(self, mid: str, rel: str, content: str) -> None:
         target = self._target(rel)
