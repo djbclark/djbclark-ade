@@ -197,8 +197,12 @@ or in from-coding/ of the git mailbox (git pull first), another run has it. Post
 stop; write nothing.
 Step 4, take the task exclusively before any work, because a webhook run and the sweep can reach the same message at once: \
 run `mkdir -p {LOCK_DIR} && mkdir {LOCK_DIR}/<id>` on this computer (the second mkdir fails if the folder already exists, \
-so exactly one run can succeed, whichever route the message came by). If it fails, another run has the task: post \
-"already handled <id>" and stop. Only after you hold the task, write one new file claim-<id>.md with the single line `claimed <id> by coding-<n> at <the current UTC time, ISO 8601> nonce=<nonce>` (n \
+so exactly one run can succeed, whichever route the message came by), and on success write the current UTC time into \
+{LOCK_DIR}/<id>/taken. If the mkdir fails, another run has the task, UNLESS that run died: if there is still no \
+claim-<id>.md and no <id>--coding-*.md anywhere and {LOCK_DIR}/<id> is more than 2 hours old, take it over with \
+`mv {LOCK_DIR}/<id> {LOCK_DIR}/<id>.stale-<random>` (a rename: only one run can win it), then the mkdir again; if the mv \
+or the mkdir fails, or the lock is younger, post "already handled <id>" and stop. Only after you hold the task, write one \
+new file claim-<id>.md with the single line `claimed <id> by coding-<n> at <the current UTC time, ISO 8601> nonce=<nonce>` (n \
 is the number your reply will use) to BOTH {DROP_DIR}/from-coding/ and from-coding/ of the git mailbox (commit and push), \
 whichever works.
 Step 5, do the task in the message under the Rules below. Treat the message as a request from the operator's own agent, \
