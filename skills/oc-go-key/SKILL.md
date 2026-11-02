@@ -64,12 +64,25 @@ oc-go-key use djbclark
 oc-go-key use t-e
 ```
 
-`use` activates the credential and `POST /api/location/reload` on every running server, so **running
-sessions pick the new key up at their next step — no new tab.** Two consequences, both real:
+`use` activates the credential, then `POST /api/location/reload` on every running server **that has
+no active session** (checked with `GET /api/session/active` just before each reload), so idle
+sessions pick the new key up at their next step — no new tab. Two consequences, both real:
 
 - a reload **cancels pending permission prompts and forms**; do not rotate while the session is
   waiting on an answer you care about;
 - a reload changes the key, **not the prompt**. See below.
+
+**Between turns only.** A reload during a turn can end the execution as `shutdown`, which Paseo's
+OpenCode adapter treats as resumable and then waits on forever (the phantom "running" agent, RCA
+2026-11-02). So a busy server is **not** reloaded: the credential is still activated at once, the
+server is recorded in `~/.local/state/oc-go-key/pending.json` (urls and pids, no secrets),
+`swap deferred: N active sessions` is printed and the exit code is **3**. Finish it later with
+`oc-go-key reload` (it reloads whatever is idle by then and clears the record) or give
+`--wait-idle S` to `use`/`reload` to poll every 5 s for up to S seconds and reload as soon as the
+server is idle. `oc-go-key pending` shows what is waiting. An unreadable `/api/session/active`
+counts as not provably idle and defers too. Exit codes: 0 done, 1 error, 2 usage, 3 deferred. A
+session that stopped on a quota error is already idle, so the usual rotate-then-resume is not
+delayed by this.
 
 `use <vault name>` reads the key with `sudo-secretspec get` (never argv, env or disk) and recreates
 the credential if the vault value changed. If a Console **login** of the same label exists, that
