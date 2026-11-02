@@ -528,6 +528,15 @@ cmd`), never in source. Verified live 2026-10-11/12: the response `model` is
 `npx skills remove fastino-glide` or by deleting the directory and its lockfile
 entry.
 
+**Greptile** (AI code review; djbclark approved adding it 2026-11-01). On the machine, not per repo: the CLI
+`brew install greptileai/tap/greptile` (tracks latest: `brew upgrade greptile`) and the official skills
+`npx skills add greptileai/skills -g -y` (`check-pr`, `greploop`, `cli-review`, installed unmodified; update with
+`npx skills update`). The key is `GREPTILE_API_KEY` in sudo-secretspec, which the CLI reads from the environment: run
+`sudo-secretspec run --reason ... -- greptile review --agent`, never `greptile login --api-key` (it stores a second copy
+in `~/.greptile/`). Machine notes, exit codes and credit costs: the `greptile` skill. Its MCP server is not part of
+this toolchain: it is a remote server whose 21 tools cost about 12,000 tokens of context per agent session (measured
+2026-11-01), so it is registered only where djbclark decides.
+
 **Graft's own wiring** (hooks, statusline and, unless `--no-mcp`, the MCP server) is installed by
 `graft init` in §6, not here. **`token-savior` (MCP server and `uv` tool) was removed
 on djbclark's machine 2026-10-18 (0 calls in 14 days): do not install or register it.** The web-access MCP servers (Exa, Parallel
