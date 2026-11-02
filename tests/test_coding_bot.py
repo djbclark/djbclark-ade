@@ -549,5 +549,231 @@ class TestAtomicState(Base):
             self.assertEqual([p.name for p in self.state.iterdir() if p.name.endswith(".tmp")], [])
 
 
+class TransportBase(Base):
+    """An ssh drop (a fake `ssh` that runs the remote command locally, with a down switch and a call log) and a git
+    mailbox (a real local bare repo, a clone for us and a clone for the 'bot')."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = Path(self.tmp.name)
+        self.to_dir, self.from_dir = root / "drop/to-coding", root / "drop/from-coding"
+        self.to_dir.mkdir(parents=True)
+        self.from_dir.mkdir()
+        self.ssh_log, self.ssh_down = root / "ssh.log", root / "ssh.down"
+        fake_ssh = root / "bin/ssh"
+        fake_ssh.write_text(
+            f"#!/bin/sh\necho call >> '{self.ssh_log}'\n"
+            f"[ -e '{self.ssh_down}' ] && {{ echo 'ssh: connect failed' >&2; exit 255; }}\n"
+            'for last; do :; done\nexec sh -c "$last"\n')
+        fake_ssh.chmod(0o755)
+        self.origin, self.mailbox, self.bot = root / "origin.git", root / "mailbox", root / "bot-clone"
+        self.git(root, "init", "--bare", "-q", "-b", "main", str(self.origin))
+        self.git(root, "clone", "-q", str(self.origin), str(self.mailbox))
+        (self.mailbox / "README.md").write_text("mailbox\n")
+        self.git(self.mailbox, "add", "README.md")
+        self.git(self.mailbox, "commit", "-q", "-m", "init")
+        self.git(self.mailbox, "push", "-q", "origin", "HEAD:main")
+        self.git(root, "clone", "-q", str(self.origin), str(self.bot))
+        self.cfg = {"ssh": {"host": "h", "user": "u", "key": "k", "known_hosts": "kh", "port": 2222,
+                            "to_dir": str(self.to_dir), "from_dir": str(self.from_dir)},
+                    "git": {"path": str(self.mailbox), "remote": "origin", "branch": "main"}}
+        self.write_cfg()
+        self.env.update(CODING_BOT_TRANSPORTS=str(root / "transports.json"), CODING_BOT_POLL_S="0.2")
+        # A local git push is far quicker than a real one; pin git's measured cost to a realistic few seconds so the
+        # tests exercise the preference (ssh prior 1 s) and not this machine's speed.
+        self.set_health("git", ewma_s=3.0, last_ok=time.time(), fails=0, down_until=0)
+
+    def write_cfg(self) -> None:
+        (Path(self.tmp.name) / "transports.json").write_text(json.dumps(self.cfg))
+
+    @staticmethod
+    def git(cwd: Path, *args: str) -> str:
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", str(cwd), *args],
+                              check=True, capture_output=True, text=True).stdout
+
+    def in_origin(self, rel: str) -> bool:
+        r = subprocess.run(["git", "-C", str(self.origin), "cat-file", "-e", f"main:{rel}"], capture_output=True)
+        return r.returncode == 0
+
+    def ssh_calls(self) -> int:
+        return len(self.ssh_log.read_text().splitlines()) if self.ssh_log.exists() else 0
+
+    def health(self) -> dict:
+        return json.loads((self.state / "health.json").read_text())
+
+    def set_health(self, name: str, **fields: object) -> None:
+        h = self.health() if (self.state / "health.json").exists() else {}
+        h.setdefault(name, {}).update(fields)
+        self.state.mkdir(exist_ok=True)
+        (self.state / "health.json").write_text(json.dumps(h))
+
+    def bot_reply_ssh(self, mid: str, body: str, n: int = 1) -> None:
+        (self.from_dir / f"{mid}--coding-{n}.md").write_text(f"[coding -> claude-code] id=coding-{n} re={mid}\n{body}\n")
+
+    def bot_reply_git(self, mid: str, body: str, n: int = 1) -> None:
+        self.git(self.bot, "pull", "-q", "origin", "main")
+        (self.bot / "from-coding").mkdir(exist_ok=True)
+        (self.bot / f"from-coding/{mid}--coding-{n}.md").write_text(f"[coding -> claude-code] id=coding-{n} re={mid}\n{body}\n")
+        self.git(self.bot, "add", "-A")
+        self.git(self.bot, "commit", "-q", "-m", "reply")
+        self.git(self.bot, "push", "-q", "origin", "HEAD:main")
+
+
+class TestTransportSend(TransportBase):
+    def test_the_cheaper_transport_carries_the_message_and_the_doorbell_is_short(self) -> None:
+        r = self.cli("send", "the long task text")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        msg = (self.to_dir / "ade-1.md").read_text()
+        self.assertTrue(msg.startswith("[claude-code -> coding] id=ade-1\nproject: "), msg)
+        self.assertIn("the long task text", msg)
+        self.assertEqual([p.name for p in self.to_dir.iterdir()], ["ade-1.md"], "a temp file was left behind")
+        self.assertFalse(self.in_origin("to-coding/ade-1.md"))
+        body = Hook.seen[0]["body"]
+        self.assertNotIn("the long task text", body["text"])
+        self.assertIn("ade-1.md", body["text"])
+        self.assertEqual(body["paths"], ["ssh"])
+        self.assertIn("via ssh", r.stdout)
+        self.assertEqual(self.health()["ssh"]["fails"], 0)
+
+    def test_falls_back_to_git_when_ssh_is_down_then_skips_ssh_while_it_is_in_backoff(self) -> None:
+        self.ssh_down.write_text("")
+        r = self.cli("send", "task one")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("transport ssh:", r.stderr)
+        self.assertTrue(self.in_origin("to-coding/ade-1.md"))
+        self.assertEqual(Hook.seen[0]["body"]["paths"], ["git"])
+        h = self.health()["ssh"]
+        self.assertEqual(h["fails"], 1)
+        self.assertTrue(5 < h["down_until"] - time.time() < 20, h)  # 15 s, jittered 0.75-1.25x, minus the send's own time
+        self.assertEqual(self.ssh_calls(), 1)
+        self.cli("send", "task two")
+        self.assertEqual(self.ssh_calls(), 1, "ssh was tried again while it was in backoff")
+        self.assertTrue(self.in_origin("to-coding/ade-2.md"))
+
+    def test_traffic_switches_back_to_the_faster_transport_once_its_backoff_ends(self) -> None:
+        self.ssh_down.write_text("")
+        self.cli("send", "while ssh is down")
+        self.ssh_down.unlink()
+        self.set_health("ssh", down_until=time.time() - 1)  # the backoff has ended
+        r = self.cli("send", "after it is back")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.to_dir / "ade-2.md").exists(), "did not return to ssh")
+        self.assertFalse(self.in_origin("to-coding/ade-2.md"))
+        self.assertEqual(self.health()["ssh"]["fails"], 0)
+
+    def test_a_failed_probe_after_backoff_lengthens_the_next_backoff(self) -> None:
+        self.ssh_down.write_text("")
+        self.cli("send", "one")
+        self.set_health("ssh", down_until=time.time() - 1)  # due again, still down
+        self.cli("send", "two")
+        h = self.health()["ssh"]
+        self.assertEqual(h["fails"], 2)
+        self.assertTrue(15 < h["down_until"] - time.time() < 40, h)  # 30 s, jittered, minus the send's own time
+
+    def test_a_measured_slow_transport_loses_to_a_measured_fast_one_and_staleness_decays_to_the_prior(self) -> None:
+        now = time.time()
+        self.set_health("ssh", ewma_s=9.0, last_ok=now, fails=0, down_until=0)
+        self.set_health("git", ewma_s=0.1, last_ok=now, fails=0, down_until=0)
+        self.cli("send", "x")
+        self.assertTrue(self.in_origin("to-coding/ade-1.md"))
+        mod = TestAtomicState.load(self)
+        self.assertEqual(mod.cost("ssh", {"ewma_s": 9.0, "last_ok": now}, now), 9.0)
+        self.assertEqual(mod.cost("ssh", {"ewma_s": 9.0, "last_ok": now - 7200}, now), 1.0)  # stale: back to the prior
+        self.assertEqual(mod.cost("git", {}, now), 4.0)
+
+    def test_when_every_transport_fails_the_doorbell_carries_the_text(self) -> None:
+        self.ssh_down.write_text("")
+        self.cfg["git"]["remote"] = "no-such-remote"
+        self.write_cfg()
+        r = self.cli("send", "the whole task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Hook.seen[0]["body"]["text"], "the whole task")
+        self.assertNotIn("paths", Hook.seen[0]["body"])
+        self.assertIn("transport ssh:", r.stderr)
+        self.assertIn("transport git:", r.stderr)
+
+    def test_backoff_grows_doubles_and_is_capped(self) -> None:
+        mod = TestAtomicState.load(self)
+        mid = [mod.backoff_s(n, rand=lambda: 0.5) for n in range(1, 11)]
+        self.assertEqual(mid[:5], [15.0, 30.0, 60.0, 120.0, 240.0])
+        self.assertEqual(mid[-1], 900.0)
+        self.assertEqual((mod.backoff_s(1, rand=lambda: 0.0), mod.backoff_s(1, rand=lambda: 1.0)), (11.25, 18.75))
+
+    def test_status_shows_the_backoff(self) -> None:
+        self.ssh_down.write_text("")
+        self.cli("send", "x")
+        st = self.cli("status")
+        self.assertIn("IN BACKOFF", st.stdout)
+        self.assertRegex(st.stdout, r"git: cost .*\n.*ssh: cost .*IN BACKOFF")  # the usable one is listed first
+
+
+class TestTransportReplies(TransportBase):
+    FINAL = "finished\nDONE"
+
+    def test_a_reply_on_both_transports_is_filed_once_and_not_refiled(self) -> None:
+        self.cli("send", "task")
+        self.bot_reply_ssh("ade-1", self.FINAL)
+        self.bot_reply_git("ade-1", self.FINAL)
+        s = self.cli("sync")
+        self.assertEqual(s.returncode, 0, s.stderr)
+        self.assertEqual(len(self.cli("inbox").stdout.strip().splitlines()), 1)
+        self.assertIn("0 new", self.cli("sync").stdout)
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("finished", w.stdout)
+
+    def test_a_reply_that_only_one_transport_has_is_found(self) -> None:
+        self.cli("send", "task")
+        self.bot_reply_git("ade-1", self.FINAL)
+        self.assertIn("finished", self.cli("wait", "ade-1", "--timeout", "10").stdout)
+
+    def test_drop_replies_are_checked_like_any_reply_and_a_refused_one_is_not_retried(self) -> None:
+        self.cli("send", "task one")
+        self.cli("send", "task two")
+        (self.from_dir / "ade-1--coding-1.md").write_text("[coding -> claude-code] id=coding-1 re=ade-2\nx\nDONE\n")
+        (self.from_dir / "ade-99--coding-1.md").write_text("[coding -> claude-code] id=coding-1 re=ade-99\nx\nDONE\n")
+        (self.from_dir / "evil.md").write_text("[coding -> claude-code] id=coding-1 re=ade-1\nx\nDONE\n")
+        (self.from_dir / "ade-1--coding-2.md.tmp").write_text("partial")
+        s = self.cli("sync")
+        self.assertIn("header says re=ade-2", s.stderr)
+        self.assertIn("not in the outbox", s.stderr)
+        self.assertEqual(self.cli("inbox").stdout, "")
+        again = self.cli("sync")
+        self.assertNotIn("header says", again.stderr, "a refused reply file was retried")
+
+    def test_ask_returns_a_reply_that_arrives_by_drop(self) -> None:
+        env = dict(self.env, CODING_BOT_WEBHOOK_URL=self.url, CODING_BOT_WEBHOOK_KEY=KEY)
+        ask = subprocess.Popen([sys.executable, str(SCRIPT), "ask", "--timeout", "20", "do it"], env=env,
+                               cwd=self.tmp.name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(ask.kill)
+        for _ in range(100):
+            if Hook.seen:
+                break
+            time.sleep(0.05)
+        self.assertTrue(Hook.seen)
+        self.assertIsNone(ask.poll())
+        self.bot_reply_ssh("ade-1", "from the drop\nDONE")
+        out, err = ask.communicate(timeout=20)
+        self.assertEqual(ask.returncode, 0, err)
+        self.assertEqual(out, "[coding -> claude-code] id=coding-1 re=ade-1\nfrom the drop\nDONE\n")
+
+    def test_polling_never_changes_the_cost_used_to_rank_transports_for_sending(self) -> None:
+        self.cli("sync")
+        h = self.health()
+        self.assertEqual(h["git"]["ewma_s"], 3.0, "a fetch made git look cheap to send with")
+        self.assertIn("poll_s", h["git"])
+        self.assertIn("poll_s", h["ssh"])
+        self.assertNotIn("ewma_s", h["ssh"])
+
+    def test_a_transport_in_backoff_is_not_polled_unless_forced(self) -> None:
+        self.ssh_down.write_text("")
+        self.cli("send", "x")  # ssh fails once, git carries it
+        before = self.ssh_calls()
+        self.cli("sync")
+        self.assertEqual(self.ssh_calls(), before, "sync polled a transport in backoff")
+        self.cli("sync", "--force")
+        self.assertEqual(self.ssh_calls(), before + 1)
+
+
 if __name__ == "__main__":
     unittest.main()
