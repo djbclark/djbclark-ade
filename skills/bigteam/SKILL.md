@@ -771,7 +771,9 @@ and grep while the slice runs (a resident Python waiter was 13-32 MB of RSS each
 and 26 of them were 306 MB during the 2026-10-18 memory stall), a real
 `acp-dispatch wait --once` pass every 60 s and the moment the marker or the record's
 `finished` appears, ending in `acp-dispatch check <record>` (2026-10-10) — so the
-waiter exits 1 (partial), 3 (no-report) or 4 (BLOCKED) and
+waiter exits 1 (partial), 3 (no-report) or 4 (BLOCKED), or 124 when its own deadline stopped it (2026-11-02: it registers
+`dispatch-wait-<record>` for min(the record's `wait_timeout`, 60 min) + 60 s through one resident `deadline run`; re-arm with the
+same line; `--no-deadline` keeps it bash-only; `docs/deadline.md`) and
 prints the verdict instead of exiting 0 whenever `.done` appears. A codex quota death had
 left only `STATUS: working` behind a waiter that exited 0. When acp-run fails before
 `DONE`, the report's last line is now `NO-REPORT: <class> (<agent>, <model>[, retry at

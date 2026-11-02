@@ -1,7 +1,7 @@
 #!/bin/bash
 # acp-dispatch-wait — the cheap rearm waiter for one acp-dispatch record (2026-10-18).
 #
-#   acp-dispatch-wait RECORD DONE
+#   acp-dispatch-wait [--no-deadline] RECORD DONE
 #
 # Printed by acp-dispatch's `rearm` field; a lead pastes it into a run_in_background Bash call.
 # While the slice runs this holds only bash, sleep and grep: a resident Python
@@ -15,6 +15,13 @@
 # and re-running Python on every 10 s tick then would undo the saving (review 2026-10-18).
 # ACP_DISPATCH_WAIT_TICK / ACP_DISPATCH_WAIT_PASS (seconds) and ACP_DISPATCH_BIN are test seams.
 #
+# Deadline (2026-11-02, docs/deadline.md): unless --no-deadline, DEADLINE_NAME is already set (it runs under a caller's `deadline run`) or
+# bin/deadline is unusable, this waiter registers itself as `dispatch-wait-<record name>` and runs under `deadline run` (budget: the record's
+# `wait_timeout` or 60 min, whichever is shorter, plus 60 s; heartbeat every pass; owner $PASEO_AGENT_ID or none = Hermes is told). Past the
+# budget the enforcer kills THIS waiter's own process group (exit 124): a waiter holds no work and the slice keeps running, so re-arm with the same
+# line. The registered copy costs one resident `deadline run` Python process (the price of an enforced bound); a deadline problem (tool missing,
+# crashing, name already live) is one stderr warning and the wait goes on unregistered. DEADLINE_BIN is a test seam.
+#
 # Exit: `wait --once`'s verdict — loops on 75 (EX_TEMPFAIL, still running); on 0 execs
 # `acp-dispatch check RECORD` and exits with its code (0 done, 1 partial, 3 no-report,
 # 4 BLOCKED, 5 pool unavailable, 75 machine too hot: nothing ran, re-dispatch later: that final 75 is
@@ -23,8 +30,53 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 dispatch=${ACP_DISPATCH_BIN:-$here/acp-dispatch}
-record=${1:?usage: acp-dispatch-wait RECORD DONE}
-marker=${2:?usage: acp-dispatch-wait RECORD DONE}
+nodl=0
+args=()
+for x in "$@"; do
+  if [ "$x" = --no-deadline ]; then nodl=1; else args+=("$x"); fi
+done
+set -- ${args[@]+"${args[@]}"}
+record=${1:?usage: acp-dispatch-wait [--no-deadline] RECORD DONE}
+marker=${2:?usage: acp-dispatch-wait [--no-deadline] RECORD DONE}
+
+# --- own deadline: run this same script under `deadline run` (see the header), or fall through and wait here ---
+dl_name=
+dl_bin=${DEADLINE_BIN:-$here/deadline}
+dl_warned=0
+dl_warn() { [ "$dl_warned" -eq 0 ] && echo "acp-dispatch-wait: warning: $1" >&2; dl_warned=1; }
+if [ "$nodl" -eq 0 ]; then
+  if [ "${DEADLINE_NAME+x}" = x ]; then
+    # under `deadline run` (ours or a caller's; an empty value is a failed registration): never register twice; ours says it is running
+    if [ -n "${DEADLINE_WAIT_MARK:-}" ] && [ "$DEADLINE_NAME" = "${DEADLINE_WAIT_NAME:-}" ]; then
+      : > "$DEADLINE_WAIT_MARK" 2>/dev/null
+      dl_name=$DEADLINE_NAME
+    fi
+  elif [ ! -x "$dl_bin" ]; then
+    dl_warn "no usable deadline tool ($dl_bin): waiting without a deadline"
+  else
+    name=$(basename "$record" .json)
+    name="dispatch-wait-${name//[!A-Za-z0-9._-]/-}"; name=${name:0:100}
+    budget=3600
+    wt=$(ggrep -Eo '"wait_timeout"[[:space:]]*:[[:space:]]*[0-9]+' "$record" 2>/dev/null | ggrep -Eo '[0-9]+$' | head -n 1)
+    [ -n "$wt" ] && [ "$wt" -gt 0 ] && [ "$wt" -lt "$budget" ] && budget=$wt
+    mark=$(mktemp -u "${TMPDIR:-/tmp}/deadline-wait.XXXXXX")
+    DEADLINE_WAIT_NAME=$name DEADLINE_WAIT_MARK=$mark "$dl_bin" run --name "$name" --budget $((budget + 60)) --heartbeat 600 \
+      --on-expire kill -- "$here/$(basename "$0")" "$record" "$marker" &
+    child=$!
+    sig=0
+    trap 'sig=1; kill -TERM "$child" 2>/dev/null' TERM INT HUP   # forwarded once; `deadline run` then stops the waiter's group
+    while :; do
+      wait "$child"; rc=$?
+      kill -0 "$child" 2>/dev/null || break   # a trapped signal interrupts `wait` while the child lives
+    done
+    trap - TERM INT HUP
+    if [ -e "$mark" ] || [ "$sig" -eq 1 ]; then rm -f "$mark"; exit "$rc"; fi   # a signal ends it even if the wait never began
+    rm -f "$mark"
+    dl_warn "the deadline tool did not run the wait (exit $rc): waiting without a deadline"
+  fi
+fi
+# heartbeat: only the registration this process made, at most once per pass (a Python start each time)
+dl_beat() { [ -n "$dl_name" ] && [ -x "$dl_bin" ] && "$dl_bin" beat "$dl_name" >/dev/null 2>&1 </dev/null; return 0; }
 tick=${ACP_DISPATCH_WAIT_TICK:-10}
 pass=${ACP_DISPATCH_WAIT_PASS:-60}
 since=$pass
@@ -37,6 +89,7 @@ while :; do
     was=0
   fi
   if [ "$since" -ge "$pass" ]; then
+    dl_beat
     "$dispatch" wait --once "$record"
     rc=$?
     if [ "$rc" -eq 75 ]; then

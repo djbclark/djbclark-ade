@@ -12,7 +12,7 @@
     load-watch admit [--max-per-core N] [--max-mem-churn N] [--min-free-mb N] [--max-pageins N] [--max-agents [N]] [--no-reserve]
     load-watch renew RESERVATION             extend an agent reservation by LW_RESERVE_S from now (a dispatcher still waiting)
     load-watch release RESERVATION           shorten an agent reservation `admit --max-agents --json` printed (its agent is spawned)
-                     [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS] [--json]
+                     [--boost-per-core N] [--boost-max-churn N] [--wait SECONDS [--no-deadline]] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
                                             the one session told about every spike (`loadwatch` skill)
@@ -83,7 +83,11 @@ launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] 
 `streak` and `hot_for_s`, so a sustained-hot machine reads as such. `--wait 0` (default) is a pure check;
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
 load drops below the threshold sleeps a random 5-30 s, never past --wait (so queued dispatchers do not all start together)
-and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
+and re-checks. `--json` prints one JSON object with the same fields. A `--wait S` (S > 0) registers its own deadline (2026-11-02,
+docs/deadline.md; bin/deadline_wait.py): `admit-wait-<pid>`, budget min(S, 30 min) + 60 s (the B9 admission class maximum),
+owner $PASEO_AGENT_ID or none (Hermes is told), heartbeat per poll; past it the enforcer kills THIS waiter's own process group (exit
+124: a waiter holds no work, nothing is lost). `--no-deadline` opts out; a waiter under a caller's `deadline run` (DEADLINE_NAME set)
+does not register again; an unusable deadline tool is one stderr warning and the wait goes on. It only decides whether to START work:
 it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"; tightened 2026-11-01):
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: available memory (free +
 file-backed + purgeable pages: memory freed without compressing or swapping, like Linux MemAvailable's file-cache
@@ -1940,6 +1944,32 @@ def admit_line(rec):
     return line
 
 
+_DW = None   # the deadline_wait module once self_deadline() imported it
+
+
+def dl_beat():
+    """Heartbeat of this waiter's own deadline from the poll loop (a no-op unless it registered one)."""
+    if _DW is not None:
+        _DW.beat()
+
+
+def self_deadline(a, poll):
+    """Register this `admit --wait`'s own deadline (bin/deadline_wait.py): the exit code of the supervised run, or None to wait in this
+    process (--no-deadline, nested under `deadline run`, this is the supervised copy, or the deadline tool could not run it)."""
+    global _DW
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import deadline_wait
+        _DW = deadline_wait
+        # class maximum 30 min (B9), or --wait when shorter, plus a margin; heartbeat: a poll plus the stagger sleep, never under 5 min
+        return deadline_wait.supervised(
+            "load-watch admit", deadline_wait.safe_name("admit-wait", os.getpid()), deadline_wait.budget_for(a.wait, 1800),
+            max(300.0, 4 * poll + 120), str(Path(__file__).resolve()), sys.argv[1:], opt_out=a.no_deadline)
+    except ImportError as e:
+        print(f"load-watch admit: warning: deadline_wait unavailable ({e}): waiting without a deadline", file=sys.stderr)
+        return None
+
+
 def cmd_admit(a):
     """May new work start now? Only ever decides; never kills, throttles or signals anything."""
     lim = {"churn": getattr(a, "max_mem_churn", ADMIT_CHURN_PAGES_S), "min_free_mb": getattr(a, "min_free_mb", ADMIT_MIN_FREE_MB),
@@ -1990,6 +2020,10 @@ def cmd_admit(a):
                             boost, boost_churn)
         return load1, cores, per_core, m, limit, calm_for
 
+    if getattr(a, "supervise", False) and a.wait > 0:
+        rc = self_deadline(a, poll)
+        if rc is not None:
+            return rc
     start, polls, next_note = time.monotonic(), 0, 60.0
     while True:
         load1, cores, per_core, m, limit, calm_for = read(polls)
@@ -2024,6 +2058,7 @@ def cmd_admit(a):
                   + (f" agents={m['agents']} (cap {lim['max_agents']})" if m["agents"] is not None else "")
                   + f", {int(waited)}s of {a.wait:g}s", file=sys.stderr)
             next_note += 60.0
+        dl_beat()
         time.sleep(max(0.0, min(poll, a.wait - waited)))
     rec = admit_record(load1, cores, per_core, limit, waited, m, lim, calm_for)
     print(json.dumps(rec) if a.json else admit_line(rec))
@@ -2047,7 +2082,7 @@ def cmd_install(a):
     return r.returncode
 
 
-def main():
+def main(supervise=False):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("sample")
@@ -2102,6 +2137,9 @@ def main():
                    help=f"the churn (pages/s) up to which the boost applies (default {ADMIT_BOOST_CHURN_PAGES_S:g})")
     p.add_argument("--wait", type=float, default=0, metavar="SECONDS",
                    help="poll every 15 s for up to SECONDS before giving up with exit 75 (0: a pure check)")
+    p.add_argument("--no-deadline", action="store_true",
+                   help="with --wait: do not register the wait with bin/deadline (default: admit-wait-<pid>, budget min(--wait, 30 min) + 60 s, "
+                        "owner $PASEO_AGENT_ID, heartbeat per poll; on expiry the waiter's own process group is killed, exit 124)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("watcher", help="the one agent session that hears about every spike (loadwatch skill)")
     p.add_argument("op", choices=["set", "show", "clear", "test"])
@@ -2116,6 +2154,7 @@ def main():
     sub.add_parser("install")
     sub.add_parser("uninstall")
     a = ap.parse_args()
+    a.supervise = supervise   # set only by the command line: a test calling cmd_admit() in-process never starts a supervised copy
     if a.cmd is None:
         ap.print_usage(sys.stderr)
         return 2
@@ -2124,4 +2163,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(supervise=True))

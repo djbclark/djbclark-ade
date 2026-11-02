@@ -153,9 +153,9 @@ herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's 
       agent job, so one budget never has two enforcers.
    2. **Registration.** The starter registers a budget, an owner, the process group and an on-expiry action
       before it starts, through the interim `bin/deadline` (`start` or `run -- CMD`; landing in PR 223, B9
-      absorbs its sweep in D1). Wrappers registering themselves with defaults is planned, not present: in
-      djbclark-ade first (`local-review`, `pr-wait`, `acp-dispatch-wait`, `load-watch admit --wait`); `bg`
-      lives in `~/ops/site-private-djbclark` and waits for djbclark's yes (order 11).
+      absorbs its sweep in D1). Since 2026-11-02 `pr-wait`, `acp-dispatch-wait` and `load-watch admit --wait` register
+      themselves with defaults (`docs/deadline.md`, "Waiters register themselves"); still planned: `local-review`,
+      then `bg`, which lives in `~/ops/site-private-djbclark` and waits for djbclark's yes (order 11).
    3. **Per-class defaults and maxima**, so a declared budget is still bounded: an admission wait 15 min
       (maximum 30 min, longer needs a reason); a test run 30 min; `local-review` 15 min; `pr-wait` and a review
       wait 60 min; any other class 30 min. A registration above its class maximum needs a reason and is

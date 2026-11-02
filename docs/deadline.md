@@ -59,10 +59,42 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
 5. A watched process that is gone without `done` becomes `lost` and the owner is told.
 6. Terminal records are pruned after 7 days, with orphan lock files. State: `~/.local/state/deadlines/` (`DEADLINE_STATE_DIR`), one JSON file per name.
 
+## Waiters register themselves (2026-11-02)
+
+`bin/pr-wait`, `bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
+wait by default, through `deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). A waiter holds no work, so on expiry the action is `kill` of
+**its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it; `acp-dispatch-wait` re-arms with the same line).
+
+|waiter|name|budget|heartbeat|
+|---|---|---|---|
+|`pr-wait PR`|`pr-wait-<PR>`|min(`--timeout`, 60 min) + 60 s|per poll; timeout 5 min or 4 polls + 2 min if longer|
+|`load-watch admit --wait S`|`admit-wait-<pid>`|min(S, 30 min) + 60 s (the admission class maximum)|per poll; timeout 5 min|
+|`acp-dispatch-wait RECORD DONE`|`dispatch-wait-<record file name>`|min(the record's `wait_timeout`, 60 min) + 60 s (60 min when 0 or unreadable)|per 60 s pass; timeout 10 min|
+
+The 60 s margin lets the waiter's own timeout path (it writes its result files) finish before the enforcer can fire; a registered waiter therefore
+never outlives its own `--timeout`/`--wait` by more than the margin plus the sweep's worst overrun (about two minutes). Owner: the caller's
+`PASEO_AGENT_ID`, else none (`-`: the sweep pings Hermes). The record is the same `kind: run` record as any `deadline run`.
+
+1. **Why a supervisor.** `deadline start --pid` refuses the registrar's own parent (safety rule 3), so a process cannot register itself. The waiter
+   runs *itself* under `deadline run --name N --budget B --heartbeat H --on-expire kill -- SELF ARGS` and returns its exit code; the inner copy
+   waits. `bin/deadline` is unchanged, and `done` on every exit path (success, failure, signals: the supervisor forwards SIGTERM/SIGINT/SIGHUP
+   once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the shared code for the two Python waiters; `acp-dispatch-wait` does the
+   same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait` was bash-only by design on
+   2026-10-18; `--no-deadline` restores that).
+2. **Opt out and nesting.** `--no-deadline` on each. A waiter started under `deadline run` (env `DEADLINE_NAME` set, even empty) does not register
+   again and does not beat the caller's record; the inner copy of a supervised waiter sees the same variable, which is also what stops a loop.
+3. **Never costs the wait.** The inner copy touches `$DEADLINE_WAIT_MARK` on its way in. If the supervised run never got there (the deadline tool is
+   missing or not executable, crashed, or refused: the name is already live) the supervisor warns ONCE on stderr and waits in its own process,
+   unregistered. A failing heartbeat (3 misses in a row) is one warning and no more beats; the wait goes on. Test seams: `DEADLINE_BIN`,
+   `DEADLINE_WAIT_BEAT_EVERY`.
+4. **Tests** (`tests/test_deadline_wrappers.py`) run each waiter against a temp `DEADLINE_STATE_DIR`; `tests/conftest.py` exports an empty
+   `DEADLINE_NAME` so no other test registers in the real state directory.
+
 ## Known gaps (follow-ups, `docs/queue.md`)
 
-The long-running wrappers (`pr-wait`, `load-watch admit --wait`, `acp-dispatch-wait`) do not yet register their own deadline by default (B9 rule 1),
-and Linux has no systemd unit for the sweep (`install` is macOS launchd only; `sweep` itself runs on both).
+`bg` (in `~/ops/site-private-djbclark`) and `local-review` do not register their own deadline yet (B9 rule 1); `local-review` still bounds its load wait with
+`--load-wait` (default 1800 s) and, through `load-watch admit --wait`, now holds an `admit-wait-<pid>` deadline of its own for that gate.
+Linux has no systemd unit for the sweep (`install` is macOS launchd only; `sweep` itself runs on both).
 
 ## Agent-session no-progress check (alert only)
 
