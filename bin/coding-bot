@@ -726,14 +726,23 @@ class Git:
         if self._git("diff", "--cached", "--name-only").strip():
             self._git("reset", "--quiet")
 
-    def _clear_locks(self) -> None:
-        """Remove lock files a killed git left behind (`run_cmd` kills a timed-out git's whole process group and reaps
-        it). Only ever called under the clone's flock, and only coding-bot uses the clone, so no live git holds them."""
+    def _locks(self) -> list[Path]:
         gd = Path(self._git("rev-parse", "--absolute-git-dir").strip())
-        for lk in [gd / n for n in ("index.lock", "HEAD.lock", "ORIG_HEAD.lock", "packed-refs.lock", "config.lock",
-                                    "shallow.lock")] + list((gd / "refs").rglob("*.lock")):
+        return [gd / n for n in ("index.lock", "HEAD.lock", "ORIG_HEAD.lock", "packed-refs.lock", "config.lock",
+                                 "shallow.lock")] + list((gd / "refs").rglob("*.lock"))
+
+    def _clear_locks(self, min_age: float = GIT_TIMEOUT_S, keep: frozenset = frozenset()) -> None:
+        """Remove lock files a killed git left behind. Only ever called under the clone's flock, and only coding-bot uses
+        the clone. `run_cmd` kills and reaps a timed-out git's whole process group, and so does a SIGTERM/SIGHUP/SIGINT of
+        coding-bot (main turns them into an exit); only a SIGKILL can orphan a live git, and no git of ours runs longer
+        than GIT_TIMEOUT_S, so a lock that old is dead. `min_age=0` only right after this process reaped its own git, and
+        then never for a lock in `keep` (one that existed before that git started, so not its)."""
+        now = time.time()
+        for lk in self._locks():
+            if lk in keep:
+                continue
             with contextlib.suppress(FileNotFoundError):
-                if lk.is_file() and not lk.is_symlink():
+                if lk.is_file() and not lk.is_symlink() and now - lk.stat().st_mtime >= min_age:
                     lk.unlink()
 
     def sync_branch(self) -> None:
@@ -769,6 +778,7 @@ class Git:
                 self._write(mid, rel, content)
             except OSError as e:  # an unwritable folder or a full disk is this route failing, not a crash
                 raise TransportError(f"git: could not write {rel} ({e.strerror or type(e).__name__})") from None
+            before = frozenset(lk for lk in self._locks() if lk.exists())
             try:
                 # add and commit sit inside the recovery too: a commit that lands and then times out (a slow hook) must
                 # be rolled back or reported uncertain like a failed push
@@ -789,7 +799,7 @@ class Git:
                     # send publishes it, which is harmless: the caller was told the message MAY be stored) and say so
                     raise UncertainPut(f"git: push of {rel} failed and the remote cannot be checked") from None
                 try:
-                    self._clear_locks()  # a git killed mid-commit leaves index.lock, which would block the reset
+                    self._clear_locks(0, keep=before)  # only what this put's own reaped git left behind
                     self._git("reset", "--quiet", "--hard", f"{self.remote}/{self.branch}")
                 except TransportError:  # the commit stays, so a later send would publish it: not "not stored"
                     raise UncertainPut(f"git: push of {rel} failed and its local commit could not be rolled back") from None
@@ -1397,6 +1407,10 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
             partial = seen.get(f"{t.name}#partial", {})
             budget = MAX_FILES_PER_POLL
             for fname in names:
+                if read_ok is not None and prefer and file_id(fname) != prefer:
+                    # the waited id's files sort first and are all handled: this route counts as read for pickup, so a
+                    # backlog for other ids can never hold off "not picked up"
+                    read_ok.add(t.name)
                 if fname == HEARTBEAT_FILE or fname in done:
                     continue
                 last_partial = partial.get(fname) if isinstance(partial, dict) else None
@@ -1573,7 +1587,10 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
             if due:
                 # this poll gets an even share of what is left, so a stalled route cannot use up the time the other
                 # route needs to be checked (the next step polls the other one)
-                share = (deadline - now) / max(1, len(ts))
+                # while no pickup is known, the ack deadline is the horizon, so other ids' backlog cannot delay exit 5
+                horizon = min(deadline, ack_deadline) if ack_deadline is not None and not claimed and not replies \
+                    else deadline
+                share = (horizon - now) / max(1, len(ts))
                 PROBE[:] = [now + max(1.0, share)]
                 read_ok: set[str] = set()
                 try:
@@ -1726,6 +1743,9 @@ def main(argv: list[str]) -> int:
     if needs_credentials(a.cmd):
         reexec_under_run(argv)
     take_credentials()
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        # an exit, not a silent death: `run_cmd` then kills and reaps the child git or ssh before any lock is let go
+        signal.signal(sig, lambda n, _f: sys.exit(128 + n))
     return a.fn(a)
 
 

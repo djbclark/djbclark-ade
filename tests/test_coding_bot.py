@@ -1379,7 +1379,9 @@ class TestTransportRobustness(TransportBase):
     def test_a_stale_git_index_lock_left_by_a_killed_git_does_not_wedge_the_mailbox(self) -> None:
         """Review of 50561929: a git killed on timeout leaves .git/index.lock; the next send clears it under the clone lock."""
         self.ssh_down.write_text("")
-        (self.mailbox / ".git/index.lock").write_text("")
+        lock = self.mailbox / ".git/index.lock"
+        lock.write_text("")
+        os.utime(lock, (time.time() - 3600, time.time() - 3600))  # older than any git of ours can run
         r = self.cli("send", "task")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.in_origin("to-coding/ade-1.md"), r.stderr)
@@ -1392,9 +1394,30 @@ class TestTransportRobustness(TransportBase):
         lock = self.mailbox / ".git/refs/remotes/origin/main.lock"
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.write_text("")
+        os.utime(lock, (time.time() - 3600, time.time() - 3600))
         w = self.cli("wait", "ade-1", "--timeout", "10")
         self.assertEqual(w.returncode, 0, w.stderr)
         self.assertIn("over git", w.stdout)
+
+    def test_a_fresh_git_lock_may_belong_to_a_live_git_and_is_left_alone(self) -> None:
+        """Review of eee69ad1: an orphaned live git (its coding-bot SIGKILLed) holds a fresh lock; never delete it."""
+        self.ssh_down.write_text("")
+        lock = self.mailbox / ".git/index.lock"
+        lock.write_text("")
+        self.cli("send", "task")
+        self.assertTrue(lock.exists())
+        self.assertFalse(self.in_origin("to-coding/ade-1.md"))
+
+    def test_a_backlog_for_other_ids_cannot_hold_off_not_picked_up(self) -> None:
+        """Review of eee69ad1: with nothing for the waited id, slow reads of other ids' files stop at the ack deadline."""
+        self.cli("send", "task")
+        for i in range(30):
+            (self.from_dir / f"ade-{100 + i}--coding-1.md").write_text("[coding -> claude-code] id=coding-1\nx\nDONE\n")
+        self.ssh_slow.write_text("0.3")
+        t0 = time.monotonic()
+        w = self.cli("wait", "ade-1", "--timeout", "60", "--ack-timeout", "1")
+        self.assertEqual(w.returncode, 5, w.stderr)
+        self.assertLess(time.monotonic() - t0, 6)
 
     def test_wait_answers_a_filed_reply_without_touching_the_network(self) -> None:
         self.cli("send", "task")
