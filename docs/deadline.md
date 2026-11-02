@@ -127,3 +127,6 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
 15. Start times are compared for zombies too (a recycled pid or leader that is already an unreaped zombie is `reused`, never an authorisation to
     `killpg` its live children). `extend` and `beat` are refused (exit 2) once the heartbeat timeout has elapsed, like the budget: a late call
     does not revive an expired deadline between sweeps.
+16. `deadline run` does not mark a record `done` while members of the command's process group outlive its leader: the budget keeps binding them
+    (stopped with 124 on expiry); once the group is empty it is `done` with the leader's rc. Registration records the start time it verified and refuses
+    (exit 2) a target that vanished or changed meanwhile, never crashes.

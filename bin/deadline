@@ -822,11 +822,13 @@ def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool =
     n = now()
     pid = pid if pid is not None else a.pid
     pgid = pgid if pgid is not None else a.pgid
+    verified = None
     try:
         if pid:
             info = proc_info(pid)
             if not info or info[1] == "Z":
                 return None, f"pid {pid} is not running (or its start time cannot be read): refusing to register it"
+            verified = info[0]
             if pgid is None:
                 try:
                     g = os.getpgid(pid)
@@ -852,9 +854,11 @@ def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool =
             if proc_info(pgid) is None:
                 # leaderless group: a bare group id could be recycled, so anchor identity on a live member (pid + start time)
                 pid = members[0]
-        pid_start = proc_info(pid)[0] if pid else None
-        if pid and pid_start is None:
-            return None, f"pid {pid} vanished while registering"
+        # the identity verified above (or the member just chosen as anchor) is the one recorded: a second read could race with its exit
+        pinfo = proc_info(pid) if pid else None
+        if pid and (pinfo is None or pinfo[1] == "Z" or (verified is not None and pinfo[0] != verified)):
+            return None, f"pid {pid} vanished or changed while registering"
+        pid_start = pinfo[0] if pinfo else None
         leader = proc_info(pgid) if pgid else None
         reg = proc_info(os.getpid())
     except ProcUnknown as e:
@@ -1171,8 +1175,20 @@ def cmd_run(a) -> int:
                 settled = True
                 if mine:
                     if cur.get("state") == "running":
-                        cur.update(state="done", ended=now(), rc=rc)
-                        save(cur)
+                        try:
+                            survivors = bool(group_members(child.pid))
+                        except ProcUnknown:
+                            survivors = True
+                        if survivors:
+                            # the leader exited but its group lives on (`sh -c 'sleep 600 &'`): the budget still binds those members
+                            settled = False
+                            try:
+                                step(cur)
+                            except ProcUnknown:
+                                pass
+                        else:
+                            cur.update(state="done", ended=now(), rc=rc)
+                            save(cur)
                     else:
                         try:
                             step(cur)   # the leader is gone: SIGKILL after the grace and recovery are still due while the group has survivors

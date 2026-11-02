@@ -868,3 +868,38 @@ def test_extend_and_beat_are_refused_after_the_heartbeat_timeout(env):
     assert r.returncode == 2 and env.record("hbx")["last_beat"] == T0
     assert env.run("beat", "hbx", now=T0 + 50).returncode == 0
     assert env.run("extend", "hbx", "--by", "10", "--reason", "ok", now=T0 + 60).returncode == 0
+
+
+# ---------- PR 223 local-review round 8: run with surviving group members, target vanishing during registration ----------
+
+def test_run_enforces_the_budget_on_group_members_that_outlive_the_leader(env):
+    r = env.run("run", "--budget", "1", "--grace", "1", "--name", "bgkid", "--owner", "o", "--on-expire", "relay", "--",
+                "sh", "-c", "(trap '' TERM; sleep 60) & exit 0", now=None, DEADLINE_RUN_POLL="0.1")
+    assert r.returncode == 124, (r.returncode, r.stderr)
+    rec = env.record("bgkid")
+    assert rec["state"] == "expired" and not env.group_alive(rec["pgid"])
+
+
+def test_run_whose_group_members_finish_by_themselves_is_done_with_the_leaders_rc(env):
+    r = env.run("run", "--budget", "30", "--name", "shortkid", "--owner", "o", "--", "sh", "-c", "(sleep 0.5) & exit 4", now=None, DEADLINE_RUN_POLL="0.1")
+    assert r.returncode == 4 and env.record("shortkid")["state"] == "done" and env.record("shortkid")["rc"] == 4
+
+
+def test_a_target_vanishing_between_the_two_start_time_reads_is_refused_not_a_crash(env, inproc, monkeypatch):
+    dl = inproc
+    calls = {"n": 0}
+    real = dl.proc_info
+
+    def flaky(pid):
+        if pid == 424242:
+            calls["n"] += 1
+            return ("start", "S") if calls["n"] == 1 else None
+        return real(pid)
+
+    monkeypatch.setattr(dl, "proc_info", flaky)
+    monkeypatch.setattr(dl, "ancestors", lambda: set())
+    monkeypatch.setattr(dl.os, "getpgid", lambda p: p)
+    ns = type("A", (), dict(name="v", owner="o", pid=424242, pgid=None, budget=10.0, heartbeat=None, grace=5.0, on_expire="notify",
+                            checkpoint=None, max_extend=None))()
+    rec, err = dl.make_record(ns)
+    assert rec is None and "vanished or changed" in err
