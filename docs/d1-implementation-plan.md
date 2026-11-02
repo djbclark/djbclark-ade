@@ -91,9 +91,10 @@ Accept: `paseo --home <fresh> status` reports its own `serverId`, different from
 daemon's pid, `startedAt` and `paseo ls` count are unchanged before and after (the script asserts this).
 **Hazard (lead, 2026-11-01), fix before T2 runs anything:** the draft `isolated_up` calls `paseo daemon config set`
 WITHOUT `--home` (lib/common.sh, the two `# KEY` lines). If the CLI does not honour the exported `PASEO_HOME`, those
-two calls rewrite the LIVE daemon's config (listener moved to a temp Unix socket, plugins off). Before any call: in a
-throwaway home, prove which form writes only there (compare `~/.paseo/config.json`'s sha256 before and after), use
-that form, and make `isolated_up` assert the live config's hash is unchanged after setup (refuse and stop if not).
+two calls rewrite the LIVE daemon's config (listener moved to a temp Unix socket, plugins off). Before any call: copy
+`~/.paseo/config.json` aside (mode 600) and record its sha256; try the `--home` form first in a throwaway home; after
+each attempt compare the live hash and, if it changed, restore the copy at once (atomic `mv`) and stop. Use the form
+that leaves the live hash unchanged, and make `isolated_up` assert that hash after setup (refuse and stop if not).
 
 ### T3. D0.2 drain scripts (`tests/paseo-acceptance/drain/`) (depends on PR 177 for item b; blocks every "disable")
 
