@@ -1363,6 +1363,27 @@ class TestTransportRobustness(TransportBase):
         self.assertEqual(w.returncode, 0, w.stderr)
         self.assertIn("then the rest", w.stdout)
 
+    def test_a_reply_caught_inside_its_header_is_read_again_not_refused_for_good(self) -> None:
+        """Review of 50561929: a nonce cut short mid-write reads as a mismatch; the file must stay re-readable."""
+        self.cli("send", "task")
+        target = self.from_dir / "ade-1--coding-1.md"
+        full = f"{self.reply_header('ade-1')}\nthe answer\nDONE\n"
+        target.write_text(full[:full.index("nonce=") + 10])
+        self.cli("sync")
+        self.assertEqual(self.cli("inbox").stdout, "")
+        target.write_text(full)
+        w = self.cli("wait", "ade-1", "--timeout", "3")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("the answer", w.stdout)
+
+    def test_a_stale_git_index_lock_left_by_a_killed_git_does_not_wedge_the_mailbox(self) -> None:
+        """Review of 50561929: a git killed on timeout leaves .git/index.lock; the next send clears it under the clone lock."""
+        self.ssh_down.write_text("")
+        (self.mailbox / ".git/index.lock").write_text("")
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.in_origin("to-coding/ade-1.md"), r.stderr)
+
     def test_wait_answers_a_filed_reply_without_touching_the_network(self) -> None:
         self.cli("send", "task")
         self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nok\nDONE")

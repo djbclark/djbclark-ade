@@ -717,6 +717,7 @@ class Git:
     def recover(self) -> None:
         """Undo what an interrupted transaction left behind: a rebase in progress, or a staged but uncommitted message.
         The clone is tool-owned, so its index is ours to reset; committed but unpublished messages are kept."""
+        self._clear_locks()
         for d in ("rebase-merge", "rebase-apply"):
             if (self.path / self._git("rev-parse", "--git-path", d).strip()).exists():
                 with contextlib.suppress(TransportError):
@@ -724,6 +725,16 @@ class Git:
                 break
         if self._git("diff", "--cached", "--name-only").strip():
             self._git("reset", "--quiet")
+
+    def _clear_locks(self) -> None:
+        """Remove lock files a killed git left behind (`run_cmd` kills a timed-out git's whole process group and reaps
+        it). Only ever called under the clone's flock, and only coding-bot uses the clone, so no live git holds them."""
+        gd = Path(self._git("rev-parse", "--absolute-git-dir").strip())
+        for lk in [gd / n for n in ("index.lock", "HEAD.lock", "ORIG_HEAD.lock", "packed-refs.lock", "config.lock",
+                                    "shallow.lock")] + list((gd / "refs").rglob("*.lock")):
+            with contextlib.suppress(FileNotFoundError):
+                if lk.is_file() and not lk.is_symlink():
+                    lk.unlink()
 
     def sync_branch(self) -> None:
         """Bring the clone up to the remote, replaying any local commit an earlier send could not publish (so one failed
@@ -778,6 +789,7 @@ class Git:
                     # send publishes it, which is harmless: the caller was told the message MAY be stored) and say so
                     raise UncertainPut(f"git: push of {rel} failed and the remote cannot be checked") from None
                 try:
+                    self._clear_locks()  # a git killed mid-commit leaves index.lock, which would block the reset
                     self._git("reset", "--quiet", "--hard", f"{self.remote}/{self.branch}")
                 except TransportError:  # the commit stays, so a later send would publish it: not "not stored"
                     raise UncertainPut(f"git: push of {rel} failed and its local commit could not be rolled back") from None
@@ -1400,23 +1412,26 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
                     print(f"coding-bot: {what} {t.name}:{fname} not filed: {e}", file=sys.stderr)
                     mark_seen(t.name, fname)
                     continue
+                # a file is judged for good only once it is complete: a reply ends DONE or BLOCKED, a claim ends its line.
+                # One caught mid-write (even inside its header, where the nonce may be cut short) is read again later
+                # (at most every PARTIAL_REREAD_S for another id), and a refusal of it proves nothing yet
                 if cm := CLAIM_FILE.fullmatch(fname):
                     rc, msg = file_claim(cm.group(1), raw, t.name)
-                    settled = rc == 0 or bool(clean(raw).strip())  # an empty claim may still be mid-write
+                    final = rc == 0 or raw.endswith("\n")
                 else:
                     rc, msg, filed = file_reply(raw, REPLY_FILE.fullmatch(fname).group(1), from_drop=True)
                     new += filed
                     final = bool(TERMINAL.match(last_line(clean(raw).strip())))
-                    settled = (rc == 0 and final) or (rc != 0 and msg != "empty reply")
+                settled = final
                 if rc:
                     print(f"coding-bot: {what} {t.name}:{fname} not filed: {msg}", file=sys.stderr)
-                if rc and msg.startswith(FOREIGN_REFUSALS):
+                if rc and settled and msg.startswith(FOREIGN_REFUSALS):
                     note_foreign(t.name, fname)  # read and shown to be another message's: not pickup evidence
                     if evidence is not None:
                         evidence.discard(f"{t.name}:{fname}")
                 if settled:
                     mark_seen(t.name, fname)
-                elif not cm:
+                else:
                     note_partial(t.name, fname)
                 if prefer and rc == 0 and not cm and final and file_id(fname) == prefer:
                     done_early = True
