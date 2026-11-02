@@ -12,18 +12,21 @@ on a pipe. So its shape copies acp-run's (blocking `ask`, prompt on argv or `-` 
 exit codes 4 BLOCKED and 124 timeout) and the return leg is an explicit sink, `deliver`.
 
 Modelled on techno-euphora's Dann -> Eve channel (`tools/peer-comms`, `channels-to-eve.md`): a Bearer-keyed webhook
-routine in the bot, `id=`/`re=` header lines, secrets in `sudo-secretspec`. Not copied, on purpose: Eve's repo mailbox,
-`ssh` drop box and Telegram topic (the Coding bot has none yet). Dated 2026-11-01. **Nothing here has run against the live
-bot**: no webhook routine exists yet; it is tested against a loopback stand-in. Cursor's docs for the bot side:
+routine in the bot, `id=`/`re=` header lines, secrets in `sudo-secretspec`, plus Eve's two durable routes: a private
+repo mailbox and an ssh drop directory (below). Dated 2026-11-02. **Proven live on 2026-11-01/02** (the webhook run, the
+git mailbox both ways, the ssh drop on the bot's box; a webhook run needs no approval card to write a file or push to
+a repo). A Grok Bot webhook run answers in the bot's own background channel, so the **webhook is only a doorbell**: the
+message and the reply travel as files. Cursor's docs for the bot side:
 [Routines](https://cursor.com/help/grok-bot/routines.md) (a routine's webhook shows **POST to**, **key**, **header**; a 200
-means a run *started*, the result appears in the bot's chat).
+means a run *started*).
 
 ## Use (from any project)
 
 1. **A task, wait for the answer:** `coding-bot ask "<self-contained task>"` (or `-` and stdin; `--timeout S`, default 900).
    The bot has none of this session's context: give the goal, URL, what to read or click, what to report. The reply is
-   printed on stdout, flagged untrusted on stderr. Exit 0 done, 4 the bot answered `BLOCKED: <question>`, 124 timed out
-   (the task is still running: `coding-bot wait ade-N`), 1 webhook failed, 2 refused or bad usage.
+   printed on stdout, flagged untrusted on stderr (stdout carries only the reply; receipts go to stderr). Exit 0 done,
+   4 the bot answered `BLOCKED: <question>`, 124 timed out (the task is still running: `coding-bot wait ade-N`), 1 webhook
+   failed, 2 refused or bad usage.
 2. **Fire and forget:** `coding-bot send "<task>"` prints `ade-N`; later `coding-bot wait ade-N`.
 3. **No webhook yet, or a page that needs the operator's eyes (UI interaction, a login):** `coding-bot send`/`ask`
    fall back, and `coding-bot prompt "<task>"` always does: the task goes on the clipboard as a **self-contained
@@ -38,6 +41,23 @@ means a run *started*, the result appears in the bot's chat).
    (`~/.local/state/coding-bot`, mode 0700/0600, each write a temp file plus `os.replace`). The webhook credentials
    come only through `sudo-secretspec run` (the tool re-runs itself under it; never `get`) and are removed from the
    environment before any child starts.
+5. **Transports (config `~/.local/state/coding-bot/transports.json`, 0600, or `$CODING_BOT_TRANSPORTS`; never in the repo).**
+   With a webhook and a transport, `send` writes `ade-N.md` (header, `project:`, the task) through a transport and rings
+   the webhook with a short "read ade-N.md" ping; the bot reads the file and writes `ade-N--coding-K.md` back to the same
+   places. `wait`/`ask` poll them (`coding-bot sync` does one pass; `--force` also tries a backed-off one) and file each
+   reply through the same checks as `deliver`, once however many places carry it.
+   - `ssh`: a key-only restricted account on the bot's box (drop dirs under `/var/tmp/coding-drop/`), host key pinned in a
+     private known_hosts, only for that account. Fast (about 1 s) while the tailnet is up.
+   - `git`: a private mailbox repo cloned locally (`to-coding/`, `from-coding/`; protocol in the repo README). Slower
+     (about 2-4 s a push), but reachable through the gaps where the bot's Tailscale loses its connection.
+   - Choice: the transport with the lower expected cost (an EWMA of measured PUT times; a stale measurement decays to its
+     prior, ssh 1 s and git 4 s). A failed one goes in backoff (15 s doubling to 15 min, jittered 0.75 to 1.25) and is
+     skipped until it ends, then competes on cost again, so traffic returns to the faster one by itself. If every transport
+     fails the webhook carries the text. `coding-bot status` shows cost and backoff; polls never change the send cost.
+   - Config keys: `ssh` {host, user, port, key, known_hosts, to_dir, from_dir}; `git` {path, remote, branch}.
+   - Bot side: restore script `/home/box/agent-data/shared/coding-drop-restore.sh` recreates the `coding` account, key,
+     drop dirs and sshd allowance after a box Update or Reset (not yet hooked into its watchdog). Re-pin the host key if
+     the box was rebuilt.
 
 ## One-time setup (needs the operator)
 
@@ -59,12 +79,9 @@ means a run *started*, the result appears in the bot's chat).
 3. The key is sent only to `api2.cursor.sh` (Eve's webhook host), a redirect is never followed, and the call has a
    60 s total deadline; `coding-bot` refuses any other host and never prints the URL. If the Coding bot's URL is on another
    Cursor host, `status` says the host is not allowed: widen `WEBHOOK_HOSTS` in `bin/coding-bot` with the operator's yes.
-4. **Return channel (open):** a webhook run answers in the bot's chat. Until the bot names a channel that reaches this
-   machine (its own email address, Slack, GitHub, Telegram through Hermes, a file over ssh) the operator relays the answer
-   and `deliver` files it. When one exists, write a small watcher that calls `coding-bot deliver`; nothing else changes.
-   Do not invent one. Cursor's docs and forum describe a documented path (routines, above) and an undocumented one (the
-   bot computer's `127.0.0.1:1340` gateway, `sendPrompt`, bearer token in its `gateway.json`); the second is unsupported, and
-   its token is a password: use it only on the operator's say-so.
+4. **Return channel:** by file, through the transports above. Do not use the undocumented `127.0.0.1:1340` gateway
+   (`sendPrompt`, bearer token in its `gateway.json`) except on the operator's say-so: it is unsupported and its token is a
+   password. A reply the operator copies from the bot's chat still goes in with `deliver`.
 
 ## Rules
 
