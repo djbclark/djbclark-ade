@@ -202,9 +202,23 @@ def test_gnu_deny_reason_names_the_g_tool():
     "gh api repos/o/r/compare/m...$(echo $r|cut -d/ -f1):master --jq .x",
     "git log $(git rev-parse HEAD | cut -c1-7)..HEAD --format=%H",
     "echo $(echo a | tr -d a) --version-sort",
+    # a filter that ends a substitution is not the status `&&` reads (Codex review of PR 254)
+    "echo $(printf x | cat) && echo done",
+    "cat <(printf x | cat) && echo done",
 ])
 def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     assert not denied(command)
+
+
+@pytest.mark.parametrize("command", [
+    # an escaped paren is argument content, not a subshell close, so the GNU option after it counts
+    "echo x | cut -d\\) --complement -f1",
+    "find . -name foo\\) -printf '%p\\n'",
+    # a plain `(a | tail)` group still hands tail's status to `&&`
+    "(git merge --ff-only x | tail -2) && git push",
+])
+def test_escaped_parens_and_subshell_groups_stay_checked(command):
+    assert denied(command)
 
 
 def test_other_tools_and_the_off_switch_pass():

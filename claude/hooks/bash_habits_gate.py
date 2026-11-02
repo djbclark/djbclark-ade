@@ -118,22 +118,56 @@ def strip_literals(c: str) -> str:
     return re.sub(r"\d*>&\d*-?|&>>?|<&\d*", " ", s)
 
 
+def _paren_scan(text: str) -> tuple[int | None, list[int]]:
+    """Walk `text` once: (index of the first `)` with no `(` before it, else None; the index of
+    each `(` still open at the end). A backslash-escaped paren is filename or
+    argument content (`find . -name foo\\)`), never a delimiter."""
+    opened: list[int] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "(":
+            opened.append(i)
+        elif ch == ")":
+            if not opened:
+                return i, []
+            opened.pop()
+        i += 1
+    return None, opened
+
+
 def before_unmatched_close(stage: str) -> str:
     """The part of a pipeline stage before a `)` that closes a subshell opened in an earlier stage.
 
     `gh api x $(echo $r | cut -d/ -f1):master --jq .y` splits at the pipe into
     `gh api x $(echo $r` and `cut -d/ -f1):master --jq .y`; everything after the `)` belongs to
     `gh`, not to `cut` (2026-11-02: that tail made the gate deny `cut --jq`). A `)` that closes
-    a `(` of the same stage is kept."""
-    depth = 0
-    for i, ch in enumerate(stage):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            if depth == 0:
-                return stage[:i]
-            depth -= 1
-    return stage
+    a `(` of the same stage is kept, and so is an escaped `\\)`."""
+    cut, _ = _paren_scan(stage)
+    return stage if cut is None else stage[:cut]
+
+
+def closes_substitution(stages: list[str]) -> bool:
+    """True when the last of `stages` ends with a `)` that closes a `$(`, `<(` or `>(` opened in
+    an earlier stage and the outer command discards that status: `echo $(printf x | cat) && echo
+    done` tests echo. A bare assignment `x=$(a | tail) && b` keeps the substitution's status (the
+    shell returns it), and a plain `(a | tail) && b` group keeps tail's, so both stay checked."""
+    if len(stages) < 2 or _paren_scan(stages[-1])[0] is None:
+        return False
+    prefix = "|".join(stages[:-1])
+    _, opened = _paren_scan(prefix)
+    if not opened:
+        return False
+    at = opened[-1]
+    kind = prefix[at - 1] if at else ""
+    if kind not in ("$", "<", ">"):
+        return False
+    if kind == "$" and re.fullmatch(r"\s*(?:\w+=\S*\s+)*\w+=\S*", prefix[:at - 1]):
+        return False
+    return True
 
 
 def words(stage: str) -> list[str]:
@@ -308,7 +342,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     guarded = bool(re.search(r"pipefail|PIPESTATUS", plain))
     warn = None
     for n, (pipeline, op) in enumerate(pipelines):
-        stages = [before_unmatched_close(st) for st in re.split(r"\|&?", pipeline)]
+        raw_stages = re.split(r"\|&?", pipeline)
+        stages = [before_unmatched_close(st) for st in raw_stages]
         for stage in stages:
             if command_word(stage)[0] == "sed":
                 return ("Use `gsed`, not bare `sed`: this Mac's `sed` is BSD sed and GNU flags "
@@ -334,7 +369,7 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                             "(this Mac's timestamp is global), so it proves nothing about a "
                             "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
                             "it ignores the cache without clearing it.")
-        if len(stages) < 2 or guarded:
+        if len(stages) < 2 or guarded or closes_substitution(raw_stages):
             continue
         last, _ = command_word(stages[-1])
         if last not in FILTERS:
