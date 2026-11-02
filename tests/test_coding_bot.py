@@ -508,6 +508,28 @@ class TestCredentialsViaRun(Base):
         for name in leaks:
             self.assertNotRegex(env, rf"(?mi)^{name}=", name)
 
+    def test_openssl_and_tls_overrides_are_gone_before_hashlib_or_ssl_are_first_imported(self) -> None:
+        """Codex P1: libcrypto reads OPENSSL_* when it loads, so the scrub must precede the first hashlib/ssl import."""
+        prog = (
+            "import os, runpy, sys\n"
+            "seen = []\n"
+            "def hook(event, args):\n"
+            "    if event == 'import' and args[0] in ('hashlib', '_hashlib', 'ssl', '_ssl'):\n"
+            "        seen.append((args[0], os.environ.get('OPENSSL_CONF'), os.environ.get('SSL_CERT_FILE'),"
+            " os.environ.get('HTTPS_PROXY')))\n"
+            "sys.addaudithook(hook)\n"
+            f"sys.argv = [{str(SCRIPT)!r}, 'inbox']\n"
+            f"try:\n    runpy.run_path({str(SCRIPT)!r}, run_name='__main__')\n"
+            "except SystemExit:\n    pass\n"
+            "print(repr(seen), file=sys.stderr)\n")
+        env = dict(self.env, OPENSSL_CONF="/tmp/evil.cnf", SSL_CERT_FILE="/tmp/evil-ca.pem", HTTPS_PROXY="http://evil.invalid:1")
+        r = subprocess.run([sys.executable, "-I", "-c", prog], check=False, capture_output=True, text=True, env=env,
+                           cwd=self.tmp.name)
+        seen = eval(r.stderr.strip().splitlines()[-1])  # a list of tuples we just printed ourselves
+        self.assertTrue(seen, "hashlib/ssl were never imported, so this test proves nothing")
+        for mod, conf, cafile, proxy in seen:
+            self.assertEqual((conf, cafile, proxy), (None, None, None), f"{mod} was imported with an override set")
+
     def test_the_initial_interpreter_is_isolated_when_run_as_a_command(self) -> None:
         """Codex P1: `coding-bot ...` must not import a planted sitecustomize even in its FIRST process, which holds the
         credentials when the caller already ran under `sudo-secretspec run`."""

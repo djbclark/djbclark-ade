@@ -45,8 +45,23 @@ import sys
 # variables, no user site, no current directory on sys.path). `coding-bot ...` is already isolated by the shebang, and an
 # import of this file (the tests) is left alone. A first interpreter that was not isolated has already run a planted
 # sitecustomize; it holds credentials only if the caller put them there.
-if __name__ == "__main__" and not sys.flags.isolated:
-    os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__), *sys.argv[1:]])
+
+
+def scrub_network_env() -> None:
+    """Drop the variables that redirect or weaken TLS or routing for the webhook call. The tool talks to one fixed host over
+    TLS with the system trust store and no proxy; a caller's proxy, CA bundle, key log or OpenSSL config must never apply to
+    it. Plain string tests, no imports: this runs before hashlib/ssl load libcrypto, which reads OPENSSL_* at load time."""
+    for name in list(os.environ):
+        low = name.lower()
+        if (low.endswith("_proxy") or low.startswith(("openssl_", "ssl_")) or low == "sslkeylogfile"
+                or low in {"requests_ca_bundle", "curl_ca_bundle"}):
+            del os.environ[name]
+
+
+if __name__ == "__main__":
+    scrub_network_env()
+    if not sys.flags.isolated:
+        os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__), *sys.argv[1:]])
 
 import argparse
 import contextlib
@@ -175,16 +190,6 @@ RUN_GUARD = "CODING_BOT_UNDER_RUN"
 # puts EVERY declared secret into the environment; none of the others, nor ours, may leak to a child. Proxy and CA
 # overrides are NOT kept: they could point the Bearer key at a caller-chosen machine (see scrub_network_env).
 KEEP_ENV = re.compile(r"(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TERM|LANG|SSH_AUTH_SOCK|LC_\w*|CODING_BOT_\w+|CLIP|PBPASTE)")
-# Variables that redirect or weaken TLS or routing for the webhook call. The tool talks to one fixed host over TLS with the
-# system trust store and no proxy; a caller's proxy, CA bundle, key log or OpenSSL config must never apply to it.
-NETWORK_ENV = re.compile(r"(?i)((http|https|all|ftp|no|socks)_proxy|ssl_cert_file|ssl_cert_dir|requests_ca_bundle"
-                         r"|curl_ca_bundle|sslkeylogfile|openssl_\w+|ssl_\w+)")
-
-
-def scrub_network_env() -> None:
-    for name in list(os.environ):
-        if NETWORK_ENV.fullmatch(name):
-            del os.environ[name]
 
 
 def needs_credentials(cmd: str) -> bool:
