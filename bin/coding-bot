@@ -1170,7 +1170,9 @@ def file_reply(raw: str, hint: str | None, *, from_drop: bool = False) -> tuple[
         print(f"coding-bot: {rid} already has a final reply; this one supersedes it (`wait` returns the latest)",
               file=sys.stderr)
     extra = {} if nonce_ok is None else {"nonce_ok": nonce_ok}
-    added = append("inbox.jsonl", {"re": rid, "bot_id": m.group(1) if m else None, "sha": sha, "text": text,
+    loose_id = header_field(text, "id")  # a reordered header still names its revision, so ordering keeps working
+    bot_id = m.group(1) if m else (loose_id if loose_id and BOT_ID_RE.fullmatch(loose_id) else None)
+    added = append("inbox.jsonl", {"re": rid, "bot_id": bot_id, "sha": sha, "text": text,
                                    "terminal": terminal, **extra},
                    # the duplicate check runs under the inbox lock: two pollers cannot both file one reply
                    unless=lambda recs: any(r.get("re") == rid and r.get("sha") == sha for r in recs))

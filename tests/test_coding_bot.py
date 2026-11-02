@@ -1739,6 +1739,18 @@ class TestAdversaryR1(TransportBase):
         self.assertIn("delivery uncertain", r.stderr)
         self.assertEqual(next(x for x in self.outbox() if x.get("result_for") == "ade-1")["stored"], "uncertain")
 
+    def test_a_reordered_header_keeps_its_revision_number_for_ordering(self) -> None:
+        """Review of c9e58010: `id=coding-10 nonce=N re=ade-1` still orders after coding-9, so it is not superseded."""
+        self.cli("send", "task")
+        nonce = next(r["nonce"] for r in self.outbox() if r.get("id") == "ade-1")
+        (self.from_dir / "ade-1--coding-10.md").write_text(
+            f"[coding -> claude-code] id=coding-10 nonce={nonce} re=ade-1\nthe newest answer\nDONE\n")
+        self.cli("sync")
+        self.bot_reply_ssh("ade-1", "an older answer\nDONE", n=9)  # imported later, numbered lower
+        self.cli("sync")
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertIn("the newest answer", w.stdout)
+
     def test_a_duplicate_check_runs_under_the_inbox_lock(self) -> None:
         """A7: `append(..., unless=...)` decides under the lock, so two pollers cannot both file one reply."""
         with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
