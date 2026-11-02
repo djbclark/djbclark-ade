@@ -38,6 +38,7 @@ usage: cow-pasture create <name> --source <repo> [--branch <b>]
        cow-pasture scrub <pasture-path> [--dry-run]
        cow-pasture trust <pasture-path>
        cow-pasture check <pasture-path>
+       cow-pasture untrust <pasture-path>
 
 create: cow create --no-symlink --print-path, cow materialise, fail (exit 1) if a
         symlink still resolves into the source; then scrub gitignored secrets.
@@ -48,7 +49,9 @@ check : list symlinks under <pasture-path> that resolve into its source or that
         `cow list --json`; exit 1 if any, 2 if <pasture-path> is not a pasture
         there or a directory in it is unreadable. create runs the same scan.
         Fix: cow materialise <source>/<name>, or recreate.
-remove: drop graft cache, chflags -R nouchg, cow remove.
+remove: drop graft cache, chflags -R nouchg, cow remove, then the pasture's Claude Code trust entry
+        (`--force` skips cow's confirmation prompt, which a non-TTY run otherwise answers "no").
+untrust: drop a pasture's seeded Claude Code trust entry from ~/.claude.json (an entry a session has since extended stays).
 EOF
   exit 2
 }
@@ -239,6 +242,36 @@ os.replace(tmp, f)
 PY
 }
 
+# The reverse of trust_claude, run by `remove`: drop projects[<path>] from ~/.claude.json, but only when the entry is
+# still exactly what trust_claude seeds (trusted, every other field empty or False). An entry a session has since
+# given allowed tools, MCP servers or approvals is the operator's, so it stays. Same atomic replace and backup.
+untrust_claude() { # $1 = pasture path (need not exist any more)
+  python3 - "$1" <<'PY' || log "WARNING: could not drop the Claude Code trust entry for $1"
+import json, os, sys, shutil
+path = os.path.realpath(sys.argv[1])
+f = os.path.expanduser('~/.claude.json')
+try:
+    d = json.load(open(f))
+except FileNotFoundError:
+    sys.exit(0)
+seeded = {'allowedTools': [], 'mcpContextUris': [], 'mcpServers': {},
+          'enabledMcpjsonServers': [], 'disabledMcpjsonServers': [],
+          'hasTrustDialogAccepted': True,
+          'hasClaudeMdExternalIncludesApproved': False,
+          'hasClaudeMdExternalIncludesWarningShown': False}
+if d.get('projects', {}).get(path) != seeded:
+    sys.exit(0)
+del d['projects'][path]
+shutil.copy2(f, f + '.bak.cow-pasture')
+tmp = f + '.tmp.cow-pasture'
+with open(tmp, 'w') as fh:
+    json.dump(d, fh, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, f)
+print('cow-pasture: dropped the Claude Code trust entry: ' + path, file=sys.stderr)
+PY
+}
+
 # graft writes graft/.cache/session/*.json into every workspace an agent
 # opens. Keep it out of `git status` so the pasture is not "dirty".
 exclude_graft_cache() { # $1 = pasture path
@@ -299,6 +332,10 @@ case "$cmd" in
     p=${1:-}; [ -d "$p" ] || usage
     trust_claude "$p"
     ;;
+  untrust)
+    [ -n "${1:-}" ] || usage
+    untrust_claude "$1"
+    ;;
   check)
     p=${1:-}; [ -d "$p" ] || usage
     rc=0; source_links "$p" || rc=$?
@@ -326,11 +363,14 @@ m = [x["name"] for x in d if x.get("name", "").endswith("/" + n)]
 print(m[0] if len(m) == 1 else "")' "$name" || true)
       if [ -n "$full" ]; then name=$full; path=$(cow path "$name" 2>/dev/null || true); fi
     fi
+    rp=''
     if [ -n "$path" ] && [ -d "$path" ]; then
+      rp=$(realpath "$path")
       clean_graft_cache "$path"
       chflags -R nouchg "$path" 2>/dev/null || true
     fi
     cow remove "$name" ${force[@]+"${force[@]}"}
+    [ -z "$rp" ] || untrust_claude "$rp"
     ;;
   *) usage ;;
 esac
