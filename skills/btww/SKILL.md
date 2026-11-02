@@ -24,7 +24,8 @@ question. It names the native command for the TUI you are running in.
    command in <TUI>; ask it as a normal message.`
 3. Do not answer the question, edit anything, or change the task in progress.
    If a task was running, carry on with it.
-4. TUI not in the table: say it is not covered and that no native side-question
+4. Quote only your own TUI's row: its command spelling, alias and notes. Never borrow a note from another row (Muse's native command is `/side`, with `/btw` as the alias).
+5. TUI not in the table: say it is not covered and that no native side-question
    command is known there.
 
 ## Table (verified 2026-11-01)
