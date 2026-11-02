@@ -150,26 +150,6 @@ def before_unmatched_close(stage: str) -> str:
     return stage if cut is None else stage[:cut]
 
 
-def closes_substitution(stages: list[str]) -> bool:
-    """True when the last of `stages` ends with a `)` that closes a `$(`, `<(` or `>(` opened in
-    an earlier stage and the outer command discards that status: `echo $(printf x | cat) && echo
-    done` tests echo. A bare assignment `x=$(a | tail) && b` keeps the substitution's status (the
-    shell returns it), and a plain `(a | tail) && b` group keeps tail's, so both stay checked."""
-    if len(stages) < 2 or _paren_scan(stages[-1])[0] is None:
-        return False
-    prefix = "|".join(stages[:-1])
-    _, opened = _paren_scan(prefix)
-    if not opened:
-        return False
-    at = opened[-1]
-    kind = prefix[at - 1] if at else ""
-    if kind not in ("$", "<", ">"):
-        return False
-    if kind == "$" and re.fullmatch(r"\s*(?:\w+=\S*\s+)*\w+=\S*", prefix[:at - 1]):
-        return False
-    return True
-
-
 def words(stage: str) -> list[str]:
     """A stage's words; `$(`, backticks and `(`/`{` start a command, so they split too."""
     return [w for w in re.split(r"\s+|\$\(|`|\(|\{", stage) if w]
@@ -369,9 +349,11 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                             "(this Mac's timestamp is global), so it proves nothing about a "
                             "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
                             "it ignores the cache without clearing it.")
-        if len(stages) < 2 or guarded or closes_substitution(raw_stages):
+        if len(stages) < 2 or guarded:
             continue
-        last, _ = command_word(stages[-1])
+        # the status check reads the untrimmed stages: a `)` that closes a substitution is still
+        # part of the text `&&` sees, and trimming it re-scoped the check (Codex review of PR 254)
+        last, _ = command_word(raw_stages[-1])
         if last not in FILTERS:
             continue
         nxt = pipelines[n + 1][0] if n + 1 < len(pipelines) else ""

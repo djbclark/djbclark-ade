@@ -216,6 +216,9 @@ def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     "find . -name foo\\) -printf '%p\\n'",
     # a plain `(a | tail)` group still hands tail's status to `&&`
     "(git merge --ff-only x | tail -2) && git push",
+    # the status check reads the whole outer pipeline, trimmed or not (Codex review of PR 254)
+    "git merge --ff-only topic | tee $(printf /tmp/merge.log | cat -) && git push",
+    "(x=$(false | tail -2)) && printf PUSHED",
 ])
 def test_escaped_parens_and_subshell_groups_stay_checked(command):
     assert denied(command)
