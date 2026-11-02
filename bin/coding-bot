@@ -568,10 +568,11 @@ DEADLINE: list[float] = []  # a monotonic deadline that bounds every transport c
 PROBE: list[float] = []     # the current poll's own, shorter deadline inside it (a share of what is left)
 
 
-def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float) -> str:
+def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float, pidfile: Path | None = None) -> str:
     """stdout of argv (never a shell). Any failure is a TransportError that names the command and its first
     stderr line, nothing else. While a `wait` deadline is set, no command runs past it, nor past its poll's share of
-    the time left: a cut there is a DeadlineError (our budget, not the route's fault: no backoff)."""
+    the time left: a cut there is a DeadlineError (our budget, not the route's fault: no backoff). `pidfile` records
+    the child's process group while it runs (removed once it is reaped), so one orphaned by a SIGKILL can be found."""
     by_wait = False
     now = time.monotonic()
     if DEADLINE:
@@ -591,6 +592,17 @@ def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float) -> str
                                 errors="replace", env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, start_new_session=True)
     except OSError as e:
         raise TransportError(f"{argv[0]}: {e.strerror or type(e).__name__}") from None
+    if pidfile is not None:
+        pidfile.write_text(f"{proc.pid}\n")
+    try:
+        return _finish(proc, argv, stdin, timeout, by_wait)
+    finally:
+        if pidfile is not None:
+            with contextlib.suppress(FileNotFoundError):
+                pidfile.unlink()
+
+
+def _finish(proc: subprocess.Popen, argv: list[str], stdin: str | None, timeout: float, by_wait: bool) -> str:
     try:
         out, err = proc.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -686,10 +698,52 @@ class Git:
     def __init__(self, c: dict) -> None:
         self.path, self.remote, self.branch = Path(expand(c["path"])), c.get("remote", "origin"), c.get("branch", "main")
 
-    def _git(self, *args: str) -> str:
+    def _git(self, *args: str, locked: bool = True) -> str:
+        """A git command on the clone; `locked=False` for a read-only object lookup run outside the clone flock, which
+        takes no lock and so is not recorded (it must never overwrite the record of a git that holds one)."""
         return run_cmd(["git", "-C", str(self.path), "-c", "user.name=coding-bot agent",
                         "-c", "user.email=coding-bot@users.noreply.github.com", "-c", "commit.gpgsign=false",
-                        "-c", "core.symlinks=false", *args], timeout=GIT_TIMEOUT_S)
+                        "-c", "core.symlinks=false", *args], timeout=GIT_TIMEOUT_S,
+                       pidfile=self._child_file() if locked else None)
+
+    def _child_file(self) -> Path:
+        return state_path(f"git-{hashlib.sha256(str(self.path).encode()).hexdigest()[:12]}.child")
+
+    def _reap_orphan(self) -> None:
+        """Under the clone flock: a child-pid record left behind means a coding-bot died (SIGKILL) with a git running.
+        That git may still be alive, holding index or ref locks, with no timeout. Only once its process group is gone
+        (it ended, or ran past GIT_TIMEOUT_S and is killed here) are the locks it left removed."""
+        pf = self._child_file()
+        try:
+            pid = int(pf.read_text().split()[0])
+            started = pf.stat().st_mtime
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, IndexError):
+            pid, started = 0, 0.0
+        if pid > 1 and self._ours_alive(pid):
+            if time.time() - started < GIT_TIMEOUT_S:
+                raise TransportError(f"git: an orphaned git (pid {pid}) is still working in the mailbox clone")
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
+            for _ in range(40):
+                if not self._ours_alive(pid):
+                    break
+                time.sleep(0.05)
+            else:
+                raise TransportError(f"git: the orphaned git (pid {pid}) in the mailbox clone would not die")
+        with contextlib.suppress(FileNotFoundError):
+            pf.unlink()
+        self._clear_locks(0)  # its owner is gone: whatever it held is dead
+
+    def _ours_alive(self, pid: int) -> bool:
+        """A live process group `pid` whose leader is a command on this clone (a reused pid is someone else's)."""
+        try:
+            os.killpg(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, check=False)
+        return str(self.path) in r.stdout
 
     @contextlib.contextmanager
     def locked(self):
@@ -710,6 +764,7 @@ class Git:
                     if time.monotonic() >= limit:
                         raise (DeadlineError if DEADLINE or PROBE else TransportError)("git: mailbox clone busy") from None
                     time.sleep(0.1)
+            self._reap_orphan()
             yield
         finally:
             os.close(lock)
@@ -734,8 +789,8 @@ class Git:
     def _clear_locks(self, min_age: float = GIT_TIMEOUT_S, keep: frozenset = frozenset()) -> None:
         """Remove lock files a killed git left behind. Only ever called under the clone's flock, and only coding-bot uses
         the clone. `run_cmd` kills and reaps a timed-out git's whole process group, and so does a SIGTERM/SIGHUP/SIGINT of
-        coding-bot (main turns them into an exit); only a SIGKILL can orphan a live git, and no git of ours runs longer
-        than GIT_TIMEOUT_S, so a lock that old is dead. `min_age=0` only right after this process reaped its own git, and
+        coding-bot (main turns them into an exit); a git orphaned by a SIGKILL is found and ended by `_reap_orphan` first,
+        so a lock older than GIT_TIMEOUT_S has no live owner. `min_age=0` only right after this process reaped its own git, and
         then never for a lock in `keep` (one that existed before that git started, so not its)."""
         now = time.time()
         for lk in self._locks():
@@ -848,11 +903,11 @@ class Git:
         rev = f"{self.remote}/{self.branch}:from-coding/{name}"
         try:
             # one blob id for both the size check and the read: a concurrent fetch cannot swap the blob in between
-            blob = self._git("rev-parse", "--verify", "--quiet", rev).strip()
-            size = self._git("cat-file", "-s", blob).strip()
+            blob = self._git("rev-parse", "--verify", "--quiet", rev, locked=False).strip()
+            size = self._git("cat-file", "-s", blob, locked=False).strip()
             if not size.isdigit() or int(size) > 4 * MAX_TEXT + 8:
                 raise OversizeReply(f"reply file is {size} bytes, over the reply cap")
-            return self._git("cat-file", "blob", blob)
+            return self._git("cat-file", "blob", blob, locked=False)
         except (DeadlineError, OversizeReply):
             raise
         except TransportError as e:  # a local object read: never the network
@@ -1588,8 +1643,9 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                 # this poll gets an even share of what is left, so a stalled route cannot use up the time the other
                 # route needs to be checked (the next step polls the other one)
                 # while no pickup is known, the ack deadline is the horizon, so other ids' backlog cannot delay exit 5
-                horizon = min(deadline, ack_deadline) if ack_deadline is not None and not claimed and not replies \
-                    else deadline
+                # (only before it passes: after that, polls get their full share so a slow listing can still finish)
+                horizon = min(deadline, ack_deadline) if (ack_deadline is not None and ack_deadline > now
+                                                          and not claimed and not replies) else deadline
                 share = (horizon - now) / max(1, len(ts))
                 PROBE[:] = [now + max(1.0, share)]
                 read_ok: set[str] = set()

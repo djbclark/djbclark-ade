@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import errno
+import hashlib
 import http.server
 import importlib.machinery
 import importlib.util
@@ -1350,6 +1351,11 @@ class TestTransportRobustness(TransportBase):
         self.assertTrue(self.in_origin("to-coding/ade-0.md"), "the unpublished commit was not recovered")
         self.assertEqual(Hook.seen[0]["body"]["paths"], ["git"])
 
+    def claim_ssh_plain(self, mid: str) -> None:
+        recs = [json.loads(x) for x in (self.state / "outbox.jsonl").read_text().splitlines()]
+        nonce = next(r["nonce"] for r in recs if r.get("id") == mid)
+        (self.from_dir / f"claim-{mid}.md").write_text(f"claimed {mid} by coding-1 at 2026-11-02T10:00:00Z nonce={nonce}\n")
+
     def test_a_reply_caught_mid_write_is_read_again_until_it_is_final(self) -> None:
         self.cli("send", "task")
         target = self.from_dir / "ade-1--coding-1.md"
@@ -1407,6 +1413,39 @@ class TestTransportRobustness(TransportBase):
         self.cli("send", "task")
         self.assertTrue(lock.exists())
         self.assertFalse(self.in_origin("to-coding/ade-1.md"))
+
+    def test_an_orphaned_git_is_waited_for_then_ended_never_raced(self) -> None:
+        """Review of d199f325: a git orphaned by a SIGKILLed coding-bot keeps its locks until it is gone, and one that
+        outlives GIT_TIMEOUT_S is killed before its locks are removed."""
+        self.ssh_down.write_text("")
+        orphan = subprocess.Popen(["sh", "-c", "sleep 60; :", str(self.mailbox)], start_new_session=True)
+        self.addCleanup(lambda: (orphan.kill(), orphan.wait()))
+        lock = self.mailbox / ".git/index.lock"
+        lock.write_text("")
+        h = hashlib.sha256(str(self.mailbox).encode()).hexdigest()[:12]
+        child = self.state / f"git-{h}.child"
+        self.state.mkdir(exist_ok=True)
+        child.write_text(f"{orphan.pid}\n")
+        r = self.cli("send", "task")
+        self.assertIn("orphaned git", r.stderr)
+        self.assertTrue(lock.exists())
+        self.assertIsNone(orphan.poll())
+        os.utime(child, (time.time() - 3600, time.time() - 3600))
+        self.set_health("git", fails=0, down_until=0)
+        r = self.cli("send", "task two")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.in_origin("to-coding/ade-2.md"), r.stderr)
+        self.assertIsNotNone(orphan.wait(timeout=5))
+        self.assertFalse(child.exists())
+
+    def test_wait_started_after_the_ack_deadline_still_gets_full_polls(self) -> None:
+        """Review of d199f325: past the ack deadline, a slow listing gets its full share, so a claim there is found."""
+        self.cli("send", "task")
+        self.claim_ssh_plain("ade-1")
+        self.ssh_slow.write_text("1.5")
+        w = self.cli("wait", "ade-1", "--timeout", "8", "--ack-timeout", "0")
+        self.assertEqual(w.returncode, 124, w.stderr)
+        self.assertIn("ade-1", json.loads((self.state / "claims.json").read_text()), "the slow listing never finished")
 
     def test_a_backlog_for_other_ids_cannot_hold_off_not_picked_up(self) -> None:
         """Review of eee69ad1: with nothing for the waited id, slow reads of other ids' files stop at the ack deadline."""
