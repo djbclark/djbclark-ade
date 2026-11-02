@@ -810,8 +810,8 @@ def _history_rows(paths: list[Path], agent: str, model: str | None, *,
 
 
 def owner_session_id() -> str:
-    """The Claude session that owns a dispatch record: the registry's id when CLAUDE_PID is a proven ancestor (a /baton successor inherits its
-    predecessor's CLAUDE_CODE_SESSION_ID), else the env var as before; the same resolver as ade_claims and the handoff listing, so an owner is written
+    """The Claude session that owns a dispatch record: the registry's id of the live Claude CLAUDE_PID names (a /baton successor inherits its
+    predecessor's CLAUDE_CODE_SESSION_ID; an ancestor or a detached job's living Claude), else the env var as before; the same resolver as ade_claims and the handoff listing, so an owner is written
     and read the same way. The raw env var when the helper is missing."""
     try:
         helper = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder")

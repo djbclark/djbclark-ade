@@ -230,7 +230,7 @@ BUSY ALERT (2026-11-02, the same session: f111c672 stayed "working" for hours in
 them from the deferred folder by hand). A text for a target that is merely WORKING is deferred until it is idle, and an agent inside a blocking wait never idles: it is deaf as
 well as silent. After `RELAY_BUSY_ALERT_S` seconds (default 1800; 0 = off) of waiting the deliverer sends ONE notice back to the sender (through relay, as a failure notice
 goes; never for a `kind: notice` record) and ONE `hermes-ping` naming target, sender, message id and age, once per message (the same card-alerts.json claim and retry
-rule as the card alert; the notice is claimed once on the record whether or not the ping works); `--pending` shows `[busy alert: pinged 31m ago]`. It NEVER steers on its own: a steer a
+rule as the card alert; a text queued BEHIND an earlier one for that long gets only the sender's notice, in neutral words; the notice is claimed once on the record whether or not the ping works); `--pending` shows `[busy alert: pinged 31m ago]`. It NEVER steers on its own: a steer a
 target declines replaces the running turn (lost work). A sender whose message matters runs `--cancel ID` on the queued copy FIRST (else it is delivered a second time later), then re-sends it with `--steer` to an omp, codex, opencode or claude target, knowing that risk.
 WHY IT CANNOT BE DELIVERED YET (2026-10-29, djbclark: "be able to tell why a message can't be delivered yet (eg picklist vs tab hung etc)"). `relay.py --why
 IDENT [--json]` names the obstacle by TWO methods compared (diagnose), exit 0 when it can take a text now, 1 when something is in the way. A Paseo agent:
@@ -2675,16 +2675,23 @@ def busy_alert_step(rid, rec, behind=False):
         text = (f"relay: {target_label(rec)} (agent {clean_text(t.get('paseo') or t.get('id'), 40) or '?'}) {why_ping}: "
                 f"{rid} from {clean_text(rec.get('sender'), 60) or '?'}. A target inside a long blocking wait never goes idle, so it cannot receive it; "
                 f"it expires in {max(0, int(float(rec.get('expires') or 0) - now)) // 60}m.")
+        # BEHIND: no operator ping. What holds the HEAD is its own business (a card already pings once per card and target; a working target pings for the head's
+        # own message), and this record's reason is neither known nor "WORKING": a ping per backlog record would be noise with wording that can be wrong
+        # (PR 248 adversary A3, local-review r3). Its sender still hears, in neutral words.
         claimed = (rec.get("sender_ident") and rec.get("kind") != "notice"
                    and transition(rid, ("queued",), when=lambda r: not r.get("busy_notice"), busy_notice=now) is not None)    # once, whether or not the ping works
-        alert_once(rid, rec, [f"busy|{rid}"], "busy_alert", "busy-alert", text)
+        if not behind:
+            alert_once(rid, rec, [f"busy|{rid}"], "busy_alert", "busy-alert", text)
         if claimed:
-            notice = (f"relay: your message to {target_label(rec)} ({rid}) has waited {mins}m: "
-                      + ("an earlier message to the same target is still waiting, so it is queued behind it, not delivered. " if behind
-                         else "the target is still working, so it is queued, not delivered. ") +
-                      f"If it matters: `relay.py --cancel {rid}` FIRST (else this copy is also delivered later, a duplicate), then re-send it with --steer (it "
-                      "interrupts a turn in progress on omp, codex, opencode and claude: the running turn may be replaced and its work lost); otherwise it goes out "
-                      "once the target is idle, or expires.")
+            head = f"relay: your message to {target_label(rec)} ({rid}) has waited {mins}m: "
+            if behind:
+                notice = (head + "an earlier message to the same target is still waiting (`relay.py --pending` shows what holds it), so this one is queued behind it, "
+                          f"not delivered; it goes out after that one, or expires. If it matters: `relay.py --cancel {rid}`, then deal with the earlier message first.")
+            else:
+                notice = (head + "the target is still working, so it is queued, not delivered. "
+                          f"If it matters: `relay.py --cancel {rid}` FIRST (else this copy is also delivered later, a duplicate), then re-send it with --steer (it "
+                          "interrupts a turn in progress on omp, codex, opencode and claude: the running turn may be replaced and its work lost); otherwise it goes out "
+                          "once the target is idle, or expires.")
             try:
                 rc, line = run_captured([rec["sender_ident"], notice, "--wait", "5", "--no-ack"], "relay", scrub=True, notice=True)
             except Exception as e:    # noqa: BLE001  # a notice never breaks the deliverer

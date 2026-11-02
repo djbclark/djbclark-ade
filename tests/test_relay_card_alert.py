@@ -353,14 +353,14 @@ class TestBusyAlert(Base):
 
         def finish_head() -> None:
             seen.append(self.to_sender())
+            seen.append(self.ping_lines())    # while still behind
             relay.finish(head, "failed", "test: gone", allowed=("queued",), notify=None)
         self.drive(behind, [finish_head, self.nothing])
-        lines = self.ping_lines()
-        self.assertEqual(len(lines), 1, lines)
-        self.assertIn(behind, lines[0])
-        self.assertIn("behind an EARLIER one", lines[0])
+        self.assertEqual(seen[1], [])    # no operator ping for a backlog record: what holds the head pings for itself, with its own wording
+        self.assertEqual(len(self.ping_lines()), 1)    # once it IS the head of a working target it pings as any working-target message does
         self.assertEqual(len(seen[0]), 1, seen)    # the notice went out while it was still behind
         self.assertIn("behind it", seen[0][0])
+        self.assertNotIn("--steer", seen[0][0])    # a steer is advice for a WORKING target, not for a backlog
         self.assertIn(f"--cancel {behind}", seen[0][0])
 
     def test_a_message_that_is_itself_a_notice_never_gets_one(self) -> None:

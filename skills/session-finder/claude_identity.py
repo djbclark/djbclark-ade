@@ -121,8 +121,8 @@ def own_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> str 
 
 
 def owner_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> str:
-    """The session id to record or compare as an OWNER (claims, job records, handoff listings): the registry's when CLAUDE_PID is a proven ancestor, else
-    CLAUDE_CODE_SESSION_ID as is, else "". Unlike own_session_id it never vetoes the env var: an orphaned background job (`nohup`, `setsid`, a tmux server
+    """The session id to record or compare as an OWNER (claims, job records, handoff listings): the registry's id of the live Claude CLAUDE_PID names (an
+    ancestor, or a detached job's still-living Claude), else CLAUDE_CODE_SESSION_ID as is, else "". Unlike own_session_id it never vetoes the env var: an orphaned background job (`nohup`, `setsid`, a tmux server
     started from a Claude shell) is reparented to launchd, so its CLAUDE_PID is no ancestor, yet its env pair is correct and its work belongs to that
     session. Only a /baton successor's inherited stale id is corrected (adversary, PR 248 r1b A1). One writer and one reader of an owner use this, so
     they agree (A2).
@@ -131,7 +131,11 @@ def owner_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> st
     same procStart, same pid in its file) is the session that exported this environment even after the job was detached. A successor's orphaned `nohup`
     job therefore still resolves to the successor's own id, not the stale env id its detached environment carries (local-review r2). If that process is
     gone, or its file does not match, the env var stands. (This is also why an owner read keeps treating an agent started from a Claude shell as that
-    Claude: owners are not identity labels, and dispatched agents carry ADE_CLAIM_ID first.)"""
+    Claude: owners are not identity labels, and dispatched agents carry ADE_CLAIM_ID first.)
+
+    Known limit (local-review r3, A4/A5): once that Claude has exited, a successor's detached job can only read the stale id its environment carries, and a
+    registry whose sessionId changes in place (a /clear) moves a living orphan to the new id; a failing `ps` lets a reused pid pass the procStart check. A
+    job that must outlive its Claude under the successor's id gets it from `claude_identity.py` at launch (acp-dispatch records it)."""
     return (registered_session_id(ancestors, require_ancestor=False) or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip())
 
 
