@@ -621,11 +621,12 @@ class TransportBase(Base):
         self.to_dir, self.from_dir = root / "drop/to-coding", root / "drop/from-coding"
         self.to_dir.mkdir(parents=True)
         self.from_dir.mkdir()
-        self.ssh_log, self.ssh_down = root / "ssh.log", root / "ssh.down"
+        self.ssh_log, self.ssh_down, self.ssh_hang = root / "ssh.log", root / "ssh.down", root / "ssh.hang"
         fake_ssh = root / "bin/ssh"
         fake_ssh.write_text(
             f"#!/bin/sh\necho call >> '{self.ssh_log}'\n"
             f"[ -e '{self.ssh_down}' ] && {{ echo 'ssh: connect failed' >&2; exit 255; }}\n"
+            f"[ -e '{self.ssh_hang}' ] && exec sleep 30\n"
             'for last; do :; done\nexec sh -c "$last"\n')
         fake_ssh.chmod(0o755)
         self.origin, self.mailbox, self.bot = root / "origin.git", root / "mailbox", root / "bot-clone"
@@ -835,6 +836,70 @@ class TestTransportReplies(TransportBase):
         self.assertEqual(self.ssh_calls(), before, "sync polled a transport in backoff")
         self.cli("sync", "--force")
         self.assertEqual(self.ssh_calls(), before + 1)
+
+
+class TestTransportRobustness(TransportBase):
+    """Local review of PR 245: backoff on send, a wedged git clone, replies caught mid-write, wait's time budget."""
+
+    def test_a_send_never_tries_a_transport_in_backoff_and_falls_back_to_the_webhook_at_once(self) -> None:
+        far = time.time() + 600
+        self.set_health("ssh", fails=3, down_until=far)
+        self.set_health("git", fails=3, down_until=far)
+        before = (self.ssh_calls(), self.git(self.origin, "rev-parse", "main"))
+        t0 = time.monotonic()
+        r = self.cli("send", "the whole task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual((self.ssh_calls(), self.git(self.origin, "rev-parse", "main")), before, "a backed-off transport was tried")
+        self.assertEqual(Hook.seen[0]["body"]["text"], "the whole task")
+        self.assertIn("skipped, in backoff", r.stderr)
+        self.assertEqual(self.health()["ssh"]["fails"], 3, "a skipped transport's backoff was extended")
+
+    def test_an_unpublished_local_commit_does_not_wedge_the_git_transport(self) -> None:
+        self.ssh_down.write_text("")
+        (self.mailbox / "to-coding").mkdir(exist_ok=True)
+        (self.mailbox / "to-coding/ade-0.md").write_text("an earlier send whose push failed\n")
+        self.git(self.mailbox, "add", "-A")
+        self.git(self.mailbox, "commit", "-q", "-m", "unpublished")
+        self.bot_reply_git("ade-9", "an unrelated reply\nDONE")  # the remote moves on: histories diverge
+        r = self.cli("send", "after the failed push")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.in_origin("to-coding/ade-1.md"), r.stderr)
+        self.assertTrue(self.in_origin("to-coding/ade-0.md"), "the unpublished commit was not recovered")
+        self.assertEqual(Hook.seen[0]["body"]["paths"], ["git"])
+
+    def test_a_reply_caught_mid_write_is_read_again_until_it_is_final(self) -> None:
+        self.cli("send", "task")
+        target = self.from_dir / "ade-1--coding-1.md"
+        target.write_text("")
+        self.cli("sync")
+        target.write_text("[coding -> claude-code] id=coding-1 re=ade-1\nhalf of the ans")
+        self.cli("sync")
+        target.write_text("[coding -> claude-code] id=coding-1 re=ade-1\nhalf of the answer, then the rest\nDONE\n")
+        self.cli("sync")
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("then the rest", w.stdout)
+
+    def test_wait_answers_a_filed_reply_without_touching_the_network(self) -> None:
+        self.cli("send", "task")
+        self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nok\nDONE")
+        self.ssh_hang.write_text("")
+        before = self.ssh_calls()
+        t0 = time.monotonic()
+        w = self.cli("wait", "ade-1", "--timeout", "20")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertLess(time.monotonic() - t0, 3)
+        self.assertEqual(self.ssh_calls(), before)
+
+    def test_a_hung_transport_cannot_hold_wait_past_its_timeout_nor_earn_a_backoff(self) -> None:
+        self.cli("send", "task")  # ssh carries it and is healthy
+        self.ssh_hang.write_text("")
+        t0 = time.monotonic()
+        w = self.cli("wait", "ade-1", "--timeout", "1.5")
+        self.assertEqual(w.returncode, 124, w.stderr)
+        self.assertLess(time.monotonic() - t0, 6)
+        self.assertEqual(self.health()["ssh"].get("fails", 0), 0, "our own deadline was counted as a transport failure")
 
 
 if __name__ == "__main__":
