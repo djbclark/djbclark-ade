@@ -70,13 +70,23 @@ def _sampler(tmp_path, monkeypatch, table=None, dry=False):
     return at
 
 
-def test_churn_below_the_admit_limit_never_fires(tmp_path, monkeypatch):
+def test_churn_below_the_alert_line_never_fires(tmp_path, monkeypatch):
     at = _sampler(tmp_path, monkeypatch)
-    for t in at.feed([0] + [at.lw.ADMIT_CHURN_PAGES_S * 0.9] * 30):  # 10 min just under the limit
+    for t in at.feed([0] + [at.lw.CHURN_ALERT_PAGES_S * 0.9] * 30):  # 10 min just under the alert line
         at(t)
     assert at.sent == [] and at.pinged() == []
     assert at.state()["churn_since"] is None
-    assert at.state()["churn_pages_s"] == round(at.lw.ADMIT_CHURN_PAGES_S * 0.9)
+    assert at.state()["churn_pages_s"] == round(at.lw.CHURN_ALERT_PAGES_S * 0.9)
+
+
+def test_standing_pressure_above_the_admit_limit_but_below_the_alert_line_is_quiet(tmp_path, monkeypatch):
+    """2026-11-02: 29-38k pages/s for hours (admit limit 20k) paged the watcher every hour; none was an incident. The gate
+    holds new work at that level; the alert waits for real thrash."""
+    at = _sampler(tmp_path, monkeypatch)
+    assert at.lw.ADMIT_CHURN_PAGES_S < 35000 < at.lw.CHURN_ALERT_PAGES_S
+    for t in at.feed([0] + [35000] * 60):  # 20 min at 35k
+        at(t)
+    assert at.sent == [] and at.pinged() == [] and at.state()["churn_since"] is None
 
 
 def test_churn_above_the_limit_for_less_than_the_sustain_time_is_quiet(tmp_path, monkeypatch):
@@ -103,7 +113,7 @@ def test_churn_held_for_the_sustain_time_fires_once(tmp_path, monkeypatch):
     assert fired_at == T0 + STEP + at.lw.CHURN_SUSTAIN_S  # exactly when the streak reaches LW_CHURN_SUSTAIN_S
     assert len(at.sent) == 1 and len(at.pinged()) == 1  # one line each, not one per sample
     msg = at.sent[0]
-    assert "compressor churn ~120k pages/s for 3+ min (limit 20k)" in msg
+    assert "compressor churn ~120k pages/s for 3+ min (alert line 50k, admit limit 20k)" in msg
     assert "top: cc1 -O2 2.5 cores, python3 -m 1.0 cores, sh 0.2 cores" in msg
     assert "Admit already holds new bg/acp-dispatch work; this is running or bypass work." in msg
     assert "Do not kill or SIGSTOP without djbclark. Investigate per the loadwatch skill." in msg

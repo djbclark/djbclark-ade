@@ -84,10 +84,11 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
 2. `status` shows a hot streak (`hot for N/300 s`), or `sample.log` has a `sustained load` line from the
    last hour.
 3. An incident has no `ack`, or `guard.jsonl` shows a trip or a `disabled` event from the last day.
-4. A `load-watch: compressor churn ~Nk pages/s for 3+ min (limit 20k); top: ...` line arrived (2026-10-23, limit 60k until 2026-11-01;
+4. A `load-watch: compressor churn ~Nk pages/s for 3+ min (alert line 50k, admit limit 20k); top: ...` line arrived (2026-10-23;
    `status` shows `compressor churn` and the `churn` / `churn-watcher` cooldowns). The sample step reads the
-   `vm_stat` compressor delta each 20 s; it is sent when churn stays above the `admit` limit for 180 s
-   (`LW_CHURN_SUSTAIN_S`), to you at most hourly and to Hermes every 6 h. `admit` already holds new
+   `vm_stat` compressor delta each 20 s; it is sent when churn stays above the ALERT line `LW_CHURN_ALERT_PAGES_S`
+   (default 50000 since 2026-11-02; it shared the admit limit before, which paged you hourly for standing 29-38k pressure that
+   was never an incident) for 180 s (`LW_CHURN_SUSTAIN_S`), to you at most hourly and to Hermes every 6 h. `admit` already holds new
    `bg`/`acp-dispatch` work, so the churn is from running or bypass work: find the top memory users with
    `/bin/ps -axo pid,rss,command -m | head` (not only the CPU list in the line), then section 3 as usual. The
    alert opens no incident and kills nothing; the Standing exceptions below only change the advice (the line
@@ -104,7 +105,7 @@ toward waiting: it refuses (exit 75) while **any** of these holds, and `--json` 
 | gate (`refused` name) | default | flag | env |
 |---|---|---|---|
 | available memory below the floor (`free_mem`): macOS free + file-backed + purgeable pages, Linux MemAvailable | 300 MB (600 MB until 2026-11-01) | `--min-free-mb` | `LW_MIN_FREE_MB` |
-| compressions + decompressions per second above (`compressor`) | 20000 (was 60000) | `--max-mem-churn` | `LW_MAX_COMPRESSOR_S` |
+| compressions + decompressions per second above (`compressor`), only with thrash: load above 1.5/core (`LW_CHURN_THRASH_PER_CORE`) or pageins over their limit, or above 60000 (`LW_MAX_COMPRESSOR_HARD_S`) on its own (djbclark 2026-11-02) | 20000 (was 60000) | `--max-mem-churn` | `LW_MAX_COMPRESSOR_S` |
 | pageins per second above (`pageins`) | 1000 | `--max-pageins` | `LW_MAX_PAGEINS_S` |
 | live `acp-run` slices machine-wide at or above the cap (`agents`), **only for a caller that passes `--max-agents`** | 14 (bare `--max-agents`) | `--max-agents [N]` | `LW_MAX_AGENTS` (0 = off) |
 
