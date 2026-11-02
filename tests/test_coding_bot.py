@@ -1086,6 +1086,49 @@ class TestRound6(TransportBase):
             self.assertEqual(read[0], "ade-2--coding-1.md")
 
 
+class TestRound7(TransportBase):
+    def test_a_timed_out_command_takes_its_whole_process_tree_with_it(self) -> None:
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            pidfile = Path(self.tmp.name) / "grandchild.pid"
+            with self.assertRaises(mod.TransportError):
+                mod.run_cmd(["sh", "-c", f"sleep 30 & echo $! > '{pidfile}'; wait"], timeout=1)
+            pid = int(pidfile.read_text())
+            time.sleep(0.2)
+            with self.assertRaises(ProcessLookupError, msg="the grandchild outlived the timeout"):
+                os.kill(pid, 0)
+
+    def test_a_poll_stops_once_the_waited_for_final_reply_is_filed(self) -> None:
+        self.cli("send", "one")
+        self.cli("send", "two")
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            read: list[str] = []
+
+            class Fake:
+                name = "ssh"
+
+                def list_replies(self) -> list[str]:
+                    return ["ade-1--coding-1.md", "ade-1--coding-2.md", "ade-2--coding-3.md"]
+
+                def read(self, name: str) -> str:
+                    read.append(name)
+                    n = name.split("--coding-")[1].split(".")[0]
+                    rid = name.split("--")[0]
+                    return f"[coding -> claude-code] id=coding-{n} re={rid}\nanswer\nDONE"
+
+            mod.poll_transports([Fake()], prefer="ade-2")
+            self.assertEqual(read, ["ade-2--coding-3.md"])
+
+    def test_an_unreadable_ssh_reply_folder_is_a_route_failure_not_an_empty_inbox(self) -> None:
+        self.cli("send", "task")
+        self.from_dir.chmod(0o300)
+        self.addCleanup(self.from_dir.chmod, 0o755)
+        s = self.cli("sync")
+        self.assertIn("transport ssh", s.stderr)
+        self.assertEqual(self.health()["ssh"]["fails"], 1)
+
+
 class TestHostileReplyIds(Base):
     def test_an_absurdly_long_bot_id_cannot_crash_wait(self) -> None:
         """Review round 3: a header id beyond Python's int-conversion limit must not be stored as a bot number."""

@@ -492,12 +492,26 @@ def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float) -> str
             raise DeadlineError(f"{argv[0]}: this poll's share of the wait is used up")
         timeout, by_wait = PROBE[0] - now, True
     try:
-        r = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-    except subprocess.TimeoutExpired:
-        raise (DeadlineError if by_wait else TransportError)(f"{argv[0]} timed out after {timeout:g}s") from None
+        # its own process group, so a timeout kills the whole tree (git pull's fetch, a rebase) before the caller lets go
+        # of the clone lock, not just the top process
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                errors="replace", env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, start_new_session=True)
     except OSError as e:
         raise TransportError(f"{argv[0]}: {e.strerror or type(e).__name__}") from None
+    try:
+        out, err = proc.communicate(stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise (DeadlineError if by_wait else TransportError)(f"{argv[0]} timed out after {timeout:g}s") from None
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
+    r = subprocess.CompletedProcess(argv, proc.returncode, out, err)
     if r.returncode != 0:
         first = next((ln for ln in r.stderr.splitlines() if ln.strip()), "")
         raise TransportError(f"{argv[0]} exited {r.returncode}: {clean(first)[:120]}", r.returncode)
@@ -525,9 +539,8 @@ class Ssh:
                 timeout=SSH_TIMEOUT_S)
 
     def list_replies(self) -> list[str]:
-        d = shlex.quote(self.c["from_dir"])
-        out = run_cmd(self._argv(f"cd {d} && {{ ls -1 | grep -E '^ade-[0-9]+--coding-[0-9]+[.]md$' || true; }}"),
-                      timeout=SSH_TIMEOUT_S)
+        # a plain listing, filtered here: a pipeline with `|| true` would turn an unreadable folder into "no replies"
+        out = run_cmd(self._argv(f"cd {shlex.quote(self.c['from_dir'])} && ls -1A"), timeout=SSH_TIMEOUT_S)
         return [n for n in out.split("\n") if REPLY_FILE.fullmatch(n)]
 
     def read(self, name: str) -> str:
@@ -988,6 +1001,8 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None) ->
                 if (rc == 0 and final) or (rc and msg != "empty reply"):
                     mark_seen(t.name, fname)
                 new += filed
+                if prefer and rc == 0 and final and REPLY_FILE.fullmatch(fname).group(1) == prefer:
+                    break  # the waited-for answer is filed: hand back to the waiter before reading other ids
         except DeadlineError:
             break
         except TransportError as e:
