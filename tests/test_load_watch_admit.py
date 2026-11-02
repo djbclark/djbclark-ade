@@ -488,6 +488,8 @@ Pages purgeable:                           500.
 Pageins:                                 50000.
 Compressions:                           700000.
 Decompressions:                         300000.
+File-backed pages:                        1500.
+Anonymous pages:                        301500.
 """
 
 
@@ -501,29 +503,46 @@ def fake_run(monkeypatch, lw, **kw):
     monkeypatch.setattr(lw.subprocess, "run", run)
 
 
-def test_vm_stat_snapshot_counts_available_memory(monkeypatch):
+def test_vm_stat_snapshot_counts_free_file_backed_and_purgeable(monkeypatch):
     lw = load_module()
     fake_run(monkeypatch, lw, stdout=VM_STAT)
     s = lw.vm_snapshot()
-    assert s == {"free_mb": (3969 + 1000 + 2000 + 500) * 16384 / 1048576, "compress": 1000000, "pageins": 50000}
+    assert s == {"free_mb": (3969 + 1500 + 500) * 16384 / 1048576, "compress": 1000000, "pageins": 50000}
 
 
-def test_reclaimable_inactive_memory_is_not_read_as_starvation(monkeypatch):
-    """2026-11-01 regression: free + speculative was 82 MB while 3.84 GB was inactive; the 600 MB floor refused every
-    launch on an idle machine. Available memory must count inactive and purgeable pages, like Linux MemAvailable."""
+def mb_pages(mb, page=16384):
+    return mb * 1048576 // page
+
+
+def vm_stat_with(**mb):
+    """VM_STAT with some counters replaced by megabyte amounts (keys: free, spec, inactive, purgeable, file, anon)."""
+    names = {"free": "Pages free", "spec": "Pages speculative", "inactive": "Pages inactive", "purgeable": "Pages purgeable",
+             "file": "File-backed pages", "anon": "Anonymous pages"}
+    out = VM_STAT
+    for key, value in mb.items():
+        out = re.sub(rf"^{re.escape(names[key])}:\s+\d+\.$", f"{names[key]}: {mb_pages(value)}.", out, flags=re.M)
+    return out
+
+
+def test_file_cache_is_available_memory_on_an_idle_mac(monkeypatch):
+    """2026-11-01 regression: free + speculative read 82 MB on an idle Mac with ~3.1 GB of file cache, and the 600 MB floor
+    refused every launch for ~1.5 h. File-backed pages are dropped at no cost, so they count as available."""
     lw = load_module()
-    page = 16384
-    real = VM_STAT.replace("Pages free:                                3969.", f"Pages free:                                {72 * 1048576 // page}.") \
-                  .replace("Pages speculative:                        1000.", f"Pages speculative:                        {10 * 1048576 // page}.") \
-                  .replace("Pages inactive:                           2000.", f"Pages inactive:                           {3840 * 1048576 // page}.") \
-                  .replace("Pages purgeable:                           500.", f"Pages purgeable:                           {26 * 1048576 // page}.")
-    fake_run(monkeypatch, lw, stdout=real)
+    fake_run(monkeypatch, lw, stdout=vm_stat_with(free=77, spec=530, inactive=3662, file=3103, anon=5269, purgeable=27))
     assert lw.vm_snapshot()["free_mb"] > lw.ADMIT_MIN_FREE_MB
 
 
-def test_a_vm_stat_without_inactive_or_purgeable_still_parses(monkeypatch):
+def test_anonymous_inactive_memory_is_not_counted_as_available(monkeypatch):
+    """Adversary F1 on PR 230: the inactive queue holds anonymous pages, which can only be reclaimed by compressing or
+    swapping. A host with little free memory, little file cache and a large (anonymous) inactive queue is short of memory."""
     lw = load_module()
-    fake_run(monkeypatch, lw, stdout=VM_STAT.replace("Pages inactive:                           2000.\n", "").replace("Pages purgeable:                           500.\n", ""))
+    fake_run(monkeypatch, lw, stdout=vm_stat_with(free=60, spec=20, inactive=4000, file=150, anon=9000, purgeable=5))
+    assert lw.vm_snapshot()["free_mb"] < lw.ADMIT_MIN_FREE_MB
+
+
+def test_a_vm_stat_without_file_backed_pages_falls_back_to_free_plus_speculative(monkeypatch):
+    lw = load_module()
+    fake_run(monkeypatch, lw, stdout=VM_STAT.replace("File-backed pages:                        1500.\n", ""))
     assert lw.vm_snapshot()["free_mb"] == (3969 + 1000) * 16384 / 1048576
 
 

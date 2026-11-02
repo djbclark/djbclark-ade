@@ -103,7 +103,7 @@ toward waiting: it refuses (exit 75) while **any** of these holds, and `--json` 
 
 | gate (`refused` name) | default | flag | env |
 |---|---|---|---|
-| free + speculative memory below the floor (`free_mem`) | 600 MB | `--min-free-mb` | `LW_MIN_FREE_MB` |
+| available memory below the floor (`free_mem`): macOS free + file-backed + purgeable pages, Linux MemAvailable | 600 MB | `--min-free-mb` | `LW_MIN_FREE_MB` |
 | compressions + decompressions per second above (`compressor`) | 20000 (was 60000) | `--max-mem-churn` | `LW_MAX_COMPRESSOR_S` |
 | pageins per second above (`pageins`) | 1000 | `--max-pageins` | `LW_MAX_PAGEINS_S` |
 | live `acp-run` slices machine-wide at or above the cap (`agents`), **only for a caller that passes `--max-agents`** | 14 (bare `--max-agents`) | `--max-agents [N]` | `LW_MAX_AGENTS` (0 = off) |

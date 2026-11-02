@@ -86,8 +86,8 @@ load drops below the threshold sleeps a random 5-30 s, never past --wait (so que
 and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
 it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"; tightened 2026-11-01):
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: available memory (free +
-speculative + inactive + purgeable, the macOS counterpart of Linux MemAvailable; free + speculative alone is nearly always
-tiny on macOS) is below --min-free-mb (default 600, env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
+file-backed + purgeable pages: memory freed without compressing or swapping, like Linux MemAvailable's file-cache
+term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default 600, env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
 exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 2026-11-01); pageins exceed --max-pageins per
 second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work can trip it
 with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (acp-dispatch does; `bg` never
@@ -1493,12 +1493,15 @@ class ReadFailed(Exception):
 
 
 def _vm_stat_snapshot():
-    """{free_mb, compress, pageins} from macOS `vm_stat`. free_mb is AVAILABLE memory, the macOS counterpart of Linux
-    MemAvailable: Pages free + speculative + inactive + purgeable (inactive pages are reclaimed without paging anything out,
-    purgeable ones are discarded on demand). Free + speculative alone is almost always tiny on macOS, because the system
-    keeps spare memory as cache: on 2026-11-01 it read 82 MB while ~3.9 GB was reclaimable and memory_pressure said 49 %
-    free, and the 600 MB floor refused every launch on an idle machine for ~1.5 h. compress = Compressions +
-    Decompressions, cumulative pages. None when there is no `vm_stat` binary; ReadFailed when it exists and fails."""
+    """{free_mb, compress, pageins} from macOS `vm_stat`. free_mb is memory available WITHOUT compressing or swapping:
+    Pages free + File-backed pages + Pages purgeable. File-backed pages (file cache, speculative included) are dropped at no
+    cost, like Linux MemAvailable's file-LRU term; purgeable (volatile) pages are discarded rather than compressed. Inactive
+    pages are NOT counted: the inactive queue also holds anonymous memory, which can only be reclaimed by compressing or
+    swapping it (adversary F1 on PR 230: >= 968 MB of inactive pages were anonymous). A vm_stat without `File-backed pages`
+    falls back to free + speculative (conservative). Why not free + speculative alone: macOS keeps spare memory as file cache,
+    so that read 82 MB on an idle Mac on 2026-11-01 and the 600 MB floor refused every launch for ~1.5 h.
+    compress = Compressions + Decompressions, cumulative pages. None when there is no `vm_stat` binary; ReadFailed when it
+    exists and fails."""
     try:
         r = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
     except FileNotFoundError:
@@ -1509,7 +1512,7 @@ def _vm_stat_snapshot():
         raise ReadFailed(f"vm_stat exited {r.returncode}")
     out = r.stdout
     v = {m.group(1): int(m.group(2)) for m in
-         re.finditer(r"^(Pages free|Pages speculative|Pages inactive|Pages purgeable|Pageins|Compressions|Decompressions):\s+(\d+)",
+         re.finditer(r"^(Pages free|Pages speculative|File-backed pages|Pages purgeable|Pageins|Compressions|Decompressions):\s+(\d+)",
                      out, re.M)}
     ps = re.search(r"page size of (\d+) bytes", out)
     try:
@@ -1518,7 +1521,10 @@ def _vm_stat_snapshot():
         raise ReadFailed(f"vm_stat page size: {e!r}") from e
     if not all(k in v for k in ("Pages free", "Pageins", "Compressions", "Decompressions")):
         raise ReadFailed("vm_stat output lacks a needed counter")
-    avail = v["Pages free"] + v.get("Pages speculative", 0) + v.get("Pages inactive", 0) + v.get("Pages purgeable", 0)
+    if "File-backed pages" in v:
+        avail = v["Pages free"] + v["File-backed pages"] + v.get("Pages purgeable", 0)
+    else:
+        avail = v["Pages free"] + v.get("Pages speculative", 0)
     return {"free_mb": avail * page / 1048576,
             "compress": v["Compressions"] + v["Decompressions"], "pageins": v["Pageins"]}
 
@@ -2078,7 +2084,7 @@ def main():
                    help=f"and compressor churn (pages compressed + decompressed per second, sampled over ~{ADMIT_MEM_WINDOW_S:g} s) "
                         f"is at most N (default {ADMIT_CHURN_PAGES_S:g}, env LW_MAX_COMPRESSOR_S; was 60000 until 2026-11-01)")
     p.add_argument("--min-free-mb", type=float, default=ADMIT_MIN_FREE_MB, metavar="N",
-                   help=f"and free+speculative memory is at least N MB (default {ADMIT_MIN_FREE_MB:g}, env LW_MIN_FREE_MB)")
+                   help=f"and available memory (free + file-backed + purgeable pages on macOS, MemAvailable on Linux) is at least N MB (default {ADMIT_MIN_FREE_MB:g}, env LW_MIN_FREE_MB)")
     p.add_argument("--max-pageins", type=float, default=ADMIT_PAGEINS_S, metavar="N",
                    help=f"and pageins per second are at most N (default {ADMIT_PAGEINS_S:g}, env LW_MAX_PAGEINS_S)")
     p.add_argument("--max-agents", type=int, nargs="?", const=ADMIT_MAX_AGENTS, default=0, metavar="N",
