@@ -182,17 +182,20 @@ own tmux session, never in the `barnowl` one.
 1. **Source and launcher.** `~/src/snipe` is a clone of
    [asedeno/snipe](https://github.com/asedeno/snipe) (the maintained fork, 39 commits ahead
    of `1ts-org/snipe`, which has been dormant since 2020). The checkout is on branch
-   `roost-offline` of [djbclark/snipe](https://github.com/djbclark/snipe): upstream plus two
-   commits ([asedeno/snipe#3](https://github.com/asedeno/snipe/pull/3)) so that roost retries
-   with a 10 s to 5 minute backoff when `roost-api` is unreachable. Without them the roost task
-   dies on the first connection error and posts a traceback. Start it with
+   `latest` of [djbclark/snipe](https://github.com/djbclark/snipe): asedeno's `master` plus two
+   open PRs, merged: [#2](https://github.com/asedeno/snipe/pull/2) (runs on Python 3.12+, see
+   item 2) and [#3](https://github.com/asedeno/snipe/pull/3) (roost retries with a 10 s to 5
+   minute backoff when `roost-api` is unreachable; without it the roost task dies on the first
+   connection error and posts a traceback). Update it with `git fetch fork latest` and
+   `git checkout -B latest fork/latest`. Start it with
    `ssh pastebin.xvm.mit.edu`, then `tmux new -As snipe snipe`; `~/.local/bin/snipe` runs the
    venv and is not on PATH for non-login ssh.
-2. **Python 3.11 on purpose.** The venv is `~/src/snipe/venv`, built by uv on Python 3.11. The
-   `Markdown<3.3` pin crashes at import on Python 3.12 and newer, and pastebin's system Python
-   is 3.13. The port is [asedeno/snipe#2](https://github.com/asedeno/snipe/pull/2) (`Markdown>=3.4.1`;
-   3.4.0 itself crashes at import; 379 of 379 tests pass on 3.11 and 3.13). It is not on pastebin's
-   branch. When it is merged and pulled, the venv can move to the system Python.
+2. **Python and Markdown.** The venv is `~/src/snipe/venv` on the system Python 3.13.5 with
+   current Markdown (3.11.2 on 2026-11-02). That works only because `latest` carries
+   [asedeno/snipe#2](https://github.com/asedeno/snipe/pull/2) (`Markdown>=3.4.1`; 3.4.0 itself
+   crashes at import). asedeno's `master` still pins `Markdown<3.3`, which crashes at import on
+   Python 3.12 and newer: after checking out `master` rebuild the venv with
+   `uv venv --python 3.11 --clear venv`. 382 of 382 tests pass on 3.11 and 3.13 on `latest`.
 3. **Subscriptions.** Roost keeps them on its server. Snipe reads the same `~/.zephyr.subs` as
    BarnOwl; `R l` (accept the default file) pushes it. Not done as of 2026-11-02:
    `roost-api.mit.edu` (18.25.132.160) was unreachable from pastebin and from the Mac (the web page
