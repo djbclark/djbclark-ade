@@ -170,8 +170,16 @@ herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's 
       is re-checked immediately before *each* signal, never once per sweep. A group is signalled while its
       recorded leader's start time matches or, after the leader exited, while a recorded member is alive (POSIX
       does not reuse a pid while a process group with that id exists). The descendant tree is recorded at
-      registration and at expiry: children that left the group (`setsid`, daemonizers) are signalled by pid,
-      start time checked, and every recorded pid must be gone before recovery starts.
+      registration, on **every sweep pass while the job runs**, and at expiry, and the record only grows: a pid
+      seen once (with its start time) stays in it until it is gone. So a child that leaves the group (`setsid`,
+      daemonizers) and loses its parent between registration and expiry is still known if any pass saw it, the
+      way `local-review` records children while their parent runs. On Linux the job runs in its own cgroup
+      (`systemd-run --user --scope`), so no child can escape and the cgroup is the member list. macOS has no
+      cgroups: the residual gap is a child that escapes AND loses its parent within one sweep interval; it is
+      named here rather than hidden. Children are signalled by pid, start time checked, and every recorded pid
+      must be gone before recovery starts. Acceptance check: a job that, after registration, starts a child
+      which calls `setsid` and whose parent then exits; at expiry that child is signalled and recovery waits
+      for it.
    6. **Recovery runs exactly once, durably and bounded.** An atomic "recovery started" mark is written before
       it runs (review rule 6), so a watchdog restart mid-recovery does not run it again. A reroute counts per
       task lineage, at most one, and goes through the admission gate (`acp-dispatch`'s gates until D2, then
@@ -447,9 +455,13 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
    case (2026-11-01, reported by Dann Chat 4, not yet probed here; D1.7c case 9 probes it): schedule `9ebe3f69`,
    run `a751f388` "succeeded" with four external `acp-dispatch` slices "running", agent archived after
    3 minutes, the memo never written, no slice reports (commented upstream on #6189). Every schedule
-   therefore runs as a G1 job: its prompt declares the deliverable or report path; the run counts as succeeded
-   only when that output exists and validates (report file plus `.done` marker, the `acp-dispatch` contract),
-   a missing one is a distinct `no-output` failure that alerts (F1); and its agent is not archived until the job
+   therefore runs as a G1 job: its prompt declares the deliverable or report path, **fresh for each run** (the
+   path carries the run id) and the `.done` marker names that run id; the run counts as succeeded only when the
+   output of THIS run exists and validates (report file plus `.done` marker, the `acp-dispatch` contract, the
+   marker's run id equal to the run's and its mtime after the run's start), so an earlier run's report at a reused
+   path never counts. A missing one is a distinct `no-output` failure that alerts (F1). Acceptance check: a run
+   that produces nothing while the previous run's report and `.done` are still present reads `no-output`. Its
+   agent is not archived until the job
    records "branch pushed and report read" (G1). A scheduled job sets no G1 heartbeat, or one longer than its
    longest wait, so waiting for its slices is never read as a stall. Until G1: a scheduled agent never
    delegates and stops; it does the work in its turn, or waits for each slice's `.done` within a declared
