@@ -140,6 +140,67 @@ herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's 
    once per 30 minutes (otherwise alert and wait for the operator); reconcile G1 after every restart.
    Keep active workspaces bounded (about 15, enforced by G2's create check), never register giant trees as
    workspaces, and create slice workspaces in the background (Fable 5.2).
+   **Declared budgets for everything long (amended 2026-11-01).** Cause: on 2026-11-01 a merge train blocked
+   for hours on `load-watch admit --wait 7200`, a two-hour review wait and an unbounded `pr-wait`, while a lead
+   agent sat blocked in a wait; nothing outside them noticed. Prior art: Temporal Start-To-Close and heartbeat
+   timeouts, systemd `RuntimeMaxSec`/`WatchdogSec`, Celery soft and hard limits, deepseek-harness discussion
+   11258 (a notify-only 60 s budget hung a session 5.5 h), Trinity issue 869 (a global staleness guess killed
+   healthy runs).
+   1. **Who enforces what.** G1 enforces its own agent jobs (wrap-up steer, interrupt at T, exit 124). This
+      watchdog enforces every *non-agent* registration (test runs, `local-review`, `pr-wait`, CI and review
+      waits, orchestration scripts, an agent's own long command). For a G1 job it is only a backstop that
+      alerts when G1 has not acted within T plus grace (for example the plugin is down); it never signals an
+      agent job, so one budget never has two enforcers.
+   2. **Registration.** The starter registers a budget, an owner, the process group and an on-expiry action
+      before it starts, through the interim `bin/deadline` (`start` or `run -- CMD`; landing in PR 223, B9
+      absorbs its sweep in D1). Wrappers registering themselves with defaults is planned, not present: in
+      djbclark-ade first (`local-review`, `pr-wait`, `acp-dispatch-wait`, `load-watch admit --wait`); `bg`
+      lives in `~/ops/site-private-djbclark` and waits for djbclark's yes (order 11).
+   3. **Per-class defaults and maxima**, so a declared budget is still bounded: an admission wait 15 min
+      (maximum 30 min, longer needs a reason); a test run 30 min; `local-review` 15 min; `pr-wait` and a review
+      wait 60 min; any other class 30 min. A registration above its class maximum needs a reason and is
+      logged. A **soft notice** goes to the owner at 80 % of the budget (Celery's soft limit), the hard stop at
+      100 %.
+   4. **Clocks.** Compute budgets run on awake time (macOS `mach_absolute_time`, which `time.monotonic` uses;
+      Linux `CLOCK_MONOTONIC`, which stops in suspend); waits on external events run on wall time. After a
+      wake, every budget that expired while asleep gets one grace period from the wake before anything is
+      signalled, so a sleep never causes a mass kill.
+   5. **Expiry.** Each sweep runs every 60 s; the grace period defaults to 60 s (systemd's `TimeoutStopSec`),
+      so the worst overrun is about two minutes. SIGTERM to the group, the grace period, SIGKILL. The start time
+      is re-checked immediately before *each* signal, never once per sweep. A group is signalled while its
+      recorded leader's start time matches or, after the leader exited, while a recorded member is alive (POSIX
+      does not reuse a pid while a process group with that id exists). The descendant tree is recorded at
+      registration, on **every sweep pass while the job runs**, and at expiry, and the record only grows: a pid
+      seen once (with its start time) stays in it until it is gone. So a child that leaves the group (`setsid`,
+      daemonizers) and loses its parent between registration and expiry is still known if any pass saw it, the
+      way `local-review` records children while their parent runs. On Linux the job runs in its own cgroup
+      (`systemd-run --user --scope`), so no child can escape and the cgroup is the member list. macOS has no
+      cgroups: the residual gap is a child that escapes AND loses its parent within one sweep interval; it is
+      named here rather than hidden. Children are signalled by pid, start time checked, and every recorded pid
+      must be gone before recovery starts. Acceptance check: a job that, after registration, starts a child
+      which calls `setsid` and whose parent then exits; at expiry that child is signalled and recovery waits
+      for it.
+   6. **Recovery runs exactly once, durably and bounded.** An atomic "recovery started" mark is written before
+      it runs (review rule 6), so a watchdog restart mid-recovery does not run it again. A reroute counts per
+      task lineage, at most one, and goes through the admission gate (`acp-dispatch`'s gates until D2, then
+      G2). An expiry caused by a quota stop is resumed after the reset, never rerouted fresh (`~/AGENTS.md`
+      item 25). A recovery into the same workspace waits until the killed group is confirmed gone and the
+      writer claim is released or transferred (order 9).
+   7. **Only declared budgets kill** (Trinity 869). A pid whose start time differs from the registration is
+      never signalled. An optional heartbeat, which may carry a checkpoint path, catches a stall sooner, but
+      only when the registration asked for one.
+   8. **Extensions** are asked for before expiry, with a reason, and capped in total (default: the original
+      budget); only the owner extends or heartbeats a registration (same-uid edits are not a boundary, as in G).
+      This is stricter than systemd's `EXTEND_TIMEOUT_USEC`, which is self-issued, carries no reason and has
+      no total cap.
+   9. **Undeclared work is a named gap, alerted, never killed.** The sweep lists children of agent sessions
+      older than 30 minutes that hold no registration and alerts once per process; it signals none of them.
+      Work outside any agent session (launchd and cron jobs) keeps its own timeouts.
+   10. **Idle agent sessions are alerted, never signalled.** An agent session that shows no timeline progress
+       past its idle limit and holds no live budget gets one `hermes-ping` per stall. No relay goes to it until
+       D1.1 marks its provider as steering (B2: sending to a running agent that cannot steer interrupts its turn),
+       and then only through G3 or `paseo send`. Paseo-native child agents that hold no budget get the same
+       alert and no bound: an accepted gap until G1 covers them.
 10. **Destructive tests never touch the live daemon.** Every probe that restarts, hangs or kills a daemon
    runs against an isolated test daemon: its own fresh `PASEO_HOME` (never a copy of the live one, so it
    cannot inherit the live server id; it does not install `session-janitor`, or writes the three B4.3
@@ -245,6 +306,17 @@ ops-promotion pilot passes.
       confirm the tab); `paseo ls -g` (D4's gate) stays the visibility check.
    7b. Create origin: does `agent.create.before` tell a plugin-SDK create from an MCP or CLI create? Record the
       answer; G2.8 depends on it.
+   7c. Declared budgets (B9's amendment), every case against throwaway processes, never a live session (B10), each
+      with its expected outcome; if any fails, B9's budget enforcement stays alert-only until it passes:
+      1. A registered process past its budget is stopped (SIGTERM, grace, SIGKILL) and its recovery runs once.
+      2. A healthy process inside its budget during one forced load incident is not signalled.
+      3. A registration whose pid now has a different start time is not signalled.
+      4. After a sleep and wake cycle (or a simulated one), no budget is signalled before its post-wake grace.
+      5. An extension asked for after expiry is refused, and one past the cap is refused.
+      6. Recovery runs once even when the watchdog is restarted mid-recovery (the durable "recovery started" mark).
+      7. An idle agent session is alerted once per stall and never signalled.
+      8. A G1 job that opted into a heartbeat and sits inside a 20-minute tool call is not failed (G1 no-progress rule).
+      9. A scheduled run whose turn ends without its declared output reads `no-output` and alerts (F2).
    8. vps-primary, before the pilot (F3): the Paseo daemon password set and the listener bound to the tailnet
       interface only, with a Tailscale ACL that admits the Mac; pilot agents run as a dedicated unprivileged
       user with their own `PASEO_HOME` and no access to the host's deploy or service secrets; provider and
@@ -363,7 +435,8 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
 
 1. **Notifications**: Paseo native push for agent events (finished, error, permission, question). The B9
    launchd watchdog sends `hermes-ping` on a sustained failure, unexpected exit, failed recovery and
-   recovery; a dead-man check on vps-primary covers the Mac offline while awake (D1.9: a sleeping Mac does
+   recovery, and (B9's budget amendment) on a budget's soft notice, a budget stop, a failed budget recovery, an
+   idle-session alert and a scheduled run that ends with `no-output` (F2); a dead-man check on vps-primary covers the Mac offline while awake (D1.9: a sleeping Mac does
    not page). Also install the reviewed `Daaaaave/paseo-telegram` plugin (0.2.3) to answer cards from
    Telegram, after a 0.14 compatibility test (D2); it covers no daemon outage. It is a remote command
    channel (it can create and drive agents), so its policy is pinned before it is enabled: DMs from the owner
@@ -375,6 +448,25 @@ worktree removal on archive (B4), and the instruction-file rewrites (D7). Each h
 2. **Unattended runs**: split by job kind. Paseo schedules only for runs that need judgment
    (`skillopt-night`, triage, reports); launchd (systemd on Linux) for monitors, collectors, record reaping
    and the watchdog. Schedules that keep worktrees need archive-on-finish turned off in the app first.
+   **A scheduled run's success is its output, not the end of its turn (amended 2026-11-01).** Paseo marks
+   a schedule run `succeeded` when the agent's turn ends, so a run that delegates and ends its turn reads as
+   a success with nothing produced. Upstream confirms the class: getpaseo/paseo#6189 (open, reproduced by the
+   maintainers: the run completes and its agent is archived while Claude background subagents still run). Our
+   case (2026-11-01, reported by Dann Chat 4, not yet probed here; D1.7c case 9 probes it): schedule `9ebe3f69`,
+   run `a751f388` "succeeded" with four external `acp-dispatch` slices "running", agent archived after
+   3 minutes, the memo never written, no slice reports (commented upstream on #6189). Every schedule
+   therefore runs as a G1 job: its prompt declares the deliverable or report path, **fresh for each run** (the
+   path carries the run id) and the `.done` marker names that run id; the run counts as succeeded only when the
+   output of THIS run exists and validates (report file plus `.done` marker, the `acp-dispatch` contract, the
+   marker's run id equal to the run's and its mtime after the run's start), so an earlier run's report at a reused
+   path never counts. A missing one is a distinct `no-output` failure that alerts (F1). Acceptance check: a run
+   that produces nothing while the previous run's report and `.done` are still present reads `no-output`. Its
+   agent is not archived until the job
+   records "branch pushed and report read" (G1). A scheduled job sets no G1 heartbeat, or one longer than its
+   longest wait, so waiting for its slices is never read as a stall. Until G1: a scheduled agent never
+   delegates and stops; it does the work in its turn, or waits for each slice's `.done` within a declared
+   deadline and checks its deliverable before it ends. A last line `NO OUTPUT: <why>` is advisory for the
+   reader; nothing parses it, and success is still only the validated output.
 3. **Second daemon**: use the **existing** vps-primary Paseo daemon (0.13.0, NixOS system service, connected
    to the Mac over the tailnet; 3.7 GiB RAM, 2 vCPU) for the one-task pilot and the dead-man check, after
    upgrading it to 0.14 and meeting D1.8's security prerequisites. Correction (lead 1e61c979, 2026-10-30):
@@ -419,16 +511,22 @@ which records the owner as `operator`. This stops mistakes and impersonation ove
 same-uid agent with a shell that edits the state files directly; like B3, it is not a boundary (adversary r1
 C9, r2 C3 and C8, r3 N2, r4 R4).
 
-1. **`ade-jobs` (plugin, hooks needed)**: durable task ids, deadline and grace, a wrap-up steer at
+1. **`ade-jobs` (plugin, hooks needed)**: durable task ids, deadline and grace, an **opt-in** no-progress
+   timeout (amended 2026-11-01; a job sets `heartbeat` in `jobs.submit` to use it): a tool call still in flight
+   or a child process still using CPU counts as progress, so a long foreground test run or wait is never a stall
+   (the delivery footer's items 5 and 10 allow foreground waits up to about 30 minutes, and the interval must
+   exceed that plus the checkpoint period); on a stall G1 steers or alerts first and fails the job only after
+   the grace period (D1.7c case 8 gates it). Also a wrap-up steer at
    T-minus-grace, interrupt at T recorded as exit 124 (cancellation confirmed, and the agent's child
    processes gone, before the writer claim is released), report-file validation, outcome records in the
    existing format, `reconcile()` after a daemon restart that never relaunches blindly. A job's agent is
    never archived until the job records "branch pushed and report read" (B4). Native parts:
    `paseo run --output-schema`, `paseo wait --timeout` (waits, does not cancel). Interface:
-   `jobs.submit(taskId, host, workspace, profile, reportPath, deadline, grace, permit)` **creates the worker
+   `jobs.submit(taskId, host, workspace, profile, reportPath, deadline, grace, permit, heartbeat?)` **creates the worker
    itself** and never accepts an existing agent id; it records `owner = context.agent.id` (the caller) and
    the worker's id, provider and mode. `jobs.get` for the owner; `jobs.finish` for the worker;
-   `jobs.extend(taskId, seconds)` for the owner; `jobs.reconcile` (astra C1, Fable 3.1, adversary r3 N2).
+   `jobs.extend(taskId, seconds, reason)` for the owner, only before T and capped in total (default: the
+   original deadline), each extension recorded in the ledger; `jobs.reconcile` (astra C1, Fable 3.1, adversary r3 N2).
 2. **`ade-gate` (plugin)**: `agent.create.before` runs `aiuse` (cached about 60 s) and
    `bin/load-watch admit --json` with no wait (the admission predicate `acp-dispatch` already uses; exit 75
    means too hot, so the gate refuses with the load named and the launcher retries outside the hook, which
