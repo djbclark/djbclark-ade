@@ -373,6 +373,11 @@ cron:
 skills:
   external_dirs:
     - '{{ .home }}/.local/share/skill-everywhere/skills'
+quick_commands:
+  # CLI only (gateways such as Telegram load the btww skill instead): /btww is the native side-question /btw.
+  btww:
+    type: alias
+    target: btw
 litellm:
   model_list:
     - cline2-pass/deepseek-v4-flash
