@@ -49,8 +49,11 @@ DEFAULTS = {
     # (anthropics/claude-code#86879, #105981). Read from the 2.1.316 binary: the SDK option
     # agentProgressSummaries and CLAUDE_CODE_AGENT_PROGRESS_SUMMARIES can only turn
     # summaries ON; "0" here closes the fork gate for Agent-tool background launches in
-    # interactive sessions, the only off switch found. Read from the binary, not yet
-    # verified live. Fork-subagent and forked-skill launch sites pass
+    # interactive sessions, the only off switch found. Verified live on 2.1.316 (2026-11-02,
+    # one background Haiku agent, 2 min 25 s: 0 AgentSummary timer fires with the switch,
+    # 4 without, about 32 s apart). The control logged "Asking for summary" from about 1 KB
+    # of notes, so on this account the summaries already use the cheaper short mode; the
+    # switch still removes the calls. Fork-subagent and forked-skill launch sites pass
     # enableSummarization: true unconditionally and nothing shows this switch changes that
     # (#86879 agrees); no installed skill has `context: fork` today. Opt back in with "1".
     "CLAUDE_CODE_FORK_SUBAGENT": "0",
