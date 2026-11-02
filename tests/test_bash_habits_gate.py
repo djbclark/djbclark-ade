@@ -104,6 +104,8 @@ def test_sudo_k_n_and_plain_sudo_are_quiet(command):
     "ls -la --human-readable",
     "date -d yesterday +%F",
     "x=$(date --date='2 days ago' +%F)",
+    "x=$(echo a,b | cut --delimiter=, -f1) && echo $x",     # inside the group still denied
+    "gh api x $(echo a | cut --delimiter=, -f1):y --jq .z",
     "date -ud @0",
     "stat -c %a f",
     "stat --format=%a f",
@@ -196,6 +198,10 @@ def test_gnu_deny_reason_names_the_g_tool():
     "git log --format=%H --reverse; git diff --stat",
     "cp a b --force",                                        # past the operands BSD reads no options
     "rm -rf -- --weird",
+    # text after the `)` of a $(... | tool ...) group belongs to the outer command (2026-11-02)
+    "gh api repos/o/r/compare/m...$(echo $r|cut -d/ -f1):master --jq .x",
+    "git log $(git rev-parse HEAD | cut -c1-7)..HEAD --format=%H",
+    "echo $(echo a | tr -d a) --version-sort",
 ])
 def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     assert not denied(command)

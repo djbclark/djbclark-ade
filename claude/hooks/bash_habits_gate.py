@@ -118,6 +118,24 @@ def strip_literals(c: str) -> str:
     return re.sub(r"\d*>&\d*-?|&>>?|<&\d*", " ", s)
 
 
+def before_unmatched_close(stage: str) -> str:
+    """The part of a pipeline stage before a `)` that closes a subshell opened in an earlier stage.
+
+    `gh api x $(echo $r | cut -d/ -f1):master --jq .y` splits at the pipe into
+    `gh api x $(echo $r` and `cut -d/ -f1):master --jq .y`; everything after the `)` belongs to
+    `gh`, not to `cut` (2026-11-02: that tail made the gate deny `cut --jq`). A `)` that closes
+    a `(` of the same stage is kept."""
+    depth = 0
+    for i, ch in enumerate(stage):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return stage[:i]
+            depth -= 1
+    return stage
+
+
 def words(stage: str) -> list[str]:
     """A stage's words; `$(`, backticks and `(`/`{` start a command, so they split too."""
     return [w for w in re.split(r"\s+|\$\(|`|\(|\{", stage) if w]
@@ -290,7 +308,7 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     guarded = bool(re.search(r"pipefail|PIPESTATUS", plain))
     warn = None
     for n, (pipeline, op) in enumerate(pipelines):
-        stages = re.split(r"\|&?", pipeline)
+        stages = [before_unmatched_close(st) for st in re.split(r"\|&?", pipeline)]
         for stage in stages:
             if command_word(stage)[0] == "sed":
                 return ("Use `gsed`, not bare `sed`: this Mac's `sed` is BSD sed and GNU flags "
