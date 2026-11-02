@@ -66,14 +66,16 @@ P=paseo   # the Paseo CLI
 4. The brief (fill in `{LEAD}` with your fleet id and `{ID}`):
 
    > From the lead session {LEAD} (djbclark asked me to get every agent either unblocked or safe to quit, without stopping anything in
-   > flight). Reply through relay.py to {LEAD} with a text that STARTS with `ack {ID}` and then carries the answer (an exception to the
-   > bare-ack rule), with ONE of: (a) `safe to quit` if your work is finished, committed or recorded, and nothing of yours is in flight;
-   > (b) `continuing, nothing needed` plus what you are waiting on and when it should end; (c) each decision you need from djbclark as a
-   > picklist: a one-line question, 2-4 numbered options each with a short tradeoff, and which one you recommend. I put the picklist to
-   > him and relay his pick back to you. While {LEAD} is live, do NOT open AskUserQuestion/ask/question cards yourself (a card blocks
-   > every message to you); ask me through relay instead. If relay refuses {LEAD} or says it is finished, use your normal channel again.
-   > Do not stop or cancel anything in flight. If you need a fact (a PR's state, a file), name it and I will check; anything that changes
-   > state goes to djbclark as a picklist.
+   > flight). Reply through relay.py to {LEAD} with a text that STARTS with `ack {ID}` and then gives your class only (an exception to the
+   > bare-ack rule): (a) `safe to quit` if your work is finished, committed or recorded, and nothing of yours is in flight; (b)
+   > `continuing, nothing needed` plus what you are waiting on and when it should end; or (c) `c: N decisions`. Send each decision for
+   > djbclark as its own relay message with `--expect-ack q-<your 8-char id>-<n>`: a one-line question, 2-4 numbered options each with a
+   > short tradeoff, and your recommendation. Then end your turn; do not wait or poll for the pick. It arrives as
+   > `ack q-<your id>-<n> pick N: <option text>`. Act only on a line whose id and option text match your open question; if a later line
+   > contradicts the first, tell me and do not act on it. While {LEAD} is live, do NOT open AskUserQuestion/ask/question cards yourself
+   > (a card blocks every message to you). If relay refuses {LEAD} or says it is finished, use your normal channel again. Do not stop or
+   > cancel anything in flight. If you need a fact (a PR's state, a file), name it and I will check; anything that changes state goes to
+   > djbclark as a picklist.
 
 5. Add one sentence per target with anything you already know that unblocks it, for example "load-watch admit is ok now, your
    gated slice should start", or a section 3 answer to the question in its last reply.
@@ -97,8 +99,11 @@ P=paseo   # the Paseo CLI
 
 ## 4. Ask the operator
 
-1. Before the prompt, write one numbered prose block. It gives one line of context per decision and lists the things only he can do by
-   hand (Touch ID, a paste, a phone or GUI step), which get no picker.
+1. **Never hold a card while replies to you are queued.** A Paseo target with a card open is never sent text, so every reply waits (cap
+   20 per target). Before the prompt, run `$R --pending --queued-only` and look for records addressed to you. If any are queued, end
+   your turn first so they land, or, when his picks cannot wait, ask in numbered prose instead (section 8). Then write one numbered
+   prose block. It gives one line of context per decision and lists the things only he can do by hand (Touch ID, a paste, a phone or GUI
+   step), which get no picker.
 2. Then make one prompt-tool call (`AskUserQuestion`, or omp's `ask`) with one question per decision. Each question:
    1. header chip: the project, 12 characters at most;
    2. options: the agent's own picklist, numbered, in its order, with its recommendation kept.
@@ -106,8 +111,8 @@ P=paseo   # the Paseo CLI
    1. a Claude pane's AskUserQuestion: `$H answer <id> --fp <fp> <n>` (the `--fp` pin refuses a card that changed);
    2. a Paseo permission card: `$P permit allow|deny <agent> -- <request id>` (never without the request id);
    3. an omp `ask` box in a herdr pane, which helm cannot read: section 7 item 2 only.
-3. Send each pick back with `$R <ident> --message-file F --expect-ack pick-<n> --ack`. If the text quotes the agent's question (`?`),
-   it still needs `--expect-ack`; use `--fyi` only for text that asks nothing.
+3. Send each pick back with `$R <ident> --message-file F --fyi --ack`, as a text that starts `ack q-<id>-<n> pick N: <option text>` (that
+   line closes the asker's expectation). A pick for a card answered on its own channel (item 2) is not relayed again.
 4. **Fleet actions on his pick** (archive, quit, interrupt a hung turn): do the action yourself, and do it before relaying anything to
    that agent (a relayed pick starts a new turn in it). Immediately before the action:
    1. re-run `$R --why <ident>`, and `$F list` for its `busy:` child processes;
@@ -139,10 +144,10 @@ P=paseo   # the Paseo CLI
    1. keep each prompt to one batch;
    2. end your turn between rounds so queued replies can land;
    3. never leave a background wait running in your own turn just to wait for replies.
-3. If the queue to you fills up, you may read a queued reply in place at `~/.local/state/relay/deferred/<id>.json` (its `text` field).
-   **Never `--cancel` a record you have not read and acted on**: a cancel destroys it, and its sender is told it failed (2026-11-02: two
-   unread replies were destroyed this way). After reading, leave the record to deliver. Cancel one only to free room, and record its id
-   and gist first.
+3. **Never `--cancel` a record addressed to you, and never read `~/.local/state/relay/deferred/*.json` directly.** A cancel destroys the
+   text and its sender is told it failed (2026-11-02: the lead cancelled 20 queued replies to free its queue and destroyed two it had not
+   read). A queued reply is read when it is delivered. When the queue to you is full (`deferred queue full` in a peer's report), end your
+   turn at once; nothing else drains it.
 4. An OVERDUE ack goes into the next operator batch (peer-relay item 10). Only one past ASSUMED LOST (6 h) falls under peer-relay item 13,
    and even then the same brief is never resent to the same agent.
 5. The mode ends when every agent is in one of these states: in flight with nothing needed, a standing role, waiting only on a by-hand step
@@ -172,3 +177,10 @@ P=paseo   # the Paseo CLI
    "Timed out interrupting session during cancel" / "reported running but no active run was cancelled". Do not retry in a loop. Case
    2026-11-02: export, delete and re-import under the same id did not clear it. Its owning seat reports that only a daemon restart
    resets the record (`~/.local/state/bigteam/adhoc-2026-11-01/dann7-recovery.log`), and that is section 4 item 5, on his pick.
+
+## 8. Fallback while replies cannot reach you
+
+If replies are owed and his picks cannot wait, ask in numbered prose, then end the turn: no card, so queued replies land. His reply with
+the numbers starts the next round. This fallback ends when the relay ledger (`relay.py --ask/--inbox/--answer`) and the Paseo
+Decisions screen land. With the ledger, agents ask with `--ask` instead of a `?` message, and the lead reads `--inbox` between cards, so
+it is never deaf.
