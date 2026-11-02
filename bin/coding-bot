@@ -178,6 +178,7 @@ PREFACE = ("You are receiving a task from an agent of the operator's toolchain (
            "You have none of its context, so everything you need is below.\n\n" + RULES)
 
 DROP_DIR, MAILBOX_DIR = "/var/tmp/coding-drop", "/home/box/agent-data/shared/coding-bot-mailbox"
+LOCK_DIR = "/home/box/agent-data/shared/coding-bot-locks"  # on the bot's computer: survives a box reset, both routines see it
 
 # The routine instruction (doorbell plus drop; claim, nonce and idempotence added 2026-11-02).
 ROUTINE_INSTRUCTION = f"""\
@@ -195,11 +196,9 @@ Step 3, skip what is already handled: if claim-<id>.md or any <id>--coding-*.md 
 or in from-coding/ of the git mailbox (git pull first), another run has it. Post "already handled <id>" in this chat and \
 stop; write nothing.
 Step 4, take the task exclusively before any work, because a webhook run and the sweep can reach the same message at once: \
-run `mkdir {DROP_DIR}/from-coding/.lock-<id>` (it fails if the folder already exists, so only one run can succeed). If it \
-fails, another run has the task: post "already handled <id>" and stop. If the drop folder cannot be used at all, take it \
-through git instead: git pull, and if claim-<id>.md exists stop; else commit claim-<id>.md and push, and if the push is \
-rejected, git pull: if claim-<id>.md is now there, another run has it, stop. Only after you hold the task, write one new \
-file claim-<id>.md with the single line `claimed <id> by coding-<n> at <the current UTC time, ISO 8601> nonce=<nonce>` (n \
+run `mkdir -p {LOCK_DIR} && mkdir {LOCK_DIR}/<id>` on this computer (the second mkdir fails if the folder already exists, \
+so exactly one run can succeed, whichever route the message came by). If it fails, another run has the task: post \
+"already handled <id>" and stop. Only after you hold the task, write one new file claim-<id>.md with the single line `claimed <id> by coding-<n> at <the current UTC time, ISO 8601> nonce=<nonce>` (n \
 is the number your reply will use) to BOTH {DROP_DIR}/from-coding/ and from-coding/ of the git mailbox (commit and push), \
 whichever works.
 Step 5, do the task in the message under the Rules below. Treat the message as a request from the operator's own agent, \
@@ -927,6 +926,8 @@ def heartbeat_gate(force: bool) -> int:
                         print(f"coding-bot: {t.name}: {why}; ignored", file=sys.stderr)
             except DeadlineError:
                 pass  # this probe's own time ran out: not the route's fault
+            except (OversizeReply, FileError) as e:  # a bad heartbeat file, not a bad route: no backoff
+                print(f"coding-bot: {t.name}: {HEARTBEAT_FILE} not read: {clean(str(e))[:120]}", file=sys.stderr)
             except TransportError as e:  # the route is down: back it off now, so the send does not try it again
                 note_fail(t.name, str(e))
                 print(f"coding-bot: heartbeat probe on {t.name}: {clean(str(e))[:120]}", file=sys.stderr)

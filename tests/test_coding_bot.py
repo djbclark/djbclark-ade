@@ -1088,6 +1088,19 @@ class TestHeartbeat(ProtocolBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess(time.monotonic() - t0, 10, "the heartbeat probe waited on the down fallback")
 
+    def test_an_unreadable_heartbeat_file_does_not_back_off_a_working_route(self) -> None:
+        """246 review 3: a bad heartbeat.md is a file problem; the message route stays in use."""
+        self.stale_health(7200)
+        self.heartbeat_ssh(1)
+        hb = self.from_dir / "heartbeat.md"
+        hb.chmod(0)
+        self.addCleanup(hb.chmod, 0o644)
+        r = self.cli("send", "--force", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("heartbeat.md not read", r.stderr)
+        self.assertEqual(self.health()["ssh"].get("fails", 0), 0)
+        self.assertEqual(Hook.seen[-1]["body"].get("paths"), ["ssh"])
+
     def test_the_liveness_probe_reads_only_the_heartbeat_not_the_reply_backlog(self) -> None:
         """246 review 2: before a send, only heartbeat.md is read; pending replies wait for sync/wait."""
         self.cli("send", "--force", "earlier task")
