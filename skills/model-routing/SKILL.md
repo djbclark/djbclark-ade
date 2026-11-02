@@ -309,7 +309,7 @@ Rules for any agent that dispatches to agy:
   weekly until 2026-10-18, the $100 plan, aiuse `prolite`, since 2026-10-19;
   `gpt-6-astra` for frontier slices, and `gpt-6.1-sol` / `gpt-6-luna` for everyday kinds while at least
   half of every window is left, item 1b), antigravity/agy (Google AI Pro — also
-  exposes Claude/GPT windows), copilot (premium requests; **reserve, floor
+  exposes Claude/GPT windows), copilot (AI credits, per token since 2026-06-01; **reserve, floor
   60%**), cursor Pro (Auto and third-party sublimits; GrokBot has its own
   separate Cursor pool since 2026-10-18, never a target), grok (SuperGrok; an
   ordinary pool since 2026-10-18: realtime-web, research, bulk;
@@ -787,7 +787,7 @@ method that runs the waves.
    slower. Read `acp-run: applied: model=... effort=... ctx=...`; the per-agent
    table is `tools/acp-run/README.md` (2026-10-15).
 6. **The reserve, never depleted:** **copilot** (GitHub-side Copilot
-   review of commits draws on its premium requests; it read 100% used on
+   review of commits draws on its AI credits, billed per token since 2026-06-01 (it read 100% used on
    2026-10-15, so this has already gone wrong once). Hard floor **60% left**
    (`reserve_floor` in `route_agent.py`), one small slice at a time, and only
    for `github` slices, GitHub-context work that `gh` from any other agent cannot
@@ -802,6 +802,35 @@ method that runs the waves.
    (`NEVER_ROUTE` in `route_agent.py`; it stays in Hermes's chain as its
    lifeline; aiuse `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
    integrating what is in flight, because orchestration runs from it.
+   **Exception (djbclark, 2026-11-01):** from the moment djbclark says the Copilot allowance is about to be lost
+   (its counters reset on the 1st of each month, 00:00 UTC, and unused allowance never carries over; GitHub docs
+   "Usage-based billing for individuals", https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-individuals,
+   read 2026-11-01), the floor, the `github`-only limit and the concurrency caps (`max_parallel = 1`) are lifted
+   until the next 00:00 UTC on the 1st, at most 24 hours, and no longer: dispatch with
+   `ACP_OPERATOR_APPROVED=route-override acp-dispatch copilot --model claude-sonnet-5.5 --kind <kind>`, or open a
+   Paseo tab on provider `copilot`. The `load-watch admit` gate still applies, because the limit is local memory.
+   `route-override` also skips item 6's "missing or stale copilot reading means do not use", so the dashboard
+   check below is the replacement for it.
+   **Included allowance only, never money:** Copilot has billed per token since 2026-06-01 (input, cached input
+   and output tokens priced per model, converted to AI credits at 1 credit = $0.01; GitHub docs "Usage-based billing
+   for individuals", read 2026-11-01); a prompt with many tool-call turns is many model calls, so tool calls are NOT
+   free, and long turns on big contexts cost more, cached input less. Usage past the allowance is charged to the
+   payment method unless a Bundled AI credits budget of $0 with "Stop usage when budget limit is reached" is set.
+   Before the first dispatch check the usage dashboard for what is left and confirm that $0 stop is set; stop
+   dispatching when the allowance is spent; never run on purchased credits (item 7 still binds). Models, by
+   Terminal-Bench 4.0 score first (Vals AI, https://www.vals.ai/benchmarks/terminal-bench-4, 2026-10-29) and token
+   price second (GitHub docs "Models and pricing",
+   https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing, read 2026-11-01; $ per M
+   tokens in/out): `claude-sonnet-5.5` (64.1%, $2/$10; $16.51 per test) for code and judgment, `gpt-6.1-terra`
+   (49.5%, $1/$5; $2.16 per test) for bulk and for an advisory second opinion (weaker than Sonnet, so never a gate;
+   djbclark's account is offered no Opus, Fable, Sol or Astra on Copilot). Those ids are the ones `acp-run copilot
+   --info` listed on 2026-11-02 (CLI 1.0.105; `tools/acp-run/README.md` copilot section): `pick_config` rejects an id
+   the CLI does not offer, so run `acp-run copilot --info` before dispatching and use an offered id, not a price-page
+   id. `kimi-k3` (17.2% on Vals, $3/$15, $12.48 per test) and `gemini-3.8-flash` (19.7%,
+   $0.75/$3.75 promotional through 2026-12-31, but $8.65 per test: cheap per token, not per task) score below the
+   tier-2 bar of item 14: never code, never a review or gate; `gemini-3.8-flash` for bulk that a stronger model
+   reviews, `kimi-k3` for diversity only. Avoid `auto` (its model, and so its price, is not chosen by you). Prices
+   and scores change: re-read both pages before relying on these.
 7. **Never:** **hermes** as a delegation target (the operator's own assistant;
    `acp-run` and `acp-dispatch` refuse it by an approval gate); **cline**,
    uninstalled 2026-10-17 and gated the same way (Hermes's ClinePass pool is
@@ -868,6 +897,34 @@ method that runs the waves.
     `bin/claude-settings-env`; `--check` shows drift) makes every unpinned Agent-tool sub-agent and teammate
     Sonnet: pass `model: "opus"` in the call for a judgment sub-agent; pinned
     definitions keep theirs; the built-in Explore and Plan agents ignore it.
+14. **Cost tiers by kind of work** (operator, 2026-11-01, after a proposed "cheap model as the daily driver" plan
+    was checked against the evidence). Decide the tier from the kind of task, up front; for code, no cheap-first
+    cascade from tier 2 to tier 1 ("escalate after the cheap tier fails twice"): a weak model's failures are often
+    silent (the code passes and is wrong). Within the Claude ladder (4c.4, 4e: Sonnet, then Opus on a verified
+    failed check) the evidence-based climb still applies; this item does not repeal it.
+    | Tier | Work | Models, in order of value |
+    |---|---|---|
+    | 1, most work | code, tests, refactors, glue, configs | Sonnet 5.5 (claude subscription, omp, Copilot when ruled), GPT-6.1 Sol (codex: best score per dollar among the models above 50% on Terminal-Bench, see below) |
+    | 2, never new or changed logic, output reviewed by a stronger model | bulk, docs, large reading, mechanical edits only when a check proves them | GLM-5.3-Flash (zai), Gemini 3.8 Flash (agy), `gpt-6-luna`, DeepSeek V4.1 Flash (non-code bulk only) |
+    | 3 | judgment, architecture; reviews default here | Opus 5.5 at high; frontier models (astra, Fable) only through `--kind frontier` |
+    Tier 3 is a default, not a ban elsewhere: item 13 drops the `adversary` to Sonnet when `claude-quota-guard` is
+    tight, and `AGENTS.md` "Code review" (adversary marker on the PR body, local Codex review) governs which
+    reviews a PR needs. Gemini 4 Argon is an advisor (agy research, `config/go-model-policy.json`), not a routed
+    frontier fallback: `dispatch.frontier_models` is `gpt-6-astra` and `fable` only.
+    **Never code on DeepSeek V4.1 Flash** (djbclark 2026-10-30: no `code` on opencode-go). Evidence: Terminal-Bench 4.0
+    (Vals AI, 2026-10-29, pass/fail on long real terminal tasks): Opus 5.5 65.2%, Sonnet 5.5 64.1%, GPT-6.1 Sol 55.1%,
+    GPT-6.1 Terra 49.5%, GLM 5.3 38.9%, GLM 5.3 Flash 37.4%, DeepSeek V4.1 Flash 19.7% (its 1017 build 31.8%), Gemini
+    3.8 Flash 19.7%, Kimi K3 17.2%, GPT-6 Luna 13.6%. Vals cost per test: Sol $1.72 at 55.1%, Terra $2.16, Kimi K3.1 Pro $4.57, Opus
+    $13.20, Sonnet $16.51; DeepSeek V4.1 Flash is cheaper ($0.50) but at 19.7%, so "best per dollar" holds only among
+    the models above 50%. The 2026-10-30 review of this repo's code (reports under
+    `~/.local/state/bigteam/deepseek-review-2026-10-30/`, PRs 171, 172, 173, 174) found four BLOCKs (a credential leak, a
+    `NameError` crash, a disabled pool chosen as primary, and a forged-ack hole in `relay.py` that predates the
+    Flash-written code) and a MAJOR duplicate paid send: weak-model code needs strong review. "Cheapest per token"
+    matters only once the flat subscriptions run out: inside a subscription's quota a strong model costs nothing
+    extra. `config/routing.toml` ranks the tiers this way (`bin/route_agent.py policy --md`); other code routes in it
+    (agy-claude Opus burn-first, zai GLM-5.3 38.9%, alibaba qwen3.8-max 34.3%, clinepass, the unpinned opencode-zen,
+    openrouter and deepseek pools) are overflow behind tier 1 or burn-first, not tier-1 choices. This item is the
+    reason, not new numbers.
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and
 `config/routing.toml` is the source of truth: the kinds, each service's
