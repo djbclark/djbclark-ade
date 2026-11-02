@@ -593,7 +593,19 @@ def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float, pidfil
     except OSError as e:
         raise TransportError(f"{argv[0]}: {e.strerror or type(e).__name__}") from None
     if pidfile is not None:
-        pidfile.write_text(f"{proc.pid}\n")
+        tmp = pidfile.with_name(f".{pidfile.name}.{os.getpid()}.tmp")
+        try:  # atomic: a reader sees no record or a whole one
+            tmp.write_text(f"{proc.pid}\n")
+            os.replace(tmp, pidfile)
+        except BaseException as e:  # no record, no child: never leave a git running that nothing can find
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            if isinstance(e, OSError):
+                raise TransportError(f"{argv[0]}: could not record its pid ({e.strerror or type(e).__name__})") from None
+            raise
     try:
         return _finish(proc, argv, stdin, timeout, by_wait)
     finally:

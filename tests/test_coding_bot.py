@@ -1438,6 +1438,17 @@ class TestTransportRobustness(TransportBase):
         self.assertIsNotNone(orphan.wait(timeout=5))
         self.assertFalse(child.exists())
 
+    def test_a_git_whose_pid_cannot_be_recorded_is_killed_not_left_running(self) -> None:
+        """Review of 5b98ba1b: a failed pid record must not leave an unrecorded git behind."""
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            missing = Path(self.tmp.name) / "no-such-dir" / "x.child"
+            t0 = time.monotonic()
+            with self.assertRaises(mod.TransportError) as cm:
+                mod.run_cmd(["sleep", "30"], timeout=60, pidfile=missing)
+            self.assertIn("could not record its pid", str(cm.exception))
+            self.assertLess(time.monotonic() - t0, 5, "the child was waited for instead of killed")
+
     def test_wait_started_after_the_ack_deadline_still_gets_full_polls(self) -> None:
         """Review of d199f325: past the ack deadline, a slow listing gets its full share, so a claim there is found."""
         self.cli("send", "task")
