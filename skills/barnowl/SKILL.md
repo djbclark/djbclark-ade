@@ -186,8 +186,11 @@ own tmux session, never in the `barnowl` one.
    open PRs, merged: [#2](https://github.com/asedeno/snipe/pull/2) (runs on Python 3.12+, see
    item 2) and [#3](https://github.com/asedeno/snipe/pull/3) (roost retries with a 10 s to 5
    minute backoff when `roost-api` is unreachable; without it the roost task dies on the first
-   connection error and posts a traceback). Update it with `git fetch fork latest` and
-   `git checkout -B latest fork/latest`. Start it with
+   connection error and posts a traceback). **These steps are human-only setup.** They need
+   an unrestricted login shell on pastebin, which an agent must not use: the forced-command key
+   and the human-confirmation boundary in the restricted-access rule above stay the only agent
+   route, and an agent never opens another key or a remote shell to run them. The human updates it
+   with `git fetch fork latest` and `git checkout -B latest fork/latest`, and starts it with
    `ssh pastebin.xvm.mit.edu`, then `tmux new -As snipe snipe`; `~/.local/bin/snipe` runs the
    venv and is not on PATH for non-login ssh.
 2. **Python and Markdown.** The venv is `~/src/snipe/venv` on the system Python 3.13.5 with
