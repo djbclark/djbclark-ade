@@ -59,11 +59,18 @@ problems, 2 = unreadable input. It needs `uv` (it carries its own `jsonschema` d
 
 ## Rebuilding btm-mt (never build locally)
 
-Builds go to CI (standing rule, `memory/feedback_macos_ci_on_request_only.md`). Work in
-`~/src/bottom` on `middle-truncate-command`, push to the fork (`origin` = `djbclark/bottom`).
-`.github/workflows/fork-build.yml` runs on push only (no `pull_request` trigger: a PR run
-uses the PR's copy of the workflow, so an outsider could replace the artifact), runs fmt,
-clippy and tests, and builds the macOS arm64 binary as artifact `btm-macos-arm64`. Then:
+Builds go to CI (standing rule, `memory/feedback_macos_ci_on_request_only.md`). Work in a
+worktree on a feature branch from `origin/middle-truncate-command` (`~/src/bottom` is the
+shared checkout; it only fast-forwards). Format with `cargo +stable fmt --all` before each
+push: the machine's default toolchain is pinned to 1.92, whose rustfmt disagrees with CI's
+latest stable (2026-11-01, a CI fmt failure). Check the branch with
+`gh workflow run fork-build.yml --repo djbclark/bottom --ref <branch>` (its artifact can be
+previewed with `preview.py --bin`), then publish by fast-forward:
+`git push origin <branch>:middle-truncate-command`, and `git merge --ff-only` `~/src/bottom`
+(the validator reads its schema). `.github/workflows/fork-build.yml` runs on push and manual
+dispatch only (no `pull_request` trigger: a PR run uses the PR's copy of the workflow, so an
+outsider could replace the artifact), runs fmt, clippy and tests, and builds the macOS arm64
+binary as artifact `btm-macos-arm64`. After the push run on `middle-truncate-command` passes:
 
 ```sh
 scripts/install_btm_mt.py
