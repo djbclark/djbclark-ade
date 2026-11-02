@@ -1163,6 +1163,23 @@ class TestDeadlines(ProtocolBase):
         self.assertEqual(w.returncode, 124, w.stderr)
         self.assertNotIn("was not picked up", w.stderr)
 
+    def test_a_route_that_goes_down_after_one_read_counts_as_unchecked_again(self) -> None:
+        """246 review 4: ssh read once, then down: a claim there cannot be seen, so no exit 5 from git alone."""
+        self.cli("send", "task")
+        env = dict(self.env, CODING_BOT_WEBHOOK_URL=self.url, CODING_BOT_WEBHOOK_KEY=KEY)
+        before = self.ssh_calls()
+        w = subprocess.Popen([sys.executable, str(SCRIPT), "wait", "ade-1", "--timeout", "5", "--ack-timeout", "2.5"],
+                             env=env, cwd=self.tmp.name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(w.kill)
+        for _ in range(100):  # until the first ssh read has happened
+            if self.ssh_calls() > before:
+                break
+            time.sleep(0.05)
+        self.ssh_down.write_text("")
+        _, err = w.communicate(timeout=30)
+        self.assertEqual(w.returncode, 124, err)
+        self.assertNotIn("was not picked up", err)
+
     def test_claimed_but_never_answered_is_124_and_pings_once_under_its_own_kind(self) -> None:
         self.cli("send", "task")
         self.cli("wait", "ade-1", *self.WAIT)  # unclaimed: kind "not picked up"

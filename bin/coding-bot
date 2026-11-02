@@ -1361,7 +1361,10 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                     poll_transports([due], prefer=rid, read_ok=read_ok)
                 finally:
                     PROBE.clear()
-                polled |= read_ok  # a transport skipped (backoff) or failed is still unchecked: no "not picked up" yet
+                # only the LATEST poll of a route counts: a route that failed or was skipped (backoff) since it was last read
+                # could be holding a claim right now, so it is unchecked again and "not picked up" must wait for it
+                polled.discard(due.name)
+                polled |= read_ok
                 nxt[due.name] = time.monotonic() + every * (1 if due.name == "ssh" else 3)
                 continue  # look at the inbox again at once
             time.sleep(min(0.5, max(0.05, min(deadline, ack_deadline or deadline) - time.monotonic())))
