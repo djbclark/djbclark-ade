@@ -1384,6 +1384,18 @@ class TestTransportRobustness(TransportBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.in_origin("to-coding/ade-1.md"), r.stderr)
 
+    def test_a_stale_ref_lock_left_by_a_killed_fetch_does_not_block_replies(self) -> None:
+        """Review of a4188cef: the reply poll clears a killed fetch's ref lock too, not only a send."""
+        self.ssh_down.write_text("")
+        self.cli("send", "task")
+        self.bot_reply_git("ade-1", "over git\nDONE")
+        lock = self.mailbox / ".git/refs/remotes/origin/main.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("")
+        w = self.cli("wait", "ade-1", "--timeout", "10")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("over git", w.stdout)
+
     def test_wait_answers_a_filed_reply_without_touching_the_network(self) -> None:
         self.cli("send", "task")
         self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nok\nDONE")

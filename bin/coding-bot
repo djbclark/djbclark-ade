@@ -827,6 +827,7 @@ class Git:
     def list_files(self) -> list[str]:
         """The reply, claim and heartbeat files in from-coding/."""
         with self.locked():
+            self._clear_locks()  # a poll killed mid-fetch leaves a ref lock that would fail every later fetch
             self._git("fetch", "--quiet", self.remote, self.branch)
             out = self._git("ls-tree", "--name-only", f"{self.remote}/{self.branch}", "from-coding/")
         return [n.split("/", 1)[1] for n in out.split("\n") if "/" in n and bot_file(n.split("/", 1)[1])]
