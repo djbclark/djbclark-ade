@@ -31,7 +31,7 @@ class Env:
                       'if [ -f "$DL_RELAY_SLEEP" ]; then sleep "$(cat "$DL_RELAY_SLEEP")"; fi\n'
                       'if [ -f "$DL_RELAY_FAIL" ]; then echo "not sent" >&2; exit "$(cat "$DL_RELAY_FAIL")"; fi\n'),
             "ping": '#!/bin/sh\necho "PING $@" >> "$DL_LOG"\n',
-            "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\n',
+            "dispatch": '#!/bin/sh\necho "DISPATCH $@" >> "$DL_LOG"\nif [ -f "$DL_DISPATCH_FAIL" ]; then echo "no eligible route" >&2; exit 3; fi\n',
             "paseo": (f'#!{sys.executable}\nimport os, sys, time\ntime.sleep(float(os.environ.get("FAKE_PASEO_SLEEP") or 0))\n'
                       'open(os.environ["DL_LOG"], "a").write("PASEO " + " ".join(sys.argv[1:]) + "\\n")\n'
                       'a = sys.argv[1:]\n'
@@ -53,7 +53,7 @@ class Env:
             "DEADLINE_RELAY": str(tmp / "relay"), "DEADLINE_HERMES_PING": str(tmp / "ping"),
             "DEADLINE_ACP_DISPATCH": str(tmp / "dispatch"), "DEADLINE_PASEO": str(tmp / "paseo"),
             "FAKE_PASEO_LS": str(tmp / "ls.json"), "FAKE_PASEO_DIR": str(self.paseo_dir), "DL_RELAY_FAIL": str(tmp / "relay-fails"),
-            "DL_RELAY_SLEEP": str(tmp / "relay-sleep"), "DEADLINE_INLINE_WORKER": "1",
+            "DL_RELAY_SLEEP": str(tmp / "relay-sleep"), "DL_DISPATCH_FAIL": str(tmp / "dispatch-fails"), "DEADLINE_INLINE_WORKER": "1",
         }
         (tmp / "ls.json").write_text("[]")
 
@@ -1036,3 +1036,21 @@ def test_sweep_skips_a_record_deleted_after_its_snapshot(env, inproc, monkeypatc
     assert res == [{"name": "ghost2", "action": "ok (gone since the scan)"}]
     assert not (env.state / "ghost2.json").exists(), "no record may be recreated as lost"
     assert env.calls("RELAY") == []
+
+
+# ---------- PR 223 local-review round 14: a failed automatic reroute is reported, once-only dispatch preserved ----------
+
+def test_a_failed_reroute_notifies_the_owner_and_the_operator_without_a_second_dispatch(env):
+    Path(env.base["DL_DISPATCH_FAIL"]).write_text("x")
+    assert start(env, "rrfail", "--budget", "5", "--on-expire", "reroute:/x/jobs/rec.json").returncode == 0
+    env.run("sweep", "--no-agents", now=T0 + 10)
+    rec = env.record("rrfail")
+    assert rec["recovery"]["state"] == "done" and "reroute rc=3" in rec["recovery"]["outcome"][-1]
+    assert len(env.calls("DISPATCH")) == 1
+    assert len(env.calls("RELAY")) == 1 and "reroute FAILED" in env.log.read_text(), "tracked owner notice"
+    assert [p for p in env.calls("PING") if "reroute FAILED" in p], "operator ping"
+    assert rec["notice"]["done"] is True
+    env.run("sweep", "--no-agents", now=T0 + 5000)
+    assert len(env.calls("DISPATCH")) == 1, "the dispatch is at-most-once"
+    ls = json.loads(env.run("ls", "--json").stdout)["records"][0]
+    assert "reroute rc=3" in ls["recovery"][-1] and ls["notice_done"] is True

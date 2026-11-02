@@ -142,3 +142,5 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     sweep does not turn the registration into `lost`. When the owner stays unreachable through all 5 notice attempts, one Hermes ping says so (`notice.escalated`).
 21. Names are compared case-insensitively (reserved `agents`, and two names differing only in case are refused: one file on a case-insensitive volume). The sweep
     advances only the record it re-reads under the lock; one deleted since its snapshot is skipped, never resurrected from the stale copy.
+22. A failed automatic reroute (`acp-dispatch reroute` exits non-zero) is never silent: the worker queues a tracked owner notice (retried like any other) and
+    pings the operator once; the dispatch itself stays at-most-once. `deadline ls --json` shows the recovery outcome and whether the owner notice was delivered.

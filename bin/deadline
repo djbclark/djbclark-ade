@@ -526,7 +526,7 @@ def work(rec: dict, held: bool = False) -> None:
         if not job:
             return
         save(cur)
-    steps, notice_result = [], None
+    steps, notice_result, reroute_failed = [], None, None
     if "recovery" in job:
         ping, reroute = job["recovery"]
         if ping:
@@ -535,6 +535,8 @@ def work(rec: dict, held: bool = False) -> None:
             argv = tool("DEADLINE_ACP_DISPATCH", "bin/acp-dispatch") + ["reroute", reroute, "--escalate", "--detach", "--no-wait"]
             rc, out = sh_nokill(argv, wait=120)
             steps.append(f"reroute rc={rc}: {out[-150:]}")
+            if rc != 0:
+                reroute_failed = f"rc={rc}: {out[-150:]}"
     if "notice" in job:
         notice_result = relay_rc(*job["notice"])
     with locked():
@@ -544,6 +546,14 @@ def work(rec: dict, held: bool = False) -> None:
         if "recovery" in job and isinstance(cur.get("recovery"), dict):
             cur["recovery"].update(state="done", at=now(), outcome=steps)
         escalate = None
+        requeue = False
+        if reroute_failed:
+            # the work is stopped and no replacement exists: a TRACKED owner notice (retried until delivered) plus an operator ping;
+            # the at-most-once reroute itself is never repeated (recovery is already claimed)
+            if not isinstance(cur.get("notice"), dict) or cur["notice"].get("done"):
+                notify(cur, message(cur, f"stopped, but the automatic reroute FAILED ({reroute_failed}); nothing replaced it"))
+                requeue = True
+            escalate = f"deadline {cur.get('name')} ({cur.get('owner')}): reroute FAILED ({reroute_failed[:100]}); work stopped, no replacement"
         if notice_result and isinstance(cur.get("notice"), dict):
             nt = cur["notice"]
             nt.update(inflight=False, done=notice_result[0] == 0, result=notice_result[1])
@@ -553,6 +563,8 @@ def work(rec: dict, held: bool = False) -> None:
         save(cur)
     if escalate:
         hermes_ping(escalate)
+    if requeue:
+        spawn_worker(cur)
 
 
 def message(rec: dict, what: str) -> str:
@@ -1045,7 +1057,9 @@ def describe(rec: dict) -> dict:
     return {"name": rec.get("name"), "owner": rec.get("owner"), "pid": rec.get("pid"), "state": rec.get("state", "running"),
             "elapsed_s": round(n - started), "left_s": round(left),
             "heartbeat_age_s": round(n - rec.get("last_beat", started)), "checkpoint": rec.get("checkpoint"),
-            "on_expire": rec.get("on_expire"), "reason": rec.get("reason")}
+            "on_expire": rec.get("on_expire"), "reason": rec.get("reason"),
+            "recovery": (rec.get("recovery") or {}).get("outcome") if isinstance(rec.get("recovery"), dict) else None,
+            "notice_done": (rec.get("notice") or {}).get("done") if isinstance(rec.get("notice"), dict) else None}
 
 
 def cmd_ls(a) -> int:
