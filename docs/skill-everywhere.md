@@ -143,39 +143,32 @@ to run `reload-plugins` the same way. Claude Code slash wrappers live in
 `~/src/djbclark-ade/claude/commands/` and are symlinked directly into
 `~/.claude/commands/`.
 
-## 3a. Paseo overwrites its six skills unless told not to (2026-10-23)
+## 3a. Paseo's skill sync and our vendored Paseo skills (2026-10-23, renamed 2026-11-02)
 
-Paseo's daemon syncs its bundled skills (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`,
-`paseo-help`, `paseo-plugin`) into `~/.claude/skills` and `~/.agents/skills` at **every start**
-(`orchestrationSkills.autoUpdate()`), overwriting whatever it finds. Those two paths are directory links into this
-repo, so the write landed here: our narrowed descriptions (`skills/paseo/UPSTREAM.md`) were replaced by upstream's,
-with a `.paseo-managed-files.json` beside each (markers dated 2026-10-19 12:16, the daemon start).
+**Our six vendored Paseo skills carry an `ade-` prefix** (`ade-paseo`, `ade-paseo-advisor`, `ade-paseo-committee`,
+`ade-paseo-handoff`, `ade-paseo-help`, `ade-paseo-plugin`) **so Paseo never touches them.** Paseo owns skills by
+name: every name in its bundle (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`,
+`paseo-plugin`) is compared in `~/.agents/skills/<name>` and `~/.claude/skills/<name>` with its bundled copy, and a
+difference is "drift" that the daemon's startup sync and any skills install, update or save rewrite. Under the old
+unprefixed names those entries were directory links into this repo, so each rewrite landed here (2026-10-19, twice on
+2026-10-24 by the dev daemon, and 2026-11-01 21:33:38 with the installed 0.15.0-beta.1 bundle; manifests
+`.paseo-managed-files.json` beside each). A name Paseo does not ship is invisible to all of its code paths, in every
+build and every Paseo home.
 
-**The fix is Paseo's own skill selection, not a different link layout.** `~/.paseo/config.json` carries
-`agents.skills.selection = {"mode": "custom", "skills": []}` (set 2026-10-23, applied with `paseo reload`; backup
-`~/.local/state/paseo-backups/config-2026-10-23-pre-skill-selection.json`). With nothing selected, the start-up
-sync only plans deletions and never applies them, so it writes nothing; with `{"mode": "all"}` (the default) it
-overwrites. Checked with the shipped `operations.js` against the real directories, not by a daemon restart (a restart
-would end this machine's Paseo agents).
-
-1. Paseo's settings screen now shows the six skills as drift ("to be removed"). Do not save the selection there and
-   never confirm the removal: it deletes our directory links (not the repo files). Re-link with
-   `skill-everywhere paseo paseo-advisor paseo-committee paseo-handoff paseo-help paseo-plugin`.
-2. A key set with `"skills"` at the top level of `config.json` is rejected by `paseo reload` (and would stop a
-   restart): the persisted path is `agents.skills.selection`.
-3. Re-vendoring a newer Paseo bundle is done by hand (`skills/paseo/UPSTREAM.md`).
-4. Tried and dropped: a real directory holding per-file symlinks makes Paseo's sync throw before writing (verified),
-   but Cursor's loader rejects a `SKILL.md` symlink that resolves outside its skills root (codex `gpt-6-astra`
-   review, 2026-10-23, verified in the installed Cursor source) and Cursor reads `~/.claude/skills` here; a settings
-   save also stages deletions before it reaches the guard.
-5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), `docs/upstream-issues.md` item 10.
-6. **Every Paseo daemon with its own home needs the same setting** (found 2026-10-24). The selection lives in each
-   home's `config.json`, but every daemon syncs into the one real `~/.agents/skills` and `~/.claude/skills`. The Paseo
-   dev daemon (`scripts/dev-daemon.sh` in `~/src/paseo`, home `.dev/paseo-home`, no selection, so mode `all`) rewrote
-   the five vendored skills at 09:26:49 and 10:05:46 EDT on 2026-10-24, after the main daemon had been restarted onto
-   0.13.0-beta.1 (09:57) with the setting in place. The main daemon was never the second writer; the 09:57 restart was
-   not needed. Seed `agents.skills.selection = {"mode":"custom","skills":[]}` in every dev or test home before
-   starting its daemon.
+1. **Keep every Paseo home's selection empty**: `agents.skills.selection = {"mode":"custom","skills":[]}` in
+   `~/.paseo/config.json` and in every dev or test home before its daemon starts (`~/src/paseo/.dev/paseo-home` has
+   it). With `{"mode":"all"}` (the default) Paseo installs its own unprefixed copies beside ours, and their broad
+   triggers ("handoff", "second opinion", "stuck") compete with the narrowed ones. The persisted path is
+   `agents.skills.selection`; a top-level `"skills"` key is rejected by `paseo reload`.
+2. With an empty selection Paseo's settings screen lists any leftover unprefixed copies as "to be removed"; after
+   the rename that removal is harmless (they are not ours).
+3. Re-vendoring a newer Paseo bundle is done by hand (`skills/ade-paseo/UPSTREAM.md`), keeping the prefix.
+4. Tried and dropped before the rename: the empty selection alone (it is per Paseo home, while every home writes the
+   one real `$HOME` skill dirs), and a real directory holding per-file symlinks (Paseo's sync throws before writing,
+   but Cursor's loader rejects a `SKILL.md` symlink that resolves outside its skills root, codex `gpt-6-astra` review
+   2026-10-23).
+5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), #7853, `docs/upstream-issues.md`
+   item 10.
 
 ## 4. When the table is wrong
 

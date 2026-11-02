@@ -1,6 +1,6 @@
 ---
-name: paseo-committee
-description: Form a committee of two high-reasoning Paseo agents to step back, do root cause analysis, and produce a plan. Use only when the user asks for a Paseo committee ("/paseo-committee"); otherwise use the dialogue skill or acp-run.
+name: ade-paseo-committee
+description: Form a committee of two high-reasoning Paseo agents to step back, do root cause analysis, and produce a plan. Use only when the user asks for a Paseo committee ("/ade-paseo-committee"); otherwise use the dialogue skill or acp-run.
 user-invocable: true
 ---
 
@@ -12,7 +12,7 @@ Two agents from contrasting profiles, fresh context, planning a solution in para
 
 ## Prerequisites
 
-Read the **paseo** skill. Call `list_profiles` before choosing committee members. Do not create committee agents until you have read the configured profiles and their `notes`.
+Read the **ade-paseo** skill. Call `list_profiles` before choosing committee members. Do not create committee agents until you have read the configured profiles and their `notes`.
 
 Contrast is the point of a committee, so pick profiles from different provider families when possible. Materialize each profile into `create_agent`.
 

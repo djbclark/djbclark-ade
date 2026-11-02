@@ -896,10 +896,11 @@ OpenCode, Pi and other agents in worktrees, with desktop, web, Android/iOS and C
 `brew install --cask paseo` (app plus the `paseo` CLI), then site-djbclark's `just
 paseo-desktop-apply` (daemon on `127.0.0.1:7263`, web UI on, relay off, `tailscale serve
 --https=7263`; never funnel, no password, so tailnet-only). Linux/NixOS hosts use
-forgejo.mit.edu/djbclark/paseo-nix (CI-built package plus `services.paseo`). Skills: `paseo`,
-`paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin` (vendored in
-`djbclark-ade/skills/`, link them with `bin/skill-everywhere`; the advisor/committee/handoff triggers
-are narrowed to explicit Paseo requests, see `skills/paseo/UPSTREAM.md`). Fleet setup:
+forgejo.mit.edu/djbclark/paseo-nix (CI-built package plus `services.paseo`). Skills: `ade-paseo`,
+`ade-paseo-advisor`, `ade-paseo-committee`, `ade-paseo-handoff`, `ade-paseo-help`, `ade-paseo-plugin` (vendored in
+`djbclark-ade/skills/` with an `ade-` prefix so Paseo's own skill sync never claims them, link them with
+`bin/skill-everywhere`; the advisor/committee/handoff triggers are narrowed to explicit Paseo requests, see
+`skills/ade-paseo/UPSTREAM.md`). Every Paseo home's `agents.skills.selection` stays `{"mode":"custom","skills":[]}`. Fleet setup:
 site-djbclark `docs/paseo.md`. **Edge-case bridges (the only herdr items kept; herdr itself is retired as a harness,
 2026-10-31):** `herdr4paseo`, a terminal front end for one Paseo agent (log view, prompt box,
 steer/interrupt, permission confirm; runs in a Herdr pane; added 2026-10-28, djbclark):
