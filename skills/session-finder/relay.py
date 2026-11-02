@@ -2577,12 +2577,12 @@ def card_alert_text(rid, rec, look, waited):
 
 def card_episode_start(rid, rec, now):
     """When the card this record now meets began, for the card clock: the oldest `card_since` of another record of the SAME target that is queued, or
-    expired with its last look on a card within the last CARD_EPISODE_GAP seconds (its deliverer was still seeing the dialog when it ended), else NOW.
+    expired, cancelled or failed (a head the sender withdrew leaves the dialog up) with its last look on a card within the last CARD_EPISODE_GAP seconds (its deliverer was still seeing the dialog when it ended), else NOW.
     A pane dialog has no id, so the claim that says it was told is scoped to the episode, and a successor of an expired record that started a clock
     of its own would tell the operator about the same dialog again (local-review 2026-11-02, round 2)."""
     starts = []
     for r in rec_all():
-        if (r["id"] != rid and target_key(r) == target_key(rec) and r.get("state") in ("queued", "expired") and r.get("card_since")
+        if (r["id"] != rid and target_key(r) == target_key(rec) and r.get("state") in ("queued", "expired", "cancelled", "failed") and r.get("card_since")
                 and now - float(r.get("card_seen") or 0) < CARD_EPISODE_GAP):    # card_seen: refreshed by every look that found a card, not only a changed one
             starts.append(float(r["card_since"]))
     return min(starts + [now])

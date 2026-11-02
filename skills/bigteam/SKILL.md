@@ -856,7 +856,7 @@ detached job follows the same contract (2026-10-08).
    `started`/`finished`, `exit`, `status`, `report_source`, `cmd` and `rearm`;
    a hand-written one needs at least:
 
-       {"owner": "<CLAUDE_CODE_SESSION_ID>", "started": <epoch>,
+       {"owner": "<this session's id: `python3 ~/src/djbclark-ade/skills/session-finder/claude_identity.py`, the registry id a /baton successor needs; the handoff listing filters on it>", "started": <epoch>,
         "report": "<abs>/<name>-report.md", "done": "<abs>/<name>-report.md.done",
         "rearm": "timeout 1800 bash -c 'until [ -e <abs>/<name>-report.md.done ]; do sleep 10; done'",
         "cmd": "<what was launched, one line>"}

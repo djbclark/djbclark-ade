@@ -270,6 +270,16 @@ class TestCardAlert(Base):
         relay.card_alert_step(rid, relay.rec_read(rid), {"state": "card:question", "cards": [{"id": CARD_ID, "tool": "AskUserQuestion", "kind": "question"}]})
         self.assertEqual(len(self.ping_lines()), 1)
 
+    def test_a_cancelled_head_leaves_its_dialog_episode_to_the_next_record(self) -> None:
+        """local-review r4: a sender who withdraws the head (--cancel) leaves the dialog up; its successor must not start a fresh clock and re-ping."""
+        first = self.queue("first message to the peer")
+        second = self.queue("second message to the peer")
+        long_ago = time.time() - 20000
+        self.patch_rec(first, card_since=long_ago, card_seen=time.time() - 5, state="cancelled", finished=time.time())
+        self.assertEqual(relay.card_episode_start(second, relay.rec_read(second), time.time()), long_ago)
+        self.patch_rec(first, state="delivered")    # delivered means the card was answered: no episode to inherit
+        self.assertGreater(relay.card_episode_start(second, relay.rec_read(second), time.time()), long_ago + 1000)
+
     def test_a_garbage_threshold_means_the_default(self) -> None:
         for raw, expect in (("abc", 1800), ("", 1800), ("-5", 0), ("0", 0), ("90", 90)):
             with self.subTest(raw=raw):
