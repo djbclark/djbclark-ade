@@ -118,36 +118,41 @@ def strip_literals(c: str) -> str:
     return re.sub(r"\d*>&\d*-?|&>>?|<&\d*", " ", s)
 
 
-def _paren_scan(text: str) -> tuple[int | None, list[int]]:
-    """Walk `text` once: (index of the first `)` with no `(` before it, else None; the index of
-    each `(` still open at the end). A backslash-escaped paren is filename or
-    argument content (`find . -name foo\\)`), never a delimiter."""
-    opened: list[int] = []
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch == "\\":
-            i += 2
-            continue
-        if ch == "(":
-            opened.append(i)
-        elif ch == ")":
-            if not opened:
-                return i, []
-            opened.pop()
-        i += 1
-    return None, opened
-
-
-def before_unmatched_close(stage: str) -> str:
-    """The part of a pipeline stage before a `)` that closes a subshell opened in an earlier stage.
+def trim_closed_substitutions(pipelines: list[list[str]]) -> list[list[str]]:
+    """Each pipeline stage, cut at the `)` that closes a `$(`, `<(` or `>(` opened in an earlier stage.
 
     `gh api x $(echo $r | cut -d/ -f1):master --jq .y` splits at the pipe into
     `gh api x $(echo $r` and `cut -d/ -f1):master --jq .y`; everything after the `)` belongs to
-    `gh`, not to `cut` (2026-11-02: that tail made the gate deny `cut --jq`). A `)` that closes
-    a `(` of the same stage is kept, and so is an escaped `\\)`."""
-    cut, _ = _paren_scan(stage)
-    return stage if cut is None else stage[:cut]
+    `gh`, not to `cut` (2026-11-02: that tail made the gate deny `cut --jq`). Only a substitution
+    opener counts: a `)` that closes a bare `(` group, a regex group (`=~ ^(awk|sed)$`) or an
+    extended glob (`@(awk|sed)`) is argument text, and a `)` with no known opener cuts nothing.
+    A backslash-escaped paren is filename or argument content (`find . -name foo\\)`), never a
+    delimiter. The open-paren stack runs across all stages and pipelines of the command, because
+    `$(a && b | cut -d/ -f1):x --jq y` opens in one pipeline and closes in another."""
+    opened: list[tuple[int, bool]] = []  # (segment number, is a substitution opener)
+    segment = 0
+    result: list[list[str]] = []
+    for stages in pipelines:
+        row: list[str] = []
+        for stage in stages:
+            cut: int | None = None
+            i = 0
+            while i < len(stage):
+                ch = stage[i]
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == "(":
+                    opened.append((segment, i > 0 and stage[i - 1] in "$<>"))
+                elif ch == ")" and opened:
+                    opener_segment, substitution = opened.pop()
+                    if cut is None and substitution and opener_segment != segment:
+                        cut = i
+                i += 1
+            row.append(stage if cut is None else stage[:cut])
+            segment += 1
+        result.append(row)
+    return result
 
 
 def words(stage: str) -> list[str]:
@@ -321,9 +326,11 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                  for i in range(0, len(parts), 2)]
     guarded = bool(re.search(r"pipefail|PIPESTATUS", plain))
     warn = None
+    raw_pipeline_stages = [re.split(r"\|&?", pipeline) for pipeline, _ in pipelines]
+    trimmed_pipeline_stages = trim_closed_substitutions(raw_pipeline_stages)
     for n, (pipeline, op) in enumerate(pipelines):
-        raw_stages = re.split(r"\|&?", pipeline)
-        stages = [before_unmatched_close(st) for st in raw_stages]
+        raw_stages = raw_pipeline_stages[n]
+        stages = trimmed_pipeline_stages[n]
         for stage in stages:
             if command_word(stage)[0] == "sed":
                 return ("Use `gsed`, not bare `sed`: this Mac's `sed` is BSD sed and GNU flags "

@@ -205,6 +205,11 @@ def test_gnu_deny_reason_names_the_g_tool():
     # a filter that ends a substitution is not the status `&&` reads (Codex review of PR 254)
     "echo $(printf x | cat) && echo done",
     "cat <(printf x | cat) && echo done",
+    # a regex or extended-glob group is not a substitution: nothing after its `)` is trimmed (Codex review of PR 254, round 3)
+    "[[ $tool =~ ^(awk|sed)$ ]] && echo recognized",
+    "ls @(awk|sed)",
+    # the substitution opens in one pipeline and closes in another
+    "gh api x $(echo $r && echo a | cut -d/ -f1):master --jq .y",
 ])
 def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     assert not denied(command)
@@ -219,6 +224,9 @@ def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     # the status check reads the whole outer pipeline, trimmed or not (Codex review of PR 254)
     "git merge --ff-only topic | tee $(printf /tmp/merge.log | cat -) && git push",
     "(x=$(false | tail -2)) && printf PUSHED",
+    # an escaped paren after a regex group, and a plain pipe after a closed substitution, stay checked
+    "echo x | grep -E '^(a|b)' | cut -d\\) --complement -f1",
+    "x=$(echo a | cut -d, -f1) && ls | cut --complement -f1",
 ])
 def test_escaped_parens_and_subshell_groups_stay_checked(command):
     assert denied(command)
