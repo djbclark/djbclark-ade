@@ -43,9 +43,10 @@ A skill cannot invoke the built-in /rename, so this writes what it writes:
 
 The session id comes from OPENCODE_SESSION_ID when this process is OpenCode,
 GROK_SESSION_ID when it is a Grok agent (`GROK_AGENT=1`), else
-CLAUDE_CODE_SESSION_ID (overridden by the `sessionId` in `~/.claude/sessions/<pid>.json` of
-the nearest Claude Code process above this one: a session started from another session's
-environment, as /baton and /handoff do, keeps the predecessor's id in the variable), else
+CLAUDE_CODE_SESSION_ID (overridden by the `sessionId` in `~/.claude/sessions/<CLAUDE_PID>.json`,
+the registry file of the Claude Code process that owns this shell: a session started from
+another session's environment, as /baton and /handoff do, keeps the predecessor's id in the
+variable; a nested unregistered Claude keeps its own id, never its parent's), else
 this process's own file descriptors, which zcode
 points at its exec-log path ~/.zcode/cli/exec/<sess-id>/call-*.log (zcode sets
 no session id env var). CURSOR_CONVERSATION_ID (with `CURSOR_AGENT=1`) wins
@@ -66,6 +67,7 @@ Exit 0 = renamed or deliberately skipped (stdout says which); 2 = cannot run.
 
 from __future__ import annotations
 import argparse
+import calendar
 import fcntl
 import json
 import os
@@ -78,6 +80,7 @@ import time
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 MARK = '"type":"custom-title"'
 MAX_LEN = 80
@@ -103,27 +106,55 @@ def find_transcript(sid: str) -> Path | None:
     return hits[0] if hits else None
 
 
+def _proc_start_matches(pid: int, recorded: Any) -> bool:
+    """False only when the registry's `procStart` (UTC `ps -o lstart=` text) provably names another
+    process than the live `pid`: a crashed Claude leaves its file behind and the pid can be reused. A
+    missing or unparsable stamp, or a failing `ps`, proves nothing, so the pid alone stands."""
+    if not isinstance(recorded, str) or not recorded.strip():
+        return True
+    fmt = "%a %b %d %H:%M:%S %Y"
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout.strip()
+        if not out:
+            return True
+        live = time.mktime(time.strptime(" ".join(out.split()), fmt))
+        was = calendar.timegm(time.strptime(" ".join(recorded.split()), fmt))
+    except (OSError, ValueError, OverflowError, subprocess.TimeoutExpired):
+        return True
+    return abs(live - was) <= 5
+
+
 def registered_claude_session_id() -> str | None:
-    """The session id of the Claude Code process above this one, from its own registry file.
+    """The session id of the Claude Code process that owns this shell, from its own registry file.
 
     A running Claude Code writes `<config>/sessions/<pid>.json` with its current `sessionId`.
     `CLAUDE_CODE_SESSION_ID` in a tool shell is not reliable: a session started from another
     session's environment (a Paseo agent launched by /baton or /handoff from a shell inside the
     predecessor, `--fork-session`, upstream issue 81304) keeps the PREDECESSOR's id there, and its
-    transcript is then missing or belongs to another session. The nearest ancestor with a registry
-    file is the session this shell belongs to; None when no ancestor has one."""
-    sessions = claude_config_dir() / "sessions"
-    for pid in ancestor_pids():
-        try:
-            data = json.loads((sessions / f"{pid}.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        sid = data.get("sessionId")
-        if data.get("pid") == pid and isinstance(sid, str) and CLAUDE_SID_RE.fullmatch(sid):
-            return sid
-    return None
+    transcript is then missing or belongs to another session.
+
+    Anchor: `CLAUDE_PID`, which Claude Code sets in every child shell next to `CLAUDE_CODE_SESSION_ID`
+    to its own pid, so a nested Claude (a `claude -p` or ACP child) names ITSELF. It counts only when it
+    is an ancestor of this process, has a registry file whose `pid` and `procStart` match, and holds a
+    uuid `sessionId`. Never "the nearest ancestor with a file": that skips an unregistered nested
+    Claude and renames its parent's session (adversary, PR 259). None means: use the env var."""
+    raw = os.environ.get("CLAUDE_PID", "")
+    if not raw.isdigit() or int(raw) <= 1:
+        return None
+    pid = int(raw)
+    if pid not in ancestor_pids():
+        return None
+    try:
+        data = json.loads((claude_config_dir() / "sessions" / f"{pid}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("pid") != pid:
+        return None
+    sid = data.get("sessionId")
+    if not (isinstance(sid, str) and CLAUDE_SID_RE.fullmatch(sid)):
+        return None
+    return sid if _proc_start_matches(pid, data.get("procStart")) else None
 
 
 def current_title(transcript: Path) -> str | None:

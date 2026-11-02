@@ -22,7 +22,7 @@ Herdr pane, auto-detected
 (`OMPCODE=1` with omp the nearest agent process above the shell, then
 `OPENCODE_SESSION_ID` for OpenCode, `CURSOR_CONVERSATION_ID` when
 `CURSOR_AGENT=1` and cursor-agent is the nearest agent process above the shell,
-else `GROK_SESSION_ID` when `GROK_AGENT=1`, else `CLAUDE_CODE_SESSION_ID` (replaced by the `sessionId` in `~/.claude/sessions/<pid>.json` of the nearest Claude Code process above the shell, since a successor started by `/baton` or `/handoff` inherits its predecessor's id in that variable, 2026-11-02), else
+else `GROK_SESSION_ID` when `GROK_AGENT=1`, else `CLAUDE_CODE_SESSION_ID` (replaced by the `sessionId` in `~/.claude/sessions/<CLAUDE_PID>.json` (`CLAUDE_PID` is the owning Claude Code process, an ancestor of the shell; the file's `procStart` must match the live process; a nested `claude -p` without a file keeps the env id) since a successor started by `/baton` or `/handoff` inherits its predecessor's id in that variable, 2026-11-02), else
 zcode's exec-log fds); in any other TUI say so and stop.
 
 It runs three ways: the operator asks (`/autorename`), `/handoff` Step 8 calls it
