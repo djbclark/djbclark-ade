@@ -1163,6 +1163,17 @@ class TestDeadlines(ProtocolBase):
         self.assertEqual(w.returncode, 124, w.stderr)
         self.assertNotIn("was not picked up", w.stderr)
 
+    def test_an_unreadable_claim_still_counts_as_pickup(self) -> None:
+        """246 review 5: a claim file that cannot be read is evidence, not absence: no exit 5."""
+        self.cli("send", "task")
+        self.claim_ssh("ade-1", self.nonce())
+        claim = self.from_dir / "claim-ade-1.md"
+        claim.chmod(0)
+        self.addCleanup(claim.chmod, 0o644)
+        w = self.cli("wait", "ade-1", "--timeout", "2", "--ack-timeout", "0.5")
+        self.assertEqual(w.returncode, 124, w.stderr)
+        self.assertNotIn("was not picked up", w.stderr)
+
     def test_a_route_that_goes_down_after_one_read_counts_as_unchecked_again(self) -> None:
         """246 review 4: ssh read once, then down: a claim there cannot be seen, so no exit 5 from git alone."""
         self.cli("send", "task")

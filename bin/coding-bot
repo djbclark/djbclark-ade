@@ -1181,7 +1181,8 @@ def file_id(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-def poll_transports(ts: list, force: bool = False, prefer: str | None = None, read_ok: set | None = None) -> int:
+def poll_transports(ts: list, force: bool = False, prefer: str | None = None, read_ok: set | None = None,
+                    evidence: set | None = None) -> int:
     """List each transport's bot files in numeric order: file the replies and claims not seen before and read the
     heartbeat (at most every HEARTBEAT_READ_EVERY_S per transport: the file is rewritten in place, so it is never marked
     seen). A transport in backoff is skipped unless `force`. A file is marked seen only once it is settled: a claim, a
@@ -1196,6 +1197,9 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
         t0 = time.monotonic()
         try:
             names = sorted(t.list_files(), key=lambda n: scan_order(n, file_id(n), prefer))
+            if evidence is not None and prefer:
+                # a claim or reply file for the waited id is proof of pickup even if it cannot be read
+                evidence.update(f"{t.name}:{n}" for n in names if file_id(n) == prefer)
             done_early = False
             done = read_json("seen.json").get(t.name, [])
             for fname in names:
@@ -1316,6 +1320,7 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
     every = _env_secs("CODING_BOT_POLL_S", 2.0)  # the cheap transport's poll interval; git is polled 3x less often
     nxt = {t.name: 0.0 for t in ts}
     polled: set[str] = set()  # "not picked up" is only decided after every transport was read at least once
+    evidence: set[str] = set()  # bot files for rid seen in a listing, readable or not
     try:
         while True:
             # the local inbox first: a reply already filed never waits behind network work
@@ -1330,7 +1335,7 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                 print(text)
                 return EXIT_BLOCKED if re.match(r"BLOCKED:", last_line(text), re.I) else 0
             entry = read_json("claims.json").get(rid)
-            claimed = isinstance(entry, dict) and isinstance(entry.get("claim"), dict)
+            claimed = (isinstance(entry, dict) and isinstance(entry.get("claim"), dict)) or bool(evidence)
             now = time.monotonic()
             waited_min = (age + now - start) / 60
             if (ack_deadline is not None and now >= ack_deadline and not claimed and not replies
@@ -1358,7 +1363,7 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                 PROBE[:] = [now + max(1.0, share)]
                 read_ok: set[str] = set()
                 try:
-                    poll_transports([due], prefer=rid, read_ok=read_ok)
+                    poll_transports([due], prefer=rid, read_ok=read_ok, evidence=evidence)
                 finally:
                     PROBE.clear()
                 # only the LATEST poll of a route counts: a route that failed or was skipped (backoff) since it was last read
