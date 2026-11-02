@@ -99,12 +99,15 @@ end, `hermes-ping` one line: counts by class and what still waits on him.
 
 ## 7. Reach limits (seen 2026-11-02)
 
-1. **A Claude background session** (`"kind":"bg"` in `~/.claude/sessions/<pid>.json`) whose recorded herdr pane no longer exists:
-   helm prints `no channel` and `herdr pane read` says `pane_not_found`. Its card can only be answered by
-   `claude --resume <sessionId>` in a terminal, which opens the running background session itself
-   ([docs](https://code.claude.com/docs/en/sessions)). Give him that command.
+1. **A Claude background session** (`"kind":"bg"` in `~/.claude/sessions/<pid>.json`, listed by `claude agents --json`) whose recorded
+   herdr pane no longer exists: helm prints `no channel` and `herdr pane read` says `pane_not_found`. Read its card yourself by running
+   `claude attach <8-char job id>` as a pty service. The full session id prints "No job matching". Killing that attach client detaches;
+   the session keeps running in its own process. Before you relay the card, check that its `cwd` still exists and that no later session
+   has done the work. Case 2026-11-02: a card 4 days old, its directory renamed, its question already settled by another session's PR.
+   Such a card gets an extra option for him, `claude stop <job id>`: nothing is in flight in it, and its transcript stays resumable.
 2. **An omp `ask` box in a herdr pane** reads as `idle`, so `helm.py keys` refuses ("not waiting on a prompt"). Read the pane, then use
    `herdr pane send-keys <pane> enter` when the highlighted option is his pick.
-3. **An opencode Paseo agent whose run ignores cancellation:** `paseo agent stop` prints "active run cancellation was not
-   acknowledged", and `~/.paseo/daemon.log` shows "Timed out interrupting session during cancel". The agent stays `running`, and messages
-   queued for it expire. Report it to him. Do not retry in a loop.
+3. **An opencode Paseo agent that is `running` but silent** (OpenCode records the turn as finished while Paseo still has it running):
+   `paseo agent stop` prints "active run cancellation was not acknowledged", and `~/.paseo/daemon.log` shows "Timed out interrupting
+   session during cancel". Do not retry the stop in a loop. Case 2026-11-02: a plain message from its owning seat woke the agent. When
+   none does, the owning seat's export, delete, then import under the same id (Dann 7's seat-recovery recipe) brings it back.
