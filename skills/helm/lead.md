@@ -33,6 +33,11 @@ P=paseo   # the Paseo CLI
    24(2); helm SKILL.md "Never relay around a permission denial").
 4. When you answer under section 3 item 1, label it: "lead's answer from <rule or probe>, not djbclark's pick". A peer may otherwise
    read relayed text as "djbclark approved" (`~/AGENTS.md` item 24).
+5. **What relay does with a text to a working agent** (one rule; sections 2, 4 and 5 point here). A working **Claude Paseo agent** is
+   steered at once (`fleet.PASEO_STEER_DEFAULT`), and Paseo replaces its turn when the steer is declined, for example during compaction.
+   So you send it nothing (a brief, a pick, a release line or `restart done`) until `$R --why <ident>` reads `idle`. A Claude herdr pane
+   gets the text typed into Claude Code's own queue, which is safe. **Every other provider** (omp, codex, opencode, pi, cline, grok,
+   copilot and other ACP agents) gets a queued copy, delivered when it is idle, which is safe. Never pass `--steer` yourself.
 
 ## 1. Survey (spends no turns on peers)
 
@@ -61,10 +66,8 @@ P=paseo   # the Paseo CLI
    herdr pane, the pane id with `:` turned into `-`; for a Hermes conversation, `lead-h` plus the last 8 characters of its session id. An
    expectation id is 1-40 characters `[A-Za-z0-9._-]`, and an id still open from an earlier round is refused, so a new round uses a new
    suffix (`lead2-…`).
-   **A working Claude agent is not sent anything** (a brief, a pick or a release line). relay.py steers Claude at once
-   (`fleet.PASEO_STEER_DEFAULT`), and Paseo replaces the running turn when the steer is declined, for example while it compacts. That
-   would stop work in flight. Wait until `$R --why <ident>` reads `idle`, and contact it in the next round. A working omp, codex,
-   opencode or cline agent's copy is queued by relay and delivered when it is idle, which is safe. Never pass `--steer` yourself.
+   **A working Claude Paseo agent is not sent anything until it is idle** (section 0 item 5). Contact it in the next round. Every other
+   working agent gets a queued copy.
    A relay to a Hermes conversation needs a tool timeout of at least 150 s (peer-relay item 3). **Exit 3, `queued`, `accepted` or
    `unverified` is never resent, on any route**: wait for the ack.
 2. A `closed` agent gets the brief only when its timeline shows a pending operator decision whose options you cannot write yourself.
@@ -150,7 +153,7 @@ P=paseo   # the Paseo CLI
    2. re-checks `$F list` for `busy:` children;
    3. runs `paseo daemon restart`;
    4. wakes the stuck agent;
-   5. sends `restart done` only to the seats that said they would re-arm something, or that are working.
+   5. sends `restart done` only to the seats that said they would re-arm something, or that are working (subject to section 0 item 5).
 
    Write the script for the case at hand: the stuck agent's id and your own id are arguments, never hard-coded.
 
@@ -161,10 +164,12 @@ P=paseo   # the Paseo CLI
    2. gather the new picklists into one prompt;
    3. ask him;
    4. relay the picks back.
-2. **You are deaf while you ask.** relay.py holds every message to an agent that has a card open (your own question card included) or a
-   turn running (omp declines steers), and its deferred queue holds at most 20 records per target. So:
+2. **You are deaf while you ask, and exposed while you work.** relay.py holds every message to you while you have a card open (your own
+   question card included). While your turn runs, a message to an omp, codex or opencode lead is queued (deferred queue: at most 20
+   records per target). A Claude lead in Paseo gets each message steered in at once, and a steer declined during compaction replaces
+   the lead's own turn. With many agents replying, that is likely. So:
    1. keep each prompt to one batch;
-   2. end your turn between rounds so queued replies can land;
+   2. keep each round's turn short and end it, so queued replies land and steers have nothing to replace;
    3. never leave a background wait running in your own turn just to wait for replies.
 3. **Never `--cancel` a record addressed to you, and never read `~/.local/state/relay/deferred/*.json` directly.** A cancel destroys the
    text and its sender is told it failed (2026-11-02: the lead cancelled 20 queued replies to free its queue and destroyed two it had not
@@ -174,8 +179,9 @@ P=paseo   # the Paseo CLI
    and even then the same brief is never resent to the same agent.
 5. The mode ends when every agent is in one of these states: in flight with nothing needed, a standing role, waiting only on a by-hand step
    listed for him, or quit or archived. **Release line**: send "lead {LEAD} has ended; use your normal channel for questions again"
-   only to agents that still have an open question or expectation with you, or that `--why` shows as working (they get the queued
-   copy). Waking every idle or `closed` agent costs a paid turn each; the rest learn it when relay refuses {LEAD}. Then `hermes-ping`
+   only to agents that still have an open question or expectation with you, or that `--why` shows as working on a non-Claude provider
+   (they get the queued copy). A working Claude agent waits for `idle` (section 0 item 5). Waking every idle or `closed` agent costs a
+   paid turn each; the rest learn it when relay refuses {LEAD}. Then `hermes-ping`
    one line with the counts by class and what still waits on him.
 
 ## 6. Operator rulings (binding in this mode)
