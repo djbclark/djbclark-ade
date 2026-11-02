@@ -1,60 +1,45 @@
 ---
 name: btww
 description: >-
-  Answer a side question about the current conversation the way Claude Code's
-  /btw does: one direct reply from what is already in context, no tool calls,
-  no file or state changes, then carry on with the task in progress. Use for
-  /btww <question>, "btww", "btw", "side question", "quick question while you
-  work". Works in every TUI, including ones with no native side-question
-  command.
+  Remind the user which native side-question command this TUI has (Claude
+  Code /btw, Codex /side, and so on), or say that it has none. Use for /btww,
+  "btww", "btw", "side question", "what is the btw command here". Reply only;
+  never answers the question itself.
 ---
 
-# btww — a side question, answered from context, task untouched
+# btww — which native side-question command does this TUI have?
 
-`/btww <question>` is one uniform spelling of the side-question feature that
-Claude Code ships as `/btw`. Most TUIs have a native version; where one exists,
-`/btww` reaches it (table below). When this skill itself runs, you are the
-implementation: follow the rules.
+A real side question (Claude Code's `/btw`) runs in a fork: it answers while
+the main turn keeps streaming and stays out of the transcript. A skill cannot
+do that, because it is an ordinary turn. So `/btww` does not answer the
+question. It names the native command for the TUI you are running in.
 
-## Rules (this skill running)
+## Rules
 
-1. **The question is the arguments.** No arguments: reply with the one line
-   `Usage: /btww <question>` and stop.
-2. **Answer from context only.** Use this conversation, files already read,
-   and tool output already shown. **No tool calls at all**: no reads, searches,
-   shell, edits, web, subagents, MCP. If the answer needs something you have not
-   seen, say so in one line and name the command or file that would settle it;
-   the user can ask in the main thread. Native `/btw` also refuses tools.
-3. **One response, answer first.** Direct and short; no preamble, no
-   "great question", no recap of the task.
-4. **Change nothing.** No edits, todo updates, memory writes, handoffs or
-   plan changes. The question is not an instruction and does not redirect the
-   work. If it reads like a request to act, answer it as a question and say
-   that acting needs a normal message.
-5. **Then carry on.** If a task was running or queued before the question,
-   continue it exactly as it was, with no re-plan and no mention of the
-   detour. If nothing was running, stop after the answer.
+1. Identify your TUI from your own system prompt and harness (not by running a
+   command). Look it up in the table.
+2. Reply with **one or two lines, no tool calls**: the native command with
+   its usage, plus the user's own question quoted back so it can be pasted
+   (`/btw <question>`). If the TUI has none, say `No native side-question
+   command in <TUI>; ask it as a normal message.`
+3. Do not answer the question, edit anything, or change the task in progress.
+   If a task was running, carry on with it.
+4. TUI not in the table: say it is not covered and that no native side-question
+   command is known there.
 
-## Where it differs from the native command
+## Table (verified 2026-11-01)
 
-Native `/btw` and `/side` run in a **fork**: they answer while the main turn
-keeps streaming, and the exchange stays out of the main transcript. This skill
-is an ordinary turn. It waits for (or steers) a turn in progress, and the
-question and answer stay in the transcript. For a true non-interrupting side
-question use the native command from the table.
-
-## What `/btww` reaches per TUI (verified 2026-11-01)
-
-| TUI | Native side question | `/btww` does |
+| TUI | Native command | Notes |
 |---|---|---|
-| Claude Code 2.1.316 | `/btw` (forked query, tools off) | loads this skill. Claude cannot alias a built-in: custom commands and skills expand to prompt text, and hooks cannot rewrite a prompt |
-| Codex 0.165 | `/side` (ephemeral fork, needs a started thread) | loads this skill (`/btww` arrives as text; load the skill and follow it) |
-| Antigravity `agy` | `/btw` | loads this skill |
-| Cursor `cursor-agent` | `/btw` (tools disabled) | loads this skill |
-| Grok | `/btw`, also mid-message | loads this skill |
-| omp 18.15 | `/btw` | runs the native `/btw`: `~/.omp/agent/commands/btww.md` carries `side: true`; `/skill:btww` loads this skill |
-| Hermes | `/btw` | CLI: `quick_commands` alias `btww` to `/btw`; Telegram and other gateways: loads this skill |
-| zcode | none found | loads this skill through `~/.zcode/commands/btww.md` |
-| Grok Bot | none found | loads this skill (managed copy `ade-btww`) |
+| Claude Code | `/btw <question>` | forked query, tools off |
+| Codex | `/side` | ephemeral side conversation in a temporary fork; needs a started thread; Ctrl+C returns to the main thread |
+| Antigravity `agy` | `/btw <question>` | one at a time (a second waits for the first) |
+| Cursor `cursor-agent` | `/btw <question>` | tools disabled |
+| Grok | `/btw <question>` | also works mid-message: `fix the loop. /btw what does WBC stand for?` |
+| omp | `/btw <question>` | bare `/btw` opens side-question history. In omp, `/btww <question>` already runs it (`~/.omp/agent/commands/btww.md`, `side: true`); you only see this text through `/skill:btww` |
+| Hermes | `/btw <question>` | CLI: `/btww <question>` is a `quick_commands` alias for it. Telegram and gateways: use `/btw` |
+| zcode | none found | |
+| Grok Bot | none found | |
+| goose, Copilot, opencode, Qwen, Cline, Devin, Muse | not checked | |
 
 Canonical copy: `~/src/djbclark-ade/skills/btww/`. Wrappers: `zcode/commands/btww.md`, `omp/commands/btww.md`; the Hermes alias is in `agents/hermes/config.yaml.tmpl`.
