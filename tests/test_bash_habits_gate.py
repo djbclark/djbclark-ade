@@ -218,6 +218,7 @@ def test_gnu_deny_reason_names_the_g_tool():
     "sed=2; echo $((sed + 1))",
     "echo $((stat -c))",
     "echo $(( (1 + 2) * 3 )) | cut -d/ -f1",
+    "sed=2; echo $((1<(sed)))",
 ])
 def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     assert not denied(command)
@@ -242,6 +243,8 @@ def test_gnu_flags_that_work_or_do_not_apply_pass(command):
     "git log --since=$(date -d yesterday +%F)",
     "echo $(echo $(echo a | cut --complement -f1) | cut -d/ -f1)",
     "echo $(( $(date -d x +%s) + 1 ))",
+    "x=$((`date -d yesterday +%s` + 1))",
+    "x=$((sed -n 1p f); printf x)",
 ])
 def test_escaped_parens_and_subshell_groups_stay_checked(command):
     assert denied(command)

@@ -128,9 +128,12 @@ def command_views(plain: str) -> list[str]:
     must still give the outer `cut` its `--complement`, so each command is checked on its own
     text. A bare `(` group, a regex group (`=~ ^(awk|sed)$`) and an extended glob (`@(awk|sed)`)
     stay inline: they are argument text, not a command. An arithmetic expansion `$((...))` runs
-    no command, so its expression is dropped (`echo $((sed + 1))`). A backslash-escaped character
-    is filename or argument content (`find . -name foo\\)`, `\\$(`), never a delimiter. An
-    unclosed substitution is still checked, as its own view."""
+    no command, so its expression is dropped (`echo $((sed + 1))`, `$((1<(sed)))`), except for
+    the backtick and `$(` substitutions inside it, which do run. `$((a); b)` is a substitution
+    around a subshell, not arithmetic: bash reads `$((` as arithmetic only when its closing `)`
+    is directly followed by another `)`. A backslash-escaped character is filename or argument
+    content (`find . -name foo\\)`, `\\$(`), never a delimiter. An unclosed substitution is
+    still checked, as its own view."""
     views: list[str] = []
     # open groups: (kind, text collected so far); kind is "sub" (`$(`, `<(`, `>(`), "arith"
     # (`$((`) or "group" (a bare `(`); the bottom entry is the outer command
@@ -144,34 +147,49 @@ def command_views(plain: str) -> list[str]:
         elif plain.startswith("$((", i):
             stack.append(("arith", []))
             i += 3
-        elif ch in "$<>" and plain[i + 1:i + 2] == "(":
+        elif ch == "$" and plain[i + 1:i + 2] == "(":
             stack.append(("sub", []))
+            i += 2
+        elif ch in "<>" and plain[i + 1:i + 2] == "(" and not any(k == "arith" for k, _ in stack):
+            stack.append(("sub", []))  # a process substitution; inside arithmetic `<(` compares
             i += 2
         elif ch == "(":
             stack.append(("group", []))
             i += 1
         elif ch == ")" and len(stack) > 1:
             kind, body = stack.pop()
+            text = "".join(body)
             if kind == "sub":
-                views.append("".join(body))
+                views.append(text)
                 stack[-1][1].append("X")
+            elif kind == "arith" and plain[i + 1:i + 2] != ")":
+                # `$((a); b)`: a subshell inside a substitution; the `(` was a group all along
+                stack.append(("sub", ["(" + text + ")"]))
             elif kind == "arith":
+                views.extend(_backtick_bodies(text))
                 stack[-1][1].append("X")
-                if plain[i + 1:i + 2] == ")":  # the closing `))`
-                    i += 1
+                i += 1  # the closing `))`
             else:
-                stack[-1][1].append("(" + "".join(body) + ")")
+                stack[-1][1].append("(" + text + ")")
             i += 1
         else:
             stack[-1][1].append(ch)
             i += 1
     while len(stack) > 1:  # unclosed: a substitution is its own command, a bare `(` stays inline
         kind, body = stack.pop()
+        text = "".join(body)
         if kind == "sub":
-            views.append("".join(body))
-        elif kind == "group":
-            stack[-1][1].append("(" + "".join(body))
+            views.append(text)
+        elif kind == "arith":
+            views.extend(_backtick_bodies(text))
+        else:
+            stack[-1][1].append("(" + text)
     return ["".join(stack[0][1])] + views
+
+
+def _backtick_bodies(text: str) -> list[str]:
+    """The commands in the backtick pairs of `text` (an arithmetic expression otherwise runs none)."""
+    return re.findall(r"`([^`]*)`", text)
 
 
 def words(stage: str) -> list[str]:
