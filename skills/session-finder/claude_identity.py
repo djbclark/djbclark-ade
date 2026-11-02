@@ -74,14 +74,27 @@ def ancestor_pids() -> list[int]:
     return chain
 
 
-def registered_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> str | None:
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True    # EPERM: it exists
+    return True
+
+
+def registered_session_id(ancestors: Callable[[], Iterable[int]] | None = None, require_ancestor: bool = True) -> str | None:
     """The registry's session id for the Claude Code that owns this process, or None (then the env var is the fallback). ANCESTORS returns the pids
     above this process (default: a `ps` walk); a caller that hides its ancestry (a notice sender) passes one that returns nothing."""
     raw = os.environ.get("CLAUDE_PID", "")
     if not raw.isdigit() or int(raw) <= 1:
         return None
     pid = int(raw)
-    if pid not in set((ancestors or ancestor_pids)()):
+    if require_ancestor:
+        if pid not in set((ancestors or ancestor_pids)()):
+            return None
+    elif not pid_alive(pid):    # no ancestry to prove it, so the Claude process itself must still be alive (and, below, the same one)
         return None
     try:
         data = json.loads((config_dir() / "sessions" / f"{pid}.json").read_text(encoding="utf-8"))
@@ -112,8 +125,14 @@ def owner_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> st
     CLAUDE_CODE_SESSION_ID as is, else "". Unlike own_session_id it never vetoes the env var: an orphaned background job (`nohup`, `setsid`, a tmux server
     started from a Claude shell) is reparented to launchd, so its CLAUDE_PID is no ancestor, yet its env pair is correct and its work belongs to that
     session. Only a /baton successor's inherited stale id is corrected (adversary, PR 248 r1b A1). One writer and one reader of an owner use this, so
-    they agree (A2)."""
-    return registered_session_id(ancestors) or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    they agree (A2).
+
+    The registry is read WITHOUT the ancestor proof here: Claude Code sets CLAUDE_PID next to CLAUDE_CODE_SESSION_ID, so the Claude process it names (live,
+    same procStart, same pid in its file) is the session that exported this environment even after the job was detached. A successor's orphaned `nohup`
+    job therefore still resolves to the successor's own id, not the stale env id its detached environment carries (local-review r2). If that process is
+    gone, or its file does not match, the env var stands. (This is also why an owner read keeps treating an agent started from a Claude shell as that
+    Claude: owners are not identity labels, and dispatched agents carry ADE_CLAIM_ID first.)"""
+    return (registered_session_id(ancestors, require_ancestor=False) or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip())
 
 
 if __name__ == "__main__":

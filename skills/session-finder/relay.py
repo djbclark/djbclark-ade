@@ -2658,10 +2658,11 @@ def busy_alert_after():
         return CARD_ALERT_DEFAULT
 
 
-def busy_alert_step(rid, rec):
+def busy_alert_step(rid, rec, behind=False):
     """One call per deliverer look that found the target WORKING (not on a card): once the message is busy_alert_after() seconds old, ONE notice back to
     the sender (through relay, as a failure notice goes, a `kind: notice` never gets one) and ONE hermes-ping naming target, sender, message id and age,
-    filed on the record as `busy_alert` for `--pending`. Never steers: a steer a target declines replaces its running turn. Never raises."""
+    filed on the record as `busy_alert` for `--pending`. BEHIND: the record is not the head of its target's queue (an earlier message is still waiting), so it never looks at the
+    target itself, and this is the only way its sender hears anything. Never steers: a steer a target declines replaces its running turn. Never raises."""
     try:
         after, now = busy_alert_after(), time.time()
         age = now - float(rec.get("created") or now)
@@ -2669,14 +2670,18 @@ def busy_alert_step(rid, rec):
             return
         t = rec.get("target") or {}
         mins = int(age) // 60
-        text = (f"relay: {target_label(rec)} (agent {clean_text(t.get('paseo') or t.get('id'), 40) or '?'}) has been WORKING for {mins}m and has not taken a queued "
-                f"message: {rid} from {clean_text(rec.get('sender'), 60) or '?'}. A target inside a long blocking wait never goes idle, so it cannot receive it; "
+        why_ping = (f"has had a message queued behind an EARLIER one that has not gone out for {mins}m" if behind else
+                    f"has been WORKING for {mins}m and has not taken a queued message")
+        text = (f"relay: {target_label(rec)} (agent {clean_text(t.get('paseo') or t.get('id'), 40) or '?'}) {why_ping}: "
+                f"{rid} from {clean_text(rec.get('sender'), 60) or '?'}. A target inside a long blocking wait never goes idle, so it cannot receive it; "
                 f"it expires in {max(0, int(float(rec.get('expires') or 0) - now)) // 60}m.")
         claimed = (rec.get("sender_ident") and rec.get("kind") != "notice"
                    and transition(rid, ("queued",), when=lambda r: not r.get("busy_notice"), busy_notice=now) is not None)    # once, whether or not the ping works
         alert_once(rid, rec, [f"busy|{rid}"], "busy_alert", "busy-alert", text)
         if claimed:
-            notice = (f"relay: your message to {target_label(rec)} ({rid}) has waited {mins}m: the target is still working, so it is queued, not delivered. "
+            notice = (f"relay: your message to {target_label(rec)} ({rid}) has waited {mins}m: "
+                      + ("an earlier message to the same target is still waiting, so it is queued behind it, not delivered. " if behind
+                         else "the target is still working, so it is queued, not delivered. ") +
                       f"If it matters: `relay.py --cancel {rid}` FIRST (else this copy is also delivered later, a duplicate), then re-send it with --steer (it "
                       "interrupts a turn in progress on omp, codex, opencode and claude: the running turn may be replaced and its work lost); otherwise it goes out "
                       "once the target is idle, or expires.")
@@ -3027,6 +3032,7 @@ def deliver(rid):
                 return 0
             if earlier_unfinished(rec):
                 last = "an earlier message to it was still waiting"
+                busy_alert_step(rid, rec, behind=True)    # a record behind the head never looks at the target: its sender must still hear after busy_alert_after()
                 time.sleep(DEFER_POLL)
                 continue
             poll = target_poll(rec)

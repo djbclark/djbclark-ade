@@ -341,6 +341,28 @@ class TestBusyAlert(Base):
         self.assertEqual(len(self.to_sender()), 1)    # one notice
         self.assertEqual((relay.rec_read(rid)["state"], len(self.messages())), ("delivered", 1))
 
+    def test_a_message_behind_the_head_of_the_queue_still_tells_its_sender_and_the_operator(self) -> None:
+        """local-review r2: only the head of a target's queue looks at the target, so a later record's deliverer waits in `earlier_unfinished`; its sender
+        would otherwise hear nothing for the whole life of the record."""
+        head = self.queue("first message to the peer")
+        behind = self.queue("second message to the peer")
+        self.old(head, 4000)
+        self.old(behind, 1900)
+        self.patch_rec(head, expires=time.time() + 86400)
+        seen: list[Any] = []
+
+        def finish_head() -> None:
+            seen.append(self.to_sender())
+            relay.finish(head, "failed", "test: gone", allowed=("queued",), notify=None)
+        self.drive(behind, [finish_head, self.nothing])
+        lines = self.ping_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn(behind, lines[0])
+        self.assertIn("behind an EARLIER one", lines[0])
+        self.assertEqual(len(seen[0]), 1, seen)    # the notice went out while it was still behind
+        self.assertIn("behind it", seen[0][0])
+        self.assertIn(f"--cancel {behind}", seen[0][0])
+
     def test_a_message_that_is_itself_a_notice_never_gets_one(self) -> None:
         rid = self.queue()
         self.old(rid, 1900)

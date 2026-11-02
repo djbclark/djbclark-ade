@@ -38,7 +38,8 @@ class Base(fb.Harness):
         self.ancestors = [111, CLAUDE_PID, 333]
         self.live_start = STAMP
         patchers = [mock.patch.object(cid, "ancestor_pids", lambda: list(self.ancestors)),
-                    mock.patch.object(cid.subprocess, "run", self.fake_ps)]
+                    mock.patch.object(cid.subprocess, "run", self.fake_ps),
+                    mock.patch.object(cid, "pid_alive", lambda pid: True)]    # the fake Claude pids are not real processes
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
@@ -156,8 +157,25 @@ class TestAutorenameAndAdeClaimsShareIt(Base):
         self.ancestors = [86395]    # reparented: the Claude (222) is no ancestor
         self.assertEqual(mod.caller_ident(os.environ), LIVE)
         self.assertEqual(cid.owner_session_id(), LIVE)
-        self.register()    # even with a valid registry file for 222, a non-ancestor is not proof: the env pair stands
-        self.assertEqual(mod.caller_ident(os.environ), LIVE)
+        self.register()    # the Claude that exported the pair is alive and registered: same answer
+        with mock.patch.object(cid, "pid_alive", lambda pid: True):
+            self.assertEqual(mod.caller_ident(os.environ), LIVE)
+
+    def test_a_successors_orphaned_job_keeps_the_successors_registry_id_while_its_claude_lives(self) -> None:
+        """local-review r2: the detached job's env carries the predecessor's stale id; the live Claude CLAUDE_PID names still proves the real one,
+        so `new` (registry id) and the job's guard agree. Once that Claude is gone, the env var stands."""
+        mod = self.ade_claims()
+        self.register()
+        self.ancestors = [86395]    # detached: no ancestry to prove anything
+        with mock.patch.object(cid, "pid_alive", lambda pid: True):
+            self.assertEqual(mod.caller_ident(os.environ), LIVE)
+            self.assertEqual(cid.owner_session_id(), LIVE)
+            self.assertIsNone(cid.own_session_id())    # an identity LABEL still needs the ancestor proof
+        with mock.patch.object(cid, "pid_alive", lambda pid: False):
+            self.assertEqual(cid.owner_session_id(), STALE)
+        self.register(proc_start=OTHER_STAMP)    # pid reuse: the file names another process start
+        with mock.patch.object(cid, "pid_alive", lambda pid: True):
+            self.assertEqual(cid.owner_session_id(), STALE)
 
     def test_a_successor_creating_its_claim_with_the_inherited_env_id_is_recorded_and_checked_under_its_own(self) -> None:
         """r1b A2: `new --owner-session "$CLAUDE_CODE_SESSION_ID"` and the guard's caller_ident must agree in the /baton-successor case."""
