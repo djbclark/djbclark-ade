@@ -107,18 +107,20 @@ def find_transcript(sid: str) -> Path | None:
 
 
 def _proc_start_matches(pid: int, recorded: Any) -> bool:
-    """False only when the registry's `procStart` (UTC `ps -o lstart=` text) provably names another
-    process than the live `pid`: a crashed Claude leaves its file behind and the pid can be reused. A
-    missing or unparsable stamp, or a failing `ps`, proves nothing, so the pid alone stands."""
+    """False only when the registry's `procStart` provably names another process than the live `pid`: a
+    crashed Claude leaves its file behind and the pid can be reused. Claude Code writes `procStart` as
+    `ps -o lstart= -p PID` under `LC_ALL=C TZ=UTC`; this runs the same command, so both stamps are UTC and
+    no local-time conversion (DST's repeated hour) is involved. A missing or unparsable stamp, or a
+    failing `ps`, proves nothing, so the pid alone stands."""
     if not isinstance(recorded, str) or not recorded.strip():
         return True
     fmt = "%a %b %d %H:%M:%S %Y"
     try:
         out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                             timeout=10, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout.strip()
+                             timeout=10, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
         if not out:
             return True
-        live = time.mktime(time.strptime(" ".join(out.split()), fmt))
+        live = calendar.timegm(time.strptime(" ".join(out.split()), fmt))
         was = calendar.timegm(time.strptime(" ".join(recorded.split()), fmt))
     except (OSError, ValueError, OverflowError, subprocess.TimeoutExpired):
         return True

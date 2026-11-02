@@ -12,6 +12,7 @@ session (adversary BLOCK on PR 259)."""
 from __future__ import annotations
 
 import importlib.util
+import calendar
 import json
 import subprocess
 import time
@@ -131,22 +132,23 @@ def test_non_object_or_broken_registry_file_falls_back_to_env(cfg: Path, monkeyp
     assert ar.session_id() == STALE
 
 
-PS_LSTART = "Mon Nov  2 11:36:39 2026"
+PS_LSTART = "Mon Nov  2 16:36:39 2026"  # what `TZ=UTC ps -o lstart=` prints
 FMT = "%a %b %d %H:%M:%S %Y"
 
 
 def fake_ps(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
     def run(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         assert cmd[:3] == ["ps", "-o", "lstart="], cmd
+        # the same environment Claude Code uses to write procStart: UTC, so no local-time conversion
+        assert kw["env"]["TZ"] == "UTC" and kw["env"]["LC_ALL"] == "C", kw["env"]
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(ar.subprocess, "run", run)
 
 
-def utc_stamp(offset_s: int = 0) -> str:
-    """The registry's `procStart`: the same instant as PS_LSTART (local time), written in UTC."""
-    epoch = time.mktime(time.strptime(PS_LSTART, FMT)) + offset_s
-    return time.strftime(FMT, time.gmtime(epoch))
+def utc_stamp(offset_s: int = 0, base: str = PS_LSTART) -> str:
+    """A `procStart` `offset_s` seconds from `base` (both UTC text, as Claude Code writes them)."""
+    return time.strftime(FMT, time.gmtime(calendar.timegm(time.strptime(base, FMT)) + offset_s))
 
 
 def test_proc_start_that_matches_the_live_process_is_trusted(cfg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +172,26 @@ def test_unreadable_ps_start_does_not_veto_the_registry(cfg: Path, monkeypatch: 
     own(monkeypatch, 222, [222])
     fake_ps(monkeypatch, ps_out)
     assert ar.session_id() == LIVE
+
+
+@pytest.mark.parametrize("tz", ["UTC", "America/New_York", "Asia/Kolkata"])
+def test_proc_start_comparison_ignores_the_machine_timezone_and_dst(
+    cfg: Path, monkeypatch: pytest.MonkeyPatch, tz: str
+) -> None:
+    # 2026-11-01 06:30Z falls in the hour US clocks repeat (01:30 EDT and 01:30 EST): local conversion is ambiguous
+    night = "Sun Nov  1 06:30:00 2026"
+    monkeypatch.setenv("TZ", tz)
+    time.tzset()
+    try:
+        register(cfg, 222, LIVE, proc_start=night)
+        own(monkeypatch, 222, [222])
+        fake_ps(monkeypatch, night + "\n")
+        assert ar.session_id() == LIVE
+        register(cfg, 222, LIVE, proc_start=utc_stamp(-3600, night))
+        assert ar.session_id() == STALE
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 def test_ancestor_walk_follows_parent_pointers_from_a_process_table(
