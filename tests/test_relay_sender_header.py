@@ -157,7 +157,7 @@ class TestAncestorPane(fb.Harness):
                     self.assertEqual(row["self"], expect)
 
 
-class TestStalePaneEnvironment(fb.Harness):
+class FleetStubs(fb.Harness):
     """2026-11-02, live: an omp in herdr pane w20:p3 (cwd ~/src/bottom) had HERDR_PANE_ID=w2F:p2X in its environment, a pane id from before the pane
     was moved, so no fleet row matched and relay refused with "cannot tell who is sending" (exit 4). The pane's own foreground processes
     (`herdr pane process-info`) name the omp pid, which is an ancestor of the caller: that proves the pane without the environment. Fake ids only."""
@@ -182,7 +182,7 @@ class TestStalePaneEnvironment(fb.Harness):
                    mock.patch.object(fleet, "pane_procs", pane_procs),
                    mock.patch.object(fleet, "herdr_label", lambda kind, ident: ident),
                    mock.patch.object(fleet, "_launched", lambda used: []),
-                   mock.patch.object(fleet, "_claude_sessions", lambda *a: []),
+                   mock.patch.object(fleet, "_claude_sessions", lambda *a: self.claude_rows(*a)),
                    mock.patch.object(fleet, "_pane_only", lambda *a: ([], [])),
                    mock.patch.object(fleet, "_proc_scan", lambda *a: []),
                    mock.patch.object(fleet, "_hermes_gateway", lambda: []),
@@ -197,6 +197,11 @@ class TestStalePaneEnvironment(fb.Harness):
         relay.own_cwd = lambda: "/Users/djbclark/src/bottom"
         self.addCleanup(fleet._ANC_PANE.__setitem__, 0, None)
 
+    def claude_rows(self, by_sid: Any, used: set[str], *a: Any) -> list[dict[str, Any]]:
+        return []
+
+
+class TestStalePaneEnvironment(FleetStubs):
     def test_an_omp_whose_environment_names_a_pane_that_no_longer_exists_still_resolves_as_the_sender(self) -> None:
         rows = REAL_SESSIONS()
         self.assertEqual([s["id"] for s in rows if s.get("self")], [self.NOW_PANE])
@@ -221,6 +226,57 @@ class TestStalePaneEnvironment(fb.Harness):
         with relay.as_caller("relay", scrub=True):
             rows = REAL_SESSIONS()
         self.assertEqual(([s["id"] for s in rows if s.get("self")], self.asked), ([], []))
+
+
+class TestOwnSessionIdBeatsThePane(FleetStubs):
+    """2026-11-02, the lead: a Claude Code started inside another session's pane (CLAUDE_CODE_CHILD_SESSION=1, its own CLAUDE_CODE_SESSION_ID e377e248-...,
+    the inherited HERDR_PANE_ID w20:pE) was taken for that pane's session f22ff8e4: its relays went out labelled f22ff8e4, every reply went to f22ff8e4,
+    `relay.py f22ff8e4` from it was refused as "that is this session", and it had no fleet row. The own session id beats the pane match."""
+
+    PARENT, CHILD, PANE = "f22ff8e4-1111-4222-8333-444455556666", "e377e248-1111-4222-8333-444455556666", "w20:pE"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.with_child_row = True
+        os.environ["HERDR_PANE_ID"] = self.PANE    # inherited from the parent's pane
+        os.environ["CLAUDE_CODE_SESSION_ID"] = self.CHILD
+        os.environ["CLAUDE_CODE_CHILD_SESSION"] = "1"
+        self.envs = {}
+        self.agents = [{"pane_id": self.PANE, "tab_id": "w20:tE", "workspace_id": "w20", "agent": "claude", "agent_status": "idle",
+                        "cwd": "/Users/djbclark/ops", "agent_session": {"value": self.PARENT}}]
+        self.procs = {self.PANE: ([{"pid": 5, "name": "claude"}], 6)}    # the parent's claude is an ancestor of the child
+        fleet.ancestors = lambda: {5, 6}
+        relay.own_cwd = lambda: "/Users/djbclark/ops"
+
+    def claude_rows(self, by_sid: Any, used: set[str], *a: Any) -> list[dict[str, Any]]:
+        parent = fleet._rec(id=self.PARENT[:8], agent="claude", sid=self.PARENT, cwd="/Users/djbclark/ops", status="idle")
+        fleet._from_herdr(parent, self.agents[0])
+        used.add(self.PANE)
+        child = fleet._rec(id=self.CHILD[:8], agent="claude", sid=self.CHILD, cwd="/Users/djbclark/ops", status="working", host="terminal", self=True)
+        return [parent] + ([child] if self.with_child_row else [])
+
+    def test_the_pane_session_is_not_self_and_the_caller_is_labelled_by_its_own_session_id(self) -> None:
+        rows = REAL_SESSIONS()
+        self.assertEqual([s["id"] for s in rows if s.get("self")], [self.CHILD[:8]])
+        self.assertTrue(relay.sender_name(rows).startswith(f"claude {self.CHILD[:8]}"), relay.sender_name(rows))
+
+    def test_relaying_to_the_pane_session_is_not_refused_as_this_session(self) -> None:
+        rows = REAL_SESSIONS()
+        parent = next(s for s in rows if s["id"] == self.PARENT[:8])
+        self.assertIsNone(relay.hard_stop(parent))
+        self.assertEqual([s["id"] for s in relay.find(self.PARENT[:8], rows)], [self.PARENT[:8]])
+
+    def test_a_caller_with_no_row_of_its_own_still_never_becomes_the_pane_session(self) -> None:
+        self.with_child_row = False    # the registry has no file for it yet
+        rows = REAL_SESSIONS()
+        self.assertEqual([s["id"] for s in rows if s.get("self")], [])    # not by the pane id, not by the process tree below the parent's claude
+        self.assertEqual(relay.sender_name(rows), f"claude {self.CHILD[:8]} (ops)")    # CLAUDE_CODE_SESSION_ID alone, never the parent's f22ff8e4
+
+    def test_without_a_session_id_of_its_own_the_pane_match_still_holds(self) -> None:
+        del os.environ["CLAUDE_CODE_SESSION_ID"]
+        self.with_child_row = False
+        rows = REAL_SESSIONS()
+        self.assertEqual([s["id"] for s in rows if s.get("self")], [self.PARENT[:8]])
 
 
 class TestStoredLabel(fb.Harness):

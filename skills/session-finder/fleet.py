@@ -206,6 +206,15 @@ ANCESTOR_SELF = [True]   # relay.as_caller(scrub=True) sets False: a notice send
 _ANC_PANE = [None]       # set by sessions(): the herdr pane an ancestor of this process runs in, when HERDR_PANE_ID is unset
 
 
+def other_session(s):
+    """True when row S is provably NOT the session this process runs in: CLAUDE_CODE_SESSION_ID names this caller's own Claude Code session, so a row
+    whose session id differs, or that is another agent, is another session even when the pane matches. A Claude Code started inside another session's
+    pane (CLAUDE_CODE_CHILD_SESSION=1) inherits that pane's HERDR_PANE_ID, and was taken for the pane's session (2026-11-02: e377e248 read as f22ff8e4:
+    its relays went out labelled f22ff8e4, `relay.py f22ff8e4` from it was refused as "that is this session"). Own session id first, pane last."""
+    me = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return bool(me and (s.get("agent") != "claude" or (s.get("sid") and s["sid"] != me)))
+
+
 def _ancestor_panes(anc):
     """The herdr panes named by the environments of ANC (a set; empty when this process's own HERDR_PANE_ID is set, a notice sender
     hides its ancestry, or there is no where.py)."""
@@ -230,7 +239,7 @@ def self_pane_by_process(rows, anc):
     relay refused with "cannot tell who is sending"). A process-tree match needs no environment. Asked only after the environment
     named a pane no row matched, so a caller outside herdr never pays one `herdr pane process-info` per pane."""
     for s in rows:
-        if s.get("host") != "herdr" or not s.get("pane"):
+        if s.get("host") != "herdr" or not s.get("pane") or other_session(s):    # the own session id beats a process match: a child session sits below its parent's pane process
             continue
         procs, shell = pane_procs(s["pane"])
         if ({p.get("pid") for p in procs or []} | {shell}) & anc:
@@ -402,7 +411,7 @@ def _from_herdr(s, a):
              where=f"herdr · ws {herdr_label('workspace', a['workspace_id'])} · tab {herdr_label('tab', a['tab_id'])}")
     s.update(pane=a["pane_id"], tab=a["tab_id"], workspace=a["workspace_id"], label=a.get("label") or "",
              herdr_status=a.get("agent_status") or "unknown")
-    if a["pane_id"] == (os.environ.get("HERDR_PANE_ID") or _ANC_PANE[0]):
+    if a["pane_id"] == (os.environ.get("HERDR_PANE_ID") or _ANC_PANE[0]) and not other_session(s):
         s["self"] = True
     if a.get("agent_status") in ("idle", "working", "blocked", "done"):
         s["status"] = "idle" if a["agent_status"] == "done" else a["agent_status"]
@@ -1153,7 +1162,7 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
         out += shells
     if not include_marked:
         out = [s for s in out if not s.get("mark")]
-    if named and ANCESTOR_SELF[0] and not any(s.get("self") and s.get("host") == "herdr" for s in out):
+    if named and ANCESTOR_SELF[0] and not any(s.get("self") for s in out):    # own session id first (a row it made self, or an ancestor TUI), pane last
         pane = self_pane_by_process([s for s in out if s.get("host") == "herdr"], anc)
         for s in out:
             if pane and s.get("pane") == pane and s.get("host") == "herdr":

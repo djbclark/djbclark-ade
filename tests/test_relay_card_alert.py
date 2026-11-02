@@ -221,6 +221,24 @@ class TestCardAlert(Base):
         self.assertTrue(relay.alert_once(rid, relay.rec_read(rid), keys, "card_alert", "card-alert", "relay: dialog two", fresh_after=time.time() + 5))
         self.assertEqual(self.ping_lines(), ["relay: dialog one", "relay: dialog two"])
 
+    def test_a_successor_of_an_expired_record_shares_the_pane_dialog_episode_and_does_not_ping_again(self) -> None:
+        """A pane dialog has no id: the claim is scoped to the episode. A record that takes over from one that expired while the dialog was still up
+        inherits its card clock, so the same dialog is not told twice (local-review round 2)."""
+        first = self.queue("first message to the peer")
+        second = self.queue("second message to the peer")
+        look = {"state": "card:picker", "why": "blocked on a question or permission prompt", "at": time.time() - 5}
+        long_ago = time.time() - 20000
+        self.patch_rec(first, card_since=long_ago, look=look)
+        relay.card_alert_step(first, relay.rec_read(first), look)    # 20000 s behind the dialog: pinged
+        self.assertEqual(len(self.ping_lines()), 1)
+        claims = json.loads(relay.card_alerts_path().read_text())
+        relay.card_alerts_path().write_text(json.dumps({k: dict(v, at=long_ago + 1900) for k, v in claims.items()}))    # that ping went out long ago
+        self.patch_rec(first, state="expired", finished=time.time())    # it expired with the dialog still up (its last look is recent)
+        relay.card_alert_step(second, relay.rec_read(second), look)    # its clock starts: inherited from the expired record
+        self.assertEqual(relay.rec_read(second)["card_since"], long_ago)
+        relay.card_alert_step(second, relay.rec_read(second), look)
+        self.assertEqual(len(self.ping_lines()), 1, self.ping_lines())
+
     def test_a_garbage_threshold_means_the_default(self) -> None:
         for raw, expect in (("abc", 1800), ("", 1800), ("-5", 0), ("0", 0), ("90", 90)):
             with self.subTest(raw=raw):
@@ -260,6 +278,8 @@ class TestBusyAlert(Base):
         self.assertIn(rid, notes[0])
         self.assertIn("--steer", notes[0])
         self.assertIn("lost", notes[0])    # the risk of a steer is named
+        self.assertIn(f"--cancel {rid}", notes[0])    # the queued copy is withdrawn first: a steer resend beside it would deliver the text twice
+        self.assertLess(notes[0].index("--cancel"), notes[0].index("--steer"))
         self.assertIn("[busy alert: pinged", shown[0])
         self.assertEqual((relay.rec_read(rid)["state"], len(self.messages())), ("delivered", 1))
         self.assertNotIn("--steer", "".join(t for _a, t in self.messages()))    # the queued text itself went out as written: never steered

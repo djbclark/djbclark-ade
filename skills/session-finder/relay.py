@@ -231,7 +231,7 @@ them from the deferred folder by hand). A text for a target that is merely WORKI
 well as silent. After `RELAY_BUSY_ALERT_S` seconds (default 1800; 0 = off) of waiting the deliverer sends ONE notice back to the sender (through relay, as a failure notice
 goes; never for a `kind: notice` record) and ONE `hermes-ping` naming target, sender, message id and age, once per message (the same card-alerts.json claim and retry
 rule as the card alert; the notice is claimed once on the record whether or not the ping works); `--pending` shows `[busy alert: pinged 31m ago]`. It NEVER steers on its own: a steer a
-target declines replaces the running turn (lost work). A sender whose message matters re-sends it with `--steer` to an omp, codex, opencode or claude target, knowing that risk.
+target declines replaces the running turn (lost work). A sender whose message matters runs `--cancel ID` on the queued copy FIRST (else it is delivered a second time later), then re-sends it with `--steer` to an omp, codex, opencode or claude target, knowing that risk.
 WHY IT CANNOT BE DELIVERED YET (2026-10-29, djbclark: "be able to tell why a message can't be delivered yet (eg picklist vs tab hung etc)"). `relay.py --why
 IDENT [--json]` names the obstacle by TWO methods compared (diagnose), exit 0 when it can take a text now, 1 when something is in the way. A Paseo agent:
 its API (`paseo agent inspect`: status, archived, pending cards BY TOOL, last update), its card text (`paseo permit ls`) and its timeline (`paseo logs`: the
@@ -2499,6 +2499,7 @@ CARD_ALERT_TIMEOUT = 45      # the ping runs inside the deliverer: bounded, its 
 CARD_ALERT_RETRY = 600
 CARD_ALERT_TRIES = 3
 CARD_ALERT_KEEP = 7 * 86400  # claims older than this are dropped
+CARD_EPISODE_GAP = 600       # a predecessor's last card look this recent means the same dialog is still up (card_episode_start)
 
 
 def card_alert_after():
@@ -2574,6 +2575,20 @@ def card_alert_text(rid, rec, look, waited):
             f"{max(0, int(float(rec.get('expires') or 0) - time.time())) // 60}m. Only you can answer the card (helm.py answer, or the Paseo UI).")
 
 
+def card_episode_start(rid, rec, now):
+    """When the card this record now meets began, for the card clock: the oldest `card_since` of another record of the SAME target that is queued, or
+    expired with its last look on a card within the last CARD_EPISODE_GAP seconds (its deliverer was still seeing the dialog when it ended), else NOW.
+    A pane dialog has no id, so the claim that says it was told is scoped to the episode, and a successor of an expired record that started a clock
+    of its own would tell the operator about the same dialog again (local-review 2026-11-02, round 2)."""
+    starts = []
+    for r in rec_all():
+        look = r.get("look") if isinstance(r.get("look"), dict) else {}
+        if (r["id"] != rid and target_key(r) == target_key(rec) and r.get("state") in ("queued", "expired") and r.get("card_since")
+                and str(look.get("state")).startswith("card:") and now - float(look.get("at") or 0) < CARD_EPISODE_GAP):
+            starts.append(float(r["card_since"]))
+    return min(starts + [now])
+
+
 def card_alert_step(rid, rec, look):
     """One call per deliverer look that found the target on a card: starts the card clock on the record (`card_since`), and once the message has
     waited card_alert_after() seconds sends the ONE ping for this card and target, filing `card_alert` on the record for `--pending`. Never raises."""
@@ -2583,7 +2598,7 @@ def card_alert_step(rid, rec, look):
             return
         since = float(rec.get("card_since") or 0)
         if not since:
-            transition(rid, ("queued",), card_since=now)
+            transition(rid, ("queued",), card_since=card_episode_start(rid, rec, now))
             return
         if now - since < after:
             return
@@ -2660,8 +2675,9 @@ def busy_alert_step(rid, rec):
         alert_once(rid, rec, [f"busy|{rid}"], "busy_alert", "busy-alert", text)
         if claimed:
             notice = (f"relay: your message to {target_label(rec)} ({rid}) has waited {mins}m: the target is still working, so it is queued, not delivered. "
-                      "If it matters, re-send it with --steer (it interrupts a turn in progress on omp, codex, opencode and claude: the running turn may be replaced "
-                      "and its work lost); otherwise it goes out once the target is idle, or expires.")
+                      f"If it matters: `relay.py --cancel {rid}` FIRST (else this copy is also delivered later, a duplicate), then re-send it with --steer (it "
+                      "interrupts a turn in progress on omp, codex, opencode and claude: the running turn may be replaced and its work lost); otherwise it goes out "
+                      "once the target is idle, or expires.")
             try:
                 rc, line = run_captured([rec["sender_ident"], notice, "--wait", "5", "--no-ack"], "relay", scrub=True, notice=True)
             except Exception as e:    # noqa: BLE001  # a notice never breaks the deliverer
