@@ -16,7 +16,7 @@ custom context, the Knowledge Base, cross-repo context or analytics (those are P
 
 1. Automatic reviews are **off** organization-wide (dashboard: Settings → Code Review → Automatic reviews: Never; drafts off).
 2. The djbclark-ade lander requests a Base review for its riskiest PRs only, after the adversary approves: at most 1 a day and
-   30 a month (`greptile-gate.py` and `greptile-budget.json` in the lead's state dir). The rest of the month's credits are manual.
+   30 a month (`scripts/greptile-gate.py`; the lander keeps its count in `greptile-budget.json` in the lead's state dir). The rest of the month's credits are manual.
 3. Manual review of one PR: comment `@greptileai` on it. Use it for a PR that deserves a second opinion, not by habit.
 4. Base tier only; never `--plus`/`--apex` or TREX without djbclark asking.
 5. djbclark-ade (public, MIT) qualifies for Greptile's free open-source program (manual application, below 50 stars); djbclark is
@@ -37,7 +37,7 @@ in place.
 Read a PR's review without the CLI (any repository; prints status, review id and the `Confidence Score` when completed):
 
 ```bash
-sudo-secretspec run --reason "greptile status" -- python3 -I ~/.local/state/bigteam/deepseek-review-2026-10-30/greptile-gate.py status 229
+sudo-secretspec run --reason "greptile status" -- python3 -I ~/src/djbclark-ade/skills/greptile/scripts/greptile-gate.py status 229
 # a third and fourth argument select another repository and its default branch: ... status 12 frdminc/nix2cf main
 ```
 
