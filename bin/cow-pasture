@@ -135,7 +135,7 @@ while stack:
                 raw = os.path.join(d, t)
                 # Judge where writes land as well as the spelled target: resolving the raw join
                 # catches an alias of the source (/tmp -> /private/tmp) and a route through
-                # another link (nm -> up/proj/node_modules where up -> the source's parent).
+                # another link (nm -> up/proj/node_modules where up -> the parent of the source).
                 hits = {os.path.normpath(raw), os.path.realpath(raw)}
                 rel = os.path.relpath(e.path, pasture)
                 if all(inside(h, pasture) for h in hits):
