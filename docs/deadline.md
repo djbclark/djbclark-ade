@@ -29,7 +29,7 @@ deadline never names a model; the reroute is waited on up to 120 s and never kil
 **A budget is enforced, never only announced.** The one named exception is the announce-only wait: a record with no `--pid`/`--pgid` has
 nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify`, `relay` or `reroute:RECORD`
 explicitly; `--on-expire notify` with a pid is likewise the operator's explicit choice.
-**`--holder PID` (2026-11-02; `notify`/`relay` records only, exit 2 with any other action or a pid that is not running).** An announce-only record has
+**`--holder PID` (2026-11-02; announce-only `notify`/`relay` records, so no `--pid`/`--pgid`: exit 2 otherwise, or for a pid that is not running).** An announce-only record has
 no process of its own, so nothing tells the sweep that the party meant to heartbeat it has died. `--holder` names that party: the process whose
 beats keep the record. If the holder is gone (same pid AND start time, the same verification as every pid here; a zombie is gone) and `done` was
 never called, the record was **abandoned**, not overdue: the sweep retires it as state `abandoned` (terminal, pruned after 7 days), prints one

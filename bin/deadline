@@ -18,7 +18,7 @@ no readable start time, is the caller's ancestor or in the caller's group/sessio
 signal death), or 124 when the enforcer stopped the command. A stop that failed (the process is still alive) is state `kill-failed`
 (non-terminal), never `expired`; the owner is told whatever the action.
 
---holder PID (notify/relay records only; exit 2 with any other action or a pid that is not running): the process whose heartbeats
+--holder PID (announce-only notify/relay records, so no --pid/--pgid; exit 2 otherwise, or for a pid that is not running): the process whose heartbeats
 keep the record alive. It is never signalled, so the refusal to register an ancestor (which stops a process from killing itself)
 does not apply to it. If the holder is gone (same pid AND start time, as for every pid here) and `done` was never called, the record
 was ABANDONED, not overdue: the sweep retires it as state `abandoned` with one `abandoned (holder N gone)` line in sweep.log, and
@@ -977,8 +977,8 @@ def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool =
                       "pass --on-expire notify or relay (or reroute:RECORD) explicitly")
     holder, holder_start = getattr(a, "holder", None), None
     if holder:
-        if a.on_expire not in ("notify", "relay"):
-            return None, "--holder is for announce-only records: pass --on-expire notify or relay (a record that signals needs --pid/--pgid)"
+        if a.on_expire not in ("notify", "relay") or pid or pgid:
+            return None, "--holder is for announce-only records: --on-expire notify or relay, and no --pid/--pgid (a record that can signal a process group never takes a holder, which must not be signalled)"
         try:
             hinfo = proc_info(holder)
         except ProcUnknown as e:

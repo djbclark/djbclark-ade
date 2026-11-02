@@ -1134,7 +1134,7 @@ def test_holder_may_be_the_callers_ancestor_but_must_run_and_needs_an_announce_o
     dead.wait()
     r = start(env, "deadhold", "--budget", "10", "--on-expire", "notify", "--holder", str(dead.pid))
     assert r.returncode == 2 and "holder" in r.stderr and not (env.state / "deadhold.json").exists()
-    for action in ("kill", "reroute:/x/jobs/rec.json"):
-        extra = ["--pid", str(env.child("sleep 60").pid)] if action == "kill" else []
+    for action in ("kill", "reroute:/x/jobs/rec.json", "notify", "relay"):
+        extra = ["--pid", str(env.child("sleep 60").pid)] if action in ("kill", "notify", "relay") else []   # a record that can signal never takes a holder
         r = start(env, "badact", "--budget", "10", "--on-expire", action, "--holder", str(os.getpid()), *extra)
         assert r.returncode == 2 and "--holder" in r.stderr, action
