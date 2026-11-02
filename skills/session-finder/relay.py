@@ -2582,9 +2582,8 @@ def card_episode_start(rid, rec, now):
     of its own would tell the operator about the same dialog again (local-review 2026-11-02, round 2)."""
     starts = []
     for r in rec_all():
-        look = r.get("look") if isinstance(r.get("look"), dict) else {}
         if (r["id"] != rid and target_key(r) == target_key(rec) and r.get("state") in ("queued", "expired") and r.get("card_since")
-                and str(look.get("state")).startswith("card:") and now - float(look.get("at") or 0) < CARD_EPISODE_GAP):
+                and now - float(r.get("card_seen") or 0) < CARD_EPISODE_GAP):    # card_seen: refreshed by every look that found a card, not only a changed one
             starts.append(float(r["card_since"]))
     return min(starts + [now])
 
@@ -2598,8 +2597,9 @@ def card_alert_step(rid, rec, look):
             return
         since = float(rec.get("card_since") or 0)
         if not since:
-            transition(rid, ("queued",), card_since=card_episode_start(rid, rec, now))
+            transition(rid, ("queued",), card_since=card_episode_start(rid, rec, now), card_seen=now)
             return
+        transition(rid, ("queued",), card_seen=now)    # this look still sees the dialog: the next record's episode can inherit this clock
         if now - since < after:
             return
         keys, has_ids = card_alert_keys(rec, look)

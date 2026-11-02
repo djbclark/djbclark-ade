@@ -226,10 +226,12 @@ class TestCardAlert(Base):
         inherits its card clock, so the same dialog is not told twice (local-review round 2)."""
         first = self.queue("first message to the peer")
         second = self.queue("second message to the peer")
-        look = {"state": "card:picker", "why": "blocked on a question or permission prompt", "at": time.time() - 5}
+        look = {"state": "card:picker", "why": "blocked on a question or permission prompt", "at": time.time()}
         long_ago = time.time() - 20000
-        self.patch_rec(first, card_since=long_ago, look=look)
-        relay.card_alert_step(first, relay.rec_read(first), look)    # 20000 s behind the dialog: pinged
+        # the filed `look` is as old as the dialog (note_look files only a CHANGED look): the episode must not depend on its `at`
+        self.patch_rec(first, card_since=long_ago, look=dict(look, at=long_ago))
+        relay.card_alert_step(first, relay.rec_read(first), look)    # 20000 s behind the dialog: pinged, and this look refreshes card_seen
+        self.assertGreater(relay.rec_read(first)["card_seen"], time.time() - 30)
         self.assertEqual(len(self.ping_lines()), 1)
         claims = json.loads(relay.card_alerts_path().read_text())
         relay.card_alerts_path().write_text(json.dumps({k: dict(v, at=long_ago + 1900) for k, v in claims.items()}))    # that ping went out long ago
