@@ -84,10 +84,12 @@ say why for rejected ones.
 
 ## MCP
 
-The Greptile MCP server is `https://api.greptile.com/mcp` (HTTP) and authenticates **only by OAuth** in the client
-(`claude mcp login greptile`, `codex mcp login greptile`). Do not configure the API key as a bearer header: Greptile's docs
-say a static `Authorization` header can block the OAuth sign-in. Adding the MCP server to a client is a toolchain change:
-ask djbclark first (`~/AGENTS.md` item 5).
+The Greptile MCP server is `https://api.greptile.com/mcp` (streamable HTTP, 21 tools). Greptile's docs describe OAuth only
+(`claude mcp login greptile`), and say a static `Authorization` header can block that sign-in; but the API key also works
+as a bearer token (probed 2026-11-01 under `sudo-secretspec run`: `tools/call get_me` 200 with the key, 401 without). Its
+tool definitions are about 47.7 KB, roughly 12,000 tokens of context in every session that registers it. It is not
+registered on this machine: adding it to a client, or fronting it with a shared local proxy that injects the key, is a
+toolchain change: ask djbclark first (`~/AGENTS.md` item 5).
 
 ## Docs
 
