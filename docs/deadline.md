@@ -124,3 +124,6 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     a cancellation during an expiry stop is recorded (`cancelled`, grace clock kept) so no recovery or reroute runs. A terminal name whose owner notice
     is undelivered (retries left) or whose recovery order is unfinished cannot be registered again until settled (work untouched for 30 min no longer
     pins it). Corrupt records are quarantined only after a fresh read under their lock.
+15. Start times are compared for zombies too (a recycled pid or leader that is already an unreaped zombie is `reused`, never an authorisation to
+    `killpg` its live children). `extend` and `beat` are refused (exit 2) once the heartbeat timeout has elapsed, like the budget: a late call
+    does not revive an expired deadline between sweeps.

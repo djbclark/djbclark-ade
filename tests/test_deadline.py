@@ -839,3 +839,32 @@ def test_quarantine_rechecks_under_the_lock(env, inproc):
     (env.state / "busy1.json").write_text("{nope")
     assert dl.quarantine("busy1").startswith("busy") and (env.state / "busy1.json").exists()
     held.__exit__()
+
+
+# ---------- PR 223 local-review round 7: zombie leaders keep their start time, heartbeat expiry blocks extend/beat ----------
+
+def test_a_recycled_pid_that_is_a_zombie_is_still_reused(env, inproc):
+    dl = inproc
+    z = subprocess.Popen(["sh", "-c", "sleep 60 & exit 0"], start_new_session=True)   # leader exits unreaped (zombie) leaving a live child
+    env.children.append(z)
+    time.sleep(0.5)
+    info = dl.proc_info(z.pid)
+    assert info and info[1] == "Z", info
+    leader = {"name": "zl", "pid": z.pid, "pgid": z.pid, "pid_start": "the original process", "pgid_start": "the original process"}
+    assert dl.target_status(leader) == "reused", "a mismatched start time on a zombie leader must not authorise killpg"
+    assert dl.signal_target(leader, signal.SIGKILL)[0] == "failed" and env.group_alive(z.pid)
+    member = {"name": "zm", "pid": None, "pgid": z.pid, "pid_start": None, "pgid_start": "the original process"}
+    assert dl.target_status(member) == "reused"
+    # the genuine zombie (same start time) is simply not alive
+    same = {"name": "zs", "pid": z.pid, "pgid": None, "pid_start": info[0], "pgid_start": None}
+    assert dl.target_status(same) == "gone"
+
+
+def test_extend_and_beat_are_refused_after_the_heartbeat_timeout(env):
+    assert start(env, "hbx", "--budget", "3600", "--heartbeat", "60", "--on-expire", "notify").returncode == 0
+    r = env.run("extend", "hbx", "--by", "10", "--reason", "late", now=T0 + 90)
+    assert r.returncode == 2 and env.record("hbx")["extended_s"] == 0 and env.record("hbx")["last_beat"] == T0
+    r = env.run("beat", "hbx", now=T0 + 90)
+    assert r.returncode == 2 and env.record("hbx")["last_beat"] == T0
+    assert env.run("beat", "hbx", now=T0 + 50).returncode == 0
+    assert env.run("extend", "hbx", "--by", "10", "--reason", "ok", now=T0 + 60).returncode == 0

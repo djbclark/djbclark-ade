@@ -235,29 +235,29 @@ def target_status(rec: dict) -> str:
     alive = False
     if pid:
         info = proc_info(int(pid))
-        if info and info[1] != "Z":
-            if info[0] != rec["pid_start"]:
-                if not (pgid and int(pid) != int(pgid)):
-                    return "reused"
-                # a recycled NON-leader anchor says nothing about its old group (other members may live on): fall through to the group check
-            else:
-                alive = True
-                if pgid:
-                    # A live pid vouches for its group only while it is still IN it: a process that left (setpgid/setsid) says nothing
-                    # about whether the recorded group id has since been recycled.
-                    try:
-                        if os.getpgid(int(pid)) != int(pgid):
-                            return "unverified"
-                    except ProcessLookupError:
-                        alive = False
-                    except OSError:
+        if info and info[0] != rec["pid_start"]:
+            # compared whatever the state, a zombie included: a recycled pid that is already an unreaped zombie is still another process
+            if not (pgid and int(pid) != int(pgid)):
+                return "reused"
+            # a recycled NON-leader anchor says nothing about its old group (other members may live on): fall through to the group check
+        elif info and info[1] != "Z":
+            alive = True
+            if pgid:
+                # A live pid vouches for its group only while it is still IN it: a process that left (setpgid/setsid) says nothing
+                # about whether the recorded group id has since been recycled.
+                try:
+                    if os.getpgid(int(pid)) != int(pgid):
                         return "unverified"
+                except ProcessLookupError:
+                    alive = False
+                except OSError:
+                    return "unverified"
     if pgid and not alive:
         if not rec.get("pgid_start"):
             # a group with no recorded leader start: an empty group is gone whatever its id; a populated one could be a recycled id
             return "unverified" if group_members(int(pgid)) else "gone"
         leader = proc_info(int(pgid))
-        if leader and leader[1] != "Z" and leader[0] != rec["pgid_start"]:
+        if leader and leader[0] != rec["pgid_start"]:   # zombie leaders included: their live children are not our group
             return "reused"
         alive = bool(group_members(int(pgid)))
     return "alive" if alive else "gone"
@@ -917,6 +917,8 @@ def cmd_beat(a) -> int:
             return die(f"no deadline named {a.name}", 1)
         if rec.get("state", "running") != "running":
             return die(f"{a.name} is {rec.get('state')}: refused", 2)
+        if heartbeat_expired(rec, now()):
+            return die(f"{a.name}: its heartbeat timeout already elapsed; a late beat does not revive it (the sweep enforces it)", 2)
         rec["last_beat"] = now()
         if a.checkpoint:
             rec["checkpoint"] = a.checkpoint
@@ -926,6 +928,10 @@ def cmd_beat(a) -> int:
     return 0
 
 
+def heartbeat_expired(rec: dict, n: float) -> bool:
+    return bool(rec.get("heartbeat_s")) and n - rec.get("last_beat", rec.get("started", n)) > rec["heartbeat_s"]
+
+
 def cmd_extend(a) -> int:
     with Locked(a.name, block=True):
         rec = load(a.name)
@@ -933,8 +939,8 @@ def cmd_extend(a) -> int:
             return die(f"no deadline named {a.name}", 1)
         n = now()
         end = rec["started"] + rec["budget_s"] + rec.get("extended_s", 0)
-        if rec.get("state", "running") != "running" or n > end:
-            return die(f"{a.name} is already past its budget or stopped: an extension must be asked for BEFORE expiry", 2)
+        if rec.get("state", "running") != "running" or n > end or heartbeat_expired(rec, n):
+            return die(f"{a.name} is already past its budget or heartbeat, or stopped: an extension must be asked for BEFORE expiry", 2)
         cap = rec.get("max_extend_s", rec["budget_s"])
         if rec.get("extended_s", 0) + a.by > cap:
             return die(f"extension refused: {fmt_dur(rec.get('extended_s', 0))} used + {fmt_dur(a.by)} exceeds the {fmt_dur(cap)} cap", 2)
