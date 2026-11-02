@@ -656,6 +656,8 @@ class TransportBase(Base):
             # lost ack: the put really happens, then the connection "breaks"; with .blind the check cannot get through
             f'case "$last" in *" ln "*) [ -e \'{root}/ssh.lostack\' ] && {{ sh -c "$last"; exit 255; }};; esac\n'
             f'case "$last" in "head -c"*) [ -e \'{root}/ssh.blind\' ] && exit 255;; esac\n'
+            # the local ssh is killed by a signal right after the remote put ran
+            f'case "$last" in *" ln "*) [ -e \'{root}/ssh.sigkill\' ] && {{ sh -c "$last"; kill -9 $$; }};; esac\n'
             'exec sh -c "$last"\n')
         fake_ssh.chmod(0o755)
         self.origin, self.mailbox, self.bot = root / "origin.git", root / "mailbox", root / "bot-clone"
@@ -2040,6 +2042,40 @@ class TestAdversaryR2(ProtocolBase):
         self.assertIn("ade-1 is already used in the mailbox", r.stderr)
         self.assertIn("new task", (self.to_dir / "ade-6.md").read_text())
         self.assertEqual(self.health()["ssh"].get("fails", 0), 0, "a name clash is not a route failure")
+
+    def test_pending_messages_alone_seed_the_next_id(self) -> None:
+        """Review of c9dabdca: after a reset the mailbox may hold only unanswered ade-1..7.md; the next id is ade-8."""
+        for n in range(1, 8):
+            (self.to_dir / f"ade-{n}.md").write_text(f"[claude-code -> coding] id=ade-{n} nonce=00\nold {n}\n")
+        r = self.cli("send", "new task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("ade-8:"), (r.stdout, r.stderr))
+
+    def test_an_uncertain_put_keeps_its_id_even_when_another_route_has_the_name(self) -> None:
+        """Review of c9dabdca: the message may already be in the ssh drop, so the id is not retired and resent."""
+        root = Path(self.tmp.name)
+        (root / "ssh.lostack").write_text("")
+        (root / "ssh.blind").write_text("")
+        self.git(self.bot, "pull", "-q", "origin", "main")
+        (self.bot / "to-coding").mkdir(exist_ok=True)
+        (self.bot / "to-coding/ade-1.md").write_text("an old message\n")
+        self.git(self.bot, "add", "-A")
+        self.git(self.bot, "commit", "-q", "-m", "old")
+        self.git(self.bot, "push", "-q", "origin", "HEAD:main")
+        Hook.status = 500
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("delivery uncertain", r.stderr)
+        self.assertTrue(r.stdout.startswith("ade-1:"), r.stdout)
+        self.assertNotIn("taking a new id", r.stderr)
+
+    def test_a_put_whose_local_ssh_died_from_a_signal_is_checked(self) -> None:
+        """Review of c9dabdca: a negative exit (a signal) is a lost connection, not a remote refusal."""
+        (Path(self.tmp.name) / "ssh.sigkill").write_text("")
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Hook.seen[-1]["body"]["paths"], ["ssh"], r.stderr)
+        self.assertFalse(self.in_origin("to-coding/ade-1.md"), "a second copy went to git")
 
     def test_a_name_taken_in_the_git_mailbox_is_retired_too(self) -> None:
         self.ssh_down.write_text("")

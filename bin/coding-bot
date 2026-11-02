@@ -124,6 +124,7 @@ WEBHOOK_HOSTS = {"api2.cursor.sh"}  # where Grok Bot routines live (the Eve webh
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}  # plain http allowed here only: tests, never a bot
 EXIT_BLOCKED, EXIT_UNPICKED, EXIT_STALE, EXIT_CLIPBOARD, EXIT_TIMEOUT = 4, 5, 6, 10, 124
 MAX_TEXT = 100_000  # characters, for a task and for a filed reply
+MESSAGE_FILE = re.compile(r"ade-\d{1,9}\.md")
 LIST_MAX_BYTES = 1 << 20  # a reply folder listing kept in memory (about 30,000 names); the rest waits for pruning
 MAX_FILES_PER_POLL = 200  # unseen bot files read per transport per poll (the rest wait for the next poll)
 PARTIAL_REREAD_S = 300.0  # an unfinished reply to another id is read again at most this often
@@ -696,8 +697,9 @@ class Ssh:
         except TransportError as e:
             if e.rc == 17:
                 raise NameTaken(f"ssh: {f} already exists in the drop") from None
-            if e.rc not in (None, 255):
-                raise  # the remote command itself said no (the name exists, a full disk): nothing was stored
+            if e.rc is not None and e.rc >= 0 and e.rc != 255:
+                raise  # the remote command itself said no (a full disk, a short upload): nothing was stored
+            # None (timed out), 255 (ssh lost the connection) or negative (the local ssh died from a signal) leave it open
             # the connection broke: the `ln` may have landed. Look once; if we cannot tell, say so instead of "not stored"
             try:
                 landed = run_cmd(self._argv(f"head -c {len(content.encode()) + 1} -- {d}/{f}"), timeout=SSH_TIMEOUT_S) == content
@@ -705,6 +707,12 @@ class Ssh:
                 raise UncertainPut(f"{e}; whether {f} landed is unknown") from None
             if not landed:
                 raise
+
+    def list_outgoing(self) -> list[str]:
+        """The message files (ade-N.md) in to_dir: ids already used by some sender."""
+        out = run_cmd(self._argv(f"cd {shlex.quote(self.c['to_dir'])} && ls -1A"), timeout=SSH_TIMEOUT_S,
+                      max_out=LIST_MAX_BYTES)
+        return [n for n in out.split("\n") if MESSAGE_FILE.fullmatch(n)]
 
     def list_files(self) -> list[str]:
         """The reply, claim and heartbeat files in from_dir. A plain listing, filtered here: a pipeline with `|| true`
@@ -722,8 +730,8 @@ class Ssh:
         except DeadlineError:
             raise
         except TransportError as e:
-            if e.rc not in (None, 255):  # ssh itself fails with 255; anything else is the remote `head` on this file
-                raise FileError(str(e), e.rc) from None
+            if e.rc is not None and e.rc >= 0 and e.rc != 255:  # ssh fails with 255, a signal is negative: the route
+                raise FileError(str(e), e.rc) from None  # anything else is the remote `head` on this file
             raise
 
 
@@ -968,6 +976,12 @@ class Git:
                 os.unlink(tmp)
             raise
 
+    def list_outgoing(self) -> list[str]:
+        """The message files (ade-N.md) in to-coding/ at the remote head (fetched by the caller's list_files)."""
+        with self.locked():
+            out = self._git("ls-tree", "--name-only", f"{self.remote}/{self.branch}", "to-coding/", max_out=LIST_MAX_BYTES)
+        return [n.split("/", 1)[1] for n in out.split("\n") if "/" in n and MESSAGE_FILE.fullmatch(n.split("/", 1)[1])]
+
     def list_files(self) -> list[str]:
         """The reply, claim and heartbeat files in from-coding/."""
         with self.locked():
@@ -1123,7 +1137,10 @@ def put_message(ts: list, mid: str, content: str) -> tuple[str | None, float, li
         t0 = time.monotonic()
         try:
             t.put(mid, content)
-        except NameTaken:
+        except NameTaken as e:
+            if uncertain:  # an earlier route may already hold this id's message: keep the id, report uncertain
+                notes.append(f"{t.name}: {clean(str(e))[:120]}")
+                break
             raise  # not this route's fault: no backoff, and no other route gets a colliding id either
         except TransportError as e:
             if isinstance(e, UncertainPut):
@@ -1559,12 +1576,13 @@ HEARTBEAT_READ_AT: dict[str, float] = {}
 
 
 def mailbox_high_id(ts: list) -> int:
-    """The highest ade-N any reachable transport's reply folder names (replies and claims), 0 if none: after a state
-    reset this is where new ids must start. A route that cannot be listed is skipped (the retry loop is bounded)."""
+    """The highest ade-N any reachable transport names, in its message folder (ade-N.md, pending or not) or its reply
+    folder (replies and claims), 0 if none: after a state reset this is where new ids must start. A route that cannot
+    be listed is skipped (the retry loop is bounded)."""
     high = 0
     for t in ts:
         try:
-            names = t.list_files()
+            names = t.list_files() + t.list_outgoing()  # list_files first: for git it fetches the remote head
         except TransportError:
             continue
         for n in names:
