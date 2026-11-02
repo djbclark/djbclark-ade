@@ -224,6 +224,39 @@ def group_members(pgid: int) -> list[int]:
     return pids
 
 
+def anchor_alive(rec: dict) -> bool:
+    """A member of the recorded group seen alive earlier (pid + start time, refreshed by `refresh_anchor` each pass) is still alive and
+    still in the group; or this is a `deadline run` record whose registrar (the leader's parent) is itself still running."""
+    an = rec.get("anchor")
+    if isinstance(an, dict) and an.get("pid") and an.get("start"):
+        info = proc_info(int(an["pid"]))
+        if info and info[1] != "Z" and info[0] == an["start"]:
+            try:
+                if os.getpgid(int(an["pid"])) == int(rec["pgid"]):
+                    return True
+            except OSError:
+                pass
+    return registrar_alive(rec)
+
+
+def refresh_anchor(rec: dict) -> bool:
+    """While the group leader is verified alive, remember one other live member as the identity anchor for after the leader exits.
+    True when the record changed."""
+    pgid = rec.get("pgid")
+    if not pgid:
+        return False
+    for m in group_members(int(pgid)):
+        if m != int(pgid):
+            info = proc_info(m)
+            if info and info[1] != "Z":
+                new = {"pid": m, "start": info[0]}
+                if rec.get("anchor") != new:
+                    rec["anchor"] = new
+                    return True
+                return False
+    return False
+
+
 def target_status(rec: dict) -> str:
     """alive | gone | reused (same pid, different start time) | unverified (a pid with no recorded start time: never
     signalled, a recycled pid could not be told apart) | none (nothing registered to watch)."""
@@ -260,6 +293,9 @@ def target_status(rec: dict) -> str:
         if leader and leader[0] != rec["pgid_start"]:   # zombie leaders included: their live children are not our group
             return "reused"
         alive = bool(group_members(int(pgid)))
+        if alive and leader is None and not anchor_alive(rec):
+            # the leader is gone: survivors of the ORIGINAL group cannot be told from a recycled group id without a verified member
+            return "unverified"
     return "alive" if alive else "gone"
 
 
@@ -578,6 +614,12 @@ def step(rec: dict, dry: bool = False) -> str:
     n = now()
     settle_s = fenv("DEADLINE_SETTLE_S", 1.0)
     ts = target_status(rec)
+    if ts == "alive" and rec.get("pgid") and not dry and st in ("running", "stopping"):
+        try:
+            if refresh_anchor(rec):
+                save(rec)
+        except ProcUnknown:
+            pass
     if st == "running":
         if ts in ("gone", "reused", "unverified"):
             if ts != "reused" and registrar_alive(rec):
@@ -1088,7 +1130,8 @@ def cmd_run(a) -> int:
     def release() -> None:
         with Locked(a.name, block=True):
             cur = load(a.name)
-            if cur and cur.get("reg_id") == reg_id and cur.get("state") == "starting":
+            # also a record already saved `running`: this run aborts before the command was ever released, so nothing is left to enforce
+            if cur and cur.get("reg_id") == reg_id and cur.get("state") in ("starting", "running"):
                 rec_path(a.name).unlink(missing_ok=True)
 
     # Startup handshake: the command is exec'd only AFTER its record (with the pid and start time) is saved. Until then it sits in `read`
@@ -1124,6 +1167,8 @@ def cmd_run(a) -> int:
                 save(rec)
             else:
                 err = "the reserved name was taken over before the command was registered"
+    if os.environ.get("DEADLINE_TEST_CANCEL_AFTER_SAVE"):   # test hook: a signal lands after the record was persisted
+        forward(signal.SIGTERM, None)
     if err or child.poll() is not None or cancel["n"]:   # refused, or interrupted before the command started: it never ran
         os.close(w_fd)
         try:

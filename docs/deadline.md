@@ -130,3 +130,7 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
 16. `deadline run` does not mark a record `done` while members of the command's process group outlive its leader: the budget keeps binding them
     (stopped with 124 on expiry); once the group is empty it is `done` with the leader's rc. Registration records the start time it verified and refuses
     (exit 2) a target that vanished or changed meanwhile, never crashes.
+17. A process group whose leader has exited is signalled only with a verified member: one seen alive earlier (`anchor`, pid + start time, refreshed on
+    every pass while the leader is verified, and still in the group) or a live `deadline run` registrar; otherwise it is `unverified` (a recycled group id
+    cannot be told from the original survivors). Start times differ after a reboot, so stale records never match. A `run` cancelled after its record was
+    persisted but before the command was released removes that record (the command never ran: no lost-process notice).

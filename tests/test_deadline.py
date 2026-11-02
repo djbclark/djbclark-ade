@@ -903,3 +903,42 @@ def test_a_target_vanishing_between_the_two_start_time_reads_is_refused_not_a_cr
                             checkpoint=None, max_extend=None))()
     rec, err = dl.make_record(ns)
     assert rec is None and "vanished or changed" in err
+
+
+# ---------- PR 223 local-review round 9: leaderless group needs a verified member, cancel after persistence retires the registration ----------
+
+def test_a_group_whose_leader_is_gone_needs_a_verified_member_before_it_is_signalled(env, inproc):
+    dl = inproc
+    c = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 61 & exit 0"], start_new_session=True)
+    env.children.append(c)
+    c.wait()   # leader gone and reaped, two members live on
+    time.sleep(0.3)
+    members = dl.group_members(c.pid)
+    assert len(members) == 2 and dl.proc_info(c.pid) is None
+    rec = {"name": "lg", "owner": "o", "pid": None, "pgid": c.pid, "pid_start": None, "pgid_start": "the original leader", "kind": "start"}
+    assert dl.target_status(rec) == "unverified", "survivors could be a recycled group id: never signalled"
+    assert dl.signal_target(rec, signal.SIGKILL)[0] == "failed" and env.group_alive(c.pid)
+    info = dl.proc_info(members[0])
+    rec["anchor"] = {"pid": members[0], "start": info[0]}   # a member seen alive while the leader was still verified
+    assert dl.target_status(rec) == "alive"
+    rec["anchor"] = {"pid": members[0], "start": "not its start"}
+    assert dl.target_status(rec) == "unverified"
+
+
+def test_refresh_anchor_remembers_a_non_leader_member(env, inproc):
+    dl = inproc
+    c = env.child("sleep 60 & sleep 61 & wait")
+    time.sleep(0.4)
+    rec = {"name": "ra", "pgid": c.pid}
+    assert dl.refresh_anchor(rec) is True and rec["anchor"]["pid"] != c.pid and rec["anchor"]["start"]
+    assert dl.refresh_anchor(rec) is False
+
+
+def test_cancel_after_the_record_was_saved_retires_the_registration(env):
+    mark = env.tmp / "must-not-run"
+    r = env.run("run", "--budget", "30", "--name", "cancelsaved", "--owner", "o", "--", "sh", "-c", f"touch {mark}; sleep 30",
+                now=None, DEADLINE_TEST_CANCEL_AFTER_SAVE="1")
+    assert r.returncode == 130 and not mark.exists()
+    assert not (env.state / "cancelsaved.json").exists(), "no live record for a command that never ran"
+    assert env.run("sweep", "--no-agents", now=T0).stdout == "" and env.calls("RELAY") == []
+    assert start(env, "cancelsaved", "--budget", "10", "--on-expire", "notify").returncode == 0
