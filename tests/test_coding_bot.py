@@ -1455,6 +1455,15 @@ class TestRound7(TransportBase):
             mod.poll_transports([Fake()], prefer="ade-2")
             self.assertEqual(read, ["ade-2--coding-3.md"])
 
+    def test_the_early_return_reads_the_newest_revision_of_the_waited_reply(self) -> None:
+        """Review round 8: with several final revisions, wait must get the newest, not stop on the first in name order."""
+        self.cli("send", "task")
+        self.bot_reply_ssh("ade-1", "old answer\nDONE", n=9)
+        self.bot_reply_ssh("ade-1", "new answer\nDONE", n=10)
+        w = self.cli("wait", "ade-1", "--timeout", "5")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("new answer", w.stdout)
+
     def test_an_unreadable_ssh_reply_folder_is_a_route_failure_not_an_empty_inbox(self) -> None:
         self.cli("send", "task")
         self.from_dir.chmod(0o300)
