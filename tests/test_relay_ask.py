@@ -214,12 +214,68 @@ class TestInbox(Base):
         self.assertEqual((rc, out), (124, ""))
         self.assertIn("no question arrived within 30s", err)
 
-    def test_the_operator_without_a_session_reads_all_and_changes_nothing(self) -> None:
+    def test_a_caller_with_no_session_needs_the_operator_token_to_read_any_question(self) -> None:
         q = self.ask()
+        nonce = self.rec(q)["nonce"]
         self.as_agent(None)
-        rc, out, _ = self.go("--inbox")
-        self.assertEqual((rc, self.rec(q)["state"]), (0, "open"))
+        self.assertEqual(self.go("--inbox")[0], 2)    # any local process could otherwise read every question
+        self.assertEqual(self.go("--inbox", "--json")[0], 2)
+        wrong = self.tmp / "wrong.token"
+        wrong.write_text("not-the-token\n")
+        rc, out, err = self.go("--inbox", "--operator-token-file", str(wrong))
+        self.assertEqual((rc, out), (2, ""))
+        self.assertEqual(self.rec(q)["state"], "open")
+        rc, out, err = self.go("--inbox", "--operator-token-file", str(relay.operator_token_path()))
+        self.assertEqual((rc, self.rec(q)["state"]), (0, "open"))    # read only: it does not mark `seen`
         self.assertIn(q, out)
+        self.assertNotIn(nonce, out)
+        rows = json.loads(self.go("--inbox", "--json", "--operator-token-file", str(relay.operator_token_path()))[1])
+        self.assertTrue(rows and all("nonce" not in r for r in rows))
+        self.as_agent(BOB)    # a session reads only what is addressed to it, and a token with --mine is refused
+        self.assertEqual(self.go("--inbox")[0], 1)
+        self.assertEqual(self.go("--inbox", "--mine", "--operator-token-file", str(relay.operator_token_path()))[0], 2)
+
+    def test_mine_returns_an_answer_the_deferred_send_could_not_carry_exactly_once(self) -> None:
+        self.rows["alice"]["agent"], self.rows["alice"]["status"] = "cline", "working"    # cannot steer: the `ack` line must queue
+        q = self.ask(ALICE)
+        q_other = self.ask(BOB, "Rebase first")
+        self.ordinary(relay.DEFER_PER_TARGET, target=ALICE)    # the asker's queue is full: the ack send is refused
+        self.as_agent(LEAD)
+        rc, out, err = self.go("--answer", q, "2", "--note", "later")
+        self.assertEqual(rc, 1, (out, err))
+        r = self.rec(q)
+        self.assertEqual((r["state"], r["answer"]["pick"]), ("answered", 2))
+        self.assertTrue(r["answer"]["delivery"].startswith("failed: "), r["answer"]["delivery"])
+        self.assertEqual(sum(x.get("kind") == "" and x["text"].startswith("ack ") for x in relay.rec_all()), 0)    # nothing reached the queue
+        self.as_agent(ALICE)
+        rc, out, _ = self.go("--inbox", "--mine", "--json")
+        rows = json.loads(out)
+        self.assertEqual((rc, [x["id"] for x in rows]), (0, [q]))    # Bob's question is not Alice's
+        self.assertEqual((rows[0]["answer"]["pick"], rows[0]["answer"]["text"], rows[0]["answer"]["note"]), (2, "No, wait", "later"))
+        self.assertNotIn("nonce", rows[0])
+        self.assertTrue(self.rec(q)["answer"]["seen_by_asker"])
+        self.assertEqual(self.go("--inbox", "--mine")[0], 1)    # exactly once in "unseen"
+        rc, out, _ = self.go("--inbox", "--mine", "--all")
+        self.assertEqual((rc, q in out), (0, True))
+        self.as_agent(BOB)
+        self.assertEqual(self.go("--inbox", "--mine")[0], 1)    # its own is still open
+        self.assertEqual(self.rec(q_other)["state"], "open")
+        self.as_agent(CAROL)
+        self.assertEqual(self.go("--inbox", "--mine", "--all")[0], 1)
+
+    def test_mine_prints_in_full_oldest_first_and_refuses_what_it_cannot_tie_to_a_session(self) -> None:
+        q1, q2 = self.ask(ALICE, "First one"), self.ask(ALICE, "Second one")
+        self.as_agent(LEAD)
+        self.go("--answer", q2, "1")
+        self.go("--answer", q1, "2")
+        self.as_agent(ALICE)
+        self.assertEqual(self.go("--inbox", "--mine", "--wait", "5")[0], 2)
+        rc, out, _ = self.go("--inbox", "--mine")
+        self.assertEqual(rc, 0)
+        self.assertLess(out.index(q1), out.index(q2))
+        self.assertIn("Q: First one", out)
+        self.as_agent(None)
+        self.assertEqual(self.go("--inbox", "--mine")[0], 2)
 
 
 class TestAnswer(Base):

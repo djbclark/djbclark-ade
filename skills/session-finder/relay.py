@@ -9,6 +9,10 @@
         (settles old acks before transfer; exit 1 with missing for explicit tokens not transferred, even if acked)
     relay.py --ask LEAD "<question>" | --message-file PATH|- --option A --option B [--option ...] [--recommend N] [--defer-for S] [--json]
     relay.py --inbox [--wait S] [--all] [--json]  |  --answer Q-ID N [--note TEXT] [--nonce X --operator-token-file PATH [--via-label L]]  |  --withdraw Q-ID
+    relay.py --inbox --mine [--all] [--json]  |  --inbox --operator-token-file PATH [--all] [--json]
+        (--inbox --mine is the ASKER's authoritative path to its answers: its own answered questions it has not seen, in full, marked `answer.seen_by_asker`; it reads the
+        ledger, never the deferral queue, so a full queue (20 per target) or a failed `ack Q-ID pick N` send cannot hide an answer. A caller with no session gets
+        no --inbox without the operator token file: exit 2.)
         (the question ledger, 2026-11-02: a decision for a lead is a record under ~/.local/state/relay/asks/, never text typed into its turn; the lead reads it with
         --inbox and answers with --answer, and the asker gets `ack Q-ID pick N: <option>`. --ask exit 2 refused; --inbox exit 0 printed, 1 nothing, 124 timed out;
         --answer exit 0 delivered or handed to its route unproven, 1 queued or failed (the answer stays recorded), 2 not allowed or no such option, 10 already answered,
@@ -3907,15 +3911,59 @@ def ask_show(r, now):
         print(f"  answer: relay.py --answer {r['id']} N [--note TEXT]")
 
 
+def inbox_mine(a, me, ident):
+    """`relay.py --inbox --mine [--all] [--json]`: the asker's AUTHORITATIVE way to learn an answer. The caller's OWN questions that were answered and that it has not seen yet, in
+    full, oldest first; each is marked `answer.seen_by_asker` (a time) as it is printed, so a question is in the "unseen" list exactly once. It reads the ledger, never the
+    deferral queue, so a full queue (20 per target) or a failed `ack q-ID pick N` send cannot hide an answer. `--all` also prints the ones already seen, read only. Exit 0
+    something printed, 1 nothing, 2 no session."""
+    if not (me.get("id") and ident):
+        return ask_refuse("--inbox --mine needs a session the questions can be tied to, and this caller has none")
+    now, shown = time.time(), []
+    for r in ask_all():
+        frm = r.get("from") if isinstance(r.get("from"), dict) else {}
+        if frm.get("ident") != ident or r.get("state") != "answered":
+            continue
+        ans = r.get("answer") if isinstance(r.get("answer"), dict) else {}
+        if ans.get("seen_by_asker"):
+            if a.all:
+                shown.append(r)
+            continue
+        with ask_lock():    # check and mark in one hold: two readers never both find it unseen
+            cur = ask_read(r["id"]) or r
+            cans = cur.get("answer") if isinstance(cur.get("answer"), dict) else {}
+            if cur.get("state") == "answered" and not cans.get("seen_by_asker"):
+                cur = {**cur, "answer": {**cans, "seen_by_asker": now}}
+                ask_write(cur)
+                ask_log(cur, "answer seen by its asker")
+                shown.append(cur)
+    if a.json:
+        print(json.dumps([ask_row(r, now) for r in shown], ensure_ascii=False))
+    elif not shown:
+        print("inbox --mine: no answered question you have not seen")
+    for r in ([] if a.json else shown):
+        ask_show(r, now)
+    return 0 if shown else 1
+
+
 def inbox_cmd(a, wait_s):
     """`relay.py --inbox [--wait S] [--all] [--json]`: the questions addressed to this session, oldest first, in full; an `open` one becomes `seen` (the witness that
     the lead read it). A withdrawn one is shown once, so it is not put to the operator. `--all` adds the last day's answered, withdrawn and expired ones, read only.
     WAIT_S: return at once when an `open` question exists, else poll every DEFER_POLL seconds for one, exit 124 when none came in time (the committed state is
-    read before parking, so no wake-up is lost). A caller with no session (the operator in a shell) reads every question and changes nothing.
-    Exit 0 when something was printed, 1 when nothing, 124 on a timeout. Never the nonce."""
+    read before parking, so no wake-up is lost). `--mine`: the asker's own answered questions (inbox_mine). `--operator-token-file P` (the operator's token, as for
+    `--answer`) reads EVERY question and changes nothing; a caller with no session and no token is refused (exit 2): any local process could otherwise read every question.
+    Exit 0 when something was printed, 1 when nothing, 2 refused, 124 on a timeout. Never the nonce."""
     listed = fleet.sessions()
     me, _sp, ident, _h, label, _u = sender_identity(listed)
-    reader = me if me.get("id") else None
+    if a.mine:
+        if a.operator_token_file is not None:
+            return ask_refuse("--mine is the asker's own view: it does not take --operator-token-file")
+        return inbox_mine(a, me, ident)
+    operator = a.operator_token_file is not None
+    if operator and not operator_proves(a.operator_token_file):
+        return ask_refuse("the operator proof was refused (the token does not match)")
+    reader = None if operator else me if me.get("id") else None
+    if reader is None and not operator:
+        return ask_refuse("--inbox needs a session to read the questions addressed to it; the operator's view of every question takes --operator-token-file")
 
     def mine():
         return [r for r in ask_all() if reader is None or same_session(reader, r.get("to"))]
@@ -5014,7 +5062,7 @@ def ledger_dispatch(a, wait_given):
     """The question-ledger commands (`--ask`, `--inbox`, `--answer`, `--withdraw`): their exit code, or None when A names none. They are exclusive with each
     other and with every other command, and their options mean nothing without one."""
     chosen = [n for n, on in (("--ask", a.ask is not None), ("--inbox", a.inbox), ("--answer", a.answer is not None), ("--withdraw", a.withdraw is not None)) if on]
-    opts = [n for n, on in (("--option", bool(a.option)), ("--recommend", a.recommend is not None), ("--all", a.all), ("--note", a.note is not None),
+    opts = [n for n, on in (("--option", bool(a.option)), ("--recommend", a.recommend is not None), ("--all", a.all), ("--mine", a.mine), ("--note", a.note is not None),
                             ("--nonce", a.nonce is not None), ("--operator-token-file", a.operator_token_file is not None), ("--via-label", a.via_label is not None)) if on]
     if not chosen:
         if opts:
@@ -5024,7 +5072,8 @@ def ledger_dispatch(a, wait_given):
                               ("--pending", a.pending), ("--cancel", bool(a.cancel)), ("--sweep", a.sweep), ("--why", a.why)) if on]
     if len(chosen) > 1 or others:
         return ask_refuse(f"{chosen[0]} cannot be combined with {', '.join(chosen[1:] + others) or 'another command'}")
-    allowed = {"--ask": {"--option", "--recommend"}, "--inbox": {"--all"}, "--answer": {"--note", "--nonce", "--operator-token-file", "--via-label"}, "--withdraw": set()}[chosen[0]]
+    allowed = {"--ask": {"--option", "--recommend"}, "--inbox": {"--all", "--mine", "--operator-token-file"}, "--answer": {"--note", "--nonce", "--operator-token-file", "--via-label"},
+               "--withdraw": set()}[chosen[0]]
     if [o for o in opts if o not in allowed]:
         return ask_refuse(f"{', '.join(o for o in opts if o not in allowed)} does not go with {chosen[0]}")
     if chosen[0] != "--ask" and a.message_file is not None:
@@ -5043,7 +5092,9 @@ def ledger_dispatch(a, wait_given):
         return ask_cmd(a, given[0])
     if chosen[0] == "--inbox":
         if a.ident is not None or a.text is not None:
-            return ask_refuse("usage: relay.py --inbox [--wait S] [--all] [--json]")
+            return ask_refuse("usage: relay.py --inbox [--wait S] [--all] [--json] | --inbox --mine [--all] [--json] | --inbox --operator-token-file PATH [--all] [--json]")
+        if a.mine and wait_given:
+            return ask_refuse("--inbox --mine reads what is recorded now: it takes no --wait")
         if wait_given and not (math.isfinite(a.wait) and a.wait >= 0):
             return ask_refuse("--wait must be a finite number of seconds >= 0")
         return inbox_cmd(a, a.wait if wait_given else None)
@@ -5115,6 +5166,8 @@ def _main(argv=None, sweep=True):
     ap.add_argument("--inbox", action="store_true", help="the questions addressed to this session, in full (an `open` one becomes `seen`); with --wait S wait up to S seconds for a "
                     "new one (exit 124 on a timeout); exit 0 something printed, 1 nothing. --json: a list of records")
     ap.add_argument("--all", action="store_true", help="with --inbox: also the last day's answered, withdrawn and expired questions, read only")
+    ap.add_argument("--mine", action="store_true", help="with --inbox: the asker's AUTHORITATIVE path to its answers: your OWN questions that were answered and that you have not seen, in full, "
+                    "oldest first (marks `answer.seen_by_asker`); it reads the ledger, not the deferral queue, so a full queue or a failed `ack q-ID pick N` send cannot hide an answer")
     ap.add_argument("--answer", metavar="QID", help="answer question QID with the option number given as the positional N (`relay.py --answer q-ID 2`): only the addressed lead, or the "
                     "operator (--nonce and --operator-token-file). Exit 0 delivered, 1 queued or not proven (the answer is recorded), 2 refused, 10 already answered, 11 withdrawn or expired")
     ap.add_argument("--note", metavar="TEXT", help="with --answer: a remark of at most 300 characters that rides on the answer line")

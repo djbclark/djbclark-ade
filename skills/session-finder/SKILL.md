@@ -413,7 +413,10 @@ Fields: `v` 1, `id`, `project` (the asker's cwd basename), `from` {ident, label,
    option over 200 or a question over 2000 characters, or a send option (`--no-defer`, `--plan`, `--idle`, `--steer`, `--via`, `--expect-ack`, `--fyi`, `--needs-reply`, `--ack`, `--no-ack`). Never wait or poll for the answer.
 2. `relay.py --inbox [--wait S] [--all] [--json]` (the lead): its questions oldest first, in full; `open` becomes `seen` (`seen_by` = your id). A withdrawn one is shown once. `--all` adds the last day's finished ones, read
    only. `--wait S` returns at once when an `open` question exists, else polls every 5 s; exit 0 something printed, 1 nothing, 124 timed out. `--json` is a list of records without their nonce. A caller with no session
-   reads every question and changes nothing.
+   is refused (exit 2) unless it gives `--operator-token-file PATH` (the operator token, as for `--answer`), which reads every question and changes nothing.
+   **`relay.py --inbox --mine [--all] [--json]` (the ASKER's authoritative path to its answers, 2026-11-02):** your OWN answered questions you have not seen, in full, oldest first; each is marked `answer.seen_by_asker`
+   as it is printed, so it is in the unseen list exactly once (`--all` also lists the seen ones, read only). It reads the ledger, never the deferral queue (20 per target), so a full queue or a failed `ack q-ID pick N`
+   send cannot hide an answer: that send is best-effort on top. Run it when the pick did not arrive, and before reporting a question unanswered. Exit 0 something printed, 1 nothing, 2 no session.
 3. `relay.py --answer q-ID N [--note TEXT]`: the addressed lead, or the operator: `--nonce X --operator-token-file PATH [--via-label L]` (the record's nonce AND a file holding the operator token,
    `~/.local/state/relay/operator.token`, 0600, made by relay on the first question; a caller with no session is NOT the operator). `answered` is written first (the commit point); the asker then gets the line
    `ack q-ID pick N: <option text>[ — note]` through the ordinary send path (queued when it is working; an operator's goes out as `[relay from operator]`). Exit 0 delivered or handed to its route unproven (a Paseo agent has no transcript to prove it), 1 queued or failed (the
