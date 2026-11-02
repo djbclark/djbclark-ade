@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """local-review: run Codex's code review LOCALLY on the exact head of a PR and file the result for `pr-wait --local-codex`.
 
-  local-review PR [--repo OWNER/NAME] [--head SHA] [--timeout S] [--allow-untrusted] [--json]
+  local-review PR [--repo OWNER/NAME] [--head SHA] [--timeout S] [--load-wait S | --no-load-gate] [--allow-untrusted] [--json]
 
 Why (2026-10-29, operator: "could we just switch to making codex reviews run locally in general"): the GitHub Codex review of PRs 112 and 124 sat
 "Running" until the waiter gave up (openai/codex#55890), while `codex review --base origin/master` run by hand finished in 2.3-11 minutes (the machine's load)
@@ -10,6 +10,18 @@ longer waits on a bot that may never answer. Run it AFTER the push has landed (t
 
 What it does, from a checkout of the repo (any worktree; it fetches into its object store and adds one temporary linked worktree under the state dir,
 and touches nothing else of yours):
+  0. asks the load gate first (2026-11-01: an unattended start-up storm that included a local review took the load to 36): `load-watch admit --wait S --json`,
+     the same gate `bg` and `acp-dispatch` ask, polled every 15 s while the machine is too hot (S: --load-wait, else $LOCAL_REVIEW_LOAD_WAIT, else 1800;
+     --no-load-gate skips it; $LOCAL_REVIEW_LOAD_WATCH names another binary, default the `load-watch` beside this script; every LW_* variable is dropped
+     from its environment EXCEPT the thresholds acp-dispatch passes through too (LW_MIN_FREE_MB, LW_MAX_COMPRESSOR_S, LW_MAX_PAGEINS_S as admit flags,
+     LW_BOOST_CALM_S as is); no --max-agents: a review is not an agent slice). It runs BEFORE the PR lookup (so a wait never leaves a stale head) and BEFORE the
+     lock and the `in progress` record (so a second caller never reads a waiting run as a running one, and a refused run leaves no result file at all).
+     A run that waited takes the lock and then looks once at the result file: a FINAL result for this head that a peer filed after this run was invoked
+     (`finished_ts`) is reported with its own exit code and left untouched, never overwritten by a second review.
+     Still too hot after S: exit 75 and this run files nothing, so `pr-wait --local-codex` keeps reading whatever was filed for that head before (a final
+     result, a stale `in progress`, or `local-codex-missing` when there is none); a later run reviews the head.
+     A gate that cannot run (no load-watch, it crashes, unreadable output) warns on stderr and the review starts. The wait is not part of --timeout or elapsed_s;
+     the result records `load_gate` ({"waited_s": N}, {"error": why}, or {"skipped": true});
   1. asks `gh api repos/R/pulls/N` for the PR's head and base (`--head SHA` pins a head, which must be the PR's current head or one of its ancestors), then
      fetches the base and `refs/pull/N/head` so both commits are present locally;
   2. adds a CLEAN, DETACHED worktree at exactly that head under the state dir (nothing of yours is reviewed: no dirty file, no other branch);
@@ -45,7 +57,7 @@ Rules (each one a way a local review could lie, so each is pinned by a test):
      Residual: a tool process that is reparented to init between two 2-second looks AND works outside the worktree escapes (no cgroups on macOS).
 
 Exit: 0 clean, 1 findings, 2 usage / no such PR / not in a checkout of that repo / an author that is not trusted, 3 failed (see `reason` in the file and on stderr), 4 another run for the
-same head is alive.
+same head is alive, 75 (EX_TEMPFAIL) the load gate still refused after --load-wait: this run started nothing and filed nothing, retry later.
 """
 
 from __future__ import annotations
@@ -54,6 +66,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -86,7 +99,10 @@ SECRET_ENV_RE = re.compile(r"(?i)(token|secret|passw|credential|api_?key)|^(GH|G
 KEEP_ENV_RE = re.compile(r"^(CODEX_|OPENAI_)")
 GH_TIMEOUT = int(os.environ.get("LOCAL_REVIEW_GH_TIMEOUT") or 90)    # seconds for the one `gh api` call (overridable so a test need not wait 90)
 GIT_TIMEOUT = 300
-EXIT_CLEAN, EXIT_FINDINGS, EXIT_USAGE, EXIT_FAILED, EXIT_DUP = 0, 1, 2, 3, 4
+EXIT_CLEAN, EXIT_FINDINGS, EXIT_USAGE, EXIT_FAILED, EXIT_DUP, EXIT_LOAD = 0, 1, 2, 3, 4, 75
+LOAD_WAIT_DEFAULT = 1800    # seconds the load gate may wait (--load-wait / LOCAL_REVIEW_LOAD_WAIT), as acp-dispatch
+LOAD_GATE_GRACE = int(os.environ.get("LOCAL_REVIEW_LOAD_GRACE") or 180)    # (overridable so a test of a hung gate need not wait 3 min) seconds past the wait before a hung load-watch is abandoned (and the gate fails open)
+HERE = Path(__file__).resolve().parent
 
 
 def state_dir() -> Path:
@@ -172,6 +188,102 @@ def take_lock(path: Path) -> int | None:
     return fd
 
 
+def load_wait_seconds(given: int | None) -> int:
+    """The gate's wait budget: --load-wait, else LOCAL_REVIEW_LOAD_WAIT, else LOAD_WAIT_DEFAULT; never negative."""
+    if given is not None:
+        return max(0, given)
+    raw = os.environ.get("LOCAL_REVIEW_LOAD_WAIT", "").strip()
+    if not raw:
+        return LOAD_WAIT_DEFAULT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        print(f"local-review: warning: ignoring LOCAL_REVIEW_LOAD_WAIT={raw!r} (need whole seconds); waiting up to {LOAD_WAIT_DEFAULT} s", file=sys.stderr)
+        return LOAD_WAIT_DEFAULT
+
+
+# (env var, admit flag, smallest value admit accepts): the thresholds acp-dispatch passes through its LW_ scrub (load-watch exits 2 for a churn or pageins
+# limit of 0). No --max-agents: a review is not an agent slice.
+LOAD_KNOBS = (("LW_MIN_FREE_MB", "--min-free-mb", 0), ("LW_MAX_COMPRESSOR_S", "--max-mem-churn", 1), ("LW_MAX_PAGEINS_S", "--max-pageins", 1))
+
+
+def load_gate_knobs() -> tuple[list[str], dict[str, str]]:
+    """The admit flags and environment this review passes through despite the LW_ scrub, the same thresholds `acp-dispatch` passes (LW_MIN_FREE_MB,
+    LW_MAX_COMPRESSOR_S, LW_MAX_PAGEINS_S as flags, LW_BOOST_CALM_S as an environment variable), so a tightened memory gate holds here as it does for
+    a dispatch. A value that is not a finite number at or above admit's own minimum is warned about and ignored. Every other LW_* variable (LW_STATE_DIR
+    and the test hooks included) is dropped, as acp-dispatch drops it."""
+    flags: list[str] = []
+    for var, flag, low in LOAD_KNOBS:
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        try:
+            val = float(raw)
+        except ValueError:
+            val = -1.0
+        if not math.isfinite(val) or val < low:
+            print(f"local-review: warning: ignoring {var}={raw!r} (need a number, {low} or more)", file=sys.stderr)
+            continue
+        flags.append(f"{flag}={raw}")
+    extra: dict[str, str] = {}
+    calm = os.environ.get("LW_BOOST_CALM_S", "").strip()
+    if calm:
+        try:
+            if not math.isfinite(float(calm)) or float(calm) < 0:
+                raise ValueError(calm)
+            extra["LW_BOOST_CALM_S"] = calm
+        except ValueError:
+            print(f"local-review: warning: ignoring LW_BOOST_CALM_S={calm!r} (need a number, 0 or more)", file=sys.stderr)
+    return flags, extra
+
+
+def load_gate(wait: int) -> tuple[bool, dict, str]:
+    """Ask `load-watch admit --wait WAIT --json` whether a review may start (it never throttles anything), as acp-dispatch does.
+    (admitted, info, why): info is {"waited_s": N} when admitted, {"error": why} when the gate could not run (missing, crashed, timed out, unreadable
+    output: warned on stderr and admitted, because a gate that cannot read the load must not stop all reviews), and the refusal's {"waited_s", "load1",
+    "per_core", "refused"} when admit exited 75. Only its exit 75 refuses. Its environment has no LW_* variable (its test hooks must never steer a
+    production gate, and a bad LW_LOAD_PER_CORE crashes it, which would fail open); the thresholds acp-dispatch passes through are passed through here
+    too (load_gate_knobs); its progress lines go to our stderr."""
+    def unknown(why: str) -> tuple[bool, dict, str]:
+        print(f"local-review: warning: {why}; starting without the load gate", file=sys.stderr)
+        return True, {"error": why}, why
+
+    path = os.path.expanduser(os.environ.get("LOCAL_REVIEW_LOAD_WATCH") or str(HERE / "load-watch"))
+    if os.sep not in path:
+        path = shutil.which(path) or path
+    path = str(Path(path).resolve())
+    if not Path(path).exists():
+        return unknown(f"{path} not found")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LW_")}
+    flags, extra_env = load_gate_knobs()
+    env.update(extra_env)
+    try:
+        proc = subprocess.run([path, "admit", "--wait", str(wait), "--json", *flags], check=False, stdout=subprocess.PIPE, stderr=None, stdin=subprocess.DEVNULL,
+                              text=True, timeout=wait + LOAD_GATE_GRACE, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return unknown(f"load-watch admit failed ({e})")
+    try:
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        info: dict | None = {"waited_s": data.get("waited_s", 0), "load1": data["load1"], "per_core": data["per_core"]}
+        if isinstance(data.get("refused"), list):
+            info["refused"] = [str(x) for x in data["refused"]]
+    except (IndexError, KeyError, TypeError, ValueError, AttributeError):
+        info = None
+    if proc.returncode == 0:
+        if info is None:
+            return unknown(f"load-watch admit exited 0 with output the gate cannot read ({proc.stdout.strip()[:80]!r})")
+        return True, {"waited_s": info["waited_s"]}, "ok"
+    if proc.returncode == EXIT_LOAD:
+        info = info or {"waited_s": wait, "load1": None, "per_core": None}
+        refused = f" refused={','.join(info['refused'])}" if info.get("refused") else ""
+        return False, info, (f"machine too hot; retry later: load1={info['load1']} per_core={info['per_core']}{refused} "
+                             f"after waiting {info['waited_s']}s of the {wait}s --load-wait budget; nothing was started or filed")
+    if proc.returncode == 2:    # admit refused its own arguments (a bad LW_* knob): failing open would bypass every guard, as acp-dispatch holds
+        return False, {"waited_s": 0, "refused": ["admit_usage"]}, (f"machine too hot; retry later: load-watch admit exited 2 (it refused its arguments {' '.join(flags)}); "
+                                                                   "nothing was started or filed, fix the LW_* settings")
+    return unknown(f"load-watch admit exited {proc.returncode}")
+
+
 def die(msg: str, code: int) -> int:
     print(f"local-review: {msg}", file=sys.stderr)
     return code
@@ -179,13 +291,17 @@ def die(msg: str, code: int) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="local-review", description="Run Codex's code review locally on the exact head of a PR "
-                                "and file the result for `pr-wait --local-codex`. Exit: 0 clean, 1 findings, 2 usage, 3 failed, 4 duplicate.")
+                                "and file the result for `pr-wait --local-codex`. Exit: 0 clean, 1 findings, 2 usage, 3 failed, 4 duplicate, 75 machine too hot (this run files nothing).")
     p.add_argument("pr", type=int, help="pull request number")
     p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
     p.add_argument("--head", help="the full head SHA to review (default: the PR's current head)")
     p.add_argument("--allow-untrusted", action="store_true", help="review a PR whose author is neither the repository owner nor the authenticated gh user "
                    "(its diff and AGENTS.md can steer the reviewing model)")
-    p.add_argument("--timeout", type=int, default=1500, help="seconds before codex is killed (default 1500)")
+    p.add_argument("--timeout", type=int, default=1500, help="seconds before codex is killed (default 1500); counts from the moment codex starts, not the load wait")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--load-wait", type=int, metavar="SECONDS", help="load gate: wait up to SECONDS for `load-watch admit` (1-minute load per core <= 1.5, free memory, "
+                   f"compressor and pageins) before starting codex; exit 75 and file nothing if still too hot (default $LOCAL_REVIEW_LOAD_WAIT or {LOAD_WAIT_DEFAULT}; 0 is a pure check)")
+    g.add_argument("--no-load-gate", action="store_true", help="skip the load gate")
     p.add_argument("--json", action="store_true", help="print the result document as one JSON line")
     return p
 
@@ -227,6 +343,16 @@ def main(argv: list[str]) -> int:
     if "/".join(re.split(r"[/:]", origin.removesuffix(".git").rstrip("/"))[-2:]).lower() != a.repo.lower():    # the whole owner/name, never a substring
         return die(f"origin of {root} is {origin!r}, not {a.repo}", EXIT_USAGE)
 
+    # The load gate comes before everything that talks to GitHub or takes the lock: a wait must not leave a stale head behind, and a run that is only waiting
+    # holds nothing a second caller could mistake for a running review (exit 4 means codex is alive for that head).
+    invoked = time.time()
+    load_gate_doc: dict = {"skipped": True}
+    if not a.no_load_gate:
+        wait = load_wait_seconds(a.load_wait)
+        admitted, load_gate_doc, why = load_gate(wait)
+        if not admitted:
+            return die(f"PR {a.pr}: {why}", EXIT_LOAD)
+
     gh = run(["gh", "api", f"repos/{a.repo}/pulls/{a.pr}"], timeout=GH_TIMEOUT)
     if gh.returncode != 0:
         return die(f"gh api pulls/{a.pr} failed: {gh.stderr.strip()[:200]}", EXIT_USAGE)
@@ -265,11 +391,19 @@ def main(argv: list[str]) -> int:
     if lock_fd is None:
         return die(f"another local-review for {head[:12]} is running (see {sd / f'lock-{stem}'})", EXIT_DUP)
 
+    peer = reviewed_while_waiting(result_path, a.repo, a.pr, head, base, invoked)
+    if peer is not None:    # the lock is ours, so that run is over and its verdict is final: report it, rewrite nothing, start no codex
+        print(f"local-review: note: {head[:12]} was reviewed while this run waited (finished {peer.get('finished')}); reporting that result, not reviewing again", file=sys.stderr)
+        try:
+            return report(peer, result_path, a.json)
+        finally:
+            os.close(lock_fd)
+
     started, t0 = now_iso(), time.monotonic()
     doc_out: dict = {"schema": SCHEMA, "repo": a.repo, "pr": a.pr, "head": head, "author": author, "base_ref": base, "base_sha": "", "result": "failed",
                      "reason": "in progress (a run that died leaves this)", "exit_code": None, "final_message": False,
                      "counts": {k: 0 for k in PRIORITIES}, "findings": [], "ignored_generated": [], "dirty_after": [],
-                     "codex_version": "", "started": started, "finished": "", "elapsed_s": 0.0, "out_sha256": "", "err_sha256": ""}
+                     "codex_version": "", "started": started, "finished": "", "elapsed_s": 0.0, "out_sha256": "", "err_sha256": "", "load_gate": load_gate_doc}
     write_private(result_path, json.dumps(doc_out, indent=1) + "\n")    # an older `clean` for this head must not survive a run that dies
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
@@ -488,12 +622,39 @@ def finish(doc: dict, result_path: Path, t0: float, as_json: bool, usage_error: 
         result_path.unlink(missing_ok=True)    # nothing was reviewed: no result file for a head that was never in scope
         return die(usage_error, EXIT_USAGE)
     doc["finished"] = now_iso()
+    doc["finished_ts"] = time.time()    # sub-second, read by a run that waited at the load gate to see a review finished meanwhile (reviewed_while_waiting)
     doc["elapsed_s"] = round(time.monotonic() - t0, 1)
     if doc["result"] != "failed":
         doc["reason"] = ""
     elif not doc["reason"]:
         doc["reason"] = "failed for an unrecorded reason"
     write_private(result_path, json.dumps(doc, indent=1) + "\n")
+    return report(doc, result_path, as_json)
+
+
+def reviewed_while_waiting(result_path: Path, repo: str, pr: int, head: str, base: str, since: float) -> dict | None:
+    """The FINAL result another run filed for this head AND this base branch (a retargeted PR keeps no old verdict, as `pr-wait` reads it) at or after SINCE (the moment this run was invoked), else None. Taken under the lock: a run that
+    waited at the load gate must not review again what a peer finished meanwhile (a second codex spend in the very storm the gate calms, and its `in progress`
+    record would hide the peer's verdict from `pr-wait`). An `in progress` record (no `finished_ts`), an older result, another head or base or an unreadable file
+    is None, so the review runs."""
+    try:
+        doc = json.loads(result_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("schema") != SCHEMA or (doc.get("repo"), doc.get("pr"), doc.get("head"), doc.get("base_ref")) != (repo, pr, head, base):
+        return None
+    ts = doc.get("finished_ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not doc.get("finished") or ts < since:
+        return None
+    if doc.get("result") not in ("clean", "findings", "failed") or not isinstance(doc.get("counts"), dict) or not isinstance(doc.get("findings"), list):
+        return None
+    if any(k not in doc["counts"] for k in PRIORITIES) or not isinstance(doc.get("ignored_generated"), list) or not isinstance(doc.get("reason"), str):
+        return None
+    return doc
+
+
+def report(doc: dict, result_path: Path, as_json: bool) -> int:
+    """Print the result document's summary and return its exit code (no file is written)."""
     c = doc["counts"]
     if doc["result"] == "clean":
         code, text = EXIT_CLEAN, "clean"

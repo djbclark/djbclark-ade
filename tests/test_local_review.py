@@ -92,6 +92,37 @@ Full review comments:
 esac
 """
 
+# The fake `load-watch admit`: FAKE_LW_MODE picks the answer; every call logs its argv and how many LW_* variables it was given, and what of the head's state
+# existed while it was asked.
+FAKE_LOAD_WATCH = r"""#!/bin/bash
+echo "$*" >> "$FAKE_LW_LOG"
+echo "LW_VARS=$(env | cut -d= -f1 | grep -c '^LW_')" >> "$FAKE_LW_LOG"
+if [ -d "$LOCAL_REVIEW_STATE_DIR" ] && [ -n "$(ls -A "$LOCAL_REVIEW_STATE_DIR")" ]; then printf 'STATE=present' > "$FAKE_LW_LOG.state"; else printf 'STATE=absent' > "$FAKE_LW_LOG.state"; fi
+case "${FAKE_LW_MODE:-admit}" in
+  admit) echo '{"load1": 0.5, "per_core": 0.06, "waited_s": 7}' ;;
+  refuse) echo '{"load1": 21.0, "per_core": 2.6, "waited_s": 3, "refused": ["free_mem"]}'; exit 75 ;;
+  usage) echo "bad knob" >&2; exit 2 ;;
+  hang) exec sleep 30 ;;
+  peer) python3 - <<'PY'
+import json, os, time
+d = json.load(open(os.environ["FAKE_PEER_DOC"]))
+d["base_ref"] = os.environ.get("FAKE_PEER_BASE", d["base_ref"])
+d["finished_ts"] = time.time()    # a peer review that finished while this run waited for the gate
+open(os.environ["FAKE_PEER_TARGET"], "w").write(json.dumps(d, indent=1) + "\n")
+PY
+    echo '{"load1": 0.5, "per_core": 0.06, "waited_s": 7}' ;;
+  crash) echo "boom" >&2; exit 1 ;;
+  garbage) echo "all fine, trust me" ;;
+esac
+"""
+
+
+def pr_wait_module():
+    ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
+    ld.exec_module(mod)
+    return mod
+
 
 def sh(*argv: str, cwd: Path | None = None, env: dict | None = None) -> str:
     r = subprocess.run(argv, cwd=cwd, env=env, check=True, capture_output=True, text=True)
@@ -133,7 +164,7 @@ class World:
         self.pr_json.write_text(json.dumps({"head": {"sha": self.head}, "base": {"ref": "master"}, "user": {"login": "owner"}}))
         bindir = tmp / "bin"
         bindir.mkdir()
-        for name, body in (("gh", FAKE_GH), ("codex", FAKE_CODEX)):
+        for name, body in (("gh", FAKE_GH), ("codex", FAKE_CODEX), ("load-watch", FAKE_LOAD_WATCH)):
             p = bindir / name
             p.write_text(body)
             p.chmod(p.stat().st_mode | stat.S_IXUSR)
@@ -141,7 +172,8 @@ class World:
         self.codex_log, self.codex_env, self.pid_file = tmp / "codex.log", tmp / "codex.env", tmp / "codex.pid"
         self.env = {**git_env, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", "LOCAL_REVIEW_STATE_DIR": str(self.state),
                     "FAKE_PR_JSON": str(self.pr_json), "FAKE_CODEX_LOG": str(self.codex_log), "FAKE_CODEX_ENV": str(self.codex_env),
-                    "FAKE_PID_FILE": str(self.pid_file), "FAKE_CODEX_MODE": "clean"}
+                    "FAKE_PID_FILE": str(self.pid_file), "FAKE_CODEX_MODE": "clean",
+                    "LOCAL_REVIEW_LOAD_WATCH": str(bindir / "load-watch"), "FAKE_LW_LOG": str(tmp / "lw.log"), "FAKE_LW_MODE": "admit"}
 
     def argv(self, *extra: str) -> list[str]:
         return [sys.executable, "-I", str(LOCAL_REVIEW), str(PR), "--repo", REPO, *extra]
@@ -510,9 +542,7 @@ def test_an_unusable_state_directory_is_failed_not_a_traceback(world: World) -> 
 
 
 def test_a_result_it_files_is_what_pr_wait_reads_as_clean_and_a_findings_one_blocks(world: World) -> None:
-    ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
-    ld.exec_module(mod)
+    mod = pr_wait_module()
     saved = os.environ.get("LOCAL_REVIEW_STATE_DIR")
     os.environ["LOCAL_REVIEW_STATE_DIR"] = str(world.state)
     try:
@@ -530,3 +560,127 @@ def test_a_result_it_files_is_what_pr_wait_reads_as_clean_and_a_findings_one_blo
             os.environ.pop("LOCAL_REVIEW_STATE_DIR")
         else:
             os.environ["LOCAL_REVIEW_STATE_DIR"] = saved
+
+
+def gate_calls(world: World) -> list[str]:
+    log = world.tmp / "lw.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_a_machine_too_hot_for_the_whole_wait_exits_75_starts_no_codex_and_files_nothing(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = world.run("--load-wait", "42", env={"FAKE_LW_MODE": "refuse"})
+    assert r.returncode == 75, r.stderr
+    assert "free_mem" in r.stderr    # the line names the refused gates
+    assert gate_calls(world)[0].split() == ["admit", "--wait", "42", "--json"]    # the wait asked of the gate is the --load-wait budget
+    assert not world.codex_log.exists()
+    assert not world.state.exists() or list(world.state.iterdir()) == []    # no result, no output file, no lock for that head
+    assert len(world.worktrees()) == 1
+    monkeypatch.setenv("LOCAL_REVIEW_STATE_DIR", str(world.state))
+    assert pr_wait_module().local_codex_read(REPO, PR, world.head, "master")["status"] == "missing"    # never `failed`: a later run reviews it
+
+
+def test_a_refused_run_leaves_an_earlier_result_for_that_head_alone(world: World) -> None:
+    assert world.run(env={"FAKE_LW_MODE": "admit"}).returncode == 0
+    before = world.stem().with_suffix(".json").read_text()
+    assert world.run(env={"FAKE_LW_MODE": "refuse"}).returncode == 75
+    assert world.stem().with_suffix(".json").read_text() == before
+
+
+def test_an_admitted_run_starts_codex_records_the_wait_and_gets_no_lw_variable_or_agent_cap(world: World) -> None:
+    r = world.run(env={"FAKE_LW_MODE": "admit", "LW_FAKE_LOAD1": "99", "LW_MAX_AGENTS": "1"})
+    assert r.returncode == 0, r.stderr
+    assert world.codex_log.exists() and world.doc()["load_gate"] == {"waited_s": 7}
+    calls = gate_calls(world)
+    assert calls[0].split() == ["admit", "--wait", "1800", "--json"] and calls[1] == "LW_VARS=0"    # default budget; a review is not an agent slice
+    assert len(calls) == 2
+
+
+def test_the_wait_holds_no_lock_and_no_result_so_a_waiting_run_is_never_mistaken_for_a_running_one(world: World) -> None:
+    assert world.run(env={"FAKE_LW_MODE": "admit"}).returncode == 0
+    assert (world.tmp / "lw.log.state").read_text() == "STATE=absent"    # nothing of the head existed while the gate was asked
+
+
+def test_the_wait_budget_comes_from_the_environment_when_no_flag_is_given(world: World) -> None:
+    assert world.run(env={"LOCAL_REVIEW_LOAD_WAIT": "9"}).returncode == 0
+    assert gate_calls(world)[0].split()[:3] == ["admit", "--wait", "9"]
+    assert world.run("--load-wait", "0", env={"LOCAL_REVIEW_LOAD_WAIT": "9"}).returncode == 0
+    assert gate_calls(world)[2].split()[:3] == ["admit", "--wait", "0"]    # the flag wins
+
+
+@pytest.mark.parametrize("mode", ["crash", "garbage", "missing"])
+def test_a_gate_that_cannot_run_warns_and_the_review_starts_anyway(world: World, mode: str) -> None:
+    env = {"FAKE_LW_MODE": mode}
+    if mode == "missing":
+        env["LOCAL_REVIEW_LOAD_WATCH"] = str(world.tmp / "no-such-load-watch")
+    r = world.run(env=env)
+    assert r.returncode == 0, r.stderr
+    assert world.codex_log.exists() and "error" in world.doc()["load_gate"]
+
+
+def test_no_load_gate_never_asks_the_gate_even_when_it_would_refuse(world: World) -> None:
+    r = world.run("--no-load-gate", env={"FAKE_LW_MODE": "refuse"})
+    assert r.returncode == 0, r.stderr
+    assert gate_calls(world) == [] and world.codex_log.exists() and world.doc()["load_gate"] == {"skipped": True}
+
+
+def test_the_load_flags_exclude_each_other(world: World) -> None:
+    r = world.run("--no-load-gate", "--load-wait", "5")
+    assert r.returncode == 2 and gate_calls(world) == []
+
+
+def test_a_run_that_waited_reports_the_final_result_a_peer_filed_meanwhile_and_never_reviews_or_rewrites_it(world: World) -> None:
+    assert world.run(mode="findings").returncode == 1    # the peer's review of this head: findings, exit 1
+    peer_doc = world.tmp / "peer.json"
+    peer_doc.write_text(world.stem().with_suffix(".json").read_text())
+    world.codex_log.unlink()
+    r = world.run(env={"FAKE_LW_MODE": "peer", "FAKE_PEER_DOC": str(peer_doc), "FAKE_PEER_TARGET": str(world.stem().with_suffix(".json"))})
+    assert r.returncode == 1, (r.stdout, r.stderr)    # the peer's exit code, not 4 and not a new verdict
+    assert not world.codex_log.exists()    # codex never started a second time
+    d = world.doc()
+    assert d["result"] == "findings" and d["counts"]["P1"] == 1 and d["finished"] and d["reason"] == ""    # never overwritten by `failed: in progress`
+    assert "P1" in r.stdout
+    assert world.run().returncode == 0 and world.codex_log.exists()    # the lock was released: a later run, invoked after that result, reviews again as always
+
+
+def test_a_final_result_that_predates_this_run_is_not_reused_after_the_wait(world: World) -> None:
+    assert world.run(mode="findings").returncode == 1
+    world.codex_log.unlink()
+    r = world.run(mode="clean", env={"FAKE_LW_MODE": "admit"})
+    assert r.returncode == 0 and world.codex_log.exists() and world.doc()["result"] == "clean"
+
+
+def test_an_admit_that_refuses_its_own_arguments_is_75_not_a_fail_open(world: World) -> None:
+    r = world.run(env={"FAKE_LW_MODE": "usage"})
+    assert r.returncode == 75 and not world.codex_log.exists()
+    assert not world.state.exists() or list(world.state.iterdir()) == []
+
+
+def test_the_thresholds_acp_dispatch_passes_through_reach_admit_and_a_bad_one_is_ignored(world: World) -> None:
+    r = world.run(env={"LW_MIN_FREE_MB": "500", "LW_MAX_COMPRESSOR_S": "30000", "LW_MAX_PAGEINS_S": "0", "LW_BOOST_CALM_S": "5", "LW_MAX_AGENTS": "1"})
+    assert r.returncode == 0, r.stderr
+    call, env_line = gate_calls(world)[:2]
+    assert call.split() == ["admit", "--wait", "1800", "--json", "--min-free-mb=500", "--max-mem-churn=30000"]    # 0 pageins is admit's own exit 2: ignored; no agent cap
+    assert env_line == "LW_VARS=1"    # only LW_BOOST_CALM_S
+
+
+def test_a_malformed_wait_budget_falls_back_to_the_default_and_says_so(world: World) -> None:
+    r = world.run(env={"LOCAL_REVIEW_LOAD_WAIT": "600s"})
+    assert r.returncode == 0, r.stderr
+    assert gate_calls(world)[0].split()[:3] == ["admit", "--wait", "1800"] and "LOCAL_REVIEW_LOAD_WAIT" in r.stderr
+
+
+def test_a_hung_gate_is_abandoned_after_its_grace_and_the_review_starts(world: World) -> None:
+    r = world.run("--load-wait", "0", env={"FAKE_LW_MODE": "hang", "LOCAL_REVIEW_LOAD_GRACE": "1"}, timeout=40)
+    assert r.returncode == 0, r.stderr
+    assert world.codex_log.exists() and "error" in world.doc()["load_gate"]
+
+
+def test_a_peers_result_for_another_base_branch_is_not_reused(world: World) -> None:
+    assert world.run(mode="findings").returncode == 1
+    peer_doc = world.tmp / "peer.json"
+    peer_doc.write_text(world.stem().with_suffix(".json").read_text())
+    world.codex_log.unlink()
+    r = world.run(mode="clean", env={"FAKE_LW_MODE": "peer", "FAKE_PEER_DOC": str(peer_doc), "FAKE_PEER_BASE": "main",
+                                      "FAKE_PEER_TARGET": str(world.stem().with_suffix(".json"))})
+    assert r.returncode == 0 and world.codex_log.exists()    # reviewed afresh against the PR's own base
+    assert (world.doc()["result"], world.doc()["base_ref"]) == ("clean", "master")
