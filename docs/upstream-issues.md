@@ -1232,7 +1232,8 @@ install/update/save unchanged. Sent as https://github.com/getpaseo/paseo/pull/85
 `fix/startup-skill-sync-skips-linked-checkouts`, refs #7700; regression test fails on main, passes on the fix;
 evidence comment https://github.com/getpaseo/paseo/issues/7700#issuecomment-6569914366). Its QA notes that
 `controller.test.ts` "renames an untouched staged deletion back with its inode and mode" fails on upstream main under
-Node 26 (`livePaths.map(lstat)` passes the index as options); upstream CI uses Node 22, not filed.
+Node 26 (`livePaths.map(lstat)` passes the index as options); upstream CI uses Node 22. Filed 2026-11-02:
+https://github.com/getpaseo/paseo/issues/8572.
 
 
 ## 18. zcode-acp — `ZCODE_DISALLOWED_TOOLS` / `--disallowed-tools` never reaches the backend session (filed 2026-10-25: https://github.com/william0wang/zcode-acp/issues/340)
