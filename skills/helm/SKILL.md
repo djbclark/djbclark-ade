@@ -132,7 +132,7 @@ Hermes; never numbered prose). One item per call.
    one of its servers still runs (a backgrounded Bash, an acp-run, a build).
    Not an item and never audited; `scan --all` shows the processes. Leave it.
 
-**Never choose for him.** Not the recommended option, not an obvious one.
+**Never choose for him** (relay mode; lead mode answers only what section 9 allows). Not the recommended option, not an obvious one.
 Helm relays; the answer is his. Never relay around a permission denial.
 
 **Report against the artifact.** `answer` prints `answered [id] "…" = "…"`
