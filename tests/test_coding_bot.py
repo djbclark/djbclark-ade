@@ -496,6 +496,7 @@ class TestCredentialsViaRun(Base):
         """Codex P1: a caller's proxy must not carry the Bearer key to another machine, nor a CA override re-trust it."""
         proxy = f"http://127.0.0.1:{self.spy.server_port}"
         leaks = dict(HTTP_PROXY=proxy, http_proxy=proxy, HTTPS_PROXY=proxy, https_proxy=proxy, ALL_PROXY=proxy,
+                     NO_PROXY="*", no_proxy="*", SOCKS_PROXY=proxy,
                      SSL_CERT_FILE="/tmp/evil-ca.pem", SSL_CERT_DIR="/tmp/evil-ca", REQUESTS_CA_BUNDLE="/tmp/evil-ca.pem",
                      CURL_CA_BUNDLE="/tmp/evil-ca.pem", SSLKEYLOGFILE="/tmp/keys.log", OPENSSL_CONF="/tmp/evil.cnf")
         r = self.cli("send", "task", hook=False, FAKE_SUPPLY="1", FAKE_URL=self.url, CLIP=self.clip_env, **leaks)

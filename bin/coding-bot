@@ -61,6 +61,8 @@ def scrub_network_env() -> None:
 if __name__ == "__main__":
     scrub_network_env()
     if not sys.flags.isolated:
+        if not sys.executable:
+            sys.exit("coding-bot: cannot find its own Python interpreter to restart isolated")
         os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__), *sys.argv[1:]])
 
 import argparse
