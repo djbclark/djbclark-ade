@@ -77,6 +77,9 @@ Interface: `lib/common.sh` exports `die`, `verdict`, `require_isolated`, `isolat
 `pj` (`paseo --home "$PASEO_HOME"`), `record_result`.
 Accept: each `ro-*` script exits 0 on the live daemon and prints one bounded JSON line; `require_isolated`
 exits 2 when run with the live home, with `PASEO_HOME=~/.paseo`, and with a copied home (three negative cases).
+**Checked 2026-11-01 (lead, after rebasing onto master `05e54519`):** all six `ro-*` probes exit 0 on the live daemon
+with one JSON line each (CLI 0.15.0-beta.1, daemon 0.14.0); `require_isolated` exits 2 for the live home, for
+`PASEO_HOME=~/.paseo/`, and for a copy of the live config without the marker. T1's acceptance holds.
 
 ### T2. Isolated test daemon (D1.7, B10; blocks T4 to T10)
 
@@ -86,6 +89,11 @@ herald, no telegram. Needs one provider credential path: either the cheapest pro
 the real home (read-only reference, never copied wholesale) or a probe-only account (question 2).
 Accept: `paseo --home <fresh> status` reports its own `serverId`, different from `srv_3QHQeiJniWBD`; the live
 daemon's pid, `startedAt` and `paseo ls` count are unchanged before and after (the script asserts this).
+**Hazard (lead, 2026-11-01), fix before T2 runs anything:** the draft `isolated_up` calls `paseo daemon config set`
+WITHOUT `--home` (lib/common.sh, the two `# KEY` lines). If the CLI does not honour the exported `PASEO_HOME`, those
+two calls rewrite the LIVE daemon's config (listener moved to a temp Unix socket, plugins off). Before any call: in a
+throwaway home, prove which form writes only there (compare `~/.paseo/config.json`'s sha256 before and after), use
+that form, and make `isolated_up` assert the live config's hash is unchanged after setup (refuse and stop if not).
 
 ### T3. D0.2 drain scripts (`tests/paseo-acceptance/drain/`) (depends on PR 177 for item b; blocks every "disable")
 
