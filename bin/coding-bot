@@ -179,7 +179,9 @@ def reexec_under_run(argv: list[str]) -> None:
     exe = shutil.which("sudo-secretspec")
     if not exe:
         return
-    os.execve(exe, [exe, "run", "--reason", "coding-bot: reach the Coding bot", "--", sys.executable,
+    # -I: isolated mode ignores PYTHON* variables, the user site and the current directory, so nothing the caller
+    # planted (PYTHONPATH, a sitecustomize, a stray json.py) can run in the process that holds the vault credentials.
+    os.execve(exe, [exe, "run", "--reason", "coding-bot: reach the Coding bot", "--", sys.executable, "-I",
                     os.path.abspath(__file__), *argv], {**os.environ, RUN_GUARD: "1"})
 
 
@@ -386,15 +388,18 @@ def clipboard_or_3(what: str, text: str) -> int:
     return 0 if clip(text) else fail(f"{what}: could not reach the clipboard tool (clip)", 3)
 
 
-def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None) -> tuple[int, str]:
-    """(exit code, message id). Webhook when configured, else the clipboard prompt (EXIT_CLIPBOARD)."""
+def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None,
+            receipts=sys.stdout) -> tuple[int, str]:
+    """(exit code, message id). Webhook when configured, else the clipboard prompt (EXIT_CLIPBOARD). Receipts go
+    to `receipts` (stdout; `ask` passes stderr: its stdout carries only the reply); failures always to stderr."""
     base = {"from": a.sender, "project": project(), "re": a.re, "chars": len(text), "text": text}
     if not (url and key):
         mid = append("outbox.jsonl", {**base, "via": "clipboard", "why": "no webhook configured"}, number=ID_PREFIX)
         rc = clipboard_or_3(mid, pasteable(a.sender, mid, a.re, text))
         if rc == 0:
             print(f"{mid}: no webhook configured ({URL_NAME}/{KEY_NAME}); the prompt is on the clipboard: "
-                  "the operator pastes it into the Coding bot, then `coding-bot deliver --clipboard` files its reply")
+                  "the operator pastes it into the Coding bot, then `coding-bot deliver --clipboard` files its reply",
+                  file=receipts)
         return (rc or EXIT_CLIPBOARD), mid
     if (why := check_url(url)):
         return fail(why, 1), ""
@@ -402,7 +407,7 @@ def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None) 
     mid = append("outbox.jsonl", {**base, "via": "webhook"}, number=ID_PREFIX)
     ok, detail = webhook_post(url, key, {k: base[k] for k in ("from", "project", "re", "text")} | {"id": mid})
     append("outbox.jsonl", {"result_for": mid, "ok": ok, "detail": detail})
-    print(f"{mid}: {detail}", file=sys.stdout if ok else sys.stderr)
+    print(f"{mid}: {detail}", file=receipts if ok else sys.stderr)
     return (0 if ok else 1), mid
 
 
@@ -493,7 +498,7 @@ def cmd_ask(a: argparse.Namespace) -> int:
     text = task_text(a.text, (url, key))
     if isinstance(text, int):
         return text
-    rc, mid = do_send(a, text, url, key)
+    rc, mid = do_send(a, text, url, key, receipts=sys.stderr)
     if rc != 0:
         return rc
     print(f"coding-bot: waiting up to {a.timeout:g}s for the reply to {mid} (`coding-bot deliver` files it)",

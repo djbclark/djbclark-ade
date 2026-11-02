@@ -208,14 +208,18 @@ class TestReplies(Base):
             time.sleep(0.05)
         self.assertTrue(Hook.seen)
         self.assertIsNone(ask.poll(), "ask returned before any reply existed")
-        self.cli("deliver", stdin=self.reply(Hook.seen[0]["body"]["id"], "finished\nDONE"))
+        reply = self.reply(Hook.seen[0]["body"]["id"], "finished\nDONE")
+        self.cli("deliver", stdin=reply)
         out, err = ask.communicate(timeout=20)
         self.assertEqual(ask.returncode, 0, err)
-        self.assertIn("finished", out)
+        self.assertEqual(out, reply.strip() + "\n", "ask's stdout must carry the reply and nothing else")
+        self.assertIn("ade-1: HTTP 200", err)  # the transport receipt is on stderr
 
     def test_ask_without_a_webhook_does_not_wait(self) -> None:
         r = self.cli("ask", "--timeout", "30", "task", hook=False)
         self.assertEqual(r.returncode, 10)
+        self.assertEqual(r.stdout, "")  # ask's stdout is reserved for the reply
+        self.assertIn("no webhook configured", r.stderr)
         self.assertIn("task", self.pasteboard.read_text())
 
 
@@ -487,6 +491,16 @@ class TestCredentialsViaRun(Base):
         for leaked in ("DECOY_SECRET", "hunter2-decoy", "CODING_BOT_WEBHOOK_KEY", KEY, "CODING_BOT_WEBHOOK_URL"):
             self.assertNotIn(leaked, env)
         self.assertIn("CODING_BOT_STATE=", env)  # its own settings and PATH survive
+
+    def test_the_process_that_holds_the_credentials_ignores_planted_python_hooks(self) -> None:
+        plant, marker = Path(self.tmp.name) / "plant", Path(self.tmp.name) / "marker.txt"
+        plant.mkdir()
+        (plant / "sitecustomize.py").write_text(
+            f"import os\nopen({str(marker)!r}, 'a').write('KEY' if os.environ.get('CODING_BOT_WEBHOOK_KEY') else 'nokey')\n")
+        r = self.cli("status", hook=False, FAKE_SUPPLY="1", FAKE_URL=self.url, PYTHONPATH=str(plant))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CODING_BOT_WEBHOOK_KEY: set", r.stdout)  # the re-executed process did run, with the credentials
+        self.assertEqual(marker.read_text(), "nokey", "a planted sitecustomize ran where the vault credentials were")
 
     def test_a_run_that_supplies_nothing_is_not_retried_and_the_tool_degrades_to_clipboard(self) -> None:
         st = self.cli("status", hook=False)
