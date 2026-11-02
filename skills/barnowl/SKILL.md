@@ -173,6 +173,31 @@ and in the Mac's `~/.ssh/config`: `Host pastebin-bo`, `HostName pastebin.xvm.mit
 that cannot use the operator's main key (not loaded in the agent socket without a prompt,
 or not readable by the agent).
 
+## Snipe on pastebin (a second client, not `bo`)
+
+Snipe, the curses client for roost (Zephyr over HTTP), IRCCloud and Zulip, was installed on
+pastebin on 2026-11-02 at djbclark's request. `bo` does not drive it and never talks to it; run it only in its
+own tmux session, never in the `barnowl` one.
+
+1. **Source and launcher.** `~/src/snipe` is a clone of
+   [asedeno/snipe](https://github.com/asedeno/snipe) (the maintained fork, 39 commits ahead
+   of `1ts-org/snipe`, which has been dormant since 2020). `~/.local/bin/snipe` runs its venv;
+   that directory is not on PATH for non-login ssh.
+2. **Python 3.11 on purpose.** The venv is `~/src/snipe/venv`, built by uv on Python 3.11. The
+   `Markdown<3.3` pin crashes at import on Python 3.12 and newer, and pastebin's system Python
+   is 3.13. The port is [asedeno/snipe#2](https://github.com/asedeno/snipe/pull/2) (`Markdown>=3.4`;
+   379 of 379 tests pass on 3.11 and 3.13). When it is merged and pulled, the venv can move to the
+   system Python.
+3. **Subscriptions.** Roost keeps them on its server. Snipe reads the same `~/.zephyr.subs` as
+   BarnOwl; `R l` (accept the default file) pushes it. Not done as of 2026-11-02:
+   `roost-api.mit.edu` (18.25.132.160) was unreachable from pastebin and from the Mac (the web page
+   `roost.mit.edu` was up), so account state and the subscription load are unverified. Re-check
+   with `curl -4 -m 10 -I https://roost-api.mit.edu/` from pastebin before anything else.
+4. **Signup is the human's.** A first roost signup asks the user to accept that the server stores
+   their messages permanently. An agent explains it and never answers it.
+5. **Auth** is the user's Kerberos ticket through `libgssapi_krb5`. Read from the code; untested
+   while the API was down.
+
 ## Answer
 
 Print the command result, not a retelling of the procedure. For a subscription
