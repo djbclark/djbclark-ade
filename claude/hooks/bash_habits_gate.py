@@ -127,29 +127,38 @@ def command_views(plain: str) -> list[str]:
     (2026-11-02: that made the gate deny `cut --jq`), and `cut -d$(printf , | cut -c1) --complement`
     must still give the outer `cut` its `--complement`, so each command is checked on its own
     text. A bare `(` group, a regex group (`=~ ^(awk|sed)$`) and an extended glob (`@(awk|sed)`)
-    stay inline: they are argument text, not a command. A backslash-escaped character is
-    filename or argument content (`find . -name foo\\)`, `\\$(`), never a delimiter. An unclosed
-    substitution is still checked, as its own view."""
+    stay inline: they are argument text, not a command. An arithmetic expansion `$((...))` runs
+    no command, so its expression is dropped (`echo $((sed + 1))`). A backslash-escaped character
+    is filename or argument content (`find . -name foo\\)`, `\\$(`), never a delimiter. An
+    unclosed substitution is still checked, as its own view."""
     views: list[str] = []
-    # open groups: (is a substitution, text collected so far); the bottom entry is the outer command
-    stack: list[tuple[bool, list[str]]] = [(False, [])]
+    # open groups: (kind, text collected so far); kind is "sub" (`$(`, `<(`, `>(`), "arith"
+    # (`$((`) or "group" (a bare `(`); the bottom entry is the outer command
+    stack: list[tuple[str, list[str]]] = [("group", [])]
     i = 0
     while i < len(plain):
         ch = plain[i]
         if ch == "\\":
             stack[-1][1].append(plain[i:i + 2])
             i += 2
+        elif plain.startswith("$((", i):
+            stack.append(("arith", []))
+            i += 3
         elif ch in "$<>" and plain[i + 1:i + 2] == "(":
-            stack.append((True, []))
+            stack.append(("sub", []))
             i += 2
         elif ch == "(":
-            stack.append((False, []))
+            stack.append(("group", []))
             i += 1
         elif ch == ")" and len(stack) > 1:
-            substitution, body = stack.pop()
-            if substitution:
+            kind, body = stack.pop()
+            if kind == "sub":
                 views.append("".join(body))
                 stack[-1][1].append("X")
+            elif kind == "arith":
+                stack[-1][1].append("X")
+                if plain[i + 1:i + 2] == ")":  # the closing `))`
+                    i += 1
             else:
                 stack[-1][1].append("(" + "".join(body) + ")")
             i += 1
@@ -157,10 +166,10 @@ def command_views(plain: str) -> list[str]:
             stack[-1][1].append(ch)
             i += 1
     while len(stack) > 1:  # unclosed: a substitution is its own command, a bare `(` stays inline
-        substitution, body = stack.pop()
-        if substitution:
+        kind, body = stack.pop()
+        if kind == "sub":
             views.append("".join(body))
-        else:
+        elif kind == "group":
             stack[-1][1].append("(" + "".join(body))
     return ["".join(stack[0][1])] + views
 
