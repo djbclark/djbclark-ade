@@ -942,3 +942,13 @@ def test_cancel_after_the_record_was_saved_retires_the_registration(env):
     assert not (env.state / "cancelsaved.json").exists(), "no live record for a command that never ran"
     assert env.run("sweep", "--no-agents", now=T0).stdout == "" and env.calls("RELAY") == []
     assert start(env, "cancelsaved", "--budget", "10", "--on-expire", "notify").returncode == 0
+
+
+def test_linux_identity_token_carries_the_boot_id(env, inproc, monkeypatch):
+    dl = inproc
+    if not Path("/proc/self/stat").exists():
+        pytest.skip("no /proc (macOS): lstart is an absolute time")
+    a = dl.proc_info(os.getpid())
+    assert a[0].count(":") >= 1 and a[0].startswith(dl.boot_id() + ":")
+    monkeypatch.setattr(dl, "boot_id", lambda: "another-boot")
+    assert dl.proc_info(os.getpid())[0] != a[0], "the same pid and start tick after a reboot must not match"

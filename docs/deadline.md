@@ -134,3 +134,5 @@ linked worktree unless `--ade DIR` names the canonical checkout. The lead instal
     every pass while the leader is verified, and still in the group) or a live `deadline run` registrar; otherwise it is `unverified` (a recycled group id
     cannot be told from the original survivors). Start times differ after a reboot, so stale records never match. A `run` cancelled after its record was
     persisted but before the command was released removes that record (the command never ran: no lost-process notice).
+18. On Linux the process identity token is `<boot_id>:<start tick>` (`/proc/sys/kernel/random/boot_id`), so a record from before a reboot never matches a
+    new process with the same pid and tick. macOS `ps -o lstart=` is an absolute time and needs no boot id.

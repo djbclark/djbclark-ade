@@ -198,13 +198,21 @@ def _ps(args: list[str], absent_rc: tuple[int, ...] = ()) -> str:
     return r.stdout
 
 
+def boot_id() -> str:
+    """Linux boot id (empty where there is none: macOS `ps -o lstart=` is an absolute wall-clock time and needs none)."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
 def proc_info(pid: int) -> tuple[str, str] | None:
     """(start time token, state letter) of a pid, or None when no such process."""
     stat = Path(f"/proc/{pid}/stat")
     if stat.exists():
         try:
             rest = stat.read_text().rsplit(")", 1)[1].split()
-            return rest[19], rest[0]
+            return f"{boot_id()}:{rest[19]}", rest[0]   # the tick count restarts at boot: the boot id keeps identities of another boot from matching
         except (OSError, IndexError):
             return None
     out = _ps(["-o", "lstart=,stat=", "-p", str(pid)], absent_rc=(1,)).strip()
