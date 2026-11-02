@@ -846,17 +846,25 @@ class Git:
             except OSError as e:  # an unwritable folder or a full disk is this route failing, not a crash
                 raise TransportError(f"git: could not write {rel} ({e.strerror or type(e).__name__})") from None
             before = frozenset(lk for lk in self._locks() if lk.exists())
+            cut_push, stage = False, "commit"
             try:
                 # add and commit sit inside the recovery too: a commit that lands and then times out (a slow hook) must
                 # be rolled back or reported uncertain like a failed push
                 self._git("add", "--", rel)
                 self._git("commit", "--quiet", "-m", f"{mid}: message to coding", "--", rel)
+                stage = "push"
                 try:
                     self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
-                except TransportError:  # the bot pushed a reply meanwhile: rebase once and retry
+                except TransportError as e:  # the bot pushed a reply meanwhile: rebase once and retry
+                    cut_push = e.rc is None
+                    stage = "sync"
                     self.sync_branch()
+                    stage = "push"
                     self._git("push", "--quiet", self.remote, f"HEAD:{self.branch}")
-            except TransportError:
+            except TransportError as e:
+                # a push cut off (timed out, killed: no exit status) may still land, e.g. behind a slow pre-receive hook,
+                # however the remote looks right now; only a push git itself refused is a definite "no"
+                cut_push = cut_push or (stage == "push" and e.rc is None)
                 # "not stored" must be true: either the push did land (seen on the remote) or the local commit goes, so a
                 # later send can never publish this message behind the sender's back
                 published = self._published(rel, content)
@@ -870,6 +878,8 @@ class Git:
                     self._git("reset", "--quiet", "--hard", f"{self.remote}/{self.branch}")
                 except TransportError:  # the commit stays, so a later send would publish it: not "not stored"
                     raise UncertainPut(f"git: push of {rel} failed and its local commit could not be rolled back") from None
+                if cut_push:
+                    raise UncertainPut(f"git: push of {rel} was cut off; it may still land") from None
                 raise
 
     def _published(self, rel: str, content: str) -> bool | None:

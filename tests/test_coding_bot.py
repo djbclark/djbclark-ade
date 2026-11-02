@@ -1899,6 +1899,20 @@ class TestAdversaryR1(TransportBase):
         self.assertEqual(Hook.seen[-1]["body"]["paths"], ["ssh"], r.stderr)
         self.assertNotIn(b"\r", (self.to_dir / "ade-1.md").read_bytes())
 
+    def test_a_push_that_was_cut_off_is_uncertain_even_if_the_remote_looks_unchanged(self) -> None:
+        """Review of ccd6b000: a timed-out push may land later (a slow pre-receive hook): never 'not stored'."""
+        self.ssh_down.write_text("")
+        real_git = shutil.which("git")
+        wrapper = Path(self.tmp.name) / "bin/git"
+        wrapper.write_text(f'#!/bin/sh\ncase " $* " in *" push "*) exec sleep 30;; esac\nexec "{real_git}" "$@"\n')
+        wrapper.chmod(0o755)
+        with mock.patch.dict(os.environ, self.env):
+            mod = TestAtomicState.load(self)
+            mod.GIT_TIMEOUT_S = 1.0
+            git = next(t for t in mod.build_transports(mod.load_config()) if t.name == "git")
+            with self.assertRaises(mod.UncertainPut):
+                git.put("ade-1", "[claude-code -> coding] id=ade-1 nonce=00\n\ntask\n")
+
     def test_a_git_push_that_cannot_be_checked_is_uncertain_not_failed(self) -> None:
         """Review of c9c751c7: a lost push ack plus a failing fetch must not be reported as 'nothing stored'."""
         self.ssh_down.write_text("")
