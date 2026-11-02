@@ -125,7 +125,9 @@ CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 SECRET_SHAPES = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY|\bsk-[A-Za-z0-9_-]{20,}|\bgithub_pat_\w{20,}|\bgh[pousr]_\w{30,}"
     r"|\bxox[abpr]-[\w-]{10,}|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/=-]{24,}")
-REPLY_HEADER = re.compile(r"\[coding\s*->\s*[^\]\s]+\]\s*id=(coding-\d+)(?:\s+re=(ade-\d+))?[ \t]*(?:\n|$)", re.I)
+# Ids are at most 9 digits everywhere (as in the argument validators), so no header can carry a number Python refuses to
+# convert or that sorts absurdly.
+REPLY_HEADER = re.compile(r"\[coding\s*->\s*[^\]\s]+\]\s*id=(coding-\d{1,9})(?:\s+re=(ade-\d{1,9}))?[ \t]*(?:\n|$)", re.I)
 TERMINAL = re.compile(r"^(DONE|BLOCKED:.*)\s*$", re.I)
 
 RULES = """\
@@ -896,7 +898,7 @@ def reply_order(fname: str) -> tuple[int, int]:
 
 
 def bot_num(rec: dict) -> int | None:
-    m = re.fullmatch(r"coding-(\d+)", str(rec.get("bot_id") or ""))
+    m = re.fullmatch(r"coding-(\d{1,9})", str(rec.get("bot_id") or ""))
     return int(m.group(1)) if m else None
 
 
@@ -993,12 +995,14 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
                 return fail(f"coding-bot: no final reply to {rid} in {a.timeout:g}s "
                             f"({len(replies)} partial filed); `coding-bot wait {rid}` again after it arrives",
                             EXIT_TIMEOUT)
-            # one transport per step, cheapest first, so a reply one transport just filed is returned before a slow or
-            # hung other transport is asked
-            due = next((t for t in ordered(ts) if now >= nxt[t.name]), None)
+            # one transport per step, so a reply one transport just filed is returned before a slow or hung other
+            # transport is asked; the most overdue goes first (ties: the cheaper one), and its next turn is counted from
+            # when its poll ENDED, so a slow poll can never starve the other transport
+            due_now = [t for t in ordered(ts) if now >= nxt[t.name]]
+            due = min(due_now, key=lambda t: nxt[t.name]) if due_now else None
             if due:
-                nxt[due.name] = now + every * (1 if due.name == "ssh" else 3)
                 poll_transports([due])
+                nxt[due.name] = time.monotonic() + every * (1 if due.name == "ssh" else 3)
                 continue  # look at the inbox again at once
             time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
     finally:
