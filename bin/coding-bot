@@ -454,11 +454,18 @@ def clipboard_or_3(what: str, text: str) -> int:
 
 # ---------------------------------------------------------------- drop transports (ssh drop dir, git mailbox)
 class TransportError(Exception):
-    pass
+    def __init__(self, msg: str, rc: int | None = None) -> None:
+        super().__init__(msg)
+        self.rc = rc  # the command's exit status, when it ran and failed
 
 
 class DeadlineError(TransportError):
     """The caller's own wait deadline cut the command short: not the transport's fault, so no backoff."""
+
+
+class FileError(TransportError):
+    """One bot file could not be read (permissions, a vanished file): the route itself works. Reported, marked seen,
+    and the poll goes on with the other files; the transport is not backed off."""
 
 
 def expand(p: str) -> str:
@@ -466,27 +473,32 @@ def expand(p: str) -> str:
 
 
 DEADLINE: list[float] = []  # a monotonic deadline that bounds every transport command while `wait` runs
+PROBE: list[float] = []     # the current poll's own, shorter deadline inside it (a share of what is left)
 
 
 def run_cmd(argv: list[str], *, stdin: str | None = None, timeout: float) -> str:
     """stdout of argv (never a shell). Any failure is a TransportError that names the command and its first
-    stderr line, nothing else. While a `wait` deadline is set, no command runs past it."""
-    capped = False
+    stderr line, nothing else. While a `wait` deadline is set, no command runs past it, nor past its poll's share of
+    the time left: a cut there is a DeadlineError (our budget, not the route's fault: no backoff)."""
+    by_wait = False
+    now = time.monotonic()
     if DEADLINE:
-        left = DEADLINE[0] - time.monotonic()
+        left = DEADLINE[0] - now
         if left < 0.5:
             raise DeadlineError(f"{argv[0]}: no time left before the wait deadline")
-        capped, timeout = left < timeout, min(timeout, left)
+        by_wait, timeout = left < timeout, min(timeout, left)
+    if PROBE and PROBE[0] - now < timeout:
+        timeout, by_wait = max(0.5, PROBE[0] - now), True
     try:
         r = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     except subprocess.TimeoutExpired:
-        raise (DeadlineError if capped else TransportError)(f"{argv[0]} timed out after {timeout:g}s") from None
+        raise (DeadlineError if by_wait else TransportError)(f"{argv[0]} timed out after {timeout:g}s") from None
     except OSError as e:
         raise TransportError(f"{argv[0]}: {e.strerror or type(e).__name__}") from None
     if r.returncode != 0:
         first = next((ln for ln in r.stderr.splitlines() if ln.strip()), "")
-        raise TransportError(f"{argv[0]} exited {r.returncode}: {clean(first)[:120]}")
+        raise TransportError(f"{argv[0]} exited {r.returncode}: {clean(first)[:120]}", r.returncode)
     return r.stdout
 
 
@@ -519,8 +531,15 @@ class Ssh:
     def read(self, name: str) -> str:
         if not REPLY_FILE.fullmatch(name):
             raise TransportError("bad reply file name")
-        return run_cmd(self._argv(f"head -c {4 * MAX_TEXT + 8} -- {shlex.quote(self.c['from_dir'])}/{name}"),
-                       timeout=SSH_TIMEOUT_S)
+        try:
+            return run_cmd(self._argv(f"head -c {4 * MAX_TEXT + 8} -- {shlex.quote(self.c['from_dir'])}/{name}"),
+                           timeout=SSH_TIMEOUT_S)
+        except DeadlineError:
+            raise
+        except TransportError as e:
+            if e.rc not in (None, 255):  # ssh itself fails with 255; anything else is the remote `head` on this file
+                raise FileError(str(e), e.rc) from None
+            raise
 
 
 class OversizeReply(TransportError):
@@ -636,10 +655,15 @@ class Git:
         if not REPLY_FILE.fullmatch(name):
             raise TransportError("bad reply file name")
         rev = f"{self.remote}/{self.branch}:from-coding/{name}"
-        size = self._git("cat-file", "-s", rev).strip()
-        if not size.isdigit() or int(size) > 4 * MAX_TEXT + 8:
-            raise OversizeReply(f"reply file is {size} bytes, over the reply cap")
-        return self._git("cat-file", "blob", rev)
+        try:
+            size = self._git("cat-file", "-s", rev).strip()
+            if not size.isdigit() or int(size) > 4 * MAX_TEXT + 8:
+                raise OversizeReply(f"reply file is {size} bytes, over the reply cap")
+            return self._git("cat-file", "blob", rev)
+        except (DeadlineError, OversizeReply):
+            raise
+        except TransportError as e:  # a local object read: never the network
+            raise FileError(str(e), e.rc) from None
 
 
 def load_config() -> dict:
@@ -942,7 +966,7 @@ def poll_transports(ts: list, force: bool = False) -> int:
                     continue
                 try:
                     raw = t.read(fname)
-                except OversizeReply as e:
+                except (OversizeReply, FileError) as e:
                     print(f"coding-bot: reply file {t.name}:{fname} not filed: {e}", file=sys.stderr)
                     mark_seen(t.name, fname)
                     continue
@@ -1001,7 +1025,14 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
             due_now = [t for t in ordered(ts) if now >= nxt[t.name]]
             due = min(due_now, key=lambda t: nxt[t.name]) if due_now else None
             if due:
-                poll_transports([due])
+                # this poll gets an even share of what is left, so a stalled route cannot use up the time the other
+                # route needs to be checked (the next step polls the other one)
+                share = (deadline - now) / max(1, len(ts))
+                PROBE[:] = [now + max(1.0, share)]
+                try:
+                    poll_transports([due])
+                finally:
+                    PROBE.clear()
                 nxt[due.name] = time.monotonic() + every * (1 if due.name == "ssh" else 3)
                 continue  # look at the inbox again at once
             time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))

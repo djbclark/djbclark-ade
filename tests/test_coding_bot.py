@@ -997,6 +997,34 @@ class TestWaitPollsOneTransportAtATime(TransportBase):
         self.assertIn("only git has it", w.stdout)
 
 
+class TestRound4(TransportBase):
+    def test_a_stalled_ssh_cannot_use_up_the_wait_before_git_is_checked(self) -> None:
+        """Review round 4: each poll gets a share of the time left, so git is still checked in time."""
+        self.cli("send", "task")  # via ssh
+        self.bot_reply_git("ade-1", "git had it all along\nDONE")
+        self.ssh_hang.write_text("")
+        t0 = time.monotonic()
+        w = self.cli("wait", "ade-1", "--timeout", "10")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("git had it all along", w.stdout)
+        self.assertLess(time.monotonic() - t0, 9)
+
+    def test_one_unreadable_reply_file_does_not_block_the_others_nor_back_off_the_route(self) -> None:
+        """Review round 4: a per-file read failure is reported and skipped, not a transport failure."""
+        self.cli("send", "task")
+        bad = self.from_dir / "ade-1--coding-1.md"
+        bad.write_text("[coding -> claude-code] id=coding-1 re=ade-1\nsecret\nDONE\n")
+        bad.chmod(0)
+        self.addCleanup(bad.chmod, 0o644)
+        self.bot_reply_ssh("ade-1", "the readable answer\nDONE", n=2)
+        s = self.cli("sync")
+        self.assertIn("ade-1--coding-1.md not filed", s.stderr)
+        self.assertEqual(self.health()["ssh"].get("fails", 0), 0)
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertIn("the readable answer", w.stdout)
+        self.assertNotIn("ade-1--coding-1.md not filed", self.cli("sync").stderr, "the bad file was retried")
+
+
 class TestHostileReplyIds(Base):
     def test_an_absurdly_long_bot_id_cannot_crash_wait(self) -> None:
         """Review round 3: a header id beyond Python's int-conversion limit must not be stored as a bot number."""
