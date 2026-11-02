@@ -625,11 +625,13 @@ class TransportBase(Base):
         self.to_dir.mkdir(parents=True)
         self.from_dir.mkdir()
         self.ssh_log, self.ssh_down, self.ssh_hang = root / "ssh.log", root / "ssh.down", root / "ssh.hang"
+        self.ssh_slow = root / "ssh.slow"
         fake_ssh = root / "bin/ssh"
         fake_ssh.write_text(
             f"#!/bin/sh\necho call >> '{self.ssh_log}'\n"
             f"[ -e '{self.ssh_down}' ] && {{ echo 'ssh: connect failed' >&2; exit 255; }}\n"
             f"[ -e '{self.ssh_hang}' ] && exec sleep 30\n"
+            f"[ -e '{self.ssh_slow}' ] && sleep \"$(cat '{self.ssh_slow}')\"\n"
             'for last; do :; done\nexec sh -c "$last"\n')
         fake_ssh.chmod(0o755)
         self.origin, self.mailbox, self.bot = root / "origin.git", root / "mailbox", root / "bot-clone"
@@ -1319,6 +1321,29 @@ class TestWaitPollsOneTransportAtATime(TransportBase):
         self.assertEqual(w.returncode, 0, w.stderr)
         self.assertIn("fast answer", w.stdout)
         self.assertLess(time.monotonic() - t0, 8, "a ready reply waited behind a hung git")
+
+    def test_a_slow_preferred_transport_cannot_starve_the_other_one(self) -> None:
+        """Review round 3: an ssh poll slower than its interval must not keep git from ever being polled."""
+        self.cli("send", "task")  # via ssh
+        self.bot_reply_git("ade-1", "only git has it\nDONE")
+        self.ssh_slow.write_text("2.5")  # each ssh poll outlasts the 0.2 s interval
+        w = self.cli("wait", "ade-1", "--timeout", "20")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("only git has it", w.stdout)
+
+
+class TestHostileReplyIds(Base):
+    def test_an_absurdly_long_bot_id_cannot_crash_wait(self) -> None:
+        """Review round 3: a header id beyond Python's int-conversion limit must not be stored as a bot number."""
+        self.cli("send", "task")
+        huge = "9" * 5000
+        d = self.cli("deliver", "--re", "ade-1", stdin=f"[coding -> claude-code] id=coding-{huge} re=ade-1\nbogus\nDONE")
+        self.assertEqual(d.returncode, 0, d.stderr)
+        self.cli("deliver", stdin="[coding -> claude-code] id=coding-2 re=ade-1\nthe real answer\nDONE")
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertNotIn("Traceback", w.stderr)
+        self.assertIn("the real answer", w.stdout)
 
 if __name__ == "__main__":
     unittest.main()
