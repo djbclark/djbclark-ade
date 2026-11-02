@@ -943,6 +943,13 @@ def reply_order(fname: str) -> tuple[int, int]:
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
+def scan_order(fname: str, fid: str | None, prefer: str | None) -> tuple:
+    """The waited-for id's files first, its NEWEST revision first (so the early return after its final reply never
+    stops on an older one); then everything else oldest first."""
+    _, k = reply_order(fname)
+    return (0, -k) if prefer and fid == prefer else (1, *reply_order(fname))
+
+
 def bot_num(rec: dict) -> int | None:
     m = re.fullmatch(r"coding-(\d{1,9})", str(rec.get("bot_id") or ""))
     return int(m.group(1)) if m else None
@@ -982,8 +989,7 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None) ->
             continue
         t0 = time.monotonic()
         try:
-            names = sorted(t.list_replies(),
-                           key=lambda n: (REPLY_FILE.fullmatch(n).group(1) != prefer, reply_order(n)))
+            names = sorted(t.list_replies(), key=lambda n: scan_order(n, REPLY_FILE.fullmatch(n).group(1), prefer))
             done = read_json("seen.json").get(t.name, [])
             for fname in names:
                 if fname in done:
