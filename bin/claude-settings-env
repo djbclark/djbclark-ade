@@ -8,7 +8,8 @@ and the build runs inside hook and MCP child processes that no wrapper on PATH
 sees. Claude Code applies the `env` block of settings.json to every child
 (hooks, stdio MCP servers, Bash tool), so that block is the one place that
 covers them all. settings.json is not tracked here, so this script sets it.
-Since 2026-10-23 it also adds CLAUDE_CODE_SUBAGENT_MODEL=sonnet (see DEFAULTS):
+Since 2026-10-23 it also adds CLAUDE_CODE_SUBAGENT_MODEL=sonnet and, since 2026-11-02,
+CLAUDE_CODE_FORK_SUBAGENT=0 (see DEFAULTS):
 
     claude-settings-env            # add or correct REQUIRED keys, add absent DEFAULTS
     claude-settings-env --check    # exit 1 if a REQUIRED key is missing or different,
@@ -42,6 +43,17 @@ DEFAULTS = {
     # "Follow-ups from PRs 29 and 30" item 2). A definition's `model:` or a model passed in
     # the call still wins (Claude Code 2.1.251+); Explore and Plan ignore it.
     "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    # No fork gate, so no `agent_summary` calls (djbclark, 2026-11-02): every ~30 s Claude
+    # Code re-sends each working background agent's whole transcript to the agent's own
+    # model for a 3-5 word panel label, invisible in transcript-based cost tools
+    # (anthropics/claude-code#86879, #105981). Read from the 2.1.316 binary: the SDK option
+    # agentProgressSummaries and CLAUDE_CODE_AGENT_PROGRESS_SUMMARIES can only turn
+    # summaries ON; "0" here closes the fork gate for Agent-tool background launches in
+    # interactive sessions, the only off switch found. Read from the binary, not yet
+    # verified live. Fork-subagent and forked-skill launch sites pass
+    # enableSummarization: true unconditionally and nothing shows this switch changes that
+    # (#86879 agrees); no installed skill has `context: fork` today. Opt back in with "1".
+    "CLAUDE_CODE_FORK_SUBAGENT": "0",
 }
 
 

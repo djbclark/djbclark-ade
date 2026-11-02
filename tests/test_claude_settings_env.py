@@ -34,7 +34,8 @@ class ClaudeSettingsEnvTest(unittest.TestCase):
         self.assertEqual(run(self.settings, "--check").returncode, 1)
         self.assertEqual(run(self.settings).returncode, 0)
         data = json.loads(self.settings.read_text())
-        self.assertEqual(data["env"], {"A": "1", "GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"})
+        self.assertEqual(data["env"], {"A": "1", "GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+                          "CLAUDE_CODE_FORK_SUBAGENT": "0"})
         self.assertEqual(list(data), ["env", "model"])
         before = self.settings.read_text()
         self.assertEqual(run(self.settings, "--check").returncode, 0)
@@ -49,10 +50,12 @@ class ClaudeSettingsEnvTest(unittest.TestCase):
         self.settings.write_text("{}\n")
         self.assertEqual(run(self.settings).returncode, 0)
         self.assertEqual(json.loads(self.settings.read_text()),
-                         {"env": {"GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"}})
+                         {"env": {"GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+                                 "CLAUDE_CODE_FORK_SUBAGENT": "0"}})
 
     def test_a_deliberate_default_value_is_left_alone(self) -> None:
-        self.settings.write_text(json.dumps({"env": {"GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "opus"}}) + "\n")
+        self.settings.write_text(json.dumps({"env": {"GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "opus",
+                                              "CLAUDE_CODE_FORK_SUBAGENT": "1"}}) + "\n")
         before = self.settings.read_text()
         p = run(self.settings, "--check")
         self.assertEqual(p.returncode, 0)
