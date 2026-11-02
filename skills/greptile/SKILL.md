@@ -1,24 +1,45 @@
 ---
 name: greptile
-description: Greptile (app.greptile.com) on this machine: run AI code reviews of a local branch with the Greptile CLI using the API key held in sudo-secretspec, read review status in scripts, and pick the right official Greptile skill for PR comment loops. Use when the user mentions Greptile, greptile.com, a Greptile review or score, @greptileai, or wants a second AI code review of a branch or PR.
+description: Greptile (app.greptile.com) on this machine: the free Starter plan's credit budget and how reviews are spent, triggering and reading PR reviews, the API key held in sudo-secretspec, and which official Greptile skill fits a PR comment loop. Use when the user mentions Greptile, greptile.com, a Greptile review or score, @greptileai, or wants a second AI code review of a PR.
 ---
 
 # Greptile
 
-Greptile is an AI code-review service (repository graph, PR comments, a 0-5 confidence score). On this machine it is
-used through three surfaces; pick by task:
+Greptile is an AI code-review service (repository graph, PR comments, a 0-5 confidence score). Organization `frdminc`
+("Freedom Included") holds all 123 djbclark and frdminc repositories (2026-11-01).
+
+## The budget comes first: free Starter plan
+
+**50 credits a month** (100 the first month), for one active developer; a Base review costs 1 credit, Plus 3, Apex 10, a TREX
+run 3 more. When credits run out, reviews pause until next month. Starter does **not** include CLI reviews, learning and
+custom context, the Knowledge Base, cross-repo context or analytics (those are Pro, $1 a credit). So (djbclark, 2026-11-01):
+
+1. Automatic reviews are **off** organization-wide (dashboard: Settings → Code Review → Automatic reviews: Never; drafts off).
+2. The djbclark-ade lander requests a Base review for its riskiest PRs only, after the adversary approves: at most 1 a day and
+   30 a month (`greptile-gate.py` and `greptile-budget.json` in the lead's state dir). The rest of the month's credits are manual.
+3. Manual review of one PR: comment `@greptileai` on it. Use it for a PR that deserves a second opinion, not by habit.
+4. Base tier only; never `--plus`/`--apex` or TREX without djbclark asking.
+5. djbclark-ade (public, MIT) qualifies for Greptile's free open-source program (manual application, below 50 stars); djbclark is
+   applying (2026-11-01). Once approved, its reviews are free and this budget applies to the other repositories only.
 
 | Task | Use |
 |---|---|
-| Review the current local branch before pushing | the Greptile CLI, below |
 | Fix the Greptile comments on an open PR, check its status checks and description | the official skill `check-pr` |
-| Loop: trigger a Greptile review, fix, re-review until 5/5 and zero comments | the official skill `greploop` |
-| Run a CLI review and summarize it (official wording) | the official skill `cli-review` |
-| Greptile MCP tools (custom context, comment search, reports) | not configured here; see MCP below |
+| Loop: trigger a review, fix, re-review until 5/5 and zero comments | the official skill `greploop` (spends a credit per round: count them) |
+| Read a PR's latest Greptile review status and score | `greptile-gate.py status PR` under `sudo-secretspec run` (below) |
+| Review a local branch with the CLI | not on the free plan; the CLI section below applies once on Pro or OSS |
+| Greptile MCP tools | the shared proxy (8 review tools), once installed; see MCP below |
 
-The three official skills come from [greptileai/skills](https://github.com/greptileai/skills) (MIT), installed unmodified
-with `npx skills add greptileai/skills -g` into `~/.agents/skills` (2026-11-01). Update them with `npx skills update`; never
-edit them in place.
+The official skills come from [greptileai/skills](https://github.com/greptileai/skills) (MIT), installed unmodified with
+`npx skills add greptileai/skills -g` into `~/.agents/skills` (2026-11-01). Update them with `npx skills update`; never edit them
+in place.
+
+Read a PR's review without the CLI (any repository; prints status, review id and the `Confidence Score` when completed):
+
+```bash
+sudo-secretspec run --reason "greptile status" -- python3 -I ~/.local/state/bigteam/deepseek-review-2026-10-30/greptile-gate.py status 229
+# a third and fourth argument select another repository and its default branch: ... status 12 frdminc/nix2cf main
+```
 
 ## Authentication: the key stays in sudo-secretspec
 
@@ -37,7 +58,7 @@ GREPTILE_NO_UPDATE_CHECK=1 sudo-secretspec run --reason "greptile review" -- gre
 4. `GREPTILE_NO_UPDATE_CHECK=1` keeps the CLI from checking for updates on every run. The CLI is installed with
    `brew install greptileai/tap/greptile` and tracks latest (`brew upgrade greptile`).
 
-## Review a local branch
+## Review a local branch (CLI: Pro or the OSS program only, not the free plan)
 
 Run from the repository root of a branch with committed changes (uncommitted changes are ignored; the base is the default branch):
 

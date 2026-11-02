@@ -532,8 +532,9 @@ entry.
 `brew install greptileai/tap/greptile` (tracks latest: `brew upgrade greptile`) and the official skills
 `npx skills add greptileai/skills -g -y` (`check-pr`, `greploop`, `cli-review`, installed unmodified; update with
 `npx skills update`). The key is `GREPTILE_API_KEY` in sudo-secretspec, which the CLI reads from the environment: run
-`sudo-secretspec run --reason ... -- greptile review --agent`, never `greptile login --api-key` (it stores a second copy
-in `~/.greptile/`). Machine notes, exit codes and credit costs: the `greptile` skill. Its MCP server is not part of
+`sudo-secretspec run --reason ... -- greptile ...`, never `greptile login --api-key` (it stores a second copy
+in `~/.greptile/`). CLI reviews (`greptile review`) need the Pro plan or the OSS program; on the free Starter plan (50
+credits a month) reviews are PR reviews, budgeted as the skill says. Machine notes, exit codes and credit costs: the `greptile` skill. Its MCP server is not part of
 this toolchain: it is a remote server whose 21 tools cost about 12,000 tokens of context per agent session (measured
 2026-11-01), so it is registered only where djbclark decides.
 
