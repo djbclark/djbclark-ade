@@ -14,7 +14,9 @@ description: >-
 `cow` (github.com/joeinnes/cow, `/opt/homebrew/bin/cow`) clones a whole repo
 directory with APFS `clonefile(2)`. A pasture is an **independent repo with
 its own `.git`** that carries the source's untracked content (`node_modules`,
-build output), so agents start without reinstalling. Measured: 36.5 GB
+build output), so agents start without reinstalling. That content must be a
+real clone, not a link back into the source: bare `cow create` links it (see
+item 1 below), `cow-pasture create` does not. Measured: 36.5 GB
 logical in 4.4 GB on disk across 10 pastures. The win is space and dependency
 reuse, not speed.
 
@@ -43,22 +45,48 @@ outside `~/ops` and `~/ops` master only fast-forwards.
 
 ## Why the wrapper, not bare `cow create`
 
-Verified 2026-09-20:
+Verified 2026-09-20 (item 1: 2026-11-01, cow 0.1.10):
 
-1. **cow copies gitignored secrets.** `.env`, `*.pem`, keys — everything
+1. **cow links dependency dirs into the source.** By default `cow create`
+   replaces large directories (each package under `node_modules`, whole scope
+   dirs such as `node_modules/@types`, `.venv/bin`) with **absolute symlinks
+   into the source checkout**, and `--print-path` hides its "writes affect
+   source" warning. Builds in such a pasture read the source's packages, and
+   a package install there writes into the source: on 2026-11-01 an
+   `npm install` in a paseo pasture emptied ~392 package directories of
+   `~/src/paseo/node_modules`. `cow-pasture create` now passes `--no-symlink`,
+   runs `cow materialise <source>/<name>`, and exits 1 without printing a
+   path if any symlink in the pasture still resolves into the source (or a
+   pasture's own recorded source), or an untracked one into any other
+   checkout `cow list --json` records. Tracked links into other repos stay
+   allowed: they are committed content (djbclark-ade's `skills/forgejo`,
+   `skills/sudo-secretspec` and kin).
+   Check an older pasture with `cow-pasture check <pasture-path>` (exit 1
+   lists the links; on 2026-11-01 `hermes-agent/forgejo-ci-2026-10` had 795)
+   and fix it with `cow materialise <source>/<name>`, the `name` that
+   `cow list --json` shows for its path. A pasture made from such a pasture
+   inherits links into the grandparent source that cow's state does not
+   record, so `materialise` leaves them (`forgejo-ci-2026-10/gh-ci-2026-10`):
+   remove it and create again from the primary checkout. The check sees
+   symlinks only: a copied Python venv still names the source's venv by
+   absolute path in `bin/activate` and every script's `#!` line, so a
+   `pip`/`uv pip install` through it lands in the source; before installing,
+   rebuild it in the pasture (`rm -rf .venv && uv sync`, with `VIRTUAL_ENV`
+   unset): a plain `uv sync` over the copy leaves the old paths in place.
+2. **cow copies gitignored secrets.** `.env`, `*.pem`, keys — everything
    untracked comes along, `uchg` flag included. `cow-pasture` deletes
    gitignored secret-like files after the clone (patterns in the script),
    warns about *tracked* ones, keeps dependency dirs. `--keep-secrets` opts
    out. Credentials a task really needs go through `sudo-secretspec`.
-2. **`uchg` strands pastures.** Copied `.env` files are often user-immutable,
+3. **`uchg` strands pastures.** Copied `.env` files are often user-immutable,
    so `cow remove` fails. `cow-pasture remove <name>` (short name or
    `<source>/<name>`) runs `chflags -R nouchg` first.
-3. **Orca registration is retired.** `--orca` (`orca repo add`) and the Orca
+4. **Orca registration is retired.** `--orca` (`orca repo add`) and the Orca
    unregistration on `remove` were deleted from `cow-pasture` on 2026-10-31
    (Orca is retired from djbclark-ade); `create ... --orca` is now a usage
    error. An older pasture may still sit in Orca's own list; that is left
    untouched.
-4. **`cow-pasture` is not on `PATH`**: call `~/src/djbclark-ade/bin/cow-pasture`.
+5. **`cow-pasture` is not on `PATH`**: call `~/src/djbclark-ade/bin/cow-pasture`.
    Plain `cow remove <short-name>` prints "not found — skipping" and **exits 0**
    having removed nothing; it needs `<source>/<name>` (2026-10-18). Check `ls`
    afterwards.
