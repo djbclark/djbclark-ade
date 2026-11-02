@@ -65,6 +65,31 @@ if [ -x "$__selftest" ]; then
   fi
 fi
 
+# Same mechanism for the zsh config (the login shell since 2026-11-02;
+# ~/.config/zsh/selftest.sh is its port of the bash selftest and asserts the
+# same invariants against clean zsh shells). Its own stamp, so a bash edit
+# does not re-run the zsh suite or vice versa. Skipped silently where the
+# zsh port is not installed.
+__zselftest="$HOME/.config/zsh/selftest.sh"
+__zstamp="$HOME/.config/zsh/.selftest-passed"
+if [ -x "$__zselftest" ]; then
+  __zstale=0
+  for __f in "$HOME/.zshrc" "$HOME/.zshenv" "$HOME/.zprofile" "$HOME/.zshrc.local" "$__zselftest"; do
+    [ -e "$__f" ] || continue
+    [ "$__f" -nt "$__zstamp" ] && __zstale=1
+  done
+  if [ "$__zstale" = 1 ]; then
+    if __zout="$("$__zselftest" 2>&1)"; then
+      : > "$__zstamp"
+    else
+      printf '%s\n' \
+        "WARNING: zsh shell config self-test FAILED after a recent edit to" \
+        "~/.zshrc, ~/.zshenv, ~/.zprofile, or ~/.zshrc.local:" "---" "$__zout" "---" \
+        "Re-run with: $__zselftest" >&2
+    fi
+  fi
+fi
+
 command -v cswap >/dev/null 2>&1 || exit 0
 
 # `cswap list` is the slow part (median 2.4 s, max 46 s, 27 of 337 runs cut off at the
