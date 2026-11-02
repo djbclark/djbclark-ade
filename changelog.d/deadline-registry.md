@@ -1,0 +1,3 @@
+### Added
+
+- `bin/deadline` (2026-11-01): register a maximum run time (`start`, `beat`, `extend`, `done`, `ls`, `run`) before any command or wait that may exceed ~2 min; `deadline sweep` (launchd `com.djbclark.deadline-sweep`, every 60 s, `deadline install`) enforces it from outside: SIGTERM to the process group, SIGKILL after the grace, then the recovery (`kill`, `notify`, `relay`, `reroute:RECORD`) once, guarded against pid reuse by the recorded process start time; it also alerts (never kills) once an hour on a running Paseo agent with no activity for 30 min and no live deadline. Rule and commands: `docs/deadline.md`. (#223)
