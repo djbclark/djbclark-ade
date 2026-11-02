@@ -81,7 +81,8 @@ class Base(unittest.TestCase):
         for f in fake.iterdir():
             f.chmod(0o755)
         self.env = {"PATH": str(fake) + ":/usr/bin:/bin", "CLIP": str(fake / "clip"), "PBPASTE": str(fake / "pbpaste"),
-                    "HOME": str(root), "CODING_BOT_STATE": str(self.state), "CODING_BOT_HERMES_PING": str(fake / "hermes-ping")}
+                    "HOME": str(root), "CODING_BOT_STATE": str(self.state), "CODING_BOT_HERMES_PING": str(fake / "hermes-ping"),
+                    "CODING_BOT_RETRY_S": "0.01"}
         Hook.status, Hook.redirect, Hook.delay, Hook.seen, Spy.seen = 200, None, 0.0, [], []
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hook)
         self.spy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Spy)
@@ -303,7 +304,7 @@ class TestKeyNeverLeaves(Base):
         r = self.cli("send", "hello", CODING_BOT_DEADLINE_S="1")
         self.assertEqual(r.returncode, 1)
         self.assertIn("no answer in 1s", r.stderr)
-        self.assertLess(time.monotonic() - t0, 3.5)
+        self.assertLess(time.monotonic() - t0, 6)  # 3 attempts (2 retries) of 1 s each, plus their pauses
 
 
 class TestStateFiles(Base):
@@ -676,13 +677,20 @@ class TransportBase(Base):
         self.state.mkdir(exist_ok=True)
         (self.state / "health.json").write_text(json.dumps(h))
 
+    def reply_header(self, mid: str, n: int = 1) -> str:
+        """The header the bot writes: with the message's nonce, as the routine instruction requires."""
+        recs = [json.loads(x) for x in (self.state / "outbox.jsonl").read_text().splitlines()] \
+            if (self.state / "outbox.jsonl").exists() else []
+        nonce = next((r.get("nonce") for r in recs if r.get("id") == mid), None)
+        return f"[coding -> claude-code] id=coding-{n} re={mid}" + (f" nonce={nonce}" if nonce else "")
+
     def bot_reply_ssh(self, mid: str, body: str, n: int = 1) -> None:
-        (self.from_dir / f"{mid}--coding-{n}.md").write_text(f"[coding -> claude-code] id=coding-{n} re={mid}\n{body}\n")
+        (self.from_dir / f"{mid}--coding-{n}.md").write_text(f"{self.reply_header(mid, n)}\n{body}\n")
 
     def bot_reply_git(self, mid: str, body: str, n: int = 1) -> None:
         self.git(self.bot, "pull", "-q", "origin", "main")
         (self.bot / "from-coding").mkdir(exist_ok=True)
-        (self.bot / f"from-coding/{mid}--coding-{n}.md").write_text(f"[coding -> claude-code] id=coding-{n} re={mid}\n{body}\n")
+        (self.bot / f"from-coding/{mid}--coding-{n}.md").write_text(f"{self.reply_header(mid, n)}\n{body}\n")
         self.git(self.bot, "add", "-A")
         self.git(self.bot, "commit", "-q", "-m", "reply")
         self.git(self.bot, "push", "-q", "origin", "HEAD:main")
@@ -824,7 +832,7 @@ class TestTransportReplies(TransportBase):
         self.bot_reply_ssh("ade-1", "from the drop\nDONE")
         out, err = ask.communicate(timeout=20)
         self.assertEqual(ask.returncode, 0, err)
-        self.assertEqual(out, "[coding -> claude-code] id=coding-1 re=ade-1\nfrom the drop\nDONE\n")
+        self.assertEqual(out, f"{self.reply_header('ade-1')}\nfrom the drop\nDONE\n")
 
     def test_polling_never_changes_the_cost_used_to_rank_transports_for_sending(self) -> None:
         self.cli("sync")
@@ -943,10 +951,16 @@ class TestNonce(ProtocolBase):
         self.assertEqual(w.returncode, 0, w.stderr)
         self.assertNotIn("nonce", w.stderr)
 
-    def test_a_reply_without_a_nonce_is_filed_flagged_and_wait_warns(self) -> None:
+    def test_a_drop_reply_without_a_nonce_is_refused_but_a_pasted_one_is_filed_flagged(self) -> None:
+        """Adversary A1: a file named for the id proves nothing (ids restart, mailboxes are shared), so a drop reply must
+        echo the nonce; the operator's own paste (`deliver`) is trusted to be flagged instead."""
         self.cli("send", "task")
         self.reply_ssh("ade-1", "no nonce\nDONE")
-        self.cli("sync")
+        s = self.cli("sync")
+        self.assertIn("no nonce: a reply file must echo the nonce", s.stderr)
+        self.assertEqual(self.inbox_records(), [])
+        self.assertEqual(self.cli("wait", "ade-1", "--timeout", "0.5").returncode, 124)
+        self.cli("deliver", "--re", "ade-1", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nno nonce\nDONE")
         [rec] = self.inbox_records()
         self.assertIs(rec["nonce_ok"], False)
         w = self.cli("wait", "ade-1", "--timeout", "2")
@@ -988,22 +1002,21 @@ class TestClaims(ProtocolBase):
         self.assertIn("nonce echoed", st.stdout)
         self.assertIn("replies: 0", st.stdout)
         self.assertRegex(st.stdout, r"ade-1: sent \S+ via ssh")
-        self.reply_ssh("ade-1", "working")
-        self.reply_ssh("ade-1", "finished\nDONE", n=2)
+        self.reply_ssh("ade-1", "working", nonce=self.nonce())
+        self.reply_ssh("ade-1", "finished\nDONE", nonce=self.nonce(), n=2)
         self.cli("sync")
         self.assertIn("replies: 2 (1 final, 1 partial)", self.cli("status", "ade-1").stdout)
 
-    def test_a_claim_with_another_nonce_is_refused_and_one_without_is_flagged(self) -> None:
+    def test_a_claim_with_another_nonce_or_none_is_refused(self) -> None:
+        """Adversary A1: a claim proves pickup only when it echoes the message's nonce."""
         self.cli("send", "one")
         self.cli("send", "two")
         self.claim_ssh("ade-1", "0" * 16)
         self.claim_ssh("ade-2", None)
         s = self.cli("sync")
         self.assertIn("nonce mismatch", s.stderr)
-        claims = self.claims()
-        self.assertNotIn("ade-1", claims)
-        self.assertIs(claims["ade-2"]["claim"]["nonce_ok"], False)
-        self.assertIn("NOT echoed", self.cli("status", "ade-2").stdout)
+        self.assertIn("no nonce: a claim must echo", s.stderr)
+        self.assertFalse((self.state / "claims.json").exists())
 
     def test_a_claim_for_a_message_not_in_the_outbox_or_not_shaped_like_a_claim_is_ignored(self) -> None:
         self.cli("send", "one")
@@ -1323,9 +1336,9 @@ class TestTransportRobustness(TransportBase):
         target = self.from_dir / "ade-1--coding-1.md"
         target.write_text("")
         self.cli("sync")
-        target.write_text("[coding -> claude-code] id=coding-1 re=ade-1\nhalf of the ans")
+        target.write_text(f"{self.reply_header('ade-1')}\nhalf of the ans")
         self.cli("sync")
-        target.write_text("[coding -> claude-code] id=coding-1 re=ade-1\nhalf of the answer, then the rest\nDONE\n")
+        target.write_text(f"{self.reply_header('ade-1')}\nhalf of the answer, then the rest\nDONE\n")
         self.cli("sync")
         w = self.cli("wait", "ade-1", "--timeout", "2")
         self.assertEqual(w.returncode, 0, w.stderr)
@@ -1553,6 +1566,7 @@ class TestRound7(TransportBase):
             mod = TestAtomicState.load(self)
             read: list[str] = []
 
+            hdr = self.reply_header
             class Fake:
                 name = "ssh"
 
@@ -1563,7 +1577,7 @@ class TestRound7(TransportBase):
                     read.append(name)
                     n = name.split("--coding-")[1].split(".")[0]
                     rid = name.split("--")[0]
-                    return f"[coding -> claude-code] id=coding-{n} re={rid}\nanswer\nDONE"
+                    return f"{hdr(rid, int(n))}\nanswer\nDONE"
 
             mod.poll_transports([Fake()], prefer="ade-2")
             self.assertEqual(read, ["ade-2--coding-3.md"])
@@ -1584,6 +1598,96 @@ class TestRound7(TransportBase):
         s = self.cli("sync")
         self.assertIn("transport ssh", s.stderr)
         self.assertEqual(self.health()["ssh"]["fails"], 1)
+
+
+class TestAdversaryR1(TransportBase):
+    """Adversary review of PR 245, round 1."""
+
+    def test_a_reply_file_written_before_the_send_is_never_the_answer(self) -> None:
+        """A1, probe P1: a stale or pre-written ade-1--coding-1.md (no nonce, or another one) is refused."""
+        stale = "[coding -> claude-code] id=coding-1 re=ade-1\nSTALE ANSWER FOR SOME OTHER TASK\nDONE\n"
+        (self.from_dir / "ade-1--coding-1.md").write_text(stale)
+        (self.from_dir / "ade-1--coding-999999999.md").write_text(
+            "[coding -> claude-code] id=coding-999999999 re=ade-1 nonce=00000000000000aa\nPRE-WRITTEN\nDONE\n")
+        self.cli("send", "a brand new task")
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 124, w.stdout)
+        self.assertNotIn("STALE", w.stdout)
+        self.assertNotIn("PRE-WRITTEN", w.stdout)
+        self.bot_reply_ssh("ade-1", "the real answer\nDONE", n=2)
+        w = self.cli("wait", "ade-1", "--timeout", "5")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("the real answer", w.stdout)
+
+    def test_the_ssh_drop_never_overwrites_a_message_with_the_same_name(self) -> None:
+        """A1: a colliding id must not replace another sender's message in the drop."""
+        (self.to_dir / "ade-1.md").write_text("someone else's message\n")
+        r = self.cli("send", "mine")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.to_dir / "ade-1.md").read_text(), "someone else's message\n")
+        self.assertTrue(self.in_origin("to-coding/ade-1.md"), "the send should have fallen back to git")
+        self.assertEqual([p.name for p in self.to_dir.iterdir()], ["ade-1.md"], "a temp file was left in the drop")
+
+    def test_a_stored_message_whose_doorbell_fails_is_a_send_and_ask_keeps_waiting(self) -> None:
+        """A2, probe P2: the message is durable, so exit 0 with a warning; the doorbell was retried; ask waits."""
+        Hook.status = 500
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Do NOT send it again", r.stderr)
+        self.assertEqual(len(Hook.seen), 3, "a 5xx doorbell is tried three times in all")
+        self.assertTrue((self.to_dir / "ade-1.md").exists())
+        env = dict(self.env, CODING_BOT_WEBHOOK_URL=self.url, CODING_BOT_WEBHOOK_KEY=KEY)
+        ask = subprocess.Popen([sys.executable, str(SCRIPT), "ask", "--timeout", "20", "second task"], env=env,
+                               cwd=self.tmp.name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(ask.kill)
+        for _ in range(200):
+            if (self.to_dir / "ade-2.md").exists():
+                break
+            time.sleep(0.05)
+        time.sleep(0.5)
+        self.assertIsNone(ask.poll(), "ask gave up although the message was stored")
+        self.bot_reply_ssh("ade-2", "done anyway\nDONE")
+        out, err = ask.communicate(timeout=20)
+        self.assertEqual(ask.returncode, 0, err)
+        self.assertIn("done anyway", out)
+
+    def test_a_webhook_only_failure_still_fails_and_a_4xx_is_not_retried(self) -> None:
+        self.ssh_down.write_text("")
+        self.cfg["git"]["remote"] = "no-such-remote"
+        self.write_cfg()
+        Hook.status = 401
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(len(Hook.seen), 1, "a 4xx refusal is final")
+
+    def test_an_unfinished_reply_to_another_id_is_not_reread_on_every_poll(self) -> None:
+        """A3, probe P3: an unfinished reply costs one read, then waits PARTIAL_REREAD_S."""
+        self.cli("send", "task")
+        (self.from_dir / "ade-1--coding-1.md").write_text(f"{self.reply_header('ade-1')}\nstill writing\n")
+        before = self.ssh_calls()
+        for _ in range(3):
+            self.cli("sync")
+        # each sync: one listing; only the first also reads the file
+        self.assertEqual(self.ssh_calls() - before, 3 + 1)
+
+    def test_seen_state_forgets_files_that_are_gone(self) -> None:
+        """A5: seen.json holds only names still listed, so it cannot grow forever."""
+        self.cli("send", "task")
+        self.bot_reply_ssh("ade-1", "x\nDONE")
+        self.cli("sync")
+        self.assertIn("ade-1--coding-1.md", json.loads((self.state / "seen.json").read_text())["ssh"])
+        (self.from_dir / "ade-1--coding-1.md").unlink()
+        self.cli("sync")
+        self.assertNotIn("ade-1--coding-1.md", json.loads((self.state / "seen.json").read_text()).get("ssh", []))
+
+    def test_a_duplicate_check_runs_under_the_inbox_lock(self) -> None:
+        """A7: `append(..., unless=...)` decides under the lock, so two pollers cannot both file one reply."""
+        with mock.patch.dict(os.environ, {"CODING_BOT_STATE": str(self.state)}):
+            mod = TestAtomicState.load(self)
+            first = mod.append("inbox.jsonl", {"re": "ade-1", "sha": "s"}, unless=lambda rs: any(r.get("sha") == "s" for r in rs))
+            second = mod.append("inbox.jsonl", {"re": "ade-1", "sha": "s"}, unless=lambda rs: any(r.get("sha") == "s" for r in rs))
+            self.assertEqual((first, second), ("", None))
+            self.assertEqual(len((self.state / "inbox.jsonl").read_text().splitlines()), 1)
 
 
 class TestHostileReplyIds(Base):

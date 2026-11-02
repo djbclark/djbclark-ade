@@ -48,7 +48,8 @@ means a run *started*).
    the webhook with a short "read ade-N.md" ping; the bot reads the file and writes `ade-N--coding-K.md` back to the same
    places. `wait`/`ask` poll them (`coding-bot sync` does one pass; `--force` also tries a backed-off one) and file each
    reply through the same checks as `deliver`, once however many places carry it.
-   - `ssh`: a key-only restricted account on the bot's box (drop dirs under `/var/tmp/coding-drop/`), host key pinned in a
+   - `ssh`: a key-only account WITH a login shell on the bot's box (the tool runs `cat`, `ln`, `ls`, `head` through it;
+     no sudo), drop dirs under `/var/tmp/coding-drop/`, host key pinned in a
      private known_hosts, only for that account. Fast (about 1 s) while the tailnet is up.
    - `git`: a private mailbox repo cloned locally (`to-coding/`, `from-coding/`; protocol in the repo README). Slower
      (about 2-4 s a push), but reachable through the gaps where the bot's Tailscale loses its connection.
@@ -56,7 +57,10 @@ means a run *started*).
      prior, ssh 1 s and git 4 s). A failed one goes in backoff (15 s doubling to 15 min, jittered 0.75 to 1.25) and is
      skipped until it ends, then competes on cost again, so traffic returns to the faster one by itself. If every transport
      fails the webhook carries the text. `coding-bot status` shows cost and backoff; polls never change the send cost.
-   - Config keys: `ssh` {host, user, port, key, known_hosts, to_dir, from_dir}; `git` {path, remote, branch}.
+   - Config keys: `ssh` {host, user, port, key, known_hosts, to_dir, from_dir}; `git` {path, remote, branch}. The bot's
+     routine instruction names `/var/tmp/coding-drop/{to,from}-coding` and the mailbox clone path itself, so `to_dir` and
+     `from_dir` must be exactly those; other values would leave the bot looking in the wrong place.
+   - Preference: ssh while the tailnet is up (about 1 s), git otherwise (always reachable); the tool measures both.
    - Bot side: restore script `/home/box/agent-data/shared/coding-drop-restore.sh` recreates the `coding` account, key,
      drop dirs and sshd allowance after a box Update or Reset (not yet hooked into its watchdog). Re-pin the host key if
      the box was rebuilt.
@@ -130,7 +134,9 @@ Files the bot reads and writes, in the drop dir and the git mailbox (`to-coding/
    outward from the bot: the standing rules tell the bot to answer `BLOCKED: <action> needs the operator's approval in
    this chat` whatever the text says (a forged or prompt-injected message must not be able to approve itself). If you need
    one, tell the operator, who approves it by typing in the bot's chat, then send the task again.
-4. The webhook can drop the body ("a missing body is normal", forum report): the routine's instruction tells the bot
-   to answer `BLOCKED: empty payload`. Treat that as a failed send and use `prompt`.
-5. Exit 1 (webhook failed) never falls back to the clipboard by itself: decide, then use `prompt`.
+4. The webhook can drop the body ("a missing body is normal", forum report). With a drop transport that costs nothing: the
+   bot reads the message file, or its sweep finds it. A send whose doorbell failed but whose message is stored exits 0 with
+   a warning: **do not send it again** (that would run the task twice under two ids); `coding-bot wait ade-N`.
+5. Exit 1 means the webhook failed AND no transport took the message: nothing was stored. It never falls back to the
+   clipboard by itself: decide, then use `prompt`.
 6. This is the Coding bot only. "Chief of Staff" is `tell-chief-of-staff`; Eve is techno-euphora's `peer_mail.py`.

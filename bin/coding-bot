@@ -18,8 +18,9 @@
 Shape of Dann -> Eve (techno-euphora `peer-comms`): a Bearer-keyed webhook routine in the bot, ids and
 `re=` in a header line `[FROM -> coding] id=ade-N nonce=HEX [re=ID]`. The bot's reply starts
 `[coding -> FROM] id=coding-N re=ade-N nonce=HEX` and ends `DONE` or `BLOCKED: <question>`. A routine's 200 only
-means a run started: the answer arrives in the bot's chat, so a reply reaches this tool only through
-`deliver`. A reply is untrusted data, never the operator's authority.
+means a run started, and its answer lands in the bot's own chat: a reply reaches this tool as a file in a drop transport
+(read by `sync`, `wait` and `ask`) or through `deliver` (the operator's paste). A reply is untrusted data, never the
+operator's authority.
 Drop transports (optional; $CODING_BOT_TRANSPORTS or <state>/transports.json, never in the repo): an ssh drop dir on the
 bot's box and a git mailbox repo carry the message and the reply; the webhook is only a doorbell ("read ade-N.md"). A send
 uses the cheaper transport by measured latency (an EWMA that decays to a prior when stale), falls back to the other when it
@@ -27,7 +28,8 @@ fails, and puts a failed one in backoff (15 s doubling to 15 min, jittered). A b
 backoff ends, then tried first again if it is the cheaper one, so traffic switches back by itself. Replies are polled from
 every transport not in backoff; the same reply on both is filed once. If every transport fails the doorbell carries the text.
 Protocol (2026-11-02): every message carries a random nonce (message file header, webhook payload, outbox record) that the
-bot must echo in its reply header: a reply with another nonce is refused, one with none is filed and flagged. On pickup the
+bot must echo in its reply header: a reply with another nonce is refused; one with none is refused from a drop (a file
+named for the id proves nothing) and only filed, flagged, from `deliver`. On pickup the
 bot writes `claim-ade-N.md` ("claimed ade-N by coding-K at TIME nonce=HEX") beside its replies; its scheduled sweep writes
 `heartbeat.md` (one ISO UTC time) there too. Claims go to claims.json, the newest heartbeat to health.json (`bot_heartbeat`).
 A send refuses (exit 6) when a heartbeat was ever seen and is older than $CODING_BOT_HEARTBEAT_STALE_S (2700 s); `--force`
@@ -48,7 +50,10 @@ Replies: control characters are stripped; `deliver` trusts the local user (it ca
 run it), so a reply is data. A later final reply for an id supersedes an earlier one, except that a bot reply
 never supersedes a final reply the bot numbered higher (coding-K order, compared as numbers).
 
-Exit codes (acp-dispatch's where they overlap): 0 ok, 1 webhook failed, 2 usage or refused text, 3 clipboard
+A send whose message is stored in a transport but whose doorbell failed (after two retries on a 429, a 5xx or no answer)
+is a send: exit 0 with a warning, and `ask` keeps waiting; the bot's sweep picks the message up. Never send it again.
+
+Exit codes (acp-dispatch's where they overlap): 0 ok, 1 webhook failed and the message is stored nowhere, 2 usage or refused text, 3 clipboard
 tool unavailable, 4 the bot answered BLOCKED, 5 not picked up (no claim or reply within --ack-timeout), 6 the bot's
 heartbeat is stale (nothing sent; --force), 10 no webhook: prompt on the clipboard for the operator, 124 timed out
 waiting for the final reply.
@@ -115,6 +120,9 @@ WEBHOOK_HOSTS = {"api2.cursor.sh"}  # where Grok Bot routines live (the Eve webh
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}  # plain http allowed here only: tests, never a bot
 EXIT_BLOCKED, EXIT_UNPICKED, EXIT_STALE, EXIT_CLIPBOARD, EXIT_TIMEOUT = 4, 5, 6, 10, 124
 MAX_TEXT = 100_000  # characters, for a task and for a filed reply
+MAX_FILES_PER_POLL = 200  # unseen bot files read per transport per poll (the rest wait for the next poll)
+PARTIAL_REREAD_S = 300.0  # an unfinished reply to another id is read again at most this often
+SYNC_DEADLINE_S = 120.0   # `sync` gives up after this long in total
 BACKOFF_BASE_S, BACKOFF_CAP_S, EWMA_ALPHA, STALE_S = 15.0, 900.0, 0.3, 1800.0
 PRIOR_COST_S = {"ssh": 1.0, "git": 4.0}  # what a transport is assumed to cost before it has been measured
 SSH_TIMEOUT_S, GIT_TIMEOUT_S = 20.0, 60.0
@@ -376,17 +384,20 @@ def parse(raw: str, name: str) -> list[dict]:
     return out
 
 
-def append(name: str, rec: dict, *, number: str | None = None) -> str:
+def append(name: str, rec: dict, *, number: str | None = None, unless=None) -> str | None:
     """Add rec as one JSON line to state/name: the whole file is rewritten to a temp file beside it, fsynced,
     then `os.replace`d, all under an flock on `name.lock`, so a crash or a full disk leaves the old file whole
     and a reader never sees a partial one. An unreadable line already there is kept as is and fenced off with
     a newline (reads skip it). With `number` (an id prefix) the record gets `<prefix>-N`, N one more than the
-    highest used; returns that id (or "")."""
+    highest used; returns that id (or ""). With `unless` (a test on the records already there, run under the lock) the
+    record is not added when it is true, and None is returned: a check-then-add that two processes cannot both pass."""
     path = state_path(name)
     lock = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
         raw = path.read_bytes().decode("utf-8", "replace") if path.exists() else ""
+        if unless is not None and unless(parse(raw, name)):
+            return None
         mid = ""
         if number:
             used = [int(m.group(1)) for r in parse(raw, name) if (m := re.fullmatch(rf"{number}-(\d+)", str(r.get("id", ""))))]
@@ -602,15 +613,20 @@ class Ssh:
 
     def _argv(self, remote: str) -> list[str]:
         c = self.c
-        return ["ssh", "-p", str(c.get("port", 22)), "-i", expand(c["key"]), "-o", "IdentitiesOnly=yes",
+        # -F /dev/null: no user ssh config (ProxyCommand, ForwardAgent, extra identities) can change this connection;
+        # only the private known_hosts vouches for the host, never the system-wide one
+        return ["ssh", "-F", "/dev/null", "-p", str(c.get("port", 22)), "-i", expand(c["key"]), "-o", "IdentitiesOnly=yes",
                 "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                 "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={expand(c['known_hosts'])}",
+                "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes",
                 f"{c['user']}@{c['host']}", remote]
 
     def put(self, mid: str, content: str) -> None:
         d, f = shlex.quote(self.c["to_dir"]), f"{mid}.md"
-        # written to a dot file then renamed, so the bot never reads half a message
-        run_cmd(self._argv(f"umask 022; cat > {d}/.{f}.tmp && mv {d}/.{f}.tmp {d}/{f}"), stdin=content,
+        # written to a dot file, then hard-linked to its name: the bot never reads half a message, and `ln` (unlike `mv`)
+        # fails when the name exists, so a colliding id never replaces someone else's message
+        t = f"{d}/.{f}.$$.tmp"
+        run_cmd(self._argv(f"umask 022; cat > {t} && ln {t} {d}/{f}; rc=$?; rm -f {t}; exit $rc"), stdin=content,
                 timeout=SSH_TIMEOUT_S)
 
     def list_files(self) -> list[str]:
@@ -755,10 +771,12 @@ class Git:
             raise TransportError("bad bot file name")
         rev = f"{self.remote}/{self.branch}:from-coding/{name}"
         try:
-            size = self._git("cat-file", "-s", rev).strip()
+            # one blob id for both the size check and the read: a concurrent fetch cannot swap the blob in between
+            blob = self._git("rev-parse", "--verify", "--quiet", rev).strip()
+            size = self._git("cat-file", "-s", blob).strip()
             if not size.isdigit() or int(size) > 4 * MAX_TEXT + 8:
                 raise OversizeReply(f"reply file is {size} bytes, over the reply cap")
-            return self._git("cat-file", "blob", rev)
+            return self._git("cat-file", "blob", blob)
         except (DeadlineError, OversizeReply):
             raise
         except TransportError as e:  # a local object read: never the network
@@ -986,14 +1004,34 @@ def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None,
         payload["paths"] = [via]
     else:
         payload["text"] = text
-    ok, detail = webhook_post(url, key, payload)
+    ok, detail = ring(url, key, payload)
     where = f" via {via} {secs:.1f}s" if via else ""
     append("outbox.jsonl", {"result_for": mid, "ok": ok, "detail": detail + where, "put": via, "put_s": round(secs, 2),
-                            "put_failures": notes})
+                            "put_failures": notes, "stored": bool(via)})
     for n in notes:
         print(f"coding-bot: transport {n}", file=sys.stderr)
+    if not ok and via:
+        # the message is stored durably and the bot's 15-minute sweep will pick it up: that is a send, not a failure.
+        # Sending it again would run the task twice under two ids.
+        print(f"{mid}: stored in {via}{where}; the doorbell failed ({detail}), so the bot's sweep picks it up within about "
+              f"15 minutes. Do NOT send it again; `coding-bot wait {mid}`.", file=sys.stderr)
+        return 0, mid
     print(f"{mid}: {detail}{where}", file=receipts if ok else sys.stderr)
     return (0 if ok else 1), mid
+
+
+def ring(url: str, key: str, payload: dict) -> tuple[bool, str]:
+    """The webhook call, retried twice more (1 s, then 2 s; $CODING_BOT_RETRY_S scales it) on a 429, a 5xx or no
+    answer. Any other refusal (a 4xx: wrong key, paused routine) is final at once."""
+    pause = _env_secs("CODING_BOT_RETRY_S", 1.0)
+    for attempt in range(3):
+        ok, detail = webhook_post(url, key, payload)
+        code = re.search(r"HTTP (\d{3})", detail)
+        if ok or (code and code.group(1).startswith("4") and code.group(1) != "429"):
+            return ok, detail
+        if attempt < 2:
+            time.sleep(pause * (attempt + 1))
+    return ok, detail
 
 
 def cmd_send(a: argparse.Namespace) -> int:
@@ -1042,10 +1080,12 @@ def header_field(text: str, name: str) -> str | None:
     return f.group(1) if f else None
 
 
-def file_reply(raw: str, hint: str | None) -> tuple[int, str, bool]:
+def file_reply(raw: str, hint: str | None, *, from_drop: bool = False) -> tuple[int, str, bool]:
     """The one sink for a reply, from `deliver` or a drop transport: (rc, message, newly_filed). rc 0 is filed or a
     duplicate, 2 is refused. `hint` is the ade-N the caller knows it answers (--re, or the reply file's name). When the
-    message has a nonce, a reply with another one is refused and one with none is filed with `nonce_ok: false`."""
+    message has a nonce, a reply with another one is refused. One with none is refused when it comes `from_drop` (a file
+    named for the id proves nothing: ids restart, mailboxes are shared, anyone with write access can pre-write one); from
+    `deliver` (the operator's paste) it is filed with `nonce_ok: false`."""
     if len(raw) > MAX_TEXT:  # the raw size, before cleaning or stripping can shrink it
         return 2, f"the reply is over {MAX_TEXT} characters; not filed", False
     text = clean(raw).strip()
@@ -1065,17 +1105,21 @@ def file_reply(raw: str, hint: str | None) -> tuple[int, str, bool]:
     nonce_ok = nonce_check(rec, m.group(3) if m else header_field(text, "nonce"))
     if nonce_ok == "mismatch":
         return 2, f"nonce mismatch: the reply's nonce is not the one sent with {rid}; not filed", False
+    if nonce_ok is False and from_drop:
+        return 2, f"no nonce: a reply file must echo the nonce sent with {rid}; not filed", False
     sha = hashlib.sha256(text.encode()).hexdigest()
     filed = records("inbox.jsonl")
-    if any(r.get("re") == rid and r.get("sha") == sha for r in filed):  # the same text may answer another task
-        return 0, f"{rid}: this reply is already filed", False
     terminal = bool(TERMINAL.match(last_line(text)))
-    if terminal and any(r.get("re") == rid and r.get("terminal") for r in filed):
+    if terminal and any(r.get("re") == rid and r.get("terminal") and r.get("sha") != sha for r in filed):
         print(f"coding-bot: {rid} already has a final reply; this one supersedes it (`wait` returns the latest)",
               file=sys.stderr)
     extra = {} if nonce_ok is None else {"nonce_ok": nonce_ok}
-    append("inbox.jsonl", {"re": rid, "bot_id": m.group(1) if m else None, "sha": sha, "text": text,
-                           "terminal": terminal, **extra})
+    added = append("inbox.jsonl", {"re": rid, "bot_id": m.group(1) if m else None, "sha": sha, "text": text,
+                                   "terminal": terminal, **extra},
+                   # the duplicate check runs under the inbox lock: two pollers cannot both file one reply
+                   unless=lambda recs: any(r.get("re") == rid and r.get("sha") == sha for r in recs))
+    if added is None:  # the same text may answer another task, so the check is per id
+        return 0, f"{rid}: this reply is already filed", False
     return 0, f"{rid}: reply filed ({len(text)} chars)", True
 
 
@@ -1131,6 +1175,32 @@ def final_reply(replies: list[dict]) -> dict | None:
     return best
 
 
+def prune_seen(name: str, listed: list[str]) -> None:
+    """Forget seen and partial entries for files no longer listed, so the state never grows without bound."""
+    keep = set(listed)
+    cur = read_json("seen.json")
+    stale = [n for n in cur.get(name, []) if n not in keep] if isinstance(cur.get(name), list) else []
+    p = cur.get(f"{name}#partial")
+    if not stale and not (isinstance(p, dict) and any(n not in keep for n in p)):
+        return  # nothing to forget: no write
+
+    def m(d: dict) -> None:
+        if isinstance(d.get(name), list):
+            d[name] = [n for n in d[name] if n in keep]
+        if isinstance(d.get(f"{name}#partial"), dict):
+            d[f"{name}#partial"] = {n: v for n, v in d[f"{name}#partial"].items() if n in keep}
+    update_json("seen.json", m)
+
+
+def note_partial(name: str, fname: str) -> None:
+    def m(d: dict) -> None:
+        p = d.get(f"{name}#partial")
+        if not isinstance(p, dict):
+            p = d[f"{name}#partial"] = {}
+        p[fname] = time.time()
+    update_json("seen.json", m)
+
+
 def mark_seen(name: str, fname: str) -> None:
     def m(d: dict) -> None:
         names = d.setdefault(name, [])
@@ -1150,7 +1220,7 @@ def parse_iso_utc(s: str) -> float | None:
 
 def file_claim(rid: str, raw: str, via: str) -> tuple[int, str]:
     """Record the bot's pickup of `rid` in claims.json (the first claim stays): (rc, message), rc 2 is refused. A claim
-    with another nonce than the message's is refused; one with none is recorded with `nonce_ok: false`."""
+    must echo the message's nonce (when it has one): another one or none is refused."""
     first = clean(raw).strip().split("\n", 1)[0].strip()
     m = CLAIM_LINE.fullmatch(first)
     if not m or m.group(1) != rid:
@@ -1161,6 +1231,8 @@ def file_claim(rid: str, raw: str, via: str) -> tuple[int, str]:
     nonce_ok = nonce_check(rec, m.group(4))
     if nonce_ok == "mismatch":
         return 2, f"nonce mismatch: the claim's nonce is not the one sent with {rid}"
+    if nonce_ok is False:
+        return 2, f"no nonce: a claim must echo the nonce sent with {rid}"
 
     def mutate(d: dict) -> None:
         e = d.get(rid)
@@ -1217,10 +1289,21 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
                 # a claim or reply file for the waited id is proof of pickup even if it cannot be read
                 evidence.update(f"{t.name}:{n}" for n in names if file_id(n) == prefer)
             done_early = False
-            done = read_json("seen.json").get(t.name, [])
+            prune_seen(t.name, names)
+            seen = read_json("seen.json")
+            done = set(seen.get(t.name, []))
+            partial = seen.get(f"{t.name}#partial", {})
+            budget = MAX_FILES_PER_POLL
             for fname in names:
                 if fname == HEARTBEAT_FILE or fname in done:
                     continue
+                last_partial = partial.get(fname) if isinstance(partial, dict) else None
+                if (file_id(fname) != prefer and isinstance(last_partial, (int, float))
+                        and time.time() - last_partial < PARTIAL_REREAD_S):
+                    continue  # an unfinished reply to another id: not read again on every poll
+                if budget <= 0:
+                    break  # the rest wait for the next poll
+                budget -= 1
                 what = "claim file" if CLAIM_FILE.fullmatch(fname) else "reply file"
                 try:
                     raw = t.read(fname)
@@ -1232,7 +1315,7 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
                     rc, msg = file_claim(cm.group(1), raw, t.name)
                     settled = rc == 0 or bool(clean(raw).strip())  # an empty claim may still be mid-write
                 else:
-                    rc, msg, filed = file_reply(raw, REPLY_FILE.fullmatch(fname).group(1))
+                    rc, msg, filed = file_reply(raw, REPLY_FILE.fullmatch(fname).group(1), from_drop=True)
                     new += filed
                     final = bool(TERMINAL.match(last_line(clean(raw).strip())))
                     settled = (rc == 0 and final) or (rc != 0 and msg != "empty reply")
@@ -1240,6 +1323,8 @@ def poll_transports(ts: list, force: bool = False, prefer: str | None = None, re
                     print(f"coding-bot: {what} {t.name}:{fname} not filed: {msg}", file=sys.stderr)
                 if settled:
                     mark_seen(t.name, fname)
+                elif not cm:
+                    note_partial(t.name, fname)
                 if prefer and rc == 0 and not cm and final and file_id(fname) == prefer:
                     done_early = True
                     break  # the waited-for answer is filed: hand back to the waiter before reading other ids
@@ -1270,7 +1355,11 @@ def cmd_sync(a: argparse.Namespace) -> int:
     if not ts:
         print("coding-bot: no drop transports configured (transports.json); nothing to sync")
         return 0
-    n = poll_transports(ts, force=a.force)
+    DEADLINE[:] = [time.monotonic() + SYNC_DEADLINE_S]  # a slow route cannot hold `sync` for N files x the timeout
+    try:
+        n = poll_transports(ts, force=a.force)
+    finally:
+        DEADLINE.clear()
     print(f"coding-bot: {n} new reply(ies) filed from {', '.join(t.name for t in ts)}")
     return 0
 
