@@ -118,41 +118,51 @@ def strip_literals(c: str) -> str:
     return re.sub(r"\d*>&\d*-?|&>>?|<&\d*", " ", s)
 
 
-def trim_closed_substitutions(pipelines: list[list[str]]) -> list[list[str]]:
-    """Each pipeline stage, cut at the `)` that closes a `$(`, `<(` or `>(` opened in an earlier stage.
+def command_views(plain: str) -> list[str]:
+    """The command line as separate commands: the outer one with each `$(...)`, `<(...)` and
+    `>(...)` replaced by a placeholder word, then the body of every substitution (nested ones
+    included, each replaced in its parent the same way).
 
-    `gh api x $(echo $r | cut -d/ -f1):master --jq .y` splits at the pipe into
-    `gh api x $(echo $r` and `cut -d/ -f1):master --jq .y`; everything after the `)` belongs to
-    `gh`, not to `cut` (2026-11-02: that tail made the gate deny `cut --jq`). Only a substitution
-    opener counts: a `)` that closes a bare `(` group, a regex group (`=~ ^(awk|sed)$`) or an
-    extended glob (`@(awk|sed)`) is argument text, and a `)` with no known opener cuts nothing.
-    A backslash-escaped paren is filename or argument content (`find . -name foo\\)`), never a
-    delimiter. The open-paren stack runs across all stages and pipelines of the command, because
-    `$(a && b | cut -d/ -f1):x --jq y` opens in one pipeline and closes in another."""
-    opened: list[tuple[int, bool]] = []  # (segment number, is a substitution opener)
-    segment = 0
-    result: list[list[str]] = []
-    for stages in pipelines:
-        row: list[str] = []
-        for stage in stages:
-            cut: int | None = None
-            i = 0
-            while i < len(stage):
-                ch = stage[i]
-                if ch == "\\":
-                    i += 2
-                    continue
-                if ch == "(":
-                    opened.append((segment, i > 0 and stage[i - 1] in "$<>"))
-                elif ch == ")" and opened:
-                    opener_segment, substitution = opened.pop()
-                    if cut is None and substitution and opener_segment != segment:
-                        cut = i
-                i += 1
-            row.append(stage if cut is None else stage[:cut])
-            segment += 1
-        result.append(row)
-    return result
+    `gh api x $(echo $r | cut -d/ -f1):master --jq .y` must not give `cut` the text after the `)`
+    (2026-11-02: that made the gate deny `cut --jq`), and `cut -d$(printf , | cut -c1) --complement`
+    must still give the outer `cut` its `--complement`, so each command is checked on its own
+    text. A bare `(` group, a regex group (`=~ ^(awk|sed)$`) and an extended glob (`@(awk|sed)`)
+    stay inline: they are argument text, not a command. A backslash-escaped character is
+    filename or argument content (`find . -name foo\\)`, `\\$(`), never a delimiter. An unclosed
+    substitution is still checked, as its own view."""
+    views: list[str] = []
+    # open groups: (is a substitution, text collected so far); the bottom entry is the outer command
+    stack: list[tuple[bool, list[str]]] = [(False, [])]
+    i = 0
+    while i < len(plain):
+        ch = plain[i]
+        if ch == "\\":
+            stack[-1][1].append(plain[i:i + 2])
+            i += 2
+        elif ch in "$<>" and plain[i + 1:i + 2] == "(":
+            stack.append((True, []))
+            i += 2
+        elif ch == "(":
+            stack.append((False, []))
+            i += 1
+        elif ch == ")" and len(stack) > 1:
+            substitution, body = stack.pop()
+            if substitution:
+                views.append("".join(body))
+                stack[-1][1].append("X")
+            else:
+                stack[-1][1].append("(" + "".join(body) + ")")
+            i += 1
+        else:
+            stack[-1][1].append(ch)
+            i += 1
+    while len(stack) > 1:  # unclosed: a substitution is its own command, a bare `(` stays inline
+        substitution, body = stack.pop()
+        if substitution:
+            views.append("".join(body))
+        else:
+            stack[-1][1].append("(" + "".join(body))
+    return ["".join(stack[0][1])] + views
 
 
 def words(stage: str) -> list[str]:
@@ -320,47 +330,48 @@ def check(cmd: str) -> tuple[str | None, str | None]:
     if hd:
         return hd, None
     plain = strip_literals(cmd)
+    warn = None
+    for view in command_views(plain):
+        # control operators split pipelines; the pipe splits stages
+        for pipeline in re.split(r"&&|\|\||;|\n|&", view):
+            for stage in re.split(r"\|&?", pipeline):
+                if command_word(stage)[0] == "sed":
+                    return ("Use `gsed`, not bare `sed`: this Mac's `sed` is BSD sed and GNU flags "
+                            "differ (2026-10-15: a BSD `sed -i` broke an edit). To read lines use "
+                            "the Read tool or `gsed -n A,Bp`; a deliberate BSD call writes "
+                            "`/usr/bin/sed`."), None
+                tool, args = command_word(stage)
+                if tree_grep(tool, args):
+                    return TREE_GREP_REASON, None
+                flag = gnu_only(tool, args)
+                if flag:
+                    return gnu_reason(tool, flag, bool(re.search(r"\bxargs\b", stage))
+                                      and tool != "xargs"), None
+                xa = xargs_args(stage)
+                flag = gnu_only("xargs", xa) if xa else None
+                if flag:
+                    return gnu_reason("xargs", flag), None
+                w = words(stage)
+                if w and w[0] == "sudo":
+                    flags = "".join(x.lstrip("-") for x in w[1:] if x.startswith("-") and not x.startswith("--"))
+                    if "n" in flags and "k" not in flags:
+                        warn = ("`sudo -n` succeeds for any command while a sudo ticket is cached "
+                                "(this Mac's timestamp is global), so it proves nothing about a "
+                                "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
+                                "it ignores the cache without clearing it.")
+    # the pipe-status check reads the whole command, substitutions and all, as it always did
+    # (2026-11-02, Codex review of PR 254: no exemption and no trimming here)
     # control operators split pipelines; keep each operator to know what reads the status
     parts = re.split(r"(&&|\|\||;|\n|&)", plain)
     pipelines = [(parts[i], parts[i + 1] if i + 1 < len(parts) else "")
                  for i in range(0, len(parts), 2)]
-    guarded = bool(re.search(r"pipefail|PIPESTATUS", plain))
-    warn = None
-    raw_pipeline_stages = [re.split(r"\|&?", pipeline) for pipeline, _ in pipelines]
-    trimmed_pipeline_stages = trim_closed_substitutions(raw_pipeline_stages)
+    if re.search(r"pipefail|PIPESTATUS", plain):
+        return None, warn
     for n, (pipeline, op) in enumerate(pipelines):
-        raw_stages = raw_pipeline_stages[n]
-        stages = trimmed_pipeline_stages[n]
-        for stage in stages:
-            if command_word(stage)[0] == "sed":
-                return ("Use `gsed`, not bare `sed`: this Mac's `sed` is BSD sed and GNU flags "
-                        "differ (2026-10-15: a BSD `sed -i` broke an edit). To read lines use "
-                        "the Read tool or `gsed -n A,Bp`; a deliberate BSD call writes "
-                        "`/usr/bin/sed`."), None
-            tool, args = command_word(stage)
-            if tree_grep(tool, args):
-                return TREE_GREP_REASON, None
-            flag = gnu_only(tool, args)
-            if flag:
-                return gnu_reason(tool, flag, bool(re.search(r"\bxargs\b", stage))
-                                  and tool != "xargs"), None
-            xa = xargs_args(stage)
-            flag = gnu_only("xargs", xa) if xa else None
-            if flag:
-                return gnu_reason("xargs", flag), None
-            w = words(stage)
-            if w and w[0] == "sudo":
-                flags = "".join(x.lstrip("-") for x in w[1:] if x.startswith("-") and not x.startswith("--"))
-                if "n" in flags and "k" not in flags:
-                    warn = ("`sudo -n` succeeds for any command while a sudo ticket is cached "
-                            "(this Mac's timestamp is global), so it proves nothing about a "
-                            "NOPASSWD rule. To test or rely on a rule, use `sudo -k -n CMD`: "
-                            "it ignores the cache without clearing it.")
-        if len(stages) < 2 or guarded:
+        stages = re.split(r"\|&?", pipeline)
+        if len(stages) < 2:
             continue
-        # the status check reads the untrimmed stages: a `)` that closes a substitution is still
-        # part of the text `&&` sees, and trimming it re-scoped the check (Codex review of PR 254)
-        last, _ = command_word(raw_stages[-1])
+        last, _ = command_word(stages[-1])
         if last not in FILTERS:
             continue
         nxt = pipelines[n + 1][0] if n + 1 < len(pipelines) else ""
