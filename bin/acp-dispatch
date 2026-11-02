@@ -621,6 +621,7 @@ AUTO_RESUME_TEXT = (
     "steps, then write the complete report and touch its `.done` marker as the brief says.\n\n"
     "Original brief:\n")
 UNAVAILABLE_EXIT = 5
+FALLBACK_REFUSED_EXIT = 2      # die()'s code: a fallback-only pool refused at dispatch (before the wait) and at the spawn (after it)
 LOAD_WAIT_DEFAULT = 1800       # seconds the load gate may wait (--load-wait / ACP_DISPATCH_LOAD_WAIT)
 LOAD_GATE_EXIT = 75            # EX_TEMPFAIL, what `load-watch admit` returns when still too hot
 LOAD_GATE_SUBPROCESS_GRACE = 180   # seconds past --load-wait before a hung load-watch is abandoned (and the gate fails open)
@@ -1111,6 +1112,58 @@ def plenty_gate_refusal(rec: dict, after: str = "the load wait") -> str | None:
         return None
     return (f"{svc.name} is not eligible for --kind {kind} after {after}"
             f"{plenty_why(route_module(), svc, kind, reading)}")
+
+
+def fallback_gate_refusal(svc: Any, kind: str | None, repo: str | None) -> str | None:
+    """Why a fallback-only pool (Gemini 4 Argon, operator 2026-10-31) may not take `kind` now, judged on a FRESH quota
+    reading (the router's 30 s memo skipped), else None; the planner's predicate (`fallback_block`). A service that is no
+    fallback is never refused."""
+    if svc is None or not svc.fallback_after or not kind:
+        return None
+    router = route_module()
+    return router.fallback_block(svc, kind, router.load_snapshot(bypass_memo=True)[0], repo=repo)
+
+
+def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, str] | None:
+    """(class, exit code, message) for why this record's slice may no longer start, judged on the pools NOW; else None.
+    Every admission predicate a wait can change is judged again right before the spawn (load wait, capacity wait;
+    foreground and detached runner alike, round 6 of PR 224): (1) the plenty gate; (2) the fallback-only gate
+    (`fallback_gate`): a pool the fallback sits behind recovered, so it is refused as at dispatch (exit 2, same message);
+    (3) the pool's own quota: a fallback with no reading fails closed, the minimum headroom, and the estimate against each
+    window (unreserved: the in-flight reservation was dispatch's, and `runner_inflight_recheck` holds the cap). A resume
+    and a route-override dispatch carry none of the stamps for (1)-(2) and skip (3), as they skip the gates at dispatch."""
+    if rec.get("resume_count") or not rec.get("kind"):
+        return None
+    stale = plenty_gate_refusal(rec, after)
+    if stale:
+        return "headroom", UNAVAILABLE_EXIT, stale
+    svc = kind_service(rec.get("agent") or "", rec.get("service"))
+    if rec.get("fallback_gate"):
+        why = fallback_gate_refusal(svc, rec.get("kind"), rec.get("gate_repo"))
+        if why:
+            return "fallback", FALLBACK_REFUSED_EXIT, why
+    if rec.get("min_headroom") is None:
+        return None                      # a record from before this check: dispatch's snapshot stands
+    remaining, reading = pool_reading(rec.get("agent") or "", rec.get("model"), fresh=not rec.get("plenty_gate"))
+    if remaining is None:
+        if svc is not None and svc.fallback_after and rec.get("fallback_gate"):
+            return ("headroom", UNAVAILABLE_EXIT,
+                    f"no fresh quota reading for {svc.window or svc.name} after {after}: a fallback-only pool is not used unmeasured")
+        return None
+    windows = (reading or {}).get("windows") or {}
+    floor = float(rec.get("min_headroom") or 0)
+    if floor > 0 and remaining < floor:
+        return "headroom", UNAVAILABLE_EXIT, (f"headroom {remaining:.1f}% < minimum {floor:.1f}% after {after}"
+                                              f"{binding_window_note(windows)}")
+    per_window = {k: float(v) for k, v in (rec.get("estimated_usage_windows") or {}).items() if windows.get(k) is not None}
+    if per_window:
+        refusal, _ = window_fit(per_window, windows)
+        if refusal:
+            return "wont-fit", UNAVAILABLE_EXIT, f"{refusal} (after {after})"
+    elif float(rec.get("estimated_usage_pct") or 0) > float(remaining):
+        return "wont-fit", UNAVAILABLE_EXIT, (f"estimated use {float(rec.get('estimated_usage_pct') or 0):.1f}% > "
+                                              f"{float(remaining):.1f}% left after {after}{binding_window_note(windows)}")
+    return None
 
 
 def escalation_next(kind: str | None) -> str | None:
@@ -3857,7 +3910,7 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
 
 def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None = None) -> tuple[str, str, dict]:
     rec = json.loads(record_path.read_text())
-    if rec.get("status") == "unavailable" and rec.get("unavailable_class") in ("load", "inflight", "headroom"):
+    if rec.get("status") == "unavailable" and rec.get("unavailable_class") in ("load", "inflight", "headroom", "fallback", "wont-fit"):
         # the runner refused before starting an agent: nothing to classify, nothing to resume, nothing
         # measured (a headroom refusal's "after" reading is the wait's, not a slice's; adversary bcdd223, A2)
         return "unavailable", (f"{LOAD_RETRY_TEXT} ({rec.get('detail', '')})" if rec["unavailable_class"] == "load"
@@ -3992,6 +4045,8 @@ def exit_for(st: str, rc: int | None) -> int:
     code = STATUS_EXIT.get(st, 1)
     if st == "unavailable" and rc == LOAD_GATE_EXIT:
         return LOAD_GATE_EXIT
+    if st == "unavailable" and rc == FALLBACK_REFUSED_EXIT:
+        return FALLBACK_REFUSED_EXIT
     if st == "done" and rc not in (None, 0):
         return 1
     if st == "no-report" and rc == 124:
@@ -4098,14 +4153,16 @@ def runner_inflight_recheck(record: Path, rec: dict) -> str | None:
             f"{', '.join(p.stem for p in ahead[:3])}; not launched, re-dispatch later")
 
 
-def refuse_headroom(record: Path, rec: dict, stale: str, **extra) -> int:
-    """Finalize a detached record as unavailable/headroom (exit 5, nothing started): the plenty gate
-    stamped at dispatch no longer holds. `finalize` leaves such a record alone."""
-    print(f"acp-dispatch: {rec.get('name')}: {stale}", file=sys.stderr)
+def refuse_admission(record: Path, rec: dict, refusal: tuple[str, int, str], **extra) -> int:
+    """Finalize a detached record as unavailable/<class> (nothing started): a gate stamped at dispatch no longer
+    holds at the spawn. `finalize` leaves such a record alone. The exit code is the refusal's (5 for quota, 2 for a
+    fallback-only pool, as at dispatch)."""
+    cls, code, stale = refusal
+    print(f"acp-dispatch: {stale}" if cls == "fallback" else f"acp-dispatch: {rec.get('name')}: {stale}", file=sys.stderr)
     release_load_reservation(rec)
-    update_record(record, load_gate_pending=False, status="unavailable", unavailable_class="headroom",
-                  detail=stale, exit=UNAVAILABLE_EXIT, finished=time.time(), pid=None, **extra)
-    return UNAVAILABLE_EXIT
+    update_record(record, load_gate_pending=False, status="unavailable", unavailable_class=cls,
+                  detail=stale, exit=code, finished=time.time(), pid=None, **extra)
+    return code
 
 
 def runner_load_gate(record: Path) -> int | None:
@@ -4114,9 +4171,10 @@ def runner_load_gate(record: Path) -> int | None:
     unavailable/load (finalize leaves such a record alone) when the machine stayed too hot. After admission it
     re-checks the in-flight cap recorded at dispatch (runner_inflight_recheck; pending runners count as in flight,
     see inflight_records): a full cap finalizes it as unavailable/inflight, exit 5, nothing started. It then
-    re-reads the pool for a `plenty_gate` record (plenty_gate_refusal): a pool no longer plentiful finalizes
-    it as unavailable/headroom, exit 5. The record stays load_gate_pending until execute_record writes the
-    pid. Other quota checks (minimum headroom, fit) use the snapshot taken at dispatch."""
+    re-judges the admission at the spawn (spawn_refusal): the plenty gate, the fallback-only gate (a pool Argon sits
+    behind recovered: unavailable/fallback, exit 2 as at dispatch) and the pool's own quota (headroom, fit; a fallback
+    with no reading fails closed): unavailable, exit 5, nothing started. The record stays load_gate_pending until
+    execute_record writes the pid; execute_record repeats spawn_refusal after the capacity wait."""
     rec = json.loads(record.read_text())
     if not rec.get("load_gate_pending"):
         return None
@@ -4132,9 +4190,9 @@ def runner_load_gate(record: Path) -> int | None:
                           unavailable_class="inflight", detail=full, exit=UNAVAILABLE_EXIT,
                           finished=time.time(), pid=None)
             return UNAVAILABLE_EXIT
-        stale = plenty_gate_refusal(rec)
+        stale = spawn_refusal(rec)
         if stale:
-            return refuse_headroom(record, rec, stale, load_gate=info)
+            return refuse_admission(record, rec, stale, load_gate=info)
         # load_gate_pending stays true until execute_record writes the pid: wait_for_capacity can hold up to 900 s
         # in between, and a pid-less row that is not pending drops out of the in-flight count after 600 s
         update_record(record, load_gate=info, gate=f"load ok after {info and info.get('waited_s')}s")
@@ -4154,9 +4212,9 @@ def execute_record(record: Path, tee: bool = False) -> int:
     rec = json.loads(record.read_text())
     # wait_for_capacity may have held the slice up to 900 s: judge the stamped plenty gate once more on the
     # pool as it is right before the spawn (adversary bcdd223, A5); a resume or route-override has no stamp
-    stale = plenty_gate_refusal(rec, "the capacity wait")
+    stale = spawn_refusal(rec, "the capacity wait")
     if stale:
-        return refuse_headroom(record, rec, stale)
+        return refuse_admission(record, rec, stale)
     got: dict = {}
     with open(rec["final"] + ".tmp", "w") as fo, open(rec["stderr"], "w") as fe:
         proc = subprocess.Popen(shlex.split(rec["cmd"]), stdout=subprocess.PIPE if tee else fo,
@@ -4633,6 +4691,13 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
              else plenty_gated(a.agent, service, kind))
     if gated is not None and not gated.eligible(kind, {gated.name: reading}):
         refuse_kind(service or gated.name, kind, {**route_module().load_snapshot()[0], gated.name: reading})
+    # The fallback predicate, judged again on the same fresh look (round 6): a load wait of up to --load-wait may have
+    # let codex or claude recover; refused exactly as before the wait (exit 2, same message). A resume and
+    # route-override skip it, as they skip the first check.
+    if gate_info is not None and not gate_deferred and not is_resume and kind and "route-override" not in approved:
+        stale = fallback_gate_refusal(kind_service(a.agent, service), kind, REPO_NAME)
+        if stale:
+            die(stale, FALLBACK_REFUSED_EXIT)
     windows = (reading or {}).get("windows") or {}
     fb_svc = kind_service(a.agent, service)
     # a fallback pool (Argon) with no fresh reading fails closed, like the planner: its window is named
@@ -4813,6 +4878,11 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         rec["advisor_edited"] = True
     if gated is not None:
         rec["plenty_gate"] = True
+    if fb_svc is not None and fb_svc.fallback_after and not previous and kind and "route-override" not in approved:
+        # the runner re-judges these at the spawn (spawn_refusal), after every wait: it has no `approved` or repo of its own
+        rec["fallback_gate"], rec["gate_repo"] = True, REPO_NAME
+    if not previous and kind:
+        rec["min_headroom"] = a.min_headroom
     if gate_deferred:
         # the launchd runner has none of this process's environment or load_policy(): hand it the resolved values
         rec["load_gate_pending"], rec["load_gate_wait"] = True, gate_wait

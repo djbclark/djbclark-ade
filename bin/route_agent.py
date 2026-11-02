@@ -1776,7 +1776,12 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         scored = [row for row in scored if row[1].name != "claude"]
     if not scored:
         return None
-    scored.sort(key=lambda t: (t[0], t[1].name))
+    # A fallback (Argon) sorts behind every candidate it sits behind, whatever the scores say: ordering is structural, not
+    # a tie of rank + pressure + penalties (Codex review of PR 224, round 6: codex 60% left at pace 1.6 scored 5, tied Argon,
+    # and the name broke the tie). The pool must be in `scored`, i.e. take the kind now; a named pool a wave cap or an
+    # `exclude` took out leaves Argon the overflow.
+    candidates = {s.name for _, s, _, _ in scored}
+    scored.sort(key=lambda t: (any(n in candidates for n in t[1].fallback_after), t[0], t[1].name))
     best_score, best, remaining, tags = scored[0]
     why = [f"{kind}: {best.cli}"]
     if remaining is not None:

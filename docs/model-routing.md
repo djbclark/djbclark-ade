@@ -101,7 +101,10 @@ quoting a chain, and update its snapshot if you change one.
 > short when the Fable sublimit is below `frontier1_min_left` (Argon then replaces the Opus downgrade).
 > It fails closed: no fresh reading of its window, or a frozen or stale one, means the planner never picks it
 > and `acp-dispatch` exits 5 naming the window. `acp-dispatch` enforces the fallback too (exit 2; the
-> `route-override` approval escapes it). Needs `--kind frontier` like astra and Fable; the item-1e frontier
+> `route-override` approval escapes it), at dispatch, again after the load wait (foreground) and again right before the spawn after every wait
+> (foreground and detached runner: a primary that recovered refuses it, exit 2, same message). The planner orders it structurally: it
+> never outranks a usable pool it falls back behind, whatever the scores say (a tie or a better score
+> after pace and pressure penalties does not matter); it takes only the overflow of a named pool a wave cap or `exclude` removed. Needs `--kind frontier` like astra and Fable; the item-1e frontier
 > allowance (claude, codex) does not cover it.
 > Gemini 4 Carbon is not reachable through agy yet (Google's staged rollout, 2026-10-28): recheck weekly.
 > Detail: `skills/model-routing/SKILL.md` item 1b.

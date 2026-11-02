@@ -12,6 +12,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -658,6 +659,119 @@ class ArgonRouting(unittest.TestCase):
                 mock.patch.object(ra, "governor_hold", return_value=None):
             rows = ra.plan(["frontier", "frontier"], quota=self.quota(codex=0.0, claude=0.0))
         self.assertEqual([c.service.name if c else None for _, c in rows], ["antigravity-argon", None])   # max_parallel 1
+
+    def test_argon_never_outranks_a_usable_pool_it_sits_behind_even_on_a_score_tie_or_a_better_score(self):
+        # Codex review of PR 224, round 6: codex 60% left at pace 1.6 scores 5 after pressure and the pace penalty, claude is
+        # exhausted (so Argon is a candidate) and Argon at 100% scores 5: the name broke the tie in Argon's favour
+        q = self.quota(codex=60.0, claude=0.0, argon=100.0)
+        q["codex"]["pace_ratio"] = 1.6
+        self.assertEqual(self.names(q), "codex")
+        # not a tie any more but a strictly better score for Argon: ordering is structural, not a score
+        with mock.patch.object(ra, "PACE_PENALTY", 50.0):
+            self.assertEqual(self.names(q), "codex")
+            self.assertEqual(self.pick(q).alternatives[:1], ["antigravity-argon"])
+
+    def test_a_wave_keeps_the_usable_pool_first_and_gives_argon_only_the_overflow(self):
+        q = self.quota(codex=60.0, claude=0.0, argon=100.0)
+        q["codex"]["pace_ratio"] = 1.6
+        with mock.patch.object(ra, "discover", return_value=list(ra.SERVICES)), \
+                mock.patch.object(ra, "governor_hold", return_value=None):
+            rows = ra.plan(["frontier", "frontier"], quota=q)
+        self.assertEqual([c.service.name if c else None for _, c in rows], ["codex", "antigravity-argon"])
+
+    def test_a_pool_removed_from_the_candidates_leaves_argon_the_slice(self):
+        q = self.quota(codex=60.0, claude=0.0, argon=100.0)
+        q["codex"]["pace_ratio"] = 1.6
+        self.assertEqual(self.names(q, exclude=frozenset({"codex"})), "antigravity-argon")
+
+
+class ArgonSpawnRecheck(ArgonDispatchBase):
+    """Codex review of PR 224, round 6: the fallback-only gate and the pool's own quota are judged again right before the
+    spawn, after every wait, in the foreground and in the detached runner. Primary pools recover (codex 30% -> 90%) or
+    Argon drains while the slice waits."""
+
+    def accounts(self, codex_left: float = 30.0, argon_weekly: float | None = 57.0) -> tuple[dict, ...]:
+        return (antigravity(gemini_weekly=90.0, argon_weekly=argon_weekly), codex(codex_left), claude(80.0))
+
+    def stamped(self) -> Path:
+        r = self.agy(ARGON, "--frontier-reason", "fallback: astra is short of quota this week", accounts=self.accounts())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = self.out / "jobs" / "s1.json"
+        rec = json.loads(path.read_text())
+        self.assertEqual((rec["fallback_gate"], rec["min_headroom"]), (True, 10.0))      # the runner is handed the gate
+        return path
+
+    def set_world(self, *accounts: dict) -> None:
+        snapshot_file(self.tmp / "latest.json", *accounts)
+
+    def recovering_load_watch(self) -> Path:
+        lw = self.tmp / "load-watch"
+        recovered = json.dumps({"collected_at": "2099-01-01T00:00:00+00:00",
+                                "snapshot": {"accounts": list(self.accounts(codex_left=90.0))}})
+        lw.write_text("#!/bin/sh\ncat > \"$LATEST\" <<'EOF'\n" + recovered + "\nEOF\n"
+                      "echo '{\"load1\": 1.0, \"per_core\": 0.1, \"waited_s\": 3}'\n")
+        lw.chmod(0o755)
+        return lw
+
+    def execute(self, path: Path, *, wait=None, runner: bool = False):
+        """execute_record or runner_load_gate in-process with Popen a trap: the world changes inside the wait."""
+        launched: list = []
+        real = subprocess.Popen
+        cmd = shlex.split(json.loads(path.read_text())["cmd"])
+
+        def trap(argv, *args, **kwargs):
+            if list(argv) != cmd:
+                return real(argv, *args, **kwargs)
+            launched.append(argv)
+            raise AssertionError("an agent was spawned")
+
+        env = {"AIUSE_SNAPSHOT": str(self.tmp / "latest.json"), "LATEST": str(self.tmp / "latest.json"), **NO_GOVERNOR}
+        with mock.patch.dict(os.environ, env), mock.patch("subprocess.Popen", trap), \
+                mock.patch.object(acpd, "wait_for_capacity", wait or (lambda record: None)):
+            rc = acpd.runner_load_gate(path) if runner else acpd.execute_record(path)
+        return rc, launched
+
+    def test_a_primary_that_recovers_during_the_capacity_wait_refuses_argon_at_the_spawn(self):
+        path = self.stamped()
+        rc, launched = self.execute(path, wait=lambda record: self.set_world(*self.accounts(codex_left=90.0)))
+        self.assertEqual((rc, launched), (2, []))
+        rec = json.loads(path.read_text())
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "fallback", 2))
+        self.assertIn("fallback behind codex, claude", rec["detail"])        # the pre-wait message, word for word
+        st, _, _ = acpd.finalize(path, rc)
+        self.assertEqual((st, acpd.exit_for(st, rc)), ("unavailable", 2))
+
+    def test_the_detached_runner_refuses_argon_after_its_own_load_wait_when_a_primary_recovered(self):
+        path = self.stamped()
+        acpd.update_record(path, status="running", pid=None, load_gate_pending=True, load_gate_wait=1,
+                           load_watch=str(self.recovering_load_watch()), finished=None)
+        rc, launched = self.execute(path, runner=True)
+        self.assertEqual((rc, launched), (2, []))
+        rec = json.loads(path.read_text())
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"], rec["load_gate_pending"]),
+                         ("unavailable", "fallback", 2, False))
+
+    def test_foreground_dispatch_refuses_argon_when_a_primary_recovers_during_the_load_wait(self):
+        r = self.agy(ARGON, "--frontier-reason", "fallback: astra is short of quota this week", accounts=self.accounts(),
+                     env={"ACP_DISPATCH_NO_LOAD_GATE": "", "ACP_DISPATCH_LOAD_WATCH": str(self.recovering_load_watch()),
+                          "LATEST": str(self.tmp / "latest.json")})
+        self.assertEqual(r.returncode, 2, r.stderr)                         # the pre-wait refusal's code ...
+        self.assertIn("fallback behind codex, claude", r.stderr)            # ... and message
+        self.assertFalse((self.out / "jobs/s1.json").exists())
+
+    def test_an_argon_window_drained_during_the_wait_is_refused_at_the_spawn_by_its_own_quota(self):
+        path = self.stamped()
+        rc, launched = self.execute(path, wait=lambda record: self.set_world(*self.accounts(argon_weekly=0.0)))
+        self.assertEqual((rc, launched), (5, []))
+        rec = json.loads(path.read_text())
+        self.assertEqual((rec["status"], rec["unavailable_class"]), ("unavailable", "headroom"))
+        self.assertIn("Gemini 4 Argon weekly", rec["detail"])
+
+    def test_an_argon_with_no_reading_at_the_spawn_fails_closed(self):
+        path = self.stamped()
+        rc, launched = self.execute(path, wait=lambda record: self.set_world(*self.accounts(argon_weekly=None)))
+        self.assertEqual((rc, launched), (5, []))
+        self.assertIn("not used unmeasured", json.loads(path.read_text())["detail"])
 
 
 if __name__ == "__main__":
