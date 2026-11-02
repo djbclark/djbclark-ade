@@ -2537,10 +2537,12 @@ def card_alerts_write(data):
         raise
 
 
-def card_alert_key(rec, look):
-    """Target plus the pending card ids of the look (sorted); a pane dialog has no id, so its state word stands in."""
-    ids = sorted(str(c.get("id")) for c in (look.get("cards") if isinstance(look, dict) else None) or [] if isinstance(c, dict) and c.get("id"))
-    return f"{target_key(rec)}|{','.join(ids) or str((look or {}).get('state') or 'card')}"
+def card_alert_keys(rec, look):
+    """One claim key per pending card (target + card id), so a second card appearing, or one of two being answered, never re-alerts a card already
+    told; a pane dialog has no id, so its state word stands in, and card_alert_step scopes that claim to the episode (fresh_after)."""
+    tk = target_key(rec)
+    ids = sorted({str(c.get("id")) for c in (look.get("cards") if isinstance(look, dict) else None) or [] if isinstance(c, dict) and c.get("id")})
+    return [f"{tk}|{i}" for i in ids] or [f"{tk}|{str((look or {}).get('state') or 'card')}"], bool(ids)
 
 
 def card_alert_ping(text):
@@ -2585,37 +2587,46 @@ def card_alert_step(rid, rec, look):
             return
         if now - since < after:
             return
-        alert_once(rid, rec, card_alert_key(rec, look), "card_alert", "card-alert", card_alert_text(rid, rec, look, now - since))
+        keys, has_ids = card_alert_keys(rec, look)
+        alert_once(rid, rec, keys, "card_alert", "card-alert", card_alert_text(rid, rec, look, now - since), fresh_after=0.0 if has_ids else since)
     except Exception as e:    # noqa: BLE001  # an alert is never worth a lost message
         defer_log(rec, "card-alert-error", f"{type(e).__name__}: {e}")
 
 
-def alert_once(rid, rec, key, field, event, text):
-    """The ONE ping for KEY: the claim is written to card-alerts.json under the state lock before the ping (a later look, a second deliverer or a
-    later record behind the same card finds it and stays quiet; a failed ping is retried no sooner than CARD_ALERT_RETRY later, at most CARD_ALERT_TRIES
-    times), the outcome is filed on record RID as FIELD for `--pending` and logged as EVENT. The ok of the ping, None when KEY was already told."""
+def alert_once(rid, rec, keys, field, event, text, fresh_after=0.0):
+    """The ONE ping for each of KEYS: the claims are written to card-alerts.json under the state lock before the ping (a later look, a second deliverer or a
+    later record behind the same card finds them and stays quiet; a failed ping is retried no sooner than CARD_ALERT_RETRY later, at most CARD_ALERT_TRIES
+    times), the outcome is filed on record RID as FIELD for `--pending` and logged as EVENT. A key is told when its claim is ok, out of tries or still
+    waiting to retry, and (FRESH_AFTER: a pane dialog has no id, so a claim older than this episode names an earlier dialog) not older than FRESH_AFTER.
+    The ping goes out when ANY key is untold (a second card appeared); it claims every untold key. The ok of the ping, None when all were already told."""
     now = time.time()
     with state_lock():
         data = card_alerts_read()
-        ent = data.get(key) if isinstance(data.get(key), dict) else None
-        told = bool(ent and (ent.get("ok") or int(ent.get("tries") or 0) >= CARD_ALERT_TRIES or now < float(ent.get("retry_at") or 0)))
-        if not told:
-            tries = int((ent or {}).get("tries") or 0) + 1
-            data[key] = {"at": now, "rid": rid, "tries": tries, "ok": False, "retry_at": now + CARD_ALERT_RETRY}
+        ents = {k: (data.get(k) if isinstance(data.get(k), dict) else None) for k in keys}
+        fresh = {k: e for k, e in ents.items() if e and float(e.get("at") or 0) >= fresh_after}
+        untold = [k for k in keys if not (k in fresh and (fresh[k].get("ok") or int(fresh[k].get("tries") or 0) >= CARD_ALERT_TRIES
+                                                          or now < float(fresh[k].get("retry_at") or 0)))]
+        tries = 1
+        if untold:
+            tries = max(int((fresh.get(k) or {}).get("tries") or 0) for k in untold) + 1
+            for k in untold:
+                data[k] = {"at": now, "rid": rid, "tries": int((fresh.get(k) or {}).get("tries") or 0) + 1, "ok": False, "retry_at": now + CARD_ALERT_RETRY}
             data = {k: v for k, v in data.items() if isinstance(v, dict) and now - float(v.get("at") or 0) < CARD_ALERT_KEEP}
             card_alerts_write(data)
-    if told:    # transition takes the state lock itself (not re-entrant): never inside the block above
+    if not untold:    # transition takes the state lock itself (not re-entrant): never inside the block above
+        ent = next(iter(fresh.values()), {})
         if not isinstance(rec.get(field), dict):
             transition(rid, ("queued",), **{field: {"at": ent.get("at"), "ok": bool(ent.get("ok")), "by": ent.get("rid"), "tries": ent.get("tries")}})
         return None
     ok, why = card_alert_ping(text)
     with state_lock():
         data = card_alerts_read()
-        if isinstance(data.get(key), dict):
-            data[key]["ok"] = ok
-            card_alerts_write(data)
+        for k in untold:
+            if isinstance(data.get(k), dict):
+                data[k]["ok"] = ok
+        card_alerts_write(data)
     transition(rid, ("queued",), **{field: {"at": now, "ok": ok, "by": rid, "tries": tries}})
-    defer_log(rec, event if ok else event + "-failed", f"{key} try {tries}" + (f": {why}" if why else ""))
+    defer_log(rec, event if ok else event + "-failed", f"{','.join(untold)} try {tries}" + (f": {why}" if why else ""))
     return ok
 
 
@@ -2646,7 +2657,7 @@ def busy_alert_step(rid, rec):
                 f"it expires in {max(0, int(float(rec.get('expires') or 0) - now)) // 60}m.")
         claimed = (rec.get("sender_ident") and rec.get("kind") != "notice"
                    and transition(rid, ("queued",), when=lambda r: not r.get("busy_notice"), busy_notice=now) is not None)    # once, whether or not the ping works
-        alert_once(rid, rec, f"busy|{rid}", "busy_alert", "busy-alert", text)
+        alert_once(rid, rec, [f"busy|{rid}"], "busy_alert", "busy-alert", text)
         if claimed:
             notice = (f"relay: your message to {target_label(rec)} ({rid}) has waited {mins}m: the target is still working, so it is queued, not delivered. "
                       "If it matters, re-send it with --steer (it interrupts a turn in progress on omp, codex, opencode and claude: the running turn may be replaced "

@@ -199,6 +199,28 @@ class TestCardAlert(Base):
         self.assertFalse(ok)
         self.assertIn("cannot run", why)
 
+    def test_answering_one_of_two_cards_does_not_alert_again_for_the_one_that_remains(self) -> None:
+        self.cards = [{"id": "frm_a", "tool": "AskUserQuestion"}, {"id": "frm_b", "tool": "Bash"}]
+        rid = self.queue()
+        self.drive(rid, [self.nothing, self.waited(rid, 1900), lambda: setattr(self, "cards", [{"id": "frm_a", "tool": "AskUserQuestion"}]), self.nothing, self.nothing])
+        self.assertEqual(len(self.ping_lines()), 1, self.ping_lines())
+
+    def test_a_new_card_beside_one_already_told_is_told_once(self) -> None:
+        rid = self.queue()
+        self.drive(rid, [self.nothing, self.waited(rid, 1900), lambda: setattr(self, "cards", [*CARD, {"id": "frm_new", "tool": "Bash"}]), self.nothing, self.nothing])
+        lines = self.ping_lines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("frm_new", lines[1])
+
+    def test_a_pane_dialog_has_no_id_so_a_later_dialog_is_a_new_alert_but_the_same_one_is_not(self) -> None:
+        rid = self.queue()
+        keys = ["w2N:pZ|card:picker"]
+        t0 = time.time()
+        self.assertTrue(relay.alert_once(rid, relay.rec_read(rid), keys, "card_alert", "card-alert", "relay: dialog one", fresh_after=t0 - 5))
+        self.assertIsNone(relay.alert_once(rid, relay.rec_read(rid), keys, "card_alert", "card-alert", "relay: dialog one again", fresh_after=t0 - 5))
+        self.assertTrue(relay.alert_once(rid, relay.rec_read(rid), keys, "card_alert", "card-alert", "relay: dialog two", fresh_after=time.time() + 5))
+        self.assertEqual(self.ping_lines(), ["relay: dialog one", "relay: dialog two"])
+
     def test_a_garbage_threshold_means_the_default(self) -> None:
         for raw, expect in (("abc", 1800), ("", 1800), ("-5", 0), ("0", 0), ("90", 90)):
             with self.subTest(raw=raw):
