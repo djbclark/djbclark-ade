@@ -311,7 +311,7 @@ id such as w2F:p45, a session id prefix, a Paseo agent id), DIR the directory it
 sending PROCESS: fleet's `self` row (HERDR_PANE_ID, else the pane an ancestor process runs in, else, when that names a pane herdr no longer has, the pane whose
 foreground or shell process is an ancestor: herdr renumbers a pane that is moved, and a process keeps the id it started with: 2026-11-02, an omp in w20:p3 had
 HERDR_PANE_ID=w2F:p2X and was refused with exit 4; `fleet.self_pane_by_process`), PASEO_AGENT_ID (else the agent the Paseo
-daemon hosts above it), CLAUDE_CODE_SESSION_ID, `hermes SID8` (a relay Hermes starts itself: the last 8 characters of its HERMES_SESSION_ID), a label
+daemon hosts above it), the Claude session id (claude_identity: the registry file of CLAUDE_PID when that is an ancestor, CLAUDE_CODE_SESSION_ID only as the fallback: a /baton successor inherits its predecessor's), `hermes SID8` (a relay Hermes starts itself: the last 8 characters of its HERMES_SESSION_ID), a label
 declared in RELAY_SENDER_NAME. A Codex tool shell keeps none of these variables
 (this machine's `shell_environment_policy inherit = "core"`), which is why the `codex` process above it is read. Only when nothing resolves
 the relay REFUSES to send (exit 4, nothing sent, queued or recorded) and names what was checked; the caller re-runs with RELAY_SENDER_NAME=<label> (a job
@@ -361,7 +361,7 @@ HERMES_HOPS_MAX = 3
 HERMES_DIR = Path(os.environ.get("RELAY_HERMES_DIR", Path.home() / ".local/state/session-finder/relay-hermes"))
 # Variables a relayed Hermes turn must not inherit: they would let it pose as the caller (a relay it makes is tagged
 # with the caller's name or labelled by Paseo as the caller's own message) or route replies to the caller's chat.
-HERMES_SCRUB = ("CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "ACP_OPERATOR_APPROVED",
+HERMES_SCRUB = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "ACP_OPERATOR_APPROVED",
                "HERMES_UI_SESSION_ID")
 HERMES_SCRUB_PREFIXES = ("HERMES_SESSION_", "HERMES_CRON_")
 # Pause between the text and its Enter (2026-10-18): sent back to back, Claude Code reads the burst as a
@@ -1587,7 +1587,7 @@ def sender_name(listed):
     if not me and own:
         me = next((x for x in listed if own in (x.get("paseo"), (x.get("chan") or (None, None))[1])), None) or {"id": own, "agent": "paseo"}
     if not (me.get("name") or me.get("id")):
-        sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8]
+        sid = (fleet.own_claude_session_id() or "")[:8]    # the registry's id, the env var only as the fallback (claude_identity)
         me = {"id": sid, "agent": "claude"} if sid else {}
     if me:
         return sender_label(me)
@@ -2378,7 +2378,7 @@ def card_backoff(n, rng=None, cap=None):
 # What identifies the session a relay runs in. A deliverer is built a new environment: it keeps none of these (a sweep
 # can start one from ANY agent's process, and fleet would mark that agent's own row `self`), and the sender's Paseo id
 # comes from its record alone. RELAY_HOPS and the other two are set from the record's stored hop count instead.
-SELF_IDS = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "CLAUDE_CODE_SESSION_ID", "HERDR_PANE_ID", "HERDR_ENV", "ORCA_PANE_KEY",
+SELF_IDS = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "HERDR_PANE_ID", "HERDR_ENV", "ORCA_PANE_KEY",
             "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "ACP_RUN_AGENT")
 DELIVER_DROP = SELF_IDS + ("RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER")
 DELIVER_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "PASEO_CLI", "PASEO_HOME", "PASEO_HOST",

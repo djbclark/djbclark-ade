@@ -5,3 +5,4 @@
 
 ### Fixed
 - `relay.py` no longer refuses with "cannot tell who is sending" for an agent in a herdr pane whose `HERDR_PANE_ID` is stale after the pane was moved (seen on an omp in w20:p3): the pane is found by its own process tree (#248)
+- A Claude Code session started by /baton, or an agent started from a Claude shell, is no longer taken for the session whose `CLAUDE_CODE_SESSION_ID` it inherited: `relay.py` (sender), `fleet.py` (`self` row), `session-find.py` and `ade_claims.caller_ident` share one resolver, `skills/session-finder/claude_identity.py` (moved from autorename), that reads the Claude registry of CLAUDE_PID when it is an ancestor and trusts the env var only as the fallback; a herdr row whose session id differs from the caller's own is no longer its `self` row (#248)

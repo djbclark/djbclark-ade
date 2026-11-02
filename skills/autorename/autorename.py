@@ -67,7 +67,6 @@ Exit 0 = renamed or deliberately skipped (stdout says which); 2 = cannot run.
 
 from __future__ import annotations
 import argparse
-import calendar
 import fcntl
 import json
 import os
@@ -85,7 +84,8 @@ from typing import Any
 MARK = '"type":"custom-title"'
 MAX_LEN = 80
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
-CLAUDE_SID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "session-finder"))
+import claude_identity  # noqa: E402  # the shared Claude session-id resolver
 
 
 def clean(title: str) -> str:
@@ -106,57 +106,11 @@ def find_transcript(sid: str) -> Path | None:
     return hits[0] if hits else None
 
 
-def _proc_start_matches(pid: int, recorded: Any) -> bool:
-    """False only when the registry's `procStart` provably names another process than the live `pid`: a
-    crashed Claude leaves its file behind and the pid can be reused. Claude Code writes `procStart` as
-    `ps -o lstart= -p PID` under `LC_ALL=C TZ=UTC`; this runs the same command, so both stamps are UTC and
-    no local-time conversion (DST's repeated hour) is involved. A missing or unparsable stamp, or a
-    failing `ps`, proves nothing, so the pid alone stands."""
-    if not isinstance(recorded, str) or not recorded.strip():
-        return True
-    fmt = "%a %b %d %H:%M:%S %Y"
-    try:
-        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                             timeout=10, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
-        if not out:
-            return True
-        live = calendar.timegm(time.strptime(" ".join(out.split()), fmt))
-        was = calendar.timegm(time.strptime(" ".join(recorded.split()), fmt))
-    except (OSError, ValueError, OverflowError, subprocess.TimeoutExpired):
-        return True
-    return abs(live - was) <= 5
-
-
 def registered_claude_session_id() -> str | None:
-    """The session id of the Claude Code process that owns this shell, from its own registry file.
-
-    A running Claude Code writes `<config>/sessions/<pid>.json` with its current `sessionId`.
-    `CLAUDE_CODE_SESSION_ID` in a tool shell is not reliable: a session started from another
-    session's environment (a Paseo agent launched by /baton or /handoff from a shell inside the
-    predecessor, `--fork-session`, upstream issue 81304) keeps the PREDECESSOR's id there, and its
-    transcript is then missing or belongs to another session.
-
-    Anchor: `CLAUDE_PID`, which Claude Code sets in every child shell next to `CLAUDE_CODE_SESSION_ID`
-    to its own pid, so a nested Claude (a `claude -p` or ACP child) names ITSELF. It counts only when it
-    is an ancestor of this process, has a registry file whose `pid` and `procStart` match, and holds a
-    uuid `sessionId`. Never "the nearest ancestor with a file": that skips an unregistered nested
-    Claude and renames its parent's session (adversary, PR 259). None means: use the env var."""
-    raw = os.environ.get("CLAUDE_PID", "")
-    if not raw.isdigit() or int(raw) <= 1:
-        return None
-    pid = int(raw)
-    if pid not in ancestor_pids():
-        return None
-    try:
-        data = json.loads((claude_config_dir() / "sessions" / f"{pid}.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict) or data.get("pid") != pid:
-        return None
-    sid = data.get("sessionId")
-    if not (isinstance(sid, str) and CLAUDE_SID_RE.fullmatch(sid)):
-        return None
-    return sid if _proc_start_matches(pid, data.get("procStart")) else None
+    """The registry's session id for the Claude Code that owns this shell, or None (then CLAUDE_CODE_SESSION_ID is the fallback). The rules (CLAUDE_PID
+    must be an ancestor, its registry file's pid and procStart must match, a uuid sessionId) live in skills/session-finder/claude_identity.py, the one
+    copy every identity read shares (relay, fleet, session-find, ade_claims); this passes autorename's own process-table walk."""
+    return claude_identity.registered_session_id(lambda: ancestor_pids())
 
 
 def current_title(transcript: Path) -> str | None:

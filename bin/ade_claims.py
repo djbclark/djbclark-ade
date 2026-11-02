@@ -423,12 +423,28 @@ def owner_label(claim: dict[str, Any]) -> str:
     return f"{who} ({ref})" if who else str(ref)
 
 
+def _own_claude_session_id() -> Optional[str]:
+    """This process's Claude Code session id from the shared resolver (skills/session-finder/claude_identity.py): the registry first, the env var only
+    as the fallback. A /baton successor inherits its predecessor's CLAUDE_CODE_SESSION_ID, so the bare env var would name the wrong owner. A checkout
+    without the helper (it is imported by path, not installed) keeps the env var."""
+    try:
+        helper = str(Path(__file__).resolve().parent.parent / "skills" / "session-finder")
+        if helper not in sys.path:
+            sys.path.insert(0, helper)
+        import claude_identity  # type: ignore[import-not-found]
+        return claude_identity.own_session_id()
+    except ImportError:
+        return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
 def caller_ident(env: Optional[dict[str, str]] = None) -> Optional[str]:
     """ADE_CLAIM_ID first (acp-dispatch exports it); harness ids leak from a lead into its slices, so they
-    are only the fallback for an interactive session (design 3.4.3)."""
+    are only the fallback for an interactive session (design 3.4.3). For this process's own environment (ENV None, or os.environ itself) the Claude session id is the
+    registry's, not the possibly stale CLAUDE_CODE_SESSION_ID; any other mapping is read as given."""
     env = os.environ if env is None else env
+    own = env is os.environ    # callers pass os.environ itself (evaluate, hook_push); a copy or a test dict is read as given
     for name in IDENT_ENV:
-        v = env.get(name)
+        v = _own_claude_session_id() if own and name == "CLAUDE_CODE_SESSION_ID" else env.get(name)
         if v:
             return v
     return None

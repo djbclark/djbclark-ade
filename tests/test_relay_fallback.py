@@ -76,7 +76,7 @@ class Harness(unittest.TestCase):
         patcher = mock.patch.dict(os.environ)    # whatever session runs the tests (Paseo, acp-run, Claude, herdr) is not under test
         patcher.start()
         self.addCleanup(patcher.stop)
-        for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "CLAUDE_CODE_SESSION_ID", "HERDR_PANE_ID", "HERDR_ENV",
+        for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "HERDR_PANE_ID", "HERDR_ENV",
                   "ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "TMUX", "TMUX_PANE", "RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER"):
             os.environ.pop(k, None)
         os.environ["RELAY_SENDER_NAME"] = "harness-job"    # relay refuses a sender it cannot resolve (exit 4): the tests that are not about that run as a declared job
