@@ -99,6 +99,13 @@ class TestMessageFile(Base):
         rc, _, err = self.send("peer-fb", "--message-file", self.file(b"\xef\xbb\xbfhello there friend\n"), "--wait", "2", "--via", "pane")
         self.assertEqual((rc, self.typed), (0, ["hello there friend"]), err)
 
+    def test_a_bare_dash_as_the_text_is_a_usage_error_and_sends_nothing(self) -> None:
+        # `relay.py ID - < file` once sent the one-character text "-" and reported it delivered (2026-11-02).
+        for text in ("-", " - "):
+            rc, _, err = self.send("peer-fb", text, "--wait", "2", "--via", "pane", stdin=TRICKY.encode())
+            self.assertEqual((rc, self.typed), (2, []), text)
+            self.assertIn("--message-file -", err)
+
 
 class TestAckBeforeAFileSend(Base):
     """`relay.py --ack PEER --message-file -` (local Codex review of #211): `-` looks like an option, so no positional was counted and PEER was read as

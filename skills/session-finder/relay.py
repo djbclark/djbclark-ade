@@ -4619,6 +4619,11 @@ def _main(argv=None, sweep=True):
         if not a.text.strip():
             print(f"relay: --message-file {a.message_file} is empty", file=sys.stderr)
             return 2
+    if a.message_file is None and a.text is not None and a.text.strip() == "-":
+        # `relay.py ID - < file` read as "send the text '-'": the peer got an empty-looking message while relay said delivered
+        # (2026-11-02). Only --message-file reads stdin.
+        print("relay: a bare `-` is not read from stdin and is not a message: use --message-file - (or PATH)", file=sys.stderr)
+        return 2
     if a.ident is None or a.text is None:
         print("relay: usage: relay.py <id> \"<text>\" | <id> --message-file PATH|- [options] (a message with code, backticks, $ or quotes goes through --message-file, never a shell-quoted string; the text is folded to one line either way) | --ack EXPECTATION_ID | --pending [--json] [--queued-only] [--older-than S] [--summary] | --status ID | --cancel ID | --sweep [--stuck-after S] | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
