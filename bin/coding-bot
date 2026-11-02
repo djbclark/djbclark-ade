@@ -695,14 +695,19 @@ class Ssh:
             raise
 
 
-# git push stderr that proves nothing was taken: the remote refused the update, or no connection was ever made
-_PUSH_REFUSED = re.compile(r"\[(?:remote )?rejected\]|Could not resolve host|Connection refused|Permission denied|"
-                           r"Authentication failed|Repository not found|does not appear to be a git repository|"
-                           r"No such file or directory|Host key verification failed", re.I)
+# git push stderr that proves nothing was taken: git's own ref status line saying the update was rejected, or a
+# connection that was never made. Lines a receive hook printed ("remote: ...") prove nothing and are never matched.
+_PUSH_REJECTED_REF = re.compile(r"^\s*!\s*\[(?:remote )?rejected\]")
+_PUSH_NO_CONNECTION = re.compile(r"Could not resolve host|Connection refused|Permission denied|Authentication failed|"
+                                 r"Repository not found|does not appear to be a git repository|"
+                                 r"No such file or directory|Host key verification failed", re.I)
 
 
 def push_refused(e: TransportError) -> bool:
-    return e.rc is not None and bool(_PUSH_REFUSED.search(e.stderr))
+    if e.rc is None:
+        return False
+    own = [ln for ln in e.stderr.splitlines() if not ln.lstrip().lower().startswith("remote:")]
+    return any(_PUSH_REJECTED_REF.match(ln) or _PUSH_NO_CONNECTION.search(ln) for ln in own)
 
 
 class UncertainPut(TransportError):

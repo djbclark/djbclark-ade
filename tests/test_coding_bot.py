@@ -1922,6 +1922,8 @@ class TestAdversaryR1(TransportBase):
             mod = TestAtomicState.load(self)
             git = next(t for t in mod.build_transports(mod.load_config()) if t.name == "git")
             for n, (stderr, uncertain) in enumerate([("error: RPC failed; HTTP 504 curl 22", True),
+                                                     ("remote: warning: Permission denied on cache\n"
+                                                      "error: RPC failed; HTTP 504", True),
                                                      ("To origin\n ! [remote rejected] HEAD -> main (hook declined)", False)]):
                 wrapper.write_text(f'#!/bin/sh\ncase " $* " in *" push "*) printf "%s\\n" "{stderr}" >&2; exit 1;; esac\n'
                                    f'exec "{real_git}" "$@"\n')
