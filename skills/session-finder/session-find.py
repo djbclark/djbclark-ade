@@ -27,6 +27,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nativeid import native_id  # noqa: E402
+import claude_identity  # noqa: E402
 import where as _where  # noqa: E402
 
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
@@ -176,7 +177,7 @@ def main() -> int:
         ap.print_usage(sys.stderr)
         return 2
 
-    me = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    me = claude_identity.own_session_id()    # the registry's id, CLAUDE_CODE_SESSION_ID only as the fallback: a /baton successor inherits its predecessor's
     rows = []
     seen = set()
     for d in live_sessions():

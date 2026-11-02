@@ -423,6 +423,16 @@ class LiveLabelTests(unittest.TestCase):
             self.assertEqual(used, declared, p.name)
 
 class SessionFindAllTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # session-find.py resolves its own session through claude_identity, which runs `ps` through the SAME subprocess module object these tests patch
+        # (`sf.subprocess.run`), so the resolver's call would land in the recorded argv (PR 248 adversary, CI pytest-linux): not under test here.
+        if str(SF) not in sys.path:
+            sys.path.insert(0, str(SF))
+        import claude_identity
+        patcher = mock.patch.object(claude_identity, "own_session_id", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_session_index_dir_override_applies_to_session_find_too(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"SESSION_INDEX_DIR": tmp}):
             spec = importlib.util.spec_from_file_location("t_sf_dir", SF / "session-find.py")

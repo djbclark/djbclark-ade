@@ -84,11 +84,12 @@ Project-scope-resolved output directory for this target repo (e.g. `ls
 
 **Also list this session's open background jobs** (bigteam's job records,
 Step 4 there). A record is open when it has no `"closed"` key and its `owner` is
-this session (`$CLAUDE_CODE_SESSION_ID`):
+this session (`me` below: the shared resolver, because a successor inherits its predecessor's `$CLAUDE_CODE_SESSION_ID`):
 
 ```bash
+me=$(python3 ~/src/djbclark-ade/skills/session-finder/claude_identity.py || echo "${CLAUDE_CODE_SESSION_ID:-}")
 for f in ~/.local/state/bigteam/*/jobs/*.json; do [ -e "$f" ] || continue
-  jq -r --arg me "${CLAUDE_CODE_SESSION_ID:-}" 'select(.owner==$me and (has("closed")|not))
+  jq -r --arg me "$me" 'select(.owner==$me and (has("closed")|not))
     | [input_filename, .report, .done, .rearm, .cmd] | @tsv' "$f"; done
 ```
 

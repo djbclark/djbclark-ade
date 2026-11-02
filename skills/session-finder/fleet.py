@@ -46,6 +46,7 @@ try:
 except (ImportError, SyntaxError):   # SyntaxError: an older python (3.9) that cannot parse it; locate nothing
     _where = None
 import nested_pty as _nested
+import claude_identity as _cid
 
 HOME = str(Path.home())
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
@@ -206,15 +207,67 @@ ANCESTOR_SELF = [True]   # relay.as_caller(scrub=True) sets False: a notice send
 _ANC_PANE = [None]       # set by sessions(): the herdr pane an ancestor of this process runs in, when HERDR_PANE_ID is unset
 
 
+_OWN_SID = [None, None, False]   # (cache key, session id, from the registry): one registry read and one process walk per sessions() call, not per row
+
+
+def _own_ancestors():
+    return ancestors() if ANCESTOR_SELF[0] else set()    # a notice sender hides its ancestry
+
+
+def own_claude_session_id(registry_only=False):
+    """This process's Claude Code session id (claude_identity.own_session_id: the registry first, CLAUDE_CODE_SESSION_ID only as the fallback and never
+    beside a CLAUDE_PID that is not an ancestor), or None. REGISTRY_ONLY: only an id the registry proves. A notice sender (ANCESTOR_SELF False) hides its
+    ancestry and has scrubbed its env, so it has none. The one read every identity decision in session-finder shares (relay, fleet, session-find)."""
+    key = (os.environ.get("CLAUDE_PID"), os.environ.get("CLAUDE_CODE_SESSION_ID"), os.environ.get("CLAUDE_CONFIG_DIR"), ANCESTOR_SELF[0])
+    if _OWN_SID[0] != key:
+        reg = _cid.registered_session_id(_own_ancestors)
+        _OWN_SID[0], _OWN_SID[1], _OWN_SID[2] = key, reg or _cid.own_session_id(_own_ancestors), bool(reg)
+    return _OWN_SID[1] if (_OWN_SID[2] or not registry_only) else None
+
+
+def other_session(s):
+    """True when row S is provably NOT the session this process runs in, by the caller's own Claude session id (own_claude_session_id): a claude row
+    with another session id is another session even when the pane matches. A Claude Code started inside another session's pane
+    (CLAUDE_CODE_CHILD_SESSION=1) inherits that pane's HERDR_PANE_ID, and was taken for the pane's session (2026-11-02: e377e248 read as f22ff8e4: its
+    relays went out labelled f22ff8e4, `relay.py f22ff8e4` from it was refused as "that is this session"). Own session id first, pane last. A
+    non-Claude row is another session only when the id came from the registry, which proves the caller is that Claude: an omp that inherited a
+    Claude's CLAUDE_CODE_SESSION_ID must still find its own pane."""
+    if s.get("agent") != "claude":
+        return bool(own_claude_session_id(registry_only=True))
+    me = own_claude_session_id()
+    return bool(me and s.get("sid") and s["sid"] != me)
+
+
+def _ancestor_panes(anc):
+    """The herdr panes named by the environments of ANC (a set; empty when this process's own HERDR_PANE_ID is set, a notice sender
+    hides its ancestry, or there is no where.py)."""
+    if os.environ.get("HERDR_PANE_ID") or not ANCESTOR_SELF[0] or not _where:
+        return set()
+    return {_where.env_of(pid).get("HERDR_PANE_ID") for pid in anc} - {None, ""}
+
+
 def ancestor_pane(anc):
     """The herdr pane this process runs in, read from an ancestor's environment, or None. Codex's `shell_environment_policy
     inherit = "core"` (this machine's ~/.codex/config.toml) strips HERDR_PANE_ID from the shell Codex runs a command in, but
     the `codex` TUI process above that shell keeps it. Used only when this process's own HERDR_PANE_ID is unset; ancestors
     naming two different panes name none (nothing is guessed)."""
-    if os.environ.get("HERDR_PANE_ID") or not ANCESTOR_SELF[0] or not _where:
-        return None
-    panes = {_where.env_of(pid).get("HERDR_PANE_ID") for pid in anc} - {None, ""}
+    panes = _ancestor_panes(anc)
     return panes.pop() if len(panes) == 1 else None
+
+
+def self_pane_by_process(rows, anc):
+    """The herdr pane of ROWS (herdr rows with a `pane`) whose foreground processes or shell are an ancestor of this process, else None.
+    The environment names a pane only as it was when the process started: herdr renumbers a pane that is moved to another workspace
+    or tab (2026-11-02, live: an omp in pane w20:p3 had HERDR_PANE_ID=w2F:p2X, a pane that no longer exists, so no row matched and
+    relay refused with "cannot tell who is sending"). A process-tree match needs no environment. Asked only after the environment
+    named a pane no row matched, so a caller outside herdr never pays one `herdr pane process-info` per pane."""
+    for s in rows:
+        if s.get("host") != "herdr" or not s.get("pane") or other_session(s):    # the own session id beats a process match: a child session sits below its parent's pane process
+            continue
+        procs, shell = pane_procs(s["pane"])
+        if ({p.get("pid") for p in procs or []} | {shell}) & anc:
+            return s["pane"]
+    return None
 
 
 def short(path):
@@ -381,7 +434,7 @@ def _from_herdr(s, a):
              where=f"herdr · ws {herdr_label('workspace', a['workspace_id'])} · tab {herdr_label('tab', a['tab_id'])}")
     s.update(pane=a["pane_id"], tab=a["tab_id"], workspace=a["workspace_id"], label=a.get("label") or "",
              herdr_status=a.get("agent_status") or "unknown")
-    if a["pane_id"] == (os.environ.get("HERDR_PANE_ID") or _ANC_PANE[0]):
+    if a["pane_id"] == (os.environ.get("HERDR_PANE_ID") or _ANC_PANE[0]) and not other_session(s):
         s["self"] = True
     if a.get("agent_status") in ("idle", "working", "blocked", "done"):
         s["status"] = "idle" if a["agent_status"] == "done" else a["agent_status"]
@@ -508,7 +561,7 @@ def _merge_inner(launch, d, sid, pid, pids=None):
 
 
 def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=None):
-    me = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    me = own_claude_session_id()
     launch_panes = launch_panes or {}
     launch_sids = launch_sids or {}
     out, live = [], {}
@@ -1108,8 +1161,10 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
     """Every running session. include_marked=False leaves out launches started with `launch.py --mark`
     (test/trial launches their starter drives; helm should ignore them, hcom trial 6g). include_archived adds
     the archived Paseo agents as `ended` rows (fleet.py --all)."""
+    _OWN_SID[0] = None    # re-read the registry once per call
     anc = ancestors()
-    _ANC_PANE[0] = ancestor_pane(anc)
+    named = {os.environ["HERDR_PANE_ID"]} if os.environ.get("HERDR_PANE_ID") else _ancestor_panes(anc)
+    _ANC_PANE[0] = next(iter(named)) if len(named) == 1 and not os.environ.get("HERDR_PANE_ID") else None
     agents = herdr_json("agent", "list").get("agents") or []
     panes = herdr_json("pane", "list").get("panes") or []
     by_sid = {(a.get("agent_session") or {}).get("value"): a for a in agents if a.get("agent_session")}
@@ -1131,6 +1186,11 @@ def sessions(include_shell=False, include_marked=True, include_archived=False):
         out += shells
     if not include_marked:
         out = [s for s in out if not s.get("mark")]
+    if named and ANCESTOR_SELF[0] and not any(s.get("self") for s in out):    # own session id first (a row it made self, or an ancestor TUI), pane last
+        pane = self_pane_by_process([s for s in out if s.get("host") == "herdr"], anc)
+        for s in out:
+            if pane and s.get("pane") == pane and s.get("host") == "herdr":
+                s["self"] = True
     table = proc_table()
     for s in out:
         mark_busy(s, table)
@@ -1557,7 +1617,7 @@ def sender_row(ss):
         """Which SESSION is the caller comes first (the nearest process of ours: an outer Claude that started this Codex is
         not the caller, review F1 2026-10-30); how it proves an ack only breaks a tie between rows of that same process."""
         d = row_depth(x)
-        if d is None and x.get("transcript") and x.get("sid") and x["sid"] == os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        if d is None and x.get("transcript") and x.get("sid") and x["sid"] == own_claude_session_id():
             # The registry's pid for this session is no ancestor of ours (a wrapper or exec'd launcher), but its session id IS the one
             # exported to this process: the session of the nearest same-agent process-scan row that names no Paseo agent and no
             # transcript, so that the old `pid*` sender (`ack pidNNNN`, 2026-10-29) does not come back (PR 173 adversary B5).
