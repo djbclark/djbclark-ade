@@ -197,6 +197,7 @@ class GhError(Exception):
 
 def gh(*args: str) -> str:
     """Run `gh` with an argv list; any failure is a GhError, never an empty success."""
+    dl_beat()   # one poll is several gh calls of up to GH_TIMEOUT each: beat between them, not only once per poll
     try:
         p = subprocess.run(
             ["gh", *args], check=False, capture_output=True, text=True, timeout=GH_TIMEOUT

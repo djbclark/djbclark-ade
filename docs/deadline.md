@@ -64,10 +64,12 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
 `bin/pr-wait`, `bin/load-watch admit --wait S` (S > 0; a pure check waits for nothing) and `bin/acp-dispatch-wait` register a deadline for their own
 wait by default, through `deadline run` (B9 rule 2; budgets are the plan's B9 rule 3). A waiter holds no work, so on expiry the action is `kill` of
 **its own process group** and nothing else: nothing is lost, and the caller sees exit 124 (re-run it; `acp-dispatch-wait` re-arms with the same line).
+The one exception is `load-watch admit`: its callers (`acp-dispatch`, `local-review`, `bg`) fail OPEN on an exit they do not know, so a deadline stop is
+answered as **exit 75, "still too hot"** (with a stderr line), the answer the wait would have given had it run out.
 
 |waiter|name|budget|heartbeat|
 |---|---|---|---|
-|`pr-wait PR`|`pr-wait-<PR>`|min(`--timeout`, 60 min) + 60 s|per poll; timeout 5 min or 4 polls + 2 min if longer|
+|`pr-wait PR`|`pr-wait-<PR>`|min(`--timeout`, 60 min) + 60 s|before every `gh` call and per poll; timeout 5 min or 4 polls + 2 min if longer|
 |`load-watch admit --wait S`|`admit-wait-<pid>`|min(S, 30 min) + 60 s (the admission class maximum)|per poll; timeout 5 min|
 |`acp-dispatch-wait RECORD DONE`|`dispatch-wait-<record file name>`|min(the record's `wait_timeout`, 60 min) + 60 s (60 min when 0 or unreadable)|per 60 s pass; timeout 10 min|
 

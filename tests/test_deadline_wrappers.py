@@ -163,7 +163,7 @@ def test_expiry_kills_the_waiters_own_group_and_exits_124(world, kind):
     r = world.sweep(rec["started"] + rec["budget_s"] + 5)
     assert r.returncode == 0, (r.stdout, r.stderr)
     p.communicate(timeout=60)
-    assert p.returncode == 124
+    assert p.returncode == (75 if kind == "admit" else 124), "admit answers 75 (callers fail open on an unknown exit); the others exit 124"
     assert world.record(name)["state"] == "expired"
     wait_until(lambda: not subprocess.run(["pgrep", "-g", str(rec["pgid"])], capture_output=True).stdout, timeout=10)
 

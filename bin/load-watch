@@ -85,8 +85,8 @@ launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] 
 load drops below the threshold sleeps a random 5-30 s, never past --wait (so queued dispatchers do not all start together)
 and re-checks. `--json` prints one JSON object with the same fields. A `--wait S` (S > 0) registers its own deadline (2026-11-02,
 docs/deadline.md; bin/deadline_wait.py): `admit-wait-<pid>`, budget min(S, 30 min) + 60 s (the B9 admission class maximum),
-owner $PASEO_AGENT_ID or none (Hermes is told), heartbeat per poll; past it the enforcer kills THIS waiter's own process group (exit
-124: a waiter holds no work, nothing is lost). `--no-deadline` opts out; a waiter under a caller's `deadline run` (DEADLINE_NAME set)
+owner $PASEO_AGENT_ID or none (Hermes is told), heartbeat per poll; past it the enforcer kills THIS waiter's own process group (a waiter
+holds no work, nothing is lost) and admit answers exit 75 and "still too hot", never 124: callers fail open on an unknown exit. `--no-deadline` opts out; a waiter under a caller's `deadline run` (DEADLINE_NAME set)
 does not register again; an unusable deadline tool is one stderr warning and the wait goes on. It only decides whether to START work:
 it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"; tightened 2026-11-01):
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: available memory (free +
@@ -1962,9 +1962,13 @@ def self_deadline(a, poll):
         import deadline_wait
         _DW = deadline_wait
         # class maximum 30 min (B9), or --wait when shorter, plus a margin; heartbeat: a poll plus the stagger sleep, never under 5 min
-        return deadline_wait.supervised(
+        rc = deadline_wait.supervised(
             "load-watch admit", deadline_wait.safe_name("admit-wait", os.getpid()), deadline_wait.budget_for(a.wait, 1800),
             max(300.0, 4 * poll + 120), str(Path(__file__).resolve()), sys.argv[1:], opt_out=a.no_deadline)
+        if rc == 124:   # stopped by its deadline: the load never fell within the wait. Callers fail OPEN on an unknown exit, so answer 75
+            print("load-watch admit: the wait's deadline expired; answering 75 (still too hot, nothing admitted)", file=sys.stderr)
+            return EX_TEMPFAIL
+        return rc
     except ImportError as e:
         print(f"load-watch admit: warning: deadline_wait unavailable ({e}): waiting without a deadline", file=sys.stderr)
         return None
@@ -2139,7 +2143,7 @@ def main(supervise=False):
                    help="poll every 15 s for up to SECONDS before giving up with exit 75 (0: a pure check)")
     p.add_argument("--no-deadline", action="store_true",
                    help="with --wait: do not register the wait with bin/deadline (default: admit-wait-<pid>, budget min(--wait, 30 min) + 60 s, "
-                        "owner $PASEO_AGENT_ID, heartbeat per poll; on expiry the waiter's own process group is killed, exit 124)")
+                        "owner $PASEO_AGENT_ID, heartbeat per poll; on expiry the waiter's own process group is killed and admit answers 75)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("watcher", help="the one agent session that hears about every spike (loadwatch skill)")
     p.add_argument("op", choices=["set", "show", "clear", "test"])
