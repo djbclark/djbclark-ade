@@ -65,6 +65,11 @@ LABEL = "com.djbclark.deadline-sweep"
 TERMINAL = {"done", "lost", "expired"}   # `kill-failed` is deliberately NOT terminal: the process may still be running
 NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")   # no leading dot: such files are skipped by the sweep
 RESERVED_NAMES = {"agents"}   # agents.json is the agent-check state file
+
+
+def bad_name(name: str) -> bool:
+    """Invalid or reserved, compared case-insensitively: on a case-insensitive volume (macOS default) `AGENTS` is the file `agents.json`."""
+    return not NAME_RE.match(name or "") or name.casefold() in RESERVED_NAMES
 ACTIONS_PLAIN = {"kill", "notify", "relay"}
 
 
@@ -937,9 +942,12 @@ def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool =
 
 
 def register(rec: dict) -> int:
-    if not NAME_RE.match(rec["name"]) or rec["name"] in RESERVED_NAMES:
+    if bad_name(rec["name"]):
         return die("name must match [A-Za-z0-9_][A-Za-z0-9._-]{0,99} and not be a reserved name (agents)")
     with Locked(rec["name"], block=True):
+        clash = [p.name for p in state_dir().glob("*.json") if p.stem != rec["name"] and p.stem.casefold() == rec["name"].casefold()]
+        if clash:
+            return die(f"{rec['name']} differs only in case from the existing record {clash[0][:-5]} (one file on a case-insensitive volume)")
         old = load(rec["name"])
         if old and old.get("state", "running") not in TERMINAL:
             return die(f"{rec['name']} is already registered and live (state {old.get('state')}); `deadline done` it first")
@@ -963,7 +971,7 @@ def pending_work(old: dict) -> bool:
 
 
 def cmd_start(a) -> int:
-    if not NAME_RE.match(a.name) or a.name in RESERVED_NAMES:
+    if bad_name(a.name):
         return die("name must match [A-Za-z0-9_][A-Za-z0-9._-]{0,99} and not be a reserved name (agents)")
     rec, err = make_record(a)
     if err:
@@ -1079,7 +1087,10 @@ def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
                 if not got:
                     results.append({"name": name, "action": "busy (another enforcer holds it)"})
                     continue
-                fresh = load(name) or rec
+                fresh = load(name)
+                if fresh is None:   # deleted (or turned corrupt) since the snapshot: never advance the stale copy
+                    results.append({"name": name, "action": "ok (gone since the scan)"})
+                    continue
                 results.append({"name": name, "action": step(fresh, dry), "state": fresh.get("state")})
         except Exception as e:   # one bad record never stops the pass
             results.append({"name": name, "action": f"error: {type(e).__name__}: {e}"})
@@ -1134,7 +1145,7 @@ def cmd_run(a) -> int:
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
     if not cmd:
         return die("run needs a command after --")
-    if not NAME_RE.match(a.name or "x") or (a.name in RESERVED_NAMES):
+    if a.name is not None and bad_name(a.name):
         return die("name must match [A-Za-z0-9_][A-Za-z0-9._-]{0,99} and not be a reserved name (agents)")
     a.name = a.name or f"run-{os.getpid()}-{int(time.time())}"
     a.owner = a.owner or os.environ.get("PASEO_AGENT_ID") or "-"

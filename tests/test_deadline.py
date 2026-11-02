@@ -404,7 +404,7 @@ def test_kill_with_nothing_to_kill_is_refused_but_announce_only_is_named(env):
 
 
 def test_reserved_and_hidden_names_are_refused(env):
-    for name in ("agents", ".hidden", "-x", "a/b"):
+    for name in ("agents", "AGENTS", "Agents", ".hidden", "-x", "a/b"):
         assert start(env, name, "--budget", "10", "--on-expire", "notify").returncode == 2, name
     assert env.run("run", "--budget", "5", "--name", "agents", "--", "true", now=None).returncode == 2
 
@@ -1016,3 +1016,23 @@ def test_exhausted_owner_notice_retries_escalate_to_the_operator_once(env):
     pings = [p for p in env.calls("PING") if "NOT reached" in p]
     assert len(pings) == 1 and "unreach" in pings[0]
     assert env.record("unreach")["notice"]["escalated"] is True
+
+
+# ---------- PR 223 local-review round 13: case-insensitive names, deleted records are not advanced from the sweep snapshot ----------
+
+def test_names_differing_only_in_case_are_one_name(env):
+    assert start(env, "Job", "--budget", "10", "--on-expire", "notify").returncode == 0
+    r = start(env, "job", "--budget", "10", "--on-expire", "notify")
+    assert r.returncode == 2 and "case" in r.stderr
+    assert env.run("run", "--budget", "5", "--name", "AgentS", "--", "true", now=None).returncode == 2
+
+
+def test_sweep_skips_a_record_deleted_after_its_snapshot(env, inproc, monkeypatch):
+    dl = inproc
+    ghost = {"name": "ghost2", "owner": "o", "state": "running", "started": T0, "budget_s": 1000, "on_expire": "notify",
+             "pid": 4242, "pgid": None, "pid_start": "x", "kind": "run", "registrar_pid": 1, "registrar_start": "y", "reg_id": "r"}
+    monkeypatch.setattr(dl, "all_records", lambda: [("ghost2", ghost)])   # snapshot taken, then the run deleted the file
+    res = dl.sweep_once(False, False, False)
+    assert res == [{"name": "ghost2", "action": "ok (gone since the scan)"}]
+    assert not (env.state / "ghost2.json").exists(), "no record may be recreated as lost"
+    assert env.calls("RELAY") == []
