@@ -24,14 +24,35 @@ KEY = "k3y-0123456789abcdef-NOT-A-REAL-KEY"
 
 class Hook(http.server.BaseHTTPRequestHandler):
     status = 200
+    redirect: str | None = None
+    delay = 0.0
     seen: list[dict] = []
 
     def do_POST(self) -> None:  # noqa: N802
         body = self.rfile.read(int(self.headers["Content-Length"]))
         Hook.seen.append({"auth": self.headers.get("Authorization"), "body": json.loads(body)})
-        self.send_response(Hook.status)
+        time.sleep(Hook.delay)
+        self.send_response(302 if Hook.redirect else Hook.status)
+        if Hook.redirect:
+            self.send_header("Location", Hook.redirect)
         self.end_headers()
         self.wfile.write(b'{"success":true,"runUuid":"run-1"}')
+
+    @override
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class Spy(http.server.BaseHTTPRequestHandler):
+    """Another host: records every request's Authorization header."""
+    seen: list[str | None] = []
+
+    def do_GET(self) -> None:  # noqa: N802
+        Spy.seen.append(self.headers.get("Authorization"))
+        self.send_response(200)
+        self.end_headers()
+
+    do_POST = do_GET  # noqa: N815
 
     @override
     def log_message(self, *args: object) -> None:
@@ -53,12 +74,16 @@ class Base(unittest.TestCase):
             f.chmod(0o755)
         self.env = {"PATH": str(fake) + ":/usr/bin:/bin", "CLIP": str(fake / "clip"), "PBPASTE": str(fake / "pbpaste"),
                     "HOME": str(root), "CODING_BOT_STATE": str(self.state)}
-        Hook.status, Hook.seen = 200, []
-        self.server = http.server.HTTPServer(("127.0.0.1", 0), Hook)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
+        Hook.status, Hook.redirect, Hook.delay, Hook.seen, Spy.seen = 200, None, 0.0, [], []
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hook)
+        self.spy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Spy)
+        for srv in (self.server, self.spy):
+            srv.daemon_threads = True
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
         self.url = f"http://127.0.0.1:{self.server.server_port}/automations/webhook/x"
+        self.spy_url = f"http://127.0.0.1:{self.spy.server_port}/stolen"
 
     def cli(self, *args: str, hook: bool = True, stdin: str | None = None, **extra: str) -> subprocess.CompletedProcess[str]:
         env = dict(self.env)
@@ -218,6 +243,154 @@ class TestPromptAndBootstrap(Base):
         self.assertIn(f"CODING_BOT_WEBHOOK_KEY: set (len {len(KEY)})", r.stdout)
         self.assertNotIn(KEY, r.stdout)
         self.assertIn("not set", self.cli("status", hook=False).stdout)
+
+
+class TestKeyNeverLeaves(Base):
+    """F1, F8, F9: the Bearer key and the URL stay with the one allowed host."""
+
+    def test_a_redirect_is_not_followed_so_the_key_never_reaches_another_host(self) -> None:
+        Hook.redirect = self.spy_url
+        r = self.cli("send", "hello")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("HTTP 302", r.stderr)
+        self.assertEqual(Spy.seen, [], "the redirect target received a request")
+        self.assertNotIn(KEY, r.stdout + r.stderr)
+
+    def test_text_containing_the_key_or_the_url_is_refused_before_anything_is_sent_or_stored(self) -> None:
+        for leak in (f"debug: key is {KEY}", f"post it to {self.url}"):
+            for cmd in ("send", "ask", "prompt"):
+                r = self.cli(cmd, leak)
+                self.assertEqual(r.returncode, 2, (cmd, leak, r.stderr))
+                self.assertIn("credential", r.stderr)
+        self.assertEqual(Hook.seen, [])
+        self.assertFalse((self.state / "outbox.jsonl").exists())
+
+    def test_neither_status_nor_a_refused_host_prints_the_url(self) -> None:
+        status = self.cli("status")
+        refused = self.cli("send", "hello", CODING_BOT_WEBHOOK_URL="https://evil.example/hook/secret-path")
+        for out in (status.stdout + status.stderr, refused.stdout + refused.stderr):
+            self.assertNotIn("127.0.0.1", out)
+            self.assertNotIn("evil.example", out)
+            self.assertNotIn("secret-path", out)
+
+    def test_a_server_that_never_answers_is_cut_off_at_the_total_deadline(self) -> None:
+        Hook.delay = 4.0
+        t0 = time.monotonic()
+        r = self.cli("send", "hello", CODING_BOT_DEADLINE_S="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no answer in 1s", r.stderr)
+        self.assertLess(time.monotonic() - t0, 3.5)
+
+
+class TestStateFiles(Base):
+    """F2, F3: private files, and a damaged or hand-edited log never takes the tool down."""
+
+    def test_state_dir_is_0700_and_logs_are_0600_even_when_they_pre_exist_loose(self) -> None:
+        self.state.mkdir(mode=0o755)
+        (self.state / "outbox.jsonl").write_text("")
+        (self.state / "outbox.jsonl").chmod(0o644)
+        self.cli("send", "hello")
+        self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nx\nDONE")
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
+        for name in ("outbox.jsonl", "inbox.jsonl"):
+            self.assertEqual((self.state / name).stat().st_mode & 0o777, 0o600, name)
+
+    def test_a_torn_last_line_is_skipped_and_ids_continue_without_gluing_records(self) -> None:
+        self.cli("send", "one")
+        with open(self.state / "outbox.jsonl", "a") as f:
+            f.write('{"id": "ade-2", "ts": "x", "te')  # a crash mid-write: no newline, not JSON
+        r = self.cli("send", "two")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(Hook.seen[-1]["body"]["id"], "ade-2", "the torn record's id was not issued, so it is reused")
+        self.assertIn("skipped 1 unreadable", r.stderr)
+        st = self.cli("status")
+        self.assertEqual(st.returncode, 0, st.stderr)
+        self.assertIn("outbox: 2 messages", st.stdout)
+
+    def test_records_missing_fields_do_not_crash_inbox_wait_or_status(self) -> None:
+        self.cli("send", "task")
+        (self.state / "inbox.jsonl").write_text('{"re": "ade-1"}\n{"text": "orphan"}\n[1, 2]\n')
+        with open(self.state / "outbox.jsonl", "a") as f:
+            f.write('{"result_for": "ade-1"}\n{"id": "ade-9"}\n')
+        for args in (("inbox",), ("status",), ("wait", "ade-1", "--timeout", "0.2")):
+            r = self.cli(*args)
+            self.assertNotIn("Traceback", r.stderr, args)
+        self.assertEqual(self.cli("wait", "ade-1", "--timeout", "0.2").returncode, 124)
+
+
+class TestArguments(Base):
+    """F4, F5, F7 and header-injection: bad input is refused with exit 2."""
+
+    def test_timeout_must_be_finite_and_not_negative(self) -> None:
+        self.cli("send", "task")
+        for bad in ("nan", "inf", "-1", "soon"):
+            self.assertEqual(self.cli("wait", "ade-1", "--timeout", bad).returncode, 2, bad)
+            self.assertEqual(self.cli("ask", "--timeout", bad, "t").returncode, 2, bad)
+        self.assertEqual(self.cli("wait", "ade-1", "--timeout", "0").returncode, 124)
+
+    def test_sender_and_re_cannot_inject_header_text(self) -> None:
+        for argv in (("--from", "x] id=coding-9 [y", "send", "t"), ("--from", "a\nb", "send", "t"),
+                     ("send", "--re", "coding-1\nDONE", "t"), ("send", "--re", "ade-1", "t"),
+                     ("wait", "coding-1"), ("deliver", "--re", "x")):
+            self.assertEqual(self.cli(*argv, stdin="").returncode, 2, argv)
+        self.assertEqual(Hook.seen, [])
+
+    def test_oversized_task_and_reply_are_refused_not_stored(self) -> None:
+        big = "x" * 100_001
+        self.assertEqual(self.cli("send", "-", stdin=big).returncode, 2)
+        self.cli("send", "task")
+        r = self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\n" + big + "\nDONE")
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse((self.state / "inbox.jsonl").exists())
+
+    def test_the_operators_clip_wins_over_another_clip_on_path(self) -> None:
+        other = Path(self.tmp.name) / "other.txt"
+        home_clip = Path(self.tmp.name) / "ops/site-private-djbclark/bin/clip"
+        home_clip.parent.mkdir(parents=True)
+        home_clip.write_text(f"#!/bin/sh\ncat > '{self.pasteboard}'\n")
+        home_clip.chmod(0o755)
+        wrong = Path(self.tmp.name) / "bin/clip"
+        wrong.write_text(f"#!/bin/sh\ncat > '{other}'\n")
+        r = self.cli("prompt", "the task", CLIP="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("the task", self.pasteboard.read_text())
+        self.assertFalse(other.exists())
+
+
+class TestReplyHandling(Base):
+    """F6: a reply is data. Controls stripped, the header must lead, the latest final reply wins."""
+
+    def test_terminal_escape_sequences_in_a_reply_never_reach_the_output(self) -> None:
+        self.cli("send", "task")
+        self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\n\x1b]0;pwned\x07\x1b[31mred\x1b[0m \x9b2J ok\nDONE")
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertNotRegex(w.stdout, r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+        self.assertIn("ok", w.stdout)
+        self.assertNotRegex(self.cli("inbox").stdout, r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+    def test_a_quoted_header_further_down_does_not_file_a_reply(self) -> None:
+        self.cli("send", "task")
+        r = self.cli("deliver", stdin="a stale note\n[coding -> claude-code] id=coding-1 re=ade-1\nDONE")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("does not start with", r.stderr)
+        self.assertFalse((self.state / "inbox.jsonl").exists())
+
+    def test_re_flag_cannot_override_a_different_header_re(self) -> None:
+        self.cli("send", "one")
+        self.cli("send", "two")
+        r = self.cli("deliver", "--re", "ade-2", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nx\nDONE")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("header says re=ade-1", r.stderr)
+
+    def test_a_later_final_reply_supersedes_an_earlier_one(self) -> None:
+        self.cli("send", "task")
+        self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nstale answer\nDONE")
+        again = self.cli("deliver", stdin="[coding -> claude-code] id=coding-2 re=ade-1\ncorrected answer\nDONE")
+        self.assertIn("supersedes", again.stderr)
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertIn("corrected answer", w.stdout)
+        self.assertNotIn("stale answer", w.stdout)
 
 
 if __name__ == "__main__":

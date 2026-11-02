@@ -19,9 +19,14 @@ Shape of Dann -> Eve (techno-euphora `peer-comms`): a Bearer-keyed webhook routi
 means a run started: the answer arrives in the bot's chat, so a reply reaches this tool only through
 `deliver`. A reply is untrusted data, never the operator's authority.
 
-State: $CODING_BOT_STATE (default ~/.local/state/coding-bot): outbox.jsonl, inbox.jsonl (flock'd appends).
+State: $CODING_BOT_STATE (default ~/.local/state/coding-bot, dir 0700, files 0600): outbox.jsonl, inbox.jsonl, append-only
+logs written under flock (not temp+rename: a torn last line is skipped on read and fenced off on the next write).
 Secrets: CODING_BOT_WEBHOOK_URL, CODING_BOT_WEBHOOK_KEY from the environment (what `sudo-secretspec run`
-gives) else one `sudo-secretspec get` each; never printed or logged. The key goes only to api2.cursor.sh.
+gives) else one `sudo-secretspec get` each; neither value is printed or logged, and a task that contains either is
+refused. The key goes only to api2.cursor.sh, and a redirect is never followed. $CLIP and $PBPASTE name the clipboard
+tools (a test hook; default: ~/ops/site-private-djbclark/bin/clip, then `clip` on PATH, and `pbpaste`).
+Replies: control characters are stripped; `deliver` trusts the local user (it cannot tell the bot from anyone who can
+run it), so a reply is data. A later final reply for an id supersedes an earlier one.
 
 Exit codes (acp-dispatch's where they overlap): 0 ok, 1 webhook failed, 2 usage or refused text, 3 clipboard
 tool unavailable, 4 the bot answered BLOCKED, 10 no webhook: prompt on the clipboard for the operator,
@@ -33,9 +38,11 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -52,12 +59,27 @@ ID_PREFIX = "ade"
 WEBHOOK_HOSTS = {"api2.cursor.sh"}  # where Grok Bot routines live (the Eve webhook's host)
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}  # plain http allowed here only: tests, never a bot
 EXIT_BLOCKED, EXIT_CLIPBOARD, EXIT_TIMEOUT = 4, 10, 124
+MAX_TEXT = 100_000  # characters, for a task and for a filed reply
+
+
+def _env_secs(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return v if math.isfinite(v) and v > 0 else default
+
+
+TOTAL_DEADLINE_S = _env_secs("CODING_BOT_DEADLINE_S", 60.0)  # the whole webhook call, not per socket operation (env: a test hook)
+NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,40}")
+BOT_ID_RE, OUT_ID_RE = re.compile(r"coding-\d{1,9}"), re.compile(r"ade-\d{1,9}")
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 # A message must not carry a credential: the bot has none of our context and the outbox keeps the text.
 SECRET_SHAPES = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY|\bsk-[A-Za-z0-9_-]{20,}|\bgithub_pat_\w{20,}|\bgh[pousr]_\w{30,}"
     r"|\bxox[abpr]-[\w-]{10,}|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/=-]{24,}")
-REPLY_HEADER = re.compile(r"\[coding\s*->\s*[^\]\s]+\]\s*id=(coding-\d+)(?:\s+re=(ade-\d+))?", re.I)
+REPLY_HEADER = re.compile(r"\[coding\s*->\s*[^\]\s]+\]\s*id=(coding-\d+)(?:\s+re=(ade-\d+))?[ \t]*(?:\n|$)", re.I)
 TERMINAL = re.compile(r"^(DONE|BLOCKED:.*)\s*$", re.I)
 
 RULES = """\
@@ -105,6 +127,28 @@ def state_dir() -> Path:
     return Path(os.environ.get("CODING_BOT_STATE") or Path.home() / ".local/state/coding-bot")
 
 
+class Timeout(Exception):
+    pass
+
+
+def finite_secs(v: str) -> float:
+    try:
+        x = float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{v!r} is not a number of seconds") from None
+    if not math.isfinite(x) or x < 0:
+        raise argparse.ArgumentTypeError(f"{v!r}: seconds must be finite and 0 or more")
+    return x
+
+
+def name_arg(pattern: re.Pattern[str], what: str):
+    def check(v: str) -> str:
+        if not pattern.fullmatch(v):
+            raise argparse.ArgumentTypeError(f"{v!r} is not a valid {what}")
+        return v
+    return check
+
+
 def secret(name: str) -> str | None:
     """Value from the environment, else one `sudo-secretspec get`; None when it is not there."""
     if (v := os.environ.get(name, "").strip()):
@@ -116,30 +160,70 @@ def secret(name: str) -> str | None:
     return (r.stdout.strip() or None) if r.returncode == 0 else None
 
 
+def channel() -> tuple[str | None, str | None]:
+    """(url, key), each read once per run."""
+    return secret(URL_NAME), secret(KEY_NAME)
+
+
 def check_url(url: str) -> str | None:
-    """None when url may receive the key, else the reason it may not."""
+    """None when url may receive the key, else the reason it may not (never the URL: it is a secret)."""
     u = urllib.parse.urlsplit(url)
     if u.scheme == "https" and u.hostname in WEBHOOK_HOSTS:
         return None
     if u.scheme == "http" and u.hostname in LOOPBACK:
         return None
-    return f"webhook host {u.hostname!r} ({u.scheme}) is not an allowed Grok Bot routine host"
+    return "the webhook URL's host is not an allowed Grok Bot routine host"
+
+
+def clean(s: str) -> str:
+    """Drop terminal control characters (ESC sequences, C0, C1) but keep newline and tab."""
+    return CONTROL.sub("", s)
+
+
+def open_state(name: str):
+    """The state file for append+read, the directory 0700 and the file 0600: they hold task text and replies."""
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    fd = os.open(d / name, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+    os.chmod(d / name, 0o600)
+    return os.fdopen(fd, "a+", encoding="utf-8")
+
+
+def parse(raw: str, name: str) -> list[dict]:
+    """The records of a JSONL file; a torn or garbled line is skipped and reported, never fatal."""
+    out, bad = [], 0
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            rec = None
+        if isinstance(rec, dict):
+            out.append(rec)
+        else:
+            bad += 1
+    if bad:
+        print(f"coding-bot: skipped {bad} unreadable line(s) in {state_dir() / name}", file=sys.stderr)
+    return out
 
 
 def append(name: str, rec: dict, *, number: str | None = None) -> str:
-    """Append rec as one JSON line to state/name under a lock. With `number` (an id prefix) the record
-    gets the next `<prefix>-N`, counted over the lines that carry an `id`; returns that id (or "")."""
-    d = state_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / name, "a+", encoding="utf-8") as f:
+    """Append rec as one JSON line to state/name under an flock (an append-only log, so no temp+rename; a
+    torn last line is tolerated on read and fenced off here). With `number` (an id prefix) the record gets
+    `<prefix>-N`, N one more than the highest used; returns that id (or "")."""
+    with open_state(name) as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         f.seek(0)
+        raw = f.read()
         mid = ""
         if number:
-            n = sum(1 for line in f.read().splitlines() if "id" in json.loads(line)) + 1
-            mid = f"{number}-{n}"
+            used = [int(m.group(1)) for r in parse(raw, name) if (m := re.fullmatch(rf"{number}-(\d+)", str(r.get("id", ""))))]
+            mid = f"{number}-{max(used, default=0) + 1}"
             rec = {"id": mid, **rec}
-        f.write(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **rec}, ensure_ascii=False) + "\n")
+        f.write(("\n" if raw and not raw.endswith("\n") else "")
+                + json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **rec}, ensure_ascii=False) + "\n")
         f.flush()
         os.fsync(f.fileno())
         return mid
@@ -149,16 +233,17 @@ def records(name: str) -> list[dict]:
     p = state_dir() / name
     if not p.exists():
         return []
-    with open(p, encoding="utf-8") as f:
+    with open(p, encoding="utf-8", errors="replace") as f:
         fcntl.flock(f, fcntl.LOCK_SH)
-        return [json.loads(x) for x in f.read().splitlines() if x.strip()]
+        return parse(f.read(), name)
 
 
 def clip(text: str) -> bool:
-    exe = os.environ.get("CLIP") or shutil.which("clip") or str(Path.home() / "ops/site-private-djbclark/bin/clip")
-    if not os.access(exe, os.X_OK):
-        return False
-    return subprocess.run([exe, "-q"], input=text, text=True, check=False).returncode == 0
+    """The operator's `clip` first (it fixes LC_CTYPE and takes -q); a `clip` on PATH only as a fallback."""
+    for exe in (os.environ.get("CLIP"), str(Path.home() / "ops/site-private-djbclark/bin/clip"), shutil.which("clip")):
+        if exe and os.access(exe, os.X_OK):
+            return subprocess.run([exe, "-q"], input=text, text=True, check=False).returncode == 0
+    return False
 
 
 def paste() -> str | None:
@@ -179,11 +264,13 @@ def fail(msg: str, code: int = 2) -> int:
     return code
 
 
-def task_text(arg: str) -> str | int:
-    text = (sys.stdin.read() if arg == "-" else arg).strip()
+def task_text(arg: str, secrets: tuple[str | None, ...]) -> str | int:
+    text = (sys.stdin.read(MAX_TEXT + 1) if arg == "-" else arg).strip()
     if not text:
         return fail("empty message")
-    if SECRET_SHAPES.search(text):
+    if len(text) > MAX_TEXT:
+        return fail(f"refused: the text is over {MAX_TEXT} characters; send a summary or a pointer")
+    if SECRET_SHAPES.search(text) or any(s and len(s) >= 8 and s in text for s in secrets):
         return fail("refused: the text contains something shaped like a credential; remove it and send again")
     return text
 
@@ -196,32 +283,53 @@ def pasteable(sender: str, mid: str, re_id: str | None, text: str) -> str:
     return f"{PREFACE.format(sender=sender, id=mid)}\n{header(sender, mid, re_id)}\n\n{text}\n"
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx is an error, never followed: urllib would re-send the Authorization header to the Location host."""
+
+    def redirect_request(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
+def _deadline(signum, frame):  # noqa: ANN001
+    raise Timeout
+
+
 def webhook_post(url: str, key: str, payload: dict) -> tuple[bool, str]:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}",
                  "User-Agent": "coding-bot/1.0"})
+    # 30 s is per socket operation; the alarm makes it a total deadline (a trickling server cannot hold us).
+    old = signal.signal(signal.SIGALRM, _deadline)
+    signal.setitimer(signal.ITIMER_REAL, TOTAL_DEADLINE_S)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with OPENER.open(req, timeout=30) as resp:
             body = resp.read(2000).decode(errors="replace")
             try:
                 run = json.loads(body).get("runUuid")
             except (ValueError, AttributeError):
                 run = None
-            return True, f"HTTP {resp.status}" + (f" runUuid={run}" if run else "")
+            return True, f"HTTP {resp.status}" + (f" runUuid={run}" if isinstance(run, str) else "")
     except urllib.error.HTTPError as e:
         return False, f"webhook rejected: HTTP {e.code}"
+    except Timeout:
+        return False, f"webhook unreachable: no answer in {TOTAL_DEADLINE_S:g}s"
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return False, f"webhook unreachable: {getattr(e, 'reason', e)}"
+        return False, f"webhook unreachable: {clean(str(getattr(e, 'reason', e)))}"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
 
 
 def clipboard_or_3(what: str, text: str) -> int:
     return 0 if clip(text) else fail(f"{what}: could not reach the clipboard tool (clip)", 3)
 
 
-def do_send(a: argparse.Namespace, text: str) -> tuple[int, str]:
+def do_send(a: argparse.Namespace, text: str, url: str | None, key: str | None) -> tuple[int, str]:
     """(exit code, message id). Webhook when configured, else the clipboard prompt (EXIT_CLIPBOARD)."""
-    url, key = secret(URL_NAME), secret(KEY_NAME)
     base = {"from": a.sender, "project": project(), "re": a.re, "chars": len(text), "text": text}
     if not (url and key):
         mid = append("outbox.jsonl", {**base, "via": "clipboard", "why": "no webhook configured"}, number=ID_PREFIX)
@@ -241,12 +349,13 @@ def do_send(a: argparse.Namespace, text: str) -> tuple[int, str]:
 
 
 def cmd_send(a: argparse.Namespace) -> int:
-    text = task_text(a.text)
-    return text if isinstance(text, int) else do_send(a, text)[0]
+    url, key = channel()
+    text = task_text(a.text, (url, key))
+    return text if isinstance(text, int) else do_send(a, text, url, key)[0]
 
 
 def cmd_prompt(a: argparse.Namespace) -> int:
-    text = task_text(a.text)
+    text = task_text(a.text, channel())
     if isinstance(text, int):
         return text
     mid = append("outbox.jsonl", {"from": a.sender, "project": project(), "re": a.re, "chars": len(text),
@@ -266,26 +375,39 @@ def cmd_bootstrap(_: argparse.Namespace) -> int:
     return rc
 
 
+def last_line(text: str) -> str:
+    return next((ln.strip() for ln in reversed(text.splitlines()) if ln.strip()), "")
+
+
 def cmd_deliver(a: argparse.Namespace) -> int:
-    text = paste() if a.clipboard else sys.stdin.read()
+    text = paste() if a.clipboard else sys.stdin.read(MAX_TEXT + 1)
     if text is None:
         return fail("deliver: could not read the clipboard", 3)
-    text = text.strip()
+    text = clean(text).strip()
     if not text:
         return fail("deliver: empty reply")
-    m = REPLY_HEADER.search(text)
+    if len(text) > MAX_TEXT:
+        return fail(f"deliver: the reply is over {MAX_TEXT} characters; not filed")
+    m = REPLY_HEADER.match(text)  # the header must be the reply's first line, not a quotation further down
+    if a.re and m and m.group(2) and m.group(2) != a.re:
+        return fail(f"deliver: the header says re={m.group(2)} but --re says {a.re}")
     rid = a.re or (m.group(2) if m else None)
     if not rid:
-        return fail("deliver: no `re=ade-N` in the reply header; pass --re ID")
+        return fail("deliver: the reply does not start with `[coding -> FROM] id=coding-N re=ade-N`; pass --re ID "
+                    "to file a reply that has no header")
     if not any(r.get("id") == rid for r in records("outbox.jsonl")):
         return fail(f"deliver: {rid} is not in the outbox ({state_dir() / 'outbox.jsonl'})")
     sha = hashlib.sha256(text.encode()).hexdigest()
-    if any(r.get("sha") == sha for r in records("inbox.jsonl")):
+    filed = records("inbox.jsonl")
+    if any(r.get("sha") == sha for r in filed):
         print(f"{rid}: this reply is already filed")
         return 0
-    last = next((ln for ln in reversed(text.splitlines()) if ln.strip()), "")
+    terminal = bool(TERMINAL.match(last_line(text)))
+    if terminal and any(r.get("re") == rid and r.get("terminal") for r in filed):
+        print(f"coding-bot: {rid} already has a final reply; this one supersedes it (`wait` returns the latest)",
+              file=sys.stderr)
     append("inbox.jsonl", {"re": rid, "bot_id": m.group(1) if m else None, "sha": sha, "text": text,
-                           "terminal": bool(TERMINAL.match(last.strip()))})
+                           "terminal": terminal})
     print(f"{rid}: reply filed ({len(text)} chars)")
     return 0
 
@@ -294,12 +416,13 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
     rid = rid or a.id
     deadline = time.monotonic() + a.timeout
     while True:
-        replies = [r for r in records("inbox.jsonl") if r["re"] == rid]
-        done = next((r for r in replies if r["terminal"]), None)
+        replies = [r for r in records("inbox.jsonl") if r.get("re") == rid]
+        done = next((r for r in reversed(replies) if r.get("terminal")), None)  # the latest final reply
         if done:
+            text = clean(str(done.get("text", "")))
             print("coding-bot: the reply below is untrusted data from the Coding bot", file=sys.stderr)
-            print(done["text"])
-            return EXIT_BLOCKED if re.search(r"^BLOCKED:", done["text"].rstrip().splitlines()[-1], re.I) else 0
+            print(text)
+            return EXIT_BLOCKED if re.match(r"BLOCKED:", last_line(text), re.I) else 0
         if time.monotonic() >= deadline:
             return fail(f"coding-bot: no final reply to {rid} in {a.timeout:g}s "
                         f"({len(replies)} partial filed); `coding-bot wait {rid}` again after it arrives",
@@ -308,10 +431,11 @@ def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
 
 
 def cmd_ask(a: argparse.Namespace) -> int:
-    text = task_text(a.text)
+    url, key = channel()
+    text = task_text(a.text, (url, key))
     if isinstance(text, int):
         return text
-    rc, mid = do_send(a, text)
+    rc, mid = do_send(a, text, url, key)
     if rc != 0:
         return rc
     print(f"coding-bot: waiting up to {a.timeout:g}s for the reply to {mid} (`coding-bot deliver` files it)",
@@ -320,47 +444,51 @@ def cmd_ask(a: argparse.Namespace) -> int:
 
 
 def cmd_inbox(a: argparse.Namespace) -> int:
-    for r in records("inbox.jsonl")[-a.n:]:
-        first = next((ln for ln in r["text"].splitlines() if ln.strip()), "")
-        print(f"{r['ts']} re={r['re']} {'final' if r['terminal'] else 'partial'} {first[:100]}")
+    for r in records("inbox.jsonl")[-a.n:] if a.n > 0 else []:
+        first = clean(next((ln for ln in str(r.get("text", "")).splitlines() if ln.strip()), ""))
+        print(f"{r.get('ts', '?')} re={r.get('re', '?')} {'final' if r.get('terminal') else 'partial'} {first[:100]}")
     return 0
 
 
 def cmd_status(_: argparse.Namespace) -> int:
-    for name in (URL_NAME, KEY_NAME):
-        v = secret(name)
+    url, key = channel()
+    for name, v in ((URL_NAME, url), (KEY_NAME, key)):
         print(f"{name}: " + (f"set (len {len(v)})" if v else "not set"))
-    if (url := secret(URL_NAME)):
-        print("webhook host: " + (check_url(url) or f"ok ({urllib.parse.urlsplit(url).hostname})"))
+    if url:
+        print("webhook host: " + (check_url(url) or "ok"))
     out, inn = records("outbox.jsonl"), records("inbox.jsonl")
     print(f"outbox: {sum('id' in r for r in out)} messages, inbox: {len(inn)} replies ({state_dir()})")
     for r in out[-5:]:
-        print("  " + (f"{r['id']} {r['ts']} {r['via']} from={r['from']} project={r['project']}" if "id" in r
-                      else f"  result of {r['result_for']}: {r['detail']}"))
+        print("  " + (f"{r['id']} {r.get('ts', '?')} {r.get('via', '?')} from={clean(str(r.get('from', '?')))} "
+                      f"project={clean(str(r.get('project', '?')))}" if "id" in r
+                      else f"  result of {r.get('result_for', '?')}: {clean(str(r.get('detail', '?')))}"))
     return 0
 
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="coding-bot", description=__doc__.split("\n\n")[0], allow_abbrev=False)
     p.add_argument("--from", dest="sender", default=os.environ.get("CODING_BOT_FROM", DEFAULT_FROM),
-                   help="who is asking (header and payload `from`), default claude-code")
+                   type=name_arg(NAME_RE, "agent name (letters, digits, . _ -)"),
+                   help="who is asking (header and payload `from`), default claude-code; goes BEFORE the subcommand")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn, helptext in (("ask", cmd_ask, "send, then block for the reply"),
                                ("send", cmd_send, "send (webhook, else clipboard exit 10), do not wait"),
                                ("prompt", cmd_prompt, "clipboard prompt, always")):
         s = sub.add_parser(name, help=helptext, allow_abbrev=False)
-        s.add_argument("--re", help="id of the bot message this answers (coding-N)")
+        s.add_argument("--re", type=name_arg(BOT_ID_RE, "bot message id (coding-N)"),
+                       help="id of the bot message this answers (coding-N)")
         if name == "ask":
-            s.add_argument("--timeout", type=float, default=900, help="seconds to wait (default 900)")
+            s.add_argument("--timeout", type=finite_secs, default=900, help="seconds to wait (default 900)")
         s.add_argument("text", help="the task, or - for stdin")
         s.set_defaults(fn=fn)
     w = sub.add_parser("wait", help="block for the reply to ID", allow_abbrev=False)
-    w.add_argument("id")
-    w.add_argument("--timeout", type=float, default=900)
+    w.add_argument("id", type=name_arg(OUT_ID_RE, "message id (ade-N)"))
+    w.add_argument("--timeout", type=finite_secs, default=900)
     w.set_defaults(fn=cmd_wait)
     d = sub.add_parser("deliver", help="file a reply (stdin or --clipboard)", allow_abbrev=False)
     d.add_argument("--clipboard", action="store_true")
-    d.add_argument("--re", help="the ade-N it answers, when its header has none")
+    d.add_argument("--re", type=name_arg(OUT_ID_RE, "message id (ade-N)"),
+                   help="the ade-N it answers, when its header has none")
     d.set_defaults(fn=cmd_deliver)
     i = sub.add_parser("inbox", help="list filed replies", allow_abbrev=False)
     i.add_argument("-n", type=int, default=10)
