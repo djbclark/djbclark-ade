@@ -902,5 +902,89 @@ class TestTransportRobustness(TransportBase):
         self.assertEqual(self.health()["ssh"].get("fails", 0), 0, "our own deadline was counted as a transport failure")
 
 
+class TestMailboxSafety(TransportBase):
+    """Local review of PR 245, round 2: a bot-writable repo cannot steer our writes, crash leftovers, ordering, caps."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ssh_down.write_text("")  # git only
+
+    def bot_commits(self, fn) -> None:
+        self.git(self.bot, "pull", "-q", "origin", "main")
+        fn(self.bot)
+        self.git(self.bot, "add", "-A")
+        self.git(self.bot, "commit", "-q", "-m", "bot change")
+        self.git(self.bot, "push", "-q", "origin", "HEAD:main")
+
+    def test_a_symlink_planted_in_the_mailbox_is_never_followed(self) -> None:
+        outside = Path(self.tmp.name) / "outside-target.md"
+        self.bot_commits(lambda d: ((d / "to-coding").mkdir(exist_ok=True), (d / "to-coding/ade-1.md").symlink_to(outside)))
+        r = self.cli("send", "task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(outside.exists(), "the write followed a symlink out of the mailbox")
+        self.assertEqual(Hook.seen[0]["body"]["text"], "task")  # git refused, the doorbell carried the text
+
+    def test_a_symlinked_to_coding_folder_is_refused(self) -> None:
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        self.bot_commits(lambda d: (d / "to-coding").symlink_to(elsewhere))
+        self.cli("send", "task")
+        self.assertEqual(list(elsewhere.iterdir()), [], "the write escaped through a symlinked folder")
+
+    def test_a_staged_but_uncommitted_message_left_by_a_crash_does_not_wedge_git(self) -> None:
+        (self.mailbox / "to-coding").mkdir(exist_ok=True)
+        (self.mailbox / "to-coding/ade-0.md").write_text("half a transaction\n")
+        self.git(self.mailbox, "add", "to-coding/ade-0.md")
+        self.bot_reply_git("ade-9", "remote moves on\nDONE")
+        r = self.cli("send", "after the crash")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.in_origin("to-coding/ade-1.md"), r.stderr)
+
+    def test_concurrent_sends_share_the_clone_without_failing(self) -> None:
+        env = dict(self.env, CODING_BOT_WEBHOOK_URL=self.url, CODING_BOT_WEBHOOK_KEY=KEY)
+        procs = [subprocess.Popen([sys.executable, str(SCRIPT), "send", f"task {i}"], env=env, cwd=self.tmp.name,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(4)]
+        outs = [p.communicate(timeout=120) for p in procs]
+        self.assertEqual([p.returncode for p in procs], [0] * 4, [o[1] for o in outs])
+        for i in range(1, 5):
+            self.assertTrue(self.in_origin(f"to-coding/ade-{i}.md"), f"ade-{i} missing; {[o[1] for o in outs]}")
+        self.assertEqual(sorted(h["body"]["paths"][0] for h in Hook.seen), ["git"] * 4)
+
+    def test_replies_are_imported_in_numeric_order_and_an_older_revision_never_wins(self) -> None:
+        self.cli("send", "task")
+        self.bot_reply_git("ade-1", "the newest answer\nDONE", n=10)
+        self.bot_reply_git("ade-1", "an older answer\nDONE", n=9)
+        self.cli("sync")
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertIn("the newest answer", w.stdout)
+        self.assertNotIn("an older answer", w.stdout)
+
+    def test_an_oversized_git_reply_is_refused_without_being_read_and_not_retried(self) -> None:
+        self.cli("send", "task")
+        self.bot_reply_git("ade-1", "x" * 500_000 + "\nDONE")
+        s = self.cli("sync")
+        self.assertIn("over the reply cap", s.stderr)
+        self.assertEqual(self.cli("inbox").stdout, "")
+        self.assertNotIn("over the reply cap", self.cli("sync").stderr, "a refused oversized reply was read again")
+
+    def test_a_huge_failure_count_still_gives_a_capped_backoff(self) -> None:
+        mod = TestAtomicState.load(self)
+        self.assertEqual(mod.backoff_s(5000, rand=lambda: 0.5), 900.0)
+
+
+class TestWaitPollsOneTransportAtATime(TransportBase):
+    def test_a_reply_ssh_just_filed_is_returned_while_git_would_hang(self) -> None:
+        self.cli("send", "task")  # via ssh
+        self.bot_reply_ssh("ade-1", "fast answer\nDONE")
+        hang = Path(self.tmp.name) / "bin/git"
+        hang.write_text("#!/bin/sh\nexec sleep 30\n")
+        hang.chmod(0o755)
+        t0 = time.monotonic()
+        w = self.cli("wait", "ade-1", "--timeout", "20")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("fast answer", w.stdout)
+        self.assertLess(time.monotonic() - t0, 8, "a ready reply waited behind a hung git")
+
+
 if __name__ == "__main__":
     unittest.main()
