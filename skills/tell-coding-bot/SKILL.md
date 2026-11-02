@@ -22,11 +22,12 @@ means a run *started*).
 
 ## Use (from any project)
 
-1. **A task, wait for the answer:** `coding-bot ask "<self-contained task>"` (or `-` and stdin; `--timeout S`, default 900).
-   The bot has none of this session's context: give the goal, URL, what to read or click, what to report. The reply is
-   printed on stdout, flagged untrusted on stderr (stdout carries only the reply; receipts go to stderr). Exit 0 done,
-   4 the bot answered `BLOCKED: <question>`, 124 timed out (the task is still running: `coding-bot wait ade-N`), 1 webhook
-   failed, 2 refused or bad usage.
+1. **A task, wait for the answer:** `coding-bot ask "<self-contained task>"` (or `-` and stdin; `--timeout S`, default 900;
+   `--ack-timeout S`, default 1800; `--force`). The bot has none of this session's context: give the goal, URL, what to read
+   or click, what to report. The reply is printed on stdout, flagged untrusted on stderr (stdout carries only the reply;
+   receipts go to stderr). Exit 0 done, 4 the bot answered `BLOCKED: <question>`, 5 not picked up (no claim or reply within
+   `--ack-timeout`), 6 the bot's heartbeat is stale (nothing sent), 124 timed out (the task may still be running:
+   `coding-bot wait ade-N`), 1 webhook failed, 2 refused or bad usage.
 2. **Fire and forget:** `coding-bot send "<task>"` prints `ade-N`; later `coding-bot wait ade-N`.
 3. **No webhook yet, or a page that needs the operator's eyes (UI interaction, a login):** `coding-bot send`/`ask`
    fall back, and `coding-bot prompt "<task>"` always does: the task goes on the clipboard as a **self-contained
@@ -36,7 +37,8 @@ means a run *started*).
    `coding-bot wait ade-N`.
 4. `--from NAME` (or `CODING_BOT_FROM`; letters, digits, `. _ -`) says who is asking (default `claude-code`) and goes
    **before** the subcommand: `coding-bot --from codex ask "..."`. The repo name rides along as `project`.
-   `coding-bot status` shows channels (names and lengths only) and recent messages; `coding-bot inbox` lists filed replies.
+   `coding-bot status` shows channels (names and lengths only), the bot heartbeat age and recent messages; `coding-bot status ade-N`
+   shows one message's history; `coding-bot inbox` lists filed replies.
    Tasks and replies are capped at 100,000 characters; `--timeout` must be finite and 0 or more; state is private
    (`~/.local/state/coding-bot`, mode 0700/0600, each write a temp file plus `os.replace`). The webhook credentials
    come only through `sudo-secretspec run` (the tool re-runs itself under it; never `get`) and are removed from the
@@ -59,11 +61,42 @@ means a run *started*).
      drop dirs and sshd allowance after a box Update or Reset (not yet hooked into its watchdog). Re-pin the host key if
      the box was rebuilt.
 
+### Protocol (2026-11-02)
+
+Files the bot reads and writes, in the drop dir and the git mailbox (`to-coding/` for us, `from-coding/` for the bot):
+
+1. **Message** `ade-N.md`, first line `[FROM -> coding] id=ade-N nonce=<16 hex> [re=coding-K]`, then `project:` and the task.
+   The same `nonce` is in the webhook payload and the outbox record; every message has its own (`secrets.token_hex(8)`).
+2. **Reply** `ade-N--coding-K.md`, first line `[coding -> FROM] id=coding-K re=ade-N nonce=<the nonce>`. A reply whose nonce
+   differs is **refused** (`nonce mismatch`, not filed); one with no nonce is filed with `nonce_ok: false` and `wait` warns on
+   stderr. A message sent before this protocol (no nonce in its outbox record) is not checked.
+3. **Claim** `claim-ade-N.md`, one line `claimed ade-N by coding-K at <ISO UTC time> nonce=<nonce>`, written by the bot on
+   pickup before it does the work. Recorded in `claims.json` (first claim wins; nonce checked like a reply's), never filed as
+   a reply. A reply also counts as pickup.
+4. **Heartbeat** `heartbeat.md`, one line (ISO UTC time), rewritten every 15 minutes by the bot's scheduled routine "Agent
+   sweep" (which also handles any message whose doorbell was lost). Read on each poll (at most every 30 s per transport), the
+   newest time kept in `health.json` (`bot_heartbeat`); one dated more than 10 minutes ahead is ignored.
+5. **Exit 6**: `send`/`ask` refuse when a heartbeat was ever seen and is older than `$CODING_BOT_HEARTBEAT_STALE_S` (default
+   2700 s = 3 sweeps): nothing is sent or recorded. `--force` sends anyway; `prompt` is never gated. No heartbeat ever seen
+   (the sweep is not set up yet) only prints a note. A poll runs first when the recorded heartbeat is missing or stale.
+6. **Exit 5 and 124**: `wait`/`ask` exit **5** when nothing claimed or answered the id within `--ack-timeout` (counted from
+   when it was sent; only when a drop transport is configured, since a claim can arrive no other way); **124** when
+   `--timeout` ends first or the bot claimed it but sent no final reply. Note `ask`'s default `--timeout` (900) is below the
+   default `--ack-timeout` (1800): to get exit 5 from `ask`, pass a smaller `--ack-timeout`.
+7. **One ping**: on exit 5 or 124 `coding-bot` runs `hermes-ping "<project>: coding-bot ade-N <not picked up|no reply> after
+   N min"` once per id and kind (recorded in `claims.json`, so a second `wait` stays quiet). `$CODING_BOT_HERMES_PING`
+   names the program (a test hook), else `hermes-ping` on PATH; absent or failing, it only says so on stderr and the exit code
+   is unchanged. Do not ping yourself after a 5 or 124.
+8. **Setup**: `coding-bot bootstrap --sweep` puts on the clipboard the prompt that asks the bot to replace the instruction of
+   "Agent inbound" with the current one (claim first, echo the nonce, skip an id that already has a claim or reply) and to
+   create "Agent sweep" (every 15 minutes: `git pull`, handle each unclaimed `to-coding/ade-*.md`, always write
+   `heartbeat.md`). No secret is needed or pasted. `coding-bot status ade-N` shows sent, claimed, replies and escalations.
+
 ## One-time setup (needs the operator)
 
 1. `coding-bot bootstrap` puts on the clipboard the prompt that asks the bot to create a webhook routine "Agent inbound"
    with a standing instruction, to say where in its UI the URL and key are, and which return channels it has. The operator
-   pastes it into the Coding bot.
+   pastes it into the Coding bot. Then `coding-bot bootstrap --sweep` (above) adds the heartbeat routine.
 2. Declare and store the two secrets (the operator copies each value from the routine's **Webhook** section; never in chat):
    ```bash
    sudo-secretspec add CODING_BOT_WEBHOOK_URL --optional --description "Coding GrokBot webhook URL (agents-to-coding push channel)" --reason "Coding bot comms"

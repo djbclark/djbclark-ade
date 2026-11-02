@@ -6,6 +6,7 @@ PATH is cut down so the host's real `sudo-secretspec` (and its real secrets) is 
 """
 from __future__ import annotations
 
+import datetime as dt
 import errno
 import http.server
 import importlib.machinery
@@ -74,10 +75,12 @@ class Base(unittest.TestCase):
         fake.mkdir()
         (fake / "clip").write_text(f"#!/bin/sh\ncat > '{self.pasteboard}'\n")
         (fake / "pbpaste").write_text(f"#!/bin/sh\ncat '{self.pasteboard}'\n")
+        self.hermes_log = root / "hermes.log"  # a fake hermes-ping, so no test can ever ping the operator
+        (fake / "hermes-ping").write_text(f"#!/bin/sh\necho \"$@\" >> '{self.hermes_log}'\n")
         for f in fake.iterdir():
             f.chmod(0o755)
         self.env = {"PATH": str(fake) + ":/usr/bin:/bin", "CLIP": str(fake / "clip"), "PBPASTE": str(fake / "pbpaste"),
-                    "HOME": str(root), "CODING_BOT_STATE": str(self.state)}
+                    "HOME": str(root), "CODING_BOT_STATE": str(self.state), "CODING_BOT_HERMES_PING": str(fake / "hermes-ping")}
         Hook.status, Hook.redirect, Hook.delay, Hook.seen, Spy.seen = 200, None, 0.0, [], []
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hook)
         self.spy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Spy)
@@ -131,8 +134,8 @@ class TestSend(Base):
         self.assertEqual(r.returncode, 10, r.stderr)
         pasted = self.pasteboard.read_text()
         self.assertIn("Read the invoice total on the billing page", pasted)
-        self.assertIn("[claude-code -> coding] id=ade-1", pasted)
-        self.assertIn("Begin the reply with the header line `[coding -> claude-code] id=coding-<n> re=ade-1`", pasted)
+        self.assertRegex(pasted, r"\[claude-code -> coding\] id=ade-1 nonce=[0-9a-f]{16}\n")
+        self.assertRegex(pasted, r"Begin the reply with the header line `\[coding -> claude-code\] id=coding-<n> re=ade-1 nonce=[0-9a-f]{16}`")
         self.assertEqual(Hook.seen, [])
 
     def test_host_outside_the_allowlist_never_gets_the_key(self) -> None:
@@ -229,7 +232,7 @@ class TestPromptAndBootstrap(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(Hook.seen, [])
         pasted = self.pasteboard.read_text()
-        self.assertIn("[claude-code -> coding] id=ade-1 re=coding-4", pasted)
+        self.assertRegex(pasted, r"\[claude-code -> coding\] id=ade-1 nonce=[0-9a-f]{16} re=coding-4")
         self.assertIn("web pages that need UI interaction", pasted)
 
     def test_missing_clipboard_tool_is_exit_3(self) -> None:
@@ -686,7 +689,7 @@ class TestTransportSend(TransportBase):
         r = self.cli("send", "the long task text")
         self.assertEqual(r.returncode, 0, r.stderr)
         msg = (self.to_dir / "ade-1.md").read_text()
-        self.assertTrue(msg.startswith("[claude-code -> coding] id=ade-1\nproject: "), msg)
+        self.assertRegex(msg, r"\A\[claude-code -> coding\] id=ade-1 nonce=[0-9a-f]{16}\nproject: ")
         self.assertIn("the long task text", msg)
         self.assertEqual([p.name for p in self.to_dir.iterdir()], ["ade-1.md"], "a temp file was left behind")
         self.assertFalse(self.in_origin("to-coding/ade-1.md"))
@@ -835,6 +838,338 @@ class TestTransportReplies(TransportBase):
         self.assertEqual(self.ssh_calls(), before, "sync polled a transport in backoff")
         self.cli("sync", "--force")
         self.assertEqual(self.ssh_calls(), before + 1)
+
+
+def iso_ago(minutes: float) -> str:
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class ProtocolBase(TransportBase):
+    """The bot's side of the protocol, written straight into the drop (ssh) or the mailbox (git)."""
+
+    def nonce(self, mid: str = "ade-1") -> str:
+        return next(r["nonce"] for r in self.outbox() if r.get("id") == mid)
+
+    def drop(self, name: str, content: str) -> None:
+        (self.from_dir / name).write_text(content)
+
+    def claim_ssh(self, mid: str, nonce: str | None, n: int = 1) -> None:
+        self.drop(f"claim-{mid}.md", f"claimed {mid} by coding-{n} at 2026-11-02T10:00:00Z"
+                  + (f" nonce={nonce}" if nonce else "") + "\n")
+
+    def reply_ssh(self, mid: str, body: str, nonce: str = "", n: int = 1) -> None:
+        self.drop(f"{mid}--coding-{n}.md", f"[coding -> claude-code] id=coding-{n} re={mid}"
+                  + (f" nonce={nonce}" if nonce else "") + f"\n{body}\n")
+
+    def heartbeat_ssh(self, minutes_ago: float) -> None:
+        self.drop("heartbeat.md", iso_ago(minutes_ago) + "\n")
+
+    def git_file(self, rel: str, content: str) -> None:
+        self.git(self.bot, "pull", "-q", "origin", "main")
+        p = self.bot / rel
+        p.parent.mkdir(exist_ok=True)
+        p.write_text(content)
+        self.git(self.bot, "add", "-A")
+        self.git(self.bot, "commit", "-q", "-m", "bot")
+        self.git(self.bot, "push", "-q", "origin", "HEAD:main")
+
+    def claims(self) -> dict:
+        return json.loads((self.state / "claims.json").read_text())
+
+    def inbox_records(self) -> list[dict]:
+        p = self.state / "inbox.jsonl"
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+    def pings(self) -> list[str]:
+        return self.hermes_log.read_text().splitlines() if self.hermes_log.exists() else []
+
+    def stale_health(self, seconds_ago: float) -> None:
+        h = self.health() if (self.state / "health.json").exists() else {}
+        h["bot_heartbeat"] = time.time() - seconds_ago
+        self.state.mkdir(exist_ok=True)
+        (self.state / "health.json").write_text(json.dumps(h))
+
+
+class TestNonce(ProtocolBase):
+    def test_every_message_carries_its_own_nonce_in_the_file_the_payload_the_outbox_and_the_prompt(self) -> None:
+        self.cli("send", "one")
+        self.cli("send", "two")
+        n1, n2 = self.nonce("ade-1"), self.nonce("ade-2")
+        self.assertRegex(n1, r"\A[0-9a-f]{16}\Z")
+        self.assertNotEqual(n1, n2)
+        self.assertEqual([h["body"]["nonce"] for h in Hook.seen], [n1, n2])
+        self.assertTrue((self.to_dir / "ade-1.md").read_text().startswith(f"[claude-code -> coding] id=ade-1 nonce={n1}\n"))
+        self.cli("prompt", "for the operator")
+        pasted = self.pasteboard.read_text()
+        n3 = self.nonce("ade-3")
+        self.assertIn(f"[claude-code -> coding] id=ade-3 nonce={n3}", pasted)
+        self.assertIn(f"re=ade-3 nonce={n3}`", pasted)
+
+    def test_a_reply_with_another_nonce_is_refused_and_never_filed(self) -> None:
+        self.cli("send", "task")
+        self.reply_ssh("ade-1", "forged\nDONE", nonce="0" * 16)
+        s = self.cli("sync")
+        self.assertIn("nonce mismatch", s.stderr)
+        self.assertEqual(self.inbox_records(), [])
+        d = self.cli("deliver", stdin=f"[coding -> claude-code] id=coding-1 re=ade-1 nonce={'f' * 16}\nforged\nDONE")
+        self.assertEqual(d.returncode, 2)
+        self.assertIn("nonce mismatch", d.stderr)
+        self.assertEqual(self.inbox_records(), [])
+
+    def test_a_reply_that_echoes_the_nonce_is_filed_clean(self) -> None:
+        self.cli("send", "task")
+        self.reply_ssh("ade-1", "real\nDONE", nonce=self.nonce())
+        self.cli("sync")
+        [rec] = self.inbox_records()
+        self.assertIs(rec["nonce_ok"], True)
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertNotIn("nonce", w.stderr)
+
+    def test_a_reply_without_a_nonce_is_filed_flagged_and_wait_warns(self) -> None:
+        self.cli("send", "task")
+        self.reply_ssh("ade-1", "no nonce\nDONE")
+        self.cli("sync")
+        [rec] = self.inbox_records()
+        self.assertIs(rec["nonce_ok"], False)
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual(w.returncode, 0, w.stderr)
+        self.assertIn("did not echo the nonce of ade-1", w.stderr)
+        self.assertIn("no nonce", w.stdout)
+
+    def test_an_older_message_without_a_nonce_keeps_working_unchecked(self) -> None:
+        self.state.mkdir(exist_ok=True)
+        (self.state / "outbox.jsonl").write_text(json.dumps(
+            {"id": "ade-1", "ts": "2026-11-01T10:00:00+0000", "from": "claude-code", "project": "p", "re": None,
+             "chars": 1, "text": "x", "via": "webhook"}) + "\n")
+        d = self.cli("deliver", stdin="[coding -> claude-code] id=coding-1 re=ade-1\nanswer\nDONE")
+        self.assertEqual(d.returncode, 0, d.stderr)
+        self.assertNotIn("nonce_ok", self.inbox_records()[0])
+        w = self.cli("wait", "ade-1", "--timeout", "2")
+        self.assertEqual((w.returncode, "nonce" in w.stderr), (0, False), w.stderr)
+        self.claim_ssh("ade-1", None)
+        self.cli("sync")
+        self.assertIsNone(self.claims()["ade-1"]["claim"]["nonce_ok"])
+        again = self.cli("deliver", stdin=f"[coding -> claude-code] id=coding-2 re=ade-1 nonce={'a' * 16}\nmore\nDONE")
+        self.assertEqual(again.returncode, 0, again.stderr)
+
+
+class TestClaims(ProtocolBase):
+    def test_a_claim_file_is_recorded_shown_in_status_and_never_filed_as_a_reply(self) -> None:
+        self.cli("send", "task")
+        self.claim_ssh("ade-1", self.nonce())
+        s = self.cli("sync")
+        self.assertEqual(s.returncode, 0, s.stderr)
+        self.assertIn("0 new", s.stdout)
+        c = self.claims()["ade-1"]["claim"]
+        self.assertEqual((c["by"], c["at"], c["via"], c["nonce_ok"]), ("coding-1", "2026-11-02T10:00:00Z", "ssh", True))
+        self.assertEqual(self.inbox_records(), [])
+        self.assertEqual(self.cli("inbox").stdout, "")
+        st = self.cli("status", "ade-1")
+        self.assertEqual(st.returncode, 0, st.stderr)
+        self.assertIn("claimed: at 2026-11-02T10:00:00Z by coding-1", st.stdout)
+        self.assertIn("nonce echoed", st.stdout)
+        self.assertIn("replies: 0", st.stdout)
+        self.assertRegex(st.stdout, r"ade-1: sent \S+ via ssh")
+        self.reply_ssh("ade-1", "working")
+        self.reply_ssh("ade-1", "finished\nDONE", n=2)
+        self.cli("sync")
+        self.assertIn("replies: 2 (1 final, 1 partial)", self.cli("status", "ade-1").stdout)
+
+    def test_a_claim_with_another_nonce_is_refused_and_one_without_is_flagged(self) -> None:
+        self.cli("send", "one")
+        self.cli("send", "two")
+        self.claim_ssh("ade-1", "0" * 16)
+        self.claim_ssh("ade-2", None)
+        s = self.cli("sync")
+        self.assertIn("nonce mismatch", s.stderr)
+        claims = self.claims()
+        self.assertNotIn("ade-1", claims)
+        self.assertIs(claims["ade-2"]["claim"]["nonce_ok"], False)
+        self.assertIn("NOT echoed", self.cli("status", "ade-2").stdout)
+
+    def test_a_claim_for_a_message_not_in_the_outbox_or_not_shaped_like_a_claim_is_ignored(self) -> None:
+        self.cli("send", "one")
+        self.claim_ssh("ade-99", "0" * 16)
+        self.drop("claim-ade-1.md", "claimed ade-2 by coding-1 at now\n")  # names another id than its file
+        s = self.cli("sync")
+        self.assertIn("not in the outbox", s.stderr)
+        self.assertIn("not a claim line", s.stderr)
+        self.assertFalse((self.state / "claims.json").exists())
+
+    def test_status_of_an_unknown_id_is_exit_2(self) -> None:
+        self.cli("send", "one")
+        r = self.cli("status", "ade-7")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("ade-7: not in the outbox", r.stderr)
+
+    def test_claim_and_heartbeat_through_the_git_mailbox_alone(self) -> None:
+        self.cli("send", "task")
+        self.git_file("from-coding/claim-ade-1.md", f"claimed ade-1 by coding-3 at 2026-11-02T11:00:00Z nonce={self.nonce()}\n")
+        self.git_file("from-coding/heartbeat.md", iso_ago(2) + "\n")
+        s = self.cli("sync")
+        self.assertEqual(s.returncode, 0, s.stderr)
+        c = self.claims()["ade-1"]["claim"]
+        self.assertEqual((c["by"], c["via"], c["nonce_ok"]), ("coding-3", "git", True))
+        self.assertTrue(time.time() - 300 < self.health()["bot_heartbeat"] < time.time())
+        self.assertEqual(self.inbox_records(), [])
+
+
+class TestHeartbeat(ProtocolBase):
+    def test_a_heartbeat_is_recorded_with_its_age_shown_and_never_filed_as_a_reply(self) -> None:
+        self.heartbeat_ssh(5)
+        s = self.cli("sync")
+        self.assertEqual(s.returncode, 0, s.stderr)
+        self.assertIn("0 new", s.stdout)
+        self.assertAlmostEqual(self.health()["bot_heartbeat"], time.time() - 300, delta=30)
+        self.assertRegex(self.cli("status").stdout, r"bot heartbeat: [45] min old\n")
+        self.assertEqual(self.inbox_records(), [])
+        self.assertIn("never seen", self.cli("status", CODING_BOT_STATE=str(self.state) + "-empty").stdout)
+
+    def test_a_heartbeat_dated_in_the_future_or_garbled_is_ignored(self) -> None:
+        self.drop("heartbeat.md", iso_ago(-30) + "\n")
+        s = self.cli("sync")
+        self.assertIn("dated in the future", s.stderr)
+        self.drop("heartbeat.md", "yesterday-ish\n")
+        self.assertIn("ISO 8601", self.cli("sync").stderr)
+        self.assertNotIn("bot_heartbeat", self.health())
+
+    def test_a_stale_heartbeat_refuses_the_send_and_records_nothing_until_forced(self) -> None:
+        self.heartbeat_ssh(60)
+        for cmd in (("send", "x"), ("ask", "--timeout", "0.3", "x")):
+            r = self.cli(*cmd)
+            self.assertEqual(r.returncode, 6, (cmd, r.stderr))
+            self.assertRegex(r.stderr, r"heartbeat is \d+ min old; nothing was sent; `--force` sends anyway, or use `prompt`")
+        self.assertEqual(Hook.seen, [])
+        self.assertFalse((self.state / "outbox.jsonl").exists())
+        self.assertEqual(list(self.to_dir.iterdir()), [])
+        self.assertFalse(self.in_origin("to-coding/ade-1.md"))
+        f = self.cli("send", "--force", "x")
+        self.assertEqual(f.returncode, 0, f.stderr)
+        self.assertIn("sending anyway", f.stderr)
+        self.assertEqual(len(Hook.seen), 1)
+        self.assertTrue((self.to_dir / "ade-1.md").exists())
+
+    def test_the_threshold_is_the_env_setting_and_prompt_is_never_gated(self) -> None:
+        self.heartbeat_ssh(10)
+        self.assertEqual(self.cli("send", "x").returncode, 0)  # 10 min is fresh against the 45 min default
+        r = self.cli("send", "y", CODING_BOT_HEARTBEAT_STALE_S="60")
+        self.assertEqual(r.returncode, 6, r.stderr)
+        self.assertEqual(self.cli("prompt", "z", CODING_BOT_HEARTBEAT_STALE_S="60").returncode, 0)
+
+    def test_a_fresh_heartbeat_file_overrides_a_stale_recorded_one(self) -> None:
+        self.stale_health(7200)
+        self.heartbeat_ssh(1)
+        r = self.cli("send", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("heartbeat", r.stderr)
+        self.assertTrue(time.time() - 300 < self.health()["bot_heartbeat"] < time.time())
+
+    def test_a_heartbeat_that_was_never_seen_only_prints_a_note(self) -> None:
+        r = self.cli("send", "x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no bot heartbeat has been seen yet", r.stderr)
+        self.assertEqual(len(Hook.seen), 1)
+
+
+class TestDeadlines(ProtocolBase):
+    WAIT = ("--timeout", "20", "--ack-timeout", "0.5")
+
+    def test_nothing_claimed_or_answered_by_the_ack_timeout_is_exit_5_and_pings_once(self) -> None:
+        self.cli("send", "task")
+        t0 = time.monotonic()
+        w = self.cli("wait", "ade-1", *self.WAIT)
+        self.assertEqual(w.returncode, 5, w.stderr)
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertIn("was not picked up", w.stderr)
+        project = self.outbox()[0]["project"]
+        [ping] = self.pings()
+        self.assertRegex(ping, rf"\A{project}: coding-bot ade-1 not picked up after \d+ min\Z")
+        self.assertEqual(self.cli("wait", "ade-1", *self.WAIT).returncode, 5)
+        self.assertEqual(len(self.pings()), 1, "a second wait pinged again")
+
+    def test_claimed_but_never_answered_is_124_and_pings_once_under_its_own_kind(self) -> None:
+        self.cli("send", "task")
+        self.cli("wait", "ade-1", *self.WAIT)  # unclaimed: kind "not picked up"
+        self.claim_ssh("ade-1", self.nonce())
+        w = self.cli("wait", "ade-1", "--timeout", "1.5", "--ack-timeout", "0.5")
+        self.assertEqual(w.returncode, 124, w.stderr)
+        self.assertNotIn("no claim seen", w.stderr)
+        self.assertEqual(len(self.pings()), 2)
+        self.assertRegex(self.pings()[1], r"coding-bot ade-1 no reply after \d+ min\Z")
+        self.cli("wait", "ade-1", "--timeout", "0.5", "--ack-timeout", "0.5")
+        self.assertEqual(len(self.pings()), 2)
+        self.cli("send", "other")
+        self.assertEqual(self.cli("wait", "ade-2", *self.WAIT).returncode, 5)
+        self.assertEqual(len(self.pings()), 3)
+        st = self.cli("status", "ade-1").stdout
+        self.assertIn("escalated: not picked up at", st)
+        self.assertIn("escalated: no reply at", st)
+
+    def test_a_partial_reply_counts_as_pickup(self) -> None:
+        self.cli("send", "task")
+        self.reply_ssh("ade-1", "working on it", nonce=self.nonce())
+        w = self.cli("wait", "ade-1", "--timeout", "1.5", "--ack-timeout", "0.5")
+        self.assertEqual(w.returncode, 124, w.stderr)
+        self.assertIn("1 partial", w.stderr)
+
+    def test_the_ack_deadline_counts_from_when_the_message_was_sent(self) -> None:
+        self.cli("send", "task")
+        (self.state / "outbox.jsonl").write_text(
+            (self.state / "outbox.jsonl").read_text().replace(self.outbox()[0]["ts"], "2026-11-01T10:00:00+0000", 1))
+        t0 = time.monotonic()
+        w = self.cli("wait", "ade-1", "--timeout", "60")  # default ack 1800 s, long past for a message from yesterday
+        self.assertEqual(w.returncode, 5, w.stderr)
+        self.assertLess(time.monotonic() - t0, 15)
+
+    def test_a_failing_or_missing_hermes_ping_never_changes_the_exit_code(self) -> None:
+        bad = Path(self.tmp.name) / "bad-ping"
+        bad.write_text("#!/bin/sh\necho oops >&2\nexit 7\n")
+        bad.chmod(0o755)
+        self.cli("send", "one")
+        self.cli("send", "two")
+        a = self.cli("wait", "ade-1", *self.WAIT, CODING_BOT_HERMES_PING=str(bad))
+        self.assertEqual(a.returncode, 5, a.stderr)
+        self.assertIn("hermes-ping exited 7", a.stderr)
+        b = self.cli("wait", "ade-2", *self.WAIT, CODING_BOT_HERMES_PING="/nonexistent/hermes-ping")
+        self.assertEqual(b.returncode, 5, b.stderr)
+        self.assertIn("hermes-ping not found", b.stderr)
+        self.assertEqual(self.pings(), [])
+
+    def test_without_a_drop_transport_no_claim_can_arrive_so_there_is_no_ack_deadline(self) -> None:
+        self.cfg.clear()
+        self.write_cfg()
+        self.cli("send", "task")
+        w = self.cli("wait", "ade-1", "--timeout", "0.5", "--ack-timeout", "0")
+        self.assertEqual(w.returncode, 124, w.stderr)
+
+    def test_ack_timeout_must_be_finite_and_not_negative(self) -> None:
+        self.cli("send", "task")
+        for bad in ("nan", "inf", "-1", "soon"):
+            self.assertEqual(self.cli("wait", "ade-1", "--ack-timeout", bad).returncode, 2, bad)
+            self.assertEqual(self.cli("ask", "--ack-timeout", bad, "t").returncode, 2, bad)
+
+
+class TestSweepBootstrap(Base):
+    def test_sweep_bootstrap_asks_for_the_routine_and_quotes_the_new_instruction_in_full(self) -> None:
+        r = self.cli("bootstrap", "--sweep", hook=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pasted = self.pasteboard.read_text()
+        for needle in ('"Agent sweep"', "every 15 minutes", "heartbeat.md", '"Agent inbound"', "claim-<id>.md",
+                       "nonce=<nonce>", "already handled", "Do NOT paste the webhook URL"):
+            self.assertIn(needle, pasted)
+        self.assertEqual(pasted.count("Step 4, claim it before any work"), 1, "the routine instruction is quoted once")
+        for raw in ("{id}", "{sender}", "{nonce}"):
+            self.assertNotIn(raw, pasted)
+
+    def test_plain_bootstrap_still_works_and_carries_the_claim_and_nonce_steps(self) -> None:
+        r = self.cli("bootstrap", hook=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pasted = self.pasteboard.read_text()
+        self.assertIn("webhook trigger", pasted)
+        self.assertNotIn("Agent sweep", pasted)
+        self.assertIn("claim-<id>.md", pasted)
+        self.assertIn("re=<id> nonce=<nonce>", pasted)
 
 
 if __name__ == "__main__":
