@@ -1,6 +1,6 @@
 ---
 name: greptile
-description: Greptile (app.greptile.com) on this machine: the free Starter plan's credit budget and how reviews are spent, triggering and reading PR reviews, the API key held in sudo-secretspec, and which official Greptile skill fits a PR comment loop. Use when the user mentions Greptile, greptile.com, a Greptile review or score, @greptileai, or wants a second AI code review of a PR.
+description: "Greptile (app.greptile.com) on this machine: the free Starter plan's credit budget and how reviews are spent, triggering and reading PR reviews, the API key held in sudo-secretspec, and which official Greptile skill fits a PR comment loop. Use when the user mentions Greptile, greptile.com, a Greptile review or score, @greptileai, or wants a second AI code review of a PR."
 ---
 
 # Greptile
