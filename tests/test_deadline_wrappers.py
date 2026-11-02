@@ -23,7 +23,8 @@ OWNER = "agent-test-1"
 PR = 4242
 KINDS = ["admit", "pr-wait", "dispatch"]
 SLUG = "djbclark__djbclark-ade"   # pr-wait's default repo, as it appears in the deadline name
-QUICK, LONG = 10, 120             # a wait that ends by itself (slow runners included) / one that must outlive the test
+QUICK, SEEN, LONG = 3, 8, 120     # a wait that ends by itself and is never inspected live / one a test inspects while it runs / one that must outlive the test
+# Wall time matters: pytest-linux's 30 min cap was crossed at PR 257 head 4aaee173 (the suite was at 29:53 before this file grew), so a natural end is 3 s.
 DROP = ("DEADLINE_NAME", "DEADLINE_WAIT_NAME", "DEADLINE_WAIT_MARK", "DEADLINE_BIN", "PASEO_AGENT_ID")
 
 
@@ -140,11 +141,11 @@ def group_gone(pgid: int) -> bool:
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_wait_registers_beats_and_deregisters_on_a_normal_end(world, kind):
-    p, name = world.start(kind)
+    p, name = world.start(kind, secs=SEEN)
     rec = wait_until(lambda: world.live(name))
     assert rec["state"] == "running" and rec["kind"] == "run" and rec["on_expire"] == "kill"
     assert rec["owner"] == OWNER
-    assert rec["budget_s"] == (660 if kind == "dispatch" else QUICK + 60), "class budget or the waiter's own timeout, plus 60 s"
+    assert rec["budget_s"] == (660 if kind == "dispatch" else SEEN + 60), "class budget or the waiter's own timeout, plus 60 s"
     assert rec["heartbeat_s"] >= 300 and rec["pgid"], "a heartbeat timeout and the waiter's own process group"
     assert rec["pgid"] != os.getpgid(0) and rec["pgid"] != p.pid, "never the caller's group, never the supervisor's"
     marks = list(world.tmpd.iterdir())
@@ -280,7 +281,7 @@ def test_the_bash_supervisor_runs_deadline_run_in_its_own_group(world):
 @pytest.mark.parametrize("kind", ["pr-wait", "dispatch"])
 def test_what_a_waiter_starts_inherits_no_registration_variables(world, kind):
     """Only DEADLINE_NAME (so ITS waiters skip registering); never the pair that would let it beat this record (PR 257 adversary A5)."""
-    p, name = world.start(kind)
+    p, name = world.start(kind, secs=SEEN)
     wait_until(lambda: world.live(name))
     dump = world.tmp / {"pr-wait": "gh-env", "dispatch": "dispatch-env"}[kind]
     wait_until(dump.exists, timeout=30)
@@ -292,7 +293,22 @@ def test_what_a_waiter_starts_inherits_no_registration_variables(world, kind):
 
 def test_no_owner_when_the_caller_has_no_paseo_agent_id(world):
     del world.env["PASEO_AGENT_ID"]
-    p, name = world.start("admit")
+    p, name = world.start("admit", secs=SEEN)
     rec = wait_until(lambda: world.live(name))
     assert rec["owner"] == "-", "no owner: the sweep tells Hermes"
     p.communicate(timeout=90)
+
+
+@pytest.mark.parametrize("kind", ["pr-wait", "dispatch"])
+def test_a_name_already_live_does_not_cost_the_wait(world, kind):
+    """The real tool refuses a registration whose name is live (exit 2, the command never runs): the waiter warns once and waits unregistered.
+    Names carry the pid, so the clash is made by a `deadline` wrapper that registers the name it is asked to run under first."""
+    wrapper = world.tmp / "clashing-deadline"
+    wrapper.write_text(f'#!/bin/sh\n# $1=run $2=--name $3=NAME\n"{sys.executable}" "{DEADLINE}" start "$3" --owner someone --budget 600 --on-expire notify >/dev/null || exit 9\n'
+                       f'exec "{sys.executable}" "{DEADLINE}" "$@"\n')
+    wrapper.chmod(0o755)
+    p, name = world.start(kind, DEADLINE_BIN=str(wrapper))
+    rc, out, err = end_naturally(world, kind, p)
+    assert rc == natural_rc(kind), (out, err)
+    assert err.count("warning") == 1 and "already registered and live" in err
+    assert world.record(name)["owner"] == "someone" and world.record(name)["state"] == "running", "the other registration is untouched"

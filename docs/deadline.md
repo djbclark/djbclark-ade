@@ -85,7 +85,7 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
    once) is `deadline run`'s own bounded stop. `bin/deadline_wait.py` is the shared code for the two Python waiters; `acp-dispatch-wait` does the
    same in bash. The price is one resident `deadline run` Python process per registered waiter (`acp-dispatch-wait` was bash-only by design on
    2026-10-18; `--no-deadline` restores that; whether this waiter should be opt-in is the operator's call).
-   Names carry the supervisor's pid, so a second waiter for the same PR (another repo, a new head) or record (a re-arm) is never refused as "name already live".
+   Names carry the supervisor's pid (each run leaves one terminal record file until `prune` removes it after 7 days), so a second waiter for the same PR (another repo, a new head) or record (a re-arm) is never refused as "name already live".
 2. **Opt out and nesting.** `--no-deadline` on each. A waiter started under `deadline run` (env `DEADLINE_NAME` set, even empty) does not register
    again and does not beat the caller's record; the inner copy of a supervised waiter sees the same variable, which is also what stops a loop. The inner
    copy removes `DEADLINE_WAIT_NAME/MARK/SUPERVISOR` from its environment on entry (it keeps its identity in process state), so what it starts

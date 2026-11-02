@@ -30,7 +30,8 @@ jobs:
     # run 40533487414 was cancelled with "The job has exceeded the maximum execution time of
     # 30m0s" while pytest-linux passed in 17m0s and context-policy in 14 s. The cap has to sit
     # above the suite's real cost plus drift, or a slow runner reports a wall-clock timeout as a
-    # code failure. pytest-linux stays at 30 (1130-1150 s measured): raise it when it needs it.
+    # code failure. pytest-linux was 30 (1130-1150 s measured) until 2026-11-02: its suite then measured 1775 s and
+    # run 41519917412 (PR 257) was cancelled at 98% with zero failures, so it has 45 as well.
     timeout-minutes: 45
 
     steps:
@@ -51,7 +52,7 @@ jobs:
   pytest-linux:
     if: ${{ github.event.inputs.context_only != 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
