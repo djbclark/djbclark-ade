@@ -492,6 +492,45 @@ class TestCredentialsViaRun(Base):
             self.assertNotIn(leaked, env)
         self.assertIn("CODING_BOT_STATE=", env)  # its own settings and PATH survive
 
+    def test_proxy_and_ca_overrides_are_dropped_before_the_key_is_used_or_any_child_starts(self) -> None:
+        """Codex P1: a caller's proxy must not carry the Bearer key to another machine, nor a CA override re-trust it."""
+        proxy = f"http://127.0.0.1:{self.spy.server_port}"
+        leaks = dict(HTTP_PROXY=proxy, http_proxy=proxy, HTTPS_PROXY=proxy, https_proxy=proxy, ALL_PROXY=proxy,
+                     SSL_CERT_FILE="/tmp/evil-ca.pem", SSL_CERT_DIR="/tmp/evil-ca", REQUESTS_CA_BUNDLE="/tmp/evil-ca.pem",
+                     CURL_CA_BUNDLE="/tmp/evil-ca.pem", SSLKEYLOGFILE="/tmp/keys.log", OPENSSL_CONF="/tmp/evil.cnf")
+        r = self.cli("send", "task", hook=False, FAKE_SUPPLY="1", FAKE_URL=self.url, CLIP=self.clip_env, **leaks)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([h["auth"] for h in Hook.seen], [f"Bearer {KEY}"], "the webhook call did not reach its own host")
+        self.assertEqual(Spy.seen, [], "the call went through the caller's proxy")
+        p = self.cli("prompt", "task", hook=False, FAKE_SUPPLY="1", FAKE_URL=self.url, CLIP=self.clip_env, **leaks)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        env = self.child_env.read_text()
+        for name in leaks:
+            self.assertNotRegex(env, rf"(?mi)^{name}=", name)
+
+    def test_the_initial_interpreter_is_isolated_when_run_as_a_command(self) -> None:
+        """Codex P1: `coding-bot ...` must not import a planted sitecustomize even in its FIRST process, which holds the
+        credentials when the caller already ran under `sudo-secretspec run`."""
+        root = Path(self.tmp.name)
+        (root / "bin/python3").symlink_to(sys.executable)
+        plant, marker = root / "plant2", root / "marker2.txt"
+        plant.mkdir()
+        (plant / "sitecustomize.py").write_text(f"open({str(marker)!r}, 'a').write('planted ran')\n")
+        env = dict(self.env, PYTHONPATH=str(plant), CODING_BOT_WEBHOOK_URL=self.url, CODING_BOT_WEBHOOK_KEY=KEY)
+        r = subprocess.run([str(SCRIPT), "status"], check=False, capture_output=True, text=True, env=env, cwd=self.tmp.name)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("CODING_BOT_WEBHOOK_KEY: set", r.stdout)
+        self.assertFalse(marker.exists(), "a planted sitecustomize ran in the first interpreter")
+
+    def test_python_without_dash_i_restarts_isolated_before_it_looks_at_credentials(self) -> None:
+        plant, marker = Path(self.tmp.name) / "plant3", Path(self.tmp.name) / "marker3.txt"
+        plant.mkdir()
+        (plant / "usercustomize.py").write_text("")  # present but harmless: -I must not even look
+        (plant / "json.py").write_text(f"open({str(marker)!r}, 'a').write('shadowed json ran')\nraise SystemExit(99)\n")
+        r = self.cli("status", hook=True, PYTHONPATH=str(plant))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(marker.exists(), "a planted json.py was imported by the credentialed process")
+
     def test_the_process_that_holds_the_credentials_ignores_planted_python_hooks(self) -> None:
         plant, marker = Path(self.tmp.name) / "plant", Path(self.tmp.name) / "marker.txt"
         plant.mkdir()
