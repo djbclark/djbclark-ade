@@ -1,0 +1,3 @@
+### Added
+
+- Added `bin/coding-bot` and the `tell-coding-bot` skill (2026-11-01): any project's agent talks to the operator's cloud Grok Bot "Coding" like `acp-run` or `hermes send`. `ask` POSTs to the bot's webhook routine (`CODING_BOT_WEBHOOK_URL`/`CODING_BOT_WEBHOOK_KEY`, Bearer key sent only to `api2.cursor.sh`, ids `ade-N` with `re=` as in the Dann -> Eve channel) and blocks for the reply (exit 4 BLOCKED, 124 timeout); `send`, `wait`, `deliver` (the one sink for the bot's reply: stdin or `--clipboard`), `inbox`, `status`; `prompt` (and `send`/`ask` with no webhook, exit 10) put a self-contained prompt on the clipboard for the operator to paste, for web pages that need UI interaction; `bootstrap` asks the bot to create its inbound webhook routine (#TBD).
