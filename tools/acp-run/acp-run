@@ -776,11 +776,51 @@ def ro_git_dir_ok(base):
         d = parent
 
 
-def ro_words(script):
-    lex = shlex.shlex(script, posix=True, punctuation_chars=True)
-    lex.whitespace_split = True
-    lex.commenters = ""  # bash starts a comment only at a word's start; readonly_command refuses `#` anyway
-    return list(lex)
+def ro_tokens(script):
+    """Split a shell line into [(kind, text, fd)]: kind "word" (quoted or not, quotes removed) or "op" (an
+    unquoted run of `|&;<>()`); fd is the digits glued in front of a redirect operator (`2>&1`), else None.
+    A quoted `';'` or `'>'` stays a word, as bash treats it. None on an unterminated quote."""
+    out, cur, started, quote, quoted = [], [], False, None, False
+    n, i = len(script), 0
+
+    def flush():
+        nonlocal cur, started, quoted
+        if started:
+            out.append(("word", "".join(cur), None))
+        cur, started, quoted = [], False, False
+    while i < n:
+        ch = script[i]
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                cur.append(ch)
+        elif ch in "'\"":
+            quote, started, quoted = ch, True, True
+        elif ch.isspace():
+            flush()
+        elif ch in "|&;<>()":
+            j = i
+            while j < n and script[j] in "|&;<>()":
+                j += 1
+            fd = None
+            if started and not quoted and "".join(cur).isdigit() and script[i] == ">":
+                # unquoted digits glued to `>` are a file descriptor
+                fd = "".join(cur)
+                cur, started = [], False
+            else:
+                flush()
+            out.append(("op", script[i:j], fd))
+            i = j
+            continue
+        else:
+            cur.append(ch)
+            started = True
+        i += 1
+    if quote:
+        return None
+    flush()
+    return out
 
 
 def ro_program(word):
@@ -878,25 +918,27 @@ def readonly_command(cmd, cwd=None, depth=0):
     query string, as the already-allowed WebFetch tool can. A guess is a refusal."""
     if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd) or ro_unquoted_meta(cmd):
         return False
-    try:
-        toks = ro_words(cmd)
-    except ValueError:
+    toks = ro_tokens(cmd)
+    if toks is None:
         return False
     segs, i = [[]], 0
     while i < len(toks):
-        t = toks[i]
-        nxt = toks[i + 1] if i + 1 < len(toks) else None
-        if t in RO_OPERATORS:
-            segs.append([])
-        elif (t in (">", ">>") and nxt == "/dev/null") or (t == ">&" and nxt in ("1", "2")):
-            if segs[-1] and segs[-1][-1] in ("1", "2"):
-                segs[-1].pop()
-            i += 1
-        elif re.fullmatch(r"[();<>|&]+", t):
-            return False
-        else:
+        kind, t, fd = toks[i]
+        if kind == "word":
             segs[-1].append(t)
+        elif t in RO_OPERATORS and fd is None:
+            segs.append([])
+        elif t in (">", ">>", ">&") and fd in (None, "1", "2"):
+            # the only redirects: output to /dev/null, or 2>&1 / >&1 / >&2 (the target must follow as a word)
+            target = toks[i + 1] if i + 1 < len(toks) else None
+            if target is None or target[0] != "word" or target[1] not in (("1", "2") if t == ">&" else ("/dev/null",)):
+                return False
+            i += 1
+        else:
+            return False
         i += 1
+    if not all(segs[:-1]):  # `a | | b`, `; a`: a syntax error in bash, so not something to approve
+        return False
     segs = [s for s in segs if s]
     return bool(segs) and all(ro_segment(s, cwd, depth) for s in segs)
 
