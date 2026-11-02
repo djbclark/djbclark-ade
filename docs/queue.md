@@ -2065,6 +2065,6 @@ Status: **ADOPTED by djbclark 2026-10-25 ("adopt it, then enforce in stages")**.
 
 ## deadline registry follow-ups (PR 223 adversary round 1, 2026-11-01)
 
-1. The long-running wrappers (`pr-wait`, `load-watch admit --wait`, `acp-dispatch-wait`) do not yet register their own deadline with defaults (B9 rule 1): wrap each in `deadline run` or have it call `deadline start`/`done`. Until then agents follow the rule in `docs/deadline.md`.
+1. ~~The long-running wrappers (`pr-wait`, `load-watch admit --wait`, `acp-dispatch-wait`) do not yet register their own deadline with defaults (B9 rule 1).~~ Done 2026-11-02: each registers itself by default (`docs/deadline.md`, "Waiters register themselves"). Still open: `local-review` (its own 15 min class budget) and `bg` (`~/ops`, waits for djbclark's yes, order 11).
 2. Linux has no unit for the sweep: `deadline install` is macOS launchd only (B9 says launchd and systemd). `sweep` itself is portable; a systemd timer is the missing piece.
 3. The sweep is 60 s granular: a budget can overrun by up to 60 s plus the grace; `deadline run` is the tight backstop.

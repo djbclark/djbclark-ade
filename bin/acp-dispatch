@@ -1883,7 +1883,9 @@ def reap_install(uninstall: bool = False) -> int:
 # instead of a longer number the tool would refuse (Codex 4324164145).
 TOOL_TIMEOUT_MAX_S = 7200
 REARM_SUFFIX = ("(Agent-tool sub-agents: bounded foreground waits instead). A killed waiter is "
-                "re-armed with the same line, never re-dispatched.")
+                "re-armed with the same line, never re-dispatched. The waiter registers its own deadline (2 h at most, from the "
+                "record's wait_timeout at arm time) and then exits 76, NOT 124: 76 means only the waiter was stopped and the slice "
+                "is still running (re-arm); 124 means the record's wait_timeout passed.")
 
 
 def rearm_hint(rec: dict) -> str:
@@ -1909,7 +1911,8 @@ def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> st
     `wait --once` pass every 60 s and the moment its cheap check trips. It follows the record's
     mutable wait_timeout (`extend` moves it), loops on wait --once's 75 (still running) and ends
     in `acp-dispatch check RECORD`: 0 done, 1 partial, 3 no-report, 4 BLOCKED, 5 pool unavailable,
-    75 machine too hot (nothing ran; re-dispatch later), 124 timed out
+    75 machine too hot (nothing ran; re-dispatch later), 124 timed out, 76 the waiter's OWN deadline
+    stopped it (2026-11-02: the slice is still running, re-arm; never read 76 as a timeout)
     (2026-10-10: a quota death used to exit the old waiter 0). Bare markers keep the bounded
     `until [ -e ]` shape; seconds 0 is unlimited (2026-10-11)."""
     wait = (f"timeout {seconds} " if seconds else "") + "bash -c " + shlex.quote(

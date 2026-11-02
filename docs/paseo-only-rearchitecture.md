@@ -153,9 +153,9 @@ herdr server and the `herdr4paseo` / `paseo4herdr` bridges run on them, so D7's 
       agent job, so one budget never has two enforcers.
    2. **Registration.** The starter registers a budget, an owner, the process group and an on-expiry action
       before it starts, through the interim `bin/deadline` (`start` or `run -- CMD`; landing in PR 223, B9
-      absorbs its sweep in D1). Wrappers registering themselves with defaults is planned, not present: in
-      djbclark-ade first (`local-review`, `pr-wait`, `acp-dispatch-wait`, `load-watch admit --wait`); `bg`
-      lives in `~/ops/site-private-djbclark` and waits for djbclark's yes (order 11).
+      absorbs its sweep in D1). Since 2026-11-02 `pr-wait`, `acp-dispatch-wait` and `load-watch admit --wait` register
+      themselves with defaults (`docs/deadline.md`, "Waiters register themselves"); still planned: `local-review`,
+      then `bg`, which lives in `~/ops/site-private-djbclark` and waits for djbclark's yes (order 11).
    3. **Per-class defaults and maxima**, so a declared budget is still bounded: an admission wait 15 min
       (maximum 30 min, longer needs a reason); a test run 30 min; `local-review` 15 min; `pr-wait` and a review
       wait 60 min; any other class 30 min. A registration above its class maximum needs a reason and is
@@ -226,7 +226,7 @@ Counts are `rg -li` over the repo on 2026-10-29, excluding `graft/` and `docs/ha
 | BB (get-bb/bb, npm `bb-app`, the web agent workspace; not `bigteam`) | few files (`docs/apply-toolchain-prompt.md`) | RETIRE; **retired from djbclark-ade by ruling 2026-10-31** (docs now; BB stays installed where it is, no uninstall planned) | Paseo |
 | Orca `computer-use` stub and `orca computer` for GUI control | outside the repo | RETIRED 2026-10-31 (the lead removed the Orca-installed skills `orca-cli`, `orca-per-workspace-env`, `herdr`, `orchestration` and the stub from the machine) | Paseo plugin `paseo-screen` (`skills/paseo-screen/`), THE screen-control tool; stays enabled when idle (2026-10-31) |
 | `acp-run` (also the agent registry: `acp-run --list` feeds `route_agent.py`) | 138 files | REPLACE in D5 | `paseo provider ls` and the C2 map; an agent with no working provider blocks its own retirement |
-| `acp-dispatch`, `acp-dispatch-wait`, records, launchd runners, reap sweep, `tell`, `resume`, `reroute`, exit-code contract (3 no report, 4 BLOCKED, 124 timeout) | 109 files | REPLACE in D5 | `paseo run`/`create_agent` + G1 jobs/deadline + G2 admission + `usage-auto-resume` (+ G5); report-file footer stays as a skill; `paseo run --output-schema` for typed results |
+| `acp-dispatch`, `acp-dispatch-wait`, records, launchd runners, reap sweep, `tell`, `resume`, `reroute`, exit-code contract (3 no report, 4 BLOCKED, 124 timeout, 76 only the waiter's own deadline stopped `acp-dispatch-wait`: the slice still runs) | 109 files | REPLACE in D5 | `paseo run`/`create_agent` + G1 jobs/deadline + G2 admission + `usage-auto-resume` (+ G5); report-file footer stays as a skill; `paseo run --output-schema` for typed results |
 | `acp-dispatch outcome` → `route_agent.py calibrate`, `agent_stats.py burn` | — | KEEP the data | G1 writes the same outcome records, so calibration keeps its source (Fable 2.1, 4.3) |
 | `/bigteam`, job records under `~/.local/state/bigteam` | 73 files | REWRITE in D5 | `paseo run` fan-out on G1 |
 | `self-slash`, `/new`-`/baton` lifecycle, successor launch, `paseo-new-seat`, `paseo-bypass-watch` | — | SIMPLIFY in D5 | successor created **top-level** from the CLI without `PASEO_AGENT_ID` until D1 proves archive-parent behaviour (an agent-scoped `create_agent` makes the successor a child of the retiring agent, Fable 2.4); keep `/baton` and Tier 1/Tier 2 |

@@ -78,6 +78,10 @@ os.environ["RELAY_LINKS_FILE"] = str(_DEFER_ROOT / "relay" / "links.json")
 # test_rumination_watch_deploy.py is the only place that exercises the deploy, and it sets
 # DEPLOY_OFF=False against its own fixture repos.
 os.environ.setdefault("RW_NO_DEPLOY", "1")
+# pr-wait, `load-watch admit --wait` and acp-dispatch-wait register their own deadline unless DEADLINE_NAME is set (2026-11-02, bin/deadline_wait.py).
+# An existing test that runs one of them must neither write the real ~/.local/state/deadlines nor see an extra supervising process: a SET (empty)
+# DEADLINE_NAME is the documented "already under a deadline" signal. test_deadline_wrappers.py unsets it per test, with its own state dir.
+os.environ["DEADLINE_NAME"] = ""
 
 
 @pytest.fixture(autouse=True)

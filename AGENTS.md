@@ -306,7 +306,8 @@ pull request here is expected to meet these; flag any it misses.
    3c40470, two pushes followed without the fix, the marker for the new head said
    `has_unresolved_findings: true`, and a head-only filter read "0" past the open
    P1. Check with `bin/pr-wait`: `merge_ready` (false with the reasons in `merge_blockers`) and
-   `PREFIX-open-findings.json`.
+   `PREFIX-open-findings.json`. `pr-wait` registers its own deadline (`pr-wait-<repo>-<PR>-<pid>`, `docs/deadline.md`): exit 124 means the enforcer stopped it
+   at its budget (`--timeout` or 60 min, plus 60 s); run it again, or `--no-deadline` to opt out.
    Fixing a finding means fixing the code, then resolving its thread. Never select
    by time: a "newest `@codex review` comment" window is moved by Codex's own
    receipts, which quote it (PR 12, 2026-10-20). GitHub re-anchors `commit_id` to the newest head when
