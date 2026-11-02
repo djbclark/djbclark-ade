@@ -2031,6 +2031,17 @@ class TestAdversaryR2(ProtocolBase):
         self.assertEqual((dmeta["source"], dmeta["path"]), ("deliver", "stdin"))
         self.assertIn("fake", dbody)
 
+    def test_deliver_hands_over_the_record_of_the_id_it_filed(self) -> None:
+        """Review of a98c0b14: the same text filed for two ids; deliver's handover names the id it was given."""
+        self.cli("send", "one")
+        self.cli("send", "two")
+        self.cli("deliver", "--re", "ade-1", stdin="same text\nDONE")
+        d = self.cli("deliver", "--re", "ade-2", stdin="same text\nDONE")
+        self.assertEqual(d.returncode, 0, d.stderr)
+        meta, _ = unfence(d.stdout.split("\n", 1)[1])
+        self.assertEqual(meta["re"], "ade-2")
+        self.assertEqual(meta["nonce"], next(r["nonce"] for r in self.outbox() if r.get("id") == "ade-2"))
+
     def test_after_a_state_reset_new_ids_start_above_the_mailbox(self) -> None:
         """A1 client side: the old mailbox holds ade-1..5; a fresh state must not reuse those names."""
         (self.to_dir / "ade-1.md").write_text("[claude-code -> coding] id=ade-1 nonce=00000000000000aa\nold\n")

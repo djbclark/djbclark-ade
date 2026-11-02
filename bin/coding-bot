@@ -1348,13 +1348,14 @@ def header_field(text: str, name: str) -> str | None:
 
 
 def file_reply(raw: str, hint: str | None, *, from_drop: bool = False, source: str = "deliver",
-               path: str = "-") -> tuple[int, str, bool]:
+               path: str = "-", found: dict | None = None) -> tuple[int, str, bool]:
     """The one sink for a reply, from `deliver` or a drop transport: (rc, message, newly_filed). rc 0 is filed or a
     duplicate, 2 is refused. `hint` is the ade-N the caller knows it answers (--re, or the reply file's name). When the
     message has a nonce, a reply with another one is refused. One with none is refused when it comes `from_drop` (a file
     named for the id proves nothing: ids restart, mailboxes are shared, anyone with write access can pre-write one); from
     `deliver` (the operator's paste) it is filed with `nonce_ok: false`. `source` and `path` say where it came from;
-    they are shown in the handover header (`handover`)."""
+    they are shown in the handover header (`handover`). On rc 0, `found` (if given) gets the id and sha it was filed
+    under, so the caller can hand over exactly that record."""
     if len(raw) > MAX_TEXT:  # the raw size, before cleaning or stripping can shrink it
         return 2, OVERSIZE_REFUSAL.format(MAX_TEXT), False
     text = clean(raw).strip()
@@ -1389,6 +1390,8 @@ def file_reply(raw: str, hint: str | None, *, from_drop: bool = False, source: s
                                    "terminal": terminal, "source": source, "path": path, **extra},
                    # the duplicate check runs under the inbox lock: two pollers cannot both file one reply
                    unless=lambda recs: any(r.get("re") == rid and r.get("sha") == sha for r in recs))
+    if found is not None:
+        found.update(re=rid, sha=sha)
     if added is None:  # the same text may answer another task, so the check is per id
         return 0, f"{rid}: this reply is already filed", False
     return 0, f"{rid}: reply filed ({len(text)} chars)", True
@@ -1425,14 +1428,14 @@ def cmd_deliver(a: argparse.Namespace) -> int:
     raw = paste() if a.clipboard else sys.stdin.read(MAX_TEXT + 1)
     if raw is None:
         return fail("deliver: could not read the clipboard", 3)
-    rc, msg, _ = file_reply(raw, a.re, source="deliver", path="clipboard" if a.clipboard else "stdin")
+    found: dict = {}
+    rc, msg, _ = file_reply(raw, a.re, source="deliver", path="clipboard" if a.clipboard else "stdin", found=found)
     print(msg if rc == 0 else f"deliver: {msg}", file=sys.stdout if rc == 0 else sys.stderr)
-    if rc == 0:
-        text = clean(raw).strip()
-        sha = hashlib.sha256(text.encode()).hexdigest()
-        rec = next((r for r in reversed(records("inbox.jsonl")) if r.get("sha") == sha), None)
+    if rc == 0:  # the record filed for THIS id: the same text may also be filed as the answer to another message
+        rec = next((r for r in reversed(records("inbox.jsonl"))
+                    if r.get("re") == found.get("re") and r.get("sha") == found.get("sha")), None)
         if rec is not None:
-            print(handover(rec, str(rec.get("re"))))
+            print(handover(rec, found["re"]))
     return rc
 
 
