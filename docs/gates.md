@@ -200,6 +200,16 @@ key at 1, and `ade_gates.judged_pool_block` (the one copy `acp-dispatch`'s grant
 `frontier1_min_left`, for any other pool its quota reading at least `frontier2_min_left`. At `tight`, `critical`, a stale or missing
 guard state the planner puts at most the closed 1 slice per pool on a wave.
 
+**Gemini 4 Argon (2026-10-31)** has no allowance of its own; its one new rule is the fallback test in this paragraph. It reads aiuse 1.5's pool family `gemini_argon`. It is a `frontier` model on the `antigravity-argon` pool
+(`config/routing.toml`, fallback behind astra and Fable), so it is gated by `--kind frontier` (acp-dispatch refuses the model under any
+other kind), the advisor role (`--role exec` needs `ACP_OPERATOR_APPROVED=frontier-exec`), the in-flight quota reservation on its own
+service, the fallback-only rule (served only while codex or claude is short for `frontier`; `acp-dispatch` refuses it otherwise, exit 2,
+`route-override` escapes; no fresh Argon reading refuses with exit 5), and, in `plan`, the planner's per-wave cap, where any non-claude pool counts as family 2 (`frontier2_per_wave`, closed value 1;
+`frontier2_judged` and `frontier2_min_left` are read against the Argon window's reading). `acp-dispatch`'s `--frontier-reason` grant
+(`frontier_judged`) covers the claude and codex pools only: for Argon the reason is recorded and `frontier_judged_note` says no allowance
+applies, which refuses nothing. Gap: Argon has no estimate floor (`[dispatch.estimate_floor]`), so an unmeasured Argon slice reserves
+the brief-size default (3, 7 or 12 percent of the Argon weekly window) until `calibrate` has measured slices.
+
 **What a granted allowance is.** While the effective gate allows it (the standing baseline; no profile is needed), an agent MAY use a
 frontier model where it judges it significantly better than judgment, if it states why in one line. The checks, in order:
 
