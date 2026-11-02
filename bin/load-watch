@@ -59,7 +59,8 @@ compressor thrashes; running work and anything that skips `bg`/`acp-dispatch` st
 therefore reads macOS `vm_stat` Compressions + Decompressions once, takes the delta against the previous
 sample's counter (kept in state.json as churn_prev / churn_prev_t; no extra sleep, so the first sample, a
 counter that went backwards, a gap over MAX_GAP_S and a missing `vm_stat` give no reading) and keeps
-`churn_since` while pages/s stay above ADMIT_CHURN_PAGES_S (the admit limit). Held for LW_CHURN_SUSTAIN_S (180)
+`churn_since` while pages/s stay above the ALERT line LW_CHURN_ALERT_PAGES_S (default 50000; deliberately not the admit limit
+LW_MAX_COMPRESSOR_S, 20000, so standing memory pressure the gate already handles does not page hourly). Held for LW_CHURN_SUSTAIN_S (180)
 seconds it sends one line, with the top 3 commands by cores, to the watcher at most hourly (cooldown
 `churn-watcher`, WATCHER_NOCPU_S) and to Hermes every LW_COOLDOWN_H (cooldown `churn`); `status` lists both.
 When a top command matches Grok|Chrome|WindowServer the line adds the loadwatch skill's standing exception;
@@ -88,7 +89,9 @@ it never kills, throttles or signals anything. Memory gate (operator 2026-10-23,
 `admit` samples macOS `vm_stat` twice, 2 s apart, and says no (exit 75) while ANY of these holds: available memory (free +
 file-backed + purgeable pages: memory freed without compressing or swapping, like Linux MemAvailable's file-cache
 term; free + speculative alone is nearly always tiny on macOS) is below --min-free-mb (default 300, operator 2026-11-01; 600 before; env LW_MIN_FREE_MB); compressor churn (Compressions + Decompressions, pages/s)
-exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 2026-11-01); pageins exceed --max-pageins per
+exceeds --max-mem-churn (default 20000, env LW_MAX_COMPRESSOR_S; 60000 until 2026-11-01) AND corroborates thrash: load above
+LW_CHURN_THRASH_PER_CORE (1.5) per core or pageins over their limit, or churn above LW_MAX_COMPRESSOR_HARD_S (60000) on its own
+(djbclark 2026-11-02: standing churn with idle CPU had refused nearly every launch for hours); pageins exceed --max-pageins per
 second (default 1000, env LW_MAX_PAGEINS_S: macOS `Pageins` also counts file-backed reads, so read-heavy work can trip it
 with memory to spare; that errs toward waiting); or, ONLY when the caller passes --max-agents (acp-dispatch does; `bg` never
 does: a test run starts no agent, and gating it would starve the very sessions the cap counts), the live `acp-run` slices
@@ -1007,7 +1010,11 @@ def cmd_guard(a):
     return 0
 
 
-CHURN_SUSTAIN_S = float(os.environ.get("LW_CHURN_SUSTAIN_S", "180"))  # seconds of churn above the admit limit
+CHURN_SUSTAIN_S = float(os.environ.get("LW_CHURN_SUSTAIN_S", "180"))  # seconds of churn above the alert threshold
+# The ALERT threshold, deliberately NOT the admit gate's limit (LW_MAX_COMPRESSOR_S, 20000 since 2026-11-01): the gate should stay
+# strict, but with the alert sharing that number it paged the watcher every hour for standing memory pressure (2026-11-02:
+# 29-38k pages/s at load ~0.7/core, CPU half idle, no runaway: none was an incident). 50000 is the old 60k limit's range.
+CHURN_ALERT_PAGES_S = float(os.environ.get("LW_CHURN_ALERT_PAGES_S", "50000"))
 CHURN_EXCEPTION_RE = re.compile(r"Grok|Chrome|WindowServer")
 _FAKE_COMPRESSOR_READS = [0]
 
@@ -1029,7 +1036,7 @@ def churn_counter():
 def churn_read(st, t):
     """One compressor-churn reading per sample: pages/s as the delta since the previous sample, or None (no
     reading: first sample, counter went backwards, a gap over MAX_GAP_S, no vm_stat). Keeps st['churn_since']
-    while the churn is above ADMIT_CHURN_PAGES_S. State keys are read with .get, so an older state.json loads."""
+    while the churn is above CHURN_ALERT_PAGES_S (not the admit limit). State keys are read with .get, so an older state.json loads."""
     c = churn_counter()
     if c is None:  # no vm_stat: change nothing
         return None
@@ -1042,7 +1049,7 @@ def churn_read(st, t):
         return None
     rate = (c - prev) / (t - prev_t)
     st["churn_pages_s"] = round(rate)
-    if rate <= ADMIT_CHURN_PAGES_S:
+    if rate <= CHURN_ALERT_PAGES_S:
         st["churn_since"] = None
     elif not st.get("churn_since"):
         st["churn_since"] = t
@@ -1089,7 +1096,7 @@ def churn_top(table, n=3):
 
 
 def churn_alert(st, t, table, dry):
-    """Tell the watcher (hourly) and Hermes (every COOLDOWN_S) when churn has stayed above the admit limit for
+    """Tell the watcher (hourly) and Hermes (every COOLDOWN_S) when churn has stayed above CHURN_ALERT_PAGES_S for
     CHURN_SUSTAIN_S. Reads and warns only: no incident row, nothing is signalled or killed."""
     since = st.get("churn_since")
     if not since or t - since < CHURN_SUSTAIN_S:
@@ -1102,7 +1109,7 @@ def churn_alert(st, t, table, dry):
         return
     top = churn_top(table)
     body = (f"compressor churn ~{st.get('churn_pages_s', 0) / 1000:.0f}k pages/s for {CHURN_SUSTAIN_S / 60:g}+ min "
-            f"(limit {ADMIT_CHURN_PAGES_S / 1000:g}k); top: "
+            f"(alert line {CHURN_ALERT_PAGES_S / 1000:g}k, admit limit {ADMIT_CHURN_PAGES_S / 1000:g}k); top: "
             + (", ".join(f"{label} {cores:.1f} cores" for label, cores, _ in top) or "none") + ". "
             "Admit already holds new bg/acp-dispatch work; this is running or bypass work.")
     tail = "do not kill or SIGSTOP without djbclark."
@@ -1310,8 +1317,9 @@ def cmd_status(a):
     for pid, (secs, _, cmd) in sorted(use.items(), key=lambda kv: -kv[1][0])[:8]:
         print(f"  {secs / span if span else 0:5.2f} cores  pid {pid}  {cmd[:110]}")
     if st.get("churn_pages_s") is not None:
-        print(f"  compressor churn {st['churn_pages_s'] / 1000:.0f}k pages/s (admit limit {ADMIT_CHURN_PAGES_S / 1000:g}k)"
-              + (f", above it for {now() - st['churn_since']:.0f}/{CHURN_SUSTAIN_S:.0f} s" if st.get("churn_since") else ""))
+        print(f"  compressor churn {st['churn_pages_s'] / 1000:.0f}k pages/s (alert line {CHURN_ALERT_PAGES_S / 1000:g}k, "
+              f"admit limit {ADMIT_CHURN_PAGES_S / 1000:g}k)"
+              + (f", above the alert line for {now() - st['churn_since']:.0f}/{CHURN_SUSTAIN_S:.0f} s" if st.get("churn_since") else ""))
     cs = calm_load().get("calm_since")
     if _num(cs):
         print(f"  calm boost: calm for {now() - cs:.0f}/{ADMIT_BOOST_CALM_S:g} s (the {ADMIT_BOOST_PER_CORE:g}/core boost applies after that; any hot reading resets it)")
@@ -1433,6 +1441,11 @@ def _env_float(name, default, lo=0.0):
 # WAITING: a free-memory floor, a lower compressor limit (12k/s was already starving, 20000 is the line), a pageins
 # limit and a cap on live `acp-run` sessions, all env-tunable; a reading that cannot be taken is said so, never guessed.
 ADMIT_CHURN_PAGES_S = _env_float("LW_MAX_COMPRESSOR_S", 20000.0, 1.0)
+# Churn over ADMIT_CHURN_PAGES_S refuses only with corroboration (djbclark 2026-11-02, after standing 30-65k churn with idle CPU
+# refused nearly every launch for hours): load per core above ADMIT_CHURN_THRASH_PER_CORE or pageins over their limit; churn above
+# ADMIT_CHURN_HARD_PAGES_S (the pre-2026-11-01 limit) refuses on its own.
+ADMIT_CHURN_THRASH_PER_CORE = _env_float("LW_CHURN_THRASH_PER_CORE", 1.5, 0.0)
+ADMIT_CHURN_HARD_PAGES_S = _env_float("LW_MAX_COMPRESSOR_HARD_S", 60000.0, 1.0)
 ADMIT_MIN_FREE_MB = _env_float("LW_MIN_FREE_MB", 300.0)  # djbclark 2026-11-01, with the available-memory measure (PR 230)
 ADMIT_PAGEINS_S = _env_float("LW_MAX_PAGEINS_S", 1000.0, 1.0)
 ADMIT_MAX_AGENTS = int(_env_float("LW_MAX_AGENTS", 14, 0))  # 0 = no cap
@@ -1837,8 +1850,13 @@ def admit_refusals(per_core, limit, m, lim):
     out = []
     if per_core > limit:
         out.append("load")
+    # Churn refuses only with corroboration (djbclark 2026-11-02): above the churn limit AND (load above THRASH_PER_CORE or
+    # pageins over their limit), or above the hard line on its own. Standing compressor pressure with idle CPU (30-65k for hours
+    # on 2026-11-02, load ~0.7-1.1/core) refused nearly every launch; real thrash still shows load or pageins with it.
     if m["churn"] is not None and m["churn"] > lim["churn"]:
-        out.append("compressor")
+        thrash = per_core > ADMIT_CHURN_THRASH_PER_CORE or (m["pageins_s"] is not None and m["pageins_s"] > lim["max_pageins"])
+        if thrash or m["churn"] > lim.get("churn_hard", max(ADMIT_CHURN_HARD_PAGES_S, lim["churn"])):
+            out.append("compressor")
     if m["free_mb"] is not None and m["free_mb"] < lim["min_free_mb"]:
         out.append("free_mem")
     if m["pageins_s"] is not None and m["pageins_s"] > lim["max_pageins"]:

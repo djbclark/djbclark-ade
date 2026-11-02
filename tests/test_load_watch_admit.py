@@ -19,7 +19,7 @@ def admit(tmp_path, *args, load1=None, **env):
     e = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
              LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_BOOST_CALM_S="0", LW_RESERVE_S="0")  # 0: the hysteresis has its own tests
     for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS", "LW_MIN_FREE_MB",
-              "LW_MAX_COMPRESSOR_S", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS"):
+              "LW_MAX_COMPRESSOR_S", "LW_MAX_COMPRESSOR_HARD_S", "LW_CHURN_THRASH_PER_CORE", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS"):
         e.pop(k, None)
     if load1 is not None:
         e["LW_FAKE_LOAD1"] = str(load1)
@@ -272,11 +272,20 @@ def test_free_memory_floor_refuses_below_and_passes_at_the_boundary(tmp_path):
     assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_FREE_MB="1500", LW_MIN_FREE_MB="2000").returncode == 75
 
 
-def test_compressor_limit_is_20000_per_second(tmp_path):
+def test_churn_over_the_limit_refuses_only_with_load_or_pageins_or_over_the_hard_line(tmp_path):
+    """djbclark 2026-11-02: standing 30-65k churn with idle CPU refused nearly every launch for hours. Over 20000 refuses only
+    together with load above 1.5/core or pageins over their limit; over 60000 (the pre-2026-11-01 limit) refuses on its own."""
     assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="20000").returncode == 0
-    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="20001")
-    assert r.returncode == 75 and refused(r) == ["compressor"]
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="25000", LW_MAX_COMPRESSOR_S="30000").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="38000").returncode == 0                 # standing pressure, idle CPU
+    r = admit(tmp_path, "--wait", "0", "--json", load1=CORES * 1.6, LW_FAKE_CHURN="20001")
+    assert "compressor" in refused(r)                                                                   # with load: thrash
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="20001", LW_FAKE_PAGEINS="1001")
+    assert refused(r) == ["compressor", "pageins"]                                                      # with pageins: thrash
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="60001")
+    assert r.returncode == 75 and refused(r) == ["compressor"]                                          # hard line alone
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="60001", LW_MAX_COMPRESSOR_HARD_S="70000").returncode == 0
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_FAKE_CHURN="25000", LW_MAX_COMPRESSOR_S="30000",
+                 LW_FAKE_PAGEINS="1001").returncode == 75                                                # pageins alone still refuse
 
 
 def test_pageins_limit_is_1000_per_second(tmp_path):
@@ -365,7 +374,7 @@ def test_a_hot_reading_resets_the_calm_clock(tmp_path):
     heavy = CORES * 3.5
     f = calm_file(tmp_path, 3600)
     # a compressor spike, even one that admit then refuses, restarts the run
-    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_BOOST_CALM_S="600", LW_FAKE_CHURN="30000").returncode == 75
+    assert admit(tmp_path, "--wait", "0", load1=0.1, LW_BOOST_CALM_S="600", LW_FAKE_CHURN="70000").returncode == 75
     assert json.loads(f.read_text())["calm_since"] is None
     # the next calm reading starts a NEW run: 10 minutes are still owed
     assert admit(tmp_path, "--max-per-core", "2.5", load1=heavy, **boost_env()).returncode == 75
