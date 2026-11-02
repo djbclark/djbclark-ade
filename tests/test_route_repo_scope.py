@@ -202,7 +202,7 @@ class TestDispatchScope(Base):
         self.assertIn("repo-scoped", self.go(self.repo, "--dry-run").stderr)   # the Go model, from another repo
         other = subprocess.run(
             [sys.executable, str(Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"), "opencode",
-             "--model", "opencode-zen-free/big-free", "--name", "s2", "-p", "x", "-C", str(self.repo), "--out", str(self.out),
+             "--model", "opencode/big-pickle", "--name", "s2", "-p", "x", "-C", str(self.repo), "--out", str(self.out),
              "--acp-run", str(self.fake), "--kind", "bulk", "--no-model-check", "--no-preflight", "--dry-run"],
             check=False, capture_output=True, text=True,
             env={k: v for k, v in os.environ.items() if k != "ROUTE_SEAT"} | self.base_env())

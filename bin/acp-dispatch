@@ -4583,6 +4583,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     seat = getattr(a, "seat", None) or route_module().current_seat()
     scoped_svc = (route_module().BY_NAME.get(service) if service
                   else None if a.agent == "opencode" else kind_service(a.agent, service))
+    if (scoped_svc is not None and scoped_svc.name == "opencode-go" and a.agent == "opencode" and a.model
+            and not a.model.startswith("opencode-go/")):
+        scoped_svc = None   # another opencode provider (the Zen catalogue): acp-dispatch's pool map defaults it to Go, but only opencode-go/* draws on the Go pool
     if scoped_svc is not None:
         scope_why = scoped_svc.scope_block(REPO_NAME, seat)
         if scope_why:
@@ -5476,6 +5479,7 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         "agent_report": str(report), "agent_done": str(done), "perm": a.perm, "effort": None, "context": None,
         "timeout": a.timeout, "wait_timeout": wait_timeout, "wrapup_grace": 0, "acp_arg": [],
         "session_id": None, "resume_count": 0, "prompt": prompt, "kind": kind, "service": service,
+        "seat": getattr(a, "seat", None) or route_module().current_seat(),
         "role": "exec", "estimated_usage_pct": 0.0, "estimated_usage_windows": {}, "estimate_source": "cloud",
         "snapshot_remaining_before": remaining, "snapshot_reading": reading, "checkpoint": False,
         "advisor_tree_before": None, "auto_resume": {"state": "off", "detail": "cloud slice"},
