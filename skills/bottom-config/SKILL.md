@@ -2,8 +2,8 @@
 name: bottom-config
 description: >-
   Edit, validate and preview the config of bottom (the `btm` process monitor)
-  and its fork build `btm-mt` with the middle-truncated Command column
-  (`processes.truncate_cmd_middle`). Use when changing ~/.config/bottom/bottom.toml,
+  and its fork build `btm-mt` with the split Command column
+  (`processes.split_command`). Use when changing ~/.config/bottom/bottom.toml,
   tuning columns, layout, colors or process options, or when btm-mt needs a rebuild.
 ---
 
@@ -12,9 +12,12 @@ description: >-
 djbclark runs two binaries from the same config, `~/.config/bottom/bottom.toml`:
 
 1. `btm`: Homebrew's stock bottom (`/opt/homebrew/bin/btm`).
-2. `btm-mt`: the fork `djbclark/bottom`, branch `middle-truncate-command`, checkout
-   `~/src/bottom`. It adds `[processes] truncate_cmd_middle = true`: a command too
-   wide for its column keeps its start and end around `[...]`. Stock `btm` ignores that key.
+2. `btm-mt`: the fork `djbclark/bottom`, branch `middle-truncate-command` (the name is
+   historical), checkout `~/src/bottom`. It adds `[processes] split_command = true`: a full
+   command is drawn as `name ┊ cwd ┊ options` (interpreters as `python3.15 script.py`;
+   cwd cut in the middle with `…`, last directory kept; options keep at least 10 cells,
+   cut at the end), and grouped mode (`Tab`) groups by that name with expandable groups
+   (`Space`/`+`/`-`, `Right`/`Left`). Stock `btm` ignores that key.
 
 ## The trap: typos are silent
 
@@ -79,7 +82,9 @@ To follow upstream: `git fetch upstream && git rebase upstream/main` in `~/src/b
 
 ## Where the change lives
 
-`truncate_middle()` in `src/utils/strings.rs`; applied in `Id::to_cell_string` and
-`ProcWidgetData::to_cell_text` (`process_data.rs`); option read in `src/options.rs`.
-Under 7 columns it falls back to the stock end-cut. Sorting and search still use the full
-command; only the drawn cell changes.
+`SplitCommand` (`src/collection/processes/split_command.rs`) is built at collection time
+when the key is on (it also turns on per-process cwd reads); `split_widths`/`split_line`
+in `src/widgets/process_table/process_data.rs` draw it (the separator uses the theme's
+`selected_border_colour`); grouping and expansion are in `get_normal_data`
+(`src/widgets/process_table.rs`). Sorting uses the joined text; search still matches the
+full command. Docs: `docs/content/configuration/config-file/processes.md`, "Split Command".
