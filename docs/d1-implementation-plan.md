@@ -144,6 +144,31 @@ parent, a plain `paseo` caller) answers option 2 through the surface a parent us
 MCP tool `respond_to_permission` through `mcp` from an agent (`MCP_STEP` branch, needs the tool catalog).
 Accept: the agent's next turn shows the chosen option's text. If neither works, B3 and G4 are redesigned
 (cards go to the operator): the probe prints that consequence.
+**Checked 2026-11-02 (slice d1-t5-card, CLI and isolated daemon both 0.15.0-beta.1): PASS, B3 and G4 stand for omp-hosted cards.**
+The claude provider was NOT probed (djbclark 2026-11-02: the Claude subscription pool must not run out); the probe uses the
+`omp` provider with `anthropic/claude-haiku-4-5` (API credits), whose `ask` tool raises a question card
+(`providers/omp/question-ui.js`: `kind: "question"`, tool name `OMP ask`, header `Response`). Results, two haiku turns,
+`~/.local/state/ade/acceptance/<UTC date>/d1-02-card-option.json`, evidence in the probe's `ACC_BASE`:
+(a) `paseo permit allow AGENT REQ --input '{"answers":{"Response":"teal-9"}}'` (option 2 of `crimson-7`/`teal-9`) was
+accepted (rc 0) and the agent's next turn read `PICKED: teal-9`, never option 1; (b) the paseo MCP tool
+`list_pending_permissions` listed the card (normalized payload, `kind: "question"`) and `respond_to_permission`
+`{agentId, requestId, response:{behavior:"allow", updatedInput:{answers:{Response:"teal-9"}}}}` returned `{success:true}`
+and the agent's next turn read `PICKED: teal-9`. Both surfaces end in `agentManager.respondToPermission`.
+Answer shape depends on the provider: omp keys `answers` by the card's `header` (`Response`); for Claude the server
+(`providers/claude/agent.js`, `resolveClaudeAskUserQuestionAnswers`) accepts `answers` keyed by the full question text or
+its `header`, and codex keys by `question.header`: [INFERENCE] from source, not run (claude pool protected; codex not
+tried). A parent that answers a card must read the card's `questions[].header`/`question` from `list_pending_permissions`
+rather than hard-code `Response`.
+**Plan-changing finding:** the daemon injects the `paseo` MCP server into its agents only when its listener is TCP
+(`bootstrap.js createAgentMcpBaseUrl` returns null for a Unix socket). The isolated daemon (decision 1: Unix socket)
+therefore gives its agents NO paseo MCP tools; a first run with an omp "parent" showed it falling back to `paseo permit
+allow` through bash. Any D1 probe whose contract is an agent calling a paseo MCP tool (T7 archive parent with a running
+child, T10 tab creation by an agent, the real parent path of B3) cannot run on a Unix-socket isolated daemon: either claim
+a port in `site-djbclark/registry/ports.yml` (through the lead) and give `isolated_up` a TCP listener option, or call
+`/mcp/agents` over the socket as `lib/mcp_call.py` does (what this probe did). Also: `omp` is not enabled in a fresh
+home; `paseo daemon config set agents.providers '{"omp":{"enabled":true}}' --home H` hot-reloads (the dotted
+`agents.providers.omp.enabled` path is refused: "replace its containing object with JSON"); the live config hash was
+unchanged.
 
 ### T6. D1.3 Archive rescue and the `paseo.json` teardown (blocks D2's gate; the largest task)
 

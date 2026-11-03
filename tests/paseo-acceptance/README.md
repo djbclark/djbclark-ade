@@ -8,6 +8,7 @@ Results go to `$ADE_ACCEPTANCE_RESULTS` (default `~/.local/state/ade/acceptance`
 |---|---|
 | `readonly/ro-*.sh` | read-only against the live daemon; safe |
 | `isolated-smoke.sh` | second daemon only: proves `lib/common.sh` `isolated_up`/`isolated_down` (own serverId, password enforced, no plugins, no speech download, live daemon and config untouched, nothing left behind); run by hand, about 25 s |
+| `d1-02-card-option.sh` | second daemon only: answers an omp `ask` question card's option 2 by CLI (`permit allow --input`) and by the paseo MCP tool `respond_to_permission` (`lib/mcp_call.py`, over the socket: a Unix-socket daemon injects no MCP into agents); two haiku turns, never the Claude subscription; passed 2026-11-02, about 2 min |
 | `d1-*.sh` marked `DESTRUCTIVE: second daemon only` | restart, hang or kill a daemon (plan B10); refuse unless `PASEO_HOME` is a fresh test home |
 | `watchdog-selftest.sh`, `d1-09-deadman.sh`, `drain/check-disabled.sh --self-test` | hermetic, no daemon |
 | `drain/*.sh` | D0.2 drain records; read-only |
