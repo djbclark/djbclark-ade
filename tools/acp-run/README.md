@@ -37,7 +37,7 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    it runs outside codex's sandbox, so the list refuses `#`, unquoted globs, braces, `~` and backslashes, program
    paths outside `/usr/bin` `/bin` `/opt/homebrew/bin`, long options that run a program (prefixes included, `--`
    is no stop), `rg` without `--no-config` as its FIRST argument while RIPGREP_CONFIG_PATH is set and `curl`
-   without a leading `-q` while a curlrc exists (a `curl` GET can carry read data in its URL, as WebFetch can). The config variables, `HOME` and `PATH` are read from the AGENT's environment (`--agent-env`, `ACP_RUN_ENV_<AGENT>`, launch tweaks), and every request is refused while that `PATH` has an empty, relative or in-tree entry (a bare `cat` would resolve to the reviewed checkout's).
+   without a leading `-q` while a curlrc exists (a `curl` GET can carry read data in its URL, as WebFetch can). The config variables, `HOME` and `PATH` are read from the AGENT's environment (`--agent-env`, `ACP_RUN_ENV_<AGENT>`, launch tweaks), and every request is refused while that `PATH` is set empty or has an empty, relative or in-tree entry, and `curl` needs `-q` whenever `HOME`, `CURL_HOME` or `XDG_CONFIG_HOME` is relative (a bare `cat` would resolve to the reviewed checkout's).
    `git` is refused on purpose: a git read in codex's sandbox asks for nothing, so a request for git needs more
    than the sandbox gives, and git then runs the repository's own config (diff.external, textconv, fsmonitor,
    hooks, ssh/proxy/credential helpers, ext:: transports, submodule configs) as programs outside it; the agent

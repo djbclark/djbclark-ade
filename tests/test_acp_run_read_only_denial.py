@@ -205,6 +205,11 @@ def probe() -> dict[str, object]:
             "path_dot": rc("cat a.txt", ctxf(PATH=".:/usr/bin")),
             "path_relative": rc("cat a.txt", ctxf(PATH="bin:/usr/bin")),
             "path_symlink_into_tree": None,
+            "path_set_empty": rc("cat a.txt", ctxf(PATH="")),
+            "curl_home_relative": rc("curl -fsSL https://example.com/x", ctxf(CURL_HOME=".")),
+            "curl_home_relative_q": rc("curl -q -fsSL https://example.com/x", ctxf(CURL_HOME=".")),
+            "curl_xdg_relative": rc("curl -fsSL https://example.com/x", ctxf(XDG_CONFIG_HOME="cfg")),
+            "curl_home_var_relative": rc("curl -fsSL https://example.com/x", ctxf(HOME="rel")),
             "path_outside_ok": rc("cat a.txt", ctxf(PATH="/opt/homebrew/bin:/usr/bin")),
             "rg_config_only_in_child": rc("rg x f", ctxf(RIPGREP_CONFIG_PATH="/tmp/rgrc")),
             "rg_config_only_in_child_flagged": rc("rg --no-config x f", ctxf(RIPGREP_CONFIG_PATH="/tmp/rgrc")),
@@ -337,11 +342,12 @@ class TestReadOnlyDenial(unittest.TestCase):
 
     def test_a_request_is_judged_against_the_agents_environment(self):
         e = self.res["agent_env"]
-        for name in ("clean", "path_outside_ok", "rg_config_only_in_child_flagged", "rg_no_config_in_child",
+        for name in ("clean", "path_outside_ok", "rg_config_only_in_child_flagged", "rg_no_config_in_child", "curl_home_relative_q",
                      "curlrc_only_in_child_home_q"):
             self.assertTrue(e[name], name)
         for name in ("path_into_tree", "path_is_tree", "path_empty_entry", "path_dot", "path_relative",
-                     "path_symlink_into_tree", "rg_config_only_in_child", "curlrc_only_in_child_home",
+                     "path_symlink_into_tree", "path_set_empty", "curl_home_relative", "curl_xdg_relative",
+                     "curl_home_var_relative", "rg_config_only_in_child", "curlrc_only_in_child_home",
                      "curl_config_home_var", "nested_bash_c"):
             self.assertFalse(e[name], name)
 
