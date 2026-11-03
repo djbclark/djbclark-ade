@@ -29,7 +29,8 @@ jobs:
         run: >-
           uv run --with pytest python -m pytest
           tests/test_fleet_migrate.py tests/test_fleet_migrate_storage.py
-          tests/test_fleet_migrate_cli.py -q
+          tests/test_fleet_migrate_cli.py tests/test_fleet_migrate_resources.py
+          tests/test_fleet_migrate_directory.py -q
 
   pytest:
     # On request only (operator, 2026-10-29: "Nothing needs to use macos unless specifically

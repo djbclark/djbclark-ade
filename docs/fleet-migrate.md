@@ -150,6 +150,40 @@ Exit codes: 0 valid offline draft/read; 2 refused input/schema/permissions/appro
    implementation approval. Ownership completion and communications convergence
    must remain separate report dimensions.
 
+## Offline resource and identity protocol helpers (not live authority)
+
+`resources.py` assesses already-inventoried evidence. Independent ACP/raw shell/
+tmux/terminal/service jobs are preserved and observed, not adopted or restarted.
+Process identity requires host, boot/start identity and command fingerprint, not
+PID alone. A vanished parent/waiter is not a dead slice; rearming an existing
+waiter is only a proposal. Final report access requires finalization evidence.
+Native children wait or propose supported reattachment, with archive still
+blocked pending lifecycle proof. Missing exit/report remains UNKNOWN. Converted
+tool histories cannot prove side effects. Checkpoint assessment requires an
+explicit authorized transfer, verified accessible artifacts, retrievable history
+and a working set within an input budget (not the model's whole catalog window).
+No resource adapter or operation retry is invoked by these helpers.
+
+`directory.py` defines an immutable versioned directory and a separate mutable
+recipient/receipt protocol in pure functions. Current-owner generation and READY
+receipt references are checked before constructing a proposed commit; old/new
+full host/native/incarnation identities persist. A→B→C resolution preserves
+historical inspection; reused incarnations never borrow an alias. Recipient
+membership is a union, including protected/unmigrated peers. Transport acceptance,
+delivery and explicit applied receipts remain separate; applied receipts bind
+full authenticated recipient identity, update ID, epoch and digest. New epochs
+and changed incarnations invalidate application coverage while retaining prior
+receipts. Acks generate no new ack request.
+
+These helpers do not authenticate a live runtime or publish routing authority.
+Opaque receipt references must be verified by a future trusted adapter against
+actual artifacts; a checkpoint cannot bless itself. Directory persistence under
+an owner-generation transaction, bounded accessible manifests/full-roster
+bootstrap, durable retries/backoff, self-recipient acceptance, additive relay
+lookup/acks and direct/native transport return-route reconciliation remain
+unfinished. No live directory, alias or bulk notification has been installed.
+Do not use the pure helper outputs to claim fleet convergence.
+
 ## Task discovery discipline
 
 Before probing a workflow, config, report or test filename, enumerate its known
