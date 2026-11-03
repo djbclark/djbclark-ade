@@ -93,6 +93,7 @@ def registration(sid: str | None = None) -> dict:
     session_id = os.environ.get("PI_SESSION_ID")
     if not session_id or (sid is not None and sid != session_id):
         raise ValueError("Pi session identity missing or explicit ID is not this session")
+    nearest = None
     for pid, name in ancestors():
         file = root() / f"{pid}.json"
         if file.exists():
@@ -104,8 +105,13 @@ def registration(sid: str | None = None) -> dict:
                 raise ValueError("Pi bridge identity mismatch")
             return reg
         if name in RUNTIMES:
+            nearest = name
             break
-    raise ValueError("no owning Pi bridge; load skills/autorename/pi-bridge.ts in Pi")
+    omp_dir = Path(__file__).resolve().parent
+    if nearest == "omp" or (nearest is None and os.environ.get("OMPCODE") == "1"):
+        raise ValueError(f"this omp has not registered with the autorename bridge; link {omp_dir / 'omp-bridge.ts'}"
+                         " into ~/.omp/agent/extensions/ and restart omp")
+    raise ValueError(f"no owning Pi bridge; load {omp_dir / 'pi-bridge.ts'} in Pi")
 
 
 def request(reg: dict, action: str, **fields) -> dict:

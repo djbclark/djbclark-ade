@@ -84,6 +84,19 @@ os.environ.setdefault("RW_NO_DEPLOY", "1")
 os.environ["DEADLINE_NAME"] = ""
 
 
+# Pi/OMP/OpenCode identity markers steer bin/self-slash and autorename.py (2026-11-03). A suite run from inside such a
+# session must behave as on CI: scrub them, and give every test its own autorename state root, never ~/.local/state.
+_IDENTITY_VARS = ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL", "PI_CODING_AGENT",
+                  "AI_AGENT", "OMPCODE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY", "OPENCODE_SESSION_ID")
+
+
+@pytest.fixture(autouse=True)
+def _scrub_agent_identity(monkeypatch, tmp_path_factory):
+    for var in _IDENTITY_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AUTORENAME_STATE_DIR", str(tmp_path_factory.mktemp("autorename-state")))
+
+
 @pytest.fixture(autouse=True)
 def _fresh_relay_links():
     """No test inherits another's first-contact state: relay.py's footer and the link ledger depend on it (2026-10-25)."""

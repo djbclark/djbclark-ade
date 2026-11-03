@@ -270,7 +270,7 @@ def grok_set_title(summary: Path, title: str) -> None:
 # Layout (cursor-agent 2026.10.01): ~/.cursor/chats/<md5(cwd)>/<uuid>/ holds
 # store.db (tables blobs, meta), meta.json and prompt_history.json.
 
-STATE_DIR = Path.home() / ".local/state/autorename"
+STATE_DIR = Path(os.environ.get("AUTORENAME_STATE_DIR", Path.home() / ".local/state/autorename"))
 AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok", "opencode": "opencode",
                "codex": "codex", "omp": "omp"}
 

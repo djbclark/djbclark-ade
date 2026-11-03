@@ -61,6 +61,14 @@ bypass. Custom Pi session IDs are opaque strings, never filename components.
 Ephemeral sessions use a null session-file identity. Environments without Pi
 markers retain the preexisting non-Pi selection and host behavior.
 
+Known limitation (2026-11-03, deliberate): a Claude Code, Codex, Grok or
+cursor-agent session started inside a Pi/OMP shell inherits `PI_SESSION_ID`, and
+those runtimes are barriers, so its autorename and self-slash refuse (exit 2)
+instead of falling back to its own host. Letting the nearer runtime win would
+need per-runtime proof that it is not a wrapper around the Pi parent; until
+that exists, unset the inherited `PI_*`/`AI_AGENT` variables when launching such a
+nested agent.
+
 The registration includes the selected provider, model and effective reasoning
 level. Compaction checks shell values at dispatch and rechecks them in Pi both
 at admission and before execution. Virtual routing does not substitute the last

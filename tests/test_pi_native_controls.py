@@ -24,6 +24,7 @@ def native(monkeypatch, tmp_path):
             monkeypatch.delenv(key)
     monkeypatch.setenv("PI_SESSION_ID", "custom/id")
     monkeypatch.setenv("PI_SESSION_FILE", "/session.jsonl")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "agent"))
     monkeypatch.setattr(mod, "ancestors", lambda: [(22, "bash"), (42, "pi")])
     reg = dict(version=1, pid=42, instance="a" * 32, session_id="custom/id",
                session_file="/session.jsonl", provider="openai", model="test", thinking="high")
@@ -34,16 +35,13 @@ def native(monkeypatch, tmp_path):
 
 
 def load_autorename(name, monkeypatch, mod):
-    """Load autorename with every state path redirected into the fixture root."""
+    """Load autorename AFTER the fixture set AUTORENAME_STATE_DIR: its paths must follow that variable unpatched."""
     spec = importlib.util.spec_from_file_location(name, SKILL / "autorename.py")
     rename = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rename)
-    state = mod.root().parent
-    monkeypatch.setattr(rename, "STATE_DIR", state)
-    monkeypatch.setattr(rename, "OMP_DIR", state / "omp")
-    monkeypatch.setattr(rename, "OMP_SESSIONS", state / "isolated-sessions")
     monkeypatch.setattr(rename, "pi_native", mod)
-    assert rename.OMP_DIR.parent == mod.root().parent
+    assert rename.STATE_DIR == mod.root().parent
+    assert rename.OMP_DIR == mod.root().parent / "omp"
     return rename
 
 
@@ -69,7 +67,7 @@ def test_nested_unregistered_runtime_blocks_parent(native, monkeypatch, name):
     mod, _ = native
     monkeypatch.setattr(mod, "ancestors", lambda: [(30, name), (42, "pi")])
     assert mod.selected(), "unverified child must not unlock inherited host routes"
-    with pytest.raises(ValueError, match="no owning"):
+    with pytest.raises(ValueError, match="omp-bridge.ts" if name == "omp" else "no owning"):
         mod.registration()
 
 
@@ -119,12 +117,36 @@ def test_self_slash_never_reaches_inherited_host(tmp_path, command):
 
 
 def test_autorename_missing_pi_never_renames_parent(tmp_path):
-    env = dict(os.environ, PI_SESSION_ID="missing", PI_SESSION_FILE="/missing",
+    scrubbed = {k: v for k, v in os.environ.items() if not k.startswith(("PI_", "ADE_OPENCODE_", "OPENCODE_"))
+                and k not in {"AI_AGENT", "OMPCODE"}}
+    env = dict(scrubbed, HOME=str(tmp_path / "home"), PI_SESSION_ID="missing", PI_SESSION_FILE="/missing",
                AUTORENAME_STATE_DIR=str(tmp_path), CLAUDE_CODE_SESSION_ID="parent")
     result = subprocess.run([sys.executable, str(SKILL / "autorename.py"), "Title"],
                             env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 2
     assert "nothing else renamed" in result.stderr
+
+
+def test_autorename_paths_follow_state_env_unpatched(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k != "AUTORENAME_STATE_DIR"}
+    env.update(HOME=str(tmp_path / "home"), AUTORENAME_STATE_DIR=str(tmp_path / "state"))
+    code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('a',sys.argv[1]);m=importlib.util.module_from_spec(s);"
+            "s.loader.exec_module(m);print(m.STATE_DIR);print(m.OMP_DIR)")
+    out = subprocess.run([sys.executable, "-c", code, str(SKILL / "autorename.py")], env=env,
+                         capture_output=True, text=True, timeout=20, check=True).stdout.split()
+    assert out == [str(tmp_path / "state"), str(tmp_path / "state/omp")]
+
+
+def test_unregistered_omp_names_omp_bridge(native, monkeypatch):
+    mod, _ = native
+    monkeypatch.setattr(mod, "ancestors", lambda: [(22, "bash"), (30, "omp"), (42, "pi")])
+    monkeypatch.setenv("OMPCODE", "1")
+    with pytest.raises(ValueError, match="omp-bridge.ts"):
+        mod.registration()
+    monkeypatch.setattr(mod, "ancestors", lambda: [(22, "bash"), (30, "node")])
+    monkeypatch.delenv("OMPCODE")
+    with pytest.raises(ValueError, match="pi-bridge.ts"):
+        mod.registration()
 
 
 def test_autorename_uses_bridge_without_host_side_effects(native, monkeypatch, capsys):
