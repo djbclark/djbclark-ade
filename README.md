@@ -94,6 +94,7 @@ their old paths are symlinks into this checkout).
 
 | Skill | One line |
 |---|---|
+| [`fleet-migrate`](skills/fleet-migrate/SKILL.md) | Safe TUI migration planning (implementation in progress): offline drafts, hard workspace exclusions and explicit refusal of unsupported live ownership/communications transitions. |
 | [`bigteam`](skills/bigteam/SKILL.md) | Run a prompt as a multi-vendor fan-out: probe every quota pool, slice into file-scoped assignments, dispatch, integrate. |
 | [`model-routing`](skills/model-routing/SKILL.md) | Which vendor × model × effort for which work; reading `aiuse` pools. |
 | [`oc-go-key`](skills/oc-go-key/SKILL.md) | Recover a session that stopped on `Go usage limit exceeded` / `Insufficient account funds`: `scripts/go-status` reads the live account state, `oc-go-key use <label>` swaps it for running sessions, and the aborted turn is resumed by relay — never by opening a new tab. |

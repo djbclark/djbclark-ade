@@ -184,6 +184,33 @@ lookup/acks and direct/native transport return-route reconciliation remain
 unfinished. No live directory, alias or bulk notification has been installed.
 Do not use the pure helper outputs to claim fleet convergence.
 
+## Development checkpoint (2026-11-03 UTC)
+
+Focused Linux CI at `e6fd50a0f2f95c3204aab3d9b97832d699c13fd5`:
+[run 41714510722](https://github.com/djbclark/djbclark-ade/actions/runs/41714510722),
+98 fleet-migrate tests passed; context-policy 142 passed, 20 skipped. Earlier
+full-suite CI at `fb7762043d4f5b3db38c091f95e94f5ef2411d72`:
+[run 41712995632](https://github.com/djbclark/djbclark-ade/actions/runs/41712995632),
+still running at this checkpoint. It covers that earlier head only. No local
+suite, paid smoke test, live migration or bulk notification was performed.
+
+The separately permitted Pi Astra/high frontier advisory admission was tested
+with `acp-dispatch ... --kind frontier --role advise --perm read-only --dry-run`.
+It refused before launch (exit 2): **Pi is not eligible for frontier**, whose
+current eligible routes are antigravity-argon, Claude and Codex. No reviewer or
+report was launched; no missing report was read. Do not use route-override,
+change pools, expand a capacity mapping or call raw Pi to bypass that gate.
+This task pauses before activation/relay correctness-sensitive integration;
+resume when a normally admitted review route is available under the brief.
+
+Still required before delivery: authoritative full-scope inventory/membership
+adapters, durable transition/intent-result coordinator and crash/concurrency
+simulation, resource adapters, persisted identity-directory/relay/launch
+integration and full convergence matrix, bounded manifests/retry reconciliation,
+independent current-head adversary/local review, full current-head CI, PR-numbered
+changelog fragment and reviewable PR. The canonical skill exists but is explicitly
+WIP and is not installed. No claim that these mandatory pieces are complete.
+
 ## Task discovery discipline
 
 Before probing a workflow, config, report or test filename, enumerate its known
