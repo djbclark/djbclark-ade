@@ -175,7 +175,9 @@ def probe() -> dict[str, object]:
         cases = json.load(sys.stdin)
         tmp = tempfile.mkdtemp(prefix="ro-denial-")
         REPO, NOREPO = os.path.join(tmp, "repo"), os.path.join(tmp, "norepo")
-        os.makedirs(os.path.join(REPO, ".git")); os.makedirs(os.path.join(REPO, "sub"))
+        import subprocess
+        os.makedirs(os.path.join(REPO, "sub"))
+        subprocess.run(["git", "init", "-q", REPO], check=True)
         os.makedirs(os.path.join(REPO, "evil", "objects")); os.makedirs(os.path.join(REPO, "evil", "refs"))
         for f in ("HEAD", "config"):
             open(os.path.join(REPO, "evil", f), "w").write("x")
@@ -204,11 +206,51 @@ def probe() -> dict[str, object]:
         junk = os.path.join(tmp, "gf-junk"); os.makedirs(junk)
         open(os.path.join(junk, ".git"), "w").write("junk")
         out["gitfile"] = {
-            "worktree": mod.readonly_command("git log", gitfile("gf-ok", wt)),
-            "hostile_dir": mod.readonly_command("git log", gitfile("gf-evil", evil_dir)),
-            "inside_tree": mod.readonly_command("git log", inside),
-            "dangling": mod.readonly_command("git log", gitfile("gf-gone", os.path.join(tmp, "nope", ".git", "worktrees", "w"))),
-            "not_a_gitfile": mod.readonly_command("git log", junk)}
+            "worktree": mod.ro_git_dir_ok(gitfile("gf-ok", wt)) is not None,
+            "hostile_dir": mod.ro_git_dir_ok(gitfile("gf-evil", evil_dir)) is not None,
+            "inside_tree": mod.ro_git_dir_ok(inside) is not None,
+            "dangling": mod.ro_git_dir_ok(gitfile("gf-gone", os.path.join(tmp, "nope", ".git", "worktrees", "w"))) is not None,
+            "not_a_gitfile": mod.ro_git_dir_ok(junk) is not None}
+        # git config helpers: a helper key naming a tracked script (relative path, or a path inside the
+        # repo) is refused; the operator's own absolute or bare-name helpers are not
+        def conf_repo(name, *settings):
+            d = os.path.join(tmp, name)
+            subprocess.run(["git", "init", "-q", d], check=True)
+            for k, v in settings:
+                subprocess.run(["git", "-C", d, "config", k, v], check=True)
+            return mod.readonly_command("git diff HEAD~1", d)
+        out["git_config"] = {
+            "plain": conf_repo("c-plain"),
+            "external_relative": conf_repo("c-ext", ("diff.external", "./scripts/diff.sh")),
+            "external_inside": conf_repo("c-ext2", ("diff.external", os.path.join(tmp, "c-ext2", "x.sh"))),
+            "external_slash": conf_repo("c-ext3", ("diff.external", "tools/d")),
+            "textconv": conf_repo("c-tc", ("diff.py.textconv", "scripts/tc.sh")),
+            "command": conf_repo("c-cmd", ("diff.py.command", "./x")),
+            "fsmonitor": conf_repo("c-fs", ("core.fsmonitor", ".githooks/fsmon")),
+            "filter_clean": conf_repo("c-fc", ("filter.x.clean", "./clean.sh %f")),
+            "gpg_program": conf_repo("c-gpg", ("gpg.program", "bin/sign")),
+            "ssh_program": conf_repo("c-gpg2", ("gpg.ssh.program", "./sign")),
+            "lfs_bare_name": conf_repo("c-lfs", ("filter.lfs.clean", "git-lfs clean -- %f"),
+                                       ("filter.lfs.process", "git-lfs filter-process")),
+            "absolute_outside": conf_repo("c-abs", ("diff.external", "/usr/bin/true")),
+            "fsmonitor_true": conf_repo("c-fst", ("core.fsmonitor", "true")),
+            "pager_is_not_a_helper": conf_repo("c-pg", ("core.pager", "./x")),
+        }
+        saved = dict(os.environ)
+        env_out = {}
+        for name in ("GIT_EXTERNAL_DIFF", "GIT_DIR", "GIT_WORK_TREE"):
+            os.environ[name] = "x"
+            env_out[name] = mod.readonly_command("git log", REPO)
+            del os.environ[name]
+        os.environ.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "diff.external", "GIT_CONFIG_VALUE_0": "./evil.sh"})
+        env_out["injected_config_helper"] = mod.readonly_command("git log", REPO)
+        os.environ["GIT_CONFIG_VALUE_0"] = "/usr/bin/true"
+        env_out["injected_config_operator_helper"] = mod.readonly_command("git log", REPO)
+        for k in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+            del os.environ[k]
+        env_out["clean"] = mod.readonly_command("git log", REPO)
+        out["git_env"] = env_out
+        out["not_a_dir"] = mod.readonly_command("git log", os.path.join(tmp, "missing"))
 
         def call(command, kind="execute"):
             return types.SimpleNamespace(kind=kind, title="Run command", tool_call_id="t1",
@@ -236,7 +278,7 @@ def probe() -> dict[str, object]:
 
         # the turn loop: a turn that ends `cancelled` on a refusal that can only end it continues in the
         # same session; one that ends on a refusal that kept the turn alive, or on an operator cancel, does not
-        async def turns(denial, cancelled_by_operator=False, stops=("cancelled", "end_turn"), limit=None):
+        async def turns(denial, cancelled_by_operator=False, stops=("cancelled", "end_turn"), limit=None, silent_after=False):
             c = mod.RunClient(io.StringIO(), "read-only", "/tmp")
             if limit is not None:
                 c.denial_continues = limit
@@ -244,7 +286,8 @@ def probe() -> dict[str, object]:
             n = [0]
             async def prompt(session_id, prompt):
                 prompts.append(prompt[0].text)
-                c.text.append(f"words of turn {n[0] + 1}. ")
+                if not (silent_after and n[0] >= 1):
+                    c.text.append(f"words of turn {n[0] + 1}. ")
                 stop = stops[min(n[0], len(stops) - 1)]
                 n[0] += 1
                 if stop == "cancelled" and denial:
@@ -256,11 +299,14 @@ def probe() -> dict[str, object]:
                                       wrapup_grace=0)
             res = {}
             r = await mod.prompt_turn(a, conn, types.SimpleNamespace(session_id="s"), c, "brief", res)
+            c.tools = 1  # the agent used a tool before the refusal
+            vcode, _ = mod.verdict(a, res, r[0], r[1], r[2], c)
             return {"prompts": prompts, "stop": res.get("stop_reason"), "finished": r[0], "code": r[2],
-                    "text": "".join(c.text)}
+                    "text": "".join(c.text), "verdict": vcode}
         END = {"tool": "Run command", "command": "curl https://x", "option": "cancel", "ends_turn": True}
         ALIVE = dict(END, option="decline", ends_turn=False)
         out["loop_continues"] = asyncio.run(turns(END))
+        out["loop_silent_continuation"] = asyncio.run(turns(END, silent_after=True))
         out["loop_keepalive"] = asyncio.run(turns(ALIVE))
         out["loop_operator"] = asyncio.run(turns(END, cancelled_by_operator=True))
         out["loop_bounded"] = asyncio.run(turns(END, stops=("cancelled",)))
@@ -303,6 +349,22 @@ class TestReadOnlyDenial(unittest.TestCase):
         self.assertEqual(self.res["gitfile"], {"worktree": True, "hostile_dir": False, "inside_tree": False,
                                                "dangling": False, "not_a_gitfile": False})
 
+    def test_git_is_refused_when_its_config_runs_a_helper_from_the_tree(self):
+        g = self.res["git_config"]
+        for name in ("external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
+                     "filter_clean", "gpg_program", "ssh_program"):
+            self.assertFalse(g[name], name)
+        for name in ("plain", "lfs_bare_name", "absolute_outside", "fsmonitor_true", "pager_is_not_a_helper"):
+            self.assertTrue(g[name], name)
+
+    def test_git_is_refused_under_environment_that_injects_a_helper_or_config(self):
+        e = self.res["git_env"]
+        self.assertEqual([e[k] for k in ("GIT_EXTERNAL_DIFF", "GIT_DIR", "GIT_WORK_TREE")], [False] * 3)
+        self.assertFalse(e["injected_config_helper"])
+        self.assertTrue(e["injected_config_operator_helper"])
+        self.assertTrue(e["clean"])
+        self.assertFalse(self.res["not_a_dir"])
+
     def test_the_requests_own_cwd_decides(self):
         self.assertEqual(self.res["tool_cwd"], [self.res["repo"], None, None])
 
@@ -344,6 +406,12 @@ class TestReadOnlyDenial(unittest.TestCase):
     def test_the_reply_keeps_the_words_of_every_turn(self):
         self.assertEqual(self.res["loop_continues"]["text"], "words of turn 1. words of turn 2. ")
         self.assertEqual(self.res["loop_no_denial"]["text"], "words of turn 1. ")
+
+    def test_a_continuation_that_says_nothing_is_not_a_delivery(self):
+        r = self.res["loop_silent_continuation"]
+        self.assertEqual(r["text"], "words of turn 1. ")        # kept for the output
+        self.assertNotEqual(r["verdict"], 0)                   # but turn 1's words do not satisfy the check
+        self.assertEqual(self.res["loop_continues"]["verdict"], 0)
 
     def test_a_deny_run_is_not_told_to_use_tools(self):
         self.assertNotIn("reading tools", self.res["deny_text"])

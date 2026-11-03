@@ -755,8 +755,59 @@ def ro_gitfile_ok(path, worktree):
             and re.search(r"/\.git/(worktrees|modules)/[^/]", target + "/") is not None)
 
 
+# Git config keys whose value is a program git runs while reading: a diff driver (`diff.external`,
+# `diff.<d>.textconv|command`, also reached by --textconv), the fsmonitor hook, a clean/smudge filter
+# (`git diff` and `cat-file --filters` apply them) and a signature program (`log --show-signature`).
+RO_GIT_HELPER_KEYS = re.compile(
+    r"diff\.external|diff\..+\.(textconv|command)|core\.fsmonitor|filter\..+\.(clean|smudge|process)"
+    r"|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand", re.IGNORECASE)
+# Environment that makes git run a helper or read another repository no matter what the config says.
+# (GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS and GIT_CONFIG_GLOBAL are not listed: `git config --list` below
+# reads them, so a helper they name is judged like any other.)
+RO_GIT_ENV_BAD = ("GIT_EXTERNAL_DIFF", "GIT_DIR", "GIT_WORK_TREE")
+
+
+def ro_git_config_ok(base, root):
+    """True when git run in `base` (repository root `root`) can run no helper from the reviewed tree. Git
+    runs `diff.external`, a textconv or clean filter, `core.fsmonitor` and `gpg.program` as programs outside
+    codex's sandbox, and a repository config that names a tracked script (one the reviewed change may have
+    rewritten) would execute it for a plain `git diff`. Refused: a helper key whose program is a relative
+    path, a path inside `root`, or unreadable config. An operator's own helper by absolute path or bare
+    name (git-lfs) stays allowed. GIT_EXTERNAL_DIFF, GIT_DIR and GIT_WORK_TREE refuse git too."""
+    if any(os.environ.get(k) for k in RO_GIT_ENV_BAD):
+        return False
+    try:
+        r = subprocess.run(["git", "-C", base, "config", "--list", "-z"], capture_output=True, text=True,
+                           timeout=10, check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if r.returncode:
+        return False
+    root = os.path.realpath(root)
+    for entry in r.stdout.split("\0"):
+        key, _, value = entry.partition("\n")
+        if not key or not RO_GIT_HELPER_KEYS.fullmatch(key):
+            continue
+        if value.strip().lower() in ("", "true", "false", "yes", "no", "on", "off", "0", "1"):
+            continue  # core.fsmonitor=true is git's builtin daemon; a bare key runs nothing
+        try:
+            first = shlex.split(value)[0]
+        except (ValueError, IndexError):
+            return False
+        first = os.path.expanduser(first)
+        if os.path.isabs(first):
+            real = os.path.realpath(first)
+            if real == root or real.startswith(root + os.sep):
+                return False
+        elif "/" in first or first.startswith("."):
+            return False
+        # a bare name is looked up through PATH, the operator's own
+    return True
+
+
 def ro_git_dir_ok(base):
-    """True when git run in `base` finds an ordinary repository, not a bare one committed inside the tree
+    """The repository root when git run in `base` finds an ordinary repository, else None. Not a bare one
+    committed inside the tree not a bare one committed inside the tree
     under review: git looks in each directory, from `base` up, for `.git` and then for a directory that is
     itself a repository (HEAD, objects/, refs/), and runs the config of whichever it meets first
     (diff.external, core.fsmonitor, gpg.program). A tree without `.git` anywhere above is refused; a `.git`
@@ -765,15 +816,22 @@ def ro_git_dir_ok(base):
     while True:
         dotgit = os.path.join(d, ".git")
         if os.path.isdir(dotgit):
-            return True
+            return d
         if os.path.isfile(dotgit):
-            return ro_gitfile_ok(dotgit, d)
+            return d if ro_gitfile_ok(dotgit, d) else None
         if all(os.path.exists(os.path.join(d, n)) for n in ("HEAD", "objects", "refs")):
-            return False
+            return None
         parent = os.path.dirname(d)
         if parent == d:
-            return False
+            return None
         d = parent
+
+
+def ro_git_repo_ok(base):
+    """Git may run in `base`: an ordinary repository (ro_git_dir_ok) whose config names no helper from the
+    tree (ro_git_config_ok)."""
+    root = ro_git_dir_ok(base)
+    return root is not None and ro_git_config_ok(base, root)
 
 
 def ro_tokens(script):
@@ -872,7 +930,7 @@ def ro_segment(words, cwd, depth):
             base = os.path.join(base, args[1]) if base else None
             args = args[2:]
         return (bool(args) and args[0] in RO_GIT and base is not None and not ro_long_bad(args[1:], "git")
-                and not ro_short_bad(args[1:]) and ro_git_dir_ok(base))
+                and not ro_short_bad(args[1:]) and ro_git_repo_ok(base))
     if ro_long_bad(args, name):
         return False
     if name == "curl":
@@ -2281,6 +2339,7 @@ class RunClient(Client):
         self.denial = None
         self.fallback = None  # {"from", "reason", "to"} once the agent switched models mid-session
         self.denial_continues = DENIAL_CONTINUES if perm in RESTRICTED_PERMS else 0
+        self.turn_from = 0  # index in self.text where the current turn's words start
 
     def rec(self, kind, data):
         row = {"t": round(time.time(), 3), "kind": kind, "data": data}
@@ -3463,6 +3522,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             if not keep_text:  # a denial continuation adds to the reply: earlier turns' words stay judged
                 client.text = []
             client.denial, keep_text = None, False
+            client.turn_from = len(client.text)  # the reply judged below is this turn's words only
             if client.err_path:
                 try:
                     client.err_mark = os.path.getsize(client.err_path)
@@ -3555,7 +3615,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                 if resp.usage:
                     out["usage"] = dump(resp.usage)
                 failure = client.last_failure = reply_failure(
-                    "".join(client.text),
+                    "".join(client.text[getattr(client, "turn_from", 0):]),
                     client.tools,
                     stderr_since(client.err_path, client.err_mark)
                     if client.err_path
@@ -3581,7 +3641,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
         if finished and not failure and code is None and out.get("stop_reason") == "end_turn":
             check_code, _ = select_exit(
                 out.get("stop_reason"),
-                "".join(client.text),
+                "".join(client.text[getattr(client, "turn_from", 0):]),
                 client.tools,
                 client.allowed,
                 client.denied,
@@ -3671,7 +3731,9 @@ def verdict(a, out, finished, failure, code, client):
     if finished:
         code, msg = select_exit(
             out.get("stop_reason"),
-            "".join(client.text),
+            # the last turn's words: after a denial continuation, an earlier turn's "I will look next"
+            # is no delivery (the full text still goes to the output)
+            "".join(client.text[getattr(client, "turn_from", 0):]),
             client.tools,
             client.allowed,
             client.denied,
@@ -5055,6 +5117,11 @@ async def run(a, log, err, log_path):
             f"tools={tools}",
             f"perm={allowed}+/{denied}-",
         ]
+        if getattr(a, "perm", None) in RESTRICTED_PERMS:
+            # did the FINAL turn end on a refused permission (denied above is the run's total)
+            last = getattr(client, "denial", None)
+            bits.append("refusal_end=" + ("1" if out.get("stop_reason") == "cancelled" and last
+                                          and last.get("ends_turn") else "0"))
         if repl is not None:
             bits.append(f"turns={repl.n}")
         tok = u.get("totalTokens") or u.get("total_tokens")
