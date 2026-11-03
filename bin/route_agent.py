@@ -94,7 +94,7 @@ agent's default unless the slice reads a whole corpus or a long log).
 Usage:
     route_agent.py route --kind bulk
     route_agent.py route --kind judgment --json
-    route_agent.py refresh          # force a synchronous quota refresh
+    aiuse --available --live --json # (not route_agent) force a fresh quota collect; this script only reads aiuse's snapshot
     route_agent.py show             # cache age, headroom, pace, expected waste
     route_agent.py calibrate [--since DAYS] [--json] [--min N]
 """
