@@ -9,6 +9,7 @@ One file per agent. Contract (the core, `session-history.py`, loads every `*.py`
                "fp": "<size:mtime or row count>",   # changes iff the session changed
                "mtime": <epoch float>,    # last activity
                "supersedes": ["old-key"], # optional migration: same-agent/id/cwd legacy rows retired after successful load
+                                          # (an entry may be ("old-key", "old-sid") when the legacy row stored another sid)
                "load": <callable>}        # -> (cwd, title, [(role, text), ...]); role is "user"|"assistant"
     def live() -> set[str]:               # optional: native sids that are running now
     def live_info() -> dict:              # optional, for messaging: sid -> {"pid", "procStart", "name"}

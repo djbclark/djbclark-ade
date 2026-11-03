@@ -89,6 +89,7 @@ from typing import Any
 MARK = '"type":"custom-title"'
 MAX_LEN = 80
 INVISIBLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
+JOINERS = frozenset({"\u200c", "\u200d"})
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "session-finder"))
 import claude_identity  # noqa: E402  # the shared Claude session-id resolver
@@ -97,9 +98,10 @@ import pi_native  # noqa: E402
 
 
 def clean(title: str) -> str:
-    # Unicode categories Cc (C0/C1 controls), Cf (bidi marks and isolates, zero-width characters, BOM), Zl and Zp (line and
-    # paragraph separators); the Pi and omp bridges reject the same set (\p{Cc}\p{Cf}\p{Zl}\p{Zp}). Emoji and accents stay.
-    title = "".join(" " if unicodedata.category(c) in INVISIBLE else c for c in title)
+    # Unicode categories Cc (C0/C1 controls), Cf (bidi marks and isolates, zero-width space/word joiner, BOM), Zl and Zp (line and
+    # paragraph separators); the Pi and omp bridges reject the same set. U+200C/U+200D (ZWNJ/ZWJ) stay: they are part of the text of
+    # Persian, Devanagari and emoji sequences (a ZWJ family), and splitting a word at them changes it.
+    title = "".join(" " if unicodedata.category(c) in INVISIBLE and c not in JOINERS else c for c in title)
     title = re.sub(r"\s+", " ", title.replace('"', "")).strip().strip("'`")
     return title[:MAX_LEN].rstrip()
 

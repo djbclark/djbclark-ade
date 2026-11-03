@@ -247,19 +247,23 @@ def main() -> int:
             print(f"history search failed: {e}", file=sys.stderr)
             history_failed = True
             found = []
-        # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
+        # asked for 80, not 20: sessions the fleet already lists are dropped below, and must not crowd out the other hits
         found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
-        for i, h in enumerate(f for f in found if identity(f) not in live_ids and not f.get("live")):
+        for i, h in enumerate(f for f in found if identity(f) not in live_ids):
             row = exited.get(identity(h))
             if row:
                 row["score"] = max(row["score"], max(1, 40 - i))
                 row["match"] = h.get("snippet") or row["match"]  # why it matched, not the fleet's delivery hint
                 row["resume"] = h.get("resume", "")
                 continue
-            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,
+            # the history's own verdict, shown as it gave it: LIVE (an exact check found it running; no resume line, it would fork
+            # a session another process holds), LIVE? (could not tell) or ended
+            state = h.get("state") if h.get("state") in ("LIVE", "LIVE?") else "ended"
+            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "cwd": h.get("cwd") or None,
+                         "status": {"LIVE": "running", "LIVE?": "unknown"}.get(state, "ended"), "state": state,
                          "titles": [h["title"]] if h.get("title") else [], "score": max(1, 40 - i), "match": h.get("snippet", ""),
-                         "live": False, "self": False, "agent": h.get("agent", ""), "finished": "",
-                         "where": None, "resume": h.get("resume", "")})
+                         "live": state == "LIVE", "self": False, "agent": h.get("agent", ""), "finished": "",
+                         "where": None, "resume": "" if state == "LIVE" else h.get("resume", "")})
 
     if a.list:
         hits = rows
@@ -269,7 +273,7 @@ def main() -> int:
         print(json.dumps(hits, indent=1))
     else:
         for r in hits:
-            tag = "live" if r["live"] else "ended"
+            tag = r.get("state") if r.get("state") == "LIVE?" else "live" if r["live"] else "ended"
             me_tag = " (this session)" if r["self"] else ""
             fin = f"  FINISHED ({r['finished']}): start a /baton session, do not message it" if r.get("finished") else ""
             agent = f"{r['agent']} " if r.get("agent") else ""

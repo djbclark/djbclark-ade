@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -298,7 +299,7 @@ print('42001 1 pi')
 
 
 @pytest.mark.parametrize("ch", ["\x85", "\x9f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069", "\x07", "\x7f",
-                                "\u200e", "\u200f", "\u061c", "\u200b", "\u200d", "\u2060", "\ufeff"])
+                                "\u200e", "\u200f", "\u061c", "\u200b", "\u2060", "\ufeff"])
 def test_clean_strips_controls_like_the_bridge_rejects(native, monkeypatch, ch):
     # Cc, Cf, Zl and Zp: the invisible bidi marks, zero-width characters and BOM too (2026-11-03, audit A12)
     rename = load_autorename("autorename_clean_test", monkeypatch, native[0])
@@ -306,9 +307,28 @@ def test_clean_strips_controls_like_the_bridge_rejects(native, monkeypatch, ch):
     assert rename.clean(ch) == ""
 
 
-def test_clean_keeps_normal_text(native, monkeypatch):
+JOINED = ["می\u200cخواهم", "👨\u200d👩\u200d👧", "क्\u200dष", "Café résumé 🚀 naïve – 日本語"]
+
+
+@pytest.mark.parametrize("text", JOINED)
+def test_clean_keeps_normal_text_and_zero_width_joiners(native, monkeypatch, text):
+    # ZWNJ/ZWJ are text (Persian, Devanagari, emoji sequences), not invisible controls
     rename = load_autorename("autorename_clean_keep_test", monkeypatch, native[0])
-    assert rename.clean("Café résumé 🚀 naïve – 日本語") == "Café résumé 🚀 naïve – 日本語"
+    assert rename.clean(text) == text
+
+
+def test_omp_bridge_rejects_the_same_invisible_set_and_keeps_joiners():
+    # omp-bridge.ts is TypeScript (not loadable as .mjs): run its validation regex, as written in the file, in Node
+    node = shutil.which("node")
+    assert node, "Node required for the bridge regression contract"
+    literal = re.search(r"if \((/.+?/u)\.test\(title\)\) throw new Error\(\"invalid title\"\)", (SKILL / "omp-bridge.ts").read_text())
+    assert literal, "omp-bridge.ts no longer validates the title"
+    script = f"""const bad = {literal.group(1)};
+const ok = {json.dumps(JOINED)}, no = {json.dumps(["a\u200eb", "a\u200fb", "a\u061cb", "a\u200bb", "a\u2060b", "a\ufeffb", "a\u2028b", "a\u202eb", "a\x07b", "a\x85b"])};
+console.log(JSON.stringify([ok.map(t => bad.test(t)), no.map(t => bad.test(t))]));"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30, check=True).stdout
+    kept, rejected = json.loads(out)
+    assert kept == [False] * len(JOINED) and rejected == [True] * 10
 
 
 def test_native_extension_contract(tmp_path):
@@ -374,9 +394,14 @@ assert.equal(title, 'Auto 2');
 assert.equal(request({action:'rename', title:'Explicit', auto:false}).status, 'renamed');
 assert.equal(reg().source, 'user');
 for (const bad of ['a\u0085b', 'a\u009fb', 'a\u2028b', 'a\u2029b', 'a\u202eb', 'a\u2066b', 'a\u2069b', 'a\u0007b', 'a\u007fb',
-  'a\u200eb', 'a\u200fb', 'a\u061cb', 'a\u200bb', 'a\u200db', 'a\u2060b', 'a\ufeffb']) {
+  'a\u200eb', 'a\u200fb', 'a\u061cb', 'a\u200bb', 'a\u2060b', 'a\ufeffb']) {
   assert.equal(request({action:'rename', title:bad, auto:false}).accepted, false, JSON.stringify(bad));
 }
+for (const good of ['\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645', '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}', '\u0915\u094d\u200d\u0937']) {
+  assert.equal(request({action:'rename', title:good, auto:false}).accepted, true, JSON.stringify(good));
+  assert.equal(title, good);
+}
+assert.equal(request({action:'rename', title:'Explicit', auto:false}).status, 'renamed');
 assert.equal(title, 'Explicit');
 assert.equal(request({action:'rename', title:'Wrong', session_id:'parent'}).accepted, false);
 assert.equal(request({action:'rename', title:'Wrong', instance:'stale'}).accepted, false);

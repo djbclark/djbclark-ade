@@ -119,7 +119,7 @@ export default function (pi) {
         if (body.nonce !== nonce || !Number.isFinite(body.expires) || body.expires < Date.now()) throw new Error("invalid or expired request");
         identity(body);
         if (body.action === "rename") {
-          if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 80 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(body.title)) throw new Error("invalid title");
+          if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 80 || /(?![\u200c\u200d])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(body.title)) throw new Error("invalid title");
           if (body.auto === true && nameState().source === "user") {
             result.status = "skipped: operator-set title kept";
           } else {

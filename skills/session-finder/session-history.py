@@ -84,10 +84,12 @@ def update(db, mods, only=()):
             )
             db.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?)",
                        (s["key"], m.AGENT, s["sid"], s["fp"], cwd or "", title or "", s["mtime"]))
-            for old_key in s.get("supersedes", ()):
+            for old in s.get("supersedes", ()):
+                # a bare key was stored under this session's sid; a (key, sid) pair under another one (a sid once taken from a file name)
+                old_key, old_sid = (old, s["sid"]) if isinstance(old, str) else old
                 if old_key != s["key"] and db.execute(
                     "SELECT 1 FROM files WHERE key=? AND agent=? AND sid=? AND cwd=?",
-                    (old_key, m.AGENT, s["sid"], cwd or ""),
+                    (old_key, m.AGENT, old_sid, cwd or ""),
                 ).fetchone():
                     db.execute("DELETE FROM msgs WHERE key=?", (old_key,))
                     db.execute("DELETE FROM files WHERE key=?", (old_key,))

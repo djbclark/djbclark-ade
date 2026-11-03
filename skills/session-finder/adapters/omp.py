@@ -12,7 +12,7 @@ indexed anyway, and a `PI_CODING_AGENT_DIR` that omp ignores in a named profile 
 
 Keys are `omp:<absolute session file>`: ids repeat across stores and an id taken from a file name collides (`daily.jsonl` in two
 projects). The native id comes from a canonical `<ISO timestamp>_<id>` file name, else from the header (`jsonl_session`), and the old
-`omp:<id>` row is retired once the file is indexed. The resume hint is `omp --resume=<id>` only for a canonical file of the default
+`omp:<id>` row (and, for a noncanonical name, the `omp:<file name>` row) is retired once the file is indexed. The resume hint is `omp --resume=<id>` only for a canonical file of the default
 store; any other store gets `omp --resume=<absolute file>`, which needs no profile or directory variable in the caller's environment.
 
 Liveness is exact: `live_among` asks `omp session lease --json -- <ids>` (the lease a running omp holds on every session it writes,
@@ -106,8 +106,11 @@ def sessions():
             if not sid:
                 continue
             seen.add(key)
+            legacy = path.stem.split("_", 1)[-1]  # what the first adapter took for the id: the whole name after the first underscore
             yield {"key": key, "sid": sid,
-                   "supersedes": [f"omp:{sid}"],  # retire the old, globally colliding key after a successful load
+                   # retire the old, globally colliding keys after a successful load: `omp:<id>`, and `omp:<file name id>` stored with
+                   # that name as its sid (a noncanonical `daily.jsonl`, whose id is in its header)
+                   "supersedes": [f"omp:{sid}", *([(f"omp:{legacy}", legacy)] if legacy != sid else [])],
                    "fp": f"{st.st_size}:{st.st_mtime_ns}", "mtime": st.st_mtime,
                    "load": lambda p=path: _read(p)}
 
@@ -124,8 +127,8 @@ def live_among(sids):
                                timeout=LEASE_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
             answer = json.loads(p.stdout) if p.returncode == 0 else None
             h, u = answer["held"], answer["unknown"]
-            if not all(isinstance(x, str) for x in (*h, *u)):
-                raise TypeError("lease ids are strings")
+            if not (isinstance(h, list) and isinstance(u, list) and all(isinstance(x, str) for x in (*h, *u))):
+                raise TypeError("lease answer is two lists of ids")
         except (OSError, ValueError, KeyError, TypeError, RecursionError, subprocess.SubprocessError):
             unknown.update(batch)
             continue

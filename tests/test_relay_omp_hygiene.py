@@ -83,6 +83,18 @@ class NamedHitsTests(unittest.TestCase):
         self.assertFalse(relay.descends_from(table("pi --session x"), 102, 100))
         self.assertTrue(relay.descends_from(table("vim pi"), 102, 100))
 
+    def test_an_omp_child_of_a_pi_pane_is_never_a_pi_hit_even_if_pis_own_test_accepts_it(self) -> None:
+        """omp's package is `@oh-my-pi/pi-coding-agent`, named like Pi's: one label per process, omp tested first, whatever
+        fleet._pi_executable accepts (another branch tightens it separately)."""
+        pi_tui = self.proc(1, "pi", "pi", "--session", "x")
+        omp_child = self.proc(2, "bun", *BUN_CLI.split())
+        with unittest.mock.patch.object(fleet, "_pi_executable", lambda argv0, argv: True):    # a Pi test that cannot tell them apart
+            self.assertEqual(relay.named_hits({"agent": "pi"}, [pi_tui, omp_child]), [pi_tui])
+            self.assertEqual(relay.named_hits(self.ROW, [pi_tui, omp_child]), [omp_child])
+            pi_row = {"agent": "pi", "id": "w2N:pZ", "chan": ("herdr", "w2N:pZ"), "pid": None, "sid": None}
+            with unittest.mock.patch.object(relay, "herdr_pane_procs", lambda s: [omp_child, pi_tui]):
+                self.assertEqual(relay.agent_pid(pi_row), 1)    # not 0 ("several match")
+
     def test_an_unreviewed_agent_keeps_the_older_argv_word_rule_until_its_row_is_added(self) -> None:
         """cursor has no row in fleet.EXACT_EXECUTABLES: its binary, a node-run script and (the known weakness a later PR flips by adding
         a row) a program with its name as the first or second word all still count. Adding the row must change this test, on purpose."""

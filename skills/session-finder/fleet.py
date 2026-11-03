@@ -106,7 +106,8 @@ PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "
 def omp_executable(argv0, argv):
     """True for an omp process: the `omp` executable itself (also `omp -p`, `omp --mode rpc`, `omp __omp_worker_*`), or node/bun
     running a script named `omp` or omp's `cli.js` entry (under an `oh-my-pi` or `@oh-my-pi` directory). A program that only
-    has `omp` among its arguments (`vim omp`, `less omp`) is not one. (Pi's `cli.js` lives under `pi-coding-agent` of another scope.)"""
+    has `omp` among its arguments (`vim omp`, `less omp`) is not one. (omp's own package is `@oh-my-pi/pi-coding-agent`, the same directory
+    name as Pi's: told apart by the `oh-my-pi` scope, and `exact_agent` tests omp before Pi, so an omp process is never reported as Pi.)"""
     exe = os.path.basename(argv0 or (argv[0] if argv else ""))
     if exe == "omp":
         return True
@@ -125,7 +126,8 @@ EXACT_EXECUTABLES = {"omp": omp_executable, "pi": lambda argv0, argv: _pi_execut
 
 
 def exact_agent(argv0, argv):
-    """The label of the EXACT_EXECUTABLES row that process (argv0, argv) is, else None. Unreviewed agents are never returned."""
+    """The label of the EXACT_EXECUTABLES row that process (argv0, argv) is, else None; one label per process, omp tested first (its
+    `cli.js` is named like Pi's, so a Pi test that cannot tell them apart never claims an omp). Unreviewed agents are never returned."""
     return next((label for label, is_it in EXACT_EXECUTABLES.items() if is_it(argv0, argv)), None)
 
 

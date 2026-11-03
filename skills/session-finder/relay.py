@@ -3164,9 +3164,8 @@ def named_hits(s, procs):
     unreviewed agent keeps the older rule: its herdr label, or a binary fleet.PROC_AGENTS maps to that label (`cursor-agent` for
     `cursor`; node-launched: the script is argv[1]), as the basename of argv0, the process name or either of the first two words."""
     label = s.get("agent") or ""
-    exact = fleet.EXACT_EXECUTABLES.get(label)
-    if exact:
-        return [pr for pr in procs if exact(pr.get("argv0") or "", pr.get("argv") or [])]
+    if label in fleet.EXACT_EXECUTABLES:  # one label per process: an omp child of a Pi pane is never a Pi hit, whatever Pi's own test accepts
+        return [pr for pr in procs if fleet.exact_agent(pr.get("argv0") or "", pr.get("argv") or []) == label]
     names = ({label, *(n for n, a in fleet.PROC_AGENTS.items() if a == label)}) - {""}
     return [pr for pr in procs
             if names & {os.path.basename(pr.get("argv0") or ""), os.path.basename(pr.get("name") or ""),

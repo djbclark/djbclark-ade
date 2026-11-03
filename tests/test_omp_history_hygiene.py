@@ -157,7 +157,7 @@ def test_live_among_asks_omp_with_an_argv_list_and_reads_held_and_unknown(home, 
     assert not (home / "pwned").exists()
 
 
-@pytest.mark.parametrize("body", ["exit 1\n", "echo not json\n", "echo '{\"held\": 3}'\n", "echo '[1]'\n", "echo '{\"held\":[1],\"unknown\":[]}'\n",
+@pytest.mark.parametrize("body", ["echo '{\"held\":\"abc\",\"unknown\":[]}'\n", "echo '{\"held\":[],\"unknown\":\"a-1\"}'\n", "exit 1\n", "echo not json\n", "echo '{\"held\": 3}'\n", "echo '[1]'\n", "echo '{\"held\":[1],\"unknown\":[]}'\n",
                                   "exec sleep 30\n", "echo '{\"held\":[],\"unknown\":[]}'; exit 3\n"])
 def test_a_failed_probe_leaves_every_id_unknown_never_ended(home, monkeypatch, body):
     monkeypatch.setenv("PATH", f"{fake_omp(home, body)}:/usr/bin:/bin")
@@ -206,3 +206,22 @@ def test_history_labels_a_leased_session_live_and_never_ended_when_the_probe_fai
     assert {r["state"] for r in rows.values()} == {"LIVE?"}
     assert not any(r["live"] for r in rows.values())
     assert all(r["resume"] for r in rows.values())  # an unknown session still gets its resume hint
+
+
+def test_the_legacy_filename_keyed_row_is_retired_not_duplicated(home):
+    """The first adapter stored a noncanonical `daily.jsonl` as `omp:daily` with sid `daily`; the header id is `id-q`."""
+    spec = importlib.util.spec_from_file_location("t_sh_legacy", SF / "session-history.py")
+    with mock.patch.dict(os.environ, {"SESSION_INDEX_DIR": str(home / "idx"), "HOME": str(home)}), mock.patch.object(Path, "home", return_value=home):
+        sh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sh)
+    q = session(home / ".omp/agent/sessions/-q/daily.jsonl", "id-q", cwd="/q")
+    omp = load("adapters/omp", home)
+    import sqlite3
+    db = sqlite3.connect(":memory:")
+    db.executescript(sh.SCHEMA)
+    db.execute("INSERT INTO files VALUES (?,?,?,?,?,?,?)", ("omp:daily", "omp", "daily", "old", "/q", "old", 0))
+    db.execute("INSERT INTO msgs VALUES (?,?,?)", ("omp:daily", "user", "legacy okapi"))
+    assert sh.update(db, [omp], {"omp"}) == {"omp": (1, 1)}
+    assert list(db.execute("SELECT key, sid FROM files")) == [(f"omp:{q.resolve()}", "id-q")]
+    assert db.execute("SELECT count(*) FROM msgs WHERE key='omp:daily'").fetchone() == (0,)
+    assert sh.update(db, [omp], {"omp"}) == {"omp": (1, 0)}
