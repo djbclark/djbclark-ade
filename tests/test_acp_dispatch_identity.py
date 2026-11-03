@@ -8,10 +8,15 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import ast
+from pathlib import Path
+
 from test_acp_dispatch import run
 from test_acp_dispatch_load_gate import LoadGate
 
 OMP = "anthropic/claude-sonnet-5-5"
+GUARDED = ("pi", "omp", "codex", "claude")
+ACP_RUN = Path(__file__).resolve().parents[1] / "tools" / "acp-run" / "acp-run"
 
 REPLACEMENTS = (["--model", "x/y"], ["--model=x/y"], ["--mod", "x/y"], ["--mod=x/y"], ["--m", "x"], ["--model x/y"],
                 ["--set", "model=x/y"], ["--set=model=x/y"], ["--set", "provider=x"], ["--set", "model"], ["--set"],
@@ -35,35 +40,63 @@ class IdentityGuard(LoadGate):
 
     def test_guard_boundaries_for_every_agent(self):
         mod = self.load_module()
-        for agent in ("omp", "codex", "claude", "agy", "opencode", "pi"):
+        for agent in GUARDED:
             for args in REPLACEMENTS:
                 with self.subTest(agent=agent, args=args):
-                    why = mod.identity_override(agent, args)
+                    why = mod.guard_module().identity_override(agent, args)
                     self.assertIn("pass-through", why)
                     self.assertTrue(why.startswith(f"{agent}:"))
             for args in ([], None, ["--tripwire-exempt-kinds=read,search"], ["--perm", "all"], ["--mode", "x"],
                          ["--resume", "abc"], ["--session-id", "abc"], ["--set", "effort=high"],
                          ["--set=reasoning_effort=low"], ["--set", "thought_level=high", "--perm", "all"], ["-m"]):
                 with self.subTest(agent=agent, ok=args):
-                    self.assertIsNone(mod.identity_override(agent, args))
+                    self.assertIsNone(mod.guard_module().identity_override(agent, args))
         # a stored command line: exactly the primary pair is the dispatcher's own
-        self.assertIsNone(mod.identity_override("omp", ["x", "--model", "a", "--perm", "all"], True))
-        self.assertIsNotNone(mod.identity_override("omp", ["--model", "a", "--model", "b"], True))
-        self.assertIsNotNone(mod.identity_override("omp", ["--model", "a", "--model=b"], True))
+        self.assertIsNone(mod.guard_module().identity_override("omp", ["x", "--model", "a", "--perm", "all"], True))
+        self.assertIsNotNone(mod.guard_module().identity_override("omp", ["--model", "a", "--model", "b"], True))
+        self.assertIsNotNone(mod.guard_module().identity_override("omp", ["--model", "a", "--model=b"], True))
 
     def test_replacement_refuses_before_any_gate_probe_or_record_for_every_agent(self):
         for agent, model, kind in (("omp", OMP, "code"), ("codex", "gpt-6.1-sol", "frontier"),
-                                   ("claude", "sonnet", "code"), ("agy", "claude-sonnet-5-5", "code")):
+                                   ("claude", "sonnet", "code"), ("pi", "openai/gpt-6.1-sol", "code")):
             for index, extra in enumerate(REPLACEMENTS):
                 with self.subTest(agent=agent, extra=extra):
                     name = f"{agent}-{index}"
                     r = self.dispatch_agent(agent, model, "--kind", kind, "--no-model-check",
                                             *[f"--acp-arg={x}" for x in extra], name=name,
-                                            env=self.quota_env(codex=100, claude=100, omp=100, antigravity=100))
+                                            env=self.quota_env(codex=100, claude=100, omp=100, pi=80))
                     self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                     self.assertIn("pass-through", r.stderr)
                     self.assertEqual(self.preflight_probes(), 0)
                     self.assertFalse((self.out / "jobs" / f"{name}.json").exists())
+
+    def test_the_policy_table_covers_every_acp_run_agent_and_matches_the_pool_maps(self):
+        mod = self.load_module()
+        guard = mod.guard_module()
+        tree = ast.parse(ACP_RUN.read_text())
+        table = next(n.value for n in tree.body if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "AGENTS" for t in n.targets))
+        names = {k.value for k in table.keys}
+        self.assertEqual(names - set(guard.AGENT_GUARDS), set(), "a new acp-run agent needs a row in bin/agent_guard.py")
+        self.assertEqual(set(guard.AGENT_GUARDS) - names, set())
+        self.assertEqual({a for a, row in guard.AGENT_GUARDS.items() if row.status == guard.GUARDED}, set(GUARDED))
+        for agent in GUARDED:
+            row = guard.policy(agent)
+            self.assertTrue(row.gates and row.identity, agent)
+            model = {"pi": "openai/gpt-6.1-sol", "omp": OMP}.get(agent, "gpt-6.1-sol")
+            self.assertEqual(mod.resolve_service(agent, model), row.pool, agent)
+
+    def test_unreviewed_agents_keep_todays_pass_through(self):
+        mod = self.load_module()
+        guard = mod.guard_module()
+        for agent in ("agy", "zcode", "opencode", "never-heard-of-it"):
+            self.assertEqual(guard.policy(agent).status, guard.UNREVIEWED)
+            for args in REPLACEMENTS:
+                self.assertIsNone(guard.identity_override(agent, args), (agent, args))
+            self.assertIsNone(guard.record_refusal({"agent": agent, "model": "m", "acp_arg": ["--model=x"],
+                                                    "cmd": f"acp-run {agent} --model m --model x"}))
+        r = self.dispatch_agent("zcode", "GLM-5.3-Flash", "--no-model-check", "--dry-run", "--acp-arg=--meta={}")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_the_audit_bypasses_of_the_frontier_and_model_gates_are_closed(self):
         # claude sonnet at --kind code passes every gate; the replacement was the frontier/fable model
@@ -100,8 +133,9 @@ class IdentityGuard(LoadGate):
             return mod.spawn_refusal({**base, **rec})
 
     def test_stored_command_and_acp_arg_refuse_a_replacement_for_every_agent(self):
-        for agent in ("omp", "codex", "claude"):
-            primary = f"acp-run {agent} --model {OMP} --perm all"
+        for agent in GUARDED:
+            model = "openai/gpt-6.1-sol" if agent == "pi" else OMP
+            primary = f"acp-run {agent} --model {model} --perm all"
             for rec in ({"cmd": f"{primary} --model=other/x"}, {"cmd": f"{primary} --model other/x"},
                         {"cmd": f"{primary} --mod x"}, {"cmd": f"{primary} --agent-env ANTHROPIC_API_KEY=x"},
                         {"cmd": f"{primary} --agent-arg=--model --agent-arg=x"},
@@ -112,10 +146,10 @@ class IdentityGuard(LoadGate):
                         {"acp_arg": ["--model=other/x"], "kind": None},        # a legacy kind-less record
                         {"acp_arg": ["--model=other/x"], "min_headroom": None}):
                 with self.subTest(agent=agent, rec=rec):
-                    refusal = self.spawn(agent=agent, **{"cmd": primary, **rec})
+                    refusal = self.spawn(agent=agent, model=model, **{"cmd": primary, **rec})
                     self.assertEqual(refusal[:2], ("headroom", 5))
                     self.assertRegex(refusal[2], "pass-through|differs from the admitted model")
-            self.assertIsNone(self.spawn(agent=agent, cmd=primary, acp_arg=["--resume", "abc", "--set", "effort=low"]))
+            self.assertIsNone(self.spawn(agent=agent, model=model, cmd=primary, acp_arg=["--resume", "abc", "--set", "effort=low"]))
 
     def test_resume_with_a_stored_replacement_refuses_before_a_new_slice(self):
         name = "resume-repl"

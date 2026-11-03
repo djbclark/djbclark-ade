@@ -169,14 +169,14 @@ class TestPiDispatchAdmission(LoadGate):
         mod = self.load_module()
         for args in self.REPLACEMENTS:
             with self.subTest(args=args):
-                self.assertIn("pass-through", mod.identity_override("pi", args))
+                self.assertIn("pass-through", mod.guard_module().identity_override("pi", args))
         for args in ([], None, ["--tripwire-exempt-kinds=read,search"], ["--perm", "all"], ["--mode", "x"], ["-m"]):
             with self.subTest(args=args):
-                self.assertIsNone(mod.identity_override("pi", args))
+                self.assertIsNone(mod.guard_module().identity_override("pi", args))
         # a stored command line: exactly the primary pair is the dispatcher's own
-        self.assertIsNone(mod.identity_override("pi", ["x", "--model", "a", "--perm", "all"], True))
-        self.assertIsNotNone(mod.identity_override("pi", ["--model", "a", "--model", "b"], True))
-        self.assertIsNotNone(mod.identity_override("pi", ["--model", "a", "--model=b"], True))
+        self.assertIsNone(mod.guard_module().identity_override("pi", ["x", "--model", "a", "--perm", "all"], True))
+        self.assertIsNotNone(mod.guard_module().identity_override("pi", ["--model", "a", "--model", "b"], True))
+        self.assertIsNotNone(mod.guard_module().identity_override("pi", ["--model", "a", "--model=b"], True))
 
     def test_replacement_model_refuses_before_preflight_and_task(self):
         for index, extra in enumerate(self.REPLACEMENTS):
@@ -281,8 +281,9 @@ class TestPiDispatchAdmission(LoadGate):
     def test_non_pi_legacy_admission_is_unchanged(self):
         mod = self.load_module()
         with patch.object(mod, "pool_reading", return_value=(None, {})) as reading:
-            self.assertIsNone(mod.spawn_refusal({"agent": "codex", "model": "m1", "resume_count": 1}))
             self.assertIsNone(mod.spawn_refusal({"agent": "zcode", "model": "m1"}))
+            self.assertIsNone(mod.spawn_refusal({"agent": "agy", "model": "m1", "resume_count": 1,
+                                                 "cmd": "acp-run agy --model other --model m1"}))
             reading.assert_not_called()
         self.assertIsNone(mod.pi_capacity_refusal("codex", "gpt-6.1-sol", None))
 

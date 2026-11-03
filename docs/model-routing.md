@@ -148,9 +148,10 @@ memo and use the existing freshness-aware snapshot reader. Unknown capacity is
 not unlimited capacity; neither credentials nor a model catalog prove headroom.
 Other providers' admission policies are unchanged.
 
-**`--acp-arg` identity contract (2026-11-03, every agent):** admission and every gate (frontier, fable-xhigh,
+**`--acp-arg` identity contract (2026-11-03):** admission and every gate (frontier, fable-xhigh,
 plenty, fallback, per-model pool, spend) judge `--model`, so a pass-through option that replaces it or the agent's
-credentials is not an admitted slice. `acp-dispatch` refuses, for every acp-run agent, `--model`, `--meta`,
+credentials is not an admitted slice. For the **guarded** agents (`pi`, `omp`, `codex`, `claude`; every other agent is an
+explicit `unreviewed` row that still passes everything through) `acp-dispatch` refuses `--model`, `--meta`,
 `--agent-arg`, `--agent-env`, `--auth`, their `--opt=value` forms, abbreviations (`--mod`, `--agent-e`) and
 packed tokens (`'--model x'`), and `--set` unless its key is a reasoning-effort option (`effort`,
 `reasoning_effort`, `reasoning`, `thought`, `thought_level`, `thinking_level`). A dispatch refuses with exit 2
@@ -159,7 +160,8 @@ before any gate, probe or record; the runner (`spawn_refusal`) refuses a stored 
 (normal, deferred, resumed and legacy records alike) with exit 5 before spawning. `--effort`/`--context` are the
 first-class way to pick effort and window; `--tripwire-exempt-kinds`, `--resume`, `--session-id`, `--mode` and the
 other non-identity options still pass. A caller that truly needs a replacement runs `acp-run` directly (omp's own
-guard there: `tools/acp-run/README.md`, `ACP_RUN_OMP_ANY_MODEL=1` is the operator-side override).
+guard there: `tools/acp-run/README.md`, `ACP_RUN_OMP_ANY_MODEL=1` is the operator-side override). The policy
+table, how to add an agent row and the per-TUI status are in `docs/agent-guard-contract.md`.
 
 **omp admission (2026-11-03):** `omp` is mapped to its own aiuse `omp` pool (Claude API credits) in both maps
 (`acp-dispatch` and `route_agent.map_agent_to_provider`), so the record carries `service: omp`, `--min-headroom`

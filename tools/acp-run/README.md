@@ -571,7 +571,7 @@ unlimited. Already-running record-based waiters follow later extensions.
 checked with the model before anything is written
 (`acp-run <agent> --info --model M --effort E --context C`), stored on the job
 record, and kept by `resume`. `--acp-arg` still forwards other flags except model/credential changers (`--model`, `--meta`,
-`--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for every agent, 2026-11-03); a
+`--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for pi, omp, codex and claude (docs/agent-guard-contract.md)); a
 dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`. zcode `--model` is accepted and
 still optional.
 
