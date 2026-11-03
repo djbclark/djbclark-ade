@@ -3,7 +3,13 @@ from pathlib import Path
 
 
 def native_id(sid) -> str:
-    """A plain id (hermes, which may contain underscores) as is, an omp transcript path as the id after the `_`
-    in its file stem."""
+    """Keep plain ids intact; Pi/OMP transcript names are ``<timestamp>_<id>.jsonl``.
+
+    Split at the first underscore: custom native ids may themselves contain underscores.
+    """
     sid = str(sid)
-    return Path(sid).stem.split("_")[-1] if "/" in sid else sid
+    if "/" not in sid:
+        return sid
+    stem = Path(sid).stem
+    prefix, separator, native = stem.partition("_")
+    return native if separator else prefix
