@@ -117,6 +117,23 @@ def omp_executable(argv0, argv):
     return False
 
 
+# THE exact-executable table (2026-11-03): agent label -> test(argv0, argv) that is true only for a process that IS that agent (its
+# own executable, or an interpreter running its script), never for a program that merely has the agent's name as an argument
+# (`vim omp`). Every other label is UNREVIEWED: it keeps the older rule, the basename of argv0 or of one of the first two command-line
+# words is a PROC_AGENTS name. Flipping a row is one entry here; relay.py (`named_hits`, `descends_from`, `turn_is_above`) reads this.
+EXACT_EXECUTABLES = {"omp": omp_executable, "pi": lambda argv0, argv: _pi_executable(argv0, argv)}
+
+
+def exact_agent(argv0, argv):
+    """The label of the EXACT_EXECUTABLES row that process (argv0, argv) is, else None. Unreviewed agents are never returned."""
+    return next((label for label, is_it in EXACT_EXECUTABLES.items() if is_it(argv0, argv)), None)
+
+
+def legacy_agents(words):
+    """The labels of the unreviewed agents (PROC_AGENTS names outside EXACT_EXECUTABLES) among the basenames of WORDS, in order."""
+    return [PROC_AGENTS[n] for n in map(os.path.basename, words) if n in PROC_AGENTS and PROC_AGENTS[n] not in EXACT_EXECUTABLES]
+
+
 PROC_SKIP = re.compile(r"(acp|mcp|--acp|gateway|dashboard|language-server|lsp|sleeper|serve\b|Helper|node_modules|"
                        r"claude-agent-acp|codex-acp| -p |--print|exec |run |\bresume-globally\b)")
 STRIP = re.compile(r"<(system-reminder|local-command-[a-z]+|command-[a-z]+|pasted_content)\b.*?</\1>", re.DOTALL)

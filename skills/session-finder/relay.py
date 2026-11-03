@@ -1603,13 +1603,12 @@ def hermes_native():
     return label if HERMES_SENDER.fullmatch(label) else ""
 
 
-INTERPRETERS = frozenset({"node", "nodejs", "bun", "python", "python3"})
-
-
-def proc_is_omp(cmd):
-    """True when the `ps` command line CMD is an omp process (`fleet.omp_executable`; `vim omp` is not)."""
+def proc_agents(cmd):
+    """The agent labels of the `ps` command line CMD, first match first: the `fleet.EXACT_EXECUTABLES` row it is (omp, Pi: `vim omp`
+    is none), else the unreviewed agents named by one of its first two words (`fleet.legacy_agents`)."""
     argv = cmd.split()
-    return fleet.omp_executable("", argv)
+    exact = fleet.exact_agent("", argv)
+    return [exact] if exact else fleet.legacy_agents(argv[:2])
 
 
 def descends_from(table, pid, anchor):
@@ -1617,14 +1616,15 @@ def descends_from(table, pid, anchor):
     way. Strict, unlike `turn_is_above` (which counts the top of the tree, right for a hop count, wrong for an identity): the top of the
     tree, a pid missing from TABLE or 40 steps without ANCHOR is False, and so is a Claude, Codex, omp or other agent session started inside a
     Hermes turn, which inherits the turn's HERMES_SESSION_ID and must not speak as it. An omp is told by its executable
-    (`omp`, `bun …/omp`, `node …/omp`, `omp -p`, `omp --mode rpc`: `proc_is_omp`); `vim omp` is not a boundary."""
+    (`omp`, `bun …/omp`, `node …/omp`, `omp -p`, `omp --mode rpc`) or Pi by its executable (`fleet.EXACT_EXECUTABLES`, via `proc_agents`);
+    `vim omp` is not a boundary. The other agents keep the older word rule until their row is added."""
     for _ in range(40):
         if pid == anchor:
             return True
         if pid <= 1 or pid not in table:
             return False
         ppid, cmd = table[pid]
-        if proc_is_omp(cmd) or any(fleet.PROC_AGENTS.get(os.path.basename(p)) not in (None, "hermes") for p in cmd.split()[:2]):
+        if set(proc_agents(cmd)) - {"hermes"}:
             return False
         pid = ppid
     return False
@@ -2113,10 +2113,9 @@ def turn_is_above(table, pid, boundary):
         if pid == boundary or pid <= 1:
             return True
         ppid, cmd = table.get(pid, (0, ""))
-        agent = "omp" if proc_is_omp(cmd) else next(
-            (fleet.PROC_AGENTS[n] for n in (os.path.basename(p) for p in cmd.split()[:2]) if n in fleet.PROC_AGENTS), None)
-        if agent:
-            return agent == "hermes"
+        agents = proc_agents(cmd)
+        if agents:
+            return agents[0] == "hermes"
         pid = ppid
     return True
 
@@ -3160,22 +3159,18 @@ def herdr_pane_procs(s):
 
 
 def named_hits(s, procs):
-    """The processes of PROCS (a herdr pane's foreground processes) that ARE session S's agent: its herdr label, or a binary
-    fleet.PROC_AGENTS maps to that label (`cursor-agent` for `cursor`), as the executable itself (argv0 or the process name)
-    or as the script argv[1] of an interpreter (`node …/cursor-agent`). An argument of another program (`vim omp`, `less omp`,
-    `omp` under a shell) is not a hit, and omp is told by `fleet.omp_executable` (also node/bun on its `cli.js`)."""
+    """The processes of PROCS (a herdr pane's foreground processes) that ARE session S's agent. An agent with a row in
+    `fleet.EXACT_EXECUTABLES` (omp, Pi) is told by its executable (`omp`, node/bun on its script): `vim omp` is not a hit. An
+    unreviewed agent keeps the older rule: its herdr label, or a binary fleet.PROC_AGENTS maps to that label (`cursor-agent` for
+    `cursor`; node-launched: the script is argv[1]), as the basename of argv0, the process name or either of the first two words."""
     label = s.get("agent") or ""
+    exact = fleet.EXACT_EXECUTABLES.get(label)
+    if exact:
+        return [pr for pr in procs if exact(pr.get("argv0") or "", pr.get("argv") or [])]
     names = ({label, *(n for n, a in fleet.PROC_AGENTS.items() if a == label)}) - {""}
-
-    def named(pr):
-        argv, argv0 = pr.get("argv") or [], pr.get("argv0") or ""
-        if label == "omp" and fleet.omp_executable(argv0, argv):
-            return True
-        if names & {os.path.basename(argv0), os.path.basename(pr.get("name") or "")}:
-            return True
-        return (bool(argv) and os.path.basename(argv[0]) in INTERPRETERS and len(argv) > 1
-                and os.path.basename(argv[1]) in names)
-    return [pr for pr in procs if named(pr)]
+    return [pr for pr in procs
+            if names & {os.path.basename(pr.get("argv0") or ""), os.path.basename(pr.get("name") or ""),
+                        *(os.path.basename(x) for x in (pr.get("argv") or [])[:2])}]
 
 
 def agent_pid(s):

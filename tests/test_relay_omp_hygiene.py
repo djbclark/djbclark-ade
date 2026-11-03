@@ -12,12 +12,12 @@ import unittest.mock
 
 import test_relay_fallback as fb  # noqa: E402  # pyright: ignore[reportMissingImports]
 
-relay = fb.relay
+relay, fleet = fb.relay, fb.fleet
 
 BUN_CLI = "bun /Users/u/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js"
 OMPS = ["omp", "/opt/homebrew/Cellar/omp/18.16.0/bin/omp --auto-approve", BUN_CLI, "bun /opt/x/bin/omp", "node /opt/x/bin/omp",
         "omp -p do the thing", "omp --mode rpc", "/opt/homebrew/Cellar/omp/18.16.0/bin/omp __omp_worker_text_predict"]
-NOT_OMPS = ["vim omp", "less /tmp/omp", "bun /x/other/cli.js omp", "node /x/pi-coding-agent/dist/cli.js", "/usr/bin/grep omp notes.txt"]
+NOT_OMPS = ["vim omp", "less /tmp/omp", "bun /x/other/cli.js omp", "/usr/bin/grep omp notes.txt"]
 
 
 def table(middle: str) -> dict[int, tuple[int, str]]:
@@ -75,11 +75,33 @@ class NamedHitsTests(unittest.TestCase):
             calls["procs"] = [tui]    # the editor exited
             self.assertEqual(relay.pid_check(row, 100), "same")
 
-    def test_cursor_agent_by_its_binary_and_by_node_still_resolves(self) -> None:
+    def test_pi_is_an_exact_row_too(self) -> None:
+        row = {"agent": "pi"}
+        tui = self.proc(1, "pi", "pi", "--session", "x")
+        via_node = self.proc(2, "node", "node", "/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js")
+        self.assertEqual(relay.named_hits(row, [tui, via_node, self.proc(3, "vim", "vim", "pi")]), [tui, via_node])
+        self.assertFalse(relay.descends_from(table("pi --session x"), 102, 100))
+        self.assertTrue(relay.descends_from(table("vim pi"), 102, 100))
+
+    def test_an_unreviewed_agent_keeps_the_older_argv_word_rule_until_its_row_is_added(self) -> None:
+        """cursor has no row in fleet.EXACT_EXECUTABLES: its binary, a node-run script and (the known weakness a later PR flips by adding
+        a row) a program with its name as the first or second word all still count. Adding the row must change this test, on purpose."""
         row = {"agent": "cursor"}
         direct = self.proc(1, "cursor-agent", "/Users/u/.local/bin/cursor-agent", "--yolo")
         via_node = self.proc(2, "node", "node", "/x/cursor-agent")
-        self.assertEqual(relay.named_hits(row, [direct, via_node, self.proc(3, "vim", "vim", "cursor-agent")]), [direct, via_node])
+        vim = self.proc(3, "vim", "vim", "cursor-agent")
+        self.assertNotIn("cursor", fleet.EXACT_EXECUTABLES)
+        self.assertEqual(relay.named_hits(row, [direct, via_node, vim, self.proc(4, "bash", "bash", "-c", "x cursor-agent")]), [direct, via_node, vim])
+        self.assertFalse(relay.descends_from(table("claude --resume abc"), 102, 100))
+
+
+class TableTests(unittest.TestCase):
+    def test_exact_agent_and_legacy_agents_split_the_table(self) -> None:
+        self.assertEqual(sorted(fleet.EXACT_EXECUTABLES), ["omp", "pi"])
+        self.assertEqual(fleet.exact_agent("", ["bun", "/x/bin/omp"]), "omp")
+        self.assertIsNone(fleet.exact_agent("", ["vim", "omp"]))
+        self.assertEqual(fleet.legacy_agents(["vim", "/x/claude"]), ["claude"])
+        self.assertEqual(fleet.legacy_agents(["omp", "pi", "vim"]), [])  # exact rows are never read by the older word rule
 
 
 if __name__ == "__main__":
