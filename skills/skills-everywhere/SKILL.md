@@ -13,7 +13,7 @@ Links a skill into every agent TUI. Content lives in exactly one place —
 `~/ops/site-private/skills/<name>/` for private ones (only `1password`) —
 and every TUI gets a **direct symlink** to it; no hub, no chains (collapsed
 2026-10-14). Clients covered (the `targets` table in the script): Claude
-Code, Codex, goose (`~/.agents/skills`, shared with Codex), omp (oh-my-pi,
+Code, Codex, goose and Pi (`~/.agents/skills`, shared with Codex), omp (oh-my-pi,
 `~/.omp/agent/skills`), Copilot, Cursor,
 opencode, zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes,
 plus Grok Bot (`grokbot`, a rendered copy `ade-<name>` in
@@ -66,6 +66,15 @@ Run `--check` first when diagnosing a missing client, and preserve links owned
 by another installer. In link mode any chained link (same realpath, different
 readlink) is collapsed to the direct link. A link being present does not prove
 that a running TUI has reloaded its skills; start a new session when needed.
+
+## Pi shared discovery (2026-11-03)
+
+Pi natively discovers `~/.agents/skills/`, so its target uses that shared directory,
+not a second set of links in `~/.pi/agent/skills/`. `SKILL_EVERYWHERE_ONLY=pi`
+works even if Codex is not installed. Existing independently installed Pi skills
+are preserved; this command does not remove duplicate skill copies. Diagnose
+startup collision warnings by comparing both copies before choosing which path
+to exclude or reconcile. Reload Pi after changing its skill resources.
 
 ## Codex access diagnosis
 

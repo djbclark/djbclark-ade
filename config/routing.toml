@@ -23,8 +23,9 @@
 # a coarse one that gets used.
 # `api-only` (operator 2026-10-19): work that needs the Claude API and cannot run through a
 # TUI or ACP (SDK paths such as the Claude route in bin/failover.py, a verdict classifier,
-# a batch or API-only job). Only omp's credits pool is eligible; the caller makes the API
-# call itself and `route_agent.py route --kind api-only` says whether the credits have room.
+# a batch or API-only job). omp's Claude API credits and pi's OpenAI API pool are
+# eligible; select the provider appropriate for the SDK. The caller makes the API
+# call itself and `route_agent.py route --kind api-only` reports capacity.
 kinds = ["judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web", "api-only"]
 # burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
 # they hold at least this much headroom. Static `burn_first = true` on a
@@ -247,6 +248,20 @@ ready_probe = "omp-anthropic"
 max_parallel = 2
 access = "cli-only"
 models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "anthropic/claude-opus-5-5 --effort high", code = "anthropic/claude-sonnet-5-5 --effort high", bulk = "anthropic/claude-haiku-5-5 --effort low" }
+
+# Pi spends the OpenAI API billing pool, NOT the Codex CLI subscription (2026-11-03).
+# A nonzero floor also makes the existing router fail closed without a measured
+# quota reading; credentials or a model catalog alone are not spending capacity.
+[[service]]
+name = "pi"
+cli = "pi (OpenAI API: acp-run pi --model openai/gpt-6.1-sol)"
+good_at = { api-only = 2, code = 15, bulk = 35, mechanical = 20 }
+billing = "credits"
+access = "api"
+reserve_floor = 1.0
+max_parallel = 2
+note = "OpenAI API billing (codex-api scope), independent of the Codex subscription; requires measured capacity"
+models = { api-only = "openai/gpt-6.1-sol --effort medium", code = "openai/gpt-6.1-sol --effort high", bulk = "openai/gpt-5.4-mini --effort low", mechanical = "openai/gpt-5.4-mini --effort low" }
 
 [[service]]
 name = "codex"

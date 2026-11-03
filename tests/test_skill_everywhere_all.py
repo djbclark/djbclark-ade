@@ -67,6 +67,21 @@ def test_all_discovers_both_roots_and_linked_skills_once(catalog, tmp_path):
     assert "already linked" in run(catalog, "--all").stdout
 
 
+def test_pi_only_links_shared_directory_without_native_duplicates(catalog):
+    home, public, _, env = catalog
+    source = skill(public, "steps")
+    pi = Path(env["PATH"].split(os.pathsep)[0]) / "pi"
+    pi.write_text("#!/bin/sh\nexit 0\n")
+    pi.chmod(0o755)
+    env["SKILL_EVERYWHERE_ONLY"] = "pi"
+    assert run(catalog, "--check", "--all").returncode == 1
+    result = run(catalog, "--all")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (home / ".agents/skills/steps").readlink() == source
+    assert not (home / ".pi").exists()
+    assert run(catalog, "--check", "--all").returncode == 0
+
+
 def test_all_dry_run_is_read_only(catalog):
     home, public, _, _ = catalog
     skill(public, "steps")

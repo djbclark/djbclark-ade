@@ -5,7 +5,8 @@ Run one prompt through a coding agent over the
 the agent's final message on stdout. It is how one agent on this machine hands a
 self-contained task to another vendor's agent: Claude Code, Codex, Copilot,
 opencode, Cursor, Qwen Code, Devin, Cline, Hermes, Antigravity (`agy`), Grok and
-zcode (through the third-party `zcode-acp-server`). Vendor, model, effort and
+zcode (through the third-party `zcode-acp-server`), OMP, and Pi (through
+`pi-acp`, bridging Pi's JSONL RPC). Vendor, model, effort and
 context for each agent are in the 2026-10-15 section below. acp-run sets
 `ZCODE_BIN` to that package's `vendor/zcode.cjs` when the file is present, so
 `--model` works (fixed 2026-10-15; the 2026-10-11 "refuses every switch" note
@@ -24,6 +25,26 @@ acp-run codex -C ~/src/repo --add-dir ~/.local/state/bigteam/task -p 'Reply with
 acp-run copilot -C ~/src/repo -f brief.md --perm deny --timeout 1200 > report.md
 acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session you keep prompting
 ```
+
+## Pi (2026-11-03)
+
+Install the latest `pi-acp` (`npm install -g pi-acp`) alongside the installed
+`@earendil-works/pi-coding-agent`. The bridge launches the installed Pi executable
+rather than bundling a separate model runtime. Pi keeps its own provider login
+and session files; `acp-run` does not copy credentials.
+
+```sh
+acp-run pi --info
+acp-run pi --model openai/gpt-6.1-sol --effort high -C ~/src/repo -p 'Reply with exactly: OK'
+```
+
+The adapter advertises model selection and `thought_level` through ACP config
+options, so normal `--model` and `--effort` verification applies. Thinking modes
+are **not permission modes**: do not select a thinking level as a yolo setting.
+Only `--perm all` is supported: Pi executes tools locally without ACP permission
+requests, and unverified `deny`/`read-only` runs are refused before prompting.
+The adapter supports loading persisted sessions. OpenAI API use belongs to the
+independent `pi` billing pool (`codex-api` scope), not the Codex subscription.
 
 ## What it adds over a bare ACP client
 
