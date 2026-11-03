@@ -757,10 +757,15 @@ def ro_gitfile_ok(path, worktree):
 
 # Git config keys whose value is a program git runs while reading: a diff driver (`diff.external`,
 # `diff.<d>.textconv|command`, also reached by --textconv), the fsmonitor hook, a clean/smudge filter
-# (`git diff` and `cat-file --filters` apply them) and a signature program (`log --show-signature`).
+# (`git diff` and `cat-file --filters` apply them), a signature program (`log --show-signature`) and the
+# hooks directory (`core.hooksPath`: `git status`/`diff` refresh the index, and writing it runs the
+# post-index-change hook, so `.githooks/` or husky's `.husky/_` in the tree would run). `core.pager` and
+# `pager.<cmd>` are NOT listed: they run only when git's stdout is a terminal, and codex's exec has none; a
+# future PTY exec mode must add them (or set GIT_PAGER=cat) before this list stays right.
 RO_GIT_HELPER_KEYS = re.compile(
     r"diff\.external|diff\..+\.(textconv|command)|core\.fsmonitor|filter\..+\.(clean|smudge|process)"
-    r"|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand", re.IGNORECASE)
+    r"|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand|core\.hookspath|core\.alternaterefscommand",
+    re.IGNORECASE)
 # Environment that makes git run a helper or read another repository no matter what the config says.
 # (GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS and GIT_CONFIG_GLOBAL are not listed: `git config --list` below
 # reads them, so a helper they name is judged like any other.)
@@ -788,8 +793,16 @@ def ro_git_config_ok(base, root):
         key, _, value = entry.partition("\n")
         if not key or not RO_GIT_HELPER_KEYS.fullmatch(key):
             continue
-        if value.strip().lower() in ("", "true", "false", "yes", "no", "on", "off", "0", "1"):
+        if (value.strip().lower() in ("", "true", "false", "yes", "no", "on", "off", "0", "1")
+                and key.lower() != "core.hookspath"):
             continue  # core.fsmonitor=true is git's builtin daemon; a bare key runs nothing
+            # (a hooksPath of `true` or `1` is a directory of that name, judged below)
+        if key.lower() == "core.hookspath":  # a directory, not a command: relative means relative to the tree
+            path = os.path.expanduser(value.strip())
+            real = os.path.realpath(path)
+            if not os.path.isabs(path) or real == root or real.startswith(root + os.sep):
+                return False
+            continue
         # git runs the value through a shell: shell syntax, or any word that names a file of the tree (an
         # interpreter's script argument: `/bin/sh tools/convert.sh`), makes it the tree's code
         if re.search(r"[;&|<>()$`\\*?\[\]{}!]", value):
@@ -799,6 +812,8 @@ def ro_git_config_ok(base, root):
         except ValueError:
             return False
         for word in words:
+            if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word):
+                return False  # `PATH=tools conv` / `env PATH=tools conv` runs the tree's `conv`
             word = os.path.expanduser(word)
             if os.path.isabs(word):
                 real = os.path.realpath(word)
@@ -813,8 +828,7 @@ def ro_git_config_ok(base, root):
 
 def ro_git_dir_ok(base):
     """The repository root when git run in `base` finds an ordinary repository, else None. Not a bare one
-    committed inside the tree not a bare one committed inside the tree
-    under review: git looks in each directory, from `base` up, for `.git` and then for a directory that is
+    committed inside the tree under review: git looks in each directory, from `base` up, for `.git` and then for a directory that is
     itself a repository (HEAD, objects/, refs/), and runs the config of whichever it meets first
     (diff.external, core.fsmonitor, gpg.program). A tree without `.git` anywhere above is refused; a `.git`
     file must pass ro_gitfile_ok."""
@@ -1036,6 +1050,12 @@ def tool_command(tool_call):
     if isinstance(cmd, list):
         cmd = shlex.join(str(c) for c in cmd)
     return cmd if isinstance(cmd, str) else None
+
+
+def refusal_end_bit(stop_reason, denial):
+    """`refusal_end=1` when the FINAL turn stopped `cancelled` on a refusal that ends the turn, else `=0`
+    (the summary line's `perm=a+/d-` counts the whole run, so acp-dispatch reads this bit for the cause)."""
+    return "refusal_end=" + ("1" if stop_reason == "cancelled" and denial and denial.get("ends_turn") else "0")
 
 
 def denial_continue_text(perm, denial):
@@ -5140,9 +5160,7 @@ async def run(a, log, err, log_path):
         ]
         if getattr(a, "perm", None) in RESTRICTED_PERMS:
             # did the FINAL turn end on a refused permission (denied above is the run's total)
-            last = getattr(client, "denial", None)
-            bits.append("refusal_end=" + ("1" if out.get("stop_reason") == "cancelled" and last
-                                          and last.get("ends_turn") else "0"))
+            bits.append(refusal_end_bit(out.get("stop_reason"), getattr(client, "denial", None)))
         if repl is not None:
             bits.append(f"turns={repl.n}")
         tok = u.get("totalTokens") or u.get("total_tokens")
