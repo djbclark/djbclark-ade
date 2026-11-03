@@ -87,8 +87,9 @@ matching real/effective identities. Replacement refuses if the temporary file
 would change the owner/group (including setgid-parent group inheritance). It does
 not try to chown or copy security metadata: settings or temporary files with
 extended attributes, ACLs or file flags require manual review. Metadata policy
-(2026-11-03), checked on the original and on the fresh temporary inode and again
-before replacement:
+(2026-11-03). The original is checked before the temporary file is created and
+again immediately before replacement; the temporary inode is checked once, before
+its contents are written (flags/ACLs it inherits are fixed at creation):
 
 - Linux: xattrs (`os.listxattr`, which covers POSIX ACLs) and inode flags via
   `FS_IOC_GETFLAGS`. Any flag other than the filesystem-internal layout bits
@@ -98,12 +99,13 @@ before replacement:
 - macOS: xattrs through `os.listxattr` when Python has it, otherwise a size-only
   `listxattr(2)` call through ctypes (never reads names/values); nonzero BSD
   `st_flags`; and the separate ACL marker from a fixed-argv `/bin/ls -lde`. The
-  libc/ACL probe code has only been exercised by the real-macOS test run, never
-  proven by Linux mocks; any probe failure fails closed.
+  libc/ACL probe code is not proven by Linux mocks, and no automated macOS CI run
+  exists; the macOS-only tests run only when a developer executes the test file on
+  a Mac (last done manually 2026-11-03). Any probe failure fails closed.
 - Other platforms: unsupported; apply/undo refuse every settings write.
 
-Metadata is checked again before replacement. No guarantee is made
-for concurrent metadata changes or directory-fsync/power-loss durability.
+A refused apply removes the receipt it had published (settings are unchanged
+then), so the same `--receipt` path can be reused. No guarantee is made for concurrent metadata changes or directory-fsync/power-loss durability.
 Plan/receipt files use mode 0600; keep them private (they contain resource paths).
 No credentials
 are accessed. A runtime claim does not authorize editing another repository's

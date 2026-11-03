@@ -301,14 +301,34 @@ def test_edited_plan_refused(case):
     case.apply(rc=2)
 
 
-def test_unsafe_settings_mode_and_prepared_receipt_recovery(case):
+def test_refused_apply_retires_receipt_and_rerun_works(case):
     case.plan()
     case.settings.chmod(0o666)
     case.apply(rc=2)
     assert json.loads(case.settings.read_text()) == {}
-    # Receipt is intentionally published before replacement; undo is a no-op.
+    # A refusal happens before replacement: no stray receipt may block a rerun.
+    assert not case.receipt.exists()
+    case.settings.chmod(0o600)
+    case.apply()
     assert case.receipt.exists()
-    case.undo()
+    assert "skills" in json.loads(case.settings.read_text())
+
+
+def test_metadata_probe_refusal_retires_receipt(case, monkeypatch):
+    ns = runpy.run_path(str(TOOL))
+    case.plan()
+    monkeypatch.setenv("HOME", str(case.settings.parents[2]))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(case.settings.parent))
+    monkeypatch.setenv("ADE_STATE_DIR", str(case.settings.parents[3] / "state"))
+    monkeypatch.setenv("ADE_CLAIM_ID", "synthetic-runtime")
+    monkeypatch.syspath_prepend(str(TOOL.parent))
+    def refuse(path):
+        raise ns["Refused"]("synthetic metadata refusal")
+    monkeypatch.setitem(ns["apply"].__globals__, "plain_metadata", refuse)
+    with pytest.raises(ns["Refused"], match="synthetic metadata"):
+        ns["apply"](case.plan_path, case.receipt)
+    assert not case.receipt.exists()
+    assert json.loads(case.settings.read_text()) == {}
 
 
 def test_undo_requires_claim_and_rejects_retarget(case, tmp_path):
@@ -462,19 +482,47 @@ def test_linux_real_probe_returns_integer(case):
     assert isinstance(flags, int) and flags >= 0
 
 
-def test_darwin_missing_xattr_api_uses_libc_or_refuses(case, monkeypatch):
+def test_darwin_libc_xattr_probe_detects_real_xattr(case, monkeypatch):
+    if sys.platform != "darwin":
+        pytest.skip("native macOS libc xattr probe needs macOS")
+    ns = runpy.run_path(str(TOOL))
+    monkeypatch.delattr(os, "listxattr", raising=False)  # force the ctypes path
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.setxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                              ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    assert not ns["darwin_has_xattrs"](case.settings)
+    assert libc.setxattr(os.fsencode(case.settings), b"user.synthetic", b"x", 1, 0, 0) == 0
+    assert ns["darwin_has_xattrs"](case.settings)
+
+
+def test_missing_libc_xattr_probe_refuses(case, monkeypatch):
     ns = runpy.run_path(str(TOOL))
     monkeypatch.delattr(os, "listxattr", raising=False)
-    if sys.platform == "darwin":
-        # Real native libc probe on a temp file (this is the only Darwin proof).
-        assert ns["darwin_has_xattrs"](case.settings) in (False, True)
-        return
     import ctypes
     def broken(*args, **kwargs):
         raise OSError("no libc")
     monkeypatch.setattr(ctypes, "CDLL", broken)
     with pytest.raises(ns["Refused"], match="extended attributes could not be verified"):
         ns["darwin_has_xattrs"](case.settings)
+
+
+def test_linux_ioctl_request_and_decoding(case, monkeypatch):
+    linux_only()
+    import ctypes
+    import fcntl
+    ns = runpy.run_path(str(TOOL))
+    seen = {}
+    def fake(fd, request, buffer, mutate):
+        seen["request"] = request
+        assert mutate and len(buffer) == ctypes.sizeof(ctypes.c_long)
+        buffer[:4] = (0x40).to_bytes(4, sys.byteorder)  # kernel writes a 4-byte int
+        return 0
+    monkeypatch.setattr(fcntl, "ioctl", fake)
+    assert ns["linux_inode_flags"](case.settings) == 0x40
+    if ctypes.sizeof(ctypes.c_long) == 8:
+        assert seen["request"] == 0x80086601  # FS_IOC_GETFLAGS, 64-bit Linux
+    assert ns["LINUX_LAYOUT_FLAGS"] == 0x80000 | 0x10000000 | 0x40000  # EXTENTS|INLINE_DATA|HUGE_FILE
 
 
 def test_darwin_nonzero_or_missing_file_flags_refused(case, monkeypatch):

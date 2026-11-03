@@ -202,7 +202,7 @@ def make_plan(agent, project, requested):
 # a fresh inode on the same filesystem gets them again. Every other bit
 # (immutable, append-only, NODUMP, NOCOW, compression, project inherit, ...) is
 # policy a replacement inode would silently lose, so any such bit is refused.
-LINUX_LAYOUT_FLAGS = 0x80000 | 0x10000000 | 0x40000000  # EXTENTS, INLINE_DATA, HUGE_FILE
+LINUX_LAYOUT_FLAGS = 0x80000 | 0x10000000 | 0x40000  # EXTENTS, INLINE_DATA, HUGE_FILE
 
 
 def linux_inode_flags(path):
@@ -218,7 +218,7 @@ def linux_inode_flags(path):
             fcntl.ioctl(fd, request, buffer, True)
         finally:
             os.close(fd)
-        return int.from_bytes(buffer, sys.byteorder)
+        return int.from_bytes(buffer[:4], sys.byteorder)  # kernel writes a 4-byte int
     except (OSError, ImportError, ValueError) as exc:
         raise Refused("settings inode flags could not be verified") from exc
 
@@ -343,9 +343,15 @@ def apply(plan_path, receipt_path):
     # Publish recovery information BEFORE mutation; interruption cannot strand an edit.
     atomic(absolute(receipt_path), encoded(receipt), exclusive=True)
     obj["skills"] = after
-    if Path(plan["target"]).resolve(strict=True) != target:
-        raise Refused("settings symlink retargeted")
-    atomic(target, encoded(obj), expected=raw)
+    try:
+        if Path(plan["target"]).resolve(strict=True) != target:
+            raise Refused("settings symlink retargeted")
+        atomic(target, encoded(obj), expected=raw)
+    except Refused:
+        # Refusals happen before os.replace: settings are unchanged, so retire the
+        # unused receipt instead of blocking a rerun with the same --receipt.
+        os.unlink(absolute(receipt_path))
+        raise
     print(f"Applied {len(plan['additions'])} exact exclusions; receipt written.")
 
 
