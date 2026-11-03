@@ -147,7 +147,9 @@ def send_argv(cfg: dict[str, str], path: str, subject: str) -> list[str]:
 
 
 def wait_argv(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: float) -> list[str]:
-    argv = peer_argv(cfg, "wait", "--as", cfg["self"], "--sender", PEER, "--re", mid, "--fetch",
+    # No `--sender`: `drain --re` has no sender filter and claims EVERY message that answers the id, so the peek must show that same
+    # set, or a non-coding message hidden from it would be claimed with the real reply and the real reply lost with it.
+    argv = peer_argv(cfg, "wait", "--as", cfg["self"], "--re", mid, "--fetch",
                      "--interval", f"{interval:g}", "--timeout", repr(timeout / 3600))
     return [*argv, "--ack-timeout", f"{ack:g}"] if ack > 0 else argv
 
