@@ -1060,3 +1060,43 @@ def test_what_is_saved_is_what_was_printed_when_the_claim_took_more_than_the_pee
     assert cb.main(["ask", "t"]) == 0
     out = capfd.readouterr().out
     assert out == claimed and saved_path(link).read_text() == claimed
+
+
+def test_peer_mail_and_every_child_run_under_the_wrappers_own_interpreter_never_a_path_python3(link, monkeypatch, tmp_path):
+    """A `python3` first on a caller-controlled PATH must never receive the webhook key (or run at all)."""
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    marker = tmp_path / "evil-ran"
+    (evil / "python3").write_text(f"#!/bin/sh\necho ran > {marker}\nexit 0\n")
+    (evil / "python3").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{evil}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("CODING_BOT_WEBHOOK_KEY", KEY)
+    link.play(**reply_scenario(), check={"out": "check: ok\n"})
+    assert cb.main(["ask", "t"]) == 0
+    assert cb.main(["status"]) == 0
+    assert not marker.exists(), "the PATH python3 ran"
+    assert [c["argv"][0] for c in link.calls()] == ["send", "wait", "drain", "wait", "check"]
+
+
+def test_a_batch_too_big_to_keep_is_not_claimed(link, capfd, monkeypatch):
+    """peer_mail bounds each message, not the batch: claiming what the resume file cannot hold would lose the answer on an interrupt."""
+    monkeypatch.setenv("CODING_BOT_WEBHOOK_KEY", KEY)  # in-process (no vault re-exec), so the patched cap applies
+    monkeypatch.setattr(cb, "REPLY_CAP", 4000)
+    big = handover("x" * 5000 + "\nDONE")
+    link.play(**reply_scenario(wait={"out": big}, drain={"out": big}))
+    assert cb.main(["ask", "t"]) == 1
+    cap = capfd.readouterr()
+    assert cap.out == "" and "NOT claimed" in cap.err and f"--re {MID}" in cap.err
+    assert [c["argv"][0] for c in link.calls()] == ["send", "wait"] and not saved_path(link).exists()
+
+
+def test_a_claim_that_grew_past_the_cap_is_printed_and_the_earlier_save_stands(link, capfd, monkeypatch):
+    monkeypatch.setenv("CODING_BOT_WEBHOOK_KEY", KEY)  # in-process (no vault re-exec), so the patched cap applies
+    monkeypatch.setattr(cb, "REPLY_CAP", 4000)
+    peek = handover("first\nDONE")
+    huge = handovers(message("first\nDONE"), message("y" * 5000 + "\nDONE", mid="coding-2"))
+    link.play(**reply_scenario(wait={"out": peek}, drain={"out": huge}))
+    assert cb.main(["ask", "t"]) == 0
+    cap = capfd.readouterr()
+    assert cap.out == huge and "could not save" in cap.err
+    assert saved_path(link).read_text() == peek, "never a save that load_reply would refuse"
