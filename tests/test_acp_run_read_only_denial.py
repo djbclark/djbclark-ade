@@ -238,6 +238,14 @@ def probe() -> dict[str, object]:
             "interpreter_bare_file": conf_repo("c-int2", ("diff.py.textconv", "python3 conv.py")),
             "shell_syntax": conf_repo("c-sh", ("diff.external", "/usr/bin/true; ./x")),
             "option_words_ok": conf_repo("c-opt", ("diff.external", "/usr/bin/true --flag")),
+            "hookspath_relative": conf_repo("c-hk", ("core.hooksPath", ".githooks")),
+            "hookspath_husky": conf_repo("c-hk2", ("core.hooksPath", ".husky/_")),
+            "hookspath_bare_word": conf_repo("c-hk3", ("core.hooksPath", "true")),
+            "hookspath_inside": conf_repo("c-hk4", ("core.hooksPath", os.path.join(tmp, "c-hk4", "hooks"))),
+            "hookspath_absolute_outside": conf_repo("c-hk5", ("core.hooksPath", "/usr/local/share/git-hooks")),
+            "alternate_refs": conf_repo("c-alt", ("core.alternateRefsCommand", "tools/refs.sh")),
+            "env_assignment": conf_repo("c-env", ("diff.py.textconv", "env PATH=tools conv")),
+            "path_assignment": conf_repo("c-env2", ("diff.py.textconv", "PATH=tools conv")),
             "lfs_bare_name": conf_repo("c-lfs", ("filter.lfs.clean", "git-lfs clean -- %f"),
                                        ("filter.lfs.process", "git-lfs filter-process")),
             "absolute_outside": conf_repo("c-abs", ("diff.external", "/usr/bin/true")),
@@ -258,6 +266,10 @@ def probe() -> dict[str, object]:
             del os.environ[k]
         env_out["clean"] = mod.readonly_command("git log", REPO)
         out["git_env"] = env_out
+        END_D = {"ends_turn": True}
+        out["refusal_end_bit"] = [mod.refusal_end_bit("cancelled", END_D), mod.refusal_end_bit("cancelled", {"ends_turn": False}),
+                                  mod.refusal_end_bit("cancelled", None), mod.refusal_end_bit("end_turn", END_D),
+                                  mod.refusal_end_bit(None, END_D)]
         URL = "https://raw.githubusercontent.com/x/y/z/f.c"
         curl = lambda c: mod.readonly_command(c, REPO)
         before = [curl("curl -fsSL " + URL), curl("curl -q -fsSL " + URL)]
@@ -368,11 +380,16 @@ class TestReadOnlyDenial(unittest.TestCase):
 
     def test_git_is_refused_when_its_config_runs_a_helper_from_the_tree(self):
         g = self.res["git_config"]
-        for name in ("interpreter_script", "interpreter_bare_file", "shell_syntax", "external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
+        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside",
+                     "alternate_refs", "env_assignment", "path_assignment", "interpreter_script", "interpreter_bare_file", "shell_syntax", "external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
                      "filter_clean", "gpg_program", "ssh_program"):
             self.assertFalse(g[name], name)
-        for name in ("plain", "lfs_bare_name", "absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
+        for name in ("plain", "lfs_bare_name", "absolute_outside", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
             self.assertTrue(g[name], name)
+
+    def test_the_summary_bit_says_whether_the_final_turn_ended_on_a_refusal(self):
+        self.assertEqual(self.res["refusal_end_bit"],
+                         ["refusal_end=1", "refusal_end=0", "refusal_end=0", "refusal_end=0", "refusal_end=0"])
 
     def test_curl_needs_dash_q_when_a_default_config_exists(self):
         c = self.res["curlrc"]
