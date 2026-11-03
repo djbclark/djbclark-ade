@@ -78,10 +78,12 @@ P=paseo   # the Paseo CLI
 2. A `closed` agent gets the brief only when its timeline shows a pending operator decision whose options you cannot write yourself.
    Otherwise summarise its need from the timeline and do not wake it.
 3. An agent that is on a card cannot take a message. Relay the card (section 4 item 2): it is the only card this mode still carries.
-4. The brief (fill in `{LEAD}` with your fleet id, `{ID}`, and `{UNTIL}` with a local time no more than 8 h ahead):
+4. The brief (fill in `{LEAD}` with your fleet id, `{ID}`, `{UNTIL}` with a local time no more than 8 h ahead, and `{GATE}`: when you
+   are a Claude Paseo agent, the sentence "I am a Claude agent: add `--idle 1800` to every relay.py call to {LEAD}, and run it in the
+   background with a tool timeout above 1800 s, so your text never steers into my running turn."; otherwise nothing):
 
    > From the lead session {LEAD} (djbclark asked me to get every agent either unblocked or safe to quit, without stopping anything in
-   > flight). Reply through relay.py to {LEAD} with a text that STARTS with `ack {ID}` and then gives your class only (an exception to the
+   > flight). {GATE} Reply through relay.py to {LEAD} with a text that STARTS with `ack {ID}` and then gives your class only (an exception to the
    > bare-ack rule): (a) `safe to quit` if your work is finished, committed or recorded, and nothing of yours is in flight; (b)
    > `continuing, nothing needed` plus what you are waiting on and when it should end; or (c) `c: N decisions`. Send each decision for
    > djbclark as its own relay message with `--expect-ack q-{ID}-<n>`: a one-line question, 2-4 numbered options each with a short
@@ -184,7 +186,9 @@ P=paseo   # the Paseo CLI
 2. **You are deaf while you ask, and exposed while you work.** relay.py holds every message to you while you have a card open (your own
    question card included). While your turn runs, a message to an omp, codex or opencode lead is queued (deferred queue: at most 20
    records per target). A Claude lead in Paseo gets each message steered in at once, and a steer declined during compaction replaces
-   the lead's own turn. With many agents replying, that is likely. So:
+   the lead's own turn. With many agents replying, that is likely. A Claude Paseo lead therefore puts `{GATE}` into the brief, so every
+   reply to it is idle-gated by its sender (section 2 item 4). A message from an agent that ignores the gate can still replace the turn,
+   so also:
    1. keep each prompt to one batch;
    2. keep each round's turn short and end it, so queued replies land and steers have nothing to replace;
    3. never leave a background wait running in your own turn just to wait for replies.
