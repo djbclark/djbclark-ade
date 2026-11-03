@@ -764,12 +764,16 @@ def ro_gitfile_ok(path, worktree):
 # future PTY exec mode must add them (or set GIT_PAGER=cat) before this list stays right.
 RO_GIT_HELPER_KEYS = re.compile(
     r"diff\.external|diff\..+\.(textconv|command)|core\.fsmonitor|filter\..+\.(clean|smudge|process)"
-    r"|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand|core\.hookspath|core\.alternaterefscommand",
+    r"|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand|core\.hookspath|core\.alternaterefscommand"
+    # a partial (blobless) clone fetches missing objects lazily, which runs the transport and its helpers
+    r"|core\.sshcommand|core\.gitproxy|credential\.(.+\.)?helper|remote\..+\.(uploadpack|receivepack)",
     re.IGNORECASE)
 # Programs that run their arguments as code or hand them to another program: a helper command starting
 # with one is refused whatever its words look like (a `-c` string or script name is no path to inspect).
 RO_INTERPRETER = re.compile(
-    r"(ba|z|da|k|c|tc|fi)?sh|env|xargs|exec|eval|command|nice|nohup|time|timeout|sudo|doas|stdbuf|awk|gawk|mawk"
+    r"(ba|z|da|k|c|tc|fi)?sh|env|xargs|exec|eval|command|nice|nohup|time|timeout|sudo|doas|stdbuf|awk|gawk|mawk|rtk"
+    r"|npx|pnpx|bunx|uvx|pipx|npm|pnpm|yarn|bun|bundle|bundler|rake|arch|busybox|cargo|go|uv|poetry|gradle|gradlew"
+    r"|mvn|dotnet|java|git"
     r"|sed|gsed|make|just|(python|perl|ruby|php|node|nodejs|deno|bun|lua|luajit|pwsh|osascript|swift)[0-9.]*",
     re.IGNORECASE)
 # Environment that makes git run a helper or read another repository no matter what the config says.
@@ -809,6 +813,9 @@ def ro_git_config_ok(base, root):
             if not os.path.isabs(path) or real == root or real.startswith(root + os.sep):
                 return False
             continue
+        value = value.strip()
+        if value.startswith("!"):  # `!/opt/homebrew/bin/gh auth git-credential`: git's own shell-command form
+            value = value[1:]
         # git runs the value through a shell: shell syntax, or any word that names a file of the tree (an
         # interpreter's script argument: `/bin/sh tools/convert.sh`), makes it the tree's code
         if re.search(r"[;&|<>()$`\\*?\[\]{}!]", value):
@@ -820,8 +827,12 @@ def ro_git_config_ok(base, root):
         if words and RO_INTERPRETER.fullmatch(os.path.basename(words[0])):
             return False  # `/bin/sh -c 'sh payload'`, `python3 x`, `env ...`: the words after it are code
         for word in words:
-            if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word):
-                return False  # `PATH=tools conv` / `env PATH=tools conv` runs the tree's `conv`
+            if "=" in word and not os.path.isabs(os.path.expanduser(word.split("=", 1)[1])):
+                # `PATH=tools conv`, `git --exec-path=tools conv`, `-c core.hooksPath=tools`: a relative
+                # value after `=` can name the tree's programs or directories
+                return False
+            if "=" in word:
+                word = word.split("=", 1)[1]  # `--out=/abs/path`: judge the value like a path word
             word = os.path.expanduser(word)
             if os.path.isabs(word):
                 real = os.path.realpath(word)
@@ -976,8 +987,10 @@ def ro_segment(words, cwd, depth):
                 and not ro_short_bad(args[1:]) and ro_git_repo_ok(base))
     if ro_long_bad(args, name):
         return False
-    if name == "rg" and os.environ.get("RIPGREP_CONFIG_PATH") and "--no-config" not in args:
-        return False  # the config file can add `--pre=./tools/x`; --no-config ignores it
+    if name == "rg" and os.environ.get("RIPGREP_CONFIG_PATH") and args[:1] != ["--no-config"]:
+        # the config file can add `--pre=./tools/x`; --no-config ignores it only as the FIRST argument (as a
+        # value or after `--` rg reads it as a pattern or path: `rg -g --no-config x f`, `rg -- --no-config f`)
+        return False
     if name == "curl":
         return ro_curl(args)
     if name == "find":
