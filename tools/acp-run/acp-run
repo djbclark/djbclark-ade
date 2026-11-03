@@ -795,7 +795,9 @@ def ro_path_ok(ctx):
     review: a bare `cat` resolves through PATH, and `<checkout>/bin/cat` (or an empty or `.` entry, which is
     the cwd) would run the reviewed tree's program outside the sandbox. (A login shell may rebuild PATH from
     the operator's own profiles; those are the operator's, not the tree's.)"""
-    for entry in (ctx["env"].get("PATH") or os.defpath).split(os.pathsep):
+    path = ctx["env"].get("PATH")
+    # an UNSET PATH falls back to the default; an EMPTY one (`--agent-env PATH=`) is the current directory
+    for entry in (os.defpath if path is None else path).split(os.pathsep):
         if not entry or not os.path.isabs(entry):
             return False
         real = os.path.realpath(entry)
@@ -808,6 +810,8 @@ def ro_curlrc_exists(ctx):
     """True when curl would read a default config (~/.curlrc, $CURL_HOME/.curlrc, $XDG_CONFIG_HOME/curlrc),
     judged with the agent's HOME and variables: it can name an output file, a cookie jar, uploaded data."""
     env = ctx["env"]
+    if any(env.get(k) and not os.path.isabs(os.path.expanduser(env[k])) for k in ("HOME", "CURL_HOME", "XDG_CONFIG_HOME")):
+        return True  # a relative config dir is relative to the agent's cwd, not acp-run's: assume a curlrc there
     home = os.path.expanduser(env.get("HOME") or "~")
     cands = [os.path.join(env.get("CURL_HOME") or home, ".curlrc"), os.path.join(home, ".curlrc"),
              os.path.join(env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "curlrc")]
