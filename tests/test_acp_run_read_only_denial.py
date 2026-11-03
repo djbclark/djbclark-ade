@@ -259,6 +259,14 @@ def probe() -> dict[str, object]:
             "absolute_value_ok": conf_repo("c-av", ("diff.py.textconv", "/usr/bin/true --out=/tmp/x")),
             "gh_credential_helper_ok": conf_repo("c-gh", ("credential.https://github.com.helper", "!/opt/homebrew/bin/gh auth git-credential"),
                                                  ("credential.helper", "osxkeychain"), ("core.sshCommand", "/usr/bin/ssh -i /tmp/key")),
+            "newline_in_helper": conf_repo("c-nl", ("diff.external", "/usr/bin/true\\n/bin/sh -c 'rm victim'")),
+            "leading_assignment": conf_repo("c-la", ("diff.external", "TMPDIR=/tmp /bin/sh -c 'rm victim'")),
+            "leading_assignment_plain": conf_repo("c-lb", ("diff.external", "TMPDIR=/tmp /usr/bin/true")),
+            "launcher_later_word": conf_repo("c-ll", ("diff.external", "/usr/bin/caffeinate -i npx conv")),
+            "askpass_relative": conf_repo("c-ap", ("core.askPass", "tools/askpass")),
+            "hook_command_relative": conf_repo("c-hc", ("hook.x.command", "./h.sh"), ("hook.x.event", "post-index-change")),
+            "hook_command_absolute_ok": conf_repo("c-hca", ("hook.x.command", "/usr/local/bin/guard.sh")),
+            "numeric_value_ok": conf_repo("c-num", ("credential.helper", "cache --timeout=3600")),
             "env_assignment": conf_repo("c-env", ("diff.py.textconv", "env PATH=tools conv")),
             "path_assignment": conf_repo("c-env2", ("diff.py.textconv", "PATH=tools conv")),
             "name_that_starts_like_a_shell": conf_repo("c-show", ("diff.external", "/usr/local/bin/show-diff")),
@@ -282,6 +290,15 @@ def probe() -> dict[str, object]:
             del os.environ[k]
         env_out["clean"] = mod.readonly_command("git log", REPO)
         out["git_env"] = env_out
+        helper_env = {}
+        for name, val in (("GIT_SSH_COMMAND", "./tools/ssh"), ("GIT_SSH", "tools/ssh"), ("GIT_PROXY_COMMAND", "./p"),
+                          ("GIT_ASKPASS", "tools/askpass"), ("SSH_ASKPASS", "./a"), ("GIT_EXEC_PATH", "./bin"),
+                          ("GIT_SSH_COMMAND#abs", "/usr/bin/ssh -i /tmp/key"), ("GIT_ASKPASS#abs", "/usr/bin/true")):
+            key = name.split("#")[0]
+            os.environ[key] = val
+            helper_env[name] = mod.readonly_command("git log", REPO)
+            del os.environ[key]
+        out["git_env_helpers"] = helper_env
         os.environ["RIPGREP_CONFIG_PATH"] = "/tmp/rgrc"
         out["rg_config"] = [mod.readonly_command("rg needle file", REPO), mod.readonly_command("rg --no-config needle file", REPO),
                             mod.readonly_command("cat file", REPO)]
@@ -403,17 +420,23 @@ class TestReadOnlyDenial(unittest.TestCase):
 
     def test_git_is_refused_when_its_config_runs_a_helper_from_the_tree(self):
         g = self.res["git_config"]
-        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside", "sh_dash_c", "exec_path_value", "dash_c_value", "launcher_npx", "launcher_bundle", "ssh_command_relative",
+        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside", "sh_dash_c", "newline_in_helper", "leading_assignment", "leading_assignment_plain", "launcher_later_word",
+                     "askpass_relative", "hook_command_relative", "exec_path_value", "dash_c_value", "launcher_npx", "launcher_bundle", "ssh_command_relative",
                      "git_proxy_relative", "credential_relative", "uploadpack_relative", "sh_script", "python_script", "env_wrapper",
                      "alternate_refs", "env_assignment", "path_assignment", "interpreter_script", "interpreter_bare_file", "shell_syntax", "external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
                      "filter_clean", "gpg_program", "ssh_program"):
             self.assertFalse(g[name], name)
-        for name in ("plain", "lfs_bare_name", "absolute_outside", "name_that_starts_like_a_shell", "absolute_value_ok", "gh_credential_helper_ok", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
+        for name in ("plain", "lfs_bare_name", "absolute_outside", "name_that_starts_like_a_shell", "hook_command_absolute_ok", "numeric_value_ok", "absolute_value_ok", "gh_credential_helper_ok", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
             self.assertTrue(g[name], name)
 
     def test_the_summary_bit_says_whether_the_final_turn_ended_on_a_refusal(self):
         self.assertEqual(self.res["refusal_end_bit"],
                          ["refusal_end=1", "refusal_end=0", "refusal_end=0", "refusal_end=0", "refusal_end=0"])
+
+    def test_environment_selected_git_helpers_are_judged_like_config_ones(self):
+        e = self.res["git_env_helpers"]
+        for name, ok in e.items():
+            self.assertEqual(ok, name.endswith("#abs"), name)
 
     def test_rg_needs_no_config_when_a_config_file_is_selected(self):
         self.assertEqual(self.res["rg_config"], [False, True, True])

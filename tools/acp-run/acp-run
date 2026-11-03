@@ -766,7 +766,9 @@ RO_GIT_HELPER_KEYS = re.compile(
     r"diff\.external|diff\..+\.(textconv|command)|core\.fsmonitor|filter\..+\.(clean|smudge|process)"
     r"|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand|core\.hookspath|core\.alternaterefscommand"
     # a partial (blobless) clone fetches missing objects lazily, which runs the transport and its helpers
-    r"|core\.sshcommand|core\.gitproxy|credential\.(.+\.)?helper|remote\..+\.(uploadpack|receivepack)",
+    r"|core\.sshcommand|core\.gitproxy|core\.askpass|credential\.(.+\.)?helper|remote\..+\.(uploadpack|receivepack)"
+    # config-based hooks (git 2.54+): `hook.<name>.command` runs on `hook.<name>.event`, e.g. post-index-change
+    r"|hook\..+\.command",
     re.IGNORECASE)
 # Programs that run their arguments as code or hand them to another program: a helper command starting
 # with one is refused whatever its words look like (a `-c` string or script name is no path to inspect).
@@ -779,7 +781,51 @@ RO_INTERPRETER = re.compile(
 # Environment that makes git run a helper or read another repository no matter what the config says.
 # (GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS and GIT_CONFIG_GLOBAL are not listed: `git config --list` below
 # reads them, so a helper they name is judged like any other.)
+RO_GIT_ENV_HELPERS = ("GIT_SSH_COMMAND", "GIT_SSH", "GIT_PROXY_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_EXEC_PATH")
 RO_GIT_ENV_BAD = ("GIT_EXTERNAL_DIFF", "GIT_DIR", "GIT_WORK_TREE")
+
+
+def ro_helper_value_ok(value, root):
+    """True when a helper command (a git config value or an environment variable git reads as a program)
+    runs nothing from the tree. It is an ALLOW-list shape, because every deny-list item leaked: the first
+    word is the program, either an absolute path outside `root` or a bare name (looked up through PATH,
+    the operator's own), and it is not an interpreter or launcher; no word is shell syntax, a newline or
+    control character, an assignment (`TMPDIR=/tmp sh -c ...`), an interpreter/launcher name (anywhere, not
+    only first), a relative or in-tree path, or a file of the tree; an `=value` word needs an absolute
+    out-of-tree path or digits (`cache --timeout=3600`)."""
+    value = value.strip()
+    if value.startswith("!"):  # `!/opt/homebrew/bin/gh auth git-credential`: git's own shell-command form
+        value = value[1:].strip()
+    if not value or re.search(r"[\x00-\x1f\x7f;&|<>()$`\\*?\[\]{}!]", value):
+        return False
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    first = os.path.expanduser(words[0])
+    if "=" in first or first.startswith("-") or ("/" in first and not os.path.isabs(first)):
+        return False  # a leading assignment, an option, or a relative program path
+    for i, word in enumerate(words):
+        if RO_INTERPRETER.fullmatch(os.path.basename(word)):
+            return False  # `/bin/sh -c 'sh payload'`, `caffeinate -i npx conv`, `env ...`
+        if "=" in word:
+            value_part = word.split("=", 1)[1]
+            if value_part.isdigit():
+                continue
+            if not os.path.isabs(os.path.expanduser(value_part)):
+                return False  # `PATH=tools conv`, `--exec-path=tools`, `-c core.hooksPath=tools`
+            word = value_part
+        word = os.path.expanduser(word)
+        if os.path.isabs(word):
+            real = os.path.realpath(word)
+            if real == root or real.startswith(root + os.sep):
+                return False
+        elif "/" in word or word.startswith(".") or (not word.startswith("-") and os.path.lexists(
+                os.path.join(root, word))):
+            return False
+    return True
 
 
 def ro_git_config_ok(base, root):
@@ -791,6 +837,11 @@ def ro_git_config_ok(base, root):
     unreadable config. An operator's own helper by absolute path or bare name (git-lfs) stays allowed. GIT_EXTERNAL_DIFF, GIT_DIR and GIT_WORK_TREE refuse git too."""
     if any(os.environ.get(k) for k in RO_GIT_ENV_BAD):
         return False
+    root_real = os.path.realpath(root)
+    for k in RO_GIT_ENV_HELPERS:  # `git config --list` cannot see these overrides
+        v = os.environ.get(k)
+        if v and not ro_helper_value_ok(v, root_real):
+            return False
     try:
         r = subprocess.run(["git", "-C", base, "config", "--list", "-z"], capture_output=True, text=True,
                            timeout=10, check=False, stdin=subprocess.DEVNULL)
@@ -813,35 +864,8 @@ def ro_git_config_ok(base, root):
             if not os.path.isabs(path) or real == root or real.startswith(root + os.sep):
                 return False
             continue
-        value = value.strip()
-        if value.startswith("!"):  # `!/opt/homebrew/bin/gh auth git-credential`: git's own shell-command form
-            value = value[1:]
-        # git runs the value through a shell: shell syntax, or any word that names a file of the tree (an
-        # interpreter's script argument: `/bin/sh tools/convert.sh`), makes it the tree's code
-        if re.search(r"[;&|<>()$`\\*?\[\]{}!]", value):
+        if not ro_helper_value_ok(value, root):
             return False
-        try:
-            words = shlex.split(value)
-        except ValueError:
-            return False
-        if words and RO_INTERPRETER.fullmatch(os.path.basename(words[0])):
-            return False  # `/bin/sh -c 'sh payload'`, `python3 x`, `env ...`: the words after it are code
-        for word in words:
-            if "=" in word and not os.path.isabs(os.path.expanduser(word.split("=", 1)[1])):
-                # `PATH=tools conv`, `git --exec-path=tools conv`, `-c core.hooksPath=tools`: a relative
-                # value after `=` can name the tree's programs or directories
-                return False
-            if "=" in word:
-                word = word.split("=", 1)[1]  # `--out=/abs/path`: judge the value like a path word
-            word = os.path.expanduser(word)
-            if os.path.isabs(word):
-                real = os.path.realpath(word)
-                if real == root or real.startswith(root + os.sep):
-                    return False
-            elif "/" in word or word.startswith(".") or (not word.startswith("-") and os.path.lexists(
-                    os.path.join(root, word))):
-                return False
-        # a bare program name is looked up through PATH, the operator's own
     return True
 
 
