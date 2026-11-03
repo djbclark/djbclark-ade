@@ -371,7 +371,9 @@ unsupported capacity refuses with exit 5 before preflight, including dry runs,
 resumes and route overrides. At least max(1%, Pi reserve_floor, --min-headroom)
 must remain. The runner rechecks fresh capacity after load and capacity waits,
 even for legacy records. --no-preflight does not skip this measurement gate.
-Pi also refuses --acp-arg forms that could replace the billed model (--model, --set, --meta, --agent-arg).
+Pi also refuses --acp-arg forms that could replace the billed model or the Pi process's credentials
+(--model, --set, --meta, --agent-arg, --agent-env, --auth); ACP_RUN_ENV_PI, ACP_RUN_ARGS_PI and
+~/.config/acp-run.env are operator-side and not covered.
 
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
@@ -1162,10 +1164,15 @@ def pi_capacity_refusal(agent: str, model: str | None, remaining: float | None,
     return None
 
 
-# acp-run options that can change which model/provider a Pi slice really uses (--model replaces the billed
-# one; --set/--meta reconfigure the session; --agent-arg reaches the Pi binary itself). acp-run sets
+# acp-run options that can change which model/provider/credentials a Pi slice really uses (--model replaces
+# the billed one; --set/--meta reconfigure the session; --agent-arg and --agent-env reach the Pi process:
+# binary, OPENAI_API_KEY, endpoint, PI_CODING_AGENT_DIR, PI_ACP_PI_COMMAND; --auth picks the ACP auth method).
+# The rest of acp-run's options (-C, --add-dir, -p/-f, --perm, --keep/--strip-user-config (other agents only),
+# --tripwire-exempt-kinds, --mode, --effort, --context, --timeout, --wrapup*, --verify*, --log, --session-id,
+# load/handshake/retry knobs) touch neither the model, the credentials, the endpoint nor the binary. Operator-side
+# ACP_RUN_ENV_PI / ACP_RUN_ARGS_PI / ~/.config/acp-run.env are not dispatch inputs and are not covered. acp-run sets
 # allow_abbrev=False, but a prefix is rejected too: the guard must not depend on that setting.
-PI_IDENTITY_OPTIONS = ("--model", "--set", "--meta", "--agent-arg")
+PI_IDENTITY_OPTIONS = ("--model", "--set", "--meta", "--agent-arg", "--agent-env", "--auth")
 
 
 def pi_identity_override(args: list[str], skip_primary_model: bool = False) -> str | None:
@@ -1187,7 +1194,7 @@ def pi_identity_override(args: list[str], skip_primary_model: bool = False) -> s
         name = words[0].split("=", 1)[0] if words else ""
         if name != "--mode" and len(name) >= 3 and name.startswith("--") and any(opt.startswith(name) for opt in PI_IDENTITY_OPTIONS):
             return (f"pi: pass-through argument {name!r} could replace the admitted billing model; "
-                    "pi accepts no --model/--set/--meta/--agent-arg override")
+                    "pi accepts no --model/--set/--meta/--agent-arg/--agent-env/--auth override")
         i += 1
     return None
 
@@ -1212,9 +1219,12 @@ def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, st
         why = pi_identity_override(argv[1:], True)
         if not why:
             why = pi_identity_override(rec.get("acp_arg") or [])
-        if not why and argv and "--model" in argv:
-            primary = argv[argv.index("--model") + 1:argv.index("--model") + 2]
-            if primary != [rec.get("model")]:
+        if not why:
+            # the admitted model must be stated: a command without --model would run Pi's own default
+            at = argv.index("--model") if "--model" in argv else None
+            if at is None:
+                why = "pi: stored command has no --model (the admitted model must be explicit)"
+            elif argv[at + 1:at + 2] != [rec.get("model")]:
                 why = "pi: stored command's --model differs from the admitted model"
         if why:
             return "headroom", UNAVAILABLE_EXIT, f"{why} (refused after {after})"

@@ -140,9 +140,12 @@ with exit 5 (`unavailable/headroom`) before any paid preflight or task. The mini
 is the greater of 1%, the Pi profile's `reserve_floor`, and `--min-headroom`.
 This measurement gate also applies to dry runs, resumes, legacy records and route
 overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. Pass-through
-`--acp-arg` values that could replace the billed model (`--model`, `--set`, `--meta`,
-`--agent-arg`, their `=` forms and prefixes such as `--mod`) are refused for Pi before any
-probe, and the runner refuses a stored command line carrying one. A resumed Pi record keeps the
+`--acp-arg` values that could replace the billed model or the Pi process's credentials, endpoint,
+binary or config dir (`--model`, `--set`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, their `=`
+forms and prefixes such as `--mod`) are refused for Pi before any probe, and the runner refuses a stored
+command line carrying one or lacking its own `--model` (2026-11-03). Operator-side `ACP_RUN_ENV_PI`,
+`ACP_RUN_ARGS_PI` and `~/.config/acp-run.env` (`ACP_RUN_ENV_FILE`) are not dispatch inputs and are
+not covered by this guard. A resumed Pi record keeps the
 minimum it was admitted under (resume: at least 10%) and the runner rechecks that number. Initial
 admission and the runner's post-load/post-capacity-wait checks bypass the quota
 memo and use the existing freshness-aware snapshot reader. Unknown capacity is

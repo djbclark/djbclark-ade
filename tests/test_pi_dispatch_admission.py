@@ -134,7 +134,7 @@ class TestPiDispatchAdmission(LoadGate):
         mod = self.load_module()
         path = self.tmp / "runner.json"
         rec = {"agent": "pi", "model": MODELS[0][1], "kind": "code", "name": "late",
-               "status": "running", "min_headroom": 0}
+               "status": "running", "min_headroom": 0, "cmd": f"acp-run pi --model {MODELS[0][1]}"}
         path.write_text(json.dumps(rec))
         with patch.object(mod, "pool_reading", return_value=(None, {})) as reading, \
              patch.object(mod, "adopt_load_reservation"), \
@@ -153,13 +153,17 @@ class TestPiDispatchAdmission(LoadGate):
             for remaining in (None, 0, 0.5):
                 with self.subTest(rec=rec, remaining=remaining), \
                      patch.object(mod, "pool_reading", return_value=(remaining, {})) as reading:
-                    refusal = mod.spawn_refusal({"agent": "pi", "model": MODELS[0][1], **rec})
+                    refusal = mod.spawn_refusal({"agent": "pi", "model": MODELS[0][1],
+                                                 "cmd": f"acp-run pi --model {MODELS[0][1]}", **rec})
                     self.assertEqual(refusal[:2], ("headroom", 5))
                     reading.assert_called_once_with("pi", MODELS[0][1], fresh=True)
 
     REPLACEMENTS = (["--model", "openai-codex/gpt-6.1-sol"], ["--model=openai-codex/gpt-6.1-sol"],
                     ["--mod", "x"], ["--mod=x"], ["--m", "x"], ["--model x"], ["--set", "model=x"],
-                    ["--set=model=x"], ["--meta", "{}"], ["--agent-arg", "--model"], ["--agent-arg=--provider"])
+                    ["--set=model=x"], ["--meta", "{}"], ["--agent-arg", "--model"], ["--agent-arg=--provider"],
+                    ["--agent-env", "OPENAI_API_KEY=x"], ["--agent-env=PI_CODING_AGENT_DIR=/x"],
+                    ["--agent-env=PI_ACP_PI_COMMAND=/bin/x"], ["--agent-e", "A=b"], ["--agent", "x"],
+                    ["--auth", "oauth"], ["--auth=oauth"], ["--au", "x"])
 
     def test_identity_guard_boundaries(self):
         mod = self.load_module()
@@ -204,6 +208,9 @@ class TestPiDispatchAdmission(LoadGate):
                  (f"{primary} --model other/x", {}),
                  (f"{primary} --mod x", {}),
                  (f"acp-run pi --model other/x", {}),
+                 (f"acp-run pi --perm all", {}), ("", {}),
+                 (f"{primary} --agent-env OPENAI_API_KEY=x", {}),
+                 (primary, {"acp_arg": ["--agent-env=PI_ACP_PI_COMMAND=x"]}),
                  (primary, {"acp_arg": ["--model=other/x"]}),
                  (primary, {"acp_arg": ["--set", "model=x"], "resume_count": 1}))
         for cmd, extra in cases:
