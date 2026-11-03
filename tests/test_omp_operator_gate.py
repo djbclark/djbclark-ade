@@ -74,30 +74,15 @@ class HermesGateTest(unittest.TestCase):
 
 
 class ClineGateTest(unittest.TestCase):
-    """cline was uninstalled (operator 2026-10-17); the machinery stays but is gated the same way."""
+    """cline's operator approval gate was replaced 2026-11-02 by clinepass's scope and lifeline floor (config/routing.toml)."""
 
-    def test_acp_run_refuses_cline_without_approval(self):
-        r = run([ACP_RUN, "cline", "-p", "hi"], None)
-        self.assertEqual(r.returncode, 2)
-        self.assertIn(GATE_MSG, r.stderr)
-
-    def test_acp_run_omp_approval_does_not_unlock_cline(self):
-        r = run([ACP_RUN, "cline", "-p", "hi"], "omp,hermes")
-        self.assertIn(GATE_MSG, r.stderr)
-
-    def test_acp_run_passes_the_cline_gate_with_approval(self):
-        # cline has an AGENTS entry; the bad --perm stops the run at the check after the gate.
-        r = run([ACP_RUN, "cline", "-p", "hi", "--perm", "bogus"], "cline")
+    def test_acp_run_no_longer_asks_for_approval(self):
+        r = run([ACP_RUN, "cline", "-p", "hi", "--perm", "bogus"], None)
         self.assertNotIn(GATE_MSG, r.stderr)
         self.assertIn("--perm must be", r.stderr)
 
-    def test_acp_dispatch_refuses_cline_without_approval(self):
+    def test_acp_dispatch_no_longer_asks_for_approval(self):
         r = run([ACP_DISPATCH, "cline", "--model", "m", "--name", "bad name!", "-p", "hi"], None)
-        self.assertEqual(r.returncode, 2)
-        self.assertIn(GATE_MSG, r.stderr)
-
-    def test_acp_dispatch_passes_the_cline_gate_with_approval(self):
-        r = run([ACP_DISPATCH, "cline", "--model", "m", "--name", "bad name!", "-p", "hi"], "cline")
         self.assertNotIn(GATE_MSG, r.stderr)
         self.assertIn("--name must be", r.stderr)
 

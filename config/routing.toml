@@ -59,7 +59,9 @@ quality_max_rank_gap = { code = 10, judgment = 10 }
 # those kinds only while the binding headroom (the tightest window of the pool, 5-hour and weekly
 # alike) is at least this many percent; below it, or with no fresh reading, codex is frontier-only
 # again, so a wave cannot empty the 5-hour window the way four astra slices did on 2026-10-18.
-plenty_min = 50.0
+# 2026-11-02 (djbclark: "fine if we run out of quota on agy omp codex zcode cursor grok, just not claude ocgo cline"): 50.0 -> 0.0, so
+# codex's everyday kinds are eligible while it has any measured quota (a missing or partly unmeasured reading still fails closed).
+plenty_min = 0.0
 # Curated profiles overlay discovery; anything discovered without one gets
 # default_profile so a newly-added agent is routable rather than invisible.
 default_profile = { bulk = 60, mechanical = 60 }
@@ -84,13 +86,15 @@ suggest_better_delta = 3
 # hermes is the operator's own assistant. omp was gated behind a per-run operator approval
 # 2026-10-15..19; the gate is lifted (operator 2026-10-19, see the omp [[service]] below),
 # so omp is a curated service now and discovery never needs to guess its profile.
-# clinepass: reserved as the lifeline/substrate of BOTH Hermes and Dann (operator 2026-10-23) — never a slice target.
+# clinepass: the lifeline/substrate of BOTH Hermes and Dann (operator 2026-10-23), so never a slice target. Re-enabled 2026-11-02
+# (djbclark) only SCOPED and FLOORED: the clinepass [[service]] below is eligible for the techno-euphora repo and the hermes seat
+# alone (allow_repos / allow_seats) and only while its headroom is at least lifeline_floor_percent (unmeasured counts as under it).
 # kiro (2026-10-25): acp-run knows it for explicit dispatch, but its billing and quality are
 # unprofiled, so discovery must not hand it slices.
-never_route = ["hermes", "clinepass", "kiro"]
-# cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
-# into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
-operator_gated = ["cline"]
+never_route = ["hermes", "kiro"]
+# cline (operator 2026-10-17): the TUI was uninstalled and gated here; the gate is gone 2026-11-02 (ALIASES folds `cline` into the
+# curated clinepass service, whose scope and floor are the gate now).
+operator_gated = []
 # Discovery names the TUI; aiuse names the account behind it. Without this
 # map, discovery would surface `cline` as a brand-new service and hand it bulk
 # work — silently defeating the never-bulk rule that protects clinepass, which
@@ -104,10 +108,10 @@ aliases = { cline = "clinepass", agy = "antigravity", claude-agent-teams = "clau
 # hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
 # ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate. omp left this list on
 # 2026-10-19 (its Claude API credits are a normal tier).
-# cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
-# keeps its own ClinePass API pool.
+# cline: gated here from 2026-10-17 (uninstalled; Hermes keeps its own ClinePass API pool). Removed 2026-11-02: clinepass is scoped
+# (techno-euphora, hermes seat) and floored (lifeline_floor_percent) instead; acp-run's own gate for cline goes with it.
 # Distinct from [discovery].operator_gated (dispatch also gates hermes).
-operator_gated = ["hermes", "cline"]
+operator_gated = ["hermes"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
 fable_gated_efforts = ["xhigh", "max"]
@@ -143,26 +147,21 @@ extra = { crush = " --acp-arg=--strip-user-config" }
 # measurement, and codex's plain 10.0 is a guess for medium `code` that would reserve too little
 # for a review at high. 25.0 is a guess as well, chosen on the high side; `calibrate` replaces it.
 [dispatch.estimate_floor]
-"codex:frontier" = 60.0
-"codex:judgment" = 25.0
-codex = 10.0
+# 2026-11-02 (djbclark: "fine if we run out of quota on agy omp codex zcode cursor grok"): the codex and antigravity-claude floors
+# below were 60 / 25 / 10 / 15 and are 0.0 now, so the estimate is the measured median, or the 3% brief-size default. claude's stays.
+"codex:frontier" = 0.0
+"codex:judgment" = 0.0
+codex = 0.0
 claude = 8.0
-antigravity-claude = 15.0
+antigravity-claude = 0.0
 
 # Repo-scoped override of the floors above (operator djbclark, 2026-11-01: "For tendcf/nix2cf only, allow astra down to a
-# lower floor"): in these repositories astra counts as usable down to 20% of Codex quota left, so Argon (fallback behind
-# astra and Fable) stands in only below that. The repository is the last path part of the `origin` remote of acp-dispatch's -C directory
-# (a worktree such as ~/src/tendcf-foo-wt has its repository's remote; with no remote, the directory's name), or `route_agent.py plan --repo NAME` / the cwd.
-# The override REPLACES the `SERVICE:frontier` floor and is also its CAP: a measured median (3+ comparable slices) still
-# wins over the default floor everywhere, but here the estimate never exceeds 20 (a median of 70 is read as 20, a median
-# of 2 stays 2), for the scalar estimate, each window's estimate, the in-flight reservation and the fallback predicate.
-# Every other repository keeps the floors above. Accepted risk (adversary 2026-11-01 F4): the key is the NAME only, so any
-# checkout named tendcf or nix2cf gets it; the effect is quota policy on this machine, nothing more.
-[dispatch.repo_overrides.tendcf.estimate_floor]
-"codex:frontier" = 20.0
-
-[dispatch.repo_overrides.nix2cf.estimate_floor]
-"codex:frontier" = 20.0
+# lower floor"; the tendcf and nix2cf tables, astra at 20%, were removed 2026-11-02 when the base astra floor went to 0): a
+# `[dispatch.repo_overrides.REPO.estimate_floor]` table REPLACES the `SERVICE:frontier` floor for that repository and is also its CAP.
+# The repository is the last path part of the `origin` remote of acp-dispatch's -C directory (a worktree such as
+# ~/src/tendcf-foo-wt has its repository's remote; with no remote, the directory's name), or `route_agent.py plan --repo NAME` / the cwd.
+# A measured median (3+ comparable slices) still wins over the default floor everywhere, but under an override the estimate never
+# exceeds the table's value. Accepted risk (adversary 2026-11-01 F4): the key is the NAME only. None is set now.
 
 # The orchestrating (lead) session's own model (operator 2026-10-23; incident and rule in
 # skills/model-routing/SKILL.md "Lead / orchestrator sessions"). Everything above routes
@@ -230,6 +229,9 @@ models = { judgment = "opus --effort high", frontier = "fable --effort high", co
 # over the grant period (a pool far from exhausted late in the month), see route_agent.py.
 [[service]]
 name = "omp"
+# 2026-11-02 (djbclark): agy, omp, codex, zcode, cursor and grok may run out of quota, so their minimum headroom is 0.0 (was the
+# caller's default, 15 for route/plan and 10 for acp-dispatch); claude, opencode-go and clinepass keep theirs.
+min_headroom = 0.0
 cli = "omp (Claude API credits: acp-run omp --model anthropic/claude-sonnet-5-5)"
 good_at = { api-only = 1, judgment = 2, code = 13, bulk = 35 }
 billing = "credits"
@@ -250,6 +252,7 @@ models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "a
 
 [[service]]
 name = "codex"
+min_headroom = 0.0
 cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds while quota is plentiful)"
 good_at = { frontier = 1, judgment = 3, mechanical = 12, code = 15, bulk = 20 }
 billing = "subscription"
@@ -297,6 +300,7 @@ models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --eff
 # acp-dispatch checks --model against `acp-run agy --info` before running.
 [[service]]
 name = "antigravity-claude"
+min_headroom = 0.0
 cli = "agy (acp-run agy --model claude-opus-5-5 --effort high | claude-sonnet-5-5)"
 good_at = { code = 11, research = 3, mechanical = 6 }
 billing = "subscription"
@@ -310,6 +314,7 @@ models = { code = "claude-opus-5-5 --effort high", research = "claude-sonnet-5-5
 
 [[service]]
 name = "antigravity"
+min_headroom = 0.0
 cli = "agy (gemini)"
 good_at = { bulk = 1, research = 1, mechanical = 2 }
 billing = "subscription"
@@ -336,6 +341,7 @@ models = { bulk = "gemini-3.8-flash --effort medium", research = "gemini-3.8-fla
 # bonus (route() gives a fallback none) keep it behind any pool it sits behind that is not short. Carbon (Google's staged rollout, 2026-10-28) is not reachable through agy yet; recheck weekly.
 [[service]]
 name = "antigravity-argon"
+min_headroom = 0.0
 cli = "agy (acp-run agy --model gemini-4-argon --effort high; frontier fallback behind gpt-6-astra and Fable)"
 good_at = { frontier = 5 }
 billing = "subscription"
@@ -383,6 +389,7 @@ allow_seats = ["hermes"]
 
 [[service]]
 name = "zai"
+min_headroom = 0.0
 cli = "zcode (GLM-5.3)"
 good_at = { bulk = 3, mechanical = 3, code = 16, research = 12 }
 billing = "subscription"
@@ -453,6 +460,7 @@ models = { github = "claude-sonnet-5.5 --effort medium" }
 # the Auto pool is its own routing entry; the provider row keeps the rest.
 [[service]]
 name = "cursor-auto"
+min_headroom = 0.0
 cli = "cursor (Auto pool)"
 good_at = { code = 14, mechanical = 4, bulk = 6, research = 12 }
 billing = "subscription"
@@ -465,6 +473,7 @@ models = { code = "default", mechanical = "default", bulk = "default", research 
 
 [[service]]
 name = "cursor"
+min_headroom = 0.0
 cli = "cursor (third-party models)"
 good_at = { code = 20, mechanical = 10 }
 billing = "subscription"
@@ -480,6 +489,7 @@ models = { code = "claude-sonnet-5-5 --effort medium", mechanical = "claude-haik
 # same cost tier, and it is no kind's default. Model ids: `bin/cursor-cloud models`.
 [[service]]
 name = "cursor-cloud"
+min_headroom = 0.0
 cli = "cursor-cloud (Cursor Cloud Agents)"
 good_at = { code = 24, bulk = 26, mechanical = 18 }
 billing = "subscription"
@@ -493,6 +503,7 @@ models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "
 # the one-slice cap are gone. Ranked behind the burn-first pools (antigravity, cursor-auto).
 [[service]]
 name = "grok"
+min_headroom = 0.0
 cli = "grok"
 good_at = { realtime-web = 1, research = 25, bulk = 30 }
 billing = "subscription"
@@ -501,6 +512,11 @@ models = { realtime-web = "grok-4.7 --effort high", research = "grok-4.7 --effor
 
 [[service]]
 name = "clinepass"
+# Scope and lifeline floor (djbclark 2026-11-02): cline slices only for the techno-euphora repo and the hermes seat, and refused
+# while clinepass headroom is under lifeline_floor_percent (unknown or unmeasured counts as under). route-override skips neither.
+allow_repos = ["techno-euphora"]
+allow_seats = ["hermes"]
+lifeline_floor_percent = 40.0
 cli = "cline"
 good_at = { bulk = 40, code = 40, mechanical = 40 }
 billing = "subscription"

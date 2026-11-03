@@ -68,7 +68,7 @@ preferences, because they encode consequences a score cannot see:
   lots of codex quota and it is the best of available options we can use it for
   non-frontier"): a service's `plenty_kinds` are eligible only while its binding
   headroom (the tightest window, 5-hour and weekly alike) is at least
-  `PLENTY_MIN` ([routing].plenty_min, 50), and with no fresh reading they are
+  `PLENTY_MIN` ([routing].plenty_min, 50 until 2026-11-02, 0 now), and with no fresh reading they are
   not, so below it codex is frontier-only again; inside that gate it competes
   on the normal ranking, it is not forced first;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
@@ -82,8 +82,8 @@ preferences, because they encode consequences a score cannot see:
   pool in that kind) and otherwise for `code`/`bulk` slices, so they are spent
   before each monthly reset; `grant_days` gives it the burn-first bonus while the
   balance is far above an even spend over the month;
-- **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
-  lifeline and stays only in `hermes_chain`;
+- route a slice to clinepass only for the techno-euphora repo or the hermes seat, and only while its headroom is at
+  least its `lifeline_floor_percent` (40; djbclark 2026-11-02) — it is the Hindsight/hermes lifeline (2026-10-23);
 - the prepaid tier (opencode-zen, openrouter, deepseek) is retired until an
   explicit operator top-up.
 
@@ -227,6 +227,15 @@ class Service:
     fallback_after: tuple[str, ...] = ()
     # The aiuse window label that bounds this pool, named in a refusal when its reading is missing ("Gemini 4 Argon weekly").
     window: str = ""
+    # Per-service replacement of the caller's default minimum headroom (route/plan `--min-headroom` 15, acp-dispatch 10): None keeps
+    # the caller's. 0.0 on the agy, omp, codex, zcode, cursor and grok pools (djbclark 2026-11-02: "fine if we run out of quota on
+    # agy omp codex zcode cursor grok, just not claude ocgo cline"): the pool is spent down to empty. An explicitly passed
+    # `--min-headroom` other than the default still wins.
+    min_headroom: float | None = None
+    # A lifeline pool's floor (clinepass, 2026-10-23 lifeline of Hermes and Dann; re-enabled scoped, djbclark 2026-11-02): a slice is
+    # refused while the pool's headroom is under this percent, and an unknown or unmeasured headroom counts as under it. 0.0: none.
+    # route-override does not skip it.
+    lifeline_floor_percent: float = 0.0
     # Per-repo / per-seat scope (djbclark 2026-11-02: opencode-go only for techno-euphora and Hermes). With either list set the
     # service is eligible ONLY for a caller whose repo (`repo_of`, lower case) is in `allow_repos` or whose seat (`--seat` /
     # ROUTE_SEAT, lower case) is in `allow_seats`; elsewhere `scope_block` names why and route(), plan() and acp-dispatch skip it,
@@ -429,6 +438,9 @@ def _service_from_entry(entry: dict[str, Any]) -> Service:
     kwargs["fallback_after"] = tuple(str(k) for k in kwargs.get("fallback_after") or ())
     kwargs["allow_repos"] = tuple(str(k).lower() for k in kwargs.get("allow_repos") or ())
     kwargs["allow_seats"] = tuple(str(k).lower() for k in kwargs.get("allow_seats") or ())
+    if kwargs.get("min_headroom") is not None:
+        kwargs["min_headroom"] = float(kwargs["min_headroom"])
+    kwargs["lifeline_floor_percent"] = float(kwargs.get("lifeline_floor_percent") or 0.0)
     if "models" in kwargs and kwargs["models"] is not None:
         kwargs["models"] = {str(k): str(v) for k, v in kwargs["models"].items()}
     return Service(**kwargs)
@@ -520,6 +532,7 @@ def policy_public() -> dict[str, Any]:
             "shares_pool": s.shares_pool, "plenty_kinds": list(s.plenty_kinds),
             "fallback_after": list(s.fallback_after), "window": s.window,
             "allow_repos": list(s.allow_repos), "allow_seats": list(s.allow_seats),
+            "min_headroom": s.min_headroom, "lifeline_floor_percent": s.lifeline_floor_percent,
         }
     return {
         "path": str(POLICY_PATH),
@@ -605,6 +618,10 @@ def policy_markdown() -> str:
         f"repos {','.join(s.allow_repos)}" if s.allow_repos else "",
         f"seats {','.join(s.allow_seats)}" if s.allow_seats else "") if x) for s in SERVICES if s.repo_scoped)
     lines.append(f"| service.allow_repos / allow_seats (repo scope; route-override does not skip) | {scoped or '(none)'} |")
+    lines.append("| service.min_headroom (replaces the caller's default; 0 = spend to empty) | "
+                 + (", ".join(f"{s.name}={s.min_headroom:g}" for s in SERVICES if s.min_headroom is not None) or "(none)") + " |")
+    lines.append("| service.lifeline_floor_percent (refused below it; unmeasured counts as below; route-override does not skip) | "
+                 + (", ".join(f"{s.name}={s.lifeline_floor_percent:g}" for s in SERVICES if s.lifeline_floor_percent) or "(none)") + " |")
     fg = frontier_gate()
     lines.append(f"| gates.frontier1_per_wave / frontier2_per_wave | {fg['frontier1_per_wave']:g} / {fg['frontier2_per_wave']:g} |")
     lines.append(f"| routing.plenty_min | {PLENTY_MIN:g} |")
@@ -1685,6 +1702,34 @@ def repo_of(directory: str | os.PathLike[str] | None) -> str | None:
     return name
 
 
+DEFAULT_MIN_HEADROOM = 15.0     # route/plan's default; acp-dispatch's own default (10) is passed to `headroom_floor`
+EMPTY_POOL_PERCENT = 0.1       # a pool reading under this is empty: a `min_headroom = 0.0` pool is still not handed work at 0%
+
+
+def headroom_floor(svc: Service, requested: float, default: float = DEFAULT_MIN_HEADROOM) -> float:
+    """The minimum headroom for `svc`: its `min_headroom` override (never under EMPTY_POOL_PERCENT) while the caller left the
+    default, else what was asked."""
+    if svc.min_headroom is not None and requested == default:
+        return max(svc.min_headroom, EMPTY_POOL_PERCENT)
+    return requested
+
+
+def lifeline_block(svc: Service, info: dict[str, Any] | None) -> str | None:
+    """Why a lifeline pool (`lifeline_floor_percent`) may not take a slice: its headroom is under the floor or unmeasured (None for
+    a pool with no floor, or at or above it). `info` is the pool's reading in the quota map."""
+    floor = svc.lifeline_floor_percent
+    if floor <= 0:
+        return None
+    left = (info or {}).get("remaining")
+    if left is None:
+        return (f"{svc.name} is a lifeline pool (Hermes and Dann, 2026-10-23): no fresh headroom reading, which counts as under its "
+                f"{floor:g}% floor (lifeline_floor_percent); route-override does not skip this")
+    if left < floor:
+        return (f"{svc.name} is a lifeline pool (Hermes and Dann, 2026-10-23): {left:g}% left, under its {floor:g}% floor "
+                f"(lifeline_floor_percent); route-override does not skip this")
+    return None
+
+
 def current_seat() -> str | None:
     """The calling seat, from ROUTE_SEAT (lower case; `--seat` overrides it in the CLI), None when unset. The seat names who is
     routing (`hermes`), as the repo names where; a service's `allow_seats` admits it (djbclark 2026-11-02)."""
@@ -1732,7 +1777,7 @@ def pool_fits(svc: Service, kind: str, info: dict[str, Any], *, min_headroom: fl
     left = info.get("remaining")
     if left is None:
         return True
-    if left < max(min_headroom, svc.reserve_floor):
+    if left < max(headroom_floor(svc, min_headroom), svc.reserve_floor):
         return False
     floor, cap = estimate_floor(svc, kind, info, repo)
     rows = kind_rows(svc, kind, info)
@@ -1820,6 +1865,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             continue
         if kind != "api-only" and not service_ready(svc):
             continue                       # e.g. omp without a working Anthropic login
+        if lifeline_block(svc, quota.get(svc.name)) is not None:
+            continue                       # a lifeline pool under its floor, or unmeasured: never a primary or an alternative
         if fallback_block(svc, kind, quota, services=by_name, min_headroom=min_headroom,
                           held=hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment"), repo=repo) is not None:
             continue                       # a fallback: only while a pool it sits behind is short

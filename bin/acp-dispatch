@@ -4590,6 +4590,17 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         scope_why = scoped_svc.scope_block(REPO_NAME, seat)
         if scope_why:
             die(scope_why)
+    # Per-service minimum headroom (djbclark 2026-11-02, [[service]] min_headroom): replaces the default 10 for the pools allowed to run
+    # out of quota, before any use of a.min_headroom below. An explicit --min-headroom still wins.
+    pool_svc = kind_service(a.agent, service)
+    if pool_svc is not None:
+        a.min_headroom = route_module().headroom_floor(pool_svc, a.min_headroom, 10.0)
+    # Lifeline floor (clinepass, 2026-10-23 lifeline; djbclark 2026-11-02): a fresh slice is refused while the pool's headroom is under
+    # [[service]] lifeline_floor_percent or unmeasured. route-override does not skip it; a resume (a slice already admitted) does.
+    if pool_svc is not None and pool_svc.lifeline_floor_percent and not is_resume:
+        life_why = route_module().lifeline_block(pool_svc, route_module().load_snapshot()[0].get(pool_svc.name))
+        if life_why:
+            die(life_why)
     if not is_resume and kind:
         if is_frontier_model(a.model) and kind != "frontier":
             die(f"model {a.model!r} is a frontier model; use --kind frontier "

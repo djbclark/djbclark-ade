@@ -66,7 +66,7 @@ frontier1_per_wave = 2             # frontier slices per wave on the claude pool
 frontier2_per_wave = 1             # same on the codex pool (astra's 5-hour window holds about one hard slice, 2026-10-18)
 frontier1_agent_calls_per_day = 4  # Agent-tool frontier-1 calls allowed without asking, per America/New_York day (0: always ask)
 frontier1_min_left = 10.0          # percent of the frontier-1 (Fable) cap that must be left (was routing.toml fable_min_left)
-frontier2_min_left = 60.0          # percent left on the codex binding window before judged frontier-2 use
+frontier2_min_left = 0.0           # percent left on the codex binding window before judged frontier-2 use (60 until 2026-11-02, djbclark: fine to run codex and the other non-claude pools out; a missing reading still fails closed)
 
 # -- floors: what a profile may touch ---------------------------------------------------------------------------
 #
@@ -105,7 +105,7 @@ frontier1_per_wave = { loosen = "higher", bound = 2 }
 frontier2_per_wave = { loosen = "higher", bound = 1 }     # astra's 5-hour window holds about one hard slice (2026-10-18)
 frontier1_agent_calls_per_day = { loosen = "higher", bound = 4 }
 frontier1_min_left = { loosen = "lower", bound = 10.0 }   # a profile may not lower the cap floor
-frontier2_min_left = { loosen = "lower", bound = 40.0 }   # a *_min_left baseline is never looser than the code default (60)
+frontier2_min_left = { loosen = "lower", bound = 0.0 }   # a *_min_left baseline is never looser than the code default (0 since 2026-11-02); 0 is the end of the range
 
 # -- profiles -------------------------------------------------------------------------------------------------------
 
@@ -152,4 +152,4 @@ frontier2_judged = 1
 frontier1_per_wave = 2
 frontier2_per_wave = 1
 frontier1_agent_calls_per_day = 4
-# frontier1_min_left and frontier2_min_left: unchanged (10 and 60), the cap floors are kept.
+# frontier1_min_left: unchanged (10; Fable is a claude pool). frontier2_min_left: 60 -> 0 on 2026-11-02 (codex and the other non-claude pools may run out).

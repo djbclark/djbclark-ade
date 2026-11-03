@@ -11,7 +11,18 @@ import unittest
 from pathlib import Path
 from typing import override
 
+import old_floors_policy
 from test_acp_dispatch import Base, run
+
+
+# The floor MECHANISMS this module pins (plenty gate, estimate floors, headroom minimum) have no value in the live policy since
+# 2026-11-02 (djbclark: codex and the other non-claude pools may run out): the module runs on tests/old_floors_policy.py's copy.
+def setUpModule() -> None:
+    old_floors_policy.install()
+
+
+def tearDownModule() -> None:
+    old_floors_policy.uninstall()
 
 
 def _pid_start() -> str:
@@ -80,8 +91,7 @@ class TestEligibility(RoutingDispatch):
 
 
 class TestCodexEverydayGate(RoutingDispatch):
-    """Operator 2026-10-25: codex takes non-frontier kinds while its quota is plentiful
-    ([routing].plenty_min), never astra; below it, frontier-only again."""
+    """Operator 2026-10-25: codex takes non-frontier kinds while its quota is plentiful ([routing].plenty_min)."""
 
     def code(self, model: str, remaining: float | None, *extra: str, kind: str = "code"):
         env = self.snap_codex(remaining) if remaining is not None else {}

@@ -4764,12 +4764,11 @@ def env_float(name):
 # that needs API access and otherwise for code/bulk slices (skills/model-routing/SKILL.md).
 # The caller sets ACP_OPERATOR_APPROVED=<agent>[,<agent>] only after the operator said yes;
 # acp-dispatch applies the same gate.
-# cline (operator 2026-10-17): the CLI and Cline.app were uninstalled; the machinery stays so it can
-# be re-enabled on purpose (reinstall, then approve). Only Hermes still uses Cline, through its own
-# ClinePass API key, never through this.
+# cline (operator 2026-10-17): was gated here after the CLI and Cline.app were uninstalled. The gate is gone 2026-11-02 (djbclark):
+# clinepass is scoped (techno-euphora repo, hermes seat) and floored (lifeline_floor_percent) in config/routing.toml, which
+# acp-dispatch enforces. A direct `acp-run cline` run is not routed, so the scope and floor do not apply to it.
 OPERATOR_GATED = {
     "hermes": "the operator's own assistant, never a delegation target (operator 2026-10-15)",
-    "cline": "uninstalled 2026-10-17; only Hermes uses Cline (its ClinePass API pool)",
 }
 APPROVAL_ENV = "ACP_OPERATOR_APPROVED"
 

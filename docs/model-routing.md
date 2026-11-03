@@ -117,6 +117,12 @@ quoting a chain, and update its snapshot if you change one.
 > added by config alone when djbclark rules on it. `route_agent.py policy --md` shows the scope.
 > Detail: `skills/model-routing/SKILL.md` ("OpenCode Go cost guard").
 >
+> **cline and run-out-of-quota (djbclark 2026-11-02).** `clinepass` is scoped like opencode-go (techno-euphora, hermes seat) and
+> floored: refused while its headroom is under `lifeline_floor_percent` (40; unmeasured counts as under). The floors of the
+> agy, omp, codex, zcode, cursor and grok pools are gone (plenty_min 50 -> 0, the codex and antigravity-claude estimate floors,
+> the tendcf/nix2cf astra override, `frontier2_min_left` 60 -> 0, per-service `min_headroom = 0`): "fine if we run out of quota on
+> agy omp codex zcode cursor grok, just not claude ocgo cline". The knob table is in `skills/model-routing/SKILL.md`.
+>
 > **Correction 2026-10-03: "route bulk work to antigravity first" has a limit
 > that `aiuse` cannot see.** The agy CLI has a per-login burst limit, roughly
 > **60 generation requests an hour** (inferred; Google publishes none). On

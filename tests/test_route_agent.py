@@ -60,7 +60,7 @@ class TestStandingRules(unittest.TestCase):
         is the pool with headroom, using it is correct."""
         tight = {name: {"remaining": 0.0} for name in IDLE}
         tight["clinepass"] = {"remaining": 100.0}
-        choice = r.route("bulk", quota=tight)
+        choice = r.route("bulk", quota=tight, repo="techno-euphora")   # clinepass is scoped to that repo since 2026-11-02
         self.assertIsNotNone(choice)
         self.assertEqual(choice.service.name, "clinepass")
 
