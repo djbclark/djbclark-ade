@@ -18,6 +18,15 @@ BEFORE anything is claimed, so a forged message beside the real reply cannot mak
 stays unread (`wait ID` rejects it again until it is read with `peer_mail.py drain --as ROLE --re ID`). The overall --timeout is
 enforced between replies too.
 
+Every accepted FINAL reply is saved (temp file + rename, 0600) to $CODING_BOT_STATE/replies/ID.md (default
+~/.local/state/coding-bot; the directory must be a real 0700 directory of yours) BEFORE it is printed. `drain` has already moved it out
+of reach of peer_mail's `wait`, so `coding-bot wait ID` first looks there and, if the answer is saved, prints it again (exit 0, or 4 for
+`BLOCKED:`) without touching peer_mail or the network: an interrupted `ask` loses nothing.
+Every task is sent with one more line, in the task file only: "End your reply with a last line DONE, or BLOCKED: <your one
+question>." (peer-link forwards tasks unchanged and does not say how the bot should finish).
+Each peer_mail wait/drain child is killed (with its process group) at the remaining --timeout + 5 s and --interval is clamped to the
+remaining budget, so --timeout holds even if peer_mail sleeps a whole interval; that is exit 124.
+
 Config (environment wins; the local ~/.config/peer-link/{peers,trust}.json belong to peer-link, not to this tool):
   PEER_LINK_TOOL  peer_mail.py to run        (default ~/src/peer-link/peer_mail.py; refused, exit 2, unless it and its
                                               directory are owned by you and not group- or world-writable)
@@ -73,6 +82,7 @@ if __name__ == "__main__":
         os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__), *sys.argv[1:]])
 
 import argparse
+import contextlib
 import math
 import re
 import secrets
@@ -94,6 +104,11 @@ FENCE_OPEN = re.compile(r"(`{3,})text")
 HEADER = "peer-link message: "
 SENDER_OK = re.compile(r"coding(?:-[0-9a-f]{6,})?")  # the role, or one of its `<role>-<hex>` instance labels
 FINAL = re.compile(r"DONE|BLOCKED:.*", re.I)
+# Appended to every task, in the file peer_mail sends (never in an argv): peer-link forwards the task unchanged and does not tell the
+# bot how to finish, and `ask` takes a reply as final only when its last line is DONE or BLOCKED:.
+CONTRACT = "End your reply with a last line DONE, or BLOCKED: <your one question>."
+GRACE = 5.0  # seconds a peer_mail child may outlive the remaining budget before it is killed
+REPLY_CAP = 2 * 1024 * 1024  # peer_mail refuses a message over 1 MiB; the handover adds a little
 # A task must not carry a credential: the mailbox is a git repo that is published, and the subject travels in argv.
 SECRET_SHAPES = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY|\bsk-[A-Za-z0-9_-]{20,}|\bgithub_pat_\w{20,}|\bgh[pousr]_\w{30,}"
@@ -158,14 +173,39 @@ def drain_argv(cfg: dict[str, str], mid: str) -> list[str]:
     return peer_argv(cfg, "drain", "--as", cfg["self"], "--re", mid)
 
 
-def run(argv: list[str], cfg: dict[str, str], key: bool = False) -> tuple[int, str]:
-    """Run one child with stdout captured and stderr/stdin inherited. `key`: this child (the send) gets the webhook key."""
+class ChildTimeout(Exception):
+    """A peer_mail child outlived its budget and was killed (with everything it started)."""
+
+
+def kill_group(proc: subprocess.Popen) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(Exception):
+        proc.communicate(timeout=5)
+
+
+def run(argv: list[str], cfg: dict[str, str], key: bool = False, timeout: float | None = None) -> tuple[int, str]:
+    """Run one child with stdout captured and stderr/stdin inherited. `key`: this child (the send) gets the webhook key. The child
+    leads its own session, so a deadline, an interrupt or a SIGTERM to this process kills the WHOLE group, never leaves it running;
+    `timeout` raises ChildTimeout."""
     try:
-        proc = subprocess.run(argv, env=child_env(cfg, key), stdout=subprocess.PIPE, text=True, errors="replace", check=False)
+        proc = subprocess.Popen(argv, env=child_env(cfg, key), stdout=subprocess.PIPE, text=True, errors="replace",
+                                start_new_session=True)
     except OSError as exc:
         print(f"coding-bot: cannot run {argv[0]}: {exc.strerror or exc}", file=sys.stderr)
         return 127, ""
-    return proc.returncode, proc.stdout
+    previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        raise ChildTimeout from None
+    except BaseException:
+        kill_group(proc)
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    return proc.returncode, out
 
 
 def parse_header(line: str) -> dict[str, str] | None:
@@ -236,6 +276,65 @@ def is_final(msg: dict) -> bool:
     return bool(body) and bool(FINAL.fullmatch(body[-1].strip()))
 
 
+def is_blocked(msg: dict) -> bool:
+    body = [ln for ln in msg["body"] if ln.strip()]
+    return bool(body) and re.fullmatch(r"BLOCKED:.*", body[-1].strip(), re.I) is not None
+
+
+def replies_dir(create: bool = False) -> Path | None:
+    """<state>/replies, state = $CODING_BOT_STATE or ~/.local/state/coding-bot, both real directories of ours that nobody else can
+    use (0700); None if they are not (or cannot be made): a saved reply is only ever read from a place only we write."""
+    base = Path(os.environ.get("CODING_BOT_STATE") or Path.home() / ".local/state/coding-bot")
+    sub_dir = base / "replies"
+    if create:
+        try:
+            base.mkdir(parents=True, mode=0o700, exist_ok=True)
+            sub_dir.mkdir(mode=0o700, exist_ok=True)
+        except OSError:
+            return None
+    return sub_dir if private(base, directory=True) and private(sub_dir, directory=True) else None
+
+
+def save_reply(mid: str, text: str) -> bool:
+    """Keep an accepted FINAL reply (temp file + os.replace, 0600) BEFORE it is printed: `drain` has moved it into the mailbox's
+    cur/, where `wait` never looks, so an interrupted ask could otherwise never get it back."""
+    folder = replies_dir(create=True)
+    if folder is None:
+        return False
+    tmp = folder / f".{mid}.{secrets.token_hex(8)}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, folder / f"{mid}.md")
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        return False
+    return True
+
+
+def load_reply(mid: str) -> str | None:
+    """The final reply saved for `mid` by a previous run, if it is still a valid accepted final reply: opened without following
+    a link, a regular file of ours, 0600, size-capped, and judged again exactly like a fresh one."""
+    folder = replies_dir()
+    if folder is None:
+        return None
+    try:
+        fd = os.open(folder / f"{mid}.md", os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077 or st.st_size > REPLY_CAP:
+            return None
+        text = fh.read(REPLY_CAP + 1).decode("utf-8", errors="replace")
+    msgs = split_messages(text)[0]
+    return text if rejection(msgs, mid) is None and any(is_final(m) for m in msgs) else None
+
+
 def subject_of(text: str) -> str:
     first = next((ln for ln in text.splitlines() if ln.strip()), "task")
     return "".join(c for c in first if c.isprintable()).strip()[:72] or "task"
@@ -249,7 +348,7 @@ def send(cfg: dict[str, str], text: str) -> tuple[int, str | None]:
         body = Path(tmp) / "task.md"
         fd = os.open(body, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text if text.endswith("\n") else text + "\n")
+            fh.write(text.rstrip("\n") + "\n\n" + CONTRACT + "\n")
         rc, out = run(send_argv(cfg, str(body), subject_of(text)), cfg, key=True)
     sys.stderr.write(out)  # peer_mail's delivery/wake report: diagnostics, never the reply
     found = SENT_ID.search(out)
@@ -271,8 +370,18 @@ def send(cfg: dict[str, str], text: str) -> tuple[int, str | None]:
 def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: float, sent: bool = False) -> int:
     """Wait (peer_mail `wait --re ID --fetch`, then `drain --re ID`, in a loop) until an accepted FINAL reply, a rejection or the
     timeout. Accepted replies that are not final go to stderr as progress; the final one goes to stdout."""
+    saved = None if sent else load_reply(mid)  # `wait ID`: an earlier run may already have the final reply (and claimed it)
+    if saved is not None:  # no network, no peer_mail
+        sys.stdout.write(saved)
+        sys.stdout.flush()
+        return 4 if any(is_blocked(m) for m in split_messages(saved)[0] if is_final(m)) else 0
     start = time.monotonic()
     resume = f"{'sent ' + mid + '; ' if sent else ''}`coding-bot wait {mid}`"
+
+    def timed_out() -> int:
+        print(f"coding-bot: no final reply to {mid} within {timeout:g}s; the task may still be running: "
+              f"`coding-bot wait {mid}`", file=sys.stderr)
+        return 124
 
     def failed(why: str) -> int:
         print(f"coding-bot: {why}; {resume}", file=sys.stderr)
@@ -291,16 +400,15 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
     while True:
         remaining = max(0.0, timeout - (time.monotonic() - start)) if looped else timeout
         if looped and remaining <= 0:  # progress used the budget: peer_mail would still return mail it already has
-            print(f"coding-bot: no final reply to {mid} within {timeout:g}s; the task may still be running: "
-                  f"`coding-bot wait {mid}`", file=sys.stderr)
-            return 124
+            return timed_out()
         looped = True
         began = time.monotonic()
-        rc, peeked = run(wait_argv(cfg, mid, remaining, interval, ack), cfg)
+        try:  # peer_mail sleeps a whole interval between deadline checks: bound the child, and the interval, by the budget
+            rc, peeked = run(wait_argv(cfg, mid, remaining, min(interval, remaining), ack), cfg, timeout=remaining + GRACE)
+        except ChildTimeout:
+            return timed_out()
         if rc == 1 and time.monotonic() - began >= remaining - 1.0:  # peer_mail's own timeout, not a crash that exits 1
-            print(f"coding-bot: no final reply to {mid} within {timeout:g}s; the task may still be running: "
-                  f"`coding-bot wait {mid}`", file=sys.stderr)
-            return 124
+            return timed_out()
         if rc == 5:
             print(f"coding-bot: nobody picked {mid} up within {ack:g}s (see the heartbeat above); ask the operator to check "
                   f"the bot; {resume}", file=sys.stderr)
@@ -311,7 +419,10 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
         # forged one beside the real final reply would otherwise consume the only copy of the answer.
         if (why := rejection(split_messages(peeked)[0], mid)) is not None:
             return rejected(why, peeked, claimed=False)
-        rc, claimed = run(drain_argv(cfg, mid), cfg)
+        try:
+            rc, claimed = run(drain_argv(cfg, mid), cfg, timeout=max(0.0, timeout - (time.monotonic() - start)) + GRACE)
+        except ChildTimeout:
+            return timed_out()
         if rc != 0:
             return failed(f"the reply was seen but could not be read (peer_mail drain exit {rc})")
         was_claimed = HEADER in claimed
@@ -322,19 +433,17 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
             return rejected(why, handover, claimed=was_claimed)
         finals = [m for m in msgs if is_final(m)]
         progress = [m for m in msgs if not is_final(m)]
-        if not progress:  # the usual case: printed exactly as peer_mail gave it
-            sys.stdout.write(handover)
-            sys.stdout.flush()
-        else:
-            for m in progress:
-                sys.stderr.write(m["text"])
-            sys.stderr.flush()
-            if finals:
-                sys.stdout.write("".join(m["text"] for m in finals) + trailer)
-                sys.stdout.flush()
+        answer = (handover if not progress else "".join(m["text"] for m in finals) + trailer) if finals else ""
+        for m in progress:  # accepted replies that are not the answer: progress, as received
+            sys.stderr.write(m["text"])
+        sys.stderr.flush()
         if finals:
-            return 4 if any(re.fullmatch(r"BLOCKED:.*", next(ln for ln in reversed(m["body"]) if ln.strip()).strip(), re.I)
-                            for m in finals) else 0
+            if not save_reply(mid, answer):  # BEFORE printing: `wait ID` can then hand it over again after an interruption
+                print(f"coding-bot: warning: could not save the reply under $CODING_BOT_STATE/replies (not a private directory "
+                      f"of yours?); if this run is interrupted, `coding-bot wait {mid}` cannot recover it", file=sys.stderr)
+            sys.stdout.write(answer)
+            sys.stdout.flush()
+            return 4 if any(is_blocked(m) for m in finals) else 0
         if not was_claimed:
             return failed(f"the reply to {mid} (not final) is on the remote but could not be claimed; `git pull` in the comm dir")
 

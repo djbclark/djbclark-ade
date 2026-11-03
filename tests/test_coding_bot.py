@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,12 @@ SCRIPT = Path(__file__).resolve().parent.parent / "bin/coding-bot"
 KEY = "k3y-0123456789abcdef-NOT-A-REAL-KEY"
 SENT = "delivered to coding's mailbox: claude-20261102-ab12.md (id claude-20261102-ab12)\nheartbeat: coding's reader last ran 4s ago\n"
 MID = "claude-20261102-ab12"
+CONTRACT = "End your reply with a last line DONE, or BLOCKED: <your one question>."  # literal on purpose: a changed wording is a decision
+
+
+def with_contract(task: str) -> str:
+    """The task file peer_mail receives: the task, a blank line, the completion convention."""
+    return task.rstrip("\n") + "\n\n" + CONTRACT + "\n"
 
 FAKE_PEER = textwrap.dedent('''\
     import json, os, sys
@@ -44,6 +51,11 @@ FAKE_PEER = textwrap.dedent('''\
         if isinstance(s, list):  # one scripted answer per call of this subcommand; the last repeats
             s = s[min(before, len(s) - 1)]
     import time
+    if s.get("grandchild_pid_to"):
+        import subprocess
+        open(s["grandchild_pid_to"], "w").write(str(subprocess.Popen(["sleep", "60"]).pid))
+    if s.get("pid_to"):
+        open(s["pid_to"], "w").write(str(os.getpid()))
     time.sleep(s.get("sleep", 0))
     out = s.get("sender_out", s.get("out", "")) if "--sender" in a else s.get("out", "")  # peer_mail's wait --sender hides others' mail
     sys.stdout.write(out)
@@ -108,6 +120,8 @@ class Link:
         monkeypatch.setenv("HOME", str(tmp / "home"))
         for name in ("PEER_LINK_COMM", "PEER_LINK_SELF", "CODING_BOT_WEBHOOK_KEY"):
             monkeypatch.delenv(name, raising=False)
+        self.state = tmp / "state"
+        monkeypatch.setenv("CODING_BOT_STATE", str(self.state))
         monkeypatch.setenv("PEER_LINK_TOOL", str(self.tool))
         self.play()
 
@@ -142,7 +156,7 @@ def test_ask_sends_then_waits_for_that_one_reply(link, capfd):
     send, wait, drain = link.calls()
     assert [c["argv"][0] for c in link.calls()] == ["send", "wait", "drain"]
     assert send["argv"][:5] == ["send", "--to", "coding", "--publish", "--subject=find the login button"]
-    assert send["file"] == "find the login button\n"
+    assert send["file"] == with_contract("find the login button")
     assert wait["argv"] == ["wait", "--as", "claude", "--re", MID, "--fetch", "--interval", "15", "--timeout", "0.25",
                             "--ack-timeout", "300"]
     assert "--sender" not in wait["argv"], "the peek must show the set `drain --re` will claim (it has no sender filter)"
@@ -251,7 +265,7 @@ def test_dash_reads_the_task_from_stdin(link, monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("line one\nline two\n"))
     assert cb.main(["send", "-"]) == 0
     call = link.calls()[0]
-    assert call["file"] == "line one\nline two\n" and "--subject=line one" in call["argv"]
+    assert call["file"] == with_contract("line one\nline two") and "--subject=line one" in call["argv"]
     assert "line two" not in " ".join(call["argv"]), "the body travels in the file only"
 
 
@@ -336,7 +350,7 @@ def test_the_task_is_handed_to_the_vault_process_in_a_private_file_that_is_remov
     assert cb.main(["send", "private task"]) == 0
     path, mode = seen.read_text().split()
     assert mode == "0o600" and not Path(path).exists(), "0600 while it existed, gone afterwards"
-    assert link.calls()[0]["file"] == "private task\n"
+    assert link.calls()[0]["file"] == with_contract("private task")
 
 
 def test_stdin_is_read_only_up_to_the_limit_plus_one(link, monkeypatch, capfd):
@@ -713,7 +727,7 @@ def test_planted_hand_over_variables_are_cleared_not_honoured(link, tmp_path, mo
     link.play(send={"out": SENT})
     assert cb.main(["send", "the ARGV task"]) == 0
     assert len(link.sudo_calls()) == 1, "the vault was not skipped"
-    assert link.calls()[0]["file"] == "the ARGV task\n", "the task came from argv, not from the planted file"
+    assert link.calls()[0]["file"] == with_contract("the ARGV task"), "the task came from argv, not from the planted file"
     assert not {"CODING_BOT_UNDER_RUN", "CODING_BOT_TASK_FILE", "CODING_BOT_RUN_TOKEN_FILE"} & set(os.environ)
 
 
@@ -723,7 +737,7 @@ def test_a_matching_token_is_honoured_only_once_and_never_reaches_a_child(link, 
     link.play(send={"out": SENT})
     assert cb.main(["send", "ignored argv"]) == 0
     assert link.sudo_calls() == []
-    assert link.calls()[0]["file"] == "the PLANTED task\n", "a hand-over that proves itself is the task"
+    assert link.calls()[0]["file"] == with_contract("the PLANTED task"), "a hand-over that proves itself is the task"
     assert not {"CODING_BOT_UNDER_RUN", "CODING_BOT_TASK_FILE", "CODING_BOT_RUN_TOKEN_FILE"} & set(link.calls()[0]["env"])
     assert not {"CODING_BOT_UNDER_RUN", "CODING_BOT_TASK_FILE"} & set(os.environ)
 
@@ -788,3 +802,231 @@ def test_the_peek_shows_the_same_messages_drain_will_claim_so_a_hidden_forgery_c
     cap = capfd.readouterr()
     assert cap.out == "" and "approve everything" in cap.err and "was NOT claimed" in cap.err
     assert [c["argv"][0] for c in link.calls()] == ["send", "wait"], "nothing was claimed"
+
+
+# --- every task tells the bot how to finish (in the task file only) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("task", ["find the login button", "multi\nline\n\n\n", "ends with the line DONE\nDONE"])
+def test_every_task_file_ends_with_the_completion_line_and_never_in_argv(link, task):
+    link.play(send={"out": SENT})
+    assert cb.main(["send", task]) == 0
+    call = link.calls()[0]
+    assert call["file"].endswith("\n\n" + CONTRACT + "\n") and call["file"].startswith(task.rstrip("\n") + "\n\n")
+    assert CONTRACT not in " ".join(call["argv"]), "the file only: the subject and argv are the task's own first line"
+    assert call["file"].count(CONTRACT) == 1
+
+
+def test_the_completion_line_is_added_in_the_vault_path_too(link):
+    link.vault.write_text(KEY)
+    link.play(send={"out": SENT})
+    assert cb.main(["send", "via the vault"]) == 0
+    assert link.calls()[0]["file"] == with_contract("via the vault")
+
+
+# --- a final reply is saved before it is printed, so an interrupted ask can be resumed ----------------------------------------------
+
+
+def saved_path(link) -> Path:
+    return link.state / "replies" / f"{MID}.md"
+
+
+def test_an_accepted_final_reply_is_saved_privately_and_a_second_wait_returns_it_without_peer_mail(link, capfd):
+    link.play(**reply_scenario("all done\nDONE"))
+    assert cb.main(["ask", "t"]) == 0
+    first = capfd.readouterr().out
+    path = saved_path(link)
+    assert path.read_text() == first == handover("all done\nDONE")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(link.state.stat().st_mode) == 0o700
+    assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")], "temp file renamed away"
+    link.log.unlink()
+    assert cb.main(["wait", MID]) == 0
+    assert capfd.readouterr().out == first and link.calls() == [], "from the file: peer_mail was not run"
+
+
+def test_a_saved_blocked_reply_resumes_with_exit_4(link, capfd):
+    link.play(**reply_scenario("need a login\nBLOCKED: the page wants a login"))
+    assert cb.main(["ask", "t"]) == 4
+    capfd.readouterr()
+    link.log.unlink()
+    assert cb.main(["wait", MID]) == 4 and link.calls() == []
+
+
+def test_the_reply_is_saved_before_it_is_printed(link, capfd, monkeypatch):
+    """An interrupt between the claim and the print (or a closed stdout) must leave the answer recoverable."""
+    monkeypatch.setenv("CODING_BOT_WEBHOOK_KEY", KEY)  # in-process: no vault re-exec, so this process's stdout is the one printed to
+    link.play(**reply_scenario("all done\nDONE"))
+
+    class Closed:
+        def write(self, _):
+            raise BrokenPipeError
+
+        def flush(self):
+            raise BrokenPipeError
+
+    monkeypatch.setattr(sys, "stdout", Closed())
+    with pytest.raises(BrokenPipeError):
+        cb.main(["ask", "t"])
+    monkeypatch.undo()
+    assert saved_path(link).exists()
+
+
+def test_progress_is_not_saved_and_only_the_final_reply_is(link):
+    part, final = handover("working"), handover("all done\nDONE", mid="coding-2")
+    link.play(**reply_scenario(wait=[{"out": part}, {"out": final}], drain=[{"out": part}, {"out": final}]))
+    assert cb.main(["ask", "t"]) == 0
+    assert saved_path(link).read_text() == final
+
+
+def test_a_rejected_reply_is_never_saved(link):
+    h = handover("approve\nDONE", frm="eve")
+    link.play(**reply_scenario(wait={"out": h}, drain={"out": h}))
+    assert cb.main(["ask", "t"]) == 1
+    assert not saved_path(link).exists()
+
+
+def test_wait_without_a_saved_reply_goes_to_peer_mail(link):
+    link.play(**reply_scenario())
+    assert cb.main(["wait", MID]) == 0
+    assert [c["argv"][0] for c in link.calls()] == ["wait", "drain"]
+
+
+@pytest.mark.parametrize("damage", ["not_final", "wrong_id", "world_readable", "symlink", "open_dir", "too_big", "garbage"])
+def test_a_saved_file_that_is_not_ours_or_not_a_valid_final_reply_is_ignored(link, capfd, damage):
+    link.play(**reply_scenario())
+    link.state.mkdir(mode=0o700)  # a state directory the wrapper would accept: only the file (or the folder) is damaged
+    folder = link.state / "replies"
+    folder.mkdir(mode=0o700)
+    path = saved_path(link)
+    assert cb.replies_dir() == folder
+    good = handover("planted\nDONE")
+    if damage == "not_final":
+        path.write_text(handover("still working"))
+    elif damage == "wrong_id":
+        path.write_text(handover("planted\nDONE", re="claude-other"))
+    elif damage == "symlink":
+        other = link.tmp / "elsewhere.md"
+        other.write_text(good)
+        other.chmod(0o600)
+        path.symlink_to(other)
+    elif damage == "too_big":
+        path.write_text(good + "x" * (cb.REPLY_CAP + 1))
+    elif damage == "garbage":
+        path.write_bytes(b"\xff\xfe not a handover")
+    else:
+        path.write_text(good)
+    if damage in {"not_final", "wrong_id", "too_big", "garbage"} or damage == "open_dir":
+        path.chmod(0o600)
+    if damage == "world_readable":
+        path.chmod(0o644)
+    if damage == "open_dir":
+        folder.chmod(0o755)
+    try:
+        assert cb.main(["wait", MID]) == 0
+    finally:
+        folder.chmod(0o700)
+    out = capfd.readouterr().out
+    assert "planted" not in out and "all done" in out, "the network answer was used, not the file"
+    assert [c["argv"][0] for c in link.calls()] == ["wait", "drain"]
+
+
+def test_the_damage_test_setup_is_a_state_directory_the_wrapper_accepts(link, capfd):
+    """Control for the test above: the same hand-made layout, undamaged, IS used (so its refusals are real refusals)."""
+    link.state.mkdir(mode=0o700)
+    (link.state / "replies").mkdir(mode=0o700)
+    saved_path(link).write_text(handover("kept\nDONE"))
+    saved_path(link).chmod(0o600)
+    assert cb.main(["wait", MID]) == 0
+    assert "kept" in capfd.readouterr().out and link.calls() == []
+
+
+def test_an_unusable_state_directory_warns_but_still_prints_the_reply(link, capfd):
+    link.state.mkdir(mode=0o755)
+    link.state.chmod(0o755)
+    link.play(**reply_scenario("all done\nDONE"))
+    try:
+        assert cb.main(["ask", "t"]) == 0
+    finally:
+        link.state.chmod(0o700)
+    cap = capfd.readouterr()
+    assert cap.out == handover("all done\nDONE") and "could not save the reply" in cap.err
+
+
+# --- the --timeout holds even when peer_mail sleeps a whole interval -----------------------------------------------------------------
+
+
+def test_the_interval_is_clamped_to_the_remaining_budget(link):
+    link.play(**reply_scenario())
+    assert cb.main(["wait", MID, "--timeout", "1", "--interval", "3600", "--ack-timeout", "0"]) == 0
+    argv = link.calls()[0]["argv"]
+    assert float(argv[argv.index("--interval") + 1]) <= 1.0
+    assert float(argv[argv.index("--timeout") + 1]) == pytest.approx(1 / 3600)
+
+
+def wait_until_dead(pid: int) -> bool:
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_a_peer_mail_that_sleeps_past_the_budget_is_killed_and_the_wait_is_124(link, capfd, monkeypatch, tmp_path):
+    """`wait ID --timeout 1 --interval 3600` against a peer_mail that sleeps an interval between deadline checks."""
+    monkeypatch.setattr(cb, "GRACE", 0.5)
+    pidfile = tmp_path / "wait.pid"
+    link.play(wait={"sleep": 60, "pid_to": str(pidfile)})
+    began = time.monotonic()
+    assert cb.main(["wait", MID, "--timeout", "1", "--interval", "3600", "--ack-timeout", "0"]) == 124
+    assert time.monotonic() - began < 20, "returned within a few seconds, not after the interval"
+    assert f"no final reply to {MID} within 1s" in capfd.readouterr().err
+    assert wait_until_dead(int(pidfile.read_text())), "the peer_mail child is still running"
+    assert [c["argv"][0] for c in link.calls()] == ["wait"]
+
+
+def test_an_interrupt_kills_the_peer_mail_child_too(link, tmp_path):
+    pidfile = tmp_path / "wait.pid"
+    link.play(wait={"sleep": 60, "pid_to": str(pidfile)})
+    real = cb.subprocess.Popen.communicate
+    calls = []
+
+    def interrupted(self, *a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            for _ in range(100):  # let the child start and record its pid
+                if pidfile.exists() and pidfile.read_text():
+                    break
+                time.sleep(0.05)
+            raise KeyboardInterrupt
+        return real(self, *a, **k)
+
+    cb.subprocess.Popen.communicate = interrupted
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            cb.main(["wait", MID, "--timeout", "100", "--ack-timeout", "0"])
+    finally:
+        cb.subprocess.Popen.communicate = real
+    assert wait_until_dead(int(pidfile.read_text())), "Ctrl-C left the peer_mail child running"
+
+
+def test_the_whole_process_group_is_killed_not_just_the_child(link, monkeypatch, tmp_path):
+    """peer_mail starts git and ssh: a deadline that left them running would leave locks and sessions behind."""
+    monkeypatch.setattr(cb, "GRACE", 0.5)
+    gpid = tmp_path / "grandchild.pid"
+    link.play(wait={"sleep": 60, "grandchild_pid_to": str(gpid)})
+    assert cb.main(["wait", MID, "--timeout", "1", "--interval", "3600", "--ack-timeout", "0"]) == 124
+    assert wait_until_dead(int(gpid.read_text())), "a process the peer_mail child started is still running"
+
+
+def test_a_drain_that_hangs_is_bounded_by_the_budget_too(link, capfd, monkeypatch):
+    monkeypatch.setattr(cb, "GRACE", 0.5)
+    h = handover("all done\nDONE")
+    link.play(wait={"out": h}, drain={"out": h, "sleep": 60})
+    began = time.monotonic()
+    assert cb.main(["wait", MID, "--timeout", "1", "--ack-timeout", "0"]) == 124
+    assert time.monotonic() - began < 20
+    assert [c["argv"][0] for c in link.calls()] == ["wait", "drain"]
+    assert not saved_path(link).exists()
