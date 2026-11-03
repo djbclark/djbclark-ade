@@ -1,0 +1,314 @@
+Title: Retry behavior - AWS SDKs and Tools
+URL: https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html
+
+Retry behavior - AWS SDKs and Tools
+
+Configuring retries How retries work Support by AWS SDKs and tools
+
+###### Important
+
+The behavior described on this page requires opting in until it becomes the default behavior. Set `AWS_NEW_RETRIES_2026=true` in your environment. Without this setting, your SDK uses pre-2026 retry behavior, which differs in backoff timing, retry quota costs, and service-specific defaults. For details, see the 
+
+When a request to an AWS service fails due to a transient error or throttling, the SDK can automatically retry the request. This page covers how to configure retries and how they work internally.
+
+- Configuring retries: Choose a retry mode, set max attempts, and understand configuration precedence.
+- How retries work: Retry flow, error classification, backoff formula, retry quota mechanics, and service-specific behavior.
+
+## Configuring retries
+
+You control which retry strategy the SDK uses and how many times it retries.
+
+### Choosing a retry mode
+
+The retry mode determines how the SDK behaves when a request fails. Three modes are available: standard, adaptive, and legacy.
+
+| | Standard | Adaptive | Legacy |
+| --- | --- | --- | --- |
+| Retry quota | Yes | Yes | Varies by SDK |
+| Can delay initial request | No | Yes | No |
+| Error-type-specific backoff | Yes | Yes | Varies by SDK |
+| Standardized across SDKs | Yes | Yes | No |
+| Recommendation | Default for all workloads | Single-resource, throttling-heavy, latency-tolerant | Backward compatibility only |
+
+#### Standard mode (default)
+
+Standard mode retries failed requests using exponential backoff with jitter. It uses shorter delays for transient errors (such as network timeouts) and longer delays for throttling errors (such as `ThrottlingException`).
+
+Standard mode includes a retry quota, a token bucket that deducts tokens for each retry and replenishes tokens when requests succeed. When the available tokens are exhausted, the SDK returns the error without retrying, so your application fails fast instead of waiting through retries that are unlikely to succeed. This also helps service disruptions resolve faster by reducing retry traffic. During normal operation, the quota stays full and has no effect. The retry quota never delays or blocks the initial request. Only retries are affected. For details, see Retry quota (token bucket).
+
+Use standard mode unless you have a specific reason to choose another mode.
+
+#### Adaptive mode
+
+Adaptive mode includes everything in standard mode, plus a client-side rate limiter. The rate limiter tracks throttling responses and adjusts the rate at which the SDK sends requests. Unlike standard mode, adaptive mode can delay or block the initial request, not just retries, when throttling is detected.
+
+The rate limiter operates per SDK client instance. All requests from a client share the same rate limit, regardless of which API operation or resource they target.
+
+When to use adaptive mode:
+
+- Your client targets a single resource (for example, one DynamoDB table) and you expect frequent throttling responses. This is common in automated workflows, batch processors, or AI workloads that call a single API operation at high volume.
+- You want the SDK to automatically slow down when the service signals throttling.
+
+When not to use adaptive mode:
+
+- Your client sends requests to multiple resources or serves multiple tenants. Throttling on one resource causes the rate limiter to slow all requests from that client, including requests to unaffected resources.
+- You need predictable latency on the initial request.
+
+Adaptive mode is not recommended as a general default.
+
+#### Legacy mode
+
+Legacy mode is the retry behavior each SDK used before standard mode was introduced. It does not include a standardized retry quota. Some SDKs (such as Java) had their own retry quota implementations in legacy mode, but the behavior is not consistent across SDKs. Without a standardized quota, a client continues to retry at full rate during service disruptions. This ties up threads and connections on requests unlikely to succeed, while adding load that can delay service recovery.
+
+Legacy mode varies across SDKs. The retry count, backoff timing, retryable error sets, and throttling behavior differ between languages. Code that depends on legacy retry behavior may behave differently when moved between SDKs.
+
+Available in: Java, Python, Ruby, PHP, C++, CLI
+
+Not available in: .NET, Go, Kotlin, Rust, Swift, JavaScript
+
+Legacy mode exists for backward compatibility. If you currently use legacy mode, switch to standard mode.
+
+### Retry settings
+
+The following settings control retry behavior. You can set them through environment variables, the shared config file (`~/.aws/config`), or client configuration in code.
+
+| Setting | What it controls | Environment variable | Config file key | Default |
+| --- | --- | --- | --- | --- |
+| Retry mode | Which retry strategy to use | `AWS_RETRY_MODE` | `retry_mode` | `standard` |
+| Max attempts | Total attempts including the initial request | `AWS_MAX_ATTEMPTS` | `max_attempts` | `3` (see notes) |
+
+A max attempts value of `3` means the SDK makes one initial request and up to two retries. Set max attempts to `1` to disable retries entirely.
+
+The DynamoDB and DynamoDB Streams clients default to `4` max attempts. These services use a shorter base backoff delay (25 ms instead of 50 ms) to match their low-latency profile. The additional attempt keeps the last retry's maximum backoff comparable to other services. You can override this with the same settings shown in the preceding table.
+
+### Configuration precedence
+
+When you specify the same setting in multiple places, the SDK resolves the value using the following precedence, from highest to lowest:
+
+1. Explicit client configuration in code. A value set directly on the SDK client or its configuration object.
+2. Environment variable. For example, `AWS_RETRY_MODE` or `AWS_MAX_ATTEMPTS`.
+3. Shared config file. The `retry_mode` or `max_attempts` key in `~/.aws/config`.
+4. SDK default. The built-in default for the setting.
+
+This follows the standard AWS SDK configuration precedence. A value set at a higher level always overrides a value set at a lower level. For example, if you set `AWS_RETRY_MODE=adaptive` as an environment variable and `retry_mode=standard` in `~/.aws/config`, the SDK uses adaptive mode.
+
+### Language-specific configuration
+
+The cross-SDK settings described on this page (`retry_mode` and `max_attempts`) work in all SDKs. However, the API for configuring retries in code varies by language. See your SDK's developer guide for language-specific configuration options such as custom backoff strategies, additional retryable errors, and retry quota tuning.
+
+## How retries work
+
+This section describes how AWS SDKs handle failed requests: which errors trigger retries, how long the SDK waits between attempts, and when it stops retrying.
+
+### What happens when a request fails
+
+When you make an API call through an AWS SDK, the SDK follows this sequence:
+
+1. Adaptive mode only: The SDK checks the client-side rate limiter. If throttling has been detected, the SDK may delay or block the request before sending it.
+2. The SDK sends the request to the AWS service endpoint.
+3. If the service returns a successful response, the SDK returns the result to your code.
+4. If the request fails, the SDK classifies the error as transient, throttling, or non-retryable. See Which errors are retried.
+5. If the error is non-retryable, the SDK returns the error to your code immediately. No retry is attempted.
+6. If the error is retryable, the SDK checks whether it has reached the maximum number of attempts. If so, it returns the error to your code.
+7. The SDK checks the Retry quota (token bucket). If the token budget is depleted, the SDK does not retry and returns the error to your code. Exception: for Long-polling operations, the SDK still applies a backoff delay before returning the error.
+8. The SDK computes a backoff delay based on the error type and the retry attempt number. See How long does the SDK wait.
+9. The SDK waits for the computed delay, then sends the request again from step 2.
+
+The SDK repeats this loop until the request succeeds, the maximum number of attempts is reached, the retry quota is depleted, or a non-retryable error occurs. The entire process is automatic. Your application sees either a successful response or a final error.
+
+### Which errors are retried
+
+The SDK classifies each failed request into one of three categories: transient, throttling, or non-retryable. This classification determines whether the SDK retries the request and how long it waits before retrying.
+
+Classification is based on the error code and HTTP status code in the service response. For example, an HTTP 400 with the error code `RequestTimeout` is classified as transient and retried. An HTTP 400 with `ValidationException` is classified as non-retryable and returned immediately.
+
+#### Error classification
+
+Transient errors are retried with a short base delay (50 ms):
+
+| Error code |
+| --- |
+| `RequestTimeout` |
+| `RequestTimeoutException` |
+| `InternalError` |
+| `IDPCommunicationError` |
+| I/O Failure (Connection reset, DNS resolution failure, socket timeout) |
+| (any HTTP 500, 502, 503, or 504 without a recognized error code) |
+
+Throttling errors are retried with a longer base delay (1,000 ms):
+
+| Error code |
+| --- |
+| `Throttling` |
+| `ThrottlingException` |
+| `ThrottledException` |
+| `RequestThrottledException` |
+| `TooManyRequestsException` |
+| `ProvisionedThroughputExceededException` |
+| `TransactionInProgressException` |
+| `LimitExceededException` |
+| `PriorRequestNotComplete` |
+| `RequestThrottled` |
+| `EC2ThrottledException` |
+| `RequestLimitExceeded` |
+| `SlowDown` |
+| `BandwidthLimitExceeded` |
+
+Non-retryable errors (such as `AccessDeniedException`, `ValidationException`, `ResourceNotFoundException`) are returned to your code immediately.
+
+An HTTP 5XX with a throttling error code is classified as a throttling error, not a transient error, even though 5XX errors are normally transient. The SDK matches on error code first, then falls back to HTTP status code.
+
+Throttling errors mean the service actively rejected your request due to rate limits, so the SDK waits longer before retrying to give the service time to recover capacity. See How long does the SDK wait for the specific delays.
+
+### How long does the SDK wait
+
+The SDK uses exponential backoff with full jitter. On average, each retry waits longer than the last, with randomization to spread out requests from multiple clients.
+
+#### Base delays by error type
+
+The base delay depends on whether the error is transient or throttling:
+
+| Error type | Base delay | Rationale |
+| --- | --- | --- |
+| Transient (non-throttling) | 50 ms | Transient errors typically resolve within milliseconds. A short base delay gives fast recovery. |
+| Throttling | 1,000 ms | The service has rate-limited the request. A longer base delay gives time to recover capacity. |
+
+#### Backoff formula
+
+The SDK computes each retry delay using this formula:
+
+`delay = random(0, 1) × min(20,000 ms, base_delay × 2^retry)`
+
+- `random(0, 1)` returns a uniformly distributed value between 0 and 1
+- `base_delay` is 50 ms for transient errors or 1,000 ms for throttling errors
+- `retry` starts at 0 for the first retry (the second overall request attempt)
+
+The maximum backoff cap is 20 seconds. No individual delay exceeds 20 seconds regardless of how many attempts have occurred.
+
+#### Worked examples
+
+Example 1: Transient error, 3 max attempts
+
+| Step | What happens | Delay |
+| --- | --- | --- |
+| Attempt 1 | Initial request. Service returns HTTP 503. | (none) |
+| Attempt 2 | SDK waits random(0, 50 ms). Retry fails with 503. | 0–50 ms (avg ~25 ms) |
+| Attempt 3 | SDK waits random(0, 100 ms). Retry succeeds. | 0–100 ms (avg ~50 ms) |
+
+Total added latency averages about 75 ms across both retries.
+
+Example 2: Throttling error, 3 max attempts
+
+| Step | What happens | Delay |
+| --- | --- | --- |
+| Attempt 1 | Initial request. Service returns 429 `Throttling`. | (none) |
+| Attempt 2 | SDK waits random(0, 1,000 ms). Retry returns 429. | 0–1,000 ms (avg ~500 ms) |
+| Attempt 3 | SDK waits random(0, 2,000 ms). Retry succeeds. | 0–2,000 ms (avg ~1,000 ms) |
+
+Total added latency averages about 1,500 ms across both retries.
+
+Example 3: Transient error, hitting the backoff cap
+
+With a 50 ms base delay, the computed delay before capping would be:
+
+| Retry attempt | Computed max delay | After 20 s cap |
+| --- | --- | --- |
+| 1 | 50 ms | 50 ms |
+| 2 | 100 ms | 100 ms |
+| 5 | 800 ms | 800 ms |
+| 9 | 12,800 ms | 12,800 ms |
+| 10 | 25,600 ms | 20,000 ms |
+
+The cap takes effect at the 10th retry (11th attempt) for transient errors. For throttling errors with a 1,000 ms base, the cap takes effect at the 6th retry.
+
+With the default of 3 max attempts (1 initial request + 2 retries), the backoff cap is never reached. This table illustrates what happens if you increase `max_attempts` well beyond the default.
+
+#### Why jitter matters
+
+The random multiplier is called full jitter. Without it, all clients that hit an error at the same time would retry at the same time, creating a burst of retry traffic (the "thundering herd" problem). Full jitter spreads retries uniformly across the entire backoff window so the service receives a steady trickle of requests instead of synchronized spikes.
+
+For example, suppose 1,000 clients all receive a 503 at the same moment. Full jitter distributes their first retries uniformly across a 50 ms window instead of having all 1,000 retry at exactly 50 ms.
+
+#### Server-directed retry timing
+
+Some AWS services include an `x-amz-retry-after` header in error responses. The header value is a delay in milliseconds. When this header is present, the SDK uses the server-specified delay, clamped to a minimum of the computed backoff delay and a maximum of the computed backoff delay plus 5,000 ms. Since the computed backoff is itself capped at 20 seconds, the effective maximum server-directed delay is 25 seconds. The SDK does not apply jitter to this value, because the service is expected to jitter it. This allows the service to communicate exactly when it expects to have capacity available.
+
+### Retry quota (token bucket)
+
+The SDK maintains an internal token budget that tracks the ratio of successful requests to failures. When failures are widespread, the budget depletes and the SDK returns errors directly. Your application fails fast instead of waiting through retries that are unlikely to succeed. This also reduces retry traffic, helping service disruptions resolve faster.
+
+#### How the retry quota works
+
+The token budget starts full. Each retry attempt deducts tokens. When a retry succeeds, the SDK restores the tokens consumed by that retry. When a request succeeds on the first try (no retries needed), the SDK restores 1 token. When the budget reaches zero, the SDK stops retrying and returns errors directly to your code.
+
+| Parameter | Value |
+| --- | --- |
+| Budget capacity | 500 tokens |
+| Cost per transient (non-throttling) retry | 14 tokens |
+| Cost per throttling retry | 5 tokens |
+| Tokens restored on success after retry | Amount consumed by the last retry (14 or 5) |
+| Tokens restored on success without retry | 1 token |
+
+The higher cost for transient retries reflects their different failure pattern. Transient errors like 500s and connection failures often indicate a service-wide problem. In these situations, continued retrying is unlikely to succeed. It adds latency to your calls, ties up client resources, and can delay recovery for everyone. Throttling errors signal that the service needs more time before the request can succeed. The SDK waits longer between retries to improve the likelihood of success.
+
+#### When does the quota block retries
+
+The retry quota tracks tokens at all times, but only blocks retries when the budget is depleted. During normal operation, nearly all requests succeed and the budget stays full. The quota has no observable effect on retries.
+
+A successful retry restores only its own token cost (14 or 5 tokens), not the cost of earlier failed retries in the same request. For example, if the first retry fails and the second succeeds, the budget loses 14 tokens net. The budget drains fastest when retries exhaust all attempts without succeeding, but it also drains gradually when requests need multiple retries before succeeding.
+
+With the default of 3 max attempts, the quota begins to drain when more than approximately 22% of requests result in sustained transient failures, or more than approximately 32% for throttling errors. Below these rates, successful requests replenish the budget faster than failed retries drain it.
+
+The budget's starting balance of 500 tokens provides a buffer that absorbs short bursts of failures. A brief spike in errors, even a severe one, does not block retries unless it persists long enough to drain the buffer.
+
+#### Practical implications
+
+- Low failure rates: The quota has no effect. The budget stays at or near capacity.
+- During a service disruption: If a high percentage of your requests fail for a sustained period, the quota depletes and your client gets errors back immediately instead of waiting through retries. This reduces client-side latency, frees up threads and connections, and helps the service recover faster.
+- Recovery: As the service recovers and requests start succeeding again, successful retries restore their full token cost and first-try successes restore 1 token. The budget gradually refills and retries resume automatically.
+- Scope: The token budget is typically scoped to a single SDK client instance. The exact scope may vary by SDK. It is not shared across processes or hosts.
+
+#### DynamoDB
+
+DynamoDB clients use tuned defaults optimized for DynamoDB's low-latency profile:
+
+| Setting | General default | DynamoDB default |
+| --- | --- | --- |
+| Transient (non-throttling) base delay | 50 ms | 25 ms |
+| Throttling base delay | 1,000 ms | 1,000 ms |
+| Max attempts | 3 | 4 |
+
+These defaults apply to both Amazon DynamoDB and DynamoDB Streams.
+
+#### Long-polling operations
+
+Certain AWS operations use long polling. They can hold a connection open waiting for work to arrive. These operations receive special retry treatment:
+
+- `SQS.ReceiveMessage`
+- `SFN.GetActivityTask`
+- `SWF.PollForActivityTask`
+- `SWF.PollForDecisionTask`
+
+Special behavior: When the retry quota is depleted and retries are blocked (step 7 in What happens when a request fails), the SDK still applies a backoff delay before returning the error to your code.
+
+This matters because long-polling operations are typically called in a tight loop. Your code calls `ReceiveMessage`, processes any messages, then immediately calls `ReceiveMessage` again. Without the forced backoff, a depleted token budget would cause the SDK to return errors with no delay. Your polling loop would then immediately send the next request, spiking client CPU usage and generating additional traffic. The forced backoff delay breaks this cycle, keeping client resource usage and polling rate manageable during failures.
+
+## Support by AWS SDKs and tools
+
+The following table lists the availability of the updated retry behavior in each SDK. For SDK-specific details including minimum version, before-and-after defaults, and code examples, see the GitHub tracking issue.
+
+| SDK | Supported | GitHub tracking issue |
+| --- | --- | --- |
+| SDK for Java 2.x | Yes | Tracking issue |
+| SDK for Python (Boto3) | Yes | Tracking issue |
+| SDK for .NET 4.x | Yes | Tracking issue |
+| Tools for PowerShell V5 | Yes | Tracking issue |
+| SDK for JavaScript 3.x | Yes | Tracking issue |
+| SDK for PHP 3.x | Yes | Tracking issue |
+| SDK for Kotlin | Yes | Tracking issue |
+| SDK for Rust | Yes | Tracking issue |
+| SDK for Swift | See tracking issue | Tracking issue |
+| SDK for Ruby 3.x | See tracking issue | Tracking issue |
+| SDK for Go V2 (1.x) | See tracking issue | Tracking issue |
+| SDK for C++ | See tracking issue | Tracking issue |
+| AWS CLI v2 | See tracking issue | Tracking issue |

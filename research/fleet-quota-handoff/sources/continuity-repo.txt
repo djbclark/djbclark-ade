@@ -1,0 +1,190 @@
+Title: GitHub - keefeere/paseo-continuity: Automatic provider failover for Paseo agents · GitHub
+URL: https://github.com/keefeere/paseo-continuity
+
+[Skip to content](https://github.com/keefeere/paseo-continuity#start-of-content)
+                 
+
+You signed in with another tab or window. [Reload](https://github.com/keefeere/paseo-continuity)
+ to refresh your session. You signed out in another tab or window. [Reload](https://github.com/keefeere/paseo-continuity)
+ to refresh your session. You switched accounts on another tab or window. [Reload](https://github.com/keefeere/paseo-continuity)
+ to refresh your session. Dismiss alert
+
+                  [](https://github.com/keefeere/paseo-continuity)
+
+main
+
+[Branches](https://github.com/keefeere/paseo-continuity/branches)
+[Tags](https://github.com/keefeere/paseo-continuity/tags)
+
+[](https://github.com/keefeere/paseo-continuity/branches)
+[](https://github.com/keefeere/paseo-continuity/tags)
+
+Go to file
+
+Code
+
+Open more actions menu
+
+Latest commit
+-------------
+
+History
+-------
+
+[5 Commits](https://github.com/keefeere/paseo-continuity/commits/main/)
+
+[](https://github.com/keefeere/paseo-continuity/commits/main/)
+5 Commits
+
+Folders and files
+-----------------
+
+| Name |     | Name | Last commit message | Last commit date |
+| --- | --- | --- | --- |
+| [.github/workflows](https://github.com/keefeere/paseo-continuity/tree/main/.github/workflows "This path skips through empty directories") |     | [.github/workflows](https://github.com/keefeere/paseo-continuity/tree/main/.github/workflows "This path skips through empty directories") |     |     |
+| [client](https://github.com/keefeere/paseo-continuity/tree/main/client "client") |     | [client](https://github.com/keefeere/paseo-continuity/tree/main/client "client") |     |     |
+| [server](https://github.com/keefeere/paseo-continuity/tree/main/server "server") |     | [server](https://github.com/keefeere/paseo-continuity/tree/main/server "server") |     |     |
+| [shared](https://github.com/keefeere/paseo-continuity/tree/main/shared "shared") |     | [shared](https://github.com/keefeere/paseo-continuity/tree/main/shared "shared") |     |     |
+| [.gitignore](https://github.com/keefeere/paseo-continuity/blob/main/.gitignore ".gitignore") |     | [.gitignore](https://github.com/keefeere/paseo-continuity/blob/main/.gitignore ".gitignore") |     |     |
+| [LICENSE](https://github.com/keefeere/paseo-continuity/blob/main/LICENSE "LICENSE") |     | [LICENSE](https://github.com/keefeere/paseo-continuity/blob/main/LICENSE "LICENSE") |     |     |
+| [README.md](https://github.com/keefeere/paseo-continuity/blob/main/README.md "README.md") |     | [README.md](https://github.com/keefeere/paseo-continuity/blob/main/README.md "README.md") |     |     |
+| [index.client.tsx](https://github.com/keefeere/paseo-continuity/blob/main/index.client.tsx "index.client.tsx") |     | [index.client.tsx](https://github.com/keefeere/paseo-continuity/blob/main/index.client.tsx "index.client.tsx") |     |     |
+| [index.server.ts](https://github.com/keefeere/paseo-continuity/blob/main/index.server.ts "index.server.ts") |     | [index.server.ts](https://github.com/keefeere/paseo-continuity/blob/main/index.server.ts "index.server.ts") |     |     |
+| [package-lock.json](https://github.com/keefeere/paseo-continuity/blob/main/package-lock.json "package-lock.json") |     | [package-lock.json](https://github.com/keefeere/paseo-continuity/blob/main/package-lock.json "package-lock.json") |     |     |
+| [package.json](https://github.com/keefeere/paseo-continuity/blob/main/package.json "package.json") |     | [package.json](https://github.com/keefeere/paseo-continuity/blob/main/package.json "package.json") |     |     |
+| [paseo-plugin.json](https://github.com/keefeere/paseo-continuity/blob/main/paseo-plugin.json "paseo-plugin.json") |     | [paseo-plugin.json](https://github.com/keefeere/paseo-continuity/blob/main/paseo-plugin.json "paseo-plugin.json") |     |     |
+| [tsconfig.json](https://github.com/keefeere/paseo-continuity/blob/main/tsconfig.json "tsconfig.json") |     | [tsconfig.json](https://github.com/keefeere/paseo-continuity/blob/main/tsconfig.json "tsconfig.json") |     |     |
+| View all files |     |     |
+
+Repository files navigation
+---------------------------
+
+Paseo Continuity
+================
+
+[](https://github.com/keefeere/paseo-continuity#paseo-continuity)
+
+Provider failover for [Paseo](https://paseo.sh/)
+. When an agent stops because its provider has exhausted quota or hit a rate limit, Continuity creates a fresh agent on the next configured provider and gives it a bounded copy of the conversation so work can continue without asking the failed provider to produce a handoff.
+
+Each transition stays in the same workspace. The successor gets a provider-prefixed title such as `● Codex · Fix authentication`, chain labels for discovery, and a prompt containing the relevant timeline. The old chat gets a transition card, while the **Continuity chain** workspace panel links the related chats.
+
+Install
+-------
+
+[](https://github.com/keefeere/paseo-continuity#install)
+
+Requires Paseo 0.10.1 or later. Enable plugins under **Settings → Plugins**, then:
+
+```shell
+paseo plugin install npm:paseo-continuity
+# or from GitHub
+paseo plugin install github:keefeere/paseo-continuity
+```
+
+Plugins are trusted, unsandboxed code. Continuity runs in the Paseo daemon and can read agent timelines and create agents in their workspaces.
+
+Configure
+---------
+
+[](https://github.com/keefeere/paseo-continuity#configure)
+
+Open **Settings → Plugins → Paseo Continuity**. The fallback chain accepts one provider per entry, optionally with a model and mode:
+
+    codex:auto
+    claude:auto
+    gemini:auto
+    
+
+The safe defaults react only to quota and rate-limit failures, bound transferred context, redact common secrets, skip unavailable providers, prevent duplicate successors, and stop after the configured number of consecutive transitions.
+
+Use `/continuity` or the Command Center action to test or trigger a transition manually.
+
+### Composer pill
+
+[](https://github.com/keefeere/paseo-continuity#composer-pill)
+
+The pill shows how much quota the current provider has left (its tightest window, e.g. `Codex 23%`). At or below the **Warn when remaining quota drops to** threshold it shows `⚠` and suggests compacting and moving. Pressing it opens a chooser of the other providers in your chain, each with its own remaining quota. **Compact & move** writes a condensed, redacted handoff to `.paseo/continuity/` (self-ignored by git) and starts the chosen provider on it. Turn on **Use LLM summary** in settings to have a separate provider/model (for example a cheap or local one) write a summary that is placed in front of a short verbatim tail; if it fails or times out, the plain transcript is used. If you ignore the warning, nothing changes: automatic failover still happens when the provider actually fails.
+
+How it works
+------------
+
+[](https://github.com/keefeere/paseo-continuity#how-it-works)
+
+*   Watches completed turns in the daemon, independent of the failed provider.
+*   Classifies quota and rate-limit errors conservatively.
+*   Serializes a bounded projected timeline and redacts common credential patterns.
+*   Selects the next ready provider from the configured chain.
+*   Creates and starts a successor in the same workspace with chain metadata.
+*   Adds a transition card to the previous chat and exposes the chain in a workspace panel.
+
+Automatic transitions require a fallback provider that is configured and ready in Paseo. A transition creates a new agent/chat because the current public plugin API cannot replace the provider of an existing agent.
+
+Develop
+-------
+
+[](https://github.com/keefeere/paseo-continuity#develop)
+
+```shell
+npm install
+npm run typecheck
+npm test
+paseo plugin install "$PWD"   # first time
+paseo plugin reload paseo-continuity
+paseo plugin logs paseo-continuity
+```
+
+To release, bump the version and push the tag. GitHub Actions publishes to npm through trusted publishing, and Paseo Cafe picks up the new version:
+
+```shell
+npm version patch   # or minor; commits and tags vX.Y.Z
+git push --follow-tags
+```
+
+License
+-------
+
+[](https://github.com/keefeere/paseo-continuity#license)
+
+MIT
+
+About
+-----
+
+Automatic provider failover for Paseo agents
+
+### Resources
+
+[Readme](https://github.com/keefeere/paseo-continuity#readme-ov-file)
+
+[MIT license](https://github.com/keefeere/paseo-continuity#MIT-1-ov-file)
+
+[Activity](https://github.com/keefeere/paseo-continuity/activity)
+
+### Stars
+
+**2** stars
+
+### Watchers
+
+**0** watching
+
+### Forks
+
+[**2** forks](https://github.com/keefeere/paseo-continuity/forks)
+
+[Report repository](https://github.com/contact/report-content?content_url=https%3A%2F%2Fgithub.com%2Fkeefeere%2Fpaseo-continuity&report=keefeere+%28user%29)
+
+Releases
+--------
+
+Packages
+--------
+
+Contributors
+------------
+
+Languages
+---------
+
+You can’t perform that action at this time.

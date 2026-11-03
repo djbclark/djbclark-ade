@@ -1,0 +1,11 @@
+quotes: 22 verified, 0 missing, 0 unverifiable (of 22)
+numbers: 0 figures in report.md have no quote containing them (existence check only; a match proves a figure was quoted, not that it is right)
+claims: 22 ids cited, 0 unknown, 0 duplicate, 0 uncited, 0 excerpt rows cited
+gate: 22 rows (22 with verified quotes), 10 source families; 0 excerpt rows excluded (leads, not evidence); need >= 6 rows from >= 2 families
+gate: ok
+refs: 0 identifiers resolved, 0 problems
+all: ok
+
+research_checker_exit=0
+superscript_anchor_check=pass (22 anchors)
+visual_render_check=not run; no authorization to open local report
