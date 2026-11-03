@@ -139,7 +139,11 @@ Dispatch refuses unsupported, absent, stale, unknown or exhausted Pi capacity
 with exit 5 (`unavailable/headroom`) before any paid preflight or task. The minimum
 is the greater of 1%, the Pi profile's `reserve_floor`, and `--min-headroom`.
 This measurement gate also applies to dry runs, resumes, legacy records and route
-overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. Initial
+overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. Pass-through
+`--acp-arg` values that could replace the billed model (`--model`, `--set`, `--meta`,
+`--agent-arg`, their `=` forms and prefixes such as `--mod`) are refused for Pi before any
+probe, and the runner refuses a stored command line carrying one. A resumed Pi record keeps the
+minimum it was admitted under (resume: at least 10%) and the runner rechecks that number. Initial
 admission and the runner's post-load/post-capacity-wait checks bypass the quota
 memo and use the existing freshness-aware snapshot reader. Unknown capacity is
 not unlimited capacity; neither credentials nor a model catalog prove headroom.

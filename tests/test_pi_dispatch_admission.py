@@ -157,6 +157,114 @@ class TestPiDispatchAdmission(LoadGate):
                     self.assertEqual(refusal[:2], ("headroom", 5))
                     reading.assert_called_once_with("pi", MODELS[0][1], fresh=True)
 
+    REPLACEMENTS = (["--model", "openai-codex/gpt-6.1-sol"], ["--model=openai-codex/gpt-6.1-sol"],
+                    ["--mod", "x"], ["--mod=x"], ["--m", "x"], ["--model x"], ["--set", "model=x"],
+                    ["--set=model=x"], ["--meta", "{}"], ["--agent-arg", "--model"], ["--agent-arg=--provider"])
+
+    def test_identity_guard_boundaries(self):
+        mod = self.load_module()
+        for args in self.REPLACEMENTS:
+            with self.subTest(args=args):
+                self.assertIn("pass-through", mod.pi_identity_override(args))
+        for args in ([], None, ["--tripwire-exempt-kinds=read,search"], ["--perm", "all"], ["--mode", "x"], ["-m"]):
+            with self.subTest(args=args):
+                self.assertIsNone(mod.pi_identity_override(args))
+        # a stored command line: exactly the primary pair is the dispatcher's own
+        self.assertIsNone(mod.pi_identity_override(["x", "--model", "a", "--perm", "all"], True))
+        self.assertIsNotNone(mod.pi_identity_override(["--model", "a", "--model", "b"], True))
+        self.assertIsNotNone(mod.pi_identity_override(["--model", "a", "--model=b"], True))
+
+    def test_replacement_model_refuses_before_preflight_and_task(self):
+        for index, extra in enumerate(self.REPLACEMENTS):
+            for model in (MODELS[0][1], MODELS[1][1]):
+                with self.subTest(extra=extra, model=model):
+                    name = f"repl-{index}-{model[-4:]}"
+                    result = self.dispatch_agent(
+                        "pi", model, "--kind", "code", "--no-model-check",
+                        *[f"--acp-arg={x}" for x in extra], name=name, env=self.quota_env("healthy"))
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("pass-through", result.stderr)
+                    self.assertEqual(self.preflight_probes(), 0)
+                    self.assertFalse((self.out / f"{name}.jsonl").exists())
+        ok = self.dispatch_agent("pi", MODELS[0][1], "--kind", "code", "--no-model-check", "--est-pct", "1",
+                                 "--acp-arg=--tripwire-exempt-kinds=read", name="fine",
+                                 env=self.quota_env("healthy"))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+
+    def test_other_agents_keep_their_pass_through(self):
+        result = self.dispatch_agent("codex", "gpt-6.1-sol", "--no-model-check", "--est-pct", "1",
+                                     "--acp-arg=--meta={}", name="codex-meta", env=self.quota_env("healthy"))
+        self.assertNotIn("pass-through", result.stderr)
+
+    def test_deferred_and_legacy_runner_refuse_a_replacement_in_the_stored_command(self):
+        mod = self.load_module()
+        base = {"agent": "pi", "model": MODELS[0][1], "kind": "code", "min_headroom": 0}
+        primary = f"acp-run pi --model {MODELS[0][1]} --perm all"
+        cases = ((f"{primary} --model=openai-codex/x", {}),
+                 (f"{primary} --model other/x", {}),
+                 (f"{primary} --mod x", {}),
+                 (f"acp-run pi --model other/x", {}),
+                 (primary, {"acp_arg": ["--model=other/x"]}),
+                 (primary, {"acp_arg": ["--set", "model=x"], "resume_count": 1}))
+        for cmd, extra in cases:
+            with self.subTest(cmd=cmd, extra=extra), patch.object(mod, "pool_reading", return_value=(90, {})) as reading:
+                refusal = mod.spawn_refusal({**base, "cmd": cmd, **extra})
+                self.assertEqual(refusal[:2], ("headroom", 5))
+                reading.assert_not_called()
+        with patch.object(mod, "pool_reading", return_value=(90, {})):
+            self.assertIsNone(mod.spawn_refusal({**base, "cmd": primary, "acp_arg": []}))
+
+    def test_runner_never_spawns_a_replacement_model(self):
+        mod = self.load_module()
+        path = self.tmp / "replaced.json"
+        path.write_text(json.dumps({"agent": "pi", "model": MODELS[0][1], "kind": "code", "name": "r",
+                                    "status": "running", "min_headroom": 0, "final": str(self.tmp / "f"),
+                                    "stderr": str(self.tmp / "e"),
+                                    "cmd": f"acp-run pi --model {MODELS[0][1]} --model other/x"}))
+        with patch.object(mod, "pool_reading", return_value=(90, {})), patch.object(mod, "adopt_load_reservation"), \
+             patch.object(mod, "wait_for_capacity"), patch.object(mod, "release_load_reservation"), \
+             patch.object(mod, "runner_load_gate", return_value=None), \
+             patch.object(mod.subprocess, "Popen") as spawn:
+            self.assertEqual(mod.execute_record(path), 5)
+            spawn.assert_not_called()
+
+    def test_resume_record_persists_and_rechecks_its_admitted_minimum(self):
+        name = "resumed"
+        result = self.dispatch_agent("pi", MODELS[0][1], "--kind", "code", "--no-model-check", "--est-pct", "1",
+                                     "--min-headroom", "0", name=name, env=self.quota_env("healthy"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.record(name)["min_headroom"], 0.0)
+        record = self.out / "jobs" / f"{name}.json"
+        resumed = run(["resume", str(record), "--timeout", "0"], env=self.base_env(**self.quota_env("healthy")))
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        rec = self.record(name)
+        self.assertEqual(rec["resume_count"], 1)
+        self.assertEqual(rec["min_headroom"], 10.0)
+        mod = self.load_module()
+        for remaining, refused in ((5.0, True), (9.9, True), (10.0, False), (12.0, False)):
+            with self.subTest(remaining=remaining), patch.object(mod, "pool_reading", return_value=(remaining, {})):
+                got = mod.spawn_refusal(rec, "the capacity wait")
+                self.assertEqual(got is not None, refused)
+        # a higher minimum already on the record survives the resume's own 10 %
+        rec_high = {**self.record(name), "min_headroom": 25}
+        record.write_text(json.dumps(rec_high))
+        again = run(["resume", str(record), "--timeout", "0"], env=self.base_env(**self.quota_env("healthy")))
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(self.record(name)["min_headroom"], 25.0)
+
+    def test_resume_with_stored_replacement_refuses_before_a_new_slice(self):
+        name = "resume-repl"
+        result = self.dispatch_agent("pi", MODELS[0][1], "--kind", "code", "--no-model-check", "--est-pct", "1",
+                                     name=name, env=self.quota_env("healthy"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = self.out / "jobs" / f"{name}.json"
+        rec = self.record(name)
+        record.write_text(json.dumps({**rec, "acp_arg": ["--model=openai-codex/gpt-6.1-sol"]}))
+        resumed = run(["resume", str(record), "--timeout", "0"], env=self.base_env(**self.quota_env("healthy")))
+        self.assertEqual(resumed.returncode, 2, resumed.stdout + resumed.stderr)
+        self.assertIn("pass-through", resumed.stderr)
+        self.assertEqual(self.record(name).get("resume_count", 0), 0)
+
     def test_non_pi_legacy_admission_is_unchanged(self):
         mod = self.load_module()
         with patch.object(mod, "pool_reading", return_value=(None, {})) as reading:

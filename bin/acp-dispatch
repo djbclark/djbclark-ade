@@ -371,6 +371,7 @@ unsupported capacity refuses with exit 5 before preflight, including dry runs,
 resumes and route overrides. At least max(1%, Pi reserve_floor, --min-headroom)
 must remain. The runner rechecks fresh capacity after load and capacity waits,
 even for legacy records. --no-preflight does not skip this measurement gate.
+Pi also refuses --acp-arg forms that could replace the billed model (--model, --set, --meta, --agent-arg).
 
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
@@ -1161,6 +1162,36 @@ def pi_capacity_refusal(agent: str, model: str | None, remaining: float | None,
     return None
 
 
+# acp-run options that can change which model/provider a Pi slice really uses (--model replaces the billed
+# one; --set/--meta reconfigure the session; --agent-arg reaches the Pi binary itself). acp-run sets
+# allow_abbrev=False, but a prefix is rejected too: the guard must not depend on that setting.
+PI_IDENTITY_OPTIONS = ("--model", "--set", "--meta", "--agent-arg")
+
+
+def pi_identity_override(args: list[str], skip_primary_model: bool = False) -> str | None:
+    """Why pass-through acp-run arguments may change a Pi slice's billing identity, else None.
+
+    Every token is judged (the `--opt=value` form, a prefix of an option such as `--mod`, and a token that packs
+    `--model x` into one word). With `skip_primary_model` the first `--model VALUE` pair is the dispatcher's own
+    (a stored command line); any further form is a replacement."""
+    skipped = not skip_primary_model
+    items = list(args or [])
+    i = 0
+    while i < len(items):
+        tok = str(items[i])
+        if not skipped and tok == "--model":
+            skipped = True
+            i += 2
+            continue
+        words = tok.split()
+        name = words[0].split("=", 1)[0] if words else ""
+        if name != "--mode" and len(name) >= 3 and name.startswith("--") and any(opt.startswith(name) for opt in PI_IDENTITY_OPTIONS):
+            return (f"pi: pass-through argument {name!r} could replace the admitted billing model; "
+                    "pi accepts no --model/--set/--meta/--agent-arg override")
+        i += 1
+    return None
+
+
 def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, str] | None:
     """(class, exit code, message) for why this record's slice may no longer start, judged on the pools NOW; else None.
     Every admission predicate a wait can change is judged again right before the spawn (load wait, capacity wait;
@@ -1173,6 +1204,20 @@ def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, st
     the `fallback_gate` stamp. A resume skips both, as at dispatch. Pi's independent API
     measurement is mandatory even for resumes and legacy kind-less records."""
     if rec.get("agent") == "pi":
+        # the stored command line is what runs: its effective identity must still be the admitted one
+        try:
+            argv = shlex.split(rec.get("cmd") or "")
+        except ValueError:
+            argv = []
+        why = pi_identity_override(argv[1:], True)
+        if not why:
+            why = pi_identity_override(rec.get("acp_arg") or [])
+        if not why and argv and "--model" in argv:
+            primary = argv[argv.index("--model") + 1:argv.index("--model") + 2]
+            if primary != [rec.get("model")]:
+                why = "pi: stored command's --model differs from the admitted model"
+        if why:
+            return "headroom", UNAVAILABLE_EXIT, f"{why} (refused after {after})"
         remaining, reading = pool_reading("pi", rec.get("model"), fresh=True)
         why = pi_capacity_refusal("pi", rec.get("model"), remaining, rec.get("min_headroom") or 0)
         if why:
@@ -4678,6 +4723,11 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         bad = check_model(acp_run, a.agent, a.model, str(Path(a.dir).resolve()))
         if bad:
             die(bad)
+    if a.agent == "pi":
+        # before any probe, paid or not: the effective model is the billed, admitted one or nothing runs
+        bad = pi_identity_override(a.acp_arg or [])
+        if bad:
+            die(bad)
     effort, context = getattr(a, "effort", None), getattr(a, "context", None)
     if ((effort or context) and not a.no_model_check and not a.dry_run
             and not any(x.startswith("--set") for x in a.acp_arg or [])):
@@ -4938,6 +4988,10 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         rec["fallback_gate"], rec["gate_repo"] = True, REPO_NAME
     if not previous and kind:
         rec["min_headroom"] = a.min_headroom
+    if a.agent == "pi":
+        # the minimum Pi was admitted under (a resume's own 10 %, or a higher one it already carried) travels with
+        # the record, so the runner's rechecks judge the same number; an old record without it keeps the 1 % floor
+        rec["min_headroom"] = max(float(a.min_headroom or 0), float((previous or {}).get("min_headroom") or 0))
     if gate_deferred:
         # the launchd runner has none of this process's environment or load_policy(): hand it the resolved values
         rec["load_gate_pending"], rec["load_gate_wait"] = True, gate_wait
