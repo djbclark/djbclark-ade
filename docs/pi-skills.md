@@ -14,8 +14,14 @@ Global pairs must be matching direct children of the agent's `skills` directory
 Paths supplied to the helper must be absolute (a leading `~` is accepted).
 
 A3. Matching `SKILL.md` alone is insufficient: scripts, references, relative
-assets and executable bits can differ. The helper compares the **whole bundle**,
-including hidden files and empty directories. Root symlinks are supported;
+assets and executable permissions can differ. The helper fingerprints **bundle
+contents and access metadata**, including hidden files, empty directories and the
+root. It compares full POSIX modes (not an any-execute-bit boolean), owner/group
+IDs and the caller's current read/search/execute access. Real and effective user
+and group IDs must match. This is deliberately conservative: different ownership
+or modes refuse even if both copies happen to work. These checks do **not** prove
+runtime equivalence: external references, path-dependent behavior and ACL policy
+beyond current caller access are not compared. Root symlinks are supported;
 internal symlinks, special files, unreadable entries, oversized files (>8 MiB),
 bundles over 10,000 entries, nonportable names and differing content are refused.
 Aliases to the same real bundle need no cleanup and are refused. Differing copies
@@ -26,7 +32,12 @@ array `skills` if present. No JSONC, duplicate keys or non-finite numbers. Exist
 settings must already exist; creating/provisioning them is outside this tool.
 Unrelated settings and user skill entries survive. Existing glob exclusions
 (`!…`) and discovery ignore files are refused rather than approximating Pi's
-matcher. Exact exclusions that would disable the keeper are refused. Resource
+matcher. Exact exclusions that would disable the keeper are refused. File-URL
+exclusions (including `-file:///…`, `-file://localhost/…` and `-./file:///…`),
+backslash syntax, empty exclusions and `~other-user` syntax require manual review
+and are refused, not treated as ordinary POSIX paths. Pi normalizes file URLs
+before matching; this helper intentionally does not reimplement that normalization.
+Resource
 packages, custom skill loaders, ancestor project catalogs, CLI overrides and
 SDK overrides are not audited: verify the actual Pi catalog after review.
 
@@ -70,9 +81,17 @@ ADE_CLAIM_ID=pi-skills-runtime-UNIQUE ~/src/djbclark-ade/bin/pi-skill-dedup appl
 B3. Receipt publication precedes the settings edit so an interruption retains
 recovery information. Outputs never overwrite existing files or symlinks. The
 settings edit uses a temporary file beside the **real target**, fsync and atomic
-replacement, preserving its permission bits and the original symlink. Settings
-must be caller-owned, single-linked, and not group/world writable. Plan/receipt
-files use mode 0600; keep them private (they contain resource paths). No credentials
+replacement, preserving its POSIX mode, owner/group and the original symlink.
+Settings must be caller-owned, single-linked, and not group/world writable, with
+matching real/effective identities. Replacement refuses if the temporary file
+would change the owner/group (including setgid-parent group inheritance). It does
+not try to chown or copy security metadata: settings or temporary files with
+extended attributes, ACLs or file flags require manual review. Linux xattrs and
+Darwin's separate ACL marker are checked; an unreadable/unsupported metadata probe
+fails closed. Metadata is checked again before replacement. No guarantee is made
+for concurrent metadata changes or directory-fsync/power-loss durability.
+Plan/receipt files use mode 0600; keep them private (they contain resource paths).
+No credentials
 are accessed. A runtime claim does not authorize editing another repository's
 tracked settings: use that repository's approved workspace/install path instead.
 
@@ -107,12 +126,18 @@ that project, retaining global `graft` from the agent or shared skill directory.
 It writes only that project's existing `.pi/settings.json`. Supply the explicit
 local/global pair and use a separate plan, receipt and real-target runtime claim.
 
-C2. The installed Pi implementation applies project skill overrides to project
-resources and user overrides to user resources. A project exclusion of a global
-path is therefore not a supported fix. The helper excludes the **local** copy
-only if the full bundles are equivalent. If project graft contains project-specific
-instructions, it refuses; preserve both and report the collision for a separate
-reviewed naming/source decision. Project settings require Pi project trust.
+C2. For auto-discovery, installed Pi applies project overrides to project resources
+and user overrides to user resources. **Explicit project resource entries are an
+exception to this scope reasoning:** they are inserted first, even when disabled,
+and can shadow a global resource's later auto-discovery. For example, listing a
+global `SKILL.md` and its exact exclusion in project settings can disable that
+keeper. The helper therefore checks both project and global settings for keeper
+exclusions, conservatively refusing even project filters without an explicit
+inclusion. Project exclusions are not a safe way to disable global graft broadly.
+The helper excludes the **local** copy only with matching bundle fingerprints.
+If project graft contains project-specific instructions, it refuses; preserve both
+and report the collision for a separate reviewed naming/source decision. Project
+settings require Pi project trust.
 
 ## D. Delivery and verification
 
@@ -129,4 +154,8 @@ repository's Linux `Tests` workflow (manual branch dispatch); do not run full
 suites/builds on the operator's Mac. Relevant installed Pi references read for
 this implementation: `docs/settings.md`, `docs/skills.md`, `docs/configuration.md`,
 `docs/packages.md`; exact resource matching/discovery was also checked in
-`dist/core/package-manager.js`.
+`dist/core/package-manager.js` and path normalization in `dist/utils/paths.js`.
+Regression cases cover file-URL refusals, explicit disabled project resources
+shadowing global auto-discovery, distinct execute masks/current caller access,
+and conservative settings metadata refusal. Linux CI tests the Darwin ACL probe
+with synthetic command results, not a live macOS filesystem.

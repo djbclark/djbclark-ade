@@ -2,6 +2,8 @@
 import json
 import os
 from pathlib import Path
+import runpy
+from types import SimpleNamespace
 import subprocess
 import sys
 
@@ -144,6 +146,25 @@ def test_existing_keeper_filters_refused(case, entry):
     case.plan(rc=2)
 
 
+@pytest.mark.parametrize("suffix", ["", "/SKILL.md"])
+@pytest.mark.parametrize("prefix", ["file://", "./file://", "file://localhost"])
+def test_pi_file_url_keeper_exclusions_refused(case, suffix, prefix):
+    # Pi normalizeExactPattern -> normalizePath -> fileURLToPath, not Path('file:...').
+    settings = {"skills": ["-" + prefix + str(case.shared) + suffix]}
+    case.settings.write_text(json.dumps(settings))
+    before = case.settings.read_bytes()
+    result = case.plan(rc=2)
+    assert "unsupported exact skill exclusion syntax" in result.stderr
+    assert not case.plan_path.exists()
+    assert case.settings.read_bytes() == before
+
+
+@pytest.mark.parametrize("entry", ["-", r"-.\skills\alpha", "-~another-user/skills/alpha"])
+def test_unsupported_exact_path_syntax_refused(case, entry):
+    case.settings.write_text(json.dumps({"skills": [entry]}))
+    case.plan(rc=2)
+
+
 @pytest.mark.parametrize("change", ["settings", "skill", "retarget"])
 def test_stale_plan_refused(case, tmp_path, change):
     case.plan()
@@ -195,6 +216,43 @@ def test_project_graft_excludes_only_project_copy(case, tmp_path):
     assert json.loads(local_settings.read_text())["skills"] == ["-" + str(local / "SKILL.md")]
     case.undo()
     assert json.loads(local_settings.read_text()) == {}
+
+
+@pytest.mark.parametrize("source", ["file", "directory", "file-url"])
+@pytest.mark.parametrize("exclusion", ["absolute", "relative", "tilde", "file-url"])
+def test_project_explicit_disabled_global_keeper_shadows_autodiscovery(case, tmp_path, source, exclusion):
+    project = tmp_path / "project"
+    local = case.bundle(project / ".agents" / "skills", "graft")
+    keeper = case.bundle(case.shared_root, "graft") / "SKILL.md"
+    (project / ".pi").mkdir()
+    settings = project / ".pi" / "settings.json"
+    include = {"file": str(keeper), "directory": str(keeper.parent), "file-url": keeper.as_uri()}[source]
+    exclude = {"absolute": str(keeper), "relative": os.path.relpath(keeper, settings.parent),
+               "tilde": "~/" + str(keeper.relative_to(case.home)), "file-url": keeper.as_uri()}[exclusion]
+    # Pi resolveLocalEntries(project) inserts even disabled entries; addResource
+    # will not replace that entry with the later enabled global autodiscovery.
+    settings.write_text(json.dumps({"skills": [include, "-" + exclude]}))
+    before = settings.read_bytes()
+    case.run("plan", "--project", project, "--pair", local, keeper.parent,
+             "--output", case.plan_path, rc=2)
+    assert settings.read_bytes() == before
+    assert not case.plan_path.exists()
+    assert json.loads(case.settings.read_text()) == {}
+
+
+def test_project_apply_rechecks_global_file_url_filter(case, tmp_path):
+    project = tmp_path / "project"
+    local = case.bundle(project / ".agents" / "skills", "graft")
+    keeper = case.bundle(case.shared_root, "graft")
+    (project / ".pi").mkdir()
+    settings = project / ".pi" / "settings.json"
+    settings.write_text('{}')
+    case.run("plan", "--project", project, "--pair", local, keeper, "--output", case.plan_path)
+    case.claim(settings)
+    case.settings.write_text(json.dumps({"skills": ["-" + (keeper / "SKILL.md").as_uri()]}))
+    case.apply(rc=2)
+    assert settings.read_text() == '{}'
+    assert not case.receipt.exists()
 
 
 def test_global_mode_rejects_project_keeper(case, tmp_path):
@@ -266,6 +324,109 @@ def test_undo_requires_claim_and_rejects_retarget(case, tmp_path):
     case.settings.symlink_to(other)
     case.undo(rc=2)
     assert other.read_bytes() == original
+
+
+@pytest.mark.parametrize("left_mode,right_mode", [(0o700, 0o601), (0o710, 0o701)])
+def test_distinct_execute_masks_are_not_equivalent(case, left_mode, right_mode):
+    (case.native / "helper.py").chmod(left_mode)
+    (case.shared / "helper.py").chmod(right_mode)
+    case.plan(rc=2)
+    assert not case.plan_path.exists()
+    assert json.loads(case.settings.read_text()) == {}
+
+
+def test_root_directory_access_metadata_compared(case):
+    case.native.chmod(0o700)
+    case.shared.chmod(0o755)
+    case.plan(rc=2)
+    assert not case.plan_path.exists()
+
+
+def test_apply_rechecks_execute_masks(case):
+    for root in (case.native, case.shared):
+        (root / "helper.py").chmod(0o700)
+    case.plan()
+    (case.shared / "helper.py").chmod(0o601)
+    case.apply(rc=2)
+    assert not case.receipt.exists()
+    assert json.loads(case.settings.read_text()) == {}
+
+
+def test_matching_executable_helpers_remain_supported(case):
+    for root in (case.native, case.shared):
+        (root / "helper.py").chmod(0o700)
+    case.plan()
+    case.apply()
+    case.undo()
+
+
+def test_same_modes_different_effective_access_or_ownership_are_not_equivalent(case, monkeypatch):
+    ns = runpy.run_path(str(TOOL))
+    signature = ns["access_signature"]
+    path = case.native / "helper.py"
+    info = path.stat()
+    monkeypatch.setattr(os, "access", lambda p, mode: True)
+    executable = signature(path, info)
+    monkeypatch.setattr(os, "access", lambda p, mode: mode != os.X_OK)
+    assert executable != signature(path, info)
+    monkeypatch.setattr(os, "access", lambda p, mode: True)
+    other_group = SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid, st_gid=info.st_gid + 1)
+    assert executable != signature(path, other_group)
+
+
+@pytest.mark.parametrize("attribute", ["system.posix_acl_access", "user.synthetic"])
+@pytest.mark.parametrize("where", ["original", "temporary"])
+def test_settings_extended_metadata_refused(case, monkeypatch, attribute, where):
+    ns = runpy.run_path(str(TOOL))
+    monkeypatch.setattr(os, "listxattr", lambda p: [attribute] if (
+        (Path(p) == case.settings) == (where == "original")) else [])
+    before = case.settings.read_bytes()
+    with pytest.raises(ns["Refused"], match="extended attributes"):
+        ns["atomic"](case.settings, b'changed', expected=before)
+    assert case.settings.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode,refused", [("-rw-------", False), ("-rw-------+", True), ("", True)])
+def test_darwin_acl_probe_fails_closed(case, monkeypatch, mode, refused):
+    ns = runpy.run_path(str(TOOL))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "listxattr", lambda p: [])
+    def probe(argv, **kwargs):
+        assert argv == ["/bin/ls", "-lde", str(case.settings)]
+        assert kwargs["capture_output"] and kwargs["env"]["LC_ALL"] == "C"
+        return SimpleNamespace(returncode=0, stderr="", stdout=mode + " synthetic")
+    monkeypatch.setattr(subprocess, "run", probe)
+    if refused:
+        with pytest.raises(ns["Refused"], match="ACL"):
+            ns["plain_metadata"](case.settings)
+    else:
+        ns["plain_metadata"](case.settings)
+
+
+def test_darwin_acl_probe_timeout_refused(case, monkeypatch):
+    ns = runpy.run_path(str(TOOL))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "listxattr", lambda p: [])
+    def timeout(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 10)
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(ns["Refused"], match="ACL"):
+        ns["plain_metadata"](case.settings)
+
+
+def test_replacement_group_mismatch_refused(case, monkeypatch):
+    ns = runpy.run_path(str(TOOL))
+    original_fstat = os.fstat
+    def different_group(fd):
+        info = original_fstat(fd)
+        return SimpleNamespace(st_uid=info.st_uid, st_gid=info.st_gid + 1)
+    before = case.settings.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", different_group)
+        with pytest.raises(ns["Refused"], match="ownership/group"):
+            ns["atomic"](case.settings, b'changed', expected=before)
+    assert case.settings.read_bytes() == before
+    assert not list(case.settings.parent.glob(".pi-skill-dedup-*"))
 
 
 def test_multiple_pairs(case):

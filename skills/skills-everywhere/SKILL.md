@@ -75,15 +75,20 @@ works even if Codex is not installed. Existing independently installed Pi skills
 are preserved; this command does not remove duplicate skill copies.
 
 For collision warnings, use `~/src/djbclark-ade/bin/pi-skill-dedup plan --pair
-/ABS/NATIVE/SKILL-DIR /ABS/SHARED/SKILL-DIR` first. The helper verifies whole-bundle
-equivalence, proposes exact loading exclusions, and supports reviewed plan/apply
-and receipt-based reversal without deleting resources. Apply/undo requires an
+/ABS/NATIVE/SKILL-DIR /ABS/SHARED/SKILL-DIR` first. The helper compares bundle
+contents, full modes, ownership and current caller access (not a proof of runtime
+equivalence), proposes exact loading exclusions, and supports reviewed plan/apply
+and receipt-based reversal without deleting resources. Unsupported exclusion syntax
+such as file URLs is refused. Settings ACLs/xattrs or replacement group changes
+also require manual review. Apply/undo requires an
 active runtime claim on the real settings file; a development workspace claim is
 not enough. Never apply live changes as part of a skill-link sweep.
 
 Project-local graft is separate: `plan --project /ABS/PROJECT` can exclude only
 an equivalent local graft copy, never global graft for every project. Differing
-project-specific graft bundles are refused, not silently hidden. Read
+project-specific graft bundles are refused, not silently hidden. Both project and
+global keeper filters are checked: explicit disabled project entries can shadow
+global auto-discovery. Read
 [`docs/pi-skills.md`](../../docs/pi-skills.md) for supported layouts, runtime
 claim/install commands, limitations and safe reversal. Reload Pi after an approved
 resource change and verify the actual retained catalog paths.
