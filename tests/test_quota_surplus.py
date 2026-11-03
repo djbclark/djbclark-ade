@@ -125,6 +125,18 @@ def test_disabled_and_never_route_skipped(qs):
     assert {v["verdict"] for v in verdicts if v["pool"] in ("zai", "hermes")} == {"skip"}
 
 
+def test_advises_bounded_concurrent_slices(qs):
+    # lead 7c58015b, 2026-11-03: four parallel agy runs spent a 25% Argon surplus in ~10 min while aiuse still read 25%
+    argon = only(qs.assess(argon_data(), policy(qs), NOW), "antigravity/gemini_argon")
+    assert "Run at most 1 concurrent slice and re-check" in qs.relay_text(argon, NOW, 3)   # max_parallel 1
+    assert "Usage Limit Reached" in qs.relay_text(argon, NOW, 3)
+    assert qs.slice_advice(dict(argon, max_parallel=4)) == (2, None)          # no per-slice cost: 1-2 at a time
+    assert qs.slice_advice(dict(argon, max_parallel=4, slice_cost=10.0)) == (2, 2)   # ~24% buys two 10% slices
+    assert qs.slice_advice(dict(argon, max_parallel=4, slice_cost=40.0)) == (1, 0)
+    text = qs.relay_text(dict(argon, max_parallel=4, slice_cost=10.0), NOW, 3)
+    assert "at most 2 concurrent slices (it buys about 2 at ~10% each)" in text
+
+
 def test_frontier_pool_absent_from_aiuse_is_no_verdict(qs):
     # aiuse --available drops an exhausted pool (2026-11-03: Argon after an agent-reported quota refusal)
     data = {"available": [row("zai", None, [window(10, 50, pace=1.0, label="weekly")])]}
