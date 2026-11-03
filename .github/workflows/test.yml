@@ -97,6 +97,13 @@ jobs:
           done
           echo "$bindir" >> "$GITHUB_PATH"
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install the Pi subagent extension test dependencies
+        run: npm ci --no-audit --no-fund --prefix pi/extensions/subagent
+
       - name: Run the test suite
         run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
 

@@ -71,6 +71,7 @@ if (process.argv.includes("--mode")) {
 		const result = await execute(params, updates);
 		assert.ok(!result.isError, JSON.stringify(result));
 		assert.equal(result.details.mode, mode);
+		assert.ok(result.content[0].text.includes(`model=${expected.model ?? "default"}, thinking=${expected.thinking ?? "default"}`), result.content[0].text);
 		assert.deepEqual(result.details.results[0].selectedConfig, expected);
 		assert.equal(records().length, 1);
 		const record = records()[0];
@@ -79,7 +80,7 @@ if (process.argv.includes("--mode")) {
 		assert.ok(record.args.includes("--no-session"));
 		assert.ok(record.prompt.includes("Test system prompt."));
 		assert.equal(fs.existsSync(record.promptPath), false, "temporary prompt cleaned up");
-		assert.equal(record.cwd, item.cwd ?? ctx.cwd);
+		assert.equal(fs.realpathSync(record.cwd), fs.realpathSync(item.cwd ?? ctx.cwd));
 		assert.ok(updates.length > 0);
 		for (const update of updates) assert.deepEqual(update.details.results[0].selectedConfig, expected);
 		cases++;

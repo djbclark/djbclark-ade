@@ -192,6 +192,16 @@ function getResultOutput(result: SingleResult): string {
 	return getFinalOutput(result.messages) || "(no output)";
 }
 
+/** Effective model/thinking as passed to the child; "default" means Pi's own default applied. */
+function configLabel(result: SingleResult): string {
+	const c = result.selectedConfig;
+	return `model=${c?.model ?? "default"}, thinking=${c?.thinking ?? "default"}`;
+}
+
+function withConfigLabel(result: SingleResult, usage: string): string {
+	return usage ? `${configLabel(result)} | ${usage}` : configLabel(result);
+}
+
 function truncateParallelOutput(output: string): string {
 	const byteLength = Buffer.byteLength(output, "utf8");
 	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
@@ -600,7 +610,7 @@ export default function (pi: ExtensionAPI) {
 					if (isError) {
 						const errorMsg = getResultOutput(result);
 						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}) [${configLabel(result)}]: ${errorMsg}` }],
 							details: makeDetails("chain")(results),
 							isError: true,
 						};
@@ -608,7 +618,7 @@ export default function (pi: ExtensionAPI) {
 					previousOutput = getFinalOutput(result.messages);
 				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [{ type: "text", text: `${getFinalOutput(results[results.length - 1].messages) || "(no output)"}\n\n${results.map((r, n) => `[step ${n + 1} ${r.agent}: ${configLabel(r)}]`).join("\n")}` }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -685,7 +695,7 @@ export default function (pi: ExtensionAPI) {
 					const status = isFailedResult(r)
 						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
 						: "completed";
-					return `### [${r.agent}] ${status}\n\n${output}`;
+					return `### [${r.agent}] ${status} (${configLabel(r)})\n\n${output}`;
 				});
 				return {
 					content: [
@@ -715,13 +725,13 @@ export default function (pi: ExtensionAPI) {
 				if (isError) {
 					const errorMsg = getResultOutput(result);
 					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
+						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"} [${configLabel(result)}]: ${errorMsg}` }],
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
 				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [{ type: "text", text: `${getFinalOutput(result.messages) || "(no output)"}\n\n[${configLabel(result)}]` }],
 					details: makeDetails("single")([result]),
 				};
 			}
@@ -839,7 +849,7 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 					}
-					const usageStr = formatUsageStats(r.usage, r.model);
+					const usageStr = withConfigLabel(r, formatUsageStats(r.usage, r.model));
 					if (usageStr) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
@@ -855,7 +865,7 @@ export default function (pi: ExtensionAPI) {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				}
-				const usageStr = formatUsageStats(r.usage, r.model);
+				const usageStr = withConfigLabel(r, formatUsageStats(r.usage, r.model));
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
 				return new Text(text, 0, 0);
 			}
@@ -924,7 +934,7 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
-						const stepUsage = formatUsageStats(r.usage, r.model);
+						const stepUsage = withConfigLabel(r, formatUsageStats(r.usage, r.model));
 						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
 					}
 
@@ -1009,7 +1019,7 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
-						const taskUsage = formatUsageStats(r.usage, r.model);
+						const taskUsage = withConfigLabel(r, formatUsageStats(r.usage, r.model));
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
 
