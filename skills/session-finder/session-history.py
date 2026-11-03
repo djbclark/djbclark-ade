@@ -273,8 +273,10 @@ def fleet_running(agents):
             if r.get("finished") or r.get("ended") or (r.get("launch") or {}).get("result") is not None:
                 continue
             sid = (r.get("transcript") or r.get("sid")) if r["agent"] == "pi" else r.get("sid")
-            if sid and (r["agent"] != "pi" or "/" in str(sid) or r.get("cwd")):
-                exact.add(history_identity(r["agent"], sid, r.get("cwd") or ""))
+            ident = history_identity(r["agent"], sid, r.get("cwd") or "") if sid else None
+            # A Pi ID (+cwd) does not name a storage root: only a file identity is exact; the rest stays LIVE?
+            if ident and (r["agent"] != "pi" or ident[1] == "file"):
+                exact.add(ident)
             cwds.add((r["agent"], r.get("cwd") or ""))
     except Exception:
         pass
@@ -382,8 +384,7 @@ def _main() -> int:
     sys.path.insert(0, str(HERE))
     from nativeid import history_identity
     for (key, rank, role, snip, count), (agent, sid, cwd, title, mtime) in picked:
-        is_live = (sid in live.get(agent, set()) or history_identity(agent, sid, cwd, key) in fl_exact
-                   or (agent == "pi" and bool(cwd) and history_identity(agent, sid, cwd) in fl_exact))
+        is_live = sid in live.get(agent, set()) or history_identity(agent, sid, cwd, key) in fl_exact
         likely = (not is_live and agent in blind and (agent, cwd) in fl_cwds and time.time() - mtime < 600)
         out.append({"agent": agent, "sessionId": sid, "sessionKey": key, "live": is_live,
                     "state": "LIVE?" if likely else labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,

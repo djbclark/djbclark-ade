@@ -84,7 +84,9 @@ def test_live_match_is_file_or_project_scoped_and_resume_is_exact(store, monkeyp
     for hit in hits:
         path = Path(hit["sessionKey"][3:])
         assert hit["sessionId"] == "daily_work"
-        assert hit["live"] == (path == paths[0] and kind in {"file", "id"})
+        assert hit["live"] == (path == paths[0] and kind == "file")
+        if kind == "id":  # ID+cwd cannot name a storage root: both roots stay uncertain, never exact LIVE
+            assert hit["state"] in {"LIVE?", "ended"} and hit["state"] != "LIVE"
         # No caller cwd, session-root environment or shell metacharacters can change this target.
         assert shlex.split(hit["resume"]) == ["pi", "--session", str(path)]
     assert adapter.RESUME("pi:daily_work", cwd) == ""  # orphan legacy key is not safe to resume
@@ -130,3 +132,44 @@ def test_session_find_does_not_hide_another_projects_custom_id(tmp_path, monkeyp
     got = json.loads(capsys.readouterr().out)
     assert {r["cwd"] for r in got} == {"/a", "/b"}
     assert next(r for r in got if r["cwd"] == "/b")["live"] is False
+
+
+def test_session_find_all_keeps_other_root_history_for_live_id(tmp_path, monkeypatch, capsys):
+    import claude_identity
+    monkeypatch.setattr(claude_identity, "own_session_id", lambda: None)
+    monkeypatch.setenv("SESSION_INDEX_DIR", str(tmp_path))
+    sf = load("session-find")
+    monkeypatch.setattr(sf, "live_sessions", lambda: [])
+    row = {"agent": "pi", "id": "pid1", "sid": "daily_work", "status": "idle", "cwd": "/project",
+           "title": "okapi", "where": "", "focus": "", "reach": "native"}
+    monkeypatch.setitem(sys.modules, "fleet", SimpleNamespace(sessions=lambda: [row]))
+    hits = [{"agent": "pi", "sessionId": "daily_work", "sessionKey": "pi:/root-b/timestamp_daily_work.jsonl",
+             "cwd": "/project", "live": False, "title": "okapi", "snippet": "okapi b", "resume": "x"}]
+    monkeypatch.setattr(sf.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, json.dumps(hits), ""))
+    monkeypatch.setattr(sys, "argv", ["session-find.py", "--all", "--json", "okapi"])
+    assert sf.main() == 0
+    got = json.loads(capsys.readouterr().out)
+    assert any(r.get("resume") == "x" and r["live"] is False for r in got)
+
+
+def test_pi_target_keeps_flag_kind(monkeypatch):
+    import fleet
+    assert fleet._pi_sid(["pi", "--session-id", "daily.jsonl"]) == "daily.jsonl"
+    assert fleet._pi_sid(["pi", "--session-id=daily.jsonl"]) == "daily.jsonl"
+    assert fleet._pi_sid(["pi", "--session", "/abs/t_x.jsonl"]) == "/abs/t_x.jsonl"
+    assert fleet._pi_sid(["pi", "--session", "abc12345"]) == "abc12345"
+    # relative files depend on the launch cwd, which a scan cannot prove
+    assert fleet._pi_sid(["pi", "--session", "sessions/t_x.jsonl"]) is None
+    assert fleet._pi_sid(["pi", "--session", "t_x.jsonl"]) is None
+
+
+def test_proc_scan_never_fabricates_file_identity(monkeypatch):
+    import fleet
+    seen = {}
+    for argv, want in [("--session-id daily.jsonl", "daily.jsonl"), ("--session sessions/t_x.jsonl", None)]:
+        line = f"12345 1 Tue Nov 3 12:00:00 2026 node /tmp/pi {argv}"
+        monkeypatch.setattr(fleet, "_pi_terminal", lambda pid: "/dev/pts/4")
+        monkeypatch.setattr(fleet, "run", lambda *a, **kw: (0, line))
+        monkeypatch.setattr(fleet, "_where", SimpleNamespace(env_of=lambda pid: {}, lookup=lambda *a: {"cwd": "/project"}))
+        rows = fleet._proc_scan(set(), set(), {})
+        assert rows[0]["sid"] == want

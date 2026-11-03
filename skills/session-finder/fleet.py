@@ -923,13 +923,22 @@ def _pi_terminal(pid):
 
 
 def _pi_sid(argv):
-    """Full native ID or exact file target; never inherit a parent's PI_SESSION_ID."""
+    """Full native ID or absolute file target; never inherit a parent's PI_SESSION_ID.
+
+    `--session-id` is always an ID (a dotted `daily.jsonl` is not a file). `--session` is an ID/prefix or a file;
+    a relative file is resolved by Pi against its launch cwd, which a scan cannot know (the session may have
+    switched cwd on resume), so it yields no identity rather than a fabricated one."""
     for i, token in enumerate(argv):
         if token == "--":
             break
         flag, sep, value = token.partition("=")
         if flag in {"--session", "--session-id"}:
-            return value if sep else (argv[i + 1] if i + 1 < len(argv) else None)
+            value = value if sep else (argv[i + 1] if i + 1 < len(argv) else None)
+            if not value:
+                return None
+            if flag == "--session-id":
+                return None if "/" in value else value
+            return value if os.path.isabs(value) or not ("/" in value or value.endswith(".jsonl")) else None
     return None
 
 
@@ -1045,8 +1054,6 @@ def _proc_scan(known_pids, known_panes, anc):
             sid = m.group(1)
         if agent == "pi":
             sid = _pi_sid(pi_argv)
-            if sid and ("/" in sid or sid.endswith(".jsonl")) and not os.path.isabs(sid):
-                sid = str(Path(w["cwd"]) / sid) if w.get("cwd") else None
         s = _rec(id=f"pid{pid}", agent=agent, sid=sid, pid=pid, cwd=w.get("cwd", ""), where=w.get("where", ""),
                  focus=w.get("focus", ""), title=w.get("title", ""), self=pid in anc, host="terminal",
                  reach="no channel: use its focus command", status="unknown")

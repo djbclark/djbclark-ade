@@ -200,7 +200,9 @@ def main() -> int:
     def identity(row):
         sid = row.get("sessionId") or row.get("sid") or row.get("id") or ""
         if row.get("agent") == "pi":
-            return history_identity("pi", row.get("transcript") or sid, row.get("cwd") or "", row.get("sessionKey") or "")
+            ident = history_identity("pi", row.get("transcript") or sid, row.get("cwd") or "", row.get("sessionKey") or "")
+            # ID+cwd is not a storage root: only file identities may merge fleet rows with, or hide, history hits
+            return ident if ident[1] == "file" else ident + (id(row),)
         return native_id(sid)  # preserve the other families' existing matching contract
 
     exited_ids = set()

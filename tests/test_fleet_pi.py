@@ -91,7 +91,7 @@ def test_pipe_pi_not_pane_seat_but_still_ancestry_boundary(monkeypatch):
 @pytest.mark.parametrize("sid", ["x", "daily_work", "/custom root/timestamp_daily_work.jsonl"])
 def test_pi_native_id_is_not_truncated(monkeypatch, sid):
     monkeypatch.setattr(fleet, "_pi_terminal", lambda pid: "/dev/pts/4")
-    for flag in ("--session", "--session-id"):
+    for flag in ("--session",) if "/" in sid else ("--session", "--session-id"):
         argv = ["pi", flag, sid]
         assert fleet._tui_of([{"argv": argv, "argv0": "pi", "pid": 12345}])[2] == sid
 
