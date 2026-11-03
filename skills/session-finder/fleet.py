@@ -883,7 +883,7 @@ def _pi_executable(argv0, argv):
     if exe in {"node", "nodejs", "bun"} and len(argv) > 1:
         script = argv[1]
         return os.path.basename(script) == "pi" or (
-            os.path.basename(script) == "cli.js" and "pi-coding-agent" in script)
+            os.path.basename(script) == "cli.js" and "pi-coding-agent" in script.split("/"))
     return False
 
 
@@ -990,10 +990,12 @@ def _tui_of(procs):
     for pr in procs:
         argv = pr["argv"]
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
-        agent = (next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
-                 or _native_extra(argv))
-        if agent == "pi" and (not _pi_executable(pr["argv0"], argv) or _pi_headless(argv)
-                              or not _pi_terminal(pr["pid"])):
+        # Pi is told by its executable, not by a basename anywhere in argv (`vim pi` is not Pi; a node-run
+        # `…/pi-coding-agent/dist/cli.js` is, though no basename matches).
+        agent = ("pi" if _pi_executable(pr["argv0"], argv) else
+                 next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS and PROC_AGENTS[n] != "pi"), None)
+                 or ("hermes" if _hermes_native(argv) else None) or _native_extra(argv))
+        if agent == "pi" and (_pi_headless(argv) or not _pi_terminal(pr["pid"])):
             continue
         if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
@@ -1041,20 +1043,26 @@ def _proc_scan(known_pids, known_panes, anc):
         if len(parts) < 8:
             continue
         pid, cmd = int(parts[0]), parts[7]
-        if pid in known_pids or pid == os.getpid() or PROC_SKIP.search(cmd):
+        if pid in known_pids or pid == os.getpid():
             continue
-        exe = os.path.basename(cmd.split()[0])
-        agent = PROC_AGENTS.get(exe)
-        if not agent and len(cmd.split()) > 1:
-            agent = PROC_AGENTS.get(os.path.basename(cmd.split()[1]))  # `python … hermes`, `node … cursor-agent`
-        if not agent:
+        try:
+            pi_argv = shlex.split(cmd)
+        except ValueError:
+            pi_argv = cmd.split()
+        # Decided before PROC_SKIP: Pi's node entry lives under node_modules, and `vim pi` must not match.
+        if _pi_executable("", pi_argv):
+            agent = "pi"
+        elif PROC_SKIP.search(cmd):
             continue
-        if agent == "pi":
-            try:
-                pi_argv = shlex.split(cmd)
-            except ValueError:
+        else:
+            exe = os.path.basename(cmd.split()[0])
+            agent = PROC_AGENTS.get(exe)
+            if not agent and len(cmd.split()) > 1:
+                agent = PROC_AGENTS.get(os.path.basename(cmd.split()[1]))  # `python … hermes`, `node … cursor-agent`
+            if not agent or agent == "pi":
                 continue
-            terminal = "" if _pi_headless(pi_argv) or not _pi_executable("", pi_argv) else _pi_terminal(pid)
+        if agent == "pi":
+            terminal = "" if _pi_headless(pi_argv) else _pi_terminal(pid)
             if not terminal:
                 continue
         env = _where.env_of(pid) if _where else {}

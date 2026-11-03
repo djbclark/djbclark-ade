@@ -208,3 +208,22 @@ def test_flat_store_under_symlinked_root_is_indexed(tmp_path, monkeypatch):
     link.symlink_to(real)
     monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(link))
     assert [s["sid"] for s in load("adapters/pi").sessions()] == ["flat_id"]
+
+
+def test_noncanonical_filename_uses_header_id_and_tolerates_bad_headers(tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    (root / "daily.jsonl").write_text('{"type":"session","id":"native_id","cwd":"/w"}\n'
+                                      '{"type":"message","message":{"role":"user","content":"okapi"}}\n')
+    (root / "malformed.jsonl").write_text("not json\n")
+    (root / "nonsession.jsonl").write_text('{"type":"message","id":"x1y2z3"}\n')
+    (root / "badid.jsonl").write_text('{"type":"session","id":"../escape"}\n')
+    (root / "huge.jsonl").write_text('{"type":"session","id":"huge_id","pad":"' + "a" * 70000 + '"}\n')
+    (root / "empty.jsonl").write_text("")
+    (root / "linked.jsonl").symlink_to(root / "daily.jsonl")
+    (root / "timestamp_canonical.jsonl").write_text("garbage never read\n")
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(root))
+    rows = {r["sid"]: r for r in load("adapters/pi").sessions()}
+    assert set(rows) == {"native_id", "canonical"}
+    assert rows["native_id"]["key"] == f"pi:{(root / 'daily.jsonl').resolve()}"
+    assert rows["native_id"]["load"]()[0] == "/w"

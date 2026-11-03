@@ -64,6 +64,23 @@ def _read(path):
     return cwd, title, messages
 
 
+HEADER_MAX = 64 * 1024
+
+
+def _header_id(path):
+    """The id in the first-line session header of a noncanonically named file; "" when absent, malformed or oversized."""
+    try:
+        with path.open("rb") as fh:
+            line = fh.readline(HEADER_MAX + 1)
+        if len(line) > HEADER_MAX:
+            return ""
+        entry = json.loads(line.decode("utf-8"))
+    except (OSError, ValueError):
+        return ""
+    sid = entry.get("id") if isinstance(entry, dict) and entry.get("type") == "session" else None
+    return sid if isinstance(sid, str) and SID.fullmatch(sid) else ""
+
+
 def sessions():
     configured = os.environ.get("PI_CODING_AGENT_DIR")
     root = Path(configured).expanduser() / "sessions" if configured else ROOT
@@ -80,7 +97,10 @@ def sessions():
         # history index reads content only when the fingerprint changes.
         timestamp, separator, sid = path.stem.partition("_")
         if not timestamp or not separator or not SID.fullmatch(sid):
-            continue
+            # `pi --session /x/daily.jsonl` keeps its filename; the native id is in the header.
+            sid = _header_id(path)
+            if not sid:
+                continue
         yield {"key": f"pi:{path.resolve()}", "sid": sid,
                "supersedes": [f"pi:{sid}"],  # retire the old, globally colliding key after a successful load
                "fp": f"{stat.st_size}:{stat.st_mtime_ns}", "mtime": stat.st_mtime,

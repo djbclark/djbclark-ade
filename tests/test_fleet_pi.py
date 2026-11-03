@@ -120,3 +120,31 @@ def test_program_with_pi_argument_is_not_a_seat(monkeypatch, argv):
     line = "12345 1 Tue Nov 3 12:00:00 2026 " + " ".join(argv)
     monkeypatch.setattr(fleet, "run", lambda *args, **kwargs: (0, line))
     assert fleet._proc_scan(set(), set(), {}) == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["node", "/usr/lib/node_modules/@x/pi-coding-agent/dist/bundle/cli.js"],
+    ["node", "/home/u/.npm/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "--session", "daily_work"],
+    ["bun", "/tmp/pi"],
+])
+def test_node_pi_entry_is_classified_even_under_node_modules(monkeypatch, argv):
+    monkeypatch.setattr(fleet, "_pi_terminal", lambda pid: "/dev/pts/4")
+    assert fleet._tui_of([{"argv": argv, "argv0": argv[0], "pid": 12345}])[:2] == ("pi", 12345)
+    line = "12345 1 Tue Nov 3 12:00:00 2026 " + " ".join(argv)
+    monkeypatch.setattr(fleet, "run", lambda *args, **kwargs: (0, line))
+    monkeypatch.setattr(fleet, "_where", None)
+    found = fleet._proc_scan(set(), set(), {})
+    assert [s["agent"] for s in found] == ["pi"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["node", "/usr/lib/node_modules/other/dist/cli.js", "pi"],
+    ["node", "/usr/lib/node_modules/other/pi-coding-agent-not/cli.js"],
+    ["vim", "/usr/lib/node_modules/pi"],
+])
+def test_non_pi_entries_stay_rejected(monkeypatch, argv):
+    monkeypatch.setattr(fleet, "_pi_terminal", lambda pid: "/dev/pts/4")
+    assert fleet._tui_of([{"argv": argv, "argv0": argv[0], "pid": 12345}])[0] is None
+    line = "12345 1 Tue Nov 3 12:00:00 2026 " + " ".join(argv)
+    monkeypatch.setattr(fleet, "run", lambda *args, **kwargs: (0, line))
+    assert fleet._proc_scan(set(), set(), {}) == []
