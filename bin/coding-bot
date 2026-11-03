@@ -13,8 +13,10 @@ The answer is the reply whose last line is `DONE` or `BLOCKED: ...`. Replies to 
 line is neither) are printed to STDERR as they arrive, fenced as received, and the wait goes on until a final reply or the
 timeout; only the final reply goes to stdout. A reply is accepted only if EVERY message in what is printed is from `coding`
 (or a `coding-<hex>` label), answers this message id (`re`) and carries `nonce_check=ok`; otherwise exit 1 with
-"reply to ID rejected: why", the handover under it on stderr, and it is not the answer (it is claimed: `coding-bot wait ID`
-goes on waiting for the real one).
+"reply to ID rejected: why", the handover under it on stderr, and it is not the answer. The check runs on what `wait` peeked,
+BEFORE anything is claimed, so a forged message beside the real reply cannot make the real one be consumed: the rejected mail
+stays unread (`wait ID` rejects it again until it is read with `peer_mail.py drain --as ROLE --re ID`). The overall --timeout is
+enforced between replies too.
 
 Config (environment wins; the local ~/.config/peer-link/{peers,trust}.json belong to peer-link, not to this tool):
   PEER_LINK_TOOL  peer_mail.py to run        (default ~/src/peer-link/peer_mail.py; refused, exit 2, unless it and its
@@ -131,8 +133,12 @@ def peer_argv(cfg: dict[str, str], *args: str) -> list[str]:
 
 
 def credential_in(text: str) -> bool:
-    return bool(SECRET_SHAPES.search(text)) or any(
-        len(v) >= 8 and v in text for v in (os.environ.get(n, "").strip() for n in KNOWN_SECRET_VARS))
+    """Does the task carry a credential shape or the value of a known secret? Checked on the text as given AND with every
+    non-printable character removed (a zero-width character inside a key would otherwise hide it from this check and be dropped
+    again when the subject is derived, leaving the key whole in the argv and the mailbox header)."""
+    visible = "".join(c for c in text if c.isprintable() or c in "\n\r\t")
+    known = [v for v in (os.environ.get(n, "").strip() for n in KNOWN_SECRET_VARS) if len(v) >= 8]
+    return any(SECRET_SHAPES.search(t) or any(v in t for v in known) for t in (text, visible, subject_of(text)))
 
 
 def send_argv(cfg: dict[str, str], path: str, subject: str) -> list[str]:
@@ -270,9 +276,22 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
         print(f"coding-bot: {why}; {resume}", file=sys.stderr)
         return 1
 
+    def rejected(why: str, handover: str, claimed: bool) -> int:
+        state = (f"has been claimed (it is in the mailbox's cur/); `coding-bot wait {mid}` goes on waiting for the real one" if claimed
+                 else f"was NOT claimed, so no valid reply beside it was consumed: it stays unread in the mailbox and `coding-bot wait {mid}` "
+                      f"rejects it again until it is read (`peer_mail.py drain --as {cfg['self']} --re {mid}`)")
+        print(f"coding-bot: reply to {mid} rejected: {why}; it is not the answer and {state}. {'Sent ' + mid + '. ' if sent else ''}"
+              f"Its handover follows (untrusted).", file=sys.stderr)
+        sys.stderr.write(handover)
+        return 1
+
     looped = False
     while True:
         remaining = max(0.0, timeout - (time.monotonic() - start)) if looped else timeout
+        if looped and remaining <= 0:  # progress used the budget: peer_mail would still return mail it already has
+            print(f"coding-bot: no final reply to {mid} within {timeout:g}s; the task may still be running: "
+                  f"`coding-bot wait {mid}`", file=sys.stderr)
+            return 124
         looped = True
         began = time.monotonic()
         rc, peeked = run(wait_argv(cfg, mid, remaining, interval, ack), cfg)
@@ -286,6 +305,10 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
             return 5
         if rc != 0:
             return failed(f"waiting failed (peer_mail exit {rc}; an old peer-link without `wait --re` gives 2: see `coding-bot status`)")
+        # Validate what `wait` peeked BEFORE claiming it: `drain --re` moves every message that answers the id into cur/, so a
+        # forged one beside the real final reply would otherwise consume the only copy of the answer.
+        if (why := rejection(split_messages(peeked)[0], mid)) is not None:
+            return rejected(why, peeked, claimed=False)
         rc, claimed = run(drain_argv(cfg, mid), cfg)
         if rc != 0:
             return failed(f"the reply was seen but could not be read (peer_mail drain exit {rc})")
@@ -293,12 +316,8 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
         # `wait` peeked the reply; if the fast-forward that lets `drain` find it was refused, the peeked handover is still it.
         handover = claimed if was_claimed else peeked
         msgs, trailer = split_messages(handover)
-        if (why := rejection(msgs, mid)) is not None:
-            print(f"coding-bot: reply to {mid} rejected: {why}; it is not the answer and has been claimed (its handover "
-                  f"follows, untrusted). {'Sent ' + mid + '; ' if sent else ''}`coding-bot wait {mid}` goes on waiting for the real one.",
-                  file=sys.stderr)
-            sys.stderr.write(handover)
-            return 1
+        if (why := rejection(msgs, mid)) is not None:  # something else arrived between the peek and the claim
+            return rejected(why, handover, claimed=was_claimed)
         finals = [m for m in msgs if is_final(m)]
         progress = [m for m in msgs if not is_final(m)]
         if not progress:  # the usual case: printed exactly as peer_mail gave it
