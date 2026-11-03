@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Rename the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, or omp session.
+"""Rename the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, omp, or Pi session.
+
+Native Pi uses pi-bridge.ts and PI_SESSION_ID/PI_SESSION_FILE, never OMP's
+first-line title slot. It updates the live name through Pi's public API and
+preserves operator names with an in-process --auto guard. See pi-native-controls.md.
 
 A skill cannot invoke the built-in /rename, so this writes what it writes:
 
@@ -86,6 +90,8 @@ MAX_LEN = 80
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "session-finder"))
 import claude_identity  # noqa: E402  # the shared Claude session-id resolver
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pi_native  # noqa: E402
 
 
 def clean(title: str) -> str:
@@ -679,6 +685,11 @@ def omp_set_title(reg: dict, title: str) -> bool:
 
 def session_id() -> str | None:
     """This session's id: omp, cursor-agent, OpenCode, or Grok when this process is one, else Claude Code, else zcode."""
+    if pi_native.selected():
+        try:
+            return pi_native.registration()["session_id"]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
     if os.environ.get("OMPCODE") == "1":
         hit = nearest_agent_proc()
         if hit and hit[0] == "omp":
@@ -713,6 +724,8 @@ def session_id() -> str | None:
 
 def backend_for(sid: str) -> str:
     """Which store owns this id, including the Herdr-backed Codex session."""
+    if pi_native.selected() and os.environ.get("PI_SESSION_ID") == sid:
+        return "pi"
     if sid.startswith("sess_"):
         return "zcode"
     if sid.startswith("ses_"):
@@ -745,6 +758,8 @@ def backend_for(sid: str) -> str:
 def read_title(sid: str) -> str | None:
     """Current title for a session id, whichever backend the id belongs to."""
     kind = backend_for(sid)
+    if kind == "pi":
+        return pi_native.registration(sid).get("title")
     if kind == "zcode":
         row = zcode_current_title(sid)
         return row[0] if row else None
@@ -778,7 +793,7 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="print the current title and exit")
     ap.add_argument("--session-id", default=None,
                     help="session id (Claude Code uuid, cursor-agent chat id, Grok session id,"
-                         " OpenCode ses_…, zcode sess_…, Codex thread id, or omp session id);"
+                         " OpenCode ses_…, zcode sess_…, Codex thread id, omp or current Pi session id);"
                          " default: this session")
     ap.add_argument("--cursor-after-exit", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--cursor-expect", default="", help=argparse.SUPPRESS)
@@ -787,6 +802,24 @@ def main() -> int:
     if args.cursor_after_exit is not None:
         return cursor_apply_after_exit(args.session_id, args.cursor_after_exit,
                                        args.cursor_expect, args.title)
+
+    # Pi's selected shell identity wins over inherited host/agent variables.
+    # Keep its mutation and pin check in the owning process; no transcript,
+    # sidecar or inherited Paseo tab is written on this path.
+    if pi_native.selected():
+        try:
+            reg = pi_native.registration(args.session_id)
+            if args.show:
+                print(f"{reg.get('title') or '(no custom title)'} ({reg.get('source')})")
+                return 0
+            if not args.title or not (title := clean(args.title)):
+                ap.error("a non-empty title is required")
+            result = pi_native.request(reg, "rename", title=title, auto=args.auto)
+            print(f"{result['status']}: {title}")
+            return 0
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"autorename: {exc}; nothing else renamed", file=sys.stderr)
+            return 2
 
     sid = args.session_id or session_id()
     if not sid:

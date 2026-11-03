@@ -17,6 +17,12 @@ session's life, closing idle herdr panes, was the `herdr-tidy` skill, retired fr
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
+It also works in native Pi through its own bridge (2026-11-03), separately from
+OMP. See [Native Pi controls](pi-native-controls.md) for installation, session/model
+identity checks, operator-name protection and native self-slash compaction limits.
+Pi renames only the provider session, never an inherited host tab. No extension
+installation or live reload is implied by running the skill.
+
 It works in Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, and omp in a
 Herdr pane, auto-detected
 (`OMPCODE=1` with omp the nearest agent process above the shell, then
