@@ -111,7 +111,8 @@ def credential_in(text: str) -> bool:
 
 
 def send_argv(cfg: dict[str, str], path: str, subject: str) -> list[str]:
-    return peer_argv(cfg, "send", "--to", PEER, "--publish", "--subject", subject, "--file", path)
+    # `--subject=<value>`: a task line that looks like an option ("--timeout ...") stays a value
+    return peer_argv(cfg, "send", "--to", PEER, "--publish", f"--subject={subject}", "--file", path)
 
 
 def wait_argv(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: float) -> list[str]:
