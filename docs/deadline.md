@@ -29,6 +29,14 @@ deadline never names a model; the reroute is waited on up to 120 s and never kil
 **A budget is enforced, never only announced.** The one named exception is the announce-only wait: a record with no `--pid`/`--pgid` has
 nothing to kill, so `start` refuses the default `kill` for it (exit 2) and it must say `--on-expire notify`, `relay` or `reroute:RECORD`
 explicitly; `--on-expire notify` with a pid is likewise the operator's explicit choice.
+**`--holder PID` (2026-11-02; announce-only `notify`/`relay` records, so no `--pid`/`--pgid`: exit 2 otherwise, or for a pid that is not running).** An announce-only record has
+no process of its own, so nothing tells the sweep that the party meant to heartbeat it has died. `--holder` names that party: the process whose
+beats keep the record. If the holder is gone (same pid AND start time, the same verification as every pid here; a zombie is gone) and `done` was
+never called, the record was **abandoned**, not overdue: the sweep retires it as state `abandoned` (terminal, pruned after 7 days), prints one
+`abandoned (holder N gone)` line to `sweep.log`, and tells nobody: no owner notice, no Hermes ping, no recovery. This wins over an expired
+budget on the same pass. The holder is **never signalled**, so the registration refusal for a pid that is the caller's own ancestor (which exists to
+stop a process from killing itself) does not apply to it: `bg`'s watcher and `bg` itself are legal holders. A record without `--holder` behaves
+exactly as before; an announce-only wait with no heartbeating process is legitimate and still announces when it expires.
 A record expires on its budget plus granted extensions, or, with `--heartbeat`, on that long without a `beat`. Recovery runs once; it is
 written `started` before it runs, so a pass that dies midway never repeats it.
 **A stop that did not happen is never recorded as a stop.** If the process is alive and the signal could not be delivered (the OS refused it,
@@ -56,7 +64,7 @@ exits between two `run` polls is not `lost`: while its `run` registrar is alive 
    would otherwise grow every minute; `deadline ls` still lists it, and it is removed after 7 days). Each subprocess the sweep runs has a timeout; a
    record being advanced by another enforcer (`run` loop) is skipped (per-record `flock`). `sweep.log` is truncated past 1 MB. Names must match
    `[A-Za-z0-9_][A-Za-z0-9._-]{0,99}` and not be `agents` (the agent-check state file).
-5. A watched process that is gone without `done` becomes `lost` and the owner is told.
+5. A watched process that is gone without `done` becomes `lost` and the owner is told. A `--holder` that is gone without `done` makes the record `abandoned`, silently (above).
 6. Terminal records are pruned after 7 days, with orphan lock files. State: `~/.local/state/deadlines/` (`DEADLINE_STATE_DIR`), one JSON file per name.
 
 ## Waiters register themselves (2026-11-02)
@@ -103,9 +111,19 @@ never outlives its own `--timeout`/`--wait` by more than the margin plus the swe
 
 ## Known gaps (follow-ups, `docs/queue.md`)
 
-`bg` (in `~/ops/site-private-djbclark`) and `local-review` do not register their own deadline yet (B9 rule 1); `local-review` still bounds its load wait with
+`local-review` does not register its own deadline yet (B9 rule 1; `bg` does since 2026-11-01, below); `local-review` still bounds its load wait with
 `--load-wait` (default 1800 s) and, through `load-watch admit --wait`, now holds an `admit-wait-<pid>` deadline of its own for that gate.
 Linux has no systemd unit for the sweep (`install` is macOS launchd only; `sweep` itself runs on both).
+
+## `bg` records and the holder (2026-11-02)
+
+`bg` (`~/ops/site-private-djbclark/bin/bg`, alert-only) registers two `--on-expire notify` records, each with a `--holder`: `bg-wait-PID-T` for the load/slot
+wait (holder: `bg` itself, which beats it) and `bg-run-PID-T` for the run (holder: the detached watcher, which beats it). The run record is registered
+only once the run has started: `bg` writes a private marker file just before it execs the command, and the watcher registers when it sees it; if `bg` is
+gone first, nothing is registered. Before the holder existed, a watcher killed with its process group (or a `bg` SIGKILLed, so its EXIT trap never ran)
+left a record nobody would ever close, and 30 min later the sweep told the owner "expired ... Recover: rerun the unfinished part" for work that never
+ran (seen 2026-11-02, about 17 such records). Now the sweep retires such a record as `abandoned`, silently. `bg` cannot use `--pid` for this:
+`deadline start` refuses a pid that is its own caller's ancestor (it would be signalled), and a holder is never signalled.
 
 ## Agent-session no-progress check (alert only)
 

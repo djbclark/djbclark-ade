@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """deadline - register a maximum run time before a long command or wait, and enforce it from outside. No model.
 
-    deadline start NAME --budget DUR --owner ID [--heartbeat DUR] [--grace DUR] [--pid PID] [--pgid PGID]
+    deadline start NAME --budget DUR --owner ID [--heartbeat DUR] [--grace DUR] [--pid PID] [--pgid PGID] [--holder PID]
                         [--on-expire kill|notify|reroute:RECORD|relay] [--checkpoint PATH] [--max-extend DUR] [--json]
     deadline beat NAME [--checkpoint PATH] [--note TEXT]        heartbeat; records the latest checkpoint
     deadline extend NAME --by DUR --reason TEXT                 only before expiry; total capped by --max-extend (default = budget); else exit 2
@@ -17,6 +17,13 @@ no readable start time, is the caller's ancestor or in the caller's group/sessio
 --pid/--pgid: an announce-only wait must say --on-expire notify|relay|reroute:RECORD); `run` returns the command's rc (128+N for a
 signal death), or 124 when the enforcer stopped the command. A stop that failed (the process is still alive) is state `kill-failed`
 (non-terminal), never `expired`; the owner is told whatever the action.
+
+--holder PID (announce-only notify/relay records, so no --pid/--pgid; exit 2 otherwise, or for a pid that is not running): the process whose heartbeats
+keep the record alive. It is never signalled, so the refusal to register an ancestor (which stops a process from killing itself)
+does not apply to it. If the holder is gone (same pid AND start time, as for every pid here) and `done` was never called, the record
+was ABANDONED, not overdue: the sweep retires it as state `abandoned` with one `abandoned (holder N gone)` line in sweep.log, and
+tells nobody (no owner notice, no Hermes ping, no recovery). A record without --holder behaves as before: an announce-only wait
+with no heartbeating process still announces when it expires.
 
 Rule (docs/deadline.md): before any command or wait that may run longer than ~2 min, register a deadline, or use `deadline run`.
 
@@ -62,7 +69,7 @@ from pathlib import Path
 HOME = Path.home()
 ADE = Path(__file__).resolve().parent.parent
 LABEL = "com.djbclark.deadline-sweep"
-TERMINAL = {"done", "lost", "expired"}   # `kill-failed` is deliberately NOT terminal: the process may still be running
+TERMINAL = {"done", "lost", "expired", "abandoned"}   # `kill-failed` is deliberately NOT terminal: the process may still be running
 NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")   # no leading dot: such files are skipped by the sweep
 RESERVED_NAMES = {"agents"}   # agents.json is the agent-check state file
 
@@ -622,6 +629,21 @@ def registrar_alive(rec: dict) -> bool:
     return bool(info and info[1] != "Z" and info[0] == start)
 
 
+def holder_gone(rec: dict) -> str | None:
+    """Why a record's --holder is gone ("holder PID N gone"), or None while it lives (or the record has none). Verified like the
+    sweep verifies every pid: same pid AND same start time, a zombie is gone. `ps` failing proves nothing: not gone."""
+    pid, start = rec.get("holder_pid"), rec.get("holder_start")
+    if not pid or not start:
+        return None
+    try:
+        info = proc_info(int(pid))
+    except ProcUnknown:
+        return None
+    if info is None or info[1] == "Z" or info[0] != start:
+        return f"holder {pid} gone" + (" (pid reused)" if info and info[0] != start and info[1] != "Z" else "")
+    return None
+
+
 def finish(rec: dict, state: str, n: float, **kw) -> dict:
     rec.update(state=state, ended=n, **kw)
     return rec
@@ -660,6 +682,12 @@ def step(rec: dict, dry: bool = False) -> str:
         except ProcUnknown:
             pass
     if st == "running":
+        gone = holder_gone(rec)
+        if gone:
+            if dry:
+                return f"would retire: abandoned ({gone})"
+            save(finish(rec, "abandoned", n, reason=gone))   # no owner notice, no ping, no recovery: nothing overdue, the work never ran or was cut off
+            return f"abandoned ({gone})"
         if ts in ("gone", "reused", "unverified"):
             if ts != "reused" and registrar_alive(rec):
                 return "ok"   # a `run` child that exited a moment ago: its registrar records the rc on its next poll
@@ -947,12 +975,25 @@ def make_record(a, pid=None, pgid=None, kind: str = "start", fresh_child: bool =
     if not pid and not pgid and a.on_expire == "kill":
         return None, ("no --pid/--pgid: there is nothing to kill. A wait with no process is the named announce-only case: "
                       "pass --on-expire notify or relay (or reroute:RECORD) explicitly")
+    holder, holder_start = getattr(a, "holder", None), None
+    if holder:
+        if a.on_expire not in ("notify", "relay") or pid or pgid:
+            return None, "--holder is for announce-only records: --on-expire notify or relay, and no --pid/--pgid (a record that can signal a process group never takes a holder, which must not be signalled)"
+        try:
+            hinfo = proc_info(holder)
+        except ProcUnknown as e:
+            return None, f"ps failed ({e}): cannot verify the holder, refusing to register it"
+        if not hinfo or hinfo[1] == "Z":
+            return None, f"holder pid {holder} is not running (or its start time cannot be read): refusing to register it"
+        holder_start = hinfo[0]   # the holder is never signalled, so the ancestor/own-group refusal above does not apply to it
     rec = {"name": a.name, "owner": a.owner, "pid": pid, "pgid": pgid, "pid_start": pid_start,
            "pgid_start": leader[0] if leader else None, "started": n, "last_beat": n,
            "budget_s": a.budget, "heartbeat_s": a.heartbeat, "grace_s": a.grace, "on_expire": a.on_expire,
            "checkpoint": a.checkpoint, "max_extend_s": a.max_extend if a.max_extend is not None else a.budget,
            "extended_s": 0, "extensions": [], "state": "running", "kind": kind,
            "registrar_pid": os.getpid(), "registrar_start": reg[0] if reg else None, "reg_id": uuid.uuid4().hex}
+    if holder:
+        rec.update(holder_pid=holder, holder_start=holder_start)
     if pgid:
         try:
             refresh_anchor(rec)   # a verified member NOW, while the leader's identity is still readable: the leader may exit before the first pass
@@ -1132,7 +1173,7 @@ def sweep_once(dry: bool, agents: bool, agents_now: bool) -> list[dict]:
 
 def quiet(action: str) -> bool:
     """Actions a 60 s sweep must not log every minute (the launchd log would grow forever)."""
-    return (action in ("ok", "done", "lost", "expired", "agent scan queued")
+    return (action in ("ok", "done", "lost", "expired", "abandoned", "agent scan queued")
             or action.startswith(("stopping: within grace", "busy", "kill-failed: still alive", "ok (")))
 
 
@@ -1456,6 +1497,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--owner", required=True)
     s.add_argument("--pid", type=int)
     s.add_argument("--pgid", type=int)
+    s.add_argument("--holder", type=int, help="notify/relay only: the process whose heartbeats keep the record; never signalled")
     s.add_argument("--checkpoint")
     s.add_argument("--max-extend", type=dur_arg)
     s.add_argument("--json", action="store_true")

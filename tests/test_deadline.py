@@ -1066,3 +1066,75 @@ def test_a_slow_reroute_is_pending_not_a_failure(env):
     assert "OUTCOME IS UNKNOWN" in log and "reroute FAILED" not in log and "nothing replaced it" not in log
     assert [p for p in env.calls("PING") if "UNKNOWN" in p] and len(env.calls("DISPATCH")) == 1
     time.sleep(4)   # the dispatch was not killed: it finished on its own
+
+
+# ---------- --holder: an abandoned record is retired silently, an overdue one still announces ----------
+
+def test_holder_alive_still_expires_and_notifies_like_any_notify_record(env):
+    h = env.child("sleep 60")
+    assert start(env, "held", "--budget", "10", "--on-expire", "notify", "--holder", str(h.pid)).returncode == 0
+    rec = env.record("held")
+    assert rec["holder_pid"] == h.pid and rec["holder_start"] and not rec.get("pid")
+    assert env.run("sweep", "--no-agents", now=T0 + 5).stdout == ""
+    r = env.run("sweep", "--no-agents", now=T0 + 11)
+    assert "expired" in r.stdout and "abandoned" not in r.stdout
+    assert env.record("held")["state"] == "expired"
+    assert env.calls("RELAY") and env.calls("PING")
+    assert h.poll() is None, "a holder is never signalled"
+
+
+def test_holder_gone_retires_the_record_silently_no_relay_no_ping_no_recovery(env):
+    h = env.child("sleep 60")
+    assert start(env, "orphan", "--budget", "10", "--on-expire", "notify", "--holder", str(h.pid)).returncode == 0
+    os.killpg(h.pid, signal.SIGKILL)
+    h.wait()
+    r = env.run("sweep", "--no-agents", now=T0 + 11)   # overdue AND abandoned: abandoned wins
+    assert f"orphan: abandoned (holder {h.pid} gone)" in r.stdout
+    rec = env.record("orphan")
+    assert rec["state"] == "abandoned" and not rec.get("recovery") and not rec.get("notice")
+    assert not env.log.exists() or env.log.read_text() == ""
+    assert env.run("sweep", "--no-agents", now=T0 + 80).stdout == "", "logged once, not every minute"
+    assert env.run("done", "orphan").returncode == 0 and env.record("orphan")["state"] == "abandoned"
+    assert start(env, "orphan", "--budget", "10", "--on-expire", "notify").returncode == 0, "the name is free again"
+
+
+def test_holder_gone_before_the_budget_runs_out_is_abandoned_not_waited_for(env):
+    h = env.child("sleep 60")
+    assert start(env, "early", "--budget", "1000", "--on-expire", "relay", "--holder", str(h.pid)).returncode == 0
+    os.killpg(h.pid, signal.SIGKILL)
+    h.wait()
+    dry = env.run("sweep", "--dry-run", "--no-agents", now=T0 + 2)
+    assert "would retire: abandoned" in dry.stdout and env.record("early")["state"] == "running"
+    assert "abandoned" in env.run("sweep", "--no-agents", now=T0 + 2).stdout
+    assert not env.log.exists() or env.log.read_text() == ""
+
+
+def test_holder_pid_reused_by_another_process_counts_as_gone(env):
+    h = env.child("sleep 60")
+    assert start(env, "reused", "--budget", "10", "--on-expire", "notify", "--holder", str(h.pid)).returncode == 0
+    rec = env.record("reused")
+    rec["holder_start"] = "Thu Jan  1 00:00:00 1970"   # the live pid now has another start time: a different process
+    (env.state / "reused.json").write_text(json.dumps(rec))
+    r = env.run("sweep", "--no-agents", now=T0 + 11)
+    assert "abandoned (holder" in r.stdout and "pid reused" in r.stdout
+    assert env.record("reused")["state"] == "abandoned" and h.poll() is None and not env.calls("RELAY")
+
+
+def test_record_without_holder_is_unchanged_an_announce_only_wait_still_announces(env):
+    assert start(env, "plainwait", "--budget", "10", "--on-expire", "notify").returncode == 0
+    assert "holder_pid" not in env.record("plainwait")
+    assert "expired" in env.run("sweep", "--no-agents", now=T0 + 11).stdout
+    assert env.record("plainwait")["state"] == "expired" and env.calls("RELAY") and env.calls("PING")
+
+
+def test_holder_may_be_the_callers_ancestor_but_must_run_and_needs_an_announce_only_action(env):
+    # the holder is never signalled, so the own-ancestor refusal does not apply: a caller's parent (this test) is a legal holder
+    assert start(env, "anc", "--budget", "10", "--on-expire", "notify", "--holder", str(os.getpid())).returncode == 0
+    dead = env.child("true")
+    dead.wait()
+    r = start(env, "deadhold", "--budget", "10", "--on-expire", "notify", "--holder", str(dead.pid))
+    assert r.returncode == 2 and "holder" in r.stderr and not (env.state / "deadhold.json").exists()
+    for action in ("kill", "reroute:/x/jobs/rec.json", "notify", "relay"):
+        extra = ["--pid", str(env.child("sleep 60").pid)] if action in ("kill", "notify", "relay") else []   # a record that can signal never takes a holder
+        r = start(env, "badact", "--budget", "10", "--on-expire", action, "--holder", str(os.getpid()), *extra)
+        assert r.returncode == 2 and "--holder" in r.stderr, action
