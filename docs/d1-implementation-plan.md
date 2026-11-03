@@ -211,6 +211,29 @@ Accept: a written answer for G2.8 ("signal exists: <field>" or "none") and for G
 ("catalog recomputed on reopen: yes/no"). If no, the registration flow (V3) cannot be create, merge id, reopen;
 G1 then needs the list read at `jobs.submit` time instead.
 
+**Checked 2026-11-02 (slice d1-t11-origin; CLI and isolated daemon 0.15.0-beta.1, provider `antigravity/gemini-3.8-flash-low`, about 15 one-word turns across exploration and runs):**
+hook names and the plugin shape are confirmed (paseo.sh/docs/plugins/hooks.md, and the daemon source `agent-manager.js` `createAgentInternal`
+and `buildLaunchContext`): a plugin is `paseo-plugin.json` + `index.server.ts` calling `server.addHook(name, handler)`; the fixture was rewritten to
+that shape (the draft's `plugin.json`/`index.js`/`api.on` did not exist). Helpers: `lib/origin-probe.sh` (plugin setup, MCP over the unix socket),
+`lib/origin-diff.py`. The isolated home starts with `pluginsEnabled=false`; the probes turn it on in the TEST home only
+(`paseo daemon config set pluginsEnabled true`, then `plugin install` + `plugin reload`, hot, no restart). Results: `d1-07b-create-origin.json`, `d1-10-reopen-hook.json`.
+**G2.8 answer (d1-07b, pass): none.** `agent.create.before` receives only `{request: {config, env?}}` (config: provider, model, cwd, title); the daemon's
+`options` (labels, owner, workspaceId, source) are not in it. A CLI `paseo run`, an MCP `create_agent` with no caller, and a plugin-SDK
+`paseo.agents.create` (the same `daemonClient.createAgent` the app uses) log identical key sets in `agent.create.before`, `agent.open.before` (labels `{}`, reason
+`create`) and `agent.create.after`; the Desktop/mobile UI create cannot be scripted (N/A, it sends the same request). Only an agent-originated MCP create (the
+agent's own MCP client, `?callerAgentId=`, needs `daemon.mcp.injectIntoAgents=true` on that daemon, default false) carries a signal, and not in `create.before`:
+`agent.open.before` `labels["paseo.parent-agent-id"]` and `labels["paseo.parent-server-id"]`, and `agent.create.after` `agent.parentAgentId`
+(`create.before` differs only by an incidental `config.modeId`). So G2.8's herald-label refusal cannot key on "plugin-SDK vs MCP vs CLI"; the only usable
+discriminator is parentage (subagent vs root), at `open.before`/`create.after`, and the `deleteHelpers:false` assertion stays the control for the rest.
+Note: an agent-scoped `create_agent` that names `cwd` is parsed as the legacy relationship/workspace shape and refused; omit `cwd` and it inherits the caller's workspace.
+**V3 / G1 answer (d1-10, pass): catalog recomputed on reopen: yes.** `agent.open.before` fires again, per open of the same agent id: `reason: "refresh"` on
+`paseo agent reload` (the `refresh_agent_request` that `reopen-archived` sends after restoring a workspace); `reason: "resume"` on archive then `paseo agent reload`
+(which also unarchives: `archivedAt` null afterwards); `reason: "refresh"` on the first send after `paseo plugin reload origin-probe` (stale session reopened
+before the next idle prompt); `reason: "resume"` on the first send after a daemon worker restart. An idle follow-up `send` fires nothing (session reused). So the
+flow create, merge id, reopen works with a `agent.open.before` reader, provided the reopen is one of `agent reload`, archive+reload, a plugin reload followed by a prompt, or a restart.
+Limit: `reopen-archived` itself was not run (it refuses a Unix-socket listener and its workspace-restore request has no CLI form); only its `refresh_agent_request` leg was exercised.
+The D2 case "newly registered orchestrator gains `jobs.submit` after reopen, unregistered does not" stays as written.
+
 ### T12. D1.8 vps-primary security prerequisites (needs djbclark's yes; touches `~/ops`, order 11)
 
 Files: `d1-08-vps-security.sh` (`READ-ONLY` against vps-primary: ssh `ps`, `ss`, `id`, `ls -l`, and one

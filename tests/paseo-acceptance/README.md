@@ -12,7 +12,7 @@ Results go to `$ADE_ACCEPTANCE_RESULTS` (default `~/.local/state/ade/acceptance`
 | `watchdog-selftest.sh`, `d1-09-deadman.sh`, `drain/check-disabled.sh --self-test` | hermetic, no daemon |
 | `drain/*.sh` | D0.2 drain records; read-only |
 | `deadman/` | D1.9 scripts for vps-primary and the Mac sender; not installed |
-| `fixtures/origin-probe-plugin/` | stub plugin, SDK names UNVERIFIED |
+| `fixtures/origin-probe-plugin/` | hook-logging plugin (`paseo-plugin.json` + `index.server.ts`, names confirmed 2026-11-02); installed in the test home only by `d1-07b`/`d1-10` via `lib/origin-probe.sh` |
 | `d1-07a-tabs.md`, `d1-11-push-off-tailnet.md` | manual checklists |
 
 `run-all.sh --list` shows scopes; `--readonly` runs only the safe ones. Nothing here is wired into CI.
