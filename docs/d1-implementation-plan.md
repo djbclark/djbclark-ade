@@ -176,6 +176,16 @@ Do: parent creates a child through MCP `create_agent` (agent-scoped, so lineage 
 Accept: child survives archive of the parent (status still `running`, finishes). If not, successors stay
 top-level permanently (C1); record whether `detach` changes the outcome.
 
+**Checked 2026-11-02 (slice d1-t7-parent-child; CLI and daemon 0.15.0-beta.1): NOT YET DECIDED, blocked on a port claim.** First run
+(codex/gpt-6-luna parent, Unix-socket isolated daemon): the parent answered "`create_agent` isn't available in this session" and created no
+child. Cause, read from the daemon bundle: `createAgentMcpBaseUrl(listenTarget)` returns `null` unless the listener is TCP, so
+`agentManager.setMcpBaseUrl(null)` and no agent gets the Paseo MCP tools; the daemon log still says "Agent MCP route mounted". **So decision 1
+(Unix socket) cannot serve any probe that needs agent MCP: T7, T5's MCP branch, T8's `create_agent` with `notifyOnFinish`.** Those need the
+isolated daemon on a claimed loopback TCP port; `lib/common.sh` `isolated_up` now takes `ACC_TCP_PORT=N` (refuses unless N is a `port:` row in
+`ports.yml`, refuses if something already listens). `d1-04` skips (77) without it, and builds one parent turn that makes two 60 s children (A
+detached first, B not), archives the parent, samples both at +1/5/15/30 s and checks each wrote its marker. The probe's lineage check reads any
+`*parent*` key in `paseo agent inspect --json` (the draft's `ParentAgentId` is unverified). Verdict stays open until a port is claimed.
+
 ### T8. D1.5 Daemon restart keeps queued prompts, pending `notifyOnFinish` and schedules
 
 Files: `d1-05-restart-persistence.sh` (`DESTRUCTIVE: second daemon only`).
