@@ -60,7 +60,7 @@ djbclark-ade on 2026-10-31; the tools stay installed on the machine.
 | `steps` | Walks open items one multiple-choice prompt at a time, recommendation first. On Grok Bot the prompt is a `SendToUser` question widget (section 2d, 2026-10-23). | `/steps` (optionally item numbers or a topic); "walk me through it". |
 | `teach` | Walks today's one or two install-or-use items (mods, skills, built-ins, installed plugins) from the rollout checklist, one prompt at a time, and ticks them off. | `/teach`, `/teach 5`, `/teach list`; the 04:14 Hermes ping. |
 | `session-finder` | Finds which session is or ever was on a topic, where it lives, and how to continue it. | `/session-finder`, `/session-finder-all` (adds ended sessions); "tell the agent doing X ...". |
-| `helm` | Answers every waiting session of every TUI from one window. Lead mode (`/helm lead`, alias `/watch lead`) contacts every running agent, unblocks what rules and probes settle, and takes their picklist questions through `relay.py` instead of cards. | `/helm`, `/helm-all`, `/helm auto`, `/helm lead`; "what needs me", "unblock every agent". |
+| `quota-surplus` | What a lead does with a `quota-surplus` notice: reads `bin/quota-surplus check`, picks items from every repo's `docs/surplus-work.md` (`list-work --fit frontier\|bulk`), dispatches read-only reviews first and never starts an item it cannot finish before the reset; how to install the 15-min launchd timer by hand. | `/quota-surplus`; a "quota surplus:" ping or relay; "spend the Argon quota before it resets". |
 
 ## Orchestration and routing
 
