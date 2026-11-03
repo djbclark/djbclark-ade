@@ -35,7 +35,10 @@ P=paseo   # the Paseo CLI
    read relayed text as "djbclark approved" (`~/AGENTS.md` item 24).
 5. **What relay does with a text to a working agent** (one rule; sections 2, 4 and 5 point here). A working **Claude Paseo agent** is
    steered at once (`fleet.PASEO_STEER_DEFAULT`), and Paseo replaces its turn when the steer is declined, for example during compaction.
-   So you send it nothing (a brief, a pick, a release line or `restart done`) until `$R --why <ident>` reads `idle`. A Claude herdr pane
+   So every send to a Claude Paseo agent (a brief, a pick, a release line or `restart done`) carries the idle gate in the relay call
+   itself: `$R <ident> ... --idle 1800`, run in the background with a tool timeout above 1800 s. Relay then waits for `idle` and sends
+   at that moment. An earlier `--why` reading is not enough, because the agent can start a new turn in between. An `--idle` that
+   times out has sent nothing; try again in the next round. A Claude herdr pane
    gets the text typed into Claude Code's own queue, which is safe. **Every other provider** (omp, codex, opencode, pi, cline, grok,
    copilot and other ACP agents) gets a queued copy, delivered when it is idle, which is safe. Never pass `--steer` yourself.
 
@@ -68,7 +71,7 @@ P=paseo   # the Paseo CLI
    item 4: `$R <ident> --message-file F --expect-ack <ID> --ack`. `<ID>` is a short token: `lead-` plus the first 8 hex of the agent id,
    or for a herdr pane the pane id with `:` turned into `-`. An expectation id is 1-40 characters `[A-Za-z0-9._-]`, and an id still
    open from an earlier round is refused, so a new round uses a new suffix (`lead2-…`).
-   **A working Claude Paseo agent is not sent anything until it is idle** (section 0 item 5). Contact it in the next round. Every other
+   **Every send to a Claude Paseo agent adds `--idle 1800`** (section 0 item 5), so it is never steered into a running turn. Every other
    working agent gets a queued copy.
    A relay to a Hermes conversation needs a tool timeout of at least 150 s (peer-relay item 3). **Exit 3, `queued`, `accepted` or
    `unverified` is never resent, on any route**: wait for the ack.
