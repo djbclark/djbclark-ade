@@ -3,12 +3,13 @@
 Index user/assistant text only, not system prompts, tool results or thinking.
 Session names are append-only session_info records; the last nonempty name wins.
 """
-import json
 import os
-import re
 import shlex
-import stat
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the shared reader lives beside session-history.py
+from jsonl_session import native_sid, records  # noqa: E402
 
 AGENT = "pi"
 ROOT_ENV = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
@@ -22,32 +23,6 @@ def RESUME(key, cwd):
 
 
 ROOT = Path.home() / ".pi/agent/sessions"
-# Pi names session files <ISO timestamp with ":" and "." as "-">_<id>, e.g. 2026-11-03T15-25-31-559Z_<id>.jsonl.
-STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-\d{3})?Z")
-SID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
-
-
-def _open_regular(path):
-    """Binary stream of a regular, non-symlink file; OSError otherwise. Never blocks on a FIFO."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("not a regular file")
-        return os.fdopen(fd, "rb")
-    except BaseException:
-        os.close(fd)
-        raise
-
-
-def _records(path):
-    with _open_regular(path) as raw:
-        for line in raw:
-            try:
-                entry = json.loads(line.decode("utf-8", errors="replace"))
-            except (ValueError, RecursionError):
-                continue
-            if isinstance(entry, dict):
-                yield entry
 
 
 def _text(content):
@@ -62,7 +37,7 @@ def _text(content):
 
 def _read(path):
     cwd, title, messages = "", "", []
-    for entry in _records(path):
+    for entry in records(path):
         if entry.get("type") == "session" and isinstance(entry.get("cwd"), str):
             cwd = entry["cwd"]
         elif entry.get("type") == "session_info" and isinstance(entry.get("name"), str):
@@ -79,23 +54,6 @@ def _read(path):
     return cwd, title, messages
 
 
-HEADER_MAX = 64 * 1024
-
-
-def _header_id(path):
-    """The id in the first-line session header of a noncanonically named file; "" when absent, malformed or oversized."""
-    try:
-        with _open_regular(path) as fh:
-            line = fh.readline(HEADER_MAX + 1)
-        if len(line) > HEADER_MAX:
-            return ""
-        entry = json.loads(line.decode("utf-8"))
-    except (OSError, ValueError, RecursionError):
-        return ""
-    sid = entry.get("id") if isinstance(entry, dict) and entry.get("type") == "session" else None
-    return sid if isinstance(sid, str) and SID.fullmatch(sid) else ""
-
-
 def sessions():
     configured = os.environ.get("PI_CODING_AGENT_DIR")
     root = Path(configured).expanduser() / "sessions" if configured else ROOT
@@ -108,14 +66,11 @@ def sessions():
             stat = path.stat()
         except OSError:
             continue
-        # Pi filenames are <timestamp>_<id>. Keep listing stat-only so the
-        # history index reads content only when the fingerprint changes.
-        timestamp, separator, sid = path.stem.partition("_")
-        if not separator or not STAMP.fullmatch(timestamp) or not SID.fullmatch(sid):
-            # `pi --session /x/daily.jsonl` keeps its filename; the native id is in the header.
-            sid = _header_id(path)
-            if not sid:
-                continue
+        # Pi filenames are <timestamp>_<id>. Keep listing stat-only so the history index reads content only when the
+        # fingerprint changes; `pi --session /x/daily.jsonl` keeps its filename and costs one bounded header read.
+        sid = native_sid(path)
+        if not sid:
+            continue
         yield {"key": f"pi:{path.resolve()}", "sid": sid,
                "supersedes": [f"pi:{sid}"],  # retire the old, globally colliding key after a successful load
                "fp": f"{stat.st_size}:{stat.st_mtime_ns}", "mtime": stat.st_mtime,

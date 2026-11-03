@@ -269,7 +269,7 @@ def test_deeply_nested_json_is_not_a_crash(tmp_path, monkeypatch):
     monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(root))
     pi = load("adapters/pi")
     assert [r["sid"] for r in pi.sessions()] == ["deep_id"]
-    list(pi._records(root / "2026-11-03T15-25-31-559Z_deep_id.jsonl"))
+    list(pi.records(root / "2026-11-03T15-25-31-559Z_deep_id.jsonl"))
 
 
 def test_cleared_session_name_falls_back_to_the_first_prompt(tmp_path):

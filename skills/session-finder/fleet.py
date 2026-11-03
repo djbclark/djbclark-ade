@@ -101,6 +101,22 @@ PASEO_STATUS = {"running": "working", "idle": "idle"}
 PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode",
                "zcode": "zcode", "pi": "pi", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
                "muse": "muse", "cline": "cline", "hermes": "hermes", "grok": "grok", "devin": "devin"}
+
+
+def omp_executable(argv0, argv):
+    """True for an omp process: the `omp` executable itself (also `omp -p`, `omp --mode rpc`, `omp __omp_worker_*`), or node/bun
+    running a script named `omp` or omp's `cli.js` entry (under an `oh-my-pi` or `@oh-my-pi` directory). A program that only
+    has `omp` among its arguments (`vim omp`, `less omp`) is not one. (Pi's `cli.js` lives under `pi-coding-agent` of another scope.)"""
+    exe = os.path.basename(argv0 or (argv[0] if argv else ""))
+    if exe == "omp":
+        return True
+    if exe in {"node", "nodejs", "bun"} and len(argv) > 1:
+        script = argv[1]
+        return os.path.basename(script) == "omp" or (
+            os.path.basename(script) in {"cli.js", "cli.ts"} and bool({"oh-my-pi", "@oh-my-pi"} & set(script.split("/"))))
+    return False
+
+
 PROC_SKIP = re.compile(r"(acp|mcp|--acp|gateway|dashboard|language-server|lsp|sleeper|serve\b|Helper|node_modules|"
                        r"claude-agent-acp|codex-acp| -p |--print|exec |run |\bresume-globally\b)")
 STRIP = re.compile(r"<(system-reminder|local-command-[a-z]+|command-[a-z]+|pasted_content)\b.*?</\1>", re.DOTALL)

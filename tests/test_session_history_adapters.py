@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -48,7 +49,8 @@ class AdapterTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_omp_reads_user_and_assistant_text_only(self) -> None:
-        write_jsonl(self.home / ".omp/agent/sessions/-src-x/2026-10-31T17-00-00-000Z_abc-123.jsonl", [
+        path = self.home / ".omp/agent/sessions/-src-x/2026-10-31T17-00-00-000Z_abc-123.jsonl"
+        write_jsonl(path, [
             {"type": "title", "title": "Fix the flux capacitor"},
             {"type": "session", "id": "abc-123", "cwd": "/src/x"},
             {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "please repair the capacitor"}]}},
@@ -58,7 +60,9 @@ class AdapterTests(unittest.TestCase):
         ])
         mod = load("omp", self.home)
         (s,) = list(mod.sessions())
-        self.assertEqual((s["key"], s["sid"]), ("omp:abc-123", "abc-123"))
+        self.assertEqual((s["key"], s["sid"]), (f"omp:{path.resolve()}", "abc-123"))
+        self.assertEqual(s["supersedes"], ["omp:abc-123"])
+        self.assertEqual(mod.RESUME(s["key"], "/src/x"), "omp --resume=abc-123")
         cwd, title, msgs = s["load"]()
         self.assertEqual((cwd, title), ("/src/x", "Fix the flux capacitor"))
         self.assertEqual(msgs, [("user", "please repair the capacitor"), ("assistant", "capacitor repaired")])
@@ -90,7 +94,7 @@ class AdapterTests(unittest.TestCase):
         write_jsonl(path, [{"type": "session", "id": "valid-id"}])
         path.with_name("timestamp_link-id.jsonl").symlink_to(path)
         mod = load("pi", self.home)
-        with mock.patch.object(mod, "_records", side_effect=AssertionError("listing must not parse")):
+        with mock.patch.object(mod, "records", side_effect=AssertionError("listing must not parse")):
             (session,) = list(mod.sessions())
         self.assertEqual(session["sid"], "valid-id")
 
@@ -223,7 +227,10 @@ class StatusTests(unittest.TestCase):
             r = subprocess.run([sys.executable, "-I", str(SF / "session-history.py"), "--json", "giraffe"],
                                env=env, capture_output=True, text=True, check=False)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(json.loads(r.stdout)[0]["resume"], "omp --resume='x;touch pwned'")
+            # the file name holds no valid id, so the header's "x" names the session and the hint names the file
+            (hit,) = json.loads(r.stdout)
+            self.assertEqual((hit["sessionId"], shlex.split(hit["resume"])), (
+                "x", ["omp", f"--resume={(home / '.omp/agent/sessions/-s/2026-10-31T00-00-00-000Z_x;touch pwned.jsonl').resolve()}"]))
 
 
 class HardeningTests(unittest.TestCase):

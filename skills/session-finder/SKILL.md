@@ -56,6 +56,9 @@ here (`/session-finder-all` loads this skill for it).
    FTS5; first run indexes everything, 1–2 minutes, start it with
    `run_in_background`). **It searches live and ended sessions together: there is no
    active-only mode** (running-only is step 1). Ended hits print a `resume:` command.
+   omp hits (every store: default, `~/.omp/profiles/*`, `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR`) are checked with
+   `omp session lease` (2026-11-03): `LIVE` when a running omp holds the session, `ended` when none does, `LIVE?` when the check
+   could not run (omp missing, a timeout): never `ended` without an answer. Outside herdr an omp has no fleet row, so this is the only signal.
    A launchd job (`session-history.py --install`, run from the primary checkout; `--uninstall` removes it; every 10 min, 2026-10-31) keeps the
    index fresh, and every search also brings it up to date first, so a search is never
    stale, only slower when the job is off. `--status` is the read-only lag report: last

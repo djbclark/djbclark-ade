@@ -297,11 +297,18 @@ print('42001 1 pi')
             assert "no inherited host fallback" in result.stderr
 
 
-@pytest.mark.parametrize("ch", ["\x85", "\x9f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069", "\x07", "\x7f"])
+@pytest.mark.parametrize("ch", ["\x85", "\x9f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069", "\x07", "\x7f",
+                                "\u200e", "\u200f", "\u061c", "\u200b", "\u200d", "\u2060", "\ufeff"])
 def test_clean_strips_controls_like_the_bridge_rejects(native, monkeypatch, ch):
+    # Cc, Cf, Zl and Zp: the invisible bidi marks, zero-width characters and BOM too (2026-11-03, audit A12)
     rename = load_autorename("autorename_clean_test", monkeypatch, native[0])
     assert rename.clean(f"a{ch}b") == "a b"
     assert rename.clean(ch) == ""
+
+
+def test_clean_keeps_normal_text(native, monkeypatch):
+    rename = load_autorename("autorename_clean_keep_test", monkeypatch, native[0])
+    assert rename.clean("Café résumé 🚀 naïve – 日本語") == "Café résumé 🚀 naïve – 日本語"
 
 
 def test_native_extension_contract(tmp_path):
@@ -366,7 +373,8 @@ assert.match(request({action:'rename', title:'No', auto:true}).status, /skipped/
 assert.equal(title, 'Auto 2');
 assert.equal(request({action:'rename', title:'Explicit', auto:false}).status, 'renamed');
 assert.equal(reg().source, 'user');
-for (const bad of ['a\u0085b', 'a\u009fb', 'a\u2028b', 'a\u2029b', 'a\u202eb', 'a\u2066b', 'a\u2069b', 'a\u0007b', 'a\u007fb']) {
+for (const bad of ['a\u0085b', 'a\u009fb', 'a\u2028b', 'a\u2029b', 'a\u202eb', 'a\u2066b', 'a\u2069b', 'a\u0007b', 'a\u007fb',
+  'a\u200eb', 'a\u200fb', 'a\u061cb', 'a\u200bb', 'a\u200db', 'a\u2060b', 'a\ufeffb']) {
   assert.equal(request({action:'rename', title:bad, auto:false}).accepted, false, JSON.stringify(bad));
 }
 assert.equal(title, 'Explicit');

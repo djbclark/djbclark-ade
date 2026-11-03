@@ -1603,18 +1603,28 @@ def hermes_native():
     return label if HERMES_SENDER.fullmatch(label) else ""
 
 
+INTERPRETERS = frozenset({"node", "nodejs", "bun", "python", "python3"})
+
+
+def proc_is_omp(cmd):
+    """True when the `ps` command line CMD is an omp process (`fleet.omp_executable`; `vim omp` is not)."""
+    argv = cmd.split()
+    return fleet.omp_executable("", argv)
+
+
 def descends_from(table, pid, anchor):
     """True when walking up from PID in TABLE (pid -> (ppid, command), `fleet.proc_table`) reaches ANCHOR with no agent other than Hermes on the
     way. Strict, unlike `turn_is_above` (which counts the top of the tree, right for a hop count, wrong for an identity): the top of the
-    tree, a pid missing from TABLE or 40 steps without ANCHOR is False, and so is a Claude, Codex or other agent session started inside a
-    Hermes turn, which inherits the turn's HERMES_SESSION_ID and must not speak as it."""
+    tree, a pid missing from TABLE or 40 steps without ANCHOR is False, and so is a Claude, Codex, omp or other agent session started inside a
+    Hermes turn, which inherits the turn's HERMES_SESSION_ID and must not speak as it. An omp is told by its executable
+    (`omp`, `bun …/omp`, `node …/omp`, `omp -p`, `omp --mode rpc`: `proc_is_omp`); `vim omp` is not a boundary."""
     for _ in range(40):
         if pid == anchor:
             return True
         if pid <= 1 or pid not in table:
             return False
         ppid, cmd = table[pid]
-        if any(fleet.PROC_AGENTS.get(os.path.basename(p)) not in (None, "hermes") for p in cmd.split()[:2]):
+        if proc_is_omp(cmd) or any(fleet.PROC_AGENTS.get(os.path.basename(p)) not in (None, "hermes") for p in cmd.split()[:2]):
             return False
         pid = ppid
     return False
@@ -1643,8 +1653,9 @@ def hermes_caller(listed):
     conversation; it counts only when it equals, in full, the session id of exactly one live gateway row AND this process descends from
     that conversation's turn process (the pid in its lock file) or from the gateway process, with no other agent between: a variable any
     shell can set proves nothing alone. NOT trusted for identity: RELAY_SENDER, RELAY_HOPS, RELAY_HOP_PARENT, the 8-character label,
-    HERMES_SESSION_KEY. Never inside a deliverer (SENDER_OVERRIDE). Same-uid residuals (a deliberate forger inside the gateway process, an
-    omp or Paseo-hosted agent inside a turn, a rotated session id) are bounds, documented in docs/queue.md."""
+    HERMES_SESSION_KEY. Never inside a deliverer (SENDER_OVERRIDE). An omp started inside a turn is an agent between (`descends_from`), so it
+    does not inherit the turn's identity (2026-11-03); a Paseo-hosted agent has no such ancestor. Same-uid residuals (a deliberate forger
+    inside the gateway process, a rotated session id) are bounds, documented in docs/queue.md."""
     sid = (os.environ.get("HERMES_SESSION_ID") or "").strip()
     if SENDER_OVERRIDE[0] or not sid:
         return None
@@ -2102,7 +2113,8 @@ def turn_is_above(table, pid, boundary):
         if pid == boundary or pid <= 1:
             return True
         ppid, cmd = table.get(pid, (0, ""))
-        agent = next((fleet.PROC_AGENTS[n] for n in (os.path.basename(p) for p in cmd.split()[:2]) if n in fleet.PROC_AGENTS), None)
+        agent = "omp" if proc_is_omp(cmd) else next(
+            (fleet.PROC_AGENTS[n] for n in (os.path.basename(p) for p in cmd.split()[:2]) if n in fleet.PROC_AGENTS), None)
         if agent:
             return agent == "hermes"
         pid = ppid
@@ -3148,13 +3160,22 @@ def herdr_pane_procs(s):
 
 
 def named_hits(s, procs):
-    """The processes of PROCS (a herdr pane's foreground processes) named like session S's agent: its herdr label, or a binary
-    fleet.PROC_AGENTS maps to that label (`cursor-agent` for `cursor`; node-launched: the script is argv[1])."""
+    """The processes of PROCS (a herdr pane's foreground processes) that ARE session S's agent: its herdr label, or a binary
+    fleet.PROC_AGENTS maps to that label (`cursor-agent` for `cursor`), as the executable itself (argv0 or the process name)
+    or as the script argv[1] of an interpreter (`node …/cursor-agent`). An argument of another program (`vim omp`, `less omp`,
+    `omp` under a shell) is not a hit, and omp is told by `fleet.omp_executable` (also node/bun on its `cli.js`)."""
     label = s.get("agent") or ""
     names = ({label, *(n for n, a in fleet.PROC_AGENTS.items() if a == label)}) - {""}
-    return [pr for pr in procs
-            if names & {os.path.basename(pr.get("argv0") or ""), os.path.basename(pr.get("name") or ""),
-                        *(os.path.basename(x) for x in (pr.get("argv") or [])[:2])}]
+
+    def named(pr):
+        argv, argv0 = pr.get("argv") or [], pr.get("argv0") or ""
+        if label == "omp" and fleet.omp_executable(argv0, argv):
+            return True
+        if names & {os.path.basename(argv0), os.path.basename(pr.get("name") or "")}:
+            return True
+        return (bool(argv) and os.path.basename(argv[0]) in INTERPRETERS and len(argv) > 1
+                and os.path.basename(argv[1]) in names)
+    return [pr for pr in procs if named(pr)]
 
 
 def agent_pid(s):

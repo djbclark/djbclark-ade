@@ -80,6 +80,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,6 +88,7 @@ from typing import Any
 
 MARK = '"type":"custom-title"'
 MAX_LEN = 80
+INVISIBLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
 ZCODE_SID_RE = re.compile(r"\.zcode/cli/exec/(sess_[0-9a-fA-F-]+)/")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "session-finder"))
 import claude_identity  # noqa: E402  # the shared Claude session-id resolver
@@ -95,8 +97,9 @@ import pi_native  # noqa: E402
 
 
 def clean(title: str) -> str:
-    # C0/C1 controls, line/paragraph separators and bidi controls; the Pi bridge rejects the same set.
-    title = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]+", " ", title)
+    # Unicode categories Cc (C0/C1 controls), Cf (bidi marks and isolates, zero-width characters, BOM), Zl and Zp (line and
+    # paragraph separators); the Pi and omp bridges reject the same set (\p{Cc}\p{Cf}\p{Zl}\p{Zp}). Emoji and accents stay.
+    title = "".join(" " if unicodedata.category(c) in INVISIBLE else c for c in title)
     title = re.sub(r"\s+", " ", title.replace('"', "")).strip().strip("'`")
     return title[:MAX_LEN].rstrip()
 
