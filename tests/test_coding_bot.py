@@ -613,3 +613,67 @@ class TestAtomicState(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMailboxFetch(Base):
+    """Stopgap until peer-link (djbclark, 2026-11-02): the bot pushes its reply to a mailbox repo."""
+
+    def git(self, cwd: Path, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                              check=True, capture_output=True, text=True).stdout
+
+    def setUp(self) -> None:
+        super().setUp()
+        root = Path(self.tmp.name)
+        self.origin, self.bot, self.box = root / "origin.git", root / "bot", root / "state" / "mailbox"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.bot)], check=True, capture_output=True)
+        (self.bot / "README").write_text("mailbox\n")
+        self.git(self.bot, "add", "-A")
+        self.git(self.bot, "commit", "-q", "-m", "init")
+        self.git(self.bot, "push", "-q", "origin", "HEAD:main")
+        self.state.mkdir(exist_ok=True)
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.box)], check=True, capture_output=True)
+
+    def bot_pushes(self, name: str, body: str) -> None:
+        (self.bot / "from-coding").mkdir(exist_ok=True)
+        (self.bot / "from-coding" / name).write_text(body)
+        self.git(self.bot, "add", "-A")
+        self.git(self.bot, "commit", "-q", "-m", name)
+        self.git(self.bot, "push", "-q", "origin", "HEAD:main")
+
+    def test_ask_returns_the_reply_the_bot_pushed_to_its_mailbox(self) -> None:
+        """Without fetch, a lone `ask` timed out (exit 124) although the bot had answered by file."""
+        env = dict(self.env, CODING_BOT_WEBHOOK_URL=self.url, CODING_BOT_WEBHOOK_KEY=KEY)
+        ask = subprocess.Popen([sys.executable, str(SCRIPT), "ask", "--timeout", "30", "do it"], env=env,
+                               cwd=self.tmp.name, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(ask.kill)
+        for _ in range(100):
+            if Hook.seen:
+                break
+            time.sleep(0.05)
+        self.bot_pushes("ade-1--coding-1.md", "[coding -> claude-code] id=coding-1 re=ade-1\nfrom the mailbox\nDONE\n")
+        out, err = ask.communicate(timeout=40)
+        self.assertEqual(ask.returncode, 0, err)
+        self.assertIn("from the mailbox", out)
+
+    def test_fetch_files_new_replies_once_and_skips_unsafe_or_foreign_files(self) -> None:
+        self.cli("send", "one")
+        self.bot_pushes("ade-1--coding-1.md", "[coding -> claude-code] id=coding-1 re=ade-1\nanswer\nDONE\n")
+        self.bot_pushes("ade-9--coding-2.md", "[coding -> other] id=coding-2 re=ade-9\nnot ours\nDONE\n")
+        self.git(self.box, "pull", "-q")
+        # a clone that checked a bot-committed link out as a real symlink: never followed
+        os.symlink("/etc/passwd", self.box / "from-coding" / "ade-1--coding-3.md")
+        first = self.cli("fetch")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("1 new reply(ies) filed", first.stdout)
+        self.assertIn("ade-1--coding-3.md: not a readable regular file", first.stderr)
+        self.assertNotIn("root:", (self.state / "inbox.jsonl").read_text())
+        again = self.cli("fetch")
+        self.assertIn("0 new reply(ies) filed", again.stdout)
+        self.assertEqual(len((self.state / "inbox.jsonl").read_text().splitlines()), 1)
+
+    def test_fetch_without_a_clone_says_so(self) -> None:
+        r = self.cli("fetch", CODING_BOT_MAILBOX=str(Path(self.tmp.name) / "nowhere"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no mailbox clone", r.stderr)

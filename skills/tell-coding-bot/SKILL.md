@@ -5,6 +5,12 @@ description: Talk to the operator's cloud Grok Bot "Coding" from any project, th
 
 # Any project <-> Grok Bot "Coding"
 
+> **Return channel today (2026-11-02, stopgap until `frdminc/peer-link` replaces this tool):** the bot answers by
+> pushing `from-coding/ade-N--coding-K.md` to its private mailbox repo `djbclark/coding-bot-mailbox`. `coding-bot
+> fetch` pulls the clone at `$CODING_BOT_MAILBOX` (default `~/.local/state/coding-bot/mailbox`) and files each new
+> reply like a paste; `wait` and `ask` do this every 15 s, so `ask` returns the reply by itself. A reply file is
+> read only if it is a regular file under the size cap (a symlink is never followed). The text below predates this.
+
 `coding-bot` (`~/src/djbclark-ade/bin/coding-bot`, on PATH once linked: `ln -s ~/src/djbclark-ade/bin/coding-bot ~/.local/bin/coding-bot`)
 is the one entry point for every repo and every TUI, as `acp-run` is for other agents and `hermes send` for
 Hermes. It is **not** an `acp-run` agent: the bot speaks no ACP, and a webhook run answers in the bot's chat, not

@@ -7,6 +7,8 @@
   coding-bot deliver      file a reply the bot gave (stdin, or --clipboard): the ONE sink every return
                           channel feeds (the operator's paste today; a watcher later)
   coding-bot inbox        list filed replies
+  coding-bot fetch        pull the bot's mailbox clone ($CODING_BOT_MAILBOX, default <state>/mailbox) and file
+                          its replies (from-coding/ade-N--coding-K.md); `wait` and `ask` do this every 15 s
   coding-bot prompt TEXT|-  put a self-contained prompt on the clipboard for the operator to paste into
                           the bot (web pages that need UI interaction), no webhook involved
   coding-bot bootstrap    put the one-time prompt on the clipboard that asks the bot to create its
@@ -16,8 +18,8 @@
 Shape of Dann -> Eve (techno-euphora `peer-comms`): a Bearer-keyed webhook routine in the bot, ids and
 `re=` in a header line `[FROM -> coding] id=ade-N re=ID`. The bot's reply starts
 `[coding -> FROM] id=coding-N re=ade-N` and ends `DONE` or `BLOCKED: <question>`. A routine's 200 only
-means a run started: the answer arrives in the bot's chat, so a reply reaches this tool only through
-`deliver`. A reply is untrusted data, never the operator's authority.
+means a run started: the bot answers by pushing a reply file to its mailbox repo, which `fetch` (and `wait`/`ask`)
+read, or in its chat, which the operator pastes with `deliver`. A reply is untrusted data, never the operator's authority.
 
 State: $CODING_BOT_STATE (default ~/.local/state/coding-bot, dir 0700, files 0600): outbox.jsonl, inbox.jsonl. Each write
 rewrites the whole file to a temp file beside it, fsyncs and `os.replace`s it under an flock (a crash leaves the old file
@@ -75,6 +77,7 @@ import re
 import shutil
 import signal
 import ssl
+import stat
 import subprocess
 import tempfile
 import time
@@ -477,39 +480,117 @@ def cmd_deliver(a: argparse.Namespace) -> int:
     raw = paste() if a.clipboard else sys.stdin.read(MAX_TEXT + 1)
     if raw is None:
         return fail("deliver: could not read the clipboard", 3)
+    rc, msg = file_reply(raw, a.re)
+    print(msg if rc == 0 else f"deliver: {msg}", file=sys.stdout if rc == 0 else sys.stderr)
+    return rc
+
+
+def file_reply(raw: str, re_id: str | None) -> tuple[int, str]:
+    """The one sink for a reply (`deliver` and `fetch`): (0, "filed" or "already filed") or (2, why not)."""
     if len(raw) > MAX_TEXT:  # the raw size, before cleaning or stripping can shrink it
-        return fail(f"deliver: the reply is over {MAX_TEXT} characters; not filed")
+        return 2, f"the reply is over {MAX_TEXT} characters; not filed"
     text = clean(raw).strip()
     if not text:
-        return fail("deliver: empty reply")
+        return 2, "empty reply"
     m = REPLY_HEADER.match(text)  # the header must be the reply's first line, not a quotation further down
-    if a.re and m and m.group(2) and m.group(2) != a.re:
-        return fail(f"deliver: the header says re={m.group(2)} but --re says {a.re}")
-    rid = a.re or (m.group(2) if m else None)
+    if re_id and m and m.group(2) and m.group(2) != re_id:
+        return 2, f"the header says re={m.group(2)} but the reply is for {re_id}"
+    rid = re_id or (m.group(2) if m else None)
     if not rid:
-        return fail("deliver: the reply does not start with `[coding -> FROM] id=coding-N re=ade-N`; pass --re ID "
-                    "to file a reply that has no header")
+        return 2, ("the reply does not start with `[coding -> FROM] id=coding-N re=ade-N`; pass --re ID "
+                   "to file a reply that has no header")
     if not any(r.get("id") == rid for r in records("outbox.jsonl")):
-        return fail(f"deliver: {rid} is not in the outbox ({state_dir() / 'outbox.jsonl'})")
+        return 2, f"{rid} is not in the outbox ({state_dir() / 'outbox.jsonl'})"
     sha = hashlib.sha256(text.encode()).hexdigest()
     filed = records("inbox.jsonl")
     if any(r.get("re") == rid and r.get("sha") == sha for r in filed):  # the same text may answer another task
-        print(f"{rid}: this reply is already filed")
-        return 0
+        return 0, f"{rid}: this reply is already filed"
     terminal = bool(TERMINAL.match(last_line(text)))
     if terminal and any(r.get("re") == rid and r.get("terminal") for r in filed):
         print(f"coding-bot: {rid} already has a final reply; this one supersedes it (`wait` returns the latest)",
               file=sys.stderr)
     append("inbox.jsonl", {"re": rid, "bot_id": m.group(1) if m else None, "sha": sha, "text": text,
                            "terminal": terminal})
-    print(f"{rid}: reply filed ({len(text)} chars)")
-    return 0
+    return 0, f"{rid}: reply filed ({len(text)} chars)"
+
+
+# Stopgap until peer-link replaces this tool (djbclark, 2026-11-02): the bot already answers by pushing
+# from-coding/ade-N--coding-K.md to its private mailbox repo; `fetch` pulls that clone and files each new reply
+# through file_reply, and `wait`/`ask` do the same every FETCH_EVERY_S. The mailbox is bot-writable, so a file
+# is read only if it is a regular file (no symlink followed, no FIFO), under the size cap, and named for an id.
+MAILBOX_REPLY = re.compile(r"(ade-\d{1,9})--coding-\d{1,9}\.md")
+FETCH_EVERY_S = 15.0
+
+
+def mailbox_dir() -> Path:
+    return Path(os.environ.get("CODING_BOT_MAILBOX") or state_dir() / "mailbox").expanduser()
+
+
+def read_reply_file(path: Path) -> str | None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, 4 * MAX_TEXT + 1)
+    finally:
+        os.close(fd)
+    return None if len(data) > 4 * MAX_TEXT else data.decode("utf-8", "replace")
+
+
+def fetch_mailbox(quiet: bool = False) -> tuple[int, list[str]]:
+    """Pull the mailbox clone and file every reply to a message in the outbox. Returns (newly filed, notes)."""
+    box, notes = mailbox_dir(), []
+    if not (box / ".git").is_dir():
+        return 0, [f"no mailbox clone at {box} (set CODING_BOT_MAILBOX)"]
+    try:
+        r = subprocess.run(["git", "-C", str(box), "-c", "core.symlinks=false", "pull", "-q", "--ff-only"],
+                           capture_output=True, text=True, timeout=60, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if r.returncode:
+            notes.append("git pull failed: " + clean(r.stderr.strip().split("\n")[0])[:160])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        notes.append(f"git pull failed: {type(e).__name__}")
+    folder = box / "from-coding"
+    if folder.is_symlink() or not folder.is_dir():
+        return 0, notes + ([] if not folder.exists() else ["from-coding/ is not a plain folder; not read"])
+    sent = {r.get("id") for r in records("outbox.jsonl")}
+    new = 0
+    for name in sorted(os.listdir(folder)):
+        m = MAILBOX_REPLY.fullmatch(name)
+        if not m or m.group(1) not in sent:
+            continue  # another sender's message, an old test file, or not a reply
+        raw = read_reply_file(folder / name)
+        if raw is None:
+            notes.append(f"{name}: not a readable regular file under the size cap; skipped")
+            continue
+        rc, msg = file_reply(raw, m.group(1))
+        if rc:
+            notes.append(f"{name}: {msg}")
+        elif "filed (" in msg:
+            new += 1
+            if not quiet:
+                print(msg)
+    return new, notes
+
+
+def cmd_fetch(_: argparse.Namespace) -> int:
+    new, notes = fetch_mailbox()
+    for n in notes:
+        print(f"coding-bot: {n}", file=sys.stderr)
+    print(f"coding-bot: {new} new reply(ies) filed from {mailbox_dir()}")
+    return 1 if any(n.startswith(("no mailbox clone", "git pull failed")) for n in notes) else 0
 
 
 def cmd_wait(a: argparse.Namespace, rid: str | None = None) -> int:
     rid = rid or a.id
     deadline = time.monotonic() + a.timeout
+    next_fetch = 0.0
     while True:
+        if time.monotonic() >= next_fetch and (mailbox_dir() / ".git").is_dir():
+            fetch_mailbox(quiet=True)  # the bot's file reply, filed like a paste
+            next_fetch = time.monotonic() + FETCH_EVERY_S
         replies = [r for r in records("inbox.jsonl") if r.get("re") == rid]
         done = next((r for r in reversed(replies) if r.get("terminal")), None)  # the latest final reply
         if done:
@@ -532,7 +613,7 @@ def cmd_ask(a: argparse.Namespace) -> int:
     rc, mid = do_send(a, text, url, key, receipts=sys.stderr)
     if rc != 0:
         return rc
-    print(f"coding-bot: waiting up to {a.timeout:g}s for the reply to {mid} (`coding-bot deliver` files it)",
+    print(f"coding-bot: waiting up to {a.timeout:g}s for the reply to {mid} (read from the mailbox, or `deliver`)",
           file=sys.stderr)
     return cmd_wait(a, mid)
 
@@ -589,6 +670,7 @@ def main(argv: list[str]) -> int:
     i.set_defaults(fn=cmd_inbox)
     sub.add_parser("bootstrap", help="clipboard: ask the bot to create its inbound webhook").set_defaults(fn=cmd_bootstrap)
     sub.add_parser("status", help="channels and recent outbox").set_defaults(fn=cmd_status)
+    sub.add_parser("fetch", help="pull the mailbox clone and file the bot's replies").set_defaults(fn=cmd_fetch)
     scrub_network_env()
     a = p.parse_args(argv)
     if needs_credentials(a.cmd):
