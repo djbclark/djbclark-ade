@@ -111,7 +111,13 @@ class TestModelFallback(unittest.TestCase):
                 {"kind": "fallback", "data": {"from": "claude-fable-5-1", "reason": "cyber",
                                               "to": "claude-opus-4-8"}}])
             self.assertEqual(MOD.model_fallback(rec),
-                             {"from": "claude-fable-5-1", "reason": "cyber", "to": "claude-opus-4-8"})
+                             {"from": "claude-fable-5-1", "reason": "cyber", "to": "claude-opus-4-8", "verified": False})
+
+    def test_only_a_claude_slice_can_have_a_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, rec = self.record(tmp, [{"kind": "fallback", "data": {"from": "a", "reason": "r", "to": "b"}}],
+                                 agent="codex")
+            self.assertIsNone(MOD.model_fallback(rec))
 
     def test_no_row_and_no_log_are_no_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,7 +136,7 @@ class TestModelFallback(unittest.TestCase):
             path, _ = self.record(tmp, [], answered_model="claude-opus-4-8", fallback_from="claude-fable-5-1",
                                   fallback_reason="cyber")
             _, _, _, det = MOD.check_record(path)
-        self.assertIn("ANSWERED BY claude-opus-4-8, not claude-fable-5-1 (model fallback: cyber)", det)
+        self.assertIn("REPORTED ANSWERED BY claude-opus-4-8, not claude-fable-5-1 (a model-fallback notice in the agent's message stream, unverified: cyber)", det)
 
     def test_an_old_record_without_the_fields_shows_nothing_extra(self):
         with tempfile.TemporaryDirectory() as tmp:

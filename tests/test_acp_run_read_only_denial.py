@@ -152,6 +152,11 @@ WRITES = [
     "cat a |& head",
     "cat a & rm b",
     "cat a >|/dev/null",
+    # git help runs man.<viewer>.cmd or a browser
+    "git log --help",
+    "git diff --help",
+    "git -C sub show -h",
+    "git log --he",
     "tail -f app.log",
     "tail -F app.log",
     "tail --follow app.log",
@@ -265,11 +270,15 @@ def probe() -> dict[str, object]:
             "launcher_later_word": conf_repo("c-ll", ("diff.external", "/usr/bin/caffeinate -i npx conv")),
             "askpass_relative": conf_repo("c-ap", ("core.askPass", "tools/askpass")),
             "hook_command_relative": conf_repo("c-hc", ("hook.x.command", "./h.sh"), ("hook.x.event", "post-index-change")),
-            "hook_command_absolute_ok": conf_repo("c-hca", ("hook.x.command", "/usr/local/bin/guard.sh")),
+            "hook_command_absolute_ok": conf_repo("c-hca", ("hook.x.command", "/usr/local/bin/git-guard")),
             "numeric_value_ok": conf_repo("c-num", ("credential.helper", "cache --timeout=3600")),
             "env_assignment": conf_repo("c-env", ("diff.py.textconv", "env PATH=tools conv")),
             "path_assignment": conf_repo("c-env2", ("diff.py.textconv", "PATH=tools conv")),
-            "name_that_starts_like_a_shell": conf_repo("c-show", ("diff.external", "/usr/local/bin/show-diff")),
+            "unknown_absolute_program": conf_repo("c-show", ("diff.external", "/usr/local/bin/show-diff")),
+            "tclsh_textconv": conf_repo("c-tcl", ("diff.py.textconv", "/usr/bin/tclsh")),
+            "m4_textconv": conf_repo("c-m4", ("diff.py.textconv", "/usr/bin/m4")),
+            "man_viewer_cmd": conf_repo("c-man", ("man.x.cmd", "tools/viewer")),
+            "git_named_helper_ok": conf_repo("c-gnh", ("diff.external", "/usr/local/bin/git-diff-helper")),
             "lfs_bare_name": conf_repo("c-lfs", ("filter.lfs.clean", "git-lfs clean -- %f"),
                                        ("filter.lfs.process", "git-lfs filter-process")),
             "absolute_outside": conf_repo("c-abs", ("diff.external", "/usr/bin/true")),
@@ -290,6 +299,12 @@ def probe() -> dict[str, object]:
             del os.environ[k]
         env_out["clean"] = mod.readonly_command("git log", REPO)
         out["git_env"] = env_out
+        NOTICE = "**Model fallback:** claude-fable-5-1 declined this request (cyber); retried with claude-opus-4-8."
+        out["fallback_re"] = {
+            "notice": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE)),
+            "notice_with_tail": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + " The session will continue on claude-opus-4-8.")),
+            "quoted_then_answer": bool(mod.MODEL_FALLBACK_RE.fullmatch(NOTICE + "I will now review the files.")),
+            "answer_then_quote": bool(mod.MODEL_FALLBACK_RE.fullmatch("As the log says: " + NOTICE))}
         helper_env = {}
         for name, val in (("GIT_SSH_COMMAND", "./tools/ssh"), ("GIT_SSH", "tools/ssh"), ("GIT_PROXY_COMMAND", "./p"),
                           ("GIT_ASKPASS", "tools/askpass"), ("SSH_ASKPASS", "./a"), ("GIT_EXEC_PATH", "./bin"),
@@ -420,13 +435,13 @@ class TestReadOnlyDenial(unittest.TestCase):
 
     def test_git_is_refused_when_its_config_runs_a_helper_from_the_tree(self):
         g = self.res["git_config"]
-        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside", "sh_dash_c", "newline_in_helper", "leading_assignment", "leading_assignment_plain", "launcher_later_word",
+        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside", "unknown_absolute_program", "tclsh_textconv", "m4_textconv", "man_viewer_cmd", "sh_dash_c", "newline_in_helper", "leading_assignment", "leading_assignment_plain", "launcher_later_word",
                      "askpass_relative", "hook_command_relative", "exec_path_value", "dash_c_value", "launcher_npx", "launcher_bundle", "ssh_command_relative",
                      "git_proxy_relative", "credential_relative", "uploadpack_relative", "sh_script", "python_script", "env_wrapper",
                      "alternate_refs", "env_assignment", "path_assignment", "interpreter_script", "interpreter_bare_file", "shell_syntax", "external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
                      "filter_clean", "gpg_program", "ssh_program"):
             self.assertFalse(g[name], name)
-        for name in ("plain", "lfs_bare_name", "absolute_outside", "name_that_starts_like_a_shell", "hook_command_absolute_ok", "numeric_value_ok", "absolute_value_ok", "gh_credential_helper_ok", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
+        for name in ("plain", "lfs_bare_name", "absolute_outside", "git_named_helper_ok", "hook_command_absolute_ok", "numeric_value_ok", "absolute_value_ok", "gh_credential_helper_ok", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
             self.assertTrue(g[name], name)
 
     def test_the_summary_bit_says_whether_the_final_turn_ended_on_a_refusal(self):
@@ -437,6 +452,11 @@ class TestReadOnlyDenial(unittest.TestCase):
         e = self.res["git_env_helpers"]
         for name, ok in e.items():
             self.assertEqual(ok, name.endswith("#abs"), name)
+
+    def test_only_a_chunk_that_is_the_whole_notice_counts_as_a_fallback(self):
+        f = self.res["fallback_re"]
+        self.assertEqual([f["notice"], f["notice_with_tail"]], [True, True])
+        self.assertEqual([f["quoted_then_answer"], f["answer_then_quote"]], [False, False])
 
     def test_rg_needs_no_config_when_a_config_file_is_selected(self):
         self.assertEqual(self.res["rg_config"], [False, True, True])
