@@ -23,7 +23,7 @@ for the link, the mailbox (a git repo), the wake, the nonce check and the fencin
 2. `coding-bot send "<task>"` prints the message id and returns; later `coding-bot wait ID` (same options) collects the answer.
    **Resuming is safe**: every accepted final reply is saved (0600, atomic; first from the validated peek, before the claim, and again as printed) to `$CODING_BOT_STATE/replies/ID.md` (default
    `~/.local/state/coding-bot`, which must be a real 0700 directory of yours) before it is printed, and `coding-bot wait ID` prints a saved answer
-   again (exit 0, or 4 for `BLOCKED:`) without touching peer_mail or the network. An interrupted `ask` therefore loses nothing: run `coding-bot wait ID`.
+   again (exit 0, or 4 for `BLOCKED:`) without touching peer_mail or the network. Replies totalling over 2 MiB are not claimed (exit 1; read them with `peer_mail.py drain`), because they could not be kept for a resume. An interrupted `ask` therefore loses nothing: run `coding-bot wait ID`.
 3. `coding-bot status` shows the resolved tool, comm dir, role, whether the key is already in the environment (never its value), whether
    the installed peer-link supports `wait --re`, and runs peer_mail's `check`.
 

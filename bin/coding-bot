@@ -144,7 +144,9 @@ def child_env(cfg: dict[str, str], key: bool = False) -> dict[str, str]:
 
 
 def peer_argv(cfg: dict[str, str], *args: str) -> list[str]:
-    return ["python3", "-I", cfg["tool"], *args]  # -I: nothing the caller planted (PYTHONPATH, sitecustomize) runs with the key
+    # sys.executable, never a bare `python3`: a PATH the caller controls must not pick the program that gets the webhook key; -I:
+    # nothing the caller planted (PYTHONPATH, sitecustomize) runs with it either
+    return [sys.executable, "-I", cfg["tool"], *args]
 
 
 def credential_in(text: str) -> bool:
@@ -306,7 +308,7 @@ def save_reply(mid: str, text: str) -> bool:
     """Keep an accepted FINAL reply (temp file + os.replace, 0600) BEFORE it is printed: `drain` has moved it into the mailbox's
     cur/, where `wait` never looks, so an interrupted ask could otherwise never get it back."""
     folder = replies_dir(create=True)
-    if folder is None:
+    if folder is None or len(text.encode("utf-8", "replace")) > REPLY_CAP:  # `load_reply` would refuse it: never save what cannot be replayed
         return False
     tmp = folder / f".{mid}.{secrets.token_hex(8)}.tmp"
     try:
@@ -437,6 +439,9 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
         peeked_msgs, peeked_trailer = split_messages(peeked)
         if (why := rejection(peeked_msgs, mid)) is not None:
             return rejected(why, peeked, claimed=False)
+        if len(peeked.encode("utf-8", "replace")) > REPLY_CAP:  # peer_mail bounds each message, not the batch; what cannot be kept is not claimed
+            return failed(f"the replies to {mid} total more than {REPLY_CAP} bytes, more than can be kept for a resume, so they were NOT "
+                          f"claimed (they stay unread; read them with `peer_mail.py drain --as {cfg['self']} --re {mid}`)")
         # ... and keep the validated final reply BEFORE the claim: if this run is interrupted or the drain is killed after it moved the
         # mail into cur/ (where `wait` never looks again), `coding-bot wait ID` still has the answer.
         if any(is_final(m) for m in peeked_msgs):
