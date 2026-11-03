@@ -16,7 +16,14 @@ for the link, the mailbox (a git repo), the wake, the nonce check and the fencin
    the one whose last line is `DONE` or `BLOCKED: ...`. Replies before it (progress notes) are printed to **stderr** as they arrive, fenced as
    received, and the wait goes on until a final reply or the timeout. `--timeout S` (default 900), `--interval S` (poll, default 15),
    `--ack-timeout S` (default 300; 0 disables).
+   Every task goes out with one more line in the task file (never in argv or the subject): "End your reply with a last line DONE, or
+   BLOCKED: <your one question>." peer-link forwards tasks unchanged and does not tell the bot how to finish, and `ask` treats a reply as
+   final only when its last line is `DONE` or `BLOCKED:`. `--timeout` is a hard bound: each peer_mail wait/drain child is killed (with its
+   process group) at the remaining budget + 5 s and `--interval` is clamped to the remaining budget, so exit 124 comes on time even if peer_mail sleeps.
 2. `coding-bot send "<task>"` prints the message id and returns; later `coding-bot wait ID` (same options) collects the answer.
+   **Resuming is safe**: every accepted final reply is saved (0600, atomic) to `$CODING_BOT_STATE/replies/ID.md` (default
+   `~/.local/state/coding-bot`, which must be a real 0700 directory of yours) before it is printed, and `coding-bot wait ID` prints a saved answer
+   again (exit 0, or 4 for `BLOCKED:`) without touching peer_mail or the network. An interrupted `ask` therefore loses nothing: run `coding-bot wait ID`.
 3. `coding-bot status` shows the resolved tool, comm dir, role, whether the key is already in the environment (never its value), whether
    the installed peer-link supports `wait --re`, and runs peer_mail's `check`.
 
