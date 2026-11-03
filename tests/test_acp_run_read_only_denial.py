@@ -189,6 +189,33 @@ def probe() -> dict[str, object]:
                             "rg -- --no-config f", "rg x --no-config f", "rg --no-config -n x f")]
         del os.environ["RIPGREP_CONFIG_PATH"]
         out["rg_no_config_env"] = mod.readonly_command("rg needle file")
+        # the AGENT's environment decides, not acp-run's own (--agent-env / ACP_RUN_ENV_<AGENT> / launch tweaks)
+        tree = os.path.join(tmp, "reviewed"); os.makedirs(os.path.join(tree, "bin"))
+        good = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]}
+        def ctxf(**extra):
+            return mod.ro_ctx({**good, **extra}, [tree])
+        rc = lambda cmd, c: mod.readonly_command(cmd, c)
+        homec = os.path.join(tmp, "childhome"); os.makedirs(homec)
+        open(os.path.join(homec, ".curlrc"), "w").write("output = /tmp/x\\n")
+        out["agent_env"] = {
+            "clean": rc("cat a.txt", ctxf()),
+            "path_into_tree": rc("cat a.txt", ctxf(PATH=os.path.join(tree, "bin") + ":/usr/bin")),
+            "path_is_tree": rc("cat a.txt", ctxf(PATH=tree + ":/usr/bin")),
+            "path_empty_entry": rc("cat a.txt", ctxf(PATH="/usr/bin::/bin")),
+            "path_dot": rc("cat a.txt", ctxf(PATH=".:/usr/bin")),
+            "path_relative": rc("cat a.txt", ctxf(PATH="bin:/usr/bin")),
+            "path_symlink_into_tree": None,
+            "path_outside_ok": rc("cat a.txt", ctxf(PATH="/opt/homebrew/bin:/usr/bin")),
+            "rg_config_only_in_child": rc("rg x f", ctxf(RIPGREP_CONFIG_PATH="/tmp/rgrc")),
+            "rg_config_only_in_child_flagged": rc("rg --no-config x f", ctxf(RIPGREP_CONFIG_PATH="/tmp/rgrc")),
+            "rg_no_config_in_child": rc("rg x f", ctxf()),
+            "curlrc_only_in_child_home": rc("curl -fsSL " + "https://example.com/x", ctxf(HOME=homec)),
+            "curlrc_only_in_child_home_q": rc("curl -q -fsSL " + "https://example.com/x", ctxf(HOME=homec)),
+            "curl_config_home_var": rc("curl -fsSL https://example.com/x", ctxf(CURL_HOME=homec)),
+            "nested_bash_c": rc("bash -lc 'cat a.txt'", ctxf(PATH=tree + ":/usr/bin")),
+        }
+        link = os.path.join(tmp, "linkbin"); os.symlink(os.path.join(tree, "bin"), link)
+        out["agent_env"]["path_symlink_into_tree"] = rc("cat a.txt", ctxf(PATH=link + ":/usr/bin"))
         END_D = {"ends_turn": True}
         out["refusal_end_bit"] = [mod.refusal_end_bit("cancelled", END_D), mod.refusal_end_bit("cancelled", {"ends_turn": False}),
                                   mod.refusal_end_bit("cancelled", None), mod.refusal_end_bit("end_turn", END_D),
@@ -307,6 +334,16 @@ class TestReadOnlyDenial(unittest.TestCase):
         # the old `.match` accepted the first two; whitespace then more text is what the fix closes
         self.assertEqual([f["notice_then_answer"], f["notice_newline_answer"], f["quoted_then_answer"],
                           f["answer_then_quote"]], [False] * 4)
+
+    def test_a_request_is_judged_against_the_agents_environment(self):
+        e = self.res["agent_env"]
+        for name in ("clean", "path_outside_ok", "rg_config_only_in_child_flagged", "rg_no_config_in_child",
+                     "curlrc_only_in_child_home_q"):
+            self.assertTrue(e[name], name)
+        for name in ("path_into_tree", "path_is_tree", "path_empty_entry", "path_dot", "path_relative",
+                     "path_symlink_into_tree", "rg_config_only_in_child", "curlrc_only_in_child_home",
+                     "curl_config_home_var", "nested_bash_c"):
+            self.assertFalse(e[name], name)
 
     def test_rg_needs_no_config_when_a_config_file_is_selected(self):
         self.assertEqual(self.res["rg_config"], [False, True, True])

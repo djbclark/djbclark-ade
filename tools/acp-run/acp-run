@@ -783,22 +783,44 @@ def ro_program(word):
     return os.path.basename(word) if os.path.dirname(word) in RO_TRUSTED_DIRS else None
 
 
-def ro_curlrc_exists():
-    """True when curl would read a default config (~/.curlrc, $CURL_HOME/.curlrc, $XDG_CONFIG_HOME/curlrc):
-    it can name an output file, a cookie jar, uploaded data."""
-    home = os.path.expanduser("~")
-    cands = [os.path.join(os.environ.get("CURL_HOME") or home, ".curlrc"), os.path.join(home, ".curlrc"),
-             os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "curlrc")]
+def ro_ctx(env=None, dirs=()):
+    """What a request is judged against: `env`, the environment the AGENT process runs in (acp-run's own
+    os.environ plus --agent-env, ACP_RUN_ENV_<AGENT> and launch tweaks: a config variable set only for the
+    child is invisible to the parent), and `dirs`, the trees under review (the run root and --add-dir)."""
+    return {"env": os.environ if env is None else env, "dirs": [os.path.realpath(d) for d in dirs]}
+
+
+def ro_path_ok(ctx):
+    """True when every PATH entry of the agent's environment is an absolute directory outside the trees under
+    review: a bare `cat` resolves through PATH, and `<checkout>/bin/cat` (or an empty or `.` entry, which is
+    the cwd) would run the reviewed tree's program outside the sandbox. (A login shell may rebuild PATH from
+    the operator's own profiles; those are the operator's, not the tree's.)"""
+    for entry in (ctx["env"].get("PATH") or os.defpath).split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            return False
+        real = os.path.realpath(entry)
+        if any(real == d or real.startswith(d + os.sep) for d in ctx["dirs"]):
+            return False
+    return True
+
+
+def ro_curlrc_exists(ctx):
+    """True when curl would read a default config (~/.curlrc, $CURL_HOME/.curlrc, $XDG_CONFIG_HOME/curlrc),
+    judged with the agent's HOME and variables: it can name an output file, a cookie jar, uploaded data."""
+    env = ctx["env"]
+    home = os.path.expanduser(env.get("HOME") or "~")
+    cands = [os.path.join(env.get("CURL_HOME") or home, ".curlrc"), os.path.join(home, ".curlrc"),
+             os.path.join(env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "curlrc")]
     return any(os.path.exists(c) for c in cands)
 
 
-def ro_curl(args):
+def ro_curl(args, ctx):
     """A plain GET: only -f/-s/-S/-L bundles, a numeric --max-time, and one http(s) URL. Without a leading
     `-q` (ignore the default config) curl loads ~/.curlrc, so the request is refused when one exists."""
     disabled = bool(args) and args[0] in ("-q", "--disable")
     if disabled:
         args = args[1:]
-    elif ro_curlrc_exists():
+    elif ro_curlrc_exists(ctx):
         return False
     urls, i = 0, 0
     while i < len(args):
@@ -815,7 +837,7 @@ def ro_curl(args):
     return urls == 1
 
 
-def ro_segment(words, depth):
+def ro_segment(words, ctx, depth):
     """True when one simple command only reads."""
     while words:
         prog = ro_program(words[0])
@@ -831,7 +853,7 @@ def ro_segment(words, depth):
     if name is None:
         return False
     if name in ("bash", "sh", "zsh"):
-        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], depth + 1)
+        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], ctx, depth + 1)
     if name == "git":
         # Deliberately not approved. A git read in codex's sandbox asks for nothing; a REQUEST for git means
         # it needs more than the sandbox gives (an index refresh, the network), and then git runs the
@@ -843,12 +865,12 @@ def ro_segment(words, depth):
         return False
     if ro_long_bad(args, name):
         return False
-    if name == "rg" and os.environ.get("RIPGREP_CONFIG_PATH") and args[:1] != ["--no-config"]:
+    if name == "rg" and ctx["env"].get("RIPGREP_CONFIG_PATH") and args[:1] != ["--no-config"]:
         # the config file can add `--pre=./tools/x`; --no-config ignores it only as the FIRST argument (as a
         # value or after `--` rg reads it as a pattern or path: `rg -g --no-config x f`, `rg -- --no-config f`)
         return False
     if name == "curl":
-        return ro_curl(args)
+        return ro_curl(args, ctx)
     if name == "find":
         return not RO_FIND_BAD.intersection(args)
     if name == "sed":  # GNU sed takes options anywhere: everything after the script must be a file name
@@ -880,14 +902,17 @@ def ro_unquoted_meta(cmd):
     return False
 
 
-def readonly_command(cmd, depth=0):
+def readonly_command(cmd, ctx=None, depth=0):
     """True when a shell command line only reads files and the network: commands from a short list (cat,
     rg, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect to /dev/null, no
     expansion, no comment, no other redirect, a program only by bare name or from RO_TRUSTED_DIRS, no long
     option that runs a program (abbreviations included, `--` is not a stop). Never git (see ro_segment); a
     plain `curl` GET can carry what the agent read in its
     query string, as the already-allowed WebFetch tool can. A guess is a refusal."""
+    ctx = ctx or ro_ctx()
     if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd) or ro_unquoted_meta(cmd):
+        return False
+    if depth == 0 and not ro_path_ok(ctx):
         return False
     toks = ro_tokens(cmd)
     if toks is None:
@@ -911,7 +936,7 @@ def readonly_command(cmd, depth=0):
     if not all(segs[:-1]):  # `a | | b`, `; a`: a syntax error in bash, so not something to approve
         return False
     segs = [s for s in segs if s]
-    return bool(segs) and all(ro_segment(s, depth) for s in segs)
+    return bool(segs) and all(ro_segment(s, ctx, depth) for s in segs)
 
 
 def tool_command(tool_call):
@@ -2252,6 +2277,7 @@ class RunClient(Client):
         self.denial = None
         self.fallback = None  # {"from", "reason", "to"} once the agent switched models mid-session
         self.denial_continues = DENIAL_CONTINUES if perm in RESTRICTED_PERMS else 0
+        self.ro_ctx = None  # ro_ctx(agent env, trees under review), set once the agent's environment is final
         self.turn_from = 0  # index in self.text where the current turn's words start
 
     def rec(self, kind, data):
@@ -2280,7 +2306,7 @@ class RunClient(Client):
             kind = infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None))
             return kind in READONLY_KINDS or (
                 kind == "execute"
-                and readonly_command(tool_command(tool_call)))
+                and readonly_command(tool_command(tool_call), getattr(self, "ro_ctx", None)))
         return self.perm != "deny"
 
     def check_tripwire(self, update):
@@ -4694,6 +4720,7 @@ async def run(a, log, err, log_path):
             client = RunClient(
                 log, a.perm, root, live=a.interactive, thinking=a.show_thinking
             )
+            client.ro_ctx = ro_ctx(env, [root, *getattr(a, "add_dir", [])])
             client.exempt_kinds = tripwire_exempt_kinds(
                 a.agent, a.perm, getattr(a, "tripwire_exempt_kinds", ""))
             client.err_path = err.name
