@@ -550,35 +550,34 @@ class SessionFindAllTests(unittest.TestCase):
         self.assertEqual(got["S-done"]["finished"], "done")
         self.assertEqual(got["S-old"]["status"], "ended")
 
-    def test_history_state_is_shown_as_the_history_gave_it(self) -> None:
-        """A LIVE? omp hit printed `ended/ended` with a resume command, and a lease-held (LIVE) one was dropped altogether."""
-        spec = importlib.util.spec_from_file_location("t_session_find_state", SF / "session-find.py")
-        sf = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(sf)
-        hits = [{"agent": "omp", "sessionId": "held-1", "live": True, "state": "LIVE", "title": "", "cwd": "/w", "snippet": "okapi", "resume": "omp --resume=held-1"},
-                {"agent": "omp", "sessionId": "maybe-2", "live": False, "state": "LIVE?", "title": "", "cwd": "/w", "snippet": "okapi", "resume": "omp --resume=maybe-2"},
-                {"agent": "omp", "sessionId": "gone-3", "live": False, "state": "ended", "title": "", "cwd": "/w", "snippet": "okapi", "resume": "omp --resume=gone-3"}]
-
-        def run(*flags):  # noqa: ANN002
+    def test_an_omp_fleet_transcript_with_a_noncanonical_name_matches_its_header_id(self) -> None:
+        """`daily.jsonl` with header id `header-id`: history reports `header-id`, the fleet row's id is the path; one row, and the fleet
+        liveness fallback matches (2026-11-03, review of PR 274)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript = Path(tmp) / "-s" / "daily.jsonl"
+            write_jsonl(transcript, [{"type": "title", "title": ""}, {"type": "session", "id": "header-id", "cwd": "/w"}])
+            spec = importlib.util.spec_from_file_location("t_session_find_hdr", SF / "session-find.py")
+            sf = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(sf)
+            sh_spec = importlib.util.spec_from_file_location("t_sh_hdr", SF / "session-history.py")
+            sh = importlib.util.module_from_spec(sh_spec)
+            sh_spec.loader.exec_module(sh)
+            row = {"agent": "omp", "id": "L3", "sid": str(transcript), "status": "idle", "cwd": "/w", "title": "okapi work", "name": "n3",
+                   "where": "", "focus": "", "finished": ""}
+            hits = [{"agent": "omp", "sessionId": "header-id", "live": False, "title": "", "cwd": "/w", "snippet": "okapi", "resume": "r"}]
             out = []
             with mock.patch.object(sf, "live_sessions", return_value=[]), \
                     mock.patch.object(sf.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, json.dumps(hits), "")), \
-                    mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: [])}), \
-                    mock.patch.object(sys, "argv", ["session-find.py", "--all", *flags, "--", "okapi"]), \
+                    mock.patch.dict(sys.modules, {"fleet": mock.Mock(sessions=lambda: [row])}), \
+                    mock.patch.object(sys, "argv", ["session-find.py", "--all", "--json", "--", "okapi"]), \
                     mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
-                self.assertEqual(sf.main(), 0)
-            return out
-
-        got = {r["sessionId"]: r for r in json.loads(run("--json")[-1])}
-        self.assertEqual({k: (v["state"], v["live"], v["resume"]) for k, v in got.items()},
-                         {"held-1": ("LIVE", True, ""), "maybe-2": ("LIVE?", False, "omp --resume=maybe-2"),
-                          "gone-3": ("ended", False, "omp --resume=gone-3")})
-        text = "\n".join(run())
-        self.assertRegex(text, r"held-1\s+live/running")
-        self.assertRegex(text, r"maybe-2\s+LIVE\?/unknown")
-        self.assertRegex(text, r"gone-3\s+ended/ended")
-        self.assertNotIn("omp --resume=held-1", text)
-        self.assertIn("omp --resume=maybe-2", text)
+                sf.main()
+                self.assertEqual([r["sessionId"] for r in json.loads(out[-1])], [str(transcript)])  # the fleet row only: no second, ended copy
+                exact, _ = sh.fleet_running({"omp"})
+            self.assertEqual(exact, {("omp", "header-id")})
+            # an unreadable file falls back to the name-derived id
+            self.assertEqual(sys.modules["nativeid"].omp_native_id(str(Path(tmp) / "gone" / "nofile.jsonl")), "nofile")
+            self.assertEqual(sys.modules["nativeid"].omp_native_id("/x/2026-11-03T14-30-49-957Z_abc-1"), "abc-1")
 
     def test_a_failed_history_search_is_exit_2_not_no_hits(self) -> None:
         spec = importlib.util.spec_from_file_location("t_session_find_fail", SF / "session-find.py")

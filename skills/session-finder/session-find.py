@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nativeid import native_id, history_identity  # noqa: E402
+from nativeid import native_id, history_identity, omp_native_id  # noqa: E402
 import claude_identity  # noqa: E402
 import where as _where  # noqa: E402
 
@@ -203,6 +203,8 @@ def main() -> int:
             ident = history_identity("pi", row.get("transcript") or sid, row.get("cwd") or "", row.get("sessionKey") or "")
             # ID+cwd is not a storage root: only file identities may merge fleet rows with, or hide, history hits
             return ident if ident[1] == "file" else ident + (id(row),)
+        if row.get("agent") == "omp":
+            return omp_native_id(sid)  # a transcript path with a header id (`daily.jsonl`) is the id the history adapter reports
         return native_id(sid)  # preserve the other families' existing matching contract
 
     exited_ids = set()
@@ -247,23 +249,19 @@ def main() -> int:
             print(f"history search failed: {e}", file=sys.stderr)
             history_failed = True
             found = []
-        # asked for 80, not 20: sessions the fleet already lists are dropped below, and must not crowd out the other hits
+        # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
         found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
-        for i, h in enumerate(f for f in found if identity(f) not in live_ids):
+        for i, h in enumerate(f for f in found if identity(f) not in live_ids and not f.get("live")):
             row = exited.get(identity(h))
             if row:
                 row["score"] = max(row["score"], max(1, 40 - i))
                 row["match"] = h.get("snippet") or row["match"]  # why it matched, not the fleet's delivery hint
                 row["resume"] = h.get("resume", "")
                 continue
-            # the history's own verdict, shown as it gave it: LIVE (an exact check found it running; no resume line, it would fork
-            # a session another process holds), LIVE? (could not tell) or ended
-            state = h.get("state") if h.get("state") in ("LIVE", "LIVE?") else "ended"
-            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "cwd": h.get("cwd") or None,
-                         "status": {"LIVE": "running", "LIVE?": "unknown"}.get(state, "ended"), "state": state,
+            rows.append({"name": None, "pid": None, "sessionId": h["sessionId"], "status": "ended", "cwd": h.get("cwd") or None,
                          "titles": [h["title"]] if h.get("title") else [], "score": max(1, 40 - i), "match": h.get("snippet", ""),
-                         "live": state == "LIVE", "self": False, "agent": h.get("agent", ""), "finished": "",
-                         "where": None, "resume": "" if state == "LIVE" else h.get("resume", "")})
+                         "live": False, "self": False, "agent": h.get("agent", ""), "finished": "",
+                         "where": None, "resume": h.get("resume", "")})
 
     if a.list:
         hits = rows
@@ -273,7 +271,7 @@ def main() -> int:
         print(json.dumps(hits, indent=1))
     else:
         for r in hits:
-            tag = r.get("state") if r.get("state") == "LIVE?" else "live" if r["live"] else "ended"
+            tag = "live" if r["live"] else "ended"
             me_tag = " (this session)" if r["self"] else ""
             fin = f"  FINISHED ({r['finished']}): start a /baton session, do not message it" if r.get("finished") else ""
             agent = f"{r['agent']} " if r.get("agent") else ""
