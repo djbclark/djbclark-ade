@@ -52,7 +52,8 @@ ln -s "$PWD/pi/extensions/subagent" ~/.pi/agent/extensions/subagent
 ```
 
 Pi resolves its own packages for extensions; `npm install` in the directory is only needed for
-the tests. Profiles stay in `~/.pi/agent/agents/` and are not managed by this repo.
+the tests. Canonical profiles ship in `.pi/agents/` and are installed by hand into
+`~/.pi/agent/agents/` (see [pi-agent-profiles.md](pi-agent-profiles.md)).
 
 ## Tests
 
