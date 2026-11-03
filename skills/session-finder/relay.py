@@ -14,7 +14,7 @@
 MESSAGE TEXT NEVER GOES THROUGH A SHELL-QUOTED STRING WHEN IT HAS CODE (2026-11-01, a recurring harness failure): a message containing backticks, `$`, `$( )`,
 or quotes goes through `--message-file PATH` (`-` reads stdin), or a Python argv list, never `"..."` in a shell: inside double quotes the caller's
 shell EXECUTES a backtick or `$( )` and silently drops its text (a lead's message lost `stages: [pre-push]`; an earlier one ran a command).
-`--message-file` replaces the positional text (exactly one of the two; an empty file is exit 2) and reads the file as UTF-8 (a leading BOM is dropped)
+`--message-file` replaces the positional text (exactly one of the two; an empty file, or a bare positional `-`, which reads nothing, is exit 2) and reads the file as UTF-8 (a leading BOM is dropped)
 without any shell step, so those characters arrive exactly as written. The text then goes through the same one-line fold as a positional text: one trailing
 newline is dropped, and every run of whitespace (newlines and indentation included) becomes ONE space, so a multi-line or indented block arrives on one line.
 
@@ -4619,6 +4619,11 @@ def _main(argv=None, sweep=True):
         if not a.text.strip():
             print(f"relay: --message-file {a.message_file} is empty", file=sys.stderr)
             return 2
+    if a.message_file is None and a.text is not None and a.text.strip() == "-":
+        # `relay.py ID - < file` read as "send the text '-'": the peer got an empty-looking message while relay said delivered
+        # (2026-11-02). Only --message-file reads stdin.
+        print("relay: a bare `-` is not read from stdin and is not a message: use --message-file - (or PATH)", file=sys.stderr)
+        return 2
     if a.ident is None or a.text is None:
         print("relay: usage: relay.py <id> \"<text>\" | <id> --message-file PATH|- [options] (a message with code, backticks, $ or quotes goes through --message-file, never a shell-quoted string; the text is folded to one line either way) | --ack EXPECTATION_ID | --pending [--json] [--queued-only] [--older-than S] [--summary] | --status ID | --cancel ID | --sweep [--stuck-after S] | --retire ID --reason TEXT [--evidence TEXT] | --transfer-expectations OLD_SENDER [--id TOKEN ...]", file=sys.stderr)
         return 2
