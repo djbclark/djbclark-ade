@@ -123,7 +123,9 @@ P=paseo   # the Paseo CLI
    your turn first so they land, or, when his picks cannot wait, ask in numbered prose instead (section 8). Then write one numbered
    prose block. It gives one line of context per decision and lists the things only he can do by hand (Touch ID, a paste, a phone or GUI
    step), which get no picker.
-2. Then make one prompt-tool call (`AskUserQuestion`, or omp's `ask`) with one question per decision. Each question:
+2. Then make one prompt-tool call (`AskUserQuestion`, or omp's `ask`) with one question per decision, up to the tool's limit per call.
+   `AskUserQuestion` takes at most 4 questions. If there are more decisions, ask the oldest first and keep the rest for the next call in
+   the same round; never drop or merge them. Each question:
    1. header chip: the project, 12 characters at most;
    2. options: the agent's own picklist, numbered, in its order, with its recommendation kept.
    A card is relayed the same way as SKILL.md 2.1 and 2.2, and answered on its own channel:
@@ -132,6 +134,10 @@ P=paseo   # the Paseo CLI
    3. an omp `ask` box in a herdr pane, which helm cannot read: section 7 item 2 only.
 3. Send each pick back with `$R <ident> --message-file F --fyi --ack`, as a text that starts `ack q-<id>-<n> pick N: <option text>` (that
    line closes the asker's expectation). A pick for a card answered on its own channel (item 2) is not relayed again.
+   An asker in a native pane that relay cannot watch (an omp, opencode, pi or Hermes TUI in a herdr pane, with no transcript) never gets
+   its expectation closed by that line: the pane route proves nothing (peer-relay item 10, state 2). Its expectation would go OVERDUE
+   after it has been answered. So the pick to such an asker adds: "after you act on this pick, run `relay.py --retire q-<id>-<n>
+   --reason 'answered by {LEAD}' --evidence '<this relay record id>'`". The retire is the asker's own; you never retire it.
 4. **Fleet actions on his pick** (archive, quit, interrupt a hung turn): do the action yourself, and do it before relaying anything to
    that agent (a relayed pick starts a new turn in it). Immediately before the action:
    1. re-run `$R --why <ident>`, and `$F list` for its `busy:` child processes. `$F list` shows children only for a row with a
@@ -186,7 +192,8 @@ P=paseo   # the Paseo CLI
 4. An OVERDUE ack goes into the next operator batch (peer-relay item 10). Only one past ASSUMED LOST (6 h) falls under peer-relay item 13,
    and even then the same brief is never resent to the same agent.
 5. The mode ends when every agent is in one of these states: in flight with nothing needed, a standing role, waiting only on a by-hand step
-   listed for him, or quit or archived. Agents learn the end in two ways:
+   listed for him, finished (it said `safe to quit`, the survey agrees, and he chose to leave it open), or quit or archived. A finished
+   agent left open needs no quit or archive pick. Agents learn the end in two ways:
    1. **The brief carries its own expiry, `{UNTIL}`.** After that time every briefed agent goes back to its normal channel with no
       message needed. An idle or `closed` lead is not refused by relay (only a finished one is), so refusal alone is not a signal.
    2. **Release line**: send "lead {LEAD} has ended; use your normal channel for questions again" to every briefed agent whose `{UNTIL}`
