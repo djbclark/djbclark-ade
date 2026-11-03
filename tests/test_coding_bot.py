@@ -28,9 +28,10 @@ MID = "claude-20261102-ab12"
 FAKE_PEER = textwrap.dedent('''\
     import json, os, sys
     a = sys.argv[1:]
-    scen = json.load(open(os.environ["FAKE_SCENARIO"]))
+    here = os.path.dirname(os.path.abspath(__file__))
+    scen = json.load(open(os.path.join(here, "scenario.json")))
     body = open(a[a.index("--file") + 1]).read() if "--file" in a else None
-    with open(os.environ["FAKE_LOG"], "a") as fh:
+    with open(os.path.join(here, "calls.jsonl"), "a") as fh:
         fh.write(json.dumps({"argv": a, "comm": os.environ.get("PEER_LINK_COMM"), "self": os.environ.get("PEER_LINK_SELF"),
                              "has_key": "CODING_BOT_WEBHOOK_KEY" in os.environ, "file": body,
                              "isolated": sys.flags.isolated, "env": sorted(os.environ)}) + "\\n")
@@ -43,8 +44,13 @@ FAKE_PEER = textwrap.dedent('''\
 FAKE_SUDO = textwrap.dedent('''\
     import json, os, sys
     a = sys.argv[1:]
-    with open(os.environ["FAKE_SUDO_LOG"], "a") as fh:
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "sudo.jsonl"), "a") as fh:
         fh.write(json.dumps({"argv": a, "env": sorted(os.environ)}) + "\\n")
+    vault = os.path.join(here, "vault-key")  # what `sudo-secretspec run` would inject: every declared secret
+    if os.path.exists(vault):
+        os.environ["CODING_BOT_WEBHOOK_KEY"] = open(vault).read().strip()
+        os.environ["GITHUB_TOKEN"] = "ghs-vault-token-NOT-FOR-PEER-MAIL"
     cut = a.index("--")
     os.execvp(a[cut + 1], a[cut + 1:])
 ''')
@@ -71,11 +77,12 @@ def handover(body: str, mid: str = "coding-1") -> str:
 class Link:
     def __init__(self, tmp: Path, monkeypatch) -> None:
         self.tmp, self.mp = tmp, monkeypatch
-        self.scenario_file, self.log, self.sudo_log = tmp / "scenario.json", tmp / "calls.jsonl", tmp / "sudo.jsonl"
+        (tmp / "bin").mkdir()
+        self.scenario_file, self.log, self.sudo_log = tmp / "scenario.json", tmp / "calls.jsonl", tmp / "bin" / "sudo.jsonl"
         self.tool = tmp / "peer_mail.py"
         self.tool.write_text(FAKE_PEER)
         sudo = tmp / "bin" / "sudo-secretspec"
-        sudo.parent.mkdir()
+        self.vault = sudo.parent / "vault-key"
         sudo.write_text(f"#!{sys.executable}\n{FAKE_SUDO}")
         sudo.chmod(sudo.stat().st_mode | stat.S_IXUSR)
         monkeypatch.setenv("PATH", f"{sudo.parent}{os.pathsep}{os.environ['PATH']}")
@@ -83,9 +90,6 @@ class Link:
         for name in ("PEER_LINK_COMM", "PEER_LINK_SELF", "CODING_BOT_WEBHOOK_KEY"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("PEER_LINK_TOOL", str(self.tool))
-        monkeypatch.setenv("FAKE_SCENARIO", str(self.scenario_file))
-        monkeypatch.setenv("FAKE_LOG", str(self.log))
-        monkeypatch.setenv("FAKE_SUDO_LOG", str(self.sudo_log))
         self.play()
 
     def play(self, **scenario) -> None:
@@ -111,10 +115,10 @@ def reply_scenario(body: str = "all done\nDONE", **extra) -> dict:
     return {"send": {"out": SENT}, "wait": {"out": h}, "drain": {"out": h}, **extra}
 
 
-def test_ask_sends_then_waits_for_that_one_reply(link, capsys):
+def test_ask_sends_then_waits_for_that_one_reply(link, capfd):
     link.play(**reply_scenario())
     assert cb.main(["ask", "find the login button"]) == 0
-    out = capsys.readouterr()
+    out = capfd.readouterr()
     assert out.out == handover("all done\nDONE"), "peer_mail's fenced handover, unchanged, and nothing else on stdout"
     send, wait, drain = link.calls()
     assert [c["argv"][0] for c in link.calls()] == ["send", "wait", "drain"]
@@ -149,17 +153,17 @@ def test_wait_ack_and_timeout_flags(link):
 
 
 @pytest.mark.parametrize(("wait_rc", "code"), [(1, 124), (5, 5), (2, 2), (7, 1)])
-def test_wait_exit_codes_map_to_the_contract(link, capsys, wait_rc, code):
+def test_wait_exit_codes_map_to_the_contract(link, capfd, wait_rc, code):
     link.play(**reply_scenario(wait={"rc": wait_rc}))
     assert cb.main(["ask", "t"]) == code
-    assert capsys.readouterr().out == ""
+    assert capfd.readouterr().out == ""
     assert [c["argv"][0] for c in link.calls()] == ["send", "wait"], "no drain without a reply"
 
 
-def test_timeout_names_how_to_resume(link, capsys):
+def test_timeout_names_how_to_resume(link, capfd):
     link.play(**reply_scenario(wait={"rc": 1}))
     assert cb.main(["ask", "t"]) == 124
-    assert f"coding-bot wait {MID}" in capsys.readouterr().err
+    assert f"coding-bot wait {MID}" in capfd.readouterr().err
 
 
 @pytest.mark.parametrize(("body", "code"), [
@@ -168,44 +172,44 @@ def test_timeout_names_how_to_resume(link, capsys):
     ("working\nBLOCKED: question\n\n", 4),
     ("```not a fence```\nBLOCKED: x", 4),
 ])
-def test_blocked_is_the_last_line_of_the_reply(link, capsys, body, code):
+def test_blocked_is_the_last_line_of_the_reply(link, capfd, body, code):
     link.play(**reply_scenario(body))
     assert cb.main(["ask", "t"]) == code
-    assert body.splitlines()[0] in capsys.readouterr().out, "the reply is printed either way"
+    assert body.splitlines()[0] in capfd.readouterr().out, "the reply is printed either way"
 
 
-def test_a_refused_fast_forward_still_hands_over_the_peeked_reply(link, capsys):
+def test_a_refused_fast_forward_still_hands_over_the_peeked_reply(link, capfd):
     """wait saw the reply but drain found nothing (peer_mail could not pull): the peeked handover is the reply."""
     link.play(**reply_scenario(drain={"out": f"no unread reply to {MID} for claude\n"}))
     assert cb.main(["ask", "t"]) == 0
-    assert capsys.readouterr().out == handover("all done\nDONE")
+    assert capfd.readouterr().out == handover("all done\nDONE")
 
 
-def test_a_reply_that_cannot_be_read_is_exit_1_not_success(link, capsys):
+def test_a_reply_that_cannot_be_read_is_exit_1_not_success(link, capfd):
     link.play(**reply_scenario(wait={"out": "nothing fenced\n"}, drain={"out": "no unread reply\n"}))
     assert cb.main(["ask", "t"]) == 1
-    assert capsys.readouterr().out == ""
+    assert capfd.readouterr().out == ""
 
 
-def test_send_exit_1_means_stored_so_do_not_send_again(link, capsys):
+def test_send_exit_1_means_stored_so_do_not_send_again(link, capfd):
     link.play(send={"out": SENT + "delivered, no live wake (mailbox delivery stands)\n", "rc": 1})
     assert cb.main(["ask", "t"]) == 1
-    err = capsys.readouterr().err
+    err = capfd.readouterr().err
     assert "do NOT send it again" in err and MID in err
     assert [c["argv"][0] for c in link.calls()] == ["send"], "no wait after a failed wake, no second send"
 
 
-def test_send_refused_stores_nothing(link, capsys):
+def test_send_refused_stores_nothing(link, capfd):
     link.play(send={"err": "peer_mail: empty message\n", "rc": 2})
     assert cb.main(["send", "t"]) == 1
-    cap = capsys.readouterr()
+    cap = capfd.readouterr()
     assert "nothing was stored" in cap.err and "do NOT" not in cap.err and cap.out == ""
 
 
-def test_send_prints_the_id_and_does_not_wait(link, capsys):
+def test_send_prints_the_id_and_does_not_wait(link, capfd):
     link.play(send={"out": SENT})
     assert cb.main(["send", "t"]) == 0
-    cap = capsys.readouterr()
+    cap = capfd.readouterr()
     assert cap.out == MID + "\n"
     assert [c["argv"][0] for c in link.calls()] == ["send"]
 
@@ -219,33 +223,130 @@ def test_dash_reads_the_task_from_stdin(link, monkeypatch):
     assert "line one" not in " ".join(call["argv"][:call["argv"].index("--subject")]), "the body travels in the file only"
 
 
-def test_sudo_secretspec_wraps_only_the_send_and_only_without_the_key(link, monkeypatch):
+def test_the_command_reexecutes_once_under_the_vault_only_without_the_key(link, monkeypatch):
     link.play(**reply_scenario())
-    assert cb.main(["ask", "t"]) == 0
+    assert cb.main(["ask", "the task text"]) == 0
     sudo = link.sudo_calls()
-    assert len(sudo) == 1, "wait and drain need no secret"
-    assert sudo[0][0] == "run" and sudo[0][sudo[0].index("--") + 1:][:4] == ["python3", "-I", str(link.tool), "send"]
-    assert "--reason" in sudo[0]
+    assert len(sudo) == 1, "one vault call for the whole ask: wait and drain need no secret"
+    cut = sudo[0].index("--")
+    assert sudo[0][0] == "run" and "--reason" in sudo[0][:cut]
+    assert sudo[0][cut + 1:cut + 3] == [sys.executable, "-I"] and sudo[0][cut + 3] == str(SCRIPT), "the wrapper itself, isolated"
+    assert sudo[0][cut + 4:cut + 5] == ["ask"] and sudo[0][-1] == "-"
+    assert "the task text" not in json.dumps(sudo[0]), "the task never rides an argv to the vault tool"
+    assert [c["argv"][0] for c in link.calls()] == ["send", "wait", "drain"]
 
     link.sudo_log.unlink()
     monkeypatch.setenv("CODING_BOT_WEBHOOK_KEY", KEY)
     assert cb.main(["ask", "t"]) == 0
     assert link.sudo_calls() == [], "the key is already in the environment: no vault call"
-    assert link.calls()[-3]["has_key"] is True
+    send, wait, drain = link.calls()[-3:]
+    assert send["has_key"] is True and wait["has_key"] is False and drain["has_key"] is False, "the key reaches only the send"
 
 
-def test_the_key_never_appears_in_argv_or_output(link, capsys, monkeypatch):
+def test_no_vault_tool_and_no_key_is_exit_1_with_nothing_sent(link, monkeypatch, capfd):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert cb.main(["send", "t"]) == 1
+    assert "sudo-secretspec is not on PATH" in capfd.readouterr().err and link.calls() == []
+
+
+def test_peer_mail_gets_only_an_allowlisted_environment_and_the_key_only_on_send(link, monkeypatch):
+    """`sudo-secretspec run` exports EVERY declared secret: none but the webhook key may reach peer_mail."""
+    link.vault.write_text(KEY)
+    for name in ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "CODING_BOT_WEBHOOK_URL", "OPENAI_API_KEY", "KEEP_ME"):
+        monkeypatch.setenv(name, "x-value")
+    link.play(**reply_scenario())
+    assert cb.main(["ask", "t"]) == 0
+    send, wait, drain = link.calls()
+    for call in (send, wait, drain):
+        leaked = {"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "CODING_BOT_WEBHOOK_URL", "OPENAI_API_KEY", "KEEP_ME",
+                  "CODING_BOT_UNDER_RUN", "CODING_BOT_TASK_FILE"} & set(call["env"])
+        assert not leaked, leaked
+        assert {"PATH", "HOME", "PEER_LINK_COMM", "PEER_LINK_SELF", "PEER_LINK_TOOL"} <= set(call["env"])
+    assert send["has_key"] is True and wait["has_key"] is False and drain["has_key"] is False
+
+
+def test_a_task_holding_the_vaults_opaque_key_is_refused_before_anything_leaves(link, capfd):
+    """The key exists only in the vault and matches no credential shape: the check must run where the vault's values are."""
+    opaque = "q7Zr-vault-opaque-key-value-98765"
+    link.vault.write_text(opaque)
+    assert cb.main(["ask", f"log in with {opaque} please"]) == 2
+    cap = capfd.readouterr()
+    assert "credential" in cap.err and "Nothing was sent" in cap.err and opaque not in cap.err + cap.out
+    assert len(link.sudo_calls()) == 1, "the check ran in the vault process"
+    assert link.calls() == [], "peer_mail was never reached: nothing stored, nothing in an argv"
+    assert opaque not in json.dumps(link.sudo_records())
+
+
+def test_a_task_from_stdin_with_the_vaults_opaque_key_is_refused_too(link, monkeypatch, capfd):
+    opaque = "q7Zr-vault-opaque-key-value-98765"
+    link.vault.write_text(opaque)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"first line\nthe key is {opaque}\n"))
+    assert cb.main(["send", "-"]) == 2
+    assert link.calls() == [] and opaque not in json.dumps(link.sudo_records())
+
+
+def test_the_task_is_handed_to_the_vault_process_in_a_private_file_that_is_removed(link, tmp_path, monkeypatch):
+    seen = tmp_path / "seen"
+    link.vault.write_text("k")
+    wrapper = link.tmp / "bin" / "sudo-secretspec"
+    wrapper.write_text(wrapper.read_text().replace(
+        "cut = a.index", f"p = os.environ['CODING_BOT_TASK_FILE']; open({str(seen)!r}, 'w').write(p + ' ' + oct(os.stat(p).st_mode & 0o777))\ncut = a.index"))
+    link.play(send={"out": SENT})
+    assert cb.main(["send", "private task"]) == 0
+    path, mode = seen.read_text().split()
+    assert mode == "0o600" and not Path(path).exists(), "0600 while it existed, gone afterwards"
+    assert link.calls()[0]["file"] == "private task\n"
+
+
+def test_stdin_is_read_only_up_to_the_limit_plus_one(link, monkeypatch, capfd):
+    """An endless or huge stdin must be refused promptly, not read to its end."""
+    asked: list[int] = []
+
+    class Endless:
+        def read(self, n=-1):
+            asked.append(n)
+            if n is None or n < 0:
+                raise AssertionError("unbounded read")
+            return "x" * n
+
+    monkeypatch.setattr(sys, "stdin", Endless())
+    assert cb.main(["send", "-"]) == 2
+    assert asked == [cb.MAX_TEXT + 1]
+    assert "over 100000 characters" in capfd.readouterr().err and link.calls() == [] and link.sudo_calls() == []
+
+
+def test_a_real_endless_stdin_is_refused_promptly_by_the_real_script(link):
+    with open("/dev/zero", "rb") as zeros:
+        proc = subprocess.run([sys.executable, "-I", str(SCRIPT), "send", "-"], stdin=zeros, capture_output=True,
+                              text=True, timeout=60, check=False)
+    assert proc.returncode == 2 and "over 100000 characters" in proc.stderr and link.calls() == []
+
+
+def test_the_script_is_isolated_even_when_run_as_python3_path(link, tmp_path):
+    """`python3 /path/coding-bot` ignores the shebang's -I: the file must re-execute itself isolated before importing anything
+    a caller's PYTHONPATH could shadow (the process may be about to hold vault credentials)."""
+    plant, marker = tmp_path / "plant", tmp_path / "planted-ran"
+    plant.mkdir()
+    (plant / "argparse.py").write_text(f"open({str(marker)!r}, 'w').write('x')\nraise SystemExit(99)\n")
+    link.play(check={"out": "check: ok\n"})
+    env = {**os.environ, "PYTHONPATH": str(plant)}
+    proc = subprocess.run([sys.executable, str(SCRIPT), "status"], env=env, capture_output=True, text=True, timeout=60, check=False)
+    assert not marker.exists(), "a planted module from PYTHONPATH was imported"
+    assert proc.returncode == 0 and "check: ok" in proc.stdout, proc.stderr
+
+
+def test_the_key_never_appears_in_argv_or_output(link, capfd, monkeypatch):
     monkeypatch.setenv("CODING_BOT_WEBHOOK_KEY", KEY)
     link.play(**reply_scenario())
     cb.main(["ask", "t"])
     cb.main(["status"])
-    cap = capsys.readouterr()
+    cap = capfd.readouterr()
     assert KEY not in cap.out and KEY not in cap.err
     assert KEY not in json.dumps([c["argv"] for c in link.calls()])
 
 
 @pytest.mark.parametrize("argv", [["ask", ""], ["ask", "   \n"], ["send", "x" * 100_001]])
-def test_unusable_text_is_a_usage_error_before_anything_runs(link, capsys, argv):
+def test_unusable_text_is_a_usage_error_before_anything_runs(link, capfd, argv):
     assert cb.main(argv) == 2
     assert link.calls() == []
 
@@ -258,16 +359,16 @@ def test_bad_usage_exits_2(link, argv):
     assert exc.value.code == 2 and link.calls() == []
 
 
-def test_a_missing_peer_mail_is_exit_1_with_the_fix(link, monkeypatch, capsys):
+def test_a_missing_peer_mail_is_exit_1_with_the_fix(link, monkeypatch, capfd):
     monkeypatch.setenv("PEER_LINK_TOOL", str(link.tmp / "absent.py"))
     assert cb.main(["ask", "t"]) == 1
-    assert "frdminc/peer-link" in capsys.readouterr().err and link.sudo_calls() == []
+    assert "frdminc/peer-link" in capfd.readouterr().err and link.sudo_calls() == []
 
 
-def test_status_shows_config_and_runs_check_without_the_key_value(link, capsys, monkeypatch):
+def test_status_shows_config_and_runs_check_without_the_key_value(link, capfd, monkeypatch):
     link.play(check={"out": "check: ok\n"})
     assert cb.main(["status"]) == 0
-    out = capsys.readouterr().out
+    out = capfd.readouterr().out
     assert "check: ok" in out and f"tool: {link.tool}" in out and "self: claude" in out
     assert "not set: send runs under sudo-secretspec" in out
     assert link.calls()[0]["argv"] == ["check"]
@@ -287,7 +388,6 @@ def test_peer_mail_runs_isolated_with_network_and_tls_overrides_removed(link, mo
     or PYTHONPATH must not reach it, in the send, the wait or the drain, nor in the vault wrapper's own environment."""
     for name, value in OVERRIDES.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("KEEP_ME", "1")
     link.play(**reply_scenario())
     assert cb.main(["ask", "t"]) == 0
     calls = link.calls()
@@ -295,7 +395,7 @@ def test_peer_mail_runs_isolated_with_network_and_tls_overrides_removed(link, mo
     for call in calls:
         assert call["isolated"] == 1, "python3 -I"
         assert not set(OVERRIDES) & set(call["env"]), sorted(set(OVERRIDES) & set(call["env"]))
-        assert "KEEP_ME" in call["env"] and "PEER_LINK_COMM" in call["env"]
+        assert "PEER_LINK_COMM" in call["env"]
     for rec in link.sudo_records():
         assert not set(OVERRIDES) & set(rec["env"])
 
@@ -309,20 +409,20 @@ def test_peer_mail_runs_isolated_with_network_and_tls_overrides_removed(link, mo
     "aws AKIAABCDEFGHIJKLMNOP here",
     "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345",
 ])
-def test_credential_shaped_text_is_refused_before_anything_is_stored(link, capsys, tmp_path, text):
+def test_credential_shaped_text_is_refused_before_anything_is_stored(link, capfd, tmp_path, text):
     for cmd in ("ask", "send"):
         assert cb.main([cmd, text]) == 2
-    cap = capsys.readouterr()
+    cap = capfd.readouterr()
     assert "credential" in cap.err and "Nothing was sent" in cap.err and cap.out == ""
     assert link.calls() == [] and link.sudo_calls() == [], "peer_mail and the vault were never reached"
 
 
 @pytest.mark.parametrize("name", ["CODING_BOT_WEBHOOK_KEY", "CODING_BOT_WEBHOOK_URL", "CODING_BOT_WEBHOOK_HEADER"])
-def test_a_known_secret_value_in_the_task_is_refused(link, monkeypatch, capsys, name):
+def test_a_known_secret_value_in_the_task_is_refused(link, monkeypatch, capfd, name):
     value = "plain-looking-secret-value-123"
     monkeypatch.setenv(name, value)
     assert cb.main(["send", f"please use {value} to log in"]) == 2
-    err = capsys.readouterr().err
+    err = capfd.readouterr().err
     assert value not in err and link.calls() == []
 
 

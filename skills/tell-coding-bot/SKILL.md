@@ -38,7 +38,7 @@ exit 1 means the task is STORED but nobody was woken, and the message says **do 
 Environment wins; defaults are for this Mac. `PEER_LINK_TOOL` (default `~/src/peer-link/peer_mail.py`), `PEER_LINK_COMM`
 (`~/.local/state/peer-link/coding-mail/comm`), `PEER_LINK_SELF` (`claude`). peer-link's own `~/.config/peer-link/{peers,trust}.json` hold
 the roles and the webhook (`CODING_BOT_WEBHOOK_KEY` is the key's name in the vault); do not edit them from here. The send runs under
-`sudo-secretspec run` unless that variable is already set. peer_mail runs as `python3 -I` with proxy, `SSL_CERT_*`, CA-bundle, `SSLKEYLOGFILE`, `OPENSSL_*` and `PYTHON*` variables removed from its environment, so the key reaches only the trusted webhook; read the `sudo-secretspec` skill first if it prompts. Needs peer-link with
+`sudo-secretspec run` unless that variable is already set: `ask`/`send` re-execute themselves once under it (isolated; the task travels in a private file, never an argv), and there, in order, check the task (credential shapes and the vault's own values, so the key itself is caught), drop every secret but the key (an allowlist), remove proxy/`SSL_CERT_*`/CA-bundle/`SSLKEYLOGFILE`/`OPENSSL_*`/`PYTHON*` variables, then run `python3 -I peer_mail.py`; the key reaches only the send, so it goes only to the trusted webhook. A task on stdin is read up to 100,000 characters + 1 and refused beyond; read the `sudo-secretspec` skill first if it prompts. Needs peer-link with
 `wait --re`/`drain --re` (frdminc/peer-link PR "wait --re"). Anything about the link itself: peer-link's README and `SKILL.md`.
 
 This is the Coding bot only. "Chief of Staff" is `tell-chief-of-staff`.
