@@ -3,7 +3,7 @@
 # --list prints every probe with its SCOPE line. --readonly runs only readonly/ro-*.sh (against the live daemon, read-only).
 # It NEVER runs a probe whose SCOPE starts with DESTRUCTIVE or "second daemon only"; run those by hand with a fresh PASEO_HOME.
 here=$(cd "$(dirname "$0")" && pwd)
-for f in "$here"/readonly/ro-*.sh "$here"/d1-*.sh "$here"/watchdog-selftest.sh "$here"/drain/*.sh; do
+for f in "$here"/readonly/ro-*.sh "$here"/isolated-smoke.sh "$here"/d1-*.sh "$here"/watchdog-selftest.sh "$here"/drain/*.sh; do
   [ -f "$f" ] || continue
   scope=$(ggrep -m1 '^# SCOPE:' "$f" | cut -c12-)
   case "${1:-}" in

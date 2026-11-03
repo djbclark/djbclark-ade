@@ -16,6 +16,9 @@ versions_json() {
   local cli daemon
   cli=$(paseo -v 2>/dev/null | head -1)
   daemon=$(paseo ${PASEO_HOME:+--home "$PASEO_HOME"} status 2>/dev/null | awk -F': ' '/^daemonVersion/{print $2}')
+  # A probe records its result after isolated_down: fall back to the status isolated_up saved.
+  [ -n "$daemon" ] || [ ! -s "${ACC_BASE:-/nonexistent}/status.json" ] \
+    || daemon=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("daemonVersion") or "")' "$ACC_BASE/status.json" 2>/dev/null)
   printf '{"cliVersion":"%s","daemonVersion":"%s"}' "${cli:-unknown}" "${daemon:-unknown}"
 }
 
@@ -44,28 +47,118 @@ require_isolated() {
 # pj ARGS...: the paseo CLI pointed at the isolated daemon only.
 pj() { require_isolated; paseo --home "$PASEO_HOME" "$@"; }
 
-# isolated_up NAME: fresh home, Unix-socket listener (open question 1), no plugins, saved PID.
-# UNVERIFIED against 0.14/0.15: the exact `daemon config set` keys; read `paseo daemon config get` in a fresh
-# home first and fix the two lines marked KEY. `daemon config` has no --home flag in the help: it may need PASEO_HOME.
-isolated_up() {
-  local name="$1" base="${TMPDIR:-/tmp}/ade-acc-$name-$$"
-  mkdir -p "$base" && chmod 700 "$base"
-  export PASEO_HOME="$base/home"; mkdir -m 700 "$PASEO_HOME"
-  echo fresh > "$PASEO_HOME/.ade-acceptance-home"
-  paseo daemon config set daemon.listen "unix://$base/paseo.sock" >/dev/null   # KEY
-  paseo daemon config set pluginsEnabled false >/dev/null                      # KEY: no janitor, no herald
-  nohup paseo daemon run --home "$PASEO_HOME" > "$base/daemon.out" 2>&1 &
-  echo $! > "$base/daemon.pid"; export ACC_BASE="$base"
-  local i; for i in $(seq 1 30); do pj status >/dev/null 2>&1 && return 0; sleep 1; done
-  die "isolated daemon did not come up; see $base/daemon.out"
+# The live daemon's config file. isolated_up hashes it before and after setup and refuses on any change (plan T2 Hazard).
+ACC_LIVE_CONFIG="$ACC_LIVE_HOME/config.json"
+live_config_sha() { shasum -a 256 "$ACC_LIVE_CONFIG" 2>/dev/null | awk '{print $1}'; }
+
+# _acc_tree PID...: each PID and all its descendants (a pgrep -P walk). Used only on the PID isolated_up started.
+_acc_tree() {
+  local p c
+  for p in "$@"; do echo "$p"; for c in $(pgrep -P "$p" 2>/dev/null); do _acc_tree "$c"; done; done
 }
 
-# isolated_down: kills exactly the saved PID (never by name).
-isolated_down() {
-  [ -n "${ACC_BASE:-}" ] && [ -f "$ACC_BASE/daemon.pid" ] || return 0
-  local pid; pid=$(cat "$ACC_BASE/daemon.pid")
-  kill "$pid" 2>/dev/null; sleep 2; kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+# _acc_refuse MSG: tear down whatever isolated_up started, keep ACC_BASE for evidence, exit 2.
+_acc_refuse() { ACC_CLEAN=0 isolated_down; die "isolated_up refused: $1 (evidence kept in ${ACC_BASE:-?})"; }
+
+# isolated_up NAME: fresh home under $TMPDIR/ade-acc-NAME.XXXXXX, Unix-socket listener (decision 1), plugins off
+# (no session-janitor, herald or telegram), dictation off (its first start downloads a ~600 MB local speech model),
+# a random password, `paseo daemon run` under a saved PID.
+# Checked 2026-11-02 (CLI 0.15.0-beta.1): `paseo daemon config set KEY VALUE --home H` writes H/config.json only (live
+# sha256 unchanged after each call); the keys come from the server's PersistedConfigSchema.
+# The password is not a config key (daemon.auth.password is a bcrypt hash `config set` refuses; set-password needs a
+# TTY), so it reaches the daemon as PASEO_PASSWORD in its environment only; the CLI authenticates over the socket with
+# the home's local-credential. Every inherited PASEO_* variable is dropped for the daemon (PASEO_LISTEN would override
+# the configured listener). Sets ACC_BASE and PASEO_HOME. ACC_BASE holds daemon.pid (the process started here, the
+# root of the tree isolated_down stops), status.pid (the pid `paseo status` reports: the DaemonRunner child of
+# daemon.pid; the server worker that logs is its child), status.json, daemon.out, password and paseo.sock.
+isolated_up() {
+  local name="${1:?usage: isolated_up NAME}" tmp="${TMPDIR:-/tmp}" base sock live_sha i kv up=0
+  tmp="${tmp%/}"
+  live_sha=$(live_config_sha); [ -n "$live_sha" ] || die "cannot hash the live config $ACC_LIVE_CONFIG"
+  base=$(mktemp -d "$tmp/ade-acc-$name.XXXXXX") || die "mktemp failed under $tmp"
+  chmod 700 "$base"; sock="$base/paseo.sock"
+  export ACC_BASE="$base" PASEO_HOME="$base/home"
+  [ "${#sock}" -lt 104 ] || _acc_refuse "socket path is ${#sock} bytes, over sun_path's 104: use a shorter TMPDIR"
+  { mkdir -m 700 "$PASEO_HOME" && echo fresh > "$PASEO_HOME/.ade-acceptance-home"; } || _acc_refuse "cannot create $PASEO_HOME"
+  for kv in "daemon.listen=unix://$sock" pluginsEnabled=false features.dictation.enabled=false; do
+    paseo daemon config set "${kv%%=*}" "${kv#*=}" --home "$PASEO_HOME" >/dev/null 2>>"$base/config.err" \
+      || _acc_refuse "config set ${kv%%=*} failed"
+    [ "$(live_config_sha)" = "$live_sha" ] \
+      || _acc_refuse "the LIVE config hash changed after 'config set ${kv%%=*}'; restore $ACC_LIVE_CONFIG from a backup now"
+  done
+  python3 - "$PASEO_HOME/config.json" "unix://$sock" <<'PY' || _acc_refuse "fresh config.json lacks the listener, pluginsEnabled=false or dictation off"
+import json, sys
+c = json.load(open(sys.argv[1]))
+ok = (c.get("daemon", {}).get("listen") == sys.argv[2] and c.get("pluginsEnabled") is False
+      and c.get("features", {}).get("dictation", {}).get("enabled") is False)
+sys.exit(0 if ok else 1)
+PY
+  (umask 077; openssl rand -hex 24 > "$base/password") || _acc_refuse "cannot generate the password"
+  (
+    for v in $(compgen -A export -X '!PASEO_*'); do unset "$v"; done
+    PASEO_PASSWORD=$(cat "$base/password")
+    export PASEO_PASSWORD
+    exec nohup paseo daemon run --home "$base/home" > "$base/daemon.out" 2>&1 < /dev/null
+  ) &
+  echo $! > "$base/daemon.pid"
+  for i in $(seq 1 60); do
+    kill -0 "$(cat "$base/daemon.pid")" 2>/dev/null || _acc_refuse "isolated daemon exited during start-up; see $base/daemon.out"
+    if [ -S "$sock" ] && pj status --json > "$base/status.json" 2>/dev/null \
+      && python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(0 if d.get("connectedDaemon") == "reachable" and d.get("serverId") else 1)' "$base/status.json"; then
+      up=1; break
+    fi
+    sleep 1
+  done
+  [ "$up" = 1 ] || _acc_refuse "isolated daemon did not come up in 60 s; see $base/daemon.out"
+  python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$base/status.json" > "$base/status.pid"
+  [ "$(live_config_sha)" = "$live_sha" ] || _acc_refuse "the LIVE config hash changed while the isolated daemon started; restore $ACC_LIVE_CONFIG from a backup now"
+  pj plugin ls --json > "$base/plugins.json" 2>/dev/null || _acc_refuse "plugin ls failed on the isolated daemon"
+  python3 - "$base/plugins.json" <<'PY' || _acc_refuse "a plugin is running on the isolated daemon (B10: no janitor, herald or telegram)"
+import json, sys
+sys.exit(1 if [p.get("id") for p in json.load(open(sys.argv[1])) if p.get("status") == "running"] else 0)
+PY
   return 0
 }
 
-live_snapshot() { paseo status 2>/dev/null | awk -F': ' '/^(pid|startedAt|serverId)/{printf "%s=%s;",$1,$2}'; }
+# isolated_down [NAME]: stops exactly the process tree isolated_up started (saved PID and its descendants, never by
+# name): TERM, up to 15 s, then KILL. Removes the socket; keeps ACC_BASE (logs, evidence) unless ACC_CLEAN=1.
+# Limit: a grandchild that detached from the tree (reparented to launchd) is not found.
+isolated_down() {
+  [ -n "${ACC_BASE:-}" ] && [ -f "$ACC_BASE/daemon.pid" ] || return 0
+  case "$ACC_BASE" in */ade-acc-*) ;; *) echo "isolated_down: refusing ACC_BASE=$ACC_BASE" >&2; return 1;; esac
+  local pid pids left p
+  pid=$(cat "$ACC_BASE/daemon.pid")
+  pids=$(_acc_tree "$pid" | tr '\n' ' ')
+  kill -TERM "$pid" 2>/dev/null
+  for _ in $(seq 1 15); do
+    left=""; for p in $pids; do kill -0 "$p" 2>/dev/null && left="$left $p"; done
+    [ -z "$left" ] && break; sleep 1
+  done
+  if [ -n "$left" ]; then
+    kill -TERM $left 2>/dev/null; sleep 2
+    left=""; for p in $pids; do kill -0 "$p" 2>/dev/null && left="$left $p"; done
+    [ -n "$left" ] && kill -KILL $left 2>/dev/null && sleep 1
+  fi
+  wait "$pid" 2>/dev/null
+  left=""; for p in $pids; do kill -0 "$p" 2>/dev/null && left="$left $p"; done
+  printf '%s\n' "$pids" > "$ACC_BASE/daemon.tree"; mv -f "$ACC_BASE/daemon.pid" "$ACC_BASE/daemon.pid.stopped"
+  rm -f "$ACC_BASE/paseo.sock"
+  [ -z "$left" ] || { echo "isolated_down: still alive after KILL:$left" >&2; return 1; }
+  if [ "${ACC_CLEAN:-0}" = 1 ] && [ "$(cat "$ACC_BASE/home/.ade-acceptance-home" 2>/dev/null)" = fresh ]; then
+    rm -rf "$ACC_BASE"
+  fi
+  return 0
+}
+
+# live_snapshot: pid, startedAt and serverId of the LIVE daemon (explicit --home: PASEO_HOME may point at a test home).
+live_snapshot() {
+  paseo --home "$ACC_LIVE_HOME" status --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print("pid=%s;startedAt=%s;serverId=%s;" % (d.get("pid"), d.get("startedAt"), d.get("serverId")))'
+}
+
+# live_agent_count: number of agents `paseo ls --json` lists on the LIVE daemon (read-only).
+live_agent_count() {
+  paseo --home "$ACC_LIVE_HOME" ls --json 2>/dev/null | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))'
+}

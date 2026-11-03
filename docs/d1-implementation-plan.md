@@ -95,6 +95,21 @@ two calls rewrite the LIVE daemon's config (listener moved to a temp Unix socket
 `~/.paseo/config.json` aside (mode 600) and record its sha256; try the `--home` form first in a throwaway home; after
 each attempt compare the live hash and, if it changed, restore the copy at once (atomic `mv`) and stop. Use the form
 that leaves the live hash unchanged, and make `isolated_up` assert that hash after setup (refuse and stop if not).
+**Checked 2026-11-02 (slice d1-t2-isolated, CLI and live daemon both 0.15.0-beta.1 that day):** the hazard is closed. With the
+live config copied aside (0600) first, `paseo daemon config get|set KEY VALUE --home <throwaway>` wrote only the throwaway
+`config.json`; the live sha256 (`ab57ed66…`) was unchanged after each of four calls (the CLI source, `commands/daemon/config.js`
+and `utils/daemon-target.js`, also honours an exported `PASEO_HOME` for local operations; the library passes `--home`
+anyway). `isolated_up` now sets `daemon.listen unix://…`, `pluginsEnabled false` and `features.dictation.enabled false`
+(a fresh home otherwise starts a ~600 MB local speech-model download), checks the live hash after each call and after
+start-up, and refuses and tears down on a change (checked hermetically with a fake live config, both before and after
+start). The password is not a config key (`daemon.auth.password` is a bcrypt hash `config set` refuses, and
+`set-password` needs a TTY), so a random one reaches the daemon only as `PASEO_PASSWORD` in its environment; the CLI
+authenticates with the test home's local credential. `isolated-smoke.sh` passed: own serverId, password enforced
+(`auth_failed` with a wrong one), no plugin running, no speech download, live pid, `startedAt`, serverId, agent count
+(18) and config hash unchanged, and no process or socket left. Process tree: `daemon.pid` (the process `isolated_up`
+starts) → the pid `paseo status` reports (saved as `status.pid`) → the server worker that logs; a probe that hangs the
+daemon with `SIGSTOP` (d1-07) must stop the worker or the whole tree, not `daemon.pid` alone. No agent was started, so
+no provider credential was needed; T4 to T10 still need decision 2's credential path.
 
 ### T3. D0.2 drain scripts (`tests/paseo-acceptance/drain/`) (depends on PR 177 for item b; blocks every "disable")
 
