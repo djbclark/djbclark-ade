@@ -50,6 +50,57 @@ class OmpIsNotGatedTest(unittest.TestCase):
         self.assertIn("--name must be", r.stderr)
 
 
+class OmpModelGuardTest(unittest.TestCase):
+    """The guard exists so omp never spends the Copilot reserve (2026-10-19). 2026-11-03 audit: `github-copilot/claude-...`
+    passed the substring test, `--resume` and a post-`acp` --agent-arg replaced the model after it."""
+
+    OK = "anthropic/claude-sonnet-5-5"
+
+    def omp(self, *argv: str, override: bool = False) -> subprocess.CompletedProcess[str]:
+        env = {k: v for k, v in os.environ.items() if k not in ("ACP_OPERATOR_APPROVED", "ACP_RUN_OMP_ANY_MODEL")}
+        if override:
+            env["ACP_RUN_OMP_ANY_MODEL"] = "1"
+        # --perm bogus ends a run that passed the omp guard at the next check, before any agent starts
+        return subprocess.run([str(ACP_RUN), "omp", "-p", "hi", "--perm", "bogus", *argv], env=env,
+                              capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+
+    def refused(self, *argv: str, text: str = "omp needs --model anthropic/") -> None:
+        r = self.omp(*argv)
+        self.assertEqual(r.returncode, 2, argv)
+        self.assertIn(text, r.stderr, argv)
+
+    def passes(self, *argv: str, override: bool = False) -> None:
+        r = self.omp(*argv, override=override)
+        self.assertNotIn("omp needs --model", r.stderr, argv)
+        self.assertNotIn("omp: --agent-arg", r.stderr, argv)
+        self.assertIn("--perm must be", r.stderr, argv)
+
+    def test_the_provider_prefix_is_required(self):
+        for model in ("github-copilot/claude-sonnet-5-5", "claude-sonnet-5-5", "openai/claude-x", "Anthropic/claude-x",
+                      "anthropic/gpt-5.6-luna", "anthropic/", " anthropic/claude-sonnet-5-5"):
+            self.refused("--model", model)
+        self.passes("--model", self.OK)
+
+    def test_resume_is_judged_like_any_other_run(self):
+        self.refused("--model", "github-copilot/gpt-5.6-luna", "--resume", "abc")
+        self.refused("--resume", "abc")
+        self.passes("--model", self.OK, "--resume", "abc")
+
+    def test_agent_arg_cannot_swap_the_model_after_the_guard(self):
+        for extra in (["--agent-arg=--model", "--agent-arg=github-copilot/gpt-5.6-luna"],
+                      ["--agent-arg=--model=github-copilot/gpt-5.6-luna"],
+                      ["--agent-arg=--mod=x"], ["--agent-arg=--model x"], ["--agent-arg=--provider=github-copilot"],
+                      ["--agent-arg=--profile=p"], ["--agent-arg=--smol=github-copilot/gpt-5.6-luna"],
+                      ["--agent-arg=--slow=x"], ["--agent-arg=--plan=x"], ["--agent-arg=--api-key=x"],
+                      ["--agent-arg=--config=x.yml"]):
+            self.refused("--model", self.OK, *extra, text="omp: --agent-arg")
+        self.passes("--model", self.OK, "--agent-arg=--no-lsp", "--agent-arg=--thinking=high")
+
+    def test_the_operator_override_still_lifts_it(self):
+        self.passes("--model", "github-copilot/gpt-5.6-luna", "--agent-arg=--model=x", override=True)
+        self.passes(override=True)
+
+
 class HermesGateTest(unittest.TestCase):
     """hermes is never a delegation target (operator 2026-10-15); the same gate covers it."""
 

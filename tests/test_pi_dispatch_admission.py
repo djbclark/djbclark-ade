@@ -169,14 +169,14 @@ class TestPiDispatchAdmission(LoadGate):
         mod = self.load_module()
         for args in self.REPLACEMENTS:
             with self.subTest(args=args):
-                self.assertIn("pass-through", mod.pi_identity_override(args))
+                self.assertIn("pass-through", mod.identity_override("pi", args))
         for args in ([], None, ["--tripwire-exempt-kinds=read,search"], ["--perm", "all"], ["--mode", "x"], ["-m"]):
             with self.subTest(args=args):
-                self.assertIsNone(mod.pi_identity_override(args))
+                self.assertIsNone(mod.identity_override("pi", args))
         # a stored command line: exactly the primary pair is the dispatcher's own
-        self.assertIsNone(mod.pi_identity_override(["x", "--model", "a", "--perm", "all"], True))
-        self.assertIsNotNone(mod.pi_identity_override(["--model", "a", "--model", "b"], True))
-        self.assertIsNotNone(mod.pi_identity_override(["--model", "a", "--model=b"], True))
+        self.assertIsNone(mod.identity_override("pi", ["x", "--model", "a", "--perm", "all"], True))
+        self.assertIsNotNone(mod.identity_override("pi", ["--model", "a", "--model", "b"], True))
+        self.assertIsNotNone(mod.identity_override("pi", ["--model", "a", "--model=b"], True))
 
     def test_replacement_model_refuses_before_preflight_and_task(self):
         for index, extra in enumerate(self.REPLACEMENTS):
@@ -195,9 +195,15 @@ class TestPiDispatchAdmission(LoadGate):
                                  env=self.quota_env("healthy"))
         self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
 
-    def test_other_agents_keep_their_pass_through(self):
+    def test_other_agents_follow_the_same_contract(self):
+        # 2026-11-03: the guard is not Pi's alone (it once pinned codex's --meta pass-through as incidental behavior)
         result = self.dispatch_agent("codex", "gpt-6.1-sol", "--no-model-check", "--est-pct", "1",
                                      "--acp-arg=--meta={}", name="codex-meta", env=self.quota_env("healthy"))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("pass-through", result.stderr)
+        result = self.dispatch_agent("codex", "gpt-6.1-sol", "--no-model-check", "--est-pct", "1",
+                                     "--acp-arg=--tripwire-exempt-kinds=read", name="codex-fine",
+                                     env=self.quota_env("healthy"))
         self.assertNotIn("pass-through", result.stderr)
 
     def test_deferred_and_legacy_runner_refuse_a_replacement_in_the_stored_command(self):

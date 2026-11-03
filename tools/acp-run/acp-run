@@ -2592,6 +2592,39 @@ def env_pairs(text):
     return out
 
 
+# omp's own flags that choose the model (or credentials / config) a run really uses, besides `--model` (omp 18.16:
+# `--smol/--slow/--plan` roles that subagents and prewalk switch to, `--provider`, `--api-key`, `--profile`, `--config`,
+# `--models`). A pass-through --agent-arg carrying one replaces the model the guard below admitted (2026-11-03).
+OMP_MODEL_FLAGS = ("--model", "--models", "--smol", "--slow", "--plan", "--prewalk-into", "--plan-yolo-into",
+                   "--provider", "--api-key", "--profile", "--config")
+
+
+def omp_model_refusal(a):
+    """Why this omp run may spend something other than the Claude API credits omp is routed for, else None.
+
+    omp's own default is github-copilot/gpt-5.6-luna, which spends the Copilot reserve (operator 2026-10-19), so a
+    prompt run needs `--model anthropic/<claude model>`: the provider prefix is required (`github-copilot/claude-...`
+    is a Copilot model), a --resume run is judged like any other (it still launches `omp --model M acp`; a bare
+    `--resume ID` would start omp on its default), and no --agent-arg may name the model, provider, profile, role
+    models or key (they come after the --model root flag and win). `--info` spends nothing. The operator's
+    ACP_RUN_OMP_ANY_MODEL=1 lifts all of it."""
+    if a.agent != "omp" or a.info or os.environ.get("ACP_RUN_OMP_ANY_MODEL"):
+        return None
+    model = a.model or ""
+    if not (model.startswith("anthropic/") and "claude" in model[len("anthropic/"):].lower()):
+        return ("omp needs --model anthropic/<claude model> (its configured default is"
+                " github-copilot/gpt-5.6-luna, which would spend the Copilot reserve, not the"
+                " Claude API credits; a github-copilot/claude-... model is a Copilot model, and --resume needs it too);"
+                " ACP_RUN_OMP_ANY_MODEL=1 overrides")
+    for arg in getattr(a, "agent_arg", None) or []:
+        words = str(arg).split()
+        name = words[0].split("=", 1)[0] if words else ""
+        if len(name) >= 3 and name.startswith("--") and any(f.startswith(name) for f in OMP_MODEL_FLAGS):
+            return (f"omp: --agent-arg {name!r} could replace the admitted Claude API model, provider or credentials"
+                    " (use --model anthropic/<claude model>); ACP_RUN_OMP_ANY_MODEL=1 overrides")
+    return None
+
+
 def launch_tweaks(a, cmd, env):
     """The agent's launch command with the flags --effort/--context/--agent-arg need at start
     (env changed in place). cline's --thinking, copilot's --context/--model, claude's 1M switch,
@@ -5018,15 +5051,9 @@ def main():
                  f" ({OPERATOR_GATED[a.agent]}); once given, set {APPROVAL_ENV}={a.agent}")
     if a.agent not in AGENTS:
         ap.error(f"agent must be one of: {', '.join(AGENTS)}")
-    if (a.agent == "omp" and not a.info and not a.resume
-            and not (a.model and "claude" in a.model.lower())
-            and not os.environ.get("ACP_RUN_OMP_ANY_MODEL")):
-        # omp's own default is github-copilot/gpt-5.6-luna, which spends the Copilot reserve, not
-        # the Claude API credits omp is routed for (operator 2026-10-19); the credits need
-        # `--model anthropic/claude-...` and a one-time `omp login` for Anthropic.
-        ap.error("omp needs --model anthropic/<claude model> (its configured default is"
-                 " github-copilot/gpt-5.6-luna, which would spend the Copilot reserve, not the"
-                 " Claude API credits); ACP_RUN_OMP_ANY_MODEL=1 overrides")
+    why = omp_model_refusal(a)
+    if why:
+        ap.error(why)
     if not (a.perm in (*PERMS, "ask") or a.perm.startswith("scoped:")):
         ap.error("--perm must be all, read-only or deny")
     if a.perm == "read-only" and a.agent not in READONLY_AGENTS:

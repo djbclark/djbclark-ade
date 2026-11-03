@@ -83,10 +83,10 @@ class Effort(base.Base):
         self.assertIn("--model m1 --context 1m --perm all", r.stdout)
 
     def test_acp_arg_still_passes_through(self):
-        r = self.dispatch("--effort", "high", "--acp-arg=--meta", '--acp-arg={"a":1}', env=self.env())
+        r = self.dispatch("--effort", "high", "--acp-arg=--tripwire-exempt-kinds", "--acp-arg=read", env=self.env())
         self.assertEqual(r.returncode, 0, r.stderr)
         argv = self.args_file.read_text().split("\n")
-        self.assertEqual(argv[-3:-1], ["--meta", '{"a":1}'])
+        self.assertEqual(argv[-3:-1], ["--tripwire-exempt-kinds", "read"])
         self.assertIn("--effort", argv)
 
     def test_zcode_accepts_a_model_now_and_still_does_not_need_one(self):

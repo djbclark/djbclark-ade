@@ -470,9 +470,13 @@ agy 1.4.1 (2026-10-18) lists bare ids (`gemini-4-argon`, `gemini-3.8-flash`, `cl
 `omp acp` (omp 18.12.2, added to the table 2026-10-19 when the per-run gate was lifted: its Claude
 API credits are a normal tier). The session has no `model` config option, so `--model M` becomes
 the root flag (`omp --model M acp`, M like `anthropic/claude-sonnet-5-5`); `--effort` drives its
-`thinking` option, which lists low..max once a Claude model is set. A run without a Claude `--model`
-exits 2: omp's configured default is `github-copilot/gpt-5.6-luna` and would spend the Copilot
-reserve (`ACP_RUN_OMP_ANY_MODEL=1` overrides). Needs an enabled Anthropic login in omp
+`thinking` option, which lists low..max once a Claude model is set. Every prompt run (`--resume` included) needs
+`--model anthropic/<claude model>`, else it exits 2: omp's configured default is `github-copilot/gpt-5.6-luna` and
+would spend the Copilot reserve, and `github-copilot/claude-...` is a Copilot model. A pass-through `--agent-arg`
+naming `--model`, `--models`, `--smol`, `--slow`, `--plan`, `--prewalk-into`, `--plan-yolo-into`, `--provider`,
+`--profile`, `--api-key` or `--config` (or an abbreviation) exits 2 too: it would replace the admitted model after
+the guard (2026-11-03). `--info` is exempt; `ACP_RUN_OMP_ANY_MODEL=1` overrides all of it.
+Needs an enabled Anthropic login in omp
 (`omp login`); with an expired one the run ends `No API key found for anthropic` (2026-10-19).
 
 ### kiro
@@ -566,8 +570,9 @@ unlimited. Already-running record-based waiters follow later extensions.
 `acp-dispatch --effort` and `--context` (2026-10-15) are first-class. They are
 checked with the model before anything is written
 (`acp-run <agent> --info --model M --effort E --context C`), stored on the job
-record, and kept by `resume`. `--acp-arg` still forwards other flags; a
-dash-leading value needs `--acp-arg=--meta`. zcode `--model` is accepted and
+record, and kept by `resume`. `--acp-arg` still forwards other flags except model/credential changers (`--model`, `--meta`,
+`--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for every agent, 2026-11-03); a
+dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`. zcode `--model` is accepted and
 still optional.
 
 `acp-dispatch extend <out>/jobs/<name>.json 3600` adds an hour to a running
