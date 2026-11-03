@@ -14,23 +14,54 @@ Config (environment wins; the local ~/.config/peer-link/{peers,trust}.json belon
   PEER_LINK_COMM  the Coding link's comm dir (default ~/.local/state/peer-link/coding-mail/comm)
   PEER_LINK_SELF  this side's role           (default claude)
 The webhook key CODING_BOT_WEBHOOK_KEY is read by peer_mail from its environment; this tool never prints it or puts it in argv.
-When it is not already set, the SEND runs under `sudo-secretspec run` (wait and drain need no secret).
-peer_mail runs as `python3 -I` (no PYTHONPATH, user site or sitecustomize) with the network/TLS overrides removed from its
-environment (proxies, SSL_CERT_FILE/DIR, CA bundles, SSLKEYLOGFILE, OPENSSL_*, PYTHON*): the key must go only to the trusted
-webhook over the system trust store. A task that looks like it carries a credential (private key, GitHub/Slack/AWS/OpenAI token,
-Bearer token, or the value of CODING_BOT_WEBHOOK_KEY/_URL/_HEADER when set) is refused with exit 2 before anything is stored.
+When it is not already set, `ask`/`send` run themselves once more under `sudo-secretspec run` (isolated, `python3 -I`), the task
+travelling in a private file, never an argv. In the process that holds the vault's secrets, in this order: the task is checked
+(a private key, GitHub/Slack/AWS/OpenAI token, Bearer token, or the value of CODING_BOT_WEBHOOK_KEY/_URL/_HEADER: refused,
+exit 2, nothing stored); every secret but the key is dropped from the environment (an allowlist); the network/TLS overrides
+(proxies, SSL_CERT_FILE/DIR, CA bundles, SSLKEYLOGFILE, OPENSSL_*, PYTHON*) are removed; then `python3 -I peer_mail.py` runs, the
+key reaching only the send. The key must go only to the trusted webhook over the system trust store.
+Stdin (`-`) is read up to 100,000 characters + 1; a longer task is refused.
 
 Exit codes: 0 done, 1 send failed (or the reply could not be read), 2 usage or refused text, 4 the reply's last line is `BLOCKED: ...`,
 5 nobody picked the task up (peer_mail `--ack-timeout`), 124 timed out (the task may still be running: `wait ID`).
 """
 from __future__ import annotations
 
+import os
+import sys
+
+
+def network_override(name: str) -> bool:
+    """A variable that redirects or weakens TLS, routing or the interpreter of a process that holds the webhook key. Plain
+    string tests, no imports: this runs before hashlib/ssl load libcrypto, which reads OPENSSL_* at load time."""
+    low = name.lower()
+    return (low.endswith("_proxy") or low.startswith(("openssl_", "ssl_", "python")) or low == "sslkeylogfile"
+            or low in {"requests_ca_bundle", "curl_ca_bundle"})
+
+
+def scrub_network_env() -> None:
+    for name in [n for n in os.environ if network_override(n)]:
+        del os.environ[name]
+
+
+# Before any other import: `python3 bin/coding-bot` (no -I) would import a caller's PYTHONPATH json.py or the current
+# directory's modules while the process may already hold vault credentials. Start again isolated (`-I`: no PYTHON*
+# variables, no user site, no current directory on sys.path). `coding-bot ...` is already isolated by the shebang, and an
+# import of this file (the tests) is left alone. A first interpreter that was not isolated has already run a planted
+# sitecustomize; it holds credentials only if the caller put them there.
+if __name__ == "__main__":
+    scrub_network_env()
+    if not sys.flags.isolated:
+        if not sys.executable:
+            sys.exit("coding-bot: cannot find its own Python interpreter to restart isolated")
+        os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__), *sys.argv[1:]])
+
 import argparse
 import math
-import os
 import re
+import shutil
+import signal
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -45,6 +76,13 @@ SECRET_SHAPES = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY|\bsk-[A-Za-z0-9_-]{20,}|\bgithub_pat_\w{20,}|\bgh[pousr]_\w{30,}"
     r"|\bxox[abpr]-[\w-]{10,}|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/=-]{24,}")
 KNOWN_SECRET_VARS = ("CODING_BOT_WEBHOOK_KEY", "CODING_BOT_WEBHOOK_URL", "CODING_BOT_WEBHOOK_HEADER")
+RUN_GUARD = "CODING_BOT_UNDER_RUN"  # set for the re-executed process, which holds the vault's secrets
+TASK_FILE = "CODING_BOT_TASK_FILE"  # the task, handed to that process in a private file: never in any argv
+VAULT_REASON = "coding-bot: send a task to the Coding bot"
+# What peer_mail may inherit once vault secrets are in the environment (`sudo-secretspec run` exports EVERY declared one):
+# the basics, peer-link's own settings and what git needs to push the mailbox. Nothing else, and the webhook key only for send.
+KEEP_ENV = re.compile(r"PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TERM|LANG|LC_\w+|SSH_AUTH_SOCK|PEER_LINK_\w+"
+                      r"|GIT_AUTHOR_\w+|GIT_COMMITTER_\w+|GIT_SSH_COMMAND|GIT_CONFIG_GLOBAL")
 
 
 def config() -> dict[str, str]:
@@ -56,15 +94,10 @@ def config() -> dict[str, str]:
     }
 
 
-def network_override(name: str) -> bool:
-    """A variable that redirects or weakens TLS, routing or the interpreter of a child that holds the webhook key."""
-    low = name.lower()
-    return (low.endswith("_proxy") or low.startswith(("openssl_", "ssl_", "python")) or low == "sslkeylogfile"
-            or low in {"requests_ca_bundle", "curl_ca_bundle"})
-
-
-def child_env(cfg: dict[str, str]) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not network_override(k)}
+def child_env(cfg: dict[str, str], key: bool = False) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if KEEP_ENV.fullmatch(k) and not network_override(k)}
+    if key and os.environ.get(KEY_VAR):
+        env[KEY_VAR] = os.environ[KEY_VAR]
     return {**env, "PEER_LINK_COMM": cfg["comm"], "PEER_LINK_SELF": cfg["self"]}
 
 
@@ -78,10 +111,7 @@ def credential_in(text: str) -> bool:
 
 
 def send_argv(cfg: dict[str, str], path: str, subject: str) -> list[str]:
-    argv = peer_argv(cfg, "send", "--to", PEER, "--publish", "--subject", subject, "--file", path)
-    if os.environ.get(KEY_VAR):
-        return argv
-    return ["sudo-secretspec", "run", "--reason", "coding-bot: send a task to the Coding bot", "--", *argv]
+    return peer_argv(cfg, "send", "--to", PEER, "--publish", "--subject", subject, "--file", path)
 
 
 def wait_argv(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: float) -> list[str]:
@@ -94,10 +124,10 @@ def drain_argv(cfg: dict[str, str], mid: str) -> list[str]:
     return peer_argv(cfg, "drain", "--as", cfg["self"], "--re", mid)
 
 
-def run(argv: list[str], cfg: dict[str, str]) -> tuple[int, str]:
-    """Run one child with stdout captured and stderr/stdin inherited (a vault prompt needs the terminal)."""
+def run(argv: list[str], cfg: dict[str, str], key: bool = False) -> tuple[int, str]:
+    """Run one child with stdout captured and stderr/stdin inherited. `key`: this child (the send) gets the webhook key."""
     try:
-        proc = subprocess.run(argv, env=child_env(cfg), stdout=subprocess.PIPE, text=True, errors="replace", check=False)
+        proc = subprocess.run(argv, env=child_env(cfg, key), stdout=subprocess.PIPE, text=True, errors="replace", check=False)
     except OSError as exc:
         print(f"coding-bot: cannot run {argv[0]}: {exc.strerror or exc}", file=sys.stderr)
         return 127, ""
@@ -123,28 +153,15 @@ def subject_of(text: str) -> str:
 
 
 def send(cfg: dict[str, str], text: str) -> tuple[int, str | None]:
-    """Store and publish the task. Returns (exit code, message id); on a failed send the id is still returned when
-    peer_mail stored the message, so the caller can say it must NOT be sent again."""
-    if not text.strip():
-        print("coding-bot: empty task", file=sys.stderr)
-        return 2, None
-    if len(text) > MAX_TEXT:
-        print(f"coding-bot: task over {MAX_TEXT} characters; not sent", file=sys.stderr)
-        return 2, None
-    if credential_in(text):
-        print("coding-bot: refused: the task contains something shaped like a credential (or a known secret value); "
-              "remove it and send again. Nothing was sent.", file=sys.stderr)
-        return 2, None
-    if not Path(cfg["tool"]).is_file():
-        print(f"coding-bot: no peer_mail.py at {cfg['tool']} (clone frdminc/peer-link, or set PEER_LINK_TOOL)", file=sys.stderr)
-        return 1, None
-    # The body goes through a private temp file, not stdin: the vault prompt of `sudo-secretspec run` owns the terminal.
+    """Store and publish a task that `task_text` has already checked. Returns (exit code, message id); on a failed send the
+    id is still returned when peer_mail stored the message, so the caller can say it must NOT be sent again."""
+    # The body goes through a private temp file, never argv.
     with tempfile.TemporaryDirectory(prefix="coding-bot-") as tmp:
         body = Path(tmp) / "task.md"
         fd = os.open(body, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text if text.endswith("\n") else text + "\n")
-        rc, out = run(send_argv(cfg, str(body), subject_of(text)), cfg)
+        rc, out = run(send_argv(cfg, str(body), subject_of(text)), cfg, key=True)
     sys.stderr.write(out)  # peer_mail's delivery/wake report: diagnostics, never the reply
     found = SENT_ID.search(out)
     mid = found.group(1) if found else None
@@ -202,8 +219,55 @@ def message_id(value: str) -> str:
     return value
 
 
-def read_text(arg: str) -> str:
-    return sys.stdin.read() if arg == "-" else arg
+def refuse(why: str) -> int:
+    print(f"coding-bot: {why}", file=sys.stderr)
+    return 2
+
+
+def task_text(arg: str) -> str | int:
+    """The task: argv, stdin (read only up to MAX_TEXT + 1 characters, so a huge or endless stream is refused promptly) or, in
+    the re-executed process, the private file its parent wrote. An int is the exit code of a refusal."""
+    if os.environ.get(RUN_GUARD) and os.environ.get(TASK_FILE):
+        try:
+            with open(os.environ[TASK_FILE], encoding="utf-8", errors="replace") as fh:
+                raw = fh.read(MAX_TEXT + 1)
+        except OSError as exc:
+            return refuse(f"cannot read the task handed over by the parent: {exc.strerror or exc}")
+    else:
+        raw = sys.stdin.read(MAX_TEXT + 1) if arg == "-" else arg
+    if len(raw) > MAX_TEXT:  # the raw size, before stripping can shrink it
+        return refuse(f"task over {MAX_TEXT} characters; not sent (send a summary or a pointer)")
+    if not raw.strip():
+        return refuse("empty task")
+    if credential_in(raw):
+        return refuse("refused: the task contains something shaped like a credential (or a known secret value); "
+                      "remove it and send again. Nothing was sent.")
+    return raw
+
+
+def under_vault(a: argparse.Namespace, text: str) -> int:
+    """Run this same command once more under `sudo-secretspec run`, isolated, with the task in a private file (never in an argv:
+    the check against the vault's values happens only in THAT process, so the text must not leave this one before it)."""
+    exe = shutil.which("sudo-secretspec")
+    if not exe:
+        print(f"coding-bot: {KEY_VAR} is not set and sudo-secretspec is not on PATH; nothing was sent", file=sys.stderr)
+        return 1
+    flags = ["--timeout", f"{a.timeout:g}", "--interval", f"{a.interval:g}", "--ack-timeout", f"{a.ack_timeout:g}"] if a.cmd == "ask" else []
+    with tempfile.TemporaryDirectory(prefix="coding-bot-") as tmp:
+        path = Path(tmp) / "task.txt"
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        env = {k: v for k, v in os.environ.items() if not network_override(k)}
+        env.update({RUN_GUARD: "1", TASK_FILE: str(path)})
+        argv = [exe, "run", "--reason", VAULT_REASON, "--", sys.executable, "-I", os.path.abspath(__file__), a.cmd, *flags, "-"]
+        previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # the temp dir is removed on the way out
+        try:
+            return subprocess.run(argv, env=env, check=False).returncode
+        except OSError as exc:
+            print(f"coding-bot: cannot run sudo-secretspec: {exc.strerror or exc}", file=sys.stderr)
+            return 1
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -242,7 +306,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if rc == 0 else 1
     if a.cmd == "wait":
         return wait(cfg, a.id, a.timeout, a.interval, a.ack_timeout)
-    rc, mid = send(cfg, read_text(a.text))
+    text = task_text(a.text)
+    if isinstance(text, int):
+        return text
+    if not Path(cfg["tool"]).is_file():  # before any vault prompt
+        print(f"coding-bot: no peer_mail.py at {cfg['tool']} (clone frdminc/peer-link, or set PEER_LINK_TOOL)", file=sys.stderr)
+        return 1
+    if not os.environ.get(KEY_VAR) and not os.environ.get(RUN_GUARD):
+        return under_vault(a, text)
+    rc, mid = send(cfg, text)
     if rc != 0 or mid is None:
         return rc
     if a.cmd == "send":
