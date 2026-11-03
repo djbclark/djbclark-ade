@@ -74,7 +74,8 @@ RESUME_FORMS = {"claude": "claude{flags} --resume {sid}", "opencode": "opencode{
                 "codex": "codex{flags} resume {sid}", "cursor": "cursor-agent{flags} --resume {sid}",
                 "copilot": "copilot{flags} --resume={sid}", "hermes": "hermes{flags} --resume {sid}",
                 "qwen": "qwen{flags} --resume {sid}", "agy": "agy{flags} --conversation {sid}",
-                "omp": "omp{flags} --resume={sid}", "zcode": "zcode{flags} --resume {sid}",
+                "omp": "omp{flags} --resume={sid}", "pi": "pi{flags} --session {sid}",
+                "zcode": "zcode{flags} --resume {sid}",
                 "muse": "muse resume {sid}", "cline": "cline --id {sid}"}
 # claude launch flags a resume may replay (the allow-list herdr-sleeper uses); everything else is dropped
 REPLAY_BOOL = {"--dangerously-skip-permissions", "--verbose"}
@@ -98,7 +99,7 @@ PASEO_LS_TIMEOUT = 20
 PASEO_STATUS = {"running": "working", "idle": "idle"}
 # binary name -> agent label, for TUIs running outside herdr (herdr panes are taken from herdr itself)
 PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode",
-               "zcode": "zcode", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
+               "zcode": "zcode", "pi": "pi", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
                "muse": "muse", "cline": "cline", "hermes": "hermes", "grok": "grok", "devin": "devin"}
 PROC_SKIP = re.compile(r"(acp|mcp|--acp|gateway|dashboard|language-server|lsp|sleeper|serve\b|Helper|node_modules|"
                        r"claude-agent-acp|codex-acp| -p |--print|exec |run |\bresume-globally\b)")
@@ -873,6 +874,20 @@ def _hermes_native(argv):
 
 
 # Native TUIs herdr does not detect that PROC_AGENTS (which `_proc_scan` also reads) must not take: recognised by exact argv only.
+def _pi_headless(argv):
+    """Pi RPC/JSON workers and informational commands are not interactive seats."""
+    for index, token in enumerate(argv):
+        if token == "--":
+            break
+        if token in {"-p", "--print", "--list-models", "--export", "-h", "--help", "-v", "--version"}:
+            return True
+        if token.startswith("--mode=") and token.split("=", 1)[1] != "text":
+            return True
+        if token == "--mode" and (index + 1 >= len(argv) or argv[index + 1] != "text"):
+            return True
+    return False
+
+
 def _native_extra(argv):
     """Exact native interactive entries, excluding service and one-shot commands."""
     base = [os.path.basename(a) for a in argv[:2]]
@@ -905,6 +920,8 @@ def _tui_of(procs):
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
         agent = (next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
                  or _native_extra(argv))
+        if agent == "pi" and _pi_headless(argv):
+            continue
         if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
         sid = None
@@ -959,6 +976,13 @@ def _proc_scan(known_pids, known_panes, anc):
             agent = PROC_AGENTS.get(os.path.basename(cmd.split()[1]))  # `python … hermes`, `node … cursor-agent`
         if not agent:
             continue
+        if agent == "pi":
+            try:
+                pi_argv = shlex.split(cmd)
+            except ValueError:
+                continue
+            if _pi_headless(pi_argv):
+                continue
         env = _where.env_of(pid) if _where else {}
         if env.get("HERDR_PANE_ID") in known_panes:
             continue

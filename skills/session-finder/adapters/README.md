@@ -24,3 +24,9 @@ long note into one row per section), `live()` = the open ones and the labels abo
 Rules: `load()` is only called when `fp` changed, so parse there, not in `sessions()`.
 Text only (no tool output, no system prompts/reminders). Read-only on the agent's data;
 open SQLite files with `file:...?mode=ro` URIs. Skip a session on any error rather than raising.
+
+Pi (`pi.py`, added 2026-11-03) reads native JSONL under `~/.pi/agent/sessions`,
+or the `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` overrides. Only user
+and assistant text is indexed; thinking and tool output are excluded. The most
+recent nonempty `session_info` name supplies the title. Listing is stat-only
+and skips symlink session files/directories. Resume with `pi --session ID`.
