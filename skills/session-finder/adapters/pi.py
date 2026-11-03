@@ -66,7 +66,7 @@ def _read(path):
         if entry.get("type") == "session" and isinstance(entry.get("cwd"), str):
             cwd = entry["cwd"]
         elif entry.get("type") == "session_info" and isinstance(entry.get("name"), str):
-            title = entry["name"].strip() or title
+            title = entry["name"].strip()  # an empty name clears the title (Pi getSessionName)
         elif entry.get("type") == "message":
             message = entry.get("message")
             if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):

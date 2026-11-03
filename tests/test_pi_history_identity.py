@@ -270,3 +270,15 @@ def test_deeply_nested_json_is_not_a_crash(tmp_path, monkeypatch):
     pi = load("adapters/pi")
     assert [r["sid"] for r in pi.sessions()] == ["deep_id"]
     list(pi._records(root / "2026-11-03T15-25-31-559Z_deep_id.jsonl"))
+
+
+def test_cleared_session_name_falls_back_to_the_first_prompt(tmp_path):
+    pi = load("adapters/pi")
+    path = tmp_path / "2026-11-03T15-25-31-559Z_named.jsonl"
+    rows = [{"type": "session", "id": "named", "cwd": "/w"},
+            {"type": "message", "message": {"role": "user", "content": "first prompt text"}},
+            {"type": "session_info", "name": "Custom name"}]
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    assert pi._read(path)[1] == "Custom name"
+    path.write_text("\n".join(json.dumps(r) for r in [*rows, {"type": "session_info", "name": "   "}]) + "\n")
+    assert pi._read(path)[1] == "first prompt text"

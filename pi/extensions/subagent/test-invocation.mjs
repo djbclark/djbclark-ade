@@ -287,6 +287,30 @@ if (process.argv.includes("--mode")) {
 	}
 	const split = await execute({ agent: "plain", task: "SPLIT_UTF8" });
 	assert.equal(split.details.results[0].stderr, "err \u00e9"); cases++;
+	// Renderers use the same failure predicate as execution: stopReason "error" with exit code 0 is a failure.
+	const theme = { fg: (color, text) => `<${color}>${text}`, bold: (text) => text };
+	const draw = (component) => component.render(200).join("\n");
+	const rendered = async (params, expanded) => {
+		const result = await execute(params);
+		return draw(tool.renderResult(result, { expanded }, theme, {}));
+	};
+	for (const expanded of [false, true]) {
+		for (const [mode, params] of [
+			["single", { agent: "plain", task: "LLM_ERROR" }],
+			["chain", { chain: [{ agent: "plain", task: "ok" }, { agent: "plain", task: "LLM_ERROR" }] }],
+			["parallel", { tasks: [{ agent: "plain", task: "ok" }, { agent: "plain", task: "LLM_ERROR" }] }]]) {
+			const out = await rendered(params, expanded);
+			assert.ok(out.includes("<error>Error: provider failure"), `${mode} expanded=${expanded}: ${out}`);
+			assert.ok(out.includes("<error>✗"), `${mode} expanded=${expanded}: ${out}`);
+			if (mode === "chain") assert.ok(out.includes("1/2 steps") && out.includes("<success>✓"), out);
+			if (mode === "parallel") assert.ok(out.includes("1/2 tasks"), out);
+			cases++;
+		}
+		// A failure with only stderr (exit 1, no errorMessage) shows the stderr.
+		const stderrOnly = await rendered({ chain: [{ agent: "plain", task: "test", model: "unavailable/model" }] }, expanded);
+		assert.ok(stderrOnly.includes("Model unavailable/model not found") && stderrOnly.includes("0/1 steps"), stderrOnly);
+		cases++;
+	}
 	// A pre-aborted call keeps the original rejection behavior and carries config in its last update.
 	const controller = new AbortController(); controller.abort();
 	const updates = [];

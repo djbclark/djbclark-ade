@@ -192,6 +192,11 @@ function getResultOutput(result: SingleResult): string {
 	return getFinalOutput(result.messages) || "(no output)";
 }
 
+/** Why a failed result failed (errorMessage, else stderr); "" for a successful one. */
+function failureDetail(result: SingleResult): string {
+	return isFailedResult(result) ? (result.errorMessage || result.stderr || "").trim() : "";
+}
+
 /** Effective model/thinking as passed to the child; "default" means Pi's own default applied. */
 function configLabel(result: SingleResult): string {
 	const c = result.selectedConfig;
@@ -894,8 +899,8 @@ export default function (pi: ExtensionAPI) {
 					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 					container.addChild(new Text(header, 0, 0));
-					if (isError && r.errorMessage)
-						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
+					if (failureDetail(r))
+						container.addChild(new Text(theme.fg("error", `Error: ${failureDetail(r)}`), 0, 0));
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
 					container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
@@ -929,7 +934,7 @@ export default function (pi: ExtensionAPI) {
 
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
+				if (failureDetail(r)) text += `\n${theme.fg("error", `Error: ${failureDetail(r)}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
@@ -954,7 +959,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
+				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
 				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
 
 				if (expanded) {
@@ -971,7 +976,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -984,6 +989,8 @@ export default function (pi: ExtensionAPI) {
 							),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						if (failureDetail(r))
+							container.addChild(new Text(theme.fg("error", `Error: ${failureDetail(r)}`), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -1023,9 +1030,10 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("chain ")) +
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
+					if (failureDetail(r)) text += `\n${theme.fg("error", `Error: ${failureDetail(r)}`)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
@@ -1069,6 +1077,8 @@ export default function (pi: ExtensionAPI) {
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						if (failureDetail(r))
+							container.addChild(new Text(theme.fg("error", `Error: ${failureDetail(r)}`), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -1112,6 +1122,7 @@ export default function (pi: ExtensionAPI) {
 								: theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
+					if (failureDetail(r)) text += `\n${theme.fg("error", `Error: ${failureDetail(r)}`)}`;
 					if (displayItems.length === 0)
 						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
