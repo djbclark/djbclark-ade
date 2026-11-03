@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""Plan exact Pi skill exclusions; apply/undo only under a runtime target claim.
+
+No resource is moved, deleted or installed. See docs/pi-skills.md.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+
+
+class Refused(ValueError):
+    pass
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def encoded(obj):
+    return (json.dumps(obj, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode()
+
+
+def pairs_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise Refused("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def regular_bytes(path):
+    # Nonblocking open avoids hanging on a FIFO; never read devices or sockets.
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
+            raise Refused("expected a regular file no larger than 8 MiB")
+        return stream.read()
+
+
+def load(path):
+    raw = regular_bytes(path)
+    try:
+        obj = json.loads(raw, object_pairs_hook=pairs_object,
+                         parse_constant=lambda _: (_ for _ in ()).throw(Refused("non-finite JSON")))
+    except (ValueError, UnicodeError) as exc:
+        raise Refused("malformed JSON (contents not displayed)") from exc
+    if not isinstance(obj, dict):
+        raise Refused("expected a JSON object")
+    return raw, obj
+
+
+def skills(settings):
+    result = settings.get("skills", [])
+    if not isinstance(result, list) or any(not isinstance(x, str) or not x or "\x00" in x for x in result):
+        raise Refused("skills must be an array of nonempty strings")
+    return result
+
+
+def absolute(value):
+    path = Path(value).expanduser()
+    if not path.is_absolute() or ".." in path.parts or any(c in str(path) for c in "\x00\n\r\\"):
+        raise Refused("paths must be absolute, without parent traversal or control characters")
+    return path
+
+
+def tree(root):
+    """Compare the whole bundle, not just instructions with potentially different scripts."""
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise Refused("skill root must be a directory")
+    entries = []
+    def walk_error(_):
+        raise Refused("unreadable bundle directory")
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+        for name in sorted(dirs + files):
+            p = Path(directory) / name
+            info = p.lstat()
+            rel = str(p.relative_to(root))
+            if p.is_symlink() or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise Refused("bundle contains an internal symlink or special file; manual review required")
+            if stat.S_ISDIR(info.st_mode):
+                entries.append((rel, "directory"))
+            else:
+                entries.append((rel, bool(info.st_mode & 0o111), digest(regular_bytes(p))))
+            if len(entries) > 10000:
+                raise Refused("bundle exceeds 10000 entries")
+    text = regular_bytes(root / "SKILL.md").decode("utf-8")
+    front = text.split("---", 2)
+    if len(front) != 3 or front[0] or not re.search(r"(?m)^description:\s*\S", front[1]):
+        raise Refused("expected skill frontmatter with description")
+    names = re.findall(r"(?m)^name: *[\"']?([a-z0-9]+(?:-[a-z0-9]+)*)[\"']? *$", front[1])
+    if len(names) != 1 or len(names[0]) > 64:
+        raise Refused("expected one portable scalar skill name")
+    return names[0], digest(encoded(sorted(entries)))
+
+
+def layout(agent, project):
+    agent = absolute(agent)
+    project = absolute(project) if project else None
+    target = (project / ".pi" if project else agent) / "settings.json"
+    # Existing files only: provisioning a settings file is a separate reviewed action.
+    real = target.resolve(strict=True)
+    return agent, project, target, real
+
+
+def check_filters(settings, keep, base):
+    for entry in skills(settings):
+        # Do not approximate minimatch or override precedence. Exact unrelated user
+        # exclusions are supported; glob exclusions need a human/Pi runtime review.
+        if entry.startswith("!"):
+            raise Refused("glob skill exclusions require manual review")
+        if entry.startswith("-"):
+            item = entry[1:]
+            candidate = Path(item).expanduser()
+            if not candidate.is_absolute():
+                candidate = base / candidate
+            if os.path.abspath(candidate) in (str(keep), str(keep.parent)):
+                raise Refused("retained skill is already excluded")
+
+
+def make_plan(agent, project, requested):
+    agent, project, target, real = layout(agent, project)
+    raw, settings = load(real)
+    shared = Path.home() / ".agents" / "skills"
+    checks = [(settings, target.parent)]
+    # Global filters apply to user resources, project filters to project resources.
+    if project:
+        _, global_settings = load(agent / "settings.json")
+        checks = [(global_settings, agent), (global_settings, shared.parent)]
+    else:
+        checks.append((settings, shared.parent))
+    verified, additions = [], []
+    excluded, retained = set(), set()
+    for left, right in requested:
+        left, right = absolute(left), absolute(right)
+        if project:
+            allowed = (project / ".pi" / "skills" / "graft", project / ".agents" / "skills" / "graft")
+            if left not in allowed or right not in (shared / "graft", agent / "skills" / "graft"):
+                raise Refused("project mode only excludes local graft in favor of global graft")
+        elif left.parent != agent / "skills" or right.parent != shared or left.name != right.name:
+            raise Refused("global mode requires matching direct native/shared skill directories")
+        # Pi's recursive discovery stops at a root SKILL.md and honors ignore files.
+        # Refuse these layouts rather than reimplement its ignore library.
+        for folder in (left.parent, right.parent, left, right):
+            if any(os.path.lexists(folder / name) for name in (".gitignore", ".ignore", ".fdignore")):
+                raise Refused("skill discovery ignore files require manual review")
+        if any(os.path.lexists(folder / "SKILL.md") for folder in (left.parent, right.parent)):
+            raise Refused("parent SKILL.md shadows child discovery")
+        name, fingerprint = tree(left)
+        if (name, fingerprint) != tree(right):
+            raise Refused("skill bundles differ; no exclusion proposed")
+        if name != left.name:
+            raise Refused("skill name must match directory name")
+        for config, base in checks:
+            check_filters(config, right / "SKILL.md", base)
+        entry = "-" + str(left / "SKILL.md")
+        if entry not in skills(settings) and entry not in additions:
+            additions.append(entry)
+        verified.append([str(left), str(right), str(left.resolve()), str(right.resolve()), fingerprint])
+        excluded.add(str(left.resolve()))
+        retained.add(str(right.resolve()))
+    if not verified:
+        raise Refused("at least one verified pair is required")
+    if excluded & retained:
+        raise Refused("excluded and retained bundles alias; no cleanup needed or unsafe pair chain")
+    return {"version": 1, "agent": str(agent), "project": str(project) if project else None,
+            "target": str(target), "real_target": str(real), "before": digest(raw),
+            "pairs": verified, "additions": additions}
+
+
+def atomic(path, data, expected=None, exclusive=False):
+    path = absolute(str(path))
+    if not path.parent.is_dir():
+        raise Refused("output parent directory must already exist")
+    if exclusive and os.path.lexists(path):
+        raise Refused("output already exists; refusing replacement")
+    if expected is not None:
+        info = path.stat()
+        if info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o022:
+            raise Refused("settings must be owned by the caller, single-linked and not group/world writable")
+    mode = stat.S_IMODE(path.stat().st_mode) if expected is not None else 0o600
+    fd, tmp = tempfile.mkstemp(prefix=".pi-skill-dedup-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if exclusive:
+            os.link(tmp, path)  # atomic publication without clobbering an existing file/link
+        else:
+            if regular_bytes(path) != expected:
+                raise Refused("target changed during operation")
+            os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def require_claim(target):
+    # Reuse ADE's registry. A workspace claim is NOT a runtime settings claim.
+    from ade_claims import read_claim
+    claim = read_claim(os.environ.get("ADE_CLAIM_ID", ""))
+    if not claim or claim.get("state") != "active" or Path(claim.get("path", "")).resolve() != target:
+        raise Refused("apply/undo requires ADE_CLAIM_ID for an active claim on the real settings FILE")
+
+
+def apply(plan_path, receipt_path):
+    _, plan = load(plan_path)
+    if plan.get("version") != 1:
+        raise Refused("unsupported plan version")
+    try:
+        fresh = make_plan(plan["agent"], plan["project"], [(p[0], p[1]) for p in plan["pairs"]])
+    except (KeyError, TypeError, IndexError) as exc:
+        raise Refused("malformed plan") from exc
+    if fresh != plan:
+        raise Refused("stale or edited plan; generate a new dry run")
+    target = Path(plan["real_target"])
+    require_claim(target)
+    raw, obj = load(target)
+    if digest(raw) != plan["before"]:
+        raise Refused("settings changed since plan")
+    if not plan["additions"]:
+        print("No changes needed; no receipt written.")
+        return
+    before_skills = skills(obj)
+    after = before_skills + plan["additions"]
+    receipt = {"version": 1, "target": plan["target"], "real_target": str(target),
+               "additions": plan["additions"], "before_skills": before_skills,
+               "had_skills": "skills" in obj, "after_skills": digest(encoded(after))}
+    # Publish recovery information BEFORE mutation; interruption cannot strand an edit.
+    atomic(absolute(receipt_path), encoded(receipt), exclusive=True)
+    obj["skills"] = after
+    if Path(plan["target"]).resolve(strict=True) != target:
+        raise Refused("settings symlink retargeted")
+    atomic(target, encoded(obj), expected=raw)
+    print(f"Applied {len(plan['additions'])} exact exclusions; receipt written.")
+
+
+def undo(receipt_path, execute):
+    _, receipt = load(receipt_path)
+    required = {"version", "target", "real_target", "additions", "before_skills", "had_skills", "after_skills"}
+    if set(receipt) != required or receipt["version"] != 1 or type(receipt["had_skills"]) is not bool:
+        raise Refused("malformed receipt")
+    before = skills({"skills": receipt["before_skills"]})
+    additions = skills({"skills": receipt["additions"]})
+    if not additions or any(not x.startswith("-/") or not x.endswith("/SKILL.md") for x in additions):
+        raise Refused("malformed receipt additions")
+    if not receipt["had_skills"] and before:
+        raise Refused("malformed receipt original skills")
+    if digest(encoded(before + additions)) != receipt["after_skills"]:
+        raise Refused("inconsistent receipt")
+    target = absolute(receipt["target"])
+    real = absolute(receipt["real_target"])
+    if target.resolve(strict=True) != real:
+        raise Refused("settings symlink retargeted")
+    raw, obj = load(real)
+    if skills(obj) == before and ("skills" in obj) == receipt["had_skills"]:
+        print("Already reversed (or apply never completed); no changes.")
+        return
+    if digest(encoded(skills(obj))) != receipt["after_skills"]:
+        raise Refused("skills changed after apply; refusing to overwrite later user edits")
+    if execute:
+        require_claim(real)
+        if receipt["had_skills"]:
+            obj["skills"] = before
+        else:
+            del obj["skills"]
+        atomic(real, encoded(obj), expected=raw)
+    print("Reversed owned exclusions." if execute else "Dry run: reversal safe; use undo --apply to write.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    plan = sub.add_parser("plan", help="dry run; optionally save a reviewed plan, never edit settings")
+    plan.add_argument("--agent-dir", default=os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent")))
+    plan.add_argument("--project", help="absolute project root; local graft exclusions only")
+    plan.add_argument("--pair", nargs=2, action="append", required=True, metavar=("EXCLUDE_DIR", "KEEP_DIR"))
+    plan.add_argument("--output", help="new absolute plan path (parent must exist)")
+    commit = sub.add_parser("apply", help="reverify saved plan and write under an active runtime claim")
+    commit.add_argument("--plan", required=True)
+    commit.add_argument("--receipt", required=True)
+    reverse = sub.add_parser("undo", help="dry-run reversal; refuses later skill-array edits")
+    reverse.add_argument("--receipt", required=True)
+    reverse.add_argument("--apply", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.command == "plan":
+            result = make_plan(args.agent_dir, args.project, args.pair)
+            print(f"Dry run: {len(result['pairs'])} equivalent bundles; {len(result['additions'])} new exclusions.")
+            for entry in result["additions"]:
+                print(entry)
+            if args.output:
+                atomic(absolute(args.output), encoded(result), exclusive=True)
+        elif args.command == "apply":
+            apply(absolute(args.plan), args.receipt)
+        else:
+            undo(absolute(args.receipt), args.apply)
+        return 0
+    except (OSError, ValueError, TypeError, RuntimeError, RecursionError) as exc:
+        # No exception detail: JSON/file errors can contain settings or skill contents.
+        message = str(exc) if isinstance(exc, Refused) else "unsafe, missing or unreadable input"
+        print(f"pi-skill-dedup: refused: {message}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
