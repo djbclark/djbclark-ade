@@ -14,7 +14,7 @@
 MESSAGE TEXT NEVER GOES THROUGH A SHELL-QUOTED STRING WHEN IT HAS CODE (2026-11-01, a recurring harness failure): a message containing backticks, `$`, `$( )`,
 or quotes goes through `--message-file PATH` (`-` reads stdin), or a Python argv list, never `"..."` in a shell: inside double quotes the caller's
 shell EXECUTES a backtick or `$( )` and silently drops its text (a lead's message lost `stages: [pre-push]`; an earlier one ran a command).
-`--message-file` replaces the positional text (exactly one of the two; an empty file is exit 2) and reads the file as UTF-8 (a leading BOM is dropped)
+`--message-file` replaces the positional text (exactly one of the two; an empty file, or a bare positional `-`, which reads nothing, is exit 2) and reads the file as UTF-8 (a leading BOM is dropped)
 without any shell step, so those characters arrive exactly as written. The text then goes through the same one-line fold as a positional text: one trailing
 newline is dropped, and every run of whitespace (newlines and indentation included) becomes ONE space, so a multi-line or indented block arrives on one line.
 

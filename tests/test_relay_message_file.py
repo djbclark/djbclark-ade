@@ -105,6 +105,8 @@ class TestMessageFile(Base):
             rc, _, err = self.send("peer-fb", text, "--wait", "2", "--via", "pane", stdin=TRICKY.encode())
             self.assertEqual((rc, self.typed), (2, []), text)
             self.assertIn("--message-file -", err)
+        rc, _, err = self.send("peer-fb", "--message-file", "-", "--wait", "2", "--via", "pane", stdin=TRICKY.encode())
+        self.assertEqual((rc, self.typed), (0, [TRICKY]), err)    # the stdin form the refusal names still sends
 
 
 class TestAckBeforeAFileSend(Base):

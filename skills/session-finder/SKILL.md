@@ -33,8 +33,8 @@ python3 -I $S/relay.py <id|name> --message-file PATH|-   # the text from a file 
 
 **A message containing code, backticks, `$` or quotes goes through `--message-file` (or a Python argv list), never a shell-quoted string**
 (2026-11-01): inside double quotes your shell EXECUTES a backtick or `$( )` and the text silently vanishes (a lead's message lost `stages: [pre-push]`;
-an earlier one ran a command). Write the text with the file tool, then `relay.py <id> --message-file /abs/path` (`-` reads stdin; an empty file, or a
-positional text as well, is exit 2). Those characters arrive exactly as written, but the text is still folded to ONE line like any relay text: one trailing
+an earlier one ran a command). Write the text with the file tool, then `relay.py <id> --message-file /abs/path` (`-` reads stdin; an empty file, a
+positional text as well, or a bare positional `-` instead of `--message-file -`, is exit 2). Those characters arrive exactly as written, but the text is still folded to ONE line like any relay text: one trailing
 newline is dropped and every whitespace run (newlines, indentation) becomes one space, so a multi-line block is not preserved.
 
 Sibling skills: `helm` (answer every waiting session from one window; `/helm-all`
