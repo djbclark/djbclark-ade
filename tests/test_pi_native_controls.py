@@ -33,6 +33,20 @@ def native(monkeypatch, tmp_path):
     return mod, reg
 
 
+def load_autorename(name, monkeypatch, mod):
+    """Load autorename with every state path redirected into the fixture root."""
+    spec = importlib.util.spec_from_file_location(name, SKILL / "autorename.py")
+    rename = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rename)
+    state = mod.root().parent
+    monkeypatch.setattr(rename, "STATE_DIR", state)
+    monkeypatch.setattr(rename, "OMP_DIR", state / "omp")
+    monkeypatch.setattr(rename, "OMP_SESSIONS", state / "isolated-sessions")
+    monkeypatch.setattr(rename, "pi_native", mod)
+    assert rename.OMP_DIR.parent == mod.root().parent
+    return rename
+
+
 def test_identity_and_native_priority(native, monkeypatch):
     mod, reg = native
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent")
@@ -115,10 +129,7 @@ def test_autorename_missing_pi_never_renames_parent(tmp_path):
 
 def test_autorename_uses_bridge_without_host_side_effects(native, monkeypatch, capsys):
     mod, reg = native
-    spec = importlib.util.spec_from_file_location("autorename_pi_test", SKILL / "autorename.py")
-    rename = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rename)
-    monkeypatch.setattr(rename, "pi_native", mod)
+    rename = load_autorename("autorename_pi_test", monkeypatch, mod)
     monkeypatch.setattr(rename, "paseo_set_name", lambda *a, **kw: pytest.fail("inherited host touched"))
     calls = []
     monkeypatch.setattr(mod, "request", lambda reg, action, **kw: calls.append((action, kw)) or {"status": "renamed"})
@@ -134,10 +145,7 @@ def test_autorename_uses_bridge_without_host_side_effects(native, monkeypatch, c
 @pytest.mark.parametrize("kind,sid", [("omp", "omp-own"), ("opencode", "ses_child")])
 def test_nested_backend_selection_and_rename(native, monkeypatch, tmp_path, kind, sid):
     mod, _ = native
-    spec = importlib.util.spec_from_file_location("autorename_child_test", SKILL / "autorename.py")
-    rename = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rename)
-    monkeypatch.setattr(rename, "pi_native", mod)
+    rename = load_autorename("autorename_child_test", monkeypatch, mod)
     monkeypatch.setattr(mod, "ancestors", lambda: [(22, "bash"), (30, kind), (42, "pi")])
     monkeypatch.setenv("PI_CODING_AGENT", "true")
     monkeypatch.setenv("AI_AGENT", "pi")
@@ -150,7 +158,7 @@ def test_nested_backend_selection_and_rename(native, monkeypatch, tmp_path, kind
         file = tmp_path / "omp.jsonl"
         file.write_text(json.dumps({"type": "title", "title": "Pinned", "source": "user"}) + "\n")
         assert rename.omp_read(file) == ("Pinned", "user")
-        rename.OMP_DIR.mkdir()
+        rename.OMP_DIR.mkdir(parents=True)
         (rename.OMP_DIR / "30.json").write_text(json.dumps({"session_id": sid, "session_file": str(file)}))
         monkeypatch.setattr(rename, "_alive", lambda pid: pid == 30)
         monkeypatch.setattr(rename, "omp_set_title", lambda reg, title: calls.append((reg["pid"], title)) or True)
@@ -208,15 +216,11 @@ def test_legacy_omp_still_renames_its_host_without_pi_markers(native, monkeypatc
     mod, _ = native
     for key in ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT", "AI_AGENT"):
         monkeypatch.delenv(key, raising=False)
-    spec = importlib.util.spec_from_file_location("autorename_legacy_test", SKILL / "autorename.py")
-    rename = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rename)
-    monkeypatch.setattr(rename, "pi_native", mod)
+    rename = load_autorename("autorename_legacy_test", monkeypatch, mod)
     monkeypatch.setenv("OMPCODE", "1")
     monkeypatch.setattr(rename, "nearest_agent_proc", lambda: ("omp", 30))
-    rename.OMP_DIR.mkdir()
+    rename.OMP_DIR.mkdir(parents=True)
     (rename.OMP_DIR / "30.json").write_text(json.dumps({"session_id": "omp-own"}))
-    monkeypatch.setattr(rename, "OMP_SESSIONS", mod.root().parent / "isolated-sessions")
     monkeypatch.setattr(rename, "_alive", lambda pid: pid == 30)
     monkeypatch.setattr(rename, "omp_read", lambda file: (None, None))
     calls = []
