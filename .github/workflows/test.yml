@@ -19,6 +19,18 @@ permissions:
   contents: read
 
 jobs:
+  fleet-migrate-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Offline fleet migration contracts (no live agents or models)
+        run: >-
+          uv run --with pytest python -m pytest
+          tests/test_fleet_migrate.py tests/test_fleet_migrate_storage.py
+          tests/test_fleet_migrate_cli.py -q
+
   pytest:
     # On request only (operator, 2026-10-29: "Nothing needs to use macos unless specifically
     # requested"): a manual dispatch with the `macos` input. Pull requests and pushes run the

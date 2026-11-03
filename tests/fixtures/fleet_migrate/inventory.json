@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "hosts": [{"id": "fixture-host", "complete": true, "reachable": true}],
+  "workspaces": [
+    {"host": "fixture-host", "id": "fixture-ade", "name": "ADE"},
+    {"host": "fixture-host", "id": "fixture-dann", "name": "Dann Home"}
+  ],
+  "agents": [
+    {"id": "fixture-source", "host": "fixture-host", "native_id": "fixture-source-native", "tui": "omp", "vendor": "anthropic", "model": "anthropic/claude-fable-5-1", "billing_route": "anthropic-api", "title": "Fixture build", "status": "error", "workspace_id": "fixture-ade", "membership": "authoritative", "channel": "relay"},
+    {"id": "fixture-dann-agent", "host": "fixture-host", "native_id": "fixture-dann-native", "tui": "opencode", "vendor": "deepseek", "model": "deepseek/deepseek-v4", "billing_route": "opencode-go", "title": "Dann fixture", "status": "idle", "workspace_id": "fixture-dann", "membership": "authoritative", "channel": "relay"}
+  ],
+  "catalog": [{"tui": "pi", "vendor": "openai", "model": "openai/gpt-6-astra", "thinking": ["low", "medium", "high", "xhigh", "max"], "billing_pool": "codex-api", "context": 272000}]
+}

@@ -97,9 +97,47 @@ catalog entry and explicit pool. Unknown aliases block. Opus/Sonnet proposals
 are not automatic rules. Pi's reported 272K catalog limit is not an input budget
 and no Codex 500K override is transplanted into Pi.
 
+## Offline CLI (not live migration)
+
+The current CLI can plan from exported normalized metadata only. Without
+`--inventory`, it returns `BLOCKED: authoritative-live-inventory-adapter-not-admitted`
+rather than using an incomplete live list. No command imports a live transport.
+Use the repository fixture for a zero-model, zero-agent offline example:
+
+```sh
+bin/fleet-migrate plan --from-tui omp --from-vendor anthropic \
+  --to-tui pi --to-vendor openai --include-herdr \
+  --inventory tests/fixtures/fleet_migrate/inventory.json \
+  --output "$HOME/.local/state/ade/fleet-migrate/plans/example.json"
+bin/fleet-migrate validate "$HOME/.local/state/ade/fleet-migrate/plans/example.json" --json
+```
+
+`plan` never overwrites an existing output. Parent directory must be private
+0700; it is created if absent. Files are 0600. Metadata must contain no secrets:
+whitelisting is not a guarantee against a credential pasted into a title or ID.
+Do not import raw transcripts/environment dumps. All JSON reads are bounded to
+1 MiB, reject duplicate keys/nonfinite numbers, and require regular single-link
+owned files. State traversal uses no-follow directory descriptors, temp-neighbor
+atomic replacement and fsync; a second local coordinator refuses lock contention.
+These are accidental-corruption/path safeguards, not malicious same-uid isolation.
+
+`apply PLAN --approved-digest SHA256` validates the immutable plan and records a
+deterministic local BLOCKED run with zero external actions. It cannot launch,
+fence, archive, publish ownership or notify. Repeated calls reuse that receipt.
+`status RUN --json` reads it. `reconcile RUN --dry-run` only inspects;
+`reconcile RUN --apply --approved-digest SHA256` verifies the binding but remains
+blocked. `notify RUN --retry-due` refuses without a committed ownership epoch and
+sends zero messages. These are explicit operational capability limits, not
+simulated claims of a successful migration. No `--force` exists.
+
+Exit codes: 0 valid offline draft/read; 2 refused input/schema/permissions/approval;
+4 precise unsupported-runtime BLOCKED. Draft validation success explicitly says
+`runtime_ready=false`. A digest is not operator authentication or live approval.
+
 ## Next milestones and completion boundaries
 
-1. Add bounded private artifact storage/CLI and authoritative discovery adapters.
+1. Admit authoritative discovery adapters; private artifacts/CLI are implemented
+   but awaiting independent review and CI.
 2. Implement durable transition/journal contracts against a fake action sink,
    resource/operation evidence and restart/concurrency fault cases. Live apply
    remains a precise refusal wherever the matrix is unproven.

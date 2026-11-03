@@ -187,3 +187,42 @@ def test_unknown_model_never_guesses_equivalence():
     inv["agents"][0]["model"] = "anthropic/claude-new-model"
     assert not plan(inv)["selected"]
     assert plan(inv)["unresolved"]
+
+
+def test_codex_subscription_pool_is_not_pi_openai_api_capacity():
+    inv = inventory()
+    inv["catalog"][0]["billing_pool"] = "codex"
+    assert not plan(inv)["selected"]
+    assert plan(inv)["unresolved"]
+
+
+def test_conflicting_native_views_cannot_create_a_successor():
+    inv = inventory()
+    inv["agents"].append(agent("bridge", native_id="source", tui="herdr-omp", model="other"))
+    assert not plan(inv)["selected"]
+    assert "conflicting-native-metadata" in plan(inv)["unresolved"][0]["reasons"]
+
+
+def test_no_channel_is_explicitly_unresolved_not_silently_dropped():
+    inv = inventory()
+    inv["agents"].append(agent("pid123", channel=None))
+    assert plan(inv)["unresolved_recipients"]
+
+
+def test_multiple_hosts_exact_name_matches_are_all_protected():
+    inv = inventory()
+    inv["hosts"].append({"id": "remote", "complete": True, "reachable": True})
+    inv["workspaces"].append({"host": "remote", "id": "protected", "name": "Dann Home"})
+    inv["agents"].append(agent("remote-agent", host="remote", workspace_id="protected"))
+    p = plan(inv)
+    assert len(p["protected_workspaces"]) == 2
+    assert len(p["selected"]) == 1
+    assert len(p["excluded"]) == 1
+
+
+@pytest.mark.parametrize("collection", ["agents", "workspaces", "hosts"])
+def test_missing_identity_is_not_null_membership_proof(collection):
+    inv = inventory()
+    inv[collection][0]["id"] = None
+    with pytest.raises(ValueError):
+        plan(inv)

@@ -15,7 +15,7 @@ MUTATIONS = frozenset({"create", "fence", "scheduler", "ownership", "archive", "
 ROUTES = frozenset({"opencode-go", "cline", "deepseek"})
 # Recommendations for Opus/Sonnet are deliberately not automatic policy entries.
 EXACT_MODELS = {("anthropic", "anthropic/claude-fable-5-1", "pi", "openai"):
-                ("openai/gpt-6-astra", "high")}
+                ("openai/gpt-6-astra", "high", "codex-api")}
 AGENT_FIELDS = ("id", "host", "native_id", "tui", "vendor", "model", "billing_route",
                 "title", "status", "workspace_id", "membership", "channel")
 RUNTIME_BLOCKERS = [
@@ -106,6 +106,11 @@ def sanitize_inventory(raw):
             if not isinstance(row, dict):
                 raise ValueError("invalid-record-" + collection)
             clean = {k: row.get(k) for k in names}
+            required = (("id",) if collection == "hosts" else
+                        ("host", "id") if collection in ("agents", "workspaces") else
+                        ("tui", "vendor", "model", "billing_pool"))
+            if any(not isinstance(clean.get(k), str) or not clean[k].strip() for k in required):
+                raise ValueError("missing-inventory-identity")
             for k, v in clean.items():
                 if k in ("complete", "reachable"):
                     if type(v) is not bool:
@@ -142,10 +147,11 @@ def _destination(source, catalog, to_tui, to_vendor):
     mapped = EXACT_MODELS.get((normalized(source.get("vendor")), normalized(source.get("model")), to_tui, to_vendor))
     if not mapped:
         return None, "no-approved-exact-model-mapping"
-    model, thinking = mapped
+    model, thinking, pool = mapped
     matches = [m for m in catalog if normalized(m.get("tui")) == to_tui and
                normalized(m.get("vendor")) == to_vendor and m.get("model") == model]
-    if len(matches) != 1 or thinking not in matches[0].get("thinking", []) or not matches[0].get("billing_pool"):
+    if (len(matches) != 1 or thinking not in matches[0].get("thinking", []) or
+            matches[0].get("billing_pool") != pool):
         return None, "destination-capability-or-pool-unknown"
     return {**matches[0], "thinking": thinking}, None
 
@@ -158,13 +164,15 @@ def build_plan(raw, *, from_tui, from_vendor=None, to_tui, to_vendor, include_he
         raise ValueError("invalid-plan-options")
     p = {"schema_version": SCHEMA, "policy_version": POLICY, "options": options,
          "inventory": inv, "protected_workspaces": protected_workspaces(inv),
-         "selected": [], "excluded": [], "unresolved": [], "recipients": [],
+         "selected": [], "excluded": [], "unresolved": [], "recipients": [], "unresolved_recipients": [],
          "runtime_blockers": list(RUNTIME_BLOCKERS), "execution_authorized": False}
     for views in _groups(inv["agents"]):
         live_views = [a for a in views if normalized(a.get("status")) in LIVE]
         recipients = [a for a in live_views if a.get("channel") and not str(a.get("id", "")).startswith("pid")]
         if recipients:
             p["recipients"].append(recipients[0])
+        elif live_views:
+            p["unresolved_recipients"].append({"views": live_views, "reason": "no-usable-communication-channel"})
         candidates = [a for a in live_views if
                       (normalized(a.get("tui")) == options["from_tui"] or
                        (include_herdr and normalized(a.get("tui")) == "herdr-" + options["from_tui"])) and
@@ -173,6 +181,8 @@ def build_plan(raw, *, from_tui, from_vendor=None, to_tui, to_vendor, include_he
             continue
         a = candidates[0]
         reasons = sorted({b for v in views for b in guard(v, inv, p["protected_workspaces"], "create")})
+        if any(len({normalized(v.get(k)) for v in views}) > 1 for k in ("model", "vendor")):
+            reasons.append("conflicting-native-metadata")
         row = {"source": a, "views": views, "reasons": reasons}
         if reasons:
             p["excluded" if any(b in ("protected-workspace", "protected-signals") for b in reasons) else "unresolved"].append(row)
