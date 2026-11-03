@@ -122,8 +122,8 @@ def test_ask_sends_then_waits_for_that_one_reply(link, capfd):
     assert out.out == handover("all done\nDONE"), "peer_mail's fenced handover, unchanged, and nothing else on stdout"
     send, wait, drain = link.calls()
     assert [c["argv"][0] for c in link.calls()] == ["send", "wait", "drain"]
-    assert send["argv"][:5] == ["send", "--to", "coding", "--publish", "--subject"]
-    assert send["argv"][5] == "find the login button" and send["file"] == "find the login button\n"
+    assert send["argv"][:5] == ["send", "--to", "coding", "--publish", "--subject=find the login button"]
+    assert send["file"] == "find the login button\n"
     assert wait["argv"][:9] == ["wait", "--as", "claude", "--sender", "coding", "--re", MID, "--fetch", "--interval"]
     assert wait["argv"][9:] == ["15", "--timeout", "0.25", "--ack-timeout", "300"]
     assert drain["argv"] == ["drain", "--as", "claude", "--re", MID]
@@ -219,8 +219,17 @@ def test_dash_reads_the_task_from_stdin(link, monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("line one\nline two\n"))
     assert cb.main(["send", "-"]) == 0
     call = link.calls()[0]
-    assert call["file"] == "line one\nline two\n" and call["argv"][call["argv"].index("--subject") + 1] == "line one"
-    assert "line one" not in " ".join(call["argv"][:call["argv"].index("--subject")]), "the body travels in the file only"
+    assert call["file"] == "line one\nline two\n" and "--subject=line one" in call["argv"]
+    assert "line two" not in " ".join(call["argv"]), "the body travels in the file only"
+
+
+def test_a_task_whose_first_line_looks_like_an_option_is_still_one_subject_value(link, monkeypatch):
+    """local-review of 5bbc9b63: `--subject` then a separate `--timeout 5` made peer_mail's argparse refuse the send."""
+    link.play(send={"out": SENT})
+    monkeypatch.setattr(sys, "stdin", io.StringIO("--timeout 5 means what?\nexplain\n"))
+    assert cb.main(["send", "-"]) == 0
+    argv = link.calls()[0]["argv"]
+    assert "--subject=--timeout 5 means what?" in argv and "--subject" not in argv
 
 
 def test_the_command_reexecutes_once_under_the_vault_only_without_the_key(link, monkeypatch):
