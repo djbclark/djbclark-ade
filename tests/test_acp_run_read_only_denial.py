@@ -248,6 +248,17 @@ def probe() -> dict[str, object]:
             "sh_script": conf_repo("c-shs", ("diff.py.textconv", "/bin/bash helper")),
             "python_script": conf_repo("c-py", ("diff.py.textconv", "/usr/bin/python3 helper")),
             "env_wrapper": conf_repo("c-envw", ("diff.py.textconv", "/usr/bin/env helper")),
+            "exec_path_value": conf_repo("c-ep", ("diff.py.textconv", "/usr/bin/true --exec-path=tools")),
+            "dash_c_value": conf_repo("c-dc", ("diff.py.textconv", "/usr/bin/true -c core.hooksPath=tools")),
+            "launcher_npx": conf_repo("c-npx", ("diff.py.textconv", "/opt/homebrew/bin/npx conv")),
+            "launcher_bundle": conf_repo("c-bun", ("diff.py.textconv", "/usr/bin/bundle exec conv")),
+            "ssh_command_relative": conf_repo("c-ssh", ("core.sshCommand", "tools/ssh")),
+            "git_proxy_relative": conf_repo("c-gp", ("core.gitProxy", "./proxy")),
+            "credential_relative": conf_repo("c-cr", ("credential.helper", "!./cred")),
+            "uploadpack_relative": conf_repo("c-up", ("remote.origin.uploadpack", "tools/up")),
+            "absolute_value_ok": conf_repo("c-av", ("diff.py.textconv", "/usr/bin/true --out=/tmp/x")),
+            "gh_credential_helper_ok": conf_repo("c-gh", ("credential.https://github.com.helper", "!/opt/homebrew/bin/gh auth git-credential"),
+                                                 ("credential.helper", "osxkeychain"), ("core.sshCommand", "/usr/bin/ssh -i /tmp/key")),
             "env_assignment": conf_repo("c-env", ("diff.py.textconv", "env PATH=tools conv")),
             "path_assignment": conf_repo("c-env2", ("diff.py.textconv", "PATH=tools conv")),
             "name_that_starts_like_a_shell": conf_repo("c-show", ("diff.external", "/usr/local/bin/show-diff")),
@@ -274,6 +285,8 @@ def probe() -> dict[str, object]:
         os.environ["RIPGREP_CONFIG_PATH"] = "/tmp/rgrc"
         out["rg_config"] = [mod.readonly_command("rg needle file", REPO), mod.readonly_command("rg --no-config needle file", REPO),
                             mod.readonly_command("cat file", REPO)]
+        out["rg_bypass"] = [mod.readonly_command(c, REPO) for c in ("rg -g --no-config x f", "rg --ignore-file --no-config x f",
+                            "rg -- --no-config f", "rg x --no-config f", "rg --no-config -n x f")]
         del os.environ["RIPGREP_CONFIG_PATH"]
         out["rg_no_config_env"] = mod.readonly_command("rg needle file", REPO)
         END_D = {"ends_turn": True}
@@ -390,11 +403,12 @@ class TestReadOnlyDenial(unittest.TestCase):
 
     def test_git_is_refused_when_its_config_runs_a_helper_from_the_tree(self):
         g = self.res["git_config"]
-        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside", "sh_dash_c", "sh_script", "python_script", "env_wrapper",
+        for name in ("hookspath_relative", "hookspath_husky", "hookspath_bare_word", "hookspath_inside", "sh_dash_c", "exec_path_value", "dash_c_value", "launcher_npx", "launcher_bundle", "ssh_command_relative",
+                     "git_proxy_relative", "credential_relative", "uploadpack_relative", "sh_script", "python_script", "env_wrapper",
                      "alternate_refs", "env_assignment", "path_assignment", "interpreter_script", "interpreter_bare_file", "shell_syntax", "external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
                      "filter_clean", "gpg_program", "ssh_program"):
             self.assertFalse(g[name], name)
-        for name in ("plain", "lfs_bare_name", "absolute_outside", "name_that_starts_like_a_shell", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
+        for name in ("plain", "lfs_bare_name", "absolute_outside", "name_that_starts_like_a_shell", "absolute_value_ok", "gh_credential_helper_ok", "hookspath_absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
             self.assertTrue(g[name], name)
 
     def test_the_summary_bit_says_whether_the_final_turn_ended_on_a_refusal(self):
@@ -403,6 +417,7 @@ class TestReadOnlyDenial(unittest.TestCase):
 
     def test_rg_needs_no_config_when_a_config_file_is_selected(self):
         self.assertEqual(self.res["rg_config"], [False, True, True])
+        self.assertEqual(self.res["rg_bypass"], [False, False, False, False, True])
         self.assertTrue(self.res["rg_no_config_env"])
 
     def test_curl_needs_dash_q_when_a_default_config_exists(self):
