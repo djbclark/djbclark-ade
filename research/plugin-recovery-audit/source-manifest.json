@@ -1,0 +1,391 @@
+[
+  {
+    "id": "continuity--index.server.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/index.server.ts",
+    "relative_path": "index.server.ts",
+    "sha256": "f2a36795445cc88f810afc6f42f0497c44c0dc02f7d56dfc5ee65ba27a4e8648"
+  },
+  {
+    "id": "continuity--index.client.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/index.client.tsx",
+    "relative_path": "index.client.tsx",
+    "sha256": "a34815d39f2cd767cd93ab762b08e97f0606a1b3f581c0721ce4d4d5027c14d7"
+  },
+  {
+    "id": "continuity--paseo-plugin.json",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/paseo-plugin.json",
+    "relative_path": "paseo-plugin.json",
+    "sha256": "68ac4acda44b0fd215bce831d08d4372340376a977c315ef2c54a6751d87d8e7"
+  },
+  {
+    "id": "continuity--README.md",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/README.md",
+    "relative_path": "README.md",
+    "sha256": "7ad9ffbe0677ac9b6444f0550186f4ca58863003071f3823a5b0e43820bb88a0"
+  },
+  {
+    "id": "continuity--package.json",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/package.json",
+    "relative_path": "package.json",
+    "sha256": "25064d1754a1d537a41f5630f1a8e03b53d2ed87992f95116008162cbe19164e"
+  },
+  {
+    "id": "continuity--tsconfig.json",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/tsconfig.json",
+    "relative_path": "tsconfig.json",
+    "sha256": "73d9e58dccb646fd27eaa5e2c4d99137cfd2abd145006860256275ea2f304c31"
+  },
+  {
+    "id": "continuity--server--state.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/state.ts",
+    "relative_path": "server/state.ts",
+    "sha256": "2d8ae5de087c130f1d29045c82fc342ec647ddeab505b4332ad896fc7e007b3d"
+  },
+  {
+    "id": "continuity--server--summarize.test.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/summarize.test.ts",
+    "relative_path": "server/summarize.test.ts",
+    "sha256": "3ae94f2f727f7fcf017fbfb462c76ddf7025ea9f5a73308445fdfa6249de2398"
+  },
+  {
+    "id": "continuity--server--serialize.test.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/serialize.test.ts",
+    "relative_path": "server/serialize.test.ts",
+    "sha256": "84ebf3572805f36c04ab48e7c40641136d07e4c6175d2feb3682892ad34aaedb"
+  },
+  {
+    "id": "continuity--server--chain.test.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/chain.test.ts",
+    "relative_path": "server/chain.test.ts",
+    "sha256": "66311be43e9617eb83e787f3aa76156403cba5ca43fd2b34f1683b2ff8651500"
+  },
+  {
+    "id": "continuity--server--summarize.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/summarize.ts",
+    "relative_path": "server/summarize.ts",
+    "sha256": "024f978d05869af8f79f7114fba9585b4eee65e7ec97ede32d3028a2e403e10e"
+  },
+  {
+    "id": "continuity--server--failover.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/failover.ts",
+    "relative_path": "server/failover.ts",
+    "sha256": "e602c6d3f5d435772b9b6b11cd53f7a107a112f9f2ed420ea9a4d6ae8f242d68"
+  },
+  {
+    "id": "continuity--server--classify.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/classify.ts",
+    "relative_path": "server/classify.ts",
+    "sha256": "57dd4272bf2e240fba53bd90841f4beffdb631ea4154cc5ff86a6209492377a8"
+  },
+  {
+    "id": "continuity--server--classify.test.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/classify.test.ts",
+    "relative_path": "server/classify.test.ts",
+    "sha256": "49b8d568639fc7e531a8470e3fbaf9823e9cfb1b2383cf107d3fb0d66a55f3d9"
+  },
+  {
+    "id": "continuity--server--chain.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/chain.ts",
+    "relative_path": "server/chain.ts",
+    "sha256": "7d75be5a342231a00558d4317d0413fb64d851c9bf23293bacbb9b887a8d3873"
+  },
+  {
+    "id": "continuity--server--handoff-file.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/handoff-file.ts",
+    "relative_path": "server/handoff-file.ts",
+    "sha256": "acc6a9bf9b4fb34e4c6d0c7988a71c31b9ea48acdd128ad921f0433bc669848d"
+  },
+  {
+    "id": "continuity--server--timeline.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/timeline.ts",
+    "relative_path": "server/timeline.ts",
+    "sha256": "197ee7c6418e27c9dcb5dc25524a2451abd63d4b6a5f4b37bb6ae3b0254fdfb5"
+  },
+  {
+    "id": "continuity--server--serialize.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/server/serialize.ts",
+    "relative_path": "server/serialize.ts",
+    "sha256": "c0d4a18470fdf00facdac20e2d32fa8d7df389b09f1967f028a1e43d1ea5a1d6"
+  },
+  {
+    "id": "continuity--shared--usage.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/shared/usage.ts",
+    "relative_path": "shared/usage.ts",
+    "sha256": "c966cbff01a24433281f3ce9d6c5122514b6e02ac0d996413e5437c46a1f6ffc"
+  },
+  {
+    "id": "continuity--shared--contracts.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/shared/contracts.ts",
+    "relative_path": "shared/contracts.ts",
+    "sha256": "5d1487f93e689b0fe369428f4f7d1a716a36b17fc2f1587a5f608e321a21ed88"
+  },
+  {
+    "id": "continuity--shared--settings.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/shared/settings.ts",
+    "relative_path": "shared/settings.ts",
+    "sha256": "18676e4821afe1affa537ed17a05cd0ff9f7f60f46e5e07ef8dbc4312223539a"
+  },
+  {
+    "id": "continuity--shared--usage.test.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/shared/usage.test.ts",
+    "relative_path": "shared/usage.test.ts",
+    "sha256": "1813f83ee5303105c2774b28d8e60d75ecd567089bc70d4ee7193324b90cfa9e"
+  },
+  {
+    "id": "continuity--shared--chain-format.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/shared/chain-format.ts",
+    "relative_path": "shared/chain-format.ts",
+    "sha256": "4ac954da43854b8e4cf34ccc9c4ab2f85817256f45aebcf48a5545d081e1f56a"
+  },
+  {
+    "id": "continuity--shared--labels.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/shared/labels.ts",
+    "relative_path": "shared/labels.ts",
+    "sha256": "ec1ea8937ed3e7aac409d404c2fff63117aae87cce7ae901799ba7d5d3c03513"
+  },
+  {
+    "id": "continuity--client--summary-settings.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/client/summary-settings.tsx",
+    "relative_path": "client/summary-settings.tsx",
+    "sha256": "3c3359e4d924dd9655db5e060b47cf0e58235a78cba80348b112d5961a659046"
+  },
+  {
+    "id": "continuity--client--chain-editor.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/client/chain-editor.tsx",
+    "relative_path": "client/chain-editor.tsx",
+    "sha256": "ac70f3ebd3f3360305155652afa22385b36dd3c94fa9ce5df1096a6afffbf2ab"
+  },
+  {
+    "id": "continuity--client--transition-card.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/client/transition-card.tsx",
+    "relative_path": "client/transition-card.tsx",
+    "sha256": "05057b6fc6d2811937804ea59da7c13e692034c228af7f6503a878d0c577ee18"
+  },
+  {
+    "id": "continuity--client--pill-popover.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/client/pill-popover.tsx",
+    "relative_path": "client/pill-popover.tsx",
+    "sha256": "96920b612afadafd5cca8d7f31add5082b43bc79371a73730b59ecd396422ea0"
+  },
+  {
+    "id": "continuity--client--dropdown.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/client/dropdown.tsx",
+    "relative_path": "client/dropdown.tsx",
+    "sha256": "532429990de904ba5d96a056f6ce7e605bb1b3ae9ee0b00aaadc5b08286422e3"
+  },
+  {
+    "id": "continuity--client--chain-panel.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/client/chain-panel.tsx",
+    "relative_path": "client/chain-panel.tsx",
+    "sha256": "f434b6bbcfee75d9fc7d57d426954e4731ab1af0702b2c412c51ba13aba02891"
+  },
+  {
+    "id": "continuity--client--settings-screen.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-continuity/client/settings-screen.tsx",
+    "relative_path": "client/settings-screen.tsx",
+    "sha256": "d910961013e9653d97126f72a0b57afd084be7ecd1fdd3ae49f78e2dd2908d25"
+  },
+  {
+    "id": "switch--index.server.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/index.server.ts",
+    "relative_path": "index.server.ts",
+    "sha256": "062026631f53d9699a7f75c9c4b6273e3ae7145ef0551328d33b0546cc0cc048"
+  },
+  {
+    "id": "switch--OVERVIEW.md",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/OVERVIEW.md",
+    "relative_path": "OVERVIEW.md",
+    "sha256": "770e0b162fbfee76f7f466c76d4ba84436d271645cda0b0cc4ca0fc66248b401"
+  },
+  {
+    "id": "switch--index.client.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/index.client.tsx",
+    "relative_path": "index.client.tsx",
+    "sha256": "34dbefdee3a7dc7d6e5e9b8d41c0e8948fdf8aa0babcdd8f78364aac1f023f2b"
+  },
+  {
+    "id": "switch--paseo-plugin.json",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/paseo-plugin.json",
+    "relative_path": "paseo-plugin.json",
+    "sha256": "963bb43bf3becb006f579bc5132e65ca883cfed54637269acaa203ea5ba82f37"
+  },
+  {
+    "id": "switch--README.md",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/README.md",
+    "relative_path": "README.md",
+    "sha256": "2badc005f01e651db732671f37d49d4df422c285e488e44e589cbd7d0fcee61c"
+  },
+  {
+    "id": "switch--package.json",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/package.json",
+    "relative_path": "package.json",
+    "sha256": "240d16ee1d96a7081c96b9bcc84476de68a2baec44033aa8a75c3e6dc28480e7"
+  },
+  {
+    "id": "switch--tsconfig.json",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/tsconfig.json",
+    "relative_path": "tsconfig.json",
+    "sha256": "2082414db87c16c3dbfe97904a3e4ad4def089192a500a8304a5826126307071"
+  },
+  {
+    "id": "switch--test--compact.check.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/test/compact.check.ts",
+    "relative_path": "test/compact.check.ts",
+    "sha256": "065dde4e5f54aeb9b8c8617f6136dc67a8fd11f222ec940326fa4ae90150886d"
+  },
+  {
+    "id": "switch--server--daemon.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/server/daemon.ts",
+    "relative_path": "server/daemon.ts",
+    "sha256": "f3b41ad72883e88b65b4f10fb385eb6ecd2b70b827c1f7226cfc4dc31a163411"
+  },
+  {
+    "id": "switch--server--opencode.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/server/opencode.ts",
+    "relative_path": "server/opencode.ts",
+    "sha256": "32b8cf898e5456de8d8d5e46fed6abfeb4c03023b840a5c9fa2ef7678c4d938d"
+  },
+  {
+    "id": "switch--server--compact.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/server/compact.ts",
+    "relative_path": "server/compact.ts",
+    "sha256": "1aedceb107565f43f2b6c58d660eca8d4d8fc205fff6d545b985308fa09cefbe"
+  },
+  {
+    "id": "switch--server--convert.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/server/convert.ts",
+    "relative_path": "server/convert.ts",
+    "sha256": "79e6bb4c553ce501d9500cafd7ce3a178163362f5cb25530f3ee9600eb6f9182"
+  },
+  {
+    "id": "switch--server--transcript.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/server/transcript.ts",
+    "relative_path": "server/transcript.ts",
+    "sha256": "5a766ecbae053f6a766c83f81ff584b9071ebc1c70cd47050d825e87bd2fdb29"
+  },
+  {
+    "id": "switch--shared--convert.ts",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/shared/convert.ts",
+    "relative_path": "shared/convert.ts",
+    "sha256": "ff29cec515bb543188701d18b8982174887cecb8dcef9f8428e42ad6cf42886c"
+  },
+  {
+    "id": "switch--client--picker.tsx",
+    "source_path": "/tmp/fleet-recovery-plugin-switch-provider/client/picker.tsx",
+    "relative_path": "client/picker.tsx",
+    "sha256": "af63ebc1f75c1e307d542067e7fb87da533daca6f1e8d85cebc3bb751b6f086d"
+  },
+  {
+    "id": "switch-installed--index.server.ts",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/index.server.ts",
+    "relative_path": "index.server.ts",
+    "sha256": "062026631f53d9699a7f75c9c4b6273e3ae7145ef0551328d33b0546cc0cc048"
+  },
+  {
+    "id": "switch-installed--OVERVIEW.md",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/OVERVIEW.md",
+    "relative_path": "OVERVIEW.md",
+    "sha256": "770e0b162fbfee76f7f466c76d4ba84436d271645cda0b0cc4ca0fc66248b401"
+  },
+  {
+    "id": "switch-installed--index.client.tsx",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/index.client.tsx",
+    "relative_path": "index.client.tsx",
+    "sha256": "34dbefdee3a7dc7d6e5e9b8d41c0e8948fdf8aa0babcdd8f78364aac1f023f2b"
+  },
+  {
+    "id": "switch-installed--paseo-plugin.json",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/paseo-plugin.json",
+    "relative_path": "paseo-plugin.json",
+    "sha256": "91fa1e2e591f3d66222293a8c4761deb14e6ac077a026ea73bdc7e0fee78359f"
+  },
+  {
+    "id": "switch-installed--README.md",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/README.md",
+    "relative_path": "README.md",
+    "sha256": "2badc005f01e651db732671f37d49d4df422c285e488e44e589cbd7d0fcee61c"
+  },
+  {
+    "id": "switch-installed--package.json",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/package.json",
+    "relative_path": "package.json",
+    "sha256": "b5e2daec00cc5878dd813066a6f4a50d2cc6861572ef7b727cde8706e38eba94"
+  },
+  {
+    "id": "switch-installed--server--daemon.ts",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/server/daemon.ts",
+    "relative_path": "server/daemon.ts",
+    "sha256": "f3b41ad72883e88b65b4f10fb385eb6ecd2b70b827c1f7226cfc4dc31a163411"
+  },
+  {
+    "id": "switch-installed--server--opencode.ts",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/server/opencode.ts",
+    "relative_path": "server/opencode.ts",
+    "sha256": "32b8cf898e5456de8d8d5e46fed6abfeb4c03023b840a5c9fa2ef7678c4d938d"
+  },
+  {
+    "id": "switch-installed--server--compact.ts",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/server/compact.ts",
+    "relative_path": "server/compact.ts",
+    "sha256": "1aedceb107565f43f2b6c58d660eca8d4d8fc205fff6d545b985308fa09cefbe"
+  },
+  {
+    "id": "switch-installed--server--convert.ts",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/server/convert.ts",
+    "relative_path": "server/convert.ts",
+    "sha256": "79e6bb4c553ce501d9500cafd7ce3a178163362f5cb25530f3ee9600eb6f9182"
+  },
+  {
+    "id": "switch-installed--server--transcript.ts",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/server/transcript.ts",
+    "relative_path": "server/transcript.ts",
+    "sha256": "5a766ecbae053f6a766c83f81ff584b9071ebc1c70cd47050d825e87bd2fdb29"
+  },
+  {
+    "id": "switch-installed--shared--convert.ts",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/shared/convert.ts",
+    "relative_path": "shared/convert.ts",
+    "sha256": "ff29cec515bb543188701d18b8982174887cecb8dcef9f8428e42ad6cf42886c"
+  },
+  {
+    "id": "switch-installed--client--picker.tsx",
+    "source_path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider/client/picker.tsx",
+    "relative_path": "client/picker.tsx",
+    "sha256": "af63ebc1f75c1e307d542067e7fb87da533daca6f1e8d85cebc3bb751b6f086d"
+  },
+  {
+    "id": "usage--server--decisions.ts",
+    "source_path": "installed skill or plugin; identified by snapshot filename",
+    "sha256": "6e0d9f7cba4a2a4fdf0169e05693d7ba14f008fe8340aebe384770688b29a6eb"
+  },
+  {
+    "id": "skills--paseo-handoff--SKILL.md",
+    "source_path": "installed skill or plugin; identified by snapshot filename",
+    "sha256": "a26e0b82f08808261de1d957eb8b4e6ac270be2bc837bcd0693ec3446fcd23d9"
+  },
+  {
+    "id": "skills--ade-paseo-handoff--SKILL.md",
+    "source_path": "installed skill or plugin; identified by snapshot filename",
+    "sha256": "e609db05687b07bebc2cf5c59e8c9145dce7d7f85903b07493b957b169a1754e"
+  },
+  {
+    "id": "skills--ade-paseo-plugin--SKILL.md",
+    "source_path": "installed skill or plugin; identified by snapshot filename",
+    "sha256": "3a7de3460209931e55d15d648e0c76559ca8d92a53c4cb590d2790032ee9d568"
+  },
+  {
+    "id": "skills--session-handoff--SKILL.md",
+    "source_path": "installed skill or plugin; identified by snapshot filename",
+    "sha256": "a75e8963cae69e21a20c2e75777314b5fd788357c72b14ed7f481f481f6549f9"
+  },
+  {
+    "id": "usage--server--resumer.ts",
+    "source_path": "installed skill or plugin; identified by snapshot filename",
+    "sha256": "ffb247e0daf4927da352ce4498e98db8894ae438bf8e6990db0d40c67351c0d4"
+  },
+  {
+    "id": "usage--index.server.ts",
+    "source_path": "installed skill or plugin; identified by snapshot filename",
+    "sha256": "c0c43b130a0186fdaea87a6cca2eb1c7cac0ff7c9c836278b3a08364cb25b64f"
+  }
+]

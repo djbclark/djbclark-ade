@@ -1,0 +1,5 @@
+{
+  "observation": [],
+  "dispatch_attempted_this_followup": false,
+  "reason": "The latest aiuse --available result returned no Codex entry. No eligible Astra route was established, so no new dispatch was attempted; the earlier explicit quota refusal remains historical evidence."
+}

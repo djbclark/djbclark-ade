@@ -1,0 +1,5 @@
+{
+  "id": "paseo-continuity",
+  "description": "Provider continuity: on quota or rate-limit failure, continue the task in a new agent on a fallback provider.",
+  "requirements": { "paseo": ">=0.10.1" }
+}

@@ -1,0 +1,14 @@
+{
+  "continuity": {
+    "rc": 0,
+    "path": "/tmp/fleet-recovery-plugin-continuity",
+    "stderr": "Cloning into '/tmp/fleet-recovery-plugin-continuity'...\n",
+    "head": "063b7e272ee1946f05e9a4845d239821aa02a049"
+  },
+  "switch-provider": {
+    "rc": 0,
+    "path": "/tmp/fleet-recovery-plugin-switch-provider",
+    "stderr": "Cloning into '/tmp/fleet-recovery-plugin-switch-provider'...\n",
+    "head": "e35f1d4abcc988f0c80c8eeab66bf98372754958"
+  }
+}

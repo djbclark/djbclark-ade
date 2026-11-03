@@ -1,0 +1,120 @@
+Title: Paseo
+URL: https://paseo.sh/llms.txt
+
+# Paseo
+
+> Open source agentic development environment for desktop, mobile, web, and CLI.
+
+Paseo is a full agentic development environment. For agent-driven development, it replaces your IDE: run coding agents, edit files, review diffs and pull requests, run tests in terminals, and check your app in the built-in desktop browser. Arrange agents, files, terminals, and browser tabs in split panes within a workspace.
+
+Run many agents in parallel, each in its own git worktree and branch. Choose a provider and model for each task, inspect the results, and decide what to merge. Agents can also create worktrees, launch other agents, and communicate with them through Paseo's orchestration tools.
+
+Agents run on your own machines with your existing tools, configuration, and credentials. Work from desktop, the full native iOS and Android app, a web browser, or the CLI. The desktop app starts its local daemon automatically. For remote work, run the daemon on another machine and connect directly or through the optional end-to-end encrypted relay.
+
+Paseo supports Claude Code, Codex, GitHub Copilot, OpenCode, Pi, Antigravity, Muse Code, and additional ACP-compatible agents. The CLI, TypeScript SDK, and MCP tools expose agent and workspace operations for automation. Plugins extend providers, workflows, and the app's interface.
+
+Distribution: native apps for Mac, Windows, Linux, iOS, and Android; web app; Homebrew; npm. Source: Apache-2.0 at https://github.com/getpaseo/paseo. Marketing site: https://paseo.sh.
+
+## Docs
+
+- Getting started: Install Paseo and start running coding agents from anywhere.
+- Why Paseo?: A full agentic development environment for running coding agents, editing files, reviewing changes, and testing your work.
+- Connectivity: Connect a Paseo client to your daemon through SSH, the relay, or Tailscale.
+- Security: Security model for Paseo: architecture overview, connection methods, relay encryption, and best practices.
+- Updates: How Paseo releases work, the difference between stable and beta channels, and how to opt in to earlier updates.
+- Docker: Run the Paseo daemon and bundled web UI with the official Docker image.
+- Self-hosting the web UI: Serve the Paseo web app from your own daemon and reach it over your own LAN, VPN, reverse proxy, or tunnel.
+- Related projects: Projects related to Paseo and built by the community.
+- Workspaces: Understand how Paseo groups working directories, agents, terminals, and browsers into workspaces.
+- Git worktrees: Run agents in isolated git worktrees with setup hooks, scripts, and long-running services.
+- Run parallel tasks: Run coding agents in separate worktrees, review their diffs, and test each change with terminals and the built-in browser in Paseo.
+- Providers: How Paseo thinks about coding agents, wrapping existing CLIs, native vs ACP support, and where to go next.
+- Supported providers: Every coding agent Paseo can launch, natively supported providers and the ACP catalog.
+- Custom providers: Configure custom providers, alternative endpoints, profiles, custom binaries, and ACP agents in ~/.paseo/config.json.
+- Claude Code: Run Claude Code in Paseo using your existing Claude plan.
+- Codex: Run Codex in Paseo using the official Codex CLI and your existing OpenAI account.
+- Muse Code: Install and configure Muse Code for Paseo.
+- Schedules: Run fresh agents on cron schedules or wake an existing agent with a heartbeat.
+- Schedules from chat: Ask an agent in chat to set up and manage a schedule for you.
+- Schedules from the CLI: Create and manage Paseo schedules with paseo schedule.
+- Orchestration: Coordinate agents across providers and machines, delegate work, and keep tasks moving with schedules and heartbeats.
+- Common orchestration workflows: Prompts for delegating, parallelizing, reviewing, and continuing agent work with Paseo.
+- Agent profiles: Save agent settings for one-click selection and use notes to guide delegation for UI work, planning, and reviews.
+- Orchestration skills: Reusable workflows for handing off tasks, getting a second opinion, and planning with multiple agents.
+- MCP reference: Reference for the Paseo tools agents use to manage agents, workspaces, scripts, terminals, and schedules.
+- Browser automation: Give agents a real browser inside Paseo to open pages, click, type, and verify their work.
+- CLI reference: Paseo CLI reference: manage projects, workspaces, agents, plugins, scripts, schedules, daemons, and permissions from your terminal.
+- When to use the Paseo browser: When to reach for Paseo's built-in browser instead of Playwright or agent-browser.
+- Browser tools: The browser_* MCP tools agents use to drive Paseo browser tabs.
+- Configuration: Configure managed instances and foreground deployments.
+- Voice: Paseo voice architecture, local-first model execution, and provider configuration.
+- Metadata generation: How Paseo uses providers to generate branch names, commit messages, and pull request text, and how to configure them.
+- Plugin quickstart: Build, install, share, and update a trusted Paseo plugin.
+- TypeScript SDK: Run Paseo coding agents from a TypeScript program.
+- Hub: The layer above your daemons. Register them, give them capabilities, and share them with your team.
+- Troubleshooting: Fix Linux AppImage launch errors, missing providers, and environment mismatches.
+
+## Alternatives
+
+- Open Source Conductor Alternative With Linux, Windows, and Mobile: Paseo is an open source Conductor alternative with Linux, Windows, native mobile apps, a self-hosted daemon, and an extensible client.
+- Open Source Superset Alternative With Native Mobile: Paseo is an Apache-2.0 Superset alternative that runs locally without an account and supports application plugins across its server and clients.
+- OpenChamber Alternative With Multi-Provider Orchestration: Paseo is an OpenChamber alternative for developers who want multiple agent harnesses, application plugins, and an Apache-2.0 codebase.
+- Happy Coder Alternative With Worktrees and Multi-Provider Support: Paseo adds managed worktrees, native clients across desktop and mobile, and extensible daemon and client surfaces to a remote coding-agent workflow.
+- Open Source Codex App Alternative With Native Mobile and Multi-Provider Support: Paseo is an open source Codex alternative that runs on your machines without a required Paseo account, telemetry, or cloud service.
+- Open Source Claude Desktop Alternative With Native Mobile and Multi-Provider Support: Paseo is an open source Claude Desktop alternative that runs on your machines without a required Paseo account, telemetry, or cloud service.
+- OpenCode Desktop Alternative With Native Mobile and Multi-Provider Orchestration: Paseo is an OpenCode Desktop alternative for developers who want native mobile apps, a self-hosted daemon, and OpenCode alongside Claude Code, Codex, Copilot, and more.
+- Orca Alternative for Agentic Development: Paseo is an open source agentic development environment with parallel worktrees, an editor, terminals, diffs, pull requests, and a built-in browser.
+
+## Supported agents
+
+- Claude Code: Run Claude Code on your machine, drive it from your phone or desktop. Launch agents, watch them work, review and merge from anywhere.
+- Codex: Run OpenAI's Codex on your machine, drive it from your phone or desktop. Same setup, same machine, no laptop required.
+- OpenCode: Run OpenCode on your machine, drive it from your phone or desktop. Open source on both ends, your code stays local.
+- Pi Agent: Run the Pi coding agent on your machine, drive it from your phone or desktop. Self-hosted and open source.
+- OMP (Oh My Pi): Run OMP (Oh My Pi) on your machine, drive it from your phone or desktop. Self-hosted and open source.
+- Cursor: Send tasks to Cursor on your machine, drive it from your phone or desktop. Review the diff anywhere.
+- Muse Code: Run Meta's Muse Code on your machine, drive it from your phone or desktop. Choose models, review tool calls, and answer approvals from anywhere.
+- Antigravity: Run your installed Antigravity CLI on your machine and drive it from your phone or desktop.
+- GitHub Copilot: Drive GitHub Copilot from your phone or desktop. Same account, same machine, ship without sitting down at your desk.
+- Gemini CLI: Run Google's Gemini CLI on your machine, drive it from your phone or desktop. Real coding work, no laptop required.
+- Hermes Agent: Run Nous Research's Hermes Agent on your machine, drive it from your phone or desktop.
+- Qwen Code: Run Alibaba's Qwen Code on your machine, drive it from your phone or desktop.
+- Kimi Code CLI: Run Moonshot AI's Kimi Code CLI on your machine, drive it from your phone or desktop.
+- Amp: Run Sourcegraph's Amp on your machine, drive it from your phone or desktop. Frontier coding, no laptop required.
+- Auggie CLI: Run Augment Code's Auggie CLI on your machine, drive it from your phone or desktop.
+- Cline: Run the Cline coding agent on your machine, drive it from your phone or desktop. Watch it work, jump in when needed.
+- Codebuddy Code: Run Tencent Cloud's Codebuddy on your machine, drive it from your phone or desktop.
+- Cortex Code: Run Snowflake's Cortex Code on your machine, drive it from your phone or desktop. No laptop required.
+- Corust Agent: Build Rust with the Corust agent on your machine, drive it from your phone or desktop.
+- crow-cli: Run crow-cli, the minimal ACP-native coding agent, on your machine. Drive it from your phone or desktop.
+- DeepAgents: Run LangChain's DeepAgents on your machine, drive it from your phone or desktop. Batteries included.
+- CodeWhale: Run CodeWhale's DeepSeek V4 terminal coding agent on your machine, drive it from your phone or desktop.
+- DimCode: Leading models, one command. Run DimCode on your machine, drive it from your phone or desktop.
+- Dirac: Run Dirac's hash-anchored parallel edits on your machine, drive it from your phone or desktop.
+- Factory Droid: Run Factory's Droid coding agent on your machine, drive it from your phone or desktop.
+- fast-agent: Run fast-agent, the multi-provider coding agent, on your machine. Drive it from your phone or desktop.
+- GLM Agent: Run Zhipu AI's GLM coding agent on your machine, drive it from your phone or desktop. Streaming, mid-session model switching.
+- goose: Run Block's goose on your machine, drive it from your phone or desktop. Local, extensible, open source.
+- Junie: Run JetBrains' Junie on your machine, drive it from your phone or desktop. Real work, no IDE required.
+- Kilo Code: Run Kilo Code on your machine, drive it from your phone or desktop. Send tasks, watch them ship.
+- Minion Code: Run Minion Code's framework agent on your machine, drive it from your phone or desktop.
+- Mistral Vibe: Run Mistral's open-source Vibe assistant on your machine, drive it from your phone or desktop.
+- Nova: Run Compass AI's Nova on your machine, drive it from your phone or desktop.
+- Poolside: Drive Poolside's coding agent from your phone or desktop. Kick off the work, watch it land.
+- Qoder CLI: Run the Qoder agentic coding assistant on your machine, drive it from your phone or desktop.
+- siGit Code: Run siGit's local-first coding agent on your machine, drive it from your phone or desktop. Optional on-device LLM inference.
+- Stakpak: Run Stakpak's Rust-based DevOps agent on your machine, drive it from your phone or desktop.
+- VT Code: Run VT Code's multi-provider coding agent on your machine, drive it from your phone or desktop.
+- Agoragentic: Run Agoragentic's 174+ AI capabilities on your machine, drive it from your phone or desktop.
+- Autohand Code: Run Autohand AI's coding agent on your machine, drive it from your phone or desktop.
+- Grok: Run xAI's Grok Build coding agent on your machine, drive it from your phone or desktop.
+
+## Optional
+
+- Changelog: Release notes for the Paseo daemon, CLI, desktop, and mobile apps.
+- Download: Install Paseo on Mac, Windows, Linux, iOS, Android, or run the web app.
+- Paseo Hub: Connect daemons and run GitHub, Slack, Discord, and Linear workflows through the hosted service or your own deployment.
+- Blog: Updates and technical posts from the Paseo team.
+- Privacy: Privacy policy.
+- Terms: Terms for the official relay and hosted Hub.
+- GitHub: Source code, issues, and releases.

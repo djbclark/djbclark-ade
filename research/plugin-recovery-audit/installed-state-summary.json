@@ -1,0 +1,44 @@
+{
+  "paseo_cli_version": "0.15.0-beta.1",
+  "global_plugins_enabled": true,
+  "plugins": [
+    {
+      "id": "switch-provider",
+      "path": "/Users/djbclark/.paseo/plugins/switch-provider/1f620460-df69-4e28-96b0-81bce47176f8/node_modules/paseo-plugin-switch-provider",
+      "enabled": true,
+      "status": "running",
+      "installation": {
+        "identity": {
+          "kind": "npm",
+          "registry": {
+            "url": "https://plugins.paseo.sh",
+            "id": "anh-chu/switch-provider"
+          },
+          "packageName": "paseo-plugin-switch-provider",
+          "pluginPath": "."
+        },
+        "currentRevision": "0.2.1"
+      }
+    },
+    {
+      "id": "usage-auto-resume",
+      "path": "/Users/djbclark/.paseo/plugins/usage-auto-resume/59448019-937c-45c7-8eb5-8e0880463506/checkout",
+      "enabled": true,
+      "status": "running",
+      "installation": {
+        "identity": {
+          "kind": "git",
+          "registry": {
+            "url": "https://plugins.paseo.sh",
+            "id": "babo-jeonguk/usage-auto-resume"
+          },
+          "remote": "https://github.com/babo-jeonguk/paseo-usage-auto-resume.git",
+          "pluginPath": "."
+        },
+        "currentRevision": "b1150985c8d62c335c3e3d682b2062138299a5b7"
+      }
+    }
+  ],
+  "continuity_installed": false,
+  "changes_made": []
+}
