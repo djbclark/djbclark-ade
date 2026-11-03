@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import stat
 from pathlib import Path
 
 AGENT = "pi"
@@ -21,15 +22,29 @@ def RESUME(key, cwd):
 
 
 ROOT = Path.home() / ".pi/agent/sessions"
+# Pi names session files <ISO timestamp with ":" and "." as "-">_<id>, e.g. 2026-11-03T15-25-31-559Z_<id>.jsonl.
+STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-\d{3})?Z")
 SID = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 
 
+def _open_regular(path):
+    """Binary stream of a regular, non-symlink file; OSError otherwise. Never blocks on a FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _records(path):
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
+    with _open_regular(path) as raw:
+        for line in raw:
             try:
-                entry = json.loads(line)
-            except ValueError:
+                entry = json.loads(line.decode("utf-8", errors="replace"))
+            except (ValueError, RecursionError):
                 continue
             if isinstance(entry, dict):
                 yield entry
@@ -70,12 +85,12 @@ HEADER_MAX = 64 * 1024
 def _header_id(path):
     """The id in the first-line session header of a noncanonically named file; "" when absent, malformed or oversized."""
     try:
-        with path.open("rb") as fh:
+        with _open_regular(path) as fh:
             line = fh.readline(HEADER_MAX + 1)
         if len(line) > HEADER_MAX:
             return ""
         entry = json.loads(line.decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return ""
     sid = entry.get("id") if isinstance(entry, dict) and entry.get("type") == "session" else None
     return sid if isinstance(sid, str) and SID.fullmatch(sid) else ""
@@ -96,7 +111,7 @@ def sessions():
         # Pi filenames are <timestamp>_<id>. Keep listing stat-only so the
         # history index reads content only when the fingerprint changes.
         timestamp, separator, sid = path.stem.partition("_")
-        if not timestamp or not separator or not SID.fullmatch(sid):
+        if not separator or not STAMP.fullmatch(timestamp) or not SID.fullmatch(sid):
             # `pi --session /x/daily.jsonl` keeps its filename; the native id is in the header.
             sid = _header_id(path)
             if not sid:

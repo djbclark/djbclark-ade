@@ -221,9 +221,52 @@ def test_noncanonical_filename_uses_header_id_and_tolerates_bad_headers(tmp_path
     (root / "huge.jsonl").write_text('{"type":"session","id":"huge_id","pad":"' + "a" * 70000 + '"}\n')
     (root / "empty.jsonl").write_text("")
     (root / "linked.jsonl").symlink_to(root / "daily.jsonl")
-    (root / "timestamp_canonical.jsonl").write_text("garbage never read\n")
+    (root / "2026-11-03T15-25-31-559Z_canonical.jsonl").write_text("garbage never read\n")
     monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(root))
     rows = {r["sid"]: r for r in load("adapters/pi").sessions()}
     assert set(rows) == {"native_id", "canonical"}
     assert rows["native_id"]["key"] == f"pi:{(root / 'daily.jsonl').resolve()}"
     assert rows["native_id"]["load"]()[0] == "/w"
+
+
+def test_timestamp_prefix_must_be_pis_real_format(tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    header = lambda sid: json.dumps({"type": "session", "id": sid}) + "\n"  # noqa: E731
+    (root / "daily_notes.jsonl").write_text(header("header_id"))      # not ts=daily,id=notes
+    (root / "my_daily_notes.jsonl").write_text(header("other-id"))
+    (root / "2026-11-03T15-25-31-559Z_with_under_scores.jsonl").write_text("never read\n")
+    (root / "2026-11-03T15-25-31Z_no_millis.jsonl").write_text("never read\n")
+    (root / "2026-11-03_bad.jsonl").write_text("{}\n")  # not canonical, header has no id
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(root))
+    assert {r["sid"] for r in load("adapters/pi").sessions()} == {
+        "header_id", "other-id", "with_under_scores", "no_millis"}
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"), reason="needs os.mkfifo")
+def test_fifo_session_file_cannot_hang_indexing(tmp_path, monkeypatch):
+    import os
+    root = tmp_path / "sessions"
+    root.mkdir()
+    os.mkfifo(root / "named.jsonl")                                  # noncanonical: header path
+    os.mkfifo(root / "2026-11-03T15-25-31-559Z_fifo_id.jsonl")       # canonical: listed, load must refuse
+    (root / "ok.jsonl").write_text('{"type":"session","id":"ok_id"}\n')
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(root))
+    pi = load("adapters/pi")
+    rows = {r["sid"]: r for r in pi.sessions()}
+    assert set(rows) == {"fifo_id", "ok_id"}
+    with pytest.raises(OSError):
+        rows["fifo_id"]["load"]()
+
+
+def test_deeply_nested_json_is_not_a_crash(tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    root.mkdir()
+    deep = "[" * 50000 + "]" * 50000
+    (root / "deep.jsonl").write_text(deep + "\n")
+    (root / "2026-11-03T15-25-31-559Z_deep_id.jsonl").write_text(
+        '{"type":"session","id":"deep_id"}\n' + deep + "\n")
+    monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(root))
+    pi = load("adapters/pi")
+    assert [r["sid"] for r in pi.sessions()] == ["deep_id"]
+    list(pi._records(root / "2026-11-03T15-25-31-559Z_deep_id.jsonl"))

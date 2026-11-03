@@ -30,8 +30,11 @@ open SQLite files with `file:...?mode=ro` URIs. Skip a session on any error rath
 Pi (`pi.py`, added 2026-11-03) reads native JSONL under `~/.pi/agent/sessions`,
 or the `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` overrides. Only user
 and assistant text is indexed; thinking and tool output are excluded. The most
-recent nonempty `session_info` name supplies the title. Listing is stat-only
-and skips symlink session files/directories. As of 2026-11-03, keys are
+recent nonempty `session_info` name supplies the title. Listing is stat-only for canonical
+file names (`<ISO timestamp, e.g. 2026-11-03T15-25-31-559Z>_<id>.jsonl`); a noncanonical name
+(`pi --session /x/daily.jsonl`) costs one bounded (64 KiB) header read in `sessions()`, which
+must be a regular file (a FIFO or oversized/malformed header is skipped). Listing skips
+symlink session files/directories. As of 2026-11-03, keys are
 `pi:<canonical absolute session file>`; the native ID is retained separately, including
 underscores. Flat custom stores and project-grouped stores are supported. Successful
 indexing retires a same-project former `pi:<id>` key; other-project orphans are preserved.

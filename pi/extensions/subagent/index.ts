@@ -173,9 +173,9 @@ function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
-			}
+			// All text blocks of the final assistant message, not just the first.
+			const texts = msg.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+			if (texts.length > 0) return texts.join("\n");
 		}
 	}
 	return "";
@@ -415,15 +415,18 @@ async function runSingleAgent(
 				}
 			};
 
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
+			// A persistent UTF-8 decoder keeps a multibyte character split across chunks intact.
+			proc.stdout.setEncoding("utf8");
+			proc.stderr.setEncoding("utf8");
+			proc.stdout.on("data", (data: string) => {
+				buffer += data;
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
 			});
 
-			proc.stderr.on("data", (data) => {
-				currentResult.stderr += data.toString();
+			proc.stderr.on("data", (data: string) => {
+				currentResult.stderr += data;
 			});
 
 			proc.on("close", (code, termSignal) => {

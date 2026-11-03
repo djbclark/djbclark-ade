@@ -97,8 +97,8 @@ class AdapterTests(unittest.TestCase):
     def test_pi_session_directory_overrides(self) -> None:
         agent = self.home / "custom-agent"
         direct = self.home / "custom-sessions"
-        write_jsonl(agent / "sessions/--src--/timestamp_agent-id.jsonl", [{"type": "session"}])
-        write_jsonl(direct / "--src--/timestamp_direct-id.jsonl", [{"type": "session"}])
+        write_jsonl(agent / "sessions/--src--/2026-11-03T15-25-31-559Z_agent-id.jsonl", [{"type": "session"}])
+        write_jsonl(direct / "--src--/2026-11-03T15-25-31-559Z_direct-id.jsonl", [{"type": "session"}])
         mod = load("pi", self.home)
         with mock.patch.dict("os.environ", {"PI_CODING_AGENT_DIR": str(agent)}):
             self.assertEqual([s["sid"] for s in mod.sessions()], ["agent-id"])

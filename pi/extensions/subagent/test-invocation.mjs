@@ -25,6 +25,30 @@ if (process.argv.includes("--mode")) {
 	} else {
 		// Small delay permits overlapping real subprocesses in parallel-mode tests.
 		await new Promise((resolve) => setTimeout(resolve, 15));
+		if (args.at(-1).includes("SPLIT_UTF8")) {
+			// "é" (2 bytes), "€" (3 bytes) and an emoji (4 bytes), each cut in half across writes.
+			const line = Buffer.from(`${JSON.stringify({ type: "message_end", message: {
+				role: "assistant", content: [{ type: "text", text: "caf\u00e9 \u20ac \u{1F600}" }], stopReason: "stop" } })}\n`);
+			const cuts = [line.indexOf(Buffer.from("\u00e9")) + 1, line.indexOf(Buffer.from("\u20ac")) + 1,
+				line.indexOf(Buffer.from("\u{1F600}")) + 2];
+			let from = 0;
+			for (const cut of cuts) {
+				process.stdout.write(line.subarray(from, cut));
+				await new Promise((resolve) => setTimeout(resolve, 30));
+				from = cut;
+			}
+			process.stdout.write(line.subarray(from));
+			process.stderr.write(Buffer.from("err \u00e9").subarray(0, 5));
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			process.stderr.write(Buffer.from("err \u00e9").subarray(5));
+			process.exit(0);
+		}
+		if (args.at(-1).includes("MULTI_TEXT")) {
+			console.log(JSON.stringify({ type: "message_end", message: {
+				role: "assistant", content: [{ type: "text", text: "first part" }, { type: "thinking", thinking: "x" },
+					{ type: "text", text: "second part" }], stopReason: "stop" } }));
+			process.exit(0);
+		}
 		console.log(JSON.stringify({ type: "message_end", message: {
 			role: "assistant", model: "child-reported-model",
 			content: [{ type: "text", text: args.at(-1).includes("DOLLAR_OUT") ? "cost $& $1 $$ $` $'" : "child output" }],
@@ -245,6 +269,24 @@ if (process.argv.includes("--mode")) {
 	delete process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS;
 	// User-scope agents never need consent, headless.
 	clear(); assert.ok(!(await execute({ agent: "plain", task: "test" })).isError); assert.equal(records().length, 1); cases++;
+	// Every text block of the final assistant message is returned (single, parallel, chain), joined by newlines.
+	for (const mode of ["single", "parallel", "chain"]) {
+		const result = await execute(wrap(mode, { agent: "plain", task: "MULTI_TEXT" }));
+		assert.ok(result.content[0].text.includes("first part\nsecond part"), result.content[0].text);
+		cases++;
+	}
+	clear();
+	await execute({ chain: [{ agent: "plain", task: "MULTI_TEXT" }, { agent: "plain", task: "next {previous}" }] });
+	assert.ok(records()[1].args.at(-1).includes("first part\nsecond part"), "{previous} carries all text blocks"); cases++;
+	// Multibyte UTF-8 split across stdout/stderr chunks is decoded intact.
+	for (const mode of ["single", "parallel", "chain"]) {
+		const result = await execute(wrap(mode, { agent: "plain", task: "SPLIT_UTF8" }));
+		assert.ok(result.content[0].text.includes("caf\u00e9 \u20ac \u{1F600}"), result.content[0].text);
+		assert.ok(!result.content[0].text.includes("\ufffd"));
+		cases++;
+	}
+	const split = await execute({ agent: "plain", task: "SPLIT_UTF8" });
+	assert.equal(split.details.results[0].stderr, "err \u00e9"); cases++;
 	// A pre-aborted call keeps the original rejection behavior and carries config in its last update.
 	const controller = new AbortController(); controller.abort();
 	const updates = [];
