@@ -128,6 +128,30 @@ quoting a chain, and update its snapshot if you change one.
 
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
+**Pi admission (2026-11-03):** `acp-dispatch pi` maps only the explicitly supported
+`openai/gpt-6.1-sol` (code) and `openai/gpt-5.4-mini` (bulk/mechanical) model IDs to
+the independent aiuse `pi` API pool. Both dispatch and router use the same mapping;
+no bare IDs, arbitrary provider/model IDs, or `openai-codex/` subscription IDs are
+inferred. Adding a supported billing route requires an explicit mapping and tests.
+Codex subscription headroom never substitutes for Pi API capacity.
+
+Dispatch refuses unsupported, absent, stale, unknown or exhausted Pi capacity
+with exit 5 (`unavailable/headroom`) before any paid preflight or task. The minimum
+is the greater of 1%, the Pi profile's `reserve_floor`, and `--min-headroom`.
+This measurement gate also applies to dry runs, resumes, legacy records and route
+overrides; `--no-preflight` and `--min-headroom 0` cannot disable it. Pass-through
+`--acp-arg` values that could replace the billed model or the Pi process's credentials, endpoint,
+binary or config dir (`--model`, `--set`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, their `=`
+forms and prefixes such as `--mod`) are refused for Pi before any probe, and the runner refuses a stored
+command line carrying one or lacking its own `--model` (2026-11-03). Operator-side `ACP_RUN_ENV_PI`,
+`ACP_RUN_ARGS_PI` and `~/.config/acp-run.env` (`ACP_RUN_ENV_FILE`) are not dispatch inputs and are
+not covered by this guard. A resumed Pi record keeps the
+minimum it was admitted under (resume: at least 10%) and the runner rechecks that number. Initial
+admission and the runner's post-load/post-capacity-wait checks bypass the quota
+memo and use the existing freshness-aware snapshot reader. Unknown capacity is
+not unlimited capacity; neither credentials nor a model catalog prove headroom.
+Other providers' admission policies are unchanged.
+
 **How `bin/route_agent.py` reads pool state (2026-10-20):** it runs `aiuse --available --json`
 (argv list, 20 s timeout, exit 0 or 3 accepted), not the snapshot file, so routing and the
 quota gate see what `aiuse` itself reports: the operator credits override (`aiuse set-credits`,
