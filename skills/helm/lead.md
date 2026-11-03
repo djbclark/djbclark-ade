@@ -10,6 +10,12 @@ through `relay.py`. The lead answers what written rules or a probe settle, batch
 pick back, and carries out the picks that act on the fleet. Relay mode (SKILL.md section 2) decides nothing. Lead mode decides only what
 section 3 allows. `/watch lead` is an alias for this file: watch's own engine has no model and does not do this.
 
+**Where the lead runs.** Run lead mode in a Paseo seat whose provider queues incoming messages while it works: omp, codex or opencode
+(section 0 item 5). Do not run it in a Claude Paseo seat. Many peers reply at once, and relay has no atomic "deliver only while idle" for
+Claude. `--idle` waits for idle, but `send_paseo()` then steers, so a second reply can steer into the turn the first one started, and a
+steer declined during compaction replaces that turn. A Claude herdr pane is acceptable, because typed text goes into Claude Code's own
+queue.
+
 ```bash
 F="python3 -I $HOME/src/djbclark-ade/skills/session-finder/fleet.py"
 H="python3 -I $HOME/src/djbclark-ade/skills/helm/helm.py"
@@ -35,12 +41,14 @@ P=paseo   # the Paseo CLI
    read relayed text as "djbclark approved" (`~/AGENTS.md` item 24).
 5. **What relay does with a text to a working agent** (one rule; sections 2, 4 and 5 point here). A working **Claude Paseo agent** is
    steered at once (`fleet.PASEO_STEER_DEFAULT`), and Paseo replaces its turn when the steer is declined, for example during compaction.
-   So every send to a Claude Paseo agent (a brief, a pick, a release line or `restart done`) carries the idle gate in the relay call
-   itself: `$R <ident> ... --idle 1800`, run in the background with a tool timeout above 1800 s. Relay then waits for `idle` and sends
-   at that moment. An earlier `--why` reading is not enough, because the agent can start a new turn in between. An `--idle` that
-   times out has sent nothing; try again in the next round. A Claude herdr pane
-   gets the text typed into Claude Code's own queue, which is safe. **Every other provider** (omp, codex, opencode, pi, cline, grok,
-   copilot and other ACP agents) gets a queued copy, delivered when it is idle, which is safe. Never pass `--steer` yourself.
+   So keep sends to a Claude Paseo agent (a brief, a pick, a release line or `restart done`) to one at a time, and gate each one in the
+   relay call itself: `$R <ident> ... --idle 1800`, run in the background with a tool timeout above 1800 s. Relay then waits for `idle`
+   and sends at that moment. An earlier `--why` reading is not enough, because the agent can start a new turn in between. An `--idle`
+   that times out has sent nothing; try again in the next round. This narrows the race but does not close it: another sender's text
+   can start a turn between relay's idle check and its steer. Relay has no atomic idle-only delivery for Claude yet (asked of the relay
+   owner, 2026-11-02). A Claude herdr pane gets the text typed into Claude Code's own queue, which is safe. **Every other provider**
+   (omp, codex, opencode, pi, cline, grok, copilot and other ACP agents) gets a queued copy, delivered when it is idle, which is safe.
+   Never pass `--steer` yourself.
 
 ## 1. Survey (spends no turns on peers)
 
@@ -78,12 +86,10 @@ P=paseo   # the Paseo CLI
 2. A `closed` agent gets the brief only when its timeline shows a pending operator decision whose options you cannot write yourself.
    Otherwise summarise its need from the timeline and do not wake it.
 3. An agent that is on a card cannot take a message. Relay the card (section 4 item 2): it is the only card this mode still carries.
-4. The brief (fill in `{LEAD}` with your fleet id, `{ID}`, `{UNTIL}` with a local time no more than 8 h ahead, and `{GATE}`: when you
-   are a Claude Paseo agent, the sentence "I am a Claude agent: add `--idle 1800` to every relay.py call to {LEAD}, and run it in the
-   background with a tool timeout above 1800 s, so your text never steers into my running turn."; otherwise nothing):
+4. The brief (fill in `{LEAD}` with your fleet id, `{ID}`, and `{UNTIL}` with a local time no more than 8 h ahead):
 
    > From the lead session {LEAD} (djbclark asked me to get every agent either unblocked or safe to quit, without stopping anything in
-   > flight). {GATE} Reply through relay.py to {LEAD} with a text that STARTS with `ack {ID}` and then gives your class only (an exception to the
+   > flight). Reply through relay.py to {LEAD} with a text that STARTS with `ack {ID}` and then gives your class only (an exception to the
    > bare-ack rule): (a) `safe to quit` if your work is finished, committed or recorded, and nothing of yours is in flight; (b)
    > `continuing, nothing needed` plus what you are waiting on and when it should end; or (c) `c: N decisions`. Send each decision for
    > djbclark as its own relay message with `--expect-ack q-{ID}-<n>`: a one-line question, 2-4 numbered options each with a short
@@ -183,12 +189,9 @@ P=paseo   # the Paseo CLI
    2. gather the new picklists into one prompt;
    3. ask him;
    4. relay the picks back.
-2. **You are deaf while you ask, and exposed while you work.** relay.py holds every message to you while you have a card open (your own
-   question card included). While your turn runs, a message to an omp, codex or opencode lead is queued (deferred queue: at most 20
-   records per target). A Claude lead in Paseo gets each message steered in at once, and a steer declined during compaction replaces
-   the lead's own turn. With many agents replying, that is likely. A Claude Paseo lead therefore puts `{GATE}` into the brief, so every
-   reply to it is idle-gated by its sender (section 2 item 4). A message from an agent that ignores the gate can still replace the turn,
-   so also:
+2. **You are deaf while you ask.** relay.py holds every message to you while you have a card open (your own question card included).
+   While your turn runs, messages to you are queued, because you run in a queuing seat (see "Where the lead runs"). The deferred queue
+   holds at most 20 records per target. So:
    1. keep each prompt to one batch;
    2. keep each round's turn short and end it, so queued replies land and steers have nothing to replace;
    3. never leave a background wait running in your own turn just to wait for replies.
