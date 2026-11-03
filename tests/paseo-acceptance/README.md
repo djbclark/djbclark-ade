@@ -8,6 +8,8 @@ Results go to `$ADE_ACCEPTANCE_RESULTS` (default `~/.local/state/ade/acceptance`
 |---|---|
 | `readonly/ro-*.sh` | read-only against the live daemon; safe |
 | `isolated-smoke.sh` | second daemon only: proves `lib/common.sh` `isolated_up`/`isolated_down` (own serverId, password enforced, no plugins, no speech download, live daemon and config untouched, nothing left behind); run by hand, about 25 s |
+| `lib/common.sh` `isolated_restart_guard` / `isolated_restart_now` / `isolated_restart` | `paseo --home <isolated home> restart` of the isolated daemon only: asserts on physical paths that the home is `$ACC_BASE/home` (never `~/.paseo`) and that the daemon there is the one `isolated_up` started; the supervisor survives, the worker is replaced (T8) |
+| `lib/mcp_call_as.py` | agent-scoped MCP call over the isolated daemon's socket (`/mcp/agents?callerAgentId=ID`): `create_agent` with `notifyOnFinish`, `send_agent_prompt`; needs `daemon.mcp.injectIntoAgents=true` in the isolated config (T8) |
 | `d1-*.sh` marked `DESTRUCTIVE: second daemon only` | restart, hang or kill a daemon (plan B10); refuse unless `PASEO_HOME` is a fresh test home |
 | `watchdog-selftest.sh`, `d1-09-deadman.sh`, `drain/check-disabled.sh --self-test` | hermetic, no daemon |
 | `drain/*.sh` | D0.2 drain records; read-only |
