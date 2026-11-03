@@ -12,4 +12,4 @@ Forked from the example as shipped in `@earendil-works/pi-coding-agent` 1.5.0
 2026-11-03; no git revision is recorded for it). Intentionally NOT adopted from newer upstream
 behavior: `dispatchDefaults` (children inheriting the parent's model and thinking; here an
 unset field means Pi's own default) and skipping the project-agent consent prompt when
-`ctx.isProjectTrusted()` (here the prompt always applies to project agents).
+`ctx.isProjectTrusted()` (here an interactive session always prompts for project agents, showing each agent's tools, model and thinking; a headless session refuses them unless the operator sets `PI_SUBAGENT_ALLOW_PROJECT_AGENTS=1`; the former model-visible `confirmProjectAgents` parameter was removed).

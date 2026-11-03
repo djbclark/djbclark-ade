@@ -2,8 +2,7 @@
 
 `pi/extensions/subagent/` is the ADE copy of Pi's `subagent` example extension (MIT, provenance in
 its `NOTICE.md`). It delegates a task to a separate `pi` process using an agent profile from
-`~/.pi/agent/agents/*.md` (user) or the nearest `.pi/agents/` (project; the consent prompt for
-project agents is kept).
+`~/.pi/agent/agents/*.md` (user) or the nearest `.pi/agents/` (project, only with `agentScope: "project"` or `"both"`).
 
 ## Model and thinking effort
 
@@ -32,6 +31,15 @@ same for `model`. In chain mode every step's agent and configuration is checked 
 possibly write-capable, step runs. Top-level `model`/`thinking` with `tasks` or `chain` is rejected; put
 them on each item. Example: `{agent: "frontier-astra", task: "...", thinking: "xhigh"}`.
 
+## Project-local agents
+
+`.pi/agents/` profiles are repo-controlled, so they are loaded only when the call sets
+`agentScope: "project"` or `"both"`, and running one needs consent that the model cannot waive
+(the old `confirmProjectAgents` parameter was removed). In an interactive session a dialog lists
+each project agent with its tools, model and thinking before anything runs. A headless session
+(no UI) refuses project agents unless the operator exports `PI_SUBAGENT_ALLOW_PROJECT_AGENTS=1`
+(exactly `1`) in the environment Pi runs in. User-scope agents never prompt.
+
 ## Install
 
 The repo has no Pi extension installer yet (Pi skills already come through
@@ -50,4 +58,4 @@ the tests. Profiles stay in `~/.pi/agent/agents/` and are not managed by this re
 
 `tests/test_pi_subagent_invocation.py` runs `pi/extensions/subagent/test-invocation.mjs`
 (fake child processes, no network, no real Pi). It needs `npm ci` in the extension directory
-(done in the Linux CI job); it skips locally when dependencies are absent.
+(done in the Linux CI job with `npm ci --ignore-scripts`; the tests need no lifecycle scripts); it skips locally when dependencies are absent.

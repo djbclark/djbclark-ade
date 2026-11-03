@@ -16,13 +16,18 @@ if (process.argv.includes("--mode")) {
 		process.stderr.write("Model unavailable/model not found");
 		process.exit(1);
 	}
+	if (args.at(-1).includes("SELF_KILL")) {
+		process.kill(process.pid, "SIGKILL");
+		await new Promise(() => {});
+	}
 	if (args.at(-1).includes("WAIT_FOR_ABORT")) {
 		setInterval(() => {}, 1000);
 	} else {
 		// Small delay permits overlapping real subprocesses in parallel-mode tests.
 		await new Promise((resolve) => setTimeout(resolve, 15));
 		console.log(JSON.stringify({ type: "message_end", message: {
-			role: "assistant", model: "child-reported-model", content: [{ type: "text", text: "child output" }],
+			role: "assistant", model: "child-reported-model",
+			content: [{ type: "text", text: args.at(-1).includes("DOLLAR_OUT") ? "cost $& $1 $$ $` $'" : "child output" }],
 			stopReason: args.at(-1).includes("LLM_ERROR") ? "error" : "stop",
 			errorMessage: args.at(-1).includes("LLM_ERROR") ? "provider failure" : undefined,
 			usage: { input: 3, output: 2, totalTokens: 5, cost: { total: 0 } },
@@ -31,7 +36,8 @@ if (process.argv.includes("--mode")) {
 } else {
 	globalThis.fetch = () => { throw new Error("Network forbidden in subagent tests"); };
 	const { Check } = await import("typebox/value");
-	const { default: register } = await import("./index.ts");
+	const { default: register, terminateChild } = await import("./index.ts");
+	const { EventEmitter } = await import("node:events");
 	const { discoverAgents } = await import("./agents.ts");
 	const { THINKING_LEVELS } = await import("./config.ts");
 	let tool;
@@ -50,7 +56,7 @@ if (process.argv.includes("--mode")) {
 	define("configured", "model: anthropic/claude-sonnet-5\nthinking: high\ntools: [read, bash]");
 	define("model-only", "model: openrouter/vendor/model:high");
 	define("thinking-only", "thinking: low");
-	define("project", "model: local/project", projectDir);
+	define("project", "model: local/project\nthinking: low\ntools: [read]", projectDir);
 	define("plain", "model: local/shadow", projectDir);
 	const ctx = { cwd: path.join(root, "project"), hasUI: false,
 		// Prove these are NOT inherited: the brief requires child Pi defaults.
@@ -179,11 +185,66 @@ if (process.argv.includes("--mode")) {
 	clear(); await execute({ tasks: Array(9).fill(steps[0]) }); assert.equal(records().length, 0);
 	assert.equal(discoverAgents(ctx.cwd, "user").agents.find((a) => a.name === "plain").source, "user");
 	assert.equal(discoverAgents(ctx.cwd, "both").agents.find((a) => a.name === "plain").model, "local/shadow");
+	// Regression: a signal-killed child (exit code null) is a failure.
+	clear();
+	const killed = await execute({ agent: "plain", task: "SELF_KILL" });
+	assert.equal(killed.isError, true);
+	assert.notEqual(killed.details.results[0].exitCode, 0);
+	assert.match(killed.content[0].text, /signal SIGKILL/); cases++;
+	// Regression: {previous} substitution is literal ($&, $1, $$, $`, $' are not interpreted).
+	clear();
+	const literal = await execute({ chain: [{ agent: "plain", task: "DOLLAR_OUT" }, { agent: "plain", task: "next {previous}" }] });
+	assert.ok(!literal.isError);
+	assert.equal(records()[1].args.at(-1), "Task: next cost $& $1 $$ $` $'"); cases++;
+	// Regression: SIGKILL escalation checks the real exit and is cancelled on exit/close.
+	const fakeChild = (exitCode = null, signalCode = null) => {
+		const p = new EventEmitter(); p.exitCode = exitCode; p.signalCode = signalCode; p.sent = [];
+		p.kill = (s) => { p.sent.push(s); return true; }; return p;
+	};
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+	const stuck = fakeChild(); terminateChild(stuck, 20); await sleep(60);
+	assert.deepEqual(stuck.sent, ["SIGTERM", "SIGKILL"]);
+	const exiting = fakeChild(); terminateChild(exiting, 20); exiting.exitCode = 0; exiting.emit("exit", 0, null);
+	await sleep(60); assert.deepEqual(exiting.sent, ["SIGTERM"]);
+	const diedSilently = fakeChild(); terminateChild(diedSilently, 20); diedSilently.signalCode = "SIGTERM"; await sleep(60);
+	assert.deepEqual(diedSilently.sent, ["SIGTERM"]);
+	const already = fakeChild(0); terminateChild(already, 20); await sleep(60); assert.deepEqual(already.sent, []); cases += 4;
+	// Regression: one profile with invalid YAML is skipped and reported; the others still load.
+	fs.writeFileSync(path.join(userDir, "broken.md"), "---\nname: broken\ndescription: [unterminated\n  : : :\n---\nBody\n");
+	const found = discoverAgents(ctx.cwd, "user");
+	assert.ok(found.agents.some((a) => a.name === "plain"));
+	assert.ok(!found.agents.some((a) => a.name === "broken"));
+	assert.equal(found.profileErrors.length, 1); assert.match(found.profileErrors[0], /broken\.md/); cases++;
+	fs.rmSync(path.join(userDir, "broken.md"));
 	clear();
 	let confirmations = 0;
 	await execute({ agent: "project", task: "test", agentScope: "project" }, [],
 		{ ...ctx, hasUI: true, ui: { confirm: async () => { confirmations++; return false; } } });
 	assert.equal(confirmations, 1); assert.equal(records().length, 0);
+	// Consent: the model-supplied confirmProjectAgents flag cannot relax it.
+	let dialog;
+	const approving = { ...ctx, hasUI: true, ui: { confirm: async (title, body) => { dialog = { title, body }; return true; } } };
+	clear();
+	const approved = await execute({ agent: "project", task: "test", agentScope: "both", confirmProjectAgents: false, thinking: "high" }, [], approving);
+	assert.ok(dialog, "prompt shown despite confirmProjectAgents:false"); assert.ok(!approved.isError);
+	assert.match(dialog.body, /project: tools=read, model=local\/project, thinking=high/);
+	assert.equal(records().length, 1); cases++;
+	// Headless: refused without the operator env override, allowed with exactly "1".
+	for (const [value, allowed] of [[undefined, false], ["", false], ["0", false], ["true", false], ["1", true]]) {
+		if (value === undefined) delete process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS; else process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS = value;
+		for (const mode of ["single", "parallel", "chain"]) {
+			clear();
+			const params = { ...wrap(mode, { agent: "project", task: "test" }), agentScope: "project", confirmProjectAgents: false };
+			const result = await execute(params);
+			assert.equal(records().length, allowed ? 1 : 0, `${mode} env=${value}`);
+			assert.equal(!!result.isError, !allowed);
+			if (!allowed) assert.match(result.content[0].text, /PI_SUBAGENT_ALLOW_PROJECT_AGENTS=1/);
+			cases++;
+		}
+	}
+	delete process.env.PI_SUBAGENT_ALLOW_PROJECT_AGENTS;
+	// User-scope agents never need consent, headless.
+	clear(); assert.ok(!(await execute({ agent: "plain", task: "test" })).isError); assert.equal(records().length, 1); cases++;
 	// A pre-aborted call keeps the original rejection behavior and carries config in its last update.
 	const controller = new AbortController(); controller.abort();
 	const updates = [];
