@@ -726,8 +726,8 @@ until the work is committed or recorded in a repo.
    and can be slower. `acp-dispatch <agent> --model <m> --kind <kind> --effort high --context 500k`
    (or `1m`). `--effort` and `--context` are first-class: checked with the
    model before anything is written, stored on the job record, kept by
-   `resume`. `--acp-arg` still forwards other flags; a dash-leading value
-   needs `--acp-arg=--meta`. A direct call is
+   `resume`. `--acp-arg` still forwards other flags except model/credential changers
+   (`--model`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for pi, omp, codex and claude (docs/agent-guard-contract.md)); a dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`. A direct call is
    `acp-run <agent> --model M --context 500k --effort high`. The model is
    applied first. Read `<name>-stderr.txt` for
    `acp-run: applied: model=... effort=... ctx=...`. `(unverified)` means that

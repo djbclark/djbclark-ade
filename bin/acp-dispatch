@@ -107,7 +107,13 @@ dispatch goes ahead with a warning. --no-model-check skips it.
 first-class after --model and recorded in the job record. They are checked together with the model,
 before anything is written or detached, by `acp-run <agent> --info --model M --effort E --context C`
 (it applies them to a fresh session without a prompt): an agent or model that cannot take the value
-exits 2 here with acp-run's list of valid values. --acp-arg still passes anything else through.
+exits 2 here with acp-run's list of valid values. --acp-arg still passes other flags through (a dash-leading
+value needs --acp-arg=--tripwire-exempt-kinds), but never one that could change the admitted model or the agent's
+credentials (2026-11-03, for the guarded agents pi, omp, codex and claude; the rest are `unreviewed` rows of
+bin/agent_guard.py, still pass-through; docs/agent-guard-contract.md): --model, --meta, --agent-arg, --agent-env, --auth, their `=` forms and
+abbreviations (--mod, --agent-e), and --set unless its key is a reasoning-effort option (effort, reasoning_effort,
+reasoning, thought, thought_level, thinking_level) exit 2 before any gate or probe; the runner and a resume refuse a stored
+command or acp_arg carrying one (exit 5). Use --effort/--context, or run acp-run directly.
 
 When the agent stops without a DONE or BLOCKED report and acp-run failed (a quota or plan
 refusal, a crash, a timeout), finalize appends a last line `NO-REPORT: <class> (<agent>,
@@ -371,9 +377,11 @@ unsupported capacity refuses with exit 5 before preflight, including dry runs,
 resumes and route overrides. At least max(1%, Pi reserve_floor, --min-headroom)
 must remain. The runner rechecks fresh capacity after load and capacity waits,
 even for legacy records. --no-preflight does not skip this measurement gate.
-Pi also refuses --acp-arg forms that could replace the billed model or the Pi process's credentials
-(--model, --set, --meta, --agent-arg, --agent-env, --auth); ACP_RUN_ENV_PI, ACP_RUN_ARGS_PI and
-~/.config/acp-run.env are operator-side and not covered.
+The --acp-arg identity guard above covers Pi; ACP_RUN_ENV_PI, ACP_RUN_ARGS_PI and
+~/.config/acp-run.env are operator-side and not covered. omp (the Claude API credits) is mapped to its own
+`omp` pool: --min-headroom and the reservation judge it, the record carries service omp, and a reroute
+excludes it. No fresh omp reading admits the slice (an ordinary pool; only a reserve or a fallback-only pool
+fails closed); a measured one below the minimum refuses, also for a resumed or legacy record.
 
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
@@ -1164,39 +1172,13 @@ def pi_capacity_refusal(agent: str, model: str | None, remaining: float | None,
     return None
 
 
-# acp-run options that can change which model/provider/credentials a Pi slice really uses (--model replaces
-# the billed one; --set/--meta reconfigure the session; --agent-arg and --agent-env reach the Pi process:
-# binary, OPENAI_API_KEY, endpoint, PI_CODING_AGENT_DIR, PI_ACP_PI_COMMAND; --auth picks the ACP auth method).
-# The rest of acp-run's options (-C, --add-dir, -p/-f, --perm, --keep/--strip-user-config (other agents only),
-# --tripwire-exempt-kinds, --mode, --effort, --context, --timeout, --wrapup*, --verify*, --log, --session-id,
-# load/handshake/retry knobs) touch neither the model, the credentials, the endpoint nor the binary. Operator-side
-# ACP_RUN_ENV_PI / ACP_RUN_ARGS_PI / ~/.config/acp-run.env are not dispatch inputs and are not covered. acp-run sets
-# allow_abbrev=False, but a prefix is rejected too: the guard must not depend on that setting.
-PI_IDENTITY_OPTIONS = ("--model", "--set", "--meta", "--agent-arg", "--agent-env", "--auth")
-
-
-def pi_identity_override(args: list[str], skip_primary_model: bool = False) -> str | None:
-    """Why pass-through acp-run arguments may change a Pi slice's billing identity, else None.
-
-    Every token is judged (the `--opt=value` form, a prefix of an option such as `--mod`, and a token that packs
-    `--model x` into one word). With `skip_primary_model` the first `--model VALUE` pair is the dispatcher's own
-    (a stored command line); any further form is a replacement."""
-    skipped = not skip_primary_model
-    items = list(args or [])
-    i = 0
-    while i < len(items):
-        tok = str(items[i])
-        if not skipped and tok == "--model":
-            skipped = True
-            i += 2
-            continue
-        words = tok.split()
-        name = words[0].split("=", 1)[0] if words else ""
-        if name != "--mode" and len(name) >= 3 and name.startswith("--") and any(opt.startswith(name) for opt in PI_IDENTITY_OPTIONS):
-            return (f"pi: pass-through argument {name!r} could replace the admitted billing model; "
-                    "pi accepts no --model/--set/--meta/--agent-arg/--agent-env/--auth override")
-        i += 1
-    return None
+def guard_module():
+    """bin/agent_guard.py: the per-agent pass-through identity policy, one function for dispatch and the runner."""
+    bindir = str(Path(__file__).resolve().parent)
+    if bindir not in sys.path:
+        sys.path.insert(0, bindir)
+    import agent_guard
+    return agent_guard
 
 
 def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, str] | None:
@@ -1210,28 +1192,23 @@ def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, st
     MEASUREMENT, which no override skips (round 7 of PR 224): it follows the pool and the record's `min_headroom`, never
     the `fallback_gate` stamp. A resume skips both, as at dispatch. Pi's independent API
     measurement is mandatory even for resumes and legacy kind-less records."""
-    if rec.get("agent") == "pi":
-        # the stored command line is what runs: its effective identity must still be the admitted one
-        try:
-            argv = shlex.split(rec.get("cmd") or "")
-        except ValueError:
-            argv = []
-        why = pi_identity_override(argv[1:], True)
-        if not why:
-            why = pi_identity_override(rec.get("acp_arg") or [])
-        if not why:
-            # the admitted model must be stated: a command without --model would run Pi's own default
-            at = argv.index("--model") if "--model" in argv else None
-            if at is None:
-                why = "pi: stored command has no --model (the admitted model must be explicit)"
-            elif argv[at + 1:at + 2] != [rec.get("model")]:
-                why = "pi: stored command's --model differs from the admitted model"
-        if why:
-            return "headroom", UNAVAILABLE_EXIT, f"{why} (refused after {after})"
+    agent = rec.get("agent") or ""
+    why = guard_module().record_refusal(rec)    # the stored cmd and acp_arg are what runs (every route a record took)
+    if why:
+        return "headroom", UNAVAILABLE_EXIT, f"{why} (refused after {after})"
+    if agent == "pi":
         remaining, reading = pool_reading("pi", rec.get("model"), fresh=True)
         why = pi_capacity_refusal("pi", rec.get("model"), remaining, rec.get("min_headroom") or 0)
         if why:
             return "headroom", UNAVAILABLE_EXIT, f"{why} after {after}"
+    if agent == "omp" and (rec.get("resume_count") or not rec.get("kind")) and float(rec.get("min_headroom") or 0) > 0:
+        # a resume or kind-less legacy record skips the generic pool check below; omp's credits are a measured grant, so
+        # a reading that exists still binds the minimum the record was admitted under. No fresh reading is not a refusal
+        # (an ordinary pool: only a reserve or a fallback-only pool fails closed, as in the planner's pool_usable).
+        remaining, _ = pool_reading("omp", rec.get("model"), fresh=True)
+        floor = float(rec.get("min_headroom") or 0)
+        if remaining is not None and remaining < floor:
+            return "headroom", UNAVAILABLE_EXIT, f"omp credits headroom {remaining:.1f}% < minimum {floor:.1f}% after {after}"
     if rec.get("resume_count") or not rec.get("kind"):
         return None
     stale = plenty_gate_refusal(rec, after)
@@ -2511,6 +2488,7 @@ AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
     "opencode": ("opencode-go", None),
     "zcode": ("zai", None),
     "grok": ("grok", None),
+    "omp": ("omp", None),     # the Claude API credits grant (aiuse provider `omp`), 2026-11-03: it had no pool admission
 }
 
 
@@ -4649,6 +4627,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         a.perm = "all"
     if bool(a.prompt) == bool(a.prompt_file):
         die("give exactly one of -p PROMPT or -f BRIEF")
+    if a.agent != CLOUD_AGENT:
+        # before any gate or probe, paid or not, and on a resume's inherited acp_arg too: the effective model is
+        # the billed, admitted one or nothing runs (the frontier/fable/pool gates all judge a.model)
+        bad = guard_module().identity_override(a.agent, a.acp_arg or [])
+        if bad:
+            die(bad)
 
     # --kind / --role (2026-10-18). Only a resume (previous set: same agent/model) skips
     # the gates. reroute inherits kind then runs frontier-model, eligibility and exec gates
@@ -4727,15 +4711,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     acp_run = a.acp_run or shutil.which("acp-run")
     if not acp_run:
         die("acp-run not on PATH (and no --acp-run given)")
-    if (a.model and not a.no_model_check and a.agent not in MODEL_CHECK_SKIP
-            and not any(x.startswith("--set") for x in a.acp_arg or [])):
+    if a.model and not a.no_model_check and a.agent not in MODEL_CHECK_SKIP:
         # Synchronously, before anything is written or detached (2026-10-10).
         bad = check_model(acp_run, a.agent, a.model, str(Path(a.dir).resolve()))
-        if bad:
-            die(bad)
-    if a.agent == "pi":
-        # before any probe, paid or not: the effective model is the billed, admitted one or nothing runs
-        bad = pi_identity_override(a.acp_arg or [])
         if bad:
             die(bad)
     effort, context = getattr(a, "effort", None), getattr(a, "context", None)
@@ -4998,9 +4976,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         rec["fallback_gate"], rec["gate_repo"] = True, REPO_NAME
     if not previous and kind:
         rec["min_headroom"] = a.min_headroom
-    if a.agent == "pi":
-        # the minimum Pi was admitted under (a resume's own 10 %, or a higher one it already carried) travels with
-        # the record, so the runner's rechecks judge the same number; an old record without it keeps the 1 % floor
+    if a.agent in ("pi", "omp"):
+        # the minimum Pi/omp was admitted under (a resume's own 10 %, or a higher one it already carried) travels with
+        # the record, so the runner's rechecks judge the same number; an old Pi record without it keeps the 1 % floor
         rec["min_headroom"] = max(float(a.min_headroom or 0), float((previous or {}).get("min_headroom") or 0))
     if gate_deferred:
         # the launchd runner has none of this process's environment or load_policy(): hand it the resolved values

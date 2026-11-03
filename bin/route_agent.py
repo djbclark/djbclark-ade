@@ -2174,6 +2174,7 @@ _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
     "opencode": ("opencode-go", None),
     "zcode": ("zai", None),
     "grok": ("grok", None),
+    "omp": ("omp", None),
 }
 
 

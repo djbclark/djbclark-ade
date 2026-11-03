@@ -123,7 +123,7 @@ def test_program_with_pi_argument_is_not_a_seat(monkeypatch, argv):
 
 
 @pytest.mark.parametrize("argv", [
-    ["node", "/usr/lib/node_modules/@x/pi-coding-agent/dist/bundle/cli.js"],
+    ["node", "/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"],
     ["node", "/home/u/.npm/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", "--session", "daily_work"],
     ["bun", "/tmp/pi"],
 ])
@@ -141,6 +141,12 @@ def test_node_pi_entry_is_classified_even_under_node_modules(monkeypatch, argv):
     ["node", "/usr/lib/node_modules/other/dist/cli.js", "pi"],
     ["node", "/usr/lib/node_modules/other/pi-coding-agent-not/cli.js"],
     ["vim", "/usr/lib/node_modules/pi"],
+    # npm-installed OMP shares the package name, not the scope: it is not a Pi seat (regression from #273)
+    ["node", "/usr/lib/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js"],
+    ["bun", "/home/u/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", "--resume"],
+    ["node", "/usr/lib/node_modules/@x/pi-coding-agent/dist/bundle/cli.js"],
+    ["node", "/usr/lib/node_modules/pi-coding-agent/dist/cli.js"],
+    ["node", "/usr/lib/node_modules/@oh-my-pi/pi-coding-agent/bin/pi"],
 ])
 def test_non_pi_entries_stay_rejected(monkeypatch, argv):
     monkeypatch.setattr(fleet, "_pi_terminal", lambda pid: "/dev/pts/4")

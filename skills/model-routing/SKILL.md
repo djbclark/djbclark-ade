@@ -457,8 +457,8 @@ the pool is out for days.
   2. `acp-dispatch --effort` and `--context` are first-class (checked with the
      model before the job is written, stored on the record, kept by `resume`):
      `acp-dispatch <agent> --model M --kind K --effort high --context 500k`.
-     `--acp-arg` still forwards other flags; a dash-leading value needs
-     `--acp-arg=--meta`.
+     `--acp-arg` still forwards other flags except model/credential changers
+     (`--model`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for pi, omp, codex and claude (docs/agent-guard-contract.md)); a dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`.
   3. Read stderr `acp-run: applied: model=... effort=... ctx=...`.
      `(unverified)` means that value could not be read back. A mismatch is
      failure class `config`, exit 1. A level or size the agent cannot take

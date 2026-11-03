@@ -149,8 +149,8 @@ its own window mid-turn; the lever is the dispatched call.
    `acp-dispatch` takes `--effort` and `--context` as first-class flags
    (checked with the model before the slice is written, stored on the job,
    kept by `resume`): `acp-dispatch <agent> --model M --kind <kind> --effort low --context 500k`.
-   `--acp-arg` still forwards other flags; a dash-leading value needs
-   `--acp-arg=--meta`.
+   `--acp-arg` still forwards other flags except model/credential changers
+   (`--model`, `--meta`, `--agent-arg`, `--agent-env`, `--auth`, `--set` but effort keys: refused for pi, omp, codex and claude (docs/agent-guard-contract.md)); a dash-leading value needs `--acp-arg=--tripwire-exempt-kinds`.
 3. Read stderr `acp-run: applied: model=... effort=... ctx=...` before you
    trust the run. `(unverified)` means that value could not be read back. A
    mismatch is failure class `config`, exit 1. A level or size the agent
