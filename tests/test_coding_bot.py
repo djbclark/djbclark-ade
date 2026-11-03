@@ -32,7 +32,8 @@ FAKE_PEER = textwrap.dedent('''\
     body = open(a[a.index("--file") + 1]).read() if "--file" in a else None
     with open(os.environ["FAKE_LOG"], "a") as fh:
         fh.write(json.dumps({"argv": a, "comm": os.environ.get("PEER_LINK_COMM"), "self": os.environ.get("PEER_LINK_SELF"),
-                             "has_key": "CODING_BOT_WEBHOOK_KEY" in os.environ, "file": body}) + "\\n")
+                             "has_key": "CODING_BOT_WEBHOOK_KEY" in os.environ, "file": body,
+                             "isolated": sys.flags.isolated, "env": sorted(os.environ)}) + "\\n")
     s = scen.get(a[0], {})
     sys.stdout.write(s.get("out", ""))
     sys.stderr.write(s.get("err", ""))
@@ -43,7 +44,7 @@ FAKE_SUDO = textwrap.dedent('''\
     import json, os, sys
     a = sys.argv[1:]
     with open(os.environ["FAKE_SUDO_LOG"], "a") as fh:
-        fh.write(json.dumps(a) + "\\n")
+        fh.write(json.dumps({"argv": a, "env": sorted(os.environ)}) + "\\n")
     cut = a.index("--")
     os.execvp(a[cut + 1], a[cut + 1:])
 ''')
@@ -93,8 +94,11 @@ class Link:
     def calls(self) -> list[dict]:
         return [json.loads(ln) for ln in self.log.read_text().splitlines()] if self.log.exists() else []
 
-    def sudo_calls(self) -> list[list[str]]:
+    def sudo_records(self) -> list[dict]:
         return [json.loads(ln) for ln in self.sudo_log.read_text().splitlines()] if self.sudo_log.exists() else []
+
+    def sudo_calls(self) -> list[list[str]]:
+        return [r["argv"] for r in self.sudo_records()]
 
 
 @pytest.fixture
@@ -220,7 +224,7 @@ def test_sudo_secretspec_wraps_only_the_send_and_only_without_the_key(link, monk
     assert cb.main(["ask", "t"]) == 0
     sudo = link.sudo_calls()
     assert len(sudo) == 1, "wait and drain need no secret"
-    assert sudo[0][0] == "run" and sudo[0][sudo[0].index("--") + 1:][:3] == ["python3", str(link.tool), "send"]
+    assert sudo[0][0] == "run" and sudo[0][sudo[0].index("--") + 1:][:4] == ["python3", "-I", str(link.tool), "send"]
     assert "--reason" in sudo[0]
 
     link.sudo_log.unlink()
@@ -269,6 +273,63 @@ def test_status_shows_config_and_runs_check_without_the_key_value(link, capsys, 
     assert link.calls()[0]["argv"] == ["check"]
     link.play(check={"out": "check: PROBLEM\n", "rc": 1})
     assert cb.main(["status"]) == 1
+
+
+OVERRIDES = {"HTTPS_PROXY": "http://hostile:3128", "https_proxy": "http://hostile:3128", "HTTP_PROXY": "x", "ALL_PROXY": "x",
+             "NO_PROXY": "", "no_proxy": "", "SSL_CERT_FILE": "/hostile/ca.pem", "SSL_CERT_DIR": "/hostile/certs",
+             "REQUESTS_CA_BUNDLE": "/hostile/b.pem", "CURL_CA_BUNDLE": "/hostile/b.pem", "SSLKEYLOGFILE": "/hostile/k.log",
+             "OPENSSL_CONF": "/hostile/o.cnf", "PYTHONPATH": "/hostile/py", "PYTHONSTARTUP": "/hostile/s.py",
+             "pythonhome": "/hostile/h"}
+
+
+def test_peer_mail_runs_isolated_with_network_and_tls_overrides_removed(link, monkeypatch):
+    """The child holds the webhook key (and, under sudo-secretspec run, every vault secret): a caller's proxy, CA, key log
+    or PYTHONPATH must not reach it, in the send, the wait or the drain, nor in the vault wrapper's own environment."""
+    for name, value in OVERRIDES.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("KEEP_ME", "1")
+    link.play(**reply_scenario())
+    assert cb.main(["ask", "t"]) == 0
+    calls = link.calls()
+    assert len(calls) == 3
+    for call in calls:
+        assert call["isolated"] == 1, "python3 -I"
+        assert not set(OVERRIDES) & set(call["env"]), sorted(set(OVERRIDES) & set(call["env"]))
+        assert "KEEP_ME" in call["env"] and "PEER_LINK_COMM" in call["env"]
+    for rec in link.sudo_records():
+        assert not set(OVERRIDES) & set(rec["env"])
+
+
+@pytest.mark.parametrize("text", [
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nabc",
+    "use sk-abcdefghijklmnopqrstuvwxyz0123",
+    "token github_pat_11ABCDEFG0123456789abcdef",
+    "token ghp_" + "a" * 36,
+    "slack xoxb-1234567890-abcdef",
+    "aws AKIAABCDEFGHIJKLMNOP here",
+    "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345",
+])
+def test_credential_shaped_text_is_refused_before_anything_is_stored(link, capsys, tmp_path, text):
+    for cmd in ("ask", "send"):
+        assert cb.main([cmd, text]) == 2
+    cap = capsys.readouterr()
+    assert "credential" in cap.err and "Nothing was sent" in cap.err and cap.out == ""
+    assert link.calls() == [] and link.sudo_calls() == [], "peer_mail and the vault were never reached"
+
+
+@pytest.mark.parametrize("name", ["CODING_BOT_WEBHOOK_KEY", "CODING_BOT_WEBHOOK_URL", "CODING_BOT_WEBHOOK_HEADER"])
+def test_a_known_secret_value_in_the_task_is_refused(link, monkeypatch, capsys, name):
+    value = "plain-looking-secret-value-123"
+    monkeypatch.setenv(name, value)
+    assert cb.main(["send", f"please use {value} to log in"]) == 2
+    err = capsys.readouterr().err
+    assert value not in err and link.calls() == []
+
+
+def test_a_short_value_or_an_ordinary_task_is_not_mistaken_for_a_secret(link, monkeypatch):
+    monkeypatch.setenv("CODING_BOT_WEBHOOK_KEY", "short")
+    link.play(send={"out": SENT})
+    assert cb.main(["send", "a short task mentioning short things, sk-learn and ghp"]) == 0
 
 
 def test_the_script_runs_as_a_command(link):
