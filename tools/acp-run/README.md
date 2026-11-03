@@ -38,7 +38,7 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    `/usr/bin` `/bin` `/opt/homebrew/bin`, long options that run a program (prefixes
    included, `--` is no stop), unquoted globs, braces, `~` and backslashes, and `git` unless the request's cwd finds an
    ordinary repository whose config (`git config --list`, env-injected keys included) names no diff/textconv/
-   filter/fsmonitor/gpg helper that is a relative path or inside the repo; a `curl` GET can carry read data in its URL, as WebFetch can). When codex's
+   filter/fsmonitor/gpg helper whose command has shell syntax or any word that is a relative path, inside the repo or a file of the tree; a `curl` needs a leading `-q` when ~/.curlrc exists; a `curl` GET can carry read data in its URL, as WebFetch can). When codex's
    only refusal option is `cancel` (it ends the turn), acp-run continues the same session up to 3 times (the exit check judges the last turn's words, not an earlier turn's "I will look next"; the summary line says `refusal_end=1` when the final turn ended on a refusal).
    claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
    WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no
