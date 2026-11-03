@@ -41,9 +41,10 @@ ticket cache holding only `zephyr/zephyr@ATHENA.MIT.EDU` in `~/.local/state/bo-a
 of `~/.owl` (made at each `bo-a` start) and can write only its jail `HOME`, regular files in `~/zlog/people` and
 `~/zlog/class`, and `bo`'s answer files in `~/.local/state/bo`; it cannot run other programs, so `zcrypt` and
 `:exec` fail there. Logs stay in `~/zlog`, so `bo log` is unchanged. `BO_A_JAIL=0 bo-a` runs it unconfined.
-Since barnowl-debian `-6` (2026-11-02) `:goose` works in the jail: BarnOwl may run `python3` and reach one loopback
-port, where a broker in tmux window `goose` (outside the jail) holds the LLM API key. `bo` still types only into
-the pane whose command is `barnowl`, never into `goose` or `tickets`.
+Since barnowl-debian `-6` (2026-11-02) `:goose` works in the jail: BarnOwl may run `python3` and connect to one TCP
+port, the one where a broker in tmux window `goose` (outside the jail, on loopback) holds the LLM API key; Landlock
+allows that port number on any host, not only loopback. `bo` still types only into the pane whose command is
+`barnowl`, never into `goose` or `tickets`.
 
 **From the Mac, always `ssh pastebin-bo bo <subcommand> ...`.** `pastebin-bo` is an SSH
 alias for a key whose only power is `scripts/bo-ssh`: it can run `bo log|screen|capture|subs|file|run|perl|locate|help`
