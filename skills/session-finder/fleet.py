@@ -888,6 +888,51 @@ def _pi_headless(argv):
     return False
 
 
+def _pi_terminal(pid):
+    """Positive seat proof: both streams use the controlling tty and its foreground group.
+
+    Environment markers (including TMUX_PANE and PI_SESSION_*) are inherited, not proof.
+    Fail closed on an exited/inaccessible process. No terminal is opened or read.
+    """
+    rc, text = run("ps", "-o", "pgid=,tpgid=,tty=", "-p", str(pid), timeout=5)
+    parts = text.split()
+    if rc or len(parts) != 3:
+        return ""
+    pgid, foreground, tty = parts
+    if not pgid.isdigit() or int(pgid) <= 0 or pgid != foreground or tty in {"?", "??", "-"}:
+        return ""
+    terminal = os.path.realpath(tty if tty.startswith("/dev/") else "/dev/" + tty)
+    streams = {}
+    if sys.platform.startswith("linux"):
+        try:
+            streams = {fd: os.readlink(f"/proc/{pid}/fd/{fd}") for fd in (0, 1)}
+        except OSError:
+            return ""
+    else:
+        rc, text = run("lsof", "-a", "-p", str(pid), "-d", "0,1", "-Ffn", timeout=5)
+        if rc:
+            return ""
+        fd = None
+        for line in text.splitlines():
+            if line.startswith("f"):
+                fd = int(line[1:]) if line[1:] in {"0", "1"} else None
+            elif line.startswith("n") and fd is not None:
+                streams[fd] = line[1:]
+    return terminal if all(streams.get(fd, "").startswith("/dev/")
+                           and os.path.realpath(streams[fd]) == terminal for fd in (0, 1)) else ""
+
+
+def _pi_sid(argv):
+    """Full native ID or exact file target; never inherit a parent's PI_SESSION_ID."""
+    for i, token in enumerate(argv):
+        if token == "--":
+            break
+        flag, sep, value = token.partition("=")
+        if flag in {"--session", "--session-id"}:
+            return value if sep else (argv[i + 1] if i + 1 < len(argv) else None)
+    return None
+
+
 def _native_extra(argv):
     """Exact native interactive entries, excluding service and one-shot commands."""
     base = [os.path.basename(a) for a in argv[:2]]
@@ -920,7 +965,7 @@ def _tui_of(procs):
         names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
         agent = (next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None) or ("hermes" if _hermes_native(argv) else None)
                  or _native_extra(argv))
-        if agent == "pi" and _pi_headless(argv):
+        if agent == "pi" and (_pi_headless(argv) or not _pi_terminal(pr["pid"])):
             continue
         if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
@@ -930,7 +975,7 @@ def _tui_of(procs):
                 val = tok.split("=", 1)[1] if "=" in tok else (argv[i + 1] if i + 1 < len(argv) else "")
                 if re.fullmatch(r"[0-9A-Za-z_.-]{6,}", val or ""):
                     sid = val
-        return agent, pr["pid"], sid, argv
+        return agent, pr["pid"], _pi_sid(argv) if agent == "pi" else sid, argv
     return None, None, None, None
 
 
@@ -981,18 +1026,27 @@ def _proc_scan(known_pids, known_panes, anc):
                 pi_argv = shlex.split(cmd)
             except ValueError:
                 continue
-            if _pi_headless(pi_argv):
+            terminal = "" if _pi_headless(pi_argv) else _pi_terminal(pid)
+            if not terminal:
                 continue
         env = _where.env_of(pid) if _where else {}
         if env.get("HERDR_PANE_ID") in known_panes:
             continue
         if env.get("HERDR_PANE_ID"):
             continue  # a herdr pane herdr did not classify: its agent list is the authority there
+        if agent == "pi" and env.get("TMUX_PANE"):
+            rc, pane_tty = run("tmux", "display-message", "-p", "-t", env["TMUX_PANE"], "#{pane_tty}", timeout=5)
+            if rc or not pane_tty.strip() or os.path.realpath(pane_tty.strip()) != terminal:
+                continue  # inherited pane metadata pointing at a different terminal
         w = (_where.lookup(pid, " ".join(parts[2:7])) or {}) if _where else {}
         sid = None
         m = re.search(r"--(?:resume|session)[= ]([0-9a-f-]{8,})", cmd)
         if m:
             sid = m.group(1)
+        if agent == "pi":
+            sid = _pi_sid(pi_argv)
+            if sid and ("/" in sid or sid.endswith(".jsonl")) and not os.path.isabs(sid):
+                sid = str(Path(w["cwd"]) / sid) if w.get("cwd") else None
         s = _rec(id=f"pid{pid}", agent=agent, sid=sid, pid=pid, cwd=w.get("cwd", ""), where=w.get("where", ""),
                  focus=w.get("focus", ""), title=w.get("title", ""), self=pid in anc, host="terminal",
                  reach="no channel: use its focus command", status="unknown")

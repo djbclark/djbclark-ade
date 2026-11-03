@@ -80,9 +80,10 @@ class AdapterTests(unittest.TestCase):
             handle.write("null\n[]\ninvalid json\n")
         mod = load("pi", self.home)
         (session,) = list(mod.sessions())
-        self.assertEqual(session["key"], "pi:custom_id")
+        self.assertEqual(session["key"], f"pi:{path.resolve()}")
+        self.assertEqual(session["sid"], "custom_id")
         self.assertEqual(session["load"](), ("/src/x", "Final name", [("user", "Hi"), ("assistant", "Hello")]))
-        self.assertEqual(mod.RESUME.format(sid=session["sid"]), "pi --session custom_id")
+        self.assertEqual(mod.RESUME(session["key"], "/src/x"), f"pi --session {path.resolve()}")
 
     def test_pi_listing_is_stat_only_and_skips_symlinks(self) -> None:
         path = self.home / ".pi/agent/sessions/--src-x--/timestamp_valid-id.jsonl"

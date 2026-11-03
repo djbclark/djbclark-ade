@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nativeid import native_id  # noqa: E402
+from nativeid import native_id, history_identity  # noqa: E402
 import claude_identity  # noqa: E402
 import where as _where  # noqa: E402
 
@@ -197,6 +197,12 @@ def main() -> int:
         rows.append({"where": loc, "name": d.get("name"), "pid": d.get("pid"), "sessionId": sid, "status": d.get("status"),
                      "cwd": d.get("cwd"), "titles": ix["titles"], "score": s, "match": why,
                      "live": True, "self": sid == me, "agent": "claude", "finished": fin})
+    def identity(row):
+        sid = row.get("sessionId") or row.get("sid") or row.get("id") or ""
+        if row.get("agent") == "pi":
+            return history_identity("pi", row.get("transcript") or sid, row.get("cwd") or "", row.get("sessionKey") or "")
+        return native_id(sid)  # preserve the other families' existing matching contract
+
     exited_ids = set()
     # every other TUI's running sessions (fleet.py): matched on title, name and cwd only; use
     # session-history.py for their full text
@@ -206,11 +212,12 @@ def main() -> int:
             if s["agent"] == "claude" or s.get("host") == "hermes-gw" and not kws:
                 continue
             if s.get("finished") or s.get("ended") or (s.get("launch") or {}).get("result") is not None:
-                exited_ids.add(native_id(s.get("sid") or s["id"]))  # an exited ACP launch stays in the fleet until it is archived
+                exited_ids.add(identity(s))  # an exited ACP launch stays in the fleet until it is archived
             head = " ".join([s.get("title", ""), s.get("name", ""), s.get("cwd", ""), s.get("agent", "")]).lower()
             sc = sum(50 for k in kws if k in head)
             rows.append({"where": {"where": s["where"], "focus": s["focus"]} if s.get("where") else None, "name": s.get("name") or s["id"],
-                         "pid": s.get("pid"), "sessionId": s.get("sid") or s["id"], "status": s["status"], "cwd": s["cwd"],
+                         "pid": s.get("pid"), "sessionId": s.get("sid") or s["id"], "transcript": s.get("transcript"),
+                         "status": s["status"], "cwd": s["cwd"],
                          "titles": [s["title"]] if s.get("title") else [], "score": sc, "match": s.get("reach", ""),
                          "live": True, "self": s.get("self", False), "agent": s["agent"], "finished": s.get("finished", "")})
     except Exception as e:  # fleet is optional here
@@ -223,9 +230,8 @@ def main() -> int:
         # only a genuinely running session is dropped from the history hits: an exited launch still in the fleet
         # keeps its row and takes the history hit's score and snippet (its title may not hold the keyword)
         # (ids compared as the history adapters report them: an omp fleet row's id is a transcript path)
-        nid = native_id
-        live_ids = {nid(r["sessionId"]) for r in rows if nid(r["sessionId"]) not in exited_ids}
-        exited = {nid(r["sessionId"]): r for r in rows if nid(r["sessionId"]) in exited_ids}
+        live_ids = {identity(r) for r in rows if identity(r) not in exited_ids}
+        exited = {identity(r): r for r in rows if identity(r) in exited_ids}
         try:
             r = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve().parent / "session-history.py"), "--json",
                                 "--limit", "80", "--", *a.keywords], capture_output=True, text=True, timeout=600, check=False)
@@ -241,8 +247,8 @@ def main() -> int:
             found = []
         # asked for 80, not 20: live sessions are dropped below, and must not crowd out the ended hits
         found = [f for f in found if isinstance(f, dict) and f.get("sessionId")]
-        for i, h in enumerate(f for f in found if f["sessionId"] not in live_ids and not f.get("live")):
-            row = exited.get(h["sessionId"])
+        for i, h in enumerate(f for f in found if identity(f) not in live_ids and not f.get("live")):
+            row = exited.get(identity(h))
             if row:
                 row["score"] = max(row["score"], max(1, 40 - i))
                 row["match"] = h.get("snippet") or row["match"]  # why it matched, not the fleet's delivery hint

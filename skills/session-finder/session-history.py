@@ -84,6 +84,13 @@ def update(db, mods, only=()):
             )
             db.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?)",
                        (s["key"], m.AGENT, s["sid"], s["fp"], cwd or "", title or "", s["mtime"]))
+            for old_key in s.get("supersedes", ()):
+                if old_key != s["key"] and db.execute(
+                    "SELECT 1 FROM files WHERE key=? AND agent=? AND sid=? AND cwd=?",
+                    (old_key, m.AGENT, s["sid"], cwd or ""),
+                ).fetchone():
+                    db.execute("DELETE FROM msgs WHERE key=?", (old_key,))
+                    db.execute("DELETE FROM files WHERE key=?", (old_key,))
             db.commit()
             added += 1
         stats[m.AGENT] = (seen, added)
@@ -258,14 +265,16 @@ def fleet_running(agents):
     try:
         sys.path.insert(0, str(HERE))  # python -I drops the script dir
         import fleet
+        from nativeid import history_identity
         for r in fleet.sessions():
             if r.get("agent") not in agents or not fleet_row_running(r):
                 continue
             # an exited ACP launch stays in launches.jsonl with status idle: fleet marks it finished
             if r.get("finished") or r.get("ended") or (r.get("launch") or {}).get("result") is not None:
                 continue
-            if r.get("sid"):
-                exact.add((r["agent"], native_id(r["sid"])))
+            sid = (r.get("transcript") or r.get("sid")) if r["agent"] == "pi" else r.get("sid")
+            if sid and (r["agent"] != "pi" or "/" in str(sid) or r.get("cwd")):
+                exact.add(history_identity(r["agent"], sid, r.get("cwd") or ""))
             cwds.add((r["agent"], r.get("cwd") or ""))
     except Exception:
         pass
@@ -362,6 +371,7 @@ def _main() -> int:
     labels = {m.AGENT: (getattr(m, "LIVE_LABEL", "LIVE"), getattr(m, "ENDED_LABEL", "ended")) for m in mods}
     info = {m.AGENT: (m.live_info() if hasattr(m, "live_info") else {}) for m in mods}
     resume = {m.AGENT: getattr(m, "RESUME", "") for m in mods}
+    resume_keys = {m.AGENT for m in mods if getattr(m, "RESUME_USES_KEY", False)}
     blind = {m.AGENT for m in mods if not hasattr(m, "live")}
     picked = [(hit, db.execute("SELECT agent, sid, cwd, title, mtime FROM files WHERE key=?", (hit[0],)).fetchone())
               for hit in sorted(((k, *v) for k, v in best.items()), key=lambda h: h[1])[: a.limit]]
@@ -369,14 +379,17 @@ def _main() -> int:
     need = blind & {row[0] for _, row in picked}
     fl_exact, fl_cwds = fleet_running(need) if need else (set(), set())
     out = []
+    sys.path.insert(0, str(HERE))
+    from nativeid import history_identity
     for (key, rank, role, snip, count), (agent, sid, cwd, title, mtime) in picked:
-        is_live = sid in live.get(agent, set()) or (agent, sid) in fl_exact
+        is_live = (sid in live.get(agent, set()) or history_identity(agent, sid, cwd, key) in fl_exact
+                   or (agent == "pi" and bool(cwd) and history_identity(agent, sid, cwd) in fl_exact))
         likely = (not is_live and agent in blind and (agent, cwd) in fl_cwds and time.time() - mtime < 600)
-        out.append({"agent": agent, "sessionId": sid, "live": is_live,
+        out.append({"agent": agent, "sessionId": sid, "sessionKey": key, "live": is_live,
                     "state": "LIVE?" if likely else labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,
                     "title": title, "lastActive": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
                     "hits": count, "role": role, "snippet": " ".join(snip.split()),
-                    "resume": resume_hint(resume.get(agent, ""), sid, cwd)})
+                    "resume": resume_hint(resume.get(agent, ""), key if agent in resume_keys else sid, cwd)})
     if info:
         sys.path.insert(0, str(HERE))  # python -I drops the script dir
         import where as _where
