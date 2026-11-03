@@ -771,9 +771,9 @@ def ro_git_config_ok(base, root):
     """True when git run in `base` (repository root `root`) can run no helper from the reviewed tree. Git
     runs `diff.external`, a textconv or clean filter, `core.fsmonitor` and `gpg.program` as programs outside
     codex's sandbox, and a repository config that names a tracked script (one the reviewed change may have
-    rewritten) would execute it for a plain `git diff`. Refused: a helper key whose program is a relative
-    path, a path inside `root`, or unreadable config. An operator's own helper by absolute path or bare
-    name (git-lfs) stays allowed. GIT_EXTERNAL_DIFF, GIT_DIR and GIT_WORK_TREE refuse git too."""
+    rewritten) would execute it for a plain `git diff`. Refused: a helper key with shell syntax or ANY word that
+    is a relative path, a path inside `root` or a file of the tree (`/bin/sh tools/convert.sh`), or
+    unreadable config. An operator's own helper by absolute path or bare name (git-lfs) stays allowed. GIT_EXTERNAL_DIFF, GIT_DIR and GIT_WORK_TREE refuse git too."""
     if any(os.environ.get(k) for k in RO_GIT_ENV_BAD):
         return False
     try:
@@ -790,18 +790,24 @@ def ro_git_config_ok(base, root):
             continue
         if value.strip().lower() in ("", "true", "false", "yes", "no", "on", "off", "0", "1"):
             continue  # core.fsmonitor=true is git's builtin daemon; a bare key runs nothing
+        # git runs the value through a shell: shell syntax, or any word that names a file of the tree (an
+        # interpreter's script argument: `/bin/sh tools/convert.sh`), makes it the tree's code
+        if re.search(r"[;&|<>()$`\\*?\[\]{}!]", value):
+            return False
         try:
-            first = shlex.split(value)[0]
-        except (ValueError, IndexError):
+            words = shlex.split(value)
+        except ValueError:
             return False
-        first = os.path.expanduser(first)
-        if os.path.isabs(first):
-            real = os.path.realpath(first)
-            if real == root or real.startswith(root + os.sep):
+        for word in words:
+            word = os.path.expanduser(word)
+            if os.path.isabs(word):
+                real = os.path.realpath(word)
+                if real == root or real.startswith(root + os.sep):
+                    return False
+            elif "/" in word or word.startswith(".") or (not word.startswith("-") and os.path.lexists(
+                    os.path.join(root, word))):
                 return False
-        elif "/" in first or first.startswith("."):
-            return False
-        # a bare name is looked up through PATH, the operator's own
+        # a bare program name is looked up through PATH, the operator's own
     return True
 
 
@@ -889,8 +895,23 @@ def ro_program(word):
     return os.path.basename(word) if os.path.dirname(word) in RO_TRUSTED_DIRS else None
 
 
+def ro_curlrc_exists():
+    """True when curl would read a default config (~/.curlrc, $CURL_HOME/.curlrc, $XDG_CONFIG_HOME/curlrc):
+    it can name an output file, a cookie jar, uploaded data."""
+    home = os.path.expanduser("~")
+    cands = [os.path.join(os.environ.get("CURL_HOME") or home, ".curlrc"), os.path.join(home, ".curlrc"),
+             os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), "curlrc")]
+    return any(os.path.exists(c) for c in cands)
+
+
 def ro_curl(args):
-    """A plain GET: only -f/-s/-S/-L bundles, a numeric --max-time, and one http(s) URL."""
+    """A plain GET: only -f/-s/-S/-L bundles, a numeric --max-time, and one http(s) URL. Without a leading
+    `-q` (ignore the default config) curl loads ~/.curlrc, so the request is refused when one exists."""
+    disabled = bool(args) and args[0] in ("-q", "--disable")
+    if disabled:
+        args = args[1:]
+    elif ro_curlrc_exists():
+        return False
     urls, i = 0, 0
     while i < len(args):
         t = args[i]

@@ -174,6 +174,9 @@ def probe() -> dict[str, object]:
         import os, tempfile
         cases = json.load(sys.stdin)
         tmp = tempfile.mkdtemp(prefix="ro-denial-")
+        os.environ["HOME"] = os.path.join(tmp, "home"); os.makedirs(os.environ["HOME"])  # no ~/.curlrc, no global git config
+        for k in ("CURL_HOME", "XDG_CONFIG_HOME"):
+            os.environ.pop(k, None)
         REPO, NOREPO = os.path.join(tmp, "repo"), os.path.join(tmp, "norepo")
         import subprocess
         os.makedirs(os.path.join(REPO, "sub"))
@@ -216,6 +219,7 @@ def probe() -> dict[str, object]:
         def conf_repo(name, *settings):
             d = os.path.join(tmp, name)
             subprocess.run(["git", "init", "-q", d], check=True)
+            open(os.path.join(d, "conv.py"), "w").write("")
             for k, v in settings:
                 subprocess.run(["git", "-C", d, "config", k, v], check=True)
             return mod.readonly_command("git diff HEAD~1", d)
@@ -230,6 +234,10 @@ def probe() -> dict[str, object]:
             "filter_clean": conf_repo("c-fc", ("filter.x.clean", "./clean.sh %f")),
             "gpg_program": conf_repo("c-gpg", ("gpg.program", "bin/sign")),
             "ssh_program": conf_repo("c-gpg2", ("gpg.ssh.program", "./sign")),
+            "interpreter_script": conf_repo("c-int", ("diff.py.textconv", "/bin/sh tools/convert.sh")),
+            "interpreter_bare_file": conf_repo("c-int2", ("diff.py.textconv", "python3 conv.py")),
+            "shell_syntax": conf_repo("c-sh", ("diff.external", "/usr/bin/true; ./x")),
+            "option_words_ok": conf_repo("c-opt", ("diff.external", "/usr/bin/true --flag")),
             "lfs_bare_name": conf_repo("c-lfs", ("filter.lfs.clean", "git-lfs clean -- %f"),
                                        ("filter.lfs.process", "git-lfs filter-process")),
             "absolute_outside": conf_repo("c-abs", ("diff.external", "/usr/bin/true")),
@@ -250,6 +258,15 @@ def probe() -> dict[str, object]:
             del os.environ[k]
         env_out["clean"] = mod.readonly_command("git log", REPO)
         out["git_env"] = env_out
+        URL = "https://raw.githubusercontent.com/x/y/z/f.c"
+        curl = lambda c: mod.readonly_command(c, REPO)
+        before = [curl("curl -fsSL " + URL), curl("curl -q -fsSL " + URL)]
+        open(os.path.join(os.environ["HOME"], ".curlrc"), "w").write("output = /tmp/x\\n")
+        out["curlrc"] = {"no_rc_plain": before[0], "no_rc_q": before[1],
+                         "rc_plain": curl("curl -fsSL " + URL), "rc_q": curl("curl -q -fsSL " + URL),
+                         "rc_disable": curl("curl --disable -fsSL " + URL),
+                         "rc_q_not_first": curl("curl -fsSL -q " + URL)}
+        os.remove(os.path.join(os.environ["HOME"], ".curlrc"))
         out["not_a_dir"] = mod.readonly_command("git log", os.path.join(tmp, "missing"))
 
         def call(command, kind="execute"):
@@ -351,11 +368,17 @@ class TestReadOnlyDenial(unittest.TestCase):
 
     def test_git_is_refused_when_its_config_runs_a_helper_from_the_tree(self):
         g = self.res["git_config"]
-        for name in ("external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
+        for name in ("interpreter_script", "interpreter_bare_file", "shell_syntax", "external_relative", "external_inside", "external_slash", "textconv", "command", "fsmonitor",
                      "filter_clean", "gpg_program", "ssh_program"):
             self.assertFalse(g[name], name)
-        for name in ("plain", "lfs_bare_name", "absolute_outside", "fsmonitor_true", "pager_is_not_a_helper"):
+        for name in ("plain", "lfs_bare_name", "absolute_outside", "option_words_ok", "fsmonitor_true", "pager_is_not_a_helper"):
             self.assertTrue(g[name], name)
+
+    def test_curl_needs_dash_q_when_a_default_config_exists(self):
+        c = self.res["curlrc"]
+        self.assertEqual([c["no_rc_plain"], c["no_rc_q"]], [True, True])
+        self.assertEqual([c["rc_plain"], c["rc_q_not_first"]], [False, False])
+        self.assertEqual([c["rc_q"], c["rc_disable"]], [True, True])
 
     def test_git_is_refused_under_environment_that_injects_a_helper_or_config(self):
         e = self.res["git_env"]
