@@ -12,11 +12,52 @@ import time
 import uuid
 
 
-def selected() -> bool:
+def marked() -> bool:
     # Presence, not truthiness: even incomplete Pi identity must fail closed.
     return any(k in os.environ for k in ("PI_SESSION_ID", "PI_SESSION_FILE")) or (
         os.environ.get("PI_CODING_AGENT") == "true" or os.environ.get("AI_AGENT") == "pi"
     )
+
+
+def child_backend() -> tuple[str, int, str] | None:
+    """Allow only a positively identified child before the first runtime barrier.
+
+    Pi markers are inherited. They may yield to an OMP PID registration or a
+    native OpenCode tool scope at the nearest owning process, never to a host.
+    Unknown Node/Bun wrappers and failed identity checks remain fail-closed.
+    This is same-user coordination, not authentication against that user.
+    """
+    if not marked():
+        return None
+    try:
+        for pid, name in ancestors():
+            if (root() / f"{pid}.json").exists():
+                return None  # Pi owns this runtime, even if its record is invalid.
+            if name == "omp" and os.environ.get("OMPCODE") == "1":
+                reg = json.loads((root().parent / "omp" / f"{pid}.json").read_text())
+                sid = reg.get("session_id") if isinstance(reg, dict) else None
+                if isinstance(sid, str) and re.fullmatch(r"[0-9A-Za-z-]+", sid):
+                    return "omp", pid, sid
+                return None
+            if name == "opencode":
+                sid = os.environ.get("ADE_OPENCODE_SESSION_ID", "")
+                directory = os.environ.get("ADE_OPENCODE_DIRECTORY", "")
+                if (re.fullmatch(r"ses_[A-Za-z0-9]+", sid) and Path(directory).is_absolute()
+                        and os.environ.get("OPENCODE_SESSION_ID", sid) == sid):
+                    return "opencode", pid, sid
+                return None
+            if name in RUNTIMES:
+                return None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def selected() -> bool:
+    return marked() and child_backend() is None
+
+
+RUNTIMES = {"pi", "omp", "node", "bun", "claude", "codex", "cursor-agent", "grok", "opencode"}
 
 
 def root() -> Path:
@@ -62,7 +103,7 @@ def registration(sid: str | None = None) -> dict:
                     or not re.fullmatch(r"[a-f0-9]{32}", str(reg.get("instance", "")))):
                 raise ValueError("Pi bridge identity mismatch")
             return reg
-        if name in {"pi", "omp", "node", "bun", "claude", "codex", "cursor-agent", "grok", "opencode"}:
+        if name in RUNTIMES:
             break
     raise ValueError("no owning Pi bridge; load skills/autorename/pi-bridge.ts in Pi")
 
@@ -99,6 +140,11 @@ def request(reg: dict, action: str, **fields) -> dict:
 
 
 def main() -> int:
+    # Internal self-slash selection probe; never admits a mutation or host route.
+    if sys.argv[1:] == ["--backend"]:
+        child = child_backend()
+        print(child[0] if child else "pi")
+        return 0
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("command", help="/compact [focus] only; all other commands fail closed")
@@ -117,7 +163,8 @@ def main() -> int:
         if any(not value or reg.get(key) != value for key, value in model.items()):
             raise ValueError("Pi selected model/reasoning identity missing or changed")
         if args.dry_run:
-            print("self-slash: dry run; native Pi identity verified; no request written")
+            print("self-slash: dry run; native Pi identity verified; no request written; "
+                  "external compaction disabled: active main-editor focus cannot be proven")
             return 0
         data = request(reg, "compact", focus=focus, **model)
         print("self-slash: " + data["status"] + "; completion is in Pi bridge registration (compact_status)")

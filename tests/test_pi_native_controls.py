@@ -50,10 +50,11 @@ def test_identity_and_native_priority(native, monkeypatch):
         mod.registration()
 
 
-@pytest.mark.parametrize("name", ["pi", "node", "bun", "omp", "claude", "codex"])
+@pytest.mark.parametrize("name", ["pi", "node", "bun", "omp", "claude", "codex", "opencode"])
 def test_nested_unregistered_runtime_blocks_parent(native, monkeypatch, name):
     mod, _ = native
     monkeypatch.setattr(mod, "ancestors", lambda: [(30, name), (42, "pi")])
+    assert mod.selected(), "unverified child must not unlock inherited host routes"
     with pytest.raises(ValueError, match="no owning"):
         mod.registration()
 
@@ -130,19 +131,144 @@ def test_autorename_uses_bridge_without_host_side_effects(native, monkeypatch, c
     assert rename.backend_for(reg["session_id"]) == "pi"
 
 
-def test_omp_dispatch_and_title_slot_unchanged(native, monkeypatch, tmp_path):
+@pytest.mark.parametrize("kind,sid", [("omp", "omp-own"), ("opencode", "ses_child")])
+def test_nested_backend_selection_and_rename(native, monkeypatch, tmp_path, kind, sid):
     mod, _ = native
-    spec = importlib.util.spec_from_file_location("autorename_omp_test", SKILL / "autorename.py")
+    spec = importlib.util.spec_from_file_location("autorename_child_test", SKILL / "autorename.py")
     rename = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rename)
-    monkeypatch.setattr(rename.pi_native, "selected", lambda: False)
+    monkeypatch.setattr(rename, "pi_native", mod)
+    monkeypatch.setattr(mod, "ancestors", lambda: [(22, "bash"), (30, kind), (42, "pi")])
+    monkeypatch.setenv("PI_CODING_AGENT", "true")
+    monkeypatch.setenv("AI_AGENT", "pi")
+    monkeypatch.setenv("PASEO_AGENT_ID", "parent")
+    monkeypatch.setattr(rename, "paseo_set_name", lambda *a, **kw: pytest.fail("parent host touched"))
+    monkeypatch.setattr(mod, "request", lambda *a, **kw: pytest.fail("parent Pi touched"))
+    calls = []
+    if kind == "omp":
+        monkeypatch.setenv("OMPCODE", "1")
+        file = tmp_path / "omp.jsonl"
+        file.write_text(json.dumps({"type": "title", "title": "Pinned", "source": "user"}) + "\n")
+        assert rename.omp_read(file) == ("Pinned", "user")
+        rename.OMP_DIR.mkdir()
+        (rename.OMP_DIR / "30.json").write_text(json.dumps({"session_id": sid, "session_file": str(file)}))
+        monkeypatch.setattr(rename, "_alive", lambda pid: pid == 30)
+        monkeypatch.setattr(rename, "omp_set_title", lambda reg, title: calls.append((reg["pid"], title)) or True)
+    else:
+        monkeypatch.setenv("ADE_OPENCODE_SESSION_ID", sid)
+        monkeypatch.setenv("ADE_OPENCODE_DIRECTORY", str(tmp_path))
+        monkeypatch.setenv("OPENCODE_SESSION_ID", sid)
+        monkeypatch.setattr(rename, "opencode_current_title", lambda sid: "Old")
+        monkeypatch.setattr(rename, "opencode_set_title", lambda sid, title: calls.append((sid, title)) or True)
+    assert mod.child_backend() == (kind, 30, sid)
+    assert not mod.selected()  # actual selection, no selector stub
+    assert rename.session_id() == sid
+    assert rename.backend_for(sid) == kind
+    monkeypatch.setattr(sys, "argv", ["autorename.py", "--session-id", "custom/id", "No"])
+    assert rename.main() == 2
+    assert not calls
+    monkeypatch.setattr(sys, "argv", ["autorename.py", "Child title"])
+    assert rename.main() == 0
+    assert calls == [(30 if kind == "omp" else sid, "Child title")]
+    # A nearer unknown runtime or Pi must never unlock this child/ancestor route.
+    for barrier in ("node", "bun", "pi"):
+        monkeypatch.setattr(mod, "ancestors", lambda: [(29, barrier), (30, kind), (42, "pi")])
+        assert mod.selected()
+        assert rename.main() == 2
+    assert len(calls) == 1
+
+
+def test_invalid_child_scope_and_pi_record_fail_closed(native, monkeypatch, tmp_path):
+    mod, _ = native
+    monkeypatch.setattr(mod, "ancestors", lambda: [(30, "opencode"), (42, "pi")])
+    monkeypatch.setenv("ADE_OPENCODE_SESSION_ID", "ses_child")
+    monkeypatch.setenv("ADE_OPENCODE_DIRECTORY", "relative")
+    assert mod.selected()
+    monkeypatch.setenv("ADE_OPENCODE_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "ses_other")
+    assert mod.selected()
+    monkeypatch.delenv("OPENCODE_SESSION_ID")
+    assert not mod.selected()
+    (mod.root() / "30.json").write_text("{}")
+    assert mod.selected(), "a mismatched Pi record must not fall back to child or host"
+    with pytest.raises(ValueError, match="identity mismatch"):
+        mod.registration()
+
+
+def test_no_pi_markers_preserves_legacy_selection(native, monkeypatch):
+    mod, _ = native
+    for key in ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT", "AI_AGENT"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(mod, "ancestors", lambda: pytest.fail("legacy path must not probe Pi ancestry"))
+    assert not mod.selected()
+    assert mod.child_backend() is None
+
+
+def test_legacy_omp_still_renames_its_host_without_pi_markers(native, monkeypatch):
+    mod, _ = native
+    for key in ("PI_SESSION_ID", "PI_SESSION_FILE", "PI_CODING_AGENT", "AI_AGENT"):
+        monkeypatch.delenv(key, raising=False)
+    spec = importlib.util.spec_from_file_location("autorename_legacy_test", SKILL / "autorename.py")
+    rename = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rename)
+    monkeypatch.setattr(rename, "pi_native", mod)
     monkeypatch.setenv("OMPCODE", "1")
-    monkeypatch.setattr(rename, "nearest_agent_proc", lambda: ("omp", 42))
-    monkeypatch.setattr(rename, "omp_registration", lambda **kw: {"session_id": "omp-own"})
-    assert rename.session_id() == "omp-own"
-    file = tmp_path / "omp.jsonl"
-    file.write_text(json.dumps({"type": "title", "title": "Pinned", "source": "user"}) + "\n")
-    assert rename.omp_read(file) == ("Pinned", "user")
+    monkeypatch.setattr(rename, "nearest_agent_proc", lambda: ("omp", 30))
+    rename.OMP_DIR.mkdir()
+    (rename.OMP_DIR / "30.json").write_text(json.dumps({"session_id": "omp-own"}))
+    monkeypatch.setattr(rename, "OMP_SESSIONS", mod.root().parent / "isolated-sessions")
+    monkeypatch.setattr(rename, "_alive", lambda pid: pid == 30)
+    monkeypatch.setattr(rename, "omp_read", lambda file: (None, None))
+    calls = []
+    monkeypatch.setattr(rename, "omp_set_title", lambda reg, title: calls.append(("omp", reg["pid"])) or True)
+    monkeypatch.setattr(rename, "paseo_set_name", lambda title, **kw: calls.append(("host", title)) or "")
+    monkeypatch.setattr(sys, "argv", ["autorename.py", "Legacy title"])
+    assert rename.main() == 0
+    assert calls == [("omp", 30), ("host", "Legacy title")]
+
+
+@pytest.mark.parametrize("owner,marked,expected", [
+    ("opencode", True, 0), ("pi", True, 2), ("node", True, 2),
+    ("opencode", False, 0),
+])
+def test_self_slash_resolves_native_child_before_inherited_pi(tmp_path, owner, marked, expected):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    ps = tools / "ps"
+    ps.write_text(f"#!{sys.executable}\n" + '''
+import os, subprocess
+# pi_native's ps child -> helper -> tool shell. Only process observation is
+# faked; run the real selection and both real self-slash/helper entrypoints.
+result = subprocess.run(['/bin/ps', '-p', str(os.getppid()), '-o', 'ppid='],
+                        capture_output=True, text=True, check=True)
+shell = int(result.stdout.strip())
+print(f'{shell} 42000 bash')
+print('42000 42001 ' + os.environ['TEST_OWNER'])
+print('42001 1 pi')
+''')
+    ps.chmod(0o755)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("PI_", "SELF_SLASH_")) and k not in {"AI_AGENT", "ACP_RUN_AGENT", "OPENCODE_SESSION_ID"}}
+    env.update(PATH=str(tools) + os.pathsep + os.environ["PATH"],
+               HOME=str(tmp_path), AUTORENAME_STATE_DIR=str(tmp_path / "state"),
+               SELF_SLASH_PATH_AS_IS="1", TEST_OWNER=owner,
+               ADE_OPENCODE_SESSION_ID="ses_child", ADE_OPENCODE_DIRECTORY=str(tmp_path),
+               PASEO_AGENT_ID="parent", HERDR_ENV="1", HERDR_PANE_ID="parent")
+    if marked:
+        env.update(PI_CODING_AGENT="true", AI_AGENT="pi", PI_SESSION_ID="parent", PI_SESSION_FILE="/parent")
+    result = subprocess.run(["bash", str(ROOT / "bin/self-slash"), "--dry-run", "/compact"],
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == expected, result.stderr
+    if expected == 0:
+        assert "native Go guard to compact ses_child" in result.stdout
+    assert not (tmp_path / ".local/state/self-slash.log").exists()
+    # Verified nested child must not leak unsupported commands into host fallback.
+    if marked and owner == "opencode":
+        for command in ("/new", "/model foo", "arbitrary text"):
+            result = subprocess.run(["bash", str(ROOT / "bin/self-slash"), "--dry-run", command],
+                                    env=env, capture_output=True, text=True, timeout=10)
+            assert result.returncode == 2
+            assert "no inherited host fallback" in result.stderr
 
 
 def test_native_extension_contract(tmp_path):
@@ -216,26 +342,45 @@ draft = ' '; assert.equal(compact().accepted, false); draft = '';
 emit('ui_prompt_start'); assert.equal(compact().accepted, false); emit('ui_prompt_end');
 ctx.mode = 'rpc'; assert.equal(compact().accepted, false); ctx.mode = 'tui';
 process.env.ACP_RUN_AGENT = '1'; assert.equal(compact().accepted, false); delete process.env.ACP_RUN_AGENT;
-assert.match(compact().status, /queued/);
-assert.equal(compactCalls.length, 0);
-assert.equal(compact().accepted, false, 'no duplicate queued compaction');
-emit('agent_end'); tick(); assert.equal(compactCalls.length, 0, 'agent_end is not idle');
-idle = true; queued = true; tick(); assert.equal(compactCalls.length, 0);
-queued = false; emit('agent_settled'); tick(); assert.equal(compactCalls.length, 1);
-assert.equal(compactCalls[0].customInstructions, 'keep constraints');
-assert.equal(reg().compact_status.status, 'running');
-compactCalls[0].onComplete(); assert.equal(reg().compact_status.status, 'completed');
-entries.push({type:'compaction', timestamp:new Date().toISOString()});
-assert.equal(compact().accepted, false, '30 minute gap'); entries.pop();
-idle = false; compact(); draft = 'new draft'; idle = true; tick();
-assert.equal(reg().compact_status.status, 'refused'); assert.equal(compactCalls.length, 1); draft = '';
-idle = false; compact(); ctx.model = {provider:'other', id:'test'}; emit('model_select'); idle = true; tick();
-assert.equal(reg().compact_status.status, 'refused'); assert.equal(reg().provider, 'other');
+// Built-in selectors replace the main editor but emit NO ui_prompt_start.
+// Their search text is not getEditorText(): this models the installed contract,
+// not an invented public focus API or an extension dialog approximation.
+let activeScreen = {kind:'main-editor', search:''};
+for (const kind of ['model-selector', 'settings-selector', 'session-selector', 'tree-selector', 'custom-screen']) {
+  activeScreen = {kind, search:'operator is typing here'};
+  draft = ''; idle = true; queued = false;
+  assert.notEqual(activeScreen.kind, 'main-editor');
+  assert.notEqual(activeScreen.search, '');
+  assert.equal(ctx.ui.getEditorText(), '', 'hidden main editor stays empty');
+  const receipt = compact();
+  assert.equal(receipt.accepted, false);
+  assert.equal(receipt.status, 'refused');
+  assert.match(receipt.error, /active main-editor focus cannot be proven/);
+  emit('agent_settled'); tick();
+  assert.equal(compactCalls.length, 0);
+  assert.equal(reg().compact_status, null, 'refusal is not queued or executed');
+}
+activeScreen = {kind:'main-editor', search:''};
+for (const busy of [true, false]) {
+  idle = !busy; queued = busy;
+  assert.equal(compact().accepted, false, 'even an apparently safe editor cannot prove focus');
+}
+ctx.model = {provider:'other', id:'test'}; emit('model_select');
+assert.match(compact().error, /model\/reasoning changed/);
+assert.equal(reg().provider, 'other');
 ctx.model = {provider:'openai', id:'test'}; emit('model_select');
-idle = false; compact(); const old = reg(); emit('session_shutdown');
+assert.equal(request({action:'rename', title:'Still works', auto:false}).status, 'renamed');
+const old = reg(); emit('session_shutdown');
 assert.equal(cleared, 1); assert.equal(fs.existsSync(path.join(root, old.instance)), false);
-tick(); assert.equal(compactCalls.length, 1, 'shutdown cancels queued work');
+tick(); assert.equal(compactCalls.length, 0, 'shutdown cannot execute refused work');
 assert.equal(fs.existsSync(path.join(root, `${process.pid}.json`)), false);
+// Actual replacement instance: old runtime requests cannot cross a reload.
+bridge(pi); emit('session_start');
+assert.notEqual(reg().instance, old.instance);
+assert.equal(request({action:'rename', title:'Stale', instance:old.instance}).accepted, false);
+assert.equal(request({action:'rename', title:'Replacement', auto:false}).status, 'renamed');
+assert.equal(compact().accepted, false);
+emit('session_shutdown'); assert.equal(cleared, 2);
 '''
     result = subprocess.run([node, "--input-type=module", "-e", script, str(bridge), str(tmp_path / "state")],
                             capture_output=True, text=True, timeout=20)

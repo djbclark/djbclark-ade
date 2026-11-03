@@ -64,9 +64,14 @@ export default function (pi) {
   }
 
   function safeUI() {
-    // RPC getEditorText is a stub: only a TUI can prove the draft is empty.
     if (current.mode !== "tui") throw new Error("native compaction requires Pi TUI mode");
-    if (promptOpen || current.ui.getEditorText() !== "") throw new Error("draft or dialog present; nothing changed");
+    if (promptOpen || current.ui.getEditorText() !== "") throw new Error("draft or extension dialog present; nothing changed");
+    // Neither the empty (possibly hidden) editor nor ui_prompt_* proves focus:
+    // built-in model/settings/session/tree selectors emit no extension prompt
+    // event. The installed public API offers no authoritative main-editor focus
+    // check. Refuse at admission AND drain; never inspect private TUI internals
+    // or add a bypass. Rename does not need this compaction-only gate.
+    throw new Error("external compaction disabled: active main-editor focus cannot be proven");
   }
 
   function finish(status, error = null) {

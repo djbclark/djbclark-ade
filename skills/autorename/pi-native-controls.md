@@ -20,29 +20,46 @@ not install this extension; this slice deliberately does not change the installe
    reports the bridge's current name and provenance. An explicit `--session-id`
    must equal this shell's Pi ID. Pi names are `session_info` entries, not OMP's
    first-line title slot. Unknown existing names are treated as operator-pinned.
-2. `bin/self-slash "/compact focus to preserve"` queues native compaction for this
-   Pi only. It returns after acknowledgment, **not after compaction**. Use as the
-   turn's last action and finish the turn: waiting on completion from that turn
-   would deadlock. The bridge runs `ctx.compact` only after Pi is idle with no
-   pending messages, no dialog and an exactly empty editor. A draft appearing
-   after acceptance cancels the queued operation; nothing types over it.
+2. `bin/self-slash "/compact focus to preserve"` **refuses external compaction**
+   (exit 2). The installed public API cannot prove that the main editor owns focus.
+   `getEditorText()` can read an empty hidden editor while a built-in model,
+   settings, session or tree selector owns input, including its own search text.
+   `ui_prompt_start/end` covers extension prompts, not those built-in selectors;
+   `isIdle()` describes agent activity, not UI focus. None is sufficient evidence.
+   The bridge fails closed at both admission and execution, without private TUI
+   introspection, speculative API methods or a bypass. Safe native rename remains
+   available. Operator-invoked built-in compaction is outside this bridge.
 3. `bin/self-slash --dry-run "/compact focus"` checks session and selected-model
-   identity without creating a request. It does not promise that admission will
-   succeed later (draft, mode, cooldown and busy checks are server-side).
+   identity without creating a request, and reports the intentional compaction
+   limitation. A successful identity-only dry run does **not** mean admission is
+   supported. A future public focus contract and regression proof are prerequisites
+   for enabling external compaction.
 4. Other self-slash commands, `--finish`, `--then`, `--no-then` and successor
    options are refused. In particular no `/new`, `/clear`, `/reset`, `/quit`,
    `/model` or arbitrary prompt fallback exists. `--delay` is ignored on Pi:
-   the native idle boundary is used instead. Dispatched `ACP_RUN_AGENT=1` slices
+   it cannot bypass the refusal. Dispatched `ACP_RUN_AGENT=1` slices
    cannot compact (exit 9). Other native refusals/unknown outcomes exit 2.
 
 ## Identity, naming and lifecycle
 
-`PI_SESSION_ID` and `PI_SESSION_FILE` must match an ancestor's bridge registration.
-The first unregistered agent/Node/Bun runtime is a barrier: nested agents cannot
-fall back to a registered parent even with inherited Pi or host environment.
-Nonstandard process names may cause safe refusals; use a standard Pi process,
-not a bypass. Custom session IDs are opaque strings, never filename components.
-Ephemeral sessions use a null session-file identity.
+Pi process markers and tool-session variables are inherited; environment presence
+alone does not establish ownership. Before selecting Pi, walk the process ancestry
+nearest-first. A nearer `omp` with `OMPCODE=1` and its own PID-keyed bridge record
+uses that record's session ID. A nearer `opencode` with a valid per-tool
+`ADE_OPENCODE_SESSION_ID` and absolute `ADE_OPENCODE_DIRECTORY` uses its native
+scope (any `OPENCODE_SESSION_ID` must agree). Explicit rename IDs cannot escape
+that child; neither child route renames an inherited host tab. Nested OpenCode
+self-slash permits only its scoped `/compact` route, whose existing native Go
+guard still admits execution. OMP has no native self-slash route here and refuses.
+These checks coordinate trusted same-user processes, not malicious same-UID peers.
+
+Otherwise `PI_SESSION_ID` and `PI_SESSION_FILE` must match the nearest runtime's
+Pi bridge registration. A Pi record, even invalid, or an unverified agent/Node/Bun
+runtime is a barrier: failed Pi identity never permits ancestor/host fallback.
+Nonstandard process names may cause safe refusals; use a standard process, not a
+bypass. Custom Pi session IDs are opaque strings, never filename components.
+Ephemeral sessions use a null session-file identity. Environments without Pi
+markers retain the preexisting non-Pi selection and host behavior.
 
 The registration includes the selected provider, model and effective reasoning
 level. Compaction checks shell values at dispatch and rechecks them in Pi both
@@ -68,23 +85,37 @@ pending requests rather than executing them in the replacement session.
 State root: `$AUTORENAME_STATE_DIR/pi`, default
 `~/.local/state/autorename/pi`. A `<pid>.json` registration points to an
 instance-specific directory. Request/receipt filenames use random nonces; writes
-are atomic, directories private and files mode 0600. This is same-user local IPC,
-not a sandbox/security boundary against other processes running as the operator.
+are atomic and newly created instance directories/files request modes 0700/0600.
+**Precondition:** the operator must supply a trusted, operator-owned, non-shared
+state root and path ancestors, with the `pi` directory private (0700), and no
+symlink/redirection to untrusted storage. The implementation follows paths; it does
+not validate existing directory ownership, modes or symlinks. Recursive creation
+and mode arguments do not repair existing permissive directories or guarantee
+privacy of intermediate directories. The same trust precondition applies to OMP
+registration state used for child selection. Do not use shared/tmp/project-writable
+state directories. This is same-user local IPC, not authenticated peer IPC or a
+sandbox/security boundary against malicious processes running as the operator.
 
-The synchronous receipt says renamed/skipped/refused or **queued (not completed)**.
-The registration's `compact_status` contains the request nonce and
+The synchronous receipt says renamed/skipped/refused. Compaction currently never
+passes admission, so it is not queued or executed and `compact_status` stays null.
+The retained queue protocol distinguishes **queued (not completed)** from execution;
+if enabled after a supported focus contract exists, `compact_status` contains the request nonce and
 `queued`, `running`, `completed`, `failed` or `refused` status. It is ephemeral:
 shutdown removes the registration and pending work, so disappearance is not proof
 of completion. Verify a completed compaction against Pi's session entry when needed.
 A request timeout is unknown outcome, never permission to retry automatically.
 
-Only one compaction can be pending/running. Pending work expires after 15 minutes;
-any compaction in the previous 30 minutes blocks admission. A competing built-in
-or automatic compaction cancels pending work. Compaction is TUI-only: RPC's editor
-getter cannot prove that the host composer is empty. Renaming works in all modes.
+The retained (currently unreachable) queue allows only one pending/running
+compaction, expires pending work after 15 minutes, and requires a 30-minute gap.
+A competing built-in/automatic compaction cancels pending work. Both TUI and RPC
+external compaction are refused; RPC additionally cannot observe the host draft.
+Renaming works in all modes.
 
 Tests in `tests/test_pi_native_controls.py` use isolated files, fake process
 ancestry and a fake public Pi API, executing the exact bridge source with Node.
-They make no provider calls and never operate a live session. Live installation,
-reload, real TUI compaction and provider-backed completion require separate
-operator/lead verification after CI and independent review.
+They cover actual backend selection with inherited Pi markers, native child/parent
+isolation, selector search text hidden from the main-editor getter, refusal without
+false queue/completion claims, pinning and replacement-instance rejection. They make
+no provider calls and never operate a live session. Live installation/reload and
+native rename require separate operator/lead verification after CI and independent
+review. Provider-backed external compaction remains intentionally unavailable.

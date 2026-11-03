@@ -685,6 +685,9 @@ def omp_set_title(reg: dict, title: str) -> bool:
 
 def session_id() -> str | None:
     """This session's id: omp, cursor-agent, OpenCode, or Grok when this process is one, else Claude Code, else zcode."""
+    child = pi_native.child_backend()
+    if child:
+        return child[2]
     if pi_native.selected():
         try:
             return pi_native.registration()["session_id"]
@@ -724,6 +727,9 @@ def session_id() -> str | None:
 
 def backend_for(sid: str) -> str:
     """Which store owns this id, including the Herdr-backed Codex session."""
+    child = pi_native.child_backend()
+    if child and child[2] == sid:
+        return child[0]
     if pi_native.selected() and os.environ.get("PI_SESSION_ID") == sid:
         return "pi"
     if sid.startswith("sess_"):
@@ -803,10 +809,15 @@ def main() -> int:
         return cursor_apply_after_exit(args.session_id, args.cursor_after_exit,
                                        args.cursor_expect, args.title)
 
-    # Pi's selected shell identity wins over inherited host/agent variables.
-    # Keep its mutation and pin check in the owning process; no transcript,
-    # sidecar or inherited Paseo tab is written on this path.
-    if pi_native.selected():
+    # Resolve a verified nearer child before inherited Pi markers. Never let an
+    # explicit ID escape to the Pi parent or let this path rename its host tab.
+    child = pi_native.child_backend()
+    if child and args.session_id is not None and args.session_id != child[2]:
+        print("autorename: explicit ID is not this child session; nothing renamed", file=sys.stderr)
+        return 2
+    # Keep Pi's mutation and pin check in the owning process. A failed Pi
+    # registration is a refusal, not permission to try an inherited backend.
+    if pi_native.marked() and child is None:
         try:
             reg = pi_native.registration(args.session_id)
             if args.show:
@@ -821,7 +832,7 @@ def main() -> int:
             print(f"autorename: {exc}; nothing else renamed", file=sys.stderr)
             return 2
 
-    sid = args.session_id or session_id()
+    sid = child[2] if child else args.session_id or session_id()
     if not sid:
         if os.environ.get("OMPCODE") == "1" and nearest_agent() == "omp":
             print("autorename: this omp has not registered with the autorename bridge; link"
@@ -834,7 +845,7 @@ def main() -> int:
               " nothing renamed", file=sys.stderr)
         return 2
 
-    kind = backend_for(sid)
+    kind = child[0] if child else backend_for(sid)
     transcript = None
     summary = None
     chat = None
@@ -863,7 +874,9 @@ def main() -> int:
             current = codex_pane_title()
             source = "auto"
         elif kind == "omp":
-            omp_reg = omp_registration(sid=sid)
+            omp_reg = omp_registration(pid=child[1], sid=sid) if child else omp_registration(sid=sid)
+            if child and omp_reg is None:
+                raise ValueError("owning OMP registration changed")
             current, source = omp_read(omp_session_file(sid, omp_reg))
         else:
             transcript = find_transcript(sid)
@@ -948,7 +961,8 @@ def main() -> int:
 
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(title + "\n", encoding="utf-8")
-    live += paseo_set_name(title, auto=args.auto)
+    if not child:
+        live += paseo_set_name(title, auto=args.auto)
     print(f"renamed: {title}{live}")
     return 0
 
