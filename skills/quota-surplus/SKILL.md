@@ -34,10 +34,17 @@ notice. The algorithm, thresholds and exit codes are in the script's usage text 
 ## 3. Dispatch
 
 1. Dispatch through the normal route (`acp-dispatch` with `--kind`, or the notice's `acp-run` line for Argon), read-only
-   (`--perm deny`) for review items, one slice per item, within the pool's per-wave cap (`route_agent.py policy --md`).
-2. Results land as review comments, queue entries or reports, like any other slice. Mark the item done by deleting it from
+   (`--perm deny`) for review items, one slice per item.
+2. **Bounded bursts: run at most the number of concurrent slices the notice names**, and re-check
+   `quota-surplus check --live` between them. It comes from the pool's measured per-slice cost (route_agent's estimate
+   floor) where one exists, else 1-2 at a time, never above the pool's `max_parallel`. Why (lead 7c58015b, 2026-11-03):
+   aiuse read Argon at 25% left, four parallel read-only agy runs (5-8 min, 27-86 tool calls each) exhausted it within
+   about 10 minutes, and aiuse still read 25%. aiuse lags a burst, and a percentage does not say how many slices it buys.
+3. **A provider's own "Usage Limit Reached" is authoritative over aiuse**: stop dispatching to that pool at once,
+   whatever `check` says.
+4. Results land as review comments, queue entries or reports, like any other slice. Mark the item done by deleting it from
    that repo's `docs/surplus-work.md` in a claimed workspace (AGENTS.md order 9).
-3. The script never dispatches and never spends quota itself; deciding what is worth it is the lead's call.
+5. The script never dispatches and never spends quota itself; deciding what is worth it is the lead's call.
 
 ## 4. Keep the lists useful
 

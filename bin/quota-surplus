@@ -31,6 +31,9 @@ one is the same episode); a new resets_at is a new episode. `notify` sends each 
 and one relay.py line (`--fyi`, never `--steer`; `--idle 1800` for a Claude Paseo target) to each live lead seat (a fleet.py
 row whose name or title starts `LEAD`, or names `helm lead`/`watch lead`). Relays run detached (log:
 ~/.local/state/quota-surplus/relay.log) so an --idle wait never holds the timer. `notify --dry-run` prints them, sends nothing.
+The relay line advises at most N concurrent slices (surplus // the pool's route_agent estimate floor, else 1-2; never above
+its max_parallel), a `check --live` between them, and that a provider's "Usage Limit Reached" overrides aiuse (aiuse lags
+a burst: 2026-11-03, four parallel agy runs spent a 25% Argon surplus in ~10 min while aiuse still read 25%).
 
 `list-work` reads docs/surplus-work.md in each repo under ~/src (or each --repo), most valuable first (format: that file
 in djbclark-ade). Exit: 0 done, 2 usage, 3 aiuse unreadable (no verdict, nothing sent or recorded).
@@ -107,6 +110,8 @@ class PoolPolicy:
     dispatch: str = ""
     allow_repos: tuple[str, ...] = ()
     allow_seats: tuple[str, ...] = ()
+    max_parallel: int = 1
+    slice_cost: float | None = None         # percent of the binding window one slice uses (route_agent estimate floor)
 
 
 @dataclass
@@ -163,8 +168,15 @@ def policy_from_routing(aiuse_disabled: dict | None = None) -> Policy:
         first = kinds[0] if kinds else ""
         dispatch = DISPATCH_OVERRIDE.get(svc.name) or (f"acp-run {agent} --model {models[first]}" if first else "")
         repos, seats = routing_scope(svc)
+        first_model = models.get(first, "")
+        try:
+            cost = ra.floor_lookup((pub.get("dispatch") or {}).get("estimate_floor") or {}, svc.name, first or None,
+                                   any(tok in first_model.lower() for tok in frontier_tokens))
+        except (AttributeError, TypeError, ValueError):
+            cost = None
         pp = PoolPolicy(service=svc.name, billing=getattr(svc, "billing", ""), frontier=frontier, blocked=blocked,
-                        kinds=kinds, dispatch=dispatch, allow_repos=repos, allow_seats=seats)
+                        kinds=kinds, dispatch=dispatch, allow_repos=repos, allow_seats=seats,
+                        max_parallel=int(getattr(svc, "max_parallel", 1) or 1), slice_cost=cost)
         key = tuple(svc.pool) if getattr(svc, "pool", None) else (svc.name, None)
         pol.pools[key] = pp
     return pol
@@ -219,7 +231,8 @@ def assess(data: dict, policy: Policy, now: datetime, *, min_surplus: float = MI
         seen |= {(provider, family), (provider, None)}
         base = {"pool": pool, "service": pp.service, "provider": provider, "pool_family": family,
                 "frontier": pp.frontier, "billing": pp.billing, "dispatch": pp.dispatch, "kinds": list(pp.kinds),
-                "allow_repos": list(pp.allow_repos), "allow_seats": list(pp.allow_seats)}
+                "allow_repos": list(pp.allow_repos), "allow_seats": list(pp.allow_seats),
+                "max_parallel": pp.max_parallel, "slice_cost": pp.slice_cost}
         windows = [w for w in (row.get("windows") or []) if isinstance(w, dict)]
         credits = (row.get("binding_window") == "credits" or any(w.get("label") == "credits" for w in windows))
         reason = None
@@ -469,10 +482,29 @@ def ping_text(alert: dict, now: datetime) -> str:
             f"{local_reset(alert, now)}: use it for {kinds_phrase(alert)}")
 
 
+def slice_advice(alert: dict) -> tuple[int, int | None]:
+    """(at most N concurrent slices, about M slices in total or None).
+
+    Lead 7c58015b, 2026-11-03: four parallel read-only agy runs spent a 25% Argon surplus in ~10 minutes while aiuse still
+    read 25%: aiuse lags a burst, and a percentage does not say how many slices it buys. With a per-slice cost
+    (route_agent's estimate floor for the pool's first kind) the surplus buys surplus // cost slices; without one, 1-2.
+    Never more than the pool's max_parallel."""
+    cap = max(1, int(alert.get("max_parallel") or 1))
+    cost = alert.get("slice_cost")
+    if cost:
+        total = int(float(alert.get("surplus") or 0) // float(cost))
+        return max(1, min(cap, total)), total
+    return min(2, cap), None
+
+
 def relay_text(alert: dict, now: datetime, n_work: int) -> str:
+    n, total = slice_advice(alert)
+    buys = f" (it buys about {total} at ~{alert['slice_cost']:g}% each)" if total is not None else ""
     return (f"quota surplus (use it or lose it): {alert['pool']} ({alert.get('window')}) has "
             f"{float(alert['remaining_percent']):.0f}% left and resets {local_reset(alert, now)}; about "
             f"{alert['surplus']:.0f}% will be lost at the current pace. Dispatch line: {alert.get('dispatch') or '?'}. "
+            f"Run at most {n} concurrent slice{'s' if n != 1 else ''}{buys} and re-check `quota-surplus check --live` "
+            f"between them: aiuse lags a burst, and a provider 'Usage Limit Reached' overrides its reading. "
             f"Pick read-only items that finish before the reset: `quota-surplus list-work"
             f"{' --fit frontier' if alert.get('frontier') else ''}` ({n_work} items in docs/surplus-work.md lists); "
             f"skill quota-surplus. FYI, no reply needed.")
