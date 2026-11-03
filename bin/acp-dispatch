@@ -365,6 +365,13 @@ Re-dispatching the --name of a record whose runner is still waiting is refused (
 name whose cloud record is unfinished (status running, any pid): `resume RECORD` it instead.
 (execute_record's older wait_for_capacity stays as the backstop at 4x cpus or critical memory pressure.)
 
+Pi API admission (2026-11-03): only openai/gpt-6.1-sol and openai/gpt-5.4-mini
+map to aiuse's independent `pi` pool, never `codex`. Missing, stale, exhausted or
+unsupported capacity refuses with exit 5 before preflight, including dry runs,
+resumes and route overrides. At least max(1%, Pi reserve_floor, --min-headroom)
+must remain. The runner rechecks fresh capacity after load and capacity waits,
+even for legacy records. --no-preflight does not skip this measurement gate.
+
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit;
@@ -1132,6 +1139,28 @@ def fallback_gate_refusal(svc: Any, kind: str | None, repo: str | None) -> str |
     return router.fallback_block(svc, kind, router.load_snapshot(bypass_memo=True)[0], repo=repo)
 
 
+def pi_capacity_refusal(agent: str, model: str | None, remaining: float | None,
+                        min_headroom: float = 0) -> str | None:
+    """Pi's measured API capacity is mandatory, including resumes/route overrides.
+
+    `remaining` comes from the router's freshness-aware snapshot reader, never
+    credentials, the model catalog, or a Codex subscription reading.
+    """
+    if agent != "pi":
+        return None
+    router = route_module()
+    if router.pi_api_pool(model) is None:
+        return "unsupported Pi billing route: use an explicitly supported openai/ model with measured Pi API capacity"
+    if remaining is None:
+        return "no fresh quota reading for pi: Pi API capacity must be measured"
+    # A zero --min-headroom cannot disable the independent API reserve floor.
+    svc = router.BY_NAME.get("pi")
+    floor = max(1.0, svc.reserve_floor if svc else 0.0, float(min_headroom or 0))
+    if remaining < floor:
+        return f"Pi API headroom {remaining:.1f}% < minimum {floor:.1f}%"
+    return None
+
+
 def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, str] | None:
     """(class, exit code, message) for why this record's slice may no longer start, judged on the pools NOW; else None.
     Every admission predicate a wait can change is judged again right before the spawn (load wait, capacity wait;
@@ -1141,7 +1170,13 @@ def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, st
     headroom, and the estimate against each window (unreserved: the in-flight reservation was dispatch's, and
     `runner_inflight_recheck` holds the cap). (2) is ELIGIBILITY, which route-override skips and a resume never had; (3) is
     MEASUREMENT, which no override skips (round 7 of PR 224): it follows the pool and the record's `min_headroom`, never
-    the `fallback_gate` stamp. A resume skips both, as at dispatch."""
+    the `fallback_gate` stamp. A resume skips both, as at dispatch. Pi's independent API
+    measurement is mandatory even for resumes and legacy kind-less records."""
+    if rec.get("agent") == "pi":
+        remaining, reading = pool_reading("pi", rec.get("model"), fresh=True)
+        why = pi_capacity_refusal("pi", rec.get("model"), remaining, rec.get("min_headroom") or 0)
+        if why:
+            return "headroom", UNAVAILABLE_EXIT, f"{why} after {after}"
     if rec.get("resume_count") or not rec.get("kind"):
         return None
     stale = plenty_gate_refusal(rec, after)
@@ -1154,7 +1189,8 @@ def spawn_refusal(rec: dict, after: str = "the load wait") -> tuple[str, int, st
             return "fallback", FALLBACK_REFUSED_EXIT, why
     if rec.get("min_headroom") is None:
         return None                      # a record from before this check: dispatch's snapshot stands
-    remaining, reading = pool_reading(rec.get("agent") or "", rec.get("model"), fresh=not rec.get("plenty_gate"))
+    if rec.get("agent") != "pi":
+        remaining, reading = pool_reading(rec.get("agent") or "", rec.get("model"), fresh=not rec.get("plenty_gate"))
     if remaining is None:
         if svc is not None and svc.fallback_after:
             return ("headroom", UNAVAILABLE_EXIT,
@@ -2425,6 +2461,8 @@ AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
 
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
     """Map acp agent and model to aiuse (provider, pool_family). None if unknown."""
+    if agent == "pi":
+        return route_module().pi_api_pool(model)
     if agent == "agy":
         # claude_gpt / gemini / gemini_argon: one table, route_agent.antigravity_family (aiuse schema 1.5)
         family = route_module().antigravity_family(model)
@@ -4695,7 +4733,11 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                                           exit_code=LOAD_GATE_EXIT, extra={"load_gate": gate_info})
     # `fresh`: the load gate ran inline and may have waited, so this look must not reuse the 30 s aiuse memo
     # the first look filled (Codex review of PR 73); a deferred or skipped gate waited nothing.
-    remaining, reading = pool_reading(a.agent, a.model, fresh=gate_info is not None and not gate_deferred)
+    remaining, reading = pool_reading(a.agent, a.model,
+                                      fresh=a.agent == "pi" or (gate_info is not None and not gate_deferred))
+    pi_refusal = pi_capacity_refusal(a.agent, a.model, remaining, a.min_headroom)
+    if pi_refusal:
+        return unavailable_record(out, a, pi_refusal, "headroom", remaining, estimate, previous)
     # The plenty gate was judged above on a reading taken BEFORE the load wait, which may have lasted
     # up to --load-wait; judge it again on this one (adversary 7802361, A1). A detached --no-wait
     # runner repeats it after its own wait (plenty_gate_refusal). route-override and a resume skip it,

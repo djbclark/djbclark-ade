@@ -2188,12 +2188,25 @@ def antigravity_family(model: str | None) -> str | None:
     return "gemini" if m.startswith("gemini-") else None
 
 
+# Only these explicitly supported Pi API model IDs share the measured `pi` pool.
+# Do not infer billing from arbitrary OpenAI-compatible providers, bare IDs, or
+# openai-codex (subscription) models. Keep additions deliberate and tested.
+PI_OPENAI_MODELS = frozenset({"openai/gpt-6.1-sol", "openai/gpt-5.4-mini"})
+
+
+def pi_api_pool(model: str | None) -> tuple[str, str | None] | None:
+    """Independent Pi/OpenAI API capacity, never the Codex subscription."""
+    return ("pi", None) if model in PI_OPENAI_MODELS else None
+
+
 def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
     """Map acp agent and model to aiuse (provider, pool_family). None if unknown.
 
     Kept in sync with acp-dispatch.map_agent_to_provider by hand (2026-10-18);
     calibrate must not import acp-dispatch while that file is mid-edit.
     """
+    if agent == "pi":
+        return pi_api_pool(model)
     if agent == "agy":
         family = antigravity_family(model)
         return ("antigravity", family) if family else None
