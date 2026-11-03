@@ -158,7 +158,7 @@ def test_live_among_asks_omp_with_an_argv_list_and_reads_held_and_unknown(home, 
 
 
 @pytest.mark.parametrize("body", ["exit 1\n", "echo not json\n", "echo '{\"held\": 3}'\n", "echo '[1]'\n", "echo '{\"held\":[1],\"unknown\":[]}'\n",
-                                  "sleep 30\n", "echo '{\"held\":[],\"unknown\":[]}'; exit 3\n"])
+                                  "exec sleep 30\n", "echo '{\"held\":[],\"unknown\":[]}'; exit 3\n"])
 def test_a_failed_probe_leaves_every_id_unknown_never_ended(home, monkeypatch, body):
     monkeypatch.setenv("PATH", f"{fake_omp(home, body)}:/usr/bin:/bin")
     omp = load("adapters/omp", home)

@@ -1,0 +1,6 @@
+### Fixed
+
+- relay.py told a program that merely had `omp` as an argument (`vim omp`) from the omp TUI of a herdr pane by basename, so it could pin vim's pid and a later poll reported "target changed"; `named_hits` and the Hermes walkers (`descends_from`, `turn_is_above`) now use an exact-executable omp test (`fleet.omp_executable`), so an omp started inside a Hermes turn no longer inherits the turn's identity or hop count (#274)
+- session-history showed a live omp session outside herdr as `ended` with a resume command: omp hits are now checked with `omp session lease --json` and print `LIVE?`, never `ended`, when the check cannot run (#274)
+- The omp history adapter indexes every omp store (named profiles, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`), keys sessions by file so equal ids and same-named files do not collide, takes the id of a noncanonically named file from its header, no longer hangs on a FIFO named `*.jsonl` and no longer loses a session that holds a non-object JSON line; Pi and omp share one reader (`skills/session-finder/jsonl_session.py`) (#274)
+- autorename `clean()` and the Pi/omp bridges strip the invisible bidi marks, zero-width characters and BOM (Unicode categories Cc, Cf, Zl, Zp) from titles (#274)
