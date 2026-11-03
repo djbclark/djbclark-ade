@@ -13,10 +13,14 @@ Config (environment wins; the local ~/.config/peer-link/{peers,trust}.json belon
   PEER_LINK_TOOL  peer_mail.py to run        (default ~/src/peer-link/peer_mail.py)
   PEER_LINK_COMM  the Coding link's comm dir (default ~/.local/state/peer-link/coding-mail/comm)
   PEER_LINK_SELF  this side's role           (default claude)
-The webhook key CODING_BOT_WEBHOOK_KEY is read by peer_mail from its environment; this tool never reads or prints it. When it
-is not already set, the SEND runs under `sudo-secretspec run` (wait and drain need no secret).
+The webhook key CODING_BOT_WEBHOOK_KEY is read by peer_mail from its environment; this tool never prints it or puts it in argv.
+When it is not already set, the SEND runs under `sudo-secretspec run` (wait and drain need no secret).
+peer_mail runs as `python3 -I` (no PYTHONPATH, user site or sitecustomize) with the network/TLS overrides removed from its
+environment (proxies, SSL_CERT_FILE/DIR, CA bundles, SSLKEYLOGFILE, OPENSSL_*, PYTHON*): the key must go only to the trusted
+webhook over the system trust store. A task that looks like it carries a credential (private key, GitHub/Slack/AWS/OpenAI token,
+Bearer token, or the value of CODING_BOT_WEBHOOK_KEY/_URL/_HEADER when set) is refused with exit 2 before anything is stored.
 
-Exit codes: 0 done, 1 send failed (or the reply could not be read), 2 usage, 4 the reply's last line is `BLOCKED: ...`,
+Exit codes: 0 done, 1 send failed (or the reply could not be read), 2 usage or refused text, 4 the reply's last line is `BLOCKED: ...`,
 5 nobody picked the task up (peer_mail `--ack-timeout`), 124 timed out (the task may still be running: `wait ID`).
 """
 from __future__ import annotations
@@ -36,6 +40,11 @@ MAX_TEXT = 100_000
 MSG_ID = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9._-]{0,79}")  # peer_mail's own id shape: never a leading `-`
 SENT_ID = re.compile(r"^delivered to \S+ mailbox: \S+ \(id ([A-Za-z0-9_.][A-Za-z0-9._-]{0,79})\)$", re.M)
 FENCE = re.compile(r"^`{3,}$")
+# A task must not carry a credential: the mailbox is a git repo that is published, and the subject travels in argv.
+SECRET_SHAPES = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY|\bsk-[A-Za-z0-9_-]{20,}|\bgithub_pat_\w{20,}|\bgh[pousr]_\w{30,}"
+    r"|\bxox[abpr]-[\w-]{10,}|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/=-]{24,}")
+KNOWN_SECRET_VARS = ("CODING_BOT_WEBHOOK_KEY", "CODING_BOT_WEBHOOK_URL", "CODING_BOT_WEBHOOK_HEADER")
 
 
 def config() -> dict[str, str]:
@@ -47,12 +56,25 @@ def config() -> dict[str, str]:
     }
 
 
+def network_override(name: str) -> bool:
+    """A variable that redirects or weakens TLS, routing or the interpreter of a child that holds the webhook key."""
+    low = name.lower()
+    return (low.endswith("_proxy") or low.startswith(("openssl_", "ssl_", "python")) or low == "sslkeylogfile"
+            or low in {"requests_ca_bundle", "curl_ca_bundle"})
+
+
 def child_env(cfg: dict[str, str]) -> dict[str, str]:
-    return {**os.environ, "PEER_LINK_COMM": cfg["comm"], "PEER_LINK_SELF": cfg["self"]}
+    env = {k: v for k, v in os.environ.items() if not network_override(k)}
+    return {**env, "PEER_LINK_COMM": cfg["comm"], "PEER_LINK_SELF": cfg["self"]}
 
 
 def peer_argv(cfg: dict[str, str], *args: str) -> list[str]:
-    return ["python3", cfg["tool"], *args]
+    return ["python3", "-I", cfg["tool"], *args]  # -I: nothing the caller planted (PYTHONPATH, sitecustomize) runs with the key
+
+
+def credential_in(text: str) -> bool:
+    return bool(SECRET_SHAPES.search(text)) or any(
+        len(v) >= 8 and v in text for v in (os.environ.get(n, "").strip() for n in KNOWN_SECRET_VARS))
 
 
 def send_argv(cfg: dict[str, str], path: str, subject: str) -> list[str]:
@@ -108,6 +130,10 @@ def send(cfg: dict[str, str], text: str) -> tuple[int, str | None]:
         return 2, None
     if len(text) > MAX_TEXT:
         print(f"coding-bot: task over {MAX_TEXT} characters; not sent", file=sys.stderr)
+        return 2, None
+    if credential_in(text):
+        print("coding-bot: refused: the task contains something shaped like a credential (or a known secret value); "
+              "remove it and send again. Nothing was sent.", file=sys.stderr)
         return 2, None
     if not Path(cfg["tool"]).is_file():
         print(f"coding-bot: no peer_mail.py at {cfg['tool']} (clone frdminc/peer-link, or set PEER_LINK_TOOL)", file=sys.stderr)
