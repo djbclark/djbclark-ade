@@ -276,6 +276,13 @@ def is_final(msg: dict) -> bool:
     return bool(body) and bool(FINAL.fullmatch(body[-1].strip()))
 
 
+def answer_of(handover: str, msgs: list[dict], trailer: str) -> str:
+    """What goes to stdout: the handover exactly as received if every message is final, else only the final messages (and the count
+    line); the rest was progress."""
+    finals = [m for m in msgs if is_final(m)]
+    return handover if len(finals) == len(msgs) else "".join(m["text"] for m in finals) + trailer
+
+
 def is_blocked(msg: dict) -> bool:
     body = [ln for ln in msg["body"] if ln.strip()]
     return bool(body) and re.fullmatch(r"BLOCKED:.*", body[-1].strip(), re.I) is not None
@@ -378,6 +385,16 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
     start = time.monotonic()
     resume = f"{'sent ' + mid + '; ' if sent else ''}`coding-bot wait {mid}`"
 
+    warned = False
+
+    def keep(answer: str) -> None:
+        """Save the final reply (BEFORE it is printed, and before the claim) so `wait ID` can hand it over after an interruption."""
+        nonlocal warned
+        if not save_reply(mid, answer) and not warned:
+            warned = True
+            print(f"coding-bot: warning: could not save the reply under $CODING_BOT_STATE/replies (not a private directory of "
+                  f"yours?); if this run is interrupted, `coding-bot wait {mid}` cannot recover it", file=sys.stderr)
+
     def timed_out() -> int:
         print(f"coding-bot: no final reply to {mid} within {timeout:g}s; the task may still be running: "
               f"`coding-bot wait {mid}`", file=sys.stderr)
@@ -417,8 +434,13 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
             return failed(f"waiting failed (peer_mail exit {rc}; an old peer-link without `wait --re` gives 2: see `coding-bot status`)")
         # Validate what `wait` peeked BEFORE claiming it: `drain --re` moves every message that answers the id into cur/, so a
         # forged one beside the real final reply would otherwise consume the only copy of the answer.
-        if (why := rejection(split_messages(peeked)[0], mid)) is not None:
+        peeked_msgs, peeked_trailer = split_messages(peeked)
+        if (why := rejection(peeked_msgs, mid)) is not None:
             return rejected(why, peeked, claimed=False)
+        # ... and keep the validated final reply BEFORE the claim: if this run is interrupted or the drain is killed after it moved the
+        # mail into cur/ (where `wait` never looks again), `coding-bot wait ID` still has the answer.
+        if any(is_final(m) for m in peeked_msgs):
+            keep(answer_of(peeked, peeked_msgs, peeked_trailer))
         try:
             rc, claimed = run(drain_argv(cfg, mid), cfg, timeout=max(0.0, timeout - (time.monotonic() - start)) + GRACE)
         except ChildTimeout:
@@ -433,14 +455,12 @@ def wait(cfg: dict[str, str], mid: str, timeout: float, interval: float, ack: fl
             return rejected(why, handover, claimed=was_claimed)
         finals = [m for m in msgs if is_final(m)]
         progress = [m for m in msgs if not is_final(m)]
-        answer = (handover if not progress else "".join(m["text"] for m in finals) + trailer) if finals else ""
         for m in progress:  # accepted replies that are not the answer: progress, as received
             sys.stderr.write(m["text"])
         sys.stderr.flush()
         if finals:
-            if not save_reply(mid, answer):  # BEFORE printing: `wait ID` can then hand it over again after an interruption
-                print(f"coding-bot: warning: could not save the reply under $CODING_BOT_STATE/replies (not a private directory "
-                      f"of yours?); if this run is interrupted, `coding-bot wait {mid}` cannot recover it", file=sys.stderr)
+            answer = answer_of(handover, msgs, trailer)
+            keep(answer)  # what is printed is what is saved (the claim may have taken more than the peek showed)
             sys.stdout.write(answer)
             sys.stdout.flush()
             return 4 if any(is_blocked(m) for m in finals) else 0

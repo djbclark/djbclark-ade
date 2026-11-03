@@ -1029,4 +1029,34 @@ def test_a_drain_that_hangs_is_bounded_by_the_budget_too(link, capfd, monkeypatc
     assert cb.main(["wait", MID, "--timeout", "1", "--ack-timeout", "0"]) == 124
     assert time.monotonic() - began < 20
     assert [c["argv"][0] for c in link.calls()] == ["wait", "drain"]
-    assert not saved_path(link).exists()
+    assert saved_path(link).read_text() == h, "saved from the validated peek before the drain that was killed"
+
+
+def test_the_final_reply_is_saved_before_the_drain_claims_it_so_a_killed_drain_loses_nothing(link, capfd, monkeypatch):
+    """peer_mail moves the mail into cur/ (where `wait` never looks again) and then does more work: a kill or an interrupt anywhere in
+    the drain must leave the answer recoverable by `coding-bot wait ID`."""
+    monkeypatch.setattr(cb, "GRACE", 0.5)
+    h = handover("all done\nDONE")
+    link.play(send={"out": SENT}, wait={"out": h}, drain={"out": h, "sleep": 60})
+    assert cb.main(["ask", "t", "--timeout", "1", "--ack-timeout", "0"]) == 124
+    capfd.readouterr()
+    link.log.unlink()
+    assert cb.main(["wait", MID]) == 0
+    assert capfd.readouterr().out == h and link.calls() == [], "handed over again from the saved file"
+
+
+def test_a_saved_mixed_batch_keeps_only_the_final_reply(link, capfd):
+    h = handovers(message("still working"), message("finished\nDONE", mid="coding-2"))
+    link.play(**reply_scenario(wait={"out": h}, drain={"out": h}))
+    assert cb.main(["ask", "t"]) == 0
+    out = capfd.readouterr().out
+    assert saved_path(link).read_text() == out and "still working" not in out
+
+
+def test_what_is_saved_is_what_was_printed_when_the_claim_took_more_than_the_peek_showed(link, capfd):
+    peek = handover("first\nDONE")
+    claimed = handovers(message("first\nDONE"), message("second\nDONE", mid="coding-2"))
+    link.play(**reply_scenario(wait={"out": peek}, drain={"out": claimed}))
+    assert cb.main(["ask", "t"]) == 0
+    out = capfd.readouterr().out
+    assert out == claimed and saved_path(link).read_text() == claimed

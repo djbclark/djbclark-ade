@@ -21,7 +21,7 @@ for the link, the mailbox (a git repo), the wake, the nonce check and the fencin
    final only when its last line is `DONE` or `BLOCKED:`. `--timeout` is a hard bound: each peer_mail wait/drain child is killed (with its
    process group) at the remaining budget + 5 s and `--interval` is clamped to the remaining budget, so exit 124 comes on time even if peer_mail sleeps.
 2. `coding-bot send "<task>"` prints the message id and returns; later `coding-bot wait ID` (same options) collects the answer.
-   **Resuming is safe**: every accepted final reply is saved (0600, atomic) to `$CODING_BOT_STATE/replies/ID.md` (default
+   **Resuming is safe**: every accepted final reply is saved (0600, atomic; first from the validated peek, before the claim, and again as printed) to `$CODING_BOT_STATE/replies/ID.md` (default
    `~/.local/state/coding-bot`, which must be a real 0700 directory of yours) before it is printed, and `coding-bot wait ID` prints a saved answer
    again (exit 0, or 4 for `BLOCKED:`) without touching peer_mail or the network. An interrupted `ask` therefore loses nothing: run `coding-bot wait ID`.
 3. `coding-bot status` shows the resolved tool, comm dir, role, whether the key is already in the environment (never its value), whether
