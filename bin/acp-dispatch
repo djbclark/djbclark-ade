@@ -3296,6 +3296,9 @@ def cancelled_note(text: str, timed_out: bool = False) -> str:
     m = re.search(r"stop=cancelled secs=([\d.]+)(?: tools=\d+)?(?: perm=\d+\+/(\d+)-)?", text)
     secs = float(m.group(1)) if m else None
     denied = int(m.group(2) or 0) if m else 0
+    end = re.search(r"\brefusal_end=([01])\b", text)
+    if end:  # acp-run says whether the FINAL turn ended on a refusal; `perm=` counts the whole run
+        denied = denied if end.group(1) == "1" else 0
     if timed_out:
         # acp-run's own --timeout cancels the turn, and the agent answers `cancelled` (exit 124)
         after = f" at {secs:.0f} s" if secs is not None else ""
@@ -3309,7 +3312,7 @@ def cancelled_note(text: str, timed_out: bool = False) -> str:
         return (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
                 " is a known cause, see dispatch-footer item 10]")
     after = f" after {secs:.0f} s" if secs is not None else ""
-    return f" [stop=cancelled{after} with no denied permission: not a time limit, see the session log]"
+    return f" [stop=cancelled{after}; the last turn did not end on a refused permission and it was not a time limit, see the session log]"
 
 
 def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,

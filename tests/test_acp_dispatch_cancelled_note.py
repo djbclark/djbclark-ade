@@ -58,7 +58,7 @@ class TestCancelledNote(unittest.TestCase):
     def test_a_short_cancel_without_a_denial_does_not_blame_an_hour(self):
         note = self.note("acp-run: agent=codex stop=cancelled secs=60.0 tools=13 perm=5+/0-\n")
         self.assertNotIn("an hour", note)
-        self.assertIn("after 60 s with no denied permission", note)
+        self.assertIn("after 60 s; the last turn did not end on a refused permission", note)
 
 
     def test_a_cancel_at_the_timeout_is_a_timeout_not_a_denial_and_not_a_denial_free_cancel(self):
@@ -68,6 +68,21 @@ class TestCancelledNote(unittest.TestCase):
             self.assertNotIn("not a time limit", note)
             self.assertNotIn("an hour", note)
             self.assertTrue(note.startswith("NO-REPORT: timeout"), note)
+
+    def test_an_earlier_recovered_denial_does_not_explain_a_later_cancel(self):
+        # acp-run continued past a refusal (perm counts the whole run); the final turn then ended on its own
+        long_run = "acp-run: agent=codex stop=cancelled secs=3626.0 tools=82 perm=5+/1- refusal_end=0\n"
+        note = self.note(REFUSED + long_run)
+        self.assertNotIn("denied permission", note)
+        self.assertIn("a foreground command that ran about an hour", note)
+        short = self.note(REFUSED + "acp-run: agent=codex stop=cancelled secs=90.0 tools=9 perm=5+/1- refusal_end=0\n")
+        self.assertNotIn("cancelled after a denied permission", short)
+        self.assertIn("did not end on a refused permission", short)
+
+    def test_a_final_turn_that_ended_on_a_refusal_is_named_even_on_a_long_run(self):
+        note = self.note(REFUSED + "acp-run: agent=codex stop=cancelled secs=3626.0 tools=82 perm=5+/1- refusal_end=1\n")
+        self.assertIn("cancelled after a denied permission", note)
+        self.assertNotIn("an hour", note)
 
     def test_a_denied_cancel_leaves_the_permission_choice_to_the_lead(self):
         note = self.note(REFUSED + "acp-run: agent=codex stop=cancelled secs=59.7 tools=13 perm=0+/1-\n")
