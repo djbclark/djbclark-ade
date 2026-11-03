@@ -47,12 +47,12 @@ The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
-A --perm read-only run also allows an execute request that only reads (cat, ls, rg, git log/show/
-diff, a plain curl GET, joined with | && ; only; readonly_command; never fd, file or graft, which
-execute or write). The allow-list is the only barrier for such a request, so it refuses `#`, any
-program path outside /usr/bin, /bin and /opt/homebrew/bin, any long option that is or abbreviates one
-that runs a program, `git` unless the request's cwd (and each -C) finds an ordinary repository (a bare one
-committed in the reviewed tree runs its own config). codex-acp offers a refusal that keeps
+A --perm read-only run also allows an execute request that only reads (cat, ls, rg, a plain curl GET,
+joined with | && ; only; readonly_command; never git, fd, file or graft: they run repository config as
+programs or write). The allow-list is the only barrier for such a request, so it refuses `#`, unquoted
+globs/braces/~/backslashes, any program path outside /usr/bin, /bin and /opt/homebrew/bin, any long option
+that is or abbreviates one that runs a program, rg without --no-config first while RIPGREP_CONFIG_PATH is
+set, and curl without -q first while a curlrc exists. The refused git call is not lost: see below. codex-acp offers a refusal that keeps
 the turn alive ("decline") only sometimes: for a network escalation it offers just "cancel", which ends the
 turn as stop=cancelled. acp-run prefers a keep-alive refusal, and when only "cancel" exists it continues the
 same session (up to 3 times, "denial_continue" log rows) with a prompt that says the call was refused and to
@@ -693,22 +693,18 @@ READONLY_UNASKED_KINDS = {"codex": ("execute",)}
 DENIAL_CONTINUES = 3
 TURN_ENDING_OPTION_IDS = frozenset({"cancel", "abort"})  # codex-acp's reject_once ids that end the turn
 # Programs that have no option which runs another program or writes (a harmless option list, so only
-# `tail -f`-style hangs are excluded below). `fd`, `file` and `graft` are NOT here: fd -x runs any command
-# (grouped and attached forms), `file --comp` writes a magic.mgc, `graft ask|map` writes a graft/ tree into
-# the reviewed worktree (adversary PR 208 round 2).
+# `tail -f`-style hangs are excluded below). `fd`, `file`, `graft` and `git` are NOT here: fd -x runs any
+# command (grouped and attached forms), `file --comp` writes a magic.mgc, `graft ask|map` writes a graft/
+# tree into the reviewed worktree, and git runs the repository's own config as programs (see ro_segment).
 RO_PLAIN = frozenset({
     "cat", "ls", "head", "tail", "wc", "rg", "grep", "egrep", "fgrep", "stat", "pwd", "nl",
     "diff", "cmp", "du", "basename", "dirname", "realpath", "readlink", "which", "true"})
-RO_GIT = frozenset({
-    "log", "show", "diff", "status", "blame", "ls-files", "ls-tree", "rev-parse", "rev-list", "cat-file",
-    "show-ref", "describe", "shortlog", "merge-base", "grep", "diff-tree", "name-rev"})
 # Long options that run another program or write a file, per option grammar. getopt_long and git's
 # parse-options accept any unique prefix (`--open=rm` is `--open-files-in-pager=rm`), so for them an
 # argument is refused when its name is a prefix of one of these or begins with one; rg does not abbreviate,
-# so its two are exact (`git log --pretty=oneline` stays allowed: --pre is rg's option, not git's).
+# so its two are exact.
 # Every argument is scanned, `--` included: a bare `--` can be an option's VALUE (`rg -e -- --pre=rm`), and
-# a path that really starts with one of these names is refused instead. Short groups with an attached value
-# (`-nOrm`) are refused for git by ro_short_bad.
+# a path that really starts with one of these names is refused instead.
 RO_BAD_LONG = ("--output", "--exec", "--open-files-in-pager", "--ext-diff")
 RO_BAD_LONG_RG = ("--pre", "--hostname-bin")
 RO_FIND_BAD = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"})
@@ -730,184 +726,6 @@ def ro_long_bad(args, name=None):
             elif any(b.startswith(opt) or opt.startswith(b) for b in RO_BAD_LONG):
                 return True
     return False
-
-
-def ro_short_bad(args):
-    """True when a short-flag group carries `O` (git grep -O<pager>, also grouped: -nOrm); `--` included."""
-    return any(re.fullmatch(r"-[^-].*", x) and "O" in x for x in args)
-
-
-def ro_gitfile_ok(path, worktree):
-    """True for a `.git` file (a linked worktree or submodule) whose `gitdir:` target is a real
-    `<repo>/.git/worktrees/<n>` or `.git/modules/...` directory outside the tree it sits in. A gitfile that
-    points inside the tree, or anywhere else, could name a hostile git dir (a tree that came by archive or
-    copy, not through git, can carry one)."""
-    try:
-        with open(path) as f:
-            first = f.readline().strip()
-    except (OSError, UnicodeDecodeError):
-        return False
-    if not first.startswith("gitdir:"):
-        return False
-    target = os.path.realpath(os.path.join(worktree, first[len("gitdir:"):].strip()))
-    inside = target == worktree or target.startswith(worktree.rstrip(os.sep) + os.sep)
-    return (not inside and os.path.isdir(target)
-            and re.search(r"/\.git/(worktrees|modules)/[^/]", target + "/") is not None)
-
-
-# Git config keys whose value is a program git runs while reading: a diff driver (`diff.external`,
-# `diff.<d>.textconv|command`, also reached by --textconv), the fsmonitor hook, a clean/smudge filter
-# (`git diff` and `cat-file --filters` apply them), a signature program (`log --show-signature`) and the
-# hooks directory (`core.hooksPath`: `git status`/`diff` refresh the index, and writing it runs the
-# post-index-change hook, so `.githooks/` or husky's `.husky/_` in the tree would run). `core.pager` and
-# `pager.<cmd>` are NOT listed: they run only when git's stdout is a terminal, and codex's exec has none; a
-# future PTY exec mode must add them (or set GIT_PAGER=cat) before this list stays right.
-RO_GIT_HELPER_KEYS = re.compile(
-    r"diff\.external|diff\..+\.(textconv|command)|core\.fsmonitor|filter\..+\.(clean|smudge|process)"
-    r"|gpg\.(.+\.)?program|gpg\.ssh\.defaultkeycommand|core\.hookspath|core\.alternaterefscommand"
-    # a partial (blobless) clone fetches missing objects lazily, which runs the transport and its helpers
-    r"|core\.sshcommand|core\.gitproxy|core\.askpass|credential\.(.+\.)?helper|remote\..+\.(uploadpack|receivepack)"
-    # config-based hooks (git 2.54+): `hook.<name>.command` runs on `hook.<name>.event`, e.g. post-index-change
-    r"|hook\..+\.command"
-    # `git <cmd> --help` viewers (refused as arguments too, judged here in case a path reaches one)
-    r"|man\..+\.(cmd|path)|man\.viewer|help\.browser|web\.browser|browser\..+\.(cmd|path)|instaweb\..+",
-    re.IGNORECASE)
-# Programs a git helper command may start with (the operator's usual helpers, none of which runs the file
-# or text it is given as code): git's own `git-*` helpers (git-lfs, git-credential-*, a signing wrapper),
-# the gh/ssh/gpg families, credential-helper short names, and true/false/cat.
-RO_HELPER_PROGRAMS = re.compile(
-    r"git-[A-Za-z0-9_.+-]+|gh|ssh|ssh-keygen|ssh-add|gpg|gpg2|gpgsm|true|false|cat|osxkeychain|cache|store|manager"
-    r"|manager-core|libsecret|wincred|credential-[A-Za-z0-9_-]+")
-# Programs that run their arguments as code or hand them to another program: a helper command starting
-# with one is refused whatever its words look like (a `-c` string or script name is no path to inspect).
-RO_INTERPRETER = re.compile(
-    r"(ba|z|da|k|c|tc|fi)?sh|env|xargs|exec|eval|command|nice|nohup|time|timeout|sudo|doas|stdbuf|awk|gawk|mawk|rtk"
-    r"|npx|pnpx|bunx|uvx|pipx|npm|pnpm|yarn|bun|bundle|bundler|rake|arch|busybox|cargo|go|uv|poetry|gradle|gradlew"
-    r"|mvn|dotnet|java|git"
-    r"|sed|gsed|make|just|(python|perl|ruby|php|node|nodejs|deno|bun|lua|luajit|pwsh|osascript|swift)[0-9.]*",
-    re.IGNORECASE)
-# Environment that makes git run a helper or read another repository no matter what the config says.
-# (GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS and GIT_CONFIG_GLOBAL are not listed: `git config --list` below
-# reads them, so a helper they name is judged like any other.)
-RO_GIT_ENV_HELPERS = ("GIT_SSH_COMMAND", "GIT_SSH", "GIT_PROXY_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_EXEC_PATH")
-RO_GIT_ENV_BAD = ("GIT_EXTERNAL_DIFF", "GIT_DIR", "GIT_WORK_TREE")
-
-
-def ro_helper_value_ok(value, root):
-    """True when a helper command (a git config value or an environment variable git reads as a program)
-    runs nothing from the tree. It is an ALLOW-list shape, because every deny-list item leaked: the first
-    word is the program, either an absolute path outside `root` or a bare name (looked up through PATH,
-    the operator's own), and it is not an interpreter or launcher; no word is shell syntax, a newline or
-    control character, an assignment (`TMPDIR=/tmp sh -c ...`), an interpreter/launcher name (anywhere, not
-    only first), a relative or in-tree path, or a file of the tree; an `=value` word needs an absolute
-    out-of-tree path or digits (`cache --timeout=3600`)."""
-    value = value.strip()
-    if value.startswith("!"):  # `!/opt/homebrew/bin/gh auth git-credential`: git's own shell-command form
-        value = value[1:].strip()
-    if not value or re.search(r"[\x00-\x1f\x7f;&|<>()$`\\*?\[\]{}!]", value):
-        return False
-    try:
-        words = shlex.split(value)
-    except ValueError:
-        return False
-    if not words:
-        return False
-    first = os.path.expanduser(words[0])
-    if not RO_HELPER_PROGRAMS.fullmatch(os.path.basename(first)):
-        # an absolute path is no proof of a harmless program: `/usr/bin/tclsh` or `m4` as a textconv runs
-        # the file git hands it. Only programs known to be helpers (not interpreters) pass; extend the list
-        # for an operator's own helper.
-        return False
-    if "=" in first or first.startswith("-") or ("/" in first and not os.path.isabs(first)):
-        return False  # a leading assignment, an option, or a relative program path
-    for i, word in enumerate(words):
-        if RO_INTERPRETER.fullmatch(os.path.basename(word)):
-            return False  # `/bin/sh -c 'sh payload'`, `caffeinate -i npx conv`, `env ...`
-        if "=" in word:
-            value_part = word.split("=", 1)[1]
-            if value_part.isdigit():
-                continue
-            if not os.path.isabs(os.path.expanduser(value_part)):
-                return False  # `PATH=tools conv`, `--exec-path=tools`, `-c core.hooksPath=tools`
-            word = value_part
-        word = os.path.expanduser(word)
-        if os.path.isabs(word):
-            real = os.path.realpath(word)
-            if real == root or real.startswith(root + os.sep):
-                return False
-        elif "/" in word or word.startswith(".") or (not word.startswith("-") and os.path.lexists(
-                os.path.join(root, word))):
-            return False
-    return True
-
-
-def ro_git_config_ok(base, root):
-    """True when git run in `base` (repository root `root`) can run no helper from the reviewed tree. Git
-    runs `diff.external`, a textconv or clean filter, `core.fsmonitor` and `gpg.program` as programs outside
-    codex's sandbox, and a repository config that names a tracked script (one the reviewed change may have
-    rewritten) would execute it for a plain `git diff`. Refused: a helper key with shell syntax or ANY word that
-    is a relative path, a path inside `root` or a file of the tree (`/bin/sh tools/convert.sh`), or
-    unreadable config. An operator's own helper by absolute path or bare name (git-lfs) stays allowed. GIT_EXTERNAL_DIFF, GIT_DIR and GIT_WORK_TREE refuse git too."""
-    if any(os.environ.get(k) for k in RO_GIT_ENV_BAD):
-        return False
-    root_real = os.path.realpath(root)
-    for k in RO_GIT_ENV_HELPERS:  # `git config --list` cannot see these overrides
-        v = os.environ.get(k)
-        if v and not ro_helper_value_ok(v, root_real):
-            return False
-    try:
-        r = subprocess.run(["git", "-C", base, "config", "--list", "-z"], capture_output=True, text=True,
-                           timeout=10, check=False, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if r.returncode:
-        return False
-    root = os.path.realpath(root)
-    for entry in r.stdout.split("\0"):
-        key, _, value = entry.partition("\n")
-        if not key or not RO_GIT_HELPER_KEYS.fullmatch(key):
-            continue
-        if (value.strip().lower() in ("", "true", "false", "yes", "no", "on", "off", "0", "1")
-                and key.lower() != "core.hookspath"):
-            continue  # core.fsmonitor=true is git's builtin daemon; a bare key runs nothing
-            # (a hooksPath of `true` or `1` is a directory of that name, judged below)
-        if key.lower() == "core.hookspath":  # a directory, not a command: relative means relative to the tree
-            path = os.path.expanduser(value.strip())
-            real = os.path.realpath(path)
-            if not os.path.isabs(path) or real == root or real.startswith(root + os.sep):
-                return False
-            continue
-        if not ro_helper_value_ok(value, root):
-            return False
-    return True
-
-
-def ro_git_dir_ok(base):
-    """The repository root when git run in `base` finds an ordinary repository, else None. Not a bare one
-    committed inside the tree under review: git looks in each directory, from `base` up, for `.git` and then for a directory that is
-    itself a repository (HEAD, objects/, refs/), and runs the config of whichever it meets first
-    (diff.external, core.fsmonitor, gpg.program). A tree without `.git` anywhere above is refused; a `.git`
-    file must pass ro_gitfile_ok."""
-    d = os.path.realpath(base)
-    while True:
-        dotgit = os.path.join(d, ".git")
-        if os.path.isdir(dotgit):
-            return d
-        if os.path.isfile(dotgit):
-            return d if ro_gitfile_ok(dotgit, d) else None
-        if all(os.path.exists(os.path.join(d, n)) for n in ("HEAD", "objects", "refs")):
-            return None
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
-
-
-def ro_git_repo_ok(base):
-    """Git may run in `base`: an ordinary repository (ro_git_dir_ok) whose config names no helper from the
-    tree (ro_git_config_ok)."""
-    root = ro_git_dir_ok(base)
-    return root is not None and ro_git_config_ok(base, root)
 
 
 def ro_tokens(script):
@@ -997,9 +815,8 @@ def ro_curl(args):
     return urls == 1
 
 
-def ro_segment(words, cwd, depth):
-    """True when one simple command only reads. `cwd` is the directory the request runs in (git is
-    judged by the repository it would find there; None refuses git)."""
+def ro_segment(words, depth):
+    """True when one simple command only reads."""
     while words:
         prog = ro_program(words[0])
         if prog == "rtk":  # the output compactor wrapper; the command after it is judged on its own
@@ -1014,19 +831,16 @@ def ro_segment(words, cwd, depth):
     if name is None:
         return False
     if name in ("bash", "sh", "zsh"):
-        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], cwd, depth + 1)
+        return len(args) == 2 and args[0] in ("-c", "-lc", "-cl") and readonly_command(args[1], depth + 1)
     if name == "git":
-        base = cwd
-        while len(args) >= 2 and args[0] == "-C":
-            base = os.path.join(base, args[1]) if base else None
-            args = args[2:]
-        # `git log --help` runs man.<viewer>.cmd / the browser: any help request is refused (git matches
-        # `--help` and its prefixes, `-h` is usage); no read needs one
-        if any(x == "-h" or (x.startswith("--h") and not x.startswith("--hidden")) for x in args[1:]
-               if x != "--"):
-            return False
-        return (bool(args) and args[0] in RO_GIT and base is not None and not ro_long_bad(args[1:], "git")
-                and not ro_short_bad(args[1:]) and ro_git_repo_ok(base))
+        # Deliberately not approved. A git read in codex's sandbox asks for nothing; a REQUEST for git means
+        # it needs more than the sandbox gives (an index refresh, the network), and then git runs the
+        # repository's own config as programs outside the sandbox: diff.external, textconv/clean filters,
+        # core.fsmonitor, hooks (core.hooksPath, hook.*.command, post-index-change), difftool/man viewers,
+        # ssh/proxy/credential/askpass helpers, ext:: transports in a lazy fetch, submodule configs. Seven
+        # review rounds (PR 208) kept finding another one in a hostile tree; refusing is the boundary. The
+        # agent is told to go on without the call (denial_continue_text).
+        return False
     if ro_long_bad(args, name):
         return False
     if name == "rg" and os.environ.get("RIPGREP_CONFIG_PATH") and args[:1] != ["--no-config"]:
@@ -1066,13 +880,12 @@ def ro_unquoted_meta(cmd):
     return False
 
 
-def readonly_command(cmd, cwd=None, depth=0):
+def readonly_command(cmd, depth=0):
     """True when a shell command line only reads files and the network: commands from a short list (cat,
-    ls, rg, git log/show/diff, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect
-    to /dev/null, no expansion, no comment, no other redirect, a program only by bare name or from
-    RO_TRUSTED_DIRS, no long option that runs a program (abbreviations included, `--` is not a stop), git runs only where
-    `cwd` (and each -C) finds an ordinary repository (ro_git_dir_ok). `git status` and `describe --dirty`
-    may refresh `.git/index`, a cache, not content; a plain `curl` GET can carry what the agent read in its
+    rg, a plain curl GET, ...) joined with | && || ; and at most `2>&1` or a redirect to /dev/null, no
+    expansion, no comment, no other redirect, a program only by bare name or from RO_TRUSTED_DIRS, no long
+    option that runs a program (abbreviations included, `--` is not a stop). Never git (see ro_segment); a
+    plain `curl` GET can carry what the agent read in its
     query string, as the already-allowed WebFetch tool can. A guess is a refusal."""
     if not isinstance(cmd, str) or depth > 2 or not cmd.strip() or re.search(r"[\n$`#]", cmd) or ro_unquoted_meta(cmd):
         return False
@@ -1098,14 +911,7 @@ def readonly_command(cmd, cwd=None, depth=0):
     if not all(segs[:-1]):  # `a | | b`, `; a`: a syntax error in bash, so not something to approve
         return False
     segs = [s for s in segs if s]
-    return bool(segs) and all(ro_segment(s, cwd, depth) for s in segs)
-
-
-def tool_cwd(tool_call):
-    """The directory an execute tool call runs in (rawInput.cwd), else None."""
-    raw = getattr(tool_call, "raw_input", None)
-    cwd = raw.get("cwd") if isinstance(raw, dict) else None
-    return cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+    return bool(segs) and all(ro_segment(s, depth) for s in segs)
 
 
 def tool_command(tool_call):
@@ -1127,7 +933,7 @@ def denial_continue_text(perm, denial):
     """The prompt that continues a session whose turn ended on a refused tool call."""
     what = " ".join((denial.get("command") or denial.get("tool") or "a tool call").split())[:300]
     how = ("answer from what you already have, with no tools" if perm == "deny" else
-           "go on with reading tools only (file reads, rg, git log/show/diff, listing)")
+           "go on with reading tools only (file reads, rg, listing)")
     return (f"acp-run refused this tool call because this run is --perm {perm}: {what}\n"
             f"It was not run and it will not be allowed, so do not retry it or ask again. Nothing was "
             f"lost: {how} and finish with your normal report. If the refused call was "
@@ -2474,7 +2280,7 @@ class RunClient(Client):
             kind = infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None))
             return kind in READONLY_KINDS or (
                 kind == "execute"
-                and readonly_command(tool_command(tool_call), tool_cwd(tool_call) or os.path.abspath(self.root)))
+                and readonly_command(tool_command(tool_call)))
         return self.perm != "deny"
 
     def check_tripwire(self, update):
@@ -2587,10 +2393,10 @@ class RunClient(Client):
                 return
             # the notice is a chunk of its own; text the agent typed that merely quotes it (or continues
             # after it) does not match as a whole. It is still the agent's message stream, so the row says
-            # `verified: False`: nothing in ACP proves the adapter, not the model, wrote it.
+            # unverified: nothing in ACP proves the adapter, not the model, wrote it (acp-dispatch says so).
             fb = MODEL_FALLBACK_RE.fullmatch(update.content.text)
             if fb and not self.fallback:
-                self.fallback = {"from": fb.group(1), "reason": fb.group(2), "to": fb.group(3), "verified": False}
+                self.fallback = {"from": fb.group(1), "reason": fb.group(2), "to": fb.group(3)}
                 self.rec("fallback", self.fallback)
                 print(f"acp-run: model fallback: {fb.group(1)} declined ({fb.group(2)}); answered by"
                       f" {fb.group(3)}", file=sys.stderr)
