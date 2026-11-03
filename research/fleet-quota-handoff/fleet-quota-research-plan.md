@@ -32,6 +32,6 @@ D. Verification and limits
 
 D1. Quote checks use saved full fetched text, reference/claim coverage checks and counter-evidence notes. No live fault injection, fleet migration, process reparenting, or provider adoption test was authorized or attempted. Research is not proof of installed capability.
 
-D2. Continuity source README fetch is being completed separately; the official plugin catalog page is already saved. Any catalog/source discrepancy must remain visible. Report is not auto-opened: the current explicit-open-only standing rule takes precedence over older report-skill open behavior.
+D2. Continuity repository README and official plugin catalog page were both fetched and saved. They agree on bounded context transfer to a same-workspace fresh agent; neither establishes fleet-wide ownership transfer. Report is not auto-opened: the current explicit-open-only standing rule takes precedence over older report-skill open behavior.
 
 D3. The existing queue item “Quota-aware automatic cross-vendor subagent routing” is related, not proof of existing fleet disaster recovery. Stale Orca guidance in that historical entry must not be revived.
